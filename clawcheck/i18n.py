@@ -165,6 +165,74 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "No issues found. Keep it that way.",
         "he": "לא נמצאו בעיות. שמור על זה.",
     },
+    "guide.next_header": {
+        "en": "What you can do next:",
+        "he": "מה אתה יכול לעשות עכשיו:",
+    },
+    "guide.run_label": {
+        "en": "run:",
+        "he": "הרץ:",
+    },
+    "guide.all_clear": {
+        "en": "You're in good shape — re-run anytime to stay safe.",
+        "he": "אתה במצב טוב — הרץ שוב בכל עת כדי להישאר בטוח.",
+    },
+    "guide.fix_guidance.title": {
+        "en": "See exactly how to fix each issue, most urgent first",
+        "he": "ראה בדיוק כיצד לתקן כל בעיה, הדחופות ביותר קודם",
+    },
+    "guide.fix_guidance.why": {
+        "en": "Get a copy-paste fix you can hand to your agent.",
+        "he": "קבל תיקון להעתקה-הדבקה שאתה יכול למסור לסוכן שלך.",
+    },
+    "guide.vet_skills.title": {
+        "en": "Double-check your installed skills for malware",
+        "he": "בדוק שוב את המיומנויות המותקנות שלך לאיתור נוזקות",
+    },
+    "guide.vet_skills.why": {
+        "en": "Installed skills run with your agent's full permissions.",
+        "he": "מיומנויות מותקנות פועלות עם ההרשאות המלאות של הסוכן שלך.",
+    },
+    "guide.setup_monitoring.title": {
+        "en": "Turn on ongoing monitoring so you're alerted if something changes",
+        "he": "הפעל ניטור מתמשך כדי שתקבל התראה אם משהו משתנה",
+    },
+    "guide.setup_monitoring.why": {
+        "en": "An agent with no monitoring won't warn you if it's compromised.",
+        "he": "סוכן ללא ניטור לא יזהיר אותך אם הוא נפרץ.",
+    },
+    "guide.live_test.title": {
+        "en": "Run a live prompt-injection test to see if your agent actually resists",
+        "he": "הרץ בדיקת הזרקת prompt חיה כדי לראות אם הסוכן שלך אכן עומד בכך",
+    },
+    "guide.live_test.why": {
+        "en": "Passive checks tell you the config; this tests real behavior.",
+        "he": "בדיקות פסיביות מספרות לך על התצורה; זה בודק התנהגות אמיתית.",
+    },
+    "guide.review_mcp.title": {
+        "en": "Review your MCP server trust boundaries",
+        "he": "בדוק את גבולות האמון של שרת ה-MCP שלך",
+    },
+    "guide.review_mcp.why": {
+        "en": "MCP servers can inject prompts or reach internal services.",
+        "he": "שרתי MCP יכולים להזריק הנחיות או להגיע לשירותים פנימיים.",
+    },
+    "guide.track_trend.title": {
+        "en": "Track your security score over time",
+        "he": "עקוב אחר ציון האבטחה שלך לאורך זמן",
+    },
+    "guide.track_trend.why": {
+        "en": "See if you're getting safer or drifting.",
+        "he": "ראה אם אתה נעשה בטוח יותר או מתסחף.",
+    },
+    "guide.share_grade.title": {
+        "en": "Share your grade (safe — findings stay private)",
+        "he": "שתף את הדירוג שלך (בטוח — הממצאים נשארים פרטיים)",
+    },
+    "guide.share_grade.why": {
+        "en": "Only the grade + score is shared, never your findings.",
+        "he": "רק הדירוג + הניקוד משותף, לעולם לא הממצאים שלך.",
+    },
 }
 
 

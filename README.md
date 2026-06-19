@@ -138,6 +138,29 @@ permissions, a malicious *update* is a real supply-chain risk — so each releas
 and the source is public to read **before** updating. Prefer reviewing/pinning a tag over blind
 auto-update for anything security-sensitive.
 
+## Guided mode
+
+When you run ClawCheck inside OpenClaw, the agent walks you through the entire audit
+conversationally — you never need to know a flag. After every default run, ClawCheck prints a
+short **"What you can do next"** block: a prioritised list of the most relevant follow-up steps
+for *your* findings, with the exact command to run each one.
+
+The same list is available two other ways:
+
+```bash
+python3 audit.py --next          # print the next-steps block only (after running the audit)
+python3 audit.py --json          # includes a "next_actions" array in the JSON envelope
+```
+
+The recommendations are driven by your actual results — open FAIL findings surface `--prompts`
+first; unvetted third-party skills surface `--vet`; no monitoring detected surfaces `--monitor`;
+and so on. When there is nothing urgent, the block tells you so and suggests the lighter follow-ups
+(trend tracking, grade sharing).
+
+**ClawCheck never applies a fix or changes your config.** For every open finding, `--prompts`
+gives you a ready copy-paste prompt to hand to your agent (or apply yourself); the change is
+yours to make. Everything stays local.
+
 ## How you get the report
 
 When you run the skill inside OpenClaw, the agent executes `audit.py`, captures its output,
@@ -187,6 +210,7 @@ preserving backward compatibility.
 ## More tools
 
 ```bash
+python3 audit.py --next                    # print the "What you can do next" guidance block only
 python3 audit.py --vet ./some-skill        # vet a skill (dir or SKILL.md) BEFORE installing it
 python3 audit.py --canary                   # active prompt-injection self-test (battle-tested)
 python3 audit.py --redteam                   # a multi-scenario adversarial payload suite
@@ -204,6 +228,10 @@ python3 audit.py --debug                     # DEBUG-level log to stderr (secret
 python3 audit.py --log audit.log            # also write log to a local file
 ```
 
+- **`--next`** prints the "What you can do next" guidance block on its own — runs the audit
+  first, then shows only the prioritised next-steps list. Same content as the block appended to
+  the default report; useful if you want to re-check recommendations without re-reading the full
+  report.
 - **`--vet PATH`** runs the B13 malware scan on a skill *before* you install it (point it at a
   downloaded folder or `SKILL.md`; for a URL, clone it first, then vet the local copy). Verdict:
   SAFE / SUSPICIOUS / DANGEROUS.
@@ -241,7 +269,7 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-v0.10. Read-only checks A1/B1–B25/C3–C5 (incl. write-protection, self-modification,
+v0.11. Read-only checks A1/B1–B25/C3–C5 (incl. write-protection, self-modification,
 approval-bypass, deep MCP, update/pinning hygiene), installed-skill malware vetting, baseline
 suppression + governance, the built-in `openclaw security audit` merged in, active injection
 tests (`--canary`/`--redteam`), a runtime dry-run harness (`--dryrun`), HTML report,
@@ -250,7 +278,11 @@ security review — **bilingual output** (`--lang he` for Hebrew + RTL, auto-det
 locale) — **CI gating** (`--sarif`, `--fail-under`, `--exit-code`) — **local score history
 and offline percentile** (`--trend`, `--percentile`, `--history`) — **local logging with
 secret redaction** (`--verbose`, `--debug`, `--log`) — expanded Hebrew detail/fix
-translations — and a reliability FP/FN fixture corpus.
+translations — a reliability FP/FN fixture corpus — and **guided mode**: a "What you can do
+next" recommendation block printed after every default run (also in `--json` as `next_actions`
+and standalone via `--next`), plus a rewritten conversational SKILL.md playbook that walks
+non-technical users through every tool without needing to know a flag. ClawCheck still only
+checks and guides — it never applies fixes or changes your config.
 
 ## Roadmap
 

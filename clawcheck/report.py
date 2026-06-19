@@ -13,6 +13,7 @@ import json
 import re
 
 from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
+from .guide import suggest_actions
 from .i18n import is_rtl, t, title_for, tp
 from .scoring import ScoreResult
 
@@ -209,6 +210,7 @@ def render_prompts(findings: list[Finding], ascii_only: bool = False,
 
 
 def render_json(findings: list[Finding], score: ScoreResult) -> str:
+    actions = suggest_actions(findings, score)
     return json.dumps({
         "score": score.score,
         "grade": score.grade,
@@ -220,6 +222,11 @@ def render_json(findings: list[Finding], score: ScoreResult) -> str:
              "status": f.status, "detail": f.detail, "fix": f.fix,
              "framework": f.framework}
             for f in findings
+        ],
+        "next_actions": [
+            {"id": a.id, "title": a.title, "command": a.command,
+             "why": a.why, "priority": a.priority}
+            for a in actions
         ],
     }, ensure_ascii=True, indent=2)
 

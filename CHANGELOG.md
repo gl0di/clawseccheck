@@ -3,6 +3,32 @@
 All notable changes to ClawCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.11.0] — 2026-06-19
+
+### Added
+- **Guided mode — "What you can do next" recommendation block.** After every default audit run,
+  ClawCheck now prints a short, prioritised list of next steps tailored to your actual findings —
+  pointing you to the right tool without requiring you to know any flags. The same list is
+  available in `--json` as a `"next_actions"` array (id, title, command, why, priority) and as a
+  standalone output via `--next`. The engine (`clawcheck/guide.py`) drives seven recommendation
+  triggers: fix prompts for open FAIL findings, skill vetting when third-party skills are
+  installed, monitoring setup when B16 is unresolved, live injection test, MCP review, trend
+  tracking, and grade sharing. Non-technical users running the skill inside OpenClaw can now
+  reach every tool through the agent's natural-language menu — they never need to know a flag.
+- **Rewritten SKILL.md conversational playbook.** The agent-facing playbook was replaced with a
+  guided, step-by-step flow: first-run orientation, plain-language explanation of Score / Grade /
+  Lethal Trifecta, a short numbered next-steps menu drawn from `--next`, and per-choice
+  sub-sections covering every tool (`--prompts`, `--vet`, `--monitor`, `--canary`/`--dryrun`/
+  `--redteam`, `--trend`, `--percentile`, `--badge`/`--card`). A natural-language-to-tool lookup
+  table and an explicit boundary section ("what ClawCheck will NOT do") are included.
+
+**ClawCheck still only CHECKS and GUIDES — it does NOT apply fixes or change your config.**
+For every open finding, `--prompts` shows a ready copy-paste prompt you hand to your agent or
+apply yourself; ClawCheck never touches your OpenClaw configuration. Everything stays local: no
+network calls, no telemetry, no write unless you ask. English report/card output for the four
+core renderers (`render_report`, `render_card`, `render_monitor`, `render_prompts`) is
+byte-identical to v0.10.0.
+
 ## [0.10.0] — 2026-06-19
 
 ### Added

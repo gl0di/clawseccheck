@@ -23,8 +23,9 @@ from .scoring import ScoreResult, compute
 from .i18n import t, tp, title_for, is_rtl
 from .sarif import render_sarif
 from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
+from .guide import suggest_actions, render_next_actions
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
@@ -55,4 +56,5 @@ __all__ = [
     "t", "tp", "title_for", "is_rtl",
     "render_sarif",
     "history_load", "history_record", "render_trend", "DEFAULT_HISTORY",
+    "suggest_actions", "render_next_actions",
 ]

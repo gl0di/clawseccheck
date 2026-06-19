@@ -17,6 +17,7 @@ from . import (
     render_card, render_json, render_monitor, render_prompts, render_report, render_svg,
     save_state, snapshot, vet_skill,
 )
+from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
 from .report import render_html
 from .monitor import DEFAULT_STATE
@@ -101,6 +102,8 @@ def main(argv=None) -> int:
                    help="print offline percentile rank for the current score and exit")
     p.add_argument("--history", default=DEFAULT_HISTORY, metavar="PATH",
                    help=f"path for trend history file (default: {DEFAULT_HISTORY})")
+    p.add_argument("--next", action="store_true",
+                   help="print recommended next actions based on the audit result")
     p.add_argument("--verbose", action="store_true",
                    help="emit INFO-level log breadcrumbs to stderr")
     p.add_argument("--debug", action="store_true",
@@ -219,6 +222,10 @@ def main(argv=None) -> int:
         _emit(render_prompts(findings, ascii_only, lang=args.lang))
         return 0
 
+    if args.next:
+        _emit(render_next_actions(suggest_actions(findings, score), ascii_only, lang=args.lang))
+        return 0
+
     if args.monitor:
         prev = load_state(args.state)
         snap = snapshot(ctx, findings, score)
@@ -240,6 +247,9 @@ def main(argv=None) -> int:
                  "", render_card(score, findings, ascii_only, lang=args.lang)]
         if ctx.errors:
             parts.append("\nnotes:\n" + "\n".join(f"  - {e}" for e in ctx.errors))
+        parts.append("")
+        parts.append(render_next_actions(
+            suggest_actions(findings, score), ascii_only, lang=args.lang))
         body = "\n".join(parts)
 
     _emit(body)

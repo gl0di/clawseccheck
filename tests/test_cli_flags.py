@@ -152,6 +152,75 @@ def test_trend_accumulates_on_second_call(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# default run contains guide header
+# ---------------------------------------------------------------------------
+
+def test_default_run_contains_guide_header(capsys):
+    """Default human output must include the next-actions guidance block."""
+    rc = main(["--home", VULN] + BASE)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "What you can do next:" in out
+
+
+def test_default_run_safe_contains_guide_header_or_all_clear(capsys):
+    """Default output on safe fixture shows guidance or all-clear line."""
+    rc = main(["--home", SAFE] + BASE)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "What you can do next:" in out or "good shape" in out
+
+
+# ---------------------------------------------------------------------------
+# --next flag
+# ---------------------------------------------------------------------------
+
+def test_next_flag_returns_zero(capsys):
+    rc = main(["--home", VULN] + BASE + ["--next"])
+    assert rc == 0
+
+
+def test_next_flag_prints_guide_header(capsys):
+    main(["--home", VULN] + BASE + ["--next"])
+    out = capsys.readouterr().out
+    assert "What you can do next:" in out
+
+
+def test_next_flag_prints_command(capsys):
+    main(["--home", VULN] + BASE + ["--next"])
+    out = capsys.readouterr().out
+    assert "audit.py" in out
+
+
+def test_next_flag_standalone_no_report(capsys):
+    """--next must not also print the full report."""
+    main(["--home", VULN] + BASE + ["--next"])
+    out = capsys.readouterr().out
+    assert "ClawCheck - OpenClaw Security Audit" not in out
+
+
+def test_next_flag_safe_fixture(capsys):
+    rc = main(["--home", SAFE] + BASE + ["--next"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "What you can do next:" in out or "good shape" in out
+
+
+# ---------------------------------------------------------------------------
+# --card does NOT include guide header
+# ---------------------------------------------------------------------------
+
+def test_card_does_not_contain_guide_header(capsys):
+    """--card output must be ONLY the badge — no guidance block."""
+    rc = main(["--home", VULN] + BASE + ["--card"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "What you can do next:" not in out
+    assert "good shape" not in out
+    assert "OpenClaw Security" in out
+
+
+# ---------------------------------------------------------------------------
 # --json regression
 # ---------------------------------------------------------------------------
 
@@ -167,6 +236,40 @@ def test_json_flag_on_vuln_returns_zero_without_exit_code(capsys):
     """Without --exit-code, --json should still return 0 even on vuln fixture."""
     rc = main(["--home", VULN] + BASE + ["--json"])
     assert rc == 0
+
+
+def test_json_contains_next_actions_field(capsys):
+    """render_json must include a top-level 'next_actions' array."""
+    main(["--home", VULN] + BASE + ["--json"])
+    out = capsys.readouterr().out
+    doc = json.loads(out)
+    assert "next_actions" in doc
+    assert isinstance(doc["next_actions"], list)
+
+
+def test_json_next_actions_have_required_keys(capsys):
+    """Each next_actions entry must have id, title, command, why, priority."""
+    main(["--home", VULN] + BASE + ["--json"])
+    out = capsys.readouterr().out
+    doc = json.loads(out)
+    for entry in doc["next_actions"]:
+        for key in ("id", "title", "command", "why", "priority"):
+            assert key in entry, f"missing key '{key}' in {entry}"
+
+
+def test_json_next_actions_not_empty_on_vuln(capsys):
+    main(["--home", VULN] + BASE + ["--json"])
+    out = capsys.readouterr().out
+    doc = json.loads(out)
+    assert len(doc["next_actions"]) > 0
+
+
+def test_json_does_not_contain_guide_header_text(capsys):
+    """--json output is machine-readable JSON; must not contain the prose header."""
+    main(["--home", VULN] + BASE + ["--json"])
+    out = capsys.readouterr().out
+    # The raw stdout should be valid JSON, not prose
+    json.loads(out)  # must not raise
 
 
 # ---------------------------------------------------------------------------
