@@ -59,15 +59,27 @@ class Context:
 
 
 def _read_skill_text(skill_dir: Path) -> str:
-    """Concatenate the text/code files of one installed skill (capped, read-only)."""
+    """Concatenate the text/code files of one installed skill (capped, read-only).
+
+    Symlinks are skipped and any path that resolves outside the skill directory is
+    refused, so a malicious skill cannot use a symlink to make the auditor read
+    (and surface) a file elsewhere on disk.
+    """
     parts, total = [], 0
+    try:
+        root = skill_dir.resolve()
+    except OSError:
+        return ""
     files = sorted(skill_dir.rglob("*"))
     for f in files:
         if total >= _MAX_BYTES_PER_SKILL:
             break
-        if not f.is_file() or f.suffix.lower() not in _SKILL_TEXT_EXT:
+        if f.is_symlink() or not f.is_file() or f.suffix.lower() not in _SKILL_TEXT_EXT:
             continue
         try:
+            real = f.resolve()
+            if root != real and root not in real.parents:  # escaped the skill dir
+                continue
             if f.stat().st_size > _MAX_FILE_BYTES:
                 continue
             text = f.read_text(encoding="utf-8", errors="replace")

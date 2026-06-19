@@ -8,10 +8,30 @@ unicode icons/box (e.g. a legacy Windows cp1252 console).
 """
 from __future__ import annotations
 
+import html
 import json
+import re
 
 from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
 from .scoring import ScoreResult
+
+# Findings, skill names, decoded payload previews and native-audit fields are UNTRUSTED
+# data. Strip terminal-control sequences (ANSI/OSC incl. OSC-52 clipboard), bidi overrides
+# and zero-width chars so a hostile skill/finding can't attack the terminal or spoof text.
+_ANSI_OSC_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.")
+_BAD_CHARS_RE = re.compile(
+    "[\x00-\x08\x0b-\x1f\x7f"
+    "\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]")
+
+
+
+def _sanitize(s: str) -> str:
+    if not s:
+        return s
+    s = _BAD_CHARS_RE.sub("", _ANSI_OSC_RE.sub("", s))
+    for c in "\r\n\t":
+        s = s.replace(c, " ")
+    return s
 
 _SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}
 _ICON = {FAIL: "⛔", WARN: "⚠️", PASS: "✅", UNKNOWN: "❔"}
@@ -36,10 +56,10 @@ def _trifecta_ratio(findings: list[Finding]) -> str:
 
 
 def _render_finding(lines, icon, f):
-    lines.append(f"{icon[f.status]} [{f.severity}] {f.title}")
+    lines.append(f"{icon[f.status]} [{f.severity}] {_sanitize(f.title)}")
     if f.detail:
-        lines.append(f"    why: {f.detail}")
-    lines.append(f"    fix: {f.fix}")
+        lines.append(f"    why: {_sanitize(f.detail)}")
+    lines.append(f"    fix: {_sanitize(f.fix)}")
     lines.append("")
 
 
@@ -189,3 +209,148 @@ def render_json(findings: list[Finding], score: ScoreResult) -> str:
             for f in findings
         ],
     }, ensure_ascii=True, indent=2)
+
+
+def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str:
+    """Standalone self-contained HTML report (inline CSS, no external assets).
+
+    Includes grade badge (colored by _GRADE_COLOR), score, Lethal Trifecta ratio,
+    and FAIL/WARN findings list. Owner view — shows findings with a note that
+    this is private and must not be shared publicly.
+
+    All finding text is HTML-escaped.
+    """
+    issues = [f for f in findings
+              if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
+    issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
+
+    badge_color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
+    trifecta = _trifecta_ratio(findings)
+
+    # Build the findings HTML
+    findings_html = ""
+    if not issues:
+        findings_html = '<div style="padding:1rem;background:#f0f8f0;border-radius:0.5rem;color:#0a4;font-weight:500;">No issues found. Keep it that way.</div>'
+    else:
+        findings_html = '<div style="padding:0;">'
+        for f in issues:
+            severity_color = {CRITICAL: "#e05d44", HIGH: "#fe7d37",
+                            MEDIUM: "#dfb317", LOW: "#97ca00"}.get(f.severity, "#999")
+            icon_char = "✕" if f.status == FAIL else "⚠"
+            findings_html += f'''
+            <div style="margin-bottom:1.5rem;border-left:4px solid {severity_color};padding-left:1rem;">
+                <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
+                    <span style="font-size:1.2rem;color:{severity_color};">{html.escape(icon_char)}</span>
+                    <strong style="color:#333;">{html.escape(f.title)}</strong>
+                    <span style="background:{severity_color};color:#fff;padding:0.125rem 0.5rem;border-radius:0.25rem;font-size:0.85rem;font-weight:600;">{html.escape(f.severity)}</span>
+                </div>
+                {f'<div style="color:#666;margin:0.5rem 0;"><strong>Why:</strong> {html.escape(f.detail)}</div>' if f.detail else ''}
+                <div style="color:#666;"><strong>Fix:</strong> {html.escape(f.fix)}</div>
+            </div>
+            '''
+        findings_html += '</div>'
+
+    html_body = f'''<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>ClawCheck Security Audit Report</title>
+    <style>
+        * {{
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: #f5f5f5;
+            padding: 2rem 1rem;
+        }}
+        .container {{
+            max-width: 900px;
+            margin: 0 auto;
+            background: #fff;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            padding: 2rem;
+        }}
+        .header {{
+            text-align: center;
+            margin-bottom: 2rem;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 1.5rem;
+        }}
+        .header h1 {{
+            font-size: 1.8rem;
+            margin-bottom: 1rem;
+            color: #222;
+        }}
+        .grade-badge {{
+            display: inline-block;
+            background: {badge_color};
+            color: #fff;
+            padding: 0.5rem 1rem;
+            border-radius: 0.375rem;
+            font-size: 2rem;
+            font-weight: 700;
+            margin: 1rem 0;
+        }}
+        .score-info {{
+            font-size: 1rem;
+            color: #666;
+            margin-top: 1rem;
+        }}
+        .section {{
+            margin-bottom: 2rem;
+        }}
+        .section h2 {{
+            font-size: 1.3rem;
+            margin-bottom: 1rem;
+            color: #222;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 0.5rem;
+        }}
+        .warning-box {{
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+            color: #856404;
+        }}
+        .warning-box strong {{
+            display: block;
+            margin-bottom: 0.5rem;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 ClawCheck Security Audit Report</h1>
+            <div class="grade-badge">{html.escape(score.grade)}</div>
+            <div class="score-info">
+                <div><strong>Score:</strong> {score.score}/100</div>
+                <div><strong>Lethal Trifecta:</strong> {html.escape(trifecta)}</div>
+                {f'<div style="color:#d9534f;"><strong>Capped:</strong> from {score.raw_score} (open {"CRITICAL" if score.failed_critical else "HIGH"} finding)</div>' if score.capped else ''}
+            </div>
+        </div>
+
+        <div class="warning-box">
+            <strong>⚠ Private Report</strong>
+            This report contains detailed security findings and must <strong>NOT</strong> be shared publicly.
+            Use the shareable badge instead (available via <code>--badge</code>).
+        </div>
+
+        <div class="section">
+            <h2>Findings</h2>
+            {findings_html}
+        </div>
+    </div>
+</body>
+</html>'''
+
+    return html_body

@@ -16,7 +16,9 @@ from . import (
     render_card, render_json, render_monitor, render_prompts, render_report, render_svg,
     save_state, snapshot, vet_skill,
 )
+from .report import render_html
 from .monitor import DEFAULT_STATE
+from .redteam import make_suite, render_suite
 
 
 def _unicode_ok() -> bool:
@@ -57,7 +59,10 @@ def main(argv=None) -> int:
                    help="vet a skill (dir or SKILL.md) for malware BEFORE installing it")
     p.add_argument("--canary", action="store_true",
                    help="active prompt-injection canary self-test")
+    p.add_argument("--redteam", action="store_true",
+                   help="print a live red-team payload suite for adversarial self-testing")
     p.add_argument("--badge", metavar="PATH", help="write a shareable SVG badge to PATH")
+    p.add_argument("--html", metavar="PATH", help="write a standalone HTML report to PATH")
     p.add_argument("--prompts", action="store_true",
                    help="print a copy-paste fix prompt for each finding")
     p.add_argument("--show-suppressed", action="store_true",
@@ -78,6 +83,10 @@ def main(argv=None) -> int:
 
     if args.canary:
         _emit(render_canary(make_canary(), ascii_only))
+        return 0
+
+    if args.redteam:
+        _emit(render_suite(make_suite(), ascii_only))
         return 0
 
     if args.show_suppressed:
@@ -104,6 +113,14 @@ def main(argv=None) -> int:
             _emit(f"(badge written to {args.badge})")
         except OSError as exc:
             _emit(f"(could not write badge: {exc})")
+        return 0
+
+    if args.html:
+        try:
+            Path(args.html).expanduser().write_text(render_html(findings, score, native=ctx.native), encoding="utf-8")
+            _emit(f"(HTML report written to {args.html})")
+        except OSError as exc:
+            _emit(f"(could not write HTML report: {exc})")
         return 0
 
     if args.prompts:

@@ -96,3 +96,7 @@ def save_state(path: str | Path, snap: dict) -> None:
     p = Path(path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(snap, indent=2), encoding="utf-8")
+    try:  # owner-only: the snapshot holds skill/bootstrap hashes + score history
+        p.chmod(0o600)
+    except OSError:
+        pass

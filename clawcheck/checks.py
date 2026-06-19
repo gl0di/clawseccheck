@@ -475,7 +475,9 @@ def _suspicious_pipe_hosts(blob: str) -> list[str]:
     hosts = []
     for host in _PIPE_SHELL_RE.findall(blob):
         h = host.lower()
-        if not any(h == r or h.endswith("." + r) or h.endswith(r) for r in _REPUTABLE_INSTALL_HOSTS):
+        # exact host or a real subdomain only — NOT a lookalike suffix
+        # (e.g. "evilastral.sh" must NOT match "astral.sh").
+        if not any(h == r or h.endswith("." + r) for r in _REPUTABLE_INSTALL_HOSTS):
             hosts.append(host)
     return hosts
 
@@ -820,13 +822,40 @@ def check_version(ctx: Context) -> Finding:
                    "Keep OpenClaw updated and re-run the installed-skill checks after updating.")
 
 
+# ---------- C3: backups of SOUL.md / memory (advisory) ----------
+def check_backups(ctx: Context) -> Finding:
+    """Are the agent's identity/memory files backed up (recoverable after drift/poisoning)?"""
+    has_bootstrap = any(n.endswith(("SOUL.md", "MEMORY.md", "AGENTS.md")) for n in ctx.bootstrap)
+    if not has_bootstrap:
+        return _finding("C3", UNKNOWN, "No bootstrap/memory files found to back up.", "—")
+    found = []
+    try:
+        for entry in ctx.home.rglob("*"):
+            n = entry.name.lower()
+            if entry.is_file() and (n.endswith((".bak", ".backup")) or "backup" in entry.parent.name.lower()):
+                found.append(entry.name)
+                if len(found) >= 5:
+                    break
+    except OSError:
+        pass
+    if found:
+        return _finding("C3", PASS,
+                        f"Backups present ({', '.join(found[:3])}{'…' if len(found) > 3 else ''}).",
+                        "Keep backups owner-only and outside the agent's writable workspace.")
+    return _finding("C3", WARN,
+                    "No backups of SOUL.md / MEMORY.md found — if the agent's identity or memory "
+                    "is poisoned or corrupted, there's nothing to restore from.",
+                    "Keep versioned, owner-only backups of SOUL.md/AGENTS.md/MEMORY.md outside the "
+                    "agent's writable workspace.")
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
     check_memory_poisoning, check_human_approval, check_leak,
     check_audit_log, check_tls, check_local_first,
     check_installed_skills, check_egress, check_mcp, check_monitoring,
-    check_autonomy, check_subagents, check_data_atrest, check_version,
+    check_autonomy, check_subagents, check_data_atrest, check_backups, check_version,
 ]
 
 

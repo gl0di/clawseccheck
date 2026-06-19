@@ -175,7 +175,9 @@ detection — not a real-time runtime IDS; that heavier model is intentionally o
 ```bash
 python3 audit.py --vet ./some-skill        # vet a skill (dir or SKILL.md) BEFORE installing it
 python3 audit.py --canary                   # active prompt-injection self-test (battle-tested)
+python3 audit.py --redteam                   # a multi-scenario adversarial payload suite
 python3 audit.py --badge badge.svg          # write a shareable SVG grade badge
+python3 audit.py --html report.html         # standalone HTML report (private — owner view)
 python3 audit.py --prompts                   # a copy-paste "ask your agent to fix it" per finding
 ```
 
@@ -210,10 +212,11 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-Prototype (v0.5). Passive, read-only checks (B1–B19), installed-skill malware vetting, baseline
-suppression, the built-in `openclaw security audit` merged in, a first active injection self-test
-(`--canary`), and a pip/pipx-installable CLI. Full live red-teaming, history/trend, and percentile
-("safer than X% of agents") are on the roadmap.
+Prototype (v0.6). Passive, read-only checks (B1–B19, C3/C4), installed-skill malware vetting,
+baseline suppression, the built-in `openclaw security audit` merged in, active injection tests
+(`--canary`/`--redteam`), HTML report, and a pip/pipx-installable CLI — hardened per an external
+security review. Deeper agent-behavior checks (write-protection, self-modification, deep MCP),
+history/trend, bilingual output, and percentile are on the roadmap.
 
 ## Tests
 

