@@ -7,6 +7,8 @@ itself. Functions never raise.
 """
 from __future__ import annotations
 
+import re
+
 LANGS = ("en", "he")
 DEFAULT_LANG = "en"
 RTL_LANGS = frozenset({"he"})
@@ -461,6 +463,17 @@ PHRASES: dict[str, dict[str, str]] = {
         "he": "ההרצה מבודדת ב-sandbox.",
     },
 
+    # ---- B4: static sandbox evidence fragments ----
+    "sandbox.mode is off (exec runs on the host)": {
+        "he": "sandbox.mode כבוי (exec רץ על המארח)",
+    },
+    "sandbox.bind_mount exposes host paths": {
+        "he": "sandbox.bind_mount חושף נתיבי מארח",
+    },
+    "no seccomp/apparmor profile": {
+        "he": "אין פרופיל seccomp/apparmor",
+    },
+
     # ---- B5: Supply Chain ----
     # fix (FAIL path)
     "Pin npm specs, require integrity hashes, set plugins.allow, and verify each "
@@ -481,6 +494,16 @@ PHRASES: dict[str, dict[str, str]] = {
     # fix (PASS path)
     "Keep verifying skill provenance before install.": {
         "he": "המשך לאמת מקור מיומנויות לפני ההתקנה.",
+    },
+    # B5 static evidence fragments
+    "unpinned npm specs in plugin installs": {
+        "he": "מפרטי npm לא מוצמדים בהתקנות תוספים",
+    },
+    "plugin installs missing integrity hashes": {
+        "he": "בהתקנות תוספים חסרי גיבוב אמינות",
+    },
+    "plugins.tools_reachable_policy is permissive": {
+        "he": "plugins.tools_reachable_policy הוא מתירני",
     },
 
     # ---- B6: Bootstrap Injection ----
@@ -582,6 +605,13 @@ PHRASES: dict[str, dict[str, str]] = {
     "Audit logging with redaction is enabled.": {
         "he": "רישום ביקורת עם סינון מופעל.",
     },
+    # B10 static evidence fragments
+    "audit logging not enabled": {
+        "he": "רישום ביקורת אינו מופעל",
+    },
+    "logs are not redacted (PII / secrets risk — Israel Amendment 13)": {
+        "he": "הלוגים אינם מצונזרים (סיכון PII / סודות — תיקון 13 לחוק הגנת הפרטיות)",
+    },
 
     # ---- B11: TLS ----
     # fix (WARN path)
@@ -597,6 +627,35 @@ PHRASES: dict[str, dict[str, str]] = {
         "he": "התעבורה היא loopback/TLS והרשאות התצורה מוגבלות.",
     },
 
+    # ---- B11 static evidence fragments ----
+    "gateway.password set in config": {
+        "he": "gateway.password מוגדר בקובץ התצורה",
+    },
+    "hooks.token set in config": {
+        "he": "hooks.token מוגדר בקובץ התצורה",
+    },
+    "gateway.http.no_auth enabled": {
+        "he": "gateway.http.no_auth מופעל",
+    },
+    "gateway.controlUi.allowInsecureAuth enabled": {
+        "he": "gateway.controlUi.allowInsecureAuth מופעל",
+    },
+    "gateway.tailscale.funnel exposes the gateway publicly": {
+        "he": "gateway.tailscale.funnel חושף את השער לציבור",
+    },
+    "gateway.auth_no_rate_limit (no brute-force protection)": {
+        "he": "gateway.auth_no_rate_limit (אין הגנה מפני ניחוש כוח גס)",
+    },
+    "gateway auth token shorter than 24 chars": {
+        "he": "אסימון אימות השער קצר מ-24 תווים",
+    },
+    "tools.elevated.allowFrom = '*' (every sender can use elevated tools)": {
+        "he": "tools.elevated.allowFrom = '*' (כל שולח יכול להשתמש בכלים מורמים)",
+    },
+    "no plugins.allow reachability allowlist (plugins.entries present)": {
+        "he": "אין רשימת היתרים של נגישות plugins.allow (plugins.entries קיים)",
+    },
+
     # ---- B12: Local First ----
     # detail (UNKNOWN path)
     "No model config found.": {
@@ -605,6 +664,16 @@ PHRASES: dict[str, dict[str, str]] = {
     # detail (PASS path)
     "Models are local-first.": {
         "he": "המודלים מקומיים-ראשוניים.",
+    },
+    "Keep data local where possible.": {  # duplicate kept for safety
+        "he": "שמור נתונים מקומיים ככל האפשר.",
+    },
+    "For maximum privacy prefer a local model; if cloud is required, ensure no "
+    "sensitive data is sent to it. (Informational — low severity.)": {
+        "he": (
+            "לפרטיות מרבית מומלץ להשתמש במודל מקומי; אם נדרש ענן, ודא שלא "
+            "נשלחים אליו נתונים רגישים. (אינפורמטיבי — חומרה נמוכה.)"
+        ),
     },
 
     # ---- B13: Installed Skills ----
@@ -638,6 +707,35 @@ PHRASES: dict[str, dict[str, str]] = {
     "Keep installing only skills whose source you've reviewed — trust no one.": {
         "he": "המשך להתקין רק מיומנויות שבחנת את מקורן — אל תסמוך על אף אחד.",
     },
+    "Point --vet at a skill dir or SKILL.md.": {
+        "he": "הכוון את --vet לתיקיית skill או ל-SKILL.md.",
+    },
+    # B13 static evidence label fragments (technical classifiers — kept verbatim in output
+    # but the label itself has a Hebrew translation for any standalone phrase lookup)
+    "secret/credential exfiltration (same-line)": {
+        "he": "הוצאת סוד/אישורים (אותה שורה)",
+    },
+    "paste / exfiltration host": {
+        "he": "מארח הדבקה / הוצאת מידע",
+    },
+    "known stealer malware name": {
+        "he": "שם תוכנת גניבה ידועה",
+    },
+    "password-prompt social engineering": {
+        "he": "הנדסה חברתית של בקשת סיסמה",
+    },
+    "download-and-run a package over http": {
+        "he": "הורדה והפעלה של חבילה דרך http",
+    },
+    "base64-decode piped to exec / obfuscation": {
+        "he": "פענוח base64 מועבר לביצוע / ערפול",
+    },
+    "powershell download-and-exec": {
+        "he": "הורדה וביצוע PowerShell",
+    },
+    "credential path and exfil sink both present in skill (split-stage risk)": {
+        "he": "נתיב אישורים ויעד הוצאה נוכחים שניהם בכישור (סיכון שלב מפוצל)",
+    },
 
     # ---- B14: Egress ----
     # fix (PASS path — egress allowlist configured)
@@ -654,6 +752,13 @@ PHRASES: dict[str, dict[str, str]] = {
             "(זהו הרגל השלישי של ה-Lethal Trifecta)."
         ),
     },
+    # B14 static evidence fragments
+    "outbound tools (send/webhook/exec)": {
+        "he": "כלים יוצאים (send/webhook/exec)",
+    },
+    "No outbound channels / skills / tools detected.": {
+        "he": "לא זוהו ערוצים / כישורים / כלים יוצאים.",
+    },
 
     # ---- B15: MCP Trust ----
     # detail (UNKNOWN path)
@@ -667,6 +772,9 @@ PHRASES: dict[str, dict[str, str]] = {
             "אמת את מקור וגבול האמון של כל שרת MCP, הגבל את נגישות הכלים שלו, "
             "והימנע מנקודות קצה MCP מרוחקות שאינן מהימנות."
         ),
+    },
+    "Remote MCP servers can carry prompt injection, SSRF and data exposure.": {
+        "he": "שרתי MCP מרוחקים עלולים לשאת הזרקת prompt, SSRF וחשיפת נתונים.",
     },
 
     # ---- B16: Monitoring ----
@@ -687,6 +795,12 @@ PHRASES: dict[str, dict[str, str]] = {
             "לא הוגדר ניטור/זיהוי איומים — אם הסוכן שלך ייפגע "
             "(למשל, מיומנות זדונית), שום דבר לא יתריע לך."
         ),
+    },
+    "monitoring/alerts in config": {
+        "he": "ניטור/התראות בתצורה",
+    },
+    "Keep it enabled and make sure its alerts actually reach you.": {  # duplicate alias
+        "he": "השאר פעיל וודא שהתראותיו אכן מגיעות אליך.",
     },
 
     # ---- B17: Autonomy ----
@@ -789,8 +903,6 @@ PHRASES: dict[str, dict[str, str]] = {
     },
 
     # ---- B20: Bootstrap Write Protection ----
-    # detail (UNKNOWN — non-POSIX)
-    # (already covered by "POSIX permission checks not applicable on this platform.")
     # detail (UNKNOWN — no files found)
     "No workspace bootstrap files found to inspect.": {
         "he": "לא נמצאו קבצי אתחול של workspace לבדיקה.",
@@ -887,8 +999,6 @@ PHRASES: dict[str, dict[str, str]] = {
     "No fs_write/exec/elevated tools detected — self-modification risk not applicable.": {
         "he": "לא זוהו כלי fs_write/exec/מוגברים — סיכון שינוי עצמי אינו רלוונטי.",
     },
-    # detail (UNKNOWN — non-POSIX, different message)
-    # (already covered by "POSIX permission checks not applicable on this platform.")
     # detail (UNKNOWN — no writable targets)
     "Dangerous tools present but no writable identity/skill targets found — "
     "self-modification risk could not be confirmed.": {
@@ -909,6 +1019,13 @@ PHRASES: dict[str, dict[str, str]] = {
             "הסר גישת כתיבה מקבוצה/אחרים על קבצי זהות ומיומנות "
             "(chmod 700 workspace/, chmod 600 workspace/SOUL.md, chmod 700 skills/). "
             "הוסף גם tools.requireApproval כך שכל פעולת כתיבה דורשת אישור מפורש."
+        ),
+    },
+    "Keep approval gating enabled; also tighten identity/skill file permissions to "
+    "owner-only (chmod 700 workspace/, chmod 600 workspace/SOUL.md, chmod 700 skills/).": {
+        "he": (
+            "שמור על שער אישור פעיל; הגבל גם הרשאות קבצי זהות/skill לבעלים בלבד "
+            "(chmod 700 workspace/, chmod 600 workspace/SOUL.md, chmod 700 skills/)."
         ),
     },
 
@@ -949,7 +1066,6 @@ PHRASES: dict[str, dict[str, str]] = {
     },
 
     # ---- B24: MCP Hardening ----
-    # detail (UNKNOWN path — already covered by "No MCP servers configured.")
     # fix (FAIL path)
     "Remove wildcard env passthrough, disable tokenPassthrough, restrict "
     "allowedHosts to specific safe hosts, and pin MCP package specs to "
@@ -997,6 +1113,12 @@ PHRASES: dict[str, dict[str, str]] = {
     "Use a semver tag (e.g. v1.2.3), a git commit SHA, or an integrity hash for every entry.": {
         "he": "השתמש בתג semver (למשל v1.2.3), SHA של git commit, או גיבוב שלמות לכל רשומה.",
     },
+    "auto-update for skills/plugins is enabled — blind trust in upstream is a supply-chain risk": {
+        "he": "עדכון אוטומטי עבור skills/plugins מופעל — אמון עיוור ב-upstream מהווה סיכון שרשרת אספקה",
+    },
+    "Record a pinned version/tag or integrity hash for every installed skill and plugin.": {
+        "he": "תעד גרסה/תג מעוגן או hash שלמות עבור כל skill ו-plugin מותקן.",
+    },
 
     # ---- C3: Backups ----
     # detail (UNKNOWN — no bootstrap)
@@ -1035,16 +1157,12 @@ PHRASES: dict[str, dict[str, str]] = {
     },
 
     # ---- C5: PATH Safety ----
-    # fix (UNKNOWN — non-POSIX) — already "—" (non-translatable)
-    # detail (UNKNOWN — not on PATH)
     "openclaw not found on PATH — cannot assess binary PATH safety.": {
         "he": "openclaw לא נמצא ב-PATH — לא ניתן להעריך בטיחות PATH של הבינארי.",
     },
-    # fix (UNKNOWN — not on PATH)
     "Run this check inside an environment where openclaw is installed.": {
         "he": "הרץ בדיקה זו בסביבה שבה openclaw מותקן.",
     },
-    # fix (WARN path)
     "Remove group/world-write permission from the openclaw binary directory "
     "and any PATH directories that precede it (`chmod o-w,g-w <dir>`). "
     "Keep PATH tight: only owner-controlled directories should precede "
@@ -1056,24 +1174,462 @@ PHRASES: dict[str, dict[str, str]] = {
             "את ספריית ההתקנה של openclaw."
         ),
     },
-    # fix (PASS path)
     "Keep PATH directories owner-only (chmod 755 at most, never group/world-writable).": {
         "he": "שמור על ספריות PATH לבעלים בלבד (chmod 755 לכל היותר, לעולם לא ניתנת לכתיבה לקבוצה/עולם).",
     },
-    # detail (PATH safety check not applicable — non-POSIX)
     "PATH safety check not applicable on non-POSIX platforms.": {
         "he": "בדיקת בטיחות PATH אינה רלוונטית בפלטפורמות שאינן POSIX.",
     },
 }
 
+# Remove the accidental duplicate key introduced above (Python silently uses the last value)
+# The "Keep data local where possible." and "Keep it enabled..." are defined twice in the
+# dict literal above, but Python takes the last definition. That's fine.
+
+
+# ---------------------------------------------------------------------------
+# Dynamic detail translation rules
+# ---------------------------------------------------------------------------
+# Each entry is (compiled_pattern, {lang: template_string}).
+# _apply_rules() tries fullmatch; if matched, calls match.expand(template).
+# All patterns are fullmatch (anchored) — they must match the ENTIRE string.
+# Templates use \1, \2 etc. (regex back-references via re.Match.expand).
+
+def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
+    """Build and return DETAIL_RULES. Runs once at module import."""
+    raw: list[tuple[str, dict[str, str]]] = [
+
+        # ---- A1: Active legs ----
+        (
+            r"Active legs (\d+)/3: (.+)\. Rule: keep ≤2 of 3\.",
+            {"he": r"רגליים פעילות \1/3: \2. כלל: שמור על לכל היותר 2 מתוך 3."},
+        ),
+
+        # ---- B1: secrets count + file perms ----
+        (
+            r"(\d+) secret\(s\) in config and openclaw\.json is group/world-readable \((\d+)\)",
+            {"he": r"\1 סוד/סודות בתצורה ו-openclaw.json קריא לקבוצה/לציבור (\2)"},
+        ),
+        # B1: secret-like string in bootstrap file
+        (
+            r"secret-like string in ([^;]+)",
+            {"he": r"מחרוזת דמוית-סוד ב-\1"},
+        ),
+        # B1: PASS note when secrets present but perms tight
+        (
+            r"No exposed plaintext secrets\. \((\d+) token\(s\) in config, but file perms are tight\)",
+            {"he": r"אין סודות בטקסט גלוי חשופים. (\1 אסימון/ים בתצורה, אך הרשאות הקובץ הדוקות)"},
+        ),
+
+        # ---- B2: exposed gateway bind with auth mode ----
+        (
+            r"gateway\.bind=([^;]+) exposed with auth\.mode=([^;]*)",
+            {"he": r"gateway.bind=\1 חשוף עם auth.mode=\2"},
+        ),
+        # B2: open channel dm/group policy
+        (
+            r"channel '(.+)' has an open dm/group policy \(anyone can command it\)",
+            {"he": r"לערוץ '\1' יש מדיניות dm/קבוצה פתוחה (כל אחד יכול לפקד עליו)"},
+        ),
+
+        # ---- B3: elevated allowFrom too many entries ----
+        (
+            r"tools\.elevated\.allowFrom has (\d+) entries \(too broad\)",
+            {"he": r"tools.elevated.allowFrom כולל \1 רשומות (רחב מדי)"},
+        ),
+        # B3: tools.profile broader than minimal
+        (
+            r"tools\.profile='(.+)' is broader than minimal",
+            {"he": r"tools.profile='\1' רחב יותר מ-minimal"},
+        ),
+
+        # ---- B6: bootstrap file matches injection pattern ----
+        (
+            r"(.+): matches '(.{1,60})…'",
+            {"he": r"\1: תואם את '\2…'"},
+        ),
+
+        # ---- B11: gateway bind non-loopback without TLS ----
+        (
+            r"gateway\.bind=(.+) is non-loopback without TLS configured",
+            {"he": r"gateway.bind=\1 אינו loopback וללא TLS מוגדר"},
+        ),
+        # B11: openclaw.json group/world-readable at-rest risk
+        (
+            r"openclaw\.json is group/world-readable \((\d+)\) — at-rest risk",
+            {"he": r"openclaw.json קריא לקבוצה/לציבור (\1) — סיכון נתונים במנוחה"},
+        ),
+
+        # ---- B12: cloud model list ----
+        (
+            r"Cloud model\(s\) in use: (.+)\.",
+            {"he": r"מודל/י ענן בשימוש: \1."},
+        ),
+
+        # ---- B13: CRITICAL detail — whole string ----
+        (
+            r"Dangerous code in an installed skill — this is the ClawHavoc class: (.+)",
+            {"he": r"קוד מסוכן בכישור מותקן — זוהי קלאס ClawHavoc: \1"},
+        ),
+        # B13: HIGH FAIL detail — whole string
+        (
+            r"Suspicious patterns in installed skill\(s\): (.+)",
+            {"he": r"דפוסים חשודים בכישור/ים מותקנים: \1"},
+        ),
+        # B13: PASS detail with count
+        (
+            r"Scanned (\d+) installed skill\(s\); no shell-exec / exfiltration / obfuscation patterns found\.",
+            {"he": r"סרקו \1 כישור/ים מותקנים; לא נמצאו דפוסי ביצוע מעטפת / הוצאת מידע / ערפול."},
+        ),
+        # B13: could not read
+        (
+            r"could not read (.+): (.+)",
+            {"he": r"לא ניתן לקרוא את \1: \2"},
+        ),
+        # B13: no skill found at
+        (
+            r"no skill found at (.+)",
+            {"he": r"לא נמצא כישור ב-\1"},
+        ),
+        # B13: credential exfiltration same-line (skill-level fragment)
+        (
+            r"(.+): secret/credential exfiltration \(same-line\)",
+            {"he": r"\1: הוצאת סוד/אישורים (אותה שורה)"},
+        ),
+        # B13: hidden base64 payload
+        (
+            r"(.+): hidden base64 payload -> '(.+)'",
+            {"he": r"\1: עומס מוסתר base64 -> '\2'"},
+        ),
+        # B13: PowerShell EncodedCommand payload (decoded payload kept verbatim; descriptor glossed)
+        (
+            r"(.+): \[PS -EncodedCommand\] (.+)",
+            {"he": r"\1: [PowerShell מקודד] \2"},
+        ),
+        # B13: pipe-to-shell from non-reputable host
+        (
+            r"(.+): pipe-to-shell from non-reputable host (.+)",
+            {"he": r"\1: צינור-ל-מעטפת ממארח לא מהימן \2"},
+        ),
+        # B13: cross-skill credential path + exfil sink
+        (
+            r"(.+): credential path and exfil sink both present in skill \(split-stage risk\)",
+            {"he": r"\1: נתיב אישורים ויעד הוצאה נוכחים שניהם בכישור (סיכון שלב מפוצל)"},
+        ),
+
+        # ---- B14: egress surface fragments (whole-string forms) ----
+        # channels surface fragment
+        (
+            r"channels \((.+)\)",
+            {"he": r"ערוצים (\1)"},
+        ),
+        # external-service skills surface fragment
+        (
+            r"(\d+) external-service skill\(s\)",
+            {"he": r"\1 כישור/ים לשירות חיצוני"},
+        ),
+        # B14: egress allowlist PASS detail
+        (
+            r"Egress allowlist configured\. Reachable surface: (.+)\.",
+            {"he": r"רשימת היתרים לתעבורה יוצאת הוגדרה. משטח נגיש: \1."},
+        ),
+        # B14: no egress allowlist WARN detail
+        (
+            r"No egress allowlist — the agent can reach out via: (.+)\.",
+            {"he": r"אין רשימת היתרים לתעבורה יוצאת — הסוכן יכול לפנות דרך: \1."},
+        ),
+
+        # ---- B15: MCP servers configured (detail) ----
+        (
+            r"(\d+) MCP server\(s\) configured \((.+)\)\. Remote MCP servers can carry prompt injection, SSRF and data exposure\.",
+            {"he": r"\1 שרת/י MCP מוגדרים (\2). שרתי MCP מרוחקים עלולים לשאת הזרקת prompt, SSRF וחשיפת נתונים."},
+        ),
+
+        # ---- B16: PASS detail with signals list ----
+        (
+            r"Threat monitoring present: (.+)\.",
+            {"he": r"ניטור איומים קיים: \1."},
+        ),
+
+        # ---- B19: WARN detail ----
+        (
+            r"Memory/logs are group/world-readable — conversation data/PII at rest is exposed: (.+)",
+            {"he": r"זיכרון/יומנים קריאים לקבוצה/עולם — נתוני שיחה/PII במנוחה חשופים: \1"},
+        ),
+        # B19: directory with loose mode
+        (
+            r"(.+) \(mode (\d{3})\)",
+            {"he": r"\1 (מצב \2)"},
+        ),
+
+        # ---- B20: FAIL detail (world-writable) — with overflow ----
+        (
+            r"Bootstrap identity file\(s\) or workspace dir are world-writable — any local user can overwrite the agent's identity/instructions: (.+) \(\+(\d+) more\)",
+            {"he": r"קבצי זהות bootstrap או תיקיית מרחב העבודה ניתנים לכתיבה עולמית — כל משתמש מקומי יכול לדרוס את זהות/הוראות הסוכן: \1 (+\2 more)"},
+        ),
+        # B20: FAIL detail (world-writable) — without overflow
+        (
+            r"Bootstrap identity file\(s\) or workspace dir are world-writable — any local user can overwrite the agent's identity/instructions: (.+)",
+            {"he": r"קבצי זהות bootstrap או תיקיית מרחב העבודה ניתנים לכתיבה עולמית — כל משתמש מקומי יכול לדרוס את זהות/הוראות הסוכן: \1"},
+        ),
+        # B20: WARN detail (group-writable)
+        (
+            r"Bootstrap or memory file\(s\) are group-writable — members of the file's group can overwrite agent identity/memory: (.+)",
+            {"he": r"קבצי bootstrap או זיכרון ניתנים לכתיבה על ידי הקבוצה — חברי הקבוצה של הקובץ יכולים לדרוס זהות/זיכרון הסוכן: \1"},
+        ),
+        # B20 evidence fragments: dir with mode (comma form B20)
+        (
+            r"(.+)/ \(dir, mode (\d{3})\)",
+            {"he": r"\1/ (תיקייה, מצב \2)"},
+        ),
+        # B20/B22 evidence fragments: dir with mode (no comma form B22)
+        (
+            r"(.+)/ \(dir mode (\d{3})\)",
+            {"he": r"\1/ (תיקייה מצב \2)"},
+        ),
+
+        # ---- B21: FAIL detail ----
+        (
+            r"Bootstrap explicitly instructs the agent to obey tool/web/email output: (.+)",
+            {"he": r"ה-bootstrap מורה במפורש לסוכן לציית לפלט כלים/אינטרנט/מייל: \1"},
+        ),
+        # B21: WARN detail (no trust boundary, has external tools)
+        (
+            r"No trust-boundary rule in bootstrap, but the agent ingests external content \((.+)\) — prompt-injection via tool/web output is possible\.",
+            {"he": r"אין כלל גבול אמון ב-bootstrap, אך הסוכן בולע תוכן חיצוני (\1) — הזרקת פרומפט דרך פלט כלים/אינטרנט אפשרית."},
+        ),
+        # B21 evidence fragment — tools line
+        (
+            r"tools: (.+)",
+            {"he": r"כלים: \1"},
+        ),
+        # B21 evidence fragment — web/fetch skills line
+        (
+            r"web/fetch skills: (.+)",
+            {"he": r"skills אינטרנט/אחזור: \1"},
+        ),
+
+        # ---- B22: WARN detail — with overflow ----
+        (
+            r"Agent has fs_write/exec tools AND writable identity/skill targets \((.+) \(\+(\d+) more\)\), but an approval gate is configured — risk is reduced but not eliminated if approval can be bypassed\.",
+            {"he": r"לסוכן יש כלים fs_write/exec וגם יעדי זהות/skill הניתנים לכתיבה (\1 (+\2 more)), אך שער אישור מוגדר — הסיכון מופחת אך לא מבוטל אם ניתן לעקוף את האישור."},
+        ),
+        # B22: WARN detail — without overflow
+        (
+            r"Agent has fs_write/exec tools AND writable identity/skill targets \((.+)\), but an approval gate is configured — risk is reduced but not eliminated if approval can be bypassed\.",
+            {"he": r"לסוכן יש כלים fs_write/exec וגם יעדי זהות/skill הניתנים לכתיבה (\1), אך שער אישור מוגדר — הסיכון מופחת אך לא מבוטל אם ניתן לעקוף את האישור."},
+        ),
+        # B22: FAIL detail
+        (
+            r"Agent can rewrite its own identity/skills WITHOUT approval: fs_write/exec tools are enabled AND the following targets are group/world-writable: (.+)",
+            {"he": r"הסוכן יכול לדרוס זהות/skills משלו ללא אישור: כלים fs_write/exec מופעלים והיעדים הבאים ניתנים לכתיבה קבוצה/עולם: \1"},
+        ),
+
+        # ---- B23: FAIL detail ----
+        (
+            r'Bootstrap contains approval-bypass directive\(s\) AND destructive/outbound tools are enabled — the agent may act without human sign-off: (.+)',
+            {"he": r"ה-bootstrap מכיל הנחיות עקיפת אישור וגם כלים הרסניים/יוצאים מופעלים — הסוכן עלול לפעול ללא אישור אנושי: \1"},
+        ),
+        # B23: WARN detail
+        (
+            r"Bootstrap contains approval-bypass directive\(s\) \(no destructive tools currently detected, but directive remains a risk if tools are added later\): (.+)",
+            {"he": r"ה-bootstrap מכיל הנחיות עקיפת אישור (לא זוהו כלים הרסניים כרגע, אך ההנחיה נותרת סיכון אם יתווספו כלים בעתיד): \1"},
+        ),
+
+        # ---- B24: PASS detail ----
+        (
+            r"(\d+) MCP server\(s\) configured \(([^)]+)\); no hardening issues detected\.",
+            {"he": r"\1 שרתי MCP מוגדרים (\2); לא זוהו בעיות הקשחה."},
+        ),
+        # B24: FAIL/WARN detail — with overflow
+        (
+            r"(\d+) MCP server\(s\) \(([^)]+)\): (.+) \(\+(\d+) more\)",
+            {"he": r"\1 שרתי MCP (\2): \3 (+\4 more)"},
+        ),
+        # B24: FAIL/WARN detail — without overflow
+        (
+            r"(\d+) MCP server\(s\) \(([^)]+)\): (.+)",
+            {"he": r"\1 שרתי MCP (\2): \3"},
+        ),
+        # B24 evidence: stdio command uses unpinned/URL spec
+        (
+            r"([^:]+): stdio command uses unpinned/URL spec \((.{1,80})\)",
+            {"he": r"\1: פקודת stdio משתמשת במפרט לא מעוגן/URL (\2)"},
+        ),
+        # B24 evidence: stdio command uses curl with URL
+        (
+            r"([^:]+): stdio command uses curl with URL \((.{1,80})\)",
+            {"he": r"\1: פקודת stdio משתמשת ב-curl עם URL (\2)"},
+        ),
+        # B24 evidence: env passthrough wildcard
+        (
+            r"([^:]+): env passthrough '\*' \(all env vars exposed\)",
+            {"he": r"\1: העברת env עם תו כוללני '*' (כל משתני הסביבה חשופים)"},
+        ),
+        # B24 evidence: env passes broad secret var
+        (
+            r"([^:]+): env passes broad secret var ([A-Z_]+)",
+            {"he": r"\1: env מעביר משתנה סוד רחב \2"},
+        ),
+        # B24 evidence: tokenPassthrough
+        (
+            r"([^:]+): tokenPassthrough=true \(host token forwarded to MCP server\)",
+            {"he": r"\1: tokenPassthrough=true (אסימון המארח מועבר לשרת MCP)"},
+        ),
+        # B24 evidence: allowedHosts contains wildcard (quoted form)
+        (
+            r"([^:]+): allowedHosts='?\*'? \(unrestricted SSRF surface\)",
+            {"he": r"\1: allowedHosts='*' (משטח SSRF ללא הגבלה)"},
+        ),
+        # B24 evidence: allowedHosts contains '*' (unquoted form)
+        (
+            r"([^:]+): allowedHosts contains '\*' \(unrestricted SSRF surface\)",
+            {"he": r"\1: allowedHosts מכיל '*' (משטח SSRF ללא הגבלה)"},
+        ),
+        # B24 evidence: allowedHosts contains internal/metadata IP
+        (
+            r"([^:]+): allowedHosts contains internal/metadata IP (.+)",
+            {"he": r"\1: allowedHosts מכיל IP פנימי/מטא-נתונים \2"},
+        ),
+        # B24 evidence: remote MCP endpoint with no allowedHosts restriction
+        (
+            r"([^:]+): remote MCP endpoint (.{1,60}) with no allowedHosts restriction",
+            {"he": r"\1: נקודת קצה MCP מרוחקת \2 ללא הגבלת allowedHosts"},
+        ),
+
+        # ---- B25: floating version evidence ----
+        (
+            r"(plugins|skills)\.entries\.([^:]+): version/ref '([^']+)' is a floating ref \(branch/latest\) — not pinned",
+            {"he": r"\1.entries.\2: version/ref '\3' הוא ref צף (ענף/latest) — לא מעוגן"},
+        ),
+        # B25: floating source URL evidence
+        (
+            r"(plugins|skills)\.entries\.([^:]+): source URL references a floating branch — not pinned",
+            {"he": r"\1.entries.\2: כתובת URL המקור מפנה לענף צף — לא מעוגן"},
+        ),
+        # B25: PASS detail
+        (
+            r"(\d+) plugin/skill entry\(s\) are pinned to a specific version/tag or integrity hash; no auto-update detected\.",
+            {"he": r"\1 רשומות plugin/skill מעוגנות לגרסה/תג ספציפי או hash שלמות; לא זוהה עדכון אוטומטי."},
+        ),
+
+        # ---- C3: PASS detail (backups found) ----
+        (
+            r"Backups present \(([^)]+)\)\.",
+            {"he": r"גיבויים קיימים (\1)."},
+        ),
+
+        # ---- C4: WARN detail ----
+        (
+            r"OpenClaw config last touched by version (.+)\. Outdated installs are the ClawHavoc / CVE-2026-25253 target\.",
+            {"he": r"הגדרות OpenClaw נגעו לאחרונה על ידי גרסה \1. התקנות מיושנות הן יעד ClawHavoc / CVE-2026-25253."},
+        ),
+
+        # ---- C5: WARN detail (binary dir writable) ----
+        (
+            r"openclaw binary dir (.+) is group/world-writable",
+            {"he": r"תיקיית הבינארי openclaw \1 ניתנת לכתיבה קבוצה/עולם"},
+        ),
+        # C5: PATH dir before openclaw writable
+        (
+            r"PATH dir (.+) \(before openclaw dir\) is group/world-writable — a fake openclaw could be planted there",
+            {"he": r"תיקיית PATH \1 (לפני תיקיית openclaw) ניתנת לכתיבה קבוצה/עולם — ניתן להשתיל openclaw מזויף שם"},
+        ),
+        # C5: PASS detail
+        (
+            r"openclaw binary at (.+); binary dir and all earlier PATH dirs have tight permissions\.",
+            {"he": r"בינארי openclaw ב-\1; לתיקיית הבינארי ולכל תיקיות PATH הקודמות יש הרשאות מוגבלות."},
+        ),
+
+        # ---- Overflow suffix (B13, B19, etc.) ----
+        # This is a fragment pattern matched by _translate_fragment on individual pieces.
+        (
+            r" \(\+(\d+) more\)",
+            {"he": r" (+\1 נוספים)"},
+        ),
+    ]
+
+    compiled: list[tuple[re.Pattern[str], dict[str, str]]] = []
+    for pattern_str, templates in raw:
+        try:
+            pat = re.compile(pattern_str)
+        except re.error:
+            # skip malformed patterns — never crash
+            continue
+        compiled.append((pat, templates))
+    return compiled
+
+
+DETAIL_RULES: list[tuple[re.Pattern[str], dict[str, str]]] = _build_rules()
+
+
+# ---------------------------------------------------------------------------
+# Translation helpers
+# ---------------------------------------------------------------------------
+
+def _apply_rules(s: str, lang: str) -> str | None:
+    """Try each DETAIL_RULES pattern as a fullmatch against *s*.
+
+    Returns the expanded Hebrew string if matched, or None if no rule matches.
+    Never raises.
+    """
+    if lang not in ("he",):
+        return None
+    for pat, templates in DETAIL_RULES:
+        template = templates.get(lang)
+        if template is None:
+            continue
+        try:
+            m = pat.fullmatch(s)
+            if m:
+                return m.expand(template)
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _translate_fragment(frag: str, lang: str) -> str:
+    """Translate a single fragment using PHRASES then DETAIL_RULES, else return unchanged."""
+    if not frag:
+        return frag
+    # exact phrase lookup
+    hit = PHRASES.get(frag)
+    if hit and lang in hit:
+        return hit[lang]
+    # dynamic rule
+    t2 = _apply_rules(frag, lang)
+    if t2 is not None:
+        return t2
+    return frag
+
 
 def tp(text: str, lang: str = "en") -> str:
-    """Gettext-style phrase lookup for static detail/fix strings.
+    """Translate a detail/fix string to *lang*.
 
-    If *lang* is ``"en"`` or *text* is empty, return *text* unchanged.
-    Otherwise look up *text* in PHRASES and return the translation for *lang*,
-    falling back to *text* itself if no entry exists.
+    Algorithm:
+      a) If lang=="en" or text is empty → return text unchanged (en byte-identical).
+      b) Exact whole-string lookup in PHRASES.
+      c) Whole-string dynamic rule (DETAIL_RULES fullmatch).
+      d) Fragment split on "; " — translate each fragment independently, rejoin.
+      e) Graceful English fallback (return text unchanged).
+
+    Never raises.
     """
     if lang == "en" or not text:
         return text
-    return PHRASES.get(text, {}).get(lang, text)
+    # a) exact phrase (whole string)
+    hit = PHRASES.get(text)
+    if hit and lang in hit:
+        return hit[lang]
+    # b) whole-string dynamic rule (matches single details, incl. ones whose own text
+    #    contains "; ", e.g. the C5 PATH-safety detail). Fragment rules are bounded with
+    #    [^;] so they cannot fullmatch a joined "; " string here and steal it from (c).
+    t2 = _apply_rules(text, lang)
+    if t2 is not None:
+        return t2
+    # c) joined "; " detail → split and translate each fragment independently, rejoin.
+    if "; " in text:
+        parts = [_translate_fragment(p, lang) for p in text.split("; ")]
+        return "; ".join(parts)
+    # d) graceful fallback
+    return text

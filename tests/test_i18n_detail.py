@@ -171,22 +171,37 @@ class TestTpStaticDetailStrings:
 # ---------------------------------------------------------------------------
 
 class TestTpDynamicFallback:
-    """Strings that look dynamic (contain interpolated values, not in PHRASES) fall
-    back to the input text unchanged."""
+    """tp() now translates dynamic strings via DETAIL_RULES when a pattern matches,
+    and falls back to the input text only for truly unknown strings."""
 
-    @pytest.mark.parametrize("text", [
-        "Active legs 3/3: untrusted input, sensitive data, outbound actions. Rule: keep ≤2 of 3.",
-        "gateway.bind=0.0.0.0 exposed with auth.mode=none",
-        "tools.elevated.allowFrom has 30 entries (too broad)",
-        "sandbox.mode is off (exec runs on the host)",
-        "secret-like string in SOUL.md",
-        "Cloud model(s) in use: openai.",
-        "1 MCP server(s) (my-mcp): some-issue",
-        "Some totally unknown string that is not in PHRASES at all.",
-        "",
+    @pytest.mark.parametrize("text,expected_he_differs", [
+        # These strings ARE covered by DETAIL_RULES — they get translated
+        ("Active legs 3/3: untrusted input, sensitive data, outbound actions. Rule: keep ≤2 of 3.", True),
+        ("gateway.bind=0.0.0.0 exposed with auth.mode=none", True),
+        ("tools.elevated.allowFrom has 30 entries (too broad)", True),
+        ("sandbox.mode is off (exec runs on the host)", True),
+        ("secret-like string in SOUL.md", True),
+        ("Cloud model(s) in use: openai.", True),
+        # This string does NOT match any DETAIL_RULES pattern → falls back
+        ("Some totally unknown string that is not in PHRASES at all.", False),
+        # Empty string always falls back
+        ("", False),
     ])
-    def test_dynamic_string_falls_back_to_input(self, text):
-        assert tp(text, "he") == text
+    def test_dynamic_string_translation(self, text, expected_he_differs):
+        result = tp(text, "he")
+        if expected_he_differs:
+            assert result != text, f"Expected Hebrew translation for: {text!r}"
+            assert result, "Expected non-empty Hebrew translation"
+        else:
+            assert result == text, f"Expected fallback (unchanged) for: {text!r}"
+
+    def test_mcp_server_detail_is_translated(self):
+        """B24 detail strings with MCP server count ARE translated."""
+        text = "1 MCP server(s) (my-mcp): some-issue"
+        result = tp(text, "he")
+        # The pattern "(\d+) MCP server(s) (name): detail" is a DETAIL_RULES match
+        assert result != text
+        assert "MCP" in result  # server name preserved
 
     def test_empty_string_unchanged_for_any_lang(self):
         assert tp("", "he") == ""

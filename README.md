@@ -269,20 +269,22 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-v0.11. Read-only checks A1/B1–B25/C3–C5 (incl. write-protection, self-modification,
+v0.12. Read-only checks A1/B1–B25/C3–C5 (incl. write-protection, self-modification,
 approval-bypass, deep MCP, update/pinning hygiene), installed-skill malware vetting, baseline
 suppression + governance, the built-in `openclaw security audit` merged in, active injection
 tests (`--canary`/`--redteam`), a runtime dry-run harness (`--dryrun`), HTML report,
 self-integrity (`--verify-self`), a pip/pipx-installable CLI — hardened per an external
-security review — **bilingual output** (`--lang he` for Hebrew + RTL, auto-detected from
-locale) — **CI gating** (`--sarif`, `--fail-under`, `--exit-code`) — **local score history
+security review — **fully bilingual output** (`--lang he` for Hebrew + RTL, auto-detected from
+locale; dynamic finding detail now translated too, not just chrome + titles + static strings) —
+**CI gating** (`--sarif`, `--fail-under`, `--exit-code`) — **local score history
 and offline percentile** (`--trend`, `--percentile`, `--history`) — **local logging with
-secret redaction** (`--verbose`, `--debug`, `--log`) — expanded Hebrew detail/fix
-translations — a reliability FP/FN fixture corpus — and **guided mode**: a "What you can do
-next" recommendation block printed after every default run (also in `--json` as `next_actions`
-and standalone via `--next`), plus a rewritten conversational SKILL.md playbook that walks
-non-technical users through every tool without needing to know a flag. ClawCheck still only
-checks and guides — it never applies fixes or changes your config.
+secret redaction** (`--verbose`, `--debug`, `--log`) — full Hebrew dynamic detail/fix
+translations via render-time fragment-splitting — a reliability FP/FN fixture corpus — and
+**guided mode**: a "What you can do next" recommendation block printed after every default run
+(also in `--json` as `next_actions` and standalone via `--next`), plus a rewritten
+conversational SKILL.md playbook that walks non-technical users through every tool without
+needing to know a flag. ClawCheck still only checks and guides — it never applies fixes or
+changes your config.
 
 ## Roadmap
 
@@ -292,9 +294,9 @@ ClawHavoc exfiltration wave. Any "analytics" here is computed and stored **only 
 the only thing that ever leaves is what *you* choose to post (the shareable grade badge). Planned,
 all local-only:
 
-- **Full Hebrew dynamic detail/fix.** Finding "why"/fix text that contains interpolated config
-  values (paths, key names, counts) still falls back to English. Translating those dynamic
-  strings is the remaining bilingual work.
+- **Shipped in v0.12:** Full Hebrew dynamic detail — finding "why"/evidence text with
+  interpolated config values (paths, key names, counts) is now translated at render time via
+  fragment-splitting + regex rules. The bilingual work begun in v0.9 is complete.
 
 ## Tests
 

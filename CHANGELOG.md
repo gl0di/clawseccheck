@@ -3,6 +3,15 @@
 All notable changes to ClawCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.12.0] — 2026-06-19
+
+### Added
+- **Full Hebrew finding detail.** The dynamic "why"/detail text (evidence with interpolated
+  config values) is now translated in the Hebrew report via render-time fragment-splitting +
+  regex rules; config keys, paths, hostnames and values are preserved. This completes the
+  bilingual work begun in v0.9 (which translated only static strings). English output is
+  unchanged (the translation layer is a no-op for en).
+
 ## [0.11.0] — 2026-06-19
 
 ### Added
