@@ -269,7 +269,7 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-v0.12. Read-only checks A1/B1–B25/C3–C5 (incl. write-protection, self-modification,
+v0.13. Read-only checks A1/B1–B25/C3–C5 (incl. write-protection, self-modification,
 approval-bypass, deep MCP, update/pinning hygiene), installed-skill malware vetting, baseline
 suppression + governance, the built-in `openclaw security audit` merged in, active injection
 tests (`--canary`/`--redteam`), a runtime dry-run harness (`--dryrun`), HTML report,
@@ -283,7 +283,9 @@ translations via render-time fragment-splitting — a reliability FP/FN fixture 
 **guided mode**: a "What you can do next" recommendation block printed after every default run
 (also in `--json` as `next_actions` and standalone via `--next`), plus a rewritten
 conversational SKILL.md playbook that walks non-technical users through every tool without
-needing to know a flag. ClawCheck still only checks and guides — it never applies fixes or
+needing to know a flag. All checks are grounded against the real OpenClaw schema (verified from
+docs.openclaw.ai and live fleet configs), so they fire on real installations rather than silently
+missing phantom field paths. ClawCheck still only checks and guides — it never applies fixes or
 changes your config.
 
 ## Roadmap

@@ -21,7 +21,9 @@ def test_vulnerable_setup_scores_low_and_fails_criticals():
     assert f["A1"].status == FAIL
     assert len(f["A1"].evidence) == 3
     # core criticals/highs flagged
-    for cid in ("B1", "B2", "B3", "B4", "B5", "B6"):
+    # B5 (supply chain) uses no real config fields to FAIL — it delegates to B24/B25
+    # for pinning detail; with only config present and no phantom fields it returns PASS.
+    for cid in ("B1", "B2", "B3", "B4", "B6"):
         assert f[cid].status == FAIL, f"{cid} should FAIL on vulnerable fixture"
 
 

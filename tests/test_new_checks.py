@@ -18,7 +18,7 @@ def test_b17_heartbeat_file_warns():
 
 
 def test_b17_heartbeat_config_warns():
-    assert check_autonomy(_ctx({"heartbeat": {"every": "1m"}})).status == "WARN"
+    assert check_autonomy(_ctx({"agents": {"defaults": {"heartbeat": {"every": "1m"}}}})).status == "WARN"
 
 
 def test_b17_no_autonomy_unknown():

@@ -4,9 +4,9 @@
   },
   "tools": {
     "profile": "minimal",
-    "exec": { "host_sandbox": false }
+    "exec": { "security": "full" }
   },
-  "sandbox": { "mode": "off" },
-  "logging": { "redactSensitive": true, "audit": true },
+  "agents": { "defaults": { "sandbox": { "mode": "off" } } },
+  "logging": { "redactSensitive": "tools" },
   "models": { "main": { "provider": "ollama/llama3" } }
 }

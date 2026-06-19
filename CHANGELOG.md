@@ -3,6 +3,27 @@
 All notable changes to ClawCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.13.0] — 2026-06-19
+
+### Fixed
+
+- **Schema-correctness — several checks read field paths that did not exist in the real OpenClaw
+  schema and silently never fired; now grounded against docs.openclaw.ai.** Corrected paths:
+  - `gateway.password` → `gateway.auth.password`
+  - `sandbox.*` → `agents.defaults.sandbox.*`
+  - `tailscale.funnel` → `tailscale.mode == "funnel"`
+  - `mcp` → `mcp.servers`
+  - `heartbeat` → `agents.defaults.heartbeat`
+  - `gateway.tls.enabled` (field confirmed present; check now reads it correctly)
+  - `tools.elevated.allowFrom` is a provider-keyed dict, not a flat list; check updated accordingly
+  - B10 audit-log check returns `UNKNOWN` when no audit config exists (audit is a CLI command, not
+    a config toggle) instead of a perpetual false WARN that dinged every config's score
+  - Removed dead phantom branches that could never be reached with real config shapes
+- The reliability FP/FN corpus fixtures now use real schema shapes drawn from live fleet configs,
+  so regression tests exercise the paths that actually fire on real installations.
+
+This materially improves true-positive coverage on real OpenClaw configs.
+
 ## [0.12.0] — 2026-06-19
 
 ### Added

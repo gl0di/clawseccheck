@@ -325,8 +325,8 @@ PHRASES: dict[str, dict[str, str]] = {
     "Keep redaction on.": {
         "he": "השאר את הסינון פעיל.",
     },
-    "Keep sandbox.mode enabled.": {
-        "he": "השאר את sandbox.mode מופעל.",
+    "Keep sandbox mode enabled.": {
+        "he": "השאר את מצב ה-sandbox מופעל.",
     },
     "Keep auth on and channels on allowlist.": {
         "he": "השאר את האימות פעיל והערוצים ברשימת ההיתר.",
@@ -398,12 +398,14 @@ PHRASES: dict[str, dict[str, str]] = {
     # ---- B2: Gateway ----
     # fix (FAIL path)
     "Bind the gateway to loopback or require auth (gateway.auth.mode=token, "
-    "token ≥24 chars), disable tailscale.funnel/http.no_auth, enable rate "
-    "limiting, and set every channel dmPolicy/groupPolicy to allowlist.": {
+    "token ≥24 chars), set gateway.tailscale.mode to 'serve' or 'off' (not "
+    "'funnel'), configure gateway.auth.rateLimit for brute-force protection, "
+    "and set every channel dmPolicy/groupPolicy to allowlist.": {
         "he": (
             "קשור את ה-gateway ל-loopback או דרוש אימות (gateway.auth.mode=token, "
-            "אסימון ≥24 תווים), השבת את tailscale.funnel/http.no_auth, הפעל "
-            "הגבלת קצב, והגדר dmPolicy/groupPolicy של כל ערוץ לרשימת היתר."
+            "אסימון ≥24 תווים), הגדר את gateway.tailscale.mode ל-'serve' או 'off' "
+            "(לא 'funnel'), הגדר gateway.auth.rateLimit להגנה מפני ניחוש כוח גס, "
+            "והגדר dmPolicy/groupPolicy של כל ערוץ לרשימת היתר."
         ),
     },
     # fix (UNKNOWN path)
@@ -425,11 +427,11 @@ PHRASES: dict[str, dict[str, str]] = {
         "he": "הגדר plugins.allow כך שרק כלים ספציפיים נגישים לתוספים.",
     },
     # fix (FAIL path)
-    "Restrict tools.elevated.allowFrom to specific owner IDs (no '*'), tighten "
-    "plugins.tools_reachable_policy, and define a plugins.allow allowlist.": {
+    "Restrict tools.elevated.allowFrom to specific provider/sender IDs "
+    "(no '*') and define a plugins.allow array to limit which plugins may load.": {
         "he": (
-            "הגבל את tools.elevated.allowFrom למזהי בעלים ספציפיים (ללא '*'), "
-            "הדק את plugins.tools_reachable_policy, והגדר רשימת היתר plugins.allow."
+            "הגבל את tools.elevated.allowFrom למזהי ספק/שולח ספציפיים (ללא '*') "
+            "והגדר מערך plugins.allow להגבלת התוספים שניתן לטעון."
         ),
     },
     # detail (PASS path)
@@ -439,20 +441,27 @@ PHRASES: dict[str, dict[str, str]] = {
 
     # ---- B4: Sandbox ----
     # fix (WARN path — exec but no sandbox set)
-    "Enable sandbox.mode and a seccomp/apparmor profile for exec.": {
-        "he": "הפעל sandbox.mode ופרופיל seccomp/apparmor עבור exec.",
+    "Set agents.defaults.sandbox.mode (e.g. 'non-main' or 'all') and "
+    "configure agents.defaults.sandbox.docker for network isolation.": {
+        "he": (
+            "הגדר agents.defaults.sandbox.mode (למשל 'non-main' או 'all') "
+            "והגדר agents.defaults.sandbox.docker לבידוד רשת."
+        ),
     },
     # fix (FAIL path)
-    "Enable sandbox.mode, set network_mode=bridge, drop host bind_mounts, and "
-    "apply seccomp/apparmor profiles.": {
+    "Set agents.defaults.sandbox.mode to 'non-main' or 'all', set "
+    "agents.defaults.sandbox.docker.network to 'bridge' (not 'host'), "
+    "and remove broad host path binds from docker.binds.": {
         "he": (
-            "הפעל sandbox.mode, הגדר network_mode=bridge, הסר bind_mounts של המארח, "
-            "והחל פרופילי seccomp/apparmor."
+            "הגדר agents.defaults.sandbox.mode ל-'non-main' או 'all', הגדר "
+            "agents.defaults.sandbox.docker.network ל-'bridge' (לא 'host'), "
+            "והסר קישורי נתיבי מארח רחבים מ-docker.binds."
         ),
     },
     # detail (WARN — exec no sandbox)
-    "exec tooling present but sandbox.mode not set — likely host execution.": {
-        "he": "כלי exec נוכחים אך sandbox.mode לא מוגדר — ככל הנראה הרצה על המארח.",
+    "exec tooling present but agents.defaults.sandbox.mode not set — "
+    "likely host execution.": {
+        "he": "כלי exec נוכחים אך agents.defaults.sandbox.mode לא מוגדר — ככל הנראה הרצה על המארח.",
     },
     # detail (UNKNOWN path)
     "No exec tools and no sandbox config — not applicable.": {
@@ -464,14 +473,14 @@ PHRASES: dict[str, dict[str, str]] = {
     },
 
     # ---- B4: static sandbox evidence fragments ----
-    "sandbox.mode is off (exec runs on the host)": {
-        "he": "sandbox.mode כבוי (exec רץ על המארח)",
+    "agents.defaults.sandbox.mode is off (exec runs on the host)": {
+        "he": "agents.defaults.sandbox.mode כבוי (exec רץ על המארח)",
     },
-    "sandbox.bind_mount exposes host paths": {
-        "he": "sandbox.bind_mount חושף נתיבי מארח",
+    "agents.defaults.sandbox.docker.binds exposes host paths": {
+        "he": "agents.defaults.sandbox.docker.binds חושף נתיבי מארח",
     },
-    "no seccomp/apparmor profile": {
-        "he": "אין פרופיל seccomp/apparmor",
+    "agents.defaults.sandbox.docker.network=host (no network isolation)": {
+        "he": "agents.defaults.sandbox.docker.network=host (אין בידוד רשת)",
     },
 
     # ---- B5: Supply Chain ----
@@ -558,11 +567,11 @@ PHRASES: dict[str, dict[str, str]] = {
         "he": "לא זוהו כלים הרסניים/יוצאים.",
     },
     # fix (WARN path)
-    "Require human approval for exec/send/fs_write/deploy actions "
-    "(confirm the exact field on your install).": {
+    "Set tools.exec.mode to 'ask' or 'allowlist' (not 'full') and "
+    "tools.exec.security='ask' to gate exec actions.": {
         "he": (
-            "דרוש אישור אנושי לפעולות exec/send/fs_write/deploy "
-            "(אמת את השדה המדויק בהתקנתך)."
+            "הגדר tools.exec.mode ל-'ask' או 'allowlist' (לא 'full') "
+            "ו-tools.exec.security='ask' לחסימת פעולות exec."
         ),
     },
     # detail (WARN path)
@@ -576,41 +585,54 @@ PHRASES: dict[str, dict[str, str]] = {
 
     # ---- B9: Leak ----
     # fix (FAIL path)
-    "Set logging.redactSensitive to redact secrets from tool output and logs.": {
-        "he": "הגדר logging.redactSensitive לסינון סודות מפלט הכלים ומהיומנים.",
+    'Set logging.redactSensitive to "tools" to redact secrets from tool output and logs.': {
+        "he": 'הגדר logging.redactSensitive ל-"tools" לסינון סודות מפלט הכלים ומהיומנים.',
     },
     # detail (FAIL path)
-    "logging.redactSensitive is off — secrets/system prompt can surface in tool output/logs.": {
-        "he": "logging.redactSensitive כבוי — סודות/הנחיית מערכת עלולים להופיע בפלט הכלים/יומנים.",
+    'logging.redactSensitive is "off" — secrets/system prompt can surface in tool output/logs.': {
+        "he": 'logging.redactSensitive הוא "off" — סודות/הנחיית מערכת עלולים להופיע בפלט הכלים/יומנים.',
     },
     # fix (WARN path)
-    "Explicitly enable sensitive redaction.": {
-        "he": "הפעל במפורש את סינון המידע הרגיש.",
+    'Explicitly set logging.redactSensitive to "tools".': {
+        "he": 'הגדר במפורש את logging.redactSensitive ל-"tools".',
     },
     # detail (WARN path)
     "logging.redactSensitive not set — default may expose secrets in output.": {
         "he": "logging.redactSensitive לא מוגדר — ברירת המחדל עלולה לחשוף סודות בפלט.",
     },
     # detail (PASS path)
-    "Sensitive redaction is enabled.": {
-        "he": "סינון מידע רגיש מופעל.",
+    'Sensitive redaction is enabled (logging.redactSensitive="tools").': {
+        "he": 'סינון מידע רגיש מופעל (logging.redactSensitive="tools").',
     },
 
     # ---- B10: Audit Log ----
-    # fix (WARN path)
-    "Enable audit logging and redaction so actions are traceable without leaking PII.": {
-        "he": "הפעל רישום ביקורת וסינון כך שפעולות ניתנות למעקב ללא דלף מידע אישי.",
+    # fix (WARN path — redactSensitive is "off")
+    'Set logging.redactSensitive to "tools" and run `openclaw security audit` periodically.': {
+        "he": 'הגדר logging.redactSensitive ל-"tools" והרץ `openclaw security audit` מעת לעת.',
     },
-    # detail (PASS path)
-    "Audit logging with redaction is enabled.": {
-        "he": "רישום ביקורת עם סינון מופעל.",
+    # fix (UNKNOWN path)
+    "Schedule `openclaw security audit` and wire its output to an alert channel.": {
+        "he": "תזמן `openclaw security audit` וחבר את פלטו לערוץ התראות.",
     },
-    # B10 static evidence fragments
-    "audit logging not enabled": {
-        "he": "רישום ביקורת אינו מופעל",
+    # detail (WARN path)
+    'logging.redactSensitive is "off" — logs may expose secrets/PII '
+    "(Israel Amendment 13). OpenClaw audit is a CLI command "
+    "(`openclaw security audit`), not a config toggle.": {
+        "he": (
+            'logging.redactSensitive הוא "off" — לוגים עלולים לחשוף סודות/PII '
+            "(תיקון 13 לחוק הגנת הפרטיות). ביקורת OpenClaw היא פקודת CLI "
+            "(`openclaw security audit`), לא מתג תצורה."
+        ),
     },
-    "logs are not redacted (PII / secrets risk — Israel Amendment 13)": {
-        "he": "הלוגים אינם מצונזרים (סיכון PII / סודות — תיקון 13 לחוק הגנת הפרטיות)",
+    # detail (UNKNOWN path)
+    "OpenClaw exposes no audit-log config field (audit is a CLI command: "
+    "`openclaw security audit`) — cannot assess from config alone. "
+    "Run `openclaw security audit` periodically to detect issues.": {
+        "he": (
+            "OpenClaw אינו חושף שדה תצורה של יומן ביקורת (ביקורת היא פקודת CLI: "
+            "`openclaw security audit`) — לא ניתן להעריך מהתצורה בלבד. "
+            "הרץ `openclaw security audit` מעת לעת לאיתור בעיות."
+        ),
     },
 
     # ---- B11: TLS ----
@@ -627,24 +649,18 @@ PHRASES: dict[str, dict[str, str]] = {
         "he": "התעבורה היא loopback/TLS והרשאות התצורה מוגבלות.",
     },
 
-    # ---- B11 static evidence fragments ----
-    "gateway.password set in config": {
-        "he": "gateway.password מוגדר בקובץ התצורה",
+    # ---- B1/B2 static evidence fragments ----
+    "gateway.auth.password set in config": {
+        "he": "gateway.auth.password מוגדר בקובץ התצורה",
     },
     "hooks.token set in config": {
         "he": "hooks.token מוגדר בקובץ התצורה",
     },
-    "gateway.http.no_auth enabled": {
-        "he": "gateway.http.no_auth מופעל",
-    },
     "gateway.controlUi.allowInsecureAuth enabled": {
         "he": "gateway.controlUi.allowInsecureAuth מופעל",
     },
-    "gateway.tailscale.funnel exposes the gateway publicly": {
-        "he": "gateway.tailscale.funnel חושף את השער לציבור",
-    },
-    "gateway.auth_no_rate_limit (no brute-force protection)": {
-        "he": "gateway.auth_no_rate_limit (אין הגנה מפני ניחוש כוח גס)",
+    "gateway.tailscale.mode=funnel exposes the gateway publicly": {
+        "he": "gateway.tailscale.mode=funnel חושף את השער לציבור",
     },
     "gateway auth token shorter than 24 chars": {
         "he": "אסימון אימות השער קצר מ-24 תווים",
@@ -664,9 +680,6 @@ PHRASES: dict[str, dict[str, str]] = {
     # detail (PASS path)
     "Models are local-first.": {
         "he": "המודלים מקומיים-ראשוניים.",
-    },
-    "Keep data local where possible.": {  # duplicate kept for safety
-        "he": "שמור נתונים מקומיים ככל האפשר.",
     },
     "For maximum privacy prefer a local model; if cloud is required, ensure no "
     "sensitive data is sent to it. (Informational — low severity.)": {
@@ -799,9 +812,6 @@ PHRASES: dict[str, dict[str, str]] = {
     "monitoring/alerts in config": {
         "he": "ניטור/התראות בתצורה",
     },
-    "Keep it enabled and make sure its alerts actually reach you.": {  # duplicate alias
-        "he": "השאר פעיל וודא שהתראותיו אכן מגיעות אליך.",
-    },
 
     # ---- B17: Autonomy ----
     # detail (UNKNOWN path)
@@ -809,11 +819,11 @@ PHRASES: dict[str, dict[str, str]] = {
         "he": "לא זוהה אות אוטונומיה/דופק.",
     },
     # fix (WARN — has outbound)
-    "Add an approval gate (tools.confirm / tools.requireApproval) for all "
-    "outbound/exec actions triggered by heartbeat tasks; validate any "
+    "Add an approval gate (tools.exec.mode='ask' or tools.exec.security='ask') "
+    "for all outbound/exec actions triggered by heartbeat tasks; validate any "
     "external content before acting on it.": {
         "he": (
-            "הוסף שער אישור (tools.confirm / tools.requireApproval) לכל "
+            "הוסף שער אישור (tools.exec.mode='ask' או tools.exec.security='ask') לכל "
             "פעולות יציאה/exec שהופעלו על ידי משימות דופק; "
             "אמת כל תוכן חיצוני לפני פעולה עליו."
         ),
@@ -1182,10 +1192,6 @@ PHRASES: dict[str, dict[str, str]] = {
     },
 }
 
-# Remove the accidental duplicate key introduced above (Python silently uses the last value)
-# The "Keep data local where possible." and "Keep it enabled..." are defined twice in the
-# dict literal above, but Python takes the last definition. That's fine.
-
 
 # ---------------------------------------------------------------------------
 # Dynamic detail translation rules
@@ -1232,7 +1238,17 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
             {"he": r"לערוץ '\1' יש מדיניות dm/קבוצה פתוחה (כל אחד יכול לפקד עליו)"},
         ),
 
-        # ---- B3: elevated allowFrom too many entries ----
+        # ---- B3: elevated allowFrom wildcard providers (new dict form) ----
+        (
+            r"tools\.elevated\.allowFrom grants '\*' \(every sender\) for providers: ([^;]+)",
+            {"he": r"tools.elevated.allowFrom מעניק '*' (כל שולח) לספקים: \1"},
+        ),
+        # B3: elevated allowFrom too many total entries across providers (new dict form)
+        (
+            r"tools\.elevated\.allowFrom has (\d+) total entries across (\d+) provider\(s\) \(too broad\)",
+            {"he": r"tools.elevated.allowFrom כולל \1 רשומות סך הכל על פני \2 ספק/ים (רחב מדי)"},
+        ),
+        # B3: elevated allowFrom too many entries (flat list form — still in checks.py)
         (
             r"tools\.elevated\.allowFrom has (\d+) entries \(too broad\)",
             {"he": r"tools.elevated.allowFrom כולל \1 רשומות (רחב מדי)"},

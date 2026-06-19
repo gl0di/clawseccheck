@@ -38,7 +38,7 @@ class TestTpStaticFixStrings:
 
     @pytest.mark.parametrize("phrase", [
         "Keep redaction on.",
-        "Keep sandbox.mode enabled.",
+        "Keep sandbox mode enabled.",
         "Keep auth on and channels on allowlist.",
         "Keep least privilege: explicit allowlists only.",
         "Keep audit + redaction on.",
@@ -70,7 +70,7 @@ class TestTpStaticFixStrings:
         """Spot-check: five fix strings each produce distinct non-English output."""
         samples = [
             "Keep redaction on.",
-            "Keep sandbox.mode enabled.",
+            "Keep sandbox mode enabled.",
             "Keep least privilege: explicit allowlists only.",
             "Keep transport encrypted and credential files locked down.",
             "Keep all entries pinned and review updates manually.",
@@ -92,7 +92,8 @@ class TestTpStaticDetailStrings:
         "No exposed plaintext secrets.",
         "Gateway is loopback/authenticated and channels are not open.",
         "No config loaded — cannot assess gateway.",
-        "exec tooling present but sandbox.mode not set — likely host execution.",
+        "exec tooling present but agents.defaults.sandbox.mode not set — "
+        "likely host execution.",
         "Execution is sandboxed.",
         "No plugins/skills declared in config.",
         "Plugin/skill installs are pinned with integrity and allowlisted.",
@@ -104,10 +105,12 @@ class TestTpStaticDetailStrings:
         "No destructive/outbound tools detected.",
         "Destructive tools (exec/send/write) present with no clear approval gate.",
         "Destructive actions require human approval.",
-        "logging.redactSensitive is off — secrets/system prompt can surface in tool output/logs.",
+        'logging.redactSensitive is "off" — secrets/system prompt can surface in tool output/logs.',
         "logging.redactSensitive not set — default may expose secrets in output.",
-        "Sensitive redaction is enabled.",
-        "Audit logging with redaction is enabled.",
+        'Sensitive redaction is enabled (logging.redactSensitive="tools").',
+        "OpenClaw exposes no audit-log config field (audit is a CLI command: "
+        "`openclaw security audit`) — cannot assess from config alone. "
+        "Run `openclaw security audit` periodically to detect issues.",
         "Transport is loopback/TLS and config perms are tight.",
         "No model config found.",
         "Models are local-first.",
@@ -156,7 +159,7 @@ class TestTpStaticDetailStrings:
         samples = [
             "No exposed plaintext secrets.",
             "Execution is sandboxed.",
-            "Sensitive redaction is enabled.",
+            'Sensitive redaction is enabled (logging.redactSensitive="tools").',
             "No MCP servers configured.",
             "No autonomy/heartbeat signal detected.",
         ]
@@ -179,7 +182,7 @@ class TestTpDynamicFallback:
         ("Active legs 3/3: untrusted input, sensitive data, outbound actions. Rule: keep ≤2 of 3.", True),
         ("gateway.bind=0.0.0.0 exposed with auth.mode=none", True),
         ("tools.elevated.allowFrom has 30 entries (too broad)", True),
-        ("sandbox.mode is off (exec runs on the host)", True),
+        ("agents.defaults.sandbox.mode is off (exec runs on the host)", True),
         ("secret-like string in SOUL.md", True),
         ("Cloud model(s) in use: openai.", True),
         # This string does NOT match any DETAIL_RULES pattern → falls back
@@ -221,7 +224,7 @@ class TestTpEnPassthrough:
 
     @pytest.mark.parametrize("phrase", [
         "Keep redaction on.",
-        "Keep sandbox.mode enabled.",
+        "Keep sandbox mode enabled.",
         "No exposed plaintext secrets.",
         "Execution is sandboxed.",
         "No MCP servers configured.",

@@ -120,7 +120,17 @@ def _enabled_tools(cfg: dict) -> list[str]:
     allow = dig(cfg, "tools.elevated.allowFrom")
     if allow:
         tools.append("elevated")
-    if dig(cfg, "tools.exec.host_sandbox") is not None or "exec" in str(dig(cfg, "tools.profile", "")):
+    # Real fields: tools.exec.security / tools.exec.host / tools.exec.mode
+    # (tools.exec.host_sandbox does NOT exist in the OpenClaw schema)
+    exec_security = dig(cfg, "tools.exec.security")
+    exec_host = dig(cfg, "tools.exec.host")
+    exec_mode = dig(cfg, "tools.exec.mode")
+    sandbox_mode = dig(cfg, "agents.defaults.sandbox.mode")
+    if (exec_security is not None
+            or exec_host is not None
+            or exec_mode is not None
+            or "exec" in str(dig(cfg, "tools.profile", ""))
+            or (sandbox_mode is not None and sandbox_mode != "off")):
         tools.append("exec")
     # collect any explicitly listed tool names
     listed = dig(cfg, "tools.allow") or dig(cfg, "gateway.tools.allow") or []
@@ -144,7 +154,7 @@ def check_trifecta(ctx: Context) -> Finding:
     sensitive_data = (
         _hint(tools, SENSITIVE_TOOL_HINTS)
         or (ctx.home / "credentials").is_dir()
-        or bool(dig(cfg, "gateway.password"))
+        or bool(dig(cfg, "gateway.auth.password"))
     )
     outbound = (
         _hint(tools, OUTBOUND_TOOL_HINTS)
@@ -175,9 +185,10 @@ def check_trifecta(ctx: Context) -> Finding:
 def check_secrets(ctx: Context) -> Finding:
     cfg = ctx.config
     ev = []
-    # gateway.password / hooks.token in config are flagged by the native audit too
-    if dig(cfg, "gateway.password"):
-        ev.append("gateway.password set in config")
+    # gateway.auth.password / hooks.token in config are flagged by the native audit too
+    # (gateway.password top-level does not exist; password lives at gateway.auth.password)
+    if dig(cfg, "gateway.auth.password"):
+        ev.append("gateway.auth.password set in config")
     if dig(cfg, "hooks.token"):
         ev.append("hooks.token set in config")
     # secrets anywhere in the config are only a real risk if the file is readable by others
@@ -210,14 +221,15 @@ def check_gateway(ctx: Context) -> Finding:
     auth = dig(cfg, "gateway.auth.mode")
     if bind and bind not in LOOPBACK and auth in (None, "none"):
         ev.append(f"gateway.bind={bind or '?'} exposed with auth.mode={auth}")
-    if dig(cfg, "gateway.http.no_auth"):
-        ev.append("gateway.http.no_auth enabled")
+    # gateway.http.no_auth does NOT exist in OpenClaw schema (auth is enforced by default)
     if dig(cfg, "gateway.controlUi.allowInsecureAuth"):
         ev.append("gateway.controlUi.allowInsecureAuth enabled")
-    if dig(cfg, "gateway.tailscale.funnel"):
-        ev.append("gateway.tailscale.funnel exposes the gateway publicly")
-    if dig(cfg, "gateway.auth_no_rate_limit"):
-        ev.append("gateway.auth_no_rate_limit (no brute-force protection)")
+    # Real field: gateway.tailscale.mode (string "funnel"/"serve"/"off")
+    # gateway.tailscale.funnel boolean does NOT exist in OpenClaw schema
+    if dig(cfg, "gateway.tailscale.mode") == "funnel":
+        ev.append("gateway.tailscale.mode=funnel exposes the gateway publicly")
+    # gateway.auth_no_rate_limit does NOT exist in OpenClaw schema
+    # Rate limiting is configured via gateway.auth.rateLimit (optional object)
     token = dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token")
     if isinstance(token, str) and 0 < len(token) < 24:
         ev.append("gateway auth token shorter than 24 chars")
@@ -226,8 +238,9 @@ def check_gateway(ctx: Context) -> Finding:
     if ev:
         return _finding("B2", FAIL, "; ".join(ev),
                         "Bind the gateway to loopback or require auth (gateway.auth.mode=token, "
-                        "token ≥24 chars), disable tailscale.funnel/http.no_auth, enable rate "
-                        "limiting, and set every channel dmPolicy/groupPolicy to allowlist.", ev)
+                        "token ≥24 chars), set gateway.tailscale.mode to 'serve' or 'off' (not "
+                        "'funnel'), configure gateway.auth.rateLimit for brute-force protection, "
+                        "and set every channel dmPolicy/groupPolicy to allowlist.", ev)
     if not cfg:
         return _finding("B2", UNKNOWN, "No config loaded — cannot assess gateway.", "Run on the host with ~/.openclaw present.")
     return _finding("B2", PASS, "Gateway is loopback/authenticated and channels are not open.",
@@ -239,8 +252,28 @@ def check_least_privilege(ctx: Context) -> Finding:
     allow = dig(cfg, "tools.elevated.allowFrom")
     hard = []   # clear over-privilege -> FAIL
     soft = []   # missing allowlist hygiene -> WARN
-    if allow == "*" or (isinstance(allow, list) and "*" in allow):
+    # Real shape: tools.elevated.allowFrom is a dict keyed by provider name
+    # e.g. { "discord": ["user-id-123"], "telegram": ["*"] }
+    # (not a flat list or bare "*" string in real OpenClaw configs)
+    if isinstance(allow, dict):
+        total_entries = sum(len(v) if isinstance(v, list) else 1 for v in allow.values())
+        wildcard_providers = [p for p, v in allow.items()
+                              if v == "*" or (isinstance(v, list) and "*" in v)]
+        if wildcard_providers:
+            hard.append(
+                "tools.elevated.allowFrom grants '*' (every sender) for providers: "
+                + ", ".join(wildcard_providers)
+            )
+        elif total_entries > 25:
+            hard.append(
+                f"tools.elevated.allowFrom has {total_entries} total entries across "
+                f"{len(allow)} provider(s) (too broad)"
+            )
+    elif allow == "*":
+        # Legacy / hypothetical flat wildcard
         hard.append("tools.elevated.allowFrom = '*' (every sender can use elevated tools)")
+    elif isinstance(allow, list) and "*" in allow:
+        hard.append("tools.elevated.allowFrom contains '*' (flat list form — every sender)")
     elif isinstance(allow, list) and len(allow) > 25:
         hard.append(f"tools.elevated.allowFrom has {len(allow)} entries (too broad)")
     profile = str(dig(cfg, "tools.profile", "")).lower()
@@ -250,12 +283,11 @@ def check_least_privilege(ctx: Context) -> Finding:
         soft.append(f"tools.profile='{dig(cfg, 'tools.profile')}' is broader than minimal")
     if dig(cfg, "plugins.allow") is None and _plugins(cfg):
         soft.append("no plugins.allow reachability allowlist (plugins.entries present)")
-    if dig(cfg, "plugins.tools_reachable_policy") == "permissive":
-        hard.append("plugins.tools_reachable_policy is permissive")
+    # plugins.tools_reachable_policy does NOT exist in OpenClaw schema — removed
     if hard:
         return _finding("B3", FAIL, "; ".join(hard + soft),
-                        "Restrict tools.elevated.allowFrom to specific owner IDs (no '*'), tighten "
-                        "plugins.tools_reachable_policy, and define a plugins.allow allowlist.",
+                        "Restrict tools.elevated.allowFrom to specific provider/sender IDs "
+                        "(no '*') and define a plugins.allow array to limit which plugins may load.",
                         hard + soft)
     if soft:
         return _finding("B3", WARN, "; ".join(soft),
@@ -266,44 +298,53 @@ def check_least_privilege(ctx: Context) -> Finding:
 
 def check_sandbox(ctx: Context) -> Finding:
     cfg = ctx.config
-    mode = dig(cfg, "sandbox.mode")
+    # Real path: agents.defaults.sandbox.mode (values: "off", "non-main", "all")
+    # The bare sandbox.* top-level path does NOT exist in OpenClaw schema
+    mode = dig(cfg, "agents.defaults.sandbox.mode")
     ev = []
-    if mode in ("off", False):
-        ev.append("sandbox.mode is off (exec runs on the host)")
-    if dig(cfg, "sandbox.network_mode") == "full":
-        ev.append("sandbox.network_mode=full")
-    if dig(cfg, "sandbox.bind_mount"):
-        ev.append("sandbox.bind_mount exposes host paths")
-    if mode not in (None,) and not dig(cfg, "sandbox.seccomp_profile") and not dig(cfg, "sandbox.apparmor_profile"):
-        ev.append("no seccomp/apparmor profile")
+    if mode == "off":
+        ev.append("agents.defaults.sandbox.mode is off (exec runs on the host)")
+    # Real path: agents.defaults.sandbox.docker.network (not sandbox.network_mode)
+    docker_network = dig(cfg, "agents.defaults.sandbox.docker.network")
+    if docker_network == "host":
+        ev.append("agents.defaults.sandbox.docker.network=host (no network isolation)")
+    # Real path: agents.defaults.sandbox.docker.binds (not sandbox.bind_mount)
+    binds = dig(cfg, "agents.defaults.sandbox.docker.binds")
+    if binds:
+        ev.append("agents.defaults.sandbox.docker.binds exposes host paths")
+    # sandbox.seccomp_profile / sandbox.apparmor_profile do NOT exist as first-class config
+    # fields; Docker backend relies on Docker's own profile mechanism
     if mode is None and "exec" in _enabled_tools(cfg):
-        return _finding("B4", WARN, "exec tooling present but sandbox.mode not set — likely host execution.",
-                        "Enable sandbox.mode and a seccomp/apparmor profile for exec.")
+        return _finding("B4", WARN,
+                        "exec tooling present but agents.defaults.sandbox.mode not set — "
+                        "likely host execution.",
+                        "Set agents.defaults.sandbox.mode (e.g. 'non-main' or 'all') and "
+                        "configure agents.defaults.sandbox.docker for network isolation.")
     if ev:
         return _finding("B4", FAIL, "; ".join(ev),
-                        "Enable sandbox.mode, set network_mode=bridge, drop host bind_mounts, and "
-                        "apply seccomp/apparmor profiles.", ev)
+                        "Set agents.defaults.sandbox.mode to 'non-main' or 'all', set "
+                        "agents.defaults.sandbox.docker.network to 'bridge' (not 'host'), "
+                        "and remove broad host path binds from docker.binds.", ev)
     if mode is None:
         return _finding("B4", UNKNOWN, "No exec tools and no sandbox config — not applicable.", "—")
-    return _finding("B4", PASS, "Execution is sandboxed.", "Keep sandbox.mode enabled.")
+    return _finding("B4", PASS, "Execution is sandboxed.", "Keep sandbox mode enabled.")
 
 
 def check_supply_chain(ctx: Context) -> Finding:
     cfg = ctx.config
     ev = []
-    if dig(cfg, "plugins.installs_unpinned_npm_specs") or dig(cfg, "installs_unpinned_npm_specs"):
-        ev.append("unpinned npm specs in plugin installs")
-    if dig(cfg, "plugins.installs_missing_integrity") or dig(cfg, "installs_missing_integrity"):
-        ev.append("plugin installs missing integrity hashes")
-    if dig(cfg, "plugins.tools_reachable_policy") == "permissive":
-        ev.append("plugins.tools_reachable_policy is permissive")
+    # plugins.installs_unpinned_npm_specs / plugins.installs_missing_integrity do NOT exist
+    # in the OpenClaw schema — install metadata is per-manifest, not stored in config.
+    # Pinning is checked by B25; MCP npx specs by B24.
+    # plugins.tools_reachable_policy also does NOT exist in the OpenClaw schema.
     if not (cfg.get("plugins") or cfg.get("skills")):
         return _finding("B5", UNKNOWN, "No plugins/skills declared in config.", "—")
     if ev:
         return _finding("B5", FAIL, "; ".join(ev),
-                        "Pin npm specs, require integrity hashes, set plugins.allow, and verify each "
-                        "skill against ClawHub VirusTotal status before loading (ClawHavoc).", ev)
-    return _finding("B5", PASS, "Plugin/skill installs are pinned with integrity and allowlisted.",
+                        "Set plugins.allow, verify each skill against ClawHub VirusTotal "
+                        "status before loading (ClawHavoc). See B24 for MCP spec pinning "
+                        "and B25 for skill/plugin version pinning.", ev)
+    return _finding("B5", PASS, "Plugin/skill install policy looks safe. See B24/B25 for pinning detail.",
                     "Keep verifying skill provenance before install.")
 
 
@@ -331,62 +372,99 @@ def check_memory_poisoning(ctx: Context) -> Finding:
     has_mem = any(n.endswith(("MEMORY.md", "memory.md")) for n in ctx.bootstrap)
     if not has_mem:
         return _finding("B7", UNKNOWN, "No memory file found.", "—")
-    writable_from_ext = dig(ctx.config, "memory.writeFromChannels") or dig(ctx.config, "memory.untrustedWrite")
-    if writable_from_ext:
-        return _finding("B7", FAIL, "Memory is writable from external messages without sanitization.",
-                        "Disable memory writes from untrusted channels, or sanitize/scope them.")
+    # memory.writeFromChannels / memory.untrustedWrite do NOT exist in the OpenClaw schema.
+    # Real memory config keys: memory.backend, memory.citations, memory.qmd.*
+    # OpenClaw has no config field for channel-write restrictions; the risk must be evaluated
+    # by reviewing bootstrap file contents and channel policies.
     return _finding("B7", WARN, "Agent has persistent memory; confirm it is not written from untrusted input.",
                     "Restrict memory writes to the owner; sanitize anything derived from external content.")
+
+
+def _has_approval_gate(cfg: dict) -> bool:
+    """Return True when the config has a meaningful exec approval gate.
+
+    Real fields (docs.openclaw.ai/tools/permission-modes):
+      tools.exec.mode     — deny/allowlist/ask/auto/full
+      tools.exec.security — deny/ask/full
+      tools.exec.ask      — off/on-miss/always
+    Non-existent: tools.confirm, tools.requireApproval, tools.elevated.requireApproval
+    """
+    mode = dig(cfg, "tools.exec.mode")
+    security = dig(cfg, "tools.exec.security")
+    ask = dig(cfg, "tools.exec.ask")
+    if mode in ("deny", "allowlist", "ask", "auto"):
+        return True
+    if security in ("deny", "ask"):
+        return True
+    if ask in ("on-miss", "always"):
+        return True
+    return False
 
 
 def check_human_approval(ctx: Context) -> Finding:
     cfg = ctx.config
     tools = _enabled_tools(cfg)
     destructive = _hint(tools, OUTBOUND_TOOL_HINTS)
-    approval = dig(cfg, "tools.confirm") or dig(cfg, "tools.requireApproval") or dig(cfg, "tools.elevated.requireApproval")
     if not destructive:
         return _finding("B8", UNKNOWN, "No destructive/outbound tools detected.", "—")
-    if approval in (None, False, "off", "never"):
-        return _finding("B8", WARN, "Destructive tools (exec/send/write) present with no clear approval gate.",
-                        "Require human approval for exec/send/fs_write/deploy actions "
-                        "(confirm the exact field on your install).")
-    return _finding("B8", PASS, "Destructive actions require human approval.",
-                    "Keep approval gating on all high-impact tools.")
+    if _has_approval_gate(cfg):
+        return _finding("B8", PASS, "Destructive actions require human approval.",
+                        "Keep approval gating on all high-impact tools.")
+    return _finding("B8", WARN, "Destructive tools (exec/send/write) present with no clear approval gate.",
+                    "Set tools.exec.mode to 'ask' or 'allowlist' (not 'full') and "
+                    "tools.exec.security='ask' to gate exec actions.")
 
 
 def check_leak(ctx: Context) -> Finding:
+    # Valid values: "off" | "tools" (default when set: "tools")
+    # Boolean False never occurs in real configs — the field is always a string or absent.
     redact = dig(ctx.config, "logging.redactSensitive")
-    if redact in (False, "off"):
-        return _finding("B9", FAIL, "logging.redactSensitive is off — secrets/system prompt can surface in tool output/logs.",
-                        "Set logging.redactSensitive to redact secrets from tool output and logs.")
+    if redact == "off":
+        return _finding("B9", FAIL,
+                        'logging.redactSensitive is "off" — secrets/system prompt can surface in tool output/logs.',
+                        'Set logging.redactSensitive to "tools" to redact secrets from tool output and logs.')
     if redact is None:
         return _finding("B9", WARN, "logging.redactSensitive not set — default may expose secrets in output.",
-                        "Explicitly enable sensitive redaction.")
-    return _finding("B9", PASS, "Sensitive redaction is enabled.", "Keep redaction on.")
+                        'Explicitly set logging.redactSensitive to "tools".')
+    if redact == "tools":
+        return _finding("B9", PASS, 'Sensitive redaction is enabled (logging.redactSensitive="tools").',
+                        "Keep redaction on.")
+    # Unexpected value — be conservative
+    return _finding("B9", WARN,
+                    f"logging.redactSensitive has unexpected value {redact!r} — expected \"tools\" or \"off\".",
+                    'Set logging.redactSensitive to "tools".')
 
 
 def check_audit_log(ctx: Context) -> Finding:
     cfg = ctx.config
-    enabled = dig(cfg, "logging.audit") or dig(cfg, "audit.enabled")
+    # logging.audit and audit.enabled do NOT exist in the OpenClaw config schema.
+    # Audit is a CLI command only: `openclaw security audit`
+    # There is no config toggle to enable/disable audit logging.
+    # We check what IS observable: log redaction (separate from audit).
     redact = dig(cfg, "logging.redactSensitive")
-    ev = []
-    if not enabled:
-        ev.append("audit logging not enabled")
-    if redact in (False, "off"):
-        ev.append("logs are not redacted (PII / secrets risk — Israel Amendment 13)")
-    if ev:
-        return _finding("B10", WARN, "; ".join(ev),
-                        "Enable audit logging and redaction so actions are traceable without leaking PII.")
-    return _finding("B10", PASS, "Audit logging with redaction is enabled.", "Keep audit + redaction on.")
+    if redact == "off":
+        return _finding("B10", WARN,
+                        'logging.redactSensitive is "off" — logs may expose secrets/PII '
+                        "(Israel Amendment 13). OpenClaw audit is a CLI command "
+                        "(`openclaw security audit`), not a config toggle.",
+                        'Set logging.redactSensitive to "tools" and run `openclaw security audit` periodically.')
+    return _finding("B10", UNKNOWN,
+                    "OpenClaw exposes no audit-log config field (audit is a CLI command: "
+                    "`openclaw security audit`) — cannot assess from config alone. "
+                    "Run `openclaw security audit` periodically to detect issues.",
+                    "Schedule `openclaw security audit` and wire its output to an alert channel.")
 
 
 def check_tls(ctx: Context) -> Finding:
     cfg = ctx.config
     bind = str(dig(cfg, "gateway.bind", "")).split(":")[0].lower()
-    tls = dig(cfg, "gateway.tls") or dig(cfg, "gateway.https")
+    # Real path: gateway.tls.enabled (bool, default false)
+    # gateway.tls as a bare boolean and gateway.https do NOT exist in OpenClaw schema
+    tls = dig(cfg, "gateway.tls.enabled")
     ev = []
     exposed = bind in EXPOSED_BINDS or (bind and bind not in LOOPBACK)
-    if exposed and not tls and not dig(cfg, "gateway.tailscale.funnel"):
+    # Real tailscale field: gateway.tailscale.mode == "funnel" (not gateway.tailscale.funnel bool)
+    if exposed and not tls and dig(cfg, "gateway.tailscale.mode") != "funnel":
         ev.append(f"gateway.bind={bind} is non-loopback without TLS configured")
     if _perms_loose(ctx):
         ev.append(f"openclaw.json is group/world-readable ({oct(ctx.config_mode)[-3:]}) — at-rest risk")
@@ -707,7 +785,15 @@ def check_egress(ctx: Context) -> Finding:
 # ---------- B15: MCP server trust ----------
 def _mcp_servers(cfg: dict) -> dict:
     out = {}
-    for key in ("mcp", "mcpServers", "mcp_servers"):
+    # Real OpenClaw schema nests servers: mcp.servers.<name> = spec.
+    mcp = cfg.get("mcp")
+    if isinstance(mcp, dict):
+        servers = mcp.get("servers")
+        if isinstance(servers, dict):
+            out.update(servers)
+        else:  # legacy/alt shape: top-level mcp is a direct {name: spec} map
+            out.update({k: v for k, v in mcp.items() if isinstance(v, dict)})
+    for key in ("mcpServers", "mcp_servers"):
         v = cfg.get(key)
         if isinstance(v, dict):
             out.update(v)
@@ -901,9 +987,9 @@ def check_monitoring(ctx: Context) -> Finding:
     for name in list(ctx.installed_skills) + list(_plugins(cfg)):
         if any(h in str(name).lower() for h in _MONITORING_HINTS):
             signals.append(f"'{name}'")
-    if dig(cfg, "monitoring") or dig(cfg, "security.monitoring") \
-            or dig(cfg, "alerts") or dig(cfg, "security.alerts"):
-        signals.append("monitoring/alerts in config")
+    # monitoring, security.monitoring, alerts, security.alerts do NOT exist in the
+    # OpenClaw config schema — removed to eliminate dead-code false-signal arms.
+    # Detection relies on skill/plugin name hints above (confirmed reliable).
     if signals:
         return _finding("B16", PASS,
                         f"Threat monitoring present: {', '.join(signals[:5])}.",
@@ -923,9 +1009,17 @@ def check_autonomy(ctx: Context) -> Finding:
 
     # Signal 1: a HEARTBEAT.md bootstrap file is present
     has_heartbeat_file = any(k.endswith("HEARTBEAT.md") for k in ctx.bootstrap)
-    # Signal 2: heartbeat / schedule / cron keys anywhere in config
+    # Signal 2: real heartbeat / cron keys in config
+    # Real paths: agents.defaults.heartbeat or agents.list[].heartbeat; top-level cron
+    # heartbeat (top-level) and schedule do NOT exist in OpenClaw schema — removed
     has_heartbeat_cfg = bool(
-        dig(cfg, "heartbeat") or dig(cfg, "schedule") or dig(cfg, "cron")
+        dig(cfg, "agents.defaults.heartbeat")
+        or any(
+            dig(agent, "heartbeat")
+            for agent in (dig(cfg, "agents.list") or [])
+            if isinstance(agent, dict)
+        )
+        or dig(cfg, "cron")
     )
     autonomous = has_heartbeat_file or has_heartbeat_cfg
 
@@ -942,8 +1036,8 @@ def check_autonomy(ctx: Context) -> Finding:
             "B17", WARN,
             "Agent runs autonomously (heartbeat) and can take outbound actions — "
             "ensure it cannot act on untrusted input without approval.",
-            "Add an approval gate (tools.confirm / tools.requireApproval) for all "
-            "outbound/exec actions triggered by heartbeat tasks; validate any "
+            "Add an approval gate (tools.exec.mode='ask' or tools.exec.security='ask') "
+            "for all outbound/exec actions triggered by heartbeat tasks; validate any "
             "external content before acting on it.",
         )
     return _finding(

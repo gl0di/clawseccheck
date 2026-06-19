@@ -412,7 +412,7 @@ class TestRuleExamplesTranslate:
 class TestFragmentSplit:
     def test_two_fragment_detail_translated(self):
         """A "; "-joined detail with two known fragments is split and both translated."""
-        detail = "gateway.bind=0.0.0.0 exposed with auth.mode=none; gateway.http.no_auth enabled"
+        detail = "gateway.bind=0.0.0.0 exposed with auth.mode=none; gateway.controlUi.allowInsecureAuth enabled"
         result = tp(detail, "he")
         assert result != detail, "Expected Hebrew output for 2-fragment detail"
         assert _has_hebrew(result), "Hebrew characters missing from translated detail"
@@ -425,9 +425,9 @@ class TestFragmentSplit:
     def test_three_fragment_detail_translated(self):
         """A "; "-joined detail with three known fragments is fully translated."""
         detail = (
-            "gateway.tailscale.funnel exposes the gateway publicly"
-            "; gateway.auth_no_rate_limit (no brute-force protection)"
+            "gateway.tailscale.mode=funnel exposes the gateway publicly"
             "; gateway auth token shorter than 24 chars"
+            "; gateway.controlUi.allowInsecureAuth enabled"
         )
         result = tp(detail, "he")
         assert result != detail
@@ -440,7 +440,7 @@ class TestFragmentSplit:
 
     def test_fragment_with_unknown_part_preserves_it(self):
         """A "; "-joined detail where one fragment is unknown keeps it verbatim."""
-        known = "gateway.http.no_auth enabled"
+        known = "gateway.controlUi.allowInsecureAuth enabled"
         unknown = "some-totally-unknown-evidence-fragment-xyz"
         detail = f"{known}; {unknown}"
         result = tp(detail, "he")
@@ -572,7 +572,7 @@ class TestHebrewReportDynamic:
         ]
         assert dynamic_details, "Expected at least one finding with a dynamic detail in home_vuln"
 
-        out = render_report(findings, score, lang="he")
+        assert render_report(findings, score, lang="he")  # he report renders without error
         for f in dynamic_details:
             he_detail = tp(f.detail, "he")
             assert _has_hebrew(he_detail), (

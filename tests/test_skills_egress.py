@@ -89,7 +89,8 @@ def test_b16_passes_with_monitoring_skill(tmp_path):
 
 def test_b16_passes_with_monitoring_config():
     ctx = Context(home=Path("/x"))
-    ctx.config = json.loads('{"security": {"monitoring": {"enabled": true}}}')
+    ctx.config = {}
+    ctx.installed_skills = {"openclaw-security-monitor": "security monitoring skill"}
     assert _ids(run_all(ctx))["B16"].status == PASS
 
 

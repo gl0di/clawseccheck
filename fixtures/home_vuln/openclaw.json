@@ -1,28 +1,18 @@
 {
   "gateway": {
     "bind": "0.0.0.0:8080",
-    "auth": { "mode": "none" },
-    "http": { "no_auth": true },
-    "tailscale": { "funnel": true },
-    "auth_no_rate_limit": true,
-    "password": "hunter2",
+    "auth": { "mode": "none", "password": "hunter2" },
+    "tailscale": { "mode": "funnel" },
     "tools": { "allow": ["exec", "email_send", "fs_write"] }
   },
   "hooks": { "token": "abc" },
   "tools": {
     "profile": "full",
-    "elevated": { "allowFrom": "*" },
-    "exec": { "host_sandbox": false }
+    "elevated": { "enabled": true, "allowFrom": { "telegram": ["*"] } },
+    "exec": { "security": "full" }
   },
-  "sandbox": { "mode": "off", "network_mode": "full", "bind_mount": "/:/host" },
-  "plugins": {
-    "installs_unpinned_npm_specs": true,
-    "installs_missing_integrity": true,
-    "tools_reachable_policy": "permissive"
-  },
-  "channels": {
-    "telegram": { "dmPolicy": "open", "groupPolicy": "open" }
-  },
-  "logging": { "redactSensitive": false },
+  "agents": { "defaults": { "sandbox": { "mode": "off" } } },
+  "channels": { "telegram": { "dmPolicy": "open", "groupPolicy": "open" } },
+  "logging": { "redactSensitive": "off" },
   "models": { "main": { "provider": "anthropic" } }
 }
