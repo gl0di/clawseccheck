@@ -212,8 +212,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "he": "בדיקות פסיביות מספרות לך על התצורה; זה בודק התנהגות אמיתית.",
     },
     "guide.review_mcp.title": {
-        "en": "Review your MCP server trust boundaries",
-        "he": "בדוק את גבולות האמון של שרת ה-MCP שלך",
+        "en": "Vet your connected MCP servers for supply-chain risk",
+        "he": "בדוק את שרתי ה-MCP המחוברים שלך לסיכוני שרשרת אספקה",
     },
     "guide.review_mcp.why": {
         "en": "MCP servers can inject prompts or reach internal services.",

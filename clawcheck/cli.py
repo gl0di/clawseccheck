@@ -15,7 +15,7 @@ from pathlib import Path
 from . import (
     audit, diff, fingerprint, load_ignore, load_state, make_canary, render_canary,
     render_card, render_json, render_monitor, render_prompts, render_report, render_svg,
-    save_state, snapshot, vet_skill,
+    save_state, snapshot, vet_mcp, vet_skill,
 )
 from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
@@ -74,6 +74,8 @@ def main(argv=None) -> int:
                    help=f"snapshot file for --monitor (default: {DEFAULT_STATE})")
     p.add_argument("--vet", metavar="PATH",
                    help="vet a skill (dir or SKILL.md) for malware BEFORE installing it")
+    p.add_argument("--vet-mcp", nargs="?", const="", metavar="NAME|FILE",
+                   help="vet configured MCP servers (or a NAME/FILE) for supply-chain risk before trusting them")
     p.add_argument("--canary", action="store_true",
                    help="active prompt-injection canary self-test")
     p.add_argument("--redteam", action="store_true",
@@ -144,6 +146,36 @@ def main(argv=None) -> int:
             if ascii_only else {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔"}[f.status]
         _emit(f"{icon} Vetting '{args.vet}': {verdict} [{f.severity}]\n    {f.detail}\n    {f.fix}")
         return 0 if f.status in ("PASS", "UNKNOWN") else 1
+
+    if args.vet_mcp is not None:
+        target = args.vet_mcp if args.vet_mcp else None
+        findings = vet_mcp(target=target, home=args.home)
+        # "No servers configured" case: single UNKNOWN finding.
+        if len(findings) == 1 and findings[0].status == "UNKNOWN":
+            f = findings[0]
+            icon = "[?]" if ascii_only else "❔"
+            _emit(f"{icon} {f.detail}")
+            return 0
+        worst_status = "PASS"
+        for f in findings:
+            if f.status == "FAIL":
+                worst_status = "FAIL"
+                break
+            if f.status == "WARN" and worst_status != "FAIL":
+                worst_status = "WARN"
+        _STATUS_ICON = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}
+        _STATUS_ICON_UNI = {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔"}
+        _VERDICT = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS": "SAFE", "UNKNOWN": "UNKNOWN"}
+        for f in findings:
+            icon = _STATUS_ICON[f.status] if ascii_only else _STATUS_ICON_UNI[f.status]
+            verdict = _VERDICT[f.status]
+            _emit(f"{icon} {verdict}: {f.title}")
+            if f.evidence:
+                for ev in f.evidence[:4]:
+                    _emit(f"    - {ev}")
+            _emit(f"    fix: {f.fix}")
+            _emit("")
+        return 0 if worst_status in ("PASS", "UNKNOWN") else 1
 
     if args.canary:
         _emit(render_canary(make_canary(), ascii_only))

@@ -755,6 +755,289 @@ def vet_skill(path: str | Path) -> Finding:
     return check_installed_skills(ctx)
 
 
+# ---------- vet_mcp: supply-chain / trust vetting for MCP servers ----------
+# Install-vector commands that are pipe-to-run dangerous (execute arbitrary code).
+_VET_MCP_DANGEROUS_CMDS = frozenset({"curl", "wget", "bash", "sh", "iex", "powershell"})
+# Package-runner commands where an unpinned spec is a pull-latest-each-run risk.
+_VET_MCP_RUNNER_CMDS = frozenset({"npx", "npm", "uvx", "pnpm", "bunx"})
+# Detect @latest or a package name with no @<version> pin.
+# "@latest" explicit, OR a bare package name without any "@" version suffix.
+_VET_MCP_UNPINNED_PKG_RE = re.compile(
+    r"@latest"
+    r"|^(?!-)[^@\s]+$",   # bare package name: no "@" at all (not a flag like -y)
+    re.I,
+)
+# Broad oauth scopes that signal wide permissions.
+_VET_MCP_BROAD_SCOPE_RE = re.compile(r"\*|all|admin|write|full", re.I)
+
+
+def _vet_mcp_server(name: str, spec: dict) -> tuple[list[str], list[str]]:
+    """Return (dangerous_reasons, suspicious_reasons) for one MCP server spec.
+
+    Grounded on real MCP fields: command, args, env, transport, url, oauth.scope.
+    Reuses _mcp_server_risks for existing B24 signals and adds supply-chain signals.
+    """
+    dangerous: list[str] = []
+    suspicious: list[str] = []
+
+    if not isinstance(spec, dict):
+        return dangerous, suspicious
+
+    # ---- Re-use existing B24 risk signals ----
+    b24_fails, b24_warns = _mcp_server_risks(name, spec)
+    # Demote b24 FAIL env-wildcard / tokenPassthrough to dangerous; warns to suspicious.
+    dangerous.extend(b24_fails)
+    suspicious.extend(b24_warns)
+
+    cmd = str(spec.get("command", "")).strip().lower()
+    # Strip path components to get just the binary name.
+    cmd_base = cmd.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    args = spec.get("args") or []
+    if not isinstance(args, list):
+        args = []
+    args_strs = [str(a) for a in args]
+
+    # ---- Install vector: pipe-to-run ----
+    if cmd_base in _VET_MCP_DANGEROUS_CMDS:
+        dangerous.append(
+            f"{name}: command '{cmd_base}' is a pipe-to-run install vector "
+            "(executes arbitrary code directly)"
+        )
+
+    # ---- Install vector: package runner with unpinned spec ----
+    if cmd_base in _VET_MCP_RUNNER_CMDS:
+        # Look at non-flag args for a package spec that has no pinned version.
+        pkg_args = [a for a in args_strs if not a.startswith("-")]
+        for arg in pkg_args:
+            if _VET_MCP_UNPINNED_PKG_RE.search(arg):
+                suspicious.append(
+                    f"{name}: '{cmd_base} {arg}' is unpinned — pulls latest each run "
+                    "(supply-chain risk)"
+                )
+                break  # one signal per server is enough
+
+    # ---- Transport / URL: remote trust surface ----
+    url = str(spec.get("url") or spec.get("endpoint") or "")
+    transport = str(spec.get("transport") or "")
+    is_remote_transport = transport.lower() in ("streamable-http", "sse")
+
+    if url.startswith("http://"):
+        dangerous.append(
+            f"{name}: url uses plaintext HTTP ({url[:60]}) — credentials/data sent in clear"
+        )
+    elif url and not url.startswith("http"):
+        # Non-HTTP URL present — note it as suspicious (unknown scheme).
+        suspicious.append(f"{name}: url uses non-HTTPS scheme ({url[:60]})")
+
+    # Remote transport or non-loopback URL -> note enlarged trust surface.
+    # (Already handled in b24_warns for remote https without allowedHosts; avoid duplicate.)
+    if is_remote_transport and not url:
+        suspicious.append(
+            f"{name}: transport='{transport}' is a remote/streaming transport "
+            "(larger trust surface than stdio)"
+        )
+
+    # ---- Secret exposure via env ----
+    env = spec.get("env") or {}
+    if isinstance(env, dict):
+        secret_keys = [k for k in env if SECRET_KEY_RE.search(str(k)) and str(k) != "*"]
+        wildcard_keys = [k for k in env if str(k) == "*" or str(env[k]) == "*"]
+        if wildcard_keys:
+            # Already caught by b24_fails but add a clearer vet message if not already there.
+            if not any("passthrough" in r.lower() or "wildcard" in r.lower()
+                       for r in dangerous):
+                dangerous.append(
+                    f"{name}: env contains wildcard passthrough — ALL env vars "
+                    "(including host secrets) forwarded to MCP server"
+                )
+        elif len(secret_keys) >= 3:
+            # Many secret-like keys: broad passthrough.
+            suspicious.append(
+                f"{name}: env forwards {len(secret_keys)} secret-like vars "
+                f"({', '.join(secret_keys[:3])}…) — server receives your secrets"
+            )
+    elif env == "*":
+        if not any("passthrough" in r.lower() or "wildcard" in r.lower()
+                   for r in dangerous):
+            dangerous.append(
+                f"{name}: env='*' — ALL env vars forwarded to MCP server"
+            )
+
+    # ---- oauth.scope wildcard / broad ----
+    oauth = spec.get("oauth") or {}
+    if isinstance(oauth, dict):
+        scope = str(oauth.get("scope") or "")
+        if scope and _VET_MCP_BROAD_SCOPE_RE.search(scope):
+            suspicious.append(
+                f"{name}: oauth.scope='{scope}' is broad/wildcard "
+                "— server has wide permissions"
+            )
+
+    return dangerous, suspicious
+
+
+def _load_mcp_spec_file(path: Path) -> dict[str, dict] | None:
+    """Load a JSON file and normalise to {name: spec}.
+
+    Accepts:
+      - A single server spec dict  -> {"<filename stem>": spec}
+      - A {name: spec} map         -> as-is (if all values are dicts)
+      - A full config with mcp.servers  -> extracted servers dict
+
+    Returns None if the file cannot be parsed as any of those shapes.
+    """
+    import json as _json
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    # Full config: mcp.servers.<name>
+    mcp = data.get("mcp")
+    if isinstance(mcp, dict):
+        servers = mcp.get("servers")
+        if isinstance(servers, dict) and servers:
+            return servers
+
+    # mcpServers top-level (common alternative key)
+    mcp_servers = data.get("mcpServers")
+    if isinstance(mcp_servers, dict) and mcp_servers:
+        return mcp_servers
+
+    # Single server spec: top-level contains "command", "url", or "transport"
+    # (these are MCP server spec fields, not wrapper keys).
+    if "command" in data or ("url" in data and "transport" in data):
+        stem = path.stem
+        return {stem: data}
+
+    # {name: spec} map: all values must be dicts
+    if data and all(isinstance(v, dict) for v in data.values()):
+        return data
+
+    return None
+
+
+def vet_mcp(target: str | Path | None = None,
+            home: str | Path = "~/.openclaw") -> list[Finding]:
+    """Vet MCP servers for supply-chain / trust risk BEFORE trusting them.
+
+    Args:
+        target: one of —
+            None         -> vet ALL servers from the config at *home*.
+            str/Path     -> if it points to an existing file: load as a JSON
+                           spec (single server, {name:spec} map, or full config).
+                           Otherwise treat as a server NAME and vet that one
+                           server from the config at *home*.
+        home: path to the OpenClaw home dir (default: ~/.openclaw).
+
+    Returns a list of Finding objects — one per server — using a synthetic
+    "MCP-VET" id (not a scored audit check). Each Finding's status is:
+        PASS       — no supply-chain / trust signals detected.
+        WARN       — suspicious signals (e.g. unpinned package, remote transport).
+        FAIL       — dangerous signals (e.g. pipe-to-run, plaintext HTTP, wildcard env).
+        UNKNOWN    — spec could not be parsed.
+    """
+    # Resolve servers to vet.
+    servers: dict[str, dict] = {}
+
+    if target is not None:
+        p = Path(str(target)).expanduser()
+        if p.is_file():
+            loaded = _load_mcp_spec_file(p)
+            if loaded is None:
+                return [Finding(
+                    id="MCP-VET", title="MCP supply-chain / trust vet",
+                    severity=HIGH, status=UNKNOWN,
+                    detail=f"Could not parse '{p}' as a valid MCP server spec or config.",
+                    fix="Provide a JSON file containing a server spec, a {name:spec} map, "
+                        "or a full config with mcp.servers.",
+                    framework="MCP Trust", scored=False,
+                )]
+            servers = loaded
+        else:
+            # Treat target as a server name — load from config.
+            name = str(target)
+            home_path = Path(str(home)).expanduser()
+            cfg_file = home_path / "openclaw.json"
+            import json as _json
+            try:
+                cfg = _json.loads(cfg_file.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, ValueError):
+                cfg = {}
+            all_servers = _mcp_servers(cfg)
+            if name in all_servers:
+                servers = {name: all_servers[name]}
+            else:
+                return [Finding(
+                    id="MCP-VET", title="MCP supply-chain / trust vet",
+                    severity=HIGH, status=UNKNOWN,
+                    detail=f"Server '{name}' not found in config at {cfg_file}.",
+                    fix="Check the server name or point --vet-mcp at a JSON file.",
+                    framework="MCP Trust", scored=False,
+                )]
+    else:
+        # Vet all servers from config at home.
+        home_path = Path(str(home)).expanduser()
+        cfg_file = home_path / "openclaw.json"
+        import json as _json
+        try:
+            cfg = _json.loads(cfg_file.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            cfg = {}
+        servers = _mcp_servers(cfg)
+
+    if not servers:
+        return [Finding(
+            id="MCP-VET", title="MCP supply-chain / trust vet",
+            severity=HIGH, status=UNKNOWN,
+            detail="No MCP servers configured.",
+            fix="Configure MCP servers under mcp.servers.<name> in openclaw.json.",
+            framework="MCP Trust", scored=False,
+        )]
+
+    findings: list[Finding] = []
+    for sname, spec in servers.items():
+        dangerous, suspicious = _vet_mcp_server(sname, spec)
+
+        if dangerous:
+            status = FAIL
+            all_reasons = dangerous + suspicious
+            fix = (
+                "Do NOT trust this server until you have reviewed its source. "
+                "Remove pipe-to-run commands (curl/wget/bash/sh), switch to HTTPS, "
+                "eliminate wildcard env passthrough, and pin package specs to exact versions."
+            )
+        elif suspicious:
+            status = WARN
+            all_reasons = suspicious
+            fix = (
+                "Review before trusting: pin package specs to exact versions "
+                "(avoid @latest / bare package names), prefer stdio transport over "
+                "remote/SSE, and minimise secret env var exposure."
+            )
+        else:
+            status = PASS
+            all_reasons = []
+            fix = "No supply-chain signals detected — keep specs pinned and env vars minimal."
+
+        # Reasons are collected with a "<sname>: " prefix; strip it so the server name
+        # appears once (as the finding title), not repeated on every line.
+        _pfx = f"{sname}: "
+        clean = [r[len(_pfx):] if r.startswith(_pfx) else r for r in all_reasons[:6]]
+        more = f" (+{len(all_reasons) - 6} more)" if len(all_reasons) > 6 else ""
+        detail = ("; ".join(clean) + more) if clean else "no supply-chain / trust risks detected"
+        findings.append(Finding(
+            id="MCP-VET", title=sname,
+            severity=HIGH, status=status, detail=detail, fix=fix,
+            framework="MCP Trust", scored=False, evidence=clean,
+        ))
+
+    return findings
+
+
 # ---------- B14: egress surface (advisory) ----------
 _EXT_SKILL_HINTS = ("slack", "github", "notion", "google", "gmail", "web", "research",
                     "http", "telegram", "obsidian", "browser", "fetch", "discord", "1password")

@@ -100,7 +100,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="review_mcp",
             title=t("guide.review_mcp.title"),
-            command="(see the B15/B24 findings)",
+            command="audit.py --vet-mcp",
             why=t("guide.review_mcp.why"),
             priority=5,
         ))

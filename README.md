@@ -212,9 +212,10 @@ preserving backward compatibility.
 ```bash
 python3 audit.py --next                    # print the "What you can do next" guidance block only
 python3 audit.py --vet ./some-skill        # vet a skill (dir or SKILL.md) BEFORE installing it
+python3 audit.py --vet-mcp                 # vet connected MCP servers for supply-chain risk BEFORE trusting them
 python3 audit.py --canary                   # active prompt-injection self-test (battle-tested)
-python3 audit.py --redteam                   # a multi-scenario adversarial payload suite
-python3 audit.py --dryrun                     # runtime behavioral test (fake secret + fake tools)
+python3 audit.py --redteam                   # a multi-scenario adversarial payload suite (incl. tool-poisoning, MCP-response injection, memory-poisoning, multi-agent, approval-bypass, dirty-to-exfil)
+python3 audit.py --dryrun                     # runtime behavioral test (fake secret + fake tools; sources: email, web, MCP response, memory, subagent)
 python3 audit.py --badge badge.svg          # write a shareable SVG grade badge
 python3 audit.py --html report.html         # standalone HTML report (private — owner view)
 python3 audit.py --verify-self               # SHA-256 of ClawCheck's own source (anti-tamper)
@@ -235,6 +236,12 @@ python3 audit.py --log audit.log            # also write log to a local file
 - **`--vet PATH`** runs the B13 malware scan on a skill *before* you install it (point it at a
   downloaded folder or `SKILL.md`; for a URL, clone it first, then vet the local copy). Verdict:
   SAFE / SUSPICIOUS / DANGEROUS.
+- **`--vet-mcp`** vets every MCP server listed under `mcp.servers.*` for supply-chain risk
+  *before* you trust it. Flags unpinned installs (`npx @latest`, unversioned packages), `curl|sh`
+  bootstrap, plaintext-HTTP remote transports, env-variable secret passthrough, and overly broad
+  OAuth scopes. Verdict per server: SAFE / SUSPICIOUS / DANGEROUS. Local and read-only — no
+  network calls, no writes. Targets the #1 agent supply-chain gap: most tools audit your skills
+  but not the MCP servers wired into your agent.
 - **`--canary`** emits a benign injection hidden in untrusted-looking content; feed it to your
   agent — if the agent echoes the token, it obeyed an injection (**VULNERABLE**), otherwise
   **RESISTANT**. This is the live "battle-tested" complement to the passive checks.
@@ -269,7 +276,7 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-v0.13. Read-only checks A1/B1–B25/C3–C5 (incl. write-protection, self-modification,
+v0.14. Read-only checks A1/B1–B25/C3–C5 (incl. write-protection, self-modification,
 approval-bypass, deep MCP, update/pinning hygiene), installed-skill malware vetting, baseline
 suppression + governance, the built-in `openclaw security audit` merged in, active injection
 tests (`--canary`/`--redteam`), a runtime dry-run harness (`--dryrun`), HTML report,
@@ -279,11 +286,17 @@ locale; dynamic finding detail now translated too, not just chrome + titles + st
 **CI gating** (`--sarif`, `--fail-under`, `--exit-code`) — **local score history
 and offline percentile** (`--trend`, `--percentile`, `--history`) — **local logging with
 secret redaction** (`--verbose`, `--debug`, `--log`) — full Hebrew dynamic detail/fix
-translations via render-time fragment-splitting — a reliability FP/FN fixture corpus — and
+translations via render-time fragment-splitting — a reliability FP/FN fixture corpus —
 **guided mode**: a "What you can do next" recommendation block printed after every default run
 (also in `--json` as `next_actions` and standalone via `--next`), plus a rewritten
 conversational SKILL.md playbook that walks non-technical users through every tool without
-needing to know a flag. All checks are grounded against the real OpenClaw schema (verified from
+needing to know a flag — **MCP supply-chain vetting** (`--vet-mcp`): checks every connected MCP
+server for unpinned installs, plaintext transport, secret passthrough, and broad OAuth scope
+before you trust it (SAFE / SUSPICIOUS / DANGEROUS, local and read-only; addresses the #1 agent
+supply-chain gap) — and an **expanded agentic red-team suite** (`--redteam`, `--dryrun`) covering
+tool poisoning, MCP-response injection, memory poisoning, multi-agent instruction smuggling,
+approval-bypass via injection, and dirty-input-to-exfil chains across MCP-response, memory, and
+subagent sources. All checks are grounded against the real OpenClaw schema (verified from
 docs.openclaw.ai and live fleet configs), so they fire on real installations rather than silently
 missing phantom field paths. ClawCheck still only checks and guides — it never applies fixes or
 changes your config.

@@ -132,6 +132,23 @@ it first, then provide the local path. Report the verdict in plain language:
 - DANGEROUS -> "This skill contains patterns used by malware. Do not install it. If it's already
   installed, remove it and rotate any secrets it could have accessed."
 
+#### Choice: MCP vetting / "is my MCP safe" / "check my connected servers" / "vet my MCP servers"
+
+```
+python3 {baseDir}/audit.py --vet-mcp
+```
+
+Reads every server listed under `mcp.servers.*` in `openclaw.json` and checks for supply-chain
+risk — unpinned install sources, plaintext-HTTP transport, environment secrets exposed to the
+server, and overly broad OAuth scope. Report the verdict per server in plain language:
+- SAFE -> "This MCP server looks well-configured."
+- SUSPICIOUS -> "This MCP server has some flags worth reviewing — see the details."
+- DANGEROUS -> "This MCP server has serious supply-chain issues. Consider removing or replacing it
+  until the issues are resolved."
+
+Remind the user: this is a static config check only, entirely local and read-only. It does not
+connect to the MCP server and does not change any configuration.
+
 #### Choice: monitoring / "keep watching" / "alert me if something changes" / "ongoing protection"
 
 First, tell the user in plain language what will happen:
@@ -213,6 +230,7 @@ Use this to map what the user says to the right command:
 |---|---|
 | "fix", "how do I fix", "what should I do", "copy-paste fix" | `--prompts` |
 | "vet", "scan this skill", "is this safe to install", "check before I install" | `--vet <path>` |
+| "is my MCP safe", "check my connected servers", "vet my MCP", "are my MCP servers trusted", "MCP supply chain" | `--vet-mcp` |
 | "monitor", "watch", "alert me", "ongoing", "keep checking" | `--monitor` (ask first) |
 | "canary", "injection test", "am I vulnerable", "try an attack" | `--canary` then `--dryrun` |
 | "red team", "adversarial", "attack suite" | `--redteam` |

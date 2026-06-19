@@ -3,6 +3,35 @@
 All notable changes to ClawCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.14.0] — 2026-06-19
+
+### Added
+- **`--vet-mcp` — MCP supply-chain vetting (the #1 market gap).** Vets every connected MCP
+  server listed under `mcp.servers.*` for supply-chain risk *before* you trust it. Flags:
+  unpinned install sources (`npx @scope/pkg` without a pinned version, `@latest` references,
+  `curl | sh` bootstrap), plaintext-HTTP remote transports (non-TLS `streamable-http` or `sse`
+  URLs), environment-variable secret passthrough (env keys that look like credentials), and
+  overly broad OAuth scopes. Each server receives a verdict of **SAFE**, **SUSPICIOUS**, or
+  **DANGEROUS**. Entirely local and read-only — no network calls, no writes, no config changes.
+  Grounded against the confirmed OpenClaw MCP schema
+  (`mcp.servers.<name>.{command, args, env, transport, url, oauth.scope}`).
+- **Expanded agentic red-team attack classes (`--redteam`).** Six new attack categories added to
+  the red-team suite, each with two scenario variants:
+  - `tool_poisoning` (TP-01, TP-02) — malicious tool descriptions that redirect agent behavior.
+  - `mcp_response_injection` (MR-01, MR-02) — injections embedded in MCP server responses.
+  - `memory_poisoning` (MP-01, MP-02) — hostile instructions written into the agent's memory store.
+  - `multi_agent` (MA-01, MA-02) — cross-agent instruction smuggling via subagent messages.
+  - `approval_bypass_via_injection` (AB-01, AB-02) — injections that claim pre-approval or try to
+    suppress confirmation prompts.
+  - `dirty_to_exfil` (DE-01, DE-02) — multi-hop dirty-input-to-exfiltration chains.
+  All scenarios carry a `criterion` field describing the concrete pass/fail signal; `render_suite`
+  emits a `CRITERION:` line per entry for easy human review.
+- **Expanded dry-run sources (`--dryrun`).** Three new untrusted-input sources added to the
+  behavioral dry-run harness: `mcp_response` (DR-06, DR-07), `memory_store` (DR-08, DR-09), and
+  `subagent` (DR-10, DR-11). The evaluator correctly classifies VULNERABLE/RESISTANT for each.
+- **+95 tests.** New test coverage for all added attack classes, criterion fields, new dry-run
+  sources, and evaluator correctness. Full suite: 924 tests, 100% pass.
+
 ## [0.13.1] — 2026-06-19
 
 ### Fixed
