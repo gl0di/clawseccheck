@@ -3,6 +3,25 @@
 All notable changes to ClawCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.8.0] — 2026-06-19
+
+### Added
+- **Runtime dry-run harness (`--dryrun`).** The behavioral test: emits scenarios of untrusted
+  input (email/web/MCP/memory) carrying a *fake* secret + fake tools, and an evaluator that flags
+  the agent VULNERABLE if it would call a dangerous tool with that secret. Beyond "is it
+  configured" → "does it actually obey an injection". (Deterministic scaffold; live run is agent-driven.)
+- **B25 — Update / pinning hygiene.** Flags blind skill auto-update and unpinned install sources
+  (a malicious update runs with the agent's full permissions).
+- **C5 — Native-binary PATH safety.** Flags a world-writable `openclaw` binary dir or a writable
+  PATH dir that could shadow it (poisoned-PATH protection for the native audit). POSIX, advisory.
+- **`--verify-self`.** Prints a SHA-256 digest of ClawCheck's own engine source so you can confirm
+  it wasn't tampered with against a trusted release.
+
+### Security
+- **`.clawcheckignore` governance.** The report warns when a CRITICAL finding (or a critical check
+  id B1/B2/B13/B20) is suppressed, and `--monitor` alerts when the ignore file changes — so a
+  suppression can't quietly hide a real hole.
+
 ## [0.7.0] — 2026-06-19
 
 ### Added (agent-behavior checks, from the external review)

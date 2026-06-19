@@ -54,3 +54,42 @@ def test_audit_applies_clawcheckignore(tmp_path):
     (tmp_path / ".clawcheckignore").write_text(target.id + "\n")
     _, findings2, _ = audit(tmp_path)
     assert next(f for f in findings2 if f.id == target.id).suppressed
+
+
+# ---- governance warning: suppressing a CRITICAL finding ----
+
+def test_suppressed_critical_severity_emits_governance_warning():
+    """render_report warns when a CRITICAL-severity finding is suppressed."""
+    supp = _f("B2", CRITICAL, FAIL, "gateway exposed")
+    supp.suppressed = True
+    out = render_report([supp], compute([supp]))
+    assert "WARNING: a CRITICAL finding (B2) is suppressed" in out
+
+
+def test_suppressed_critical_check_id_emits_governance_warning():
+    """render_report warns when a critical check id (B1/B2/B13/B20) is suppressed,
+    even when its catalog severity is not CRITICAL."""
+    # B20 is MEDIUM severity but is a critical check id
+    supp = _f("B20", "MEDIUM", WARN, "bootstrap world-writable")
+    supp.suppressed = True
+    out = render_report([supp], compute([supp]))
+    assert "WARNING: a CRITICAL finding (B20) is suppressed" in out
+
+
+def test_suppressed_non_critical_does_not_emit_governance_warning():
+    """render_report must NOT warn when a non-critical finding is suppressed."""
+    supp = _f("B14", "MEDIUM", WARN, "egress surface")
+    supp.suppressed = True
+    out = render_report([supp], compute([supp]))
+    assert "WARNING: a CRITICAL finding" not in out
+
+
+def test_suppressed_critical_warns_once_per_finding():
+    """One warning line per suppressed critical finding, not duplicated."""
+    s1 = _f("B1", CRITICAL, FAIL, "secret in config")
+    s1.suppressed = True
+    s2 = _f("B2", CRITICAL, FAIL, "gateway exposed")
+    s2.suppressed = True
+    out = render_report([s1, s2], compute([s1, s2]))
+    assert out.count("WARNING: a CRITICAL finding (B1)") == 1
+    assert out.count("WARNING: a CRITICAL finding (B2)") == 1

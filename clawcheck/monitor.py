@@ -17,6 +17,16 @@ from pathlib import Path
 
 from .catalog import BY_ID, FAIL
 
+
+def _ignore_hash(home: Path) -> str:
+    """Return sha256 of the .clawcheckignore file contents, or '' if absent."""
+    p = home / ".clawcheckignore"
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+
 SNAPSHOT_VERSION = 1
 DEFAULT_STATE = "~/.clawcheck/state.json"
 
@@ -37,6 +47,7 @@ def snapshot(ctx, findings, score) -> dict:
         "skills": {n: _h(b) for n, b in ctx.installed_skills.items()},
         "bootstrap": {n: _h(t) for n, t in ctx.bootstrap.items()},
         "native_count": native_count,
+        "ignore_hash": _ignore_hash(ctx.home),
     }
 
 
@@ -78,6 +89,13 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     if curr.get("native_count", 0) > prev.get("native_count", 0):
         delta = curr["native_count"] - prev["native_count"]
         alerts.append(("INFO", f"openclaw security audit reports {delta} more issue(s) than last time."))
+
+    prev_ih = prev.get("ignore_hash", "")
+    curr_ih = curr.get("ignore_hash", "")
+    if prev_ih != curr_ih:
+        alerts.append(("HIGH",
+                       "your .clawcheckignore changed — a suppression was added/removed "
+                       "(review to ensure a real hole is not hidden)."))
 
     return alerts
 

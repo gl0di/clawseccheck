@@ -88,6 +88,14 @@ def render_report(findings: list[Finding], score: ScoreResult,
 
     if suppressed_count:
         lines.append(f"({suppressed_count} finding(s) suppressed via .clawcheckignore)")
+        _CRITICAL_CHECK_IDS = {"B1", "B2", "B13", "B20"}
+        for f in findings:
+            if not getattr(f, "suppressed", False):
+                continue
+            if f.severity == CRITICAL or f.id in _CRITICAL_CHECK_IDS:
+                lines.append(
+                    f"WARNING: a CRITICAL finding ({f.id}) is suppressed via .clawcheckignore"
+                )
 
     if native is not None:
         lines.append("--- Also from OpenClaw's built-in `security audit` ---")

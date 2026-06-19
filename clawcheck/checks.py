@@ -11,6 +11,7 @@ import base64
 import binascii
 import os
 import re
+import shutil
 from pathlib import Path
 
 from .catalog import BY_ID, CRITICAL, FAIL, HIGH, MEDIUM, PASS, UNKNOWN, WARN, Finding
@@ -1567,6 +1568,232 @@ def check_approval_bypass(ctx: Context) -> Finding:
     )
 
 
+# ---------- B25: update / pinning hygiene ----------
+# Ref strings that are unambiguously floating (a supply-chain risk for skills).
+_FLOATING_REF_RE = re.compile(
+    r"^(?:latest|main|master|HEAD|dev|develop|trunk|stable|nightly|canary|edge|next|beta|alpha)$",
+    re.I,
+)
+# A pinned ref looks like a commit SHA (7–40 hex chars) or a semver tag.
+_PINNED_REF_RE = re.compile(
+    r"^v?\d+\.\d+[\.\d]*(?:[+\-][^\s]*)?$"   # semver tag: v1.2.3 / 1.2.3-rc1
+    r"|^[0-9a-f]{7,40}$",                     # git commit SHA (short or full)
+    re.I,
+)
+
+
+def _iter_entries(cfg: dict):
+    """Yield (namespace, name, entry_dict) for plugins.entries and skills.entries."""
+    for ns in ("plugins", "skills"):
+        block = cfg.get(ns)
+        if not isinstance(block, dict):
+            continue
+        entries = block.get("entries")
+        if not isinstance(entries, dict):
+            continue
+        for name, entry in entries.items():
+            if isinstance(entry, dict):
+                yield ns, name, entry
+
+
+def check_update_pinning(ctx: Context) -> Finding:
+    """B25 — Update / pinning hygiene.
+
+    A malicious skill UPDATE is a supply-chain risk (runs with agent permissions).
+
+    WARN  — auto-update for skills/plugins is enabled (blind trust in upstream);
+            OR a plugin/skill entry records a floating ref (branch name / 'latest').
+    PASS  — at least one entry is present and all have a pinned tag/commit or an
+            integrity hash; no auto-update enabled.
+    UNKNOWN — no plugin/skill config from which pinning can be determined.
+    """
+    cfg = ctx.config
+
+    warn_ev: list[str] = []
+
+    # ---- signal 1: auto-update enabled ----
+    # Supported key shapes (conservative — only flag when clearly true):
+    #   update.auto.enabled / update.auto / autoUpdate / auto_update
+    auto_update = (
+        dig(cfg, "update.auto.enabled")
+        or dig(cfg, "update.auto")
+        or cfg.get("autoUpdate")
+        or cfg.get("auto_update")
+    )
+    # Only flag when the value is explicitly truthy (not just "present").
+    if auto_update is True or (isinstance(auto_update, str) and auto_update.lower() in ("true", "yes", "1", "on")):
+        warn_ev.append("auto-update for skills/plugins is enabled — blind trust in upstream is a supply-chain risk")
+
+    # ---- signal 2: per-entry pinning ----
+    pinned_count = 0
+    floating_count = 0
+    total_with_source = 0
+
+    for ns, name, entry in _iter_entries(cfg):
+        # An integrity hash is the strongest signal — always counts as pinned.
+        if entry.get("integrity") or entry.get("checksum") or entry.get("sha256"):
+            pinned_count += 1
+            total_with_source += 1
+            continue
+
+        source = entry.get("source") or entry.get("url") or entry.get("repo")
+        version = entry.get("version") or entry.get("ref") or entry.get("tag") or entry.get("commit")
+
+        if version is None and source is None:
+            # Entry exists but carries no source/version info — skip (cannot determine).
+            continue
+
+        total_with_source += 1
+
+        if version is not None:
+            v = str(version).strip()
+            if _FLOATING_REF_RE.match(v):
+                floating_count += 1
+                warn_ev.append(
+                    f"{ns}.entries.{name}: version/ref {v!r} is a floating ref "
+                    "(branch/latest) — not pinned"
+                )
+            elif _PINNED_REF_RE.match(v):
+                pinned_count += 1
+            else:
+                # Non-empty but unrecognised format — cannot determine; don't flag.
+                pass
+        elif source is not None:
+            # source present but no version — check if the source URL itself embeds
+            # a branch name (e.g. github.com/owner/repo/tree/main).
+            src_str = str(source).lower()
+            if re.search(r"/(?:tree|archive|tarball|zipball)/(?:main|master|HEAD|dev|develop|latest)[/.]?", src_str):
+                floating_count += 1
+                warn_ev.append(
+                    f"{ns}.entries.{name}: source URL references a floating branch — not pinned"
+                )
+            # No version and no floating branch in URL — cannot determine pinning.
+
+    # ---- verdict ----
+    if not warn_ev and total_with_source == 0 and not auto_update:
+        return _finding(
+            "B25", UNKNOWN,
+            "No plugin/skill source or version info found — pinning hygiene cannot be determined.",
+            "Record a pinned version/tag or integrity hash for every installed skill and plugin.",
+        )
+
+    if warn_ev:
+        detail = "; ".join(warn_ev[:6]) + (f" (+{len(warn_ev) - 6} more)" if len(warn_ev) > 6 else "")
+        return _finding(
+            "B25", WARN, detail,
+            "Pin every skill/plugin to a specific tag or commit SHA and record an "
+            "integrity hash (sha256/checksum). Disable auto-update for skills "
+            "(update.auto.enabled = false) and review updates manually before applying.",
+            evidence=warn_ev[:6],
+        )
+
+    if pinned_count > 0:
+        return _finding(
+            "B25", PASS,
+            f"{pinned_count} plugin/skill entry(s) are pinned to a specific version/tag or "
+            "integrity hash; no auto-update detected.",
+            "Keep all entries pinned and review updates manually.",
+        )
+
+    # total_with_source > 0 but nothing was floating and nothing was pinned
+    # (unrecognised version strings) — be conservative.
+    return _finding(
+        "B25", UNKNOWN,
+        "Plugin/skill entries present but version format could not be classified as pinned or floating.",
+        "Use a semver tag (e.g. v1.2.3), a git commit SHA, or an integrity hash for every entry.",
+    )
+
+
+# ---------- C5: native binary PATH safety (advisory, POSIX only) ----------
+def check_path_safety(ctx: Context) -> Finding:
+    """C5 — Native binary PATH safety.
+
+    A poisoned PATH could shadow the real openclaw binary with a malicious one.
+    We check two conditions (POSIX only, stat() calls only — no file reads):
+
+    1. The directory that contains the openclaw binary is group/world-writable.
+    2. Any directory in $PATH that appears BEFORE the openclaw dir is
+       group/world-writable (an attacker with write access there could drop a
+       fake 'openclaw' that would be found first).
+
+    WARN  — at least one such writable dir found.
+    PASS  — openclaw found and all relevant PATH dirs have tight perms.
+    UNKNOWN — openclaw not on PATH, or non-POSIX platform.
+
+    Only stat() is called; no file contents are read.
+    """
+    if not _is_posix():
+        return _custom("C5", BY_ID["C5"].severity, UNKNOWN,
+                       "PATH safety check not applicable on non-POSIX platforms.", "—")
+
+    exe = shutil.which("openclaw")
+    if not exe:
+        return _custom("C5", BY_ID["C5"].severity, UNKNOWN,
+                       "openclaw not found on PATH — cannot assess binary PATH safety.",
+                       "Run this check inside an environment where openclaw is installed.")
+
+    bin_dir = Path(exe).resolve().parent
+
+    # Collect PATH directories in order.
+    path_env = os.environ.get("PATH", "")
+    path_dirs = [Path(p) for p in path_env.split(os.pathsep) if p]
+
+    # Find where the openclaw bin_dir sits in PATH (first match, resolved).
+    openclaw_index: int | None = None
+    for i, d in enumerate(path_dirs):
+        try:
+            if d.resolve() == bin_dir:
+                openclaw_index = i
+                break
+        except OSError:
+            continue
+
+    writable: list[str] = []
+
+    def _is_group_world_writable(d: Path) -> bool:
+        try:
+            mode = d.stat().st_mode & 0o777
+            return bool(mode & 0o022)
+        except OSError:
+            return False
+
+    # Check the binary's own directory.
+    if _is_group_world_writable(bin_dir):
+        writable.append(f"openclaw binary dir {bin_dir} is group/world-writable")
+
+    # Check all PATH dirs that appear before the openclaw dir (shadow-attack surface).
+    if openclaw_index is not None:
+        for d in path_dirs[:openclaw_index]:
+            try:
+                resolved = d.resolve()
+            except OSError:
+                continue
+            if _is_group_world_writable(resolved):
+                writable.append(
+                    f"PATH dir {d} (before openclaw dir) is group/world-writable "
+                    "— a fake openclaw could be planted there"
+                )
+
+    if writable:
+        detail = "; ".join(writable[:6]) + (f" (+{len(writable) - 6} more)" if len(writable) > 6 else "")
+        return _custom(
+            "C5", BY_ID["C5"].severity, WARN,
+            detail,
+            "Remove group/world-write permission from the openclaw binary directory "
+            "and any PATH directories that precede it (`chmod o-w,g-w <dir>`). "
+            "Keep PATH tight: only owner-controlled directories should precede "
+            "the openclaw install directory.",
+            writable[:6],
+        )
+
+    return _custom(
+        "C5", BY_ID["C5"].severity, PASS,
+        f"openclaw binary at {exe}; binary dir and all earlier PATH dirs have "
+        "tight permissions.",
+        "Keep PATH directories owner-only (chmod 755 at most, never group/world-writable).",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -1576,6 +1803,7 @@ CHECKS = [
     check_monitoring, check_autonomy, check_subagents, check_data_atrest,
     check_bootstrap_write_protection, check_self_modification, check_backups,
     check_version, check_tool_output_trust, check_approval_bypass,
+    check_update_pinning, check_path_safety,
 ]
 
 

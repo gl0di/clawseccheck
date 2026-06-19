@@ -74,3 +74,69 @@ def test_monitor_end_to_end_detects_new_skill(tmp_path):
     alerts = diff(base, snapshot(ctx2, f2, s2))
     assert any("newcomer" in m for _, m in alerts)
     assert "No new threats" not in render_monitor(alerts, compute([]))
+
+
+# ---- ignore_hash governance tests ----
+
+def test_snapshot_includes_ignore_hash_absent(tmp_path):
+    """snapshot includes ignore_hash='' when .clawcheckignore is absent."""
+    (tmp_path / "openclaw.json").write_text("{}")
+    ctx, findings, score = audit(tmp_path)
+    snap = snapshot(ctx, findings, score)
+    assert "ignore_hash" in snap
+    assert snap["ignore_hash"] == ""
+
+
+def test_snapshot_includes_ignore_hash_present(tmp_path):
+    """snapshot includes the sha256 of .clawcheckignore when it exists."""
+    import hashlib
+    (tmp_path / "openclaw.json").write_text("{}")
+    content = "B14\n"
+    (tmp_path / ".clawcheckignore").write_text(content)
+    ctx, findings, score = audit(tmp_path)
+    snap = snapshot(ctx, findings, score)
+    expected = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    assert snap["ignore_hash"] == expected
+
+
+def test_ignore_hash_change_triggers_high_alert():
+    """diff alerts HIGH when ignore_hash changes between snapshots."""
+    prev = {"score": 90, "grade": "A", "skills": {}, "bootstrap": {}, "checks": {},
+            "ignore_hash": "aabbcc"}
+    curr = {"score": 90, "grade": "A", "skills": {}, "bootstrap": {}, "checks": {},
+            "ignore_hash": "ddeeff"}
+    alerts = diff(prev, curr)
+    assert "HIGH" in _levels(alerts)
+    assert any(".clawcheckignore" in m for _, m in alerts)
+
+
+def test_ignore_hash_unchanged_no_alert():
+    """diff does NOT alert when ignore_hash is the same."""
+    snap = {"score": 90, "grade": "A", "skills": {}, "bootstrap": {}, "checks": {},
+            "ignore_hash": "aabbcc"}
+    assert diff(snap, dict(snap)) == []
+
+
+def test_ignore_hash_absent_to_present_triggers_alert():
+    """Adding .clawcheckignore for the first time ('' -> hash) triggers alert."""
+    prev = {"score": 90, "grade": "A", "skills": {}, "bootstrap": {}, "checks": {},
+            "ignore_hash": ""}
+    curr = {"score": 90, "grade": "A", "skills": {}, "bootstrap": {}, "checks": {},
+            "ignore_hash": "abc123"}
+    alerts = diff(prev, curr)
+    assert "HIGH" in _levels(alerts)
+
+
+def test_monitor_end_to_end_ignore_hash_change(tmp_path):
+    """End-to-end: adding a .clawcheckignore triggers a HIGH alert in next run."""
+    (tmp_path / "openclaw.json").write_text("{}")
+    ctx1, f1, s1 = audit(tmp_path)
+    base = snapshot(ctx1, f1, s1)
+    assert base["ignore_hash"] == ""
+
+    # Add a .clawcheckignore file between runs
+    (tmp_path / ".clawcheckignore").write_text("B14\n")
+    ctx2, f2, s2 = audit(tmp_path)
+    alerts = diff(base, snapshot(ctx2, f2, s2))
+    assert "HIGH" in _levels(alerts)
+    assert any(".clawcheckignore" in m for _, m in alerts)

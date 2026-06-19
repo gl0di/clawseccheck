@@ -85,9 +85,12 @@ CATALOG: list[CheckMeta] = [
               HIGH, "hardening", "Human Approval"),
     CheckMeta("B24", "MCP server hardening",
               HIGH, "hardening", "MCP Trust"),
+    CheckMeta("B25", "Update / pinning hygiene",
+              MEDIUM, "hardening", "Supply Chain"),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False),
     CheckMeta("C4", "OpenClaw version / update hygiene", LOW, "advisory", "Patch hygiene", scored=False),
+    CheckMeta("C5", "Native binary PATH safety", LOW, "advisory", "Binary Integrity", scored=False),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

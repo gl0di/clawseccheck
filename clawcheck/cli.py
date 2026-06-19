@@ -16,9 +16,11 @@ from . import (
     render_card, render_json, render_monitor, render_prompts, render_report, render_svg,
     save_state, snapshot, vet_skill,
 )
+from .integrity import package_digest
 from .report import render_html
 from .monitor import DEFAULT_STATE
 from .redteam import make_suite, render_suite
+from .dryrun import make_scenarios, render_dryrun
 
 
 def _unicode_ok() -> bool:
@@ -61,17 +63,35 @@ def main(argv=None) -> int:
                    help="active prompt-injection canary self-test")
     p.add_argument("--redteam", action="store_true",
                    help="print a live red-team payload suite for adversarial self-testing")
+    p.add_argument("--dryrun", action="store_true",
+                   help="print a behavioral dry-run harness (prompt-injection self-test across all sources)")
     p.add_argument("--badge", metavar="PATH", help="write a shareable SVG badge to PATH")
     p.add_argument("--html", metavar="PATH", help="write a standalone HTML report to PATH")
     p.add_argument("--prompts", action="store_true",
                    help="print a copy-paste fix prompt for each finding")
     p.add_argument("--show-suppressed", action="store_true",
                    help="list suppressed finding ids + fingerprints and exit")
+    p.add_argument("--verify-self", action="store_true",
+                   help="print the SHA-256 digest of the ClawCheck engine source for tamper detection")
     args = p.parse_args(argv)
 
     ascii_only = args.ascii or not _unicode_ok()
 
     # standalone modes that don't audit ~/.openclaw
+    if args.verify_self:
+        from . import __version__
+        combined, per_file = package_digest()
+        lines = [f"ClawCheck {__version__} — engine source digest (SHA-256)",
+                 f"combined : {combined}",
+                 ""]
+        for name, digest in sorted(per_file.items()):
+            lines.append(f"  {digest}  {name}")
+        lines.append("")
+        lines.append("Compare the 'combined' value against the digest printed by a trusted release.")
+        lines.append("Any mismatch means a source file was modified after that release.")
+        _emit("\n".join(lines))
+        return 0
+
     if args.vet:
         f = vet_skill(args.vet)
         verdict = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS": "looks SAFE",
@@ -87,6 +107,10 @@ def main(argv=None) -> int:
 
     if args.redteam:
         _emit(render_suite(make_suite(), ascii_only))
+        return 0
+
+    if args.dryrun:
+        _emit(render_dryrun(make_scenarios(), ascii_only))
         return 0
 
     if args.show_suppressed:

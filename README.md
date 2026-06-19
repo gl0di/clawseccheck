@@ -178,8 +178,10 @@ detection — not a real-time runtime IDS; that heavier model is intentionally o
 python3 audit.py --vet ./some-skill        # vet a skill (dir or SKILL.md) BEFORE installing it
 python3 audit.py --canary                   # active prompt-injection self-test (battle-tested)
 python3 audit.py --redteam                   # a multi-scenario adversarial payload suite
+python3 audit.py --dryrun                     # runtime behavioral test (fake secret + fake tools)
 python3 audit.py --badge badge.svg          # write a shareable SVG grade badge
 python3 audit.py --html report.html         # standalone HTML report (private — owner view)
+python3 audit.py --verify-self               # SHA-256 of ClawCheck's own source (anti-tamper)
 python3 audit.py --prompts                   # a copy-paste "ask your agent to fix it" per finding
 ```
 
@@ -214,11 +216,12 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-Prototype (v0.7). Read-only checks A1/B1–B24/C3/C4 (incl. write-protection, self-modification,
-approval-bypass, deep MCP), installed-skill malware vetting, baseline suppression, the built-in
-`openclaw security audit` merged in, active injection tests (`--canary`/`--redteam`), HTML report,
-and a pip/pipx-installable CLI — hardened per an external security review. A runtime dry-run
-harness, history/trend, bilingual output, and percentile are on the roadmap.
+Prototype (v0.8). Read-only checks A1/B1–B25/C3–C5 (incl. write-protection, self-modification,
+approval-bypass, deep MCP, update/pinning hygiene), installed-skill malware vetting, baseline
+suppression + governance, the built-in `openclaw security audit` merged in, active injection
+tests (`--canary`/`--redteam`), a runtime dry-run harness (`--dryrun`), HTML report,
+self-integrity (`--verify-self`), and a pip/pipx-installable CLI — hardened per an external
+security review. History/trend, bilingual output, and percentile are on the roadmap.
 
 ## Tests
 
