@@ -3,6 +3,20 @@
 All notable changes to ClawCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.13.1] — 2026-06-19
+
+### Fixed
+- **B6 false positive (CRITICAL) on well-configured agents.** B6's bootstrap scan used a
+  context-blind `without (asking|confirmation)` pattern that flagged *protective* directives —
+  e.g. "Don't run destructive commands without asking" — as injection-prone, producing a false
+  CRITICAL FAIL on real configs. Removed that pattern; B6 now flags only blanket-obedience /
+  injection-override directives. Approval-bypass phrasing remains covered by **B23** (which is
+  severity-gated and correctly scoped). Verified against live fleet bootstrap files.
+- **B5 no longer falsely reassures.** Plugin/skill pinning & integrity are not recorded in
+  `openclaw.json` (per-manifest metadata), so B5 returned a misleading "looks safe" PASS. It now
+  returns **UNKNOWN** when plugins are installed, pointing to the checks that actually assess
+  supply chain: B13 (content scan), B24 (MCP pinning), B25 (update pinning).
+
 ## [0.13.0] — 2026-06-19
 
 ### Fixed
