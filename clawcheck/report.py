@@ -59,7 +59,7 @@ def _trifecta_ratio(findings: list[Finding]) -> str:
 def _render_finding(lines, icon, f, lang: str = "en"):
     lines.append(f"{icon[f.status]} [{f.severity}] {_sanitize(title_for(f.id, f.title, lang))}")
     if f.detail:
-        lines.append(f"    {t('report.label_why', lang)}: {_sanitize(f.detail)}")
+        lines.append(f"    {t('report.label_why', lang)}: {_sanitize(tp(f.detail, lang))}")
     lines.append(f"    {t('report.label_fix', lang)}: {_sanitize(tp(f.fix, lang))}")
     lines.append("")
 

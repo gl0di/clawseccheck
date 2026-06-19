@@ -1,0 +1,12 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:8080"
+  },
+  "tools": {
+    "profile": "minimal",
+    "exec": { "host_sandbox": false }
+  },
+  "sandbox": { "mode": "off" },
+  "logging": { "redactSensitive": true, "audit": true },
+  "models": { "main": { "provider": "ollama/llama3" } }
+}

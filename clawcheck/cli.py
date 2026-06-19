@@ -22,6 +22,10 @@ from .report import render_html
 from .monitor import DEFAULT_STATE
 from .redteam import make_suite, render_suite
 from .dryrun import make_scenarios, render_dryrun
+from .sarif import render_sarif
+from .history import DEFAULT_HISTORY, load as history_load, record as history_record, render_trend
+from .percentile import render_percentile
+from .logsafe import get_logger
 
 
 def _default_lang() -> str:
@@ -85,9 +89,34 @@ def main(argv=None) -> int:
                    help="print the SHA-256 digest of the ClawCheck engine source for tamper detection")
     p.add_argument("--lang", choices=("en", "he"), default=_default_lang(),
                    help="output language (en|he; he is right-to-left)")
+    p.add_argument("--sarif", metavar="PATH",
+                   help="write a SARIF 2.1.0 report to PATH")
+    p.add_argument("--fail-under", metavar="N", type=int, default=None,
+                   help="exit 1 if score is below N")
+    p.add_argument("--exit-code", action="store_true",
+                   help="exit 1 if any unsuppressed FAIL finding exists")
+    p.add_argument("--trend", action="store_true",
+                   help="record this run to history, print trend + percentile, and exit")
+    p.add_argument("--percentile", action="store_true",
+                   help="print offline percentile rank for the current score and exit")
+    p.add_argument("--history", default=DEFAULT_HISTORY, metavar="PATH",
+                   help=f"path for trend history file (default: {DEFAULT_HISTORY})")
+    p.add_argument("--verbose", action="store_true",
+                   help="emit INFO-level log breadcrumbs to stderr")
+    p.add_argument("--debug", action="store_true",
+                   help="emit DEBUG-level log breadcrumbs to stderr")
+    p.add_argument("--log", metavar="PATH", default=None,
+                   help="also write log output to PATH (only when given)")
     args = p.parse_args(argv)
 
     ascii_only = args.ascii or not _unicode_ok()
+
+    # Set up safe logger early — level from --verbose/--debug; file only when --log given.
+    logger = get_logger(
+        verbose=getattr(args, "verbose", False),
+        debug=getattr(args, "debug", False),
+        logfile=getattr(args, "log", None),
+    )
 
     # standalone modes that don't audit ~/.openclaw
     if args.verify_self:
@@ -141,7 +170,10 @@ def main(argv=None) -> int:
                     _emit(f"  {entry}")
         return 0
 
+    logger.info("auditing home=%s", args.home)
     ctx, findings, score = audit(args.home, include_native=not args.no_native)
+    logger.debug("ran %d checks", len(findings))
+    logger.info("score=%s grade=%s", score.score, score.grade)
 
     if args.badge:
         try:
@@ -161,6 +193,28 @@ def main(argv=None) -> int:
             _emit(f"(could not write HTML report: {exc})")
         return 0
 
+    if args.sarif:
+        from . import __version__
+        try:
+            Path(args.sarif).expanduser().write_text(
+                render_sarif(findings, score, __version__),
+                encoding="utf-8")
+            _emit(f"(SARIF written to {args.sarif})")
+        except OSError as exc:
+            _emit(f"(could not write SARIF: {exc})")
+        return 0
+
+    if args.trend:
+        history_record(score, args.history)
+        rows = history_load(args.history)
+        _emit(render_trend(rows, ascii_only))
+        _emit(render_percentile(score.score, ascii_only))
+        return 0
+
+    if args.percentile:
+        _emit(render_percentile(score.score, ascii_only))
+        return 0
+
     if args.prompts:
         _emit(render_prompts(findings, ascii_only, lang=args.lang))
         return 0
@@ -174,6 +228,7 @@ def main(argv=None) -> int:
             save_state(args.state, snap)
         except OSError as exc:
             _emit(f"\n(could not save monitor state: {exc})")
+        history_record(score, args.history)
         return 0
 
     if args.json:
@@ -195,6 +250,18 @@ def main(argv=None) -> int:
             _emit(f"\n(report saved to {args.save})")
         except OSError as exc:
             _emit(f"\n(could not save report: {exc})")
+
+    if args.fail_under is not None and score.score < args.fail_under:
+        return 1
+
+    if args.exit_code:
+        has_fail = any(
+            not getattr(f, "suppressed", False) and f.status == "FAIL"
+            for f in findings
+        )
+        if has_fail:
+            return 1
+
     return 0
 
 

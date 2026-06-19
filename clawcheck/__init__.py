@@ -21,8 +21,10 @@ from .report import (
 )
 from .scoring import ScoreResult, compute
 from .i18n import t, tp, title_for, is_rtl
+from .sarif import render_sarif
+from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
@@ -51,4 +53,6 @@ __all__ = [
     "snapshot", "diff", "load_state", "save_state", "__version__",
     "load_ignore", "apply_baseline", "fingerprint",
     "t", "tp", "title_for", "is_rtl",
+    "render_sarif",
+    "history_load", "history_record", "render_trend", "DEFAULT_HISTORY",
 ]

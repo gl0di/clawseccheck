@@ -1,0 +1,55 @@
+{
+  "gateway": {
+    "bind": "localhost:9000",
+    "auth": { "mode": "token", "token": "secure-workstation-token-min32chars-xyz" },
+    "tailscale": { "funnel": false },
+    "auth_no_rate_limit": false
+  },
+  "tools": {
+    "profile": "minimal",
+    "confirm": true
+  },
+  "sandbox": {
+    "mode": "enabled",
+    "network_mode": "bridge",
+    "seccomp_profile": "default"
+  },
+  "channels": {
+    "telegram": {
+      "dmPolicy": "allowlist",
+      "groupPolicy": "allowlist",
+      "groupAllowFrom": ["owner-abc456def"]
+    }
+  },
+  "plugins": {
+    "allow": ["file-organizer"],
+    "installs_unpinned_npm_specs": false,
+    "installs_missing_integrity": false,
+    "tools_reachable_policy": "restricted",
+    "entries": {
+      "file-organizer": {
+        "source": "https://github.com/example/file-organizer",
+        "version": "v3.1.0",
+        "integrity": "sha256-deadbeef1234567890abcdef"
+      }
+    }
+  },
+  "mcpServers": {
+    "local-fs": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem@1.2.3", "/home/user/documents"]
+    }
+  },
+  "logging": { "redactSensitive": true, "audit": true },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ollama/phi3",
+        "fallbacks": ["ollama/llama3"]
+      }
+    }
+  },
+  "network": {
+    "egress": ["api.openai.com", "registry.npmjs.org"]
+  }
+}

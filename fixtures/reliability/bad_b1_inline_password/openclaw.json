@@ -1,0 +1,11 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": { "mode": "token", "token": "a-valid-long-token-1234567890abcdef" },
+    "password": "FAKE_PASSWORD_FOR_TESTING_DO_NOT_USE"
+  },
+  "tools": { "profile": "minimal" },
+  "sandbox": { "mode": "enabled", "network_mode": "bridge", "seccomp_profile": "default" },
+  "logging": { "redactSensitive": true, "audit": true },
+  "models": { "main": { "provider": "ollama/llama3" } }
+}

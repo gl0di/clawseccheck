@@ -172,6 +172,18 @@ Schedule it via OpenClaw's heartbeat or cron; when an alert fires, have your age
 It stores one small snapshot at `~/.clawcheck/state.json`. (Scheduled re-audit + drift
 detection — not a real-time runtime IDS; that heavier model is intentionally out of scope.)
 
+## CI / automation
+
+```bash
+python3 audit.py --sarif results.sarif      # write SARIF 2.1.0 locally (for GitHub Code Scanning upload step)
+python3 audit.py --fail-under 70            # exit 1 if score < 70 (use in CI pipelines)
+python3 audit.py --exit-code                # exit 1 if any unsuppressed FAIL finding
+```
+
+The SARIF file is written to the path you choose — ClawCheck never uploads it anywhere.
+`--fail-under` and `--exit-code` do not change the default exit code (0) when omitted,
+preserving backward compatibility.
+
 ## More tools
 
 ```bash
@@ -184,6 +196,12 @@ python3 audit.py --html report.html         # standalone HTML report (private �
 python3 audit.py --verify-self               # SHA-256 of ClawCheck's own source (anti-tamper)
 python3 audit.py --prompts                   # a copy-paste "ask your agent to fix it" per finding
 python3 audit.py --lang he                   # Hebrew report (right-to-left); default auto-detects locale
+python3 audit.py --trend                     # print local score trend (stored in ~/.clawcheck/history.jsonl)
+python3 audit.py --percentile                # show where your score sits vs. an offline reference profile
+python3 audit.py --history ~/.clawcheck/history.jsonl  # custom history file path (default shown)
+python3 audit.py --verbose                   # INFO-level log to stderr (secrets redacted)
+python3 audit.py --debug                     # DEBUG-level log to stderr (secrets redacted)
+python3 audit.py --log audit.log            # also write log to a local file
 ```
 
 - **`--vet PATH`** runs the B13 malware scan on a skill *before* you install it (point it at a
@@ -194,6 +212,12 @@ python3 audit.py --lang he                   # Hebrew report (right-to-left); de
   **RESISTANT**. This is the live "battle-tested" complement to the passive checks.
 - **`--badge PATH`** writes a shields-style SVG (grade + score only) for your README / posts.
 - **`--prompts`** turns every finding into a ready prompt you paste into your agent to fix it.
+- **`--trend`** records the current audit result to a local append-only history file and prints
+  a table of past scores with per-run arrows. History stays on your machine only.
+- **`--percentile`** compares your score against a bundled offline reference profile — no network,
+  no telemetry.
+- **`--verbose` / `--debug` / `--log PATH`** activate structured local logging. Config values
+  that may hold secrets are redacted before being written (practising ClawCheck's own B9/B10).
 
 ## Baseline (accepting findings)
 
@@ -217,13 +241,16 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-v0.9. Read-only checks A1/B1–B25/C3–C5 (incl. write-protection, self-modification,
+v0.10. Read-only checks A1/B1–B25/C3–C5 (incl. write-protection, self-modification,
 approval-bypass, deep MCP, update/pinning hygiene), installed-skill malware vetting, baseline
 suppression + governance, the built-in `openclaw security audit` merged in, active injection
 tests (`--canary`/`--redteam`), a runtime dry-run harness (`--dryrun`), HTML report,
 self-integrity (`--verify-self`), a pip/pipx-installable CLI — hardened per an external
-security review — and **bilingual output** (`--lang he` for Hebrew + RTL, auto-detected from
-locale).
+security review — **bilingual output** (`--lang he` for Hebrew + RTL, auto-detected from
+locale) — **CI gating** (`--sarif`, `--fail-under`, `--exit-code`) — **local score history
+and offline percentile** (`--trend`, `--percentile`, `--history`) — **local logging with
+secret redaction** (`--verbose`, `--debug`, `--log`) — expanded Hebrew detail/fix
+translations — and a reliability FP/FN fixture corpus.
 
 ## Roadmap
 
@@ -233,19 +260,9 @@ ClawHavoc exfiltration wave. Any "analytics" here is computed and stored **only 
 the only thing that ever leaves is what *you* choose to post (the shareable grade badge). Planned,
 all local-only:
 
-- **CI-friendly exit codes & reports.** `--fail-under N` / `--exit-code` (non-zero exit when the
-  score is below a threshold) and an optional **SARIF** file (`--sarif PATH`) so the report drops
-  straight into GitHub Code Scanning — a local file, not an upload.
-- **Local error logging.** `--verbose` / `--debug` to stderr and an optional `--log PATH`, with
-  **secret redaction** (ClawCheck reads config that holds secrets, so it practises its own B9/B10
-  checks — values are never written to a log).
-- **Local analytics / trend.** A score history kept in `~/.clawcheck/` with `--trend` (your grade
-  over time) and an **offline** percentile from a bundled static reference — no comparison over
-  the network.
-- **Full Hebrew detail/fix.** Finish translating the dynamic finding "why"/fix text (follow-up to
-  the v0.9 bilingual release).
-- **Reliability corpus.** A false-positive / false-negative fixture set to guard the checks against
-  regressions.
+- **Full Hebrew dynamic detail/fix.** Finding "why"/fix text that contains interpolated config
+  values (paths, key names, counts) still falls back to English. Translating those dynamic
+  strings is the remaining bilingual work.
 
 ## Tests
 

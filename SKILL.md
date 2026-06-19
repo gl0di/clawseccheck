@@ -51,7 +51,11 @@ Options: `--json` (machine-readable), `--card` (just the shareable badge), `--as
 (plain output for terminals that can't render unicode — the script also auto-detects this),
 `--save PATH` (keep a copy of the report), `--lang he` (Hebrew output, right-to-left;
 auto-detected from the `LANG`/`LC_ALL` locale — pass it explicitly when running on behalf of
-a Hebrew-locale user).
+a Hebrew-locale user), `--sarif PATH` (write a local SARIF 2.1.0 file for CI / GitHub Code
+Scanning — never uploaded), `--fail-under N` (exit 1 if score < N), `--exit-code` (exit 1
+if any unsuppressed FAIL), `--trend` (record to local history and print score trend),
+`--percentile` (offline reference percentile, no network), `--verbose` / `--debug` /
+`--log PATH` (local logging with secret redaction).
 
 ## Monitoring (when the user wants ongoing protection)
 

@@ -1,0 +1,111 @@
+"""Local score history for --trend: append-only JSONL, chmod 600, stdlib only.
+
+This module is the ONLY writer of history records. record() is never called
+automatically — only when an explicit caller (CLI --trend/--monitor) invokes it,
+preserving ClawCheck's "writes nothing by default" promise.
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+
+DEFAULT_HISTORY = "~/.clawcheck/history.jsonl"
+
+
+def record(score, path: str = DEFAULT_HISTORY, when: str | None = None) -> None:
+    """Append one JSON line {date, score, grade} to the history file.
+
+    Parameters
+    ----------
+    score:
+        A ScoreResult (or any object with .score: int and .grade: str).
+    path:
+        Path to the history JSONL file.  ``~`` is expanded.
+    when:
+        ISO date string (``YYYY-MM-DD``).  Defaults to today's date.
+    """
+    if when is None:
+        when = datetime.now().strftime("%Y-%m-%d")
+
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    row = {"date": when, "score": int(score.score), "grade": str(score.grade)}
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+    try:  # owner-only: history holds score progression
+        p.chmod(0o600)
+    except OSError:
+        pass
+
+
+def load(path: str = DEFAULT_HISTORY) -> list[dict]:
+    """Read the JSONL history file and return a list of {date, score, grade} dicts.
+
+    Blank lines and malformed JSON lines are skipped gracefully.
+    Returns an empty list if the file does not exist.
+    """
+    p = Path(path).expanduser()
+    if not p.is_file():
+        return []
+
+    rows: list[dict] = []
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            # Validate expected keys exist
+            rows.append({"date": obj["date"], "score": obj["score"], "grade": obj["grade"]})
+        except (json.JSONDecodeError, KeyError):
+            continue  # skip corrupt/incomplete lines
+
+    return rows
+
+
+def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
+    """Return a compact human-readable trend string.
+
+    Each row shows DATE  GRADE  SCORE plus an arrow (▲▼· or ^v=) relative to
+    the previous row's score.  If rows is empty a friendly message is returned.
+
+    Parameters
+    ----------
+    rows:
+        List of {date, score, grade} dicts, in chronological order.
+    ascii_only:
+        Use ASCII arrows (^, v, =) instead of unicode (▲, ▼, ·).
+    """
+    if not rows:
+        return "No history yet. Run --trend again later to see your trend."
+
+    if ascii_only:
+        arrow_up, arrow_down, arrow_flat = "^", "v", "="
+    else:
+        arrow_up, arrow_down, arrow_flat = "▲", "▼", "·"
+
+    lines = ["ClawCheck - Score Trend", ""]
+    for i, row in enumerate(rows):
+        if i == 0:
+            arrow = arrow_flat
+        else:
+            prev_score = rows[i - 1]["score"]
+            curr_score = row["score"]
+            if curr_score > prev_score:
+                arrow = arrow_up
+            elif curr_score < prev_score:
+                arrow = arrow_down
+            else:
+                arrow = arrow_flat
+
+        lines.append(f"{row['date']}  {row['grade']}  {row['score']}  {arrow}")
+
+    return "\n".join(lines)

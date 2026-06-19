@@ -3,6 +3,34 @@
 All notable changes to ClawCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.10.0] — 2026-06-19
+
+### Added
+- **`--sarif PATH` — local SARIF 2.1.0 output.** Writes a SARIF file to the path you
+  specify; compatible with GitHub Code Scanning's "Upload SARIF" step. The file is written
+  locally and never uploaded — ClawCheck makes no network calls.
+- **`--fail-under N` / `--exit-code` — CI gating.** `--fail-under N` exits 1 when the
+  audit score is below N; `--exit-code` exits 1 when any unsuppressed FAIL finding is
+  present. Without these flags the exit code stays 0 (backward-compatible).
+- **`--verbose` / `--debug` / `--log PATH` — local logging with secret redaction.**
+  Structured stdlib `logging` to stderr (INFO or DEBUG level) and optionally to a file.
+  Config values that may contain secrets are redacted before being written to any log,
+  practising ClawCheck's own B9/B10 checks.
+- **`--trend` / `--history PATH` — local score history.** Records each audit result to an
+  append-only JSONL file (default `~/.clawcheck/history.jsonl`, `chmod 600`) and prints a
+  compact trend table with per-run arrows. History is stored only on your machine.
+- **`--percentile` — offline reference percentile.** Shows where your score sits relative
+  to a bundled static reference profile. Entirely offline — no comparison over the network,
+  no telemetry.
+- **Expanded Hebrew translations (detail + fix).** Static detail and fix strings for all
+  checks (A1, B1–B25, C3–C5) are now translated in the Hebrew report. Dynamic strings
+  containing interpolated config values fall back to English.
+- **Reliability FP/FN corpus.** A false-positive / false-negative fixture set guards all
+  checks against regressions, supplementing the existing unit tests.
+
+**Everything stays local. No network calls, no telemetry, no phone-home — ever.**
+All history, SARIF files, and logs are written only on your machine, only when you ask.
+
 ## [0.9.0] — 2026-06-19
 
 ### Added

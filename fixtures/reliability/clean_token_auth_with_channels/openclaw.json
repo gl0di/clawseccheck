@@ -1,0 +1,46 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:7777",
+    "auth": { "mode": "token", "token": "a-strong-randomly-generated-token-abc123xyz" },
+    "tailscale": { "funnel": false },
+    "auth_no_rate_limit": false
+  },
+  "tools": {
+    "profile": "minimal",
+    "elevated": { "allowFrom": ["owner-uid-7f3a"], "requireApproval": true },
+    "confirm": true
+  },
+  "sandbox": {
+    "mode": "enabled",
+    "network_mode": "bridge",
+    "seccomp_profile": "runtime/default",
+    "apparmor_profile": "openclaw-default"
+  },
+  "channels": {
+    "slack": {
+      "dmPolicy": "allowlist",
+      "groupPolicy": "allowlist",
+      "groupAllowFrom": ["owner-uid-7f3a"]
+    }
+  },
+  "plugins": {
+    "allow": ["notes-helper", "calendar-sync"],
+    "installs_unpinned_npm_specs": false,
+    "installs_missing_integrity": false,
+    "tools_reachable_policy": "restricted",
+    "entries": {
+      "notes-helper": {
+        "source": "https://github.com/example/notes-helper",
+        "version": "v1.4.2",
+        "integrity": "sha256-abc123def456"
+      },
+      "calendar-sync": {
+        "source": "https://github.com/example/calendar-sync",
+        "version": "v2.0.1",
+        "integrity": "sha256-xyz789uvw012"
+      }
+    }
+  },
+  "logging": { "redactSensitive": true, "audit": true },
+  "models": { "main": { "provider": "ollama/mistral" } }
+}
