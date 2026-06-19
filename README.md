@@ -92,7 +92,15 @@ openclaw skills install clawcheck                # from ClawHub (once published)
 # then ask your agent: "audit my OpenClaw setup with clawcheck"
 ```
 
-Or run directly (Linux/macOS):
+Or install it as a standalone CLI (zero dependencies):
+
+```bash
+pipx install git+https://github.com/gl0di/clawcheck   # or: pip install .
+clawcheck --home ~/.openclaw                            # then just `clawcheck`
+python -m clawcheck                                     # also works
+```
+
+Or run the bundled script directly (Linux/macOS):
 
 ```bash
 python3 audit.py                 # human report + shareable card
@@ -202,10 +210,10 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-Prototype (v0.4). Passive, read-only checks (B1–B19), installed-skill malware vetting, baseline
-suppression, the built-in `openclaw security audit` merged in, and a first active injection
-self-test (`--canary`). Full live red-teaming, history/trend, and percentile ("safer than X% of
-agents") are on the roadmap.
+Prototype (v0.5). Passive, read-only checks (B1–B19), installed-skill malware vetting, baseline
+suppression, the built-in `openclaw security audit` merged in, a first active injection self-test
+(`--canary`), and a pip/pipx-installable CLI. Full live red-teaming, history/trend, and percentile
+("safer than X% of agents") are on the roadmap.
 
 ## Tests
 

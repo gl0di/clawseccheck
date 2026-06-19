@@ -3,6 +3,15 @@
 All notable changes to ClawCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.5.0] — 2026-06-19
+
+### Added
+- **Installable CLI.** `pyproject.toml` (zero dependencies) exposes a `clawcheck` console script
+  and `python -m clawcheck`, so it's `pipx install`-able as a standalone tool — not just the
+  bundled skill. The CLI moved to `clawcheck/cli.py`; `audit.py` is now a thin shim so the
+  OpenClaw skill (`python3 {baseDir}/audit.py`) keeps working unchanged.
+- **CI.** GitHub Actions runs the test suite + ruff on every push/PR.
+
 ## [0.4.0] — 2026-06-19
 
 ### Added
