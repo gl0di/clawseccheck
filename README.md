@@ -238,7 +238,7 @@ Beyond individual checks, ClawSecCheck runs a **risk engine** that looks for dan
 *combinations* — capability chains where two or more co-occurring properties make a
 compromise catastrophic or trivial to execute.
 
-The eight chains it detects (RISK-01 through RISK-08):
+The nine chains it detects (RISK-01 through RISK-09):
 
 | ID | Severity | Chain |
 |----|----------|-------|
@@ -250,6 +250,7 @@ The eight chains it detects (RISK-01 through RISK-08):
 | RISK-06 | CRITICAL | Open/untrusted surface → control-plane endpoint → full agent takeover |
 | RISK-07 | HIGH | Exec/write tool (no approval gate) → writable bootstrap/identity files → persistent compromise |
 | RISK-08 | MEDIUM | Multi-user channel → shared session (`dmScope="main"`) → cross-user data leak |
+| RISK-09 | CRITICAL | Malicious installed skill (B13 fail) → reachable secrets/data → outbound egress → exfiltration |
 
 Each chain fires **only when every link has positive evidence** — no chain is invented from
 absent or UNKNOWN data, so findings are evidence-gated, which keeps false positives low —
@@ -345,7 +346,7 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-v0.15. Read-only checks A1/B1–B25/B30/B32/B38/B39/C3–C5 (incl. write-protection, self-modification,
+v0.17. Read-only checks A1/B1–B25/B30/B32/B38/B39/C3–C5 (incl. write-protection, self-modification,
 approval-bypass, deep MCP, update/pinning hygiene, sender identity strength, control-plane
 mutation reachability, browser/SSRF exposure, and session visibility/cross-user leak),
 installed-skill malware vetting, baseline suppression + governance, the built-in
@@ -367,23 +368,34 @@ supply-chain gap) — an **expanded agentic red-team suite** (`--redteam`, `--dr
 tool poisoning, MCP-response injection, memory poisoning, multi-agent instruction smuggling,
 approval-bypass via injection, and dirty-input-to-exfil chains across MCP-response, memory, and
 subagent sources — and a **risk engine** (`--risk-paths`): combinational chain detection that
-surfaces the highest-risk capability paths (RISK-01 through RISK-08) without affecting the
+surfaces the highest-risk capability paths (RISK-01 through RISK-09) without affecting the
 deterministic A–F score. All checks are grounded against the real OpenClaw schema (verified from
 docs.openclaw.ai and live fleet configs), so they fire on real installations rather than silently
-missing phantom field paths. ClawSecCheck still only checks and guides — it never applies fixes or
-changes your config.
+missing phantom field paths. The project was renamed to **ClawSecCheck** in v0.16, and v0.17 was a
+stable-readiness pass driven by an external security review: it fixed an approval-gate false
+positive (checks now read the real `tools.exec.mode` instead of non-existent fields), IPv6 gateway
+bind detection, prompt/report sanitization across **every** output channel (`--prompts`, `--json`,
+`--sarif`, HTML), and hardened the publish pipeline. ClawSecCheck still only checks and guides — it
+never applies fixes or changes your config.
 
 ## Roadmap
 
 **Everything stays local. No telemetry, no phone-home, ever.** ClawSecCheck makes no network
 calls and transmits nothing — that is the whole point of a trust-first audit tool born amid the
 ClawHavoc exfiltration wave. Any "analytics" here is computed and stored **only on your machine**;
-the only thing that ever leaves is what *you* choose to post (the shareable grade badge). Planned,
-all local-only:
+the only thing that ever leaves is what *you* choose to post (the shareable grade badge).
 
-- **Shipped in v0.12:** Full Hebrew dynamic detail — finding "why"/evidence text with
-  interpolated config values (paths, key names, counts) is now translated at render time via
-  fragment-splitting + regex rules. The bilingual work begun in v0.9 is complete.
+Planned next, all local-only:
+
+- **Dirty-input taint chain (B26–B28):** a sanitizer/normalizer for untrusted content, a
+  dirty-input → action gate (block exec/send/write/memory-write influenced by untrusted data
+  without approval), and provenance/taint labelling so summaries inherit their source's trust
+  level. This is the largest remaining coverage gap.
+- **OpenClaw CVE / version gate (B33):** a maintained table of known-vulnerable OpenClaw version
+  ranges, with unknown versions reported as `WARN`/`UNKNOWN` rather than `PASS`.
+- **Inbound reachability & effective-tools matrix (B29/B31):** map every entrypoint → actor →
+  agent → the tools actually reachable after all overrides, to surface exposed capability paths
+  more precisely.
 
 ## Limitations
 

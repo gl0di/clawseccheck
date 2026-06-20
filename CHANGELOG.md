@@ -5,12 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
 
 ## [0.17.1] — 2026-06-20
 
-Docs only — no code change.
+Docs only — README accuracy pass, no code change.
 
 ### Changed
 - Dropped the "beta" framing from the README. 0.17.0 closed the four stable-release
-  blockers, so the project is now positioned as stable; the README section keeps the
-  honest-limits and bug-reporting guidance, just without the beta label.
+  blockers, so the project is now positioned as stable; the section keeps the honest-limits
+  and bug-reporting guidance, just without the beta label.
+
+### Fixed (README accuracy)
+- **Roadmap section** rewritten: it had listed an *already-shipped* v0.12 item as "planned".
+  It now lists the genuinely unshipped work — the B26–B28 dirty-input taint chain, the B33
+  OpenClaw CVE/version gate, and the B29/B31 reachability + effective-tools matrix.
+- **Highest-risk paths**: corrected "eight chains (RISK-01 through RISK-08)" → nine; added the
+  missing RISK-09 row (malicious installed skill → reachable data → egress → exfiltration).
+- **Status**: corrected the stale "v0.15" → v0.17, RISK count, and added the v0.16 rename and
+  the v0.17 stable-readiness hardening (real `tools.exec.mode` approval, IPv6 bind, all-channel
+  sanitization, publish-pipeline hardening). Field names cited for B30/B32/B38/B39 verified
+  against the real checks.
 
 ## [0.17.0] — 2026-06-20
 
