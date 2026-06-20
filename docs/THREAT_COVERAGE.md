@@ -1,0 +1,61 @@
+# Threat coverage matrix
+
+Honest map of what ClawSecCheck checks today, what it does **not** yet check, and where
+the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
+all (so they can't even surface as a finding). Generated 2026-06-20 for v0.17.1.
+
+Current catalog: `A1, B1–B25, B30, B32, B38, B39, C3–C5`, plus the combinational risk
+engine `RISK-01..RISK-09` and the install-time vetters `--vet` (B13 on an uninstalled
+skill) / `--vet-mcp`.
+
+## Covered
+
+| Threat | Covered by | Notes |
+|---|---|---|
+| Plaintext secrets in config / bootstrap | B1 | Reports key paths, not values |
+| Gateway exposure & channel auth | B2, B11 | IPv6-aware bind parsing (v0.17.0) |
+| Least privilege / dangerous tools | B3, B7, B8 | Approval gate via real `tools.exec.mode` (v0.17.0) |
+| Execution sandbox present | B4 | Depth is partial — see gaps (B35) |
+| Bootstrap-file injection surface | B6 | Prompt-injection-prone directives in SOUL/AGENTS/TOOLS |
+| Trusted-output boundary policy | B21 | Is external content treated as data, not instructions |
+| Installed-skill malware (ClawHavoc class) | B13, `--vet` | curl\|sh, base64/PS-encoded, split-stage exfil, paste hosts |
+| Egress surface | B14 | Where the agent can reach out |
+| MCP server trust | B15, B24, `--vet-mcp` | Unpinned installs, plaintext transport, env/secret passthrough, broad scopes |
+| Threat monitoring present | B16, `--monitor` | Detects absence; `--monitor` provides drift detection |
+| Autonomy / heartbeat | B17 | Self-acting agent steerable by untrusted input |
+| Subagent delegation | B18 | Elevated/exec inheritance w/o approval (real gate, v0.17.0) |
+| Data at-rest perms | B19 | Group/world-readable memory/log dirs |
+| Bootstrap/memory write protection | B20 | Identity-file writability |
+| Self-modification risk | B22 | Writable identity + tools + no approval |
+| Approval-bypass directives | B23 | "do X without asking" in bootstrap |
+| Update / pinning hygiene | B25, C4 | Pinned releases; NOT a CVE DB (see B33 gap) |
+| Sender identity strength | B30 | Mutable display-name allowlists, group history injection |
+| Control-plane mutation reachability | B32 | cron/config.apply/update.run exposed over gateway |
+| Browser / SSRF exposure | B38 | Metadata-IP, no-sandbox, hostname allowlist |
+| Session visibility / cross-user leak | B39 | `session.dmScope`, `tools.sessions.visibility` |
+| Backups of identity/memory | C3 | |
+| Native binary PATH safety | C5 | |
+| **Combinational attack chains** | RISK-01..09 | Lethal trifecta, untrusted→exec, control-plane takeover, malicious-skill→exfil, etc. |
+
+## Gaps (no check today)
+
+| Gap | Intended ID | Why it matters | Status |
+|---|---|---|---|
+| Dirty-input **sanitizer** (HTML/bidi/zero-width normalization, hidden-text stripping) | B26 | First line of prompt-injection defense | Roadmap |
+| Dirty-input → **action gate** (block exec/send/write/memory-write influenced by untrusted data w/o approval) | B27 | Stops injection from reaching side-effects | Roadmap |
+| **Taint / provenance** labels (summaries inherit source trust) | B28 | "sanitized ≠ trusted"; the core agentic gap | Roadmap |
+| **Inbound reachability** map (entrypoint→actor→agent) | B29 | Precise exposure path, not just per-setting | Roadmap |
+| **Effective-tools matrix** (after global/provider/channel/agent/toolsBySender/allow-deny) incl. "deny write but exec/apply_patch still mutates" | B31 | Bypass-aware least-privilege | Roadmap |
+| Known-vulnerable **OpenClaw version** DB (CVE ranges) | B33 | Patch-gating; C4 only checks update hygiene | Roadmap |
+| **Credential blast-radius** inventory (env, auth profiles, OAuth, SSH, cookies, MCP env) | B41 | Scope of a compromise | Backlog |
+| **Skill/plugin install policy** (auto-update, postinstall scripts, world-writable skill dirs) | B42 | Supply-chain at install time; partial via B13/B25 | Backlog |
+| **Sandbox depth** (`docker.sock`, `elevated.allowFrom`, workspaceAccess rw) | B35 | Host-escape routes; B4 is shallow | Backlog |
+| **Secret redaction in the report** (not just logs) | — | A decoded payload preview could surface a secret value | See HARDENING_BACKLOG #2 |
+| **Suppression governance** (suppressed CRITICAL stays visible; reason/expiry) | — | A suppressed CRITICAL silently uncaps the score | See HARDENING_BACKLOG #3 |
+| **Windows ACL** equivalents of POSIX perm checks | — | Perm checks return UNKNOWN on Windows | Backlog |
+| Per-finding **confidence** level | — | Methodology asks for it | Backlog |
+
+## Rule
+
+> If an attack path has no check and no test, assume the tool can miss it. This file is the
+> source of truth for that — update it whenever a check or gap changes.
