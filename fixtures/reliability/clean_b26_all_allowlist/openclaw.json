@@ -1,0 +1,22 @@
+{
+  "meta": { "lastTouchedVersion": "2026.2.9" },
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": { "mode": "token", "token": "minimum-32-character-secure-token-here" }
+  },
+  "channels": {
+    "defaults": { "contextVisibility": "allowlist" },
+    "slack": {
+      "dmPolicy": "allowlist",
+      "groupPolicy": "allowlist"
+    },
+    "telegram": {
+      "dmPolicy": "allowlist",
+      "groupPolicy": "allowlist",
+      "contextVisibility": "allowlist_quote"
+    }
+  },
+  "tools": { "profile": "minimal" },
+  "logging": { "redactSensitive": "tools" },
+  "models": { "main": { "provider": "ollama/llama3" } }
+}

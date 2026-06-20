@@ -28,7 +28,9 @@ skill) / `--vet-mcp`.
 | Bootstrap/memory write protection | B20 | Identity-file writability |
 | Self-modification risk | B22 | Writable identity + tools + no approval |
 | Approval-bypass directives | B23 | "do X without asking" in bootstrap |
-| Update / pinning hygiene | B25, C4 | Pinned releases; NOT a CVE DB (see B33 gap) |
+| Update / pinning hygiene | B25, C4 | Pinned releases |
+| Untrusted-context exposure | B26 | `channels.<p>.contextVisibility` — untrusted group/quote/history context injected into the model (config side; B21 is the policy side) |
+| Known-vulnerable version gate | B33 | `meta.lastTouchedVersion` vs a maintained advisory table (seeded: GHSA-g8p2-7wf7-98mq, fixed 2026.1.29) |
 | Sender identity strength | B30 | Mutable display-name allowlists, group history injection |
 | Control-plane mutation reachability | B32 | cron/config.apply/update.run exposed over gateway |
 | Browser / SSRF exposure | B38 | Metadata-IP, no-sandbox, hostname allowlist |
@@ -41,12 +43,12 @@ skill) / `--vet-mcp`.
 
 | Gap | Intended ID | Why it matters | Status |
 |---|---|---|---|
-| Dirty-input **sanitizer** (HTML/bidi/zero-width normalization, hidden-text stripping) | B26 | First line of prompt-injection defense | Roadmap |
+| Dirty-input **content sanitizer** (HTML/bidi/zero-width normalization, hidden-text stripping) | (part of B26) | OpenClaw exposes no sanitizer config field; the context-exposure side ships as B26 (`contextVisibility`), the policy side is B21. Deeper normalization has no config surface to check | Partial / no config surface |
 | Dirty-input → **action gate** (block exec/send/write/memory-write influenced by untrusted data w/o approval) | B27 | Stops injection from reaching side-effects | Roadmap |
 | **Taint / provenance** labels (summaries inherit source trust) | B28 | "sanitized ≠ trusted"; the core agentic gap | Roadmap |
 | **Inbound reachability** map (entrypoint→actor→agent) | B29 | Precise exposure path, not just per-setting | Roadmap |
 | **Effective-tools matrix** (after global/provider/channel/agent/toolsBySender/allow-deny) incl. "deny write but exec/apply_patch still mutates" | B31 | Bypass-aware least-privilege | Roadmap |
-| Known-vulnerable **OpenClaw version** DB (CVE ranges) | B33 | Patch-gating; C4 only checks update hygiene | Roadmap |
+| Known-vulnerable **OpenClaw version** DB (more advisories) | B33+ | B33 ships with one confirmed advisory; the table grows as new advisories are published | Shipped (seed) |
 | **Credential blast-radius** inventory (env, auth profiles, OAuth, SSH, cookies, MCP env) | B41 | Scope of a compromise | Backlog |
 | **Skill/plugin install policy** (auto-update, postinstall scripts, world-writable skill dirs) | B42 | Supply-chain at install time; partial via B13/B25 | Backlog |
 | **Sandbox depth** (`docker.sock`, `elevated.allowFrom`, workspaceAccess rw) | B35 | Host-escape routes; B4 is shallow | Backlog |

@@ -2631,6 +2631,156 @@ def check_session_visibility(ctx: Context) -> Finding:
     )
 
 
+# ---------- B26: untrusted-context exposure (channels.contextVisibility) ----------
+# Real field: channels.defaults.contextVisibility (default for all channels) and
+# channels.<provider>.contextVisibility (per-channel override).
+# Values:
+#   "all"             — model sees quoted replies / thread roots / fetched group
+#                       history from ANY sender, including untrusted ones
+#                       (documented default when field is absent -> prompt-injection surface)
+#   "allowlist"       — only supplemental context from allowlisted senders
+#   "allowlist_quote" — allowlist + one explicit quoted reply
+_B26_SAFE_VALUES = frozenset({"allowlist", "allowlist_quote"})
+
+
+def check_untrusted_context(ctx: Context) -> Finding:
+    """B26 — Untrusted-context exposure via channels.contextVisibility.
+
+    PASS    — all configured channels' effective contextVisibility is in
+              ('allowlist', 'allowlist_quote').
+    WARN    — at least one channel's effective value is 'all' (the insecure default),
+              meaning untrusted senders' quoted/history context is injected into the
+              model prompt (prompt-injection surface).  Never FAIL — this is a
+              hardening advisory, not a broken config.
+    UNKNOWN — no channels configured; cannot assess.
+    """
+    cfg = ctx.config
+    channel_map = dig(cfg, "channels")
+    # Real providers only — the "defaults" block holds defaults, it is not a channel.
+    providers = {}
+    if isinstance(channel_map, dict):
+        providers = {k: v for k, v in channel_map.items()
+                     if k != "defaults" and isinstance(v, dict)}
+    if not providers:
+        return _finding(
+            "B26", UNKNOWN,
+            "No channels configured — cannot assess untrusted-context exposure.",
+            "Set channels.defaults.contextVisibility to 'allowlist' or 'allowlist_quote' "
+            "before enabling any channel.",
+        )
+
+    global_default = dig(cfg, "channels.defaults.contextVisibility")
+
+    affected: list[str] = []
+    for provider, provider_cfg in providers.items():
+        # Per-channel value takes priority; fall back to global default; then "all".
+        effective = provider_cfg.get("contextVisibility") or global_default or "all"
+        if effective == "all":
+            affected.append(provider)
+
+    if affected:
+        return _finding(
+            "B26", WARN,
+            "Untrusted senders' quoted/history context is injected into the model "
+            f"(channels.<p>.contextVisibility='all'/default) — a prompt-injection surface. "
+            f"Affected channel(s): {', '.join(affected)}.",
+            "Set channels.defaults.contextVisibility (or per channel) to 'allowlist' or "
+            "'allowlist_quote' so the model only sees context from allowlisted senders.",
+            evidence=affected,
+        )
+
+    return _finding(
+        "B26", PASS,
+        "All configured channels restrict context to allowlisted senders "
+        "(contextVisibility='allowlist' or 'allowlist_quote').",
+        "Keep contextVisibility set to 'allowlist' or 'allowlist_quote' on all channels.",
+    )
+
+
+# ---------- B33: known-vulnerable OpenClaw version gate ----------
+# Advisory table — update this list as new OpenClaw advisories are published.
+# Unknown / future versions that do not appear in this table are treated as PASS
+# only against the entries here; they may still be vulnerable to undiscovered issues.
+# Each entry: (ghsa_id, max_vulnerable_version_tuple, fixed_version_str, short_desc)
+_KNOWN_ADVISORIES: list[tuple[str, tuple[int, ...], str, str]] = [
+    (
+        "GHSA-g8p2-7wf7-98mq",
+        (2026, 1, 28),
+        "2026.1.29",
+        "Control UI gatewayUrl → gateway token exfiltration",
+    ),
+]
+
+_VERSION_LEADING_INTS_RE = re.compile(r"^(\d+(?:\.\d+)*)")
+
+
+def _parse_version(ver: str) -> tuple[int, ...] | None:
+    """Parse the leading dotted-integer portion of a version string.
+
+    Handles "2026.2.9", "2026.1.28", and strips any trailing "-dev"/"-beta"/
+    "-rc1"/etc. suffix.  Returns None if fewer than 2 integer components can
+    be parsed.
+
+    Examples:
+        "2026.1.29"     -> (2026, 1, 29)
+        "2026.2.9"      -> (2026, 2, 9)
+        "2026.1.28-dev" -> (2026, 1, 28)
+        "nightly"       -> None
+        "2026"          -> None   (single component — ambiguous)
+    """
+    m = _VERSION_LEADING_INTS_RE.match(str(ver).strip())
+    if not m:
+        return None
+    parts = tuple(int(x) for x in m.group(1).split("."))
+    if len(parts) < 2:
+        return None
+    return parts
+
+
+def check_known_vulns(ctx: Context) -> Finding:
+    """B33 — Known-vulnerable OpenClaw version gate.
+
+    FAIL    — installed version <= a known-advisory's max_vulnerable_version_tuple.
+    PASS    — installed version is past all known advisory fixes.
+    UNKNOWN — meta.lastTouchedVersion is missing or cannot be parsed.
+    """
+    raw_ver = dig(ctx.config, "meta.lastTouchedVersion")
+    if not raw_ver:
+        return _finding(
+            "B33", UNKNOWN,
+            "OpenClaw version unknown (meta.lastTouchedVersion not set) — "
+            "cannot check against known advisories.",
+            "Set meta.lastTouchedVersion in openclaw.json (or upgrade to a current "
+            "release) and keep OpenClaw current.",
+        )
+
+    parsed = _parse_version(str(raw_ver))
+    if parsed is None:
+        return _finding(
+            "B33", UNKNOWN,
+            f"OpenClaw version {raw_ver!r} could not be parsed — "
+            "cannot check against known advisories.",
+            "Verify your version string (expected dotted-integer format like '2026.1.29') "
+            "and keep OpenClaw current.",
+        )
+
+    for ghsa_id, max_vuln, fixed_ver, desc in _KNOWN_ADVISORIES:
+        if parsed <= max_vuln:
+            return _finding(
+                "B33", FAIL,
+                f"OpenClaw {raw_ver} is affected by {ghsa_id}: {desc}. "
+                f"Versions <= {'.'.join(str(x) for x in max_vuln)} are vulnerable.",
+                f"Upgrade OpenClaw to >= {fixed_ver} to remediate {ghsa_id}.",
+                evidence=[ghsa_id],
+            )
+
+    return _finding(
+        "B33", PASS,
+        f"OpenClaw {raw_ver} is at or past all known-advisory fixes.",
+        "Keep OpenClaw updated and re-check after new advisories are published.",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -2643,6 +2793,7 @@ CHECKS = [
     check_update_pinning, check_path_safety,
     check_sender_identity, check_control_plane_mutation,
     check_browser_ssrf, check_session_visibility,
+    check_untrusted_context, check_known_vulns,
 ]
 
 

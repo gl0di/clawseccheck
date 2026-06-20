@@ -18,7 +18,7 @@
     "tools_reachable_policy": "restricted"
   },
   "channels": {
-    "telegram": { "dmPolicy": "allowlist", "groupPolicy": "allowlist", "groupAllowFrom": ["owner-123"] }
+    "telegram": { "dmPolicy": "allowlist", "groupPolicy": "allowlist", "groupAllowFrom": ["owner-123"], "contextVisibility": "allowlist" }
   },
   "logging": { "redactSensitive": "tools", "audit": true },
   "models": { "main": { "provider": "local-llama" } }

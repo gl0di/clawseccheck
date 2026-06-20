@@ -3,6 +3,30 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.18.0] — 2026-06-20
+
+Phase 0.18.0, wave 1 — two new checks, both grounded on **real** OpenClaw config fields
+(re-confirmed against docs.openclaw.ai + live fleet configs; no phantom paths).
+
+### Added
+- **B26 — Untrusted-context exposure** (`channels.<provider>.contextVisibility` /
+  `channels.defaults.contextVisibility`). The OpenClaw default `"all"` lets the model see
+  quoted/thread/history context from non-allowlisted senders in group chats — a prompt-injection
+  surface. WARNs when any channel's effective value is `"all"`; PASS when all are
+  `"allowlist"`/`"allowlist_quote"`; UNKNOWN with no channels. Hardening advisory (never FAIL).
+  Complements the B21 bootstrap-policy check.
+- **B33 — Known-vulnerable OpenClaw version gate** (`meta.lastTouchedVersion`). FAILs on a version
+  in a known-advisory range — seeded with the one confirmed advisory **GHSA-g8p2-7wf7-98mq**
+  (versions `<= 2026.1.28`, fixed `2026.1.29`: Control-UI `gatewayUrl` → gateway-token exfiltration;
+  no CVE assigned). Unknown/unparseable versions are `UNKNOWN`, never `PASS`. The advisory table is
+  maintained in-source and only asserts against the advisories it lists.
+
+### Notes
+- Deferred (documented in `docs/THREAT_COVERAGE.md` / `HARDENING_BACKLOG.md`): B27 action-gate and
+  B28 taint have **no** OpenClaw config surface and are already covered combinationally by the risk
+  engine + B21/B8/B22, so they are intentionally not shipped as redundant scored checks. B36 egress
+  stays unbuilt (the egress-allowlist fields are phantom). B29/B31/B41/B42 are later waves.
+
 ## [0.17.2] — 2026-06-20
 
 Hardening pass from the v0.17.1 internal code review (all defense-in-depth — the tool is local

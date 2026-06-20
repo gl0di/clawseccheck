@@ -55,8 +55,10 @@ implementation consistent; scoring caps (49/79) and grade bands correct.
 
 1. **H1, H3, H2** — small, security/honesty-relevant → fold into a `0.17.2` patch with regression tests.
 2. **H4–H6** — opportunistic, same patch.
-3. **Coverage:** plan **B26–B28** (dirty-input taint chain) next — the single biggest missing domain
-   for an agentic-security tool. Then B33 (CVE DB) and B29/B31 (reachability + effective-tools).
+3. **Coverage (phase 0.18.0):** ✅ **B26** (untrusted-context exposure via `contextVisibility`) and
+   ✅ **B33** (known-vulnerable version gate) shipped in 0.18.0 wave 1. B27 (action-gate) / B28 (taint)
+   have no OpenClaw config surface and are covered combinationally (risk engine + B21/B8/B22) — not
+   shipped as redundant scored checks. Next waves: B29/B31 (reachability + effective-tools), B41/B42.
 
 ## Recommended issues to open
 

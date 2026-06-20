@@ -93,6 +93,12 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
 - **B39 — session visibility / cross-user transcript leak:** flags `session.dmScope="main"`
   (all DM peers share one session — cross-user contamination) and `tools.sessions.visibility`
   of `"agent"` or `"all"` (cross-session transcript reads).
+- **B26 — untrusted-context exposure:** flags `channels.<provider>.contextVisibility="all"` (the
+  OpenClaw default), where quoted/thread/history text from non-allowlisted senders is injected into
+  the model as context — a prompt-injection surface; recommends `allowlist`/`allowlist_quote`.
+- **B33 — known-vulnerable version gate:** compares `meta.lastTouchedVersion` against a maintained
+  OpenClaw advisory table (seeded with GHSA-g8p2-7wf7-98mq, fixed `2026.1.29`); unknown versions are
+  `UNKNOWN`, never `PASS`.
 - Plus your platform's own **`openclaw security audit`**, run for you and merged in.
 
 ## Built-in audit, included for you
@@ -346,7 +352,7 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-v0.17. Read-only checks A1/B1–B25/B30/B32/B38/B39/C3–C5 (incl. write-protection, self-modification,
+v0.18. Read-only checks A1/B1–B26/B30/B32/B33/B38/B39/C3–C5 (incl. write-protection, self-modification,
 approval-bypass, deep MCP, update/pinning hygiene, sender identity strength, control-plane
 mutation reachability, browser/SSRF exposure, and session visibility/cross-user leak),
 installed-skill malware vetting, baseline suppression + governance, the built-in
