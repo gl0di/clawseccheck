@@ -14,6 +14,7 @@ mislabelled as .py) yields no findings rather than an error.
 from __future__ import annotations
 
 import ast
+import re
 from collections import namedtuple
 
 # A finding: rule id, severity ("crit" = malware-grade / FAIL-eligible on its own;
@@ -39,6 +40,53 @@ _DANGEROUS_OBJ = {"os", "subprocess", "sys", "builtins", "__builtins__",
                   "importlib", "ctypes", "posix", "commands"}
 
 _MAX_FINDINGS_PER_FILE = 25
+
+# Taint (CRED_EXFIL_FLOW): a credential-FILE's contents flowing into a network sink.
+# Sources are credential FILE paths ONLY — NOT environment variables — so the common
+# legit "read OPENAI_API_KEY, send it as an auth header" pattern is never flagged.
+_CRED_PATH_RE = re.compile(
+    r"\.ssh/id_|\bid_rsa\b|\bid_ed25519\b|\.aws/credentials|login\.keychain|wallet\.dat|"
+    r"keystore\.json|\.npmrc|\.pypirc|\.netrc|\.docker/config|\.kube/config|"
+    r"\.config/gcloud|/\.?secrets?\b|cookies\.sqlite|Cookies\b", re.I)
+_NET_SINK_ATTRS_ANY = {"post", "put", "patch", "urlopen", "request"}
+_NET_SINK_ATTRS_BASED = {"send", "sendall", "sendto", "connect"}
+_NET_SINK_BASES = {"requests", "httpx", "urllib", "socket", "aiohttp", "smtplib", "ftplib", "session"}
+
+
+def _has_cred_path_const(node: ast.AST) -> bool:
+    """True if the subtree contains a string constant naming a credential file."""
+    for n in ast.walk(node):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and _CRED_PATH_RE.search(n.value):
+            return True
+    return False
+
+
+def _is_net_sink(func: ast.AST) -> bool:
+    if isinstance(func, ast.Name):
+        return func.id == "urlopen"
+    if isinstance(func, ast.Attribute):
+        if func.attr in _NET_SINK_ATTRS_ANY:
+            return True
+        if func.attr in _NET_SINK_ATTRS_BASED:
+            return _attr_base(func.value) in _NET_SINK_BASES
+    return False
+
+
+def _cred_tainted_names(tree: ast.AST) -> set[str]:
+    """Names whose value derives from reading a credential file (transitively)."""
+    tainted: set[str] = set()
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    for _ in range(4):  # small fixpoint for multi-step flows (p = path; k = open(p).read())
+        changed = False
+        for a in assigns:
+            if _has_cred_path_const(a.value) or (_names_in(a.value) & tainted):
+                for t in a.targets:
+                    if isinstance(t, ast.Name) and t.id not in tainted:
+                        tainted.add(t.id)
+                        changed = True
+        if not changed:
+            break
+    return tainted
 
 
 def _is_decode_call(node: ast.AST) -> bool:
@@ -163,5 +211,16 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             if is_os or is_subp:
                 add("DANGEROUS_SINK", "info", ln, f"{base}.{f.attr}() shell/exec sink")
                 continue
+
+    # Taint: credential-FILE contents reaching a network sink (read secret -> send out).
+    # Cheap pre-filter on the raw source so the propagation runs only when relevant.
+    if _CRED_PATH_RE.search(source):
+        cred_tainted = _cred_tainted_names(tree)
+        if cred_tainted:
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and _is_net_sink(node.func)
+                        and (_names_in(node) & cred_tainted)):
+                    add("CRED_EXFIL_FLOW", "crit", getattr(node, "lineno", 0),
+                        "credential-file contents flow into a network sink (read secret -> send out)")
 
     return out

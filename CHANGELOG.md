@@ -3,6 +3,21 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.23.0] — 2026-06-20
+
+### Added
+- **Taint tracking in skill AST (`CRED_EXFIL_FLOW`)** — the deferred 0.21 follow-up. `skillast.py`
+  now traces an intra-file dataflow: a **credential FILE's** contents (`~/.ssh/id_*`,
+  `.aws/credentials`, keychain, wallet, cookies DB, `.npmrc`/`.netrc`/`.docker/config`, …) reaching a
+  **network sink** (`requests.post`, `urllib.urlopen`, `socket.send`, …). "Read a secret file → send
+  it out" is malware-grade, so it routes through the existing B13 engine as **CRITICAL** in `--vet`
+  and the default audit.
+  - **FP-safe by construction:** sources are credential **files only — NOT environment variables**,
+    so the ubiquitous legit pattern "read `OPENAI_API_KEY`, send it as an auth header" is never
+    flagged. The taint pass is gated behind a cheap credential-path pre-filter and propagates across
+    a few assignment steps (`p = path; k = open(p).read(); requests.post(url, data=k)`).
+  - Parse-only (no execution); Python skill files only.
+
 ## [0.22.0] — 2026-06-20
 
 ### Added

@@ -27,7 +27,7 @@ from .sarif import render_sarif
 from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
 from .guide import suggest_actions, render_next_actions
 
-__version__ = "0.22.0"
+__version__ = "0.23.0"
 
 
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,

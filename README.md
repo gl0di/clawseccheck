@@ -76,7 +76,11 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
   v0.21 it also runs a static **Python AST** pass (stdlib `ast`, parse-only — never executed) that
   catches obfuscation regex misses — `exec(base64.b64decode(...))`, `getattr(os,"sys"+"tem")(...)`,
   `__import__("os").system(...)` — plus prompt-injection / hide-from-user directives embedded in a
-  third-party skill's prose. (AST is Python-only; JS/shell stay on the regex engine.)
+  third-party skill's prose, and (v0.23) a **taint trace** that flags a credential **file's** contents
+  (`~/.ssh/id_*`, `.aws/credentials`, keychain, wallet, …) flowing into a network sink ("read a secret
+  file → send it out"). Sources are credential files only, not env vars, so the legit "read
+  `OPENAI_API_KEY`, send as auth header" pattern is never flagged. (AST is Python-only; JS/shell stay
+  on the regex engine.)
 - **B14 — egress surface:** where the agent can reach out (channels, external skills, tools).
 - **B15 — MCP server trust** boundaries.
 - **B16 — threat monitoring:** whether you actually have monitoring/detection set up at all.
