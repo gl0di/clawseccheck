@@ -3,6 +3,17 @@
 All notable changes to ClawCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.15.2] — 2026-06-20
+
+### Security / hygiene
+- **Removed secret-shaped literals from the test suite.** The log-redaction tests
+  (`tests/test_logsafe.py`) contained literal API-key-format strings (a Google `AIza…` key, an
+  AWS `AKIA…` key, an Anthropic `sk-ant-…` key) used as inputs to verify `redact()` masks them.
+  Secret scanners can't tell a test fixture from a real credential and flagged the Google one as a
+  public leak. The values are now **assembled at runtime from parts**, so no contiguous secret
+  literal exists anywhere in source — the tests still exercise the exact redaction patterns. None
+  of these were real credentials; they were synthetic test inputs.
+
 ## [0.15.1] — 2026-06-20
 
 ### Added
