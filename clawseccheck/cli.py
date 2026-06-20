@@ -13,15 +13,15 @@ import sys
 from pathlib import Path
 
 from . import (
-    audit, diff, fingerprint, load_ignore, load_state, make_canary, render_canary,
-    render_card, render_json, render_monitor, render_prompts, render_report, render_svg,
-    save_state, snapshot, vet_mcp, vet_skill,
+    audit, diff, fingerprint, load_events, load_ignore, load_state, make_canary, record_events,
+    render_canary, render_card, render_events, render_json, render_monitor, render_prompts,
+    render_report, render_svg, save_state, snapshot, vet_mcp, vet_skill,
 )
 from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
 from .report import render_html
-from .monitor import DEFAULT_STATE
+from .monitor import DEFAULT_EVENTS, DEFAULT_STATE
 from .redteam import make_suite, render_suite
 from .dryrun import make_scenarios, render_dryrun
 from .sarif import render_sarif
@@ -75,6 +75,10 @@ def main(argv=None) -> int:
                    help="monitor mode: alert on what changed since the last check")
     p.add_argument("--state", default=DEFAULT_STATE, metavar="PATH",
                    help=f"snapshot file for --monitor (default: {DEFAULT_STATE})")
+    p.add_argument("--events", default=DEFAULT_EVENTS, metavar="PATH",
+                   help=f"Agent Watch event journal (default: {DEFAULT_EVENTS})")
+    p.add_argument("--watch-log", action="store_true",
+                   help="print the Agent Watch event journal (timeline of what changed)")
     p.add_argument("--vet", metavar="PATH",
                    help="vet a skill (dir or SKILL.md) for malware BEFORE installing it")
     p.add_argument("--vet-mcp", nargs="?", const="", metavar="NAME|FILE",
@@ -223,6 +227,10 @@ def main(argv=None) -> int:
                     _emit(f"  {entry}")
         return 0
 
+    if args.watch_log:
+        _emit(render_events(load_events(args.events), ascii_only))
+        return 0
+
     logger.info("auditing home=%s", args.home)
     ctx, findings, score = audit(args.home, include_native=not args.no_native,
                                  include_host=not args.no_host)
@@ -286,12 +294,13 @@ def main(argv=None) -> int:
     if args.monitor:
         prev = load_state(args.state)
         snap = snapshot(ctx, findings, score)
-        _emit(render_monitor(diff(prev, snap), score, ascii_only, baseline=prev is None,
-                             lang=args.lang))
+        alerts = diff(prev, snap)
+        _emit(render_monitor(alerts, score, ascii_only, baseline=prev is None, lang=args.lang))
         try:
             save_state(args.state, snap)
         except OSError as exc:
             _emit(f"\n(could not save monitor state: {exc})")
+        record_events(alerts, args.events)  # Agent Watch: append the drift to the local journal
         history_record(score, args.history)
         return 0
 

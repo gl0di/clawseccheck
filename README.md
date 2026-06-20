@@ -256,9 +256,13 @@ monitoring/detection set up — an agent with none won't alert you if it's compr
 for a monitoring skill/plugin (ClawSec, `openclaw-security-monitor`, …) or monitoring/alerts
 config; if none is found it warns you and tells you how to add one.
 
-**`--monitor` — built-in lightweight monitoring.** One way to *get* monitoring: re-audit on a
-schedule and alert on what **changed** — a new or modified installed skill, `SOUL.md` drift, a
-dropped score, a check going PASS → FAIL.
+**`--monitor` — Agent Watch.** One way to *get* monitoring: re-audit on a schedule and alert,
+**by severity**, on what **changed** — a new or modified installed skill, `SOUL.md` drift, a dropped
+score, a check going PASS → FAIL, **a newly connected MCP server, a new channel, the gateway becoming
+network-exposed, or a host monitor disappearing**. Each run appends the changes to a private local
+journal (`~/.clawseccheck/events.jsonl`, owner-only, never uploaded); view the timeline with
+`--watch-log`. (Drift detection is upgrade-safe: an older snapshot never produces spurious
+"new connection" alerts.)
 
 ```bash
 python3 audit.py --monitor                 # first run = baseline, then alerts on changes
@@ -384,7 +388,7 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-v0.21. Read-only checks A1/B1–B26/B30/B31/B32/B33/B38/B39/B41/B50–B54/C3–C5 (incl. write-protection,
+v0.24. Read-only checks A1/B1–B26/B30/B31/B32/B33/B38/B39/B41/B42/B50–B54/C3–C5 (incl. write-protection,
 self-modification, approval-bypass, deep MCP, update/pinning hygiene, sender identity strength,
 control-plane mutation reachability, browser/SSRF exposure, session visibility/cross-user leak, and a
 **Host Watch Posture** ring — is the machine the agent runs on watched at all: network IDS, host

@@ -3,6 +3,32 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.24.0] — 2026-06-20
+
+**Agent Watch** — `--monitor` grows from a baseline→diff into a connection-aware, severity-tagged
+drift watcher with a local event journal. It answers "is anyone watching what my agent is joined to,
+and what changed?" — still fully local, the only writes being the (opt-in) snapshot + journal.
+
+### Added
+- **Connection / trust-surface drift.** The monitor snapshot now also fingerprints the agent's
+  **MCP servers**, **channels**, and **gateway bind**, so `--monitor` alerts on:
+  - a **new MCP server** connected since last check → CRITICAL (a new tool/data trust surface to vet);
+    a changed server → HIGH; a removed one → INFO;
+  - a **new channel** → HIGH; a channel's openness/auth changing → MEDIUM;
+  - the **gateway bind** changing → HIGH, or CRITICAL if it became network-exposed (`0.0.0.0`/`::`);
+  - a **host monitor** (B50–B54) going from present → absent → HIGH ("a watcher was removed").
+  Drift checks are guarded so upgrading from an older snapshot never emits spurious "new X" alerts.
+- **Event journal** (`~/.clawseccheck/events.jsonl`, owner-only `0o600`, never uploaded). Every
+  `--monitor` run appends its detected changes as a timeline. View it with the new **`--watch-log`**
+  (and `--events PATH` to point elsewhere). Severity-ranked, ANSI-sanitized output.
+- Monitor alerts now include a **MEDIUM** tier and are sanitized before display (skill/channel/MCP
+  names are attacker-controlled).
+
+### Note
+This is the free skill's *informational* watcher — it tells you what changed and how serious it is.
+Continuous, autonomous, off-host alerting (a real sensor/daemon) remains a separate product concern;
+the skill stays local and read-only by design.
+
 ## [0.23.0] — 2026-06-20
 
 ### Added

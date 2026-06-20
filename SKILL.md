@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 0.23.0
+version: 0.24.0
 description: Free, local, read-only security self-audit for your own OpenClaw agent. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true}}
 ---
@@ -178,9 +178,12 @@ Wait for the user to confirm. Only then run:
 python3 {baseDir}/audit.py --monitor
 ```
 
-First run saves a baseline; later runs report only what changed (new or modified skill, a drifted
-`SOUL.md`, a dropped score). If the user wants it to run automatically, suggest scheduling it via
-the OpenClaw heartbeat or an hourly cron — but do NOT set up any schedule yourself without
+First run saves a baseline; later runs report only what changed — a new/modified skill, a drifted
+`SOUL.md`, a dropped score, **a newly connected MCP server, a new channel, the gateway becoming
+network-exposed, or a host monitor disappearing** — each tagged by severity. Every run also appends
+the changes to a private local journal (`~/.clawseccheck/events.jsonl`, owner-only, never uploaded);
+show the timeline with `--watch-log`. If the user wants it to run automatically, suggest scheduling
+it via the OpenClaw heartbeat or an hourly cron — but do NOT set up any schedule yourself without
 explicit confirmation.
 
 #### Choice: live test / "test it" / "try an attack" / "see if I'm vulnerable to injection"
@@ -286,3 +289,5 @@ For completeness — these are less common but available:
 - `--no-native` — skip the built-in `openclaw security audit` (for offline / hermetic testing).
 - `--verify-self` — print SHA-256 digest of ClawSecCheck's source files for tamper detection.
 - `--show-suppressed` — list any findings the user has silenced via `.clawseccheckignore`.
+- `--watch-log` — print the Agent Watch event journal (a local timeline of what changed across
+  `--monitor` runs); `--events PATH` points it at a different journal file.

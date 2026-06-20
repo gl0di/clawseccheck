@@ -29,16 +29,52 @@ def _ignore_hash(home: Path) -> str:
 
 SNAPSHOT_VERSION = 1
 DEFAULT_STATE = "~/.clawseccheck/state.json"
+DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
 
 
 def _h(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
 
 
+def _mcp_sig(ctx) -> dict:
+    """name -> hash of each MCP server spec, so new/changed/removed servers drift."""
+    from .checks import _mcp_servers  # noqa: PLC0415 (avoid import-order coupling)
+    out = {}
+    for name, spec in (_mcp_servers(ctx.config) or {}).items():
+        try:
+            out[name] = _h(json.dumps(spec, sort_keys=True, default=str))
+        except (TypeError, ValueError):
+            out[name] = _h(str(spec))
+    return out
+
+
+def _channel_sig(ctx) -> dict:
+    """name -> hash of a channel's openness/auth signature (drift = openness change)."""
+    out, chans = {}, ctx.config.get("channels")
+    if isinstance(chans, dict):
+        for name, c in chans.items():
+            if not isinstance(c, dict):
+                continue
+            nodes = [c] + list((c.get("accounts") or {}).values())
+            dm = any(isinstance(n, dict) and n.get("dmPolicy") == "open" for n in nodes)
+            grp = any(isinstance(n, dict) and n.get("groupPolicy") == "open" for n in nodes)
+            has_auth = bool(c.get("token") or c.get("auth") or c.get("allowFrom")
+                            or c.get("allowlist") or c.get("allowedSenders"))
+            out[name] = _h(f"dm={dm};grp={grp};auth={has_auth}")
+    return out
+
+
+def _gateway_bind(ctx) -> str:
+    from .checks import parse_bind_host  # noqa: PLC0415
+    from .collector import dig  # noqa: PLC0415
+    return parse_bind_host(dig(ctx.config, "gateway.bind")
+                           or dig(ctx.config, "gateway.host") or "")
+
+
 def snapshot(ctx, findings, score) -> dict:
     native = getattr(ctx, "native", None)
     native_count = len(getattr(native, "findings", []) or []) if native else 0
-    return {
+    snap = {
         "version": SNAPSHOT_VERSION,
         "score": score.score,
         "grade": score.grade,
@@ -48,7 +84,17 @@ def snapshot(ctx, findings, score) -> dict:
         "bootstrap": {n: _h(t) for n, t in ctx.bootstrap.items()},
         "native_count": native_count,
         "ignore_hash": _ignore_hash(ctx.home),
+        # Agent Watch — connection / trust surface, so drift in what the agent is
+        # joined to (MCP servers, channels, gateway bind) raises an alert.
+        "mcp": _mcp_sig(ctx),
+        "channels": _channel_sig(ctx),
+        "gateway_bind": _gateway_bind(ctx),
     }
+    host = getattr(ctx, "host", None)
+    if host and host.get("supported"):
+        snap["host"] = {cls: info.get("status")
+                        for cls, info in (host.get("classes") or {}).items()}
+    return snap
 
 
 def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
@@ -97,6 +143,44 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                        "your .clawseccheckignore changed — a suppression was added/removed "
                        "(review to ensure a real hole is not hidden)."))
 
+    # --- Agent Watch: connection / trust-surface drift (guarded so an old snapshot
+    #     without these keys never produces spurious 'new X' alerts after upgrade) ---
+    if "mcp" in prev and "mcp" in curr:
+        pm, cm = prev["mcp"], curr["mcp"]
+        for name in sorted(cm.keys() - pm.keys()):
+            alerts.append(("CRITICAL", f"NEW MCP server connected since last check: '{name}' — "
+                           "vet it before trusting (new tool/data trust surface)."))
+        for name in sorted(pm.keys() & cm.keys()):
+            if pm[name] != cm[name]:
+                alerts.append(("HIGH", f"MCP server '{name}' configuration CHANGED — "
+                               "re-review its transport, secret passthrough and scope."))
+        for name in sorted(pm.keys() - cm.keys()):
+            alerts.append(("INFO", f"MCP server '{name}' was removed."))
+
+    if "channels" in prev and "channels" in curr:
+        pch, cch = prev["channels"], curr["channels"]
+        for name in sorted(cch.keys() - pch.keys()):
+            alerts.append(("HIGH", f"NEW channel '{name}' appeared since last check — "
+                           "confirm its auth / allowlist before it can reach the agent."))
+        for name in sorted(pch.keys() & cch.keys()):
+            if pch[name] != cch[name]:
+                alerts.append(("MEDIUM", f"Channel '{name}' openness/auth changed — review it."))
+
+    if "gateway_bind" in prev and "gateway_bind" in curr and prev["gateway_bind"] != curr["gateway_bind"]:
+        from .checks import EXPOSED_BINDS  # noqa: PLC0415
+        cb = curr["gateway_bind"]
+        exposed = cb in EXPOSED_BINDS
+        alerts.append(("CRITICAL" if exposed else "HIGH",
+                       f"Gateway bind changed: '{prev['gateway_bind']}' -> '{cb}'"
+                       + (" (now exposed to the network!)" if exposed else "")))
+
+    if "host" in prev and "host" in curr:
+        ph, ch = prev["host"], curr["host"]
+        for cls in sorted(set(ph) & set(ch)):
+            if ph[cls] == "present" and ch[cls] != "present":
+                alerts.append(("HIGH", f"Host monitor '{cls}' is no longer detected — "
+                               "a watcher on this machine was removed or disabled."))
+
     return alerts
 
 
@@ -122,3 +206,47 @@ def save_state(path: str | Path, snap: dict) -> None:
         p.chmod(0o600)
     except OSError:
         pass
+
+
+def record_events(alerts, path: str | Path = DEFAULT_EVENTS, when: str | None = None) -> None:
+    """Append each drift alert to a local, owner-only event journal (a timeline of
+    what changed when). No-op when there are no alerts. Never uploaded — local only."""
+    if not alerts:
+        return
+    if when is None:
+        from datetime import datetime  # noqa: PLC0415
+        when = datetime.now().isoformat(timespec="seconds")
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        p.parent.chmod(0o700)
+    except (OSError, NotImplementedError):
+        pass
+    body = "".join(json.dumps({"ts": when, "level": lvl, "message": msg}) + "\n"
+                   for lvl, msg in alerts)
+    try:
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(body)
+        p.chmod(0o600)
+    except OSError:
+        pass
+
+
+def load_events(path: str | Path = DEFAULT_EVENTS, limit: int | None = None) -> list[dict]:
+    """Read the event journal (chronological). Returns [] if absent/unreadable."""
+    p = Path(path).expanduser()
+    if not p.is_file():
+        return []
+    out: list[dict] = []
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        return []
+    return out[-limit:] if limit else out

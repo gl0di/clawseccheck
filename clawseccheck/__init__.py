@@ -15,10 +15,13 @@ from .canary import evaluate, make_canary, render_canary
 from .checks import run_all, vet_mcp, vet_skill
 from .collector import collect
 from .hostwatch import detect as _host_detect
-from .monitor import diff, load_state, save_state, snapshot
+from .monitor import (
+    DEFAULT_EVENTS, diff, load_events, load_state, record_events, save_state, snapshot,
+)
 from .native import run_native_audit
 from .report import (
-    render_card, render_json, render_monitor, render_prompts, render_report, render_svg,
+    render_card, render_events, render_json, render_monitor, render_prompts, render_report,
+    render_svg,
 )
 from .risk import risk_paths, render_risk_paths
 from .scoring import ScoreResult, compute
@@ -27,7 +30,7 @@ from .sarif import render_sarif
 from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
 from .guide import suggest_actions, render_next_actions
 
-__version__ = "0.23.0"
+__version__ = "0.24.0"
 
 
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
@@ -61,6 +64,7 @@ __all__ = [
     "render_svg", "render_prompts", "vet_skill", "vet_mcp",
     "make_canary", "evaluate", "render_canary",
     "snapshot", "diff", "load_state", "save_state", "__version__",
+    "record_events", "load_events", "render_events", "DEFAULT_EVENTS",
     "load_ignore", "apply_baseline", "fingerprint",
     "t", "tp", "title_for", "is_rtl",
     "render_sarif",

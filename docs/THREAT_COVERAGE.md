@@ -21,7 +21,7 @@ an uninstalled skill, now AST- and injection-aware) / `--vet-mcp`.
 | Installed-skill malware (ClawHavoc class) | B13, `--vet` | curl\|sh, base64/PS-encoded, split-stage exfil, paste hosts; **AST obfuscation** (`exec(b64decode)`, `getattr(os,…)()`, `__import__(…).system`) + injection directives in skill prose (v0.21); **AST taint** cred-file→network (`CRED_EXFIL_FLOW`, v0.23) |
 | Egress surface | B14 | Where the agent can reach out |
 | MCP server trust | B15, B24, `--vet-mcp` | Unpinned installs, plaintext transport, env/secret passthrough, broad scopes |
-| Threat monitoring present | B16, `--monitor` | Detects absence; `--monitor` provides drift detection |
+| Threat monitoring present | B16, `--monitor` | Detects absence; **Agent Watch** (`--monitor`, v0.24) gives severity-tagged drift on skills/bootstrap/score **and connections** (new MCP server / channel / gateway-exposed / host-monitor lost) + a local event journal (`--watch-log`) |
 | Autonomy / heartbeat | B17 | Self-acting agent steerable by untrusted input |
 | Subagent delegation | B18 | Elevated/exec inheritance w/o approval (real gate, v0.17.0) |
 | Data at-rest perms | B19 | Group/world-readable memory/log dirs |

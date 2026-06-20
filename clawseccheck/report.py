@@ -210,9 +210,9 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
 
 def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
                    baseline: bool = False, lang: str = "en") -> str:
-    mark = {"CRITICAL": "[X]", "HIGH": "[!]", "INFO": "[i]"} if ascii_only \
-        else {"CRITICAL": "⛔", "HIGH": "⚠️", "INFO": "ℹ️"}
-    order = {"CRITICAL": 0, "HIGH": 1, "INFO": 2}
+    mark = {"CRITICAL": "[X]", "HIGH": "[!]", "MEDIUM": "[~]", "INFO": "[i]"} if ascii_only \
+        else {"CRITICAL": "⛔", "HIGH": "⚠️", "MEDIUM": "🔶", "INFO": "ℹ️"}
+    order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "INFO": 3}
     ok = "[OK]" if ascii_only else "✅"
     lines = [t("monitor.title", lang), "=" * 30,
              t("monitor.current", lang, score=score.score, grade=score.grade)]
@@ -223,7 +223,25 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     else:
         lines += ["", t("monitor.changes", lang, n=len(alerts)), ""]
         for level, msg in sorted(alerts, key=lambda a: order.get(a[0], 9)):
-            lines.append(f"{mark.get(level, '[*]')} {msg}")
+            lines.append(f"{mark.get(level, '[*]')} {_sanitize(msg)}")
+    out = "\n".join(lines).rstrip() + "\n"
+    return _asciify(out) if ascii_only else out
+
+
+def render_events(events, ascii_only: bool = False) -> str:
+    """Render the Agent Watch event journal (timeline of what changed when)."""
+    mark = {"CRITICAL": "[X]", "HIGH": "[!]", "MEDIUM": "[~]", "INFO": "[i]"} if ascii_only \
+        else {"CRITICAL": "⛔", "HIGH": "⚠️", "MEDIUM": "🔶", "INFO": "ℹ️"}
+    if not events:
+        out = "Agent Watch journal\n" + "=" * 30 + "\n\nNo recorded change events yet.\n"
+        return _asciify(out) if ascii_only else out
+    lines = ["Agent Watch journal", "=" * 30,
+             f"{len(events)} recorded change event(s) (most recent last):", ""]
+    for e in events:
+        ts = str(e.get("ts", "?"))
+        lvl = str(e.get("level", "INFO"))
+        msg = _sanitize(str(e.get("message", "")))
+        lines.append(f"{mark.get(lvl, '[*]')} {ts}  {msg}")
     out = "\n".join(lines).rstrip() + "\n"
     return _asciify(out) if ascii_only else out
 
