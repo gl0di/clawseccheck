@@ -2896,6 +2896,130 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
     )
 
 
+# ---------- B31: Effective-tools bypass (illusory deny) ----------
+# Grounded on docs.openclaw.ai (config-tools, exec, apply-patch pages).
+# Deny lists can exist at three levels:
+#   1. tools.deny  (global)
+#   2. toolsBySender.<key>.deny  (global per-sender)
+#   3. agents.list[N].tools.toolsBySender.<key>.deny  (per-agent per-sender)
+# The documented footgun: denying "write"/"edit" does NOT deny "apply_patch",
+# "exec", or "process" — each is a separate tool that can also write files.
+# To block all file mutation use "group:fs" OR list every mutating tool.
+_B31_WRITE_CLASS = frozenset({"write", "edit"})
+_B31_BYPASS_CANDIDATES = ("apply_patch", "exec", "process")
+
+
+def _b31_collect_deny_lists(cfg: dict) -> list[tuple[str, set[str]]]:
+    """Return (scope_label, deny_set) pairs for every deny list in the config.
+
+    Scopes inspected:
+      - tools.deny  (global)
+      - toolsBySender.<key>.deny  (top-level, global per-sender)
+      - agents.list[N].tools.toolsBySender.<key>.deny  (per-agent per-sender)
+    """
+    results: list[tuple[str, set[str]]] = []
+
+    # 1. Global tools.deny
+    global_deny = dig(cfg, "tools.deny")
+    if isinstance(global_deny, list) and global_deny:
+        deny_set = {str(t).strip().lower() for t in global_deny}
+        results.append(("tools.deny (global)", deny_set))
+
+    # 2. Top-level toolsBySender.<key>.deny
+    tbs = cfg.get("toolsBySender")
+    if isinstance(tbs, dict):
+        for key, sender_cfg in tbs.items():
+            if not isinstance(sender_cfg, dict):
+                continue
+            deny_val = sender_cfg.get("deny")
+            if isinstance(deny_val, list) and deny_val:
+                deny_set = {str(t).strip().lower() for t in deny_val}
+                results.append((f"toolsBySender.{key}.deny", deny_set))
+
+    # 3. Per-agent: agents.list[N].tools.toolsBySender.<key>.deny
+    agents_cfg = cfg.get("agents")
+    if isinstance(agents_cfg, dict):
+        agents_list = agents_cfg.get("list")
+        if isinstance(agents_list, list):
+            for idx, agent in enumerate(agents_list):
+                if not isinstance(agent, dict):
+                    continue
+                agent_tools = agent.get("tools")
+                if not isinstance(agent_tools, dict):
+                    continue
+                agent_tbs = agent_tools.get("toolsBySender")
+                if not isinstance(agent_tbs, dict):
+                    continue
+                for key, sender_cfg in agent_tbs.items():
+                    if not isinstance(sender_cfg, dict):
+                        continue
+                    deny_val = sender_cfg.get("deny")
+                    if isinstance(deny_val, list) and deny_val:
+                        deny_set = {str(t).strip().lower() for t in deny_val}
+                        results.append(
+                            (f"agents.list[{idx}].tools.toolsBySender.{key}.deny", deny_set)
+                        )
+
+    return results
+
+
+def check_effective_tools(ctx: Context) -> Finding:
+    """B31 — Effective-tools bypass (illusory deny).
+
+    WARN    — at least one deny list blocks 'write' or 'edit' but leaves
+               apply_patch/exec/process un-denied and does not use 'group:fs'.
+    PASS    — deny lists exist and every one either uses 'group:fs' or denies
+               the full mutating set (write, edit, apply_patch, exec, process).
+    UNKNOWN — no deny lists configured anywhere.
+    """
+    deny_lists = _b31_collect_deny_lists(ctx.config)
+
+    if not deny_lists:
+        return _finding(
+            "B31", UNKNOWN,
+            "No tool deny-policy configured — effective-tools bypass not applicable.",
+            "—",
+        )
+
+    bypassable_scopes: list[str] = []
+    for scope, deny in deny_lists:
+        denies_fs_group = "group:fs" in deny
+        if denies_fs_group:
+            # group:fs blocks all fs mutation — safe
+            continue
+        has_write_class = bool(_B31_WRITE_CLASS & deny)
+        if not has_write_class:
+            # No write/edit denied — bypass check not triggered for this list
+            continue
+        bypass_tools = [t for t in _B31_BYPASS_CANDIDATES if t not in deny]
+        if bypass_tools:
+            bypassable_scopes.append(
+                f"{scope}: blocks {sorted(_B31_WRITE_CLASS & deny)!r} "
+                f"but not {bypass_tools!r}"
+            )
+
+    if bypassable_scopes:
+        bypass_names = sorted(
+            {t for scope, deny in deny_lists for t in _B31_BYPASS_CANDIDATES if t not in deny
+             and (bool(_B31_WRITE_CLASS & deny)) and "group:fs" not in deny}
+        )
+        return _finding(
+            "B31", WARN,
+            f"A tool deny-list blocks 'write'/'edit' but not {bypass_names!r} "
+            f"(and no 'group:fs') — file mutation is still possible via those tools, "
+            f"so the restriction is bypassable.",
+            "Deny the group token 'group:fs', or list every mutating tool "
+            "(write, edit, apply_patch, exec, process) in the deny list.",
+            evidence=bypassable_scopes,
+        )
+
+    return _finding(
+        "B31", PASS,
+        "Tool deny-policies block file mutation with no apply_patch/exec bypass.",
+        "Keep the deny list complete or use 'group:fs' to block all file mutation.",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -2909,7 +3033,7 @@ CHECKS = [
     check_sender_identity, check_control_plane_mutation,
     check_browser_ssrf, check_session_visibility,
     check_untrusted_context, check_known_vulns,
-    check_credential_blast_radius,
+    check_credential_blast_radius, check_effective_tools,
 ]
 
 

@@ -24,6 +24,10 @@ Phase 0.18.0, wave 1 — two new checks, both grounded on **real** OpenClaw conf
   credential surface reachable by the agent and WARNs when those credentials co-exist with untrusted
   ingress + outbound tools (one compromise's blast radius spans all of them). Reports only provider
   names + counts — **never** the account/email part of a profile key or any token value (PII-safe).
+- **B31 — Effective-tools bypass** (`tools.deny`, `toolsBySender.<k>.deny`, `agents.list[].tools.toolsBySender`).
+  Detects the documented OpenClaw footgun where `deny: ["write"]` does **not** deny `apply_patch`
+  (or `exec`/`process`), so a believed-safe restriction still allows file mutation. WARNs unless the
+  deny list uses `group:fs` or lists every mutating tool; UNKNOWN when no deny policy is configured.
 
 ### Changed
 - **B4 (execution sandbox)** now specifically flags `agents.defaults.sandbox.docker.binds` mounting

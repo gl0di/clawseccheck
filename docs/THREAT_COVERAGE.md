@@ -32,6 +32,7 @@ skill) / `--vet-mcp`.
 | Untrusted-context exposure | B26 | `channels.<p>.contextVisibility` — untrusted group/quote/history context injected into the model (config side; B21 is the policy side) |
 | Known-vulnerable version gate | B33 | `meta.lastTouchedVersion` vs a maintained advisory table (seeded: GHSA-g8p2-7wf7-98mq, fixed 2026.1.29) |
 | Credential blast-radius | B41 | `auth.profiles.*` + gateway token vs reachability; PII-safe (provider names only) |
+| Effective-tools bypass | B31 | `tools.deny`/`toolsBySender`/per-agent deny vs the `deny write` ⇏ `deny apply_patch`/`exec` footgun |
 | Sender identity strength | B30 | Mutable display-name allowlists, group history injection |
 | Control-plane mutation reachability | B32 | cron/config.apply/update.run exposed over gateway |
 | Browser / SSRF exposure | B38 | Metadata-IP, no-sandbox, hostname allowlist |
@@ -47,8 +48,7 @@ skill) / `--vet-mcp`.
 | Dirty-input **content sanitizer** (HTML/bidi/zero-width normalization, hidden-text stripping) | (part of B26) | OpenClaw exposes no sanitizer config field; the context-exposure side ships as B26 (`contextVisibility`), the policy side is B21. Deeper normalization has no config surface to check | Partial / no config surface |
 | Dirty-input → **action gate** (block exec/send/write/memory-write influenced by untrusted data w/o approval) | B27 | Stops injection from reaching side-effects | Roadmap |
 | **Taint / provenance** labels (summaries inherit source trust) | B28 | "sanitized ≠ trusted"; the core agentic gap | Roadmap |
-| **Inbound reachability** map (entrypoint→actor→agent) | B29 | Precise exposure path, not just per-setting | Roadmap |
-| **Effective-tools matrix** (after global/provider/channel/agent/toolsBySender/allow-deny) incl. "deny write but exec/apply_patch still mutates" | B31 | Bypass-aware least-privilege | Roadmap |
+| **Inbound reachability** map (entrypoint→actor→agent) | B29 | Largely covered by B2 (open channels) + B30 (sender identity) + B3 (elevated allowFrom) | Mostly covered |
 | Known-vulnerable **OpenClaw version** DB (more advisories) | B33+ | B33 ships with one confirmed advisory; the table grows as new advisories are published | Shipped (seed) |
 | **Credential blast-radius** — broader inventory (SSH keys, cookies, MCP env) | B41+ | B41 ships `auth.profiles.*` + gateway-token surface vs reachability (PII-safe); SSH/cookies/MCP-env are later | Shipped (core) |
 | **Skill/plugin install policy** (auto-update, postinstall scripts, world-writable skill dirs) | B42 | Supply-chain at install time; partial via B13/B25 | Backlog |

@@ -89,6 +89,8 @@ CATALOG: list[CheckMeta] = [
               MEDIUM, "hardening", "Supply Chain"),
     CheckMeta("B30", "Sender identity strength (name-matching / mutable-ID bypass)",
               MEDIUM, "hardening", "Sender Identity"),
+    CheckMeta("B31", "Effective-tools bypass (illusory deny — write blocked but apply_patch/exec still write)",
+              MEDIUM, "hardening", "Least Privilege / Tool Policy"),
     CheckMeta("B32", "Control-plane mutation reachability via gateway",
               HIGH, "hardening", "Control Plane"),
     CheckMeta("B38", "Browser control / cookie & SSRF exposure",

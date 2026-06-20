@@ -102,6 +102,9 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
 - **B41 — credential blast-radius:** inventories the credential surface (`auth.profiles.*`,
   gateway token) reachable by the agent and warns when it co-exists with untrusted ingress + outbound
   tools. Reports only provider names + counts — never the account/email or token value.
+- **B31 — effective-tools bypass:** detects the OpenClaw footgun where `tools.deny: ["write"]` does
+  not deny `apply_patch`/`exec` — a believed-safe restriction that still allows file mutation; checks
+  global, `toolsBySender`, and per-agent deny lists. Recommends `group:fs` or a complete deny list.
 - Plus your platform's own **`openclaw security audit`**, run for you and merged in.
 
 ## Built-in audit, included for you
@@ -355,7 +358,7 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-v0.18. Read-only checks A1/B1–B26/B30/B32/B33/B38/B39/B41/C3–C5 (incl. write-protection, self-modification,
+v0.18. Read-only checks A1/B1–B26/B30/B31/B32/B33/B38/B39/B41/C3–C5 (incl. write-protection, self-modification,
 approval-bypass, deep MCP, update/pinning hygiene, sender identity strength, control-plane
 mutation reachability, browser/SSRF exposure, and session visibility/cross-user leak),
 installed-skill malware vetting, baseline suppression + governance, the built-in
