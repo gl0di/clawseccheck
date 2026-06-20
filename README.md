@@ -109,6 +109,11 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
 - **B31 — effective-tools bypass:** detects the OpenClaw footgun where `tools.deny: ["write"]` does
   not deny `apply_patch`/`exec` — a believed-safe restriction that still allows file mutation; checks
   global, `toolsBySender`, and per-agent deny lists. Recommends `group:fs` or a complete deny list.
+- **B42 — skill/plugin install-time policy:** install-time supply-chain risk that isn't malware
+  per se — `package.json` `pre/postinstall` hooks that run code on install **and every auto-update**
+  (unsandboxed, with the agent's permissions), and **world-writable skill directories** (any local
+  user could drop a skill the agent loads). WARN-max, never FAIL; complements B25 (pinning) and B13
+  (content).
 - **B50–B54 — Host Watch Posture:** widens the lens past the agent to the *machine it runs on* —
   is anyone watching it? Read-only, filesystem-only detection (no subprocess, no network) of host
   defensive monitors: **B50** network monitoring / IDS (Suricata, Zeek, Snort, Little Snitch,

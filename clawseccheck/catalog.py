@@ -103,6 +103,8 @@ CATALOG: list[CheckMeta] = [
               HIGH, "hardening", "Patch hygiene"),
     CheckMeta("B41", "Credential blast-radius assessment",
               MEDIUM, "advisory", "Credential / Blast Radius", scored=True),
+    CheckMeta("B42", "Skill/plugin install-time policy (postinstall hooks, writable skill dirs)",
+              MEDIUM, "hardening", "Supply Chain / Install Policy"),
     # Host Watch Posture — is anyone watching the machine the agent runs on?
     # Read-only host-monitor detection (hostwatch.detect). LOW + WARN-only (never
     # FAIL): the absence of host monitoring is flagged only when the agent is

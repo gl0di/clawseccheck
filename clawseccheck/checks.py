@@ -3068,6 +3068,88 @@ def check_effective_tools(ctx: Context) -> Finding:
     )
 
 
+# ---------- B42: skill/plugin install-time policy ----------
+# Non-redundant with B25 (auto-update/pinning), B13 (skill malware content), B22 (writable
+# identity + dangerous tools). B42 surfaces install-time supply-chain risk: an install hook
+# that runs code on install/auto-update, and skill dirs writable by OTHER local users.
+_POSTINSTALL_RE = re.compile(r'"(pre|post)install"\s*:\s*"([^"]{1,200})"', re.I)
+_HOOK_EXEC_RE = re.compile(
+    r"\bcurl\b|\bwget\b|\|\s*(?:ba|z)?sh\b|\bbash\b|node\s+-e|python\d?\s+-c|"
+    r"base64|\biex\b|invoke-expression|powershell|https?://|eval\s*\(", re.I)
+
+
+def _writable_skill_dirs(ctx: Context):
+    """POSIX group/world-writable skill dirs (base dirs + immediate skill dirs).
+
+    Returns a list of (path, who, mode) — possibly empty — or None when perms are
+    not assessable (Windows / non-POSIX), so the caller reports honestly.
+    """
+    if not _is_posix():
+        return None
+    from .collector import SKILL_DIRS  # noqa: PLC0415
+    bad, seen = [], 0
+    for rel in SKILL_DIRS:
+        base = ctx.home / rel
+        try:
+            if not base.is_dir() or base.is_symlink():
+                continue
+        except OSError:
+            continue
+        candidates = [base]
+        try:
+            for c in sorted(base.iterdir()):
+                if seen >= 200:
+                    break
+                if c.is_dir() and not c.is_symlink():
+                    candidates.append(c)
+                    seen += 1
+        except OSError:
+            pass
+        for d in candidates:
+            try:
+                mode = d.stat().st_mode & 0o777
+            except OSError:
+                continue
+            # Only WORLD-writable is unambiguous: any user on the box can drop a skill.
+            # Group-writable is benign on the common user-private-group setup (umask 002),
+            # so flagging it would be a false positive — we skip it.
+            if mode & 0o002:
+                bad.append((str(d), "world", mode))
+    return bad
+
+
+def check_install_policy(ctx: Context) -> Finding:
+    from .logsafe import redact as _redact  # noqa: PLC0415
+    skills = ctx.installed_skills
+    if not skills:
+        return _finding("B42", UNKNOWN,
+                        "No installed skills/plugins found to assess for install-time policy.",
+                        "Run on the host where skills live (~/.openclaw/skills, workspace/skills).")
+    warns: list[str] = []
+    # install/postinstall hooks that execute code on install or auto-update
+    for name, blob in skills.items():
+        for m in _POSTINSTALL_RE.finditer(blob):
+            kind, cmd = m.group(1).lower(), m.group(2)
+            if _HOOK_EXEC_RE.search(cmd):
+                warns.append(f"{name}: {kind}install hook runs code on install/update -> "
+                             f"'{_redact(cmd)[:80]}'")
+    # skill dirs writable by other local users (anyone can drop a skill the agent loads)
+    perm_bad = _writable_skill_dirs(ctx)
+    for path, who, mode in (perm_bad or [])[:6]:
+        warns.append(f"{who}-writable skill dir {path} (mode {mode:o})")
+    if warns:
+        return _finding("B42", WARN,
+                        "Install-time supply-chain risk: " + "; ".join(warns[:8]),
+                        "Review/disable any install hook you haven't read; pin skills to a reviewed "
+                        "commit; `chmod 700` skill dirs so only you can add skills; turn off skill "
+                        "auto-update until each hook is trusted.", warns)
+    return _finding("B42", PASS,
+                    f"Scanned {len(skills)} installed skill(s): no risky install hooks, and skill "
+                    "dirs are not writable by other local users.",
+                    "Keep skill dirs owner-only and read any install/postinstall hook before trusting "
+                    "a skill.")
+
+
 # ---------- B50–B54: Host Watch Posture (read-only host-monitor detection) ----------
 # These read ctx.host (populated by audit(include_host=True) via hostwatch.detect).
 # In hermetic/test mode ctx.host is None -> UNKNOWN (excluded from the score).
@@ -3177,7 +3259,7 @@ CHECKS = [
     check_sender_identity, check_control_plane_mutation,
     check_browser_ssrf, check_session_visibility,
     check_untrusted_context, check_known_vulns,
-    check_credential_blast_radius, check_effective_tools,
+    check_credential_blast_radius, check_effective_tools, check_install_policy,
     check_host_network_ids, check_host_audit, check_host_file_integrity,
     check_host_edr, check_host_firewall,
 ]

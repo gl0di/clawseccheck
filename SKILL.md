@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 0.21.1
+version: 0.22.0
 description: Free, local, read-only security self-audit for your own OpenClaw agent. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true}}
 ---

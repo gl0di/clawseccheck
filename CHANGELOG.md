@@ -3,6 +3,22 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.22.0] — 2026-06-20
+
+### Added
+- **B42 — skill/plugin install-time policy.** A supply-chain check for the install-time attack
+  surface, scoped to NOT duplicate B25 (auto-update/pinning), B13 (skill content malware), or B22
+  (writable identity + dangerous tools). It flags two genuinely new signals, read-only:
+  - **Install/postinstall hooks that execute code** — a `package.json` `preinstall`/`postinstall`
+    script whose command calls out or runs a shell (`curl … | sh`, `wget … | bash`, `node -e`,
+    `base64`, `powershell`, a URL, …). These run on install **and on every auto-update**, unsandboxed,
+    with the agent's permissions. Benign build hooks (`node build.js`) are not flagged.
+  - **World-writable skill directories** — any other user on the box could drop a skill the agent
+    loads. Only *world*-writable (`o+w`) is flagged; group-writable is skipped (benign on the common
+    user-private-group / umask-002 setup) to keep zero false positives. POSIX-only; UNKNOWN on Windows.
+  - MEDIUM, scored, **WARN-max (never FAIL)**; UNKNOWN when no skills are installed (mirrors B13, so
+    grades on skill-less configs are unchanged).
+
 ## [0.21.1] — 2026-06-20
 
 Quality checkpoint: an adversarial review of the 0.20.0 Host Watch and 0.21.0 Deeper-Vetting code
