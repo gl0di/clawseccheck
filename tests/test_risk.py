@@ -20,7 +20,7 @@ from clawcheck.checks import run_all
 from clawcheck.scoring import compute
 from clawcheck.risk import RiskPath, risk_paths, render_risk_paths
 from clawcheck.report import render_json, render_report
-from clawcheck.catalog import CRITICAL, HIGH, MEDIUM, FAIL
+from clawcheck.catalog import CRITICAL, HIGH, MEDIUM, FAIL, Finding
 from clawcheck.cli import main
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -699,3 +699,39 @@ def test_fleet_config_risk_paths_are_list(cfg_path):
     for p in paths:
         assert isinstance(p, RiskPath)
         assert p.severity in (CRITICAL, HIGH, MEDIUM)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule RISK-09: malicious installed skill (B13 FAIL) + egress  -> CRITICAL
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _b13_fail() -> Finding:
+    return Finding("B13", "Installed skill / plugin safety", CRITICAL, FAIL,
+                   "Dangerous code in an installed skill (ClawHavoc class)",
+                   "Uninstall and rotate secrets.", "Supply Chain / ClawHavoc")
+
+
+def test_risk09_malicious_skill_plus_channel_egress_is_critical():
+    # A flagged skill (B13 FAIL) + a configured channel (egress) -> active exfil path.
+    cfg = {"channels": {"telegram": {"groupPolicy": "allowlist"}}}
+    paths = _paths(cfg, extra_findings=[_b13_fail()])
+    p = next((p for p in paths if p.id == "RISK-09"), None)
+    assert p is not None, [x.id for x in paths]
+    assert p.severity == CRITICAL
+    assert "exfiltrat" in (p.title + p.why).lower()
+    # CRITICAL paths sort first
+    assert paths[0].severity == CRITICAL
+
+
+def test_risk09_no_malicious_skill_no_path():
+    # No B13 FAIL -> no RISK-09 (zero false-positive on clean configs).
+    cfg = {"channels": {"telegram": {"groupPolicy": "allowlist"}}}
+    paths = _paths(cfg)
+    assert not any(p.id == "RISK-09" for p in paths)
+
+
+def test_risk09_malicious_skill_but_no_egress_no_path():
+    # B13 FAIL but no channels / outbound tools / egress -> chain does not fire.
+    cfg = {"agents": {"defaults": {"model": {"primary": "local/llama"}}}}
+    paths = _paths(cfg, extra_findings=[_b13_fail()])
+    assert not any(p.id == "RISK-09" for p in paths)

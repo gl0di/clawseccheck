@@ -3,6 +3,20 @@
 All notable changes to ClawCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.15.1] — 2026-06-20
+
+### Added
+- **Risk engine: malicious-skill exfiltration path (RISK-09).** When a check flags an installed
+  skill as malicious (B13 FAIL) *and* the agent has an outbound egress surface (messaging channels
+  or external-service skills), the risk engine now surfaces a **CRITICAL** chain — *malicious skill
+  → full agent permissions → outbound egress → credential & data exfiltration* — so a real
+  compromise shows up as an attack path, not only as an isolated finding. Found a real ClawHavoc
+  skill (`googleworkspace`, base64 `curl|bash`) during a live run; this makes such cases legible.
+
+### Fixed
+- **ClawHub version.** Declared `version` in the SKILL.md frontmatter so ClawHub indexes the real
+  release instead of defaulting to 0.1.0. (Bump this alongside `clawcheck.__version__` each release.)
+
 ## [0.15.0] — 2026-06-19
 
 ### Added

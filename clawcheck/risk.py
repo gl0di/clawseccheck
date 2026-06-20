@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .catalog import CRITICAL, FAIL, HIGH, MEDIUM, Finding
+from .catalog import CRITICAL, FAIL, HIGH, MEDIUM, WARN, Finding
 from .checks import (
     _enabled_tools,
     _hint,
@@ -422,6 +422,48 @@ def _rule_session_cross_user(ctx: Context, findings: list[Finding], cfg: dict) -
     )
 
 
+def _rule_malicious_skill_exfil(ctx: Context, findings: list[Finding],
+                                tools: list[str], cfg: dict) -> RiskPath | None:
+    """CRITICAL: a malicious installed skill (B13 FAIL) + outbound egress = active exfiltration.
+
+    A flagged skill runs with the agent's FULL permissions; if the agent can also
+    reach out (messaging channels, external-service skills, outbound tools), the
+    malicious skill has a live path to read secrets/data and send them out.
+    """
+    if _finding_status(findings, "B13") != FAIL:
+        return None
+    has_egress = (
+        _has_outbound(tools, cfg)
+        or bool(cfg.get("channels"))
+        or _finding_status(findings, "B14") in (FAIL, WARN)
+    )
+    if not has_egress:
+        return None
+    return RiskPath(
+        id="RISK-09",
+        severity=CRITICAL,
+        title="Malicious installed skill can exfiltrate your data",
+        chain=[
+            "malicious installed skill (B13)",
+            "runs with full agent permissions",
+            "outbound egress (channels / external skills)",
+            "credential & data exfiltration",
+        ],
+        why=(
+            "ClawCheck flagged an installed skill as malicious (B13 — the ClawHavoc "
+            "class). Skills run with the agent's FULL permissions, and this agent has "
+            "an outbound egress surface (messaging channels and/or external-service "
+            "skills). The malicious skill can read your secrets and conversation data "
+            "and send them out — this is an active exfiltration path, not theoretical."
+        ),
+        fix=(
+            "Uninstall the flagged skill(s) NOW (see the B13 finding for the name), and "
+            "ROTATE every secret it could have reached — channel tokens, cloud keys, "
+            "password managers. Only reinstall skills whose source you have read."
+        ),
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Public API
 # ──────────────────────────────────────────────────────────────────────────────
@@ -467,6 +509,10 @@ def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
         candidates.append(path)
 
     path = _rule_session_cross_user(ctx, findings, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_malicious_skill_exfil(ctx, findings, tools, cfg)
     if path:
         candidates.append(path)
 
