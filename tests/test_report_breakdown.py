@@ -245,6 +245,7 @@ class TestHebrewPath:
         findings = _mixed_findings()
         score = compute(findings)
         out = render_report(findings, score, lang="he")
+        out = out.replace("‏", "").replace("⁦", "").replace("⁩", "")  # drop RTL marks
         # Both flag names are literal ASCII in Hebrew text too
         assert "--canary" in out
         assert "--vet-mcp" in out

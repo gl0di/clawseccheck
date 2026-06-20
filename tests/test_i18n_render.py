@@ -63,6 +63,7 @@ class TestRenderReportLang:
     def test_he_has_hebrew_check_title_for_known_finding(self):
         findings, score = _audit_vuln()
         out = render_report(findings, score, lang="he")
+        out = out.replace("‏", "").replace("⁦", "").replace("⁩", "")  # drop RTL marks
         # B2 finding ("Gateway exposure") should render in Hebrew
         # TITLES["B2"]["he"] = "חשיפת ה-Gateway ואימות ערוצים"
         issues = [f for f in findings if f.status in ("FAIL", "WARN")]
@@ -94,6 +95,7 @@ class TestRenderReportLang:
         score = ScoreResult(score=100, grade="A", capped=False, raw_score=100,
                             failed_critical=0, failed_high=0)
         out = render_report([], score, lang="he")
+        out = out.replace("‏", "").replace("⁦", "").replace("⁩", "")  # drop RTL marks
         # STRINGS["report.no_issues"]["he"]
         assert "ClawSecCheck לא מצא בעיות" in out
 

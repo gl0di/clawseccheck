@@ -50,6 +50,35 @@ def _asciify(text: str) -> str:
     return text.translate(_ASCII_MAP).encode("ascii", "replace").decode("ascii")
 
 
+_RLM = "‏"   # RIGHT-TO-LEFT MARK — sets RTL base direction at line start
+_LRI = "⁦"   # LEFT-TO-RIGHT ISOLATE
+_PDI = "⁩"   # POP DIRECTIONAL ISOLATE
+# A left-to-right "token" (English field name, check code, file path, number) that must
+# stay internally LTR inside an RTL line. ASCII-only classes so it never swallows Hebrew.
+_LTR_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-/=':@%+]*")
+
+
+def _rtl_format(text: str) -> str:
+    """Make a plain-text report render correctly in RTL chat clients / terminals.
+
+    Each non-blank line gets an RLM prefix (RTL base direction) and every embedded LTR
+    token is wrapped in an isolate so the client's bidi algorithm doesn't scramble the
+    line order (numbers, punctuation and English field names jumping sides).
+
+    Safety: only SAFE isolate marks (LRI/PDI) and the RLM are added, and only to our own
+    final output — untrusted finding evidence was already bidi-stripped by `_sanitize`
+    before assembly, so this cannot be used to spoof. No directional *overrides* are used.
+    """
+    out_lines = []
+    for line in text.split("\n"):
+        if not line.strip():
+            out_lines.append(line)
+            continue
+        isolated = _LTR_TOKEN_RE.sub(lambda m: _LRI + m.group(0) + _PDI, line)
+        out_lines.append(_RLM + isolated)
+    return "\n".join(out_lines)
+
+
 def _trifecta_ratio(findings: list[Finding]) -> str:
     for f in findings:
         if f.id == "A1":
@@ -150,7 +179,11 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append("")
 
     out = "\n".join(lines).rstrip() + "\n"
-    return _asciify(out) if ascii_only else out
+    if ascii_only:
+        return _asciify(out)
+    if is_rtl(lang):
+        out = _rtl_format(out)
+    return out
 
 
 def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = False,

@@ -3,6 +3,18 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.19.1] — 2026-06-20
+
+### Fixed
+- **RTL now actually works in the plain-text report** (`--lang he`). Previously the Hebrew text was
+  translated but had no bidi formatting, so chat clients/terminals scrambled mixed Hebrew+English
+  lines (field names, codes, numbers jumping sides). The text report now prefixes each line with an
+  RLM (RTL base direction) and wraps every embedded LTR token (English field names, check codes,
+  file paths, numbers) in a bidi **isolate**, so mixed lines render correctly. Applied only to our
+  own final output **after** untrusted evidence has been bidi-stripped, and only safe isolate marks
+  (no directional overrides) are used — so it doesn't weaken the anti-bidi-spoofing sanitizer.
+  ASCII mode (`--ascii`) stays pure ASCII; the HTML report's `dir="rtl"` is unchanged.
+
 ## [0.19.0] — 2026-06-20
 
 UX/transparency pass driven by real beta feedback (a user couldn't tell *why* the score was what
