@@ -3,6 +3,15 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.17.1] — 2026-06-20
+
+Docs only — no code change.
+
+### Changed
+- Dropped the "beta" framing from the README. 0.17.0 closed the four stable-release
+  blockers, so the project is now positioned as stable; the README section keeps the
+  honest-limits and bug-reporting guidance, just without the beta label.
+
 ## [0.17.0] — 2026-06-20
 
 Release-readiness pass: closes the four stable-release blockers from the security

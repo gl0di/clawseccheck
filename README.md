@@ -9,11 +9,11 @@ plus a **shareable grade badge**.
 Because you run it on your own agent, there's no "scanning someone else" problem: no
 proof-of-ownership, no legal grey area.
 
-## 🧪 Beta — please test it and report back
+## Local, read-only, and honest about its limits
 
-ClawSecCheck is in **beta**. It runs **locally and read-only** — no network calls, no
-telemetry, nothing leaves your machine — so trying it is safe. Please run it on your real
-setup and tell us what's wrong or confusing.
+ClawSecCheck runs **locally and read-only** — no network calls, no telemetry, nothing
+leaves your machine. It's a heuristic audit, so it's upfront about what it does and
+doesn't check:
 
 **Honest limits (we never hide these behind a green score):**
 
@@ -27,7 +27,7 @@ setup and tell us what's wrong or confusing.
 - **Vetting the scanner itself** (`--vet` pointed at ClawSecCheck's own source) reports
   *safe with a note* — a security tool necessarily ships attack signatures as data.
 
-**How to report a bug:** open an issue at
+**Found a false positive/negative or something confusing?** Open an issue at
 <https://github.com/gl0di/clawseccheck/issues> with the output of `clawseccheck --json`
 (it redacts secret *values* — only key names/paths appear) and your OpenClaw version. Do
 not paste raw secrets.
