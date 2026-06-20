@@ -33,6 +33,10 @@ _DANGEROUS_ATTRS = {
     "call", "run", "check_output", "check_call", "Popen",
 }
 _DESERIALIZE_MODS = {"pickle", "cpickle", "_pickle", "marshal", "dill"}
+# Objects on which a *dynamic* getattr(...)() is obfuscation rather than ordinary
+# dynamic dispatch: getattr(os, x)() is suspicious; getattr(plugin, handler)() is not.
+_DANGEROUS_OBJ = {"os", "subprocess", "sys", "builtins", "__builtins__",
+                  "importlib", "ctypes", "posix", "commands"}
 
 _MAX_FINDINGS_PER_FILE = 25
 
@@ -78,10 +82,10 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     """Return AST findings for one Python source string. Never raises, never executes."""
     try:
         tree = ast.parse(source)
-    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        tainted = _tainted_names(tree)
+    except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
         return []
 
-    tainted = _tainted_names(tree)
     out: list[ASTFinding] = []
     seen: set[tuple[str, int]] = set()
 
@@ -93,6 +97,8 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         out.append(ASTFinding(rule, severity, lineno, reason))
 
     for node in ast.walk(tree):
+        if len(out) >= _MAX_FINDINGS_PER_FILE:
+            break
         if not isinstance(node, ast.Call):
             continue
         f = node.func
@@ -108,15 +114,22 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 add("DANGEROUS_SINK", "info", ln, f"dynamic {f.id}() call")
             continue
 
-        # getattr(obj, name)(...) — dynamic or dangerous attribute = obfuscated call
+        # getattr(obj, name)(...) — obfuscated call.
+        # crit only for a dangerous attribute literal, OR a dynamic attr on a dangerous
+        # module (os/subprocess/...). A dynamic attr on an ordinary object is normal
+        # dynamic dispatch (plugin frameworks) -> info, so it never FAILs on its own.
         if isinstance(f, ast.Call) and isinstance(f.func, ast.Name) and f.func.id == "getattr":
+            first = f.args[0] if f.args else None
             second = f.args[1] if len(f.args) >= 2 else None
-            literal_str = (isinstance(second, ast.Constant) and isinstance(second.value, str))
+            literal_str = isinstance(second, ast.Constant) and isinstance(second.value, str)
             dynamic = second is not None and not literal_str
             dangerous_literal = literal_str and second.value in _DANGEROUS_ATTRS
-            if dynamic or dangerous_literal:
+            base_obj = _attr_base(first) if first is not None else ""
+            if dangerous_literal or (dynamic and base_obj in _DANGEROUS_OBJ):
                 add("GETATTR_INDIRECTION", "crit", ln,
-                    "getattr(...)() indirection to a dynamic/dangerous attribute (obfuscated call)")
+                    "getattr(...)() indirection to a dangerous attribute (obfuscated call)")
+            elif dynamic:
+                add("GETATTR_INDIRECTION", "info", ln, "dynamic getattr(...)() dispatch")
             continue
 
         # __import__("os").system(...) / importlib.import_module("os").system(...)
@@ -150,8 +163,5 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             if is_os or is_subp:
                 add("DANGEROUS_SINK", "info", ln, f"{base}.{f.attr}() shell/exec sink")
                 continue
-
-        if len(out) >= _MAX_FINDINGS_PER_FILE:
-            break
 
     return out

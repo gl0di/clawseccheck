@@ -53,6 +53,17 @@ def test_getattr_safe_literal_not_flagged():
     assert "GETATTR_INDIRECTION" not in _rules(src)
 
 
+def test_getattr_dynamic_dispatch_on_object_is_not_crit():
+    # ordinary plugin/dispatch pattern: getattr(obj, runtime_name)() must NOT be crit
+    src = 'def run(obj, name):\n    return getattr(obj, name)()\n'
+    assert all(f.severity != "crit" for f in analyze_python(src, "t.py"))
+
+
+def test_getattr_dynamic_on_dangerous_module_is_crit():
+    src = 'import os\nfn = "system"\ngetattr(os, fn)("id")\n'
+    assert _by_rule(src)["GETATTR_INDIRECTION"].severity == "crit"
+
+
 def test_dynamic_import_exec():
     src = '__import__("os").system("whoami")\n'
     assert "DYNAMIC_IMPORT_EXEC" in _rules(src)

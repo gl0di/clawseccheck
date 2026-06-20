@@ -140,6 +140,14 @@ def test_macos_santa_detected(tmp_path):
     assert "Santa" in res["classes"]["edr_av"]["found"]
 
 
+def test_macos_host_audit_is_unknown(tmp_path):
+    # OpenBSM state is not reliably determinable read-only (ships by default <=13,
+    # disabled by default >=14) -> UNKNOWN, never a false PASS.
+    _touch(tmp_path, "etc/security/audit_control", "flags:lo\n")
+    res = detect(root=tmp_path, system="Darwin", which=_none)
+    assert res["classes"]["host_audit"]["status"] == "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Windows (best-effort; registry unavailable off-Windows -> filesystem only)
 # ---------------------------------------------------------------------------

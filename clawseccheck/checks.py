@@ -643,16 +643,20 @@ _SKILL_HIGH = [
 # MANIPULATION phrasing, NOT ordinary setup prose (a skill reading its own `.env` or
 # curling a reputable installer must stay clean — see the zero-false-positive law).
 # Genuine malware co-located with these still scores CRITICAL via _SKILL_CRIT / cred-exfil.
+# (label, standalone, regex). standalone=True fires HIGH on its own (the canonical
+# prompt-injection phrase is essentially never in legit skill prose). standalone=False
+# rules are dual-use ("do not notify the user on every sync" is a normal UX directive),
+# so they fire ONLY alongside a credential/exfil signal — keeping zero false-positive FAILs.
 _SKILL_INJECTION = [
-    ("ignore-instructions directive",
+    ("ignore-instructions directive", True,
      re.compile(r"ignore\s+(all\s+)?(your\s+|the\s+)?previous\s+instructions|"
                 r"disregard\s+(your\s+)?(system\s+)?(prompt|instructions)|"
                 r"forget\s+(all\s+)?(your\s+)?(previous\s+)?instructions", re.I)),
-    ("exfiltration directive",
+    ("exfiltration directive", False,
      re.compile(r"\bexfiltrate\b|"
                 r"(send|upload|leak|email)\s+[^\n]{0,40}(secret|token|api[_-]?key|credential|"
                 r"password|private\s+key)s?\s+to\b", re.I)),
-    ("hide-from-user directive",
+    ("hide-from-user directive", False,
      re.compile(r"do\s+not\s+(tell|inform|notify|alert)\s+the\s+user|"
                 r"without\s+(telling|notifying|informing)\s+the\s+user|"
                 r"bypass\s+the\s+(confirmation|approval)\s+(prompt|step|dialog)|"
@@ -812,17 +816,17 @@ def check_installed_skills(ctx: Context) -> Finding:
         # rule above. This is at least HIGH — the combination is suspicious.
         if not _has_cred_exfil(blob) and _has_cred_exfil_cross_skill(blob):
             high.append(f"{name}: credential path and exfil sink both present in skill (split-stage risk)")
-        # Prompt-injection / approval-bypass directives in the skill's prose (P1-P8 class).
-        # HIGH only — co-located real malware (paste-host / cred-exfil) raises the verdict
-        # to CRITICAL on its own via _SKILL_CRIT, so we don't double-escalate on bare curl.
-        for label, rx in _SKILL_INJECTION:
-            if rx.search(blob):
+        # Dual-use directives only fire alongside a real cred/exfil signal (zero-FP);
+        # the canonical "ignore previous instructions" phrase fires on its own. Co-located
+        # real malware (paste-host) still scores CRITICAL via _SKILL_CRIT independently.
+        cred_exfil_signal = _has_cred_exfil(blob) or _has_cred_exfil_cross_skill(blob)
+        for label, standalone, rx in _SKILL_INJECTION:
+            if rx.search(blob) and (standalone or cred_exfil_signal):
                 high.append(f"{name}: injection directive — {label}")
         # AST analysis of the skill's Python files — catches obfuscation regex misses.
         # crit rules (obfuscated exec, getattr/import indirection) FAIL on their own;
         # info rules (plain shell sinks, deserialization) escalate only alongside a
         # credential/exfil signal, so a skill that merely uses subprocess is never failed.
-        cred_exfil_signal = _has_cred_exfil(blob) or _has_cred_exfil_cross_skill(blob)
         for relpath, src in ctx.installed_skill_py.get(name, []):
             for af in analyze_python(src, relpath):
                 loc = f"{relpath}:{af.lineno}"

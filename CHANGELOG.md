@@ -3,6 +3,31 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.21.1] — 2026-06-20
+
+Quality checkpoint: an adversarial review of the 0.20.0 Host Watch and 0.21.0 Deeper-Vetting code
+surfaced false-positive and robustness issues. All fixed here with regression tests. The detection
+fixes are strictly narrowing, so they cannot introduce a false FAIL.
+
+### Fixed
+- **AST `GETATTR_INDIRECTION` false positive** — `getattr(obj, runtime_name)()` (ordinary dynamic
+  dispatch) was flagged as malware-grade `crit`. Now `crit` only for a dangerous attribute literal or
+  a dynamic attribute on a dangerous module (`os`/`subprocess`/…); ordinary dispatch is informational.
+- **Injection-directive false positives** — dual-use prose ("do not notify the user on every sync",
+  "never send your API key to a third party") raised a HIGH FAIL. Now the dual-use rules fire only
+  alongside a real credential/exfil signal; only the canonical "ignore previous instructions" phrase
+  fires on its own.
+- **`skillast` "never raises" contract** — `_tainted_names` ran outside the parse try and
+  `OverflowError` wasn't caught; wrapped. `_MAX_FINDINGS_PER_FILE` cap moved to the loop top.
+- **`hostwatch` robustness** — `_alf_globalstate` now catches `struct.error` from a corrupt binary
+  plist; macOS OpenBSM audit reports UNKNOWN (filesystem presence ≠ enabled on ≤13, deprecated on ≥14)
+  instead of a false PASS.
+- **Terminal-output sanitization** — `--vet-mcp` evidence and the `--vet` detail line are now
+  `_sanitize`-d, mirroring the `--vet` evidence list (attacker-controlled MCP/skill strings no longer
+  reach the terminal raw).
+- Refreshed `docs/THREAT_COVERAGE.md` (now reflects B26/B31/B33/B41/B50–B54, RISK-10, AST/injection
+  vetting) and logged the review findings in `docs/HARDENING_BACKLOG.md`.
+
 ## [0.21.0] — 2026-06-20
 
 **Deeper skill vetting (AST + injection directives).** Inspired by a grounded comparison with

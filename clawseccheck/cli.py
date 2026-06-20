@@ -152,7 +152,7 @@ def main(argv=None) -> int:
                    "UNKNOWN": "could not assess"}[f.status]
         icon = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}[f.status] \
             if ascii_only else {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔"}[f.status]
-        lines = [f"{icon} Vetting '{args.vet}': {verdict} [{f.severity}]", f"    {f.detail}"]
+        lines = [f"{icon} Vetting '{args.vet}': {verdict} [{f.severity}]", f"    {_sanitize(f.detail)}"]
         if f.evidence:
             bullet = "*" if ascii_only else "•"
             lines.append("    Evidence:")
@@ -165,6 +165,7 @@ def main(argv=None) -> int:
         return 0 if f.status in ("PASS", "UNKNOWN") else 1
 
     if args.vet_mcp is not None:
+        from .report import _sanitize
         target = args.vet_mcp if args.vet_mcp else None
         findings = vet_mcp(target=target, home=args.home)
         # "No servers configured" case: single UNKNOWN finding.
@@ -186,10 +187,10 @@ def main(argv=None) -> int:
         for f in findings:
             icon = _STATUS_ICON[f.status] if ascii_only else _STATUS_ICON_UNI[f.status]
             verdict = _VERDICT[f.status]
-            _emit(f"{icon} {verdict}: {f.title}")
+            _emit(f"{icon} {verdict}: {_sanitize(f.title)}")
             if f.evidence:
                 for ev in f.evidence[:4]:
-                    _emit(f"    - {ev}")
+                    _emit(f"    - {_sanitize(ev)}")
             _emit(f"    fix: {f.fix}")
             _emit("")
         return 0 if worst_status in ("PASS", "UNKNOWN") else 1

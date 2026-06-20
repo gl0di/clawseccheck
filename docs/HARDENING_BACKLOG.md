@@ -51,6 +51,32 @@ stdlib-only; HTML output escaped after sanitize; sanitizer (`_sanitize`) has no 
 `render_html` `private_body` is trusted static text; blocker fixes (BLK-01..04) correct; catalog ↔
 implementation consistent; scoring caps (49/79) and grade bands correct.
 
+## Code-review findings — 0.20.0/0.21.0 checkpoint (fixed in 0.21.1)
+
+Adversarial review of the Host Watch (0.20.0) and Deeper-Vetting (0.21.0) code. All fixed in 0.21.1
+with regression tests; the FP fixes are strictly detection-narrowing, so they cannot add a false FAIL.
+
+- [x] **R1 · zero-FP · `skillast.py` — `GETATTR_INDIRECTION` crit-fired on ordinary dynamic dispatch.**
+  `getattr(obj, runtime_name)()` (normal plugin dispatch) was flagged `crit` (FAIL). Now crit only for a
+  dangerous attribute *literal* or a dynamic attr on a *dangerous module* (os/subprocess/…); ordinary
+  dynamic dispatch is `info` (escalate-only).
+- [x] **R2 · zero-FP · `checks.py` `_SKILL_INJECTION` — "hide-from-user"/"exfiltration" prose FP.**
+  "Do not notify the user on every sync" / "never send your API key to a third party" raised HIGH FAIL.
+  Now dual-use rules fire ONLY alongside a real cred/exfil signal; only the canonical
+  "ignore previous instructions" fires standalone.
+- [x] **R3 · robustness · `skillast.py` — "never raises" contract.** `_tainted_names` ran outside the
+  try; `OverflowError` not caught. Wrapped; `_MAX_FINDINGS_PER_FILE` cap moved to loop top.
+- [x] **R4 · robustness · `hostwatch.py` — corrupt plist + false macOS audit PASS.** `_alf_globalstate`
+  now catches `struct.error`; macOS OpenBSM reports UNKNOWN (file presence ≠ enabled on <=13, deprecated
+  on >=14) instead of a false PASS.
+- [x] **R5 · hygiene · `cli.py` — `--vet-mcp` evidence + `--vet` detail not sanitized.** Attacker-
+  controlled MCP/skill strings reached the terminal raw; now `_sanitize`-d (mirrors the `--vet` evidence).
+
+**Verified safe (no action):** hostwatch executes nothing and makes no network call (`shutil.which` reads
+PATH only); host checks can never return FAIL and never KeyError; RISK-10 fires only on positive
+evidence (all four visibility classes `absent` + powerful agent); `skillast` is parse-only (no
+compile/exec/eval/import of skill content); `_is_own_source` still exempts the scanner.
+
 ## Suggested order
 
 1. **H1, H3, H2** — small, security/honesty-relevant → fold into a `0.17.2` patch with regression tests.

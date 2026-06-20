@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import platform
 import shutil
+import struct
 from pathlib import Path
 
 # detection-class keys (stable; consumed by checks B50–B54 and risk RISK-10)
@@ -218,7 +219,7 @@ def _alf_globalstate(root: Path) -> int | None:
         import plistlib
         with p.open("rb") as fh:
             data = plistlib.load(fh)
-    except (OSError, ValueError):  # unreadable or malformed plist — never crash the audit
+    except (OSError, ValueError, struct.error):  # unreadable/corrupt plist — never crash
         return None
     gs = data.get("globalstate") if isinstance(data, dict) else None
     return gs if isinstance(gs, int) else None
@@ -235,13 +236,11 @@ def _detect_macos(root: Path, which) -> dict:
         found.append("LuLu")
     classes[NETWORK_IDS] = _cls(found)
 
-    # Host audit — OpenBSM. The real /etc/security/audit_control (not the shipped
-    # .example) is the enable signal. Disabled by default since macOS 14.
-    found, active = [], None
-    if _exists(root, "etc/security/audit_control"):
-        found.append("OpenBSM audit")
-        active = True
-    classes[HOST_AUDIT] = _cls(found, active)
+    # Host audit — OpenBSM cannot be assessed honestly from the filesystem:
+    # /etc/security/audit_control ships by default on macOS <=13 (present != enabled),
+    # and OpenBSM is disabled-by-default and deprecated on >=14. So we report UNKNOWN
+    # rather than a false PASS/active.
+    classes[HOST_AUDIT] = _unknown_cls()
 
     # File-integrity — osquery (homebrew or system paths) ----------------------
     found = []

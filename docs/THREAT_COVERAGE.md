@@ -2,11 +2,11 @@
 
 Honest map of what ClawSecCheck checks today, what it does **not** yet check, and where
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
-all (so they can't even surface as a finding). Generated 2026-06-20 for v0.17.1.
+all (so they can't even surface as a finding). Updated 2026-06-20 for v0.21.1.
 
-Current catalog: `A1, B1–B25, B30, B32, B38, B39, C3–C5`, plus the combinational risk
-engine `RISK-01..RISK-09` and the install-time vetters `--vet` (B13 on an uninstalled
-skill) / `--vet-mcp`.
+Current catalog: `A1, B1–B26, B30–B33, B38, B39, B41, B50–B54, C3–C5`, plus the
+combinational risk engine `RISK-01..RISK-10` and the install-time vetters `--vet` (B13 on
+an uninstalled skill, now AST- and injection-aware) / `--vet-mcp`.
 
 ## Covered
 
@@ -18,7 +18,7 @@ skill) / `--vet-mcp`.
 | Execution sandbox present | B4 | Depth is partial — see gaps (B35) |
 | Bootstrap-file injection surface | B6 | Prompt-injection-prone directives in SOUL/AGENTS/TOOLS |
 | Trusted-output boundary policy | B21 | Is external content treated as data, not instructions |
-| Installed-skill malware (ClawHavoc class) | B13, `--vet` | curl\|sh, base64/PS-encoded, split-stage exfil, paste hosts |
+| Installed-skill malware (ClawHavoc class) | B13, `--vet` | curl\|sh, base64/PS-encoded, split-stage exfil, paste hosts; **AST obfuscation** (`exec(b64decode)`, `getattr(os,…)()`, `__import__(…).system`) + injection directives in skill prose (v0.21) |
 | Egress surface | B14 | Where the agent can reach out |
 | MCP server trust | B15, B24, `--vet-mcp` | Unpinned installs, plaintext transport, env/secret passthrough, broad scopes |
 | Threat monitoring present | B16, `--monitor` | Detects absence; `--monitor` provides drift detection |
@@ -39,7 +39,8 @@ skill) / `--vet-mcp`.
 | Session visibility / cross-user leak | B39 | `session.dmScope`, `tools.sessions.visibility` |
 | Backups of identity/memory | C3 | |
 | Native binary PATH safety | C5 | |
-| **Combinational attack chains** | RISK-01..09 | Lethal trifecta, untrusted→exec, control-plane takeover, malicious-skill→exfil, etc. |
+| **Host defensive posture** | B50–B54 | Is the agent's *host* watched: network IDS, host audit, file-integrity, EDR/AV, firewall — read-only, WARN only for a high-privilege agent, never FAIL (v0.20) |
+| **Combinational attack chains** | RISK-01..10 | Lethal trifecta, untrusted→exec, control-plane takeover, malicious-skill→exfil, powerful-agent-on-unmonitored-host (RISK-10), etc. |
 
 ## Gaps (no check today)
 
@@ -53,8 +54,8 @@ skill) / `--vet-mcp`.
 | **Credential blast-radius** — broader inventory (SSH keys, cookies, MCP env) | B41+ | B41 ships `auth.profiles.*` + gateway-token surface vs reachability (PII-safe); SSH/cookies/MCP-env are later | Shipped (core) |
 | **Skill/plugin install policy** (auto-update, postinstall scripts, world-writable skill dirs) | B42 | Supply-chain at install time; partial via B13/B25 | Backlog |
 | **Sandbox depth** | B4 (enhanced) + B3 | B4 now flags `docker.sock` bind (host escape) + `workspaceAccess=rw`; `tools.elevated.allowFrom` wildcard is B3. A separate B35 is largely redundant | Mostly covered |
-| **Secret redaction in the report** (not just logs) | — | A decoded payload preview could surface a secret value | See HARDENING_BACKLOG #2 |
-| **Suppression governance** (suppressed CRITICAL stays visible; reason/expiry) | — | A suppressed CRITICAL silently uncaps the score | See HARDENING_BACKLOG #3 |
+| **Secret redaction in the report** (not just logs) | — | A decoded payload preview could surface a secret value | ✅ Done (H2): decoded previews `redact()`-ed; `--vet`/`--vet-mcp` evidence `_sanitize`-d (v0.21.1) |
+| **Suppression governance** (suppressed CRITICAL stays visible; reason/expiry) | — | A suppressed CRITICAL silently uncaps the score | ✅ Done (H3): suppressed HIGH/CRITICAL stay visible in the report |
 | **Windows ACL** equivalents of POSIX perm checks | — | Perm checks return UNKNOWN on Windows | Backlog |
 | Per-finding **confidence** level | — | Methodology asks for it | Backlog |
 
