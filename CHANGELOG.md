@@ -3,6 +3,36 @@
 All notable changes to ClawCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.15.0] — 2026-06-19
+
+### Added
+- **B30 — Sender identity strength.** Reads `channels.<provider>.dangerouslyAllowNameMatching`
+  and `channels.telegram.includeGroupHistoryContext`; FAILs when allowlists are keyed on the
+  mutable display name (trivially bypassed by renaming), WARNs when recent group history is
+  injected into model context as untrusted input.
+- **B32 — Control-plane mutation reachability.** Reads `gateway.tools.allow` and
+  `gateway.tools.deny`; FAILs when a control-plane tool (`cron`, `config.apply`, `update.run`,
+  `sessions_spawn`, `sessions_send`, `gateway`) is explicitly re-enabled over the HTTP gateway,
+  WARNs when the gateway is network-exposed and control-plane tools are not explicitly denied.
+- **B38 — Browser / SSRF exposure.** Reads `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork`,
+  `browser.noSandbox`, and `browser.ssrfPolicy.hostnameAllowlist`; FAILs when the agent browser
+  can reach private/internal IPs (cloud-metadata credential theft) or runs without OS sandbox,
+  WARNs when no hostname allowlist restricts browser egress.
+- **B39 — Session visibility / cross-user transcript leak.** Reads `session.dmScope` and
+  `tools.sessions.visibility`; FAILs when `dmScope="main"` shares one session across all DM
+  peers in a multi-sender channel (cross-user transcript contamination), WARNs when
+  `tools.sessions.visibility` is `"agent"` or `"all"` (cross-session transcript reads).
+- **Risk engine — highest-risk capability chains (`--risk-paths`).** Combinational analysis that
+  detects dangerous chains of co-occurring properties: untrusted sender + exec tool (RISK-01),
+  Lethal Trifecta: dirty input + secrets + outbound (RISK-02), no sandbox + untrusted ingress +
+  exec (RISK-03), mutable agent identity + elevated tools (RISK-04), browser SSRF + secrets
+  reachable (RISK-05), control-plane reachable from open surface (RISK-06), writable
+  bootstrap/identity + exec without approval gate (RISK-07), session shared across users in
+  multi-user channel (RISK-08). Each chain fires only on positive evidence for every link
+  (zero false-positives by design). Surfaced in the default report, in `--json` as `"risk_paths"`,
+  and as a standalone section via `--risk-paths`. Does not affect the deterministic A–F score.
+  All checks grounded on the real OpenClaw schema; local and read-only.
+
 ## [0.14.0] — 2026-06-19
 
 ### Added

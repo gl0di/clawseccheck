@@ -1,0 +1,14 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": { "mode": "token", "token": "minimum-32-character-secure-token-here" }
+  },
+  "channels": {
+    "discord": {
+      "dmPolicy": "allowlist",
+      "groupPolicy": "allowlist",
+      "dangerouslyAllowNameMatching": true
+    }
+  },
+  "logging": { "redactSensitive": "tools" }
+}

@@ -1,0 +1,529 @@
+"""Risk engine: combinational chain detection (the Lethal Trifecta, generalised).
+
+Detects dangerous CAPABILITY CHAINS — not isolated property checks. A chain
+fires only on POSITIVE evidence for every link; UNKNOWN inputs yield no chain
+(zero false-positives by design).
+
+English-only for v1 (no i18n). Read-only. Pure stdlib.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from .catalog import CRITICAL, FAIL, HIGH, MEDIUM, Finding
+from .checks import (
+    _enabled_tools,
+    _hint,
+    _open_channels,
+    SENSITIVE_TOOL_HINTS,
+    INPUT_TOOL_HINTS,
+    OUTBOUND_TOOL_HINTS,
+)
+from .collector import Context, dig
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Data model
+# ──────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class RiskPath:
+    id: str
+    severity: str   # CRITICAL | HIGH | MEDIUM
+    title: str
+    chain: list[str]  # ordered steps, rendered as A -> B -> C
+    why: str          # plain-language explanation
+    fix: str          # remediation guidance
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+_SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2}
+
+
+def _finding_status(findings: list[Finding], check_id: str) -> str | None:
+    """Return the status string for a finding by id, or None if absent.
+
+    When the same id appears more than once (e.g. a real check result followed
+    by a test-injected override), the LAST entry wins so callers can override
+    a check result by appending a synthetic Finding at the end of the list.
+    """
+    result = None
+    for f in findings:
+        if f.id == check_id:
+            result = f.status
+    return result
+
+
+def _has_exec_or_write_tools(tools: list[str]) -> bool:
+    """True when exec, shell, fs_write or elevated tools are present."""
+    return _hint(tools, ("exec", "shell", "fs_write", "deploy")) or "elevated" in tools
+
+
+def _has_outbound(tools: list[str], cfg: dict) -> bool:
+    return _hint(tools, OUTBOUND_TOOL_HINTS) or bool(dig(cfg, "tools.elevated.allowFrom"))
+
+
+def _has_sensitive_data(tools: list[str], ctx: Context) -> bool:
+    return (
+        _hint(tools, SENSITIVE_TOOL_HINTS)
+        or (ctx.home / "credentials").is_dir()
+        or bool(dig(ctx.config, "gateway.auth.password"))
+    )
+
+
+def _open_channel_labels(cfg: dict) -> list[str]:
+    """Human-readable labels for open dm/group channels, e.g. 'telegram (open group)'."""
+    labels = []
+    channels = cfg.get("channels")
+    if not isinstance(channels, dict):
+        return labels
+    for name, c in channels.items():
+        if not isinstance(c, dict):
+            continue
+        nodes = [c] + list((c.get("accounts") or {}).values())
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            parts = []
+            if node.get("dmPolicy") == "open":
+                parts.append("open DM")
+            if node.get("groupPolicy") == "open":
+                parts.append("open group")
+            if parts:
+                labels.append(f"{name} ({', '.join(parts)})")
+                break
+    return labels
+
+
+def _has_untrusted_ingress(tools: list[str], cfg: dict) -> bool:
+    """True when there is at least one vector for untrusted content to reach the agent."""
+    return bool(_open_channels(cfg)) or _hint(tools, INPUT_TOOL_HINTS)
+
+
+def _sandbox_off(cfg: dict) -> bool:
+    """True when sandbox is explicitly off OR completely absent alongside exec tools."""
+    mode = dig(cfg, "agents.defaults.sandbox.mode")
+    return mode == "off" or mode is None
+
+
+def _has_mutable_identity(findings: list[Finding], cfg: dict) -> bool:
+    """True when B30 FAILs OR any channel has dangerouslyAllowNameMatching."""
+    b30 = _finding_status(findings, "B30")
+    if b30 == FAIL:
+        return True
+    channels = cfg.get("channels")
+    if isinstance(channels, dict):
+        for c in channels.values():
+            if isinstance(c, dict) and c.get("dangerouslyAllowNameMatching"):
+                return True
+    return False
+
+
+def _browser_ssrf(findings: list[Finding], cfg: dict) -> bool:
+    """True when B38 FAILs OR browser.ssrfPolicy.dangerouslyAllowPrivateNetwork is set."""
+    if _finding_status(findings, "B38") == FAIL:
+        return True
+    return bool(dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork"))
+
+
+def _control_plane_exposed(findings: list[Finding], cfg: dict) -> bool:
+    """True when B32 FAILs (control-plane reachable from an exposed surface)."""
+    return _finding_status(findings, "B32") == FAIL
+
+
+def _bootstrap_writable(findings: list[Finding]) -> bool:
+    """True when B20 FAILs (bootstrap / memory files are world-writable)."""
+    return _finding_status(findings, "B20") == FAIL
+
+
+def _self_mod_exec(findings: list[Finding]) -> bool:
+    """True when B22 FAILs (self-modification path open without approval)."""
+    return _finding_status(findings, "B22") == FAIL
+
+
+def _session_cross_user(findings: list[Finding], cfg: dict) -> bool:
+    """True when B39 FAILs OR session.dmScope == 'main'."""
+    if _finding_status(findings, "B39") == FAIL:
+        return True
+    return dig(cfg, "session.dmScope") == "main"
+
+
+def _has_multi_user_channel(cfg: dict) -> bool:
+    """True when any channel has a group policy (not necessarily open)."""
+    channels = cfg.get("channels")
+    if not isinstance(channels, dict):
+        return False
+    for c in channels.values():
+        if isinstance(c, dict):
+            if c.get("groupPolicy") is not None:
+                return True
+            for acc in (c.get("accounts") or {}).values():
+                if isinstance(acc, dict) and acc.get("groupPolicy") is not None:
+                    return True
+    return False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule implementations
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _rule_open_sender_exec(ctx: Context, tools: list[str], cfg: dict) -> RiskPath | None:
+    """CRITICAL: public/group sender + exec/write/elevated tool.
+
+    An untrusted actor (anonymous DM or open group) can reach host execution
+    or mutate state directly — no intermediary step required.
+    """
+    open_ch = _open_channel_labels(cfg)
+    if not open_ch:
+        return None
+    if not (_has_exec_or_write_tools(tools) or "elevated" in tools):
+        return None
+    channel_label = open_ch[0]
+    tool_label = "exec/write tool" if _hint(tools, ("exec", "shell", "fs_write", "deploy")) else "elevated tool"
+    return RiskPath(
+        id="RISK-01",
+        severity=CRITICAL,
+        title="Untrusted sender can reach host execution",
+        chain=[channel_label, tool_label, "host / filesystem"],
+        why=(
+            f"The channel '{channel_label}' accepts messages from anyone "
+            f"(dmPolicy or groupPolicy is 'open'). The agent also has "
+            f"{tool_label} enabled. Any anonymous actor can craft a message "
+            "that causes the agent to execute code or mutate files on the host "
+            "— no additional privilege escalation required."
+        ),
+        fix=(
+            "Lock every channel's dmPolicy and groupPolicy to 'allowlist' so only "
+            "known, trusted senders can reach the agent. If open channels are required, "
+            "remove or gate exec/write/elevated tools behind human approval "
+            "(tools.exec.mode='ask' or tools.exec.security='ask')."
+        ),
+    )
+
+
+def _rule_lethal_trifecta(ctx: Context, tools: list[str], cfg: dict) -> RiskPath | None:
+    """HIGH: dirty input + sensitive data + outbound/exec (the explicit Trifecta path)."""
+    has_input = _has_untrusted_ingress(tools, cfg)
+    has_sensitive = _has_sensitive_data(tools, ctx)
+    has_outbound = _has_outbound(tools, cfg)
+    if not (has_input and has_sensitive and has_outbound):
+        return None
+    open_ch = _open_channel_labels(cfg)
+    input_label = open_ch[0] if open_ch else "input tool (email/web/feed)"
+    sensitive_label = "secrets / credentials reachable"
+    outbound_label = "outbound / exec action"
+    return RiskPath(
+        id="RISK-02",
+        severity=HIGH,
+        title="Lethal Trifecta: untrusted input → sensitive data → outbound",
+        chain=[input_label, sensitive_label, outbound_label],
+        why=(
+            "All three legs of the Lethal Trifecta are active simultaneously: "
+            "the agent ingests untrusted content, has access to sensitive data, "
+            "and can take outbound or exec actions. A single prompt-injection in "
+            "the untrusted input is sufficient to exfiltrate secrets or execute "
+            "arbitrary commands."
+        ),
+        fix=(
+            "Break at least one leg: (1) lock channels to allowlist and remove "
+            "web/email input tools, OR (2) move secrets out of the agent's reach "
+            "(use tools.exec.security='deny' for sensitive-data contexts), OR (3) "
+            "gate ALL outbound/exec actions behind human approval. Keeping all "
+            "three legs active is the highest-risk configuration possible."
+        ),
+    )
+
+
+def _rule_sandbox_off_untrusted_exec(ctx: Context, tools: list[str], cfg: dict) -> RiskPath | None:
+    """HIGH: sandbox off + untrusted ingress + fs_write/exec."""
+    if not _sandbox_off(cfg):
+        return None
+    if not _has_untrusted_ingress(tools, cfg):
+        return None
+    if not (_hint(tools, ("exec", "shell", "fs_write", "deploy")) or "elevated" in tools):
+        return None
+    open_ch = _open_channel_labels(cfg)
+    ingress_label = open_ch[0] if open_ch else "untrusted input (email/web/feed)"
+    return RiskPath(
+        id="RISK-03",
+        severity=HIGH,
+        title="No sandbox + untrusted ingress + exec/write tools",
+        chain=[ingress_label, "no execution sandbox", "exec/write directly on host"],
+        why=(
+            "The execution sandbox is disabled (agents.defaults.sandbox.mode is "
+            "'off' or absent), meaning exec and fs_write tools run directly on the "
+            "host OS. Combined with an untrusted ingress channel, a prompt-injection "
+            "payload delivered via that channel can execute code or write files on "
+            "the host without any containment."
+        ),
+        fix=(
+            "Enable the sandbox: set agents.defaults.sandbox.mode to 'non-main' or "
+            "'all', and configure agents.defaults.sandbox.docker (network='bridge', "
+            "no broad host binds). If sandboxing is not possible, remove exec/write "
+            "tools or lock all ingress channels to a strict allowlist."
+        ),
+    )
+
+
+def _rule_mutable_identity_elevated(ctx: Context, findings: list[Finding],
+                                    tools: list[str], cfg: dict) -> RiskPath | None:
+    """HIGH: mutable identity + elevated/privileged tools."""
+    if not _has_mutable_identity(findings, cfg):
+        return None
+    if not ("elevated" in tools or _hint(tools, ("exec", "shell"))):
+        return None
+    return RiskPath(
+        id="RISK-04",
+        severity=HIGH,
+        title="Mutable agent identity + elevated/privileged tools",
+        chain=["identity spoofing or name-matching bypass", "elevated / exec tools", "privilege escalation"],
+        why=(
+            "The agent's identity can be impersonated or matched by name "
+            "(dangerouslyAllowNameMatching is enabled or B30 fails), AND elevated "
+            "or exec tools are present. An attacker who spoofs the agent's name "
+            "in a channel can cause the agent to treat their messages as "
+            "coming from a trusted source and invoke privileged capabilities."
+        ),
+        fix=(
+            "Disable dangerouslyAllowNameMatching in all channel configurations "
+            "and require cryptographic identity verification (e.g. token-based "
+            "auth). Restrict elevated tool allowFrom to explicit, verified sender "
+            "IDs — never '*' or name-matched identities."
+        ),
+    )
+
+
+def _rule_browser_ssrf_secrets(ctx: Context, findings: list[Finding],
+                                tools: list[str], cfg: dict) -> RiskPath | None:
+    """HIGH: browser SSRF + secrets reachable."""
+    if not _browser_ssrf(findings, cfg):
+        return None
+    if not _has_sensitive_data(tools, ctx):
+        return None
+    return RiskPath(
+        id="RISK-05",
+        severity=HIGH,
+        title="Browser SSRF to private network + secrets reachable",
+        chain=["browser tool", "SSRF to private/internal network", "secrets / credentials exfiltration"],
+        why=(
+            "The browser tool is allowed to reach private or internal network "
+            "addresses (browser.ssrfPolicy.dangerouslyAllowPrivateNetwork is set "
+            "or B38 fails), and the agent has access to sensitive credentials. "
+            "A prompt-injection payload in a web page can redirect the browser "
+            "to internal services (metadata APIs, credential stores) and exfiltrate "
+            "the retrieved data."
+        ),
+        fix=(
+            "Set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false (or "
+            "remove it). Configure an explicit allowlist of permitted domains. "
+            "Move credentials out of the agent's reach, or gate browser tool "
+            "invocations behind human approval."
+        ),
+    )
+
+
+def _rule_control_plane_exposed(ctx: Context, findings: list[Finding],
+                                 tools: list[str], cfg: dict) -> RiskPath | None:
+    """CRITICAL: control-plane reachable from an exposed/open surface."""
+    if not _control_plane_exposed(findings, cfg):
+        return None
+    open_ch = _open_channel_labels(cfg)
+    has_open_surface = bool(open_ch) or _has_untrusted_ingress(tools, cfg)
+    if not has_open_surface:
+        return None
+    surface_label = open_ch[0] if open_ch else "untrusted input surface"
+    return RiskPath(
+        id="RISK-06",
+        severity=CRITICAL,
+        title="Control plane reachable from open/exposed surface",
+        chain=[surface_label, "control-plane endpoint", "full agent takeover"],
+        why=(
+            "The agent's control plane (management API, admin interface) is "
+            "reachable from an open or untrusted surface (B32 fails). An attacker "
+            "with access to an open channel or input vector can send commands "
+            "directly to the control plane, potentially taking over the agent "
+            "configuration, installing skills, or reading all secrets."
+        ),
+        fix=(
+            "Restrict control-plane access to loopback or a trusted VPN "
+            "interface only. Lock all external channels to an allowlist. "
+            "Enable strong auth (token ≥ 24 chars) on the control-plane endpoint "
+            "and never expose it on a public or open interface."
+        ),
+    )
+
+
+def _rule_self_modification(ctx: Context, findings: list[Finding],
+                             tools: list[str], cfg: dict) -> RiskPath | None:
+    """HIGH: writable bootstrap + exec/fs_write without approval."""
+    # Check B20 (bootstrap write) or B22 (self-modification) failing
+    has_writable_bootstrap = (_finding_status(findings, "B20") == FAIL
+                               or _finding_status(findings, "B22") == FAIL)
+    if not has_writable_bootstrap:
+        return None
+    if not (_hint(tools, ("exec", "shell", "fs_write", "deploy")) or "elevated" in tools):
+        return None
+    # Only fire when there is no approval gate
+    has_approval = (
+        dig(cfg, "tools.confirm")
+        or dig(cfg, "tools.requireApproval")
+        or dig(cfg, "tools.elevated.requireApproval")
+    )
+    if has_approval and has_approval not in (False, "off", "never"):
+        return None
+    return RiskPath(
+        id="RISK-07",
+        severity=HIGH,
+        title="Self-modification: writable identity/bootstrap + exec without approval",
+        chain=["exec / fs_write tool (no approval gate)", "writable bootstrap/identity files",
+               "agent identity rewritten → persistent compromise"],
+        why=(
+            "Bootstrap or identity files (SOUL.md / AGENTS.md / TOOLS.md) are "
+            "group- or world-writable (B20 or B22 fails), AND the agent has "
+            "exec or fs_write tools enabled without a human approval gate. The "
+            "agent can therefore rewrite its own instructions, identity, or "
+            "installed skills — a single successful prompt-injection makes the "
+            "compromise persistent across restarts."
+        ),
+        fix=(
+            "Run 'chmod 700 workspace/ && chmod 600 workspace/SOUL.md "
+            "workspace/AGENTS.md workspace/TOOLS.md' to remove group/world "
+            "write access. Also add an approval gate: set tools.requireApproval "
+            "or tools.exec.security='ask' so every write action needs explicit "
+            "human sign-off."
+        ),
+    )
+
+
+def _rule_session_cross_user(ctx: Context, findings: list[Finding], cfg: dict) -> RiskPath | None:
+    """MEDIUM: session cross-user data leak + multi-user channel."""
+    if not _session_cross_user(findings, cfg):
+        return None
+    if not _has_multi_user_channel(cfg):
+        return None
+    return RiskPath(
+        id="RISK-08",
+        severity=MEDIUM,
+        title="Session context shared across users in a multi-user channel",
+        chain=["multi-user channel", "session.dmScope='main' (shared session)", "cross-user data leak"],
+        why=(
+            "The session scope is set to 'main' (or B39 fails), meaning all "
+            "users in a multi-user channel share the same session context. "
+            "A message from one user can inadvertently reveal another user's "
+            "conversation history, personal data, or injected context."
+        ),
+        fix=(
+            "Set session.dmScope to 'per-user' so each DM participant receives "
+            "an isolated session context. Audit channel configurations to ensure "
+            "no group channel inadvertently shares session state across users."
+        ),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Public API
+# ──────────────────────────────────────────────────────────────────────────────
+
+def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
+    """Compute dangerous capability chains from config + existing findings.
+
+    Returns [] when no chains are detected. Each rule fires only on POSITIVE
+    evidence for every link — no chain is invented from absent data.
+    Deduplicated by id; sorted by severity (CRITICAL first).
+    """
+    cfg = ctx.config
+    tools = _enabled_tools(cfg)
+
+    candidates: list[RiskPath] = []
+
+    path = _rule_open_sender_exec(ctx, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_lethal_trifecta(ctx, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_sandbox_off_untrusted_exec(ctx, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_mutable_identity_elevated(ctx, findings, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_browser_ssrf_secrets(ctx, findings, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_control_plane_exposed(ctx, findings, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_self_modification(ctx, findings, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_session_cross_user(ctx, findings, cfg)
+    if path:
+        candidates.append(path)
+
+    # Deduplicate by id (keep first occurrence)
+    seen: set[str] = set()
+    unique: list[RiskPath] = []
+    for p in candidates:
+        if p.id not in seen:
+            seen.add(p.id)
+            unique.append(p)
+
+    # Sort by severity
+    unique.sort(key=lambda p: _SEV_ORDER.get(p.severity, 9))
+    return unique
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Renderer
+# ──────────────────────────────────────────────────────────────────────────────
+
+_ASCII_MAP = str.maketrans({
+    "→": "->",  # →
+    "—": "-",   # —
+    "–": "-",   # –
+    "…": "...", # …
+    "‘": "'",   # '
+    "’": "'",   # '
+    "“": '"',   # "
+    "”": '"',   # "
+})
+
+
+def _asciify(text: str) -> str:
+    return text.translate(_ASCII_MAP).encode("ascii", "replace").decode("ascii")
+
+
+def render_risk_paths(paths: list[RiskPath], ascii_only: bool = False) -> str:
+    """Render the 'Highest-risk paths' section as plain text.
+
+    Returns a single string ending with a newline. When ascii_only=True, all
+    non-ASCII characters are folded to ASCII equivalents.
+    """
+    if not paths:
+        msg = "No dangerous capability chains detected.\n"
+        return _asciify(msg) if ascii_only else msg
+
+    arrow = " -> " if ascii_only else " → "  # ->  or  →
+
+    lines: list[str] = ["Highest-risk paths", "=" * 44, ""]
+
+    for p in paths:
+        sev_tag = f"[{p.severity}]"
+        lines.append(f"{sev_tag} {p.title}")
+        lines.append(f"  Chain : {arrow.join(p.chain)}")
+        lines.append(f"  Why   : {p.why}")
+        lines.append(f"  Fix   : {p.fix}")
+        lines.append("")
+
+    out = "\n".join(lines).rstrip() + "\n"
+    return _asciify(out) if ascii_only else out

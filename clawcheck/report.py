@@ -66,7 +66,8 @@ def _render_finding(lines, icon, f, lang: str = "en"):
 
 
 def render_report(findings: list[Finding], score: ScoreResult,
-                  ascii_only: bool = False, native=None, lang: str = "en") -> str:
+                  ascii_only: bool = False, native=None, lang: str = "en",
+                  *, risk=None) -> str:
     icon = _ICON_ASCII if ascii_only else _ICON
     ok = "[OK]" if ascii_only else "✅"
     suppressed_count = sum(1 for f in findings if getattr(f, "suppressed", False))
@@ -112,6 +113,12 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 lines.append(t("report.native_clean", lang))
         else:
             lines.append(t("report.native_not_included", lang, note=native.note))
+        lines.append("")
+
+    if risk:
+        from .risk import render_risk_paths
+        risk_section = render_risk_paths(risk, ascii_only=ascii_only)
+        lines.append(risk_section.rstrip())
         lines.append("")
 
     out = "\n".join(lines).rstrip() + "\n"
@@ -209,9 +216,9 @@ def render_prompts(findings: list[Finding], ascii_only: bool = False,
     return _asciify(out) if ascii_only else out
 
 
-def render_json(findings: list[Finding], score: ScoreResult) -> str:
+def render_json(findings: list[Finding], score: ScoreResult, *, risk=None) -> str:
     actions = suggest_actions(findings, score)
-    return json.dumps({
+    payload: dict = {
         "score": score.score,
         "grade": score.grade,
         "capped": score.capped,
@@ -228,7 +235,20 @@ def render_json(findings: list[Finding], score: ScoreResult) -> str:
              "why": a.why, "priority": a.priority}
             for a in actions
         ],
-    }, ensure_ascii=True, indent=2)
+    }
+    if risk is not None:
+        payload["risk_paths"] = [
+            {
+                "id": p.id,
+                "severity": p.severity,
+                "title": p.title,
+                "chain": p.chain,
+                "why": p.why,
+                "fix": p.fix,
+            }
+            for p in risk
+        ]
+    return json.dumps(payload, ensure_ascii=True, indent=2)
 
 
 def render_html(findings: list[Finding], score: ScoreResult, native=None,

@@ -2175,6 +2175,382 @@ def check_path_safety(ctx: Context) -> Finding:
     )
 
 
+# ---------- B30: Sender Identity Strength ----------
+# channels.<provider>.dangerouslyAllowNameMatching — true means allowlist is
+# matched against the MUTABLE display name, not an immutable user/channel ID.
+# An attacker who can rename themselves bypasses the allowlist entirely.
+#
+# channels.telegram.includeGroupHistoryContext — "recent" feeds untrusted group
+# history into the model context; "mention-only" or "none" are safe.
+_B30_NAME_MATCH_KEY = "dangerouslyAllowNameMatching"
+_B30_HISTORY_KEY = "includeGroupHistoryContext"
+_B30_PROVIDERS_WITH_NAME_MATCH = ("discord", "slack")
+
+
+def check_sender_identity(ctx: Context) -> Finding:
+    """B30 — Sender identity strength.
+
+    FAIL   — any channel has dangerouslyAllowNameMatching == true (mutable display
+             name used as allowlist key; trivially bypassed by renaming).
+    WARN   — channels.telegram.includeGroupHistoryContext == "recent" (untrusted
+             group history injected into model context).
+    PASS   — channels exist and neither dangerous flag is set.
+    UNKNOWN — no channels configured (cannot assess).
+    """
+    ch = _channels(ctx.config)
+    if not ch:
+        return _finding(
+            "B30", UNKNOWN,
+            "No channels configured — sender identity hardening not applicable.",
+            "—",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+
+    for provider, val in ch.items():
+        if not isinstance(val, dict):
+            continue
+
+        # Check top-level provider object AND per-account sub-objects
+        nodes = [val]
+        accounts = val.get("accounts")
+        if isinstance(accounts, dict):
+            nodes.extend(v for v in accounts.values() if isinstance(v, dict))
+
+        for node in nodes:
+            if node.get(_B30_NAME_MATCH_KEY) is True:
+                fail_ev.append(
+                    f"channels.{provider}.{_B30_NAME_MATCH_KEY}=true — "
+                    "allowlist matched against mutable display name (bypass risk)"
+                )
+                break  # one signal per provider is enough
+
+        # includeGroupHistoryContext applies at the provider level only
+        history = val.get(_B30_HISTORY_KEY)
+        if history == "recent":
+            warn_ev.append(
+                f"channels.{provider}.{_B30_HISTORY_KEY}=\"recent\" — "
+                "untrusted group history injected into model context"
+            )
+
+    if fail_ev:
+        return _finding(
+            "B30", FAIL,
+            "; ".join(fail_ev),
+            "Set dangerouslyAllowNameMatching to false (or omit it) and use "
+            "immutable user/channel IDs in allowlists instead of display names. "
+            "Display names are user-controlled and can be changed to impersonate "
+            "an allowlisted user.",
+            evidence=fail_ev,
+        )
+
+    if warn_ev:
+        return _finding(
+            "B30", WARN,
+            "; ".join(warn_ev),
+            "Set channels.telegram.includeGroupHistoryContext to \"mention-only\" "
+            "or \"none\" to prevent untrusted group history from being injected into "
+            "the model context (prompt-injection surface).",
+            evidence=warn_ev,
+        )
+
+    return _finding(
+        "B30", PASS,
+        f"Channel(s) configured ({', '.join(list(ch)[:5])}); "
+        "name-matching is off and group history context is not set to 'recent'.",
+        "Keep dangerouslyAllowNameMatching unset/false and "
+        "includeGroupHistoryContext at 'mention-only' or 'none'.",
+    )
+
+
+# ---------- B32: Control-Plane Mutation Reachability ----------
+# gateway.tools.allow — explicit re-enablement of a tool over the HTTP gateway.
+# gateway.tools.deny  — explicit denial list.
+# Control-plane / mutation tool names that are dangerous to expose over HTTP:
+_B32_CONTROL_PLANE_TOOLS = frozenset({
+    "gateway", "cron", "sessions_spawn", "sessions_send", "config.apply", "update.run",
+})
+
+
+def check_control_plane_mutation(ctx: Context) -> Finding:
+    """B32 — Control-plane mutation reachability via gateway.
+
+    FAIL   — gateway.tools.allow re-enables a control-plane tool (config mutation,
+             cron scheduling, or cross-session spawn/send exposed over HTTP).
+    WARN   — gateway is exposed (non-loopback bind or auth.mode=="none") AND
+             control-plane tools are not explicitly denied in gateway.tools.deny.
+    PASS   — control-plane tools are denied / not re-enabled.
+    UNKNOWN — no gateway config present.
+    """
+    cfg = ctx.config
+    gw = cfg.get("gateway")
+    if not isinstance(gw, dict):
+        return _finding(
+            "B32", UNKNOWN,
+            "No gateway config — control-plane mutation reachability not applicable.",
+            "—",
+        )
+
+    gw_tools = gw.get("tools") if isinstance(gw.get("tools"), dict) else {}
+    allow_list: list[str] = gw_tools.get("allow") or [] if isinstance(gw_tools, dict) else []
+    deny_list: list[str] = gw_tools.get("deny") or [] if isinstance(gw_tools, dict) else []
+
+    if not isinstance(allow_list, list):
+        allow_list = []
+    if not isinstance(deny_list, list):
+        deny_list = []
+
+    allow_set = {str(t).strip() for t in allow_list}
+    deny_set = {str(t).strip() for t in deny_list}
+
+    # FAIL: a control-plane tool is explicitly re-enabled in gateway.tools.allow
+    re_enabled = sorted(_B32_CONTROL_PLANE_TOOLS & allow_set)
+    if re_enabled:
+        return _finding(
+            "B32", FAIL,
+            "gateway.tools.allow re-enables control-plane tool(s) over the HTTP "
+            "gateway — config mutation / cron / cross-session send is reachable via "
+            f"HTTP: {', '.join(re_enabled)}",
+            "Remove control-plane tools ("
+            + ", ".join(sorted(_B32_CONTROL_PLANE_TOOLS))
+            + ") from gateway.tools.allow. Add them to gateway.tools.deny to "
+            "explicitly block HTTP access.",
+            evidence=re_enabled,
+        )
+
+    # WARN: gateway is network-exposed and control-plane tools are not denied
+    bind = str(gw.get("bind", "")).split(":")[0].lower()
+    auth_mode = dig(cfg, "gateway.auth.mode")
+    is_exposed = (
+        (bind and bind not in LOOPBACK and bind not in {"", "loopback"})
+        or auth_mode == "none"
+    )
+    cp_not_denied = not (_B32_CONTROL_PLANE_TOOLS & deny_set)
+
+    if is_exposed and cp_not_denied:
+        warn_detail = (
+            f"Gateway is network-exposed (bind={bind or '?'}, auth.mode={auth_mode!r}) "
+            "and control-plane tools are not explicitly in gateway.tools.deny — "
+            "an authenticated caller could reach mutation endpoints"
+        )
+        return _finding(
+            "B32", WARN,
+            warn_detail,
+            "Add control-plane tool names ("
+            + ", ".join(sorted(_B32_CONTROL_PLANE_TOOLS))
+            + ") to gateway.tools.deny to explicitly block HTTP mutation access, "
+            "even for authenticated callers.",
+            evidence=[warn_detail],
+        )
+
+    denied_preview = sorted(_B32_CONTROL_PLANE_TOOLS & deny_set)
+    pass_detail = (
+        "Control-plane tools are not re-enabled via gateway.tools.allow"
+        + (f" and are denied: {', '.join(denied_preview)}" if denied_preview else "")
+        + "."
+    )
+    return _finding(
+        "B32", PASS,
+        pass_detail,
+        "Keep control-plane tools out of gateway.tools.allow and "
+        "add them to gateway.tools.deny for defence-in-depth.",
+    )
+
+
+# ---------- B38: Browser Control / Cookie & SSRF Exposure ----------
+# browser.ssrfPolicy.dangerouslyAllowPrivateNetwork (bool) — lets the agent browser
+# reach internal/metadata IPs (cloud-credential theft via 169.254.169.254).
+# browser.noSandbox (bool) — browser runs without OS sandbox.
+# browser.ssrfPolicy.hostnameAllowlist (array) — restrict outbound browser targets.
+# browser.headless (bool) — informational; headless adds stealth but not a FAIL alone.
+
+
+def check_browser_ssrf(ctx: Context) -> Finding:
+    """B38 — Browser control / cookie & SSRF exposure.
+
+    FAIL    — browser is configured AND (dangerouslyAllowPrivateNetwork == true
+              OR noSandbox == true). Either flag is a CRITICAL-class primitive:
+              private-network access enables cloud-metadata credential theft;
+              no-sandbox means the headless browser can escape OS isolation.
+    WARN    — browser is configured but ssrfPolicy.hostnameAllowlist is absent
+              (open egress surface — the browser can reach any external host).
+    PASS    — browser is configured AND sandboxed AND private network is blocked
+              AND a hostnameAllowlist is present.
+    UNKNOWN — no browser config (not applicable).
+    """
+    cfg = ctx.config
+    browser = cfg.get("browser")
+    if not isinstance(browser, dict):
+        return _finding(
+            "B38", UNKNOWN,
+            "No browser config — browser SSRF / cookie exposure not applicable.",
+            "—",
+        )
+
+    ssrf_policy = browser.get("ssrfPolicy") if isinstance(browser.get("ssrfPolicy"), dict) else {}
+    allow_private = ssrf_policy.get("dangerouslyAllowPrivateNetwork")
+    no_sandbox = browser.get("noSandbox")
+    allowlist = ssrf_policy.get("hostnameAllowlist")
+
+    fail_ev: list[str] = []
+    if allow_private is True:
+        fail_ev.append(
+            "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork=true — "
+            "agent browser can reach internal/metadata IPs (169.254.169.254 cloud-credential theft)"
+        )
+    if no_sandbox is True:
+        fail_ev.append(
+            "browser.noSandbox=true — headless browser runs without OS sandbox "
+            "(process-escape risk)"
+        )
+
+    if fail_ev:
+        return _finding(
+            "B38", FAIL,
+            "; ".join(fail_ev),
+            "Set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false to block "
+            "cloud-metadata IP access; set browser.noSandbox to false (or omit it) to "
+            "keep the OS sandbox active. Also add browser.ssrfPolicy.hostnameAllowlist "
+            "to restrict which hosts the browser may reach.",
+            evidence=fail_ev,
+        )
+
+    # WARN: browser is configured but no hostnameAllowlist — open egress surface
+    has_allowlist = isinstance(allowlist, list) and len(allowlist) > 0
+    if not has_allowlist:
+        return _finding(
+            "B38", WARN,
+            "Browser is configured with no ssrfPolicy.hostnameAllowlist — the agent "
+            "browser can fetch any external URL (open egress / SSRF surface).",
+            "Add browser.ssrfPolicy.hostnameAllowlist listing only the domains the "
+            "browser legitimately needs to reach; set "
+            "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false.",
+        )
+
+    return _finding(
+        "B38", PASS,
+        "Browser is configured: sandboxed, private-network access blocked, "
+        "and hostnameAllowlist is present.",
+        "Keep browser.noSandbox unset/false, "
+        "dangerouslyAllowPrivateNetwork=false, and maintain a tight hostnameAllowlist.",
+    )
+
+
+# ---------- B39: Session Visibility / Cross-user Transcript Leak ----------
+# session.dmScope — controls which DM peers share a session.
+#   "main"                  : ALL DM peers share ONE session (cross-user contamination).
+#   "per-peer"              : one session per DM peer (safe).
+#   "per-channel-peer"      : one session per channel+peer combo (safe).
+#   "per-account-channel-peer": most granular (safe).
+#
+# tools.sessions.visibility — controls which sessions a tool can read.
+#   "self"  : only own session (safe).
+#   "tree"  : own session tree (safe).
+#   "agent" : any session of the same agent (cross-user leak risk).
+#   "all"   : all sessions across all agents (cross-user leak risk).
+
+
+def check_session_visibility(ctx: Context) -> Finding:
+    """B39 — Session visibility / cross-user transcript leak.
+
+    FAIL    — session.dmScope == "main" AND any channel allows non-owner senders
+              (open/allowlist groups — real cross-user contamination risk).
+    WARN    — tools.sessions.visibility in ("agent", "all") regardless of dmScope
+              (one session can read other sessions' transcripts).
+    PASS    — dmScope is per-peer-ish AND visibility is "self" or "tree".
+    UNKNOWN — no session config (not applicable).
+    """
+    cfg = ctx.config
+    session_cfg = cfg.get("session")
+    tools_sessions = dig(cfg, "tools.sessions")
+
+    has_session_config = isinstance(session_cfg, dict) or isinstance(tools_sessions, dict)
+    if not has_session_config:
+        return _finding(
+            "B39", UNKNOWN,
+            "No session config — session isolation not applicable.",
+            "—",
+        )
+
+    dm_scope = session_cfg.get("dmScope") if isinstance(session_cfg, dict) else None
+    visibility = (
+        tools_sessions.get("visibility")
+        if isinstance(tools_sessions, dict)
+        else None
+    )
+
+    # FAIL: dmScope=="main" combined with open/allowlist channels
+    # (when dmScope=="main" all DM senders contaminate the same session)
+    fail_ev: list[str] = []
+    if dm_scope == "main":
+        # Check whether any channel accepts non-owner senders
+        open_ch = _open_channels(cfg)
+        # Also check for allowlist channels (non-owner senders can still DM the bot)
+        allowlist_ch = []
+        for name, val in _channels(cfg).items():
+            if not isinstance(val, dict):
+                continue
+            if (val.get("dmPolicy") == "allowlist"
+                    or val.get("groupPolicy") == "allowlist"):
+                allowlist_ch.append(name)
+        non_owner_channels = open_ch + [c for c in allowlist_ch if c not in open_ch]
+        if non_owner_channels:
+            fail_ev.append(
+                "session.dmScope=\"main\" — all DM peers share ONE session "
+                f"(cross-user contamination / transcript leak); "
+                f"non-owner channels: {', '.join(non_owner_channels[:5])}"
+            )
+
+    if fail_ev:
+        return _finding(
+            "B39", FAIL,
+            "; ".join(fail_ev),
+            "Set session.dmScope to \"per-peer\", \"per-channel-peer\", or "
+            "\"per-account-channel-peer\" so each DM sender gets an isolated session. "
+            "With dmScope=\"main\" any DM peer can read and influence another user's "
+            "conversation history.",
+            evidence=fail_ev,
+        )
+
+    # WARN: visibility lets one session read other sessions' transcripts
+    warn_ev: list[str] = []
+    if visibility in ("agent", "all"):
+        warn_ev.append(
+            f"tools.sessions.visibility=\"{visibility}\" — "
+            "a session (or tool) can read transcripts from other sessions "
+            "(cross-user data leak risk)"
+        )
+
+    if warn_ev:
+        return _finding(
+            "B39", WARN,
+            "; ".join(warn_ev),
+            "Set tools.sessions.visibility to \"self\" or \"tree\" to restrict "
+            "transcript access to the current session only. Values \"agent\" and "
+            "\"all\" allow cross-session transcript reads.",
+            evidence=warn_ev,
+        )
+
+    # Build PASS detail from what we observed
+    details = []
+    if dm_scope:
+        details.append(f"session.dmScope=\"{dm_scope}\"")
+    if visibility:
+        details.append(f"tools.sessions.visibility=\"{visibility}\"")
+    pass_detail = (
+        ("Session isolation looks good: " + "; ".join(details) + ".")
+        if details
+        else "Session config present; no cross-user leak signals detected."
+    )
+    return _finding(
+        "B39", PASS,
+        pass_detail,
+        "Keep session.dmScope at per-peer or narrower and "
+        "tools.sessions.visibility at \"self\" or \"tree\".",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -2185,6 +2561,8 @@ CHECKS = [
     check_bootstrap_write_protection, check_self_modification, check_backups,
     check_version, check_tool_output_trust, check_approval_bypass,
     check_update_pinning, check_path_safety,
+    check_sender_identity, check_control_plane_mutation,
+    check_browser_ssrf, check_session_visibility,
 ]
 
 

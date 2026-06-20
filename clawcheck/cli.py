@@ -17,6 +17,7 @@ from . import (
     render_card, render_json, render_monitor, render_prompts, render_report, render_svg,
     save_state, snapshot, vet_mcp, vet_skill,
 )
+from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
 from .report import render_html
@@ -106,6 +107,8 @@ def main(argv=None) -> int:
                    help=f"path for trend history file (default: {DEFAULT_HISTORY})")
     p.add_argument("--next", action="store_true",
                    help="print recommended next actions based on the audit result")
+    p.add_argument("--risk-paths", action="store_true",
+                   help="print only the highest-risk capability chains and exit")
     p.add_argument("--verbose", action="store_true",
                    help="emit INFO-level log breadcrumbs to stderr")
     p.add_argument("--debug", action="store_true",
@@ -210,6 +213,12 @@ def main(argv=None) -> int:
     logger.debug("ran %d checks", len(findings))
     logger.info("score=%s grade=%s", score.score, score.grade)
 
+    paths = _risk.risk_paths(ctx, findings)
+
+    if args.risk_paths:
+        _emit(_risk.render_risk_paths(paths, ascii_only=ascii_only))
+        return 0
+
     if args.badge:
         try:
             Path(args.badge).expanduser().write_text(render_svg(score, findings), encoding="utf-8")
@@ -271,11 +280,12 @@ def main(argv=None) -> int:
         return 0
 
     if args.json:
-        body = render_json(findings, score)
+        body = render_json(findings, score, risk=paths)
     elif args.card:
         body = render_card(score, findings, ascii_only, lang=args.lang)
     else:
-        parts = [render_report(findings, score, ascii_only, native=ctx.native, lang=args.lang),
+        parts = [render_report(findings, score, ascii_only, native=ctx.native, lang=args.lang,
+                               risk=paths),
                  "", render_card(score, findings, ascii_only, lang=args.lang)]
         if ctx.errors:
             parts.append("\nnotes:\n" + "\n".join(f"  - {e}" for e in ctx.errors))

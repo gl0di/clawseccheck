@@ -1,0 +1,16 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": { "mode": "token", "token": "minimum-32-character-secure-token-here" }
+  },
+  "channels": {
+    "telegram": {
+      "dmPolicy": "allowlist",
+      "groupPolicy": "allowlist"
+    }
+  },
+  "session": {
+    "dmScope": "main"
+  },
+  "logging": { "redactSensitive": "tools" }
+}

@@ -58,6 +58,18 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
 - **B19 — data at-rest:** group/world-readable memory/log directories (conversation data / PII exposure).
 - **B20–B24 — agent behavior:** write-protection of identity/memory files, tool-output trust boundary,
   self-modification risk, approval-bypass directives, and deep MCP-server hardening.
+- **B30 — sender identity strength:** flags `channels.<provider>.dangerouslyAllowNameMatching`
+  (allowlist keyed on mutable display name — trivially bypassed by renaming) and
+  `channels.telegram.includeGroupHistoryContext="recent"` (untrusted group history injected as context).
+- **B32 — control-plane mutation reachability:** flags control-plane tools (`cron`, `config.apply`,
+  `update.run`, `sessions_spawn`, `sessions_send`, `gateway`) exposed via `gateway.tools.allow`
+  over the HTTP gateway — full agent takeover without further escalation.
+- **B38 — browser / SSRF exposure:** flags `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork`
+  (cloud-metadata IP access / credential theft via 169.254.169.254) and `browser.noSandbox`
+  (headless browser without OS isolation); warns when no `hostnameAllowlist` limits egress.
+- **B39 — session visibility / cross-user transcript leak:** flags `session.dmScope="main"`
+  (all DM peers share one session — cross-user contamination) and `tools.sessions.visibility`
+  of `"agent"` or `"all"` (cross-session transcript reads).
 - Plus your platform's own **`openclaw security audit`**, run for you and merged in.
 
 ## Built-in audit, included for you
@@ -195,6 +207,37 @@ Schedule it via OpenClaw's heartbeat or cron; when an alert fires, have your age
 It stores one small snapshot at `~/.clawcheck/state.json`. (Scheduled re-audit + drift
 detection — not a real-time runtime IDS; that heavier model is intentionally out of scope.)
 
+## Highest-risk paths
+
+Beyond individual checks, ClawCheck runs a **risk engine** that looks for dangerous
+*combinations* — capability chains where two or more co-occurring properties make a
+compromise catastrophic or trivial to execute.
+
+The eight chains it detects (RISK-01 through RISK-08):
+
+| ID | Severity | Chain |
+|----|----------|-------|
+| RISK-01 | CRITICAL | Untrusted sender (open DM/group) → exec/write/elevated tool → host/filesystem |
+| RISK-02 | HIGH | Untrusted input → sensitive data reachable → outbound/exec (Lethal Trifecta) |
+| RISK-03 | HIGH | Untrusted ingress + no execution sandbox → exec/write directly on host |
+| RISK-04 | HIGH | Mutable agent identity (name-matching) → elevated/exec tools → privilege escalation |
+| RISK-05 | HIGH | Browser SSRF to private network → secrets/credentials → exfiltration |
+| RISK-06 | CRITICAL | Open/untrusted surface → control-plane endpoint → full agent takeover |
+| RISK-07 | HIGH | Exec/write tool (no approval gate) → writable bootstrap/identity files → persistent compromise |
+| RISK-08 | MEDIUM | Multi-user channel → shared session (`dmScope="main"`) → cross-user data leak |
+
+Each chain fires **only when every link has positive evidence** — no chain is invented from
+absent or UNKNOWN data, so there are zero false-positives by design. The risk engine does not
+change the deterministic A–F score; it surfaces separately so you can see the worst-case
+paths at a glance without score inflation.
+
+```bash
+python3 audit.py --risk-paths       # print the highest-risk chains section only
+python3 audit.py --json             # includes a "risk_paths" array in the JSON envelope
+```
+
+The `--risk-paths` output is also appended to the default report when any chain fires.
+
 ## CI / automation
 
 ```bash
@@ -276,16 +319,17 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-v0.14. Read-only checks A1/B1–B25/C3–C5 (incl. write-protection, self-modification,
-approval-bypass, deep MCP, update/pinning hygiene), installed-skill malware vetting, baseline
-suppression + governance, the built-in `openclaw security audit` merged in, active injection
-tests (`--canary`/`--redteam`), a runtime dry-run harness (`--dryrun`), HTML report,
-self-integrity (`--verify-self`), a pip/pipx-installable CLI — hardened per an external
-security review — **fully bilingual output** (`--lang he` for Hebrew + RTL, auto-detected from
-locale; dynamic finding detail now translated too, not just chrome + titles + static strings) —
-**CI gating** (`--sarif`, `--fail-under`, `--exit-code`) — **local score history
-and offline percentile** (`--trend`, `--percentile`, `--history`) — **local logging with
-secret redaction** (`--verbose`, `--debug`, `--log`) — full Hebrew dynamic detail/fix
+v0.15. Read-only checks A1/B1–B25/B30/B32/B38/B39/C3–C5 (incl. write-protection, self-modification,
+approval-bypass, deep MCP, update/pinning hygiene, sender identity strength, control-plane
+mutation reachability, browser/SSRF exposure, and session visibility/cross-user leak),
+installed-skill malware vetting, baseline suppression + governance, the built-in
+`openclaw security audit` merged in, active injection tests (`--canary`/`--redteam`), a runtime
+dry-run harness (`--dryrun`), HTML report, self-integrity (`--verify-self`), a pip/pipx-installable
+CLI — hardened per an external security review — **fully bilingual output** (`--lang he` for
+Hebrew + RTL, auto-detected from locale; dynamic finding detail now translated too, not just
+chrome + titles + static strings) — **CI gating** (`--sarif`, `--fail-under`, `--exit-code`) —
+**local score history and offline percentile** (`--trend`, `--percentile`, `--history`) — **local
+logging with secret redaction** (`--verbose`, `--debug`, `--log`) — full Hebrew dynamic detail/fix
 translations via render-time fragment-splitting — a reliability FP/FN fixture corpus —
 **guided mode**: a "What you can do next" recommendation block printed after every default run
 (also in `--json` as `next_actions` and standalone via `--next`), plus a rewritten
@@ -293,10 +337,12 @@ conversational SKILL.md playbook that walks non-technical users through every to
 needing to know a flag — **MCP supply-chain vetting** (`--vet-mcp`): checks every connected MCP
 server for unpinned installs, plaintext transport, secret passthrough, and broad OAuth scope
 before you trust it (SAFE / SUSPICIOUS / DANGEROUS, local and read-only; addresses the #1 agent
-supply-chain gap) — and an **expanded agentic red-team suite** (`--redteam`, `--dryrun`) covering
+supply-chain gap) — an **expanded agentic red-team suite** (`--redteam`, `--dryrun`) covering
 tool poisoning, MCP-response injection, memory poisoning, multi-agent instruction smuggling,
 approval-bypass via injection, and dirty-input-to-exfil chains across MCP-response, memory, and
-subagent sources. All checks are grounded against the real OpenClaw schema (verified from
+subagent sources — and a **risk engine** (`--risk-paths`): combinational chain detection that
+surfaces the highest-risk capability paths (RISK-01 through RISK-08) without affecting the
+deterministic A–F score. All checks are grounded against the real OpenClaw schema (verified from
 docs.openclaw.ai and live fleet configs), so they fire on real installations rather than silently
 missing phantom field paths. ClawCheck still only checks and guides — it never applies fixes or
 changes your config.

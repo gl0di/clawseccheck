@@ -1,0 +1,15 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": { "mode": "token", "token": "minimum-32-character-secure-token-here" }
+  },
+  "browser": {
+    "headless": true,
+    "noSandbox": false,
+    "ssrfPolicy": {
+      "dangerouslyAllowPrivateNetwork": true,
+      "hostnameAllowlist": ["example.com"]
+    }
+  },
+  "logging": { "redactSensitive": "tools" }
+}

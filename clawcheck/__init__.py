@@ -19,13 +19,14 @@ from .native import run_native_audit
 from .report import (
     render_card, render_json, render_monitor, render_prompts, render_report, render_svg,
 )
+from .risk import risk_paths, render_risk_paths
 from .scoring import ScoreResult, compute
 from .i18n import t, tp, title_for, is_rtl
 from .sarif import render_sarif
 from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
 from .guide import suggest_actions, render_next_actions
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
@@ -57,4 +58,5 @@ __all__ = [
     "render_sarif",
     "history_load", "history_record", "render_trend", "DEFAULT_HISTORY",
     "suggest_actions", "render_next_actions",
+    "risk_paths", "render_risk_paths",
 ]

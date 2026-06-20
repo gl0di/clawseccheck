@@ -1,0 +1,11 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": { "mode": "token", "token": "minimum-32-character-secure-token-here" },
+    "tools": {
+      "allow": ["config.apply", "cron"],
+      "deny": []
+    }
+  },
+  "logging": { "redactSensitive": "tools" }
+}
