@@ -1,16 +1,22 @@
 name: Publish to ClawHub
 
-# Auto-publishes the skill to ClawHub whenever a release tag (vX.Y.Z) is pushed.
-# Setup (one-time, done by the repo owner):
-#   1. Create a ClawHub API token (clh_...) from https://clawhub.ai/dashboard.
-#   2. Add it as a GitHub repo secret named CLAWHUB_TOKEN
-#      (Settings -> Secrets and variables -> Actions -> New repository secret).
-# After that, every  git push origin vX.Y.Z  publishes that release automatically.
+# Publishes the skill to ClawHub:
+#   - automatically when a release tag (vX.Y.Z) is pushed, and
+#   - manually via the "Run workflow" button (workflow_dispatch).
+# Auth uses the CLAWHUB_TOKEN repo secret — no local login needed.
+# One-time setup (done): create a clh_ token at https://clawhub.ai/dashboard and add it
+# as a repo secret named CLAWHUB_TOKEN (Settings -> Secrets and variables -> Actions).
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (blank = use SKILL.md frontmatter version)"
+        required: false
+        default: ""
 
 jobs:
   publish:
@@ -25,15 +31,21 @@ jobs:
       - name: Install ClawHub CLI
         run: npm i -g clawhub
 
-      # Guard: the SKILL.md frontmatter version must match the pushed tag, so ClawHub
-      # never indexes a mismatched/stale version (this is what showed 0.1.0 before).
-      - name: Verify SKILL.md version matches the tag
+      - name: Resolve & verify version
+        id: ver
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
           FM="$(grep -m1 '^version:' SKILL.md | awk '{print $2}')"
-          echo "tag=$TAG  SKILL.md version=$FM"
-          if [ "$TAG" != "$FM" ]; then
-            echo "::error::Tag v$TAG does not match SKILL.md frontmatter version $FM — bump SKILL.md before tagging."
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VER="${{ github.event.inputs.version }}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER="$FM"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "resolved version=$VER  (SKILL.md frontmatter=$FM)"
+          if [ "$VER" != "$FM" ]; then
+            echo "::error::Version '$VER' does not match SKILL.md frontmatter '$FM' — bump SKILL.md first."
             exit 1
           fi
 
@@ -43,4 +55,11 @@ jobs:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
 
       - name: Publish skill
-        run: clawhub skill publish . --json
+        run: >
+          clawhub publish . --json
+          --slug clawcheck
+          --owner gl0di
+          --version "${{ steps.ver.outputs.version }}"
+          --source-repo "${{ github.repository }}"
+          --source-commit "${{ github.sha }}"
+          --source-ref "${{ github.ref }}"
