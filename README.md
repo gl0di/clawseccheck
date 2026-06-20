@@ -119,9 +119,12 @@ ClawSecCheck score (kept deterministic). Disable with `--no-native`.
 
 ClawSecCheck is **open source and zero-dependency (Python stdlib only)**. Its own checks are
 **read-only and offline** — they read only `~/.openclaw/openclaw.json` and your workspace
-bootstrap markdown files, and make **no network calls**. It writes nothing by default; the only
-writes are ones you ask for — a report file (`--save`) and the `--monitor` snapshot at
-`~/.clawseccheck/state.json`. It never touches your OpenClaw config or data.
+bootstrap markdown files, and make **no network calls**. It never touches your OpenClaw config or
+data, and **nothing ever leaves your machine**. The only thing it writes by default is a one-line
+entry to a **private, owner-only** local score history (`~/.clawseccheck/history.jsonl`) so you can
+track your grade over time — opt out with `--no-history`. Everything else is written only when you
+ask: a report file (`--save`), the `--monitor` snapshot (`~/.clawseccheck/state.json`), a badge
+(`--badge`), HTML/SARIF (`--html`/`--sarif`), or a log (`--log`).
 
 The **only** external command it can run is your own, fixed and read-only:
 

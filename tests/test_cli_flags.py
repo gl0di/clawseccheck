@@ -15,7 +15,7 @@ from clawseccheck.cli import main
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 VULN = str(FIXTURES / "home_vuln")
 SAFE = str(FIXTURES / "home_safe")
-BASE = ["--no-native"]
+BASE = ["--no-native", "--no-history"]
 
 
 # ---------------------------------------------------------------------------

@@ -7,13 +7,13 @@ FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
 def test_cli_card_returns_zero(capsys):
-    rc = main(["--home", str(FIXTURES / "home_safe"), "--no-native", "--card"])
+    rc = main(["--home", str(FIXTURES / "home_safe"), "--no-native", "--no-history", "--card"])
     assert rc == 0
     assert "OpenClaw Security" in capsys.readouterr().out
 
 
 def test_cli_json_machine_readable(capsys):
-    rc = main(["--home", str(FIXTURES / "home_safe"), "--no-native", "--json"])
+    rc = main(["--home", str(FIXTURES / "home_safe"), "--no-native", "--no-history", "--json"])
     assert rc == 0
     assert '"grade"' in capsys.readouterr().out
 

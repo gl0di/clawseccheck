@@ -82,6 +82,31 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append(t("report.capped", lang,
                        raw=score.raw_score,
                        sev="CRITICAL" if score.failed_critical else "HIGH"))
+
+    # --- "Why this score" breakdown ---
+    scored_findings = [f for f in findings if getattr(f, "scored", True)
+                       and f.status != UNKNOWN
+                       and not getattr(f, "suppressed", False)]
+    n_scored = len(scored_findings)
+    n_pass = sum(1 for f in scored_findings if f.status == PASS)
+    n_warn = sum(1 for f in scored_findings if f.status == WARN)
+    n_fail = sum(1 for f in scored_findings if f.status == FAIL)
+    lines.append(t("report.score_breakdown", lang,
+                   score=score.score, n_scored=n_scored,
+                   n_pass=n_pass, n_warn=n_warn, n_fail=n_fail))
+    if n_fail > 0 or n_warn > 0:
+        _sev_counts: dict[str, int] = {}
+        for f in scored_findings:
+            if f.status in (FAIL, WARN):
+                _sev_counts[f.severity] = _sev_counts.get(f.severity, 0) + 1
+        sev_parts = []
+        for sev in (CRITICAL, HIGH, MEDIUM, LOW):
+            if sev in _sev_counts:
+                sev_parts.append(f"{_sev_counts[sev]} {sev}")
+        sev_summary = ", ".join(sev_parts)
+        lines.append(t("report.score_breakdown_detail", lang,
+                       n_fail=n_fail, n_warn=n_warn, sev_summary=sev_summary))
+    lines.append(t("report.scope_note", lang))
     lines.append("")
     if not issues:
         lines.append(t("report.no_issues", lang, ok=ok))

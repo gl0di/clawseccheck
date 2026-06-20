@@ -3,6 +3,29 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.19.0] — 2026-06-20
+
+UX/transparency pass driven by real beta feedback (a user couldn't tell *why* the score was what
+it was, didn't realise active tests are separate, and wanted automatic history).
+
+### Added
+- **"Why this score" breakdown** in the report: a line showing the weighted pass-rate over the
+  scored checks (N pass / N warn / N fail, with a per-severity tally), so the grade is explainable
+  at a glance instead of a bare number. UNKNOWN/advisory checks are stated as excluded.
+- **Scope-clarity note** in the report: states plainly that the score reflects **configuration**,
+  not live prompt-injection resistance or a deep MCP supply-chain vet, and points to
+  `--canary`/`--redteam`/`--dryrun` (live injection) and `--vet-mcp` (deep MCP) for those.
+- **Automatic local history**: every default audit now appends one entry to the private,
+  owner-only `~/.clawseccheck/history.jsonl` so you can track your grade over time with `--trend`,
+  with no extra flag. Opt out with the new **`--no-history`**. Still local — nothing is uploaded.
+
+### Changed
+- **SKILL.md guided playbook**: the agent now surfaces the open issues that lowered the grade (not
+  just the single top one), states that the score is about configuration (and offers the live-injection
+  + deep-MCP tests for what it doesn't cover), and mentions the local history.
+- README "no writes by default" wording updated to reflect the opt-out auto-history (the only
+  default write; owner-only, never uploaded).
+
 ## [0.18.0] — 2026-06-20
 
 Phase 0.18.0, wave 1 — two new checks, both grounded on **real** OpenClaw config fields

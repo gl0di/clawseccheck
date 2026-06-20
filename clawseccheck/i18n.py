@@ -61,6 +61,36 @@ STRINGS: dict[str, dict[str, str]] = {
         "he": "אזהרה: ממצא {sev} ({id}) מושתק באמצעות .clawseccheckignore — "
               "הוא עדיין נחשב לאבטחה האמיתית שלך; בדוק את רשימת ההתעלמות.",
     },
+    "report.score_breakdown": {
+        "en": (
+            "Why {score}/100: weighted pass-rate over {n_scored} scored checks"
+            " — {n_pass} pass, {n_warn} warn (half weight), {n_fail} fail."
+            " UNKNOWN/advisory checks are excluded."
+        ),
+        "he": (
+            "מדוע {score}/100: שיעור מעבר משוקלל על פני {n_scored} בדיקות עם ניקוד"
+            " — {n_pass} עברו, {n_warn} אזהרה (משקל חצי), {n_fail} נכשלו."
+            " בדיקות UNKNOWN/ייעוץ אינן נכללות."
+        ),
+    },
+    "report.score_breakdown_detail": {
+        "en": "({n_fail} FAIL, {n_warn} WARN — incl. {sev_summary})",
+        "he": "({n_fail} נכשלות, {n_warn} אזהרות — כולל {sev_summary})",
+    },
+    "report.scope_note": {
+        "en": (
+            "This score reflects your configuration. It does not test live"
+            " prompt-injection resistance or do a deep MCP supply-chain vet"
+            " — run `--canary` / `--redteam` / `--dryrun` (live injection)"
+            " and `--vet-mcp` (deep MCP) for those."
+        ),
+        "he": (
+            "ציון זה משקף את התצורה שלך. הוא אינו בודק עמידות להזרקת prompt"
+            " חיה או בודק לעומק שרשרת אספקה של MCP — הרץ `--canary` /"
+            " `--redteam` / `--dryrun` (הזרקה חיה) ו-`--vet-mcp`"
+            " (MCP מעמיק) לצורך כך."
+        ),
+    },
     "report.native_header": {
         "en": "--- Also from OpenClaw's built-in `security audit` ---",
         "he": "--- גם מביקורת `security audit` המובנית של OpenClaw ---",

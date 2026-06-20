@@ -105,6 +105,8 @@ def main(argv=None) -> int:
                    help="print offline percentile rank for the current score and exit")
     p.add_argument("--history", default=DEFAULT_HISTORY, metavar="PATH",
                    help=f"path for trend history file (default: {DEFAULT_HISTORY})")
+    p.add_argument("--no-history", action="store_true",
+                   help="do not record this run to the local score history (default: record)")
     p.add_argument("--next", action="store_true",
                    help="print recommended next actions based on the audit result")
     p.add_argument("--risk-paths", action="store_true",
@@ -302,6 +304,9 @@ def main(argv=None) -> int:
             _emit(f"\n(report saved to {args.save})")
         except OSError as exc:
             _emit(f"\n(could not save report: {exc})")
+
+    if not args.no_history and not args.trend and not args.monitor:
+        history_record(score, args.history)
 
     if args.fail_under is not None and score.score < args.fail_under:
         return 1

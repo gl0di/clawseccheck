@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 0.18.0
+version: 0.19.0
 description: Free, local, read-only security self-audit for your own OpenClaw agent. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true}}
 ---
@@ -82,8 +82,21 @@ Lead with: the **Grade** (A through F), the **Score** (0-100), and whether the *
 is triggered (3/3 = danger, 2/3 = caution, 1/3 or 0/3 = fine). Then name the single most
 important problem in one calm, plain sentence.
 
-Keep this section short. Do not list every finding here — the menu in Step 4 will lead the user
-to details.
+**Then show WHY the score is what it is** — don't leave the user guessing. The report prints a
+"Why <score>/100" breakdown line and a prioritised fix-list; surface the open issues that lowered
+the grade as a short bulleted list (plain language, most urgent first — not just the top one). If
+the user wants the exact remediation, that's the Step-4 menu (`--prompts`).
+
+**Be honest about what the score covers.** The report includes a scope note: the score reflects
+**configuration**, not live behaviour. It does NOT test prompt-injection resistance or do a deep
+MCP supply-chain vet. Say this plainly — e.g. "This grade is about how your agent is *set up*; to
+see if it actually *resists* an injection attack, run the live test (option below)." Offer the
+active tests (`--canary`/`--redteam`/`--dryrun`) and the deep MCP vet (`--vet-mcp`) as the way to
+cover what the score can't.
+
+**Mention history.** Each audit is recorded to a private local history file (`~/.clawseccheck/history.jsonl`,
+owner-only, never uploaded) so the user can track their score over time — show the trend with
+`--trend`. If they don't want any record, they can run with `--no-history`.
 
 ### Step 4 — Offer a short menu
 
