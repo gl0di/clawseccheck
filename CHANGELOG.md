@@ -3,6 +3,14 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.16.2] — 2026-06-20
+
+CI maintenance only — no change to the audit engine or its behaviour.
+
+### Changed
+- Bumped GitHub Actions to clear the Node 20 deprecation: `actions/checkout@v5`,
+  `actions/setup-node@v5`, `actions/setup-python@v6`.
+
 ## [0.16.1] — 2026-06-20
 
 First public **beta** for tester feedback. No behavioural change to the audit itself.
