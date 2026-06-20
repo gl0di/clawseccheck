@@ -9,6 +9,29 @@ plus a **shareable grade badge**.
 Because you run it on your own agent, there's no "scanning someone else" problem: no
 proof-of-ownership, no legal grey area.
 
+## 🧪 Beta — please test it and report back
+
+ClawSecCheck is in **beta**. It runs **locally and read-only** — no network calls, no
+telemetry, nothing leaves your machine — so trying it is safe. Please run it on your real
+setup and tell us what's wrong or confusing.
+
+**Honest limits (we never hide these behind a green score):**
+
+- **Static analysis, not runtime-verified.** Findings describe your *configuration*, not a
+  live exploit. Results are labelled accordingly.
+- **`UNKNOWN` ≠ `PASS`.** If a file can't be read, the config can't be parsed, or a state
+  can't be determined, it's reported as `UNKNOWN` and excluded from the score — never
+  silently marked safe.
+- **Some deep checks are planned, not shipped yet:** dirty-input sanitizer / action-gate /
+  taint-tracking (B26–B28) and an exhaustive OpenClaw CVE table (B33) are on the roadmap.
+- **Vetting the scanner itself** (`--vet` pointed at ClawSecCheck's own source) reports
+  *safe with a note* — a security tool necessarily ships attack signatures as data.
+
+**How to report a bug:** open an issue at
+<https://github.com/gl0di/clawseccheck/issues> with the output of `clawseccheck --json`
+(it redacts secret *values* — only key names/paths appear) and your OpenClaw version. Do
+not paste raw secrets.
+
 ## ⚠️ Important — trust no one (including this skill)
 
 OpenClaw skills are **not sandboxed**: an installed skill runs with your agent's full

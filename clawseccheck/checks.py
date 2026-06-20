@@ -14,8 +14,8 @@ import re
 import shutil
 from pathlib import Path
 
-from .catalog import BY_ID, CRITICAL, FAIL, HIGH, MEDIUM, PASS, UNKNOWN, WARN, Finding
-from .collector import Context, _read_skill_text, dig
+from .catalog import BY_ID, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
+from .collector import _OWN_SKILL_NAMES, Context, _read_skill_text, dig
 
 
 def _is_posix() -> bool:
@@ -737,10 +737,46 @@ def check_installed_skills(ctx: Context) -> Finding:
                    "Keep installing only skills whose source you've reviewed — trust no one.")
 
 
+# Distinctive symbols that only ClawSecCheck's own signature module (checks.py)
+# contains. Used to recognise our own source so --vet doesn't flag the scanner's
+# embedded attack signatures + red-team payloads as malware.
+_OWN_ENGINE_MARKERS = ("def check_installed_skills", "def vet_skill", "_SKILL_CRIT")
+
+
+def _is_own_source(p: Path) -> bool:
+    """True if `p` is ClawSecCheck's own source tree (repo root, install dir, or the
+    package dir itself). A security auditor necessarily ships attack signatures and
+    red-team payloads as *data*, so a naive malware scan of its own source self-flags.
+
+    Recognition is by structure (package layout) AND distinctive engine symbols — not
+    by name alone — so a look-alike skill that merely calls itself "clawseccheck" is
+    still scanned normally and cannot use the name to dodge detection.
+    """
+    if (p / "clawseccheck" / "checks.py").is_file():        # repo root / install dir
+        engine = p / "clawseccheck" / "checks.py"
+    elif p.name.lower() in _OWN_SKILL_NAMES and (p / "checks.py").is_file():  # package dir
+        engine = p / "checks.py"
+    else:
+        return False
+    try:
+        head = engine.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return all(m in head for m in _OWN_ENGINE_MARKERS)
+
+
 def vet_skill(path: str | Path) -> Finding:
     """Vet a skill BEFORE installing it: run the B13 scan on a local skill dir or SKILL.md."""
     p = Path(path).expanduser()
     if p.is_dir():
+        if _is_own_source(p):
+            return _custom("B13", LOW, PASS,
+                           "This is ClawSecCheck's own source. A security auditor necessarily "
+                           "ships attack signatures and red-team payloads as data, so a naive "
+                           "malware scan flags its own signature database — that is expected here, "
+                           "not malware.",
+                           "Point --vet at third-party skills you're about to install, not at the "
+                           "scanner itself.")
         text, name = _read_skill_text(p), p.name
     elif p.is_file():
         try:

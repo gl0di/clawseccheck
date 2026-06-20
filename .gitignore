@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+
+# Dev-only agent instructions live in the workspace root, never inside the
+# published skill — keep CLAUDE.md out of the distributed artifact.
+CLAUDE.md

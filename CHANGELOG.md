@@ -3,6 +3,23 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.16.1] — 2026-06-20
+
+First public **beta** for tester feedback. No behavioural change to the audit itself.
+
+### Fixed
+- **`--vet` no longer false-flags ClawSecCheck's own source as malware.** A security auditor
+  necessarily ships attack signatures and red-team payloads as *data*, so a naive scan of its own
+  tree self-flagged `CRITICAL`. Vetting our own source (repo root, install dir, or the package dir)
+  now reports *safe with a note*. Recognition is by package structure **and** distinctive engine
+  symbols — not by name — so a look-alike skill that merely calls itself `clawseccheck` is still
+  scanned in full and cannot use the name to dodge detection. (Regression tests added.)
+
+### Added
+- **Beta-tester note in the README**: states the honest limits up front — static (not
+  runtime-verified) analysis, `UNKNOWN` is never counted as `PASS`, the planned-but-unshipped deep
+  checks (B26–B28 taint chain, B33 CVE table), and how to file a bug with redacted `--json` output.
+
 ## [0.16.0] — 2026-06-20
 
 ### Changed
