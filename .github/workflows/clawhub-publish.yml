@@ -21,6 +21,10 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # contents:write is needed to create the GitHub Release (the repo default token is
+    # read-only). Scoped to this job only.
+    permissions:
+      contents: write
     # Manual-approval gate: configure required reviewers under
     # repo Settings → Environments → "release" for this gate to actually block.
     environment: release
@@ -78,3 +82,18 @@ jobs:
           --owner gl0di
           --version "${{ steps.ver.outputs.version }}"
           --changelog "Release ${{ steps.ver.outputs.version }} (${{ github.sha }})"
+
+      # Create a matching GitHub Release so the "Latest release" badge tracks the tag.
+      # Uses the runner's built-in gh CLI (no third-party action → respects the
+      # github-owned+verified Actions policy). Notes are pulled from CHANGELOG.md.
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          NOTES="$(awk -v v="## [$VER]" 'index($0,v){f=1;next} /^## \[/{f=0} f' CHANGELOG.md)"
+          [ -z "$NOTES" ] && NOTES="Release ${GITHUB_REF_NAME} — see CHANGELOG.md."
+          gh release create "${GITHUB_REF_NAME}" --verify-tag \
+            --title "ClawSecCheck ${GITHUB_REF_NAME}" --notes "$NOTES" \
+            || echo "GitHub Release already exists for ${GITHUB_REF_NAME}"
