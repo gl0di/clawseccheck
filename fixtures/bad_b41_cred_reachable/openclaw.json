@@ -1,0 +1,21 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": { "mode": "token", "token": "a-very-long-token-of-32-characters" }
+  },
+  "auth": {
+    "profiles": {
+      "google:owner@example.com": { "provider": "google", "email": "owner@example.com", "mode": "oauth" },
+      "github:owner": { "provider": "github", "email": "owner@example.com", "mode": "oauth" }
+    }
+  },
+  "channels": {
+    "telegram": { "dmPolicy": "open", "groupPolicy": "open" }
+  },
+  "tools": {
+    "profile": "minimal",
+    "allow": ["email_send", "fs_write"]
+  },
+  "logging": { "redactSensitive": "tools" },
+  "models": { "main": { "provider": "ollama/llama3" } }
+}

@@ -99,6 +99,8 @@ CATALOG: list[CheckMeta] = [
               MEDIUM, "hardening", "Injection Surface"),
     CheckMeta("B33", "Known-vulnerable OpenClaw version gate",
               HIGH, "hardening", "Patch hygiene"),
+    CheckMeta("B41", "Credential blast-radius assessment",
+              MEDIUM, "advisory", "Credential / Blast Radius", scored=True),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False),
     CheckMeta("C4", "OpenClaw version / update hygiene", LOW, "advisory", "Patch hygiene", scored=False),

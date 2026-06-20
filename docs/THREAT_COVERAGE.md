@@ -31,6 +31,7 @@ skill) / `--vet-mcp`.
 | Update / pinning hygiene | B25, C4 | Pinned releases |
 | Untrusted-context exposure | B26 | `channels.<p>.contextVisibility` — untrusted group/quote/history context injected into the model (config side; B21 is the policy side) |
 | Known-vulnerable version gate | B33 | `meta.lastTouchedVersion` vs a maintained advisory table (seeded: GHSA-g8p2-7wf7-98mq, fixed 2026.1.29) |
+| Credential blast-radius | B41 | `auth.profiles.*` + gateway token vs reachability; PII-safe (provider names only) |
 | Sender identity strength | B30 | Mutable display-name allowlists, group history injection |
 | Control-plane mutation reachability | B32 | cron/config.apply/update.run exposed over gateway |
 | Browser / SSRF exposure | B38 | Metadata-IP, no-sandbox, hostname allowlist |
@@ -49,9 +50,9 @@ skill) / `--vet-mcp`.
 | **Inbound reachability** map (entrypoint→actor→agent) | B29 | Precise exposure path, not just per-setting | Roadmap |
 | **Effective-tools matrix** (after global/provider/channel/agent/toolsBySender/allow-deny) incl. "deny write but exec/apply_patch still mutates" | B31 | Bypass-aware least-privilege | Roadmap |
 | Known-vulnerable **OpenClaw version** DB (more advisories) | B33+ | B33 ships with one confirmed advisory; the table grows as new advisories are published | Shipped (seed) |
-| **Credential blast-radius** inventory (env, auth profiles, OAuth, SSH, cookies, MCP env) | B41 | Scope of a compromise | Backlog |
+| **Credential blast-radius** — broader inventory (SSH keys, cookies, MCP env) | B41+ | B41 ships `auth.profiles.*` + gateway-token surface vs reachability (PII-safe); SSH/cookies/MCP-env are later | Shipped (core) |
 | **Skill/plugin install policy** (auto-update, postinstall scripts, world-writable skill dirs) | B42 | Supply-chain at install time; partial via B13/B25 | Backlog |
-| **Sandbox depth** (`docker.sock`, `elevated.allowFrom`, workspaceAccess rw) | B35 | Host-escape routes; B4 is shallow | Backlog |
+| **Sandbox depth** | B4 (enhanced) + B3 | B4 now flags `docker.sock` bind (host escape) + `workspaceAccess=rw`; `tools.elevated.allowFrom` wildcard is B3. A separate B35 is largely redundant | Mostly covered |
 | **Secret redaction in the report** (not just logs) | — | A decoded payload preview could surface a secret value | See HARDENING_BACKLOG #2 |
 | **Suppression governance** (suppressed CRITICAL stays visible; reason/expiry) | — | A suppressed CRITICAL silently uncaps the score | See HARDENING_BACKLOG #3 |
 | **Windows ACL** equivalents of POSIX perm checks | — | Perm checks return UNKNOWN on Windows | Backlog |

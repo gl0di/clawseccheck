@@ -363,6 +363,22 @@ def check_sandbox(ctx: Context) -> Finding:
     binds = dig(cfg, "agents.defaults.sandbox.docker.binds")
     if binds:
         ev.append("agents.defaults.sandbox.docker.binds exposes host paths")
+        # docker.sock bind hands full host control to the sandbox (container escape vector)
+        if isinstance(binds, list):
+            binds_str = " ".join(str(b) for b in binds)
+        else:
+            binds_str = str(binds)
+        if "docker.sock" in binds_str:
+            ev.append(
+                "agents.defaults.sandbox.docker.binds mounts docker.sock — "
+                "grants host control to the sandbox (container escape)"
+            )
+    # Real path: agents.defaults.sandbox.workspaceAccess ("none"/"ro"/"rw")
+    workspace_access = dig(cfg, "agents.defaults.sandbox.workspaceAccess")
+    if workspace_access == "rw":
+        ev.append(
+            "agents.defaults.sandbox.workspaceAccess=rw (agent can write the mounted workspace)"
+        )
     # sandbox.seccomp_profile / sandbox.apparmor_profile do NOT exist as first-class config
     # fields; Docker backend relies on Docker's own profile mechanism
     if mode is None and "exec" in _enabled_tools(cfg):
@@ -375,6 +391,8 @@ def check_sandbox(ctx: Context) -> Finding:
         return _finding("B4", FAIL, "; ".join(ev),
                         "Set agents.defaults.sandbox.mode to 'non-main' or 'all', set "
                         "agents.defaults.sandbox.docker.network to 'bridge' (not 'host'), "
+                        "remove the docker.sock bind from docker.binds (it grants host "
+                        "control to the sandbox), set workspaceAccess to 'none' or 'ro', "
                         "and remove broad host path binds from docker.binds.", ev)
     if mode is None:
         return _finding("B4", UNKNOWN, "No exec tools and no sandbox config — not applicable.", "—")
@@ -2781,6 +2799,103 @@ def check_known_vulns(ctx: Context) -> Finding:
     )
 
 
+# ---------- B41: Credential blast-radius assessment ----------
+
+def check_credential_blast_radius(ctx: Context) -> Finding:
+    """B41 — Credential blast-radius assessment.
+
+    Inventories the credential surface exposed in this OpenClaw config and
+    assesses whether an attacker with untrusted ingress + outbound capability
+    could reach ALL of them in a single compromise.
+
+    WARN    — credentials exist AND the agent has an untrusted-ingress path
+              (open channels or an input tool) AND an outbound/exec capability
+              — one compromise's blast radius spans every listed provider.
+    PASS    — credentials exist but the ingress+outbound combination is not
+              present — blast radius is not broadly reachable.
+    UNKNOWN — no auth.profiles and no gateway.auth.token found to assess.
+
+    PRIVACY: provider names only are included in findings.  The account/email
+    portion of profile keys (after ":") and any token values are NEVER emitted.
+    """
+    cfg = ctx.config
+
+    # --- inventory credential surface ---
+    profiles = dig(cfg, "auth.profiles") or {}
+    has_gateway_token = bool(
+        dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token")
+    )
+
+    # Collect unique provider names from profile keys of the form "<provider>:<account>"
+    # CRITICAL: extract only the part BEFORE the first ":" — never the account/email.
+    providers: list[str] = []
+    if isinstance(profiles, dict):
+        seen: set[str] = set()
+        for key in profiles:
+            provider = str(key).split(":", 1)[0]
+            if provider and provider not in seen:
+                seen.add(provider)
+                providers.append(provider)
+
+    has_credentials = bool(providers) or has_gateway_token
+
+    if not has_credentials:
+        return _finding(
+            "B41", "UNKNOWN",
+            "No credential profiles found to assess.",
+            "—",
+        )
+
+    # --- assess reachability ---
+    tools = _enabled_tools(cfg)
+    open_ch = _open_channels(cfg)
+    has_untrusted_ingress = bool(open_ch) or _hint(tools, INPUT_TOOL_HINTS)
+    has_outbound = _hint(tools, OUTBOUND_TOOL_HINTS) or bool(
+        dig(cfg, "tools.elevated.allowFrom")
+    )
+    reachable = has_untrusted_ingress and has_outbound
+
+    n = len(providers) + (1 if has_gateway_token else 0)
+    provider_list = ", ".join(sorted(providers))
+    gateway_note = " + gateway token" if has_gateway_token else ""
+
+    # Build evidence list — provider names and gateway marker only, never emails/values
+    evidence: list[str] = []
+    if providers:
+        evidence.append(f"providers: {provider_list}")
+    if has_gateway_token:
+        evidence.append("gateway-token: present")
+
+    if reachable:
+        detail = (
+            f"{n} provider credential(s) (providers: {provider_list}){gateway_note} "
+            "are reachable by an agent with untrusted ingress and outbound tools — "
+            "one compromise's blast radius spans all of them. Use least-privilege "
+            "scopes, isolate high-value profiles, and keep them rotatable."
+        )
+        return _finding(
+            "B41", WARN,
+            detail,
+            "Use least-privilege OAuth scopes for each provider profile, isolate "
+            "high-value credentials into dedicated agents with no untrusted-ingress "
+            "channels, and ensure all credentials are rotatable. Remove open channel "
+            "policies (dmPolicy/groupPolicy) or outbound tools where not needed.",
+            evidence,
+        )
+
+    detail = (
+        f"{n} credential profile(s) present; no untrusted-ingress + outbound path "
+        "makes them broadly reachable."
+    )
+    return _finding(
+        "B41", PASS,
+        detail,
+        "Keep channels on allowlist policies and avoid adding outbound tools "
+        "alongside credential profiles without careful scope restrictions.",
+        evidence,
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -2794,6 +2909,7 @@ CHECKS = [
     check_sender_identity, check_control_plane_mutation,
     check_browser_ssrf, check_session_visibility,
     check_untrusted_context, check_known_vulns,
+    check_credential_blast_radius,
 ]
 
 

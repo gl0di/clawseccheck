@@ -20,6 +20,15 @@ Phase 0.18.0, wave 1 — two new checks, both grounded on **real** OpenClaw conf
   (versions `<= 2026.1.28`, fixed `2026.1.29`: Control-UI `gatewayUrl` → gateway-token exfiltration;
   no CVE assigned). Unknown/unparseable versions are `UNKNOWN`, never `PASS`. The advisory table is
   maintained in-source and only asserts against the advisories it lists.
+- **B41 — Credential blast-radius** (`auth.profiles.*`, `gateway.auth.token`). Inventories the
+  credential surface reachable by the agent and WARNs when those credentials co-exist with untrusted
+  ingress + outbound tools (one compromise's blast radius spans all of them). Reports only provider
+  names + counts — **never** the account/email part of a profile key or any token value (PII-safe).
+
+### Changed
+- **B4 (execution sandbox)** now specifically flags `agents.defaults.sandbox.docker.binds` mounting
+  `docker.sock` (host-control / container-escape → FAIL) and `agents.defaults.sandbox.workspaceAccess="rw"`
+  (agent can write the mounted workspace), in addition to the existing mode/network/binds checks.
 
 ### Notes
 - Deferred (documented in `docs/THREAT_COVERAGE.md` / `HARDENING_BACKLOG.md`): B27 action-gate and
