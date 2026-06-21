@@ -116,8 +116,10 @@ class TestTpStaticDetailStrings:
         "Models are local-first.",
         "No installed third-party skills found to inspect.",
         "No MCP servers configured.",
-        "No threat monitoring / detection is set up — if your agent gets compromised "
-        "(e.g. a malicious skill), nothing will alert you.",
+        "No threat-monitoring or detection plugin/skill is configured in this OpenClaw "
+        "config. Monitors set up OUTSIDE it — a separate security agent or workspace, "
+        "host-level IDS/EDR — are not visible to this config-only scan, so this is "
+        "'not detected here', not proof you're unwatched; confirm before relying on it.",
         "No autonomy/heartbeat signal detected.",
         "Agent has persistent memory; confirm it is not written from untrusted input.",
         "No subagent delegation configured.",

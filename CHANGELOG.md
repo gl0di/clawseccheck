@@ -3,6 +3,27 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.31.1] — 2026-06-21
+
+Honesty fix found by a round-4 breadth run (full audit of two real configs — **zero hard
+false positives**; every WARN mapped to a real field, and B9 correctly stayed silent where
+`logging.redactSensitive` was set).
+
+### Fixed
+- **B16 over-claim (§4 "no fabricated facts").** The WARN read "No threat monitoring … nothing
+  will alert you" as an absolute — but a config-only scan cannot see monitors set up OUTSIDE
+  the OpenClaw config (a separate security agent/workspace, host-level IDS/EDR), so on a real
+  setup that *does* have them the HIGH-severity wording asserted something untrue. Reworded to
+  scope the claim to "not detected in this config" and to point at `--ask`/`--attest`
+  (`host_monitors`) for monitoring that lives elsewhere. Hebrew translation updated in lock-step.
+  Detection logic and status are unchanged — wording only.
+
+### Notes
+- `SendUserFile → EGRESS` (the other item the run flagged) is left as-is by decision: the verb
+  taxonomy classifies capability *shape*, not *destination*; "can emit a file" is a real (mild)
+  egress vector, and special-casing a tool name would be the kind of hardcoding the project laws
+  forbid. The verdict (WARN) is correct regardless.
+
 ## [0.31.0] — 2026-06-21
 
 Surfaces finding `evidence` in the main outputs — a value defect found by the round-3 field

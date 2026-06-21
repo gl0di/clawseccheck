@@ -840,21 +840,29 @@ PHRASES: dict[str, dict[str, str]] = {
 
     # ---- B16: Monitoring ----
     # fix (WARN path)
-    "Install a monitoring skill (e.g. ClawSec or openclaw-security-monitor), wire "
-    "audit logging to an alert channel, or schedule ClawSecCheck's own lightweight "
-    "`audit.py --monitor` so changes don't go unnoticed.": {
+    "If you have no detection, add a monitoring skill (e.g. ClawSec or "
+    "openclaw-security-monitor), wire audit logging to an alert channel, or schedule "
+    "ClawSecCheck's own `audit.py --monitor`. If monitoring lives elsewhere, you can "
+    "self-report it via `--ask`/`--attest` (host_monitors) so the host-watch checks "
+    "credit it.": {
         "he": (
-            "התקן מיומנות ניטור (כגון ClawSec או openclaw-security-monitor), חבר "
-            "רישום ביקורת לערוץ התראות, או תזמן את `audit.py --monitor` הקל של "
-            "ClawSecCheck כך ששינויים לא יעברו ללא הבחנה."
+            "אם אין לך זיהוי, הוסף מיומנות ניטור (כגון ClawSec או "
+            "openclaw-security-monitor), חבר רישום ביקורת לערוץ התראות, או תזמן את "
+            "`audit.py --monitor` של ClawSecCheck. אם הניטור נמצא במקום אחר, תוכל "
+            "לדווח עליו עצמית דרך `--ask`/`--attest` (host_monitors) כך שבדיקות "
+            "מעקב-המארח יזקפו אותו לזכותך."
         ),
     },
     # detail (WARN path)
-    "No threat monitoring / detection is set up — if your agent gets compromised "
-    "(e.g. a malicious skill), nothing will alert you.": {
+    "No threat-monitoring or detection plugin/skill is configured in this OpenClaw "
+    "config. Monitors set up OUTSIDE it — a separate security agent or workspace, "
+    "host-level IDS/EDR — are not visible to this config-only scan, so this is "
+    "'not detected here', not proof you're unwatched; confirm before relying on it.": {
         "he": (
-            "לא הוגדר ניטור/זיהוי איומים — אם הסוכן שלך ייפגע "
-            "(למשל, מיומנות זדונית), שום דבר לא יתריע לך."
+            "לא הוגדר תוסף/מיומנות ניטור או זיהוי איומים בתצורת OpenClaw הזו. "
+            "מנגנוני ניטור שהוגדרו מחוצה לה — סוכן אבטחה או סביבת עבודה נפרדת, "
+            "IDS/EDR ברמת המארח — אינם נראים לסריקת-התצורה הזו, ולכן זהו "
+            "'לא זוהה כאן', ולא הוכחה שאינך מנוטר; ודא לפני שתסתמך על כך."
         ),
     },
     "monitoring/alerts in config": {

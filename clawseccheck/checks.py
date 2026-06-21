@@ -1443,11 +1443,15 @@ def check_monitoring(ctx: Context) -> Finding:
                         f"Threat monitoring present: {', '.join(signals[:5])}.",
                         "Keep it enabled and make sure its alerts actually reach you.")
     return _finding("B16", WARN,
-                    "No threat monitoring / detection is set up — if your agent gets compromised "
-                    "(e.g. a malicious skill), nothing will alert you.",
-                    "Install a monitoring skill (e.g. ClawSec or openclaw-security-monitor), wire "
-                    "audit logging to an alert channel, or schedule ClawSecCheck's own lightweight "
-                    "`audit.py --monitor` so changes don't go unnoticed.")
+                    "No threat-monitoring or detection plugin/skill is configured in this OpenClaw "
+                    "config. Monitors set up OUTSIDE it — a separate security agent or workspace, "
+                    "host-level IDS/EDR — are not visible to this config-only scan, so this is "
+                    "'not detected here', not proof you're unwatched; confirm before relying on it.",
+                    "If you have no detection, add a monitoring skill (e.g. ClawSec or "
+                    "openclaw-security-monitor), wire audit logging to an alert channel, or schedule "
+                    "ClawSecCheck's own `audit.py --monitor`. If monitoring lives elsewhere, you can "
+                    "self-report it via `--ask`/`--attest` (host_monitors) so the host-watch checks "
+                    "credit it.")
 
 
 # ---------- B17: autonomy / heartbeat actions ----------
