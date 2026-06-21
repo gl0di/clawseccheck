@@ -15,7 +15,9 @@ import shutil
 from pathlib import Path
 
 from . import attest as _attest
-from .catalog import BY_ID, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
+from .catalog import (
+    ATTESTED, BY_ID, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding,
+)
 from .collector import _OWN_SKILL_NAMES, Context, _read_skill_text, dig, read_skill_python
 from .skillast import analyze_python
 
@@ -115,10 +117,11 @@ def _meta(cid: str):
     return BY_ID[cid]
 
 
-def _finding(cid, status, detail, fix, evidence=None) -> Finding:
+def _finding(cid, status, detail, fix, evidence=None, confidence=None) -> Finding:
     m = _meta(cid)
     return Finding(m.id, m.title, m.severity, status, detail, fix,
-                   m.framework, m.scored, evidence or [], confidence=m.confidence)
+                   m.framework, m.scored, evidence or [],
+                   confidence=confidence or m.confidence)
 
 
 def _channels(cfg: dict) -> dict:
@@ -3188,9 +3191,52 @@ def _agent_is_powerful(ctx: Context) -> bool:
     return can_act and reachable
 
 
+# Keywords that map a free-text self-reported host monitor to a host-watch class.
+# Used only to UPGRADE a gap (absent / unknown / not-scanned) to an attested PASS —
+# never to downgrade a static detection and never to create a FAIL.
+_HOST_ATTEST_HINTS = {
+    "network_ids": ("ids", "ips", "suricata", "zeek", "snort", "network monitor",
+                    "little snitch", "ntopng", "darktrace"),
+    "host_audit": ("audit", "auditd", "syscall", "openbsm", "sysmon"),
+    "file_integrity": ("integrity", "fim", "aide", "tripwire", "osquery", "samhain"),
+    "edr_av": ("edr", "xdr", "antivirus", "anti-virus", "crowdstrike", "defender",
+               "wazuh", "sentinelone", "sentinel one", "carbon black", "clamav",
+               "santa", "cortex", "cylance", "malwarebytes"),
+    "firewall": ("firewall", "ufw", "firewalld", "iptables", "nftables", " pf ",
+                 "packet filter", "alf"),
+}
+
+
+def _attested_host_monitors(ctx: Context, cls: str) -> list[str]:
+    """Self-reported host monitors (attestation) that keyword-match this class."""
+    att = getattr(ctx, "attestation", None) or {}
+    declared = att.get("host_monitors")
+    if not isinstance(declared, list):
+        return []
+    hints = _HOST_ATTEST_HINTS.get(cls, ())
+    out = []
+    for d in declared:
+        if isinstance(d, str) and any(h in f" {d.lower()} " for h in hints):
+            out.append(d)
+    return out
+
+
 def _host_finding(cid: str, cls: str, ctx: Context) -> Finding:
     label = _HOST_CLASS_LABEL[cls]
     host = getattr(ctx, "host", None)
+    # Attestation fills the gap the read-only scan can't see — but only when the
+    # static scan did NOT already confirm this class present (that HIGH evidence wins).
+    static_present = bool(
+        host and host.get("supported")
+        and host.get("classes", {}).get(cls, {}).get("status") == "present")
+    attested = _attested_host_monitors(ctx, cls)
+    if attested and not static_present:
+        return _finding(
+            cid, PASS,
+            f"{label} not confirmed by the read-only scan, but the agent attests it "
+            f"runs on this host: {', '.join(attested)} (self-reported).",
+            "Self-reported — confirm it is actually active and its rules are current.",
+            evidence=attested, confidence=ATTESTED)
     if not host or not host.get("supported"):
         return _finding(
             cid, UNKNOWN,

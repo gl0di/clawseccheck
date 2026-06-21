@@ -3,6 +3,31 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.28.0] — 2026-06-21
+
+Attestation-stabilization pass toward 1.0 — three independent steps, no scoring change.
+
+### Added
+- **`Public API & stability` section** (README): declares what becomes the frozen contract at
+  1.0.0 (CLI flags, `--json`/SARIF schema, `audit()` API, check IDs, status/confidence
+  vocabularies, scoring bands) vs what stays experimental pre-1.0 (the attestation schema
+  `clawseccheck-attest/1`, the B43 verb taxonomy, B44). This is the v1 prerequisite that lets
+  breaking changes require a major bump.
+- **Host-monitor attestation → B50–B54.** A self-reported `host_monitors` entry (e.g. a corporate
+  EDR or a gateway IDS the read-only scan cannot see) now **upgrades** the matching host-watch
+  class from a gap (absent / unknown / not-scanned) to an `ATTESTED` PASS. Keyword-matched per
+  class; it never downgrades a static detection (HIGH wins) and never creates a FAIL.
+
+### Changed
+- **Hardened the B43 verb→blast-radius taxonomy** against real MCP toolset shapes so it survives
+  real use: Slack `schedule_message` and Facebook page-publish verbs now classify as `EGRESS`;
+  added regression tests asserting a real Gmail toolset (draft/label/search, no send) → PASS, and
+  that calendar create/update/respond verbs are not mis-flagged as high-blast.
+
+### Notes
+- `_finding()` gained an optional `confidence=` override (used by the attested host path); the
+  default still derives from the check's `CheckMeta`. No new check IDs.
+
 ## [0.27.0] — 2026-06-21
 
 Stabilizes the attestation layer (a 1.0 prerequisite): the agent now **self-builds** its

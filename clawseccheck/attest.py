@@ -53,6 +53,10 @@ _VERB_CLASSES = (
         "send", "forward", "reply", "post", "publish", "webhook", "http_post",
         "upload", "email_send", "share", "tweet", "broadcast", "dispatch",
         "notify_external", "export",
+        # real-world MCP verb forms not caught by the bare stems above
+        "schedule_message",          # Slack: scheduled send is still egress
+        "page_post", "page_photo", "page_video", "page_profile",  # FB page publish
+        "send_message_from_page", "messenger_send",
     )),
 )
 

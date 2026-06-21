@@ -10,16 +10,19 @@ from __future__ import annotations
 import json
 
 from clawseccheck import attest, audit
-from clawseccheck.catalog import ATTESTED, FAIL, PASS, UNKNOWN, WARN
+from clawseccheck.catalog import ATTESTED, FAIL, HIGH, PASS, UNKNOWN, WARN
 from clawseccheck.checks import (
+    _host_finding,
     check_attestation_mismatch,
     check_capability_blast_radius,
 )
 from clawseccheck.collector import Context
 
 
-def _ctx(config=None, attestation=None):
-    return Context(home=None, config=config or {}, attestation=attestation or {})
+def _ctx(config=None, attestation=None, host=None):
+    c = Context(home=None, config=config or {}, attestation=attestation or {})
+    c.host = host
+    return c
 
 
 # --------------------------------------------------------------- classify_verb
@@ -221,3 +224,72 @@ def test_audit_threads_attestation_through(tmp_path):
         "tools": ["search_threads", "create_draft"]})
     b43 = next(f for f in findings if f.id == "B43")
     assert b43.status == PASS
+
+
+# --------------------------------------------------------------- real MCP toolsets
+# Taxonomy hardened against actual toolset shapes so it survives real use (1.0 trigger).
+GMAIL_REVERSIBLE = [
+    "search_threads", "get_thread", "create_draft", "list_drafts", "list_labels",
+    "create_label", "update_label", "delete_label", "label_message", "label_thread",
+    "unlabel_message", "unlabel_thread",
+]
+
+
+def test_real_gmail_toolset_is_pass():
+    # The session's Gmail toolset holds NO send/forward — only draft/label/search.
+    f = check_capability_blast_radius(_ctx(attestation={"tools": GMAIL_REVERSIBLE}))
+    assert f.status == PASS
+
+
+def test_real_gmail_verbs_never_high_blast():
+    for v in GMAIL_REVERSIBLE:
+        assert attest.classify_verb(v) not in attest.HIGH_BLAST_CLASSES, v
+
+
+def test_slack_send_and_schedule_are_egress():
+    assert attest.classify_verb("slack_send_message") == "EGRESS"
+    assert attest.classify_verb("slack_schedule_message") == "EGRESS"
+
+
+def test_facebook_page_publish_is_egress():
+    for v in ("facebook_pages_create_page_post", "facebook_pages_create_page_photo",
+              "facebook_pages_create_page_video", "facebook_messenger_send_message_from_page"):
+        assert attest.classify_verb(v) == "EGRESS", v
+
+
+def test_calendar_mutations_are_not_high_blast():
+    # create/update/respond on a calendar are reversible-ish — must not false-FAIL.
+    for v in ("create_event", "update_event", "respond_to_event", "get_event", "list_events"):
+        assert attest.classify_verb(v) not in attest.HIGH_BLAST_CLASSES, v
+
+
+# --------------------------------------------------------------- host-monitor attestation
+def test_host_attestation_upgrades_unscanned_to_pass():
+    # No host scan run (host=None), but the agent attests an EDR -> B53 PASS, ATTESTED.
+    ctx = _ctx(attestation={"host_monitors": ["CrowdStrike Falcon EDR"]})
+    f = _host_finding("B53", "edr_av", ctx)
+    assert f.status == PASS
+    assert f.confidence == ATTESTED
+    assert any("CrowdStrike" in e for e in f.evidence)
+
+
+def test_host_attestation_keyword_must_match_class():
+    # An EDR attestation does NOT satisfy the network-IDS class.
+    ctx = _ctx(attestation={"host_monitors": ["CrowdStrike Falcon EDR"]})
+    f = _host_finding("B50", "network_ids", ctx)
+    assert f.status == UNKNOWN  # unscanned + no matching attestation
+
+
+def test_host_attestation_suricata_matches_network_ids():
+    ctx = _ctx(attestation={"host_monitors": ["Suricata on the gateway"]})
+    f = _host_finding("B50", "network_ids", ctx)
+    assert f.status == PASS and f.confidence == ATTESTED
+
+
+def test_static_present_wins_over_attestation():
+    # A real detection (HIGH) is never relabelled to ATTESTED by a self-report.
+    host = {"supported": True, "classes": {
+        "network_ids": {"status": "present", "found": ["suricata"], "active": True}}}
+    ctx = _ctx(attestation={"host_monitors": ["Suricata"]}, host=host)
+    f = _host_finding("B50", "network_ids", ctx)
+    assert f.status == PASS and f.confidence == HIGH

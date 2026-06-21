@@ -398,9 +398,38 @@ CRITICAL caps the score at 49, any open HIGH at 79 — you can never show an "A"
 hole. Grades: A 90+ · B 80–89 · C 70–79 · D 50–69 · F <50. The shareable card shows **only the
 grade + score + trifecta ratio — never the findings** (sharing must not hand attackers your map).
 
+## Public API & stability
+
+ClawSecCheck is pre-1.0 (`0.x`): per the release protocol, **anything may change with a minor
+bump**. This section declares what will become the stable contract at **1.0.0** — the point at
+which breaking it requires a **major** version bump (SemVer).
+
+**Will be stable at 1.0 (the contract):**
+- **CLI flags** and their documented meaning (`--json`, `--sarif`, `--card`, `--monitor`,
+  `--fail-under`, `--exit-code`, …).
+- **`--json` schema:** top-level `score`, `grade`, `capped`, `raw_score`, `trifecta`,
+  `findings[]`, `next_actions[]`; each finding's `id`, `title`, `severity`, `status`, `detail`,
+  `fix`, `framework`, `confidence`.
+- **SARIF 2.1.0 output** shape (rule ids = check ids; `properties.confidence`).
+- **Public Python API:** `clawseccheck.audit(...) -> (ctx, findings, ScoreResult)` and the
+  `Finding` field names.
+- **Check IDs** (`A1`, `B1–B54`, `C3–C5`, `RISK-01..10`): an id, once shipped, keeps its meaning.
+- **Status / confidence vocabularies:** `PASS|WARN|FAIL|UNKNOWN`, `HIGH|MEDIUM|LOW|ATTESTED`.
+- **Scoring bands:** A 90+ · B 80–89 · C 70–79 · D 50–69 · F <50; `UNKNOWN` never scores; advisory
+  checks (`scored=False`) never move the grade.
+
+**Experimental (may still change before 1.0, by design):**
+- The **attestation layer**: the `clawseccheck-attest/1` self-report schema (note the `/1` — it is
+  explicitly versioned to evolve), the `--ask`/`--attest` flow, the B43 **verb→blast-radius
+  taxonomy**, and B44. The `ATTESTED` confidence tier exists to mark exactly this: a self-report is
+  weaker than a config fact, advisory, and never overrides one.
+
+1.0.0 ships when the attestation surface settles, real-world use confirms the zero-false-positive
+property holds, and this contract is frozen.
+
 ## Status
 
-v0.27. Read-only checks A1/B1–B26/B30/B31/B32/B33/B38/B39/B41–B44/B50–B54/C3–C5 (incl. write-protection,
+v0.28. Read-only checks A1/B1–B26/B30/B31/B32/B33/B38/B39/B41–B44/B50–B54/C3–C5 (incl. write-protection,
 self-modification, approval-bypass, deep MCP, update/pinning hygiene, sender identity strength,
 control-plane mutation reachability, browser/SSRF exposure, session visibility/cross-user leak, a
 **Host Watch Posture** ring — is the machine the agent runs on watched at all: network IDS, host
