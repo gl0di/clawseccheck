@@ -89,9 +89,10 @@ def normalize_verb(name) -> str:
     ``mcp__SendGrid__list_templates`` -> ``list_templates``; ``gmail.send`` -> ``send``.
     """
     s = str(name).replace("__", ".")
-    if "." in s:
-        s = s.rsplit(".", 1)[-1]
-    return s.strip().lower()
+    # Take the last NON-EMPTY segment, so a trailing separator can't strip the verb to
+    # nothing and hide it: 'forward__' -> 'forward' (not ''), 'gmail.send' -> 'send'.
+    parts = [p for p in s.split(".") if p.strip()]
+    return (parts[-1] if parts else s).strip().lower()
 
 
 def classify_verb(name: str) -> str:

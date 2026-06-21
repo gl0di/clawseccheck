@@ -3330,6 +3330,15 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
             "real 'tools' list, then re-run with '--attest <file>'.",
         )
     held = _attest.classify_tools(tools)
+    if not held:
+        # A non-empty list that yielded nothing classifiable (all non-string junk):
+        # we read nothing, so report UNKNOWN rather than implying "verified safe".
+        return _finding(
+            "B43", UNKNOWN,
+            "Attested tool inventory had no readable verb names — capability "
+            "blast-radius could not be classified.",
+            "Re-attest 'tools' as a list of the exact tool/verb name strings.",
+        )
     high = {c: held[c] for c in _attest.HIGH_BLAST_CLASSES if c in held}
     if not high:
         return _finding(

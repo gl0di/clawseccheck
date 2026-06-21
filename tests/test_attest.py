@@ -64,6 +64,19 @@ def test_provider_name_does_not_pollute_classification():
     assert attest.classify_verb("mcp__SendGrid__list_templates") == "REVERSIBLE"
 
 
+def test_trailing_separator_does_not_hide_verb():
+    # Regression: a trailing separator must not strip the verb to '' and hide it.
+    assert attest.normalize_verb("forward__") == "forward"
+    assert attest.classify_verb("forward__") == "EGRESS"
+    assert attest.classify_verb("delete_forever__") == "DESTRUCTIVE"
+    assert attest.classify_verb("send.") == "EGRESS"
+
+
+def test_normalize_never_raises_on_separator_only():
+    for s in ("", "__", ".", "...", "   "):
+        assert isinstance(attest.normalize_verb(s), str)
+
+
 def test_namespaced_real_verbs_classify_on_the_verb():
     assert attest.classify_verb("mcp__claude_ai_Slack__slack_send_message") == "EGRESS"
     assert attest.classify_verb("mcp__claude_ai_Gmail__create_draft") == "REVERSIBLE"
@@ -153,6 +166,13 @@ def test_is_ungated():
 
 
 # --------------------------------------------------------------- B43 verdicts
+def test_b43_unknown_when_no_readable_verbs():
+    # Regression: a list with no string entries must be UNKNOWN, not a false PASS.
+    for junk in ([1, 2, 3], [{"k": "v"}], [["nested"]]):
+        f = check_capability_blast_radius(_ctx(attestation={"tools": junk}))
+        assert f.status == UNKNOWN, junk
+
+
 def test_b43_unknown_without_attestation():
     f = check_capability_blast_radius(_ctx())
     assert f.status == UNKNOWN

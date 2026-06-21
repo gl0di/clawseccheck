@@ -3,6 +3,26 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.29.1] — 2026-06-21
+
+Adversarial-review hardening of the attestation surface (capstone before a 1.0 freeze).
+Two false-negative/honesty fixes; no behaviour change for well-formed input.
+
+### Fixed
+- **Trailing-separator verb hiding (false negative).** `normalize_verb` stripped a name with
+  a trailing separator to the empty string, so `forward__` / `send.` / `delete_forever__`
+  classified as `UNKNOWN` and a dangerous verb could slip past B43/B44. It now takes the last
+  **non-empty** segment, so the verb survives.
+- **False-PASS on unreadable inventory.** B43 returned `PASS` ("all reversible") when the
+  attested `tools` list contained no readable verb strings at all (e.g. `[1, 2, 3]`). It now
+  returns `UNKNOWN` — we report what we could not read instead of implying "verified safe".
+
+### Notes
+- Robustness otherwise confirmed by the review: malformed attestations (non-list `tools`,
+  int/None/nested entries, non-list `host_monitors`, huge lists) degrade to UNKNOWN without
+  raising; `is_ungated` is conservative; attestation never overrides a static config fact;
+  zero-network and read-only hold.
+
 ## [0.29.0] — 2026-06-21
 
 Verb-normalization stabilization — makes the B43/B44 taxonomy survive real MCP tool
