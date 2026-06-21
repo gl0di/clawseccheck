@@ -3,6 +3,25 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.31.0] — 2026-06-21
+
+Surfaces finding `evidence` in the main outputs — a value defect found by the round-3 field
+run of the live B44 cross-check.
+
+### Fixed
+- **Evidence was computed but never shown.** B43/B44 (and B31/B42/host checks) name the exact
+  flagged item in `Finding.evidence` — e.g. B44's `granted but not attested: create_filter,
+  gmail_send` — but that list reached only the `--vet`/`--vet-mcp` paths. `--json`, the text
+  report and SARIF dropped it, so a finding said "some high-blast verb is granted but
+  undisclosed" without naming *which*. Naming the dangerous verb is the whole point of the
+  check, so:
+  - `--json`: every finding now carries a sanitized `evidence` array.
+  - text report: FAIL/WARN findings list their evidence (sanitized, capped at 12) under the
+    `why` line.
+  - SARIF: `properties.evidence` added alongside `properties.confidence`.
+  - The `--json` finding contract in README's *Public API & stability* now lists `evidence`.
+- Check logic (B43/B44) is unchanged — it was already correct; only the surfacing was missing.
+
 ## [0.30.1] — 2026-06-21
 
 Test-portability fix found by a field run of the packaged skill.

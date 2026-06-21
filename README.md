@@ -410,7 +410,7 @@ which breaking it requires a **major** version bump (SemVer).
   `--fail-under`, `--exit-code`, …).
 - **`--json` schema:** top-level `score`, `grade`, `capped`, `raw_score`, `trifecta`,
   `findings[]`, `next_actions[]`; each finding's `id`, `title`, `severity`, `status`, `detail`,
-  `fix`, `framework`, `confidence`.
+  `fix`, `framework`, `confidence`, `evidence`.
 - **SARIF 2.1.0 output** shape (rule ids = check ids; `properties.confidence`).
 - **Public Python API:** `clawseccheck.audit(...) -> (ctx, findings, ScoreResult)` and the
   `Finding` field names.
@@ -430,7 +430,7 @@ property holds, and this contract is frozen.
 
 ## Status
 
-v0.30. Read-only checks A1/B1–B26/B30/B31/B32/B33/B38/B39/B41–B44/B50–B54/C3–C5 (incl. write-protection,
+v0.31. Read-only checks A1/B1–B26/B30/B31/B32/B33/B38/B39/B41–B44/B50–B54/C3–C5 (incl. write-protection,
 self-modification, approval-bypass, deep MCP, update/pinning hygiene, sender identity strength,
 control-plane mutation reachability, browser/SSRF exposure, session visibility/cross-user leak, a
 **Host Watch Posture** ring — is the machine the agent runs on watched at all: network IDS, host

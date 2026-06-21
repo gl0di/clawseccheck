@@ -299,6 +299,29 @@ def test_no_attestation_keeps_score_unchanged(tmp_path):
     assert plain["B43"] == UNKNOWN and plain["B44"] == UNKNOWN
 
 
+def test_b44_evidence_names_verbs_in_json(tmp_path):
+    # Field finding (v0.31): the flagged verbs must reach the user, not just be computed.
+    from clawseccheck.report import render_json
+    (tmp_path / "openclaw.json").write_text(
+        json.dumps({"tools": {"allow": ["search_threads", "gmail_send", "create_filter"]}}),
+        encoding="utf-8")
+    _, findings, score = audit(tmp_path, attestation={"tools": ["search_threads"]})
+    data = json.loads(render_json(findings, score))
+    b44 = next(f for f in data["findings"] if f["id"] == "B44")
+    assert b44["status"] == "WARN"
+    joined = " ".join(b44["evidence"])
+    assert "create_filter" in joined and "gmail_send" in joined
+
+
+def test_b44_evidence_in_text_report(tmp_path):
+    from clawseccheck.report import render_report
+    (tmp_path / "openclaw.json").write_text(
+        json.dumps({"tools": {"allow": ["gmail_send"]}}), encoding="utf-8")
+    _, findings, score = audit(tmp_path, attestation={"tools": ["search_threads"]})
+    out = render_report(findings, score)
+    assert "gmail_send" in out
+
+
 def test_audit_threads_attestation_through(tmp_path):
     (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
     _, findings, _ = audit(tmp_path, attestation={

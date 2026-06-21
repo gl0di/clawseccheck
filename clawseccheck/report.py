@@ -93,6 +93,11 @@ def _render_finding(lines, icon, f, lang: str = "en"):
                  f"{_sanitize(title_for(f.id, f.title, lang))}{tag}")
     if f.detail:
         lines.append(f"    {t('report.label_why', lang)}: {_sanitize(tp(f.detail, lang))}")
+    # Surface the concrete evidence (e.g. the exact verbs B43/B44 flagged) when a
+    # FAIL/WARN carries it — naming the specific item is the value of the finding.
+    if f.evidence and f.status in (FAIL, WARN):
+        for ev in f.evidence[:12]:
+            lines.append(f"      - {_sanitize(ev)}")
     lines.append(f"    {t('report.label_fix', lang)}: {_sanitize(tp(f.fix, lang))}")
     lines.append("")
 
@@ -321,7 +326,8 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None) -> st
             {"id": f.id, "title": _sanitize(f.title), "severity": f.severity,
              "status": f.status, "detail": _sanitize(f.detail),
              "fix": _sanitize(f.fix), "framework": f.framework,
-             "confidence": getattr(f, "confidence", "HIGH")}
+             "confidence": getattr(f, "confidence", "HIGH"),
+             "evidence": [_sanitize(e) for e in (f.evidence or [])]}
             for f in findings
         ],
         "next_actions": [

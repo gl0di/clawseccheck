@@ -81,7 +81,8 @@ def render_sarif(
                 "ruleId": f.id,
                 "level": level,
                 "message": {"text": message_text},
-                "properties": {"confidence": getattr(f, "confidence", "HIGH")},
+                "properties": {"confidence": getattr(f, "confidence", "HIGH"),
+                               "evidence": [_sanitize(e) for e in (f.evidence or [])]},
             }
         )
 
