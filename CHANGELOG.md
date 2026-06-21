@@ -3,6 +3,27 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.30.0] — 2026-06-21
+
+First **field-discovered** accuracy fix: a live agent run (the v0.26 attestation round-trip,
+verified end-to-end on a real agent) surfaced a blast-radius blind spot that synthetic tests
+missed.
+
+### Added
+- **`EXEC` blast-radius class** in the B43 verb taxonomy. Arbitrary code/command execution is the
+  broadest blast radius of all — it *subsumes* egress (`curl`), destruction (`rm`) and config
+  mutation — yet a tool like `Bash` previously classified as `UNKNOWN`, so an agent holding only
+  an exec primitive scored B43 `PASS` ("all reversible"). Now `bash`/`shell`/`exec`/`subprocess`/
+  `powershell`/`run_command`/`code_interpreter`/`terminal`/… classify as `EXEC` (high-blast):
+  holding one → at least `WARN`; exec + ungated → `FAIL`. Hints are deliberately high-precision —
+  bare `system`/`eval`/`spawn` are omitted because they match benign reads
+  (`get_system_info`, `evaluate_expression`) and would violate the zero-false-positive law.
+
+### Notes
+- This is exactly the 1.0 "trigger 2" payoff: real-use validation found a real gap. The flow
+  itself (agent self-reports → file written → `--attest` consumes it → B43/B44 resolve at
+  `ATTESTED`) was confirmed working on a live agent.
+
 ## [0.29.1] — 2026-06-21
 
 Adversarial-review hardening of the attestation surface (capstone before a 1.0 freeze).

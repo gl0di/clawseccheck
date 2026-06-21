@@ -3344,8 +3344,9 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
         return _finding(
             "B43", PASS,
             "All attested tools are reversible / non-egress — no high-blast-radius "
-            "verb (send/forward, delete-forever, mailbox-config) is in the agent's "
-            "hands, so forward-exfil and delete-evidence are not possible.",
+            "verb (arbitrary exec/shell, send/forward, delete-forever, mailbox-config) "
+            "is in the agent's hands, so forward-exfil and delete-evidence are not "
+            "possible.",
             "Keep the toolset minimal; re-attest after any tool grant.",
         )
     evidence = [f"{cls}: {', '.join(sorted(set(names)))}" for cls, names in high.items()]

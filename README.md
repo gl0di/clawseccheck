@@ -131,7 +131,8 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
   only; it cannot see the agent's *real tool/verb inventory* — config lists tool *names* as opaque
   strings. The attestation layer closes that: `--ask` emits a template the running agent fills with
   its own ground truth, and `--attest <file>` feeds it back. **B43** classifies the held verbs by
-  blast radius — `MAILBOX_CONFIG` (auto-forward/filter/delegation — a persistent silent channel),
+  blast radius — `EXEC` (bash/shell/exec — the broadest: subsumes egress+destruction),
+  `MAILBOX_CONFIG` (auto-forward/filter/delegation — a persistent silent channel),
   `DESTRUCTIVE` (delete-forever/purge), `EGRESS` (send/forward/post), `REVERSIBLE`
   (search/get/draft/label). A reversible-only toolset *passes* (forward-exfil and delete-evidence
   are physically impossible); a high-blast verb that can fire without approval *fails*. **B44**
@@ -429,7 +430,7 @@ property holds, and this contract is frozen.
 
 ## Status
 
-v0.29.1. Read-only checks A1/B1–B26/B30/B31/B32/B33/B38/B39/B41–B44/B50–B54/C3–C5 (incl. write-protection,
+v0.30. Read-only checks A1/B1–B26/B30/B31/B32/B33/B38/B39/B41–B44/B50–B54/C3–C5 (incl. write-protection,
 self-modification, approval-bypass, deep MCP, update/pinning hygiene, sender identity strength,
 control-plane mutation reachability, browser/SSRF exposure, session visibility/cross-user leak, a
 **Host Watch Posture** ring — is the machine the agent runs on watched at all: network IDS, host

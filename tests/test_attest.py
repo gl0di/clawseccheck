@@ -42,6 +42,39 @@ def test_classify_egress():
         assert attest.classify_verb(v) == "EGRESS", v
 
 
+def test_classify_exec_is_high_blast():
+    # Field finding (v0.30): arbitrary exec is the broadest blast radius and was UNKNOWN.
+    for v in ("Bash", "bash", "shell", "run_shell_command", "exec", "subprocess_run",
+              "powershell", "run_command", "code_interpreter", "terminal"):
+        assert attest.classify_verb(v) == "EXEC", v
+    assert "EXEC" in attest.HIGH_BLAST_CLASSES
+
+
+def test_exec_hints_do_not_false_positive_on_benign_reads():
+    # The omitted bare 'system'/'eval'/'spawn' would have caught these — they must NOT.
+    for v in ("get_system_info", "system_status", "evaluate_expression",
+              "evaluate_model", "spawn_subagent", "list_events"):
+        assert attest.classify_verb(v) != "EXEC", v
+
+
+def test_b43_flags_a_lone_exec_tool():
+    # Regression for the field gap: an agent holding only Bash must NOT be PASS.
+    warn = check_capability_blast_radius(_ctx(attestation={"tools": ["Bash"]}))
+    assert warn.status == WARN and any("EXEC" in e for e in warn.evidence)
+    fail = check_capability_blast_radius(_ctx(attestation={
+        "tools": ["Bash"], "untrusted_to_action": "ungated"}))
+    assert fail.status == FAIL
+
+
+def test_b43_real_session_toolset_warns():
+    # The exact toolset from the field report — Bash makes it high-blast.
+    toolset = ["Agent", "AskUserQuestion", "Bash", "Edit", "Read", "ScheduleWakeup",
+               "SendUserFile", "Skill", "ToolSearch", "Workflow", "Write"]
+    f = check_capability_blast_radius(_ctx(attestation={"tools": toolset}))
+    assert f.status == WARN
+    assert any("EXEC" in e for e in f.evidence)
+
+
 def test_classify_reversible():
     for v in ("search_threads", "get_thread", "create_draft", "label_message",
               "list_labels", "archive_thread"):

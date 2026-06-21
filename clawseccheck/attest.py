@@ -37,6 +37,15 @@ SCHEMA_ID = "clawseccheck-attest/1"
 # rule, filter, delegation, signature, auto-responder) installs a *persistent silent
 # channel* that keeps exfiltrating after the agent stops acting.
 _VERB_CLASSES = (
+    # EXEC is the broadest blast radius of all: arbitrary code/command execution
+    # SUBSUMES egress (curl), destruction (rm) and config mutation. It is the single
+    # most dangerous primitive an agent can hold, so it ranks first. Hints are kept
+    # high-precision on purpose — bare "system"/"eval"/"spawn" are omitted because they
+    # match benign reads (get_system_info, evaluate_expression) and would FP under §5.
+    ("EXEC", (
+        "bash", "shell", "exec", "subprocess", "powershell", "run_command",
+        "run_code", "code_interpreter", "terminal", "os_command", "shell_command",
+    )),
     ("MAILBOX_CONFIG", (
         "auto_forward", "autoforward", "auto-forward", "forward_rule", "forwarding",
         "create_filter", "add_filter", "set_filter", "update_filter",
@@ -111,7 +120,7 @@ def classify_verb(name: str) -> str:
     return "UNKNOWN"
 
 
-HIGH_BLAST_CLASSES = ("MAILBOX_CONFIG", "DESTRUCTIVE", "EGRESS")
+HIGH_BLAST_CLASSES = ("EXEC", "MAILBOX_CONFIG", "DESTRUCTIVE", "EGRESS")
 
 
 def classify_tools(tools) -> dict:
