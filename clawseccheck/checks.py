@@ -3392,11 +3392,13 @@ def check_attestation_mismatch(ctx: Context) -> Finding:
             "self-report against.",
             "—",
         )
-    reported_l = {str(t).lower() for t in reported if isinstance(t, (str, bytes))}
+    # Compare on the NORMALIZED verb so MCP/provider namespacing doesn't cause a false
+    # mismatch (config 'mcp__Gmail__send_email' vs attested 'send_email' are the same verb).
+    reported_l = {_attest.normalize_verb(t) for t in reported if isinstance(t, (str, bytes))}
     undisclosed = [
         str(t) for t in listed
         if _attest.classify_verb(str(t)) in _attest.HIGH_BLAST_CLASSES
-        and str(t).lower() not in reported_l
+        and _attest.normalize_verb(t) not in reported_l
     ]
     if undisclosed:
         return _finding(

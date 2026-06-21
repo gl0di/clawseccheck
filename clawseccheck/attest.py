@@ -44,6 +44,11 @@ _VERB_CLASSES = (
         "set_signature", "signature", "vacation", "auto_reply", "autoresponder",
         "out_of_office", "set_rule", "create_rule", "forward_to",
     )),
+    # DESTRUCTIVE is reserved for IRREVERSIBLE loss. A bare 'delete'/'remove' is left
+    # UNKNOWN on purpose: in most real APIs it is a reversible soft-delete (trash, archive,
+    # unsend, delete a draft/label), so flagging every 'delete_*' as high-blast would
+    # manufacture false FAILs and break the zero-false-positive law. Only names that
+    # *spell out* irreversibility land here.
     ("DESTRUCTIVE", (
         "delete_forever", "delete_permanently", "permanently_delete", "empty_trash",
         "purge", "destroy", "expunge", "hard_delete", "drop_table", "drop_database",
@@ -72,12 +77,31 @@ _REVERSIBLE_HINTS = (
 GATE_CLASSES = ("exec", "send", "write")
 
 
+def normalize_verb(name) -> str:
+    """Isolate the verb from MCP / provider namespacing so classification matches the
+    ACTION, not the server name.
+
+    Real tool names arrive wrapped: ``mcp__claude_ai_Slack__slack_send_message`` or
+    dotted ``gmail.send``. Substring-matching the whole string lets a *provider* name
+    pollute the verdict — e.g. ``mcp__SendGrid__list_templates`` would read as EGRESS
+    on the "send" in "SendGrid" though the verb is a reversible ``list_templates``.
+    Stripping to the last namespace segment fixes that:
+    ``mcp__SendGrid__list_templates`` -> ``list_templates``; ``gmail.send`` -> ``send``.
+    """
+    s = str(name).replace("__", ".")
+    if "." in s:
+        s = s.rsplit(".", 1)[-1]
+    return s.strip().lower()
+
+
 def classify_verb(name: str) -> str:
     """Map one tool/verb name to a blast-radius class.
 
     Returns one of MAILBOX_CONFIG, DESTRUCTIVE, EGRESS, REVERSIBLE, or UNKNOWN.
+    Classification runs on the normalized verb (namespace stripped) so a provider
+    name can never decide the class.
     """
-    n = str(name).lower()
+    n = normalize_verb(name)
     for cls, hints in _VERB_CLASSES:
         if any(h in n for h in hints):
             return cls

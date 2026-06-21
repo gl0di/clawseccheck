@@ -3,6 +3,29 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.29.0] — 2026-06-21
+
+Verb-normalization stabilization — makes the B43/B44 taxonomy survive real MCP tool
+names. No scoring change, no new check IDs.
+
+### Fixed
+- **Provider-name pollution (latent false positive).** Real tools arrive namespaced
+  (`mcp__claude_ai_Slack__slack_send_message`, dotted `gmail.send`). Substring-matching the
+  whole string let a *provider* name decide the class — e.g.
+  `mcp__SendGrid__list_templates` read as `EGRESS` on the "send" in "SendGrid" though the
+  verb is a reversible list. Classification now runs on the **normalized verb** (namespace
+  stripped to the last segment), so only the action decides the class.
+- **B44 namespace mismatch.** B44 now compares normalized verbs on both sides, so a config
+  grant `mcp__Gmail__send_email` and an attested `send_email` are recognized as the same
+  verb instead of a false "undisclosed capability".
+
+### Notes
+- New `attest.normalize_verb()`; `classify_verb()` and B44 both route through it.
+- Documented the intentional taxonomy boundary: a bare `delete`/`remove` stays `UNKNOWN`
+  (most real APIs soft-delete reversibly); only names that spell out irreversibility
+  (`delete_forever`, `purge`, `expunge`, …) are `DESTRUCTIVE`. Broadening it would
+  manufacture false FAILs and break the zero-false-positive law.
+
 ## [0.28.0] — 2026-06-21
 
 Attestation-stabilization pass toward 1.0 — three independent steps, no scoring change.

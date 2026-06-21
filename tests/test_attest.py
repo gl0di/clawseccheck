@@ -52,6 +52,25 @@ def test_classify_unknown():
     assert attest.classify_verb("frobnicate_quux") == "UNKNOWN"
 
 
+# --------------------------------------------------------------- verb normalization
+def test_normalize_strips_mcp_namespace():
+    assert attest.normalize_verb("mcp__claude_ai_Slack__slack_send_message") == "slack_send_message"
+    assert attest.normalize_verb("gmail.send") == "send"
+    assert attest.normalize_verb("create_draft") == "create_draft"
+
+
+def test_provider_name_does_not_pollute_classification():
+    # 'SendGrid' contains 'send' but the verb is a reversible list — must NOT be EGRESS.
+    assert attest.classify_verb("mcp__SendGrid__list_templates") == "REVERSIBLE"
+
+
+def test_namespaced_real_verbs_classify_on_the_verb():
+    assert attest.classify_verb("mcp__claude_ai_Slack__slack_send_message") == "EGRESS"
+    assert attest.classify_verb("mcp__claude_ai_Gmail__create_draft") == "REVERSIBLE"
+    assert attest.classify_verb(
+        "mcp__claude_ai_Zapier__facebook_pages_create_page_post") == "EGRESS"
+
+
 def test_auto_forward_beats_plain_egress():
     # 'auto_forward' must classify as MAILBOX_CONFIG, not EGRESS — order matters.
     assert attest.classify_verb("auto_forward") == "MAILBOX_CONFIG"
@@ -188,6 +207,15 @@ def test_b44_warn_undisclosed_high_blast():
     f = check_attestation_mismatch(_ctx(config=cfg, attestation=att))
     assert f.status == WARN
     assert any("create_filter" in e for e in f.evidence)
+
+
+def test_b44_namespace_mismatch_is_not_flagged():
+    # config lists the MCP-namespaced grant; agent reports the bare verb — same thing,
+    # so normalization must prevent a false "undisclosed".
+    cfg = {"tools": {"allow": ["mcp__claude_ai_Gmail__send_email"]}}
+    att = {"tools": ["send_email"]}
+    f = check_attestation_mismatch(_ctx(config=cfg, attestation=att))
+    assert f.status == PASS
 
 
 def test_b44_pass_all_acknowledged():

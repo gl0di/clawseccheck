@@ -2,7 +2,7 @@
 
 Honest map of what ClawSecCheck checks today, what it does **not** yet check, and where
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
-all (so they can't even surface as a finding). Updated 2026-06-21 for v0.28.0.
+all (so they can't even surface as a finding). Updated 2026-06-21 for v0.29.0.
 
 Current catalog: `A1, B1–B26, B30–B33, B38, B39, B41–B44, B50–B54, C3–C5`, plus the
 combinational risk engine `RISK-01..RISK-10`, the install-time vetters `--vet` (B13 on
