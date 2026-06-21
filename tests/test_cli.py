@@ -55,6 +55,21 @@ def test_cli_attest_runs(tmp_path, capsys):
     assert '"B43"' in out
 
 
+def test_cli_attest_stdin(tmp_path, capsys, monkeypatch):
+    import io
+    import json
+    from clawseccheck import attest
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    payload = json.dumps({"schema": attest.SCHEMA_ID,
+                          "tools": ["search_threads", "create_draft"]})
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    rc = main(["--home", str(tmp_path), "--no-native", "--no-host",
+               "--no-history", "--attest", "-", "--json"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert '"B43"' in out and '"PASS"' in out
+
+
 def test_cli_attest_bad_file_warns_but_runs(tmp_path, capsys):
     (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
     bad = tmp_path / "bad.json"

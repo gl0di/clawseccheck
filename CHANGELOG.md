@@ -3,6 +3,28 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.27.0] — 2026-06-21
+
+Stabilizes the attestation layer (a 1.0 prerequisite): the agent now **self-builds** its
+self-report through a guided interrogation, instead of a human hand-filling the empty
+template.
+
+### Added
+- **Interrogation protocol** (SKILL.md): a 5-step playbook for the running agent — read its
+  own tool/verb names off its definitions (Step 2), ask the user in plain language for the
+  harness/policy facts only they know (approval gating, untrusted→action, host monitors;
+  Step 3), assemble the JSON, feed it, and report B43/B44. Unknown answers stay `unknown` —
+  never invented.
+- **`--attest -`** — read the attestation JSON from **stdin**, so the agent can pipe a
+  self-report straight in without writing a temp file (an auditable file is still preferred
+  and documented first). New `attest.parse_attestation()` validates string-or-object input;
+  the file loader and the stdin path now validate identically.
+
+### Notes
+- Read-only is preserved: the engine only reads; the agent assembles the report with its own
+  tools. No new check IDs, no scoring change — this is a usability/stabilization release for
+  the v0.26 attestation layer.
+
 ## [0.26.0] — 2026-06-21
 
 Adds the **attestation layer** — the first time the audit reads more than config files.

@@ -101,18 +101,19 @@ def classify_tools(tools) -> dict:
 
 
 # ---------------------------------------------------------------- load / template
-def load_attestation(path) -> dict:
-    """Read + minimally validate an attestation JSON file. Read-only.
+def parse_attestation(data) -> dict:
+    """Validate an attestation given as a JSON string or an already-parsed object.
 
-    Returns the parsed dict, or ``{}`` on any problem (missing file, bad JSON,
-    non-object root, wrong schema). Never raises — a malformed attestation simply
-    means "no attestation", so checks fall back to UNKNOWN.
+    Returns the dict, or ``{}`` on any problem (bad JSON, non-object root, unknown
+    schema version). Never raises — a malformed attestation means "no attestation",
+    so checks fall back to UNKNOWN. Shared by the file loader and the stdin path so
+    both validate identically.
     """
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return {}
+    if isinstance(data, (str, bytes)):
+        try:
+            data = json.loads(data)
+        except ValueError:
+            return {}
     if not isinstance(data, dict):
         return {}
     schema = data.get("schema")
@@ -120,6 +121,19 @@ def load_attestation(path) -> dict:
         # Unknown schema version — refuse to guess its shape.
         return {}
     return data
+
+
+def load_attestation(path) -> dict:
+    """Read + minimally validate an attestation JSON file. Read-only.
+
+    Returns the parsed dict, or ``{}`` on any problem (missing file, bad JSON,
+    non-object root, wrong schema). Never raises.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return parse_attestation(fh.read())
+    except OSError:
+        return {}
 
 
 def template() -> dict:

@@ -93,7 +93,8 @@ def main(argv=None) -> int:
                    help="emit an attestation template (JSON) for the agent to self-report "
                         "facts the config can't show; fill it, then pass --attest")
     p.add_argument("--attest", metavar="PATH",
-                   help="enrich the audit with an agent self-report JSON (enables B43/B44)")
+                   help="enrich the audit with an agent self-report JSON (enables B43/B44); "
+                        "use '-' to read the JSON from stdin")
     p.add_argument("--badge", metavar="PATH", help="write a shareable SVG badge to PATH")
     p.add_argument("--html", metavar="PATH", help="write a standalone HTML report to PATH")
     p.add_argument("--prompts", action="store_true",
@@ -245,9 +246,14 @@ def main(argv=None) -> int:
     attestation = None
     if args.attest:
         from . import attest as _attest  # noqa: PLC0415
-        attestation = _attest.load_attestation(Path(args.attest).expanduser())
+        if args.attest == "-":
+            attestation = _attest.parse_attestation(sys.stdin.read())
+            src = "stdin"
+        else:
+            attestation = _attest.load_attestation(Path(args.attest).expanduser())
+            src = args.attest
         if not attestation:
-            _emit(f"⚠ could not read a valid attestation from {args.attest} "
+            _emit(f"⚠ could not read a valid attestation from {src} "
                   "(ignored; B43/B44 stay UNKNOWN). See 'clawseccheck --ask'.")
 
     logger.info("auditing home=%s", args.home)

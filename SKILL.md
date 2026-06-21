@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 0.26.0
+version: 0.27.0
 description: Free, local, read-only security self-audit for your own OpenClaw agent. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true}}
 ---
@@ -173,25 +173,45 @@ whether untrusted input can reach a side-effect, or host monitors a file scan ca
 of that is in any config field. The **attestation layer** lets the running agent self-report those
 facts so the audit can classify capability-level blast radius (B43/B44).
 
+You (the assistant) build the self-report yourself by running this short **interrogation protocol**.
+Do NOT just dump the empty template on the user — most of it you can answer from your own runtime,
+and the rest you ask in plain language.
+
+**Step 1 — see the questions.**
 ```
-python3 {baseDir}/audit.py --ask        # emits a JSON template with the questions
+python3 {baseDir}/audit.py --ask
 ```
 
-Then **fill the template from your own (the assistant's) ground truth** — list the exact tool/verb
-names you can actually invoke in this session, and answer the approval/gating questions honestly.
-Save it to a local file and re-run:
+**Step 2 — answer what only YOU know (your tools).** List the **exact** tool/verb names you can
+actually invoke in this session — read them off your own tool definitions, do not guess generic
+names. This is the most important field: it is what lets the audit see whether a `send` / `forward`
+/ `delete_forever` / `create_filter` verb is even in your hands. If you have none of those, say so.
 
+**Step 3 — ask the user what only THEY know.** Ask these in plain language (one short message), because
+they describe the *harness/policy* around you, which you cannot fully see:
+> - "When I take an action like sending a message or running a command, does your setup make me ask
+>    you first, or can I just do it?" → `approval_gates`
+> - "If I'm working from an email or a web page I fetched, could a send / run / delete happen without
+>    you approving it?" → `untrusted_to_action` (`gated` / `ungated`)
+> - "Any security monitoring on this machine a file scan wouldn't see — a work EDR agent, a network
+>    IDS on the gateway?" → `host_monitors`
+
+If the user doesn't know, leave the field `unknown` — never invent an answer.
+
+**Step 4 — assemble the JSON and feed it.** Fill the template from Steps 2–3. Either write it to a
+local file the user can inspect and pass the path, or pipe it straight in with `-`:
 ```
-python3 {baseDir}/audit.py --attest <filled.json>
+python3 {baseDir}/audit.py --attest answers.json     # auditable file (preferred)
+python3 {baseDir}/audit.py --attest -                # or pipe the JSON via stdin
 ```
 
-This adds two findings, both at `ATTESTED` confidence (a self-report is weaker than a config fact,
-so it is advisory and never overrides one):
-- **B43 — Capability blast-radius.** If you hold only reversible verbs (search/get/draft/label) →
-  PASS: "forward-exfil and delete-evidence are physically impossible." If you hold a send/forward,
-  delete-forever, or mailbox-config (auto-forward/filter) verb that can fire without approval → FAIL.
-- **B44 — Self-report ⇄ config drift.** If the config's `tools.allow` grants a dangerous verb you did
-  *not* list, that mismatch is flagged (drift / blind spot / something masking a capability).
+**Step 5 — report B43/B44** in plain language. Both are `ATTESTED` confidence (a self-report is
+weaker than a config fact — advisory, and it never overrides one):
+- **B43 — Capability blast-radius.** Only reversible verbs (search/get/draft/label) → PASS:
+  "forward-exfil and delete-evidence are physically impossible." A send/forward, delete-forever, or
+  mailbox-config (auto-forward/filter) verb that can fire without approval → FAIL.
+- **B44 — Self-report ⇄ config drift.** Config `tools.allow` grants a dangerous verb you did *not*
+  list → flagged (drift / blind spot / something masking a capability).
 
 Boundary: this is introspection only. **Never perform a side-effectful action to "test" a capability**
 (do not actually send, forward, delete, or exec). Report what you hold; do not exercise it.

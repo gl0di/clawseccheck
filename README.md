@@ -400,11 +400,12 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-v0.26. Read-only checks A1/B1–B26/B30/B31/B32/B33/B38/B39/B41–B44/B50–B54/C3–C5 (incl. write-protection,
+v0.27. Read-only checks A1/B1–B26/B30/B31/B32/B33/B38/B39/B41–B44/B50–B54/C3–C5 (incl. write-protection,
 self-modification, approval-bypass, deep MCP, update/pinning hygiene, sender identity strength,
 control-plane mutation reachability, browser/SSRF exposure, session visibility/cross-user leak, a
 **Host Watch Posture** ring — is the machine the agent runs on watched at all: network IDS, host
-audit, file-integrity, EDR, and host firewall — and an **attestation layer** (`--ask`/`--attest`)
+audit, file-integrity, EDR, and host firewall — and an **attestation layer** (`--ask`/`--attest`,
+with a guided interrogation protocol so the agent self-builds the report; `--attest -` reads stdin)
 that classifies capability-level blast radius from the agent's own self-report: B43 dangerous-verb
 inventory, B44 self-report ⇄ config drift),
 installed-skill malware vetting, baseline suppression + governance, the built-in

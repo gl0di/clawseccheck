@@ -85,6 +85,34 @@ def test_load_valid_roundtrip(tmp_path):
     assert attest.load_attestation(p)["tools"] == ["search", "send_email"]
 
 
+def test_parse_attestation_from_dict():
+    d = {"schema": attest.SCHEMA_ID, "tools": ["x"]}
+    assert attest.parse_attestation(d) == d
+
+
+def test_parse_attestation_from_json_string():
+    s = json.dumps({"schema": attest.SCHEMA_ID, "tools": ["search"]})
+    assert attest.parse_attestation(s)["tools"] == ["search"]
+
+
+def test_parse_attestation_bad_json_string():
+    assert attest.parse_attestation("{not json") == {}
+
+
+def test_parse_attestation_non_object():
+    assert attest.parse_attestation("[1,2]") == {}
+    assert attest.parse_attestation(42) == {}
+
+
+def test_parse_attestation_wrong_schema():
+    assert attest.parse_attestation({"schema": "other/2", "tools": ["x"]}) == {}
+
+
+def test_parse_attestation_no_schema_ok():
+    # schema is optional; absence is allowed
+    assert attest.parse_attestation({"tools": ["search"]})["tools"] == ["search"]
+
+
 def test_template_is_valid_and_complete():
     t = attest.template()
     assert t["schema"] == attest.SCHEMA_ID
