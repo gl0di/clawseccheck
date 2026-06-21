@@ -43,7 +43,7 @@ def test_json_includes_confidence(tmp_path):
     data = json.loads(render_json(findings, score))
     assert data["findings"]
     assert all("confidence" in f for f in data["findings"])
-    assert {f["confidence"] for f in data["findings"]} <= {"HIGH", "MEDIUM", "LOW"}
+    assert {f["confidence"] for f in data["findings"]} <= {"HIGH", "MEDIUM", "LOW", "ATTESTED"}
 
 
 def test_sarif_includes_confidence():

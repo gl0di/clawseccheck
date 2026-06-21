@@ -30,12 +30,13 @@ from .sarif import render_sarif
 from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
 from .guide import suggest_actions, render_next_actions
 
-__version__ = "0.25.0"
+__version__ = "0.26.0"
 
 
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
           include_host: bool = False, host_root: str = "/",
-          native_bin: str = "openclaw", native_timeout: int = 60):
+          native_bin: str = "openclaw", native_timeout: int = 60,
+          attestation: dict | None = None):
     """Run the full audit. Returns (ctx, findings, ScoreResult).
 
     `include_native=False` and `include_host=False` keep the engine fully offline
@@ -45,10 +46,16 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
 
     Host detection is populated BEFORE run_all so the B50–B54 checks can read it.
     When off, ctx.host stays None and those checks report UNKNOWN (no score impact).
+
+    `attestation` (the agent's self-report; see attest.py) enriches the audit: when
+    omitted, the attestation checks (B43/B44) report UNKNOWN and the score is
+    unchanged. Passed straight through to ctx so the engine stays deterministic.
     """
     ctx = collect(home)
     if include_host:
         ctx.host = _host_detect(root=host_root)
+    if attestation:
+        ctx.attestation = attestation
     findings = run_all(ctx)
     ignore = _baseline.load_ignore(home)
     _baseline.apply(findings, ignore)

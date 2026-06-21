@@ -89,6 +89,11 @@ def main(argv=None) -> int:
                    help="print a live red-team payload suite for adversarial self-testing")
     p.add_argument("--dryrun", action="store_true",
                    help="print a behavioral dry-run harness (prompt-injection self-test across all sources)")
+    p.add_argument("--ask", action="store_true",
+                   help="emit an attestation template (JSON) for the agent to self-report "
+                        "facts the config can't show; fill it, then pass --attest")
+    p.add_argument("--attest", metavar="PATH",
+                   help="enrich the audit with an agent self-report JSON (enables B43/B44)")
     p.add_argument("--badge", metavar="PATH", help="write a shareable SVG badge to PATH")
     p.add_argument("--html", metavar="PATH", help="write a standalone HTML report to PATH")
     p.add_argument("--prompts", action="store_true",
@@ -211,6 +216,12 @@ def main(argv=None) -> int:
         _emit(render_dryrun(make_scenarios(), ascii_only))
         return 0
 
+    if args.ask:
+        import json as _json  # noqa: PLC0415
+        from . import attest as _attest  # noqa: PLC0415
+        _emit(_json.dumps(_attest.template(), indent=2, ensure_ascii=False))
+        return 0
+
     if args.show_suppressed:
         ignore = load_ignore(Path(args.home).expanduser())
         if not ignore:
@@ -231,9 +242,18 @@ def main(argv=None) -> int:
         _emit(render_events(load_events(args.events), ascii_only))
         return 0
 
+    attestation = None
+    if args.attest:
+        from . import attest as _attest  # noqa: PLC0415
+        attestation = _attest.load_attestation(Path(args.attest).expanduser())
+        if not attestation:
+            _emit(f"⚠ could not read a valid attestation from {args.attest} "
+                  "(ignored; B43/B44 stay UNKNOWN). See 'clawseccheck --ask'.")
+
     logger.info("auditing home=%s", args.home)
     ctx, findings, score = audit(args.home, include_native=not args.no_native,
-                                 include_host=not args.no_host)
+                                 include_host=not args.no_host,
+                                 attestation=attestation)
     logger.debug("ran %d checks", len(findings))
     logger.info("score=%s grade=%s", score.score, score.grade)
 

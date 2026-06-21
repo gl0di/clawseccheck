@@ -3,6 +3,42 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [0.26.0] — 2026-06-21
+
+Adds the **attestation layer** — the first time the audit reads more than config files.
+The static scan sees only what the config *records*; an agent's real tool/verb inventory,
+whether untrusted input can reach a side-effect, and host monitors a file scan can't see
+are not in any config field. The agent now self-reports those facts in a small JSON
+(`--ask` emits a template, `--attest` consumes it), unlocking capability-level least
+privilege without inventing config fields. Local, read-only, no network — the self-report
+is a local file the user's agent fills in.
+
+### Added
+- **`--ask`** — emit an attestation template (JSON) listing exactly the facts the config
+  can't show, with inline guidance for the agent to self-report.
+- **`--attest <file>`** — enrich the audit with the agent's self-report. Threaded through
+  `audit(..., attestation=...)`; with no attestation the new checks report `UNKNOWN` and the
+  score is unchanged (fully backward-compatible).
+- **B43 — Capability blast-radius / dangerous-verb inventory.** Classifies the agent's REAL
+  held verbs by blast radius: `MAILBOX_CONFIG` (auto-forward/filter/delegation — a persistent
+  silent channel, the highest blast), `DESTRUCTIVE` (delete-forever/purge), `EGRESS`
+  (send/forward/post), `REVERSIBLE` (search/get/draft/label). A toolset of only reversible
+  verbs **PASSes** (forward-exfil and delete-evidence are physically impossible); a high-blast
+  verb that can fire without approval **FAILs**.
+- **B44 — Attestation ⇄ config mismatch.** Cross-checks the self-report against the static
+  `tools.allow` list: a high-blast verb the config grants but the agent omitted is flagged as
+  drift / blind-spot / injection-mask — a signal no static-only scan can produce.
+- **`ATTESTED` confidence tier** (below `HIGH`/`MEDIUM`): a self-report is weaker evidence than
+  a config fact, so attested findings are advisory (not scored) and labelled as such in
+  text/JSON/SARIF. An attestation only resolves an `UNKNOWN` or sharpens a heuristic — it never
+  overrides a hard config fact.
+
+### Notes
+- New module `clawseccheck/attest.py` (stdlib only): schema, verb taxonomy, loader, template.
+- Read-only by construction: the layer asks introspective questions and classifies strings — it
+  never has the agent perform a side-effectful "test". Partially addresses the long-standing
+  B27/B28 runtime gaps (action-gate / provenance) that have no config surface.
+
 ## [0.25.0] — 2026-06-20
 
 Closes the open-gap triage from THREAT_COVERAGE honestly: builds the one item that fits the laws

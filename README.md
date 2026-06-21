@@ -127,6 +127,18 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
   Firewall). LOW severity, **never FAIL**: a missing monitor is a WARN only when the agent is
   high-privilege, otherwise PASS; anything not determinable read-only is `UNKNOWN`. Where it can be
   read without running a command, it distinguishes *enabled* from merely *installed*.
+- **B43 / B44 — capability blast-radius (attestation layer):** the static scan reads config files
+  only; it cannot see the agent's *real tool/verb inventory* — config lists tool *names* as opaque
+  strings. The attestation layer closes that: `--ask` emits a template the running agent fills with
+  its own ground truth, and `--attest <file>` feeds it back. **B43** classifies the held verbs by
+  blast radius — `MAILBOX_CONFIG` (auto-forward/filter/delegation — a persistent silent channel),
+  `DESTRUCTIVE` (delete-forever/purge), `EGRESS` (send/forward/post), `REVERSIBLE`
+  (search/get/draft/label). A reversible-only toolset *passes* (forward-exfil and delete-evidence
+  are physically impossible); a high-blast verb that can fire without approval *fails*. **B44**
+  cross-checks the self-report against the config `tools.allow` and flags a high-blast verb the
+  config grants but the agent omitted (drift / blind spot / masking). Both at `ATTESTED` confidence —
+  a self-report is weaker evidence than a config fact, so they are advisory and never override one.
+  Read-only and introspective: the agent reports what it holds, it never *exercises* a verb to test it.
 - Plus your platform's own **`openclaw security audit`**, run for you and merged in.
 
 ## Built-in audit, included for you
@@ -388,11 +400,13 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## Status
 
-v0.24. Read-only checks A1/B1–B26/B30/B31/B32/B33/B38/B39/B41/B42/B50–B54/C3–C5 (incl. write-protection,
+v0.26. Read-only checks A1/B1–B26/B30/B31/B32/B33/B38/B39/B41–B44/B50–B54/C3–C5 (incl. write-protection,
 self-modification, approval-bypass, deep MCP, update/pinning hygiene, sender identity strength,
-control-plane mutation reachability, browser/SSRF exposure, session visibility/cross-user leak, and a
+control-plane mutation reachability, browser/SSRF exposure, session visibility/cross-user leak, a
 **Host Watch Posture** ring — is the machine the agent runs on watched at all: network IDS, host
-audit, file-integrity, EDR, and host firewall),
+audit, file-integrity, EDR, and host firewall — and an **attestation layer** (`--ask`/`--attest`)
+that classifies capability-level blast radius from the agent's own self-report: B43 dangerous-verb
+inventory, B44 self-report ⇄ config drift),
 installed-skill malware vetting, baseline suppression + governance, the built-in
 `openclaw security audit` merged in, active injection tests (`--canary`/`--redteam`), a runtime
 dry-run harness (`--dryrun`), HTML report, self-integrity (`--verify-self`), a pip/pipx-installable

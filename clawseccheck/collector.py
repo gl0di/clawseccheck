@@ -56,6 +56,7 @@ class Context:
     host: object = None                             # hostwatch.detect() result; set by audit(include_host=True)
     installed_skills: dict = field(default_factory=dict)  # skill name -> concatenated text
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
+    attestation: dict = field(default_factory=dict)  # agent self-report (--attest); see attest.py
 
     @property
     def bootstrap_blob(self) -> str:

@@ -20,6 +20,11 @@ FAIL = "FAIL"
 WARN = "WARN"        # partial / likely-insecure default; counts half, does not hard-cap
 UNKNOWN = "UNKNOWN"  # not determinable from config -> excluded from score denominator
 
+# Confidence tiers (orthogonal to severity/status). A self-report from the audited
+# agent is WEAKER evidence than a config fact — the agent may be compromised or
+# prompt-injected — so attestation-derived findings carry ATTESTED, below MEDIUM.
+ATTESTED = "ATTESTED"
+
 
 @dataclass(frozen=True)
 class CheckMeta:
@@ -108,6 +113,15 @@ CATALOG: list[CheckMeta] = [
               MEDIUM, "advisory", "Credential / Blast Radius", scored=True),
     CheckMeta("B42", "Skill/plugin install-time policy (postinstall hooks, writable skill dirs)",
               MEDIUM, "hardening", "Supply Chain / Install Policy", confidence="MEDIUM"),
+    # Attestation layer (v0.26.0) — enriched by the agent's self-report (--attest).
+    # ATTESTED confidence: weaker than a config fact; advisory (not scored) so the
+    # static grade is unaffected when no attestation is supplied (finding -> UNKNOWN).
+    CheckMeta("B43", "Capability blast-radius / dangerous-verb inventory",
+              HIGH, "advisory", "Least Privilege / Blast Radius",
+              scored=False, confidence=ATTESTED),
+    CheckMeta("B44", "Attestation ⇄ config mismatch (undisclosed capability)",
+              MEDIUM, "advisory", "Trust Boundary / Drift",
+              scored=False, confidence=ATTESTED),
     # Host Watch Posture — is anyone watching the machine the agent runs on?
     # Read-only host-monitor detection (hostwatch.detect). LOW + WARN-only (never
     # FAIL): the absence of host monitoring is flagged only when the agent is

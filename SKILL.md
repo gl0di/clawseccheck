@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 0.25.0
+version: 0.26.0
 description: Free, local, read-only security self-audit for your own OpenClaw agent. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true}}
 ---
@@ -166,6 +166,36 @@ server, and overly broad OAuth scope. Report the verdict per server in plain lan
 Remind the user: this is a static config check only, entirely local and read-only. It does not
 connect to the MCP server and does not change any configuration.
 
+#### Choice: deeper / capability check / "what dangerous actions can my agent take" / "least privilege" / "check my tools"
+
+The static scan reads config files only. It cannot see the agent's **real tool/verb inventory**,
+whether untrusted input can reach a side-effect, or host monitors a file scan can't detect — none
+of that is in any config field. The **attestation layer** lets the running agent self-report those
+facts so the audit can classify capability-level blast radius (B43/B44).
+
+```
+python3 {baseDir}/audit.py --ask        # emits a JSON template with the questions
+```
+
+Then **fill the template from your own (the assistant's) ground truth** — list the exact tool/verb
+names you can actually invoke in this session, and answer the approval/gating questions honestly.
+Save it to a local file and re-run:
+
+```
+python3 {baseDir}/audit.py --attest <filled.json>
+```
+
+This adds two findings, both at `ATTESTED` confidence (a self-report is weaker than a config fact,
+so it is advisory and never overrides one):
+- **B43 — Capability blast-radius.** If you hold only reversible verbs (search/get/draft/label) →
+  PASS: "forward-exfil and delete-evidence are physically impossible." If you hold a send/forward,
+  delete-forever, or mailbox-config (auto-forward/filter) verb that can fire without approval → FAIL.
+- **B44 — Self-report ⇄ config drift.** If the config's `tools.allow` grants a dangerous verb you did
+  *not* list, that mismatch is flagged (drift / blind spot / something masking a capability).
+
+Boundary: this is introspection only. **Never perform a side-effectful action to "test" a capability**
+(do not actually send, forward, delete, or exec). Report what you hold; do not exercise it.
+
 #### Choice: monitoring / "keep watching" / "alert me if something changes" / "ongoing protection"
 
 First, tell the user in plain language what will happen:
@@ -251,6 +281,7 @@ Use this to map what the user says to the right command:
 | "fix", "how do I fix", "what should I do", "copy-paste fix" | `--prompts` |
 | "vet", "scan this skill", "is this safe to install", "check before I install" | `--vet <path>` |
 | "is my MCP safe", "check my connected servers", "vet my MCP", "are my MCP servers trusted", "MCP supply chain" | `--vet-mcp` |
+| "what dangerous actions can my agent take", "least privilege", "check my tools", "capability", "blast radius", "deeper check" | `--ask` then `--attest <filled.json>` |
 | "monitor", "watch", "alert me", "ongoing", "keep checking" | `--monitor` (ask first) |
 | "canary", "injection test", "am I vulnerable", "try an attack" | `--canary` then `--dryrun` |
 | "red team", "adversarial", "attack suite" | `--redteam` |
@@ -289,5 +320,9 @@ For completeness — these are less common but available:
 - `--no-native` — skip the built-in `openclaw security audit` (for offline / hermetic testing).
 - `--verify-self` — print SHA-256 digest of ClawSecCheck's source files for tamper detection.
 - `--show-suppressed` — list any findings the user has silenced via `.clawseccheckignore`.
+- `--ask` — emit a JSON attestation template (the facts config can't show: real tool inventory,
+  approval gating, host monitors). The running agent fills it from its own ground truth.
+- `--attest PATH` — enrich the audit with that self-report; enables B43 (capability blast-radius)
+  and B44 (self-report ⇄ config drift) at `ATTESTED` confidence. Read-only; introspection only.
 - `--watch-log` — print the Agent Watch event journal (a local timeline of what changed across
   `--monitor` runs); `--events PATH` points it at a different journal file.

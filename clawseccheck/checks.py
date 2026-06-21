@@ -14,6 +14,7 @@ import re
 import shutil
 from pathlib import Path
 
+from . import attest as _attest
 from .catalog import BY_ID, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
 from .collector import _OWN_SKILL_NAMES, Context, _read_skill_text, dig, read_skill_python
 from .skillast import analyze_python
@@ -3254,6 +3255,121 @@ def check_host_firewall(ctx: Context) -> Finding:
     return _host_finding("B54", "firewall", ctx)
 
 
+# ---------- B43/B44: attestation layer (v0.26.0) ----------
+# Both read ctx.attestation — the agent's self-report (--attest). With no attestation
+# they return UNKNOWN, so the default static audit and its score are unchanged. Their
+# findings carry ATTESTED confidence (set on the CheckMeta) — weaker than a config fact.
+
+def check_capability_blast_radius(ctx: Context) -> Finding:
+    """B43 — classify the agent's REAL held verbs by blast radius.
+
+    The config exposes tool *names* as opaque strings; it cannot tell a reversible
+    'search' from an irreversible 'delete_forever' or a persistent 'create_filter'.
+    The agent's self-reported inventory can. Verdict:
+
+    PASS    — every held verb is reversible / non-egress: forward-exfil and
+              delete-evidence are physically impossible (the verb isn't in hand).
+    WARN    — a high-blast verb is held but a human-approval gate is reported.
+    FAIL    — a high-blast verb is held AND a side-effect can fire without approval.
+    UNKNOWN — no tool inventory attested (run --ask, then --attest).
+    """
+    att = ctx.attestation or {}
+    tools = att.get("tools")
+    if not isinstance(tools, list) or not tools:
+        return _finding(
+            "B43", UNKNOWN,
+            "No tool inventory attested — capability blast-radius cannot be "
+            "classified from config (tool names are opaque strings there).",
+            "Run 'clawseccheck --ask' to emit a template, have the agent fill in its "
+            "real 'tools' list, then re-run with '--attest <file>'.",
+        )
+    held = _attest.classify_tools(tools)
+    high = {c: held[c] for c in _attest.HIGH_BLAST_CLASSES if c in held}
+    if not high:
+        return _finding(
+            "B43", PASS,
+            "All attested tools are reversible / non-egress — no high-blast-radius "
+            "verb (send/forward, delete-forever, mailbox-config) is in the agent's "
+            "hands, so forward-exfil and delete-evidence are not possible.",
+            "Keep the toolset minimal; re-attest after any tool grant.",
+        )
+    evidence = [f"{cls}: {', '.join(sorted(set(names)))}" for cls, names in high.items()]
+    label = ", ".join(c.lower().replace("_", "-") for c in high)
+    if _attest.is_ungated(att):
+        return _finding(
+            "B43", FAIL,
+            f"The agent holds high-blast-radius verbs ({label}) AND a side-effect "
+            f"can fire without human approval — a single injected instruction can "
+            f"reach exfil / destruction / a persistent forwarding rule.",
+            "Drop the dangerous verbs the agent does not need (least privilege at "
+            "the capability level), or require human approval before send/exec/write "
+            "and for any mailbox-config change.",
+            evidence=evidence,
+        )
+    return _finding(
+        "B43", WARN,
+        f"The agent holds high-blast-radius verbs ({label}). An approval gate is "
+        f"reported, but holding these at all widens the blast radius if the gate is "
+        f"ever bypassed.",
+        "Remove any dangerous verb the agent does not strictly need; keep the "
+        "approval gate on the rest.",
+        evidence=evidence,
+    )
+
+
+def check_attestation_mismatch(ctx: Context) -> Finding:
+    """B44 — config grants a high-blast verb the agent did not self-report.
+
+    Cross-checks the static allow-list against the attested inventory. A tool the
+    config GRANTS but the agent OMITS is a drift / blind-spot / injection-mask signal:
+    the dangerous verb is in reach per config, yet the self-report glossed over it.
+    (The reverse — tools beyond the allow-list — is normal: built-ins and MCP tools
+    are not listed there, so it is not flagged, to stay false-positive-free.)
+
+    WARN    — config grants a high-blast verb absent from the attestation.
+    PASS    — every high-blast verb in the allow-list is acknowledged.
+    UNKNOWN — no attestation, or no explicit tools.allow inventory to compare.
+    """
+    att = ctx.attestation or {}
+    reported = att.get("tools")
+    if not isinstance(reported, list) or not reported:
+        return _finding(
+            "B44", UNKNOWN,
+            "No tool inventory attested — nothing to cross-check against config.",
+            "Provide '--attest <file>' with the agent's real 'tools' list.",
+        )
+    listed = dig(ctx.config, "tools.allow") or dig(ctx.config, "gateway.tools.allow") or []
+    if not isinstance(listed, list) or not listed:
+        return _finding(
+            "B44", UNKNOWN,
+            "Config has no explicit 'tools.allow' inventory to cross-check the "
+            "self-report against.",
+            "—",
+        )
+    reported_l = {str(t).lower() for t in reported if isinstance(t, (str, bytes))}
+    undisclosed = [
+        str(t) for t in listed
+        if _attest.classify_verb(str(t)) in _attest.HIGH_BLAST_CLASSES
+        and str(t).lower() not in reported_l
+    ]
+    if undisclosed:
+        return _finding(
+            "B44", WARN,
+            "Config grants high-blast-radius tools the agent did not list in its "
+            "self-report — the dangerous verb is in reach per config, but the "
+            "attestation omitted it (config drift, agent blind spot, or masking).",
+            "Reconcile: remove the unused grant from 'tools.allow', or have the agent "
+            "re-attest its true inventory and review why it was omitted.",
+            evidence=[f"granted but not attested: {n}" for n in sorted(set(undisclosed))],
+        )
+    return _finding(
+        "B44", PASS,
+        "Every high-blast-radius tool in the config allow-list is acknowledged in the "
+        "agent's self-report — no undisclosed dangerous capability.",
+        "Keep the allow-list and the attested inventory in sync.",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -3270,6 +3386,7 @@ CHECKS = [
     check_credential_blast_radius, check_effective_tools, check_install_policy,
     check_host_network_ids, check_host_audit, check_host_file_integrity,
     check_host_edr, check_host_firewall,
+    check_capability_blast_radius, check_attestation_mismatch,
 ]
 
 
