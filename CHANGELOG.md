@@ -3,6 +3,37 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.2.0] — 2026-06-22
+
+**Offline update advisory — keep users current without breaking zero-network.** Users who install
+once and never update miss security fixes and new checks. Knowing whether a *newer* version exists
+is server-side state, so the tool must never fetch it (golden rule #1: local-only / no phone-home —
+and a scanner that beacons would have to flag itself). Instead, three offline-respecting signals.
+
+### Added
+- **Offline staleness notice** in the default human report (suppressed in `--json` / `--card` /
+  `--sarif` / `--badge`). Two local signals, never a network call:
+  1. a **local hint file** `~/.clawseccheck/latest.json` (written by the user's distribution layer
+     or agent — *not* by the tool) announcing a newer version, read locally; else
+  2. an **age nudge** when the baked-in build date (`__released__`) is ≥ 60 days behind the local
+     clock. Clock skew (clock before release) stays silent.
+- **`__released__`** build-date constant in `clawseccheck/__init__.py` (bumped at release time).
+- **`clawseccheck.update`** module: `update_notice()`, `read_latest_hint()`, `DEFAULT_LATEST`.
+- **`--no-update-notice`** flag (and `CLAWSECCHECK_NO_UPDATE_NOTICE=1`) to silence the reminder.
+- **SKILL.md agent guidance** — "Keeping ClawSecCheck current": since the tool won't network-check
+  itself, the *agent* (which has network) should check ClawHub for a newer build after auditing,
+  tell the user, optionally refresh the local hint file, and verify integrity with `--verify-self`.
+
+### Security
+- The hint file is **untrusted input**: only a strict `X.Y.Z` is accepted from its `version` field,
+  reconstructed from parsed integers, so a planted hint can at most misstate a number — never inject
+  terminal sequences, a URL, or an action. Echoed text also passes through `_sanitize`.
+
+### Notes
+- Additive: the frozen 1.0 contract (`--json`/SARIF/`audit()`/check ids/vocab/scoring) is untouched;
+  the notice is human-report-only. Library callers of `render_report()` get no notice unless they
+  pass the new keyword-only `update_notice=` argument.
+
 ## [1.1.0] — 2026-06-22
 
 **`--vet` / `--vet-mcp` now honor `--json` and `--sarif`.** Previously the vetting branches

@@ -17,7 +17,8 @@ from . import (
     render_canary, render_card, render_events, render_json, render_monitor, render_prompts,
     render_report, render_svg, render_vet_json, save_state, snapshot, vet_mcp, vet_skill,
 )
-from . import __version__
+from . import __released__, __version__
+from .update import update_notice
 from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
@@ -120,6 +121,9 @@ def main(argv=None) -> int:
                    help=f"path for trend history file (default: {DEFAULT_HISTORY})")
     p.add_argument("--no-history", action="store_true",
                    help="do not record this run to the local score history (default: record)")
+    p.add_argument("--no-update-notice", action="store_true",
+                   help="suppress the offline 'your build may be stale' reminder "
+                        "(also suppressible via CLAWSECCHECK_NO_UPDATE_NOTICE=1; offline, never a network call)")
     p.add_argument("--next", action="store_true",
                    help="print recommended next actions based on the audit result")
     p.add_argument("--risk-paths", action="store_true",
@@ -360,8 +364,13 @@ def main(argv=None) -> int:
     elif args.card:
         body = render_card(score, findings, ascii_only, lang=args.lang)
     else:
+        # Offline staleness advisory — human report only; never in --json/--card/--sarif.
+        # Reads only the local clock + an optional local hint file; makes no network call.
+        notice = []
+        if not args.no_update_notice and not os.environ.get("CLAWSECCHECK_NO_UPDATE_NOTICE"):
+            notice = update_notice(__version__, released=__released__)
         parts = [render_report(findings, score, ascii_only, native=ctx.native, lang=args.lang,
-                               risk=paths),
+                               risk=paths, update_notice=notice),
                  "", render_card(score, findings, ascii_only, lang=args.lang)]
         if ctx.errors:
             parts.append("\nnotes:\n" + "\n".join(f"  - {e}" for e in ctx.errors))

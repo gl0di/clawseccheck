@@ -225,6 +225,16 @@ permissions, a malicious *update* is a real supply-chain risk — so each releas
 and the source is public to read **before** updating. Prefer reviewing/pinning a tag over blind
 auto-update for anything security-sensitive.
 
+**Staleness reminder (offline).** A stale security scanner is itself a risk, so the default report
+may print a one-line "your build may be out of date" notice. It is **100% offline** — it reads only
+the local clock against the baked-in build date, plus an optional local hint file
+`~/.clawseccheck/latest.json` that your distribution layer or agent may write. ClawSecCheck **never
+checks for its own updates over the network** (that would break its zero-network promise and it
+would have to flag itself). The actual "is there a newer version?" lookup belongs to your package
+tooling or your agent — see SKILL.md "Keeping ClawSecCheck current". Silence the notice with
+`--no-update-notice` or `CLAWSECCHECK_NO_UPDATE_NOTICE=1`; after any update, verify the engine with
+`--verify-self`.
+
 ## Guided mode
 
 When you run ClawSecCheck inside OpenClaw, the agent walks you through the entire audit

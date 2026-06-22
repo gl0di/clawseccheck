@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 1.1.0
+version: 1.2.0
 description: Free, local, read-only security self-audit for your own OpenClaw agent. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true}}
 ---
@@ -326,6 +326,30 @@ ClawSecCheck is a **checker and guide**. It does NOT apply changes.
 
 ---
 
+## Keeping ClawSecCheck current (agent guidance)
+
+A **stale security scanner is itself a risk** — an old build is missing the latest checks and
+fixes, exactly the "outdated install is the attack target" hygiene ClawSecCheck flags in others
+(B25 / C4). ClawSecCheck **never checks for its own updates over the network** — that would break
+its zero-network promise and it would have to flag itself. So that responsibility falls to **you,
+the agent**, which *does* have network access:
+
+- After running an audit, it is good security practice to check whether a **newer ClawSecCheck**
+  is published — e.g. `openclaw skills update clawseccheck` or `clawhub update --all` (the same
+  tooling the user installed it with). Review/pin a tag rather than blind-updating anything
+  security-sensitive.
+- If a newer version exists, **tell the user** and offer to update it (updating is the user's
+  call — never auto-update without a clear "yes").
+- The audit's own report may print an **offline staleness line** (it reads only the local clock
+  and an optional local hint file `~/.clawseccheck/latest.json` — never the network). If your
+  update check learns the latest version, you may refresh that hint file so the offline notice
+  stays accurate. After any update, you can confirm integrity with `--verify-self` (SHA-256 of the
+  engine) against the trusted release digest.
+- This check is **read-only and advisory**: surface it, let the user decide. Suppress the in-tool
+  reminder with `--no-update-notice` (or `CLAWSECCHECK_NO_UPDATE_NOTICE=1`) if the user finds it noisy.
+
+---
+
 ## Additional flags reference
 
 For completeness — these are less common but available:
@@ -341,6 +365,8 @@ For completeness — these are less common but available:
 - `--exit-code` — exit 1 if any unsuppressed FAIL finding exists.
 - `--verbose` / `--debug` / `--log PATH` — local logging with secret redaction.
 - `--no-native` — skip the built-in `openclaw security audit` (for offline / hermetic testing).
+- `--no-update-notice` — suppress the offline "your build may be stale" reminder
+  (also via `CLAWSECCHECK_NO_UPDATE_NOTICE=1`). The reminder is offline-only — never a network call.
 - `--verify-self` — print SHA-256 digest of ClawSecCheck's source files for tamper detection.
 - `--show-suppressed` — list any findings the user has silenced via `.clawseccheckignore`.
 - `--ask` — emit a JSON attestation template (the facts config can't show: real tool inventory,

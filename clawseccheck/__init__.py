@@ -29,8 +29,11 @@ from .i18n import t, tp, title_for, is_rtl
 from .sarif import render_sarif
 from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
 from .guide import suggest_actions, render_next_actions
+from .update import update_notice, read_latest_hint, DEFAULT_LATEST
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
+# Build/release date, baked in at release time (offline staleness nudge reads this; no network).
+__released__ = "2026-06-22"
 
 
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
@@ -70,7 +73,8 @@ __all__ = [
     "render_report", "render_card", "render_json", "render_monitor",
     "render_svg", "render_prompts", "render_vet_json", "vet_skill", "vet_mcp",
     "make_canary", "evaluate", "render_canary",
-    "snapshot", "diff", "load_state", "save_state", "__version__",
+    "snapshot", "diff", "load_state", "save_state", "__version__", "__released__",
+    "update_notice", "read_latest_hint", "DEFAULT_LATEST",
     "record_events", "load_events", "render_events", "DEFAULT_EVENTS",
     "load_ignore", "apply_baseline", "fingerprint",
     "t", "tp", "title_for", "is_rtl",

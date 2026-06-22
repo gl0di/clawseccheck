@@ -104,7 +104,7 @@ def _render_finding(lines, icon, f, lang: str = "en"):
 
 def render_report(findings: list[Finding], score: ScoreResult,
                   ascii_only: bool = False, native=None, lang: str = "en",
-                  *, risk=None) -> str:
+                  *, risk=None, update_notice: list[str] | None = None) -> str:
     icon = _ICON_ASCII if ascii_only else _ICON
     ok = "[OK]" if ascii_only else "✅"
     suppressed_count = sum(1 for f in findings if getattr(f, "suppressed", False))
@@ -185,6 +185,15 @@ def render_report(findings: list[Finding], score: ScoreResult,
         risk_section = render_risk_paths(risk, ascii_only=ascii_only)
         lines.append(risk_section.rstrip())
         lines.append("")
+
+    # Offline staleness advisory (computed by the CLI; never a network call). Untrusted hint
+    # text is already sanitized to a clean semver in update.py, but pass through _sanitize too.
+    if update_notice:
+        bullet = "*" if ascii_only else "⏳"
+        lines.append("")
+        for i, ln in enumerate(update_notice):
+            prefix = f"{bullet} " if i == 0 else "   "
+            lines.append(f"{prefix}{_sanitize(ln)}")
 
     out = "\n".join(lines).rstrip() + "\n"
     if ascii_only:
