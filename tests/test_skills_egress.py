@@ -106,8 +106,11 @@ def test_c4_version_advisory():
     ctx = Context(home=Path("/x"))
     ctx.config = json.loads('{"meta": {"lastTouchedVersion": "1.2.3"}}')
     c4 = _ids(run_all(ctx))["C4"]
-    assert c4.status == WARN and c4.scored is False
+    # C4 is a neutral update-hygiene advisory (PASS) — it must NOT WARN on a recorded
+    # version or name an ungrounded CVE; the grounded vuln gate is B33.
+    assert c4.status == PASS and c4.scored is False
     assert "1.2.3" in c4.detail
+    assert "CVE" not in c4.detail
 
 
 # ---------------------------------------------------------------------------

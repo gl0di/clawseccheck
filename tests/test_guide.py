@@ -59,6 +59,13 @@ class TestSuggestActionsVuln:
         ids = [a.id for a in suggest_actions(findings, score)]
         assert "track_trend" in ids
 
+    def test_commands_use_real_invocation_not_audit_py(self):
+        # A skill/CLI user has the `clawseccheck` command, not a bare `audit.py`.
+        findings, score = _audit_vuln()
+        for a in suggest_actions(findings, score):
+            assert "audit.py" not in a.command, f"{a.id} hint uses audit.py: {a.command!r}"
+            assert a.command.startswith("clawseccheck "), f"{a.id}: {a.command!r}"
+
     def test_share_grade_always_present(self):
         findings, score = _audit_vuln()
         ids = [a.id for a in suggest_actions(findings, score)]
@@ -80,7 +87,7 @@ class TestSuggestActionsVuln:
         findings, score = _audit_vuln()
         actions = suggest_actions(findings, score)
         fg = next(a for a in actions if a.id == "fix_guidance")
-        assert fg.command == "audit.py --prompts"
+        assert fg.command == "clawseccheck --prompts"
 
     def test_fix_guidance_before_track_trend(self):
         findings, score = _audit_vuln()
@@ -283,11 +290,11 @@ class TestRenderNextActions:
     def _sample_actions(self):
         return [
             Action(id="fix_guidance", title="Fix issues",
-                   command="audit.py --prompts", why="Urgent.", priority=0),
+                   command="clawseccheck --prompts", why="Urgent.", priority=0),
             Action(id="track_trend", title="Track score",
-                   command="audit.py --trend", why="See drift.", priority=8),
+                   command="clawseccheck --trend", why="See drift.", priority=8),
             Action(id="share_grade", title="Share grade",
-                   command="audit.py --badge grade.svg", why="Safe.", priority=9),
+                   command="clawseccheck --badge grade.svg", why="Safe.", priority=9),
         ]
 
     def test_contains_header(self):
@@ -298,7 +305,7 @@ class TestRenderNextActions:
     def test_contains_command(self):
         actions = self._sample_actions()
         out = render_next_actions(actions)
-        assert "audit.py --prompts" in out
+        assert "clawseccheck --prompts" in out
 
     def test_numbered_items(self):
         actions = self._sample_actions()
@@ -365,7 +372,7 @@ class TestRenderNextActions:
     def test_he_title_is_localised(self):
         """fix_guidance title must come from i18n when lang=he."""
         actions = [Action(id="fix_guidance", title="English title",
-                          command="audit.py --prompts", why="English why", priority=0)]
+                          command="clawseccheck --prompts", why="English why", priority=0)]
         out = render_next_actions(actions, lang="he")
         assert "ראה בדיוק כיצד לתקן" in out
 

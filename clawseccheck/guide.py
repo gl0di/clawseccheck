@@ -48,7 +48,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="fix_guidance",
             title=t("guide.fix_guidance.title"),
-            command="audit.py --prompts",
+            command="clawseccheck --prompts",
             why=t("guide.fix_guidance.why"),
             priority=priority,
         ))
@@ -59,7 +59,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="vet_skills",
             title=t("guide.vet_skills.title"),
-            command="audit.py --vet <skill-folder>",
+            command="clawseccheck --vet <skill-folder>",
             why=t("guide.vet_skills.why"),
             priority=1,
         ))
@@ -70,7 +70,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="setup_monitoring",
             title=t("guide.setup_monitoring.title"),
-            command="audit.py --monitor",
+            command="clawseccheck --monitor",
             why=t("guide.setup_monitoring.why"),
             priority=3,
         ))
@@ -86,7 +86,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="live_test",
             title=t("guide.live_test.title"),
-            command="audit.py --canary   (then --dryrun / --redteam)",
+            command="clawseccheck --canary   (then --dryrun / --redteam)",
             why=t("guide.live_test.why"),
             priority=4,
         ))
@@ -100,7 +100,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="review_mcp",
             title=t("guide.review_mcp.title"),
-            command="audit.py --vet-mcp",
+            command="clawseccheck --vet-mcp",
             why=t("guide.review_mcp.why"),
             priority=5,
         ))
@@ -109,7 +109,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
     actions.append(Action(
         id="track_trend",
         title=t("guide.track_trend.title"),
-        command="audit.py --trend",
+        command="clawseccheck --trend",
         why=t("guide.track_trend.why"),
         priority=8,
     ))
@@ -118,7 +118,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
     actions.append(Action(
         id="share_grade",
         title=t("guide.share_grade.title"),
-        command="audit.py --badge grade.svg",
+        command="clawseccheck --badge grade.svg",
         why=t("guide.share_grade.why"),
         priority=9,
     ))

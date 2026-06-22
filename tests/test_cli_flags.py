@@ -189,7 +189,8 @@ def test_next_flag_prints_guide_header(capsys):
 def test_next_flag_prints_command(capsys):
     main(["--home", VULN] + BASE + ["--next"])
     out = capsys.readouterr().out
-    assert "audit.py" in out
+    assert "clawseccheck " in out
+    assert "audit.py" not in out
 
 
 def test_next_flag_standalone_no_report(capsys):

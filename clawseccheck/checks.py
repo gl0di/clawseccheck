@@ -1537,7 +1537,7 @@ def check_monitoring(ctx: Context) -> Finding:
                     "'not detected here', not proof you're unwatched; confirm before relying on it.",
                     "If you have no detection, add a monitoring skill (e.g. ClawSec or "
                     "openclaw-security-monitor), wire audit logging to an alert channel, or schedule "
-                    "ClawSecCheck's own `audit.py --monitor`. If monitoring lives elsewhere, you can "
+                    "ClawSecCheck's own `clawseccheck --monitor`. If monitoring lives elsewhere, you can "
                     "self-report it via `--ask`/`--attest` (host_monitors) so the host-watch checks "
                     "credit it.")
 
@@ -1988,10 +1988,14 @@ def check_version(ctx: Context) -> Finding:
     if not ver:
         return _custom("C4", BY_ID["C4"].severity, UNKNOWN,
                        "OpenClaw version not recorded in config.", "—")
-    return _custom("C4", BY_ID["C4"].severity, WARN,
-                   f"OpenClaw config last touched by version {ver}. Outdated installs are the "
-                   "ClawHavoc / CVE-2026-25253 target.",
-                   "Keep OpenClaw updated and re-run the installed-skill checks after updating.")
+    # Advisory only — do NOT claim a vulnerability here. The grounded known-vulnerable
+    # version gate is B33 (check_known_vulns), which compares against real advisories.
+    # C4 stays a neutral update-hygiene reminder; it must not name a CVE it can't ground
+    # or imply a current/patched version is outdated (it has no offline "latest" to judge).
+    return _custom("C4", BY_ID["C4"].severity, PASS,
+                   f"OpenClaw config last touched by version {ver}. Known-vulnerable releases "
+                   "are gated by B33; this is an update-hygiene reminder, not a vulnerability claim.",
+                   "Keep OpenClaw updated and re-run the checks after upgrading.")
 
 
 # ---------- C3: backups of SOUL.md / memory (advisory) ----------

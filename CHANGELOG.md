@@ -3,6 +3,25 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.7.1] — 2026-06-22
+
+**Out-of-the-box dogfood fixes.** Stood up a real stock `openclaw@2026.6.9` and audited its default
+config as a first-time user would. The audit itself was clean (grade A, **zero false-positive FAILs**
+on the stock config; sparse-config keys correctly report UNKNOWN), but the naive-user view surfaced two
+real defects, now fixed. A field-path cross-check against the live `openclaw config schema` confirmed
+the rest of the "not in current schema" reads are intentional legacy/alt-shape fallbacks (like the
+existing `mcpServers`), not fabrications — left as-is.
+
+### Fixed
+- **C4 no longer asserts an ungrounded CVE or false "outdated" warning.** `check_version` used to WARN
+  on *any* recorded version and name `CVE-2026-25253` — a CVE absent from the grounded `_KNOWN_ADVISORIES`
+  (B33), applied even to the current latest release. It is now a neutral PASS update-hygiene advisory;
+  all version-vulnerability claims are deferred to the grounded **B33** gate (§4: don't invent CVEs; §5:
+  no spurious warning on a current install). The Hebrew rule was updated to match.
+- **Next-action / fix hints now use `clawseccheck`, not `audit.py`.** A first-time skill/CLI user has the
+  `clawseccheck` command; the guidance hints (`--prompts`/`--monitor`/`--badge`/…) and the B16 fix text
+  referenced a bare `audit.py` that doesn't resolve for them.
+
 ## [1.7.0] — 2026-06-22
 
 **Paste-ready remediation (`--fix`).** The exact fix commands were already in each finding's prose;

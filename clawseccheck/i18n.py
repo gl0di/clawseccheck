@@ -861,13 +861,13 @@ PHRASES: dict[str, dict[str, str]] = {
     # fix (WARN path)
     "If you have no detection, add a monitoring skill (e.g. ClawSec or "
     "openclaw-security-monitor), wire audit logging to an alert channel, or schedule "
-    "ClawSecCheck's own `audit.py --monitor`. If monitoring lives elsewhere, you can "
+    "ClawSecCheck's own `clawseccheck --monitor`. If monitoring lives elsewhere, you can "
     "self-report it via `--ask`/`--attest` (host_monitors) so the host-watch checks "
     "credit it.": {
         "he": (
             "אם אין לך זיהוי, הוסף מיומנות ניטור (כגון ClawSec או "
             "openclaw-security-monitor), חבר רישום ביקורת לערוץ התראות, או תזמן את "
-            "`audit.py --monitor` של ClawSecCheck. אם הניטור נמצא במקום אחר, תוכל "
+            "`clawseccheck --monitor` של ClawSecCheck. אם הניטור נמצא במקום אחר, תוכל "
             "לדווח עליו עצמית דרך `--ask`/`--attest` (host_monitors) כך שבדיקות "
             "מעקב-המארח יזקפו אותו לזכותך."
         ),
@@ -1762,10 +1762,10 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
             {"he": r"גיבויים קיימים (\1)."},
         ),
 
-        # ---- C4: WARN detail ----
+        # ---- C4: version advisory (PASS) detail ----
         (
-            r"OpenClaw config last touched by version (.+)\. Outdated installs are the ClawHavoc / CVE-2026-25253 target\.",
-            {"he": r"הגדרות OpenClaw נגעו לאחרונה על ידי גרסה \1. התקנות מיושנות הן יעד ClawHavoc / CVE-2026-25253."},
+            r"OpenClaw config last touched by version (.+)\. Known-vulnerable releases are gated by B33; this is an update-hygiene reminder, not a vulnerability claim\.",
+            {"he": r"הגדרות OpenClaw נגעו לאחרונה על ידי גרסה \1. גרסאות פגיעות ידועות נשמרות על ידי B33; זוהי תזכורת היגיינת עדכון, לא טענת פגיעוּת."},
         ),
 
         # ---- C5: WARN detail (binary dir / PATH dir / ancestor / attested install,

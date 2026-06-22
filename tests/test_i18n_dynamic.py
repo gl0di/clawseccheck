@@ -345,9 +345,10 @@ RULE_EXAMPLES: list[tuple[str, str]] = [
         "Backups present (SOUL.md.bak, MEMORY.md.bak…).",
         "SOUL.md.bak",
     ),
-    # C4: WARN detail
+    # C4: version advisory detail
     (
-        "OpenClaw config last touched by version 1.4.2. Outdated installs are the ClawHavoc / CVE-2026-25253 target.",
+        "OpenClaw config last touched by version 1.4.2. Known-vulnerable releases are gated "
+        "by B33; this is an update-hygiene reminder, not a vulnerability claim.",
         "1.4.2",
     ),
     # C5: binary dir writable
