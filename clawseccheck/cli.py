@@ -65,6 +65,9 @@ def _emit(text: str) -> None:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="clawseccheck",
                                 description="ClawSecCheck OpenClaw security self-audit (read-only).")
+    p.add_argument("--version", action="version",
+                   version=f"%(prog)s {__version__} ({__released__})",
+                   help="print version and exit")
     p.add_argument("--home", default="~/.openclaw", help="OpenClaw home dir (default: ~/.openclaw)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--card", action="store_true", help="print only the shareable badge")

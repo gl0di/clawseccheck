@@ -10,6 +10,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from clawseccheck import __released__, __version__
 from clawseccheck.cli import main
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -302,3 +305,18 @@ def test_log_file_not_written_without_flag(tmp_path, capsys):
     logfile = tmp_path / "should_not_exist.log"
     main(["--home", SAFE] + BASE + ["--verbose"])
     assert not logfile.exists()
+
+
+# ---------------------------------------------------------------------------
+# --version
+# ---------------------------------------------------------------------------
+
+def test_version_flag_prints_version_and_exits_zero(capsys):
+    """--version prints 'clawseccheck X.Y.Z (date)' and exits 0."""
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert __version__ in out
+    assert __released__ in out
+    assert "clawseccheck" in out
