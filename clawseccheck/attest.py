@@ -205,13 +205,46 @@ def template() -> dict:
                 "Defensive monitors you KNOW run on this host but a file scan cannot "
                 "see (e.g. a corporate EDR agent, a network IDS on the gateway)."
             ),
+            "paths": (
+                "Filesystem locations the static scan can't guess. 'bootstrap': absolute "
+                "paths to your identity/memory files (SOUL.md, AGENTS.md, TOOLS.md, "
+                "MEMORY.md, ...) wherever they actually live. 'openclaw_install': the "
+                "directory OpenClaw is installed in. The engine still stat()s these "
+                "ITSELF — you only point it at WHERE to look, so the permission check "
+                "stays an authoritative file stat, not a trusted self-report."
+            ),
         },
         "tools": [],
         "approval_gates": {k: "unknown" for k in GATE_CLASSES},
         "untrusted_to_action": "unknown",
         "host_monitors": [],
+        "paths": {"bootstrap": [], "openclaw_install": ""},
         "notes": "",
     }
+
+
+def attested_paths(att: dict) -> dict:
+    """Agent-declared filesystem locations for discovery-assisted permission checks.
+
+    DISCOVERY, not attestation-of-fact: the agent supplies *where* to look; the engine
+    still runs the stat() itself, so a finding built from these keeps real-stat strength
+    (HIGH confidence), unlike the weak ATTESTED self-report fields above. Tolerant of
+    junk — returns ``{"bootstrap": [str, ...], "openclaw_install": str | None}``.
+    """
+    out: dict = {"bootstrap": [], "openclaw_install": None}
+    if not isinstance(att, dict):
+        return out
+    paths = att.get("paths")
+    if not isinstance(paths, dict):
+        return out
+    boot = paths.get("bootstrap")
+    if isinstance(boot, list):
+        out["bootstrap"] = [str(p) for p in boot
+                            if isinstance(p, (str, bytes)) and str(p).strip()]
+    inst = paths.get("openclaw_install")
+    if isinstance(inst, (str, bytes)) and str(inst).strip():
+        out["openclaw_install"] = str(inst)
+    return out
 
 
 def is_ungated(att: dict) -> bool:

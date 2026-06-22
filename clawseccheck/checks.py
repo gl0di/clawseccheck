@@ -1650,16 +1650,47 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
 
     from .collector import WORKSPACE_DIRS
 
-    for ws in WORKSPACE_DIRS:
-        ws_dir = ctx.home / ws
+    seen: set = set()   # resolved paths already statted -> never double-report
+
+    def _classify_file(path: Path, rel: str, *, soft: bool) -> bool:
+        """stat one file; record world/group write. Returns True if the file existed.
+
+        soft (MEMORY.md/HEARTBEAT.md): WARN on group OR world write.
+        critical (SOUL/AGENTS/TOOLS): FAIL on world write, WARN on group write.
+        """
+        if not path.is_file():
+            return False
+        try:
+            real = path.resolve()
+        except OSError:
+            real = path
+        if real in seen:
+            return True
+        seen.add(real)
+        try:
+            mode = path.stat().st_mode & 0o777
+        except OSError:
+            return True
+        if soft:
+            if mode & 0o022:
+                group_write.append(f"{rel} (mode {oct(mode)[-3:]})")
+        elif mode & 0o002:
+            world_write.append(f"{rel} (mode {oct(mode)[-3:]})")
+        elif mode & 0o020:
+            group_write.append(f"{rel} (mode {oct(mode)[-3:]})")
+        return True
+
+    # Scan the OpenClaw home ROOT ("") as well as each workspace dir. The root is
+    # included so a bootstrap/memory file living OUTSIDE the three workspace dir names
+    # (a common real layout) is no longer invisible — §6: never hardcode one shape.
+    scan_dirs = [("", ctx.home)] + [(ws, ctx.home / ws) for ws in WORKSPACE_DIRS]
+    for ws, ws_dir in scan_dirs:
         if not ws_dir.is_dir():
             continue
-
-        # Check the workspace directory itself for critical files
+        prefix = f"{ws}/" if ws else ""
         has_critical_here = any((ws_dir / f).is_file() for f in _CRITICAL_BOOTSTRAP)
         has_any_here = has_critical_here or any(
-            (ws_dir / f).is_file() for f in _SOFT_BOOTSTRAP
-        )
+            (ws_dir / f).is_file() for f in _SOFT_BOOTSTRAP)
         if not has_any_here:
             continue
 
@@ -1669,7 +1700,7 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
         if has_critical_here:
             try:
                 dir_mode = ws_dir.stat().st_mode & 0o777
-                rel = str(ws_dir.relative_to(ctx.home))
+                rel = prefix.rstrip("/") or "."
                 if dir_mode & 0o002:
                     world_write.append(f"{rel}/ (dir, mode {oct(dir_mode)[-3:]})")
                 elif dir_mode & 0o020:
@@ -1677,33 +1708,21 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
             except OSError:
                 pass
 
-        # Critical bootstrap files
         for fname in _CRITICAL_BOOTSTRAP:
-            f = ws_dir / fname
-            if not f.is_file():
-                continue
-            try:
-                mode = f.stat().st_mode & 0o777
-                rel = f"{ws}/{fname}"
-                if mode & 0o002:
-                    world_write.append(f"{rel} (mode {oct(mode)[-3:]})")
-                elif mode & 0o020:
-                    group_write.append(f"{rel} (mode {oct(mode)[-3:]})")
-            except OSError:
-                pass
-
-        # Soft bootstrap files (MEMORY.md / HEARTBEAT.md): warn on group OR world write
+            _classify_file(ws_dir / fname, f"{prefix}{fname}", soft=False)
         for fname in _SOFT_BOOTSTRAP:
-            f = ws_dir / fname
-            if not f.is_file():
-                continue
-            try:
-                mode = f.stat().st_mode & 0o777
-                rel = f"{ws}/{fname}"
-                if mode & 0o022:
-                    group_write.append(f"{rel} (mode {oct(mode)[-3:]})")
-            except OSError:
-                pass
+            _classify_file(ws_dir / fname, f"{prefix}{fname}", soft=True)
+
+    # Discovery-assisted: the agent may declare where its bootstrap/memory files really
+    # live (any path, any name). The agent supplies WHERE; the engine still stat()s the
+    # file itself, so this stays an authoritative permission check, not a weak self-report.
+    for raw in _attest.attested_paths(ctx.attestation)["bootstrap"]:
+        p = Path(raw).expanduser()
+        # Classify by filename: a known identity file gets the critical (FAIL-on-world)
+        # rule; anything else is treated as soft (memory) -> WARN only.
+        soft = p.name not in _CRITICAL_BOOTSTRAP
+        if _classify_file(p, f"{p} [attested]", soft=soft):
+            found_any = True
 
     if not found_any:
         return _finding("B20", UNKNOWN,
@@ -2251,17 +2270,25 @@ def check_update_pinning(ctx: Context) -> Finding:
 def check_path_safety(ctx: Context) -> Finding:
     """C5 — Native binary PATH safety.
 
-    A poisoned PATH could shadow the real openclaw binary with a malicious one.
-    We check two conditions (POSIX only, stat() calls only — no file reads):
+    A poisoned PATH or a writable install tree could shadow/replace the real openclaw
+    binary. We check (POSIX only, stat() calls only — no file reads):
 
     1. The directory that contains the openclaw binary is group/world-writable.
-    2. Any directory in $PATH that appears BEFORE the openclaw dir is
-       group/world-writable (an attacker with write access there could drop a
-       fake 'openclaw' that would be found first).
+    2. Any ANCESTOR install dir above the binary (e.g. the npm package root
+       .../node_modules/openclaw) is group/world-writable — a group member could
+       replace the subtree even if the immediate bin dir is tight.
+    3. Any directory in $PATH that appears BEFORE the openclaw dir is
+       group/world-writable (a fake 'openclaw' could be found first).
+
+    A sticky world-writable dir (e.g. /tmp, mode 1777) is NOT flagged: the sticky bit
+    blocks cross-owner rename/delete, so it is not a replace vector. The agent may also
+    declare paths.openclaw_install via --attest when the binary isn't on PATH — discovery
+    is agent-supplied, but the engine still stat()s the dir itself (so this stays a real
+    permission check, HIGH confidence, not a weak self-report).
 
     WARN  — at least one such writable dir found.
-    PASS  — openclaw found and all relevant PATH dirs have tight perms.
-    UNKNOWN — openclaw not on PATH, or non-POSIX platform.
+    PASS  — openclaw located and binary dir / ancestors / earlier PATH dirs are tight.
+    UNKNOWN — openclaw not on PATH and no attested install dir, or non-POSIX platform.
 
     Only stat() is called; no file contents are read.
     """
@@ -2270,70 +2297,99 @@ def check_path_safety(ctx: Context) -> Finding:
                        "PATH safety check not applicable on non-POSIX platforms.", "—")
 
     exe = shutil.which("openclaw")
-    if not exe:
+    attested_install = _attest.attested_paths(ctx.attestation)["openclaw_install"]
+    if not exe and not attested_install:
         return _custom("C5", BY_ID["C5"].severity, UNKNOWN,
                        "openclaw not found on PATH — cannot assess binary PATH safety.",
-                       "Run this check inside an environment where openclaw is installed.")
-
-    bin_dir = Path(exe).resolve().parent
-
-    # Collect PATH directories in order.
-    path_env = os.environ.get("PATH", "")
-    path_dirs = [Path(p) for p in path_env.split(os.pathsep) if p]
-
-    # Find where the openclaw bin_dir sits in PATH (first match, resolved).
-    openclaw_index: int | None = None
-    for i, d in enumerate(path_dirs):
-        try:
-            if d.resolve() == bin_dir:
-                openclaw_index = i
-                break
-        except OSError:
-            continue
+                       "Run this check inside an environment where openclaw is installed, "
+                       "or declare paths.openclaw_install via --attest.")
 
     writable: list[str] = []
+    checked: set = set()
 
-    def _is_group_world_writable(d: Path) -> bool:
+    def _loose_dir(d: Path) -> bool:
+        """True if *d* lets others replace/shadow its entries: group- or world-writable.
+        A sticky dir (e.g. /tmp, mode 1777) is exempt regardless of group/world bits —
+        the sticky bit blocks cross-owner rename/delete, so it is not a replace vector
+        and would otherwise be a false positive as the ancestor walk passes through /tmp."""
         try:
-            mode = d.stat().st_mode & 0o777
-            return bool(mode & 0o022)
+            m = d.stat().st_mode
         except OSError:
             return False
+        if m & 0o1000:                          # sticky -> cross-owner replace blocked
+            return False
+        return bool(m & 0o022)                  # group- or world-writable
 
-    # Check the binary's own directory.
-    if _is_group_world_writable(bin_dir):
-        writable.append(f"openclaw binary dir {bin_dir} is group/world-writable")
+    def _flag(d: Path, why: str) -> None:
+        try:
+            rd = d.resolve()
+        except OSError:
+            rd = d
+        if rd in checked:
+            return
+        checked.add(rd)
+        if _loose_dir(rd):
+            writable.append(why)
 
-    # Check all PATH dirs that appear before the openclaw dir (shadow-attack surface).
-    if openclaw_index is not None:
-        for d in path_dirs[:openclaw_index]:
+    def _walk_ancestors(start: Path, label: str, levels: int = 5) -> None:
+        # Flag group/world-writable ancestor install dirs ABOVE the binary. A writable
+        # ancestor (e.g. the npm package root .../node_modules/openclaw) lets a group
+        # member replace the whole subtree even when the immediate bin dir is tight.
+        cur = start
+        for _ in range(levels):
+            _flag(cur, f"{label} {cur} is group/world-writable — a group member could "
+                       "replace the openclaw install")
+            if cur.parent == cur:               # filesystem root
+                break
+            cur = cur.parent
+
+    if exe:
+        bin_dir = Path(exe).resolve().parent
+        _flag(bin_dir, f"openclaw binary dir {bin_dir} is group/world-writable")
+        # NEW: ancestor install dirs above the resolved binary.
+        _walk_ancestors(bin_dir.parent, "openclaw install ancestor dir")
+
+        # PATH dirs that appear before the openclaw dir (shadow-attack surface).
+        path_env = os.environ.get("PATH", "")
+        path_dirs = [Path(p) for p in path_env.split(os.pathsep) if p]
+        openclaw_index: int | None = None
+        for i, d in enumerate(path_dirs):
             try:
-                resolved = d.resolve()
+                if d.resolve() == bin_dir:
+                    openclaw_index = i
+                    break
             except OSError:
                 continue
-            if _is_group_world_writable(resolved):
-                writable.append(
-                    f"PATH dir {d} (before openclaw dir) is group/world-writable "
-                    "— a fake openclaw could be planted there"
-                )
+        if openclaw_index is not None:
+            for d in path_dirs[:openclaw_index]:
+                _flag(d, f"PATH dir {d} (before openclaw dir) is group/world-writable "
+                         "— a fake openclaw could be planted there")
+
+    # Discovery-assisted: the agent may point at an install dir that `which` can't
+    # resolve (non-PATH install). The engine still stat()s it itself.
+    if attested_install:
+        inst = Path(attested_install).expanduser()
+        _flag(inst, f"openclaw install dir {inst} [attested] is group/world-writable")
+        _walk_ancestors(inst.parent, "openclaw install ancestor dir [attested]")
 
     if writable:
         detail = "; ".join(writable[:6]) + (f" (+{len(writable) - 6} more)" if len(writable) > 6 else "")
         return _custom(
             "C5", BY_ID["C5"].severity, WARN,
             detail,
-            "Remove group/world-write permission from the openclaw binary directory "
-            "and any PATH directories that precede it (`chmod o-w,g-w <dir>`). "
-            "Keep PATH tight: only owner-controlled directories should precede "
-            "the openclaw install directory.",
+            "Remove group/world-write permission from the openclaw binary directory, "
+            "its install-tree ancestors, and any PATH directories that precede it "
+            "(`chmod o-w,g-w <dir>`). Only owner-controlled directories should hold or "
+            "precede the openclaw install.",
             writable[:6],
         )
 
+    where = exe or f"{attested_install} (attested)"
     return _custom(
         "C5", BY_ID["C5"].severity, PASS,
-        f"openclaw binary at {exe}; binary dir and all earlier PATH dirs have "
-        "tight permissions.",
-        "Keep PATH directories owner-only (chmod 755 at most, never group/world-writable).",
+        f"openclaw at {where}; binary dir, install-tree ancestors, and earlier PATH "
+        "dirs all have tight permissions.",
+        "Keep install/PATH directories owner-only (chmod 755 at most, never group/world-writable).",
     )
 
 

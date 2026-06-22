@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 1.2.0
+version: 1.3.0
 description: Free, local, read-only security self-audit for your own OpenClaw agent. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true}}
 ---
@@ -110,6 +110,10 @@ python3 {baseDir}/audit.py --json      # -> "next_actions" array in the JSON
 python3 {baseDir}/audit.py --next      # -> next actions only, plain text
 ```
 
+The audit ALWAYS emits a "What you can do next" block (4–5 items). When you relay the result to
+the user, **include that block** — surface the items as a numbered menu rather than collapsing the
+report into prose that drops them; the next-step menu is part of the deliverable, not optional.
+
 Pick the 3-4 most relevant actions for this user's situation and offer them as a numbered menu
 in plain, friendly language. Example:
 
@@ -197,6 +201,18 @@ they describe the *harness/policy* around you, which you cannot fully see:
 >    IDS on the gateway?" → `host_monitors`
 
 If the user doesn't know, leave the field `unknown` — never invent an answer.
+
+**Step 3b — tell the audit WHERE your files are (you can see the filesystem; the static scan
+can't guess).** Fill `paths` so the permission checks (B20 / C5) cover your real layout:
+> - `paths.bootstrap`: absolute paths to your identity/memory files (`SOUL.md`, `AGENTS.md`,
+>   `TOOLS.md`, `MEMORY.md`, …) **wherever they actually live** — the static scan only looks in
+>   the standard workspace dirs, so a file in the home root or a custom dir is otherwise invisible.
+> - `paths.openclaw_install`: the directory OpenClaw is installed in (e.g. the npm package dir).
+>
+> This is **discovery, not a trust claim**: you only say *where*; the engine still `stat()`s the
+> path itself, so a finding here stays an authoritative file-permission check (HIGH confidence),
+> not a weak self-report. It catches group/world-writable identity files and install dirs — a
+> binary-replacement / memory-injection vector the config-only scan can't see.
 
 **Step 4 — assemble the JSON and feed it.** Fill the template from Steps 2–3. Either write it to a
 local file the user can inspect and pass the path, or pipe it straight in with `-`:

@@ -140,6 +140,14 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
   config grants but the agent omitted (drift / blind spot / masking). Both at `ATTESTED` confidence —
   a self-report is weaker evidence than a config fact, so they are advisory and never override one.
   Read-only and introspective: the agent reports what it holds, it never *exercises* a verb to test it.
+  The attestation `paths` block additionally lets the agent point B20/C5 at where its identity/memory
+  files and OpenClaw install really live — discovery only: the agent supplies *where*, the engine still
+  `stat()`s the path itself, so those permission findings keep full file-stat strength (not `ATTESTED`).
+- **B20 / C5 — at-rest write protection:** B20 flags group/world-writable bootstrap/identity/memory
+  files (`SOUL.md`/`AGENTS.md`/`TOOLS.md`/`MEMORY.md`) in the home root **and** the workspace dirs;
+  C5 flags a group/world-writable openclaw binary dir, its install-tree ancestors (e.g. the npm
+  package root — a binary-replacement vector), and writable PATH dirs before it. Sticky dirs like
+  `/tmp` are exempt (the sticky bit blocks cross-owner replacement).
 - Plus your platform's own **`openclaw security audit`**, run for you and merged in.
 
 ## Built-in audit, included for you
