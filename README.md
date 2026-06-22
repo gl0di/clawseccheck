@@ -113,6 +113,13 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
 - **B38 — browser / SSRF exposure:** flags `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork`
   (cloud-metadata IP access / credential theft via 169.254.169.254) and `browser.noSandbox`
   (headless browser without OS isolation); warns when no `hostnameAllowlist` limits egress.
+- **B48 — dangerous break-glass overrides:** a grounded registry of OpenClaw's `dangerously*` /
+  `allowUnsafe*` toggles that are documented "keep disabled." **FAIL** when a sandbox-escape
+  (`sandbox.docker.dangerouslyAllow{ContainerNamespaceJoin,ExternalBindSources,ReservedContainerTargets}`)
+  or control-plane auth-bypass (`gateway.controlUi.dangerouslyDisableDeviceAuth`) flag is active;
+  **WARN** for the rest (webhook signature disable, host-header origin fallback, external embeds,
+  real-IP fallback, `allowUnsafeExternalContent`, per-channel/plugin private-network access, extra
+  node commands). Default/absent = clean PASS (zero false positives on a stock config).
 - **B39 — session visibility / cross-user transcript leak:** flags `session.dmScope="main"`
   (all DM peers share one session — cross-user contamination) and `tools.sessions.visibility`
   of `"agent"` or `"all"` (cross-session transcript reads).

@@ -4,7 +4,7 @@ Honest map of what ClawSecCheck checks today, what it does **not** yet check, an
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
 all (so they can't even surface as a finding). Updated 2026-06-22 for v1.6.0.
 
-Current catalog: `A1, B1–B26, B30–B33, B38, B39, B41–B47, B50–B54, C3–C5`, plus the
+Current catalog: `A1, B1–B26, B30–B33, B38, B39, B41–B48, B50–B54, C3–C5`, plus the
 combinational risk engine `RISK-01..RISK-11`, the install-time vetters `--vet` (B13 on
 an uninstalled skill, now AST- and injection-aware) / `--vet-mcp`, and the **attestation
 layer** (`--ask` / `--attest`, with a guided interrogation protocol so the agent self-builds
@@ -58,12 +58,12 @@ OWASP Agentic (ASI) classes below, not stretched into a category they don't fit.
 
 | Code | Category | ClawSecCheck checks |
 |---|---|---|
-| LLM01 | Prompt Injection | A1, B2, B6, B21, B23, B26, B30 |
+| LLM01 | Prompt Injection | A1, B2, B6, B21, B23, B26, B30, B48 |
 | LLM02 | Sensitive Information Disclosure | B1, B9, B11, B14, B19, B39, B41 |
 | LLM03 | Supply Chain | B5, B13, B15, B24, B25, B33, B42, C4, C5 |
 | LLM04 | Data and Model Poisoning | B7, B20, B22 |
 | LLM05 | Improper Output Handling | B21, B47 |
-| LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47 |
+| LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48 |
 | LLM07 | System Prompt Leakage | B9 |
 | LLM08 | Vector and Embedding Weaknesses | — (no agent-config surface; RAG/embedding concern) |
 | LLM09 | Misinformation | — (model output / overreliance; out of scope) |
@@ -87,7 +87,7 @@ stamped here):
 | Tool misuse (unsafe delegation / parameter injection) | B3, B18, B31, B45, B46, B47 |
 | Identity & privilege abuse (multi-agent delegation chains) | B30, B45, B46, B47 |
 | Runtime supply chain (dynamic tool/plugin composition) | B5, B13, B25, B33, B42 |
-| Unexpected RCE (sandboxing failures) | B4, C5 |
+| Unexpected RCE (sandboxing failures) | B4, B48, C5 |
 | Memory & context poisoning | B7, B20, B28 |
 | Insecure inter-agent communication | B47, B2, B32 |
 | Cascading failures / blast-radius amplification | B41, B43, B45, B46, B47 |

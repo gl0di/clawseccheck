@@ -362,6 +362,7 @@ TITLES: dict[str, dict[str, str]] = {
     "B45": {"he": "הפרדת הרשאות בין סוכנים (פירוק ה-Lethal Trifecta)"},
     "B46": {"he": "חשיפת Trifecta בסביבה רב-סוכנית"},
     "B47": {"he": "הרכבה מחדש של ה-Trifecta בין סוכנים (גרף האצלה)"},
+    "B48": {"he": "עקיפות break-glass מסוכנות מופעלות"},
     "B50": {"he": "ניטור רשת / IDS במארח"},
     "B51": {"he": "תיעוד ביקורת / syscall במארח"},
     "B52": {"he": "ניטור שלמות קבצים במארח"},
@@ -1416,6 +1417,33 @@ PHRASES: dict[str, dict[str, str]] = {
     },
     "isolate DM sessions per user; do not use \"main\"": {
         "he": "בודד סשני DM לכל משתמש; אל תשתמש ב-\"main\"",
+    },
+    # ---- B48: dangerous break-glass overrides (v1.8.0) ----
+    "Dangerous break-glass override(s) that enable sandbox escape or control-plane "
+    "auth bypass are active (see evidence).": {
+        "he": "עקיפות break-glass מסוכנות המאפשרות בריחה מארגז החול או עקיפת אימות "
+              "ב-control-plane פעילות (ראה ראיות).",
+    },
+    "Disable these unless a specific, temporary break-glass need requires one — each "
+    "opens sandbox escape or control-plane authentication bypass. Restore the safe "
+    "default (set to false / remove).": {
+        "he": "בטל אותן אלא אם יש צורך break-glass ספציפי וזמני — כל אחת פותחת בריחה "
+              "מארגז החול או עקיפת אימות ב-control-plane. החזר לברירת המחדל הבטוחה "
+              "(הגדר false / הסר).",
+    },
+    "One or more dangerous break-glass override flag(s) are enabled (see evidence).": {
+        "he": "דגל break-glass מסוכן אחד או יותר מופעל (ראה ראיות).",
+    },
+    "Review each — OpenClaw documents these as 'keep disabled' break-glass toggles. "
+    "Turn off any you do not actively need.": {
+        "he": "בדוק כל אחד — OpenClaw מתעד אותם כמתגי break-glass שיש 'להשאיר כבויים'. "
+              "כבה כל מה שאינך צריך באופן פעיל.",
+    },
+    "No dangerous break-glass override flags enabled.": {
+        "he": "לא מופעלים דגלי עקיפת break-glass מסוכנים.",
+    },
+    "Keep these break-glass toggles off unless an incident temporarily requires one.": {
+        "he": "השאר את מתגי ה-break-glass כבויים אלא אם אירוע מצריך אחד באופן זמני.",
     },
 }
 

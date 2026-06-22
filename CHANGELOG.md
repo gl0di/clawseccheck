@@ -3,6 +3,31 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.8.0] — 2026-06-22
+
+**B48 — dangerous break-glass overrides.** Mining the real `openclaw config schema` (2026.6.9) for
+`dangerously*` / `allowUnsafe*` toggles found ~20 such flags but only 3 were checked. The new B48
+closes that coverage gap with a grounded registry — every path was confirmed accepted by `openclaw
+config validate` (so they are real, not fabricated), and each is documented "keep disabled."
+
+### Added
+- **B48 — dangerous break-glass overrides enabled** (scored). **FAIL** when a sandbox-escape
+  (`agents[.defaults|.list[]].sandbox.docker.dangerouslyAllow{ContainerNamespaceJoin,ExternalBindSources,
+  ReservedContainerTargets}`) or control-plane auth-bypass (`gateway.controlUi.dangerouslyDisableDeviceAuth`)
+  flag is active; **WARN** for the rest — `gateway.controlUi.{dangerouslyAllowHostHeaderOriginFallback,
+  allowExternalEmbedUrls}`, `gateway.allowRealIpFallback`, `gateway.nodes.allowCommands`,
+  `channels.<x>.{dangerouslyDisableSignatureValidation,dangerouslyAllowInheritedWebhookPath,
+  network.dangerouslyAllowPrivateNetwork}`, `hooks[.gmail|.mappings[]].allowUnsafeExternalContent`,
+  `plugins.entries.<x>.config.allowPrivateNetwork`. Absent/false = clean **PASS** — verified zero
+  false positives on the real stock out-of-box config and on the fixture corpus.
+- Mapped to OWASP **LLM01/LLM06** and the ASI sandboxing/RCE class (`docs/THREAT_COVERAGE.md`).
+
+### Notes
+- Grounded the new check the dogfood way: set each flag via the real `openclaw` binary (the schema
+  validated the path) and confirmed B48 FAIL/WARN on the live config; the stock default stays PASS.
+- B48 deliberately does not re-cover flags owned by dedicated checks (`dangerouslyAllowNameMatching`→B30,
+  `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork`→B38).
+
 ## [1.7.1] — 2026-06-22
 
 **Out-of-the-box dogfood fixes.** Stood up a real stock `openclaw@2026.6.9` and audited its default

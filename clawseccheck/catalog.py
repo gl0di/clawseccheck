@@ -137,6 +137,10 @@ CATALOG: list[CheckMeta] = [
     CheckMeta("B47", "Cross-agent trifecta reassembly (delegation graph)",
               HIGH, "advisory", "Privilege Separation / Delegation",
               scored=False, confidence=ATTESTED),
+    # B48 (v1.8.0): grounded registry of OpenClaw "dangerously*/allowUnsafe*" break-glass
+    # toggles. Scored: FAIL on sandbox-escape / control-plane-auth-disable, WARN on the rest.
+    CheckMeta("B48", "Dangerous break-glass overrides enabled",
+              HIGH, "hardening", "Least Privilege / Break-Glass"),
     # Host Watch Posture — is anyone watching the machine the agent runs on?
     # Read-only host-monitor detection (hostwatch.detect). LOW + WARN-only (never
     # FAIL): the absence of host monitoring is flagged only when the agent is
@@ -221,6 +225,7 @@ OWASP_MAP = {
     "B45": ("LLM06",),
     "B46": ("LLM06",),
     "B47": ("LLM05", "LLM06"),
+    "B48": ("LLM01", "LLM06"),
     "C4": ("LLM03",),
     "C5": ("LLM03",),
 }

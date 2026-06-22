@@ -3701,6 +3701,116 @@ def check_multiagent_exposure(ctx: Context) -> Finding:
 _TIER_NAME = {3: "schema (wall)", 2: "filtered (sieve)", 1: "raw/unknown (passthrough)"}
 
 
+# ---------- B48: dangerous break-glass overrides (v1.8.0) ----------
+# Grounded registry of OpenClaw "dangerously*/allowUnsafe*" break-glass flags, verified
+# against the real `openclaw config schema` (2026.6.9). Each is documented there as
+# DANGEROUS / "keep disabled". (path, risk label, FAIL?). Active (truthy) = a deliberate
+# dangerous override. FAIL = sandbox escape or control-plane auth bypass; WARN = the rest.
+_DANGER_FIXED = [
+    ("agents.defaults.sandbox.docker.dangerouslyAllowContainerNamespaceJoin",
+     "sandbox escape: joins another container's namespace", True),
+    ("agents.defaults.sandbox.docker.dangerouslyAllowExternalBindSources",
+     "sandbox escape: external host bind sources", True),
+    ("agents.defaults.sandbox.docker.dangerouslyAllowReservedContainerTargets",
+     "sandbox escape: reserved container targets", True),
+    ("gateway.controlUi.dangerouslyDisableDeviceAuth",
+     "control-plane: Control-UI device identity auth disabled", True),
+    ("gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback",
+     "control-plane: Host-header origin fallback (CSRF/origin-bypass surface)", False),
+    ("gateway.controlUi.allowExternalEmbedUrls",
+     "control-plane: external embed URLs allowed (SSRF / clickjacking)", False),
+    ("gateway.allowRealIpFallback",
+     "x-real-ip fallback enabled (client-IP spoofing via forged header)", False),
+    ("hooks.gmail.allowUnsafeExternalContent",
+     "less-sanitized external Gmail content into processing (injection surface)", False),
+]
+# per-agent sandbox docker flags (FAIL) — same leaf names under agents.list[]
+_DANGER_AGENT_SANDBOX = (
+    ("dangerouslyAllowContainerNamespaceJoin", "namespace join"),
+    ("dangerouslyAllowExternalBindSources", "external bind sources"),
+    ("dangerouslyAllowReservedContainerTargets", "reserved container targets"),
+)
+
+
+def check_dangerous_overrides(ctx: Context) -> Finding:
+    """B48 — flag OpenClaw 'dangerously*/allowUnsafe*' break-glass toggles that are ACTIVE.
+
+    These are explicit opt-in overrides OpenClaw documents as 'keep disabled'. Absent /
+    false = nothing flagged (so a default config is a clean PASS — zero false positives).
+    FAIL when a sandbox-escape or control-plane-auth-disable flag is on; WARN for the rest.
+    """
+    cfg = ctx.config
+    fails: list[str] = []
+    warns: list[str] = []
+
+    for path, label, is_fail in _DANGER_FIXED:
+        if dig(cfg, path):
+            (fails if is_fail else warns).append(f"{path} — {label}")
+
+    nc = dig(cfg, "gateway.nodes.allowCommands")
+    if isinstance(nc, list) and nc:
+        warns.append("gateway.nodes.allowCommands — extra node.invoke commands enabled "
+                     "(beyond gateway defaults; possible RCE surface)")
+
+    agent_list = dig(cfg, "agents.list")
+    if isinstance(agent_list, list):
+        for i, agent in enumerate(agent_list):
+            if not isinstance(agent, dict):
+                continue
+            for flag, lbl in _DANGER_AGENT_SANDBOX:
+                if dig(agent, f"sandbox.docker.{flag}"):
+                    fails.append(f"agents.list[{i}].sandbox.docker.{flag} — sandbox escape: {lbl}")
+
+    for name, c in _channels(cfg).items():
+        if not isinstance(c, dict):
+            continue
+        if c.get("dangerouslyDisableSignatureValidation"):
+            warns.append(f"channels.{name}.dangerouslyDisableSignatureValidation — "
+                         "webhook signature validation disabled (spoofable untrusted input)")
+        if c.get("dangerouslyAllowInheritedWebhookPath"):
+            warns.append(f"channels.{name}.dangerouslyAllowInheritedWebhookPath — "
+                         "inherited webhook path accepted")
+        if dig(c, "network.dangerouslyAllowPrivateNetwork"):
+            warns.append(f"channels.{name}.network.dangerouslyAllowPrivateNetwork — "
+                         "private-network access from this channel (SSRF)")
+
+    mappings = dig(cfg, "hooks.mappings")
+    if isinstance(mappings, list):
+        for i, m in enumerate(mappings):
+            if isinstance(m, dict) and m.get("allowUnsafeExternalContent"):
+                warns.append(f"hooks.mappings[{i}].allowUnsafeExternalContent — "
+                             "less-sanitized external content (injection surface)")
+
+    for name, p in _plugins(cfg).items():
+        if isinstance(p, dict) and dig(p, "config.allowPrivateNetwork"):
+            warns.append(f"plugins.entries.{name}.config.allowPrivateNetwork — "
+                         "plugin private-network access (SSRF)")
+
+    if fails:
+        return _finding(
+            "B48", FAIL,
+            "Dangerous break-glass override(s) that enable sandbox escape or control-plane "
+            "auth bypass are active (see evidence).",
+            "Disable these unless a specific, temporary break-glass need requires one — each "
+            "opens sandbox escape or control-plane authentication bypass. Restore the safe "
+            "default (set to false / remove).",
+            evidence=fails + warns,
+        )
+    if warns:
+        return _finding(
+            "B48", WARN,
+            "One or more dangerous break-glass override flag(s) are enabled (see evidence).",
+            "Review each — OpenClaw documents these as 'keep disabled' break-glass toggles. "
+            "Turn off any you do not actively need.",
+            evidence=warns,
+        )
+    return _finding(
+        "B48", PASS,
+        "No dangerous break-glass override flags enabled.",
+        "Keep these break-glass toggles off unless an incident temporarily requires one.",
+    )
+
+
 def check_delegation_reassembly(ctx: Context) -> Finding:
     """B47 — cross-agent trifecta reassembly across the delegation graph (confused deputy).
 
@@ -3781,7 +3891,7 @@ CHECKS = [
     check_host_edr, check_host_firewall,
     check_capability_blast_radius, check_attestation_mismatch,
     check_agent_separation, check_multiagent_exposure,
-    check_delegation_reassembly,
+    check_delegation_reassembly, check_dangerous_overrides,
 ]
 
 
