@@ -15,8 +15,9 @@ from pathlib import Path
 from . import (
     audit, diff, fingerprint, load_events, load_ignore, load_state, make_canary, record_events,
     render_canary, render_card, render_events, render_json, render_monitor, render_prompts,
-    render_report, render_svg, save_state, snapshot, vet_mcp, vet_skill,
+    render_report, render_svg, render_vet_json, save_state, snapshot, vet_mcp, vet_skill,
 )
+from . import __version__
 from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
@@ -142,7 +143,6 @@ def main(argv=None) -> int:
 
     # standalone modes that don't audit ~/.openclaw
     if args.verify_self:
-        from . import __version__
         combined, per_file = package_digest()
         lines = [f"ClawSecCheck {__version__} — engine source digest (SHA-256)",
                  f"combined : {combined}",
@@ -158,6 +158,15 @@ def main(argv=None) -> int:
     if args.vet:
         from .report import _sanitize
         f = vet_skill(args.vet)
+        # Side output: SARIF file (mirrors the full-audit --sarif behavior).
+        if args.sarif:
+            Path(args.sarif).expanduser().write_text(
+                render_sarif([f], tool_version=__version__), encoding="utf-8")
+            _emit(f"(SARIF written to {args.sarif})")
+        # Primary output: machine-readable JSON, else the human text report.
+        if args.json:
+            _emit(render_vet_json([f], mode="vet", target=args.vet, version=__version__))
+            return 0 if f.status in ("PASS", "UNKNOWN") else 1
         verdict = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS": "looks SAFE",
                    "UNKNOWN": "could not assess"}[f.status]
         icon = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}[f.status] \
@@ -178,6 +187,23 @@ def main(argv=None) -> int:
         from .report import _sanitize
         target = args.vet_mcp if args.vet_mcp else None
         findings = vet_mcp(target=target, home=args.home)
+        # Side output: SARIF file (mirrors the full-audit --sarif behavior).
+        if args.sarif:
+            Path(args.sarif).expanduser().write_text(
+                render_sarif(findings, tool_version=__version__), encoding="utf-8")
+            _emit(f"(SARIF written to {args.sarif})")
+        # Primary output: machine-readable JSON (covers the no-servers UNKNOWN case too).
+        if args.json:
+            _emit(render_vet_json(findings, mode="vet-mcp",
+                                  target=target or "configured", version=__version__))
+            worst = "PASS"
+            for f in findings:
+                if f.status == "FAIL":
+                    worst = "FAIL"
+                    break
+                if f.status == "WARN" and worst != "FAIL":
+                    worst = "WARN"
+            return 0 if worst in ("PASS", "UNKNOWN") else 1
         # "No servers configured" case: single UNKNOWN finding.
         if len(findings) == 1 and findings[0].status == "UNKNOWN":
             f = findings[0]
@@ -288,7 +314,6 @@ def main(argv=None) -> int:
         return 0
 
     if args.sarif:
-        from . import __version__
         try:
             Path(args.sarif).expanduser().write_text(
                 render_sarif(findings, score, __version__),

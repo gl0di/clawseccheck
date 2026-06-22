@@ -30,7 +30,7 @@ _SEV_LEVEL = {
 
 def render_sarif(
     findings: list[Finding],
-    score: ScoreResult,
+    score: ScoreResult | None = None,
     tool_version: str = "0.0.0",
 ) -> str:
     """Return a SARIF 2.1.0 JSON string representing *findings*.
@@ -45,7 +45,9 @@ def render_sarif(
     findings:
         List of :class:`clawseccheck.catalog.Finding` objects from :func:`clawseccheck.checks.run_all`.
     score:
-        :class:`clawseccheck.scoring.ScoreResult` from :func:`clawseccheck.scoring.compute`.
+        Optional :class:`clawseccheck.scoring.ScoreResult` from :func:`clawseccheck.scoring.compute`.
+        Not embedded in SARIF output; accepted for call-site symmetry with the full audit
+        and may be omitted (e.g. the vetting modes, which produce no score).
     tool_version:
         Version string embedded in ``tool.driver.version``.
 
@@ -68,6 +70,7 @@ def render_sarif(
     ]
 
     # Build results: only FAIL / WARN, not suppressed.
+    _catalog_ids = {meta.id for meta in CATALOG}
     results = []
     for f in findings:
         if f.suppressed:
@@ -85,6 +88,16 @@ def render_sarif(
                                "evidence": [_sanitize(e) for e in (f.evidence or [])]},
             }
         )
+        # Vetting findings (e.g. MCP-VET) carry ids outside the scored CATALOG.
+        # Keep the SARIF self-consistent: every referenced ruleId must have a rule.
+        if f.id not in _catalog_ids:
+            _catalog_ids.add(f.id)
+            rules.append({
+                "id": f.id,
+                "name": _sanitize(f.title),
+                "shortDescription": {"text": _sanitize(f.title)},
+                "defaultConfiguration": {"level": _SEV_LEVEL.get(f.severity, "note")},
+            })
 
     sarif_log = {
         "$schema": _SARIF_SCHEMA,

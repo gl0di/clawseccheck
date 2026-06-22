@@ -314,6 +314,43 @@ def render_prompts(findings: list[Finding], ascii_only: bool = False,
     return _asciify(out) if ascii_only else out
 
 
+# Verdict words for the vetting modes (--vet / --vet-mcp), keyed by worst status.
+_VET_VERDICT = {FAIL: "DANGEROUS", WARN: "SUSPICIOUS", PASS: "SAFE", UNKNOWN: "UNKNOWN"}
+_VET_STATUS_RANK = {FAIL: 3, WARN: 2, UNKNOWN: 1, PASS: 0}
+
+
+def _finding_to_dict(f: Finding) -> dict:
+    """Serialize one Finding to the frozen public JSON shape (shared by every renderer)."""
+    return {"id": f.id, "title": _sanitize(f.title), "severity": f.severity,
+            "status": f.status, "detail": _sanitize(f.detail),
+            "fix": _sanitize(f.fix), "framework": f.framework,
+            "confidence": getattr(f, "confidence", "HIGH"),
+            "evidence": [_sanitize(e) for e in (f.evidence or [])]}
+
+
+def render_vet_json(findings: list[Finding], *, mode: str, target: str,
+                    version: str) -> str:
+    """Machine-readable output for --vet / --vet-mcp (no score: vetting is not a scored audit).
+
+    `mode` is "vet" or "vet-mcp"; `target` is the path/name vetted. `verdict` is the
+    worst finding status mapped to SAFE / SUSPICIOUS / DANGEROUS / UNKNOWN. Finding
+    dicts use the same frozen shape as the full audit (`_finding_to_dict`).
+    """
+    # Verdict = the worst finding status. Empty -> UNKNOWN (nothing to assess).
+    # Note: UNKNOWN outranks PASS, so a mix surfaces the honest "could not assess".
+    worst = (max((f.status for f in findings), key=lambda s: _VET_STATUS_RANK.get(s, 0))
+             if findings else UNKNOWN)
+    payload = {
+        "tool": "clawseccheck",
+        "version": version,
+        "mode": mode,
+        "target": target,
+        "verdict": _VET_VERDICT.get(worst, "UNKNOWN"),
+        "findings": [_finding_to_dict(f) for f in findings],
+    }
+    return json.dumps(payload, ensure_ascii=True, indent=2)
+
+
 def render_json(findings: list[Finding], score: ScoreResult, *, risk=None) -> str:
     actions = suggest_actions(findings, score)
     payload: dict = {
@@ -323,11 +360,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None) -> st
         "raw_score": score.raw_score,
         "trifecta": _trifecta_ratio(findings),
         "findings": [
-            {"id": f.id, "title": _sanitize(f.title), "severity": f.severity,
-             "status": f.status, "detail": _sanitize(f.detail),
-             "fix": _sanitize(f.fix), "framework": f.framework,
-             "confidence": getattr(f, "confidence", "HIGH"),
-             "evidence": [_sanitize(e) for e in (f.evidence or [])]}
+            _finding_to_dict(f)
             for f in findings
         ],
         "next_actions": [

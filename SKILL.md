@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 1.0.0
+version: 1.1.0
 description: Free, local, read-only security self-audit for your own OpenClaw agent. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true}}
 ---
@@ -299,8 +299,8 @@ Use this to map what the user says to the right command:
 | User says | Run |
 |---|---|
 | "fix", "how do I fix", "what should I do", "copy-paste fix" | `--prompts` |
-| "vet", "scan this skill", "is this safe to install", "check before I install" | `--vet <path>` |
-| "is my MCP safe", "check my connected servers", "vet my MCP", "are my MCP servers trusted", "MCP supply chain" | `--vet-mcp` |
+| "vet", "scan this skill", "is this safe to install", "check before I install" | `--vet <path>` (add `--json` or `--sarif PATH` for machine-readable / CI output) |
+| "is my MCP safe", "check my connected servers", "vet my MCP", "are my MCP servers trusted", "MCP supply chain" | `--vet-mcp` (add `--json` or `--sarif PATH` for machine-readable / CI output) |
 | "what dangerous actions can my agent take", "least privilege", "check my tools", "capability", "blast radius", "deeper check" | `--ask` then `--attest <filled.json>` |
 | "monitor", "watch", "alert me", "ongoing", "keep checking" | `--monitor` (ask first) |
 | "canary", "injection test", "am I vulnerable", "try an attack" | `--canary` then `--dryrun` |
@@ -334,6 +334,9 @@ For completeness — these are less common but available:
 - `--save PATH` — write the report to a local file.
 - `--lang he` — Hebrew output, right-to-left (auto-detected from `LANG`/`LC_ALL`).
 - `--sarif PATH` — write a local SARIF 2.1.0 file (for CI / GitHub Code Scanning; never uploaded).
+  Works with `--vet`/`--vet-mcp` too, as a side output alongside the human report.
+- `--json` with `--vet`/`--vet-mcp` — emits a vetting JSON object (`mode`, `target`, `verdict`,
+  `findings[]`). No score: vetting is not a scored audit. Exit code is 1 on SUSPICIOUS/DANGEROUS.
 - `--fail-under N` — exit with code 1 if score is below N (useful for CI pipelines).
 - `--exit-code` — exit 1 if any unsuppressed FAIL finding exists.
 - `--verbose` / `--debug` / `--log PATH` — local logging with secret redaction.

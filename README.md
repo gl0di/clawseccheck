@@ -337,6 +337,7 @@ preserving backward compatibility.
 ```bash
 python3 audit.py --next                    # print the "What you can do next" guidance block only
 python3 audit.py --vet ./some-skill        # vet a skill (dir or SKILL.md) BEFORE installing it
+python3 audit.py --vet ./some-skill --json # same, machine-readable (verdict + findings); --sarif PATH for CI
 python3 audit.py --vet-mcp                 # vet connected MCP servers for supply-chain risk BEFORE trusting them
 python3 audit.py --canary                   # active prompt-injection self-test (battle-tested)
 python3 audit.py --redteam                   # a multi-scenario adversarial payload suite (incl. tool-poisoning, MCP-response injection, memory-poisoning, multi-agent, approval-bypass, dirty-to-exfil)
@@ -360,7 +361,9 @@ python3 audit.py --log audit.log            # also write log to a local file
   report.
 - **`--vet PATH`** runs the B13 malware scan on a skill *before* you install it (point it at a
   downloaded folder or `SKILL.md`; for a URL, clone it first, then vet the local copy). Verdict:
-  SAFE / SUSPICIOUS / DANGEROUS.
+  SAFE / SUSPICIOUS / DANGEROUS. Add `--json` for a machine-readable verdict + findings (no score —
+  vetting isn't a scored audit), or `--sarif PATH` to drop a SARIF file for CI / code scanning;
+  exit code is `1` on SUSPICIOUS/DANGEROUS so `--vet … || fail` gates an install pipeline.
 - **`--vet-mcp`** vets every MCP server listed under `mcp.servers.*` for supply-chain risk
   *before* you trust it. Flags unpinned installs (`npx @latest`, unversioned packages), `curl|sh`
   bootstrap, plaintext-HTTP remote transports, env-variable secret passthrough, and overly broad

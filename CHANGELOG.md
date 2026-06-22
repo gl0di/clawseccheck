@@ -3,6 +3,31 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.1.0] — 2026-06-22
+
+**`--vet` / `--vet-mcp` now honor `--json` and `--sarif`.** Previously the vetting branches
+returned before the CLI looked at those flags, so `clawseccheck --vet ./skill --json` silently
+printed the human text report instead of JSON — a real gap for CI pipelines that vet skills
+before install. Additive only: nothing in the frozen 1.0 contract changes.
+
+### Added
+- **`--vet … --json` / `--vet-mcp … --json`** — emit a vetting JSON object via the new public
+  `render_vet_json()`: `tool`, `version`, `mode` (`vet`/`vet-mcp`), `target`, `verdict`
+  (`SAFE`/`SUSPICIOUS`/`DANGEROUS`/`UNKNOWN`), and `findings[]` in the same frozen finding shape
+  as the audit. **No `score`/`grade`** — vetting is not a scored audit, so no number is fabricated.
+- **`--vet … --sarif PATH` / `--vet-mcp … --sarif PATH`** — write SARIF 2.1.0 as a side output
+  alongside the human report (mirrors the full-audit `--sarif` behavior).
+- Exit code for the JSON/SARIF vet paths is unchanged: `1` on SUSPICIOUS/DANGEROUS, else `0`.
+
+### Fixed
+- **SARIF self-consistency for vetting:** vet findings carry ids outside the scored CATALOG
+  (e.g. `MCP-VET`). `render_sarif()` now synthesizes a matching `rule` for any referenced
+  `ruleId` not in the catalog, so a dangerous-MCP SARIF result always points at a defined rule.
+- **`render_sarif()` `score` is now optional** — accepted for call-site symmetry; the vetting
+  modes pass no `ScoreResult`. (Backward compatible: existing positional calls are unaffected.)
+- Removed shadowing function-local `from . import __version__` imports in `cli.py` that made
+  `__version__` a local and would `UnboundLocalError` once referenced from the vet branches.
+
 ## [1.0.0] — 2026-06-21
 
 **API freeze.** The mature core is now a stable contract: breaking it requires a major
