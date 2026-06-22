@@ -201,27 +201,47 @@ def _hint(names, hints) -> bool:
 
 
 # ---------------------------------------------------------------- Block A
-def check_trifecta(ctx: Context) -> Finding:
+def _trifecta_legs(ctx: Context) -> dict:
+    """The three lethal-trifecta legs computed from the GLOBAL config surface.
+
+    Shared by A1 (check_trifecta) and B46 (check_multiagent_exposure) so both read
+    one definition of the legs. Keys are the human-facing labels A1 emits; insertion
+    order is preserved (input → sensitive → outbound).
+    """
     cfg = ctx.config
     tools = _enabled_tools(cfg)
     open_ch = _open_channels(cfg)
-
-    untrusted_input = bool(open_ch) or _hint(tools, INPUT_TOOL_HINTS)
-    sensitive_data = (
-        _hint(tools, SENSITIVE_TOOL_HINTS)
-        or (ctx.home / "credentials").is_dir()
-        or bool(dig(cfg, "gateway.auth.password"))
-    )
-    outbound = (
-        _hint(tools, OUTBOUND_TOOL_HINTS)
-        or bool(dig(cfg, "tools.elevated.allowFrom"))
-    )
-
-    legs = {
-        "untrusted input": untrusted_input,
-        "sensitive data": sensitive_data,
-        "outbound actions": outbound,
+    return {
+        "untrusted input": bool(open_ch) or _hint(tools, INPUT_TOOL_HINTS),
+        "sensitive data": (
+            _hint(tools, SENSITIVE_TOOL_HINTS)
+            or (ctx.home / "credentials").is_dir()
+            or bool(dig(cfg, "gateway.auth.password"))
+        ),
+        "outbound actions": (
+            _hint(tools, OUTBOUND_TOOL_HINTS)
+            or bool(dig(cfg, "tools.elevated.allowFrom"))
+        ),
     }
+
+
+def _agent_legs(tools: list) -> dict:
+    """Classify ONE agent's declared tool list into the three trifecta legs.
+
+    Per-agent we only have that agent's own tool names (from the attestation roster),
+    so legs are derived purely from the same tool-name hints A1 uses. The config-level
+    signals A1 also consults (credentials dir, gateway password, elevated.allowFrom)
+    are GLOBAL, not attributable to one agent, so they are intentionally not applied here.
+    """
+    return {
+        "untrusted input": _hint(tools, INPUT_TOOL_HINTS),
+        "sensitive data": _hint(tools, SENSITIVE_TOOL_HINTS),
+        "outbound actions": _hint(tools, OUTBOUND_TOOL_HINTS),
+    }
+
+
+def check_trifecta(ctx: Context) -> Finding:
+    legs = _trifecta_legs(ctx)
     active = [k for k, v in legs.items() if v]
     detail = f"Active legs {len(active)}/3: {', '.join(active) or 'none'}. Rule: keep ≤2 of 3."
 
@@ -3502,6 +3522,110 @@ def check_attestation_mismatch(ctx: Context) -> Finding:
     )
 
 
+# ---------- B45/B46: multi-agent privilege separation (v1.4.0) ----------
+def check_agent_separation(ctx: Context) -> Finding:
+    """B45 — per-agent lethal-trifecta decomposition (privilege separation).
+
+    A1 flattens the whole setup into one capability surface, so it cannot tell a
+    monolithic agent (one agent holds all three legs) from a properly separated fleet
+    where no single agent does. OpenClaw config has no per-agent tool allowlist (only
+    per-agent deny lists), so the per-agent capability split is NOT in config — this
+    reads the attested agent roster (--attest 'agents') and classifies each agent's
+    legs itself (it never trusts a self-graded "this agent is safe").
+
+    WARN    — some single agent holds all three legs (input + sensitive + outbound):
+              separation is absent; that agent alone is the lethal trifecta.
+    PASS    — no single agent holds all three (necessary condition for separation met).
+              NOT a safety guarantee: runtime data-flow and the delegation graph are
+              not checked here.
+    UNKNOWN — no agent roster attested (single-agent setup, or simply not declared).
+
+    ATTESTED confidence, advisory (scored=False): the verdict rests on the agent's
+    self-declared roster, which the static config cannot corroborate.
+    """
+    agents = _attest.attested_agents(ctx.attestation)
+    if not agents:
+        return _finding(
+            "B45", UNKNOWN,
+            "No agent roster attested — per-agent privilege separation cannot be "
+            "assessed from config (OpenClaw config has no per-agent tool allowlist).",
+            "If you run more than one agent, run 'clawseccheck --ask', have each agent "
+            "list its real tools under 'agents', then re-run with '--attest <file>'.",
+        )
+    rostered = [(a["name"], _agent_legs(a["tools"])) for a in agents]
+    trifecta_agents = [name for name, legs in rostered if all(legs.values())]
+    if trifecta_agents:
+        return _finding(
+            "B45", WARN,
+            "At least one agent holds all three lethal-trifecta legs by itself "
+            "(untrusted input + sensitive data + outbound/exec) — privilege "
+            "separation is absent; that agent alone is the full trifecta.",
+            "Split that agent's capabilities: the agent that ingests untrusted content "
+            "must not also hold sensitive-data and outbound/exec tools. Move one leg to "
+            "a separate agent the untrusted-input agent cannot drive.",
+            evidence=[f"{n}: holds all 3 legs" for n in trifecta_agents],
+        )
+    return _finding(
+        "B45", PASS,
+        "No single attested agent holds all three trifecta legs — the necessary "
+        "condition for privilege separation is met. This is not a safety guarantee: "
+        "whether untrusted data is re-interpreted by a privileged agent at runtime, "
+        "and whether the trifecta reassembles across delegation, are not checked here.",
+        "Keep each agent below all-three legs; constrain delegation so a low-trust "
+        "agent cannot reach a privileged agent's tools.",
+        evidence=[f"{name}: {sum(legs.values())}/3 legs" for name, legs in rostered],
+    )
+
+
+def check_multiagent_exposure(ctx: Context) -> Finding:
+    """B46 — multi-agent topology with the global trifecta active and no approval gate.
+
+    Config-only (no attestation needed). A strictly-narrower, more-dangerous subset of
+    A1: when subagents / multiple agents can be spawned AND all three trifecta legs are
+    active globally AND no exec approval gate exists, an injection has both the full
+    trifecta and spawnable helpers to reassemble it, with no human checkpoint. A
+    deliberate light scored nudge layered on A1 — capped at WARN, never a hard FAIL,
+    so it cannot introduce a new FAIL on real configs (§5).
+
+    WARN    — multi-agent topology + global trifecta + no approval gate.
+    PASS    — multi-agent topology present but the trifecta is incomplete or a gate exists.
+    UNKNOWN — no multi-agent topology (single agent; A1 already covers that case).
+    """
+    cfg = ctx.config
+    if not _has_subagents(cfg):
+        return _finding(
+            "B46", UNKNOWN,
+            "No multi-agent / subagent delegation detected in config — multi-agent "
+            "trifecta exposure does not apply (single-agent trifecta is covered by A1).",
+            "—",
+        )
+    legs = _trifecta_legs(ctx)
+    if not all(legs.values()):
+        return _finding(
+            "B46", PASS,
+            "Multiple agents/subagents can be spawned, but the global lethal trifecta "
+            "is not fully active (at least one leg is absent), so the multi-agent "
+            "amplifier does not apply.",
+            "Keep at least one trifecta leg off the shared surface as agents are added.",
+        )
+    if _has_approval_gate(cfg):
+        return _finding(
+            "B46", PASS,
+            "Multiple agents/subagents and the full trifecta are present, but an exec "
+            "approval gate forces a human checkpoint before side-effects fire.",
+            "Keep the approval gate on for every agent that can take outbound/exec actions.",
+        )
+    return _finding(
+        "B46", WARN,
+        "Multiple agents/subagents can be spawned, all three trifecta legs are active "
+        "globally, and no exec approval gate is set — an injection has the full "
+        "trifecta plus spawnable helpers to reassemble it, with no human checkpoint.",
+        "Add an exec approval gate (tools.exec.mode='ask'/'allowlist') AND separate "
+        "capabilities across agents so no single agent holds all three legs. Attest "
+        "your agent roster ('--attest') to check per-agent separation (B45).",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -3519,6 +3643,7 @@ CHECKS = [
     check_host_network_ids, check_host_audit, check_host_file_integrity,
     check_host_edr, check_host_firewall,
     check_capability_blast_radius, check_attestation_mismatch,
+    check_agent_separation, check_multiagent_exposure,
 ]
 
 

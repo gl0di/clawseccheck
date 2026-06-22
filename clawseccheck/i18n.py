@@ -343,6 +343,8 @@ TITLES: dict[str, dict[str, str]] = {
     "B42": {"he": "מדיניות התקנה של מיומנויות/תוספים (hooks והרשאות תיקיות)"},
     "B43": {"he": "רדיוס פגיעה של יכולות / מצאי פעלים מסוכנים"},
     "B44": {"he": "אי-התאמה בין הצהרת הסוכן לתצורה (יכולת לא מדווחת)"},
+    "B45": {"he": "הפרדת הרשאות בין סוכנים (פירוק ה-Lethal Trifecta)"},
+    "B46": {"he": "חשיפת Trifecta בסביבה רב-סוכנית"},
     "B50": {"he": "ניטור רשת / IDS במארח"},
     "B51": {"he": "תיעוד ביקורת / syscall במארח"},
     "B52": {"he": "ניטור שלמות קבצים במארח"},
@@ -1245,6 +1247,83 @@ PHRASES: dict[str, dict[str, str]] = {
     },
     "PATH safety check not applicable on non-POSIX platforms.": {
         "he": "בדיקת בטיחות PATH אינה רלוונטית בפלטפורמות שאינן POSIX.",
+    },
+    # ---- B45 / B46: multi-agent privilege separation (v1.4.0) ----
+    "No agent roster attested — per-agent privilege separation cannot be "
+    "assessed from config (OpenClaw config has no per-agent tool allowlist).": {
+        "he": "לא הוצהר מצבת סוכנים — לא ניתן להעריך הפרדת הרשאות לכל סוכן "
+              "מתוך התצורה (לתצורת OpenClaw אין רשימת היתר כלים לכל סוכן).",
+    },
+    "If you run more than one agent, run 'clawseccheck --ask', have each agent "
+    "list its real tools under 'agents', then re-run with '--attest <file>'.": {
+        "he": "אם אתה מריץ יותר מסוכן אחד, הרץ 'clawseccheck --ask', בקש מכל סוכן "
+              "לרשום את הכלים האמיתיים שלו תחת 'agents', ואז הרץ שוב עם "
+              "'--attest <file>'.",
+    },
+    "At least one agent holds all three lethal-trifecta legs by itself "
+    "(untrusted input + sensitive data + outbound/exec) — privilege "
+    "separation is absent; that agent alone is the full trifecta.": {
+        "he": "לפחות סוכן אחד מחזיק בעצמו בכל שלוש רגלי ה-lethal trifecta "
+              "(קלט לא מהימן + נתונים רגישים + יציאה/הרצה) — אין הפרדת הרשאות; "
+              "אותו סוכן לבדו הוא ה-trifecta המלא.",
+    },
+    "Split that agent's capabilities: the agent that ingests untrusted content "
+    "must not also hold sensitive-data and outbound/exec tools. Move one leg to "
+    "a separate agent the untrusted-input agent cannot drive.": {
+        "he": "פצל את יכולות הסוכן: הסוכן שקולט תוכן לא מהימן אסור שיחזיק גם כלי "
+              "נתונים רגישים וגם כלי יציאה/הרצה. העבר רגל אחת לסוכן נפרד שסוכן "
+              "הקלט הלא-מהימן אינו יכול להפעיל.",
+    },
+    "No single attested agent holds all three trifecta legs — the necessary "
+    "condition for privilege separation is met. This is not a safety guarantee: "
+    "whether untrusted data is re-interpreted by a privileged agent at runtime, "
+    "and whether the trifecta reassembles across delegation, are not checked here.": {
+        "he": "אף סוכן מוצהר אינו מחזיק בכל שלוש רגלי ה-trifecta — התנאי ההכרחי "
+              "להפרדת הרשאות מתקיים. זו אינה ערובת בטיחות: האם נתונים לא מהימנים "
+              "מתפרשים מחדש על ידי סוכן מורשה בזמן ריצה, והאם ה-trifecta מתאחה "
+              "מחדש לאורך ההאצלה — אינם נבדקים כאן.",
+    },
+    "Keep each agent below all-three legs; constrain delegation so a low-trust "
+    "agent cannot reach a privileged agent's tools.": {
+        "he": "שמור כל סוכן מתחת לשלוש הרגליים; הגבל האצלה כך שסוכן בעל אמון נמוך "
+              "לא יוכל להגיע לכלים של סוכן מורשה.",
+    },
+    "No multi-agent / subagent delegation detected in config — multi-agent "
+    "trifecta exposure does not apply (single-agent trifecta is covered by A1).": {
+        "he": "לא זוהתה האצלה רב-סוכנית / לסוכני משנה בתצורה — חשיפת trifecta "
+              "רב-סוכנית אינה רלוונטית (trifecta של סוכן יחיד מכוסה ב-A1).",
+    },
+    "Multiple agents/subagents can be spawned, but the global lethal trifecta "
+    "is not fully active (at least one leg is absent), so the multi-agent "
+    "amplifier does not apply.": {
+        "he": "ניתן להוליד מספר סוכנים/סוכני משנה, אך ה-lethal trifecta הגלובלי "
+              "אינו פעיל במלואו (לפחות רגל אחת חסרה), כך שמגביר הסיכון הרב-סוכני "
+              "אינו רלוונטי.",
+    },
+    "Keep at least one trifecta leg off the shared surface as agents are added.": {
+        "he": "השאר לפחות רגל אחת של ה-trifecta מחוץ למשטח המשותף ככל שמתווספים סוכנים.",
+    },
+    "Multiple agents/subagents and the full trifecta are present, but an exec "
+    "approval gate forces a human checkpoint before side-effects fire.": {
+        "he": "קיימים מספר סוכנים/סוכני משנה וה-trifecta המלא, אך שער אישור הרצה "
+              "מחייב נקודת ביקורת אנושית לפני שתופעל פעולת לוואי.",
+    },
+    "Keep the approval gate on for every agent that can take outbound/exec actions.": {
+        "he": "השאר את שער האישור פעיל לכל סוכן שיכול לבצע פעולות יציאה/הרצה.",
+    },
+    "Multiple agents/subagents can be spawned, all three trifecta legs are active "
+    "globally, and no exec approval gate is set — an injection has the full "
+    "trifecta plus spawnable helpers to reassemble it, with no human checkpoint.": {
+        "he": "ניתן להוליד מספר סוכנים/סוכני משנה, כל שלוש רגלי ה-trifecta פעילות "
+              "גלובלית, ולא הוגדר שער אישור הרצה — להזרקה יש את ה-trifecta המלא "
+              "ועוזרים שניתן להוליד כדי לאחות אותו מחדש, ללא נקודת ביקורת אנושית.",
+    },
+    "Add an exec approval gate (tools.exec.mode='ask'/'allowlist') AND separate "
+    "capabilities across agents so no single agent holds all three legs. Attest "
+    "your agent roster ('--attest') to check per-agent separation (B45).": {
+        "he": "הוסף שער אישור הרצה (tools.exec.mode='ask'/'allowlist') וגם הפרד "
+              "יכולות בין סוכנים כך שאף סוכן יחיד לא יחזיק בכל שלוש הרגליים. הצהר "
+              "על מצבת הסוכנים שלך ('--attest') כדי לבדוק הפרדה לכל סוכן (B45).",
     },
 }
 

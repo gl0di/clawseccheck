@@ -3,6 +3,39 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.4.0] — 2026-06-22
+
+**Multi-agent privilege separation.** The trifecta check (A1) flattens the whole setup into one
+capability surface, so it can't tell a monolithic agent (one agent holds all three legs) from a
+properly separated fleet where no single agent does — and it fails the separated fleet anyway. Two
+new checks close that blind spot. Grounded against the real OpenClaw schema
+(`docs/research/multiagent-privilege-separation.md`): config expresses the *fact* of multi-agent
+topology but **not** the delegation graph, per-agent tool allowlists, or inter-agent data-handling —
+so per-agent analysis is attestation-driven, and the runtime parts stay honestly out of scope.
+
+### Added
+- **B45 — per-agent privilege separation (trifecta decomposition).** Reads the attested agent roster
+  (new `agents: [{name, tools}]` block in the `--attest` self-report; `--ask` template updated) and
+  classifies each agent's trifecta legs itself. WARN when a single agent holds all three legs
+  (separation absent); PASS when none does (necessary condition met — explicitly **not** a safety
+  guarantee); UNKNOWN without a roster. `ATTESTED` confidence, advisory (unscored) — like B43/B44, the
+  verdict rests on a self-report the static config can't corroborate, so it never moves the grade.
+- **B46 — multi-agent trifecta exposure.** Config-only, scored: spawnable subagents + the global
+  trifecta active + no exec approval gate → WARN. Capped at WARN so it can never introduce a new FAIL
+  on a real config; a deliberate light nudge layered on A1, not a duplicate.
+- New attestation parser `attest.attested_agents()` (tolerant, mirrors `attested_paths()`); `agents`
+  block added to `template()`/`_questions`, additive under the same `clawseccheck-attest/1` schema
+  (older attestations stay valid).
+
+### Notes
+- Zero false-positive FAILs held: without `--attest` B45 is UNKNOWN everywhere (no new FAIL by
+  construction), and B46 is capped at WARN. Verified across the real-schema fixture corpus —
+  `home_safe` unchanged (A/91, 0 FAIL), `home_vuln` FAIL baseline unchanged (8 FAILs), no spurious
+  B46 WARN.
+- Deferred to 1.5.0 (needs an attestation `delegation` block): cross-agent confused-deputy reassembly
+  (`RISK-11`) and the inter-agent data-handling tier (structured-return wall / text-filter sieve /
+  raw passthrough). The §4 grounding doc records why the runtime trust property stays UNKNOWN.
+
 ## [1.3.1] — 2026-06-22
 
 **Wording precision from a live field validation.** An on-machine agent validated v1.3.0 against a

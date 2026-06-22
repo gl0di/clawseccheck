@@ -122,6 +122,16 @@ CATALOG: list[CheckMeta] = [
     CheckMeta("B44", "Attestation ⇄ config mismatch (undisclosed capability)",
               MEDIUM, "advisory", "Trust Boundary / Drift",
               scored=False, confidence=ATTESTED),
+    # Multi-agent privilege separation (v1.4.0).
+    # B45 reads the attested agent roster (config has no per-agent tool allowlist), so
+    # it is ATTESTED + advisory like B43/B44 — UNKNOWN without --attest, no score impact.
+    # B46 is config-only (grounded multi-agent topology + global trifecta + no gate); it
+    # is scored but capped at WARN so it can never introduce a new FAIL on real configs.
+    CheckMeta("B45", "Per-agent privilege separation (trifecta decomposition)",
+              HIGH, "advisory", "Privilege Separation / Lethal Trifecta",
+              scored=False, confidence=ATTESTED),
+    CheckMeta("B46", "Multi-agent trifecta exposure",
+              MEDIUM, "hardening", "Least Privilege / Agents"),
     # Host Watch Posture — is anyone watching the machine the agent runs on?
     # Read-only host-monitor detection (hostwatch.detect). LOW + WARN-only (never
     # FAIL): the absence of host monitoring is flagged only when the agent is

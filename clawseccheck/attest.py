@@ -213,12 +213,24 @@ def template() -> dict:
                 "ITSELF — you only point it at WHERE to look, so the permission check "
                 "stays an authoritative file stat, not a trusted self-report."
             ),
+            "agents": (
+                "If you run MORE THAN ONE agent (a main agent plus sub-agents, or "
+                "several agents doing different jobs), list each one and the REAL "
+                "tool/verb names IT holds: [{'name': 'researcher', 'tools': "
+                "['web_fetch', 'read_file']}, ...]. The engine classifies each "
+                "agent's lethal-trifecta legs itself and checks whether any single "
+                "agent holds all three (untrusted input + sensitive data + outbound/"
+                "exec) — privilege separation means no single agent does. Config "
+                "cannot express per-agent tool grants, so only you can supply this. "
+                "Omit (leave []) if you run a single agent."
+            ),
         },
         "tools": [],
         "approval_gates": {k: "unknown" for k in GATE_CLASSES},
         "untrusted_to_action": "unknown",
         "host_monitors": [],
         "paths": {"bootstrap": [], "openclaw_install": ""},
+        "agents": [],
         "notes": "",
     }
 
@@ -244,6 +256,41 @@ def attested_paths(att: dict) -> dict:
     inst = paths.get("openclaw_install")
     if isinstance(inst, (str, bytes)) and str(inst).strip():
         out["openclaw_install"] = str(inst)
+    return out
+
+
+def attested_agents(att: dict) -> list[dict]:
+    """Agent-declared roster for per-agent privilege-separation analysis (B45).
+
+    The agent self-reports each agent it runs and the tool/verb names that agent
+    holds; the engine classifies the lethal-trifecta legs ITSELF (it never trusts a
+    self-graded "this agent is safe"). Like the other attestation fields this is a
+    DECLARATION the static config cannot express — OpenClaw config has no per-agent
+    tool allowlist, only per-agent *deny* lists — so findings built from it carry
+    ATTESTED confidence, not HIGH. Tolerant of junk — returns a list of
+    ``{"name": str, "tools": [str, ...]}``; non-dict entries are dropped, a missing
+    name falls back to a positional label, non-string tools are skipped.
+    """
+    out: list[dict] = []
+    if not isinstance(att, dict):
+        return out
+    agents = att.get("agents")
+    if not isinstance(agents, list):
+        return out
+    for i, a in enumerate(agents):
+        if not isinstance(a, dict):
+            continue
+        name = a.get("name")
+        if isinstance(name, (str, bytes)) and str(name).strip():
+            name = str(name).strip()
+        else:
+            name = f"agent[{i}]"
+        tools = a.get("tools")
+        tool_list = (
+            [str(t) for t in tools if isinstance(t, (str, bytes)) and str(t).strip()]
+            if isinstance(tools, list) else []
+        )
+        out.append({"name": name, "tools": tool_list})
     return out
 
 

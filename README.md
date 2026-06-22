@@ -86,6 +86,14 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
 - **B16 — threat monitoring:** whether you actually have monitoring/detection set up at all.
 - **B17 — autonomy / heartbeat:** whether the agent acts on its own and could be steered by untrusted input.
 - **B18 — subagent delegation:** whether spawned subagents can wield elevated/exec tools without approval.
+- **B45 — per-agent privilege separation (attestation):** A1 flattens the whole setup into one
+  capability surface; B45 reads the attested agent roster (`--attest`, `agents: [{name, tools}]`) and
+  checks whether any *single* agent holds all three trifecta legs by itself. OpenClaw config has no
+  per-agent tool allowlist, so this needs the self-report — `UNKNOWN` without it, advisory (`ATTESTED`,
+  unscored). PASS means "no single agent is the full trifecta" — a necessary condition, **not** a
+  guarantee: runtime data-flow and the delegation graph are out of scope (see 1.5.0).
+- **B46 — multi-agent trifecta exposure:** config-only nudge — spawnable subagents **plus** the global
+  trifecta **plus** no exec approval gate. Capped at WARN (never a new FAIL).
 - **B19 — data at-rest:** group/world-readable memory/log directories (conversation data / PII exposure).
 - **B20–B24 — agent behavior:** write-protection of identity/memory files, tool-output trust boundary,
   self-modification risk, approval-bypass directives, and deep MCP-server hardening.
