@@ -3,6 +3,31 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.8.1] — 2026-06-22
+
+**Hebrew evidence localization fix + a CI guard so it can't regress.** Eight FAIL/WARN checks
+rendered an English `detail` line in the `--lang he` report because their evidence prose had no
+matching `DETAIL_RULES` entry — the recurring "forgot the he rule for a new check" gap (it had
+previously surfaced at C5 → B45 → B47). Probing every fixture home found the gap was still open for
+B9, B26, B30, B32 (WARN + FAIL variants), B38, B39, and B41.
+
+### Fixed
+- **`--lang he` evidence leaks (B9, B26, B30, B32, B38, B39, B41).** Added Hebrew `DETAIL_RULES`
+  for every leaking `detail` variant in `i18n.py`. Interpolated tokens (counts, channel lists,
+  bind/auth values, provider lists, re-enabled control-plane tools) are preserved verbatim via
+  capture groups; only the prose is translated. English output is byte-identical (unchanged).
+
+### Added
+- **`tests/test_i18n_completeness.py` — i18n-completeness CI guard.** Audits every fixture home and
+  fails CI if any FAIL/WARN finding's `detail` renders fully in English under `tp(detail, "he")`.
+  Permanently closes the recurring localization gap at commit time. Deterministic and offline; the
+  whole-detail unit has no false-positive risk from Latin config identifiers. (Hebrew **titles**
+  were already guarded by `test_i18n.py`.)
+
+### Notes
+- No new checks, no schema changes, no scoring changes — output-localization fix only. The audit
+  still only checks and guides; it never applies fixes or changes your config.
+
 ## [1.8.0] — 2026-06-22
 
 **B48 — dangerous break-glass overrides.** Mining the real `openclaw config schema` (2026.6.9) for
