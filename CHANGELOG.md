@@ -3,6 +3,25 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.4.1] — 2026-06-22
+
+**Hebrew report completeness.** A field validation confirmed a general gap: in `--lang he`, finding
+**evidence bullets** rendered in English while `detail`/`fix` translated (first seen on C5, then on
+B45). Evidence now runs through the same i18n pipeline (`tp`) as detail/fix.
+
+### Fixed
+- **Evidence bullets are localized.** `report._render_finding` routes each evidence line through
+  `tp(ev, lang)`. The translation is graceful and data-safe: a bullet matching a `PHRASES` key or a
+  `DETAIL_RULES` pattern is translated, while a dynamic data bullet (path, verb name, perm bits, agent
+  name) has no match and is preserved verbatim. `lang="en"` is unaffected (`tp` is a no-op there).
+- Added a `DETAIL_RULES` pattern for the B45 trifecta-decomposition evidence (`<agent>: holds all 3
+  legs`): the prose is Hebrew, the agent name (data) is preserved.
+
+### Notes
+- Pure-data / taxonomy evidence (paths, verb names, perm bits, blast-radius class tokens) stays
+  language-neutral by design — the same stance as the English-by-design JSON `detail`/`fix` contract.
+  No FAIL/WARN verdict changed; this is output-text only.
+
 ## [1.4.0] — 2026-06-22
 
 **Multi-agent privilege separation.** The trifecta check (A1) flattens the whole setup into one

@@ -1691,6 +1691,13 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
             r" \(\+(\d+) more\)",
             {"he": r" (+\1 נוספים)"},
         ),
+
+        # ---- B45 evidence: an agent that holds the full trifecta by itself ----
+        # The agent name (group 1) is data and is preserved verbatim; only the prose is he.
+        (
+            r"(.+): holds all 3 legs",
+            {"he": r"\1: מחזיק בכל שלוש הרגליים"},
+        ),
     ]
 
     # C5 write-exposure fragments: the engine reports the PRECISE bit found

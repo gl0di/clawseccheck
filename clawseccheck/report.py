@@ -97,7 +97,11 @@ def _render_finding(lines, icon, f, lang: str = "en"):
     # FAIL/WARN carries it — naming the specific item is the value of the finding.
     if f.evidence and f.status in (FAIL, WARN):
         for ev in f.evidence[:12]:
-            lines.append(f"      - {_sanitize(ev)}")
+            # Evidence runs through the SAME i18n pipeline as detail/fix (tp): a bullet
+            # that matches a PHRASES key or a DETAIL_RULES pattern is translated; a
+            # dynamic data bullet (path, verb name, perm bits, agent name) has no match
+            # and falls back to itself verbatim. For lang="en" tp() is a no-op.
+            lines.append(f"      - {_sanitize(tp(ev, lang))}")
     lines.append(f"    {t('report.label_fix', lang)}: {_sanitize(tp(f.fix, lang))}")
     lines.append("")
 

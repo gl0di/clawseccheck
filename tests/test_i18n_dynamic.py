@@ -35,6 +35,11 @@ RULE_EXAMPLES: list[tuple[str, str]] = [
         "Active legs 3/3: untrusted input, sensitive data, outbound actions. Rule: keep ≤2 of 3.",
         "3/3",
     ),
+    # B45 evidence: agent name (data) preserved, prose translated
+    (
+        "mono: holds all 3 legs",
+        "mono",
+    ),
     # B1: secrets count + perms
     (
         "3 secret(s) in config and openclaw.json is group/world-readable (644)",
