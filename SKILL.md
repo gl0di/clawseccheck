@@ -2,7 +2,8 @@
 name: clawseccheck
 version: 1.8.1
 description: Free, local, read-only security self-audit for your own OpenClaw agent. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
-metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true}}
+license: MIT
+metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"he":"ClawSecCheck — ביקורת אבטחה ל-OpenClaw"},"display_description":{"he":"כלי חינמי, מקומי וקריאה-בלבד לביקורת אבטחה עצמית של סוכן ה-OpenClaw שלך. נותן ציון A–F, מאתר את הפרצות הדחופות ביותר ומספק תיקונים מוכנים להדבקה. ללא מפתח API — שום מידע לא יוצא מהמחשב שלך."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","read-only","self-audit","sarif"],"he":["אבטחה","ביקורת","סוכני-AI","אבטחת-LLM","זריקת-פרומפט","קריאה-בלבד","OpenClaw"]}}
 ---
 
 # ClawSecCheck — OpenClaw Security Self-Audit
