@@ -11,7 +11,7 @@ Doctrine (matches the rest of ClawSecCheck):
   paths, binary names on PATH (``shutil.which`` reads PATH, it does NOT execute),
   systemd enable-symlinks, and read-only config/plist files.
 - **No fabricated positives.** Every signal here is grounded against authoritative
-  docs (see ``docs/research/host-monitor-signals.md``). Low-confidence signals are
+  upstream docs for each monitor. Low-confidence signals are
   deliberately omitted — an honest ``unknown`` beats a wrong ``present``/``absent``.
 - **Injectable for tests.** ``detect(root=..., system=..., which=...)`` lets tests
   point at a fake filesystem root and a fake PATH resolver, so the suite stays
