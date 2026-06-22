@@ -3,6 +3,39 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.5.0] — 2026-06-22
+
+**Cross-agent trifecta reassembly (confused deputy).** B45 (1.4.0) checks whether one agent is the
+trifecta. But separation is fictional if the trifecta reassembles *across* delegation: an
+untrusted-input agent that can drive a sensitive-data agent and an outbound agent has the whole
+trifecta even though no single agent holds all three. What decides exploitability is the data-handling
+tier on the edge — a typed/structured return is a wall; raw passthrough carries the poison. Grounded in
+`docs/research/multiagent-privilege-separation.md`: config has no delegation graph, so this is
+attestation-driven and advisory; the runtime data-flow property stays honestly UNKNOWN.
+
+### Added
+- **B47 — cross-agent trifecta reassembly (delegation graph).** Reads a new attestation block
+  `delegation: [{from, to, returns}]` (`returns` ∈ `schema`/`filtered`/`raw`/`unknown`) and walks the
+  graph from each untrusted-input agent. UNKNOWN without a `delegation` block; PASS when the trifecta
+  is unreachable across agents **or** when every traversable edge is a `schema` wall (with an explicit
+  not-runtime-verified caveat); WARN when an untrusted agent reassembles the trifecta via a non-wall
+  edge (raw/filtered/unknown). `ATTESTED` confidence, advisory (unscored).
+- **RISK-11 — cross-agent reassembly narrative** in the "Highest-risk paths" section, firing on the
+  same condition with the concrete chain (`<entry> → <secrets> → <outbound>`).
+- Attestation parser `attest.attested_delegation()` + the `delegation` block in `template()`/
+  `_questions`, additive under `clawseccheck-attest/1` (older attestations stay valid).
+- Shared `checks._reassembly()` graph helper (reused by B47 and RISK-11); tiers `schema=3 (wall) >
+  filtered=2 > raw=1 ≈ unknown=1`.
+
+### Notes
+- Zero false-positive FAILs held: without a `delegation` block B47 is UNKNOWN everywhere and RISK-11
+  never fires. Verified across the real-schema fixture corpus — `home_safe` (A/91, 0 FAIL) and
+  `home_vuln` (8 FAILs) baselines unchanged; no B47 FAIL anywhere.
+- Conservative by design: a necessary-condition reachability + weakest-tier heuristic, not a precise
+  per-edge data-flow proof. Whether a privileged agent re-interprets returned data at runtime stays
+  UNKNOWN (out of static scope). RISK narratives remain English-only (a general `render_risk_paths`
+  limitation across all RISK rules).
+
 ## [1.4.1] — 2026-06-22
 
 **Hebrew report completeness.** A field validation confirmed a general gap: in `--lang he`, finding

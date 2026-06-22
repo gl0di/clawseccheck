@@ -68,12 +68,32 @@ that a self-report cannot soundly attest (the claim is exactly what an injection
 The honest ceiling: check the **necessary** structural conditions; report the **sufficient**
 runtime condition as UNKNOWN.
 
-## Deferred to 1.5.0 (needs an attestation `delegation` block)
+## Delivered in 1.5.0 — delegation-graph reassembly (B47 + RISK-11)
 
-- **Delegation reassembly:** can an untrusted-input agent reach a secrets agent and an
-  outbound agent transitively, reassembling the trifecta across edges. `RISK-11` narrative.
-- **Data-handling tier on an edge:** structured/typed return (**wall**) vs text filter
-  (**sieve**) vs raw passthrough (**none**) — "presence ≠ efficacy"; runtime trust stays UNKNOWN.
+A new attestation block `delegation: [{from, to, returns}]` declares the call graph (config
+can't express it). `returns` is the caller's data-handling tier for the callee's output:
+`schema` (typed/structured = a **wall** that blocks the injected instruction/data channel),
+`filtered` (sanitized text = a **sieve**), `raw` (passthrough), or `unknown`.
+
+`checks._reassembly(ctx)` walks the graph from each untrusted-input agent and asks whether the
+**full trifecta becomes reachable across agents** (confused deputy), tracking the weakest tier
+the untrusted agent can traverse. Verdicts:
+- **B47** (ATTESTED, advisory): UNKNOWN without a `delegation` block; PASS when no untrusted
+  agent reaches the full trifecta, **or** when every edge it can traverse is a `schema` wall
+  (with an explicit *not-runtime-verified* caveat — the wall blocks the channel, but whether a
+  privileged agent re-interprets returned data at runtime is out of static scope); WARN when an
+  untrusted agent reassembles the trifecta via a non-wall edge (raw/filtered/unknown).
+- **RISK-11** narrative fires on the same WARN condition (`<entry> → <secrets> → <outbound>`).
+
+The model is conservative on purpose (a necessary-condition reachability + weakest-tier heuristic,
+not a precise per-edge data-flow proof). The runtime trust property stays UNKNOWN — checking the
+*declared* graph, not the *execution*.
+
+## Still out of scope
+
+- Precise per-edge data-flow proof (we take the conservative reachability + weakest-tier signal).
+- Runtime verification of how a privileged agent treats returned data (stays UNKNOWN by design).
+- Localization of RISK narratives (`render_risk_paths` is English-only across all RISK rules).
 
 ## Threat references (real, current)
 

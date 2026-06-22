@@ -240,6 +240,74 @@ def _agent_legs(tools: list) -> dict:
     }
 
 
+# Delegation return-handling tiers, safest→weakest. A schema (typed) return is a wall
+# that blocks the injected instruction/data channel; raw/unknown carry it through.
+_DELEGATION_TIER = {"schema": 3, "filtered": 2, "raw": 1, "unknown": 1}
+_LEG_KEYS = ("untrusted input", "sensitive data", "outbound actions")
+
+
+def _reassembly(ctx: Context):
+    """Cross-agent lethal-trifecta reassembly over the attested delegation graph.
+
+    Shared by B45's sibling B47 and RISK-11. Reads the attested agent roster + the
+    attested delegation edges; classifies each agent's legs with _agent_legs; then, from
+    every untrusted-input agent, walks the delegation graph to see whether the full
+    trifecta becomes reachable, tracking the weakest return-handling tier the untrusted
+    agent can traverse.
+
+    Returns:
+      * ``None`` when there is no roster OR no delegation edges (the graph is not
+        declared) → the caller reports UNKNOWN.
+      * ``{"reachable": False, ...}`` when roster+edges exist but no untrusted agent can
+        reach the full trifecta.
+      * ``{"reachable": True, "entry", "sensitive_agent", "outbound_agent",
+        "weakest_tier"}`` for the most-severe (lowest weakest_tier) reassembly found.
+    Deterministic: roster/edge order is preserved; supplier selection uses visit order.
+    """
+    agents = _attest.attested_agents(ctx.attestation)
+    edges = _attest.attested_delegation(ctx.attestation)
+    if not agents or not edges:
+        return None
+    legs = {a["name"]: _agent_legs(a["tools"]) for a in agents}
+
+    def legs_of(name):
+        return legs.get(name, {k: False for k in _LEG_KEYS})
+
+    adj: dict = {}
+    for e in edges:
+        adj.setdefault(e["from"], []).append((e["to"], _DELEGATION_TIER.get(e["returns"], 1)))
+
+    none_result = {"reachable": False, "entry": None, "sensitive_agent": None,
+                   "outbound_agent": None, "weakest_tier": None}
+    best = None
+    for entry in legs:
+        if not legs_of(entry)["untrusted input"]:
+            continue
+        visited = {entry}
+        order = [entry]
+        tiers_seen: list[int] = []
+        stack = [entry]
+        while stack:
+            node = stack.pop()
+            for to, tier in adj.get(node, []):
+                tiers_seen.append(tier)
+                if to not in visited:
+                    visited.add(to)
+                    order.append(to)
+                    stack.append(to)
+        union = {k: any(legs_of(v)[k] for v in order) for k in _LEG_KEYS}
+        if not all(union.values()):
+            continue
+        weakest = min(tiers_seen) if tiers_seen else 1
+        sens = next((v for v in order if legs_of(v)["sensitive data"]), entry)
+        outb = next((v for v in order if legs_of(v)["outbound actions"]), entry)
+        cand = {"reachable": True, "entry": entry, "sensitive_agent": sens,
+                "outbound_agent": outb, "weakest_tier": weakest}
+        if best is None or weakest < best["weakest_tier"]:
+            best = cand
+    return best if best is not None else none_result
+
+
 def check_trifecta(ctx: Context) -> Finding:
     legs = _trifecta_legs(ctx)
     active = [k for k, v in legs.items() if v]
@@ -3626,6 +3694,71 @@ def check_multiagent_exposure(ctx: Context) -> Finding:
     )
 
 
+_TIER_NAME = {3: "schema (wall)", 2: "filtered (sieve)", 1: "raw/unknown (passthrough)"}
+
+
+def check_delegation_reassembly(ctx: Context) -> Finding:
+    """B47 — cross-agent trifecta reassembly across the delegation graph (confused deputy).
+
+    B45 checks whether a single agent is the trifecta; this checks whether the trifecta
+    reassembles ACROSS agents: an untrusted-input agent that can drive a sensitive-data
+    agent and an outbound agent has, in effect, the whole trifecta even though no single
+    agent holds all three. The return-handling tier on the edges decides exploitability —
+    a schema (typed) return is a wall; raw/filtered/unknown carry the channel. Config has
+    no delegation graph, so this reads the attested 'delegation' block.
+
+    UNKNOWN — no roster or no delegation edges attested.
+    PASS    — no untrusted agent reaches the full trifecta, OR every edge it can traverse
+              is a wall (schema return) — the latter with an explicit not-verified caveat.
+    WARN    — an untrusted agent reassembles the trifecta via a non-wall edge.
+
+    ATTESTED confidence, advisory (scored=False): the verdict rests on the self-declared
+    graph the static config cannot corroborate.
+    """
+    r = _reassembly(ctx)
+    if r is None:
+        return _finding(
+            "B47", UNKNOWN,
+            "No delegation graph attested — cross-agent trifecta reassembly cannot be "
+            "assessed (OpenClaw config has no delegation edges; only the agent knows them).",
+            "Declare your delegation edges in the attestation 'delegation' block "
+            "([{from, to, returns}]) and re-run with '--attest <file>'.",
+        )
+    if not r["reachable"]:
+        return _finding(
+            "B47", PASS,
+            "No untrusted-input agent can transitively reach the full trifecta across the "
+            "attested delegation graph — the trifecta does not reassemble across agents.",
+            "Keep delegation constrained so an untrusted-input agent cannot reach both a "
+            "sensitive-data and an outbound agent.",
+        )
+    chain = " → ".join(dict.fromkeys([r["entry"], r["sensitive_agent"], r["outbound_agent"]]))
+    if r["weakest_tier"] >= 3:
+        return _finding(
+            "B47", PASS,
+            "An untrusted-input agent can reach the full trifecta across delegation, but "
+            "every edge it can traverse returns a typed/structured value (a wall), so the "
+            "injected instruction/data channel is blocked. This is not a runtime guarantee: "
+            "whether a privileged agent re-interprets returned data at runtime is not "
+            "checked here.",
+            "Keep every delegation return schema-constrained; never widen an edge to raw "
+            "text passthrough.",
+            evidence=[f"reachable via walls only: {chain}"],
+        )
+    return _finding(
+        "B47", WARN,
+        "An untrusted-input agent can reassemble the full trifecta across delegation via "
+        "an edge that is not a structural wall (raw passthrough, text filter, or "
+        "undeclared) — a single injection at the entry agent can orchestrate the others to "
+        "exfiltrate or act.",
+        "Break the reassembly: constrain the edge to a typed/structured return (a wall), "
+        "or remove the delegation reach so the untrusted-input agent cannot drive both a "
+        "sensitive-data and an outbound agent.",
+        evidence=[f"reassembly chain: {chain}",
+                  f"weakest edge tier: {_TIER_NAME.get(r['weakest_tier'], 'raw/unknown (passthrough)')}"],
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -3644,6 +3777,7 @@ CHECKS = [
     check_host_edr, check_host_firewall,
     check_capability_blast_radius, check_attestation_mismatch,
     check_agent_separation, check_multiagent_exposure,
+    check_delegation_reassembly,
 ]
 
 

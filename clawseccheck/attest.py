@@ -85,6 +85,12 @@ _REVERSIBLE_HINTS = (
 # Action classes used by the approval_gates self-report.
 GATE_CLASSES = ("exec", "send", "write")
 
+# How a CALLER handles a delegated callee's output, strongest→weakest. A typed/
+# structured return ("schema") is a wall that blocks the instruction/data channel; a
+# sanitized-text return ("filtered") is a best-effort sieve; "raw" passes the callee's
+# output through verbatim. Used by the delegation-reassembly analysis (B47/RISK-11).
+RETURN_TIERS = ("schema", "filtered", "raw", "unknown")
+
 
 def normalize_verb(name) -> str:
     """Isolate the verb from MCP / provider namespacing so classification matches the
@@ -224,6 +230,16 @@ def template() -> dict:
                 "cannot express per-agent tool grants, so only you can supply this. "
                 "Omit (leave []) if you run a single agent."
             ),
+            "delegation": (
+                "If your agents call/spawn each other, list the edges: [{'from': "
+                "'researcher', 'to': 'main', 'returns': 'schema'}, ...]. 'from' is the "
+                "caller, 'to' the callee, and 'returns' is how the CALLER handles the "
+                "callee's output — 'schema' (a typed/structured value = a wall that "
+                "blocks injected instructions), 'filtered' (sanitized text = a sieve), "
+                "'raw' (the callee's output flows in verbatim), or 'unknown'. The engine "
+                "checks whether an untrusted-input agent can reassemble the full trifecta "
+                "across these edges. Omit (leave []) if there is no delegation."
+            ),
         },
         "tools": [],
         "approval_gates": {k: "unknown" for k in GATE_CLASSES},
@@ -231,6 +247,7 @@ def template() -> dict:
         "host_monitors": [],
         "paths": {"bootstrap": [], "openclaw_install": ""},
         "agents": [],
+        "delegation": [],
         "notes": "",
     }
 
@@ -291,6 +308,38 @@ def attested_agents(att: dict) -> list[dict]:
             if isinstance(tools, list) else []
         )
         out.append({"name": name, "tools": tool_list})
+    return out
+
+
+def attested_delegation(att: dict) -> list[dict]:
+    """Agent-declared delegation edges for cross-agent reassembly analysis (B47/RISK-11).
+
+    Each edge is ``{"from": <caller>, "to": <callee>, "returns": <tier>}``: the caller
+    can invoke the callee, and ``returns`` is how the caller handles the callee's output
+    — one of RETURN_TIERS. The OpenClaw config does not express a delegation graph, so
+    this is a DECLARATION (findings carry ATTESTED confidence), not a config fact.
+    Tolerant of junk — non-dict edges are dropped, a blank/missing ``from`` or ``to``
+    drops the edge, and an unrecognized ``returns`` normalizes to ``"unknown"``.
+    """
+    out: list[dict] = []
+    if not isinstance(att, dict):
+        return out
+    edges = att.get("delegation")
+    if not isinstance(edges, list):
+        return out
+    for e in edges:
+        if not isinstance(e, dict):
+            continue
+        frm, to = e.get("from"), e.get("to")
+        if not (isinstance(frm, (str, bytes)) and str(frm).strip()):
+            continue
+        if not (isinstance(to, (str, bytes)) and str(to).strip()):
+            continue
+        ret = e.get("returns")
+        ret = str(ret).strip().lower() if isinstance(ret, (str, bytes)) else ""
+        if ret not in RETURN_TIERS:
+            ret = "unknown"
+        out.append({"from": str(frm).strip(), "to": str(to).strip(), "returns": ret})
     return out
 
 

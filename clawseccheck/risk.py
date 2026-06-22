@@ -16,6 +16,7 @@ from .checks import (
     _has_approval_gate,
     _hint,
     _open_channels,
+    _reassembly,
     SENSITIVE_TOOL_HINTS,
     INPUT_TOOL_HINTS,
     OUTBOUND_TOOL_HINTS,
@@ -521,6 +522,41 @@ def _rule_host_blind(ctx: Context, tools: list[str], cfg: dict) -> RiskPath | No
 # Public API
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _rule_delegation_reassembly(ctx: Context, findings: list[Finding]) -> RiskPath | None:
+    """HIGH: the trifecta reassembles ACROSS agents via the attested delegation graph.
+
+    Fires only when an untrusted-input agent can transitively reach both a sensitive-data
+    and an outbound agent through an edge that is NOT a structural wall (schema return) —
+    the same condition as B47's WARN. A fully-walled reach yields no chain (the wall
+    blocks it), and no attestation yields no chain (zero false-positives by design).
+    """
+    r = _reassembly(ctx)
+    if not r or not r.get("reachable") or (r.get("weakest_tier") or 1) >= 3:
+        return None
+    entry, sens, outb = r["entry"], r["sensitive_agent"], r["outbound_agent"]
+    return RiskPath(
+        id="RISK-11",
+        severity=HIGH,
+        title="Cross-agent trifecta reassembly (confused deputy)",
+        chain=[f"{entry} (untrusted input)",
+               f"{sens} (sensitive data)",
+               f"{outb} (outbound)"],
+        why=(
+            "No single agent holds the full Lethal Trifecta, but the untrusted-input "
+            f"agent '{entry}' can drive a sensitive-data agent and an outbound agent "
+            "across delegation edges that are not structural walls (raw passthrough / "
+            "text filter / undeclared return). A single prompt-injection at the entry "
+            "agent can orchestrate the others to exfiltrate secrets or take action — the "
+            "trifecta reassembles across the graph (a confused-deputy chain)."
+        ),
+        fix=(
+            "Break one edge: make the callee return a typed/structured value (a wall) so "
+            "injected instructions and raw data cannot flow back, OR remove the delegation "
+            f"reach so '{entry}' cannot drive both a sensitive-data and an outbound agent."
+        ),
+    )
+
+
 def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
     """Compute dangerous capability chains from config + existing findings.
 
@@ -570,6 +606,10 @@ def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
         candidates.append(path)
 
     path = _rule_host_blind(ctx, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_delegation_reassembly(ctx, findings)
     if path:
         candidates.append(path)
 

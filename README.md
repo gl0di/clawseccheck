@@ -94,6 +94,13 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
   guarantee: runtime data-flow and the delegation graph are out of scope (see 1.5.0).
 - **B46 — multi-agent trifecta exposure:** config-only nudge — spawnable subagents **plus** the global
   trifecta **plus** no exec approval gate. Capped at WARN (never a new FAIL).
+- **B47 — cross-agent trifecta reassembly (attestation):** even when no single agent is the trifecta,
+  it can reassemble across delegation (a *confused deputy*): an untrusted-input agent that can drive a
+  sensitive-data agent and an outbound agent. Reads the attested `delegation: [{from, to, returns}]`
+  graph; the `returns` tier decides exploitability — a `schema` (typed) return is a **wall** that
+  blocks the channel (PASS, with a not-runtime-verified caveat), while `raw`/`filtered`/`unknown`
+  carries it (WARN). UNKNOWN without `--attest`. `RISK-11` narrates the chain. Runtime data-flow stays
+  out of static scope.
 - **B19 — data at-rest:** group/world-readable memory/log directories (conversation data / PII exposure).
 - **B20–B24 — agent behavior:** write-protection of identity/memory files, tool-output trust boundary,
   self-modification risk, approval-bypass directives, and deep MCP-server hardening.

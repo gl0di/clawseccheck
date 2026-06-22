@@ -345,6 +345,7 @@ TITLES: dict[str, dict[str, str]] = {
     "B44": {"he": "אי-התאמה בין הצהרת הסוכן לתצורה (יכולת לא מדווחת)"},
     "B45": {"he": "הפרדת הרשאות בין סוכנים (פירוק ה-Lethal Trifecta)"},
     "B46": {"he": "חשיפת Trifecta בסביבה רב-סוכנית"},
+    "B47": {"he": "הרכבה מחדש של ה-Trifecta בין סוכנים (גרף האצלה)"},
     "B50": {"he": "ניטור רשת / IDS במארח"},
     "B51": {"he": "תיעוד ביקורת / syscall במארח"},
     "B52": {"he": "ניטור שלמות קבצים במארח"},
@@ -1324,6 +1325,56 @@ PHRASES: dict[str, dict[str, str]] = {
         "he": "הוסף שער אישור הרצה (tools.exec.mode='ask'/'allowlist') וגם הפרד "
               "יכולות בין סוכנים כך שאף סוכן יחיד לא יחזיק בכל שלוש הרגליים. הצהר "
               "על מצבת הסוכנים שלך ('--attest') כדי לבדוק הפרדה לכל סוכן (B45).",
+    },
+    # ---- B47: cross-agent reassembly over the delegation graph (v1.5.0) ----
+    "No delegation graph attested — cross-agent trifecta reassembly cannot be "
+    "assessed (OpenClaw config has no delegation edges; only the agent knows them).": {
+        "he": "לא הוצהר גרף האצלה — לא ניתן להעריך הרכבה מחדש של ה-trifecta בין סוכנים "
+              "(לתצורת OpenClaw אין קשתות האצלה; רק הסוכן מכיר אותן).",
+    },
+    "Declare your delegation edges in the attestation 'delegation' block "
+    "([{from, to, returns}]) and re-run with '--attest <file>'.": {
+        "he": "הצהר על קשתות ההאצלה שלך בבלוק 'delegation' של ההצהרה "
+              "([{from, to, returns}]) והרץ שוב עם '--attest <file>'.",
+    },
+    "No untrusted-input agent can transitively reach the full trifecta across the "
+    "attested delegation graph — the trifecta does not reassemble across agents.": {
+        "he": "אף סוכן עם קלט לא מהימן אינו יכול להגיע באופן מעבר ל-trifecta המלא דרך "
+              "גרף ההאצלה המוצהר — ה-trifecta אינו מורכב מחדש בין סוכנים.",
+    },
+    "Keep delegation constrained so an untrusted-input agent cannot reach both a "
+    "sensitive-data and an outbound agent.": {
+        "he": "שמור על האצלה מוגבלת כך שסוכן עם קלט לא מהימן לא יוכל להגיע גם לסוכן "
+              "נתונים רגישים וגם לסוכן יציאה.",
+    },
+    "An untrusted-input agent can reach the full trifecta across delegation, but "
+    "every edge it can traverse returns a typed/structured value (a wall), so the "
+    "injected instruction/data channel is blocked. This is not a runtime guarantee: "
+    "whether a privileged agent re-interprets returned data at runtime is not "
+    "checked here.": {
+        "he": "סוכן עם קלט לא מהימן יכול להגיע ל-trifecta המלא דרך האצלה, אך כל קשת "
+              "שהוא יכול לעבור מחזירה ערך מטיפוס/מובנה (חומה), כך שערוץ ההוראות/הנתונים "
+              "המוזרק חסום. זו אינה ערובת זמן-ריצה: האם סוכן מורשה מפרש מחדש נתונים "
+              "מוחזרים בזמן ריצה — אינו נבדק כאן.",
+    },
+    "Keep every delegation return schema-constrained; never widen an edge to raw "
+    "text passthrough.": {
+        "he": "שמור כל החזרת האצלה מוגבלת-סכמה; לעולם אל תרחיב קשת למעבר טקסט גולמי.",
+    },
+    "An untrusted-input agent can reassemble the full trifecta across delegation via "
+    "an edge that is not a structural wall (raw passthrough, text filter, or "
+    "undeclared) — a single injection at the entry agent can orchestrate the others to "
+    "exfiltrate or act.": {
+        "he": "סוכן עם קלט לא מהימן יכול להרכיב מחדש את ה-trifecta המלא דרך האצלה דרך "
+              "קשת שאינה חומה מבנית (מעבר גולמי, מסנן טקסט, או לא מוצהרת) — הזרקה אחת "
+              "בסוכן הכניסה יכולה לתזמר את האחרים להוצאת מידע או לפעולה.",
+    },
+    "Break the reassembly: constrain the edge to a typed/structured return (a wall), "
+    "or remove the delegation reach so the untrusted-input agent cannot drive both a "
+    "sensitive-data and an outbound agent.": {
+        "he": "שבור את ההרכבה מחדש: הגבל את הקשת להחזרה מטיפוס/מובנית (חומה), או הסר את "
+              "טווח ההאצלה כך שסוכן הקלט הלא-מהימן לא יוכל להפעיל גם סוכן נתונים רגישים "
+              "וגם סוכן יציאה.",
     },
 }
 

@@ -132,6 +132,11 @@ CATALOG: list[CheckMeta] = [
               scored=False, confidence=ATTESTED),
     CheckMeta("B46", "Multi-agent trifecta exposure",
               MEDIUM, "hardening", "Least Privilege / Agents"),
+    # B47 (v1.5.0): cross-agent reassembly over the attested delegation graph. ATTESTED +
+    # advisory like B45 — config has no delegation graph, so UNKNOWN without --attest.
+    CheckMeta("B47", "Cross-agent trifecta reassembly (delegation graph)",
+              HIGH, "advisory", "Privilege Separation / Delegation",
+              scored=False, confidence=ATTESTED),
     # Host Watch Posture — is anyone watching the machine the agent runs on?
     # Read-only host-monitor detection (hostwatch.detect). LOW + WARN-only (never
     # FAIL): the absence of host monitoring is flagged only when the agent is
