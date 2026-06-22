@@ -120,7 +120,7 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
   checks whether any *single* agent holds all three trifecta legs by itself. OpenClaw config has no
   per-agent tool allowlist, so this needs the self-report — `UNKNOWN` without it, advisory (`ATTESTED`,
   unscored). PASS means "no single agent is the full trifecta" — a necessary condition, **not** a
-  guarantee: runtime data-flow and the delegation graph are out of scope (see 1.5.0).
+  guarantee: runtime data-flow and the delegation graph are out of scope.
 - **B46 — multi-agent trifecta exposure:** config-only nudge — spawnable subagents **plus** the global
   trifecta **plus** no exec approval gate. Capped at WARN (never a new FAIL).
 - **B47 — cross-agent trifecta reassembly (attestation):** even when no single agent is the trifecta,
