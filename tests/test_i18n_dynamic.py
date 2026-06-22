@@ -337,12 +337,12 @@ RULE_EXAMPLES: list[tuple[str, str]] = [
     ),
     # C5: binary dir writable
     (
-        "openclaw binary dir /usr/local/bin is group/world-writable",
+        "openclaw binary dir /usr/local/bin is world-writable",
         "/usr/local/bin",
     ),
     # C5: PATH dir before openclaw
     (
-        "PATH dir /usr/local/bin (before openclaw dir) is group/world-writable — a fake openclaw could be planted there",
+        "PATH dir /usr/local/bin (before openclaw dir) is group-writable — a fake openclaw could be planted there",
         "/usr/local/bin",
     ),
     # C5: PASS detail

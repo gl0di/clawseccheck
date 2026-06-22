@@ -1725,9 +1725,13 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
             found_any = True
 
     if not found_any:
-        return _finding("B20", UNKNOWN,
-                        "No workspace bootstrap files found to inspect.",
-                        "—")
+        return _finding(
+            "B20", UNKNOWN,
+            "No workspace bootstrap files (SOUL.md/AGENTS.md/TOOLS.md/MEMORY.md) found "
+            "under the audited home or known workspace dirs — they may live elsewhere.",
+            "Point the audit at the directory holding these files with "
+            "`clawseccheck --home <workspace>`, or declare their real paths via "
+            "`--attest` (paths.bootstrap) so the engine can stat them.")
 
     if world_write:
         joined = "; ".join(world_write[:8])
@@ -2307,20 +2311,29 @@ def check_path_safety(ctx: Context) -> Finding:
     writable: list[str] = []
     checked: set = set()
 
-    def _loose_dir(d: Path) -> bool:
-        """True if *d* lets others replace/shadow its entries: group- or world-writable.
-        A sticky dir (e.g. /tmp, mode 1777) is exempt regardless of group/world bits —
-        the sticky bit blocks cross-owner rename/delete, so it is not a replace vector
-        and would otherwise be a false positive as the ancestor walk passes through /tmp."""
+    def _writable_kind(d: Path) -> str | None:
+        """The precise non-owner write exposure of *d*, or None if tight/sticky-exempt.
+        Returns 'group-writable', 'world-writable', or 'group- and world-writable' so the
+        evidence reflects the bits actually set — a 0o775 dir is group-writable only and
+        must never be reported as 'world-writable'. A sticky dir (e.g. /tmp, mode 1777) is
+        exempt regardless of group/world bits: the sticky bit blocks cross-owner
+        rename/delete, so it is not a replace vector (and the ancestor walk passes /tmp)."""
         try:
             m = d.stat().st_mode
         except OSError:
-            return False
+            return None
         if m & 0o1000:                          # sticky -> cross-owner replace blocked
-            return False
-        return bool(m & 0o022)                  # group- or world-writable
+            return None
+        g, w = bool(m & 0o020), bool(m & 0o002)
+        if g and w:
+            return "group- and world-writable"
+        if w:
+            return "world-writable"
+        if g:
+            return "group-writable"
+        return None
 
-    def _flag(d: Path, why: str) -> None:
+    def _flag(d: Path, prefix: str, suffix: str = "") -> None:
         try:
             rd = d.resolve()
         except OSError:
@@ -2328,8 +2341,9 @@ def check_path_safety(ctx: Context) -> Finding:
         if rd in checked:
             return
         checked.add(rd)
-        if _loose_dir(rd):
-            writable.append(why)
+        kind = _writable_kind(rd)
+        if kind:
+            writable.append(f"{prefix} is {kind}{suffix}")
 
     def _walk_ancestors(start: Path, label: str, levels: int = 5) -> None:
         # Flag group/world-writable ancestor install dirs ABOVE the binary. A writable
@@ -2337,15 +2351,15 @@ def check_path_safety(ctx: Context) -> Finding:
         # member replace the whole subtree even when the immediate bin dir is tight.
         cur = start
         for _ in range(levels):
-            _flag(cur, f"{label} {cur} is group/world-writable — a group member could "
-                       "replace the openclaw install")
+            _flag(cur, f"{label} {cur}",
+                  " — a group member could replace the openclaw install")
             if cur.parent == cur:               # filesystem root
                 break
             cur = cur.parent
 
     if exe:
         bin_dir = Path(exe).resolve().parent
-        _flag(bin_dir, f"openclaw binary dir {bin_dir} is group/world-writable")
+        _flag(bin_dir, f"openclaw binary dir {bin_dir}")
         # NEW: ancestor install dirs above the resolved binary.
         _walk_ancestors(bin_dir.parent, "openclaw install ancestor dir")
 
@@ -2362,14 +2376,14 @@ def check_path_safety(ctx: Context) -> Finding:
                 continue
         if openclaw_index is not None:
             for d in path_dirs[:openclaw_index]:
-                _flag(d, f"PATH dir {d} (before openclaw dir) is group/world-writable "
-                         "— a fake openclaw could be planted there")
+                _flag(d, f"PATH dir {d} (before openclaw dir)",
+                      " — a fake openclaw could be planted there")
 
     # Discovery-assisted: the agent may point at an install dir that `which` can't
     # resolve (non-PATH install). The engine still stat()s it itself.
     if attested_install:
         inst = Path(attested_install).expanduser()
-        _flag(inst, f"openclaw install dir {inst} [attested] is group/world-writable")
+        _flag(inst, f"openclaw install dir {inst} [attested]")
         _walk_ancestors(inst.parent, "openclaw install ancestor dir [attested]")
 
     if writable:

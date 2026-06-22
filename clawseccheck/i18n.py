@@ -1597,16 +1597,9 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
             {"he": r"הגדרות OpenClaw נגעו לאחרונה על ידי גרסה \1. התקנות מיושנות הן יעד ClawHavoc / CVE-2026-25253."},
         ),
 
-        # ---- C5: WARN detail (binary dir writable) ----
-        (
-            r"openclaw binary dir (.+) is group/world-writable",
-            {"he": r"תיקיית הבינארי openclaw \1 ניתנת לכתיבה קבוצה/עולם"},
-        ),
-        # C5: PATH dir before openclaw writable
-        (
-            r"PATH dir (.+) \(before openclaw dir\) is group/world-writable — a fake openclaw could be planted there",
-            {"he": r"תיקיית PATH \1 (לפני תיקיית openclaw) ניתנת לכתיבה קבוצה/עולם — ניתן להשתיל openclaw מזויף שם"},
-        ),
+        # ---- C5: WARN detail (binary dir / PATH dir / ancestor / attested install,
+        #      each in 3 write-exposure kinds) are generated after this literal; see
+        #      _C5_WRITABLE_KIND_HE below. ----
         # C5: PASS detail
         (
             r"openclaw binary at (.+); binary dir and all earlier PATH dirs have tight permissions\.",
@@ -1620,6 +1613,32 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
             {"he": r" (+\1 נוספים)"},
         ),
     ]
+
+    # C5 write-exposure fragments: the engine reports the PRECISE bit found
+    # ("group-writable" / "world-writable" / "group- and world-writable"), so generate a
+    # he rule for each fragment form x each kind rather than hardcoding one blanket phrase.
+    _C5_WRITABLE_KIND_HE = {
+        "group-writable": "ניתנת לכתיבה על ידי הקבוצה",
+        "world-writable": "ניתנת לכתיבה עולמית",
+        "group- and world-writable": "ניתנת לכתיבה על ידי הקבוצה ועולמית",
+    }
+    # (english fragment template, he fragment template) — {k} = English kind, {h} = he kind.
+    _C5_FORMS = [
+        (r"openclaw binary dir (.+) is {k}",
+         r"תיקיית הבינארי openclaw \1 {h}"),
+        (r"PATH dir (.+) \(before openclaw dir\) is {k} — a fake openclaw could be planted there",
+         r"תיקיית PATH \1 (לפני תיקיית openclaw) {h} — ניתן להשתיל openclaw מזויף שם"),
+        (r"openclaw install ancestor dir (.+) is {k} — a group member could replace the openclaw install",
+         r"תיקיית אב של התקנת openclaw \1 {h} — חבר בקבוצה יכול להחליף את התקנת openclaw"),
+        (r"openclaw install dir (.+) is {k}",
+         r"תיקיית התקנת openclaw \1 {h}"),
+    ]
+    for _en_form, _he_form in _C5_FORMS:
+        for _kind, _kind_he in _C5_WRITABLE_KIND_HE.items():
+            raw.append((
+                _en_form.format(k=re.escape(_kind)),
+                {"he": _he_form.format(h=_kind_he)},
+            ))
 
     compiled: list[tuple[re.Pattern[str], dict[str, str]]] = []
     for pattern_str, templates in raw:

@@ -142,6 +142,82 @@ def test_c5_tight_path_passes(monkeypatch, tmp_path):
     assert result.id == "C5"
 
 
+# ---- precision: a group-only (775) dir must NOT be called "world-writable" ----
+def test_c5_group_only_dir_says_group_not_world(monkeypatch, tmp_path):
+    import shutil
+    from clawseccheck import checks
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_exe = bin_dir / "openclaw"
+    fake_exe.write_text("#!/bin/sh")
+    fake_exe.chmod(0o755)
+    bin_dir.chmod(0o775)   # group-writable ONLY (o=r-x, no world write)
+    try:
+        monkeypatch.setattr(checks, "_is_posix", lambda: True)
+        monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
+        monkeypatch.setenv("PATH", str(bin_dir))
+
+        result = check_path_safety(_ctx())
+        assert result.status == "WARN"
+        joined = " ".join(result.evidence)
+        assert "group-writable" in joined
+        # the overstatement the field round flagged: never claim world-write on a 775 dir
+        assert "world-writable" not in joined
+        assert "group/world-writable" not in joined
+    finally:
+        bin_dir.chmod(0o755)
+
+
+# ---- precision: a 0o757 (world-only-ish) dir says world-writable ----
+def test_c5_world_writable_dir_says_world(monkeypatch, tmp_path):
+    import shutil
+    from clawseccheck import checks
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_exe = bin_dir / "openclaw"
+    fake_exe.write_text("#!/bin/sh")
+    fake_exe.chmod(0o755)
+    bin_dir.chmod(0o757)   # world-writable, group not
+    try:
+        monkeypatch.setattr(checks, "_is_posix", lambda: True)
+        monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
+        monkeypatch.setenv("PATH", str(bin_dir))
+
+        result = check_path_safety(_ctx())
+        assert result.status == "WARN"
+        joined = " ".join(result.evidence)
+        assert "world-writable" in joined
+        assert "group- and world-writable" not in joined
+    finally:
+        bin_dir.chmod(0o755)
+
+
+# ---- precision: a 0o777 dir reports BOTH bits ----
+def test_c5_group_and_world_writable_dir_says_both(monkeypatch, tmp_path):
+    import shutil
+    from clawseccheck import checks
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_exe = bin_dir / "openclaw"
+    fake_exe.write_text("#!/bin/sh")
+    fake_exe.chmod(0o755)
+    bin_dir.chmod(0o777)
+    try:
+        monkeypatch.setattr(checks, "_is_posix", lambda: True)
+        monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
+        monkeypatch.setenv("PATH", str(bin_dir))
+
+        result = check_path_safety(_ctx())
+        assert result.status == "WARN"
+        joined = " ".join(result.evidence)
+        assert "group- and world-writable" in joined
+    finally:
+        bin_dir.chmod(0o755)
+
+
 # ---- advisory: scored=False ----
 def test_c5_is_not_scored(monkeypatch, tmp_path):
     import shutil

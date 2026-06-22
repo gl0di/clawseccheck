@@ -3,6 +3,33 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.3.1] — 2026-06-22
+
+**Wording precision from a live field validation.** An on-machine agent validated v1.3.0 against a
+real fleet (grade B, 0 spurious FAILs — zero-FP held) and surfaced two honest rough edges in the
+output text. No contract change; evidence/messages only.
+
+### Fixed
+- **C5 overstated the exposure.** Every writable PATH/install dir was labelled
+  `group/world-writable` regardless of which bit was actually set, so a `0o775` (group-only) dir was
+  reported as world-writable — an overstatement on a tool whose job is accuracy. C5 now reports the
+  precise bit found: **`group-writable`**, **`world-writable`**, or **`group- and world-writable`**
+  (B20 already did this; C5 now matches). Hebrew (`--lang he`) renders each kind, and the v1.3.0
+  ancestor/attested-install fragments — previously untranslated — are now covered too.
+
+### Changed
+- **B20's UNKNOWN is now actionable.** When no bootstrap files are found under the audited home or
+  the known workspace dirs (e.g. they live in `~/openclaw-workspaces/…`), the finding no longer
+  dead-ends with `—`; it tells the user to point the audit with `clawseccheck --home <workspace>`
+  or declare the real paths via `--attest` (`paths.bootstrap`) so the engine can `stat()` them. The
+  UNKNOWN stays honest (never a false PASS); it just stops being a dead end.
+
+### Notes
+- `SendUserFile → EGRESS` in B43 is **intentional**: the blast-radius taxonomy classifies the
+  send-capable *form* of a verb, not its presumed purpose. Inferring "this send is benign" requires
+  intent-guessing, which is exactly what produces a false PASS — form-over-intent is the
+  conservative default and stays. (Raised in the same field round; documented, not changed.)
+
 ## [1.3.0] — 2026-06-22
 
 **Two field-found permission-scan gaps closed + agent-assisted discovery.** A real audit found a

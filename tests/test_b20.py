@@ -86,6 +86,17 @@ def test_b20_no_files_unknown(tmp_path):
     assert result.status == "UNKNOWN"
 
 
+# ---- UNKNOWN must guide the user to --home / --attest, not dead-end ----
+def test_b20_unknown_message_is_actionable(tmp_path):
+    result = check_bootstrap_write_protection(_ctx(tmp_path))
+    assert result.status == "UNKNOWN"
+    text = f"{result.detail} {result.fix}"
+    assert "--home" in text
+    assert "--attest" in text
+    # must not be the old dead-end placeholder
+    assert result.fix.strip() != "—"
+
+
 # ---- tight perms on all bootstrap files -> PASS ----
 def test_b20_tight_perms_passes(tmp_path):
     ws = _ws(tmp_path)
