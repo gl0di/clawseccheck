@@ -231,6 +231,55 @@ def owasp_for(check_id: str) -> tuple:
     return OWASP_MAP.get(check_id, ())
 
 
+# ── Paste-ready remediation (additive; surfaced by --fix / --json / SARIF) ────────
+# Authored ONLY for checks with a safe, deterministic, paste-ready fix. ClawSecCheck
+# never applies these — it prints them; the user reviews and runs them (§2 read-only).
+#   commands: exact shell, allowlisted verbs only (chmod / openclaw); <placeholders>
+#             for workspace-specific paths are documented forms, not auto-substituted
+#             (never chmod a path guessed from evidence — §5).
+#   config:   path+value GUIDANCE for openclaw.json (grounded dotted paths only, §4) —
+#             "set <path> -> <value>", NOT a paste-over JSON blob (a blob would clobber
+#             neighbouring keys). set=None means the value is descriptive (see note).
+REMEDIATION = {
+    "B1": {"commands": ["openclaw secrets configure",
+                        "chmod 600 ~/.openclaw/openclaw.json",
+                        "chmod 700 ~/.openclaw"]},
+    "B2": {"config": [{"path": "gateway.auth", "set": None,
+                       "note": "enable gateway auth and restrict channels to an allowlist"}]},
+    "B3": {"config": [{"path": "tools.elevated.allowFrom", "set": None,
+                       "note": "restrict to an explicit allowlist (no wildcards)"}]},
+    "B4": {"config": [{"path": "agents.defaults.sandbox.mode", "set": "non-main",
+                       "note": "run exec tools in a sandbox"}]},
+    "B8": {"config": [{"path": "tools.exec.mode", "set": "ask",
+                       "note": "require human approval before exec"}]},
+    "B19": {"commands": ["chmod 700 ~/.openclaw"]},
+    "B20": {"commands": ["chmod 700 <workspace>",
+                         "chmod 600 <workspace>/SOUL.md <workspace>/AGENTS.md "
+                         "<workspace>/TOOLS.md <workspace>/MEMORY.md"]},
+    "B22": {"commands": ["chmod 600 <workspace>/SOUL.md", "chmod 700 <workspace>/skills"]},
+    "B23": {"config": [{"path": "tools.exec.mode", "set": "ask",
+                        "note": "enforce the approval gate; do not let bootstrap text weaken it"}]},
+    "B30": {"config": [{"path": "channels.<provider>.dangerouslyAllowNameMatching", "set": None,
+                        "note": "remove this flag — a mutable display-name allowlist is "
+                                "trivially bypassed"}]},
+    "B38": {"config": [{"path": "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork", "set": False,
+                        "note": "block private-network requests from the browser tool"}]},
+    "B39": {"config": [{"path": "session.dmScope", "set": None,
+                        "note": "isolate DM sessions per user; do not use \"main\""}]},
+    "C5": {"commands": ["chmod o-w,g-w <dir>"]},
+}
+
+
+def remediation_for(check_id: str) -> dict:
+    """Paste-ready remediation for a check, normalized to {"commands": [...], "config": [...]}.
+
+    Empty lists when the check has no deterministic paste-ready fix (its prose `fix` leads).
+    """
+    r = REMEDIATION.get(check_id, {})
+    return {"commands": list(r.get("commands", ())),
+            "config": [dict(c) for c in r.get("config", ())]}
+
+
 @dataclass
 class Finding:
     id: str

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from .catalog import CATALOG, CRITICAL, FAIL, HIGH, WARN, Finding
+from .catalog import CATALOG, CRITICAL, FAIL, HIGH, WARN, Finding, remediation_for
 from .report import _sanitize
 from .scoring import ScoreResult
 
@@ -79,15 +79,25 @@ def render_sarif(
             continue
         level = "error" if f.status == FAIL else "warning"
         message_text = _sanitize(f.detail if f.detail else f.title)
-        results.append(
-            {
-                "ruleId": f.id,
-                "level": level,
-                "message": {"text": message_text},
-                "properties": {"confidence": getattr(f, "confidence", "HIGH"),
-                               "evidence": [_sanitize(e) for e in (f.evidence or [])]},
-            }
-        )
+        result = {
+            "ruleId": f.id,
+            "level": level,
+            "message": {"text": message_text},
+            "properties": {"confidence": getattr(f, "confidence", "HIGH"),
+                           "evidence": [_sanitize(e) for e in (f.evidence or [])]},
+        }
+        # SARIF `fixes`: description-only (no artifactChanges — ClawSecCheck never edits
+        # files). Built from the paste-ready remediation when the check has one.
+        rem = remediation_for(f.id)
+        fix_texts = list(rem["commands"])
+        for c in rem["config"]:
+            if c.get("set") is None:
+                fix_texts.append(f"set {c['path']}: {c.get('note', '')}".rstrip(": "))
+            else:
+                fix_texts.append(f"set {c['path']} = {json.dumps(c['set'])} ({c.get('note', '')})")
+        if fix_texts:
+            result["fixes"] = [{"description": {"text": _sanitize(tx)}} for tx in fix_texts]
+        results.append(result)
         # Vetting findings (e.g. MCP-VET) carry ids outside the scored CATALOG.
         # Keep the SARIF self-consistent: every referenced ruleId must have a rule.
         if f.id not in _catalog_ids:

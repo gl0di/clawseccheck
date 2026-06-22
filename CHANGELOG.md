@@ -3,6 +3,32 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.7.0] — 2026-06-22
+
+**Paste-ready remediation (`--fix`).** The exact fix commands were already in each finding's prose;
+now they're extracted into a copy-paste block. ClawSecCheck stays **read-only** — `--fix` only
+*prints* remediation; it never applies anything (the name promises a check). Config fixes are given
+as *set `<dotted-path>` → `<value>`* guidance so you edit your own `openclaw.json`, never a
+paste-over JSON blob that could clobber neighbouring keys.
+
+### Added
+- **`--fix` view** — prints paste-ready remediation for current FAIL/WARN findings: exact shell
+  commands (allowlisted verbs only — `chmod`/`openclaw`, no destructive or network commands) and
+  config path+value guidance. Header states plainly that ClawSecCheck does not apply them.
+- **`catalog.REMEDIATION` + `remediation_for(id)`** — single source of truth, authored only for
+  checks with a safe, deterministic, grounded fix (config dotted paths verified against the real
+  schema, §4). Checks needing manual review keep their prose `fix`.
+- **`--json` exposes `"remediation": {commands, config}`** per finding; **SARIF** results carry a
+  `fixes` array (description-only — no `artifactChanges`, since nothing is auto-edited).
+
+### Notes
+- Additive only — no verdict, score, or check behaviour changed; grades unchanged on the fixture
+  corpus. A safety test enforces the command allowlist (no `rm`/`curl`/`sudo`/pipes/etc.).
+- Workspace-specific paths use documented `<placeholder>` forms rather than auto-substituting a
+  path guessed from evidence (never `chmod` the wrong thing, §5).
+- Out of scope (deliberately): an auto-apply `--apply` (would need to be opt-in and
+  confirmation-gated, §2) and a paste-over JSON patch (clobber risk).
+
 ## [1.6.0] — 2026-06-22
 
 **OWASP framework mapping.** Each check is now mapped to the **OWASP Top 10 for LLM Applications

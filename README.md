@@ -292,6 +292,13 @@ and so on. When there is nothing urgent, the block tells you so and suggests the
 gives you a ready copy-paste prompt to hand to your agent (or apply yourself); the change is
 yours to make. Everything stays local.
 
+**`--fix` — paste-ready remediation.** Prints the exact, copy-paste fixes for your current
+FAIL/WARN findings: safe shell commands (e.g. `chmod 600 ~/.openclaw/openclaw.json`) and
+config guidance (`set tools.exec.mode → "ask"`). It is **output only** — ClawSecCheck does not
+apply anything; you review and run it. Config fixes are given as *set this dotted path to this
+value* guidance (so you edit your own `openclaw.json`), never a paste-over JSON blob that could
+clobber your other keys. Also surfaced per finding in `--json` (`"remediation"`) and SARIF (`fixes`).
+
 ## How you get the report
 
 When you run the skill inside OpenClaw, the agent executes `audit.py`, captures its output,

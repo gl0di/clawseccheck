@@ -20,8 +20,8 @@ from .monitor import (
 )
 from .native import run_native_audit
 from .report import (
-    render_card, render_events, render_json, render_monitor, render_prompts, render_report,
-    render_svg, render_vet_json,
+    render_card, render_events, render_fix, render_json, render_monitor, render_prompts,
+    render_report, render_svg, render_vet_json,
 )
 from .risk import risk_paths, render_risk_paths
 from .scoring import ScoreResult, compute
@@ -31,7 +31,7 @@ from .history import load as history_load, record as history_record, render_tren
 from .guide import suggest_actions, render_next_actions
 from .update import update_notice, read_latest_hint, DEFAULT_LATEST
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
 __released__ = "2026-06-22"
 
@@ -71,7 +71,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
 __all__ = [
     "audit", "collect", "run_all", "compute", "ScoreResult", "run_native_audit",
     "render_report", "render_card", "render_json", "render_monitor",
-    "render_svg", "render_prompts", "render_vet_json", "vet_skill", "vet_mcp",
+    "render_svg", "render_prompts", "render_fix", "render_vet_json", "vet_skill", "vet_mcp",
     "make_canary", "evaluate", "render_canary",
     "snapshot", "diff", "load_state", "save_state", "__version__", "__released__",
     "update_notice", "read_latest_hint", "DEFAULT_LATEST",

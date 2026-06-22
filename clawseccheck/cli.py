@@ -14,8 +14,9 @@ from pathlib import Path
 
 from . import (
     audit, diff, fingerprint, load_events, load_ignore, load_state, make_canary, record_events,
-    render_canary, render_card, render_events, render_json, render_monitor, render_prompts,
-    render_report, render_svg, render_vet_json, save_state, snapshot, vet_mcp, vet_skill,
+    render_canary, render_card, render_events, render_fix, render_json, render_monitor,
+    render_prompts, render_report, render_svg, render_vet_json, save_state, snapshot,
+    vet_mcp, vet_skill,
 )
 from . import __released__, __version__
 from .update import update_notice
@@ -128,6 +129,8 @@ def main(argv=None) -> int:
                    help="print recommended next actions based on the audit result")
     p.add_argument("--risk-paths", action="store_true",
                    help="print only the highest-risk capability chains and exit")
+    p.add_argument("--fix", action="store_true",
+                   help="print paste-ready remediation for current findings (does NOT apply it)")
     p.add_argument("--verbose", action="store_true",
                    help="emit INFO-level log breadcrumbs to stderr")
     p.add_argument("--debug", action="store_true",
@@ -297,6 +300,10 @@ def main(argv=None) -> int:
 
     if args.risk_paths:
         _emit(_risk.render_risk_paths(paths, ascii_only=ascii_only))
+        return 0
+
+    if args.fix:
+        _emit(render_fix(findings, ascii_only=ascii_only, lang=args.lang))
         return 0
 
     if args.badge:

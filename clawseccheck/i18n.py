@@ -27,6 +27,22 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "ClawSecCheck - OpenClaw Security Audit",
         "he": "ClawSecCheck - ביקורת אבטחה של OpenClaw",
     },
+    "fix.header": {
+        "en": "Remediation (copy-paste)",
+        "he": "תיקון (העתק-הדבק)",
+    },
+    "fix.note": {
+        "en": "ClawSecCheck does NOT apply these — review and run them yourself.",
+        "he": "ClawSecCheck אינו מחיל אותם — בדוק והרץ אותם בעצמך.",
+    },
+    "fix.config_label": {
+        "en": "config",
+        "he": "תצורה",
+    },
+    "fix.none": {
+        "en": "Nothing to paste-apply — no current FAIL/WARN has a paste-ready fix.",
+        "he": "אין מה להדביק — לאף ממצא FAIL/WARN נוכחי אין תיקון מוכן להדבקה.",
+    },
     "report.score_line": {
         "en": "Score: {score}/100   Grade: {grade}   Lethal Trifecta: {trifecta}",
         "he": "ציון: {score}/100   דירוג: {grade}   Lethal Trifecta: {trifecta}",
@@ -1375,6 +1391,31 @@ PHRASES: dict[str, dict[str, str]] = {
         "he": "שבור את ההרכבה מחדש: הגבל את הקשת להחזרה מטיפוס/מובנית (חומה), או הסר את "
               "טווח ההאצלה כך שסוכן הקלט הלא-מהימן לא יוכל להפעיל גם סוכן נתונים רגישים "
               "וגם סוכן יציאה.",
+    },
+    # ---- B*/--fix config remediation notes (v1.7.0) ----
+    "enable gateway auth and restrict channels to an allowlist": {
+        "he": "הפעל אימות ב-gateway והגבל ערוצים לרשימת היתר",
+    },
+    "restrict to an explicit allowlist (no wildcards)": {
+        "he": "הגבל לרשימת היתר מפורשת (ללא תווים כלליים)",
+    },
+    "run exec tools in a sandbox": {
+        "he": "הרץ כלי exec בארגז חול",
+    },
+    "require human approval before exec": {
+        "he": "דרוש אישור אנושי לפני exec",
+    },
+    "enforce the approval gate; do not let bootstrap text weaken it": {
+        "he": "אכוף את שער האישור; אל תיתן לטקסט האתחול להחליש אותו",
+    },
+    "remove this flag — a mutable display-name allowlist is trivially bypassed": {
+        "he": "הסר דגל זה — רשימת היתר לפי שם-תצוגה משתנה נעקפת בקלות",
+    },
+    "block private-network requests from the browser tool": {
+        "he": "חסום בקשות לרשת פרטית מכלי הדפדפן",
+    },
+    "isolate DM sessions per user; do not use \"main\"": {
+        "he": "בודד סשני DM לכל משתמש; אל תשתמש ב-\"main\"",
     },
 }
 

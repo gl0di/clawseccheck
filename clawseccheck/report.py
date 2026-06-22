@@ -12,7 +12,9 @@ import html
 import json
 import re
 
-from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, owasp_for
+from .catalog import (
+    CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, owasp_for, remediation_for,
+)
 from .guide import suggest_actions
 from .i18n import is_rtl, t, title_for, tp
 from .scoring import ScoreResult
@@ -339,7 +341,46 @@ def _finding_to_dict(f: Finding) -> dict:
             "fix": _sanitize(f.fix), "framework": f.framework,
             "confidence": getattr(f, "confidence", "HIGH"),
             "owasp": list(owasp_for(f.id)),
+            "remediation": remediation_for(f.id),
             "evidence": [_sanitize(e) for e in (f.evidence or [])]}
+
+
+def render_fix(findings: list[Finding], ascii_only: bool = False, lang: str = "en") -> str:
+    """Render the paste-ready remediation block for current FAIL/WARN findings.
+
+    Output only — ClawSecCheck never applies these (read-only by default, §2). Commands
+    are exact shell with allowlisted verbs; config items are path+value guidance for
+    openclaw.json (the user edits their own file), never a paste-over blob.
+    """
+    actionable = []
+    for f in findings:
+        if f.status not in (FAIL, WARN) or getattr(f, "suppressed", False):
+            continue
+        rem = remediation_for(f.id)
+        if rem["commands"] or rem["config"]:
+            actionable.append((f, rem))
+
+    if not actionable:
+        out = t("fix.none", lang) + "\n"
+        return _asciify(out) if ascii_only else out
+
+    arrow = "->" if ascii_only else "→"
+    lines = [t("fix.header", lang), "=" * 44, "", t("fix.note", lang), ""]
+    for f, rem in actionable:
+        lines.append(f"[{f.status}] {f.id} — {_sanitize(title_for(f.id, f.title, lang))}")
+        for cmd in rem["commands"]:
+            lines.append(f"  $ {_sanitize(cmd)}")
+        for c in rem["config"]:
+            path = _sanitize(c["path"])
+            note = _sanitize(tp(c.get("note", ""), lang))
+            label = t("fix.config_label", lang)
+            if c.get("set") is None:
+                lines.append(f"  {label}: {path} — {note}")
+            else:
+                lines.append(f"  {label}: set {path} {arrow} {json.dumps(c['set'])}  ({note})")
+        lines.append("")
+    out = "\n".join(lines).rstrip() + "\n"
+    return _asciify(out) if ascii_only else out
 
 
 def render_vet_json(findings: list[Finding], *, mode: str, target: str,
