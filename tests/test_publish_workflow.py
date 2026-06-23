@@ -2,6 +2,7 @@
 
 Reads the YAML as plain text — no pyyaml dependency (stdlib only).
 """
+import json
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,17 @@ import pytest
 WORKFLOW_PATH = (
     Path(__file__).resolve().parents[1] / ".github" / "workflows" / "clawhub-publish.yml"
 )
+SKILL_PATH = Path(__file__).resolve().parents[1] / "SKILL.md"
+
+
+def _skill_display_name_en() -> str:
+    """The en display name declared in SKILL.md frontmatter metadata (inline JSON)."""
+    fm = SKILL_PATH.read_text(encoding="utf-8").split("---", 2)[1]
+    for line in fm.splitlines():
+        if line.startswith("metadata:"):
+            meta = json.loads(line.split("metadata:", 1)[1].strip())
+            return meta["display_name"]["en"]
+    raise AssertionError("no metadata: line in SKILL.md frontmatter")
 
 # The published skill package ships without .github/ (CI files are repo-only), so these
 # workflow-validation tests have nothing to read there. Skip — don't FAIL — when the file
@@ -105,6 +117,21 @@ def test_publish_workflow_dir_basename_matches_slug() -> None:
     assert not basename.startswith("dist"), (
         f"Published dir basename {basename!r} still looks like a staging dir — "
         "ClawHub would title-case it into a wrong display name."
+    )
+
+
+def test_publish_sets_display_name_matching_skill_md() -> None:
+    """The publish command must pass --name set to SKILL.md's display_name.en (B-015 #2).
+
+    ClawHub titles a skill from --name (grounded: `clawhub publish --help`); without it the
+    dir basename title-cases to "Clawseccheck". The flag value must equal the declared
+    display name so the live title is "ClawSecCheck — …" and the two never drift.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    expected = _skill_display_name_en()
+    assert f'--name "{expected}"' in text, (
+        f"publish workflow must pass --name \"{expected}\" (from SKILL.md "
+        "metadata.display_name.en); found no matching --name flag."
     )
 
 

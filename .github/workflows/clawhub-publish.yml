@@ -83,10 +83,11 @@ jobs:
         # gate above already ran the full suite on the complete checkout; we publish only the
         # runtime + docs so the audited artifact contains no decoy configs.
         #
-        # The staging dir basename IS the human-facing skill title on ClawHub (it title-cases
-        # the published dir name; there is no display-name flag we publish with). It must read
-        # "clawseccheck", not "dist-skill" → "Dist Skill" (B-015). We nest it under dist/ so the
-        # basename matches the slug without colliding with the clawseccheck/ package in the cp.
+        # We still nest the staging dir under dist/ with basename "clawseccheck" (not the old
+        # "dist-skill" → "Dist Skill", B-015) so the dir-derived fallback name is sane, but the
+        # authoritative title is now set explicitly with the --name flag below — the dir
+        # basename is only a fallback. dist/clawseccheck also avoids colliding with the
+        # clawseccheck/ package during the cp.
         run: |
           rm -rf dist && mkdir -p dist/clawseccheck
           cp -r clawseccheck SKILL.md SKILL_HE.md README.md LICENSE \
@@ -96,10 +97,16 @@ jobs:
           echo "Staged for publish:" && ls -1 dist/clawseccheck
 
       - name: Publish skill
+        # --name sets the human-facing ClawHub title (grounded: the CLI's `publish --help`
+        # lists "--name <name>  Display name"). Without it ClawHub falls back to the
+        # title-cased dir basename ("Clawseccheck"). This value MUST equal SKILL.md
+        # metadata.display_name.en — tests/test_publish_workflow.py fails the build if they
+        # drift, so the title stays a single source of truth (B-015 fix-item 2).
         run: >
           clawhub publish ./dist/clawseccheck
           --slug clawseccheck
           --owner gl0di
+          --name "ClawSecCheck — OpenClaw Security Self-Audit"
           --version "${{ steps.ver.outputs.version }}"
           --changelog "Release ${{ steps.ver.outputs.version }} (${{ github.sha }})"
 
