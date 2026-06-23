@@ -155,6 +155,12 @@ CATALOG: list[CheckMeta] = [
               LOW, "hardening", "Host Watch / EDR"),
     CheckMeta("B54", "Host firewall active",
               LOW, "hardening", "Host Watch / Firewall"),
+    # B55 (C-013): filesystem-write tool exposure. Advisory (scored=False) — it names
+    # the fs-write capability and feeds RISK-12 (write + untrusted ingress = tamper /
+    # persistence); the scored write/least-privilege dimensions stay with B3/B22/B31 so
+    # this never introduces a new scored FAIL on real configs.
+    CheckMeta("B55", "Filesystem-write tool exposure (broad fs-write without scoping)",
+              HIGH, "hardening", "Least Privilege / Filesystem Write", scored=False),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False),
     CheckMeta("C4", "OpenClaw version / update hygiene", LOW, "advisory", "Patch hygiene", scored=False),
@@ -226,6 +232,7 @@ OWASP_MAP = {
     "B46": ("LLM06",),
     "B47": ("LLM05", "LLM06"),
     "B48": ("LLM01", "LLM06"),
+    "B55": ("LLM06", "LLM04"),
     "C4": ("LLM03",),
     "C5": ("LLM03",),
 }

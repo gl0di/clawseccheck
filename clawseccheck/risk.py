@@ -557,6 +557,44 @@ def _rule_delegation_reassembly(ctx: Context, findings: list[Finding]) -> RiskPa
     )
 
 
+def _rule_fs_write_tamper(ctx: Context, findings: list[Finding],
+                          tools: list[str], cfg: dict) -> RiskPath | None:
+    """HIGH: broad filesystem-write capability (B55) + untrusted ingress = tamper/persistence.
+
+    Fires only when B55 already found a write-capable tool that is broadly reachable or
+    ungated (FAIL or WARN) AND there is an untrusted ingress vector. Keyed on the B55
+    fs-write verdict rather than on raw tool names, so it is the capability-scoping framing
+    of the write risk (distinct from RISK-01's open-sender-reaches-exec path).
+    """
+    if _finding_status(findings, "B55") not in (FAIL, WARN):
+        return None
+    if not _has_untrusted_ingress(tools, cfg):
+        return None
+    open_ch = _open_channel_labels(cfg)
+    ingress_label = open_ch[0] if open_ch else "untrusted input (email/web/feed)"
+    return RiskPath(
+        id="RISK-12",
+        severity=HIGH,
+        title="Untrusted input + broad filesystem-write = tamper / persistence",
+        chain=[ingress_label, "broad fs-write tool (unscoped, no approval gate)",
+               "files overwritten → tamper / persistence implant"],
+        why=(
+            "The agent is granted a filesystem-write tool (fs_write / apply_patch) that "
+            "B55 found broadly reachable or ungated, AND untrusted content can reach the "
+            "agent (an open channel or an input tool). A single prompt-injection in that "
+            "untrusted input can drive arbitrary file writes — overwriting bootstrap or "
+            "skill files to implant persistent instructions, or tampering with data the "
+            "agent later trusts."
+        ),
+        fix=(
+            "Scope the write capability: set tools.exec.mode='ask' so writes need human "
+            "sign-off, restrict tools.elevated.allowFrom to an explicit allowlist (no '*'), "
+            "and lock ingress channels to 'allowlist'. Removing the fs_write/apply_patch "
+            "grant entirely also breaks the chain."
+        ),
+    )
+
+
 def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
     """Compute dangerous capability chains from config + existing findings.
 
@@ -610,6 +648,10 @@ def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
         candidates.append(path)
 
     path = _rule_delegation_reassembly(ctx, findings)
+    if path:
+        candidates.append(path)
+
+    path = _rule_fs_write_tamper(ctx, findings, tools, cfg)
     if path:
         candidates.append(path)
 

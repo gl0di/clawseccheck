@@ -368,6 +368,7 @@ TITLES: dict[str, dict[str, str]] = {
     "B52": {"he": "ניטור שלמות קבצים במארח"},
     "B53": {"he": "הגנת קצה / EDR במארח"},
     "B54": {"he": "חומת אש פעילה במארח"},
+    "B55": {"he": "חשיפת כלי כתיבה למערכת הקבצים (כתיבה רחבה ללא תיחום)"},
     "C3": {"he": "גיבויים של SOUL.md / זיכרון"},
     "C4": {"he": "גרסת OpenClaw / היגיינת עדכון"},
     "C5": {"he": "בטיחות PATH של בינארי מקומי"},
@@ -1952,6 +1953,24 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
         (
             r"weakest edge tier: raw/unknown \(passthrough\)",
             {"he": r"הקשת החלשה ביותר: raw/unknown (מעבר ישיר)"},
+        ),
+
+        # ---- B55: filesystem-write tool exposure (C-013) ----
+        # FAIL — broad fs-write reachable by untrusted senders, no approval gate.
+        (
+            r"Broad filesystem-write capability \((.+)\) is reachable by untrusted "
+            r"senders with no approval gate, so untrusted input can drive arbitrary "
+            r"file writes \(tamper / persistence\)\.",
+            {"he": r"יכולת כתיבה רחבה למערכת הקבצים (\1) נגישה לשולחים לא מהימנים ללא שער "
+                   r"אישור, כך שקלט לא מהימן יכול להניע כתיבות קבצים שרירותיות "
+                   r"(שיבוש / השתרשות)."},
+        ),
+        # WARN — write tool granted, no approval gate and no explicit sender allowlist.
+        (
+            r"Filesystem-write tool granted \((.+)\) without an approval gate and "
+            r"without an explicit sender allowlist\.",
+            {"he": r"כלי כתיבה למערכת הקבצים הוענק (\1) ללא שער אישור וללא רשימת היתר "
+                   r"מפורשת של שולחים."},
         ),
     ]
 

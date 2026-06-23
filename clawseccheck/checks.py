@@ -108,6 +108,10 @@ INJECTION_PATTERNS = [
 INPUT_TOOL_HINTS = ("email", "imap", "gmail", "rss", "feed", "web", "browse", "fetch", "file_read", "inbox")
 SENSITIVE_TOOL_HINTS = ("db", "sql", "postgres", "supabase", "secret", "credential", "vault", "fs_read", "files")
 OUTBOUND_TOOL_HINTS = ("send", "email_send", "webhook", "http_post", "exec", "shell", "fs_write", "deploy", "publish")
+# B55: filesystem-write tool names. Grounded: fs_write is in OUTBOUND_TOOL_HINTS and
+# apply_patch is the canonical patch-writer (see B31 — "apply_patch/exec still write").
+# Matched as substrings so write_file / writeFile variants of the same capability count.
+_FS_WRITE_TOOL_HINTS = ("fs_write", "write_file", "writefile", "apply_patch")
 # B21: hints for installed skills that retrieve external content (web / email / MCP responses).
 # Kept narrow: only names that unambiguously mean "fetch remote content",
 # so research/summarise skills that may or may not hit the network don't generate noise.
@@ -3900,6 +3904,102 @@ def check_delegation_reassembly(ctx: Context) -> Finding:
     )
 
 
+def check_fs_write_exposure(ctx: Context) -> Finding:
+    """B55 (C-013) — filesystem-write tool granted without scoping.
+
+    A write-capable tool (fs_write / apply_patch) explicitly listed in the tool
+    allowlist lets the agent create or overwrite files. Unscoped — reachable by a
+    wildcard sender allowlist or an open channel with no approval gate — untrusted
+    input can drive arbitrary writes (tamper / persistence). Advisory (scored=False):
+    it names the capability and feeds RISK-12; the scored write/least-privilege
+    dimensions stay with B3/B22/B31 so this never moves the grade.
+
+    UNKNOWN — no tool allowlist declared (tools.allow / gateway.tools.allow absent):
+              fs-write grants are not enumerable from config.
+    PASS    — no write-capable tool granted, OR one is granted but scoped (an approval
+              gate, or a tight non-wildcard sender allowlist).
+    WARN    — write tool granted, no approval gate and no explicit sender allowlist,
+              but no proven broad reach.
+    FAIL    — write tool granted AND reachable by untrusted senders (wildcard
+              allowFrom or open channel) AND no approval gate.
+    """
+    cfg = ctx.config
+    allow_a = dig(cfg, "tools.allow")
+    allow_b = dig(cfg, "gateway.tools.allow")
+    listed: list[str] = []
+    for v in (allow_a, allow_b):
+        if isinstance(v, list):
+            listed.extend(str(t) for t in v)
+
+    write_tools = sorted({t for t in listed if _hint([t], _FS_WRITE_TOOL_HINTS)})
+
+    if allow_a is None and allow_b is None:
+        return _finding(
+            "B55", UNKNOWN,
+            "Tool allowlist (tools.allow / gateway.tools.allow) is not declared in "
+            "config, so filesystem-write tool grants cannot be enumerated.",
+            "Declare tools.allow explicitly so write-capable tools are auditable, and "
+            "scope any fs_write/apply_patch grant with an approval gate "
+            "(tools.exec.mode='ask') or a tight tools.elevated.allowFrom allowlist.",
+        )
+
+    if not write_tools:
+        return _finding(
+            "B55", PASS,
+            "No filesystem-write tool (fs_write / apply_patch) is granted in the tool "
+            "allowlist.",
+            "Keep write-capable tools out of the allowlist unless they are required.",
+        )
+
+    label = ", ".join(write_tools)
+    gated = _has_approval_gate(cfg)
+    allow_from = dig(cfg, "tools.elevated.allowFrom")
+    tight_allowlist = (
+        isinstance(allow_from, list) and bool(allow_from) and "*" not in allow_from
+    )
+    wildcard = allow_from == "*" or (isinstance(allow_from, list) and "*" in allow_from)
+    open_ch = _open_channels(cfg)
+
+    if gated or tight_allowlist:
+        return _finding(
+            "B55", PASS,
+            f"Filesystem-write tool granted ({label}) but scoped by an approval gate "
+            f"or a tight sender allowlist.",
+            "Scoping is in place — keep tools.exec.mode='ask' (or the "
+            "tools.elevated.allowFrom allowlist) tight.",
+            evidence=[f"write tool granted: {label}"],
+        )
+
+    if wildcard or open_ch:
+        ev = [f"filesystem-write tool granted: {label}"]
+        if wildcard:
+            ev.append("tools.elevated.allowFrom is a wildcard (any sender can invoke "
+                      "elevated tools)")
+        if open_ch:
+            ev.append(f"open-ingress channel(s): {', '.join(open_ch)}")
+        ev.append("no approval gate (tools.exec.mode is not deny/allowlist/ask/auto)")
+        return _finding(
+            "B55", FAIL,
+            f"Broad filesystem-write capability ({label}) is reachable by untrusted "
+            f"senders with no approval gate, so untrusted input can drive arbitrary "
+            f"file writes (tamper / persistence).",
+            "Add an approval gate (tools.exec.mode='ask') and restrict "
+            "tools.elevated.allowFrom to an explicit allowlist (no '*'); lock open "
+            "channels to 'allowlist'.",
+            evidence=ev,
+        )
+
+    return _finding(
+        "B55", WARN,
+        f"Filesystem-write tool granted ({label}) without an approval gate and without "
+        f"an explicit sender allowlist.",
+        "Scope it: set tools.exec.mode='ask' or add a tight tools.elevated.allowFrom "
+        "allowlist so only trusted senders can drive file writes.",
+        evidence=[f"write tool granted: {label}",
+                  "no approval gate (tools.exec.mode is not deny/allowlist/ask/auto)"],
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -3919,6 +4019,7 @@ CHECKS = [
     check_capability_blast_radius, check_attestation_mismatch,
     check_agent_separation, check_multiagent_exposure,
     check_delegation_reassembly, check_dangerous_overrides,
+    check_fs_write_exposure,
 ]
 
 
