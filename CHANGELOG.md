@@ -3,6 +3,39 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.10.0] — 2026-06-23
+
+**New filesystem-write exposure check + honest output on non-OpenClaw setups.** Adds the B55
+fs-write capability check (advisory — it never moves your grade) and a new combinational risk
+path, and makes the report read honestly when there is no OpenClaw config to assess. Also fixes
+two robustness/CI nits surfaced after the v1.9.0 audit.
+
+### Added
+- **B55 — filesystem-write tool exposure.** Flags a write-capable tool (`fs_write` / `apply_patch`)
+  granted in the tool allowlist without scoping: FAIL when it is reachable by untrusted senders
+  (wildcard `tools.elevated.allowFrom` or an open channel) with no approval gate, WARN when ungated
+  but not provably broad, PASS when gated or behind a tight sender allowlist, UNKNOWN when no tool
+  allowlist is declared. Advisory (not scored) so it surfaces the capability without changing the
+  numeric grade — the scored write/least-privilege dimensions stay with B3/B22/B31. Grounded only on
+  existing OpenClaw tool fields. Bilingual (en/he).
+- **RISK-12 — untrusted input + broad filesystem-write = tamper / persistence.** A new combinational
+  chain that fires when a broad/ungated B55 verdict meets an untrusted ingress vector.
+
+### Fixed
+- **Honest report on non-OpenClaw / custom setups (B-017).** With no `openclaw.json` the config-driven
+  checks correctly return UNKNOWN and the score holds, but the output gave no context, so a hardened
+  custom setup read as half-broken. The report now states the non-standard detection explicitly, names
+  OpenClaw as the only fully-supported target, and explains that the UNKNOWN checks are not counted
+  against the grade. Presentation only — the numeric score is unchanged. Bilingual (en/he).
+- **Graceful degrade on a non-dict top-level `openclaw.json` (B-016).** A valid-JSON but non-object top
+  level (list, string, number, bool, null) was assigned straight to the config, so every later
+  `cfg.get()` raised `AttributeError` and crashed the audit. The collector now type-guards the parsed
+  value and degrades with a clear "expected a JSON object" note, treating the config as absent. Subsumes
+  the v1.9.0 `RecursionError` special case as the general unusable-config path.
+- **ClawHub display title no longer reads "Dist Skill" (B-015).** ClawHub derives the skill title from
+  the basename of the published directory; the publish workflow staged into `dist-skill`. It now stages
+  into `dist/clawseccheck` so the title matches the slug, with the same tests/fixtures exclusion logic.
+
 ## [1.9.0] — 2026-06-23
 
 **Security hardening pass — resolves a manual code audit (findings B-006…B-014).** Closes a
