@@ -82,17 +82,22 @@ jobs:
         # but a scanner pointed at the published tree mis-reads them as live settings. The smoke
         # gate above already ran the full suite on the complete checkout; we publish only the
         # runtime + docs so the audited artifact contains no decoy configs.
+        #
+        # The staging dir basename IS the human-facing skill title on ClawHub (it title-cases
+        # the published dir name; there is no display-name flag we publish with). It must read
+        # "clawseccheck", not "dist-skill" → "Dist Skill" (B-015). We nest it under dist/ so the
+        # basename matches the slug without colliding with the clawseccheck/ package in the cp.
         run: |
-          rm -rf dist-skill && mkdir -p dist-skill
+          rm -rf dist && mkdir -p dist/clawseccheck
           cp -r clawseccheck SKILL.md SKILL_HE.md README.md LICENSE \
                 SECURITY.md SECURITY_MODEL.md CHANGELOG.md pyproject.toml docs audit.py \
-                dist-skill/
-          find dist-skill -name '__pycache__' -type d -prune -exec rm -rf {} + || true
-          echo "Staged for publish:" && ls -1 dist-skill
+                dist/clawseccheck/
+          find dist/clawseccheck -name '__pycache__' -type d -prune -exec rm -rf {} + || true
+          echo "Staged for publish:" && ls -1 dist/clawseccheck
 
       - name: Publish skill
         run: >
-          clawhub publish ./dist-skill
+          clawhub publish ./dist/clawseccheck
           --slug clawseccheck
           --owner gl0di
           --version "${{ steps.ver.outputs.version }}"

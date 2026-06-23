@@ -81,6 +81,33 @@ def test_publish_workflow_has_environment_gate() -> None:
     )
 
 
+def test_publish_workflow_dir_basename_matches_slug() -> None:
+    """The published directory basename becomes the ClawHub display title (B-015).
+
+    ClawHub title-cases the basename of the published dir (there is no display-name
+    flag we pass). Publishing ./dist-skill produced the title "Dist Skill"; the
+    staging dir must instead end in 'clawseccheck' so the title reads "Clawseccheck".
+    """
+    publish_line = next(
+        (line for line in _lines() if "clawhub publish" in line), None
+    )
+    assert publish_line is not None, "No 'clawhub publish' line found in workflow."
+
+    # Token right after 'clawhub publish' is the path being published.
+    after = publish_line.split("clawhub publish", 1)[1].strip()
+    published_path = after.split()[0]
+    basename = published_path.rstrip("/").rsplit("/", 1)[-1]
+
+    assert basename == "clawseccheck", (
+        f"Published dir basename {basename!r} (from {published_path!r}) must be "
+        "'clawseccheck' so the ClawHub title is not derived from a staging-dir name."
+    )
+    assert not basename.startswith("dist"), (
+        f"Published dir basename {basename!r} still looks like a staging dir — "
+        "ClawHub would title-case it into a wrong display name."
+    )
+
+
 def test_publish_workflow_does_not_echo_token() -> None:
     """No line must both echo/cat a value and reference CLAWHUB_TOKEN."""
     for line in _lines():
