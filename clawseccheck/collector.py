@@ -164,8 +164,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     cfg_path = home / "openclaw.json"
     if cfg_path.is_file():
         try:
-            ctx.config = _loads_tolerant(cfg_path.read_text(encoding="utf-8"))
-            ctx.config_mode = cfg_path.stat().st_mode & 0o777
+            parsed = _loads_tolerant(cfg_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             ctx.errors.append(f"could not parse {cfg_path}: {exc}")
         except RecursionError:
@@ -173,6 +172,20 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
             # user's own config reaches this path (self-inflicted, not attacker-
             # reachable), so degrade gracefully instead of crashing the audit (B-014).
             ctx.errors.append(f"could not parse {cfg_path}: nesting too deep")
+        else:
+            if isinstance(parsed, dict):
+                ctx.config = parsed
+                ctx.config_mode = cfg_path.stat().st_mode & 0o777
+            else:
+                # Valid JSON but a non-object top level (list/scalar). The config
+                # contract is a JSON object; every later cfg.get() would raise
+                # AttributeError on a list/str/int. Degrade with a clear note and
+                # leave ctx.config as the empty dict so downstream checks read the
+                # config as absent rather than crashing the audit (B-016).
+                ctx.errors.append(
+                    f"malformed {cfg_path}: expected a JSON object, "
+                    f"got {type(parsed).__name__}"
+                )
     else:
         ctx.errors.append(f"config not found: {cfg_path}")
 

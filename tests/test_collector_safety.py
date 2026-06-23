@@ -161,3 +161,66 @@ def test_deeply_nested_config_degrades_gracefully(tmp_path):
 
     assert ctx.config == {}
     assert any("openclaw.json" in e for e in ctx.errors)
+
+
+# ---------------------------------------------------------------------------
+# B-016 — non-dict top-level openclaw.json must degrade, not raise AttributeError
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "body, kind",
+    [
+        ("[]", "list"),
+        ("[1,2,3]", "list"),
+        ('"juststring"', "str"),
+        ("123", "int"),
+        ("12.5", "float"),
+        ("true", "bool"),
+        ("null", "NoneType"),
+    ],
+)
+def test_non_dict_config_degrades_gracefully(tmp_path, body, kind):
+    """Valid JSON whose top level is not an object (list/scalar) must not crash.
+
+    Pre-fix, collect() assigned the parsed value straight to ctx.config and every
+    later cfg.get() raised `AttributeError: '<type>' object has no attribute 'get'`.
+    collect() must instead leave ctx.config == {} and record a clear malformed note.
+    """
+    (tmp_path / "openclaw.json").write_text(body, encoding="utf-8")
+
+    ctx = collect(tmp_path)  # must not raise
+
+    assert ctx.config == {}, f"non-dict {kind} top-level must degrade to empty config"
+    assert ctx.config_mode is None, "config_mode must not be set for a malformed config"
+    assert any("expected a JSON object" in e for e in ctx.errors), (
+        f"expected a 'malformed ... expected a JSON object' note, got {ctx.errors}"
+    )
+    assert any(kind in e for e in ctx.errors), (
+        f"error note should name the actual type {kind!r}, got {ctx.errors}"
+    )
+
+
+def test_dict_config_still_parses(tmp_path):
+    """Control: a well-formed JSON object is parsed and recorded as before."""
+    (tmp_path / "openclaw.json").write_text('{"gateway": {}}', encoding="utf-8")
+
+    ctx = collect(tmp_path)
+
+    assert ctx.config == {"gateway": {}}
+    assert not any("expected a JSON object" in e for e in ctx.errors)
+
+
+def test_full_audit_on_non_dict_config_does_not_crash(tmp_path):
+    """End-to-end: auditing a home whose openclaw.json is a list must not raise.
+
+    Mirrors the reported bug (exit-1 traceback). audit() must complete and return a
+    numeric score, treating the config as absent rather than crashing on cfg.get().
+    """
+    from clawseccheck import audit
+
+    (tmp_path / "openclaw.json").write_text("[1, 2, 3]", encoding="utf-8")
+
+    ctx, findings, score = audit(tmp_path)  # must not raise
+
+    assert isinstance(score.score, (int, float))
+    assert ctx.config == {}
