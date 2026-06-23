@@ -52,6 +52,7 @@ class Context:
     bootstrap: dict = field(default_factory=dict)   # filename -> text
     errors: list[str] = field(default_factory=list)
     config_mode: int | None = None                  # octal perms of openclaw.json, or None
+    config_found: bool = False                       # openclaw.json present (vs non-OpenClaw setup)
     native: object = None                           # NativeResult from openclaw security audit
     host: object = None                             # hostwatch.detect() result; set by audit(include_host=True)
     installed_skills: dict = field(default_factory=dict)  # skill name -> concatenated text
@@ -162,6 +163,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     ctx = Context(home=home)
 
     cfg_path = home / "openclaw.json"
+    ctx.config_found = cfg_path.is_file()
     if cfg_path.is_file():
         try:
             parsed = _loads_tolerant(cfg_path.read_text(encoding="utf-8"))

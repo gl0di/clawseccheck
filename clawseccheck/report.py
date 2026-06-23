@@ -110,7 +110,8 @@ def _render_finding(lines, icon, f, lang: str = "en"):
 
 def render_report(findings: list[Finding], score: ScoreResult,
                   ascii_only: bool = False, native=None, lang: str = "en",
-                  *, risk=None, update_notice: list[str] | None = None) -> str:
+                  *, risk=None, update_notice: list[str] | None = None,
+                  openclaw_detected: bool = True) -> str:
     icon = _ICON_ASCII if ascii_only else _ICON
     ok = "[OK]" if ascii_only else "✅"
     suppressed_count = sum(1 for f in findings if getattr(f, "suppressed", False))
@@ -154,6 +155,19 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append(t("report.score_breakdown_detail", lang,
                        n_fail=n_fail, n_warn=n_warn, sev_summary=sev_summary))
     lines.append(t("report.scope_note", lang))
+    # Honest framing for non-OpenClaw / custom setups (B-017): when there is no
+    # openclaw.json the config-driven checks come back UNKNOWN. UNKNOWN is neutral
+    # (never counted against the score), but without context a hardened custom setup
+    # reads as "half-broken". State the non-standard detection explicitly and explain
+    # the UNKNOWNs instead of letting them look like failures.
+    if not openclaw_detected:
+        n_unknown = sum(1 for f in findings if f.status == UNKNOWN)
+        warn_icon = "[!]" if ascii_only else "⚠️"
+        lines.append("")
+        lines.append(f"{warn_icon} {t('report.nonstandard_banner', lang)}")
+        if n_unknown:
+            lines.append(t("report.nonstandard_unknown", lang,
+                           n=n_unknown, n_scored=n_scored))
     lines.append("")
     if not issues:
         lines.append(t("report.no_issues", lang, ok=ok))

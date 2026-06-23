@@ -393,7 +393,8 @@ def main(argv=None) -> int:
         if not args.no_update_notice and not os.environ.get("CLAWSECCHECK_NO_UPDATE_NOTICE"):
             notice = update_notice(__version__, released=__released__)
         parts = [render_report(findings, score, ascii_only, native=ctx.native, lang=args.lang,
-                               risk=paths, update_notice=notice),
+                               risk=paths, update_notice=notice,
+                               openclaw_detected=ctx.config_found),
                  "", render_card(score, findings, ascii_only, lang=args.lang)]
         if ctx.errors:
             parts.append("\nnotes:\n" + "\n".join(f"  - {e}" for e in ctx.errors))

@@ -107,6 +107,28 @@ STRINGS: dict[str, dict[str, str]] = {
             " (MCP מעמיק) לצורך כך."
         ),
     },
+    "report.nonstandard_banner": {
+        "en": (
+            "No openclaw.json found — this looks like a non-standard or custom setup."
+            " ClawSecCheck is calibrated for OpenClaw, the only fully-supported target"
+            " right now, so checks that need the standard config could not be assessed."
+        ),
+        "he": (
+            "לא נמצא openclaw.json — נראה שזו תצורה לא-סטנדרטית או מותאמת אישית."
+            " ClawSecCheck מכוון ל-OpenClaw, היעד היחיד הנתמך במלואו כרגע, ולכן"
+            " בדיקות שדורשות את התצורה הסטנדרטית לא יכלו להיבדק."
+        ),
+    },
+    "report.nonstandard_unknown": {
+        "en": (
+            "{n} check(s) were not assessed (UNKNOWN) and are NOT counted against your"
+            " score — the grade reflects only the {n_scored} assessable check(s)."
+        ),
+        "he": (
+            "{n} בדיקות לא נבדקו (UNKNOWN) ואינן נספרות לרעת הציון שלך —"
+            " הציון משקף רק את {n_scored} הבדיקות הניתנות להערכה."
+        ),
+    },
     "report.native_header": {
         "en": "--- Also from OpenClaw's built-in `security audit` ---",
         "he": "--- גם מביקורת `security audit` המובנית של OpenClaw ---",
