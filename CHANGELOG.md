@@ -3,6 +3,38 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.8.2] — 2026-06-23
+
+**Self-hardening + bilingual directory metadata.** A property-based test for the secret
+redactor uncovered (and fixed) a redaction idempotency bug, a new CI gate locks in the
+zero-false-positive law, and the skill manifest now carries explicit English and Hebrew
+directory metadata. No new checks, no behavior change to the audit itself.
+
+### Fixed
+- **`logsafe.redact()` idempotency.** A second `redact()` pass over an already-masked
+  `key= <redacted>` pair collapsed the whole match to a bare `<redacted>`, dropping the key
+  name (the colon/equals secret pattern re-matched the marker). A value that is already
+  `<redacted>` is now left untouched. No secret was ever leaked — only the documented
+  idempotency contract was broken.
+
+### Added
+- **False-positive corpus CI gate (`tests/test_fp_corpus.py`).** Operationalizes the
+  zero-false-positive-FAIL law: every clean fixture home (`home_safe` + `fixtures/clean_*`)
+  is audited and asserted to yield zero `FAIL` findings; new clean fixtures auto-enroll by
+  naming convention, with a guard against a vacuous (empty-corpus) pass.
+- **Property-based tests for `logsafe.redact()` (`tests/test_logsafe_property.py`).**
+  Randomized secret payloads in randomized surrounding text (200 iterations/property) prove
+  no secret value ever survives redaction and that `redact()` never raises on arbitrary input.
+- **Bilingual directory metadata in `SKILL.md`.** Explicit English and Hebrew `display_name` /
+  `display_description` plus `tags`, and a `license: MIT` field, for catalog listings. A Hebrew
+  companion manifest `SKILL_HE.md` ships for the Israeli skills directory; English remains the
+  canonical manifest.
+
+### Changed
+- **Repository now publishes only product docs.** Process and research notes were moved out of
+  the published tree; the public repo keeps README, SKILL.md/SKILL_HE.md, CHANGELOG,
+  SECURITY/SECURITY_MODEL, and docs/THREAT_COVERAGE.md.
+
 ## [1.8.1] — 2026-06-22
 
 **Hebrew evidence localization fix + a CI guard so it can't regress.** Eight FAIL/WARN checks
