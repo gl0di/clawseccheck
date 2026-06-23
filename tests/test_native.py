@@ -91,3 +91,34 @@ def test_native_findings_never_affect_score():
     native_fail = native._to_finding({"severity": "critical", "title": "boom"})
     assert compute([native_fail]).score == 0  # no scored findings -> 0 baseline, not a cap artifact
     assert compute([native_fail]).capped is False
+
+
+# ---------------------------------------------------------------------------
+# B-014 — refuse to exec an openclaw binary on an untrusted (writable) path
+# ---------------------------------------------------------------------------
+
+def test_native_skips_group_writable_install_path(tmp_path, monkeypatch):
+    import os
+
+    if os.name != "posix":
+        import pytest
+        pytest.skip("POSIX permission bits only")
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    exe = bindir / "openclaw"
+    exe.write_text("#!/bin/sh\necho '[]'\n")
+    exe.chmod(0o755)
+    # Make the install dir group- and world-writable -> a local user could swap it.
+    bindir.chmod(0o777)
+
+    monkeypatch.setattr(native.shutil, "which", lambda *_a, **_k: str(exe))
+
+    def _boom(*_a, **_k):  # exec must NOT happen
+        raise AssertionError("subprocess.run should not be called for an untrusted path")
+
+    monkeypatch.setattr(native.subprocess, "run", _boom)
+
+    res = run_native_audit()
+    assert res.status == "skipped"
+    assert "writable" in res.note

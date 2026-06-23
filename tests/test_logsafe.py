@@ -95,6 +95,74 @@ class TestRedact:
 
 
 # ---------------------------------------------------------------------------
+# redact() — provider-specific secret formats (B-009)
+# Every secret is assembled from fragments at runtime so NO contiguous
+# secret-shaped literal exists in source (project law §2.3).
+# ---------------------------------------------------------------------------
+
+
+class TestRedactProviderFormats:
+    def test_masks_github_token(self):
+        secret = "ghp" + "_" + "A" * 36
+        result = redact(secret)
+        assert secret not in result
+        assert "<redacted>" in result
+
+    def test_masks_slack_token(self):
+        secret = "xoxb" + "-" + "1" * 12 + "-" + "A" * 24
+        result = redact(secret)
+        assert secret not in result
+        assert "<redacted>" in result
+
+    def test_masks_stripe_live_key(self):
+        secret = "sk" + "_live_" + "A" * 24
+        result = redact(secret)
+        assert secret not in result
+        assert "<redacted>" in result
+
+    def test_masks_openai_project_key(self):
+        secret = "sk" + "-proj-" + "A" * 40
+        result = redact(secret)
+        assert secret not in result
+        assert "<redacted>" in result
+
+    def test_masks_jwt(self):
+        secret = "ey" + "J" + "a" * 20 + ".ey" + "J" + "b" * 20 + "." + "c" * 20
+        result = redact(secret)
+        assert secret not in result
+        assert "<redacted>" in result
+
+    def test_masks_pem_private_key_block(self):
+        body = "M" * 40
+        secret = "-----BEGIN RSA PRIVATE KEY-----\n" + body + "\n-----END RSA PRIVATE KEY-----"
+        result = redact(secret)
+        assert body not in result
+        assert "<redacted>" in result
+
+    def test_masks_luhn_valid_pan(self):
+        # 4111 1111 1111 1111 is a Luhn-valid test PAN (assembled from parts).
+        pan = " ".join(["4111", "1111", "1111", "1111"])
+        result = redact(pan)
+        assert pan not in result
+        assert "<redacted>" in result
+
+    def test_leaves_non_luhn_long_number(self):
+        # 13 digits, not Luhn-valid -> not a PAN -> untouched.
+        text = "order 1234567890123 shipped"
+        assert redact(text) == text
+
+    def test_leaves_phone_number(self):
+        # 11 digits is below the PAN length floor.
+        text = "call 12025550173 now"
+        assert redact(text) == text
+
+    def test_provider_formats_idempotent(self):
+        secret = "ghp" + "_" + "Z" * 30
+        once = redact(secret)
+        assert redact(once) == once
+
+
+# ---------------------------------------------------------------------------
 # get_logger()
 # ---------------------------------------------------------------------------
 

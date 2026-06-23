@@ -144,3 +144,20 @@ def test_file_count_cap_does_not_affect_small_skill(tmp_path):
     assert file_markers == n, (
         f"All {n} files should be read when under the cap, got {file_markers}"
     )
+
+
+# ---------------------------------------------------------------------------
+# B-014 — deeply-nested openclaw.json must degrade, not crash with RecursionError
+# ---------------------------------------------------------------------------
+
+def test_deeply_nested_config_degrades_gracefully(tmp_path):
+    """A pathologically deep JSON config overflows json.loads' C recursion limit;
+    collect() must record an error and keep going, not propagate RecursionError."""
+    depth = 100_000
+    deep = "[" * depth + "]" * depth
+    (tmp_path / "openclaw.json").write_text(deep, encoding="utf-8")
+
+    ctx = collect(tmp_path)  # must not raise
+
+    assert ctx.config == {}
+    assert any("openclaw.json" in e for e in ctx.errors)

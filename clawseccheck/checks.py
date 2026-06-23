@@ -12,6 +12,7 @@ import binascii
 import os
 import re
 import shutil
+import unicodedata
 from pathlib import Path
 
 from . import attest as _attest
@@ -762,8 +763,15 @@ _REPUTABLE_INSTALL_HOSTS = (
     "bun.sh", "get.pnpm.io", "install.python-poetry.org", "sdk.cloud.google.com",
     "nodejs.org", "get.k3s.io", "starship.rs", "get.helm.sh", "fnm.vercel.app",
 )
+# Bounded quantifiers ({0,256}) instead of unbounded [^\n|]* — two adjacent
+# unbounded same-class runs split by a tail that fails on no-pipe lines caused
+# catastrophic O(n^2) backtracking, so one long line of attacker-controlled
+# skill text could hang the scanner (B-006 ReDoS). Bounding the runs keeps the
+# match linear while still covering any real `curl URL | sh` one-liner (the URL
+# sits within 256 chars of curl and the pipe within 256 of the host).
 _PIPE_SHELL_RE = re.compile(
-    r"(?:curl|wget)\b[^\n|]*?https?://([^\s/'\"|]+)[^\n|]*\|\s*(?:sudo\s+)?(?:ba|z)?sh", re.I)
+    r"(?:curl|wget)\b[^\n|]{0,256}?https?://([^\s/'\"|]+)[^\n|]{0,256}\|\s*(?:sudo\s+)?(?:ba|z)?sh",
+    re.I)
 
 # PowerShell -EncodedCommand / -enc carries UTF-16LE-encoded payloads hidden from plain
 # text search. We extract the blob, attempt UTF-16LE decode, and re-scan.
@@ -773,6 +781,12 @@ _PS_ENC_RE = re.compile(r"-(?:EncodedCommand|enc(?:odedcommand)?)\s+([A-Za-z0-9+
 # obfuscated payloads. We try both alphabets.
 _B64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 _B64URL_BLOB_RE = re.compile(r"[A-Za-z0-9_-]{40,}")
+_WS_RE = re.compile(r"\s+")
+# A run of >=2 quoted string literals optionally joined by '+', e.g.
+#   "Y3Vy" + "bCBo" + "dHRw"   — the JS/TS/Python string-concat split evasion.
+_QUOTED_CONCAT_RE = re.compile(r"""(?:"[^"\n]*"|'[^'\n]*')(?:\s*\+?\s*(?:"[^"\n]*"|'[^'\n]*'))+""")
+# Joiners stripped from a quoted-concat run to glue its base64 fragments back together.
+_CONCAT_STRIP_RE = re.compile(r"""[\s"'+\\,]+""")
 _DECODED_BAD_RE = re.compile(
     r"/bin/(ba|z)?sh|\bcurl\b|\bwget\b|\bnc\b|powershell|invoke-expression|"
     r"https?://\d{1,3}(?:\.\d{1,3}){3}", re.I)
@@ -824,27 +838,40 @@ def _decoded_payloads(blob: str) -> list[str]:
     seen: set[str] = set()
 
     def _check(decoded: str) -> None:
-        key = decoded[:80]
+        # NFKC-fold so a fullwidth / homoglyph variant inside the payload
+        # (e.g. `ｃurl`) normalizes to ASCII before the keyword match.
+        norm = unicodedata.normalize("NFKC", decoded)
+        key = norm[:80]
         if key in seen:
             return
         seen.add(key)
-        if len(decoded) >= 6 and _DECODED_BAD_RE.search(decoded):
-            hits.append(decoded.strip().replace("\n", " ")[:80])
+        if len(norm) >= 6 and _DECODED_BAD_RE.search(norm):
+            hits.append(norm.strip().replace("\n", " ")[:80])
 
-    # Standard base64 blobs.
-    for token in _B64_BLOB_RE.findall(blob):
-        decoded = _try_b64_decode(token, urlsafe=False)
-        if decoded is not None:
-            _check(decoded)
+    def _scan(source: str) -> None:
+        # Standard base64 blobs.
+        for token in _B64_BLOB_RE.findall(source):
+            decoded = _try_b64_decode(token, urlsafe=False)
+            if decoded is not None:
+                _check(decoded)
+        # URL-safe base64 blobs (characters - and _ instead of + and /).
+        # We skip tokens that are a pure subset of the standard alphabet (already covered).
+        for token in _B64URL_BLOB_RE.findall(source):
+            if not re.search(r"[-_]", token):
+                continue  # no URL-safe chars; standard pass already handled this
+            decoded = _try_b64_decode(token, urlsafe=True)
+            if decoded is not None:
+                _check(decoded)
 
-    # URL-safe base64 blobs (characters - and _ instead of + and /).
-    # We skip tokens that are a pure subset of the standard alphabet (already covered).
-    for token in _B64URL_BLOB_RE.findall(blob):
-        if not re.search(r"[-_]", token):
-            continue  # no URL-safe chars; standard pass already handled this
-        decoded = _try_b64_decode(token, urlsafe=True)
-        if decoded is not None:
-            _check(decoded)
+    # Pass 1: the blob as-is (contiguous blobs).
+    _scan(blob)
+    # Pass 2: whitespace stripped — rejoins a base64 blob wrapped/split across
+    # lines (each fragment below the 40-char threshold), the verified B-010 evasion.
+    _scan(_WS_RE.sub("", blob))
+    # Pass 3: quoted-string concatenation runs ("frag"+"frag"+...) glued back
+    # together, so a blob split across concatenated string literals is rejoined.
+    for run in _QUOTED_CONCAT_RE.findall(blob):
+        _scan(_CONCAT_STRIP_RE.sub("", run))
 
     return hits
 

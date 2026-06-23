@@ -100,6 +100,19 @@ def test_vet_sarif_clean_has_no_results(tmp_path):
     assert sarif["runs"][0]["results"] == []
 
 
+def test_vet_sarif_unwritable_path_degrades_gracefully(tmp_path, capsys):
+    """B-014: an unwritable --sarif path during --vet must degrade like the main
+    path (a '(could not write SARIF: ...)' note), not raise an uncaught OSError."""
+    bad = tmp_path / "no_such_dir" / "vet.sarif"  # parent does not exist
+    rc = main(["--vet", str(_dirty_skill(tmp_path)), "--sarif", str(bad)])
+    out = capsys.readouterr().out
+    assert "could not write SARIF" in out
+    # the primary text report still completes and the exit code is unchanged
+    assert "DANGEROUS" in out
+    assert rc == 1
+    assert not bad.exists()
+
+
 # ---------------------------------------------------------------------------
 # --vet-mcp --json / --sarif
 # ---------------------------------------------------------------------------

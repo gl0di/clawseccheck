@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 
 from .checks import SECRET_KEY_RE, SECRET_PATTERNS
@@ -18,12 +19,52 @@ __all__ = ["redact", "get_logger"]
 
 # Pattern for bare key=value or key = value pairs where the key looks secret-like.
 # Matches: key=value, key = value, key="value", key='value'
-_KV_RE = __import__("re").compile(
+_KV_RE = re.compile(
     r"(?P<key>"
     + SECRET_KEY_RE.pattern
     + r")\s*=\s*['\"]?(?P<val>[^\s'\"&;,]{4,})",
-    __import__("re").I,
+    re.I,
 )
+
+# Provider-specific secret formats that the generic SECRET_PATTERNS in checks.py
+# miss (B-009).  These are full-token shapes, so each match is replaced wholesale.
+# Kept here (not in checks.SECRET_PATTERNS) so they only widen *redaction* and do
+# not introduce new config-scan findings / false-positive FAILs.
+_EXTRA_SECRET_PATTERNS = [
+    re.compile(r"gh[opsur]_[A-Za-z0-9]{20,}"),                 # GitHub PAT / OAuth / app tokens
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),               # Slack tokens
+    re.compile(r"sk_(?:live|test)_[A-Za-z0-9]{10,}"),          # Stripe secret keys (underscores)
+    re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"),                 # OpenAI project keys (hyphen after proj)
+    re.compile(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),  # JWT (header.payload.sig)
+    re.compile(                                                # PEM private-key blocks
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        re.DOTALL),
+]
+
+# Candidate credit-card PAN: 13–19 digits with optional single space/hyphen
+# separators, not glued to other digits.  Luhn-validated in _replace_pan so plain
+# long numbers (phone numbers, ids) are left untouched.
+_PAN_CANDIDATE_RE = re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)")
+
+
+def _luhn_ok(digits: str) -> bool:
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = int(ch)
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+def _replace_pan(m: re.Match) -> str:  # type: ignore[type-arg]
+    raw = m.group(0)
+    digits = re.sub(r"\D", "", raw)
+    if 13 <= len(digits) <= 19 and _luhn_ok(digits):
+        return "<redacted>"
+    return raw
 
 
 def redact(text: str | None) -> str:
@@ -41,6 +82,13 @@ def redact(text: str | None) -> str:
     for pat in SECRET_PATTERNS:
         result = pat.sub(_replace_secret_pattern, result)
 
+    # Provider-specific token shapes (GitHub/Slack/Stripe/OpenAI-proj/JWT/PEM).
+    for pat in _EXTRA_SECRET_PATTERNS:
+        result = pat.sub("<redacted>", result)
+
+    # Credit-card PANs (Luhn-validated so we don't mask ordinary long numbers).
+    result = _PAN_CANDIDATE_RE.sub(_replace_pan, result)
+
     # Replace key=value pairs where the key looks secret-like.
     # We must not re-redact already-redacted markers.
     result = _KV_RE.sub(_replace_kv, result)
@@ -48,7 +96,7 @@ def redact(text: str | None) -> str:
     return result
 
 
-def _replace_secret_pattern(m: __import__("re").Match) -> str:  # type: ignore[type-arg]
+def _replace_secret_pattern(m: re.Match) -> str:  # type: ignore[type-arg]
     """Replacement callback for SECRET_PATTERNS.
 
     For patterns like `password: <value>`, keep the key prefix and redact
@@ -78,7 +126,7 @@ def _replace_secret_pattern(m: __import__("re").Match) -> str:  # type: ignore[t
     return "<redacted>"
 
 
-def _replace_kv(m: __import__("re").Match) -> str:  # type: ignore[type-arg]
+def _replace_kv(m: re.Match) -> str:  # type: ignore[type-arg]
     """Replacement callback for key=value patterns."""
     val = m.group("val")
     if val == "<redacted>":

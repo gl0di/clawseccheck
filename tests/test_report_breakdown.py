@@ -172,6 +172,32 @@ class TestBreakdownCapExplanation:
         assert "capped" in out.lower()
         assert "HIGH" in out
 
+    def test_breakdown_uses_raw_score_so_arithmetic_reconciles(self):
+        """B-013: when a cap fires, the 'Why X/100' line must show the RAW
+        pass-rate (which matches the pass/warn/fail counts), not the capped score
+        — otherwise the explained number contradicts its own arithmetic."""
+        findings = [_finding(f"P{i}", PASS, HIGH) for i in range(9)]
+        findings.append(_finding("C1", FAIL, CRITICAL))
+        score = compute(findings)
+        assert score.capped and score.raw_score != score.score
+        out = render_report(findings, score, lang="en")
+        # The breakdown explains the RAW number...
+        assert f"Why {score.raw_score}/100" in out
+        # ...and the separate capped line discloses raw -> capped.
+        assert f"capped from {score.raw_score}" in out
+        # The headline score line still shows the capped score.
+        assert f"{score.score}/100" in out
+
+    def test_cap_line_labels_medium_when_medium_fail_caps(self):
+        """B-011/B-013: a MEDIUM-only cap must label the cap as MEDIUM, not HIGH."""
+        findings = [_finding("M1", FAIL, MEDIUM)] + [
+            _finding(f"P{i}", PASS, LOW) for i in range(200)
+        ]
+        score = compute(findings)
+        assert score.capped and score.cap_severity == MEDIUM
+        out = render_report(findings, score, lang="en")
+        assert "MEDIUM" in out
+
     def test_cap_line_absent_when_no_critical_or_high_fail(self):
         findings = [
             _finding("P1", PASS, HIGH),

@@ -10,6 +10,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from .safeio import secure_append_text, secure_dir
+
 DEFAULT_HISTORY = "~/.clawseccheck/history.jsonl"
 
 
@@ -29,18 +31,14 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None) -> None:
         when = datetime.now().strftime("%Y-%m-%d")
 
     p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    try:  # owner-only directory: history dir must not be world-readable (POSIX only)
-        p.parent.chmod(0o700)
-    except (OSError, NotImplementedError):
-        pass
-
     row = {"date": when, "score": int(score.score), "grade": str(score.grade)}
-    with p.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row) + "\n")
-
-    try:  # owner-only: history holds score progression
-        p.chmod(0o600)
+    # Symlink-safe: dir 0700 and an O_NOFOLLOW append, so a planted symlink at
+    # history.jsonl can never redirect this default-path write to another file.
+    # record() runs by default on every audit, so it degrades quietly (refuse =
+    # skip) instead of crashing the audit when the target is a symlink/unwritable.
+    try:
+        secure_dir(p.parent)
+        secure_append_text(p, json.dumps(row) + "\n")
     except OSError:
         pass
 

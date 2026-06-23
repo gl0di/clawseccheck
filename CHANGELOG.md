@@ -3,6 +3,45 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.9.0] — 2026-06-23
+
+**Security hardening pass — resolves a manual code audit (findings B-006…B-014).** Closes a
+ReDoS, a symlink/TOCTOU file-clobber, a blind self-integrity digest, several secret-redaction
+gaps, a base64 evasion, a scoring inversion, and a cluster of robustness nits. The audit is the
+tool turning its own lens on itself: every fix removes a weakness ClawSecCheck flags in others.
+
+### Added
+- **Symlink-safe local writes (`safeio`).** New stdlib helpers create `~/.clawseccheck/` with mode
+  `0700` and open state/history/event files with `O_NOFOLLOW | O_CREAT 0600`, so a planted symlink
+  can never be followed — and there is no transient world-readable umask window at creation.
+- **Provider-specific secret redaction.** `logsafe.redact()` now masks GitHub (`gh[opsur]_`), Slack
+  (`xox[baprs]-`), Stripe (`sk_live_/sk_test_`), OpenAI project (`sk-proj-`), JWTs, PEM private-key
+  blocks, and Luhn-validated credit-card PANs — on top of the existing patterns.
+- **`--redteam --seed VALUE`** for reproducible CI runs; without it, the suite now emits a fresh
+  random seed (and prints it) each run.
+
+### Fixed
+- **B-006 — ReDoS in the pipe-to-shell detector.** Bounded the unbounded `[^\n|]` runs in
+  `_PIPE_SHELL_RE`; a 60 KB attacker-controlled line now scans in ~0.1 s instead of ~10 s.
+- **B-007 — symlink/TOCTOU file clobber.** `monitor.save_state` / `record_events` / `history.record`
+  no longer follow a symlinked target into an arbitrary-file overwrite.
+- **B-008 — blind self-integrity digest.** `--verify-self` now hashes a recursive walk of *all*
+  package files (any type, nested included), so adding or nesting a foreign file changes the digest.
+- **B-009 — secret-format leaks** in logs and embedded base64 previews (see Added).
+- **B-010 — base64 line-split evasion.** The hidden-payload detector now rejoins base64 split across
+  lines or concatenated string literals before decoding, and NFKC-folds the decoded text.
+- **B-013 — self-contradicting score breakdown.** The "Why X/100" line now shows the raw pass-rate
+  (which reconciles with the pass/warn/fail counts); the cap is disclosed on its own line.
+- **B-014 — robustness cluster.** Catch `RecursionError` on deeply-nested configs; refuse to exec
+  `openclaw` from a group/world-writable PATH; wrap the `--vet`/`--vet-mcp --sarif` side-write.
+
+### Changed
+- **B-011 — every FAILed severity now caps the score** (CRITICAL 49 / HIGH 79 / MEDIUM 89 / LOW 94),
+  so a config that fails a real check can no longer out-grade a safer one; flipping any check
+  PASS→FAIL can never raise the score. **Scores for configs with MEDIUM/LOW failures may drop.**
+- **B-014 — "not assessable" instead of a fake F.** An empty / all-UNKNOWN / all-advisory result now
+  reports grade `N/A` rather than being mislabeled worst-possible.
+
 ## [1.8.3] — 2026-06-23
 
 **Manifest honesty + clean publish surface.** Resolves the contradictions a supply-chain

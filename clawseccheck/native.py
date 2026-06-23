@@ -13,11 +13,34 @@ ClawSecCheck score (kept deterministic / no double-counting).
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass, field
 
 from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, Finding
+
+
+def _untrusted_exec_reason(exe: str) -> str | None:
+    """Return a reason if *exe* (or its directory) is writable by group/other on
+    POSIX — i.e. a local user could have swapped the binary we are about to run.
+
+    The audit flags group/world-writable install dirs in others, so it must not
+    blindly exec from such a path itself (B-014).  Stat failures / non-POSIX
+    return None so the normal exec path is unaffected.
+    """
+    if os.name != "posix":
+        return None
+    try:
+        real = os.path.realpath(exe)
+        for target in (real, os.path.dirname(real)):
+            mode = os.stat(target).st_mode
+            if mode & (stat.S_IWGRP | stat.S_IWOTH):
+                return "group/world-writable install path"
+    except OSError:
+        return None
+    return None
 
 _SEV_MAP = {
     "critical": CRITICAL, "crit": CRITICAL, "fatal": CRITICAL,
@@ -100,6 +123,12 @@ def run_native_audit(openclaw_bin: str = "openclaw", timeout: int = 60,
         return NativeResult("not_found", note=(
             "openclaw CLI not on PATH — run this inside OpenClaw to also include "
             "its built-in `openclaw security audit`."))
+    unsafe = _untrusted_exec_reason(exe)
+    if unsafe:
+        return NativeResult("skipped", note=(
+            f"openclaw at {os.path.realpath(exe)} not run: {unsafe}. "
+            "Restore owner-only perms on the binary/dir, or run from a trusted PATH, "
+            "to include the built-in audit."))
     try:
         proc = subprocess.run(
             [exe, "security", "audit", "--json"],

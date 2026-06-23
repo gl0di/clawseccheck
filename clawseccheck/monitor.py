@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 from .catalog import BY_ID, FAIL
+from .safeio import secure_append_text, secure_dir, secure_write_text
 
 
 def _ignore_hash(home: Path) -> str:
@@ -196,16 +197,10 @@ def load_state(path: str | Path = DEFAULT_STATE) -> dict | None:
 
 def save_state(path: str | Path, snap: dict) -> None:
     p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    try:  # owner-only directory: state dir must not be world-readable (POSIX only)
-        p.parent.chmod(0o700)
-    except (OSError, NotImplementedError):
-        pass
-    p.write_text(json.dumps(snap, indent=2), encoding="utf-8")
-    try:  # owner-only: the snapshot holds skill/bootstrap hashes + score history
-        p.chmod(0o600)
-    except OSError:
-        pass
+    # Symlink-safe: create the dir 0700 and refuse to follow a symlinked target,
+    # so a planted symlink can never turn this write into an arbitrary-file clobber.
+    secure_dir(p.parent)
+    secure_write_text(p, json.dumps(snap, indent=2))
 
 
 def record_events(alerts, path: str | Path = DEFAULT_EVENTS, when: str | None = None) -> None:
@@ -217,17 +212,11 @@ def record_events(alerts, path: str | Path = DEFAULT_EVENTS, when: str | None = 
         from datetime import datetime  # noqa: PLC0415
         when = datetime.now().isoformat(timespec="seconds")
     p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        p.parent.chmod(0o700)
-    except (OSError, NotImplementedError):
-        pass
     body = "".join(json.dumps({"ts": when, "level": lvl, "message": msg}) + "\n"
                    for lvl, msg in alerts)
-    try:
-        with p.open("a", encoding="utf-8") as fh:
-            fh.write(body)
-        p.chmod(0o600)
+    try:  # symlink-safe append; never raise from the event journal
+        secure_dir(p.parent)
+        secure_append_text(p, body)
     except OSError:
         pass
 

@@ -25,12 +25,25 @@ _PKG_DIR = Path(__file__).resolve().parent
 
 
 def package_digest(pkg_dir: Path | None = None) -> tuple[str, dict[str, str]]:
-    """Return ``(combined_hex, per_file_map)`` for all ``*.py`` files in the package.
+    """Return ``(combined_hex, per_file_map)`` for **every** file in the package tree.
 
     The combined digest is a SHA-256 hash computed over the **sorted** sequence
-    of ``filename:sha256hex`` pairs (sorted by filename so the result is
+    of ``relpath:sha256hex`` pairs (sorted by relative path so the result is
     independent of filesystem enumeration order).  This makes the digest stable
     across identical file trees on any platform.
+
+    The scan is a recursive walk that hashes *all* file types — not just
+    top-level ``*.py``.  A flat ``iterdir()`` over ``*.py`` was blind to added
+    foreign files (``.so`` / ``.pth`` / data) and to nested subpackage modules,
+    so a tamperer could drop a malicious file and still get an unchanged digest.
+    Recursing over every file means adding *or* nesting any file changes the
+    digest.  ``__pycache__`` is excluded because compiled ``.pyc`` artifacts vary
+    by interpreter and are regenerated, not part of the shipped source.
+
+    Note: self-integrity computed from inside the artifact is advisory — a
+    modified ``integrity.py`` can print anything.  An out-of-band signature is the
+    real anchor; this only proves "this file set's bytes are unchanged AND nothing
+    was added/nested."
 
     Parameters
     ----------
@@ -43,20 +56,23 @@ def package_digest(pkg_dir: Path | None = None) -> tuple[str, dict[str, str]]:
     combined_hex : str
         64-character lowercase SHA-256 hex string over the sorted per-file digests.
     per_file : dict[str, str]
-        ``{filename: sha256hex}`` mapping, keyed by plain filename (no directory
-        component) sorted by name.
+        ``{relpath: sha256hex}`` mapping, keyed by POSIX relative path from the
+        package root (so nested files are distinguishable), sorted by path.
     """
     if pkg_dir is None:
         pkg_dir = _PKG_DIR
 
-    py_files = sorted(p for p in pkg_dir.iterdir() if p.suffix == ".py" and p.is_file())
+    files = sorted(
+        p for p in pkg_dir.rglob("*")
+        if p.is_file() and not p.is_symlink() and "__pycache__" not in p.parts
+    )
 
     per_file: dict[str, str] = {}
-    for path in py_files:
-        content = path.read_bytes()
-        per_file[path.name] = hashlib.sha256(content).hexdigest()
+    for path in files:
+        rel = path.relative_to(pkg_dir).as_posix()
+        per_file[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
 
-    # Combine: hash the sorted sequence of "name:digest\n" lines for stability.
+    # Combine: hash the sorted sequence of "relpath:digest\n" lines for stability.
     combined = hashlib.sha256(
         "".join(f"{name}:{digest}\n" for name, digest in sorted(per_file.items())).encode()
     ).hexdigest()

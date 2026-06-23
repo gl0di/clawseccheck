@@ -168,6 +168,11 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
             ctx.config_mode = cfg_path.stat().st_mode & 0o777
         except (OSError, json.JSONDecodeError) as exc:
             ctx.errors.append(f"could not parse {cfg_path}: {exc}")
+        except RecursionError:
+            # Deeply-nested JSON overflows json.loads' C recursion limit. Only the
+            # user's own config reaches this path (self-inflicted, not attacker-
+            # reachable), so degrade gracefully instead of crashing the audit (B-014).
+            ctx.errors.append(f"could not parse {cfg_path}: nesting too deep")
     else:
         ctx.errors.append(f"config not found: {cfg_path}")
 

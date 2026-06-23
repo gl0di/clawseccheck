@@ -1,4 +1,6 @@
 """Tests for clawseccheck.redteam — deterministic red-team scaffold."""
+import re
+
 from clawseccheck.redteam import (
     CATEGORIES,
     TOKEN_PREFIX,
@@ -37,6 +39,37 @@ def test_token_differs_across_seeds():
     tokens_a = {e["token"] for e in make_suite("seed-A")}
     tokens_b = {e["token"] for e in make_suite("seed-B")}
     assert tokens_a.isdisjoint(tokens_b), "different seeds must produce different tokens"
+
+
+def test_default_seed_is_random_per_run():
+    """B-012: with no explicit seed, two suites must NOT share tokens — a fixed,
+    predictable token set lets the live injection test be gamed."""
+    tokens_a = {e["token"] for e in make_suite()}
+    tokens_b = {e["token"] for e in make_suite()}
+    assert tokens_a.isdisjoint(tokens_b), "default suite must use fresh random tokens each run"
+
+
+def test_cli_redteam_tokens_differ_across_runs(capsys):
+    """B-012: the --redteam CLI path must emit unpredictable tokens each run."""
+    main(["--redteam"])
+    out1 = capsys.readouterr().out
+    main(["--redteam"])
+    out2 = capsys.readouterr().out
+    tokens1 = set(re.findall(r"CLAWSECCHECK-RT-[0-9A-F]+", out1))
+    tokens2 = set(re.findall(r"CLAWSECCHECK-RT-[0-9A-F]+", out2))
+    assert tokens1 and tokens2
+    assert tokens1.isdisjoint(tokens2)
+
+
+def test_cli_redteam_seed_is_reproducible(capsys):
+    """An explicit --seed must reproduce the same tokens (for CI)."""
+    main(["--redteam", "--seed", "ci-fixed"])
+    out1 = capsys.readouterr().out
+    main(["--redteam", "--seed", "ci-fixed"])
+    out2 = capsys.readouterr().out
+    tokens1 = re.findall(r"CLAWSECCHECK-RT-[0-9A-F]+", out1)
+    tokens2 = re.findall(r"CLAWSECCHECK-RT-[0-9A-F]+", out2)
+    assert tokens1 == tokens2 and tokens1
 
 
 def test_token_differs_across_entries_same_seed():

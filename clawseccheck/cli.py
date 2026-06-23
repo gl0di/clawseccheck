@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -93,6 +94,9 @@ def main(argv=None) -> int:
                    help="active prompt-injection canary self-test")
     p.add_argument("--redteam", action="store_true",
                    help="print a live red-team payload suite for adversarial self-testing")
+    p.add_argument("--seed", default=None, metavar="VALUE",
+                   help="fixed seed for --redteam tokens (reproducible CI runs); "
+                        "default is a fresh random seed each run")
     p.add_argument("--dryrun", action="store_true",
                    help="print a behavioral dry-run harness (prompt-injection self-test across all sources)")
     p.add_argument("--ask", action="store_true",
@@ -168,11 +172,15 @@ def main(argv=None) -> int:
     if args.vet:
         from .report import _sanitize
         f = vet_skill(args.vet)
-        # Side output: SARIF file (mirrors the full-audit --sarif behavior).
+        # Side output: SARIF file (mirrors the full-audit --sarif behavior, incl.
+        # the same graceful handling of an unwritable path — B-014).
         if args.sarif:
-            Path(args.sarif).expanduser().write_text(
-                render_sarif([f], tool_version=__version__), encoding="utf-8")
-            _emit(f"(SARIF written to {args.sarif})")
+            try:
+                Path(args.sarif).expanduser().write_text(
+                    render_sarif([f], tool_version=__version__), encoding="utf-8")
+                _emit(f"(SARIF written to {args.sarif})")
+            except OSError as exc:
+                _emit(f"(could not write SARIF: {exc})")
         # Primary output: machine-readable JSON, else the human text report.
         if args.json:
             _emit(render_vet_json([f], mode="vet", target=args.vet, version=__version__))
@@ -197,11 +205,15 @@ def main(argv=None) -> int:
         from .report import _sanitize
         target = args.vet_mcp if args.vet_mcp else None
         findings = vet_mcp(target=target, home=args.home)
-        # Side output: SARIF file (mirrors the full-audit --sarif behavior).
+        # Side output: SARIF file (mirrors the full-audit --sarif behavior, incl.
+        # the same graceful handling of an unwritable path — B-014).
         if args.sarif:
-            Path(args.sarif).expanduser().write_text(
-                render_sarif(findings, tool_version=__version__), encoding="utf-8")
-            _emit(f"(SARIF written to {args.sarif})")
+            try:
+                Path(args.sarif).expanduser().write_text(
+                    render_sarif(findings, tool_version=__version__), encoding="utf-8")
+                _emit(f"(SARIF written to {args.sarif})")
+            except OSError as exc:
+                _emit(f"(could not write SARIF: {exc})")
         # Primary output: machine-readable JSON (covers the no-servers UNKNOWN case too).
         if args.json:
             _emit(render_vet_json(findings, mode="vet-mcp",
@@ -246,7 +258,8 @@ def main(argv=None) -> int:
         return 0
 
     if args.redteam:
-        _emit(render_suite(make_suite(), ascii_only))
+        seed = args.seed if args.seed is not None else secrets.token_hex(8)
+        _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
         return 0
 
     if args.dryrun:

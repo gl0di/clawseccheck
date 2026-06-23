@@ -21,13 +21,14 @@ def test_digest_is_64_hex_chars():
 
 def test_per_file_map_contains_py_files():
     _, per_file = package_digest()
-    # Must include this very module's package files
+    # Must include this very module's package files (keyed by POSIX relpath).
     assert "integrity.py" in per_file
     assert "cli.py" in per_file
     assert "checks.py" in per_file
-    # Every per-file entry is also a 64-char hex string
+    # __pycache__ artifacts must never be hashed (they vary by interpreter).
+    assert not any("__pycache__" in name for name in per_file)
+    # Every per-file entry is a 64-char hex string.
     for name, digest in per_file.items():
-        assert name.endswith(".py"), f"non-py file in map: {name}"
         assert len(digest) == 64, f"bad digest length for {name}: {digest!r}"
         assert all(c in "0123456789abcdef" for c in digest)
 
@@ -76,15 +77,60 @@ def test_digest_is_order_independent(tmp_path):
     assert combined == manual
 
 
-def test_only_py_files_are_included(tmp_path):
-    """Non-.py files (configs, binaries) must be ignored."""
+def test_all_file_types_are_included(tmp_path):
+    """Every file type is hashed — a tamperer must not be able to add a foreign
+    (non-.py) file and keep a clean digest (B-008)."""
     (tmp_path / "engine.py").write_text("# engine", encoding="utf-8")
     (tmp_path / "README.md").write_text("readme", encoding="utf-8")
     (tmp_path / "data.json").write_text("{}", encoding="utf-8")
 
     _, per_file = package_digest(pkg_dir=tmp_path)
 
+    assert set(per_file.keys()) == {"engine.py", "README.md", "data.json"}
+
+
+def test_pycache_is_excluded(tmp_path):
+    """Compiled __pycache__ artifacts must never be part of the digest."""
+    (tmp_path / "engine.py").write_text("# engine", encoding="utf-8")
+    cache = tmp_path / "__pycache__"
+    cache.mkdir()
+    (cache / "engine.cpython-312.pyc").write_bytes(b"\x00\x01compiled")
+
+    _, per_file = package_digest(pkg_dir=tmp_path)
+
     assert set(per_file.keys()) == {"engine.py"}
+
+
+def test_added_foreign_file_changes_digest(tmp_path):
+    """Dropping ANY new file (even non-.py, even nested) must change the digest —
+    the flat top-level *.py scan was blind to this (B-008)."""
+    (tmp_path / "engine.py").write_text("# engine", encoding="utf-8")
+    before, _ = package_digest(pkg_dir=tmp_path)
+
+    # Foreign top-level file.
+    (tmp_path / "_evil.txt").write_text("payload", encoding="utf-8")
+    after_foreign, _ = package_digest(pkg_dir=tmp_path)
+    assert after_foreign != before
+
+    # Nested subpackage module.
+    sub = tmp_path / "_sub"
+    sub.mkdir()
+    (sub / "deep.py").write_text("# nested", encoding="utf-8")
+    after_nested, _ = package_digest(pkg_dir=tmp_path)
+    assert after_nested != after_foreign
+
+
+def test_nested_files_keyed_by_relpath(tmp_path):
+    """Nested files are distinguishable via their POSIX relative path."""
+    (tmp_path / "top.py").write_text("# top", encoding="utf-8")
+    sub = tmp_path / "pkg"
+    sub.mkdir()
+    (sub / "mod.py").write_text("# mod", encoding="utf-8")
+
+    _, per_file = package_digest(pkg_dir=tmp_path)
+
+    assert "top.py" in per_file
+    assert "pkg/mod.py" in per_file
 
 
 def test_empty_pkg_dir_returns_empty_map_and_valid_digest(tmp_path):

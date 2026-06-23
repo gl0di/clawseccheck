@@ -124,7 +124,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     if score.capped:
         lines.append(t("report.capped", lang,
                        raw=score.raw_score,
-                       sev="CRITICAL" if score.failed_critical else "HIGH"))
+                       sev=score.cap_severity or "CRITICAL"))
 
     # --- "Why this score" breakdown ---
     scored_findings = [f for f in findings if getattr(f, "scored", True)
@@ -134,8 +134,12 @@ def render_report(findings: list[Finding], score: ScoreResult,
     n_pass = sum(1 for f in scored_findings if f.status == PASS)
     n_warn = sum(1 for f in scored_findings if f.status == WARN)
     n_fail = sum(1 for f in scored_findings if f.status == FAIL)
+    # Use the RAW (uncapped) pass-rate as the explained number so the arithmetic
+    # reconciles with the pass/warn/fail counts. When a cap fired, the separate
+    # `report.capped` line above already discloses raw -> capped, so showing the
+    # raw value here is internally consistent instead of self-contradicting (B-013).
     lines.append(t("report.score_breakdown", lang,
-                   score=score.score, n_scored=n_scored,
+                   score=score.raw_score, n_scored=n_scored,
                    n_pass=n_pass, n_warn=n_warn, n_fail=n_fail))
     if n_fail > 0 or n_warn > 0:
         _sev_counts: dict[str, int] = {}
