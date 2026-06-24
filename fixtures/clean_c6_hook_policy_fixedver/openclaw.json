@@ -1,0 +1,11 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": { "mode": "token", "token": "a-very-long-token-of-32-characters" }
+  },
+  "meta": { "lastTouchedVersion": "2026.6.10" },
+  "tools": { "exec": { "mode": "ask" } },
+  "channels": { "telegram": { "dmPolicy": "allowlist", "groupPolicy": "allowlist" } },
+  "logging": { "redactSensitive": "tools" },
+  "models": { "main": { "provider": "ollama/llama3" } }
+}

@@ -396,6 +396,7 @@ TITLES: dict[str, dict[str, str]] = {
     "C3": {"he": "גיבויים של SOUL.md / זיכרון"},
     "C4": {"he": "גרסת OpenClaw / היגיינת עדכון"},
     "C5": {"he": "בטיחות PATH של בינארי מקומי"},
+    "C6": {"he": "השמטת מדיניות כלים בהרכבת hooks (לפני v2026.6.10)"},
 }
 
 
@@ -594,6 +595,21 @@ PHRASES: dict[str, dict[str, str]] = {
     "action is confirmed.": {
         "he": "הגדר permissionMode ל-'ask' עבור התוסף/ים המפורט/ים כך שכל פעולה מורשית "
               "תאושר במפורש.",
+    },
+    # ---- C6 (C-052): hook-composition tool-policy drop (UNKNOWN advisory) ----
+    "This OpenClaw version predates v2026.6.10, which fixed a hook-registry "
+    "composition bug that could silently drop trusted tool policies at runtime. "
+    "Whether your tools.exec.mode / tools.elevated.allowFrom policy was affected is a "
+    "runtime evaluation-order effect that cannot be read from config — state unknown.": {
+        "he": "גרסת OpenClaw זו קודמת ל-v2026.6.10, שתיקנה באג בהרכבת מרשם ה-hooks "
+              "שעלול היה להשמיט בשקט מדיניות כלים מהימנה בזמן ריצה. האם מדיניות "
+              "tools.exec.mode / tools.elevated.allowFrom שלך הושפעה היא תוצאה של סדר "
+              "הערכה בזמן ריצה שלא ניתן לקרוא מהתצורה — המצב אינו ידוע.",
+    },
+    "Upgrade to OpenClaw v2026.6.10 or later, then re-verify that tools.exec.mode and "
+    "tools.exec.security are enforced as intended.": {
+        "he": "שדרג ל-OpenClaw v2026.6.10 ומעלה, ואז ודא מחדש ש-tools.exec.mode "
+              "ו-tools.exec.security נאכפים כמתוכנן.",
     },
 
     # ---- B4: static sandbox evidence fragments ----
