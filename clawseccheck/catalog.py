@@ -174,6 +174,11 @@ CATALOG: list[CheckMeta] = [
     CheckMeta("C4", "OpenClaw version / update hygiene", LOW, "advisory", "Patch hygiene", scored=False),
     CheckMeta("C5", "Native binary PATH safety", LOW, "advisory", "Binary Integrity",
               scored=False, confidence="MEDIUM"),
+    # C6 (C-052): pre-v2026.6.10 hook-composition could silently drop trusted tool
+    # policies. Runtime evaluation-order effect, no static config field — an honest
+    # UNKNOWN nudge, never a FAIL. Advisory (not scored).
+    CheckMeta("C6", "Hook-composition tool-policy drop (pre-v2026.6.10)",
+              LOW, "advisory", "Patch hygiene", scored=False),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

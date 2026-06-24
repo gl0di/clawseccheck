@@ -2039,6 +2039,45 @@ def check_version(ctx: Context) -> Finding:
                    "Keep OpenClaw updated and re-run the checks after upgrading.")
 
 
+# C6 (C-052): hook-composition tool-policy drop, fixed in this OpenClaw version.
+_HOOK_POLICY_FIX_VERSION = (2026, 6, 10)
+
+
+def check_hook_policy_bypass(ctx: Context) -> Finding:
+    """C6 (C-052) — advisory: pre-v2026.6.10 hook-registry composition could silently
+    drop trusted tool policies at runtime (fixed v2026.6.10).
+
+    This is a runtime evaluation-order effect with NO static config field (hooks.* /
+    tools.trusted are not in the schema), so it is an honest UNKNOWN nudge — never a FAIL.
+    UNKNOWN fires only when the recorded version predates the fix AND a tool policy
+    (tools.exec.mode / tools.elevated.allowFrom) is configured (something that could have
+    been dropped). Everything else PASSes, so there is no UNKNOWN flood.
+    """
+    cfg = ctx.config
+    raw = dig(cfg, "meta.lastTouchedVersion")
+    parsed = _parse_version(str(raw)) if raw else None
+    has_policy = (
+        bool(dig(cfg, "tools.exec.mode"))
+        or isinstance(dig(cfg, "tools.elevated.allowFrom"), dict)
+    )
+    if parsed is not None and parsed < _HOOK_POLICY_FIX_VERSION and has_policy:
+        return _finding(
+            "C6", UNKNOWN,
+            "This OpenClaw version predates v2026.6.10, which fixed a hook-registry "
+            "composition bug that could silently drop trusted tool policies at runtime. "
+            "Whether your tools.exec.mode / tools.elevated.allowFrom policy was affected is a "
+            "runtime evaluation-order effect that cannot be read from config — state unknown.",
+            "Upgrade to OpenClaw v2026.6.10 or later, then re-verify that tools.exec.mode and "
+            "tools.exec.security are enforced as intended.",
+            evidence=[f"meta.lastTouchedVersion={raw} (predates the v2026.6.10 fix)"],
+        )
+    return _finding(
+        "C6", PASS,
+        "No pre-v2026.6.10 hook-composition tool-policy-drop exposure detected.",
+        "Keep OpenClaw updated and re-verify tools.exec.mode after upgrades.",
+    )
+
+
 # ---------- C3: backups of SOUL.md / memory (advisory) ----------
 def check_backups(ctx: Context) -> Finding:
     """Are the agent's identity/memory files backed up (recoverable after drift/poisoning)?"""
@@ -4122,6 +4161,7 @@ CHECKS = [
     check_delegation_reassembly, check_dangerous_overrides,
     check_fs_write_exposure,
     check_controlui_origins, check_plugin_permission_mode,
+    check_hook_policy_bypass,
 ]
 
 

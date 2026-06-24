@@ -727,6 +727,49 @@ def _rule_sandbox_cred_controlplane(ctx: Context, findings: list[Finding],
     )
 
 
+def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
+                                 tools: list[str], cfg: dict) -> RiskPath | None:
+    """HIGH (RISK-15): untrusted-context ingress + browser SSRF to private network.
+
+    Distinct from RISK-05, which keys on SECRETS being reachable: this keys on an
+    untrusted-context channel (B26 FAIL/WARN — channels.<p>.contextVisibility='all') feeding a
+    browser allowed onto the private network (B38). An injection in untrusted message
+    content drives the browser to an internal metadata/credential endpoint and the response
+    surfaces in tool output. RISK-05 and RISK-15 cover different entries (stored-cred reach
+    vs injection-driven SSRF) and only co-fire when a config has both — each still names a
+    distinct path. Fires only when both legs are positive → zero-FP.
+    """
+    if _finding_status(findings, "B26") not in (FAIL, WARN):
+        return None
+    if not _browser_ssrf(findings, cfg):
+        return None
+    return RiskPath(
+        id="RISK-15",
+        severity=HIGH,
+        title="Untrusted context + browser SSRF to private network = metadata/credential exfil",
+        chain=[
+            "untrusted message content (channels.<p>.contextVisibility='all')",
+            "agent browses an attacker-controlled URL",
+            "SSRF to internal metadata/credential endpoint -> data in tool output",
+        ],
+        why=(
+            "A channel exposes full untrusted context to the agent "
+            "(channels.<p>.contextVisibility='all', B26), and the browser is allowed to reach "
+            "private/internal addresses (browser.ssrfPolicy.dangerouslyAllowPrivateNetwork, "
+            "B38). A prompt-injection in an untrusted message can make the agent fetch an "
+            "internal URL — cloud metadata or a credential store — and the response surfaces "
+            "in tool output. OpenClaw has no built-in egress allowlist, so the attacker-fetch "
+            "leg is structurally unconstrained."
+        ),
+        fix=(
+            "Set channels.<provider>.contextVisibility (or channels.defaults) to 'allowlist' "
+            "or 'allowlist_quote', and set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork "
+            "to false with an explicit browser.ssrfPolicy.hostnameAllowlist. Breaking either "
+            "leg breaks the chain."
+        ),
+    )
+
+
 def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
     """Compute dangerous capability chains from config + existing findings.
 
@@ -792,6 +835,10 @@ def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
         candidates.append(path)
 
     path = _rule_sandbox_cred_controlplane(ctx, findings, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_injection_browser_ssrf(ctx, findings, tools, cfg)
     if path:
         candidates.append(path)
 

@@ -837,3 +837,46 @@ def test_risk16_narrow_bind_no_fire():
 def test_risk16_no_bind_no_fire():
     cfg = _risk16_cfg(binds=None)
     assert not any(p.id == "RISK-16" for p in _paths(cfg))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule RISK-15: untrusted context (B26) + browser SSRF (B38) -> metadata exfil
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _risk15_cfg(context_vis="all", ssrf=True):
+    cfg = {
+        "channels": {"telegram": {"contextVisibility": context_vis,
+                                  "dmPolicy": "allowlist", "groupPolicy": "allowlist"}},
+    }
+    if ssrf:
+        cfg["browser"] = {"ssrfPolicy": {"dangerouslyAllowPrivateNetwork": True}}
+    return cfg
+
+
+def test_risk15_untrusted_context_plus_ssrf_fires():
+    paths = _paths(_risk15_cfg())
+    p = next((p for p in paths if p.id == "RISK-15"), None)
+    assert p is not None, [x.id for x in paths]
+    assert p.severity == HIGH
+
+
+def test_risk15_adds_coverage_over_risk05_when_no_secrets():
+    # contextVisibility=all + SSRF flag but NO secrets/credentials:
+    # RISK-05 must NOT fire (needs sensitive data) while RISK-15 DOES -> genuine new coverage.
+    paths = _paths(_risk15_cfg())
+    ids = [p.id for p in paths]
+    assert "RISK-15" in ids
+    assert "RISK-05" not in ids, f"RISK-05 unexpectedly fired (no secrets present): {ids}"
+
+
+def test_risk15_allowlist_context_no_fire():
+    # contextVisibility=allowlist -> B26 passes -> no RISK-15 even with the SSRF flag.
+    assert not any(p.id == "RISK-15" for p in _paths(_risk15_cfg(context_vis="allowlist")))
+
+
+def test_risk15_no_ssrf_flag_no_fire():
+    assert not any(p.id == "RISK-15" for p in _paths(_risk15_cfg(ssrf=False)))
+
+
+def test_risk15_empty_config_no_fire():
+    assert not any(p.id == "RISK-15" for p in _paths({}))
