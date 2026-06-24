@@ -445,20 +445,6 @@ def check_least_privilege(ctx: Context) -> Finding:
                     "Keep least privilege: explicit allowlists only.")
 
 
-# Documented dangerous docker-sandbox break-glass flags (NC-7). Names grounded against
-# docs.openclaw.ai/gateway/security — see the docker/sandbox section of the internal
-# openclaw-schema-recon.md. The "why" text describes the risk the flag name denotes; the
-# docs list the keys without per-flag prose, so we do not quote a definition we don't have.
-_DOCKER_DANGER_FLAGS = (
-    ("dangerouslyAllowReservedContainerTargets",
-     "lets the sandbox target reserved/privileged containers it normally cannot"),
-    ("dangerouslyAllowExternalBindSources",
-     "allows bind mounts from sources outside the approved roots (host-path escape)"),
-    ("dangerouslyAllowContainerNamespaceJoin",
-     "lets the container join another container's namespaces (sandbox isolation break)"),
-)
-
-
 def check_sandbox(ctx: Context) -> Finding:
     cfg = ctx.config
     # Real path: agents.defaults.sandbox.mode (values: "off", "non-main", "all")
@@ -491,14 +477,11 @@ def check_sandbox(ctx: Context) -> Finding:
         ev.append(
             "agents.defaults.sandbox.workspaceAccess=rw (agent can write the mounted workspace)"
         )
-    # Documented break-glass docker flags (docs.openclaw.ai/gateway/security — the
-    # "dangerously*" schema accordion; grounded 2026-06-24, see the docker/sandbox
-    # section of the internal openclaw-schema-recon.md). Each defaults false, so only an
-    # explicit `true` is dangerous — `is True` keeps a truthy string ("false"!) or an
-    # absent key from firing, so the trio never produces a false-positive FAIL (§5).
-    for flag, why in _DOCKER_DANGER_FLAGS:
-        if dig(cfg, f"agents.defaults.sandbox.docker.{flag}") is True:
-            ev.append(f"agents.defaults.sandbox.docker.{flag}=true — {why}")
+    # NOTE: the agents.defaults.sandbox.docker.dangerouslyAllow* break-glass trio is
+    # intentionally NOT checked here — check_dangerous_overrides (B48) already owns the
+    # whole "dangerously*" registry (gateway + per-agent), so detecting it here too would
+    # double-report the same finding. See the docker/sandbox section of the internal
+    # openclaw-schema-recon.md.
     # sandbox.seccomp_profile / sandbox.apparmor_profile do NOT exist as first-class config
     # fields; Docker backend relies on Docker's own profile mechanism
     if mode is None and "exec" in _enabled_tools(cfg):
@@ -513,9 +496,7 @@ def check_sandbox(ctx: Context) -> Finding:
                         "agents.defaults.sandbox.docker.network to 'bridge' (not 'host'), "
                         "remove the docker.sock bind from docker.binds (it grants host "
                         "control to the sandbox), set workspaceAccess to 'none' or 'ro', "
-                        "remove broad host path binds from docker.binds, and disable any "
-                        "agents.defaults.sandbox.docker.dangerouslyAllow* flags (set them "
-                        "to false).", ev)
+                        "and remove broad host path binds from docker.binds.", ev)
     if mode is None:
         return _finding("B4", UNKNOWN, "No exec tools and no sandbox config — not applicable.", "—")
     return _finding("B4", PASS, "Execution is sandboxed.", "Keep sandbox mode enabled.")
