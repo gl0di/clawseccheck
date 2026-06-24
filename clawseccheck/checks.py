@@ -4005,6 +4005,97 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     )
 
 
+def check_controlui_origins(ctx: Context) -> Finding:
+    """B56 (NC-4) — Control-UI cross-origin allow-all.
+
+    Grounded (docs.openclaw.ai/gateway/security): for non-loopback Control UI
+    deployments `gateway.controlUi.allowedOrigins` is required by default, and
+    `["*"]` is "an explicit allow-all browser-origin policy, not a hardened default."
+    A wildcard lets any website drive the Control UI (CSRF / origin bypass).
+
+    UNKNOWN — allowedOrigins not set: the default is restrictive, and whether the
+              Control UI is exposed beyond loopback is not determinable from config.
+    FAIL    — the list contains "*".
+    PASS    — an explicit non-wildcard origin allowlist.
+    """
+    cfg = ctx.config
+    origins = dig(cfg, "gateway.controlUi.allowedOrigins")
+    if origins is None:
+        return _finding(
+            "B56", UNKNOWN,
+            "gateway.controlUi.allowedOrigins is not set — its default is restrictive "
+            "(cross-origin denied), and whether the Control UI is exposed beyond loopback "
+            "cannot be determined from config alone.",
+            "If you expose the Control UI beyond loopback, set "
+            "gateway.controlUi.allowedOrigins to an explicit list of trusted origins "
+            "(never \"*\").",
+        )
+    vals = [str(o) for o in origins] if isinstance(origins, list) else [str(origins)]
+    if "*" in vals:
+        return _finding(
+            "B56", FAIL,
+            "gateway.controlUi.allowedOrigins contains \"*\" — an allow-all browser-origin "
+            "policy, so any website can drive the Control UI (CSRF / origin bypass).",
+            "Replace the \"*\" wildcard in gateway.controlUi.allowedOrigins with an "
+            "explicit list of trusted origins.",
+            evidence=["gateway.controlUi.allowedOrigins contains \"*\" "
+                      "(allow-all browser origins)"],
+        )
+    return _finding(
+        "B56", PASS,
+        "Control-UI allowed origins are an explicit allowlist (no \"*\" wildcard).",
+        "Keep gateway.controlUi.allowedOrigins to an explicit list of trusted origins.",
+    )
+
+
+def check_plugin_permission_mode(ctx: Context) -> Finding:
+    """B57 (NC-8) — plugin permissionMode=approve-all.
+
+    Grounded (docs.openclaw.ai/gateway/security): plugins "run in-process with the
+    Gateway — treat them as trusted code", and `plugins.entries.<name>.config.permissionMode
+    = approve-all` is an audit-tracked dangerous flag that auto-approves every plugin
+    permission prompt, removing the last gate before trusted-code actions.
+
+    UNKNOWN — no plugins installed (plugins.entries absent).
+    FAIL    — any installed plugin sets config.permissionMode == "approve-all".
+    PASS    — no plugin uses approve-all.
+    """
+    cfg = ctx.config
+    plugins = _plugins(cfg)
+    if not plugins:
+        return _finding(
+            "B57", UNKNOWN,
+            "No plugins are installed (plugins.entries absent), so plugin permission "
+            "modes are not applicable.",
+            "When you install plugins, set each plugins.entries.<name>.config.permissionMode "
+            "to 'ask' (never 'approve-all').",
+        )
+    offenders = []
+    for name, entry in plugins.items():
+        if not isinstance(entry, dict):
+            continue
+        if dig(entry, "config.permissionMode") == "approve-all":
+            offenders.append(
+                f"plugins.entries.{name}.config.permissionMode=approve-all — auto-approves "
+                "every plugin permission prompt (plugins run in-process as trusted code)"
+            )
+    if offenders:
+        return _finding(
+            "B57", FAIL,
+            "One or more installed plugins set config.permissionMode=approve-all, "
+            "auto-approving every plugin permission prompt (plugins run in-process as "
+            "trusted code, so this removes the last gate).",
+            "Set permissionMode to 'ask' for the listed plugin(s) so each privileged "
+            "action is confirmed.",
+            evidence=offenders,
+        )
+    return _finding(
+        "B57", PASS,
+        "No installed plugin sets config.permissionMode=approve-all.",
+        "Keep plugin permissionMode at 'ask'.",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -4025,6 +4116,7 @@ CHECKS = [
     check_agent_separation, check_multiagent_exposure,
     check_delegation_reassembly, check_dangerous_overrides,
     check_fs_write_exposure,
+    check_controlui_origins, check_plugin_permission_mode,
 ]
 
 

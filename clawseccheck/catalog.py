@@ -161,6 +161,14 @@ CATALOG: list[CheckMeta] = [
     # this never introduces a new scored FAIL on real configs.
     CheckMeta("B55", "Filesystem-write tool exposure (broad fs-write without scoping)",
               HIGH, "hardening", "Least Privilege / Filesystem Write", scored=False),
+    # B56 (NC-4) / B57 (NC-8): real config-fact misconfigurations grounded against
+    # docs.openclaw.ai/gateway/security. Both FAIL only on an explicit dangerous value
+    # (allowedOrigins contains "*"; permissionMode=="approve-all"); a default/absent
+    # config is UNKNOWN/PASS, so neither introduces a false-positive FAIL on real configs.
+    CheckMeta("B56", "Control-UI cross-origin allow-all (allowedOrigins \"*\")",
+              HIGH, "hardening", "Zero Trust / Control-UI Origin"),
+    CheckMeta("B57", "Plugin auto-approve (permissionMode=approve-all)",
+              HIGH, "hardening", "Least Privilege / Plugin Approval"),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False),
     CheckMeta("C4", "OpenClaw version / update hygiene", LOW, "advisory", "Patch hygiene", scored=False),
@@ -233,6 +241,8 @@ OWASP_MAP = {
     "B47": ("LLM05", "LLM06"),
     "B48": ("LLM01", "LLM06"),
     "B55": ("LLM06", "LLM04"),
+    "B56": ("LLM01",),
+    "B57": ("LLM06", "LLM03"),
     "C4": ("LLM03",),
     "C5": ("LLM03",),
 }

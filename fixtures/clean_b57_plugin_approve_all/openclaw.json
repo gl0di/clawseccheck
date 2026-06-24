@@ -1,0 +1,14 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": { "mode": "token", "token": "a-very-long-token-of-32-characters" }
+  },
+  "channels": { "telegram": { "dmPolicy": "allowlist", "groupPolicy": "allowlist" } },
+  "tools": { "profile": "minimal" },
+  "plugins": {
+    "allow": ["acpx"],
+    "entries": { "acpx": { "config": { "permissionMode": "ask" } } }
+  },
+  "logging": { "redactSensitive": "tools" },
+  "models": { "main": { "provider": "ollama/llama3" } }
+}

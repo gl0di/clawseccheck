@@ -391,6 +391,8 @@ TITLES: dict[str, dict[str, str]] = {
     "B53": {"he": "הגנת קצה / EDR במארח"},
     "B54": {"he": "חומת אש פעילה במארח"},
     "B55": {"he": "חשיפת כלי כתיבה למערכת הקבצים (כתיבה רחבה ללא תיחום)"},
+    "B56": {"he": "מדיניות origin מתירנית ל-Control-UI (allowedOrigins \"*\")"},
+    "B57": {"he": "אישור אוטומטי של תוסף (permissionMode=approve-all)"},
     "C3": {"he": "גיבויים של SOUL.md / זיכרון"},
     "C4": {"he": "גרסת OpenClaw / היגיינת עדכון"},
     "C5": {"he": "בטיחות PATH של בינארי מקומי"},
@@ -567,6 +569,31 @@ PHRASES: dict[str, dict[str, str]] = {
     # detail (PASS path)
     "Execution is sandboxed.": {
         "he": "ההרצה מבודדת ב-sandbox.",
+    },
+
+    # ---- B56 (NC-4): Control-UI cross-origin allow-all ----
+    "gateway.controlUi.allowedOrigins contains \"*\" — an allow-all browser-origin "
+    "policy, so any website can drive the Control UI (CSRF / origin bypass).": {
+        "he": "gateway.controlUi.allowedOrigins מכיל \"*\" — מדיניות origin מתירנית לכל "
+              "הדפדפנים, כך שכל אתר יכול להניע את ה-Control UI (CSRF / עקיפת origin).",
+    },
+    "Replace the \"*\" wildcard in gateway.controlUi.allowedOrigins with an "
+    "explicit list of trusted origins.": {
+        "he": "החלף את התו הכללי \"*\" ב-gateway.controlUi.allowedOrigins ברשימה מפורשת "
+              "של origins מהימנים.",
+    },
+    # ---- B57 (NC-8): plugin permissionMode=approve-all ----
+    "One or more installed plugins set config.permissionMode=approve-all, "
+    "auto-approving every plugin permission prompt (plugins run in-process as "
+    "trusted code, so this removes the last gate).": {
+        "he": "תוסף מותקן אחד או יותר מגדיר config.permissionMode=approve-all, ומאשר "
+              "אוטומטית כל בקשת הרשאה של תוסף (תוספים רצים בתהליך עצמו כקוד מהימן, כך "
+              "שהדבר מסיר את השער האחרון).",
+    },
+    "Set permissionMode to 'ask' for the listed plugin(s) so each privileged "
+    "action is confirmed.": {
+        "he": "הגדר permissionMode ל-'ask' עבור התוסף/ים המפורט/ים כך שכל פעולה מורשית "
+              "תאושר במפורש.",
     },
 
     # ---- B4: static sandbox evidence fragments ----
