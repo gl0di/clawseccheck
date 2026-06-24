@@ -38,8 +38,8 @@ def _sanitize(s: str) -> str:
     return s
 
 _SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}
-_ICON = {FAIL: "⛔", WARN: "⚠️", PASS: "✅", UNKNOWN: "❔"}
-_ICON_ASCII = {FAIL: "[X]", WARN: "[!]", PASS: "[OK]", UNKNOWN: "[?]"}
+_ICON = {FAIL: "⛔", WARN: "⚠️", PASS: "✅", UNKNOWN: "❔", "SKILL_ARCHIVE_PATH_TRAVERSAL": "❔"}
+_ICON_ASCII = {FAIL: "[X]", WARN: "[!]", PASS: "[OK]", UNKNOWN: "[?]", "SKILL_ARCHIVE_PATH_TRAVERSAL": "[?]"}
 
 _ASCII_MAP = str.maketrans({
     "×": "x", "≤": "<=", "≥": ">=", "—": "-", "–": "-", "…": "...",
@@ -129,7 +129,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
 
     # --- "Why this score" breakdown ---
     scored_findings = [f for f in findings if getattr(f, "scored", True)
-                       and f.status != UNKNOWN
+                       and f.status not in (UNKNOWN, "SKILL_ARCHIVE_PATH_TRAVERSAL")
                        and not getattr(f, "suppressed", False)]
     n_scored = len(scored_findings)
     n_pass = sum(1 for f in scored_findings if f.status == PASS)
@@ -161,7 +161,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # reads as "half-broken". State the non-standard detection explicitly and explain
     # the UNKNOWNs instead of letting them look like failures.
     if not openclaw_detected:
-        n_unknown = sum(1 for f in findings if f.status == UNKNOWN)
+        n_unknown = sum(1 for f in findings if f.status in (UNKNOWN, "SKILL_ARCHIVE_PATH_TRAVERSAL"))
         warn_icon = "[!]" if ascii_only else "⚠️"
         lines.append("")
         lines.append(f"{warn_icon} {t('report.nonstandard_banner', lang)}")
@@ -348,8 +348,8 @@ def render_prompts(findings: list[Finding], ascii_only: bool = False,
 
 
 # Verdict words for the vetting modes (--vet / --vet-mcp), keyed by worst status.
-_VET_VERDICT = {FAIL: "DANGEROUS", WARN: "SUSPICIOUS", PASS: "SAFE", UNKNOWN: "UNKNOWN"}
-_VET_STATUS_RANK = {FAIL: 3, WARN: 2, UNKNOWN: 1, PASS: 0}
+_VET_VERDICT = {FAIL: "DANGEROUS", WARN: "SUSPICIOUS", PASS: "SAFE", UNKNOWN: "UNKNOWN", "SKILL_ARCHIVE_PATH_TRAVERSAL": "UNKNOWN"}
+_VET_STATUS_RANK = {FAIL: 3, WARN: 2, UNKNOWN: 1, "SKILL_ARCHIVE_PATH_TRAVERSAL": 1, PASS: 0}
 
 
 def _finding_to_dict(f: Finding) -> dict:

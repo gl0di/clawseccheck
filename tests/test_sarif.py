@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from clawseccheck import audit
 from clawseccheck.catalog import (
@@ -290,3 +291,82 @@ def test_default_tool_version():
     text = render_sarif([], compute([]))
     doc = json.loads(text)
     assert doc["runs"][0]["tool"]["driver"]["version"] == "0.0.0"
+
+
+# ---------------------------------------------------------------------------
+# analysis_completeness tests
+# ---------------------------------------------------------------------------
+
+def test_analysis_completeness_omitted_without_ctx():
+    doc = json.loads(render_sarif([], ctx=None))
+    assert "properties" not in doc["runs"][0]
+
+
+def test_analysis_completeness_populated_with_ctx():
+    from clawseccheck.collector import Context
+    ctx = Context(home=Path("/tmp"))
+    ctx.total_files_inspected = 42
+    ctx.excluded_binary_files_count = 3
+    ctx.archives_unpacked = 2
+    ctx.limit_hits = ["limit_hit_1"]
+    ctx.path_traversal_violations = ["violation_1"]
+    ctx.file_manifest = {"file1.py": "scanned"}
+    ctx.installed_skill_py = {
+        "my_skill": [
+            ("file1.py", "print('hello')")
+        ]
+    }
+    
+    doc = json.loads(render_sarif([], ctx=ctx))
+    props = doc["runs"][0]["properties"]
+    assert "analysis_completeness" in props
+    
+    completeness = props["analysis_completeness"]
+    assert completeness["total_files_inspected"] == 42
+    assert completeness["excluded_binary_files_count"] == 3
+    assert completeness["archives_unpacked"] == 2
+    assert completeness["limit_hits"] == ["limit_hit_1"]
+    assert completeness["path_traversal_violations"] == ["violation_1"]
+    assert completeness["file_manifest"] == {"file1.py": "scanned"}
+    assert isinstance(completeness["simulated_effects"], list)
+
+
+@patch("clawseccheck.skillast.simulate_effects")
+def test_analysis_completeness_simulated_effects(mock_simulate):
+    from clawseccheck.collector import Context
+    mock_simulate.return_value = [{"test_effect": "val"}]
+    
+    ctx = Context(home=Path("/tmp"))
+    ctx.installed_skill_py = {
+        "test_skill": [
+            ("test_file.py", "dummy code")
+        ]
+    }
+    
+    doc = json.loads(render_sarif([], ctx=ctx))
+    completeness = doc["runs"][0]["properties"]["analysis_completeness"]
+    effects = completeness["simulated_effects"]
+    assert len(effects) == 1
+    assert effects[0]["test_effect"] == "val"
+    assert effects[0]["skill"] == "test_skill"
+    assert effects[0]["file"] == "test_file.py"
+    
+    mock_simulate.assert_called_once_with("dummy code", "test_file.py")
+
+
+@patch("clawseccheck.skillast.simulate_effects")
+def test_analysis_completeness_simulate_effects_crashes(mock_simulate):
+    from clawseccheck.collector import Context
+    mock_simulate.side_effect = Exception("ast error")
+    
+    ctx = Context(home=Path("/tmp"))
+    ctx.installed_skill_py = {
+        "test_skill": [
+            ("test_file.py", "dummy code")
+        ]
+    }
+    
+    # This should not raise an exception
+    doc = json.loads(render_sarif([], ctx=ctx))
+    completeness = doc["runs"][0]["properties"]["analysis_completeness"]
+    assert completeness["simulated_effects"] == []

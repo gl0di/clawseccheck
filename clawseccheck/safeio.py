@@ -73,3 +73,40 @@ def secure_append_text(path: Path, data: str) -> None:
         path.chmod(0o600)
     except (OSError, NotImplementedError):
         pass
+
+
+def is_safe_tar_member(base_dir: Path, member_name: str) -> bool:
+    try:
+        # Resolve absolute path without writing to disk
+        target_path = Path(base_dir / member_name).resolve()
+        # Ensure target path resides within the base directory
+        return base_dir.resolve() in target_path.parents or base_dir.resolve() == target_path
+    except (OSError, ValueError):
+        return False
+
+
+def walk_dir_safely(base_dir: Path, exclude_pycache: bool = False) -> list[Path]:
+    """Recursively walk base_dir, skipping symlinks and any file that escapes base_dir.
+    
+    If exclude_pycache is True, ignores directories or files containing "__pycache__".
+    """
+    try:
+        root = base_dir.resolve()
+    except OSError:
+        return []
+    
+    out = []
+    # sorted(base_dir.rglob("*")) to have deterministic order
+    for p in sorted(base_dir.rglob("*")):
+        if p.is_symlink():
+            continue
+        if exclude_pycache and "__pycache__" in p.parts:
+            continue
+        try:
+            real = p.resolve()
+            if root != real and root not in real.parents:  # escaped the base dir
+                continue
+        except OSError:
+            continue
+        out.append(p)
+    return out

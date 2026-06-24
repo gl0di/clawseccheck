@@ -11,10 +11,14 @@ Usage::
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 from .catalog import CATALOG, CRITICAL, FAIL, HIGH, WARN, Finding, remediation_for
 from .report import _sanitize
 from .scoring import ScoreResult
+
+if TYPE_CHECKING:
+    from .collector import Context
 
 _SARIF_SCHEMA = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
 _INFO_URI = "https://github.com/gl0di/clawseccheck"
@@ -32,6 +36,7 @@ def render_sarif(
     findings: list[Finding],
     score: ScoreResult | None = None,
     tool_version: str = "0.0.0",
+    ctx: Context | None = None,
 ) -> str:
     """Return a SARIF 2.1.0 JSON string representing *findings*.
 
@@ -126,5 +131,48 @@ def render_sarif(
             }
         ],
     }
+
+    if ctx is not None:
+        total_files_inspected = getattr(ctx, "total_files_inspected", 0)
+        excluded_binary_files_count = getattr(ctx, "excluded_binary_files_count", 0)
+        archives_unpacked = getattr(ctx, "archives_unpacked", 0)
+        limit_hits = list(getattr(ctx, "limit_hits", []))
+        path_traversal_violations = list(getattr(ctx, "path_traversal_violations", []))
+        file_manifest = dict(getattr(ctx, "file_manifest", {}))
+
+        simulated_effects = []
+        installed_skill_py = getattr(ctx, "installed_skill_py", None)
+        if installed_skill_py:
+            from .skillast import simulate_effects
+            for skill, files in installed_skill_py.items():
+                if not isinstance(files, list):
+                    continue
+                for item in files:
+                    try:
+                        if isinstance(item, tuple) and len(item) >= 2:
+                            relpath, source = item[0], item[1]
+                        else:
+                            continue
+                        effects = simulate_effects(source, relpath)
+                        for effect in [dict(e) for e in effects if isinstance(e, dict)]:
+                            effect["skill"] = skill
+                            effect["file"] = relpath
+                            simulated_effects.append(effect)
+                    except Exception:
+                        pass
+
+        completeness = {
+            "total_files_inspected": total_files_inspected,
+            "excluded_binary_files_count": excluded_binary_files_count,
+            "archives_unpacked": archives_unpacked,
+            "limit_hits": limit_hits,
+            "path_traversal_violations": path_traversal_violations,
+            "file_manifest": file_manifest,
+            "simulated_effects": simulated_effects,
+        }
+        run = sarif_log["runs"][0]
+        if "properties" not in run:
+            run["properties"] = {}
+        run["properties"]["analysis_completeness"] = completeness
 
     return json.dumps(sarif_log, ensure_ascii=True, indent=2)

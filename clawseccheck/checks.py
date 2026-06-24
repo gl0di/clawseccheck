@@ -1064,6 +1064,33 @@ def check_installed_skills(ctx: Context) -> Finding:
                        "Suspicious patterns in installed skill(s): " + "; ".join(high[:6]),
                        "Review the flagged skills' source before trusting them; prefer pinned, "
                        "signed, VirusTotal-clean releases.", high)
+
+    # Path traversal check
+    if getattr(ctx, "path_traversal_violations", None):
+        return _custom("B13", HIGH, "SKILL_ARCHIVE_PATH_TRAVERSAL",
+                       "Archive path traversal detected: " + "; ".join(ctx.path_traversal_violations[:6]),
+                       "Ensure archives inside skills do not attempt path traversal.")
+
+    # Limit hits check
+    if getattr(ctx, "limit_hits", None):
+        return _custom("B13", HIGH, UNKNOWN,
+                       "Skill scanning aborted due to limit hits: " + "; ".join(ctx.limit_hits[:6]),
+                       "Avoid placing excessively large or deeply nested archives in skill folders.")
+
+    # Mismatch/polyglot/binary warnings
+    warnings = []
+    if getattr(ctx, "mismatches", None):
+        warnings.extend(ctx.mismatches)
+    if getattr(ctx, "polyglots", None):
+        warnings.extend(ctx.polyglots)
+    if getattr(ctx, "binary_files", None):
+        warnings.append(f"Binary files found: {len(ctx.binary_files)}")
+
+    if warnings:
+        return _custom("B13", HIGH, WARN,
+                       "Warnings in installed skill(s): " + "; ".join(warnings[:6]),
+                       "Review the flagged files for extension mismatch, polyglot structures, or unexpected binaries.")
+
     return _custom("B13", HIGH, PASS,
                    f"Scanned {n} installed skill(s); no shell-exec / exfiltration / obfuscation "
                    "patterns found.",
@@ -1101,30 +1128,38 @@ def _is_own_source(p: Path) -> bool:
 def vet_skill(path: str | Path) -> Finding:
     """Vet a skill BEFORE installing it: run the B13 scan on a local skill dir or SKILL.md."""
     p = Path(path).expanduser()
+    ctx = Context(home=p)
     if p.is_dir():
         if _is_own_source(p):
-            return _custom("B13", LOW, PASS,
-                           "This is ClawSecCheck's own source. A security auditor necessarily "
-                           "ships attack signatures and red-team payloads as data, so a naive "
-                           "malware scan flags its own signature database — that is expected here, "
-                           "not malware.",
-                           "Point --vet at third-party skills you're about to install, not at the "
-                           "scanner itself.")
-        text, name = _read_skill_text(p), p.name
-        py_sources = read_skill_python(p)
+            finding = _custom("B13", LOW, PASS,
+                             "This is ClawSecCheck's own source. A security auditor necessarily "
+                             "ships attack signatures and red-team payloads as data, so a naive "
+                             "malware scan flags its own signature database — that is expected here, "
+                             "not malware.",
+                             "Point --vet at third-party skills you're about to install, not at the "
+                             "scanner itself.")
+            finding.ctx = ctx
+            return finding
+        text, name = _read_skill_text(p, ctx), p.name
+        py_sources = read_skill_python(p, ctx)
     elif p.is_file():
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            return _custom("B13", HIGH, UNKNOWN, f"could not read {p}: {exc}", "—")
+            finding = _custom("B13", HIGH, UNKNOWN, f"could not read {p}: {exc}", "—")
+            finding.ctx = ctx
+            return finding
         name = p.parent.name or p.stem
         py_sources = [(p.name, text)] if p.suffix == ".py" else []
     else:
-        return _custom("B13", HIGH, UNKNOWN, f"no skill found at {p}", "Point --vet at a skill dir or SKILL.md.")
-    ctx = Context(home=p)
+        finding = _custom("B13", HIGH, UNKNOWN, f"no skill found at {p}", "Point --vet at a skill dir or SKILL.md.")
+        finding.ctx = ctx
+        return finding
     ctx.installed_skills = {name or "skill": text}
     ctx.installed_skill_py = {name or "skill": py_sources}
-    return check_installed_skills(ctx)
+    finding = check_installed_skills(ctx)
+    finding.ctx = ctx
+    return finding
 
 
 # ---------- vet_mcp: supply-chain / trust vetting for MCP servers ----------

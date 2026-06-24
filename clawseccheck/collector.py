@@ -7,8 +7,16 @@ from __future__ import annotations
 
 import json
 import re
+import io
+import zipfile
+import tarfile
+import gzip
+import bz2
+import lzma
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from .safeio import walk_dir_safely, is_safe_tar_member
 
 # Bootstrap / prompt files injected into the system prompt as "trusted context".
 # The native `openclaw security audit` does NOT scan these -> our wedge (B6/B7/B9).
@@ -22,8 +30,6 @@ WORKSPACE_DIRS = ["workspace-home", "workspace-work", "workspace"]
 # Where OpenClaw discovers installed skills (we read their CONTENT, never run them).
 SKILL_DIRS = ["skills", "workspace/skills", "workspace-home/skills",
               "workspace-work/skills", ".agents/skills"]
-_SKILL_TEXT_EXT = {".md", ".sh", ".bash", ".zsh", ".py", ".js", ".ts", ".mjs",
-                   ".cjs", ".json", ".txt", ".ps1"}
 _OWN_SKILL_NAMES = {"clawseccheck", "clawshield"}
 _MAX_SKILLS = 300
 _MAX_BYTES_PER_SKILL = 60_000
@@ -60,78 +66,569 @@ class Context:
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
     attestation: dict = field(default_factory=dict)  # agent self-report (--attest); see attest.py
 
+    # Integrity & analysis metadata blocks (CLAWSECCHECK-E-009)
+    limit_hits: list[str] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
+    polyglots: list[str] = field(default_factory=list)
+    binary_files: list[str] = field(default_factory=list)
+    total_files_inspected: int = 0
+    excluded_binary_files_count: int = 0
+    archives_unpacked: int = 0
+    path_traversal_violations: list[str] = field(default_factory=list)
+    file_manifest: dict[str, str] = field(default_factory=dict)  # file relpath -> status
+
     @property
     def bootstrap_blob(self) -> str:
         return "\n".join(self.bootstrap.values())
 
 
-def _read_skill_text(skill_dir: Path) -> str:
-    """Concatenate the text/code files of one installed skill (capped, read-only).
+def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
+    """Classify data as "TEXT" or "BINARY" and return (classification, format_name)."""
+    fmt = None
+    if data.startswith(b"\x7fELF"):
+        fmt = "ELF"
+    elif data.startswith(b"MZ"):
+        fmt = "PE"
+    elif data.startswith(b"\xce\xfa\xed\xfe"):
+        fmt = "Mach-O (32 LSB)"
+    elif data.startswith(b"\xcf\xfa\xed\xfe"):
+        fmt = "Mach-O (64 LSB)"
+    elif data.startswith(b"\xfe\xed\xfa\xce"):
+        fmt = "Mach-O (32 MSB)"
+    elif data.startswith(b"\xfe\xed\xfa\xcf"):
+        fmt = "Mach-O (64 MSB)"
+    elif data.startswith(b"\xc0\xde\xc0\xde"):
+        fmt = "Mach-O (FAT LSB)"
+    elif data.startswith(b"\xca\xfe\xba\xbe"):
+        if file_size < 50000 and len(data) >= 10:
+            major_version = int.from_bytes(data[6:8], "big")
+            constant_pool_count = int.from_bytes(data[8:10], "big")
+            if 45 <= major_version <= 100 and constant_pool_count > 0:
+                fmt = "class"
+        if not fmt:
+            fmt = "Mach-O (FAT MSB)"
+    elif data.startswith(b"PK\x03\x04"):
+        fmt = "ZIP"
+    elif data.startswith(b"PK\x05\x06"):
+        fmt = "ZIP"
+    elif data.startswith(b"PK\x07\x08"):
+        fmt = "ZIP"
+    elif data.startswith(b"\x1f\x8b"):
+        fmt = "gzip"
+    elif data.startswith(b"BZh"):
+        fmt = "bz2"
+    elif data.startswith(b"\xfd7zXZ\x00"):
+        fmt = "xz"
+    elif len(data) >= 262 and data[257:262] == b"ustar":
+        fmt = "tar"
+    elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+        fmt = "PNG"
+    elif data.startswith(b"\xff\xd8\xff"):
+        fmt = "JPEG"
+    elif data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        fmt = "GIF"
+    elif data.startswith(b"%PDF-"):
+        fmt = "PDF"
 
-    Symlinks are skipped and any path that resolves outside the skill directory is
-    refused, so a malicious skill cannot use a symlink to make the auditor read
-    (and surface) a file elsewhere on disk.
-    """
-    parts, total, file_count = [], 0, 0
-    try:
-        root = skill_dir.resolve()
-    except OSError:
-        return ""
-    files = sorted(skill_dir.rglob("*"))
-    for f in files:
-        if total >= _MAX_BYTES_PER_SKILL or file_count >= _MAX_FILES_PER_SKILL:
-            break
-        if f.is_symlink() or not f.is_file() or f.suffix.lower() not in _SKILL_TEXT_EXT:
-            continue
+    if fmt is not None:
+        return "BINARY", fmt
+
+    # Attempt to decode first 4096 bytes as UTF-8, UTF-16LE, UTF-16BE
+    chunk = data[:4096]
+    decoded = None
+    for encoding in ("utf-8", "utf-16le", "utf-16be"):
         try:
-            real = f.resolve()
-            if root != real and root not in real.parents:  # escaped the skill dir
-                continue
-            if f.stat().st_size > _MAX_FILE_BYTES:
-                continue
-            text = f.read_text(encoding="utf-8", errors="replace")
+            decoded = chunk.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+
+    if decoded is None:
+        return "BINARY", None
+
+    if not decoded:
+        return "TEXT", None
+
+    # Calculate printable ratio
+    printable_count = 0
+    for char in decoded:
+        if char in ("\t", "\n", "\r"):
+            printable_count += 1
+        else:
+            cat = unicodedata.category(char)
+            # Cc, Cf, Cs, Co, Cn are Unicode categories for control/format/surrogates/etc.
+            if cat not in ("Cc", "Cf", "Cs", "Co", "Cn"):
+                printable_count += 1
+
+    ratio = printable_count / len(decoded)
+    if ratio >= 0.85:
+        return "TEXT", None
+    else:
+        return "BINARY", None
+
+
+def check_mismatch(filename: str, classification: str, format_name: str | None, data: bytes) -> str | None:
+    ext = Path(filename).suffix.lower()
+    text_extensions = {".py", ".json", ".txt", ".md", ".sh", ".bash", ".zsh", ".js", ".ts", ".mjs", ".cjs", ".ps1"}
+    
+    if ext in text_extensions:
+        if data.startswith(b"MZ") or data.startswith(b"\x7fELF") or data.startswith(b"PK\x03\x04"):
+            return "MISMATCH_EXTENSION"
+            
+    binary_ext_to_format = {
+        ".png": "PNG",
+        ".jpg": "JPEG",
+        ".jpeg": "JPEG",
+        ".pdf": "PDF",
+        ".zip": "ZIP",
+        ".gz": "gzip",
+        ".bz2": "bz2",
+        ".xz": "xz",
+        ".tar": "tar",
+        ".class": "class",
+    }
+    if ext in binary_ext_to_format:
+        expected_format = binary_ext_to_format[ext]
+        if format_name is not None and format_name != expected_format:
+            return "MISMATCH_EXTENSION"
+            
+    return None
+
+
+def check_polyglot(filename: str, format_name: str | None, data: bytes) -> str | None:
+    if format_name != "ZIP":
+        idx = data.find(b"PK\x03\x04")
+        if idx > 0:
+            return "POLYGLOT_DETECTED"
+
+    if format_name in ("PNG", "JPEG", "GIF"):
+        header = data[:1024].lower()
+        html_tags = (b"<html>", b"<script", b"<body>", b"<iframe>", b"</a>", b"</div>")
+        for tag in html_tags:
+            if tag in header:
+                return "POLYGLOT_DETECTED"
+
+    ext = Path(filename).suffix.lower()
+    archive_extensions = {".zip", ".tar", ".gz", ".bz2", ".xz"}
+    if ext not in archive_extensions and len(data) > 0:
+        tail = data[-1024:]
+        if b"PK\x01\x02" in tail or b"PK\x05\x06" in tail:
+            return "POLYGLOT_DETECTED"
+
+    return None
+
+
+def decompress_and_classify(
+    ctx: Context | None,
+    skill_dir: Path,
+    file_bytes: bytes,
+    file_relpath: str,
+    depth: int,
+    archive_stats: dict
+) -> list[tuple[str, bytes, str, str | None]]:
+    """Recursively decompress and classify files from an archive."""
+    try:
+        classification, format_name = classify_bytes(file_bytes, len(file_bytes))
+    except Exception as e:
+        if ctx is not None:
+            ctx.limit_hits.append(f"Classification failed for {file_relpath}: {e}")
+            ctx.file_manifest[file_relpath] = "binary-strings"
+        return [(file_relpath, file_bytes, "BINARY", None)]
+
+    if format_name not in ("ZIP", "tar", "gzip", "bz2", "xz"):
+        return [(file_relpath, file_bytes, classification, format_name)]
+        
+    if depth > 3:
+        if ctx is not None:
+            ctx.limit_hits.append(f"Depth limit hit (>3) at {file_relpath}")
+            ctx.file_manifest[file_relpath] = "capped(depth)"
+        return [(file_relpath, file_bytes, classification, format_name)]
+        
+    if ctx is not None:
+        ctx.archives_unpacked += 1
+        
+    compressed_size = len(file_bytes)
+    results = []
+    
+    # ZIP
+    if format_name == "ZIP":
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                namelist = zf.namelist()
+                if len(namelist) + archive_stats["total_files_count"] > 500:
+                    if ctx is not None:
+                        ctx.limit_hits.append(f"Max files limit hit (>500) in {file_relpath}")
+                        ctx.file_manifest[file_relpath] = "capped(files)"
+                    return [(file_relpath, file_bytes, classification, format_name)]
+                
+                for member_name in namelist:
+                    if not is_safe_tar_member(skill_dir, member_name):
+                        if ctx is not None:
+                            ctx.path_traversal_violations.append(f"{file_relpath}::{member_name}")
+                            ctx.file_manifest[f"{file_relpath}::{member_name}"] = "unsafe-path"
+                        return [(file_relpath, file_bytes, classification, format_name)]
+                        
+                    if member_name.endswith("/"):
+                        continue
+                        
+                    try:
+                        member_bytes = zf.read(member_name)
+                    except Exception:
+                        continue
+                        
+                    if len(member_bytes) > 200000:
+                        if ctx is not None:
+                            ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member_name} in {file_relpath}")
+                            ctx.file_manifest[f"{file_relpath}::{member_name}"] = "capped(size)"
+                        continue
+                        
+                    archive_stats["total_files_count"] += 1
+                    archive_stats["cumulative_decompressed_size"] += len(member_bytes)
+                    
+                    if archive_stats["cumulative_decompressed_size"] > 20000000:
+                        if ctx is not None:
+                            ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
+                            ctx.file_manifest[file_relpath] = "capped(size)"
+                        return [(file_relpath, file_bytes, classification, format_name)]
+                        
+                    if compressed_size > 10240:
+                        ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
+                        if ratio > 100:
+                            if ctx is not None:
+                                ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                                ctx.file_manifest[file_relpath] = "capped(ratio)"
+                            return [(file_relpath, file_bytes, classification, format_name)]
+                            
+                    sub_rel = f"{file_relpath}::{member_name}"
+                    sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+                    results.extend(sub_results)
+                if ctx is not None:
+                    ctx.file_manifest[file_relpath] = "decoded"
+        except Exception as e:
+            if ctx is not None:
+                ctx.limit_hits.append(f"ZIP decompression failed in {file_relpath}: {e}")
+                ctx.file_manifest[file_relpath] = "binary-strings"
+            return [(file_relpath, file_bytes, classification, format_name)]
+
+    # TAR
+    elif format_name == "tar":
+        try:
+            with tarfile.open(fileobj=io.BytesIO(file_bytes)) as tf:
+                members = tf.getmembers()
+                if len(members) + archive_stats["total_files_count"] > 500:
+                    if ctx is not None:
+                        ctx.limit_hits.append(f"Max files limit hit (>500) in {file_relpath}")
+                        ctx.file_manifest[file_relpath] = "capped(files)"
+                    return [(file_relpath, file_bytes, classification, format_name)]
+                    
+                for member in members:
+                    if not is_safe_tar_member(skill_dir, member.name):
+                        if ctx is not None:
+                            ctx.path_traversal_violations.append(f"{file_relpath}::{member.name}")
+                            ctx.file_manifest[f"{file_relpath}::{member.name}"] = "unsafe-path"
+                        return [(file_relpath, file_bytes, classification, format_name)]
+                        
+                    if not member.isreg():
+                        continue
+                        
+                    try:
+                        f_obj = tf.extractfile(member)
+                        if f_obj is None:
+                            continue
+                        member_bytes = f_obj.read()
+                    except Exception:
+                        continue
+                        
+                    if len(member_bytes) > 200000:
+                        if ctx is not None:
+                            ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member.name} in {file_relpath}")
+                            ctx.file_manifest[f"{file_relpath}::{member.name}"] = "capped(size)"
+                        continue
+                        
+                    archive_stats["total_files_count"] += 1
+                    archive_stats["cumulative_decompressed_size"] += len(member_bytes)
+                    
+                    if archive_stats["cumulative_decompressed_size"] > 20000000:
+                        if ctx is not None:
+                            ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
+                            ctx.file_manifest[file_relpath] = "capped(size)"
+                        return [(file_relpath, file_bytes, classification, format_name)]
+                        
+                    if compressed_size > 10240:
+                        ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
+                        if ratio > 100:
+                            if ctx is not None:
+                                ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                                ctx.file_manifest[file_relpath] = "capped(ratio)"
+                            return [(file_relpath, file_bytes, classification, format_name)]
+                            
+                    sub_rel = f"{file_relpath}::{member.name}"
+                    sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+                    results.extend(sub_results)
+                if ctx is not None:
+                    ctx.file_manifest[file_relpath] = "decoded"
+        except Exception as e:
+            if ctx is not None:
+                ctx.limit_hits.append(f"tar decompression failed in {file_relpath}: {e}")
+                ctx.file_manifest[file_relpath] = "binary-strings"
+            return [(file_relpath, file_bytes, classification, format_name)]
+
+    # GZIP
+    elif format_name == "gzip":
+        try:
+            member_bytes = gzip.decompress(file_bytes)
+            if len(member_bytes) > 200000:
+                if ctx is not None:
+                    ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) in {file_relpath}")
+                    ctx.file_manifest[file_relpath] = "capped(size)"
+                return [(file_relpath, file_bytes, classification, format_name)]
+                
+            archive_stats["total_files_count"] += 1
+            archive_stats["cumulative_decompressed_size"] += len(member_bytes)
+            
+            if archive_stats["cumulative_decompressed_size"] > 20000000:
+                if ctx is not None:
+                    ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
+                    ctx.file_manifest[file_relpath] = "capped(size)"
+                return [(file_relpath, file_bytes, classification, format_name)]
+                
+            if compressed_size > 10240:
+                ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
+                if ratio > 100:
+                    if ctx is not None:
+                        ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                        ctx.file_manifest[file_relpath] = "capped(ratio)"
+                    return [(file_relpath, file_bytes, classification, format_name)]
+                    
+            sub_rel = file_relpath[:-3] if file_relpath.lower().endswith(".gz") else f"{file_relpath}::extracted"
+            sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+            results.extend(sub_results)
+            if ctx is not None:
+                ctx.file_manifest[file_relpath] = "decoded"
+        except Exception as e:
+            if ctx is not None:
+                ctx.limit_hits.append(f"gzip decompression failed in {file_relpath}: {e}")
+                ctx.file_manifest[file_relpath] = "binary-strings"
+            return [(file_relpath, file_bytes, classification, format_name)]
+
+    # BZIP2
+    elif format_name == "bz2":
+        try:
+            member_bytes = bz2.decompress(file_bytes)
+            if len(member_bytes) > 200000:
+                if ctx is not None:
+                    ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) in {file_relpath}")
+                    ctx.file_manifest[file_relpath] = "capped(size)"
+                return [(file_relpath, file_bytes, classification, format_name)]
+                
+            archive_stats["total_files_count"] += 1
+            archive_stats["cumulative_decompressed_size"] += len(member_bytes)
+            
+            if archive_stats["cumulative_decompressed_size"] > 20000000:
+                if ctx is not None:
+                    ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
+                    ctx.file_manifest[file_relpath] = "capped(size)"
+                return [(file_relpath, file_bytes, classification, format_name)]
+                
+            if compressed_size > 10240:
+                ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
+                if ratio > 100:
+                    if ctx is not None:
+                        ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                        ctx.file_manifest[file_relpath] = "capped(ratio)"
+                    return [(file_relpath, file_bytes, classification, format_name)]
+                    
+            sub_rel = file_relpath[:-4] if file_relpath.lower().endswith(".bz2") else f"{file_relpath}::extracted"
+            sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+            results.extend(sub_results)
+            if ctx is not None:
+                ctx.file_manifest[file_relpath] = "decoded"
+        except Exception as e:
+            if ctx is not None:
+                ctx.limit_hits.append(f"bz2 decompression failed in {file_relpath}: {e}")
+                ctx.file_manifest[file_relpath] = "binary-strings"
+            return [(file_relpath, file_bytes, classification, format_name)]
+
+    # XZ
+    elif format_name == "xz":
+        try:
+            member_bytes = lzma.decompress(file_bytes)
+            if len(member_bytes) > 200000:
+                if ctx is not None:
+                    ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) in {file_relpath}")
+                    ctx.file_manifest[file_relpath] = "capped(size)"
+                return [(file_relpath, file_bytes, classification, format_name)]
+                
+            archive_stats["total_files_count"] += 1
+            archive_stats["cumulative_decompressed_size"] += len(member_bytes)
+            
+            if archive_stats["cumulative_decompressed_size"] > 20000000:
+                if ctx is not None:
+                    ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
+                    ctx.file_manifest[file_relpath] = "capped(size)"
+                return [(file_relpath, file_bytes, classification, format_name)]
+                
+            if compressed_size > 10240:
+                ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
+                if ratio > 100:
+                    if ctx is not None:
+                        ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                        ctx.file_manifest[file_relpath] = "capped(ratio)"
+                    return [(file_relpath, file_bytes, classification, format_name)]
+                    
+            sub_rel = file_relpath[:-3] if file_relpath.lower().endswith(".xz") else f"{file_relpath}::extracted"
+            sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+            results.extend(sub_results)
+            if ctx is not None:
+                ctx.file_manifest[file_relpath] = "decoded"
+        except Exception as e:
+            if ctx is not None:
+                ctx.limit_hits.append(f"xz decompression failed in {file_relpath}: {e}")
+                ctx.file_manifest[file_relpath] = "binary-strings"
+            return [(file_relpath, file_bytes, classification, format_name)]
+
+    return results
+
+
+def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dict]:
+    files = walk_dir_safely(skill_dir)
+    collected = []
+    
+    for f in files:
+        if not f.is_file():
+            continue
+            
+        if ctx is not None:
+            ctx.total_files_inspected += 1
+            
+        try:
+            st_size = f.stat().st_size
         except OSError:
             continue
+            
+        relpath = str(f.relative_to(skill_dir))
+        
+        # Read the first 4096 bytes to classify
+        try:
+            with open(f, "rb") as fp:
+                header = fp.read(4096)
+        except OSError:
+            continue
+            
+        classification, format_name = classify_bytes(header, st_size)
+        
+        is_archive = format_name in ("ZIP", "tar", "gzip", "bz2", "xz")
+        
+        if is_archive:
+            if st_size > 10 * 1024 * 1024:
+                if ctx is not None:
+                    ctx.limit_hits.append(f"Compressed size of archive {f.name} exceeds 10MB")
+                    ctx.file_manifest[relpath] = "capped(size)"
+                continue
+        else:
+            if st_size > 200_000:
+                if ctx is not None:
+                    ctx.limit_hits.append(f"File {f.name} size exceeds 200,000 bytes")
+                    ctx.file_manifest[relpath] = "capped(size)"
+                continue
+                
+        # Read the whole file bytes
+        try:
+            file_bytes = f.read_bytes()
+        except OSError:
+            continue
+            
+        archive_stats = {
+            "total_files_count": 0,
+            "cumulative_decompressed_size": 0,
+            "compressed_size": len(file_bytes),
+        }
+        
+        # Recursively decompress and classify
+        extracted = decompress_and_classify(
+            ctx, skill_dir, file_bytes, relpath, depth=1, archive_stats=archive_stats
+        )
+        
+        for sub_relpath, sub_bytes, sub_class, sub_fmt in extracted:
+            mismatch_err = check_mismatch(sub_relpath, sub_class, sub_fmt, sub_bytes)
+            if mismatch_err and ctx is not None:
+                ctx.mismatches.append(f"{sub_relpath}: {mismatch_err}")
+                
+            polyglot_err = check_polyglot(sub_relpath, sub_fmt, sub_bytes)
+            if polyglot_err and ctx is not None:
+                ctx.polyglots.append(f"{sub_relpath}: {polyglot_err}")
+                
+            if sub_class == "BINARY":
+                if ctx is not None:
+                    ctx.excluded_binary_files_count += 1
+                    ctx.binary_files.append(sub_relpath)
+            
+            # Map statuses here!
+            if ctx is not None:
+                if sub_relpath not in ctx.file_manifest:
+                    if sub_relpath.lower().endswith(".py"):
+                        ctx.file_manifest[sub_relpath] = "scanned-ast"
+                    elif sub_class == "TEXT":
+                        ctx.file_manifest[sub_relpath] = "scanned-text"
+                    else:
+                        if sub_fmt not in ("ZIP", "tar", "gzip", "bz2", "xz"):
+                            ctx.file_manifest[sub_relpath] = "binary-strings"
+            
+            collected.append({
+                "relpath": sub_relpath,
+                "content": sub_bytes,
+                "classification": sub_class,
+                "format": sub_fmt,
+            })
+            
+    return collected
+
+
+def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
+    """Concatenate the text/code files of one installed skill (capped, read-only)."""
+    collected = collect_skill_files(skill_dir, ctx)
+    parts = []
+    total = 0
+    file_count = 0
+    
+    for item in collected:
+        if total >= _MAX_BYTES_PER_SKILL or file_count >= _MAX_FILES_PER_SKILL:
+            break
+        if item["classification"] != "TEXT":
+            continue
+            
+        text = item["content"].decode(encoding="utf-8", errors="replace")
         chunk = text[: _MAX_BYTES_PER_SKILL - total]
-        parts.append(f"# file: {f.name}\n{chunk}")
+        parts.append(f"# file: {Path(item['relpath']).name}\n{chunk}")
         total += len(chunk)
         file_count += 1
+        
     return "\n".join(parts)
 
 
-def read_skill_python(skill_dir: Path) -> list[tuple[str, str]]:
+def read_skill_python(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str, str]]:
     """Collect the Python source files of one skill for read-only AST analysis.
 
-    Returns a list of (relative-path, source) pairs, bounded by the same caps and
-    symlink/escape guards as _read_skill_text — never executes anything.
+    Returns a list of (relative-path, source) pairs.
     """
+    collected = collect_skill_files(skill_dir, ctx)
     out: list[tuple[str, str]] = []
-    total, file_count = 0, 0
-    try:
-        root = skill_dir.resolve()
-    except OSError:
-        return out
-    for f in sorted(skill_dir.rglob("*.py")):
+    total = 0
+    file_count = 0
+    
+    for item in collected:
         if total >= _MAX_PY_BYTES_PER_SKILL or file_count >= _MAX_FILES_PER_SKILL:
             break
-        if f.is_symlink() or not f.is_file():
+        if item["classification"] != "TEXT":
             continue
-        try:
-            real = f.resolve()
-            if root != real and root not in real.parents:  # escaped the skill dir
-                continue
-            if f.stat().st_size > _MAX_FILE_BYTES:
-                continue
-            text = f.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        if not item["relpath"].lower().endswith(".py"):
             continue
-        try:
-            rel = str(f.relative_to(skill_dir))
-        except ValueError:
-            rel = f.name
-        out.append((rel, text))
+            
+        text = item["content"].decode(encoding="utf-8", errors="replace")
+        out.append((item["relpath"], text))
         total += len(text)
         file_count += 1
+        
     return out
 
 
@@ -153,8 +650,8 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                 continue
             seen.add(key)
             try:
-                ctx.installed_skills[key] = _read_skill_text(sd)
-                ctx.installed_skill_py[key] = read_skill_python(sd)
+                ctx.installed_skills[key] = _read_skill_text(sd, ctx)
+                ctx.installed_skill_py[key] = read_skill_python(sd, ctx)
             except OSError as exc:
                 ctx.errors.append(f"could not read skill {key}: {exc}")
 
@@ -171,20 +668,12 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
         except (OSError, json.JSONDecodeError) as exc:
             ctx.errors.append(f"could not parse {cfg_path}: {exc}")
         except RecursionError:
-            # Deeply-nested JSON overflows json.loads' C recursion limit. Only the
-            # user's own config reaches this path (self-inflicted, not attacker-
-            # reachable), so degrade gracefully instead of crashing the audit (B-014).
             ctx.errors.append(f"could not parse {cfg_path}: nesting too deep")
         else:
             if isinstance(parsed, dict):
                 ctx.config = parsed
                 ctx.config_mode = cfg_path.stat().st_mode & 0o777
             else:
-                # Valid JSON but a non-object top level (list/scalar). The config
-                # contract is a JSON object; every later cfg.get() would raise
-                # AttributeError on a list/str/int. Degrade with a clear note and
-                # leave ctx.config as the empty dict so downstream checks read the
-                # config as absent rather than crashing the audit (B-016).
                 ctx.errors.append(
                     f"malformed {cfg_path}: expected a JSON object, "
                     f"got {type(parsed).__name__}"

@@ -47,7 +47,7 @@ class ScoreResult:
 
 
 def compute(findings: list[Finding]) -> ScoreResult:
-    scored = [f for f in findings if f.scored and f.status != UNKNOWN
+    scored = [f for f in findings if f.scored and f.status not in (UNKNOWN, "SKILL_ARCHIVE_PATH_TRAVERSAL")
               and not getattr(f, "suppressed", False)]
     total = sum(WEIGHT[f.severity] for f in scored)
     if total == 0:

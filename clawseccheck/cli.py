@@ -177,7 +177,7 @@ def main(argv=None) -> int:
         if args.sarif:
             try:
                 Path(args.sarif).expanduser().write_text(
-                    render_sarif([f], tool_version=__version__), encoding="utf-8")
+                    render_sarif([f], tool_version=__version__, ctx=getattr(f, "ctx", None)), encoding="utf-8")
                 _emit(f"(SARIF written to {args.sarif})")
             except OSError as exc:
                 _emit(f"(could not write SARIF: {exc})")
@@ -343,7 +343,7 @@ def main(argv=None) -> int:
     if args.sarif:
         try:
             Path(args.sarif).expanduser().write_text(
-                render_sarif(findings, score, __version__),
+                render_sarif(findings, score, __version__, ctx=ctx),
                 encoding="utf-8")
             _emit(f"(SARIF written to {args.sarif})")
         except OSError as exc:

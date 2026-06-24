@@ -61,11 +61,8 @@ def package_digest(pkg_dir: Path | None = None) -> tuple[str, dict[str, str]]:
     """
     if pkg_dir is None:
         pkg_dir = _PKG_DIR
-
-    files = sorted(
-        p for p in pkg_dir.rglob("*")
-        if p.is_file() and not p.is_symlink() and "__pycache__" not in p.parts
-    )
+    from .safeio import walk_dir_safely
+    files = [p for p in walk_dir_safely(pkg_dir, exclude_pycache=True) if p.is_file()]
 
     per_file: dict[str, str] = {}
     for path in files:
