@@ -3,6 +3,29 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.14.1] — 2026-06-24
+
+**Bugfix batch from the ClawRange behavioural-judge run.** Hebrew-output polish, more
+actionable gateway remediation, and a flag-scope fix — no verdict/grade changes.
+
+### Fixed
+- **Hebrew fix-string leaks (B-019).** Runtime-assembled remediation prose fell back to
+  English in `--lang he` even when the rest of the report was Hebrew. Every leaking fix
+  clause is now translated (27 clauses across B1/B2/B6/B7/B9/B11/B12/B14/B22/B26/B30/B32/
+  B38/B39/B41/B55).
+- **Non-actionable B2 gateway fix (B-020).** When the gateway check FAILed solely on
+  `gateway.controlUi.allowInsecureAuth` (an otherwise loopback + token config), the fix was
+  generic boilerplate the user already satisfied. The remediation is now assembled per
+  triggering condition, so it names the real fix (e.g. "Disable gateway.controlUi.allowInsecureAuth").
+- **C5 ran under `--no-host` (B-021).** The native binary-PATH safety check stat()'d the host
+  filesystem even when host scanning was disabled. It is now gated on host scanning (like
+  B50–B54) and reports UNKNOWN under `--no-host`.
+
+### Changed
+- **Hebrew completeness guard now covers fix prose (C-056).** The CI i18n guard checked only
+  whole detail blocks; it now also asserts Hebrew coverage of fix fragments (split on "; "),
+  closing the long-known "partial-fragment leaks" gap so new fix leaks fail CI before release.
+
 ## [1.14.0] — 2026-06-24
 
 **One new attack-chain and one honest-UNKNOWN advisory** from the ClawRadar 2026-06-24 sweep.
