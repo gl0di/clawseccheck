@@ -565,6 +565,11 @@ def _has_approval_gate(cfg: dict) -> bool:
     mode = dig(cfg, "tools.exec.mode")
     security = dig(cfg, "tools.exec.security")
     ask = dig(cfg, "tools.exec.ask")
+    # "auto" IS a gate (grounded 2026-06-24, docs.openclaw.ai/tools/permission-modes):
+    # "Run allowlist matches, then use auto-review" — approval misses go through the
+    # native auto-reviewer first, then fall back to the human approval route. Only "full"
+    # ("Run host exec without prompts") is ungated, and it is intentionally excluded here.
+    # Do not re-flag "auto" as a false-PASS (see Pulse B-018, closed not-a-bug).
     if mode in ("deny", "allowlist", "ask", "auto"):
         return True
     if security in ("deny", "ask"):
