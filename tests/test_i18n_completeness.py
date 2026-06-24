@@ -91,3 +91,59 @@ def test_en_detail_is_byte_identical():
     """tp(detail, 'en') is always a no-op — the English path must never mutate."""
     for _home, f in _prose_findings():
         assert tp(f.detail, "en") == f.detail
+
+
+# ---------------------------------------------------------------------------
+# C-056: the same guard, extended to FIX prose at the fragment level.
+# Dynamically-assembled fix strings (joined on "; ") used to leak English after
+# the Hebrew label even when the detail was localized (B-019). The detail guard
+# above is whole-block only; this one splits the fix on "; " and checks each
+# prose fragment, closing the long-known "partial-fragment leaks" gap.
+# ---------------------------------------------------------------------------
+
+def _fix_fragments():
+    """Yield (cid, fragment) for every prose fragment of a FAIL/WARN finding's fix."""
+    for home in _fixture_homes():
+        try:
+            _, findings, _ = audit(home, include_native=False)
+        except Exception:  # noqa: BLE001
+            continue
+        for f in findings:
+            if f.status not in ("FAIL", "WARN"):
+                continue
+            for frag in (f.fix or "").split("; "):
+                frag = frag.strip()
+                if frag and _PROSE.search(frag):
+                    yield f.id, frag
+
+
+def test_some_fix_fragments_exercised():
+    """Guard is meaningful only if fixtures actually produce prose fix fragments."""
+    assert any(True for _ in _fix_fragments()), "no FAIL/WARN fix fragments fired"
+
+
+def test_every_failwarn_fix_fragment_is_localized_he():
+    """No FAIL/WARN fix fragment may render in English in the Hebrew report.
+
+    Fix prose is assembled at runtime (often joined on '; '), so a single clause can
+    leak English even when the rest of the report is Hebrew. Add the matching he entry
+    in i18n.PHRASES / DETAIL_RULES in the SAME change as the check (CLAUDE.md
+    evidence-i18n rule). Keyed per (cid, fragment) so every distinct clause is covered.
+    """
+    leaks: dict[str, str] = {}
+    for cid, frag in _fix_fragments():
+        if not _HEBREW.search(tp(frag, "he")):
+            leaks.setdefault(f"{cid}::{frag[:60]}", frag)
+
+    assert not leaks, (
+        "FAIL/WARN fix fragments NOT localized to Hebrew "
+        "(add the he PHRASES/DETAIL_RULES entry in the same change):\n"
+        + "\n".join(f"  {k}: {txt[:100]}" for k, txt in sorted(leaks.items()))
+    )
+
+
+def test_en_fix_is_byte_identical():
+    """tp(fix, 'en') is always a no-op — the English path must never mutate."""
+    for _home, f in _prose_findings():
+        if f.fix:
+            assert tp(f.fix, "en") == f.fix

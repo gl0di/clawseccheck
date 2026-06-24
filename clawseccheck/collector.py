@@ -55,6 +55,7 @@ class Context:
     config_found: bool = False                       # openclaw.json present (vs non-OpenClaw setup)
     native: object = None                           # NativeResult from openclaw security audit
     host: object = None                             # hostwatch.detect() result; set by audit(include_host=True)
+    include_host: bool = False                      # host-filesystem scanning enabled (audit(include_host=True) / not --no-host)
     installed_skills: dict = field(default_factory=dict)  # skill name -> concatenated text
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
     attestation: dict = field(default_factory=dict)  # agent self-report (--attest); see attest.py

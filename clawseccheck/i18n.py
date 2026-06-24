@@ -612,6 +612,140 @@ PHRASES: dict[str, dict[str, str]] = {
               "ו-tools.exec.security נאכפים כמתוכנן.",
     },
 
+    # ---- B-019 / C-056: he for runtime-assembled FIX fragments (split on "; ") ----
+    # These previously fell back to English in the Hebrew report. Each is a static fix
+    # clause; the C-009 guard now also checks fix fragments so new leaks fail CI.
+    "Move secrets to `openclaw secrets configure` / env vars, never into bootstrap files": {
+        "he": "העבר סודות אל `openclaw secrets configure` / משתני סביבה, לעולם לא לקבצי bootstrap",
+    },
+    "`chmod 600 ~/.openclaw/openclaw.json` and `chmod 700 ~/.openclaw` so config-stored "
+    "tokens are not readable by others.": {
+        "he": "`chmod 600 ~/.openclaw/openclaw.json` ו-`chmod 700 ~/.openclaw` כדי שטוקנים "
+              "השמורים בתצורה לא יהיו קריאים לאחרים.",
+    },
+    "Terminate TLS (reverse proxy / tailscale) for any non-loopback bind": {
+        "he": "סיים TLS (reverse proxy / tailscale) עבור כל bind שאינו loopback",
+    },
+    "`chmod 600 ~/.openclaw/openclaw.json` and `chmod 700 ~/.openclaw`.": {
+        "he": "`chmod 600 ~/.openclaw/openclaw.json` ו-`chmod 700 ~/.openclaw`.",
+    },
+    "For maximum privacy prefer a local model": {
+        "he": "לפרטיות מרבית העדף מודל מקומי",
+    },
+    "if cloud is required, ensure no sensitive data is sent to it. (Informational — low severity.)": {
+        "he": "אם נדרש ענן, ודא שלא נשלח אליו מידע רגיש. (מידע — חומרה נמוכה.)",
+    },
+    "OpenClaw has no built-in egress allowlist": {
+        "he": "ל-OpenClaw אין רשימת היתר יוצאת (egress) מובנית",
+    },
+    "minimise send-capable channels and external-service skills. Every outbound-capable "
+    "skill can exfiltrate data (this is the third leg of the Lethal Trifecta).": {
+        "he": "צמצם ערוצים בעלי יכולת שליחה וכישורי שירות חיצוני. כל כישור בעל יכולת יוצאת "
+              "יכול לדלות מידע (זו הרגל השלישית של ה-Lethal Trifecta).",
+    },
+    "Set every open channel's dmPolicy/groupPolicy to 'allowlist'": {
+        "he": "הגדר את dmPolicy/groupPolicy של כל ערוץ פתוח ל-'allowlist'",
+    },
+    "Bind the gateway to loopback or require auth "
+    "(gateway.auth.mode=token, token >=24 chars)": {
+        "he": "קשר את ה-gateway ל-loopback או דרוש אימות "
+              "(gateway.auth.mode=token, טוקן באורך 24 תווים לפחות)",
+    },
+    "Set gateway.tailscale.mode to 'serve' or 'off' (not 'funnel')": {
+        "he": "הגדר את gateway.tailscale.mode ל-'serve' או 'off' (לא 'funnel')",
+    },
+    "Disable gateway.controlUi.allowInsecureAuth": {
+        "he": "השבת את gateway.controlUi.allowInsecureAuth",
+    },
+    "Use a gateway auth token of at least 24 characters": {
+        "he": "השתמש בטוקן אימות gateway באורך 24 תווים לפחות",
+    },
+    "Keep approval gating enabled": {
+        "he": "השאר את שער האישור מופעל",
+    },
+    "also tighten identity/skill file permissions to owner-only (chmod 700 workspace/, "
+    "chmod 600 workspace/SOUL.md, chmod 700 skills/).": {
+        "he": "כמו כן הדק הרשאות קבצי זהות/כישורים לבעלים בלבד (chmod 700 workspace/, "
+              "chmod 600 workspace/SOUL.md, chmod 700 skills/).",
+    },
+    "Set channels.defaults.contextVisibility (or per channel) to 'allowlist' or "
+    "'allowlist_quote' so the model only sees context from allowlisted senders.": {
+        "he": "הגדר את channels.defaults.contextVisibility (או לכל ערוץ) ל-'allowlist' או "
+              "'allowlist_quote' כך שהמודל יראה הקשר רק משולחים מורשים.",
+    },
+    "Set dangerouslyAllowNameMatching to false (or omit it) and use immutable user/channel "
+    "IDs in allowlists instead of display names. Display names are user-controlled and can "
+    "be changed to impersonate an allowlisted user.": {
+        "he": "הגדר את dangerouslyAllowNameMatching ל-false (או השמט אותו) והשתמש במזהי "
+              "משתמש/ערוץ קבועים ברשימות היתר במקום בשמות תצוגה. שמות תצוגה נשלטים על ידי "
+              "המשתמש וניתן לשנותם כדי להתחזות למשתמש מורשה.",
+    },
+    "Add control-plane tool names (config.apply, cron, gateway, sessions_send, "
+    "sessions_spawn, update.run) to gateway.tools.deny to explicitly block HTTP mutation "
+    "access, even for authenticated callers.": {
+        "he": "הוסף שמות כלי בקרה (config.apply, cron, gateway, sessions_send, sessions_spawn, "
+              "update.run) ל-gateway.tools.deny כדי לחסום במפורש גישת mutation ב-HTTP, גם "
+              "לקוראים מאומתים.",
+    },
+    "Remove control-plane tools (config.apply, cron, gateway, sessions_send, sessions_spawn, "
+    "update.run) from gateway.tools.allow. Add them to gateway.tools.deny to explicitly "
+    "block HTTP access.": {
+        "he": "הסר כלי בקרה (config.apply, cron, gateway, sessions_send, sessions_spawn, "
+              "update.run) מ-gateway.tools.allow. הוסף אותם ל-gateway.tools.deny כדי לחסום "
+              "במפורש גישת HTTP.",
+    },
+    "Set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false to block cloud-metadata "
+    "IP access": {
+        "he": "הגדר את browser.ssrfPolicy.dangerouslyAllowPrivateNetwork ל-false כדי לחסום "
+              "גישה לכתובות IP של cloud-metadata",
+    },
+    "set browser.noSandbox to false (or omit it) to keep the OS sandbox active. Also add "
+    "browser.ssrfPolicy.hostnameAllowlist to restrict which hosts the browser may reach.": {
+        "he": "הגדר את browser.noSandbox ל-false (או השמט אותו) כדי לשמור על sandbox מערכת "
+              "ההפעלה פעיל. כמו כן הוסף את browser.ssrfPolicy.hostnameAllowlist כדי להגביל "
+              "לאילו hosts הדפדפן יכול לגשת.",
+    },
+    "Set session.dmScope to \"per-peer\", \"per-channel-peer\", or \"per-account-channel-peer\" "
+    "so each DM sender gets an isolated session. With dmScope=\"main\" any DM peer can read "
+    "and influence another user's conversation history.": {
+        "he": "הגדר את session.dmScope ל-\"per-peer\", \"per-channel-peer\" או "
+              "\"per-account-channel-peer\" כך שכל שולח DM יקבל סשן מבודד. עם dmScope=\"main\" "
+              "כל עמית DM יכול לקרוא ולהשפיע על היסטוריית השיחה של משתמש אחר.",
+    },
+    "Use least-privilege OAuth scopes for each provider profile, isolate high-value "
+    "credentials into dedicated agents with no untrusted-ingress channels, and ensure all "
+    "credentials are rotatable. Remove open channel policies (dmPolicy/groupPolicy) or "
+    "outbound tools where not needed.": {
+        "he": "השתמש ב-OAuth scopes בעיקרון ההרשאה המינימלית לכל פרופיל ספק, בודד אישורים "
+              "בעלי ערך גבוה לתוך סוכנים ייעודיים ללא ערוצי קלט לא מהימן, וודא שכל האישורים "
+              "ניתנים לרוטציה. הסר מדיניות ערוץ פתוחה (dmPolicy/groupPolicy) או כלים יוצאים "
+              "היכן שאינם נדרשים.",
+    },
+    "Add an approval gate (tools.exec.mode='ask') and restrict tools.elevated.allowFrom to "
+    "an explicit allowlist (no '*')": {
+        "he": "הוסף שער אישור (tools.exec.mode='ask') והגבל את tools.elevated.allowFrom "
+              "לרשימת היתר מפורשת (ללא '*')",
+    },
+    "lock open channels to 'allowlist'.": {
+        "he": "נעל ערוצים פתוחים ל-'allowlist'.",
+    },
+    "Remove blanket 'obey/follow any instruction' directives from SOUL.md/AGENTS.md/TOOLS.md. "
+    "Add an explicit rule: treat content from channels/web/email as untrusted data, never "
+    "as instructions.": {
+        "he": "הסר הנחיות גורפות 'obey/follow any instruction' מ-SOUL.md/AGENTS.md/TOOLS.md. "
+              "הוסף כלל מפורש: התייחס לתוכן מערוצים/אינטרנט/אימייל כנתונים לא מהימנים, לעולם "
+              "לא כהוראות.",
+    },
+    "Restrict memory writes to the owner": {
+        "he": "הגבל כתיבות לזיכרון לבעלים בלבד",
+    },
+    "sanitize anything derived from external content.": {
+        "he": "נקה (sanitize) כל דבר הנגזר מתוכן חיצוני.",
+    },
+    "Set logging.redactSensitive to \"tools\".": {
+        "he": "הגדר את logging.redactSensitive ל-\"tools\".",
+    },
+
     # ---- B4: static sandbox evidence fragments ----
     "agents.defaults.sandbox.mode is off (exec runs on the host)": {
         "he": "agents.defaults.sandbox.mode כבוי (exec רץ על המארח)",

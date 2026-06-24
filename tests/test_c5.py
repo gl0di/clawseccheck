@@ -9,6 +9,7 @@ from clawseccheck.collector import Context
 def _ctx():
     c = Context(home=Path("/nonexistent"))
     c.config = {}
+    c.include_host = True  # these tests exercise the host-PATH scan (B-021 gate)
     return c
 
 
@@ -236,3 +237,23 @@ def test_c5_is_not_scored(monkeypatch, tmp_path):
 
     result = check_path_safety(_ctx())
     assert result.scored is False
+
+
+# B-021: C5 is a host-filesystem check -> gated by include_host (--no-host).
+
+def test_c5_skipped_when_host_scan_disabled(monkeypatch):
+    """With host scanning off (include_host=False), C5 must not stat the host -> UNKNOWN."""
+    from clawseccheck.catalog import UNKNOWN
+    c = Context(home=Path("/nonexistent"))
+    c.config = {}
+    c.include_host = False  # e.g. --no-host
+    # Even on a POSIX box with a real PATH, the gate short-circuits before any stat().
+    result = check_path_safety(c)
+    assert result.status == UNKNOWN
+    assert "no-host" in (result.detail or "").lower() or "host-filesystem" in (result.detail or "").lower()
+
+
+def test_c5_default_context_is_host_disabled():
+    """A bare Context defaults include_host=False -> C5 UNKNOWN (no incidental host stat)."""
+    from clawseccheck.catalog import UNKNOWN
+    assert check_path_safety(Context(home=Path("/nonexistent"))).status == UNKNOWN

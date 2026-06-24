@@ -28,6 +28,7 @@ pytestmark = pytest.mark.skipif(not _is_posix(), reason="POSIX mode bits only")
 def _ctx(home, attestation=None):
     c = Context(home=Path(home))
     c.config = {}
+    c.include_host = True  # C5 host-PATH scan is gated on include_host (B-021)
     if attestation is not None:
         c.attestation = attestation
     return c

@@ -55,6 +55,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     unchanged. Passed straight through to ctx so the engine stays deterministic.
     """
     ctx = collect(home)
+    ctx.include_host = include_host
     if include_host:
         ctx.host = _host_detect(root=host_root)
     if attestation:

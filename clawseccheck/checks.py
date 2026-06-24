@@ -366,30 +366,39 @@ def check_secrets(ctx: Context) -> Finding:
 def check_gateway(ctx: Context) -> Finding:
     cfg = ctx.config
     ev = []
+    # B-020: build the remediation from the conditions that ACTUALLY fired, one clause per
+    # trigger, so the fix names the real problem (e.g. allowInsecureAuth alone -> "Disable
+    # gateway.controlUi.allowInsecureAuth", not generic boilerplate the config already meets).
+    # Clauses join with "; " so the Hebrew renderer (tp) localizes each fragment.
+    fixes = []
     bind = parse_bind_host(dig(cfg, "gateway.bind", ""))
     auth = dig(cfg, "gateway.auth.mode")
     if bind and bind not in LOOPBACK and auth in (None, "none"):
         ev.append(f"gateway.bind={bind or '?'} exposed with auth.mode={auth}")
+        fixes.append("Bind the gateway to loopback or require auth "
+                     "(gateway.auth.mode=token, token >=24 chars)")
     # gateway.http.no_auth does NOT exist in OpenClaw schema (auth is enforced by default)
     if dig(cfg, "gateway.controlUi.allowInsecureAuth"):
         ev.append("gateway.controlUi.allowInsecureAuth enabled")
+        fixes.append("Disable gateway.controlUi.allowInsecureAuth")
     # Real field: gateway.tailscale.mode (string "funnel"/"serve"/"off")
     # gateway.tailscale.funnel boolean does NOT exist in OpenClaw schema
     if dig(cfg, "gateway.tailscale.mode") == "funnel":
         ev.append("gateway.tailscale.mode=funnel exposes the gateway publicly")
+        fixes.append("Set gateway.tailscale.mode to 'serve' or 'off' (not 'funnel')")
     # gateway.auth_no_rate_limit does NOT exist in OpenClaw schema
     # Rate limiting is configured via gateway.auth.rateLimit (optional object)
     token = dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token")
     if isinstance(token, str) and 0 < len(token) < 24:
         ev.append("gateway auth token shorter than 24 chars")
-    for name in _open_channels(cfg):
+        fixes.append("Use a gateway auth token of at least 24 characters")
+    open_ch = _open_channels(cfg)
+    for name in open_ch:
         ev.append(f"channel '{name}' has an open dm/group policy (anyone can command it)")
+    if open_ch:
+        fixes.append("Set every open channel's dmPolicy/groupPolicy to 'allowlist'")
     if ev:
-        return _finding("B2", FAIL, "; ".join(ev),
-                        "Bind the gateway to loopback or require auth (gateway.auth.mode=token, "
-                        "token ≥24 chars), set gateway.tailscale.mode to 'serve' or 'off' (not "
-                        "'funnel'), configure gateway.auth.rateLimit for brute-force protection, "
-                        "and set every channel dmPolicy/groupPolicy to allowlist.", ev)
+        return _finding("B2", FAIL, "; ".join(ev), "; ".join(fixes), ev)
     if not cfg:
         return _finding("B2", UNKNOWN, "No config loaded — cannot assess gateway.", "Run on the host with ~/.openclaw present.")
     return _finding("B2", PASS, "Gateway is loopback/authenticated and channels are not open.",
@@ -2468,6 +2477,14 @@ def check_path_safety(ctx: Context) -> Finding:
 
     Only stat() is called; no file contents are read.
     """
+    # C5 inspects the host filesystem (PATH dirs + install-tree perms), so it belongs to
+    # the host-scanning scope. When host scanning is off (--no-host / audit(include_host=
+    # False)), do not stat the host — report UNKNOWN, consistent with B50–B54 (B-021).
+    if not getattr(ctx, "include_host", False):
+        return _custom("C5", BY_ID["C5"].severity, UNKNOWN,
+                       "Host-filesystem scanning is disabled (--no-host), so binary-PATH "
+                       "safety was not assessed.",
+                       "Re-run without --no-host to check PATH / install-tree permissions.")
     if not _is_posix():
         return _custom("C5", BY_ID["C5"].severity, UNKNOWN,
                        "PATH safety check not applicable on non-POSIX platforms.", "—")
