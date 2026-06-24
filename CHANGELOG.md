@@ -3,6 +3,29 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.11.0] — 2026-06-24
+
+**Detect dangerous docker sandbox break-glass flags (NC-7).** The sandbox check now flags
+the documented `dangerouslyAllow*` docker escape hatches, closing a real gap where a
+config that enabled them — but bound no docker.sock — scored a clean PASS.
+
+### Added
+- **B4 catches the docker break-glass trio.** `check_sandbox` (B4) now FAILs when any of
+  `agents.defaults.sandbox.docker.dangerouslyAllowReservedContainerTargets`,
+  `dangerouslyAllowExternalBindSources`, or `dangerouslyAllowContainerNamespaceJoin` is set
+  explicitly `true`. Previously B4 only caught docker.sock binds and `network=host`, so a
+  config enabling only the trio passed silently. Field names grounded against
+  `docs.openclaw.ai/gateway/security`. FP-guard: an `is True` test means a truthy string or
+  an absent key never fires — no spurious FAILs on real configs. Bilingual evidence +
+  remediation (en/he).
+
+### Fixed
+- **Hebrew leak in the B4 remediation.** The sandbox FAIL remediation rendered in English
+  on Hebrew reports — its `he` translation was a stale shorter form that no longer matched
+  the shipped string. The full remediation (incl. docker.sock, workspaceAccess, and the new
+  trio guidance) is now translated, along with the docker.sock and `workspaceAccess=rw`
+  evidence fragments.
+
 ## [1.10.1] — 2026-06-23
 
 **ClawHub display title fix.** The published skill now shows its proper brand title
