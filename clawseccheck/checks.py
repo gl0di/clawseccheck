@@ -454,6 +454,39 @@ def check_least_privilege(ctx: Context) -> Finding:
                     "Keep least privilege: explicit allowlists only.")
 
 
+def _peragent_sandbox_evidence(cfg: dict) -> list:
+    """Unsafe per-agent sandbox OVERRIDES under agents.list[].sandbox.* (real schema:
+    agents.list[N].sandbox.{mode,docker.network,docker.binds,workspaceAccess}). B4 otherwise
+    reads only agents.defaults.sandbox, so a named agent that overrides a safe default is
+    missed entirely (C-058). Returns attributed evidence strings; empty when none."""
+    out = []
+    agent_list = dig(cfg, "agents.list")
+    if not isinstance(agent_list, list):
+        return out
+    for a in agent_list:
+        if not isinstance(a, dict):
+            continue
+        sb = a.get("sandbox")
+        if not isinstance(sb, dict):
+            continue
+        name = a.get("name") or "<unnamed>"
+        if sb.get("mode") == "off":
+            out.append(f"agent '{name}': sandbox.mode=off (exec runs on the host)")
+        docker = sb.get("docker") if isinstance(sb.get("docker"), dict) else {}
+        if docker.get("network") == "host":
+            out.append(f"agent '{name}': sandbox.docker.network=host (no network isolation)")
+        binds = docker.get("binds")
+        if binds:
+            out.append(f"agent '{name}': sandbox.docker.binds exposes host paths")
+            binds_str = " ".join(str(b) for b in binds) if isinstance(binds, list) else str(binds)
+            if "docker.sock" in binds_str:
+                out.append(f"agent '{name}': sandbox.docker.binds mounts docker.sock "
+                           "(grants host control to the sandbox — container escape)")
+        if sb.get("workspaceAccess") == "rw":
+            out.append(f"agent '{name}': sandbox.workspaceAccess=rw (agent can write the mounted workspace)")
+    return out
+
+
 def check_sandbox(ctx: Context) -> Finding:
     cfg = ctx.config
     # Real path: agents.defaults.sandbox.mode (values: "off", "non-main", "all")
@@ -486,6 +519,22 @@ def check_sandbox(ctx: Context) -> Finding:
         ev.append(
             "agents.defaults.sandbox.workspaceAccess=rw (agent can write the mounted workspace)"
         )
+    # Per-agent sandbox overrides are explicit, unambiguous misconfig — a named agent can
+    # re-expose the host even when agents.defaults.sandbox is safe (C-058). Report it as a
+    # definite FAIL ahead of the defaults-only WARN/UNKNOWN/phantom branches.
+    agent_ev = _peragent_sandbox_evidence(cfg)
+    if agent_ev:
+        return _finding(
+            "B4", FAIL,
+            "one or more named agents override agents.defaults.sandbox with unsafe "
+            "settings (see evidence) — a per-agent override can re-expose the host even "
+            "when the defaults are safe.",
+            "Remove the unsafe per-agent sandbox overrides under agents.list[].sandbox "
+            "(set mode to 'non-main'/'all', docker.network to 'bridge', workspaceAccess "
+            "to 'none'/'ro', and drop host and docker.sock binds), or rely on "
+            "agents.defaults.sandbox.",
+            ev + agent_ev,
+        )
     # NOTE: the agents.defaults.sandbox.docker.dangerouslyAllow* break-glass trio is
     # intentionally NOT checked here — check_dangerous_overrides (B48) already owns the
     # whole "dangerously*" registry (gateway + per-agent), so detecting it here too would
@@ -499,6 +548,17 @@ def check_sandbox(ctx: Context) -> Finding:
     phantom_sandbox = isinstance(cfg.get("sandbox"), dict)
     _move_fix = ("Move the sandbox settings under agents.defaults.sandbox "
                  "(e.g. set agents.defaults.sandbox.mode to 'non-main' or 'all').")
+    # B-024: a populated defaults-evidence list is a definite FAIL (docker.sock bind,
+    # network=host, workspaceAccess=rw, mode=off). Surface it BEFORE the softer "mode not
+    # set" WARN below, so a real container-escape signal is not masked just because
+    # agents.defaults.sandbox.mode happens to be unset while exec is enabled.
+    if ev:
+        return _finding("B4", FAIL, "; ".join(ev),
+                        "Set agents.defaults.sandbox.mode to 'non-main' or 'all', set "
+                        "agents.defaults.sandbox.docker.network to 'bridge' (not 'host'), "
+                        "remove the docker.sock bind from docker.binds (it grants host "
+                        "control to the sandbox), set workspaceAccess to 'none' or 'ro', "
+                        "and remove broad host path binds from docker.binds.", ev)
     if mode is None and "exec" in _enabled_tools(cfg):
         if phantom_sandbox:
             return _finding("B4", WARN,
@@ -512,13 +572,6 @@ def check_sandbox(ctx: Context) -> Finding:
                         "likely host execution.",
                         "Set agents.defaults.sandbox.mode (e.g. 'non-main' or 'all') and "
                         "configure agents.defaults.sandbox.docker for network isolation.")
-    if ev:
-        return _finding("B4", FAIL, "; ".join(ev),
-                        "Set agents.defaults.sandbox.mode to 'non-main' or 'all', set "
-                        "agents.defaults.sandbox.docker.network to 'bridge' (not 'host'), "
-                        "remove the docker.sock bind from docker.binds (it grants host "
-                        "control to the sandbox), set workspaceAccess to 'none' or 'ro', "
-                        "and remove broad host path binds from docker.binds.", ev)
     if mode is None:
         if phantom_sandbox:
             return _finding("B4", UNKNOWN,
@@ -1573,22 +1626,28 @@ def check_mcp_hardening(ctx: Context) -> Finding:
     # Detail is a summary only; the per-server specifics go in evidence so the renderer
     # does not print the same line twice (in the "why" and again as a bullet) — C-057.
     if all_fails:
+        ev = all_fails[:6]
+        if len(all_fails) > 6:
+            ev = ev + [f"(+{len(all_fails) - 6} more issue(s) not shown)"]
         return _finding(
             "B24", FAIL,
             f"{n} MCP server(s) ({names_preview}) have dangerous hardening issues — see evidence.",
             "Remove wildcard env passthrough, disable tokenPassthrough, restrict "
             "allowedHosts to specific safe hosts, and pin MCP package specs to "
             "exact versions.",
-            evidence=all_fails[:6],
+            evidence=ev,
         )
 
     if all_warns:
+        ev = all_warns[:6]
+        if len(all_warns) > 6:
+            ev = ev + [f"(+{len(all_warns) - 6} more issue(s) not shown)"]
         return _finding(
             "B24", WARN,
             f"{n} MCP server(s) ({names_preview}) have likely-insecure settings — see evidence.",
             "Pin MCP package specs to exact versions (avoid @latest/URLs), restrict "
             "allowedHosts to known-safe hosts, and avoid forwarding broad secret env vars.",
-            evidence=all_warns[:6],
+            evidence=ev,
         )
 
     return _finding(
