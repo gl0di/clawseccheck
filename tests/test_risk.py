@@ -748,3 +748,92 @@ def test_risk09_malicious_skill_but_no_egress_no_path():
     cfg = {"agents": {"defaults": {"model": {"primary": "local/llama"}}}}
     paths = _paths(cfg, extra_findings=[_b13_fail()])
     assert not any(p.id == "RISK-09" for p in paths)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule RISK-14: wildcard-elevated sender + heartbeat -> self-escalating autonomy
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_risk14_wildcard_elevated_plus_heartbeat_fires():
+    cfg = {
+        "tools": {"elevated": {"allowFrom": {"telegram": ["*"]}}},
+        "agents": {"defaults": {"heartbeat": {"everyMinutes": 10}}},
+    }
+    paths = _paths(cfg)
+    p = next((p for p in paths if p.id == "RISK-14"), None)
+    assert p is not None, [x.id for x in paths]
+    assert p.severity == HIGH
+    assert "telegram" in " ".join(p.chain)
+
+
+def test_risk14_per_agent_heartbeat_also_fires():
+    cfg = {
+        "tools": {"elevated": {"allowFrom": {"discord": ["*"]}}},
+        "agents": {"list": [{"name": "a", "heartbeat": True}]},
+    }
+    assert any(p.id == "RISK-14" for p in _paths(cfg))
+
+
+def test_risk14_wildcard_without_heartbeat_no_fire():
+    cfg = {"tools": {"elevated": {"allowFrom": {"telegram": ["*"]}}}}
+    assert not any(p.id == "RISK-14" for p in _paths(cfg))
+
+
+def test_risk14_heartbeat_without_wildcard_no_fire():
+    cfg = {
+        "tools": {"elevated": {"allowFrom": {"telegram": ["user-1"]}}},
+        "agents": {"defaults": {"heartbeat": {"everyMinutes": 10}}},
+    }
+    assert not any(p.id == "RISK-14" for p in _paths(cfg))
+
+
+def test_risk14_empty_config_no_fire():
+    assert not any(p.id == "RISK-14" for p in _paths({}))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule RISK-16: rw workspace + host-reaching bind + plaintext gateway password
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _risk16_cfg(workspace="rw", binds=None, password="a-plaintext-gateway-password-here"):
+    cfg = {"agents": {"defaults": {"sandbox": {"workspaceAccess": workspace}}}}
+    if binds is not None:
+        cfg["agents"]["defaults"]["sandbox"]["docker"] = {"binds": binds}
+    if password is not None:
+        cfg["gateway"] = {"auth": {"password": password}}
+    return cfg
+
+
+def test_risk16_all_three_legs_fires():
+    cfg = _risk16_cfg(binds=["/var/run/docker.sock:/var/run/docker.sock"])
+    paths = _paths(cfg)
+    p = next((p for p in paths if p.id == "RISK-16"), None)
+    assert p is not None, [x.id for x in paths]
+    assert p.severity == HIGH
+    assert "control plane" in (p.title + p.why).lower()
+
+
+def test_risk16_root_level_bind_fires():
+    cfg = _risk16_cfg(binds=["/home:/host-home"])
+    assert any(p.id == "RISK-16" for p in _paths(cfg))
+
+
+def test_risk16_missing_password_no_fire():
+    cfg = _risk16_cfg(binds=["/var/run/docker.sock:/x"], password=None)
+    assert not any(p.id == "RISK-16" for p in _paths(cfg))
+
+
+def test_risk16_workspace_ro_no_fire():
+    cfg = _risk16_cfg(workspace="ro", binds=["/var/run/docker.sock:/x"])
+    assert not any(p.id == "RISK-16" for p in _paths(cfg))
+
+
+def test_risk16_narrow_bind_no_fire():
+    # A narrow data bind does not reach the host config -> zero-FP.
+    cfg = _risk16_cfg(binds=["/data:/data"])
+    assert not any(p.id == "RISK-16" for p in _paths(cfg))
+
+
+def test_risk16_no_bind_no_fire():
+    cfg = _risk16_cfg(binds=None)
+    assert not any(p.id == "RISK-16" for p in _paths(cfg))

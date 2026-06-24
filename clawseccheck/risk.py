@@ -99,6 +99,53 @@ def _open_channel_labels(cfg: dict) -> list[str]:
     return labels
 
 
+def _wildcard_elevated_providers(cfg: dict) -> list[str]:
+    """Providers whose tools.elevated.allowFrom grants '*' (every sender).
+
+    Mirrors B3's wildcard detection: allowFrom is a provider-dict
+    {provider: ["*"|sender,...]}; a provider counts when its value is "*" or a
+    list containing "*". Returns [] for any other shape (zero-FP).
+    """
+    allow = dig(cfg, "tools.elevated.allowFrom")
+    if not isinstance(allow, dict):
+        return []
+    return [p for p, v in allow.items()
+            if v == "*" or (isinstance(v, list) and "*" in v)]
+
+
+def _has_heartbeat_cfg(cfg: dict) -> bool:
+    """Autonomous heartbeat configured at agents.defaults or any per-agent entry."""
+    if dig(cfg, "agents.defaults.heartbeat"):
+        return True
+    agents = dig(cfg, "agents.list")
+    if isinstance(agents, list):
+        return any(isinstance(a, dict) and dig(a, "heartbeat") for a in agents)
+    return False
+
+
+def _host_reaching_bind(cfg: dict) -> str | None:
+    """Label for a docker bind that reaches the host filesystem broadly, else None.
+
+    Matches docker.sock (full host control) or a root-level host source
+    (/, /home, /root, /etc, /var, /usr). Narrow data binds (e.g. /data:/data) do
+    NOT match — keeps the RISK-16 chain zero-FP.
+    """
+    binds = dig(cfg, "agents.defaults.sandbox.docker.binds")
+    if isinstance(binds, str):
+        binds = [binds]
+    if not isinstance(binds, list):
+        return None
+    sensitive_roots = ("", "/", "/home", "/root", "/etc", "/var", "/usr")
+    for b in binds:
+        s = str(b)
+        if "docker.sock" in s:
+            return "docker.sock bind (full host control)"
+        src = s.split(":", 1)[0].rstrip("/")
+        if src in sensitive_roots:
+            return f"root-level host bind from {src or '/'}"
+    return None
+
+
 def _has_untrusted_ingress(tools: list[str], cfg: dict) -> bool:
     """True when there is at least one vector for untrusted content to reach the agent."""
     return bool(_open_channels(cfg)) or _hint(tools, INPUT_TOOL_HINTS)
@@ -595,6 +642,91 @@ def _rule_fs_write_tamper(ctx: Context, findings: list[Finding],
     )
 
 
+def _rule_self_escalating_autonomy(ctx: Context, findings: list[Finding],
+                                   tools: list[str], cfg: dict) -> RiskPath | None:
+    """HIGH (RISK-14): wildcard-elevated sender + heartbeat = self-escalating loop.
+
+    A provider whose tools.elevated.allowFrom is '*' lets ANY sender invoke elevated
+    tools (B3 flags this alone); a configured heartbeat makes the agent act unattended
+    (B17 flags this alone). Neither existing check — nor any RISK rule — captures the
+    conjunction: one injected instruction from an untrusted sender drives elevated
+    actions that the heartbeat keeps re-running with no human in the loop (ATLAS
+    AML.T0053). Fires only when BOTH legs are explicitly present → zero-FP.
+    """
+    providers = _wildcard_elevated_providers(cfg)
+    if not providers:
+        return None
+    if not _has_heartbeat_cfg(cfg):
+        return None
+    return RiskPath(
+        id="RISK-14",
+        severity=HIGH,
+        title="Wildcard-elevated sender + heartbeat = self-escalating autonomy loop",
+        chain=[
+            f"any sender via wildcard elevated provider(s): {', '.join(providers)}",
+            "injected instruction invokes elevated tools",
+            "heartbeat re-runs the agent unattended -> self-escalating privilege loop",
+        ],
+        why=(
+            "A provider in tools.elevated.allowFrom is set to '*', so any sender on that "
+            "channel can invoke elevated tools, and a heartbeat (agents.defaults.heartbeat "
+            "or a per-agent heartbeat) makes the agent act on its own schedule. Together, a "
+            "single prompt-injection from an untrusted sender can trigger elevated actions "
+            "that the heartbeat keeps re-running unattended — a self-escalating autonomous "
+            "privilege loop with no human in the path."
+        ),
+        fix=(
+            "Replace the '*' in tools.elevated.allowFrom with an explicit per-provider "
+            "sender allowlist, and gate elevated execution (tools.exec.mode='ask'). If "
+            "unattended autonomy is not required, disable the heartbeat. Breaking either "
+            "leg breaks the chain."
+        ),
+    )
+
+
+def _rule_sandbox_cred_controlplane(ctx: Context, findings: list[Finding],
+                                    tools: list[str], cfg: dict) -> RiskPath | None:
+    """HIGH (RISK-16): rw workspace + host-reaching bind + plaintext gateway password.
+
+    sandbox-escape -> credential-read -> control-plane takeover. B4 flags the rw
+    workspace and the host bind; B1 flags the plaintext password — but no RISK rule
+    unifies the three-leg path. Fires only when all three are explicitly present, so
+    FP is no higher than the individual B4/B1 findings.
+    """
+    if dig(cfg, "agents.defaults.sandbox.workspaceAccess") != "rw":
+        return None
+    bind_label = _host_reaching_bind(cfg)
+    if not bind_label:
+        return None
+    if not dig(cfg, "gateway.auth.password"):
+        return None
+    return RiskPath(
+        id="RISK-16",
+        severity=HIGH,
+        title="Sandbox host-reach + plaintext gateway credential = control-plane takeover",
+        chain=[
+            f"rw workspace + {bind_label}",
+            "agent reads plaintext gateway.auth.password from openclaw.json on the host",
+            "authenticates to the control plane as admin -> takeover",
+        ],
+        why=(
+            "The default agent sandbox grants workspaceAccess='rw' AND a docker bind that "
+            "reaches the host filesystem broadly (docker.sock or a root-level source), so an "
+            "exec-capable agent can read arbitrary host files. The gateway credential is "
+            "stored in plaintext at gateway.auth.password in openclaw.json, so the agent can "
+            "read it and authenticate to the control plane as admin — a sandbox weakness "
+            "escalates to full control-plane takeover."
+        ),
+        fix=(
+            "Set agents.defaults.sandbox.workspaceAccess to 'ro' or 'none', remove "
+            "docker.sock and root-level host binds from agents.defaults.sandbox.docker.binds, "
+            "and stop storing gateway.auth.password in plaintext (use gateway.auth.mode="
+            "'token' with a secret from the environment / a manager). Breaking any one leg "
+            "breaks the chain."
+        ),
+    )
+
+
 def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
     """Compute dangerous capability chains from config + existing findings.
 
@@ -652,6 +784,14 @@ def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
         candidates.append(path)
 
     path = _rule_fs_write_tamper(ctx, findings, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_self_escalating_autonomy(ctx, findings, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_sandbox_cred_controlplane(ctx, findings, tools, cfg)
     if path:
         candidates.append(path)
 
