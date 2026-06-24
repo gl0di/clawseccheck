@@ -1082,6 +1082,27 @@ PHRASES: dict[str, dict[str, str]] = {
         ),
     },
 
+    # ---- B4: per-agent sandbox override (C-058) ----
+    "one or more named agents override agents.defaults.sandbox with unsafe "
+    "settings (see evidence) — a per-agent override can re-expose the host even "
+    "when the defaults are safe.": {
+        "he": (
+            "סוכן אחד או יותר עוקפים את agents.defaults.sandbox עם הגדרות לא בטוחות "
+            "(ראה ראיות) — עקיפה ברמת סוכן יחיד יכולה לחשוף מחדש את המארח גם כאשר "
+            "ברירות המחדל בטוחות."
+        ),
+    },
+    "Remove the unsafe per-agent sandbox overrides under agents.list[].sandbox "
+    "(set mode to 'non-main'/'all', docker.network to 'bridge', workspaceAccess "
+    "to 'none'/'ro', and drop host and docker.sock binds), or rely on "
+    "agents.defaults.sandbox.": {
+        "he": (
+            "הסר את עקיפות ה-sandbox הלא-בטוחות תחת agents.list[].sandbox (הגדר mode "
+            "ל-'non-main'/'all', docker.network ל-'bridge', workspaceAccess ל-'none'/'ro', "
+            "והסר binds של המארח ו-docker.sock), או הסתמך על agents.defaults.sandbox."
+        ),
+    },
+
     # ---- B4: phantom top-level sandbox block (C-057) ----
     "a top-level 'sandbox' block is set, but that is not a real OpenClaw config key "
     "(sandbox settings live under agents.defaults.sandbox), so it is ignored and exec "
@@ -1876,11 +1897,11 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
         ),
         # B24: hardening summary (C-057 dedup — specifics moved to evidence)
         (
-            r"(\d+) MCP server\(s\) \(([^)]+)\) have dangerous hardening issues — see evidence\.",
+            r"(\d+) MCP server\(s\) \((.+)\) have dangerous hardening issues — see evidence\.",
             {"he": r"\1 שרת/י MCP (\2) בעלי בעיות hardening מסוכנות — ראה ראיות."},
         ),
         (
-            r"(\d+) MCP server\(s\) \(([^)]+)\) have likely-insecure settings — see evidence\.",
+            r"(\d+) MCP server\(s\) \((.+)\) have likely-insecure settings — see evidence\.",
             {"he": r"\1 שרת/י MCP (\2) בעלי הגדרות שקרוב לוודאי אינן מאובטחות — ראה ראיות."},
         ),
 
