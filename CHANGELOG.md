@@ -3,6 +3,23 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.14.2] — 2026-06-24
+
+**Report prose clarity (ClawRange judge nits).** Wording-only — no verdict or grade changes.
+
+### Fixed
+- **Phantom top-level `sandbox` block (B4).** A `sandbox.*` block at the config root is not a
+  real OpenClaw key (sandbox config lives under `agents.defaults.sandbox`). B4 now says so
+  explicitly instead of a bare "mode not set", so a user who configured the wrong key isn't
+  misled into thinking the tool missed it.
+- **MCP stdio vs remote framing (B15).** The MCP check described every server as a "remote"
+  injection/SSRF risk even for a local stdio subprocess. It is now transport-aware: stdio/local
+  servers get subprocess-privilege framing; only `url`/network-transport servers get the remote
+  framing.
+- **Doubled MCP hardening line (B24).** The hardening finding printed each per-server reason in
+  the detail and again as an evidence bullet (with a doubled `name:` prefix). The detail is now
+  a summary ("… have hardening issues — see evidence") and the specifics live in evidence only.
+
 ## [1.14.1] — 2026-06-24
 
 **Bugfix batch from the ClawRange behavioural-judge run.** Hebrew-output polish, more
