@@ -3,6 +3,36 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.16.0] — 2026-06-24
+
+Predictive skill analysis: `--vet` now inspects **every** file by content (no extension
+blind spots), unpacks nested archives in memory, and statically simulates a skill's
+reachable effects under adversarial seeds — without ever executing it. Still
+stdlib-only, offline, read-only; coverage gaps surface as UNKNOWN/WARN, never a
+false-positive FAIL.
+
+### Added
+- **Content-classified full-file coverage (F-010):** every file is classified by
+  magic-byte content instead of an extension allowlist, so payloads in `.xyz`,
+  no-extension, or binary files are no longer silently skipped. Extension/content
+  mismatch and polyglots (e.g. a ZIP-in-PNG) are reported.
+- **In-memory archive inspection (F-011):** recursive ZIP/tar/gz/bz2/xz unpacking
+  entirely in RAM (zero disk writes), bounded by depth/per-file/cumulative-size/
+  expansion-ratio/member-count caps. Tar member-name traversal is refused
+  (`SKILL_ARCHIVE_PATH_TRAVERSAL`); over-budget archives degrade to UNKNOWN, never
+  silent truncation.
+- **Abstract effect simulation (F-012):** `EffectSimulator` / `simulate_effects()`
+  perform deterministic taint analysis over a skill's AST under three threat models
+  (hostile input, poisoned MCP response, attacker-controlled default), reporting which
+  network/write/read/eval sinks a tainted value can reach and under what guard.
+- **Coverage manifest (C-046):** SARIF output gains an `analysis_completeness` block —
+  files inspected, binaries excluded, archives unpacked, limit hits, path-traversal
+  violations, per-file manifest, and simulated effects — so nothing is silently skipped.
+
+### Changed
+- New `SKILL_ARCHIVE_PATH_TRAVERSAL` status is excluded from scoring (treated like
+  UNKNOWN), so an archive-traversal signal never distorts the A–F grade.
+
 ## [1.15.0] — 2026-06-24
 
 Per-agent sandbox coverage plus the full batch of known B4/B24 bugs — closes every
