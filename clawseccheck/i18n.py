@@ -541,21 +541,18 @@ PHRASES: dict[str, dict[str, str]] = {
     },
     # fix (FAIL path) — must match check_sandbox's full remediation string verbatim so
     # the Hebrew report does not fall back to English (the earlier short key never matched
-    # the shipped longer remediation; now extended for the NC-7 dangerouslyAllow* trio).
+    # the shipped longer remediation — that pre-existing he leak is fixed here).
     "Set agents.defaults.sandbox.mode to 'non-main' or 'all', set "
     "agents.defaults.sandbox.docker.network to 'bridge' (not 'host'), "
     "remove the docker.sock bind from docker.binds (it grants host "
     "control to the sandbox), set workspaceAccess to 'none' or 'ro', "
-    "remove broad host path binds from docker.binds, and disable any "
-    "agents.defaults.sandbox.docker.dangerouslyAllow* flags (set them "
-    "to false).": {
+    "and remove broad host path binds from docker.binds.": {
         "he": (
             "הגדר agents.defaults.sandbox.mode ל-'non-main' או 'all', הגדר "
             "agents.defaults.sandbox.docker.network ל-'bridge' (לא 'host'), "
             "הסר את עיגון docker.sock מ-docker.binds (הוא מעניק שליטת מארח "
-            "ל-sandbox), הגדר workspaceAccess ל-'none' או 'ro', הסר קישורי "
-            "נתיבי מארח רחבים מ-docker.binds, והשבת כל דגלי "
-            "agents.defaults.sandbox.docker.dangerouslyAllow* (הגדר אותם ל-false)."
+            "ל-sandbox), הגדר workspaceAccess ל-'none' או 'ro', והסר קישורי "
+            "נתיבי מארח רחבים מ-docker.binds."
         ),
     },
     # detail (WARN — exec no sandbox)
@@ -591,29 +588,6 @@ PHRASES: dict[str, dict[str, str]] = {
     },
     "agents.defaults.sandbox.workspaceAccess=rw (agent can write the mounted workspace)": {
         "he": "agents.defaults.sandbox.workspaceAccess=rw (הסוכן יכול לכתוב למרחב העבודה המעוגן)",
-    },
-    # NC-7 — documented dangerous docker break-glass flags (trio). Keys must match the
-    # f-string evidence in check_sandbox verbatim (incl. the "— " separator).
-    "agents.defaults.sandbox.docker.dangerouslyAllowReservedContainerTargets=true — "
-    "lets the sandbox target reserved/privileged containers it normally cannot": {
-        "he": (
-            "agents.defaults.sandbox.docker.dangerouslyAllowReservedContainerTargets=true — "
-            "מאפשר ל-sandbox לפנות לקונטיינרים שמורים/מורשים שבדרך כלל חסומים בפניו"
-        ),
-    },
-    "agents.defaults.sandbox.docker.dangerouslyAllowExternalBindSources=true — "
-    "allows bind mounts from sources outside the approved roots (host-path escape)": {
-        "he": (
-            "agents.defaults.sandbox.docker.dangerouslyAllowExternalBindSources=true — "
-            "מתיר bind mounts ממקורות מחוץ לשורשים המאושרים (בריחת נתיב מארח)"
-        ),
-    },
-    "agents.defaults.sandbox.docker.dangerouslyAllowContainerNamespaceJoin=true — "
-    "lets the container join another container's namespaces (sandbox isolation break)": {
-        "he": (
-            "agents.defaults.sandbox.docker.dangerouslyAllowContainerNamespaceJoin=true — "
-            "מאפשר לקונטיינר להצטרף ל-namespaces של קונטיינר אחר (שבירת בידוד ה-sandbox)"
-        ),
     },
 
     # ---- B5: Supply Chain ----
