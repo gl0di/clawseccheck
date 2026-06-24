@@ -493,7 +493,20 @@ def check_sandbox(ctx: Context) -> Finding:
     # openclaw-schema-recon.md.
     # sandbox.seccomp_profile / sandbox.apparmor_profile do NOT exist as first-class config
     # fields; Docker backend relies on Docker's own profile mechanism
+    # A present-but-phantom top-level `sandbox` block (sandbox.mode=... etc.) is NOT a real
+    # OpenClaw key — sandbox config lives under agents.defaults.sandbox. Say so explicitly so
+    # a user who configured the wrong key doesn't think the tool missed it (C-057).
+    phantom_sandbox = isinstance(cfg.get("sandbox"), dict)
+    _move_fix = ("Move the sandbox settings under agents.defaults.sandbox "
+                 "(e.g. set agents.defaults.sandbox.mode to 'non-main' or 'all').")
     if mode is None and "exec" in _enabled_tools(cfg):
+        if phantom_sandbox:
+            return _finding("B4", WARN,
+                            "a top-level 'sandbox' block is set, but that is not a real "
+                            "OpenClaw config key (sandbox settings live under "
+                            "agents.defaults.sandbox), so it is ignored and exec tooling "
+                            "likely runs on the host.",
+                            _move_fix)
         return _finding("B4", WARN,
                         "exec tooling present but agents.defaults.sandbox.mode not set — "
                         "likely host execution.",
@@ -507,6 +520,13 @@ def check_sandbox(ctx: Context) -> Finding:
                         "control to the sandbox), set workspaceAccess to 'none' or 'ro', "
                         "and remove broad host path binds from docker.binds.", ev)
     if mode is None:
+        if phantom_sandbox:
+            return _finding("B4", UNKNOWN,
+                            "a top-level 'sandbox' block is set, but that is not a real "
+                            "OpenClaw config key (sandbox settings live under "
+                            "agents.defaults.sandbox); no exec tools are configured, so it "
+                            "is not currently exploitable.",
+                            _move_fix)
         return _finding("B4", UNKNOWN, "No exec tools and no sandbox config — not applicable.", "—")
     return _finding("B4", PASS, "Execution is sandboxed.", "Keep sandbox mode enabled.")
 
@@ -1392,15 +1412,39 @@ def _mcp_servers(cfg: dict) -> dict:
     return out
 
 
+_MCP_REMOTE_TRANSPORTS = ("sse", "http", "streamable-http", "streamablehttp", "websocket", "ws")
+
+
+def _mcp_has_remote(spec) -> bool:
+    """True when an MCP server spec is a remote endpoint (url / network transport),
+    vs a local stdio subprocess (a `command`)."""
+    if not isinstance(spec, dict):
+        return False
+    if spec.get("url"):
+        return True
+    return str(spec.get("transport", "")).lower() in _MCP_REMOTE_TRANSPORTS
+
+
 def check_mcp(ctx: Context) -> Finding:
     servers = _mcp_servers(ctx.config)
     if not servers:
         return _finding("B15", UNKNOWN, "No MCP servers configured.", "—")
+    names = ", ".join(list(servers)[:5])
+    n = len(servers)
+    # Frame by transport so a local stdio server isn't described as a "remote" risk (C-057).
+    if any(_mcp_has_remote(spec) for spec in servers.values()):
+        return _finding("B15", WARN,
+                        f"{n} MCP server(s) configured ({names}). "
+                        "Remote MCP servers can carry prompt injection, SSRF and data exposure.",
+                        "Verify each MCP server's source and trust boundary, restrict its tool "
+                        "reachability, and avoid untrusted remote MCP endpoints.")
     return _finding("B15", WARN,
-                    f"{len(servers)} MCP server(s) configured ({', '.join(list(servers)[:5])}). "
-                    "Remote MCP servers can carry prompt injection, SSRF and data exposure.",
-                    "Verify each MCP server's source and trust boundary, restrict its tool "
-                    "reachability, and avoid untrusted remote MCP endpoints.")
+                    f"{n} MCP server(s) configured ({names}). "
+                    "Local (stdio) MCP servers run as subprocesses with the agent's "
+                    "privileges; a malicious or compromised server can read local data and "
+                    "act through the agent's tools.",
+                    "Verify each MCP server's source and trust boundary, pin its "
+                    "package/command to a known version, and restrict its tool reachability.")
 
 
 # ---------- B24: MCP server hardening ----------
@@ -1526,14 +1570,12 @@ def check_mcp_hardening(ctx: Context) -> Finding:
     n = len(servers)
     names_preview = ", ".join(list(servers)[:5])
 
+    # Detail is a summary only; the per-server specifics go in evidence so the renderer
+    # does not print the same line twice (in the "why" and again as a bullet) — C-057.
     if all_fails:
-        detail = (
-            f"{n} MCP server(s) ({names_preview}): "
-            + "; ".join(all_fails[:6])
-            + (f" (+{len(all_fails) - 6} more)" if len(all_fails) > 6 else "")
-        )
         return _finding(
-            "B24", FAIL, detail,
+            "B24", FAIL,
+            f"{n} MCP server(s) ({names_preview}) have dangerous hardening issues — see evidence.",
             "Remove wildcard env passthrough, disable tokenPassthrough, restrict "
             "allowedHosts to specific safe hosts, and pin MCP package specs to "
             "exact versions.",
@@ -1541,13 +1583,9 @@ def check_mcp_hardening(ctx: Context) -> Finding:
         )
 
     if all_warns:
-        detail = (
-            f"{n} MCP server(s) ({names_preview}): "
-            + "; ".join(all_warns[:6])
-            + (f" (+{len(all_warns) - 6} more)" if len(all_warns) > 6 else "")
-        )
         return _finding(
-            "B24", WARN, detail,
+            "B24", WARN,
+            f"{n} MCP server(s) ({names_preview}) have likely-insecure settings — see evidence.",
             "Pin MCP package specs to exact versions (avoid @latest/URLs), restrict "
             "allowedHosts to known-safe hosts, and avoid forwarding broad secret env vars.",
             evidence=all_warns[:6],

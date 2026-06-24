@@ -1073,6 +1073,41 @@ PHRASES: dict[str, dict[str, str]] = {
     "Remote MCP servers can carry prompt injection, SSRF and data exposure.": {
         "he": "שרתי MCP מרוחקים עלולים לשאת הזרקת prompt, SSRF וחשיפת נתונים.",
     },
+    # fix (stdio/local path, C-057)
+    "Verify each MCP server's source and trust boundary, pin its "
+    "package/command to a known version, and restrict its tool reachability.": {
+        "he": (
+            "אמת את מקור וגבול האמון של כל שרת MCP, נעֵל את החבילה/הפקודה שלו לגרסה "
+            "ידועה, והגבל את נגישות הכלים שלו."
+        ),
+    },
+
+    # ---- B4: phantom top-level sandbox block (C-057) ----
+    "a top-level 'sandbox' block is set, but that is not a real OpenClaw config key "
+    "(sandbox settings live under agents.defaults.sandbox), so it is ignored and exec "
+    "tooling likely runs on the host.": {
+        "he": (
+            "מוגדר בלוק 'sandbox' ברמה העליונה, אך זהו אינו מפתח תצורה אמיתי של OpenClaw "
+            "(הגדרות sandbox נמצאות תחת agents.defaults.sandbox), כך שהוא מתעלם וכלי exec "
+            "ככל הנראה רצים על המארח."
+        ),
+    },
+    "a top-level 'sandbox' block is set, but that is not a real OpenClaw config key "
+    "(sandbox settings live under agents.defaults.sandbox); no exec tools are configured, "
+    "so it is not currently exploitable.": {
+        "he": (
+            "מוגדר בלוק 'sandbox' ברמה העליונה, אך זהו אינו מפתח תצורה אמיתי של OpenClaw "
+            "(הגדרות sandbox נמצאות תחת agents.defaults.sandbox); לא הוגדרו כלי exec, "
+            "ולכן אין כרגע ניצול אפשרי."
+        ),
+    },
+    "Move the sandbox settings under agents.defaults.sandbox "
+    "(e.g. set agents.defaults.sandbox.mode to 'non-main' or 'all').": {
+        "he": (
+            "העבר את הגדרות ה-sandbox תחת agents.defaults.sandbox "
+            "(למשל הגדר agents.defaults.sandbox.mode ל-'non-main' או 'all')."
+        ),
+    },
 
     # ---- B16: Monitoring ----
     # fix (WARN path)
@@ -1830,6 +1865,23 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
         (
             r"(\d+) MCP server\(s\) configured \((.+)\)\. Remote MCP servers can carry prompt injection, SSRF and data exposure\.",
             {"he": r"\1 שרת/י MCP מוגדרים (\2). שרתי MCP מרוחקים עלולים לשאת הזרקת prompt, SSRF וחשיפת נתונים."},
+        ),
+        # B15: stdio/local framing (C-057)
+        (
+            r"(\d+) MCP server\(s\) configured \((.+)\)\. Local \(stdio\) MCP servers run as "
+            r"subprocesses with the agent's privileges; a malicious or compromised server can "
+            r"read local data and act through the agent's tools\.",
+            {"he": r"\1 שרת/י MCP מוגדרים (\2). שרתי MCP מקומיים (stdio) רצים כתת-תהליכים עם "
+                   r"הרשאות הסוכן; שרת זדוני או שנפרץ יכול לקרוא נתונים מקומיים ולפעול דרך כלי הסוכן."},
+        ),
+        # B24: hardening summary (C-057 dedup — specifics moved to evidence)
+        (
+            r"(\d+) MCP server\(s\) \(([^)]+)\) have dangerous hardening issues — see evidence\.",
+            {"he": r"\1 שרת/י MCP (\2) בעלי בעיות hardening מסוכנות — ראה ראיות."},
+        ),
+        (
+            r"(\d+) MCP server\(s\) \(([^)]+)\) have likely-insecure settings — see evidence\.",
+            {"he": r"\1 שרת/י MCP (\2) בעלי הגדרות שקרוב לוודאי אינן מאובטחות — ראה ראיות."},
         ),
 
         # ---- B16: PASS detail with signals list ----

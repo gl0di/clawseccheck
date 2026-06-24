@@ -59,7 +59,8 @@ def test_b24_npx_at_latest_warns():
     ctx = _mcp({"tool": {"command": "npx", "args": ["-y", "some-pkg@latest"]}})
     f = check_mcp_hardening(ctx)
     assert f.status == "WARN"
-    assert "unpinned" in f.detail.lower() or "@latest" in f.detail
+    ev = " ".join(f.evidence)
+    assert "unpinned" in ev.lower() or "@latest" in ev
 
 
 def test_b24_npx_url_warns():
@@ -102,7 +103,8 @@ def test_b24_remote_url_no_allowlist_warns():
     ctx = _mcp({"remote": {"url": "https://mcp.example.com/api"}})
     f = check_mcp_hardening(ctx)
     assert f.status == "WARN"
-    assert "allowedHosts" in f.detail or "allowlist" in f.detail.lower()
+    ev = " ".join(f.evidence)
+    assert "allowedHosts" in ev or "allowlist" in ev.lower()
 
 
 # ---- FAIL patterns ----
@@ -115,7 +117,7 @@ def test_b24_env_wildcard_in_key_fails():
     }})
     f = check_mcp_hardening(ctx)
     assert f.status == "FAIL"
-    assert "*" in f.detail
+    assert "*" in " ".join(f.evidence)
 
 
 def test_b24_env_wildcard_string_fails():
@@ -136,7 +138,7 @@ def test_b24_token_passthrough_true_fails():
     }})
     f = check_mcp_hardening(ctx)
     assert f.status == "FAIL"
-    assert "tokenPassthrough" in f.detail
+    assert "tokenPassthrough" in " ".join(f.evidence)
 
 
 def test_b24_token_passthrough_hyphen_fails():
@@ -156,7 +158,7 @@ def test_b24_allowed_hosts_wildcard_fails():
     }})
     f = check_mcp_hardening(ctx)
     assert f.status == "FAIL"
-    assert "*" in f.detail
+    assert "*" in " ".join(f.evidence)
 
 
 def test_b24_allowed_hosts_metadata_ip_fails():
@@ -167,7 +169,7 @@ def test_b24_allowed_hosts_metadata_ip_fails():
     }})
     f = check_mcp_hardening(ctx)
     assert f.status == "FAIL"
-    assert "169.254.169.254" in f.detail
+    assert "169.254.169.254" in " ".join(f.evidence)
 
 
 def test_b24_allowed_hosts_internal_ip_fails():
