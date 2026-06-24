@@ -3,6 +3,31 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.15.0] — 2026-06-24
+
+Per-agent sandbox coverage plus the full batch of known B4/B24 bugs — closes every
+open bug on the tracker. No change to the real fleet grade; zero false-positive FAILs.
+
+### Added
+- **B4 per-agent sandbox coverage:** `check_sandbox` now inspects per-agent
+  `agents.list[].sandbox.*` overrides (`mode`, `docker.network`, `docker.binds`,
+  `workspaceAccess`), not just `agents.defaults.sandbox`. A named agent that re-exposes
+  the host (e.g. `sandbox.mode=off`, a `docker.sock` bind) while the defaults are safe
+  now FAILs, attributed to that agent. Grounded against the real `agents.list[].sandbox`
+  schema.
+
+### Fixed
+- **B4 evidence ordering:** a populated defaults sandbox-evidence list (`docker.sock`
+  bind, `network=host`, `workspaceAccess=rw`, `mode=off`) now FAILs ahead of the softer
+  "mode not set" WARN, so a real container-escape signal is no longer masked when
+  `mode` is unset and exec is enabled.
+- **B24 Hebrew i18n leak:** the hardening-summary `DETAIL_RULES` regexes use `(.+)`
+  instead of `([^)]+)` for the server-names group, so an MCP server name containing a
+  `)` (e.g. `weather (beta)`) no longer leaks untranslated English into the Hebrew report.
+- **B24 silent truncation:** when more than 6 server issues are found, the evidence now
+  ends with a `(+N more issue(s) not shown)` indicator, restoring the truncation signal
+  that was dropped when the detail was condensed in 1.14.2.
+
 ## [1.14.2] — 2026-06-24
 
 **Report prose clarity (ClawRange judge nits).** Wording-only — no verdict or grade changes.
