@@ -3,6 +3,27 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.14.0] — 2026-06-24
+
+**One new attack-chain and one honest-UNKNOWN advisory** from the ClawRadar 2026-06-24 sweep.
+
+### Added
+- **RISK-15 — untrusted context → browser SSRF → metadata/credential exfil (HIGH).** Fires
+  when a channel exposes full untrusted context (`channels.<p>.contextVisibility='all'`, B26)
+  AND the browser may reach the private network (`browser.ssrfPolicy.dangerouslyAllowPrivateNetwork`,
+  B38). An injection in untrusted message content drives the browser to an internal endpoint.
+  Distinct from RISK-05 (which keys on reachable secrets) — RISK-15 keys on the untrusted-context
+  entry and fires where no secrets are present.
+- **C6 — hook-composition tool-policy drop advisory (UNKNOWN, never FAIL).** OpenClaw versions
+  before v2026.6.10 had a hook-registry composition bug that could silently drop trusted tool
+  policies at runtime. With no static config field to read, C6 emits an honest UNKNOWN only when
+  the recorded version predates the fix AND a tool policy (`tools.exec.mode` /
+  `tools.elevated.allowFrom`) is configured; otherwise it PASSes (no UNKNOWN flood). Advisory
+  (unscored).
+
+Both fire only on positive evidence and were verified not to misfire on the live config or the
+bundled fixtures.
+
 ## [1.13.0] — 2026-06-24
 
 **Two new combinational attack-chains in the risk engine.** Each combines legs that
