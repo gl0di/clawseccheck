@@ -865,6 +865,59 @@ _SKILL_HIGH = [
          re.I | re.MULTILINE,
      )),
 ]
+
+# F-021: runtime-external-fetch instruction detector (OWASP AST05 "Untrusted External
+# Instructions").  A skill that directs the agent to fetch its own instructions / system
+# prompt / context from an external URL at runtime hides the malicious payload at a
+# remote address — the "brand-landing-page" evasion that static line-scan misses.
+#
+# Detection requires ALL THREE signals in a 300-char window around a URL:
+#   1. a fetch/load VERB  (fetch, download, load, read, retrieve, pull, GET)
+#   2. an external http(s):// URL
+#   3. an instruction/context TARGET noun  (instructions, context, system prompt, config,
+#      rules, prompt, directives)
+#
+# Conservative design: a skill that merely *references* a URL for documentation
+# ("see https://… for details") never fires — it contains no fetch verb + target noun
+# combination.  _is_code_example is applied so documented anti-patterns stay clean.
+_RUNTIME_FETCH_URL_RE = re.compile(r"https?://[^\s\"'<>)\]]{6,}", re.I)
+_RUNTIME_FETCH_VERB_RE = re.compile(
+    r"\b(?:fetch|download|load|read|retrieve|pull|GET)\b", re.I
+)
+_RUNTIME_FETCH_NOUN_RE = re.compile(
+    r"\b(?:instructions?|context|system\s+prompt|config(?:uration)?|rules?|"
+    r"prompt|directives?)\b",
+    re.I,
+)
+_RUNTIME_FETCH_WINDOW = 300  # chars around the URL to scan for verb + noun
+
+
+def _runtime_fetch_matches(
+    blob: str, fence_ranges: list[tuple[int, int]]
+) -> list[str]:
+    """Return a list of URL strings where the surrounding window contains BOTH a
+    fetch/load verb AND an instruction/context noun — fence-aware (C-041).
+
+    A URL that appears only in a code-example context (fenced block or negation
+    window) is silently skipped.  A URL that is present but whose window contains
+    only a verb, only a noun, or neither is also skipped (doc-reference safe).
+    """
+    hits: list[str] = []
+    seen: set[str] = set()
+    for m in _RUNTIME_FETCH_URL_RE.finditer(blob):
+        if _is_code_example(blob, m.start(), fence_ranges):
+            continue
+        url = m.group(0)
+        # Expand a symmetric window around the URL match.
+        win_start = max(0, m.start() - _RUNTIME_FETCH_WINDOW)
+        win_end = min(len(blob), m.end() + _RUNTIME_FETCH_WINDOW)
+        window = blob[win_start:win_end]
+        if _RUNTIME_FETCH_VERB_RE.search(window) and _RUNTIME_FETCH_NOUN_RE.search(window):
+            key = url[:80]
+            if key not in seen:
+                seen.add(key)
+                hits.append(url[:80])
+    return hits
 # C-044: unpinned dependency patterns — WARN severity (supply-chain SC1-3).
 # Scans the skill blob for manifest sections (requirements.txt, package.json, pyproject.toml)
 # that declare unpinned/floating dependencies — a supply-chain vector where a compromised
@@ -1345,6 +1398,12 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if not _is_code_example(blob, m.start(), _fr):
                     high.append(f"{name}: {label}")
                     break
+
+        # F-021: runtime-external-fetch instruction (OWASP AST05).
+        # Fires when a skill's text contains fetch/load verb + external http(s) URL +
+        # instruction/context noun in a 300-char window — all outside code examples.
+        for rf_url in _runtime_fetch_matches(blob, _fr):
+            high.append(f"{name}: runtime-external-fetch instruction (OWASP AST05): {rf_url}")
 
         # Pipe-to-shell: use finditer so we have match positions for FP filter.
         for pm in _PIPE_SHELL_RE.finditer(blob):

@@ -1205,6 +1205,10 @@ PHRASES: dict[str, dict[str, str]] = {
             "במניפסטי הכישור כדי למנוע חטיפת שרשרת אספקה באמצעות עדכון חבילה זדוני."
         ),
     },
+    # F-021 B13 evidence label fragment — runtime-external-fetch instruction
+    "runtime-external-fetch instruction (OWASP AST05)": {
+        "he": "הוראת טעינת הנחיות מרחוק בזמן ריצה (OWASP AST05)",
+    },
 
     # ---- B14: Egress ----
     # fix (PASS path — egress allowlist configured)
@@ -2075,6 +2079,11 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
         (
             r"(.+): pyproject\.toml: '(.+)' unpinned \(supply-chain SC3\)",
             {"he": r"\1: pyproject.toml: '\2' לא מוצמד (שרשרת אספקה SC3)"},
+        ),
+        # F-021: runtime-external-fetch instruction evidence fragment
+        (
+            r"(.+): runtime-external-fetch instruction \(OWASP AST05\): (.+)",
+            {"he": r"\1: הוראת טעינת הנחיות מרחוק בזמן ריצה (OWASP AST05): \2"},
         ),
 
         # ---- B14: egress surface fragments (whole-string forms) ----
