@@ -3,6 +3,14 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.20.1] — 2026-06-25
+
+Fix linting/CI issues from the v1.20.0 release.
+
+### Fixed
+- **B63 Localization collision:** Resolved a duplicate dictionary key error in `i18n.py` by differentiating the resolution string for `B63` to `"skills exist."`.
+- **Test suite cleanup:** Removed an unused `pytest` import in `tests/test_b63.py`.
+
 ## [1.20.0] — 2026-06-25
 
 Introduced B63 (Silent-instruction detector) check.
