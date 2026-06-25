@@ -1180,6 +1180,136 @@ _VET_MCP_UNPINNED_PKG_RE = re.compile(
 # Broad oauth scopes that signal wide permissions.
 _VET_MCP_BROAD_SCOPE_RE = re.compile(r"\*|all|admin|write|full", re.I)
 
+# ---------------------------------------------------------------------------
+# C-038: MCP tool-poisoning detector (TP1–TP3)
+#
+# Grounding decision (§4 grounding wall, recon doc §4 + skillspector-parity.md):
+#   The OpenClaw MCP config schema (mcp.servers.<name>) exposes: command, args,
+#   env, transport, url, oauth.scope (all confirmed real fields, recon doc §1/§4).
+#   There is NO documented "tools", "description", or "inputSchema" sub-key in the
+#   static openclaw.json spec file — tool metadata comes from the live server
+#   handshake, which we never perform offline.
+#
+#   Therefore:
+#     TP2 (obfuscation/homoglyph in the server NAME) ships unconditionally — the
+#          server name IS read from the spec file and IS in our scan surface.
+#     TP1/TP3 (hidden instructions + param-description injection) scan tool
+#          metadata ONLY IF spec.get("tools") is present in the parsed dict.
+#          When absent → no signal (not a false PASS, not a fabricated finding).
+#          In practice, since no current fleet config embeds "tools" inline, these
+#          legs produce no output on real configs and zero false-positive FAILs.
+# ---------------------------------------------------------------------------
+
+# TP2: mixed-script / RTL-override / invisible chars in identifiers (suspicious).
+# Reuses normalize_for_scan / obfuscation_signals from textnorm.
+
+# TP1: hidden instructions in tool descriptions — keyword boosts signal danger.
+_C038_HIDDEN_INSTR_RE = re.compile(
+    r"(?:SYSTEM\s*:|IGNORE\s+PREVIOUS|OVERRIDE\s+(?:ALL\s+)?INSTRUCTIONS?|"
+    r"<\|im_start\|>\s*system)",
+    re.I,
+)
+# TP1: HTML comment / markdown comment hiding.
+_C038_COMMENT_RE = re.compile(r"<!--.*?-->|\[//\]:\s*#\s*\(", re.DOTALL | re.I)
+# TP1: data-URI embedding.
+_C038_DATA_URI_RE = re.compile(r"data:[^;,]{0,40};base64,", re.I)
+
+# TP3: imperative injection in param defaults or descriptions.
+_C038_PARAM_INJECT_RE = re.compile(
+    r"ignore\s+previous|<\|im_start\|>|"
+    r"(?:curl|wget|nc|netcat|bash)\s+https?://|"
+    r"https?://[^\s\"']{0,80}(?:\?|&)[^\s\"']{0,40}=",
+    re.I,
+)
+
+
+def _vet_mcp_tool_poisoning(name: str, spec: dict) -> tuple[list[str], list[str]]:
+    """C-038: MCP tool-poisoning TP1–TP3.
+
+    Returns (dangerous_reasons, suspicious_reasons).
+
+    TP2 is unconditional (server name is always available).
+    TP1/TP3 run only when spec contains a 'tools' key (tool metadata present
+    inline in the spec file — currently ungrounded for production configs;
+    kept for future configs that may embed tool descriptions).
+    """
+    dangerous: list[str] = []
+    suspicious: list[str] = []
+
+    # ---- TP2: homoglyph / mixed-script / bidi-override in server NAME ----
+    # The server name is a real field we can inspect offline.
+    signals = obfuscation_signals(name)
+    if signals:
+        norm_name = normalize_for_scan(name)
+        if norm_name != name:
+            suspicious.append(
+                f"{name}: server name contains obfuscation / homoglyph characters "
+                f"({'; '.join(signals)}) — may impersonate a trusted server"
+            )
+
+    # ---- TP1 / TP3: tool metadata — only if embedded inline in the spec ----
+    # (Grounding: not a standard field in openclaw.json; guard prevents FP.)
+    tools = spec.get("tools")
+    if not isinstance(tools, list):
+        return dangerous, suspicious
+
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        tool_name = str(tool.get("name", "<unnamed>"))
+        description = str(tool.get("description", ""))
+        norm_desc = normalize_for_scan(description)
+
+        # TP1a: HTML/markdown comment hiding in description.
+        if _C038_COMMENT_RE.search(description):
+            dangerous.append(
+                f"{name}/{tool_name}: tool description contains hidden comment "
+                "(HTML/markdown comment block — potential hidden instruction)"
+            )
+
+        # TP1b: data-URI in description.
+        if _C038_DATA_URI_RE.search(description):
+            dangerous.append(
+                f"{name}/{tool_name}: tool description contains data-URI "
+                "(potential base64-encoded hidden payload)"
+            )
+
+        # TP1c: base64 blobs that decode to shell/download payloads.
+        b64_hits = _decoded_payloads(description)
+        for hit in b64_hits[:2]:
+            dangerous.append(
+                f"{name}/{tool_name}: tool description base64 blob decodes to "
+                f"shell/download payload: {hit[:60]}"
+            )
+
+        # TP1d: keyword-boost injection phrases in normalized description.
+        if _C038_HIDDEN_INSTR_RE.search(norm_desc):
+            dangerous.append(
+                f"{name}/{tool_name}: tool description contains injection keyword "
+                f"(SYSTEM:/IGNORE PREVIOUS/OVERRIDE — prompt injection risk)"
+            )
+
+        # TP3: injection in parameter descriptions / defaults.
+        input_schema = tool.get("inputSchema") or {}
+        if isinstance(input_schema, dict):
+            props = input_schema.get("properties") or {}
+            if isinstance(props, dict):
+                for param_name, param_def in props.items():
+                    if not isinstance(param_def, dict):
+                        continue
+                    param_desc = str(param_def.get("description", ""))
+                    param_default = str(param_def.get("default", ""))
+                    for text, label in ((param_desc, "description"),
+                                        (param_default, "default")):
+                        if _C038_PARAM_INJECT_RE.search(normalize_for_scan(text)):
+                            dangerous.append(
+                                f"{name}/{tool_name}: parameter '{param_name}' "
+                                f"{label} contains injection directive or exfil URL"
+                            )
+                            break
+
+    return dangerous, suspicious
+
 
 def _vet_mcp_server(name: str, spec: dict) -> tuple[list[str], list[str]]:
     """Return (dangerous_reasons, suspicious_reasons) for one MCP server spec.
@@ -1282,6 +1412,11 @@ def _vet_mcp_server(name: str, spec: dict) -> tuple[list[str], list[str]]:
                 f"{name}: oauth.scope='{scope}' is broad/wildcard "
                 "— server has wide permissions"
             )
+
+    # ---- C-038 TP1–TP3: MCP tool-poisoning ----
+    tp_dangerous, tp_suspicious = _vet_mcp_tool_poisoning(name, spec)
+    dangerous.extend(tp_dangerous)
+    suspicious.extend(tp_suspicious)
 
     return dangerous, suspicious
 
@@ -4574,6 +4709,123 @@ def check_prompt_self_replication(ctx: Context) -> Finding:
     )
 
 
+# ---------------------------------------------------------------------------
+# B61 — Cross-agent config snooping / credential theft (F-006)
+# ---------------------------------------------------------------------------
+#
+# Grounded against recon doc §1/§4 and skillspector-parity.md §3 (agent_snooping
+# AS1–AS3). We detect skills that read ANOTHER agent's config file to steal
+# credentials.
+#
+# Grounded foreign-agent config paths (confirmed real from recon doc + our own
+# fleet configs): ~/.claude/mcp.json, ~/.codex/mcp.json, ~/.gemini/mcp.json,
+# ~/.openclaw/openclaw.json, ~/.openclaw/mcp_config.json.
+# NOT grounded (dropped): .cursor/.continue/.cline/.aider — not in recon doc.
+#
+# FAIL  — foreign-config path co-occurs with a read/exfil verb (cat/grep/open/
+#          read or an existing exfil sink) on the same or adjacent line.
+# WARN  — path literal present but no read verb detected.
+# UNKNOWN — no installed skills.
+#
+# Conservative gating (path + verb) maintains zero-false-positive-FAIL guarantee.
+# ---------------------------------------------------------------------------
+
+# Foreign-agent config paths — grounded only.
+_B61_CONFIG_PATH_RE = re.compile(
+    r"\.(?:claude|codex|gemini)/(?:mcp(?:_config)?|config)(?:\.json)?"
+    r"|\.openclaw/(?:openclaw\.json|mcp(?:_config)?\.json|skills|memory)",
+    re.I,
+)
+
+# Read / exfil verbs that indicate active data access.
+_B61_READ_VERB_RE = re.compile(
+    r"\b(?:cat|less|head|tail|grep|jq|open|read|load|import|require|fetch|curl|wget|"
+    r"requests?\.get|requests?\.post|subprocess|os\.popen|pathlib|Path)\b",
+    re.I,
+)
+
+# Exfil sinks (reuses the existing _EXFIL_RE pattern's key terms).
+_B61_EXFIL_SINK_RE = re.compile(
+    r"\bcurl\b|\bwget\b|\brequests?\.post\b|fetch\s*\(|"
+    r"discord\.com/api/webhooks|api\.telegram\.org/bot|"
+    r"glot\.io|pastebin|webhook\.site|transfer\.sh",
+    re.I,
+)
+
+# Window in characters around the config-path match to search for a verb.
+_B61_WINDOW = 120
+
+
+def check_agent_snooping(ctx: Context) -> Finding:
+    """B61 — Cross-agent config snooping / credential theft (F-006 / SkillSpector AS1–AS3).
+
+    Scans installed skills for patterns that read ANOTHER agent's config file
+    (e.g., ~/.claude/mcp.json, ~/.openclaw/openclaw.json) to steal credentials.
+
+    FAIL    — foreign-config path co-occurs with a read/exfil verb in close proximity
+              (positive evidence of active snooping).
+    WARN    — foreign-config path literal present but no read verb detected
+              (the path alone may be coincidental — flag for human review).
+    PASS    — no foreign-agent config paths found.
+    UNKNOWN — no installed skills to inspect.
+    """
+    if not ctx.installed_skills:
+        return _finding(
+            "B61", UNKNOWN,
+            "No installed skills found — nothing to inspect for cross-agent snooping.",
+            "Run on the host where installed skills live "
+            "(~/.openclaw/skills, workspace/skills).",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        for m in _B61_CONFIG_PATH_RE.finditer(norm):
+            path_match = m.group(0)
+            start = max(0, m.start() - _B61_WINDOW)
+            end = min(len(norm), m.end() + _B61_WINDOW)
+            window = norm[start:end]
+            if _B61_READ_VERB_RE.search(window) or _B61_EXFIL_SINK_RE.search(window):
+                fail_ev.append(
+                    f"{skill_name}: reads foreign-agent config path "
+                    f"'{path_match}' with a read/exfil verb"
+                )
+            else:
+                warn_ev.append(
+                    f"{skill_name}: foreign-agent config path literal "
+                    f"'{path_match}' found (no read verb in context)"
+                )
+            break  # one signal per skill is enough to flag it
+
+    if fail_ev:
+        return _finding(
+            "B61", FAIL,
+            "Cross-agent config snooping detected — skill(s) read another agent's "
+            "config to steal credentials: " + "; ".join(fail_ev[:4]),
+            "Remove or sandbox any skill that reads foreign-agent config files "
+            "(~/.claude/, ~/.codex/, ~/.gemini/, ~/.openclaw/). "
+            "A legitimate skill only accesses its own files.",
+            fail_ev,
+        )
+    if warn_ev:
+        return _finding(
+            "B61", WARN,
+            "Foreign-agent config path(s) referenced in installed skill(s): "
+            + "; ".join(warn_ev[:4]),
+            "Review the flagged skills. A reference to another agent's config path "
+            "without a read verb may be documentation or coincidental — confirm no "
+            "credential access occurs at runtime.",
+            warn_ev,
+        )
+    return _finding(
+        "B61", PASS,
+        "No cross-agent config snooping patterns found in installed skills.",
+        "Ensure installed skills access only their own files and declared resources.",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -4599,6 +4851,7 @@ CHECKS = [
     check_unicode_obfuscation,
     check_markdown_image_exfil,
     check_prompt_self_replication,
+    check_agent_snooping,
 ]
 
 

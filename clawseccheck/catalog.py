@@ -184,6 +184,11 @@ CATALOG: list[CheckMeta] = [
     # WARN only — highest FP risk among content checks; requires verb + target proximity.
     CheckMeta("B60", "Prompt self-replication / propagation directive",
               HIGH, "hardening", "Agentic Worm / Self-Replication", confidence="MEDIUM"),
+    # B61 (v1.17.0): Cross-agent config snooping / credential theft (F-006 / SkillSpector
+    # AS1–AS3). FAIL when a foreign-agent config path co-occurs with a read/exfil verb;
+    # WARN on path-alone. Conservative gating (path + verb) prevents false-positive FAILs.
+    CheckMeta("B61", "Cross-agent config snooping / credential theft",
+              HIGH, "hardening", "Credential Theft / Supply Chain", confidence="MEDIUM"),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False),
     CheckMeta("C4", "OpenClaw version / update hygiene", LOW, "advisory", "Patch hygiene", scored=False),

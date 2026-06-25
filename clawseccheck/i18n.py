@@ -396,6 +396,7 @@ TITLES: dict[str, dict[str, str]] = {
     "B58": {"he": "הזרקה מעורפלת Unicode / עקיפת טקסט נסתר"},
     "B59": {"he": "דליפת נתונים דרך תמונת Markdown (URL מרוחק)"},
     "B60": {"he": "הנחיית שכפול-עצמי של פרומפט / הפצה (ATLAS AML.T0061)"},
+    "B61": {"he": "ריגול בתצורת סוכן אחר / גניבת פרטי כניסה"},
     "C3": {"he": "גיבויים של SOUL.md / זיכרון"},
     "C4": {"he": "גרסת OpenClaw / היגיינת עדכון"},
     "C5": {"he": "בטיחות PATH של בינארי מקומי"},
@@ -701,6 +702,38 @@ PHRASES: dict[str, dict[str, str]] = {
     "its own instructions across replies, memory, or other agents.": {
         "he": "וודא שקבצי האתחול אינם מורים לסוכן לשכפל או להפיץ את הנחיותיו שלו "
               "על פני תשובות, זיכרון או סוכנים אחרים.",
+    },
+
+    # ---- B61 (v1.17.0): Cross-agent config snooping / credential theft ----
+    # detail (UNKNOWN path)
+    "No installed skills found — nothing to inspect for cross-agent snooping.": {
+        "he": "לא נמצאו מיומנויות מותקנות — אין מה לבדוק לריגול בתצורת סוכן אחר.",
+    },
+    # fix (UNKNOWN path) — reuses B13's identical string already in PHRASES above;
+    # no duplicate entry needed here.
+    # fix (FAIL path)
+    "Remove or sandbox any skill that reads foreign-agent config files "
+    "(~/.claude/, ~/.codex/, ~/.gemini/, ~/.openclaw/). "
+    "A legitimate skill only accesses its own files.": {
+        "he": "הסר או בודד כל מיומנות שקוראת קבצי תצורה של סוכן אחר "
+              "(~/.claude/, ~/.codex/, ~/.gemini/, ~/.openclaw/). "
+              "מיומנות לגיטימית ניגשת רק לקבצים שלה.",
+    },
+    # fix (WARN path)
+    "Review the flagged skills. A reference to another agent's config path "
+    "without a read verb may be documentation or coincidental — confirm no "
+    "credential access occurs at runtime.": {
+        "he": "בדוק את המיומנויות המסומנות. הפניה לנתיב תצורה של סוכן אחר "
+              "ללא פועל קריאה עשויה להיות תיעוד או מקרית — ודא שלא מתרחשת "
+              "גישה לפרטי כניסה בזמן ריצה.",
+    },
+    # detail (PASS path)
+    "No cross-agent config snooping patterns found in installed skills.": {
+        "he": "לא נמצאו דפוסי ריגול בתצורת סוכן אחר במיומנויות המותקנות.",
+    },
+    # fix (PASS path)
+    "Ensure installed skills access only their own files and declared resources.": {
+        "he": "וודא שהמיומנויות המותקנות ניגשות רק לקבצים שלהן ולמשאבים המוצהרים.",
     },
 
     # ---- C6 (C-052): hook-composition tool-policy drop (UNKNOWN advisory) ----
@@ -2444,6 +2477,43 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
     raw.append((
         r"(.+): prompt self-replication / propagation directive detected",
         {"he": r"\1: זוהתה הנחיית שכפול-עצמי / הפצה של פרומפט"},
+    ))
+
+    # ---- B61: Cross-agent config snooping / credential theft ----
+    # B61 FAIL detail — whole string: "Cross-agent config snooping detected — skill(s) read another agent's config to steal credentials: <ev>"
+    raw.append((
+        r"Cross-agent config snooping detected — skill\(s\) read another agent's "
+        r"config to steal credentials: (.+)",
+        {"he": r"זוהה ריגול בתצורת סוכן אחר — מיומנות/ות קוראת תצורת סוכן אחר לגניבת פרטי כניסה: \1"},
+    ))
+    # B61 per-skill FAIL evidence: "<skill>: reads foreign-agent config path '<path>' with a read/exfil verb"
+    raw.append((
+        r"(.+): reads foreign-agent config path '(.+)' with a read/exfil verb",
+        {"he": r"\1: קורא נתיב תצורה של סוכן אחר '\2' עם פועל קריאה/דליפה"},
+    ))
+    # B61 WARN detail — whole string: "Foreign-agent config path(s) referenced in installed skill(s): <ev>"
+    raw.append((
+        r"Foreign-agent config path\(s\) referenced in installed skill\(s\): (.+)",
+        {"he": r"נתיב/י תצורה של סוכן אחר מוזכרים במיומנות/ות מותקנת/ות: \1"},
+    ))
+    # B61 per-skill WARN evidence: "<skill>: foreign-agent config path literal '<path>' found (no read verb in context)"
+    raw.append((
+        r"(.+): foreign-agent config path literal '(.+)' found \(no read verb in context\)",
+        {"he": r"\1: נמצא ליטרל נתיב תצורה של סוכן אחר '\2' (ללא פועל קריאה בהקשר)"},
+    ))
+
+    # ---- C-038 TP2: MCP server name obfuscation (suspicious) ----
+    # TP2 per-server evidence (with server-name prefix, as stored in dangerous/suspicious lists):
+    # "<name>: server name contains obfuscation / homoglyph characters (<signals>) — may impersonate a trusted server"
+    raw.append((
+        r"(.+): server name contains obfuscation / homoglyph characters \((.+)\) — may impersonate a trusted server",
+        {"he": r"\1: שם השרת מכיל תווי ערפול / homoglyph (\2) — עלול להתחזות לשרת מהימן"},
+    ))
+    # TP2 bare detail (after vet_mcp strips the server-name prefix):
+    # "server name contains obfuscation / homoglyph characters (<signals>) — may impersonate a trusted server"
+    raw.append((
+        r"server name contains obfuscation / homoglyph characters \((.+)\) — may impersonate a trusted server",
+        {"he": r"שם השרת מכיל תווי ערפול / homoglyph (\1) — עלול להתחזות לשרת מהימן"},
     ))
 
     compiled: list[tuple[re.Pattern[str], dict[str, str]]] = []

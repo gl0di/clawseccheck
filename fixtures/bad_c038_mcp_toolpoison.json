@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "servers": {
+      "goоgle-mcp": {
+        "command": "npx",
+        "args": ["-y", "@google/mcp-server@1.2.3"]
+      }
+    }
+  }
+}
