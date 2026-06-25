@@ -175,4 +175,15 @@ def render_sarif(
             run["properties"] = {}
         run["properties"]["analysis_completeness"] = completeness
 
+        # F-018: per-skill effect profile derived from ctx.effect_profiles.
+        # Each key is a skill name; value is a list of entry-point dicts produced by
+        # simulate_effects (annotated with "file" by check_installed_skills).
+        # Emitted only when at least one skill has a non-empty profile.
+        effect_profiles = getattr(ctx, "effect_profiles", {})
+        if effect_profiles:
+            run["properties"]["effectProfile"] = {
+                skill: list(entries)
+                for skill, entries in effect_profiles.items()
+            }
+
     return json.dumps(sarif_log, ensure_ascii=True, indent=2)

@@ -66,6 +66,11 @@ class Context:
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
     attestation: dict = field(default_factory=dict)  # agent self-report (--attest); see attest.py
 
+    # F-018: per-skill aggregated effect profiles from the abstract effect simulator.
+    # Populated by check_installed_skills; keyed by skill name.
+    # Each value is a list of entry-point result dicts (see skillast.simulate_effects).
+    effect_profiles: dict = field(default_factory=dict)
+
     # Integrity & analysis metadata blocks (CLAWSECCHECK-E-009)
     limit_hits: list[str] = field(default_factory=list)
     mismatches: list[str] = field(default_factory=list)

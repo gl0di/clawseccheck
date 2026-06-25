@@ -20,7 +20,7 @@ from .catalog import (
     ATTESTED, BY_ID, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding,
 )
 from .collector import _OWN_SKILL_NAMES, Context, _read_skill_text, dig, read_skill_python
-from .skillast import analyze_python
+from .skillast import analyze_python, simulate_effects as _simulate_effects
 from .textnorm import normalize_for_scan, obfuscation_signals
 
 
@@ -1807,6 +1807,10 @@ def check_installed_skills(ctx: Context) -> Finding:
         # crit rules (obfuscated exec, getattr/import indirection) FAIL on their own;
         # info rules (plain shell sinks, deserialization) escalate only alongside a
         # credential/exfil signal, so a skill that merely uses subprocess is never failed.
+        # F-018: also run the abstract effect simulator on each Python file and accumulate
+        # the per-entry-point results into ctx.effect_profiles[name].  This is strictly
+        # additive — the simulator result is NEVER used to alter crit/high/verdict.
+        _skill_ep_results: list[dict] = []
         for relpath, src in ctx.installed_skill_py.get(name, []):
             for af in analyze_python(src, relpath):
                 loc = f"{relpath}:{af.lineno}"
@@ -1814,6 +1818,19 @@ def check_installed_skills(ctx: Context) -> Finding:
                     crit.append(f"{name}: {af.reason} ({loc})")
                 elif cred_exfil_signal:
                     high.append(f"{name}: {af.reason} ({loc})")
+            # simulate_effects never raises; guard here too in case of future
+            # refactors or mocking in tests.
+            try:
+                _ep = _simulate_effects(src, relpath)
+            except Exception:  # noqa: BLE001
+                _ep = []
+            for entry in _ep:
+                # Annotate each entry-point record with its source file for traceability.
+                annotated = dict(entry)
+                annotated["file"] = relpath
+                _skill_ep_results.append(annotated)
+        if _skill_ep_results:
+            ctx.effect_profiles[name] = _skill_ep_results
     # C-044: unpinned dependency scan — collect across all skills; WARN severity.
     # Runs after the main CRIT/HIGH loop to avoid polluting the main evidence lists.
     warns_unpinned: list[str] = []
