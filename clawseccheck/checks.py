@@ -5670,7 +5670,7 @@ def check_prompt_self_replication(ctx: Context) -> Finding:
             "No bootstrap files or installed skills found — nothing to inspect for "
             "prompt self-replication directives.",
             "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and installed "
-            "skills exist.",
+            "skills are present.",
         )
 
     evidence: list[str] = []
@@ -6298,6 +6298,147 @@ def check_silent_instruction(ctx: Context) -> Finding:
     )
 
 
+# ---------------------------------------------------------------------------
+# B64 — Instruction-hierarchy override detector (C-076)
+# ---------------------------------------------------------------------------
+#
+# Detects authority override phrases that attempt to bypass system prompts,
+# safety controls, or guidelines (OWASP LLM Top 10, NIST AI 600-1).
+# FAIL on high-confidence override patterns.
+# WARN on weaker signals.
+# PASS when no override patterns found.
+# UNKNOWN when no bootstrap files, installed skills, or MCP tools found.
+#
+# Code-fence dampening is applied so documented examples of attacks
+# do not fire.
+# ---------------------------------------------------------------------------
+
+_B64_HIGH_CONFIDENCE_RE = re.compile(
+    normalize_for_scan(
+        r"(?:"
+        r"ignore\s+(?:all\s+)?(?:your\s+|the\s+)?previous\s+instructions"
+        r"|disregard\s+(?:your\s+)?(?:system\s+)?(?:prompt|instructions)"
+        r"|\[\s*system\s+override\s*\]"
+        r"|\bsystem\s+override\b"
+        r"|pretend\s+(?:you\s+)?(?:have\s+)?no\s+(?:restrictions|limits)"
+        r")"
+    ),
+    re.I
+)
+
+_B64_WEAK_SIGNAL_RE = re.compile(
+    normalize_for_scan(
+        r"(?:"
+        r"you\s+are\s+now\s+(?:in\s+)?developer\s+mode"
+        r"|developer\s+mode\s+(?:enabled|activated)"
+        r"|your\s+new\s+instructions\s+(?:are|will\s+be)"
+        r"|as\s+(?:system\s+)?admin(?:istrator)?\s*,\s*override"
+        r"|override\s+as\s+(?:system\s+)?admin(?:istrator)?"
+        r")"
+    ),
+    re.I
+)
+
+
+def check_instruction_hierarchy_override(ctx: Context) -> Finding:
+    """B64 — Instruction-hierarchy override detector (C-076).
+
+    Scan bootstrap files, installed skills, and MCP tool descriptions for
+    authority override phrases. FAIL on high confidence, WARN on weaker signals.
+    """
+    servers = _mcp_servers(ctx.config)
+    has_tools = False
+    for spec in servers.values():
+        if isinstance(spec.get("tools"), list) and spec["tools"]:
+            has_tools = True
+            break
+
+    if not ctx.bootstrap and not ctx.installed_skills and not has_tools:
+        return _finding(
+            "B64", UNKNOWN,
+            "No bootstrap files, installed skills, or MCP tools found to inspect for "
+            "instruction-hierarchy overrides.",
+            "Run on a host with bootstrap files, installed skills, or configured MCP tools.",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+
+    def add_hits(source_name: str, text: str):
+        norm = normalize_for_scan(text)
+        fr = _fence_ranges(norm)
+        high_spans = []
+        for m in _B64_HIGH_CONFIDENCE_RE.finditer(norm):
+            if _is_code_example(norm, m.start(), fr):
+                continue
+            snippet = m.group().strip()
+            if len(snippet) > 80:
+                snippet = snippet[:77] + "..."
+            fail_ev.append(f"{source_name}: \"{snippet}\"")
+            high_spans.append((m.start(), m.end()))
+
+        for m in _B64_WEAK_SIGNAL_RE.finditer(norm):
+            if _is_code_example(norm, m.start(), fr):
+                continue
+            if any(s <= m.start() < e for s, e in high_spans):
+                continue
+            snippet = m.group().strip()
+            if len(snippet) > 80:
+                snippet = snippet[:77] + "..."
+            warn_ev.append(f"{source_name}: \"{snippet}\"")
+
+    for fname, text in ctx.bootstrap.items():
+        add_hits(fname, text)
+
+    for skill_name, blob in ctx.installed_skills.items():
+        add_hits(skill_name, blob)
+
+    for sname, spec in servers.items():
+        tools = spec.get("tools")
+        if isinstance(tools, list):
+            for tool in tools:
+                if isinstance(tool, dict):
+                    tool_name = str(tool.get("name", "<unnamed>"))
+                    desc = str(tool.get("description", ""))
+                    if desc:
+                        add_hits(f"mcp:{sname}/{tool_name}", desc)
+
+    if fail_ev:
+        ev_summary = "; ".join(fail_ev[:4])
+        extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
+        return _finding(
+            "B64", FAIL,
+            "Instruction-hierarchy override directive(s) detected — the agent is "
+            "instructed to ignore previous instructions or override system controls: "
+            + ev_summary + extra,
+            "Remove all authority override directives. These attempt to bypass system "
+            "prompts, safety controls, or guidelines. Legitimate code, skills, or "
+            "tool definitions should not contain instructions to override system prompts.",
+            fail_ev,
+        )
+
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
+        return _finding(
+            "B64", WARN,
+            "Possible instruction-hierarchy override pattern(s) found (weaker signals — "
+            "may be documentation or ambiguous rules): " + ev_summary + extra,
+            "Review the flagged content. If it is documentation describing attack "
+            "patterns, move it into a fenced code block (```) so it is treated as an "
+            "example. If it is a live directive, remove it.",
+            warn_ev,
+        )
+
+    return _finding(
+        "B64", PASS,
+        "No instruction-hierarchy override directives found in bootstrap files, "
+        "installed skills, or MCP tool descriptions.",
+        "Ensure system guidelines remain primary and cannot be overridden by "
+        "untrusted skills or tool metadata.",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -6326,6 +6467,7 @@ CHECKS = [
     check_agent_snooping,
     check_capability_intent_mismatch,
     check_silent_instruction,
+    check_instruction_hierarchy_override,
 ]
 
 

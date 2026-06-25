@@ -204,6 +204,11 @@ CATALOG: list[CheckMeta] = [
     CheckMeta("B63", "Silent-instruction directive (hidden actions from user)",
               HIGH, "hardening", "Human Oversight / Transparency",
               confidence="HIGH"),
+    # B64 (C-076): Scan bootstrap files, installed skills, and MCP tool descriptions
+    # for authority override phrases. FAIL on high confidence, WARN on weaker signals.
+    CheckMeta("B64", "Instruction-hierarchy override detector",
+              HIGH, "hardening", "Prompt Injection / Instruction Hierarchy",
+              confidence="MEDIUM"),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False),
     CheckMeta("C4", "OpenClaw version / update hygiene", LOW, "advisory", "Patch hygiene", scored=False),

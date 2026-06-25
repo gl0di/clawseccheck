@@ -399,6 +399,7 @@ TITLES: dict[str, dict[str, str]] = {
     "B61": {"he": "ריגול בתצורת סוכן אחר / גניבת פרטי כניסה"},
     "B62": {"he": "אי-התאמה בין יכולות למטרה המוצהרת"},
     "B63": {"he": "הנחיית פעולה סמויה (הסתרת פעולות מהמשתמש)"},
+    "B64": {"he": "גלאי עקיפת היררכיית הנחיות (השתלטות סמנטית)"},
     "C3": {"he": "גיבויים של SOUL.md / זיכרון"},
     "C4": {"he": "גרסת OpenClaw / היגיינת עדכון"},
     "C5": {"he": "בטיחות PATH של בינארי מקומי"},
@@ -847,6 +848,36 @@ PHRASES: dict[str, dict[str, str]] = {
     "withhold information from the user.": {
         "he": "וודא שאין הנחיה שמורה לסוכן להסתיר פעולות, לדכא פלט או להסתיר "
               "מידע מהמשתמש.",
+    },
+
+    # ---- B64 (C-076): Instruction-hierarchy override detector ----
+    # UNKNOWN
+    "No bootstrap files, installed skills, or MCP tools found to inspect for "
+    "instruction-hierarchy overrides.": {
+        "he": "לא נמצאו קובצי bootstrap, מיומנויות מותקנות או כלי MCP לבדיקת עקיפות "
+              "היררכיית הנחיות.",
+    },
+    "Run on a host with bootstrap files, installed skills, or configured MCP tools.": {
+        "he": "הפעל על מארח עם קובצי bootstrap, מיומנויות מותקנות או כלי MCP מוגדרים.",
+    },
+    # FAIL
+    "Remove all authority override directives. These attempt to bypass system "
+    "prompts, safety controls, or guidelines. Legitimate code, skills, or "
+    "tool definitions should not contain instructions to override system prompts.": {
+        "he": "הסר את כל הנחיות עקיפת הסמכות. אלו מנסות לעקוף פרומפטים של המערכת, "
+              "בקרות בטיחות או הנחיות. קוד, מיומנויות או הגדרות כלים לגיטימיים "
+              "אינם אמורים להכיל הנחיות לעקיפת פרומפטים של המערכת.",
+    },
+    # PASS
+    "No instruction-hierarchy override directives found in bootstrap files, "
+    "installed skills, or MCP tool descriptions.": {
+        "he": "לא נמצאו הנחיות לעקיפת היררכיית הנחיות בקובצי bootstrap, מיומנויות "
+              "מותקנות או תיאורי כלי MCP.",
+    },
+    "Ensure system guidelines remain primary and cannot be overridden by "
+    "untrusted skills or tool metadata.": {
+        "he": "וודא שהנחיות המערכת נשארות ראשוניות ואינן יכולות להיעקף על ידי "
+              "מיומנויות לא מהימנות או מטא-נתונים של כלים.",
     },
 
     # ---- F-022: typosquatting — skill/dep name resembles well-known name ----
@@ -2810,6 +2841,20 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
     raw.append((
         r"Possible silent-instruction pattern\(s\) found \(no action context co-located — may be documentation\): (.+)",
         {"he": r"נמצאו דפוסי הנחיות סמויות אפשריים (ללא הקשר פעולה צמוד — ייתכן שמדובר בתיעוד): \1"},
+    ))
+
+    # ---- B64 (C-076): Instruction-hierarchy override detector ----
+    # B64 FAIL detail:
+    # "Instruction-hierarchy override directive(s) detected — the agent is instructed to ignore previous instructions or override system controls: <evidence>"
+    raw.append((
+        r"Instruction-hierarchy override directive\(s\) detected — the agent is instructed to ignore previous instructions or override system controls: (.+)",
+        {"he": r"זוהו הנחיות לעקיפת היררכיית הנחיות — הסוכן מונחה להתעלם מהנחיות קודמות או לעקוף בקרות מערכת: \1"},
+    ))
+    # B64 WARN detail:
+    # "Possible instruction-hierarchy override pattern(s) found (weaker signals — may be documentation or ambiguous rules): <evidence>"
+    raw.append((
+        r"Possible instruction-hierarchy override pattern\(s\) found \(weaker signals — may be documentation or ambiguous rules\): (.+)",
+        {"he": r"נמצאו דפוסים אפשריים לעקיפת היררכיית הנחיות (אותות חלשים — ייתכן שמדובר בתיעוד או בכללים עמומים): \1"},
     ))
 
     # ---- C-038 TP2: MCP server name obfuscation (suspicious) ----
