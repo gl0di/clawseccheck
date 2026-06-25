@@ -3,6 +3,53 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.18.0] — 2026-06-25
+
+Skill-vetting detector batch (SkillSpector-parity, wave 1): nine new
+deterministic, stdlib-only detections deepen `--vet`/B13 and the MCP vet path —
+taint dataflow, malware signatures, supply-chain and persistence checks — plus
+a false-positive reducer so security skills that *document* dangerous patterns
+no longer fail. Still local-only, offline, read-only; FP-prone classes ship
+WARN and `home_safe` produces no new false-positive FAIL.
+
+### Added
+- **Source→sink taint rules (F-005):** the skillast taint engine now catches
+  external-input→exec (command/code injection, absorbing the output-handling
+  class where a tool/LLM result reaches a shell sink), file-read→network, and
+  SSRF (external value → `requests.get`/`urlopen`, escalated on an
+  internal/metadata endpoint literal), with fixpoint propagation through
+  assignments, dict/list packing and f-strings.
+- **Malware-signature classes (C-039):** remote-bootstrap execution
+  (`exec(requests.get(url).text)`, `pip install git+https`) and a new
+  destructive-autonomous class (`rm -rf /`, `git push --force`, `shred`/`dd`
+  co-occurring with an autonomy marker); widened webhook-exfil host list.
+- **Excessive agency + unpinned dependencies (C-044):** auto-approve/auto-exec
+  directives and a skill self-granting `permissions: all` (HIGH); bare/floating
+  dependency pins in a bundle's requirements/pyproject/package.json (WARN).
+- **Runtime-external-fetch instruction (F-021):** flags a skill that tells the
+  agent to fetch its instructions/context from an external URL at runtime
+  (OWASP AST05) — the payload-at-the-URL evasion that static scan misses.
+- **Typosquatting (F-022):** skill or dependency names within Levenshtein
+  distance 2 of a curated list of well-known service/package names (WARN).
+- **MCP least-privilege cross-check (F-007):** when an MCP server declares a
+  narrow `oauth.scope` but its command exercises elevated capabilities, flag
+  the under-declaration on the vet-mcp path.
+- **MCP rug-pull / manifest-drift (F-008):** the baseline snapshot now carries
+  a structured per-server signature; `--monitor` flags post-approval
+  oauth.scope expansion (RP1), command/transport change (RP2), and url
+  endpoint repoint (RP3).
+- **Persistence / rogue-agent detection (C-040):** self-modification
+  (`Path(__file__).write_text`), cron/startup install, and writes to an
+  agent-context file (`SOUL.md`/`CLAUDE.md`/`.claude/settings.json`) as HIGH;
+  daemonizing (`nohup`/`setsid`) as WARN.
+
+### Changed
+- **Code-example FP dampening (C-041):** a dangerous-pattern match inside a
+  Markdown code fence or a negation/example context ("don't run", "for
+  example", "# warning") is treated as documentation and no longer FAILs a
+  skill — guarding the zero-false-positive rule. Base64/PowerShell/AST paths
+  remain unfiltered; live unfenced instructions still FAIL.
+
 ## [1.17.0] — 2026-06-25
 
 Detector pack: a Unicode de-obfuscation pre-pass closes a class of injection
