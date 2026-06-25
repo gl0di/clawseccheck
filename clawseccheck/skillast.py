@@ -52,6 +52,265 @@ _NET_SINK_ATTRS_ANY = {"post", "put", "patch", "urlopen", "request"}
 _NET_SINK_ATTRS_BASED = {"send", "sendall", "sendto", "connect"}
 _NET_SINK_BASES = {"requests", "httpx", "urllib", "socket", "aiohttp", "smtplib", "ftplib", "session"}
 
+# ---------------------------------------------------------------------------
+# Extended taint: TT4 (file-read->network), TT5 (external->exec), SSRF
+# ---------------------------------------------------------------------------
+
+# Call names that signal external/tool/LLM output — conservative, noun-like result vars.
+# A variable assigned from ANY call whose name matches this pattern is treated as tainted.
+_TOOL_RESULT_CALL_RE = re.compile(
+    r"\b(response|result|completion|output|message|reply)\b", re.I)
+
+# Network source attrs: a call to one of these reads data FROM the network.
+_NET_SOURCE_ATTRS = {"get", "urlopen", "urlretrieve", "read", "recv", "recvfrom"}
+_NET_SOURCE_BASES = {"requests", "httpx", "urllib", "urllib.request"}
+
+# Exec/shell sinks for TT5.
+_EXEC_SINK_NAMES = {"exec", "eval"}
+_EXEC_SINK_OS_ATTRS = {"system", "popen"}
+_EXEC_SINK_SUBP_ATTRS = {"run", "call", "check_output", "check_call", "Popen"}
+_EXEC_SINK_BASES_OS = {"os"}
+_EXEC_SINK_BASES_SUBP = {"subprocess"}
+
+# Network-out sinks for TT4 (data-bearing) and SSRF (fetch).
+_NET_OUT_SINK_DATA_ATTRS = {"post", "put", "patch"}
+_NET_OUT_SINK_SEND_ATTRS = {"send", "sendall", "sendto"}
+_NET_OUT_SINK_FETCH_ATTRS = {"get", "urlopen"}  # SSRF sinks
+_NET_OUT_SINK_BASES = {"requests", "httpx", "urllib", "urllib.request",
+                       "socket", "aiohttp", "smtplib", "ftplib", "session"}
+
+# Internal metadata / SSRF-attractive endpoints.
+_SSRF_LITERAL_RE = re.compile(
+    r"169\.254\.169\.254|metadata\.internal|localhost|127\.0\.0\.1|::1", re.I)
+
+# File-read call patterns for TT4 source detection.
+_FILE_READ_METHOD_ATTRS = {"read", "read_text", "readline", "readlines", "read_bytes"}
+_FILE_OPEN_NAMES = {"open"}
+
+
+def _is_external_source_call(node: ast.Call) -> bool:
+    """True if *node* is a call that introduces external/untrusted data."""
+    f = node.func
+    # input()
+    if isinstance(f, ast.Name) and f.id == "input":
+        return True
+    # requests.get / httpx.get / urllib.urlopen — network input.
+    if isinstance(f, ast.Attribute):
+        base = _attr_base(f.value)
+        if f.attr in _NET_SOURCE_ATTRS and base in _NET_SOURCE_BASES:
+            return True
+        # .read() / .read_text() on any file object — file-read source.
+        if f.attr in _FILE_READ_METHOD_ATTRS:
+            return True
+    if isinstance(f, ast.Name) and f.id in _FILE_OPEN_NAMES:
+        return True
+    return False
+
+
+def _is_tool_result_call(node: ast.Call) -> bool:
+    """True if the call's name suggests a model/tool result variable."""
+    f = node.func
+    name = ""
+    if isinstance(f, ast.Name):
+        name = f.id
+    elif isinstance(f, ast.Attribute):
+        name = f.attr
+    return bool(_TOOL_RESULT_CALL_RE.search(name))
+
+
+def _rhs_has_subscript_environ(node: ast.AST) -> bool:
+    """True if *node* is or contains os.environ[...] (subscript form)."""
+    for n in ast.walk(node):
+        if isinstance(n, ast.Subscript):
+            v = n.value
+            if isinstance(v, ast.Attribute) and v.attr == "environ" and _attr_base(v.value) == "os":
+                return True
+            if isinstance(v, ast.Name) and v.id == "environ":
+                return True
+    return False
+
+
+def _rhs_has_fstring_taint(node: ast.AST, tainted: set[str]) -> bool:
+    """True if *node* is an f-string (JoinedStr) containing a tainted name."""
+    for n in ast.walk(node):
+        if isinstance(n, ast.JoinedStr):
+            if _names_in(n) & tainted:
+                return True
+    return False
+
+
+def _value_is_tainted_source(node: ast.AST, tainted: set[str]) -> bool:
+    """True if *node* derives from an external source or a tainted name."""
+    if isinstance(node, ast.Name) and node.id in tainted:
+        return True
+    if isinstance(node, ast.Call):
+        call = node
+        f = call.func
+        # os.getenv
+        if isinstance(f, ast.Attribute) and f.attr == "getenv" and _attr_base(f.value) == "os":
+            return True
+        # environ.get(...)
+        if isinstance(f, ast.Attribute) and f.attr == "get" and _attr_base(f.value) == "environ":
+            return True
+        if _is_external_source_call(call):
+            return True
+        if _is_tool_result_call(call):
+            return True
+        # Recurse into args — catches open(...).read() chain.
+        for child in ast.iter_child_nodes(call):
+            if _value_is_tainted_source(child, tainted):
+                return True
+    else:
+        for child in ast.iter_child_nodes(node):
+            if _value_is_tainted_source(child, tainted):
+                return True
+    return False
+
+
+def _external_tainted_names(tree: ast.AST, func_params: set[str]) -> set[str]:
+    """Compute tainted names for TT4/TT5/SSRF rules.
+
+    Sources: function parameters, os.getenv/os.environ[...], open/read (file),
+    requests.get/urllib.urlopen/httpx.get (network input), input(), tool-result calls.
+    Propagation: assignment, dict/list packing, f-strings, fixpoint up to 6 iterations.
+    """
+    tainted: set[str] = set(func_params)
+    assigns = [n for n in ast.walk(tree) if isinstance(n, (ast.Assign, ast.AugAssign))]
+
+    for _ in range(6):
+        changed = False
+        for a in assigns:
+            rhs = a.value
+            targets = a.targets if isinstance(a, ast.Assign) else [a.target]
+            sourced = (
+                _value_is_tainted_source(rhs, tainted)
+                or _rhs_has_subscript_environ(rhs)
+                or _rhs_has_fstring_taint(rhs, tainted)
+                or bool(_names_in(rhs) & tainted)
+            )
+            if sourced:
+                for t in targets:
+                    if isinstance(t, ast.Name) and t.id not in tainted:
+                        tainted.add(t.id)
+                        changed = True
+                    elif isinstance(t, (ast.Tuple, ast.List)):
+                        for elt in t.elts:
+                            if isinstance(elt, ast.Name) and elt.id not in tainted:
+                                tainted.add(elt.id)
+                                changed = True
+        if not changed:
+            break
+    return tainted
+
+
+def _collect_func_params(tree: ast.AST) -> set[str]:
+    """All argument names of all function definitions in *tree*."""
+    params: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for arg in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
+                params.add(arg.arg)
+            if node.args.vararg:
+                params.add(node.args.vararg.arg)
+            if node.args.kwarg:
+                params.add(node.args.kwarg.arg)
+    return params
+
+
+def _is_exec_sink_call(func: ast.AST) -> tuple:
+    """Return (is_exec_sink, sink_description) for a call node's func."""
+    if isinstance(func, ast.Name) and func.id in _EXEC_SINK_NAMES:
+        return True, func.id
+    if isinstance(func, ast.Attribute):
+        base = _attr_base(func.value)
+        if base in _EXEC_SINK_BASES_OS and func.attr in _EXEC_SINK_OS_ATTRS:
+            return True, "os.{}".format(func.attr)
+        if base in _EXEC_SINK_BASES_SUBP and func.attr in _EXEC_SINK_SUBP_ATTRS:
+            return True, "subprocess.{}".format(func.attr)
+    return False, ""
+
+
+def _is_net_out_data_sink(func: ast.AST) -> tuple:
+    """Return (is_data_net_sink, sink_description) — POST/PUT/PATCH/send* sinks."""
+    if isinstance(func, ast.Attribute):
+        base = _attr_base(func.value)
+        if func.attr in _NET_OUT_SINK_DATA_ATTRS and base in _NET_OUT_SINK_BASES:
+            return True, "{}.{}".format(base, func.attr)
+        if func.attr in _NET_OUT_SINK_SEND_ATTRS and base in _NET_OUT_SINK_BASES:
+            return True, "{}.{}".format(base, func.attr)
+    return False, ""
+
+
+def _is_ssrf_sink_call(func: ast.AST) -> tuple:
+    """Return (is_ssrf_sink, sink_description) — GET/urlopen sinks."""
+    if isinstance(func, ast.Name) and func.id == "urlopen":
+        return True, "urlopen"
+    if isinstance(func, ast.Attribute):
+        base = _attr_base(func.value)
+        if func.attr in _NET_OUT_SINK_FETCH_ATTRS and base in _NET_OUT_SINK_BASES:
+            return True, "{}.{}".format(base, func.attr)
+    return False, ""
+
+
+def _call_args_tainted(node: ast.Call, tainted: set[str]) -> tuple:
+    """Return (any_tainted, first_arg_direct).
+
+    first_arg_direct: first positional arg is a tainted Name directly.
+    """
+    all_args = list(node.args) + [kw.value for kw in node.keywords]
+    any_tainted = False
+    for arg_node in all_args:
+        if _names_in(arg_node) & tainted:
+            any_tainted = True
+            break
+        for sub in ast.walk(arg_node):
+            if isinstance(sub, ast.JoinedStr) and _names_in(sub) & tainted:
+                any_tainted = True
+                break
+        if any_tainted:
+            break
+    direct = bool(node.args and isinstance(node.args[0], ast.Name)
+                  and node.args[0].id in tainted)
+    return any_tainted, direct
+
+
+def _file_read_tainted_names(tree: ast.AST) -> set[str]:
+    """Names whose value derives from a file-read operation (for TT4 source)."""
+    tainted: set[str] = set()
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    for _ in range(4):
+        changed = False
+        for a in assigns:
+            if _names_in(a.value) & tainted or _is_file_read_value(a.value, tainted):
+                for t in a.targets:
+                    if isinstance(t, ast.Name) and t.id not in tainted:
+                        tainted.add(t.id)
+                        changed = True
+        if not changed:
+            break
+    return tainted
+
+
+def _is_file_read_value(node: ast.AST, tainted: set[str]) -> bool:
+    """True if *node* is a file-read expression or references a file-read tainted name."""
+    if isinstance(node, ast.Name) and node.id in tainted:
+        return True
+    if isinstance(node, ast.Call):
+        f = node.func
+        if isinstance(f, ast.Attribute) and f.attr in _FILE_READ_METHOD_ATTRS:
+            return True
+        for child in ast.iter_child_nodes(node):
+            if _is_file_read_value(child, tainted):
+                return True
+    return False
+
+
+def _file_tainted(source: str, tree: ast.AST) -> set[str]:
+    """Pre-filtered file-read taint: only run when the source has an open()/read_text() call."""
+    if "open(" not in source and "read_text" not in source and "read_bytes" not in source:
+        return set()
+    return _file_read_tainted_names(tree)
+
 
 def _has_cred_path_const(node: ast.AST) -> bool:
     """True if the subtree contains a string constant naming a credential file."""
@@ -222,6 +481,60 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                         and (_names_in(node) & cred_tainted)):
                     add("CRED_EXFIL_FLOW", "crit", getattr(node, "lineno", 0),
                         "credential-file contents flow into a network sink (read secret -> send out)")
+
+    # Extended taint rules: TT5 (external-input -> exec), TT4 (file-read -> network),
+    # SSRF (tainted URL -> network-fetch).  Compute external taint once and reuse.
+    func_params = _collect_func_params(tree)
+    ext_tainted = _external_tainted_names(tree, func_params)
+
+    if ext_tainted:
+        for node in ast.walk(tree):
+            if len(out) >= _MAX_FINDINGS_PER_FILE:
+                break
+            if not isinstance(node, ast.Call):
+                continue
+            ln = getattr(node, "lineno", 0)
+
+            # TT5: tainted value flows into exec/eval/os.system/os.popen/subprocess.*
+            is_exec, exec_name = _is_exec_sink_call(node.func)
+            if is_exec:
+                any_t, direct = _call_args_tainted(node, ext_tainted)
+                if any_t:
+                    flow_kind = "direct" if direct else "indirect"
+                    add("TT5_CMD_INJECTION", "crit", ln,
+                        "external input flows into {sink} ({flow} flow) — command/code injection".format(
+                            sink=exec_name, flow=flow_kind))
+                    continue
+
+            # TT4: file-read tainted value flows into a data-bearing network sink.
+            is_net_data, net_name = _is_net_out_data_sink(node.func)
+            if is_net_data:
+                file_t = _file_tainted(source, tree)
+                if file_t:
+                    any_t, direct = _call_args_tainted(node, file_t)
+                    if any_t:
+                        flow_kind = "direct" if direct else "indirect"
+                        add("TT4_FILE_NET", "info", ln,
+                            "file-read contents flow into {sink} ({flow} flow) — data exfiltration risk".format(
+                                sink=net_name, flow=flow_kind))
+                    continue
+
+            # SSRF: externally-tainted value flows into a network-fetch URL argument.
+            is_ssrf_s, ssrf_name = _is_ssrf_sink_call(node.func)
+            if is_ssrf_s:
+                any_t, direct = _call_args_tainted(node, ext_tainted)
+                if any_t:
+                    # Elevate evidence when a literal internal endpoint appears in the file.
+                    has_internal = bool(_SSRF_LITERAL_RE.search(source))
+                    flow_kind = "direct" if direct else "indirect"
+                    if has_internal:
+                        add("TT_SSRF", "info", ln,
+                            "externally-controlled URL flows into {sink} with internal endpoint literal present ({flow} flow) — SSRF".format(
+                                sink=ssrf_name, flow=flow_kind))
+                    else:
+                        add("TT_SSRF", "info", ln,
+                            "externally-controlled URL flows into {sink} ({flow} flow) — SSRF risk".format(
+                                sink=ssrf_name, flow=flow_kind))
 
     return out
 
