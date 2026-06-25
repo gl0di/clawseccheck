@@ -6130,6 +6130,174 @@ def check_capability_intent_mismatch(ctx: Context) -> Finding:
     )
 
 
+# ---------------------------------------------------------------------------
+# B63 — Silent-instruction detector (C-075)
+# ---------------------------------------------------------------------------
+#
+# Detects directives that instruct the agent to hide its actions from the
+# user — undermining human-oversight transparency (OWASP LLM09, NIST AI 600-1
+# §4.2).  These are ALWAYS malicious in a healthy agent setup; no legitimate
+# skill or bootstrap file needs to say "don't tell the user".
+#
+# Detection uses a dual-signal proximity gate:
+#   Signal A — a secrecy/suppression verb phrase ("don't tell", "silently",
+#              "without notifying", "suppress output", "скрой от пользователя")
+#   Signal B — an action/execution context ("execute", "run", "send", "delete",
+#              "exfiltrate", "the user", "пользователю", "output")
+#
+# FAIL  — Signal A + Signal B within _B63_WINDOW chars (positive evidence of
+#         hiding intent with an action target; always malicious).
+# WARN  — Signal A alone, no co-located action context (bare secrecy phrase;
+#         could be documentation — human review needed).
+# PASS  — no silent-instruction patterns found.
+# UNKNOWN — nothing to inspect (no bootstrap, no skills).
+#
+# Code-fence dampening (C-041) is applied so documented examples of attacks
+# do not fire.
+# ---------------------------------------------------------------------------
+
+# Signal A: secrecy / suppression verb phrases.
+_B63_SECRECY_RE = re.compile(
+    normalize_for_scan(
+        r"(?:"
+        # English
+        r"do(?:n'?t|[ ]not)\s+(?:tell|inform|notify|alert|show|reveal|disclose|mention)(?:\s+(?:the\s+)?user)?"
+        r"|(?:without|never)\s+(?:telling|informing|notifying|alerting|showing|revealing|mentioning)"
+        r"|silently\s+(?:execute|run|perform|send|delete|install|download|modify|write|read)"
+        r"|suppress\s+(?:the\s+)?(?:output|response|notification|warning|error|log|message)"
+        r"|hide\s+(?:this|the\s+(?:action|output|result|command|response))\s+(?:from\s+(?:the\s+)?user)"
+        r"|keep\s+(?:this|it)\s+(?:secret|hidden|quiet|private)\s+(?:from\s+(?:the\s+)?user)"
+        r"|(?:invisible|hidden|covert|stealth)\s+(?:mode|execution|operation)"
+        # Russian
+        r"|не\s+(?:сообщай|говори|показывай|уведомляй|информируй)\s+(?:пользовател[юя]|юзер[ау])"
+        r"|скрой\s+(?:от\s+(?:пользовател[яю]|юзер[ау])|это|результат|действи[ея])"
+        r"|(?:тайно|скрытно|незаметно)\s+(?:выполни|запусти|отправь|удали|установи|скачай)"
+        r")"
+    ),
+    re.IGNORECASE,
+)
+
+# Signal B: action / execution context — confirms the secrecy has a target.
+_B63_ACTION_RE = re.compile(
+    normalize_for_scan(
+        r"\b(?:"
+        r"execut[ei]|run|perform|send|delet[ei]|install|download|upload|modify|writ[ei]|read"
+        r"|exfiltrat[ei]|exfil|extract|steal|harvest|collect|forward|relay|transmit"
+        r"|curl|wget|fetch|request|socket|subprocess|os\.system|eval|exec"
+        r"|rm\b|chmod|chown|kill|shutdown|reboot|format"
+        # Russian action verbs
+        r"|выполн[ия]|запуст[ия]|отправ[ья]|удал[ия]|скача[йт]|загруз[ия]|установ[ия]"
+        r")\b"
+    ),
+    re.IGNORECASE,
+)
+
+_B63_WINDOW = 120  # proximity window in characters
+
+
+def _b63_scan(text: str, fence_ranges: list[tuple[int, int]]) -> list[tuple[str, bool]]:
+    """Scan *text* for silent-instruction patterns.
+
+    Returns a list of (snippet, has_action) tuples — one per secrecy-phrase
+    match found outside code fences.  *has_action* is True when Signal B
+    co-occurs within the proximity window.
+    """
+    hits: list[tuple[str, bool]] = []
+    for m in _B63_SECRECY_RE.finditer(text):
+        if _is_code_example(text, m.start(), fence_ranges):
+            continue
+        start = max(0, m.start() - _B63_WINDOW)
+        end = min(len(text), m.end() + _B63_WINDOW)
+        window = text[start:end]
+        has_action = bool(_B63_ACTION_RE.search(window))
+        # Keep a readable snippet for evidence (truncate long matches).
+        snippet = m.group().strip()
+        if len(snippet) > 80:
+            snippet = snippet[:77] + "..."
+        hits.append((snippet, has_action))
+    return hits
+
+
+def check_silent_instruction(ctx: Context) -> Finding:
+    """B63 — Silent-instruction detector (C-075).
+
+    Detects directives that instruct the agent to hide its actions from the
+    user — undermining human-oversight transparency.
+
+    FAIL    — secrecy phrase + action context in close proximity (positive
+              evidence of hiding intent — always malicious).
+    WARN    — bare secrecy phrase without co-located action (may be
+              documentation — flag for human review).
+    PASS    — no silent-instruction patterns found.
+    UNKNOWN — no bootstrap files or installed skills to inspect.
+    """
+    if not ctx.bootstrap and not ctx.installed_skills:
+        return _finding(
+            "B63", UNKNOWN,
+            "No bootstrap files or installed skills found — nothing to inspect for "
+            "silent-instruction directives.",
+            "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and installed "
+            "skills are present.",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+
+    for fname, text in ctx.bootstrap.items():
+        norm = normalize_for_scan(text)
+        fr = _fence_ranges(norm)
+        for snippet, has_action in _b63_scan(norm, fr):
+            tag = f"{fname}: \"{snippet}\""
+            if has_action:
+                fail_ev.append(tag)
+            else:
+                warn_ev.append(tag)
+
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        fr = _fence_ranges(norm)
+        for snippet, has_action in _b63_scan(norm, fr):
+            tag = f"{skill_name}: \"{snippet}\""
+            if has_action:
+                fail_ev.append(tag)
+            else:
+                warn_ev.append(tag)
+
+    if fail_ev:
+        ev_summary = "; ".join(fail_ev[:4])
+        extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
+        return _finding(
+            "B63", FAIL,
+            "Silent-instruction directive(s) detected — the agent is instructed to "
+            "hide actions from the user: " + ev_summary + extra,
+            "Remove ALL directives that instruct the agent to suppress output, hide "
+            "actions, or withhold information from the user. Transparency is a core "
+            "AI safety requirement (OWASP LLM09 / NIST AI 600-1). A legitimate skill "
+            "never needs to say 'don't tell the user'.",
+            fail_ev,
+        )
+
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
+        return _finding(
+            "B63", WARN,
+            "Possible silent-instruction pattern(s) found (no action context "
+            "co-located — may be documentation): " + ev_summary + extra,
+            "Review the flagged content. If it is documentation describing attack "
+            "patterns, move it into a fenced code block (```) so it is treated as an "
+            "example. If it is a live directive, remove it.",
+            warn_ev,
+        )
+
+    return _finding(
+        "B63", PASS,
+        "No silent-instruction directives found in bootstrap files or installed skills.",
+        "Ensure no directive instructs the agent to hide actions, suppress output, or "
+        "withhold information from the user.",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -6157,6 +6325,7 @@ CHECKS = [
     check_prompt_self_replication,
     check_agent_snooping,
     check_capability_intent_mismatch,
+    check_silent_instruction,
 ]
 
 

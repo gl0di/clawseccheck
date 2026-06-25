@@ -398,6 +398,7 @@ TITLES: dict[str, dict[str, str]] = {
     "B60": {"he": "הנחיית שכפול-עצמי של פרומפט / הפצה (ATLAS AML.T0061)"},
     "B61": {"he": "ריגול בתצורת סוכן אחר / גניבת פרטי כניסה"},
     "B62": {"he": "אי-התאמה בין יכולות למטרה המוצהרת"},
+    "B63": {"he": "הנחיית פעולה סמויה (הסתרת פעולות מהמשתמש)"},
     "C3": {"he": "גיבויים של SOUL.md / זיכרון"},
     "C4": {"he": "גרסת OpenClaw / היגיינת עדכון"},
     "C5": {"he": "בטיחות PATH של בינארי מקומי"},
@@ -806,6 +807,46 @@ PHRASES: dict[str, dict[str, str]] = {
     "remains meaningful.": {
         "he": "שמור על דיוק תיאורי SKILL.md ככל שהמיומנויות מתפתחות כדי שבדיקה "
               "זו תישאר משמעותית.",
+    },
+
+    # ---- B63 (C-075): Silent-instruction detector ----
+    # UNKNOWN
+    "No bootstrap files or installed skills found — nothing to inspect for "
+    "silent-instruction directives.": {
+        "he": "לא נמצאו קובצי bootstrap או מיומנויות מותקנות — אין מה לבדוק "
+              "להנחיות פעולה סמויות.",
+    },
+    "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and installed "
+    "skills are present.": {
+        "he": "הפעל על המארח שבו נמצאים SOUL.md/AGENTS.md/TOOLS.md של סביבת העבודה "
+              "ומיומנויות מותקנות.",
+    },
+    # FAIL
+    "Remove ALL directives that instruct the agent to suppress output, hide "
+    "actions, or withhold information from the user. Transparency is a core "
+    "AI safety requirement (OWASP LLM09 / NIST AI 600-1). A legitimate skill "
+    "never needs to say 'don't tell the user'.": {
+        "he": "הסר את כל ההנחיות שמורות לסוכן לדכא פלט, להסתיר פעולות או להסתיר "
+              "מידע מהמשתמש. שקיפות היא דרישת בטיחות AI בסיסית (OWASP LLM09 / "
+              "NIST AI 600-1). מיומנות לגיטימית לעולם לא צריכה לומר 'אל תספר "
+              "למשתמש'.",
+    },
+    # WARN fix
+    "Review the flagged content. If it is documentation describing attack "
+    "patterns, move it into a fenced code block (```) so it is treated as an "
+    "example. If it is a live directive, remove it.": {
+        "he": "סקור את התוכן המסומן. אם מדובר בתיעוד המתאר דפוסי תקיפה, העבר אותו "
+              "לבלוק קוד מגודר (```) כדי שיטופל כדוגמה. אם מדובר בהנחיה פעילה, "
+              "הסר אותה.",
+    },
+    # PASS
+    "No silent-instruction directives found in bootstrap files or installed skills.": {
+        "he": "לא נמצאו הנחיות פעולה סמויות בקובצי bootstrap או במיומנויות מותקנות.",
+    },
+    "Ensure no directive instructs the agent to hide actions, suppress output, or "
+    "withhold information from the user.": {
+        "he": "וודא שאין הנחיה שמורה לסוכן להסתיר פעולות, לדכא פלט או להסתיר "
+              "מידע מהמשתמש.",
     },
 
     # ---- F-022: typosquatting — skill/dep name resembles well-known name ----
@@ -2755,6 +2796,20 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
     raw.append((
         r"(.+): declared as '(.+)' but has reachable (.+) capabilities",
         {"he": r"\1: מוצהר כ-'\2' אך יש לו יכולות \3 נגישות"},
+    ))
+
+    # ---- B63 (C-075): Silent-instruction detector ----
+    # B63 FAIL detail — whole string (the dynamic part is "; "-joined evidence):
+    # "Silent-instruction directive(s) detected — the agent is instructed to hide actions from the user: <evidence>"
+    raw.append((
+        r"Silent-instruction directive\(s\) detected — the agent is instructed to hide actions from the user: (.+)",
+        {"he": r"זוהו הנחיות פעולה סמויות — הסוכן מונחה להסתיר פעולות מהמשתמש: \1"},
+    ))
+    # B63 WARN detail:
+    # "Possible silent-instruction pattern(s) found (no action context co-located — may be documentation): <evidence>"
+    raw.append((
+        r"Possible silent-instruction pattern\(s\) found \(no action context co-located — may be documentation\): (.+)",
+        {"he": r"נמצאו דפוסי הנחיות סמויות אפשריים (ללא הקשר פעולה צמוד — ייתכן שמדובר בתיעוד): \1"},
     ))
 
     # ---- C-038 TP2: MCP server name obfuscation (suspicious) ----

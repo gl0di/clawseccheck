@@ -198,6 +198,12 @@ CATALOG: list[CheckMeta] = [
     CheckMeta("B62", "Capability–intent mismatch (declared purpose vs actual behaviour)",
               MEDIUM, "advisory", "Excessive Agency / Inaccurate Capability Declaration",
               scored=False, confidence="MEDIUM"),
+    # B63 (C-075): Silent-instruction detector — directives that hide agent actions
+    # from the user.  Always malicious (no legit skill says "don't tell the user").
+    # FAIL on secrecy + action co-occurrence; WARN on bare secrecy phrase.
+    CheckMeta("B63", "Silent-instruction directive (hidden actions from user)",
+              HIGH, "hardening", "Human Oversight / Transparency",
+              confidence="HIGH"),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False),
     CheckMeta("C4", "OpenClaw version / update hygiene", LOW, "advisory", "Patch hygiene", scored=False),
@@ -279,6 +285,9 @@ OWASP_MAP = {
     "B57": ("LLM06", "LLM03"),
     # B62: Excessive Agency (LLM06) — skill acts beyond its declared scope.
     "B62": ("LLM06",),
+    # B63: Improper Output Handling (LLM09) / Excessive Agency (LLM06) — hiding
+    # actions from the user undermines transparency and human oversight.
+    "B63": ("LLM09", "LLM06"),
     "C4": ("LLM03",),
     "C5": ("LLM03",),
 }
