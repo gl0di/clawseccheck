@@ -394,6 +394,8 @@ TITLES: dict[str, dict[str, str]] = {
     "B56": {"he": "מדיניות origin מתירנית ל-Control-UI (allowedOrigins \"*\")"},
     "B57": {"he": "אישור אוטומטי של תוסף (permissionMode=approve-all)"},
     "B58": {"he": "הזרקה מעורפלת Unicode / עקיפת טקסט נסתר"},
+    "B59": {"he": "דליפת נתונים דרך תמונת Markdown (URL מרוחק)"},
+    "B60": {"he": "הנחיית שכפול-עצמי של פרומפט / הפצה (ATLAS AML.T0061)"},
     "C3": {"he": "גיבויים של SOUL.md / זיכרון"},
     "C4": {"he": "גרסת OpenClaw / היגיינת עדכון"},
     "C5": {"he": "בטיחות PATH של בינארי מקומי"},
@@ -634,6 +636,71 @@ PHRASES: dict[str, dict[str, str]] = {
     "in ASCII-context prose.": {
         "he": "שמור על קבצי האתחול נקיים מתווים בלתי נראים / בקרת bidi / תווים מבלבלים "
               "בטקסט הקשר ASCII.",
+    },
+
+    # ---- B59 (v1.17.0): Markdown-image data-exfil via remote URL ----
+    # detail (UNKNOWN path)
+    "No bootstrap files or installed skills found — nothing to inspect for "
+    "markdown-image exfiltration.": {
+        "he": "לא נמצאו קבצי אתחול או מיומנויות מותקנות — אין מה לבדוק לדליפת נתונים דרך תמונות Markdown.",
+    },
+    # fix (UNKNOWN path) — distinct from B58's "…skills live." variant
+    "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and installed "
+    "skills are located.": {
+        "he": "הרץ על המארח שבו נמצאים קבצי workspace SOUL.md/AGENTS.md/TOOLS.md "
+              "והמיומנויות המותקנות.",
+    },
+    # fix (WARN path)
+    "Remove or replace image references that include query parameters in bootstrap "
+    "files and installed skills. Use static CDN URLs without query strings, or "
+    "reference images locally.": {
+        "he": "הסר או החלף הפניות לתמונות הכוללות פרמטרי query בקבצי האתחול ובמיומנויות המותקנות. "
+              "השתמש ב-URL של CDN סטטי ללא query string, או הפנה לתמונות מקומיות.",
+    },
+    # detail (PASS path)
+    "No remote image URLs with data-bearing query parameters found in bootstrap "
+    "files or installed skills.": {
+        "he": "לא נמצאו URL-ים של תמונות מרוחקות עם פרמטרי query נושאי נתונים בקבצי האתחול "
+              "או במיומנויות המותקנות.",
+    },
+    # fix (PASS path)
+    "Keep image references free of query parameters unless the URL is a trusted, "
+    "static resource with no data payload.": {
+        "he": "שמור על הפניות לתמונות נקיות מפרמטרי query אלא אם ה-URL הוא משאב סטטי מהימן "
+              "ללא מטען נתונים.",
+    },
+
+    # ---- B60 (v1.17.0): Prompt self-replication / propagation directive ----
+    # detail (UNKNOWN path)
+    "No bootstrap files or installed skills found — nothing to inspect for "
+    "prompt self-replication directives.": {
+        "he": "לא נמצאו קבצי אתחול או מיומנויות מותקנות — אין מה לבדוק להנחיות שכפול-עצמי של פרומפט.",
+    },
+    # fix (UNKNOWN path) — distinct from B58/B59 variants
+    "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and installed "
+    "skills are present.": {
+        "he": "הרץ על המארח שבו נמצאים קבצי workspace SOUL.md/AGENTS.md/TOOLS.md "
+              "והמיומנויות המותקנות.",
+    },
+    # fix (WARN path)
+    "Remove or isolate any instruction that directs the agent to copy its own "
+    "system prompt, inject instructions into replies, write to memory for "
+    "propagation, or forward directives to other agents. Such patterns are a "
+    "hallmark of agentic worm / self-replication attacks.": {
+        "he": "הסר או בודד כל הנחיה המורה לסוכן להעתיק את הפרומפט המערכתי שלו, להזריק הנחיות "
+              "לתשובות, לכתוב לזיכרון לצורך הפצה, או להעביר הנחיות לסוכנים אחרים. דפוסים כאלה "
+              "הם סימן היכר של התקפות תולעת אג'נטיות / שכפול-עצמי.",
+    },
+    # detail (PASS path)
+    "No prompt self-replication or propagation directives found in bootstrap "
+    "files or installed skills.": {
+        "he": "לא נמצאו הנחיות שכפול-עצמי או הפצה של פרומפט בקבצי האתחול או במיומנויות המותקנות.",
+    },
+    # fix (PASS path)
+    "Ensure bootstrap files do not instruct the agent to reproduce or propagate "
+    "its own instructions across replies, memory, or other agents.": {
+        "he": "וודא שקבצי האתחול אינם מורים לסוכן לשכפל או להפיץ את הנחיותיו שלו "
+              "על פני תשובות, זיכרון או סוכנים אחרים.",
     },
 
     # ---- C6 (C-052): hook-composition tool-policy drop (UNKNOWN advisory) ----
@@ -2348,6 +2415,35 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
     raw.append((
         r"(.+): Unicode obfuscation signals present \((.+)\) but no hidden injection detected",
         {"he": r"\1: אותות ערפול Unicode קיימים (\2) אך לא זוהתה הזרקה נסתרת"},
+    ))
+
+    # ---- B59: Markdown-image data-exfil via remote URL ----
+    # B59 WARN detail — whole string: "Remote image URL(s) with data-bearing query parameters found: <ev>"
+    raw.append((
+        r"Remote image URL\(s\) with data-bearing query parameters found: (.+)",
+        {"he": r"נמצאו URL-ים של תמונות מרוחקות עם פרמטרי query נושאי נתונים: \1"},
+    ))
+    # B59 per-item WARN evidence: "<fname>: markdown image URL with query params: <url>"
+    raw.append((
+        r"(.+): markdown image URL with query params: (.+)",
+        {"he": r"\1: URL של תמונת Markdown עם פרמטרי query: \2"},
+    ))
+    # B59 per-item WARN evidence: "<fname>: HTML img src URL with query params: <url>"
+    raw.append((
+        r"(.+): HTML img src URL with query params: (.+)",
+        {"he": r"\1: URL של תמונת HTML img src עם פרמטרי query: \2"},
+    ))
+
+    # ---- B60: Prompt self-replication / propagation directive ----
+    # B60 WARN detail — whole string: "Prompt self-replication directive(s) found (ATLAS AML.T0061): <ev>"
+    raw.append((
+        r"Prompt self-replication directive\(s\) found \(ATLAS AML\.T0061\): (.+)",
+        {"he": r"נמצאו הנחיות שכפול-עצמי של פרומפט (ATLAS AML.T0061): \1"},
+    ))
+    # B60 per-file WARN evidence: "<fname>: prompt self-replication / propagation directive detected"
+    raw.append((
+        r"(.+): prompt self-replication / propagation directive detected",
+        {"he": r"\1: זוהתה הנחיית שכפול-עצמי / הפצה של פרומפט"},
     ))
 
     compiled: list[tuple[re.Pattern[str], dict[str, str]]] = []

@@ -4390,6 +4390,190 @@ def check_unicode_obfuscation(ctx: Context) -> Finding:
     )
 
 
+
+# ---------------------------------------------------------------------------
+# B59 — Markdown-image data-exfil via remote URL
+# ---------------------------------------------------------------------------
+
+# Markdown form: ![alt](https://...?param=...)
+_B59_MD_IMG_RE = re.compile(
+    r"!\[[^\]]*\]\(\s*https?://[^)\s]*[?&][^)\s]*=",
+    re.IGNORECASE,
+)
+# HTML form: <img ... src="https://...?param=...">
+_B59_HTML_IMG_RE = re.compile(
+    r"""<img\b[^>]*\bsrc\s*=\s*["']https?://[^"']*[?&][^"']*=[^"']*["'][^>]*>""",
+    re.IGNORECASE,
+)
+
+
+def check_markdown_image_exfil(ctx: Context) -> Finding:
+    """B59 — Markdown-image data-exfil via remote URL.
+
+    Detects Markdown ![alt](URL) or HTML <img src="URL"> where URL is a remote
+    http(s):// URL AND carries a query string with at least one parameter
+    (``?key=`` or ``&key=``). Such constructs can exfiltrate context data to an
+    attacker-controlled server as the image is fetched.
+
+    WARN  — remote image URL with a data-bearing query string found.
+    PASS  — no such construct detected.
+    UNKNOWN — nothing to inspect.
+    """
+    if not ctx.bootstrap and not ctx.installed_skills:
+        return _finding(
+            "B59", UNKNOWN,
+            "No bootstrap files or installed skills found — nothing to inspect for "
+            "markdown-image exfiltration.",
+            "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and installed "
+            "skills are located.",
+        )
+
+    evidence: list[str] = []
+
+    for fname, text in ctx.bootstrap.items():
+        norm = normalize_for_scan(text)
+        for m in _B59_MD_IMG_RE.finditer(norm):
+            evidence.append(f"{fname}: markdown image URL with query params: {m.group()[:80]}")
+        for m in _B59_HTML_IMG_RE.finditer(norm):
+            evidence.append(f"{fname}: HTML img src URL with query params: {m.group()[:80]}")
+
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        for m in _B59_MD_IMG_RE.finditer(norm):
+            evidence.append(
+                f"{skill_name}: markdown image URL with query params: {m.group()[:80]}"
+            )
+        for m in _B59_HTML_IMG_RE.finditer(norm):
+            evidence.append(
+                f"{skill_name}: HTML img src URL with query params: {m.group()[:80]}"
+            )
+
+    if evidence:
+        return _finding(
+            "B59", WARN,
+            "Remote image URL(s) with data-bearing query parameters found: "
+            + "; ".join(evidence[:4]),
+            "Remove or replace image references that include query parameters in bootstrap "
+            "files and installed skills. Use static CDN URLs without query strings, or "
+            "reference images locally.",
+            evidence,
+        )
+    return _finding(
+        "B59", PASS,
+        "No remote image URLs with data-bearing query parameters found in bootstrap "
+        "files or installed skills.",
+        "Keep image references free of query parameters unless the URL is a trusted, "
+        "static resource with no data payload.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# B60 — Prompt self-replication / propagation directive (ATLAS AML.T0061)
+# ---------------------------------------------------------------------------
+
+# Propagate verbs: append|add|copy|write|inject|insert|include
+_B60_VERB_RE = re.compile(
+    r"\b(append|add|copy|write|inject|insert|include)\b",
+    re.IGNORECASE,
+)
+# Self-reference target patterns (require word "every"/"each"/"all" + output noun)
+_B60_TARGET_EVERY_RE = re.compile(
+    r"\b(to|into)\s+(every|each|all)\s+(reply|response|message|output)\b",
+    re.IGNORECASE,
+)
+# Self-reference to memory / another agent
+_B60_TARGET_AGENT_RE = re.compile(
+    r"\b(into|to)\s+(memory|MEMORY\.md|another\s+agent|other\s+agents|the\s+next\s+agent)\b",
+    re.IGNORECASE,
+)
+# Self-reference to the instructions themselves (reduces FP when target is generic)
+_B60_SELF_REF_RE = re.compile(
+    r"\b(this\s+prompt|these\s+instructions|your\s+system\s+prompt|this\s+system\s+prompt)\b",
+    re.IGNORECASE,
+)
+
+_B60_WINDOW = 80  # proximity window in characters
+
+
+def _b60_has_propagation(text: str) -> bool:
+    """Return True if *text* contains a self-replication directive.
+
+    Requires: a propagate verb AND (a generic every/each/all output target +
+    a self-reference to the instructions, OR a memory/agent propagation target).
+    The conjunction must appear within a ~80-char proximity window.
+    """
+    # Scan for each verb occurrence, then check for a matching target nearby.
+    for vm in _B60_VERB_RE.finditer(text):
+        start = max(0, vm.start() - _B60_WINDOW)
+        end = min(len(text), vm.end() + _B60_WINDOW)
+        window = text[start:end]
+
+        # Agent/memory target — high-confidence signal even without self-ref
+        if _B60_TARGET_AGENT_RE.search(window):
+            return True
+
+        # Generic "every/each/all reply/response" target PLUS a self-reference
+        # to the instructions themselves (to avoid FP on benign templating).
+        if _B60_TARGET_EVERY_RE.search(window) and _B60_SELF_REF_RE.search(window):
+            return True
+
+    return False
+
+
+def check_prompt_self_replication(ctx: Context) -> Finding:
+    """B60 — Prompt self-replication / propagation directive (ATLAS AML.T0061).
+
+    Detects instructions that direct the agent to copy or propagate its own
+    system prompt / instructions to every reply, to memory, or to other agents
+    — a classic self-replication / worm vector.
+
+    WARN  — a propagation directive is detected (NEVER FAIL — highest FP risk).
+    PASS  — no self-replication directive found.
+    UNKNOWN — nothing to inspect.
+    """
+    if not ctx.bootstrap and not ctx.installed_skills:
+        return _finding(
+            "B60", UNKNOWN,
+            "No bootstrap files or installed skills found — nothing to inspect for "
+            "prompt self-replication directives.",
+            "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and installed "
+            "skills are present.",
+        )
+
+    evidence: list[str] = []
+
+    for fname, text in ctx.bootstrap.items():
+        norm = normalize_for_scan(text)
+        if _b60_has_propagation(norm):
+            evidence.append(f"{fname}: prompt self-replication / propagation directive detected")
+
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        if _b60_has_propagation(norm):
+            evidence.append(
+                f"{skill_name}: prompt self-replication / propagation directive detected"
+            )
+
+    if evidence:
+        return _finding(
+            "B60", WARN,
+            "Prompt self-replication directive(s) found (ATLAS AML.T0061): "
+            + "; ".join(evidence[:4]),
+            "Remove or isolate any instruction that directs the agent to copy its own "
+            "system prompt, inject instructions into replies, write to memory for "
+            "propagation, or forward directives to other agents. Such patterns are a "
+            "hallmark of agentic worm / self-replication attacks.",
+            evidence,
+        )
+    return _finding(
+        "B60", PASS,
+        "No prompt self-replication or propagation directives found in bootstrap "
+        "files or installed skills.",
+        "Ensure bootstrap files do not instruct the agent to reproduce or propagate "
+        "its own instructions across replies, memory, or other agents.",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -4413,6 +4597,8 @@ CHECKS = [
     check_controlui_origins, check_plugin_permission_mode,
     check_hook_policy_bypass,
     check_unicode_obfuscation,
+    check_markdown_image_exfil,
+    check_prompt_self_replication,
 ]
 
 

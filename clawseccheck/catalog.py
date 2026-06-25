@@ -175,6 +175,15 @@ CATALOG: list[CheckMeta] = [
     # WARN on obfuscation presence without a confirmed injection (never a false-positive FAIL).
     CheckMeta("B58", "Unicode-obfuscated injection / hidden-text evasion",
               HIGH, "hardening", "Prompt Injection / Unicode Evasion", confidence="MEDIUM"),
+    # B59 (v1.17.0): Markdown/HTML image URLs with data-bearing query params — potential
+    # exfiltration channel (image fetch carries context as query params to remote server).
+    # WARN only — query-param images are common in legit docs; FAIL would risk FP.
+    CheckMeta("B59", "Markdown-image data-exfil via remote URL",
+              MEDIUM, "hardening", "Data Exfiltration / Markdown Injection", confidence="MEDIUM"),
+    # B60 (v1.17.0): Prompt self-replication / propagation directive (ATLAS AML.T0061).
+    # WARN only — highest FP risk among content checks; requires verb + target proximity.
+    CheckMeta("B60", "Prompt self-replication / propagation directive",
+              HIGH, "hardening", "Agentic Worm / Self-Replication", confidence="MEDIUM"),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False),
     CheckMeta("C4", "OpenClaw version / update hygiene", LOW, "advisory", "Patch hygiene", scored=False),
