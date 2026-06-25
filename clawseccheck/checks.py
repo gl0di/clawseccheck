@@ -443,14 +443,21 @@ def check_least_privilege(ctx: Context) -> Finding:
     if dig(cfg, "plugins.allow") is None and _plugins(cfg):
         soft.append("no plugins.allow reachability allowlist (plugins.entries present)")
     # plugins.tools_reachable_policy does NOT exist in OpenClaw schema — removed
+    fixes = []
+    if hard:
+        fixes.append("Restrict tools.elevated.allowFrom to specific provider/sender IDs (no '*')")
+    if profile and profile != "minimal":
+        fixes.append("Set tools.profile to 'minimal'")
+    if dig(cfg, "plugins.allow") is None and _plugins(cfg):
+        fixes.append("Define a plugins.allow array to limit which plugins may load")
+
     if hard:
         return _finding("B3", FAIL, "; ".join(hard + soft),
-                        "Restrict tools.elevated.allowFrom to specific provider/sender IDs "
-                        "(no '*') and define a plugins.allow array to limit which plugins may load.",
+                        "; ".join(fixes),
                         hard + soft)
     if soft:
         return _finding("B3", WARN, "; ".join(soft),
-                        "Define plugins.allow so only specific tools are reachable by plugins.", soft)
+                        "; ".join(fixes), soft)
     return _finding("B3", PASS, "Elevated tools are restricted and tool reachability is constrained.",
                     "Keep least privilege: explicit allowlists only.")
 
@@ -554,12 +561,23 @@ def check_sandbox(ctx: Context) -> Finding:
     # set" WARN below, so a real container-escape signal is not masked just because
     # agents.defaults.sandbox.mode happens to be unset while exec is enabled.
     if ev:
-        return _finding("B4", FAIL, "; ".join(ev),
-                        "Set agents.defaults.sandbox.mode to 'non-main' or 'all', set "
-                        "agents.defaults.sandbox.docker.network to 'bridge' (not 'host'), "
-                        "remove the docker.sock bind from docker.binds (it grants host "
-                        "control to the sandbox), set workspaceAccess to 'none' or 'ro', "
-                        "and remove broad host path binds from docker.binds.", ev)
+        fixes = []
+        if mode == "off":
+            fixes.append("Set agents.defaults.sandbox.mode to 'non-main' or 'all'")
+        if docker_network == "host":
+            fixes.append("Set agents.defaults.sandbox.docker.network to 'bridge' (not 'host')")
+        if binds:
+            if isinstance(binds, list):
+                binds_str = " ".join(str(b) for b in binds)
+            else:
+                binds_str = str(binds)
+            if "docker.sock" in binds_str:
+                fixes.append("Remove the docker.sock bind from docker.binds (it grants host control to the sandbox)")
+            fixes.append("Remove broad host path binds from docker.binds")
+        if workspace_access == "rw":
+            fixes.append("Set workspaceAccess to 'none' or 'ro'")
+
+        return _finding("B4", FAIL, "; ".join(ev), "; ".join(fixes), ev)
     if mode is None and "exec" in _enabled_tools(cfg):
         if phantom_sandbox:
             return _finding("B4", WARN,

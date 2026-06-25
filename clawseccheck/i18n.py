@@ -521,6 +521,16 @@ PHRASES: dict[str, dict[str, str]] = {
     },
 
     # ---- B3: Least Privilege ----
+    # fix (B-025 dynamic fragments)
+    "Restrict tools.elevated.allowFrom to specific provider/sender IDs (no '*')": {
+        "he": "הגבל את tools.elevated.allowFrom למזהי ספק/שולח ספציפיים (ללא '*')",
+    },
+    "Set tools.profile to 'minimal'": {
+        "he": "הגדר את tools.profile ל-'minimal'",
+    },
+    "Define a plugins.allow array to limit which plugins may load": {
+        "he": "הגדר מערך plugins.allow להגבלת התוספים שניתן לטעון",
+    },
     # fix (WARN path — define plugins.allow)
     "Define plugins.allow so only specific tools are reachable by plugins.": {
         "he": "הגדר plugins.allow כך שרק כלים ספציפיים נגישים לתוספים.",
@@ -539,6 +549,22 @@ PHRASES: dict[str, dict[str, str]] = {
     },
 
     # ---- B4: Sandbox ----
+    # fix (B-026 dynamic fragments)
+    "Set agents.defaults.sandbox.mode to 'non-main' or 'all'": {
+        "he": "הגדר agents.defaults.sandbox.mode ל-'non-main' או 'all'",
+    },
+    "Set agents.defaults.sandbox.docker.network to 'bridge' (not 'host')": {
+        "he": "הגדר agents.defaults.sandbox.docker.network ל-'bridge' (לא 'host')",
+    },
+    "Remove the docker.sock bind from docker.binds (it grants host control to the sandbox)": {
+        "he": "הסר את עיגון docker.sock מ-docker.binds (הוא מעניק שליטת מארח ל-sandbox)",
+    },
+    "Remove broad host path binds from docker.binds": {
+        "he": "הסר קישורי נתיבי מארח רחבים מ-docker.binds",
+    },
+    "Set workspaceAccess to 'none' or 'ro'": {
+        "he": "הגדר workspaceAccess ל-'none' או 'ro'",
+    },
     # fix (WARN path — exec but no sandbox set)
     "Set agents.defaults.sandbox.mode (e.g. 'non-main' or 'all') and "
     "configure agents.defaults.sandbox.docker for network isolation.": {
