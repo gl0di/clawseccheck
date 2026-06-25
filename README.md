@@ -178,6 +178,25 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
   Firewall). LOW severity, **never FAIL**: a missing monitor is a WARN only when the agent is
   high-privilege, otherwise PASS; anything not determinable read-only is `UNKNOWN`. Where it can be
   read without running a command, it distinguishes *enabled* from merely *installed*.
+- **B55 — filesystem-write tool exposure:** advisory warning when broad write-capability (`fs_write`,
+  `apply_patch`) is granted without enough scoping controls.
+- **B56 — dangerous Control-UI cross-origin policy:** flags `allowedOrigins: ["*"]` in control UI config.
+- **B57 — plugin auto-approve:** flags `permissionMode: "approve-all"`, which bypasses explicit
+  per-action confirmation in plugin execution.
+- **B58 — Unicode-obfuscated injection / hidden-text evasion:** detects Unicode confusables, zero-width and
+  bidi controls used to hide injection directives.
+- **B59 — markdown-image / anchor data-exfil signals:** flags remote markdown image/anchor URLs with data-bearing
+  query params that can leak context.
+- **B60 — prompt self-replication / propagation directives:** catches prompt-level instructions that try
+  to make injected content propagate itself.
+- **B61 — cross-agent config snooping / credential theft:** flags cross-agent access to foreign agent
+  identity/config paths combined with extraction capabilities.
+- **B62 — capability–intent mismatch:** detects large drift between SKILL.md declared purpose and actual
+  observed behavior from static and effect profiling.
+- **B63–B66 — instruction hardening checks:** hidden directive / hierarchy override / sleeper trigger /
+  persona-role jailbreak coverage.
+- **C6 — hook-composition policy drop (legacy):** advisory `UNKNOWN` for pre-v2026.6.10 hook chains where
+  policy drop order can behave unexpectedly.
 - **B43 / B44 — capability blast-radius (attestation layer):** the static scan reads config files
   only; it cannot see the agent's *real tool/verb inventory* — config lists tool *names* as opaque
   strings. The attestation layer closes that: `--ask` emits a template the running agent fills with
@@ -396,7 +415,7 @@ Beyond individual checks, ClawSecCheck runs a **risk engine** that looks for dan
 *combinations* — capability chains where two or more co-occurring properties make a
 compromise catastrophic or trivial to execute.
 
-The eleven chains it detects (RISK-01 through RISK-11):
+The highest-risk chains it detects now span **RISK-01 through RISK-16**:
 
 | ID | Severity | Chain |
 |----|----------|-------|
@@ -411,6 +430,10 @@ The eleven chains it detects (RISK-01 through RISK-11):
 | RISK-09 | CRITICAL | Malicious installed skill (B13 fail) → reachable secrets/data → outbound egress → exfiltration |
 | RISK-10 | MEDIUM | Untrusted input → agent can exec/write on host → no host detection (IDS/audit/FIM/EDR) → a breach would be invisible |
 | RISK-11 | HIGH | Cross-agent trifecta reassembly (confused deputy): untrusted-input agent → drives a sensitive-data agent → drives an outbound agent across non-wall delegation edges |
+| RISK-12 | HIGH | Untrusted input + broad/unscoped write capability (B55) → filesystem tamper/persistence |
+| RISK-14 | HIGH | Wildcard-elevated sender + heartbeat → self-escalating autonomy loop |
+| RISK-15 | HIGH | Untrusted context + browser SSRF to private network → metadata/credential exfiltration |
+| RISK-16 | HIGH | RW workspace + host bind + plaintext gateway credential path → control-plane takeover |
 
 Each chain fires **only when every link has positive evidence** — no chain is invented from
 absent or UNKNOWN data, so findings are evidence-gated, which keeps false positives low —
@@ -555,7 +578,7 @@ positives on real configs.
 - **SARIF 2.1.0 output** shape (rule ids = check ids; `properties.confidence` + `.evidence`).
 - **Public Python API:** `clawseccheck.audit(...) -> (ctx, findings, ScoreResult)` and the
   `Finding` field names.
-- **Check IDs** (`A1`, `B1–B54`, `C3–C5`, `RISK-01..10`): an id, once shipped, keeps its meaning.
+- **Check IDs** (`A1`, `B1–B66`, `C3–C6`, `RISK-01..16`): an id, once shipped, keeps its meaning.
 - **Status / confidence vocabularies:** `PASS|WARN|FAIL|UNKNOWN`, `HIGH|MEDIUM|LOW|ATTESTED`.
 - **Scoring bands:** A 90+ · B 80–89 · C 70–79 · D 50–69 · F <50; `UNKNOWN` never scores; advisory
   checks (`scored=False`) never move the grade.
@@ -572,15 +595,12 @@ positives on real configs.
 ## 🚦 Status
 
 Current release **v1.20.4** — the public API contract has been frozen since **1.0.0** (breaking
-CLI / `--json` / SARIF changes require a major bump). Read-only checks
-A1/B1–B26/B30/B31/B32/B33/B38/B39/B41–B44/B48/B50–B54/C3–C5 (incl. write-protection,
-self-modification, approval-bypass, deep MCP, update/pinning hygiene, sender identity strength,
-control-plane mutation reachability, browser/SSRF exposure, session visibility/cross-user leak, a
-**Host Watch Posture** ring — is the machine the agent runs on watched at all: network IDS, host
-audit, file-integrity, EDR, and host firewall — and an **attestation layer** (`--ask`/`--attest`,
+CLI / `--json` / SARIF changes require a major bump). Read-only checks cover
+A1/B1–B66 and C3–C6 (plus advisory `scored=False` layers in B42–B44, B45–B47, B55, B56–B57,
+B58–B66, and the host-watch B50–B54 checks), plus the **attestation layer** (`--ask`/`--attest`,
 with a guided interrogation protocol so the agent self-builds the report; `--attest -` reads stdin)
 that classifies capability-level blast radius from the agent's own self-report: B43 dangerous-verb
-inventory, B44 self-report ⇄ config drift),
+inventory, B44 self-report ⇄ config drift).
 installed-skill malware vetting, baseline suppression + governance, the built-in
 `openclaw security audit` merged in, active injection tests (`--canary`/`--redteam`), a runtime
 dry-run harness (`--dryrun`), HTML report, self-integrity (`--verify-self`), a pip/pipx-installable
@@ -600,7 +620,7 @@ supply-chain gap) — an **expanded agentic red-team suite** (`--redteam`, `--dr
 tool poisoning, MCP-response injection, memory poisoning, multi-agent instruction smuggling,
 approval-bypass via injection, and dirty-input-to-exfil chains across MCP-response, memory, and
 subagent sources — and a **risk engine** (`--risk-paths`): combinational chain detection that
-surfaces the highest-risk capability paths (RISK-01 through RISK-11, incl. a powerful agent on an
+surfaces the highest-risk capability paths (RISK-01 through RISK-16, incl. a powerful agent on an
 unmonitored host and cross-agent trifecta reassembly) without affecting the deterministic A–F score. All checks are grounded against the real OpenClaw schema (verified from
 docs.openclaw.ai and live fleet configs), so they fire on real installations rather than silently
 missing phantom field paths. Every finding also carries a **confidence** (HIGH = a deterministic
