@@ -5,7 +5,6 @@ Checks for directives that instruct the agent to hide its actions from the user.
 from __future__ import annotations
 
 from pathlib import Path
-import pytest
 
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_silent_instruction

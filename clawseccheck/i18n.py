@@ -817,7 +817,7 @@ PHRASES: dict[str, dict[str, str]] = {
               "להנחיות פעולה סמויות.",
     },
     "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and installed "
-    "skills are present.": {
+    "skills exist.": {
         "he": "הפעל על המארח שבו נמצאים SOUL.md/AGENTS.md/TOOLS.md של סביבת העבודה "
               "ומיומנויות מותקנות.",
     },

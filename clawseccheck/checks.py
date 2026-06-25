@@ -5670,7 +5670,7 @@ def check_prompt_self_replication(ctx: Context) -> Finding:
             "No bootstrap files or installed skills found — nothing to inspect for "
             "prompt self-replication directives.",
             "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and installed "
-            "skills are present.",
+            "skills exist.",
         )
 
     evidence: list[str] = []
@@ -6237,7 +6237,7 @@ def check_silent_instruction(ctx: Context) -> Finding:
             "No bootstrap files or installed skills found — nothing to inspect for "
             "silent-instruction directives.",
             "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and installed "
-            "skills are present.",
+            "skills exist.",
         )
 
     fail_ev: list[str] = []
