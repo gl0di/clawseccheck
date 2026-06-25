@@ -3,6 +3,25 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.19.1] — 2026-06-25
+
+Documentation and framing clarity — no behaviour change. Tightens how the skill
+describes itself so an automated marketplace audit is not misled by internal
+phrasing (the scanner cannot tell a security tool's own detection vocabulary
+from a payload; this removes the avoidable signal).
+
+### Changed
+- Neutralised internal "wedge" framing in code comments (`collector.py`,
+  `check_bootstrap_injection` docstring): the bootstrap-content checks are
+  described as filling a coverage gap the native audit leaves, not as a trick.
+- Clarified the **read-only** claim in `SKILL.md`: read-only means it never
+  modifies your OpenClaw setup and sends nothing off-machine; the only writes
+  are your own local report/history under `~/.clawseccheck/`. The default audit
+  is inspection-only and the active tests (`--canary`/`--redteam`/`--dryrun`)
+  are explicitly opt-in, never run unless requested.
+- Made the first-run consent flow explicit: proceed only after the one-line
+  heads-up of what the audit reads; active attack tests run only on request.
+
 ## [1.19.0] — 2026-06-25
 
 Behavioral intent analysis (wave 2): `--vet` now reasons about what a skill

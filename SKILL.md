@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 1.19.0
+version: 1.19.1
 description: Free, local, read-only security self-audit for your own OpenClaw agent. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
 license: MIT
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit","he":"ClawSecCheck — ביקורת אבטחה ל-OpenClaw"},"display_description":{"en":"Free, local, read-only security self-audit for your own OpenClaw agent. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.","he":"כלי חינמי, מקומי וקריאה-בלבד לביקורת אבטחה עצמית של סוכן ה-OpenClaw שלך. נותן ציון A–F, מאתר את הפרצות הדחופות ביותר ומספק תיקונים מוכנים להדבקה. ללא מפתח API — שום מידע לא יוצא מהמחשב שלך."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","read-only","self-audit","sarif"],"he":["אבטחה","ביקורת","סוכני-AI","אבטחת-LLM","זריקת-פרומפט","קריאה-בלבד","OpenClaw"]}}
@@ -17,6 +17,10 @@ Activate when the user says anything like:
 It is **read-only and local** — it inspects, it never changes your setup or reaches the network — so
 it is safe to run on request. Before the first run, tell the user in one line what it will read (their
 OpenClaw config, bootstrap files, and the text of installed skills) so there are no surprises.
+"Read-only" means it never modifies your OpenClaw setup and sends nothing off the machine; the only
+files it writes are your **own** local report and audit history under `~/.clawseccheck/`. The default
+audit is inspection-only — the optional active tests (`--canary`/`--redteam`/`--dryrun`) simulate an
+attack against your *own* agent locally and are **opt-in**, never run unless you ask for them.
 
 ## What ClawSecCheck does (be transparent)
 
@@ -67,7 +71,8 @@ Give a 2-3 line welcome before running:
 > "I can check your agent's security, watch for changes, and test it against real attack patterns
 > — all locally, nothing leaves your machine. Let me run a quick scan now."
 
-Then proceed to Step 2 immediately (no need to wait for the user to say yes).
+After that one-line heads-up, proceed to Step 2 — the default scan is read-only and local, so it does
+not need an explicit "yes". (The optional active attack tests below are opt-in and run only on request.)
 
 ### Step 2 — Run the audit
 

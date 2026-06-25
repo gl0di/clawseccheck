@@ -605,7 +605,7 @@ def check_supply_chain(ctx: Context) -> Finding:
 
 
 def check_bootstrap_injection(ctx: Context) -> Finding:
-    """THE WEDGE: native audit does NOT scan bootstrap-file content."""
+    """Coverage gap: the native audit does not scan bootstrap-file content; this check does."""
     if not ctx.bootstrap:
         return _finding("B6", UNKNOWN, "No bootstrap files found to inspect.",
                         "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md live.")

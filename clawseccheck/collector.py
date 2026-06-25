@@ -19,7 +19,8 @@ from pathlib import Path
 from .safeio import walk_dir_safely, is_safe_tar_member
 
 # Bootstrap / prompt files injected into the system prompt as "trusted context".
-# The native `openclaw security audit` does NOT scan these -> our wedge (B6/B7/B9).
+# The native `openclaw security audit` does not inspect these files; checks
+# B6/B7/B9 cover that gap.
 BOOTSTRAP_FILES = [
     "SOUL.md", "AGENTS.md", "TOOLS.md", "MEMORY.md", "IDENTITY.md",
     "USER.md", "HEARTBEAT.md", "BOOTSTRAP.md", "memory.md",
