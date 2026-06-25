@@ -3,6 +3,13 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.20.0] — 2026-06-25
+
+Introduced B63 (Silent-instruction detector) check.
+
+### Added
+- **Silent-instruction detector (B63/C-075):** Detects directives instructing the agent to hide its actions from the user (undermining transparency, OWASP LLM09). Includes proximity detection, code-fence FP dampening, Hebrew/Russian translation, and validation tests.
+
 ## [1.19.3] — 2026-06-25
 
 Automated schema-grounding check to enforce configuration path correctness.
