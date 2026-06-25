@@ -1180,6 +1180,19 @@ PHRASES: dict[str, dict[str, str]] = {
     "credential path and exfil sink both present in skill (split-stage risk)": {
         "he": "נתיב אישורים ויעד הוצאה נוכחים שניהם בכישור (סיכון שלב מפוצל)",
     },
+    # C-039 new B13 evidence label fragments
+    "dangerous wipe: rm -rf / (destructive wipe of entire filesystem)": {
+        "he": "מחיקה מסוכנת: rm -rf / (מחיקת מערכת קבצים שלמה)",
+    },
+    "remote code fetch-and-exec (requests.get/urlopen piped to exec/eval)": {
+        "he": "הורדה והרצת קוד מרחוק (requests.get/urlopen מועבר ל-exec/eval)",
+    },
+    "pip install from git URL (unvetted remote package)": {
+        "he": "pip install מכתובת git (חבילה מרוחקת לא מאומתת)",
+    },
+    "destructive command with autonomy marker (no-confirmation destructive action)": {
+        "he": "פקודה הרסנית עם מחוון אוטונומיה (פעולה הרסנית ללא אישור)",
+    },
 
     # ---- B14: Egress ----
     # fix (PASS path — egress allowlist configured)
@@ -2005,6 +2018,26 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
         (
             r"(.+): credential path and exfil sink both present in skill \(split-stage risk\)",
             {"he": r"\1: נתיב אישורים ויעד הוצאה נוכחים שניהם בכישור (סיכון שלב מפוצל)"},
+        ),
+        # C-039: remote fetch-and-exec evidence fragment
+        (
+            r"(.+): remote code fetch-and-exec \(requests\.get/urlopen piped to exec/eval\)",
+            {"he": r"\1: הורדה והרצת קוד מרחוק (requests.get/urlopen מועבר ל-exec/eval)"},
+        ),
+        # C-039: pip install from git URL evidence fragment
+        (
+            r"(.+): pip install from git URL \(unvetted remote package\)",
+            {"he": r"\1: pip install מכתובת git (חבילה מרוחקת לא מאומתת)"},
+        ),
+        # C-039: destructive command + autonomy marker evidence fragment
+        (
+            r"(.+): destructive command with autonomy marker \(no-confirmation destructive action\)",
+            {"he": r"\1: פקודה הרסנית עם מחוון אוטונומיה (פעולה הרסנית ללא אישור)"},
+        ),
+        # C-039: rm -rf / wipe evidence fragment (CRIT label)
+        (
+            r"(.+): dangerous wipe: rm -rf / \(destructive wipe of entire filesystem\)",
+            {"he": r"\1: מחיקה מסוכנת: rm -rf / (מחיקת מערכת קבצים שלמה)"},
         ),
 
         # ---- B14: egress surface fragments (whole-string forms) ----

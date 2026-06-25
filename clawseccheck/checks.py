@@ -787,13 +787,20 @@ _SKILL_CRIT = [
          r"\b(glot\.io|pastebin\.com|hastebin|transfer\.sh|0x0\.st|webhook\.site|requestbin|"
          r"discord\.com/api/webhooks|api\.telegram\.org/bot|rentry\.co|rentry\.org|"
          r"beeceptor\.com|interactsh\.com|oast\.(?:pro|fun|me|live|site|online)|"
-         r"canarytokens\.(?:com|net|org)|file\.io|localtunnel\.me|trycloudflare\.com)\b",
+         r"canarytokens\.(?:com|net|org)|file\.io|localtunnel\.me|trycloudflare\.com|"
+         r"[a-z0-9-]+\.ngrok(?:-free)?\.(?:io|app)|ngrok\.io|ngrok-free\.app|"
+         r"[a-z0-9-]+\.pipedream\.net|pipedream\.net)\b",
          re.I,
      )),
     ("known stealer malware name",
      re.compile(r"\b(AMOS|Atomic\s*Stealer|RedLine\s*Stealer|Lumma\s*Stealer)\b", re.I)),
     ("password-prompt social engineering",
      re.compile(r"(enter|type)\s+your\s+(mac|login|system|sudo)\s*password|osascript[^\n]{0,80}password|display\s+dialog[^\n]{0,80}password", re.I)),
+    # C-039: rm -rf / (or //) as a bare literal is unambiguously destructive — CRITICAL on its own.
+    # Use (?=\s|$|--) so the match fires when / is followed by whitespace, end-of-string, or
+    # an option flag (e.g. --no-preserve-root); avoids false \b boundary issues after /.
+    ("dangerous wipe: rm -rf / (destructive wipe of entire filesystem)",
+     re.compile(r"\brm\s+-[rR][fF]\s+/+(?=\s|$|--|\Z)|\brm\s+-[fF][rR]\s+/+(?=\s|$|--|\Z)", re.I)),
 ]
 # Credential/secret access is only malicious when EXFILTRATED.
 # Same-line rule: a line that touches a secret path AND ships it out (avoids flagging a
@@ -816,7 +823,8 @@ _EXFIL_RE = re.compile(
     r"glot\.io|webhook\.site|transfer\.sh|pastebin|"
     r"discord\.com/api/webhooks|api\.telegram\.org/bot|rentry\.co|rentry\.org|"
     r"beeceptor\.com|interactsh\.com|oast\.|canarytokens\.|file\.io|"
-    r"localtunnel\.me|trycloudflare\.com",
+    r"localtunnel\.me|trycloudflare\.com|"
+    r"ngrok(?:-free)?\.(?:io|app)|pipedream\.net",
     re.I,
 )
 # HIGH: suspicious but sometimes legitimate — flag for human review, don't hard-fail.
@@ -827,7 +835,40 @@ _SKILL_HIGH = [
      re.compile(r"base64\s+-d[^\n]{0,40}\|\s*(ba)?sh|eval\([^\n]{0,40}(atob|b64decode|base64)", re.I)),
     ("powershell download-and-exec",
      re.compile(r"(iwr|invoke-webrequest)\b[^\n|]{0,200}\|\s*iex|Invoke-Expression", re.I)),
+    # C-039: exec(requests.get(url).text) — downloads and immediately evals arbitrary remote code.
+    ("remote code fetch-and-exec (requests.get/urlopen piped to exec/eval)",
+     re.compile(
+         r"exec\s*\(\s*(?:requests?\.get|urllib\b[^\n]{0,60}urlopen)\s*\([^\n]{0,120}\)\s*"
+         r"(?:\.text|\.read\s*\(\s*\)|\.content\b)",
+         re.I,
+     )),
+    # C-039: pip install git+https:// — installs arbitrary code from an unvetted git ref.
+    ("pip install from git URL (unvetted remote package)",
+     re.compile(r"pip\s+(?:install|install\s+-[^\s]{0,20})\s+git\+https?://", re.I)),
 ]
+# C-039: destructive autonomous actions — HIGH when a destructive command co-occurs with an
+# autonomy marker ("silently", "without asking", "--yes", "--force", "non-interactive", etc.).
+# The bare `rm -rf /` literal is already CRITICAL via _SKILL_CRIT; the patterns here cover
+# the broader class where a human-override directive amplifies a dangerous git/shell command.
+# Bounded quantifiers ({0,120}) keep matching linear against attacker-controlled skill text.
+_DESTRUCTIVE_CMD_RE = re.compile(
+    # rm -rf targeting home or absolute paths is dangerous; rm -rf on relative paths
+    # (./dist, ../build, .) is routine tooling and excluded to avoid false positives.
+    r"\brm\s+-[rR][fF]\s+(?:~(?:/[^\s]{0,80})?|\$HOME\b|\$\{HOME\}[^\n\s]{0,80})|"
+    r"\bgit\s+(?:reset\s+--hard|push\s+(?:--force|-f)\b)|"
+    r"\bhistory\s+-[cC]\b|"
+    r"\bshred\b[^\n]{0,80}|"
+    r"\bmkfs\b[^\n]{0,80}|"
+    r"\bdd\s+if=[^\n]{0,80}of=/dev/",
+    re.I,
+)
+_AUTONOMY_RE = re.compile(
+    r"without\s+asking|silently|non.?interactive|no\s+confirmation|automatically|"
+    r"(?<!\S)--yes\b|(?<!\S)-y\b(?!\w)|without\s+(?:prompting|confirmation|approval)|"
+    r"no\s+prompt",
+    re.I,
+)
+
 # Prompt-injection / approval-bypass directives embedded in a THIRD-PARTY skill's prose
 # (the SkillSpector P1-P8 class). Distinct from B6, which scans the user's OWN bootstrap.
 # A skill that tells the agent to ignore its instructions, hide actions from the user, or
@@ -1186,6 +1227,25 @@ def check_installed_skills(ctx: Context) -> Finding:
         _has_cross = bool(_CRED_RE.search(_blob_nofence) and _EXFIL_RE.search(_blob_nofence))
         if not _has_same_line and _has_cross:
             high.append(f"{name}: credential path and exfil sink both present in skill (split-stage risk)")
+
+        # C-039: destructive + autonomy pattern — HIGH when a destructive shell command
+        # (git reset --hard, git push --force, rm -rf ~, shred, mkfs, dd to /dev/) appears
+        # alongside an autonomy marker in the skill text. Bare rm -rf / is already CRITICAL
+        # via _SKILL_CRIT; this catches the broader class that only becomes dangerous when
+        # the agent is instructed to act without asking.  Fence-aware: skip matches that
+        # are inside documented code-example blocks.
+        if _DESTRUCTIVE_CMD_RE.search(blob) and _AUTONOMY_RE.search(blob):
+            # Confirm neither signal is exclusively inside a fenced documentation block.
+            _has_destructive_live = any(
+                not _is_code_example(blob, m.start(), _fr)
+                for m in _DESTRUCTIVE_CMD_RE.finditer(blob)
+            )
+            _has_autonomy_live = any(
+                not _is_code_example(blob, m.start(), _fr)
+                for m in _AUTONOMY_RE.finditer(blob)
+            )
+            if _has_destructive_live and _has_autonomy_live:
+                high.append(f"{name}: destructive command with autonomy marker (no-confirmation destructive action)")
 
         # Dual-use directives only fire alongside a real cred/exfil signal (zero-FP);
         # the canonical "ignore previous instructions" phrase fires on its own. Co-located
