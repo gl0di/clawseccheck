@@ -383,7 +383,7 @@ def main(argv=None) -> int:
         return 0
 
     if args.json:
-        body = render_json(findings, score, risk=paths)
+        body = render_json(findings, score, risk=paths, ctx=ctx)
     elif args.card:
         body = render_card(score, findings, ascii_only, lang=args.lang)
     else:

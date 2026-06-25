@@ -424,7 +424,8 @@ def render_vet_json(findings: list[Finding], *, mode: str, target: str,
     return json.dumps(payload, ensure_ascii=True, indent=2)
 
 
-def render_json(findings: list[Finding], score: ScoreResult, *, risk=None) -> str:
+def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
+                ctx=None) -> str:
     actions = suggest_actions(findings, score)
     payload: dict = {
         "score": score.score,
@@ -454,6 +455,14 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None) -> st
             }
             for p in risk
         ]
+    # F-020: Structured Attestation Requests — always present in --json output.
+    # Empty list when no B62 mismatches; one entry per mismatch-flagged skill.
+    # Machine-readable only; no Hebrew rendering needed.
+    if ctx is not None:
+        from .sar import build_sars  # noqa: PLC0415
+        payload["intentAttestationRequests"] = build_sars(ctx)
+    else:
+        payload["intentAttestationRequests"] = []
     return json.dumps(payload, ensure_ascii=True, indent=2)
 
 
