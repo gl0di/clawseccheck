@@ -1218,6 +1218,40 @@ PHRASES: dict[str, dict[str, str]] = {
         "he": "הוראת טעינת הנחיות מרחוק בזמן ריצה (OWASP AST05)",
     },
 
+    # ---- C-040: persistence / rogue-agent B13 detectors ----
+    # static evidence label fragments (bare labels, used in PHRASES lookup)
+    "self-modification: skill writes to its own source file (__file__)": {
+        "he": "שינוי עצמי: הכישור כותב לקובץ המקור שלו (__file__)",
+    },
+    "cron/startup persistence: installs a scheduled or boot-time job": {
+        "he": "התמדה דרך cron/הפעלה: מתקין משימה מתוזמנת או משימת אתחול",
+    },
+    "backgrounding/daemonize: skill detaches a persistent subprocess (nohup/disown/setsid)": {
+        "he": "ריצה ברקע/daemonize: הכישור מנתק תהליך ברקע (nohup/disown/setsid)",
+    },
+    # C-040 fix strings — daemonize/backgrounding WARN path
+    # whole string
+    "Review whether the skill legitimately needs a background process; "
+    "a skill that detaches subprocesses (nohup/disown/setsid) can "
+    "establish hidden persistence on the host.": {
+        "he": (
+            "בדוק אם הכישור באמת צריך תהליך ברקע; "
+            "כישור שמנתק תהליכי משנה (nohup/disown/setsid) יכול "
+            "לבסס התמדה סמויה במארח."
+        ),
+    },
+    # C-056 "; "-split fragments of the fix string above
+    "Review whether the skill legitimately needs a background process": {
+        "he": "בדוק אם הכישור באמת צריך תהליך ברקע",
+    },
+    "a skill that detaches subprocesses (nohup/disown/setsid) can "
+    "establish hidden persistence on the host.": {
+        "he": (
+            "כישור שמנתק תהליכי משנה (nohup/disown/setsid) יכול "
+            "לבסס התמדה סמויה במארח."
+        ),
+    },
+
     # ---- B14: Egress ----
     # fix (PASS path — egress allowlist configured)
     "Keep the egress allowlist tight.": {
@@ -2104,6 +2138,34 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
         (
             r"(.+): '([^']+)' name resembles '([^']+)' \(possible typosquat, edit distance (\d+)\)",
             {"he": r"\1: השם '\2' דומה ל-'\3' (חשד לחיקוי, מרחק עריכה \4)"},
+        ),
+
+        # ---- C-040: persistence / rogue-agent B13 detectors ----
+        # C-040: B13 HIGH FAIL — whole-string detail (goes through existing "Suspicious patterns" rule above)
+        # C-040: per-skill HIGH evidence fragment — self-modification
+        (
+            r"(.+): self-modification: skill writes to its own source file \(__file__\)",
+            {"he": r"\1: שינוי עצמי: הכישור כותב לקובץ המקור שלו (__file__)"},
+        ),
+        # C-040: per-skill HIGH evidence fragment — cron/startup persistence
+        (
+            r"(.+): cron/startup persistence: installs a scheduled or boot-time job",
+            {"he": r"\1: התמדה דרך cron/הפעלה: מתקין משימה מתוזמנת או משימת אתחול"},
+        ),
+        # C-040: per-skill HIGH evidence fragment — agent-config injection (filename varies)
+        (
+            r"(.+): agent-config persistence: writes to agent-context file '([^']+)'",
+            {"he": r"\1: הזרקת הנחיות: כותב לקובץ הקשר של הסוכן '\2'"},
+        ),
+        # C-040: per-skill WARN evidence fragment — backgrounding/daemonize
+        (
+            r"(.+): backgrounding/daemonize: skill detaches a persistent subprocess \(nohup/disown/setsid\)",
+            {"he": r"\1: ריצה ברקע/daemonize: הכישור מנתק תהליך ברקע (nohup/disown/setsid)"},
+        ),
+        # C-040: B13 HIGH WARN — whole-string detail for daemonize path
+        (
+            r"Possible persistence/daemonize pattern in installed skill\(s\): (.+)",
+            {"he": r"דפוס התמדה/daemonize אפשרי בכישור/ים מותקנים: \1"},
         ),
 
         # ---- B14: egress surface fragments (whole-string forms) ----

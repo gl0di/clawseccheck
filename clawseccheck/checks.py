@@ -1046,6 +1046,154 @@ _SKILL_HIGH = [
      )),
 ]
 
+# C-040: Persistence / rogue-agent detectors (SkillSpector RA1–RA2 parity).
+#
+# A skill that establishes PERSISTENCE on the host — rewriting its own code, injecting
+# instructions into known agent-context files, installing cron/startup jobs, or
+# daemonizing itself — poses a distinct threat from B61 (cross-agent config READING)
+# and F-005 (data exfiltration): it survives removal / agent restarts and turns the
+# host into a persistent beachhead.
+#
+# HIGH (hard FAIL alongside the rest of _SKILL_HIGH):
+#   - self-modification:      a skill writing to __file__ at runtime
+#   - agent-config injection: writing to known agent-context files (SOUL.md, MEMORY.md,
+#                              CLAUDE.md, AGENTS.md, .claude/settings.json, openclaw.json,
+#                              ~/.bashrc / ~/.zshrc / ~/.profile)
+#   - cron/startup install:   crontab -e/-l, @reboot, systemctl enable, launchctl load,
+#                              /etc/cron.* or ~/Library/LaunchAgents writes
+#
+# WARN (lower-confidence, backgrounding / daemonize):
+#   - nohup … &, disown, setsid — a skill detaching a process from the terminal
+#
+# Conservative gating: a skill that merely writes to its OWN data file (open("out.json","w"))
+# and mentions "cron" in documentation prose must stay clean.  The self-mod pattern fires
+# ONLY when the write target is literally `__file__`; the agent-config pattern fires ONLY
+# when a known context-file NAME appears in a write-mode open/write_text call; the cron
+# pattern fires on scheduling verbs + cron paths, not bare cron mentions.
+#
+# C-041 _is_code_example is applied so documented anti-patterns stay clean.
+
+# Agent-context filenames whose presence in a write-mode context is a persistence signal.
+# Grounded against real agent config layouts (OpenClaw, Claude Code, CodexCLI).
+_AGENT_CONTEXT_FILES_RE = re.compile(
+    r"""(?:
+        SOUL\.md | MEMORY\.md | CLAUDE\.md | AGENTS\.md |
+        \.claude/settings\.json |
+        openclaw\.json |
+        ~/?\.(bashrc|zshrc|profile|bash_profile|zprofile|bash_login) |
+        /etc/environment
+    )""",
+    re.I | re.VERBOSE,
+)
+
+# Self-modification: writing to `__file__` at runtime.
+# Patterns: Path(__file__).write_text(, open(__file__, 'w'), open(__file__, "a"),
+#           __file__.write_text, f=open(__file__,  (with any spacing)
+_SELF_MOD_RE = re.compile(
+    r"""(?:
+        Path\s*\(\s*__file__\s*\)\s*\.write_text\s*\( |
+        open\s*\(\s*__file__\s*,\s*['"][wa]['"] |
+        __file__\s*[,)]\s*['"][wa]['"]
+    )""",
+    re.I | re.VERBOSE,
+)
+
+# Write-mode open / write_text in proximity to an agent-context filename.
+# Two-step: first find the agent-context filename; then check within ±_PERSIST_WINDOW
+# chars for a write verb.  The write verb is NOT "open" alone (read-opens are fine);
+# it must be open(..., 'w'/'a'), .write_text(, .write(, >> (shell redirect), or
+# pathlib write_bytes/write_text.
+_PERSIST_WRITE_VERB_RE = re.compile(
+    r"""(?:
+        open\s*\([^)]{0,120}[,\s]['"][wa]['"] |   # open(..., 'w') or open(..., 'a')
+        \.write_text\s*\(                        |  # pathlib .write_text(
+        \.write_bytes\s*\(                       |  # pathlib .write_bytes(
+        \.write\s*\(                             |  # fileobj.write(
+        >>\s*\S                                  |  # shell append >>
+        >\s*\S                                      # shell overwrite >
+    )""",
+    re.I | re.VERBOSE,
+)
+
+# Cron/startup persistence: scheduling a command that runs at login or reboot.
+# Grounded: crontab -e / crontab <file, @reboot inside a cron entry, systemctl enable,
+# launchctl load, writes to /etc/cron.* paths or ~/Library/LaunchAgents.
+# Conservative: "crontab -l" (read-only listing) is excluded; bare "cron" in prose
+# (e.g., "runs daily via cron") does NOT fire — must be an action verb context.
+_CRON_PERSIST_RE = re.compile(
+    r"""(?:
+        crontab\s+-[eur]\b                          |  # crontab -e/-u/-r (not -l)
+        crontab\s+[^-\s]                            |  # crontab <file>
+        @reboot\b                                   |  # cron @reboot directive
+        systemctl\s+enable\b                        |  # systemd persistent enable
+        launchctl\s+load\b                          |  # macOS launchd load
+        /etc/cron\.(?:d|daily|weekly|monthly|hourly)|  # drop into cron dirs
+        Library/LaunchAgents                           # macOS per-user launch agent
+    )""",
+    re.I | re.VERBOSE,
+)
+
+# Backgrounding / daemonize — lower confidence (WARN, not FAIL).
+# nohup CMD &, disown, setsid CMD — detaches a process from the session.
+# Conservative: "nohup" in a doc comment or "disown" in prose must be quiet;
+# we require the shell keyword followed by a command token or whitespace+&.
+_DAEMONIZE_RE = re.compile(
+    r"""(?:
+        \bnohup\s+\S                         |  # nohup <cmd>
+        \bdisown\b                           |  # disown (bash job control)
+        \bsetsid\s+\S                           # setsid <cmd>
+    )""",
+    re.I | re.VERBOSE,
+)
+
+_PERSIST_WINDOW = 200  # chars around agent-context filename to look for a write verb
+
+
+# C-040: persistence/rogue-agent patterns
+# Each tuple: (label, regex)  — consumed in check_installed_skills HIGH loop.
+_SKILL_PERSISTENCE_HIGH = [
+    ("self-modification: skill writes to its own source file (__file__)",
+     _SELF_MOD_RE),
+    ("cron/startup persistence: installs a scheduled or boot-time job",
+     _CRON_PERSIST_RE),
+]
+
+# WARN-severity persistence patterns (backgrounding — lower confidence).
+# Tuple: (label, regex)
+_SKILL_PERSISTENCE_WARN = [
+    ("backgrounding/daemonize: skill detaches a persistent subprocess (nohup/disown/setsid)",
+     _DAEMONIZE_RE),
+]
+
+
+def _agent_config_write_hits(name: str, blob: str,
+                              fence_ranges: list[tuple[int, int]]) -> list[str]:
+    """Return evidence strings for agent-config-file write patterns in *blob*.
+
+    Two-step detection: (1) find each agent-context filename match outside a
+    code-example fence; (2) confirm a write-mode verb exists within
+    ±_PERSIST_WINDOW chars of the filename match.  This keeps a skill that merely
+    READS (or documents) an agent-context file from tripping the detector.
+    """
+    hits: list[str] = []
+    seen_skills: set[str] = set()
+    for m in _AGENT_CONTEXT_FILES_RE.finditer(blob):
+        if _is_code_example(blob, m.start(), fence_ranges):
+            continue
+        fname = m.group(0)
+        win_start = max(0, m.start() - _PERSIST_WINDOW)
+        win_end = min(len(blob), m.end() + _PERSIST_WINDOW)
+        window = blob[win_start:win_end]
+        if _PERSIST_WRITE_VERB_RE.search(window):
+            key = name
+            if key not in seen_skills:
+                seen_skills.add(key)
+                hits.append(
+                    f"{name}: agent-config persistence: writes to agent-context file '{fname}'"
+                )
+    return hits
+
+
 # F-021: runtime-external-fetch instruction detector (OWASP AST05 "Untrusted External
 # Instructions").  A skill that directs the agent to fetch its own instructions / system
 # prompt / context from an external URL at runtime hides the malicious payload at a
@@ -1547,7 +1695,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         return _custom("B13", HIGH, UNKNOWN,
                        "No installed third-party skills found to inspect.",
                        "Run on the host where installed skills live (~/.openclaw/skills, workspace/skills).")
-    crit, high = [], []
+    crit, high, _persist_warn = [], [], []
     for name, blob in skills.items():
         # C-041: precompute fence ranges once per blob so every check below can
         # skip matches that are purely inside a documented code example.
@@ -1631,6 +1779,30 @@ def check_installed_skills(ctx: Context) -> Finding:
             if rx.search(_blob_norm) and (standalone or cred_exfil_signal):
                 high.append(f"{name}: injection directive — {label}")
 
+        # C-040: persistence / rogue-agent patterns — HIGH (self-mod, cron/startup)
+        # and WARN (backgrounding/daemonize). Fence-aware via _is_code_example.
+        for p_label, p_rx in _SKILL_PERSISTENCE_HIGH:
+            for pm in p_rx.finditer(blob):
+                if not _is_code_example(blob, pm.start(), _fr):
+                    high.append(f"{name}: {p_label}")
+                    break  # one finding per label per skill
+
+        # C-040: agent-config injection (two-step: filename + write-verb in window).
+        for hit in _agent_config_write_hits(name, blob, _fr):
+            high.append(hit)
+
+        # C-040: backgrounding/daemonize — lower confidence → WARN bucket.
+        # We collect into a separate list so they don't escalate to HIGH FAIL.
+        # Stored per-skill in a shared list; returned as WARN after the HIGH check.
+        for p_label, p_rx in _SKILL_PERSISTENCE_WARN:
+            for pm in p_rx.finditer(blob):
+                if not _is_code_example(blob, pm.start(), _fr):
+                    # Append to high for now with a WARN tag — separated at return time.
+                    # Actually: collect separately to keep severity correct.
+                    # We use a dedicated collector defined just below.
+                    _persist_warn.append(f"{name}: {p_label}")
+                    break
+
         # AST analysis of the skill's Python files — catches obfuscation regex misses.
         # crit rules (obfuscated exec, getattr/import indirection) FAIL on their own;
         # info rules (plain shell sinks, deserialization) escalate only alongside a
@@ -1661,6 +1833,17 @@ def check_installed_skills(ctx: Context) -> Finding:
                        "Suspicious patterns in installed skill(s): " + "; ".join(high[:6]),
                        "Review the flagged skills' source before trusting them; prefer pinned, "
                        "signed, VirusTotal-clean releases.", high)
+
+    # C-040: backgrounding/daemonize — lower confidence WARN (nohup/disown/setsid).
+    # Only reached when no CRIT/HIGH patterns fired; a skill that also has a CRIT/HIGH
+    # signal is already captured above and this path is not reached.
+    if _persist_warn:
+        return _custom("B13", HIGH, WARN,
+                       "Possible persistence/daemonize pattern in installed skill(s): "
+                       + "; ".join(_persist_warn[:6]),
+                       "Review whether the skill legitimately needs a background process; "
+                       "a skill that detaches subprocesses (nohup/disown/setsid) can "
+                       "establish hidden persistence on the host.", _persist_warn)
 
     # Path traversal check
     if getattr(ctx, "path_traversal_violations", None):
