@@ -571,7 +571,7 @@ positives on real configs.
 
 ## 🚦 Status
 
-Current release **v1.8.0** — the public API contract has been frozen since **1.0.0** (breaking
+Current release **v1.20.4** — the public API contract has been frozen since **1.0.0** (breaking
 CLI / `--json` / SARIF changes require a major bump). Read-only checks
 A1/B1–B26/B30/B31/B32/B33/B38/B39/B41–B44/B48/B50–B54/C3–C5 (incl. write-protection,
 self-modification, approval-bypass, deep MCP, update/pinning hygiene, sender identity strength,
