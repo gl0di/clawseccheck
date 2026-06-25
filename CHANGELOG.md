@@ -3,6 +3,20 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.20.3] — 2026-06-25
+
+Hardened installed-skill auditing against parser-bloat and traversal side-effects: capped collection stats and archive reads.
+
+### Added
+- _No new checks added._
+
+### Fixed
+- **B28 / v1:** fixed double collection of installed skill files during scans, which inflated counters and created unnecessary work.
+- **B27 / OOM hardening:** switched archive unpacking to stream-limited reads so oversized ZIP/GZIP/BZ2/XZ members cannot blow memory during `--vet`/`--vet-mcp`.
+
+### Changed
+- Internal decompression/cap constants became stricter and shared for both collector passes.
+
 ## [1.20.2] — 2026-06-25
 
 Enhanced markdown and policy-abuse security coverage for OpenClaw bootstrap and installed skill content; added stronger markdown exfiltration detection and two new C-0xx checks for hidden-trigger behavior and persona-role abuse.
