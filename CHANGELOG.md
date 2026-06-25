@@ -3,6 +3,16 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.19.2] — 2026-06-25
+
+Tailored remediation prose for B3 (least privilege) and B4 (sandbox) checks. Remediations
+are now dynamically constructed to match only the conditions that actually fired for the
+given configuration, avoiding irrelevant or non-actionable suggestions.
+
+### Fixed
+- **B3 least-privilege fix prose (B-025):** Dynamically build the remediation advice based on the active trigger (wildcard allowFrom, tools.profile, or plugins.allow) instead of proposing to define plugins.allow when it is already configured.
+- **B4 sandbox fix prose (B-026):** Dynamically construct the B4 FAIL fix string so that it only suggests configuring or removing docker.* keys (network, binds, workspaceAccess) when they are actually present in the config.
+
 ## [1.19.1] — 2026-06-25
 
 Documentation and framing clarity — no behaviour change. Tightens how the skill
