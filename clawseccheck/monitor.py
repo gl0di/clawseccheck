@@ -49,6 +49,42 @@ def _mcp_sig(ctx) -> dict:
     return out
 
 
+def _mcp_detail_sig(ctx) -> dict:
+    """name -> structured per-server snapshot for rug-pull (RP1-RP3) detection.
+
+    Captures real MCP spec fields (command, args[0], transport, url, env key names,
+    oauth.scope) — confirmed real fields per recon docs §1/§4.  Env VALUES are never
+    stored; only the key names are recorded (SECRET_KEY_RE keys get a ``*``-marker so
+    their presence is visible but no value leaks).
+    """
+    from .checks import SECRET_KEY_RE, _mcp_servers  # noqa: PLC0415
+    out: dict = {}
+    for name, spec in (_mcp_servers(ctx.config) or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        args = spec.get("args") or []
+        args0 = str(args[0]) if isinstance(args, list) and args else ""
+        env = spec.get("env") or {}
+        env_keys: list[str] = []
+        if isinstance(env, dict):
+            for k in env:
+                k_str = str(k)
+                env_keys.append(
+                    k_str + ":*" if SECRET_KEY_RE.search(k_str) else k_str
+                )
+        oauth = spec.get("oauth") or {}
+        oauth_scope = str(oauth.get("scope") or "") if isinstance(oauth, dict) else ""
+        out[name] = {
+            "command": str(spec.get("command") or ""),
+            "args0": args0,
+            "transport": str(spec.get("transport") or ""),
+            "url": str(spec.get("url") or ""),
+            "env_keys": sorted(env_keys),
+            "oauth_scope": oauth_scope,
+        }
+    return out
+
+
 def _channel_sig(ctx) -> dict:
     """name -> hash of a channel's openness/auth signature (drift = openness change)."""
     out, chans = {}, ctx.config.get("channels")
@@ -88,6 +124,9 @@ def snapshot(ctx, findings, score) -> dict:
         # Agent Watch — connection / trust surface, so drift in what the agent is
         # joined to (MCP servers, channels, gateway bind) raises an alert.
         "mcp": _mcp_sig(ctx),
+        # Rug-pull detection (RP1-RP3): per-server structured fields for fine-grained
+        # privilege/transport/endpoint drift analysis (added F-008).
+        "mcp_detail": _mcp_detail_sig(ctx),
         "channels": _channel_sig(ctx),
         "gateway_bind": _gateway_bind(ctx),
     }
@@ -157,6 +196,71 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                                "re-review its transport, secret passthrough and scope."))
         for name in sorted(pm.keys() - cm.keys()):
             alerts.append(("INFO", f"MCP server '{name}' was removed."))
+
+    # --- Rug-pull detection (RP1-RP3): fine-grained MCP server manifest drift ---
+    # Only runs when BOTH snapshots carry the structured mcp_detail key (guarded so an
+    # old snapshot without this key never produces spurious alerts after upgrade).
+    if "mcp_detail" in prev and "mcp_detail" in curr:
+        pd, cd = prev["mcp_detail"], curr["mcp_detail"]
+        for name in sorted(set(pd) & set(cd)):
+            ps, cs = pd[name], cd[name]
+            if not isinstance(ps, dict) or not isinstance(cs, dict):
+                continue
+
+            # RP1 — scope/privilege expansion (HIGH): oauth.scope gained a new token or
+            # was broadened (e.g. read → read+write, or any → */all/admin).
+            p_scope = ps.get("oauth_scope", "")
+            c_scope = cs.get("oauth_scope", "")
+            if p_scope != c_scope and c_scope:
+                p_tokens = set(p_scope.split()) if p_scope else set()
+                c_tokens = set(c_scope.split()) if c_scope else set()
+                gained = c_tokens - p_tokens
+                _BROAD = {"*", "all", "admin", "write", "read:write"}
+                is_broad = any(t.endswith(("*", ":write", ":admin", ":all")) or t in _BROAD
+                               for t in gained)
+                if gained:
+                    sev = "HIGH" if is_broad else "MEDIUM"
+                    alerts.append((sev,
+                                   f"MCP server '{name}' rug-pull RP1: oauth.scope expanded "
+                                   f"'{p_scope}' -> '{c_scope}' (gained: {' '.join(sorted(gained))}) "
+                                   "— server gained privilege post-approval, re-vet it."))
+
+            # RP2 — command/transport change (HIGH): the executable, first arg, or
+            # transport changed — a different thing now runs under the same trusted name.
+            p_transport = ps.get("transport", "")
+            c_transport = cs.get("transport", "")
+            p_cmd = ps.get("command", "")
+            c_cmd = cs.get("command", "")
+            p_args0 = ps.get("args0", "")
+            c_args0 = cs.get("args0", "")
+            transport_changed = p_transport != c_transport
+            cmd_changed = p_cmd != c_cmd
+            args0_changed = p_args0 != c_args0
+            if transport_changed or cmd_changed or args0_changed:
+                parts = []
+                if cmd_changed:
+                    parts.append(f"command '{p_cmd}'->'{c_cmd}'")
+                if args0_changed:
+                    parts.append(f"args[0] '{p_args0}'->'{c_args0}'")
+                if transport_changed:
+                    parts.append(f"transport '{p_transport}'->'{c_transport}'")
+                alerts.append(("HIGH",
+                               f"MCP server '{name}' rug-pull RP2: "
+                               + ", ".join(parts)
+                               + " — a different binary/package/transport now runs under "
+                               "this trusted name, re-vet it."))
+
+            # RP3 — endpoint/default repoint (HIGH): url or env values that look like
+            # endpoints changed.  We snapshot env KEY names only, so this detects an env
+            # var disappearing or appearing; the url field is snapshotted directly.
+            p_url = ps.get("url", "")
+            c_url = cs.get("url", "")
+            if p_url != c_url:
+                # Determine severity: host change is always HIGH; adding/clearing url is HIGH.
+                alerts.append(("HIGH",
+                               f"MCP server '{name}' rug-pull RP3: url repointed "
+                               f"'{p_url}' -> '{c_url}' "
+                               "— trusted endpoint changed, verify the destination."))
 
     if "channels" in prev and "channels" in curr:
         pch, cch = prev["channels"], curr["channels"]

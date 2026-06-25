@@ -140,3 +140,189 @@ def test_monitor_end_to_end_ignore_hash_change(tmp_path):
     alerts = diff(base, snapshot(ctx2, f2, s2))
     assert "HIGH" in _levels(alerts)
     assert any(".clawseccheckignore" in m for _, m in alerts)
+
+
+# ---- F-008: MCP rug-pull / manifest-drift (RP1-RP3) ----
+
+def _make_mcp_snap(servers: dict) -> dict:
+    """Build a minimal snapshot dict with mcp_detail populated from a servers map.
+
+    servers: {name: {command, args0, transport, url, env_keys, oauth_scope}}
+    The mcp key (hash-based) is left empty — RP1-RP3 only uses mcp_detail.
+    """
+    return {
+        "score": 90, "grade": "A",
+        "skills": {}, "bootstrap": {}, "checks": {},
+        "ignore_hash": "",
+        "mcp": {},
+        "mcp_detail": servers,
+    }
+
+
+def test_rugpull_identical_manifest_no_alert():
+    """Identical mcp_detail in both snapshots produces no rug-pull alerts."""
+    detail = {"command": "npx", "args0": "my-mcp", "transport": "",
+              "url": "", "env_keys": [], "oauth_scope": "read"}
+    prev = _make_mcp_snap({"myserver": detail})
+    curr = _make_mcp_snap({"myserver": dict(detail)})
+    alerts = diff(prev, curr)
+    rp_alerts = [(lvl, msg) for lvl, msg in alerts if "rug-pull" in msg]
+    assert rp_alerts == [], f"expected no rug-pull alerts, got: {rp_alerts}"
+
+
+def test_rugpull_rp1_scope_expansion_high_alert():
+    """RP1: oauth.scope gains a write token -> HIGH alert."""
+    prev = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "svc-mcp", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "read",
+    }})
+    curr = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "svc-mcp", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "read write",
+    }})
+    alerts = diff(prev, curr)
+    rp1 = [(lvl, msg) for lvl, msg in alerts if "RP1" in msg]
+    assert rp1, "expected RP1 alert for scope expansion"
+    assert rp1[0][0] == "HIGH", f"expected HIGH severity, got {rp1[0][0]}"
+    assert "write" in rp1[0][1]
+
+
+def test_rugpull_rp1_scope_expansion_new_token_medium():
+    """RP1: oauth.scope gains a new non-broad token -> MEDIUM alert."""
+    prev = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "svc-mcp", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "read",
+    }})
+    curr = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "svc-mcp", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "read files",
+    }})
+    alerts = diff(prev, curr)
+    rp1 = [(lvl, msg) for lvl, msg in alerts if "RP1" in msg]
+    assert rp1, "expected RP1 alert for scope expansion"
+    assert rp1[0][0] == "MEDIUM", f"expected MEDIUM severity for non-broad token, got {rp1[0][0]}"
+
+
+def test_rugpull_rp1_scope_contraction_no_rp1_alert():
+    """RP1: scope SHRINKING (losing a token) does not fire RP1 — only expansion is a rug-pull."""
+    prev = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "svc-mcp", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "read write",
+    }})
+    curr = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "svc-mcp", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "read",
+    }})
+    alerts = diff(prev, curr)
+    rp1 = [(lvl, msg) for lvl, msg in alerts if "RP1" in msg]
+    assert rp1 == [], f"scope shrink should not fire RP1, got: {rp1}"
+
+
+def test_rugpull_rp2_command_change_high_alert():
+    """RP2: command changes -> HIGH alert."""
+    prev = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "trusted-pkg", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "",
+    }})
+    curr = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "evil-pkg", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "",
+    }})
+    alerts = diff(prev, curr)
+    rp2 = [(lvl, msg) for lvl, msg in alerts if "RP2" in msg]
+    assert rp2, "expected RP2 alert for command/args change"
+    assert rp2[0][0] == "HIGH"
+    assert "evil-pkg" in rp2[0][1] or "args" in rp2[0][1]
+
+
+def test_rugpull_rp2_stdio_to_remote_transport_alert():
+    """RP2: stdio -> streamable-http transport change -> HIGH alert."""
+    prev = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "my-mcp", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "",
+    }})
+    curr = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "my-mcp", "transport": "streamable-http",
+        "url": "https://api.example.com/mcp", "env_keys": [], "oauth_scope": "",
+    }})
+    alerts = diff(prev, curr)
+    # RP2 (transport changed) and/or RP3 (url appeared) should fire
+    rp_alerts = [(lvl, msg) for lvl, msg in alerts if "RP2" in msg or "RP3" in msg]
+    assert rp_alerts, "expected RP2/RP3 alert for stdio->remote transition"
+    assert all(lvl == "HIGH" for lvl, _ in rp_alerts)
+
+
+def test_rugpull_rp3_url_repoint_high_alert():
+    """RP3: url host changes -> HIGH alert."""
+    prev = _make_mcp_snap({"svc": {
+        "command": "", "args0": "", "transport": "streamable-http",
+        "url": "https://api.trusted.com/mcp", "env_keys": [], "oauth_scope": "",
+    }})
+    curr = _make_mcp_snap({"svc": {
+        "command": "", "args0": "", "transport": "streamable-http",
+        "url": "https://api.evil.com/mcp", "env_keys": [], "oauth_scope": "",
+    }})
+    alerts = diff(prev, curr)
+    rp3 = [(lvl, msg) for lvl, msg in alerts if "RP3" in msg]
+    assert rp3, "expected RP3 alert for url repoint"
+    assert rp3[0][0] == "HIGH"
+    assert "evil.com" in rp3[0][1] or "trusted.com" in rp3[0][1]
+
+
+def test_rugpull_new_server_is_not_a_rugpull():
+    """A brand-new MCP server appearing is NOT a rug-pull (handled by existing mcp hash diff)."""
+    prev = _make_mcp_snap({})
+    curr = _make_mcp_snap({"newserver": {
+        "command": "npx", "args0": "new-pkg", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "read",
+    }})
+    alerts = diff(prev, curr)
+    rp_alerts = [(lvl, msg) for lvl, msg in alerts if "rug-pull" in msg]
+    assert rp_alerts == [], f"new server should not fire rug-pull, got: {rp_alerts}"
+
+
+def test_rugpull_old_snapshot_without_mcp_detail_no_spurious_alert():
+    """An old snapshot without mcp_detail key never produces RP1-RP3 alerts (upgrade safety)."""
+    prev = {"score": 90, "grade": "A", "skills": {}, "bootstrap": {}, "checks": {},
+            "ignore_hash": "", "mcp": {"svc": "oldhash"}}
+    curr = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "svc-mcp", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "read write",
+    }})
+    alerts = diff(prev, curr)
+    rp_alerts = [(lvl, msg) for lvl, msg in alerts if "rug-pull" in msg]
+    assert rp_alerts == [], f"old snapshot must not trigger rug-pull, got: {rp_alerts}"
+
+
+def test_rugpull_first_run_no_alert():
+    """First run (prev=None) never produces any alert."""
+    curr = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "svc-mcp", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "read write admin",
+    }})
+    assert diff(None, curr) == []
+
+
+def test_snapshot_includes_mcp_detail(tmp_path):
+    """snapshot() includes mcp_detail key with per-server structured fields."""
+    cfg = {"mcp": {"servers": {"myserver": {
+        "command": "npx", "args": ["my-mcp-pkg"],
+        "transport": "", "url": "",
+        "env": {"MY_TOKEN": "secret"},
+        "oauth": {"scope": "read"},
+    }}}}
+    import json as _json
+    (tmp_path / "openclaw.json").write_text(_json.dumps(cfg))
+    ctx, findings, score = audit(tmp_path)
+    snap = snapshot(ctx, findings, score)
+    assert "mcp_detail" in snap
+    detail = snap["mcp_detail"]
+    assert "myserver" in detail
+    s = detail["myserver"]
+    assert s["command"] == "npx"
+    assert s["args0"] == "my-mcp-pkg"
+    assert s["oauth_scope"] == "read"
+    # env keys present but values not stored; secret-shaped keys get :* marker
+    assert any("MY_TOKEN" in k for k in s["env_keys"])
+    # env VALUES must not appear in the snapshot
+    assert "secret" not in _json.dumps(snap)
