@@ -1193,6 +1193,18 @@ PHRASES: dict[str, dict[str, str]] = {
     "destructive command with autonomy marker (no-confirmation destructive action)": {
         "he": "פקודה הרסנית עם מחוון אוטונומיה (פעולה הרסנית ללא אישור)",
     },
+    # C-044 new B13 evidence label fragments
+    "excessive agency: auto-approve/execute directive (skill content)": {
+        "he": "סמכות מוגזמת: הנחיית אישור/ביצוע אוטומטי (תוכן כישור)",
+    },
+    # C-044 fix string for unpinned deps WARN path (whole string + each "; "-split fragment)
+    "Pin all dependencies to exact versions (== X.Y.Z / exact semver) in skill "
+    "manifests to prevent supply-chain hijacking via a malicious package update.": {
+        "he": (
+            "נעץ את כל התלויות לגרסאות מדויקות (== X.Y.Z / semver מדויק) "
+            "במניפסטי הכישור כדי למנוע חטיפת שרשרת אספקה באמצעות עדכון חבילה זדוני."
+        ),
+    },
 
     # ---- B14: Egress ----
     # fix (PASS path — egress allowlist configured)
@@ -2038,6 +2050,31 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
         (
             r"(.+): dangerous wipe: rm -rf / \(destructive wipe of entire filesystem\)",
             {"he": r"\1: מחיקה מסוכנת: rm -rf / (מחיקת מערכת קבצים שלמה)"},
+        ),
+        # C-044: excessive-agency evidence fragment
+        (
+            r"(.+): excessive agency: auto-approve/execute directive \(skill content\)",
+            {"he": r"\1: סמכות מוגזמת: הנחיית אישור/ביצוע אוטומטי (תוכן כישור)"},
+        ),
+        # C-044: B13 HIGH WARN — unpinned deps detail (whole-string form)
+        (
+            r"Unpinned dependencies in installed skill\(s\): (.+)",
+            {"he": r"תלויות לא מוצמדות בכישור/ים מותקנים: \1"},
+        ),
+        # C-044: unpinned deps evidence fragment — requirements.txt
+        (
+            r"(.+): requirements[^:]*: '(.+)' unpinned \(supply-chain SC1\)",
+            {"he": r"\1: requirements: '\2' לא מוצמד (שרשרת אספקה SC1)"},
+        ),
+        # C-044: unpinned deps evidence fragment — package.json
+        (
+            r"(.+): package\.json: '(.+)' unpinned \('(.+)'\) \(supply-chain SC2\)",
+            {"he": r"\1: package.json: '\2' לא מוצמד ('\3') (שרשרת אספקה SC2)"},
+        ),
+        # C-044: unpinned deps evidence fragment — pyproject.toml
+        (
+            r"(.+): pyproject\.toml: '(.+)' unpinned \(supply-chain SC3\)",
+            {"he": r"\1: pyproject.toml: '\2' לא מוצמד (שרשרת אספקה SC3)"},
         ),
 
         # ---- B14: egress surface fragments (whole-string forms) ----

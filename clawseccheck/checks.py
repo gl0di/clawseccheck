@@ -845,7 +845,143 @@ _SKILL_HIGH = [
     # C-039: pip install git+https:// — installs arbitrary code from an unvetted git ref.
     ("pip install from git URL (unvetted remote package)",
      re.compile(r"pip\s+(?:install|install\s+-[^\s]{0,20})\s+git\+https?://", re.I)),
+    # C-044: excessive-agency — skill prose/manifest grants itself wildcard tool access or
+    # auto-approves commands without user confirmation.  This is the SKILL-CONTENT side of
+    # the threat; it is distinct from B48 (config `dangerously*` flags) and B3 (config-level
+    # `tools.elevated.allowFrom="*"`).  Conservative patterns matched against agent-
+    # manipulation phrasing only; ordinary "automatically format output" prose stays clean.
+    #
+    # Pattern 1 — auto-approve / auto-confirm / auto-execute / auto-deploy directive prose.
+    # Must be followed by "all" (or "any" / "every") so "automatically format" doesn't match.
+    ("excessive agency: auto-approve/execute directive (skill content)",
+     re.compile(
+         r"\bauto[_\-]?(?:approve|confirm|execute|deploy)\s+(?:all|any|every)\b|"
+         # "execute arbitrary commands" / "run any code" variants
+         r"\b(?:execute|run)\s+(?:arbitrary|any)\s+(?:commands?|code|scripts?)\b|"
+         # Skill manifest declaring wildcard tool grant: tools: ["*"] / tools: [*] / tools: "*"
+         r"^\s*tools\s*:\s*\[?\s*[\"']?\*[\"']?\s*\]?\s*$|"
+         # permissions: all / permissions: "all"
+         r"^\s*permissions\s*:\s*[\"']?all[\"']?\s*$",
+         re.I | re.MULTILINE,
+     )),
 ]
+# C-044: unpinned dependency patterns — WARN severity (supply-chain SC1-3).
+# Scans the skill blob for manifest sections (requirements.txt, package.json, pyproject.toml)
+# that declare unpinned/floating dependencies — a supply-chain vector where a compromised
+# package update silently delivers malware into the skill bundle on next install.
+# Tomllib (3.11+) is not available on 3.9/3.10; use regex-only approach for 3.9 compat.
+#
+# Recognise the section header injected by _read_skill_text: "# file: <name>\n".
+_MANIFEST_HEADER_RE = re.compile(
+    r"^# file:\s+(?P<name>[^\n]+)\n(?P<body>.*?)(?=^# file:|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+# requirements.txt / constraints.txt / requirements-*.txt:
+# An unpinned line is one that:
+#   - has a bare package name (no version specifier)
+#   - uses >= or > (floating lower bound)
+#   - uses == * (wildcard version)
+#   - uses @latest
+# A pinned line uses == X.Y.Z  (exact pin is clean; range specs are supply-chain risk).
+# Lines starting with # (comments), -r/-c/-e/-i (options), or blank are skipped.
+_REQ_UNPINNED_RE = re.compile(
+    r"^[ \t]*(?!#)(?!-[rcei])(?!\s*$)"          # not comment, option, blank
+    r"([A-Za-z0-9_.\-\[,\]]+)"                   # package name (+ extras)
+    r"(?:"
+    r"\s*$|"                                       # 1. bare (no version)
+    r"\s*>=\s*\S+|"                               # 2. >= (floating lower bound)
+    r"\s*>\s*\S+|"                                # 3. > (strict lower bound)
+    r"\s*==\s*\*|"                                # 4. == * (wildcard)
+    r"\s*@\s*latest"                              # 5. @latest
+    r")",
+    re.MULTILINE | re.IGNORECASE,
+)
+_REQ_PINNED_SUFFIX_RE = re.compile(r"==\s*[0-9]")  # == X.Y.Z exact pin is clean
+
+# package.json dependency values that are unpinned:
+#   "*", "latest", ">=x.y", ">x.y", "x.y" (bare non-pinned semver range)
+_PKG_JSON_UNPINNED_RE = re.compile(
+    r"[\"'](?:dependencies|devDependencies|peerDependencies|optionalDependencies)[\"']\s*:\s*\{[^}]*?",
+    re.DOTALL | re.IGNORECASE,
+)
+# Within a deps block: "pkgname": "<unpinned-value>"
+_PKG_JSON_DEP_RE = re.compile(
+    r"[\"'](?P<pkg>[A-Za-z0-9@/_.\-]+)[\"']\s*:\s*[\"'](?P<ver>[^\"']+)[\"']"
+)
+_PKG_JSON_UNPINNED_VER_RE = re.compile(
+    r"^(?:\*|latest|>=\S+|>\S+)$", re.IGNORECASE
+)
+
+# pyproject.toml [project.dependencies] / [project.optional-dependencies]
+# Conservative: look for lines that look like PEP 508 specifiers without exact pins.
+_PYPROJECT_DEP_SECTION_RE = re.compile(
+    r"\[project(?:\.[^\]]+)?\.dependencies\](?P<body>.*?)(?=\[|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
+_PYPROJECT_DEP_LINE_RE = re.compile(
+    r"^\s*\"?([A-Za-z0-9_.\-\[,\]]+)\"?"
+    r"(?:\s*$|\s*>=\s*\S+|\s*>\s*\S+|\s*==\s*\*|\s*@\s*latest)",
+    re.MULTILINE,
+)
+
+_MANIFEST_FILENAMES = frozenset({
+    "requirements.txt", "requirements-dev.txt", "requirements-test.txt",
+    "constraints.txt", "package.json", "pyproject.toml",
+})
+
+# Pattern prefix that requirements.txt-style filenames match
+_REQS_FILE_RE = re.compile(r"^requirements.*\.txt$|^constraints\.txt$", re.IGNORECASE)
+
+
+def _unpinned_deps_in_skill(name: str, blob: str) -> list[str]:
+    """Return a list of 'filename: pkg (unpinned)' strings found in the skill blob.
+
+    Only looks inside sections that start with '# file: <manifest-filename>' headers
+    (injected by _read_skill_text).  Deliberately conservative: only the manifest-
+    filename types known to carry dependency specs are scanned; all other text is
+    ignored to avoid false positives on skill documentation.
+    """
+    hits: list[str] = []
+    for m in _MANIFEST_HEADER_RE.finditer(blob):
+        fname = m.group("name").strip().lower()
+        body = m.group("body")
+
+        if _REQS_FILE_RE.match(fname):
+            # requirements.txt style
+            for lm in _REQ_UNPINNED_RE.finditer(body):
+                line = lm.group(0).strip()
+                # Skip if the line also contains an exact pin (e.g. pkg>=1,==2.0)
+                if _REQ_PINNED_SUFFIX_RE.search(line):
+                    continue
+                pkg = lm.group(1).rstrip(",[ \t")
+                hits.append(f"{name}: {fname}: '{pkg}' unpinned (supply-chain SC1)")
+
+        elif fname == "package.json":
+            # Scan inside each dependency block
+            for block_m in _PKG_JSON_UNPINNED_RE.finditer(body):
+                block_end = body.find("}", block_m.end())
+                if block_end == -1:
+                    block_end = len(body)
+                block_text = body[block_m.start():block_end + 1]
+                for dep_m in _PKG_JSON_DEP_RE.finditer(block_text):
+                    ver = dep_m.group("ver").strip()
+                    if _PKG_JSON_UNPINNED_VER_RE.match(ver):
+                        pkg = dep_m.group("pkg")
+                        hits.append(f"{name}: package.json: '{pkg}' unpinned ('{ver}') (supply-chain SC2)")
+
+        elif fname == "pyproject.toml":
+            for sec_m in _PYPROJECT_DEP_SECTION_RE.finditer(body):
+                sec_body = sec_m.group("body")
+                for lm in _PYPROJECT_DEP_LINE_RE.finditer(sec_body):
+                    line = lm.group(0).strip()
+                    if _REQ_PINNED_SUFFIX_RE.search(line):
+                        continue
+                    pkg = lm.group(1).rstrip(",[ \t")
+                    hits.append(f"{name}: pyproject.toml: '{pkg}' unpinned (supply-chain SC3)")
+
+    return hits
+
+
 # C-039: destructive autonomous actions — HIGH when a destructive command co-occurs with an
 # autonomy marker ("silently", "without asking", "--yes", "--force", "non-interactive", etc.).
 # The bare `rm -rf /` literal is already CRITICAL via _SKILL_CRIT; the patterns here cover
@@ -1267,6 +1403,11 @@ def check_installed_skills(ctx: Context) -> Finding:
                     crit.append(f"{name}: {af.reason} ({loc})")
                 elif cred_exfil_signal:
                     high.append(f"{name}: {af.reason} ({loc})")
+    # C-044: unpinned dependency scan — collect across all skills; WARN severity.
+    # Runs after the main CRIT/HIGH loop to avoid polluting the main evidence lists.
+    warns_unpinned: list[str] = []
+    for name, blob in skills.items():
+        warns_unpinned.extend(_unpinned_deps_in_skill(name, blob))
     n = len(skills)
     if crit:
         extra = f" (+{len(crit) - 6} more)" if len(crit) > 6 else ""
@@ -1307,6 +1448,15 @@ def check_installed_skills(ctx: Context) -> Finding:
         return _custom("B13", HIGH, WARN,
                        "Warnings in installed skill(s): " + "; ".join(warnings[:6]),
                        "Review the flagged files for extension mismatch, polyglot structures, or unexpected binaries.")
+
+    # C-044: unpinned deps — WARN (supply-chain SC1-3); lower severity than the HIGH/CRIT paths above.
+    if warns_unpinned:
+        extra = f" (+{len(warns_unpinned) - 6} more)" if len(warns_unpinned) > 6 else ""
+        return _custom("B13", HIGH, WARN,
+                       "Unpinned dependencies in installed skill(s): " + "; ".join(warns_unpinned[:6]) + extra,
+                       "Pin all dependencies to exact versions (== X.Y.Z / exact semver) in skill "
+                       "manifests to prevent supply-chain hijacking via a malicious package update.",
+                       warns_unpinned)
 
     return _custom("B13", HIGH, PASS,
                    f"Scanned {n} installed skill(s); no shell-exec / exfiltration / obfuscation "
