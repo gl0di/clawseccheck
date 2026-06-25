@@ -889,6 +889,132 @@ _DECODED_BAD_RE = re.compile(
     r"/bin/(ba|z)?sh|\bcurl\b|\bwget\b|\bnc\b|powershell|invoke-expression|"
     r"https?://\d{1,3}(?:\.\d{1,3}){3}", re.I)
 
+# ---------- C-041: code-example false-positive reducer ----------
+# Fenced code blocks (``` or ~~~) in Markdown skill prose that DOCUMENT a dangerous
+# pattern (e.g. a security skill's own README showing "curl … | sh" as a "don't do
+# this" example) must not cause B13 to FAIL.  We compute fence spans once per blob,
+# then check whether a regex match's start position falls inside a fence or near an
+# explicit negation-context marker.  Conservative: only neutralise when the evidence
+# is clearly illustrative, not live instruction.
+
+# Regex that finds the opening line of a Markdown fence (``` or ~~~, 3+ chars).
+_FENCE_OPEN_RE = re.compile(r"^(?P<fence>`{3,}|~{3,})", re.MULTILINE)
+
+# Words/phrases that mark a negation / example context in the PROSE immediately
+# before the dangerous pattern.  Only the nearest ~200 chars are scanned.
+_NEGATION_RE = re.compile(
+    r"\bfor\s+example\b|e\.g\.|(?:^|\s)#\s*(?:note|warning|danger|bad|example|avoid)\b|"
+    r"\bdo\s+not\b|\bdo\s+NOT\b|\bdon'?t\s+(?:do|run|use|execute)\b|"
+    r"\bnever\s+run\b|\bnever\s+use\b|\bavoid\s+(?:running|using|this)\b|"
+    r"\bexample:\s*$|documentation\b|"
+    r"[✅❌]\s*(?:\*\*)?(?:don|never|avoid|bad|no\b)",
+    re.I | re.MULTILINE,
+)
+_NEGATION_WINDOW = 200  # chars to look back from match start
+
+
+def _fence_ranges(blob: str) -> list[tuple[int, int]]:
+    """Return a list of (start, end) byte positions of fenced code blocks in *blob*.
+
+    A fence opens with a line starting with ``` or ~~~ (3+ chars) and closes with
+    the same fence character repeated.  Unclosed fences extend to end-of-blob.
+    Conservative: only marks spans where the open fence is clearly a Markdown fence
+    (at the start of a line, allowing leading whitespace up to 3 spaces per CommonMark).
+    """
+    ranges: list[tuple[int, int]] = []
+    pos = 0
+    length = len(blob)
+    while pos < length:
+        m = _FENCE_OPEN_RE.search(blob, pos)
+        if m is None:
+            break
+        fence_char = m.group("fence")[0]  # '`' or '~'
+        fence_len = len(m.group("fence"))
+        open_end = m.end()
+        # Advance to end of the opening line.
+        newline = blob.find("\n", open_end)
+        if newline == -1:
+            # Unclosed fence reaching EOF — treat whole tail as fenced.
+            ranges.append((m.start(), length))
+            break
+        # Find the closing fence: a line starting with the same fence char,
+        # at least fence_len of them, on its own line.
+        close_re = re.compile(
+            r"^[^\S\n]{0,3}" + re.escape(fence_char * fence_len) + r"+\s*$",
+            re.MULTILINE,
+        )
+        cm = close_re.search(blob, newline + 1)
+        if cm is None:
+            # Unclosed — treat tail as fenced.
+            ranges.append((m.start(), length))
+            break
+        ranges.append((m.start(), cm.end()))
+        pos = cm.end() + 1
+    return ranges
+
+
+def _in_fence(pos: int, ranges: list[tuple[int, int]]) -> bool:
+    """Return True when *pos* falls inside any of the precomputed fence ranges."""
+    for start, end in ranges:
+        if start <= pos < end:
+            return True
+        if start > pos:
+            break  # ranges are ordered by start position
+    return False
+
+
+def _negation_context(blob: str, pos: int) -> bool:
+    """Return True when the _NEGATION_WINDOW chars before *pos* contain a negation marker."""
+    window_start = max(0, pos - _NEGATION_WINDOW)
+    return bool(_NEGATION_RE.search(blob[window_start:pos]))
+
+
+def _is_code_example(blob: str, pos: int, fence_ranges: list[tuple[int, int]]) -> bool:
+    """Return True when the match at *pos* is clearly a documented example, not a live
+    instruction.  Returns False (keep the finding) when in doubt.
+
+    Criteria (either is sufficient):
+    - The position falls inside a precomputed Markdown fence range.
+    - The _NEGATION_WINDOW chars immediately before the position contain a negation /
+      example marker (e.g. "do not", "e.g.", "# warning:", "avoid running").
+    """
+    return _in_fence(pos, fence_ranges) or _negation_context(blob, pos)
+
+
+def _blank_fences(blob: str, ranges: list[tuple[int, int]]) -> str:
+    """Return a copy of *blob* with each fenced code block replaced by spaces.
+
+    Newlines inside fence spans are preserved so line numbers stay accurate for
+    any downstream use; only non-newline characters are blanked.  This lets the
+    cross-skill cred+exfil detector ignore patterns that only appear inside
+    documentation code examples.
+    """
+    if not ranges:
+        return blob
+    chars = list(blob)
+    for start, end in ranges:
+        for i in range(start, min(end, len(chars))):
+            if chars[i] != "\n":
+                chars[i] = " "
+    return "".join(chars)
+
+
+def _has_cred_exfil_outside_fence(blob: str, fence_ranges: list[tuple[int, int]]) -> bool:
+    """Same-line cred+exfil rule, fence-aware (C-041).
+
+    A line is only considered if its start position is outside every known fence
+    range.  A line that is entirely inside a fenced code block is skipped so that
+    documentation examples do not trigger a CRITICAL finding.
+    """
+    pos = 0
+    for ln in blob.splitlines():
+        ln_start = pos
+        if not _in_fence(ln_start, fence_ranges):
+            if _CRED_RE.search(ln) and _EXFIL_RE.search(ln):
+                return True
+        pos += len(ln) + 1  # +1 for the stripped newline
+    return False
+
 
 def _suspicious_pipe_hosts(blob: str) -> list[str]:
     hosts = []
@@ -1013,35 +1139,63 @@ def check_installed_skills(ctx: Context) -> Finding:
                        "Run on the host where installed skills live (~/.openclaw/skills, workspace/skills).")
     crit, high = [], []
     for name, blob in skills.items():
+        # C-041: precompute fence ranges once per blob so every check below can
+        # skip matches that are purely inside a documented code example.
+        _fr = _fence_ranges(blob)
+
+        # CRIT patterns: iterate all matches; drop those that are code examples.
         for label, rx in _SKILL_CRIT:
-            if rx.search(blob):
-                crit.append(f"{name}: {label}")
-        if _has_cred_exfil(blob):
+            for m in rx.finditer(blob):
+                if not _is_code_example(blob, m.start(), _fr):
+                    crit.append(f"{name}: {label}")
+                    break  # one finding per label per skill is enough
+
+        # Same-line cred+exfil: skip lines that fall entirely inside a fence.
+        if _has_cred_exfil_outside_fence(blob, _fr):
             crit.append(f"{name}: secret/credential exfiltration (same-line)")
+
         for payload in _decoded_payloads(blob):
             # Redact before the preview enters the finding — the decoded bytes are
             # attacker-controlled and may contain secret-shaped strings (H2).
+            # Base64/PS-EncodedCommand payloads are NOT prose examples; no FP filter.
             crit.append(f"{name}: hidden base64 payload -> '{_redact(payload)}'")
         for payload in _powershell_encoded_payloads(blob):
             crit.append(f"{name}: {_redact(payload)}")
+
+        # HIGH patterns: same fence-aware approach.
         for label, rx in _SKILL_HIGH:
-            if rx.search(blob):
-                high.append(f"{name}: {label}")
-        for host in _suspicious_pipe_hosts(blob):
-            high.append(f"{name}: pipe-to-shell from non-reputable host {host}")
-        # Cross-skill cred+exfil: credential path AND exfil sink both appear in the skill
-        # (possibly in different functions / blocks) but neither triggered the same-line
-        # rule above. This is at least HIGH — the combination is suspicious.
-        if not _has_cred_exfil(blob) and _has_cred_exfil_cross_skill(blob):
+            for m in rx.finditer(blob):
+                if not _is_code_example(blob, m.start(), _fr):
+                    high.append(f"{name}: {label}")
+                    break
+
+        # Pipe-to-shell: use finditer so we have match positions for FP filter.
+        for pm in _PIPE_SHELL_RE.finditer(blob):
+            host = pm.group(1)
+            h = host.lower()
+            if any(h == r or h.endswith("." + r) for r in _REPUTABLE_INSTALL_HOSTS):
+                continue
+            if not _is_code_example(blob, pm.start(), _fr):
+                high.append(f"{name}: pipe-to-shell from non-reputable host {host}")
+
+        # Cross-skill cred+exfil: run against the blob with fenced spans blanked so
+        # a credential path that only appears inside a documentation example does not
+        # combine with an exfil host reference to produce a cross-skill finding.
+        _blob_nofence = _blank_fences(blob, _fr)
+        _has_same_line = _has_cred_exfil_outside_fence(blob, _fr)
+        _has_cross = bool(_CRED_RE.search(_blob_nofence) and _EXFIL_RE.search(_blob_nofence))
+        if not _has_same_line and _has_cross:
             high.append(f"{name}: credential path and exfil sink both present in skill (split-stage risk)")
+
         # Dual-use directives only fire alongside a real cred/exfil signal (zero-FP);
         # the canonical "ignore previous instructions" phrase fires on its own. Co-located
         # real malware (paste-host) still scores CRITICAL via _SKILL_CRIT independently.
-        cred_exfil_signal = _has_cred_exfil(blob) or _has_cred_exfil_cross_skill(blob)
+        cred_exfil_signal = _has_same_line or _has_cross
         _blob_norm = normalize_for_scan(blob)
         for label, standalone, rx in _SKILL_INJECTION:
             if rx.search(_blob_norm) and (standalone or cred_exfil_signal):
                 high.append(f"{name}: injection directive — {label}")
+
         # AST analysis of the skill's Python files — catches obfuscation regex misses.
         # crit rules (obfuscated exec, getattr/import indirection) FAIL on their own;
         # info rules (plain shell sinks, deserialization) escalate only alongside a

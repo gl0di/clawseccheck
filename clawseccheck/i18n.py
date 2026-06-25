@@ -1132,13 +1132,20 @@ PHRASES: dict[str, dict[str, str]] = {
             "התקן מחדש רק מיומנויות שקראת את קוד המקור שלהן."
         ),
     },
-    # fix (HIGH FAIL path)
+    # fix (HIGH FAIL path) — whole string (kept for detail-level translation)
     "Review the flagged skills' source before trusting them; prefer pinned, "
     "signed, VirusTotal-clean releases.": {
         "he": (
             "בדוק את קוד המקור של המיומנויות המסומנות לפני שתסמוך עליהן; "
             "העדף גרסאות מוצמדות, חתומות ונקיות ב-VirusTotal."
         ),
+    },
+    # fix (HIGH FAIL path) — individual "; "-split fragments (C-056 fragment guard)
+    "Review the flagged skills' source before trusting them": {
+        "he": "בדוק את קוד המקור של המיומנויות המסומנות לפני שתסמוך עליהן",
+    },
+    "prefer pinned, signed, VirusTotal-clean releases.": {
+        "he": "העדף גרסאות מוצמדות, חתומות ונקיות ב-VirusTotal.",
     },
     # fix (PASS path)
     "Keep installing only skills whose source you've reviewed — trust no one.": {
