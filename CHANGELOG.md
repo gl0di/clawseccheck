@@ -3,6 +3,17 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.20.5] — 2026-06-25
+
+Release process hardening and documentation alignment updates.
+
+### Added
+- Formalized a pre-release protocol: `ruff`, `pytest`, and targeted checks before shipping.
+
+### Changed
+- Added mandatory release-file synchronization checklist for `README.md`, `CHANGELOG.md`, `SECURITY.md`, `SECURITY_MODEL.md`, `SKILL.md`, and `SKILL_HE.md`.
+- Documented the protocol consistently across skill and maintainer documentation.
+
 ## [1.20.4] — 2026-06-25
 
 Restores ZIP archive member collection after a regression in archive handling logic, while preserving all cap/lifecycle protections added in the previous hardening release.

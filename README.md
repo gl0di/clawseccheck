@@ -594,7 +594,7 @@ positives on real configs.
 
 ## 🚦 Status
 
-Current release **v1.20.4** — the public API contract has been frozen since **1.0.0** (breaking
+Current release **v1.20.5** — the public API contract has been frozen since **1.0.0** (breaking
 CLI / `--json` / SARIF changes require a major bump). Read-only checks cover
 A1/B1–B66 and C3–C6 (plus advisory `scored=False` layers in B42–B44, B45–B47, B55, B56–B57,
 B58–B66, and the host-watch B50–B54 checks), plus the **attestation layer** (`--ask`/`--attest`,
