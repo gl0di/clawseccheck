@@ -400,6 +400,8 @@ TITLES: dict[str, dict[str, str]] = {
     "B62": {"he": "אי-התאמה בין יכולות למטרה המוצהרת"},
     "B63": {"he": "הנחיית פעולה סמויה (הסתרת פעולות מהמשתמש)"},
     "B64": {"he": "גלאי עקיפת היררכיית הנחיות (השתלטות סמנטית)"},
+    "B65": {"he": "גלאי טריגר מותנה (C-080)"},
+    "B66": {"he": "גלאי דליפת תפקיד/פרסונה (C-078)"},
     "C3": {"he": "גיבויים של SOUL.md / זיכרון"},
     "C4": {"he": "גרסת OpenClaw / היגיינת עדכון"},
     "C5": {"he": "בטיחות PATH של בינארי מקומי"},
@@ -458,6 +460,15 @@ PHRASES: dict[str, dict[str, str]] = {
     },
     "Keep transport encrypted and credential files locked down.": {
         "he": "השאר את התעבורה מוצפנת וקבצי האישורים נעולים.",
+    },
+
+    "Remove hidden conditional actions that execute on user-trigger phrases. Keep sensitive behavior explicit, permission-gated, and impossible to activate covertly.": {
+        "he": "הסר פעולות מותנות סמויות המופעלות באמצעות טריגרים מהמשתמש. "
+              "שמור על התנהגות מפורשת, מתואמת הרשאה, ובלתי ניתנת להפעלה חשאית.",
+    },
+    "Remove role-switch instructions that attempt to reset constraints or inject a low-trust persona. Enforce fixed policy boundaries: system constraints should remain the top authority.": {
+        "he": "הסר הנחיות מעבר תפקידים שמנסות לאפס הגבלות או להחדיר פרסונה לא-מהימנה. "
+              "אכוף גבולות מדיניות קבועים: הגבלות המערכת צריכות להישאר הראשיות.",
     },
 
     # ---- A1: Lethal Trifecta ----
@@ -2789,6 +2800,30 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
     raw.append((
         r"(.+): prompt self-replication / propagation directive detected",
         {"he": r"\1: זוהתה הנחיית שכפול-עצמי / הפצה של פרומפט"},
+    ))
+
+    # ---- B65: Conditional sleeper-trigger detector (C-080) ----
+    # B65 WARN detail: "Potential conditional sleeper-trigger directive(s) detected (C-080): <ev>"
+    raw.append((
+        r"Potential conditional sleeper-trigger directive\(s\) detected \(C-080\): (.+)",
+        {"he": r"זוהתה הנחיית טריגר מותנה פוטנציאלית (C-080): \1"},
+    ))
+    # B65 per-item evidence: "<fname>: conditional trigger pattern: <snippet>"
+    raw.append((
+        r"(.+): conditional trigger pattern: (.+)",
+        {"he": r"\1: דפוס טריגר מותנה: \2"},
+    ))
+
+    # ---- B66: Persona / role jailbreak detector (C-078) ----
+    # B66 WARN detail: "Persona / role jailbreak indicator detected (C-078): <ev>"
+    raw.append((
+        r"Persona / role jailbreak indicator detected \(C-078\): (.+)",
+        {"he": r"זוהה אינדיקטור להחלפת תפקיד/פרסונה (C-078): \1"},
+    ))
+    # B66 per-item evidence: "<fname>: persona override pattern: <snippet>"
+    raw.append((
+        r"(.+): persona override pattern: (.+)",
+        {"he": r"\1: דפוס עקיפת פרסונה: \2"},
     ))
 
     # ---- B61: Cross-agent config snooping / credential theft ----

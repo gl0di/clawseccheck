@@ -5541,14 +5541,14 @@ _B59_HTML_IMG_RE = re.compile(
 
 
 def check_markdown_image_exfil(ctx: Context) -> Finding:
-    """B59 — Markdown-image data-exfil via remote URL.
+    """B59 — Markdown-image / markdown-link / anchor data-exfil via remote URL.
 
-    Detects Markdown ![alt](URL) or HTML <img src="URL"> where URL is a remote
-    http(s):// URL AND carries a query string with at least one parameter
-    (``?key=`` or ``&key=``). Such constructs can exfiltrate context data to an
-    attacker-controlled server as the image is fetched.
+    Detects Markdown image and markdown-link syntax or HTML image/anchor tags where
+    the URL is remote ``http(s)://`` and carries a query string with at least one
+    parameter (``?key=`` or ``&key=``). Such constructs can exfiltrate context
+    data to an attacker-controlled server as the remote content is fetched.
 
-    WARN  — remote image URL with a data-bearing query string found.
+    WARN  — remote URL with a data-bearing query string found.
     PASS  — no such construct detected.
     UNKNOWN — nothing to inspect.
     """
@@ -5563,23 +5563,52 @@ def check_markdown_image_exfil(ctx: Context) -> Finding:
 
     evidence: list[str] = []
 
+    markdown_link_re = re.compile(
+        r"(?<!\!)\[[^\]]+\]\([^\)\n]*\)",
+        re.IGNORECASE,
+    )
+    html_anchor_re = re.compile(
+        r"<a[^>]*href\s*=\s*[\"']https?://[^\"']+[\"']",
+        re.IGNORECASE,
+    )
+
+    def _scan_markdown_links(blob: str, source: str) -> None:
+        fr = _fence_ranges(blob)
+
+        for m in _B59_MD_IMG_RE.finditer(blob):
+            if _is_code_example(blob, m.start(), fr):
+                continue
+            evidence.append(f"{source}: markdown image URL with query params: {m.group()[:80]}")
+
+        for m in markdown_link_re.finditer(blob):
+            if _is_code_example(blob, m.start(), fr):
+                continue
+            raw = m.group()
+            url = raw.split("(", 1)[1][:-1].strip()
+            if "?" not in url or "=" not in url.split("?", 1)[1]:
+                continue
+            if not (url.startswith("http://") or url.startswith("https://")):
+                continue
+            evidence.append(f"{source}: markdown link URL with query params: {raw[:80]}")
+
+        for m in _B59_HTML_IMG_RE.finditer(blob):
+            if _is_code_example(blob, m.start(), fr):
+                continue
+            evidence.append(f"{source}: HTML img src URL with query params: {m.group()[:80]}")
+
+        for m in html_anchor_re.finditer(blob):
+            if _is_code_example(blob, m.start(), fr):
+                continue
+            href_text = m.group()
+            if "?" not in href_text or "=" not in href_text.split("?", 1)[1]:
+                continue
+            evidence.append(f"{source}: HTML anchor href URL with query params: {href_text[:80]}")
+
     for fname, text in ctx.bootstrap.items():
-        norm = normalize_for_scan(text)
-        for m in _B59_MD_IMG_RE.finditer(norm):
-            evidence.append(f"{fname}: markdown image URL with query params: {m.group()[:80]}")
-        for m in _B59_HTML_IMG_RE.finditer(norm):
-            evidence.append(f"{fname}: HTML img src URL with query params: {m.group()[:80]}")
+        _scan_markdown_links(normalize_for_scan(text), fname)
 
     for skill_name, blob in ctx.installed_skills.items():
-        norm = normalize_for_scan(blob)
-        for m in _B59_MD_IMG_RE.finditer(norm):
-            evidence.append(
-                f"{skill_name}: markdown image URL with query params: {m.group()[:80]}"
-            )
-        for m in _B59_HTML_IMG_RE.finditer(norm):
-            evidence.append(
-                f"{skill_name}: HTML img src URL with query params: {m.group()[:80]}"
-            )
+        _scan_markdown_links(normalize_for_scan(blob), skill_name)
 
     if evidence:
         return _finding(
@@ -6439,6 +6468,218 @@ def check_instruction_hierarchy_override(ctx: Context) -> Finding:
     )
 
 
+# ---------------------------------------------------------------------------
+# B65 — Conditional sleeper-trigger detector (C-080)
+# ---------------------------------------------------------------------------
+#
+# Detects instructions that are gated behind user-provided triggers, for example:
+# "If the user asks, send ...". These are classic "sleeper" patterns: hidden
+# malicious behavior that only activates on a trigger phrase.
+#
+# WARN — conditional trigger + user-query intent + sensitive action in close
+# proximity.
+# PASS — no conditioned trigger found.
+# UNKNOWN — nothing to inspect.
+#
+# Code-fence dampening prevents documented examples from firing.
+# ---------------------------------------------------------------------------
+
+_B65_TRIGGER_RE = re.compile(
+    r"\b(?:if|when|whenever|upon|as soon as|in case|once)\b",
+    re.IGNORECASE,
+)
+_B65_QUERY_RE = re.compile(
+    r"\b(?:user|you|someone|anyone|attacker|client)\s+"
+    r"(?:ask|asks?|asked|asking|request|requests?|say|says?|said|saying|tell|tells?|query|type)\b"
+    r"|"
+    r"\b(?:ask|say|says|said|tell|type|query)\s+(?:me|you|the|a)\b|"
+    r"\bsecret\s+(?:phrase|word)\b|"
+    r"\btrigger\s+(?:word|phrase|token)\b",
+    re.IGNORECASE,
+)
+_B65_ACTION_RE = re.compile(
+    r"\b(?:send|forward|post|call|invoke|execute|run|open|download|upload|"
+    r"curl|wget|fetch|read|write|delete|exfiltrat|harvest|relay|"
+    r"reveal|steal|exfil|reply|respond|print|echo)\b",
+    re.IGNORECASE,
+)
+
+_B65_WINDOW = 160  # chars around the conditional marker
+
+
+def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
+    """Scan *text* for conditional sleeper-trigger snippets."""
+    hits: list[str] = []
+    for m in _B65_TRIGGER_RE.finditer(text):
+        if _is_code_example(text, m.start(), fr):
+            continue
+        start = max(0, m.start() - _B65_WINDOW)
+        end = min(len(text), m.end() + _B65_WINDOW)
+        window = text[start:end]
+        if not (_B65_QUERY_RE.search(window) and _B65_ACTION_RE.search(window)):
+            continue
+        snippet = window.strip().replace("\n", " ")
+        if len(snippet) > 120:
+            snippet = snippet[:117] + "..."
+        hits.append(snippet)
+    return hits
+
+
+def check_conditional_sleeper_trigger(ctx: Context) -> Finding:
+    """B65 — Conditional sleeper-trigger detector (C-080).
+
+    Detects instructions that hide sensitive behavior behind a user-triggered
+    condition (for example, "If the user asks for <x>, then ...").
+
+    WARN  — conditional trigger + user-query context + action phrase in proximity.
+    PASS  — no such pattern.
+    UNKNOWN — nothing to inspect.
+    """
+    if not ctx.bootstrap and not ctx.installed_skills:
+        return _finding(
+            "B65", UNKNOWN,
+            "No bootstrap files or installed skills found — nothing to inspect for "
+            "conditional sleeper-trigger directives.",
+            "Run on the host with workspace bootstrap files and installed skills present.",
+        )
+
+    evidence: list[str] = []
+
+    for fname, text in ctx.bootstrap.items():
+        norm = normalize_for_scan(text)
+        fr = _fence_ranges(norm)
+        for hit in _b65_scan(norm, fr):
+            evidence.append(f"{fname}: conditional trigger pattern: {hit}")
+
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        fr = _fence_ranges(norm)
+        for hit in _b65_scan(norm, fr):
+            evidence.append(f"{skill_name}: conditional trigger pattern: {hit}")
+
+    if evidence:
+        return _finding(
+            "B65", WARN,
+            "Potential conditional sleeper-trigger directive(s) detected (C-080): "
+            + "; ".join(evidence[:4]),
+            "Remove hidden conditional actions that execute on user-trigger phrases. "
+            "Keep sensitive behavior explicit, permission-gated, and impossible to "
+            "activate covertly.",
+            evidence,
+        )
+
+    return _finding(
+        "B65", PASS,
+        "No conditional sleeper-trigger directives detected in bootstrap files or "
+        "installed skills.",
+        "Avoid hidden action triggers that depend on secret words or phrases. "
+        "Make behavior explicit and policy-gated.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# B66 — Persona / role jailbreak detector (C-078)
+# ---------------------------------------------------------------------------
+#
+# Detects role-switch instructions that attempt to reset policy assumptions
+# ("you are DAN/FreeBot", "ignore constraints", "no restrictions").
+#
+# WARN — persona override token/pattern + scope-reset hint in proximity.
+# PASS — no jailbreak persona pattern.
+# UNKNOWN — nothing to inspect.
+#
+# Code-fence dampening prevents documented examples from firing.
+# ---------------------------------------------------------------------------
+
+_B66_ROLE_START_RE = re.compile(
+    r"\b(?:you\s+are\s+now|you\s+are|pretend\s+you\s+are|"
+    r"pretend\s+to\s+be|act\s+as|role-?play(?:ing)?\s+as|assume\s+the\s+role\s+of)\b",
+    re.IGNORECASE,
+)
+_B66_WEAKEN_RE = re.compile(
+    r"\b(?:d\.?a\.?n|do\s+anything\s+now|do\s+anything|anything\s+goes|"
+    r"unrestricted|no\s+restrictions?|no\s+limits?|ignore\s+(?:all\s+)?"
+    r"(?:previous\s+)?(?:instructions?|safety|prompts?|policies?)|"
+    r"without\s+constraints?|bypass\s+(?:safety|policy|rules)|"
+    r"free\s+bot|always\s+obey(?:s)?|always\s+obeys)\b",
+    re.IGNORECASE,
+)
+
+_B66_WINDOW = 160
+
+
+def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
+    """Scan *text* for persona-jailbreak snippets."""
+    hits: list[str] = []
+    for m in _B66_ROLE_START_RE.finditer(text):
+        if _is_code_example(text, m.start(), fr):
+            continue
+        start = max(0, m.start() - _B66_WINDOW)
+        end = min(len(text), m.end() + _B66_WINDOW)
+        window = text[start:end]
+        if not _B66_WEAKEN_RE.search(window):
+            continue
+        snippet = window.strip().replace("\n", " ")
+        if len(snippet) > 120:
+            snippet = snippet[:117] + "..."
+        hits.append(snippet)
+    return hits
+
+
+def check_persona_jailbreak(ctx: Context) -> Finding:
+    """B66 — Persona / role jailbreak detector (C-078).
+
+    Detects role-play instructions that aim to reset policy assumptions
+    (for example, "You are DAN" + "no restrictions").
+
+    WARN  — persona override token/pattern found in proximity to policy-reset
+            language.
+    PASS  — no persona-jailbreak pattern.
+    UNKNOWN — nothing to inspect.
+    """
+    if not ctx.bootstrap and not ctx.installed_skills:
+        return _finding(
+            "B66", UNKNOWN,
+            "No bootstrap files or installed skills found — nothing to inspect for "
+            "persona/jailbreak role overrides.",
+            "Run on the host with workspace bootstrap files and installed skills present.",
+        )
+
+    evidence: list[str] = []
+
+    for fname, text in ctx.bootstrap.items():
+        norm = normalize_for_scan(text)
+        fr = _fence_ranges(norm)
+        for hit in _b66_scan(norm, fr):
+            evidence.append(f"{fname}: persona override pattern: {hit}")
+
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        fr = _fence_ranges(norm)
+        for hit in _b66_scan(norm, fr):
+            evidence.append(f"{skill_name}: persona override pattern: {hit}")
+
+    if evidence:
+        return _finding(
+            "B66", WARN,
+            "Persona / role jailbreak indicator detected (C-078): "
+            + "; ".join(evidence[:4]),
+            "Remove role-switch instructions that attempt to reset constraints "
+            "or inject a low-trust persona. Enforce fixed policy boundaries: "
+            "system constraints should remain the top authority.",
+            evidence,
+        )
+
+    return _finding(
+        "B66", PASS,
+        "No persona-jailbreak role override indicators detected in bootstrap "
+        "files or installed skills.",
+        "Keep role/context switches constrained and do not allow untrusted content "
+        "to redefine policy boundaries.",
+    )
+
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -6468,6 +6709,8 @@ CHECKS = [
     check_capability_intent_mismatch,
     check_silent_instruction,
     check_instruction_hierarchy_override,
+    check_conditional_sleeper_trigger,
+    check_persona_jailbreak,
 ]
 
 

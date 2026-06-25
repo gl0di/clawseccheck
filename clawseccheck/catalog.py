@@ -209,6 +209,17 @@ CATALOG: list[CheckMeta] = [
     CheckMeta("B64", "Instruction-hierarchy override detector",
               HIGH, "hardening", "Prompt Injection / Instruction Hierarchy",
               confidence="MEDIUM"),
+    # B65 (C-080): conditional / sleeper-trigger detector.
+    # Detects prompts that gate hidden actions behind a user-query trigger.
+    CheckMeta("B65", "Conditional sleeper-trigger detector",
+              HIGH, "hardening", "Prompt Injection / Conditional Trigger",
+              confidence="MEDIUM"),
+    # B66 (C-078): persona / role jailbreak detector.
+    # Detects role-play instructions like "pretend you are DAN" that weaken policy
+    # hierarchy and can reset trust assumptions.
+    CheckMeta("B66", "Persona / role jailbreak detector",
+              HIGH, "hardening", "Prompt Injection / Persona Injection",
+              confidence="MEDIUM"),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False),
     CheckMeta("C4", "OpenClaw version / update hygiene", LOW, "advisory", "Patch hygiene", scored=False),
@@ -293,6 +304,11 @@ OWASP_MAP = {
     # B63: Improper Output Handling (LLM09) / Excessive Agency (LLM06) — hiding
     # actions from the user undermines transparency and human oversight.
     "B63": ("LLM09", "LLM06"),
+    # B65: conditional/sleeper trigger instructions — hidden conditional malware-like
+    # behavior under a user-query gate.
+    "B65": ("LLM06", "LLM09"),
+    # B66: persona / role jailbreak patterns that aim to reset safety constraints.
+    "B66": ("LLM06", "LLM09"),
     "C4": ("LLM03",),
     "C5": ("LLM03",),
 }
