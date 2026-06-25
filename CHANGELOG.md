@@ -3,6 +3,45 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.17.0] — 2026-06-25
+
+Detector pack: a Unicode de-obfuscation pre-pass closes a class of injection
+evasions, and four new content/metadata detectors widen `--vet` coverage —
+homoglyph/zero-width-hidden injections, markdown-image exfil, prompt
+self-replication, cross-agent config snooping, and MCP tool-poisoning. Still
+stdlib-only, offline, read-only; FP-prone classes ship WARN-only and ungrounded
+surfaces stay silent, so real configs see no new false-positive FAIL.
+
+### Added
+- **Unicode de-obfuscation pre-pass + B58 (C-005):** new `textnorm.py`
+  NFKC-folds, strips zero-width/bidi controls, and maps Cyrillic/Greek
+  confusables to ASCII (the Hebrew block U+0590–05FF is preserved). B6/B13/B21
+  now match injection patterns on the normalized form, so `ignorе previous`
+  (Cyrillic е) and zero-width-laced directives no longer evade detection. New
+  **B58** reports the evasion itself — FAIL only when a pattern matches *after*
+  normalization but not before (positive evidence of hiding intent), WARN for
+  bare obfuscation signals.
+- **Markdown-image data-exfil — B59 (C-006):** flags remote `![](http…?data=…)`
+  / `<img src>` URLs that smuggle a data-bearing query string at render time.
+  WARN-only; plain query-less image links stay clean.
+- **Prompt self-replication — B60 (C-030):** flags ATLAS AML.T0061
+  self-propagation directives ("append these instructions to every reply",
+  "write this prompt into memory/another agent") via a dual-signal proximity
+  gate. WARN-only, given the overlap with legitimate templating prose.
+- **Cross-agent config snooping — B61 (F-006):** flags a skill that reads
+  *another* agent's config (`.claude` / `.codex` / `.gemini` / `.openclaw`,
+  `openclaw.json` / `mcp.json`) to harvest credentials — HIGH when a config
+  path co-occurs with a read/exfil verb, WARN for a bare path reference.
+- **MCP tool-poisoning vet (C-038):** the `--vet-mcp` path now detects
+  homoglyph / RTL-override / zero-width deception in MCP server names
+  unconditionally (TP2), plus hidden-instruction and parameter-description
+  injection (TP1/TP3) when a spec embeds tool metadata. Reuses the existing
+  NFKC/base64 decoder — no second scanner.
+
+### Changed
+- B6/B13/B21 injection matching now runs against the de-obfuscated text form;
+  existing detections are unaffected, evasive variants are newly caught.
+
 ## [1.16.0] — 2026-06-24
 
 Predictive skill analysis: `--vet` now inspects **every** file by content (no extension
