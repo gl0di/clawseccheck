@@ -3,6 +3,20 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.20.4] — 2026-06-25
+
+Restores ZIP archive member collection after a regression in archive handling logic, while preserving all cap/lifecycle protections added in the previous hardening release.
+
+### Added
+- _No new checks added in this release._
+
+### Fixed
+- Restored ZIP member extraction path so nested archive files are now discovered and analyzed again (including Python members and traversal/depth markers).
+- Kept archive safety caps for nested archive file size, count, cumulative decompression, and depth behavior from being bypassed by empty member streams.
+
+### Changed
+- Minor reliability fix only: ZIP iteration now executes within the active archive context.
+
 ## [1.20.3] — 2026-06-25
 
 Hardened installed-skill auditing against parser-bloat and traversal side-effects: capped collection stats and archive reads.
