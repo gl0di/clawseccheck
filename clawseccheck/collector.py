@@ -279,24 +279,24 @@ def decompress_and_classify(
     # ZIP
     if format_name == "ZIP":
         try:
-                with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-                    namelist = zf.namelist()
-                    if len(namelist) + archive_stats["total_files_count"] > _ARCHIVE_FILE_LIMIT:
-                        if ctx is not None:
-                            ctx.limit_hits.append(f"Max files limit hit (>500) in {file_relpath}")
-                            ctx.file_manifest[file_relpath] = "capped(files)"
-                        return [(file_relpath, file_bytes, classification, format_name)]
-                
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                namelist = zf.namelist()
+                if len(namelist) + archive_stats["total_files_count"] > _ARCHIVE_FILE_LIMIT:
+                    if ctx is not None:
+                        ctx.limit_hits.append(f"Max files limit hit (>500) in {file_relpath}")
+                        ctx.file_manifest[file_relpath] = "capped(files)"
+                    return [(file_relpath, file_bytes, classification, format_name)]
+
                 for member_name in namelist:
                     if not is_safe_tar_member(skill_dir, member_name):
                         if ctx is not None:
                             ctx.path_traversal_violations.append(f"{file_relpath}::{member_name}")
                             ctx.file_manifest[f"{file_relpath}::{member_name}"] = "unsafe-path"
                         return [(file_relpath, file_bytes, classification, format_name)]
-                        
+
                     if member_name.endswith("/"):
                         continue
-                        
+
                     try:
                         member_info = zf.getinfo(member_name)
                         if member_info.is_dir():
@@ -320,16 +320,16 @@ def decompress_and_classify(
                             ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member_name} in {file_relpath}")
                             ctx.file_manifest[f"{file_relpath}::{member_name}"] = "capped(size)"
                         continue
-                        
+
                     archive_stats["total_files_count"] += 1
                     archive_stats["cumulative_decompressed_size"] += len(member_bytes)
-                    
+
                     if archive_stats["cumulative_decompressed_size"] > _ARCHIVE_MAX_TOTAL_BYTES:
                         if ctx is not None:
                             ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
                             ctx.file_manifest[file_relpath] = "capped(size)"
                         return [(file_relpath, file_bytes, classification, format_name)]
-                        
+
                     if compressed_size > 10240:
                         ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
                         if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
@@ -337,10 +337,11 @@ def decompress_and_classify(
                                 ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
                                 ctx.file_manifest[file_relpath] = "capped(ratio)"
                             return [(file_relpath, file_bytes, classification, format_name)]
-                            
+
                     sub_rel = f"{file_relpath}::{member_name}"
                     sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
                     results.extend(sub_results)
+
                 if ctx is not None:
                     ctx.file_manifest[file_relpath] = "decoded"
         except Exception as e:
