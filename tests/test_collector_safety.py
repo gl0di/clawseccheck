@@ -18,6 +18,7 @@ from clawseccheck.checks import check_installed_skills, vet_skill
 from clawseccheck.collector import (
     Context,
     _MAX_FILES_PER_SKILL,
+    _MAX_FILE_BYTES,
     _read_installed_skills,
     _read_skill_text,
     collect,
@@ -121,6 +122,21 @@ def test_file_count_cap_limits_files_read(tmp_path):
         f"_read_skill_text read {file_markers} files but cap is {_MAX_FILES_PER_SKILL} (H6)"
     )
     assert file_markers > 0, "at least some files should have been read"
+
+
+def test_skill_collection_cached_for_installed_skill(tmp_path):
+    """collect_skill_files should only run once per skill while collecting text+AST inputs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    sd = _make_skill(home, "dupcheck", "clean skill text")
+    (sd / "fake.py").write_bytes(b"MZ\x90\x00\x03\x00\x00\x00")
+
+    ctx = Context(home=home)
+    _read_installed_skills(home, ctx)
+
+    assert ctx.total_files_inspected == 2
+    assert any("fake.py: MISMATCH_EXTENSION" in item for item in ctx.mismatches)
+    assert len([item for item in ctx.mismatches if "MISMATCH_EXTENSION" in item]) == 1
 
 
 def test_file_count_cap_exact_boundary(tmp_path):
@@ -256,6 +272,27 @@ def test_archive_decompression_zip(tmp_path):
     assert any(name == "archive.zip::nested.py" and content == "print('hello zip')\n" for name, content in py_files)
     assert not ctx.limit_hits
     assert not ctx.path_traversal_violations
+
+
+def test_zip_archive_member_cap_stops_before_full_read(monkeypatch, tmp_path):
+    """Big archive members must be capped without reading member payloads via ZipFile.read()."""
+    home = tmp_path / "home"
+    sd = _make_skill(home, "zipcap", "initial text")
+
+    payload = b"a" * (_MAX_FILE_BYTES + 1)
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("huge.py", payload)
+    (sd / "huge.zip").write_bytes(bio.getvalue())
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("ZIP full-member read should not be used")
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", explode)
+    ctx = Context(home=home)
+    collect_skill_files(sd, ctx)
+
+    assert ctx.file_manifest["huge.zip::huge.py"] == "capped(size)"
 
 
 def test_archive_decompression_tar(tmp_path):

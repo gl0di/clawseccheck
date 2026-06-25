@@ -85,28 +85,46 @@ def is_safe_tar_member(base_dir: Path, member_name: str) -> bool:
         return False
 
 
-def walk_dir_safely(base_dir: Path, exclude_pycache: bool = False) -> list[Path]:
+def walk_dir_safely(
+    base_dir: Path,
+    exclude_pycache: bool = False,
+    max_files: int | None = None,
+) -> list[Path]:
     """Recursively walk base_dir, skipping symlinks and any file that escapes base_dir.
     
     If exclude_pycache is True, ignores directories or files containing "__pycache__".
+    If max_files is provided, stop after that many regular files are collected.
     """
     try:
         root = base_dir.resolve()
     except OSError:
         return []
-    
+
     out = []
-    # sorted(base_dir.rglob("*")) to have deterministic order
-    for p in sorted(base_dir.rglob("*")):
-        if p.is_symlink():
-            continue
-        if exclude_pycache and "__pycache__" in p.parts:
-            continue
-        try:
-            real = p.resolve()
-            if root != real and root not in real.parents:  # escaped the base dir
+    for dirpath, dirnames, filenames in os.walk(base_dir, topdown=True, followlinks=False):
+        # Deterministic traversal
+        if exclude_pycache:
+            dirnames[:] = [d for d in sorted(dirnames) if "__pycache__" not in (Path(dirpath) / d).parts]
+        else:
+            dirnames.sort()
+
+        filenames = sorted(filenames)
+        for filename in filenames:
+            p = Path(dirpath) / filename
+
+            if exclude_pycache and "__pycache__" in p.parts:
                 continue
-        except OSError:
-            continue
-        out.append(p)
+            if p.is_symlink():
+                continue
+
+            try:
+                real = p.resolve()
+                if root != real and root not in real.parents:  # escaped the base dir
+                    continue
+            except OSError:
+                continue
+
+            out.append(p)
+            if max_files is not None and len(out) >= max_files:
+                return out
     return out

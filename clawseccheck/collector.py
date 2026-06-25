@@ -37,6 +37,10 @@ _MAX_BYTES_PER_SKILL = 60_000
 _MAX_FILE_BYTES = 200_000
 _MAX_FILES_PER_SKILL = 500
 _MAX_PY_BYTES_PER_SKILL = 200_000  # cap on Python source kept per skill for AST analysis
+_ARCHIVE_FILE_LIMIT = _MAX_FILES_PER_SKILL
+_ARCHIVE_MAX_FILE_BYTES = _MAX_FILE_BYTES
+_ARCHIVE_MAX_TOTAL_BYTES = 20_000_000
+_ARCHIVE_MAX_EXPANSION_RATIO = 100
 
 _COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
@@ -66,6 +70,7 @@ class Context:
     installed_skills: dict = field(default_factory=dict)  # skill name -> concatenated text
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
     attestation: dict = field(default_factory=dict)  # agent self-report (--attest); see attest.py
+    _collected_skill_files: dict[str, list[dict]] = field(default_factory=dict)
 
     # F-018: per-skill aggregated effect profiles from the abstract effect simulator.
     # Populated by check_installed_skills; keyed by skill name.
@@ -86,6 +91,21 @@ class Context:
     @property
     def bootstrap_blob(self) -> str:
         return "\n".join(self.bootstrap.values())
+
+
+def _read_with_limit(file_obj: io.BufferedIOBase, byte_limit: int) -> tuple[bytes, bool]:
+    """Read up to ``byte_limit`` bytes from ``file_obj`` without over-allocation."""
+    if byte_limit < 0:
+        raise ValueError("byte_limit must be >= 0")
+
+    out = bytearray()
+    while True:
+        chunk = file_obj.read(byte_limit + 1 - len(out))
+        if not chunk:
+            return bytes(out), False
+        out.extend(chunk)
+        if len(out) > byte_limit:
+            return bytes(out[:byte_limit]), True
 
 
 def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
@@ -259,13 +279,13 @@ def decompress_and_classify(
     # ZIP
     if format_name == "ZIP":
         try:
-            with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-                namelist = zf.namelist()
-                if len(namelist) + archive_stats["total_files_count"] > 500:
-                    if ctx is not None:
-                        ctx.limit_hits.append(f"Max files limit hit (>500) in {file_relpath}")
-                        ctx.file_manifest[file_relpath] = "capped(files)"
-                    return [(file_relpath, file_bytes, classification, format_name)]
+                with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                    namelist = zf.namelist()
+                    if len(namelist) + archive_stats["total_files_count"] > _ARCHIVE_FILE_LIMIT:
+                        if ctx is not None:
+                            ctx.limit_hits.append(f"Max files limit hit (>500) in {file_relpath}")
+                            ctx.file_manifest[file_relpath] = "capped(files)"
+                        return [(file_relpath, file_bytes, classification, format_name)]
                 
                 for member_name in namelist:
                     if not is_safe_tar_member(skill_dir, member_name):
@@ -278,11 +298,24 @@ def decompress_and_classify(
                         continue
                         
                     try:
-                        member_bytes = zf.read(member_name)
+                        member_info = zf.getinfo(member_name)
+                        if member_info.is_dir():
+                            continue
+
+                        if member_info.file_size > _ARCHIVE_MAX_FILE_BYTES:
+                            if ctx is not None:
+                                ctx.limit_hits.append(
+                                    f"Max file decompressed size hit (>200,000) for {member_name} in {file_relpath}"
+                                )
+                                ctx.file_manifest[f"{file_relpath}::{member_name}"] = "capped(size)"
+                            continue
+
+                        with zf.open(member_name, "r") as zfp:
+                            member_bytes, truncated = _read_with_limit(zfp, _ARCHIVE_MAX_FILE_BYTES)
                     except Exception:
                         continue
-                        
-                    if len(member_bytes) > 200000:
+
+                    if truncated:
                         if ctx is not None:
                             ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member_name} in {file_relpath}")
                             ctx.file_manifest[f"{file_relpath}::{member_name}"] = "capped(size)"
@@ -291,7 +324,7 @@ def decompress_and_classify(
                     archive_stats["total_files_count"] += 1
                     archive_stats["cumulative_decompressed_size"] += len(member_bytes)
                     
-                    if archive_stats["cumulative_decompressed_size"] > 20000000:
+                    if archive_stats["cumulative_decompressed_size"] > _ARCHIVE_MAX_TOTAL_BYTES:
                         if ctx is not None:
                             ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
                             ctx.file_manifest[file_relpath] = "capped(size)"
@@ -299,7 +332,7 @@ def decompress_and_classify(
                         
                     if compressed_size > 10240:
                         ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
-                        if ratio > 100:
+                        if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
                             if ctx is not None:
                                 ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
                                 ctx.file_manifest[file_relpath] = "capped(ratio)"
@@ -321,7 +354,7 @@ def decompress_and_classify(
         try:
             with tarfile.open(fileobj=io.BytesIO(file_bytes)) as tf:
                 members = tf.getmembers()
-                if len(members) + archive_stats["total_files_count"] > 500:
+                if len(members) + archive_stats["total_files_count"] > _ARCHIVE_FILE_LIMIT:
                     if ctx is not None:
                         ctx.limit_hits.append(f"Max files limit hit (>500) in {file_relpath}")
                         ctx.file_manifest[file_relpath] = "capped(files)"
@@ -332,20 +365,26 @@ def decompress_and_classify(
                         if ctx is not None:
                             ctx.path_traversal_violations.append(f"{file_relpath}::{member.name}")
                             ctx.file_manifest[f"{file_relpath}::{member.name}"] = "unsafe-path"
-                        return [(file_relpath, file_bytes, classification, format_name)]
+                            return [(file_relpath, file_bytes, classification, format_name)]
                         
                     if not member.isreg():
                         continue
                         
                     try:
+                        if member.size > _ARCHIVE_MAX_FILE_BYTES:
+                            if ctx is not None:
+                                ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member.name} in {file_relpath}")
+                                ctx.file_manifest[f"{file_relpath}::{member.name}"] = "capped(size)"
+                            continue
+
                         f_obj = tf.extractfile(member)
                         if f_obj is None:
                             continue
-                        member_bytes = f_obj.read()
+                        member_bytes = f_obj.read(member.size)
                     except Exception:
                         continue
                         
-                    if len(member_bytes) > 200000:
+                    if len(member_bytes) > _ARCHIVE_MAX_FILE_BYTES:
                         if ctx is not None:
                             ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member.name} in {file_relpath}")
                             ctx.file_manifest[f"{file_relpath}::{member.name}"] = "capped(size)"
@@ -354,7 +393,7 @@ def decompress_and_classify(
                     archive_stats["total_files_count"] += 1
                     archive_stats["cumulative_decompressed_size"] += len(member_bytes)
                     
-                    if archive_stats["cumulative_decompressed_size"] > 20000000:
+                    if archive_stats["cumulative_decompressed_size"] > _ARCHIVE_MAX_TOTAL_BYTES:
                         if ctx is not None:
                             ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
                             ctx.file_manifest[file_relpath] = "capped(size)"
@@ -362,7 +401,7 @@ def decompress_and_classify(
                         
                     if compressed_size > 10240:
                         ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
-                        if ratio > 100:
+                        if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
                             if ctx is not None:
                                 ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
                                 ctx.file_manifest[file_relpath] = "capped(ratio)"
@@ -382,8 +421,10 @@ def decompress_and_classify(
     # GZIP
     elif format_name == "gzip":
         try:
-            member_bytes = gzip.decompress(file_bytes)
-            if len(member_bytes) > 200000:
+            with gzip.GzipFile(fileobj=io.BytesIO(file_bytes), mode="rb") as gz:
+                member_bytes, truncated = _read_with_limit(gz, _ARCHIVE_MAX_FILE_BYTES)
+
+            if truncated or len(member_bytes) > _ARCHIVE_MAX_FILE_BYTES:
                 if ctx is not None:
                     ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) in {file_relpath}")
                     ctx.file_manifest[file_relpath] = "capped(size)"
@@ -392,18 +433,18 @@ def decompress_and_classify(
             archive_stats["total_files_count"] += 1
             archive_stats["cumulative_decompressed_size"] += len(member_bytes)
             
-            if archive_stats["cumulative_decompressed_size"] > 20000000:
+            if archive_stats["cumulative_decompressed_size"] > _ARCHIVE_MAX_TOTAL_BYTES:
                 if ctx is not None:
                     ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
                     ctx.file_manifest[file_relpath] = "capped(size)"
                 return [(file_relpath, file_bytes, classification, format_name)]
                 
-            if compressed_size > 10240:
-                ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
-                if ratio > 100:
-                    if ctx is not None:
-                        ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
-                        ctx.file_manifest[file_relpath] = "capped(ratio)"
+                if compressed_size > 10240:
+                    ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
+                    if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
+                        if ctx is not None:
+                            ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                            ctx.file_manifest[file_relpath] = "capped(ratio)"
                     return [(file_relpath, file_bytes, classification, format_name)]
                     
             sub_rel = file_relpath[:-3] if file_relpath.lower().endswith(".gz") else f"{file_relpath}::extracted"
@@ -420,8 +461,10 @@ def decompress_and_classify(
     # BZIP2
     elif format_name == "bz2":
         try:
-            member_bytes = bz2.decompress(file_bytes)
-            if len(member_bytes) > 200000:
+            with bz2.BZ2File(io.BytesIO(file_bytes), mode="rb") as bzf:
+                member_bytes, truncated = _read_with_limit(bzf, _ARCHIVE_MAX_FILE_BYTES)
+
+            if truncated or len(member_bytes) > _ARCHIVE_MAX_FILE_BYTES:
                 if ctx is not None:
                     ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) in {file_relpath}")
                     ctx.file_manifest[file_relpath] = "capped(size)"
@@ -430,18 +473,18 @@ def decompress_and_classify(
             archive_stats["total_files_count"] += 1
             archive_stats["cumulative_decompressed_size"] += len(member_bytes)
             
-            if archive_stats["cumulative_decompressed_size"] > 20000000:
+            if archive_stats["cumulative_decompressed_size"] > _ARCHIVE_MAX_TOTAL_BYTES:
                 if ctx is not None:
                     ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
                     ctx.file_manifest[file_relpath] = "capped(size)"
                 return [(file_relpath, file_bytes, classification, format_name)]
                 
-            if compressed_size > 10240:
-                ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
-                if ratio > 100:
-                    if ctx is not None:
-                        ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
-                        ctx.file_manifest[file_relpath] = "capped(ratio)"
+                if compressed_size > 10240:
+                    ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
+                    if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
+                        if ctx is not None:
+                            ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                            ctx.file_manifest[file_relpath] = "capped(ratio)"
                     return [(file_relpath, file_bytes, classification, format_name)]
                     
             sub_rel = file_relpath[:-4] if file_relpath.lower().endswith(".bz2") else f"{file_relpath}::extracted"
@@ -458,8 +501,10 @@ def decompress_and_classify(
     # XZ
     elif format_name == "xz":
         try:
-            member_bytes = lzma.decompress(file_bytes)
-            if len(member_bytes) > 200000:
+            with lzma.open(io.BytesIO(file_bytes), mode="rb") as xf:
+                member_bytes, truncated = _read_with_limit(xf, _ARCHIVE_MAX_FILE_BYTES)
+
+            if truncated or len(member_bytes) > _ARCHIVE_MAX_FILE_BYTES:
                 if ctx is not None:
                     ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) in {file_relpath}")
                     ctx.file_manifest[file_relpath] = "capped(size)"
@@ -468,18 +513,18 @@ def decompress_and_classify(
             archive_stats["total_files_count"] += 1
             archive_stats["cumulative_decompressed_size"] += len(member_bytes)
             
-            if archive_stats["cumulative_decompressed_size"] > 20000000:
+            if archive_stats["cumulative_decompressed_size"] > _ARCHIVE_MAX_TOTAL_BYTES:
                 if ctx is not None:
                     ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
                     ctx.file_manifest[file_relpath] = "capped(size)"
                 return [(file_relpath, file_bytes, classification, format_name)]
                 
-            if compressed_size > 10240:
-                ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
-                if ratio > 100:
-                    if ctx is not None:
-                        ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
-                        ctx.file_manifest[file_relpath] = "capped(ratio)"
+                if compressed_size > 10240:
+                    ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
+                    if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
+                        if ctx is not None:
+                            ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                            ctx.file_manifest[file_relpath] = "capped(ratio)"
                     return [(file_relpath, file_bytes, classification, format_name)]
                     
             sub_rel = file_relpath[:-3] if file_relpath.lower().endswith(".xz") else f"{file_relpath}::extracted"
@@ -497,7 +542,13 @@ def decompress_and_classify(
 
 
 def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dict]:
-    files = walk_dir_safely(skill_dir)
+    if ctx is not None:
+        cache_key = str(skill_dir)
+        cached = ctx._collected_skill_files.get(cache_key)
+        if cached is not None:
+            return cached
+
+    files = walk_dir_safely(skill_dir, max_files=_MAX_FILES_PER_SKILL)
     collected = []
     
     for f in files:
@@ -532,11 +583,11 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     ctx.file_manifest[relpath] = "capped(size)"
                 continue
         else:
-            if st_size > 200_000:
+            if st_size > _MAX_FILE_BYTES:
                 if ctx is not None:
-                    ctx.limit_hits.append(f"File {f.name} size exceeds 200,000 bytes")
+                    ctx.limit_hits.append(f"File {f.name} size exceeds {_MAX_FILE_BYTES} bytes")
                     ctx.file_manifest[relpath] = "capped(size)"
-                continue
+                    continue
                 
         # Read the whole file bytes
         try:
@@ -586,7 +637,10 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                 "classification": sub_class,
                 "format": sub_fmt,
             })
-            
+
+    if ctx is not None:
+        ctx._collected_skill_files[str(skill_dir)] = collected
+
     return collected
 
 
