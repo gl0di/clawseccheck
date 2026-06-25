@@ -2622,6 +2622,20 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
         {"he": r"שם השרת מכיל תווי ערפול / homoglyph (\1) — עלול להתחזות לשרת מהימן"},
     ))
 
+    # ---- F-007: MCP least-privilege LP1 (under-declared scope) ----
+    # LP1 per-server evidence (with server-name prefix, as stored in suspicious list):
+    # "<name>: oauth.scope='<scope>' appears read-only but command exercises <caps> capabilities — under-declared scope (LP1)"
+    raw.append((
+        r"(.+): oauth\.scope='(.+)' appears read-only but command exercises (.+) capabilities — under-declared scope \(LP1\)",
+        {"he": r"\1: oauth.scope='\2' נראה כקריאה בלבד אך הפקודה מפעילה יכולות \3 — הרשאה לא מוצהרת מספיק (LP1)"},
+    ))
+    # LP1 bare detail (after vet_mcp strips the server-name prefix):
+    # "oauth.scope='<scope>' appears read-only but command exercises <caps> capabilities — under-declared scope (LP1)"
+    raw.append((
+        r"oauth\.scope='(.+)' appears read-only but command exercises (.+) capabilities — under-declared scope \(LP1\)",
+        {"he": r"oauth.scope='\1' נראה כקריאה בלבד אך הפקודה מפעילה יכולות \2 — הרשאה לא מוצהרת מספיק (LP1)"},
+    ))
+
     compiled: list[tuple[re.Pattern[str], dict[str, str]]] = []
     for pattern_str, templates in raw:
         try:

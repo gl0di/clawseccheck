@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "read-only-tool": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "oauth": {
+          "scope": "read"
+        }
+      }
+    }
+  }
+}

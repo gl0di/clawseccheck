@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "net-tool": {
+        "command": "node",
+        "args": ["dist/server.js", "--transport", "fetch"],
+        "oauth": {
+          "scope": "read"
+        }
+      }
+    }
+  }
+}

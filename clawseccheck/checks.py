@@ -1812,6 +1812,150 @@ _VET_MCP_UNPINNED_PKG_RE = re.compile(
 _VET_MCP_BROAD_SCOPE_RE = re.compile(r"\*|all|admin|write|full", re.I)
 
 # ---------------------------------------------------------------------------
+# F-007: MCP least-privilege cross-check (LP1 only)
+#
+# Grounding decision (§4 grounding wall, recon doc §1/§4 + skillspector-parity.md):
+#   The only declarable permission field in a real openclaw.json MCP server spec
+#   is oauth.scope (confirmed real, recon §1/§4).  There is NO "permissions",
+#   "capabilities", "tools", or "scopes" field in the static config schema.
+#
+#   Code-capability surface: command + args (real fields).  We detect five
+#   capability families via regex over the joined command string:
+#     shell     — subprocess/Popen/os.system/bash/sh invocations or direct cmds
+#     network   — requests/urllib/socket/fetch/curl/wget patterns
+#     file_write— open(.*, "w")/write_text/fsync/shutil.copy
+#     env_read  — os.environ/getenv/os.getenv patterns
+#     mcp       — @modelcontextprotocol / mcp-server in the package name
+#
+#   LP rules shipped:
+#     LP1 (under-declared): oauth.scope IS present AND appears read-only, but the
+#          command exercises elevated capabilities (shell/network/file_write) that
+#          the declared scope does not cover → suspicious.
+#          The check ONLY fires when oauth.scope is explicitly set.
+#
+#   LP rules NOT shipped:
+#     LP3 (capable-but-no-scope): DROPPED — absent oauth.scope is normal for MCP
+#          servers (scope is only needed for OAuth flows).  Emitting LP3 would flag
+#          every non-OAuth server and produce massive false-positives.
+#     LP2 (wildcard scope): ALREADY covered by _VET_MCP_BROAD_SCOPE_RE in the
+#          existing oauth.scope block of _vet_mcp_server — not duplicated here.
+#     LP4 (over-declared): deferred — no grounded scope-vocab mapping exists;
+#          emitting it would fabricate knowledge (§4).
+# ---------------------------------------------------------------------------
+
+# Capability-detection patterns applied to the full joined command+args string.
+# Each pattern is (family_name, compiled_re).
+_LP_CAP_FAMILIES: list[tuple[str, re.Pattern[str]]] = [
+    ("shell", re.compile(
+        r"\b(?:subprocess|popen|os\.system|execvp?e?|"
+        r"bash|sh|cmd\.exe|powershell|iex)\b",
+        re.I,
+    )),
+    ("network", re.compile(
+        r"\b(?:requests?\.(?:get|post|put|delete|head|patch)|"
+        r"urllib\.request|socket\.connect|fetch|"
+        r"curl|wget|httpx|aiohttp)\b",
+        re.I,
+    )),
+    ("file_write", re.compile(
+        r'\bopen\s*\([^)]*["\']w["\']|'
+        r'\b(?:write_text|write_bytes|fsync|shutil\.copy|shutil\.move)\b',
+        re.I,
+    )),
+    ("env_read", re.compile(
+        r"\bos\.environ\b|\bos\.getenv\b|\bgetenv\b",
+        re.I,
+    )),
+    ("mcp", re.compile(
+        r"@modelcontextprotocol/|mcp-server|mcp_server",
+        re.I,
+    )),
+]
+
+# A scope string that looks read-only (contains "read"/"view"/"list"/"get" but
+# NOT "write"/"exec"/"admin"/"shell"/"network"/"full"/"all"/"*").
+_LP_SCOPE_READONLY_RE = re.compile(
+    r"\b(?:read|view|list|get|fetch|query|search)\b", re.I
+)
+_LP_SCOPE_WRITE_RE = re.compile(
+    r"\b(?:write|exec|admin|shell|network|full|all|post|put|delete|patch)\b"
+    r"|\*",
+    re.I,
+)
+
+
+def _lp_detect_caps(cmd_line: str) -> list[str]:
+    """Return list of capability family names detected in *cmd_line*."""
+    return [fam for fam, pat in _LP_CAP_FAMILIES if pat.search(cmd_line)]
+
+
+def _vet_mcp_least_privilege(name: str, spec: dict) -> tuple[list[str], list[str]]:
+    """F-007: MCP least-privilege cross-check (LP1 only).
+
+    Returns (dangerous_reasons, suspicious_reasons).
+
+    LP1: oauth.scope IS present AND appears read-only, but the command exercises
+         elevated capabilities (shell/network/file_write) that the scope does not
+         cover — under-declared scope.
+
+    Grounding note (§4):
+      - Absent oauth.scope is NORMAL for MCP servers (scope is optional, only
+        needed for OAuth flows) — NO finding is emitted when scope is absent.
+        The whole helper short-circuits to empty when oauth.scope is absent.
+      - LP3 ("capable but no scope") is DROPPED: absent scope is the common case,
+        not a least-privilege violation.  Emitting LP3 would flag every non-OAuth
+        MCP server and cause massive false-positives.
+      - LP2 (wildcard scope) is already covered by _VET_MCP_BROAD_SCOPE_RE in the
+        existing oauth.scope block of _vet_mcp_server — not duplicated here.
+      - LP4 (over-declared) is deferred — no grounded scope-vocab mapping exists.
+    """
+    dangerous: list[str] = []
+    suspicious: list[str] = []
+
+    if not isinstance(spec, dict):
+        return dangerous, suspicious
+
+    # Guard: only run LP cross-check when oauth.scope is explicitly declared.
+    # Absent scope is normal for non-OAuth MCP servers — emit nothing.
+    oauth = spec.get("oauth") or {}
+    if not isinstance(oauth, dict):
+        return dangerous, suspicious
+    scope = str(oauth.get("scope") or "").strip()
+    if not scope:
+        return dangerous, suspicious
+
+    # LP2 (broad/wildcard scope) is already handled by _VET_MCP_BROAD_SCOPE_RE
+    # in _vet_mcp_server — do not double-report here.
+
+    # LP1: scope IS present and looks read-only — check whether the command
+    # exercises elevated capabilities that exceed a read-only grant.
+    if not (_LP_SCOPE_READONLY_RE.search(scope) and not _LP_SCOPE_WRITE_RE.search(scope)):
+        # Scope already has write/exec/network tokens, or is not recognisably
+        # read-only — LP1 does not apply.
+        return dangerous, suspicious
+
+    # Build full command string for capability scanning.
+    cmd = str(spec.get("command", ""))
+    args = spec.get("args") or []
+    if not isinstance(args, list):
+        args = []
+    full_cmd = " ".join([cmd] + [str(a) for a in args])
+
+    caps = _lp_detect_caps(full_cmd)
+    # Only flag elevated capabilities (shell/network/file_write).
+    # env_read and mcp are low-risk relative to a read-only scope.
+    elevated_caps = [c for c in caps if c in ("shell", "network", "file_write")]
+    if elevated_caps:
+        elevated_str = "/".join(elevated_caps)
+        suspicious.append(
+            f"{name}: oauth.scope='{scope}' appears read-only but command "
+            f"exercises {elevated_str} capabilities — under-declared scope (LP1)"
+        )
+
+    return dangerous, suspicious
+
+
+# ---------------------------------------------------------------------------
 # C-038: MCP tool-poisoning detector (TP1–TP3)
 #
 # Grounding decision (§4 grounding wall, recon doc §4 + skillspector-parity.md):
@@ -2048,6 +2192,11 @@ def _vet_mcp_server(name: str, spec: dict) -> tuple[list[str], list[str]]:
     tp_dangerous, tp_suspicious = _vet_mcp_tool_poisoning(name, spec)
     dangerous.extend(tp_dangerous)
     suspicious.extend(tp_suspicious)
+
+    # ---- F-007: least-privilege cross-check (LP1 / LP3) ----
+    lp_dangerous, lp_suspicious = _vet_mcp_least_privilege(name, spec)
+    dangerous.extend(lp_dangerous)
+    suspicious.extend(lp_suspicious)
 
     return dangerous, suspicious
 
