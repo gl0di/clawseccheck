@@ -1,0 +1,29 @@
+{
+  "tools": {
+    "allow": ["exec", "http_post"],
+    "http": {
+      "allow": ["api.example.com"]
+    },
+    "exec": {
+      "mode": "ask"
+    }
+  },
+  "channels": {
+    "slack": {
+      "dmPolicy": "allowlist",
+      "groupPolicy": "allowlist"
+    }
+  },
+  "mcp": {
+    "servers": {
+      "localdocs": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+      },
+      "remote": {
+        "url": "https://mcp.example.com/sse",
+        "allowedHosts": ["mcp.example.com"]
+      }
+    }
+  }
+}

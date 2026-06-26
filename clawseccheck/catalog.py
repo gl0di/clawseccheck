@@ -230,6 +230,8 @@ CATALOG: list[CheckMeta] = [
     # UNKNOWN nudge, never a FAIL. Advisory (not scored).
     CheckMeta("C6", "Hook-composition tool-policy drop (pre-v2026.6.10)",
               LOW, "advisory", "Patch hygiene", scored=False),
+    CheckMeta("C014", "Egress inventory (outbound-capable surface enumeration)",
+              LOW, "advisory", "Egress Inventory", scored=False),
     CheckMeta("C047", "Non-local MCP server endpoint (manual review)",
               LOW, "advisory", "MCP / External Endpoint Review", scored=False),
     # C048: top-level cron scheduler persistence surface. Advisory UNKNOWN-only when

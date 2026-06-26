@@ -2614,6 +2614,113 @@ def check_egress(ctx: Context) -> Finding:
     return _custom("B14", MEDIUM, UNKNOWN, "No outbound channels / skills / tools detected.", "—")
 
 
+def check_egress_inventory(ctx: Context) -> Finding:
+    """C014 — read-only inventory of outbound-capable surfaces and restriction signals.
+
+    Complements B14's short summary with per-surface evidence: channels, outbound-capable
+    tools, MCP servers, and clearly external-service skills. Advisory only: it surfaces the
+    raw egress posture, not a blocking verdict.
+    """
+    cfg = ctx.config
+    evidence = []
+    restricted = False
+
+    global_allow = (dig(cfg, "gateway.egress") or dig(cfg, "network.egress")
+                    or cfg.get("egress") or dig(cfg, "tools.http.allow"))
+    if global_allow:
+        restricted = True
+        evidence.append("global egress restriction configured")
+
+    channels = _channels(cfg)
+    for name, chan in channels.items():
+        dm = group = None
+        if isinstance(chan, dict):
+            dm = chan.get("dmPolicy")
+            group = chan.get("groupPolicy")
+        bits = []
+        if dm:
+            bits.append(f"dmPolicy={dm}")
+            if str(dm).lower() in ("allowlist", "owner", "owner-only"):
+                restricted = True
+        if group:
+            bits.append(f"groupPolicy={group}")
+            if str(group).lower() in ("allowlist", "owner", "owner-only"):
+                restricted = True
+        suffix = ", ".join(bits) if bits else "policy unspecified"
+        evidence.append(f"channel {name}: outbound-capable path ({suffix})")
+
+    tool_names = sorted({
+        t for t in _enabled_tools(cfg)
+        if t == "elevated" or _hint([t], OUTBOUND_TOOL_HINTS)
+    })
+    for tool in tool_names:
+        notes = []
+        if tool == "exec":
+            if _has_approval_gate(cfg):
+                restricted = True
+                notes.append("approval gate present")
+            else:
+                notes.append("no approval gate detected")
+        if tool == "elevated":
+            allow_from = dig(cfg, "tools.elevated.allowFrom")
+            if allow_from:
+                restricted = True
+                notes.append("sender allowlist configured")
+            else:
+                notes.append("no sender allowlist detected")
+        if tool != "elevated" and global_allow:
+            notes.append("global egress restriction configured")
+        evidence.append(
+            f"tool {tool}: outbound-capable ({'; '.join(notes) or 'no explicit restriction signal'})"
+        )
+
+    for name, spec in _mcp_servers(cfg).items():
+        if not isinstance(spec, dict):
+            continue
+        parts = []
+        if _mcp_has_remote(spec):
+            parts.append("remote MCP endpoint")
+            allowed_hosts = spec.get("allowedHosts")
+            if allowed_hosts:
+                restricted = True
+                parts.append("allowedHosts restricted")
+            else:
+                parts.append("no allowedHosts restriction")
+            url = spec.get("url") or spec.get("endpoint")
+            if isinstance(url, str) and _mcp_url_is_local(url):
+                restricted = True
+                parts.append("local URL")
+        else:
+            restricted = True
+            parts.append("local stdio subprocess")
+        evidence.append(f"MCP {name}: {'; '.join(parts)}")
+
+    ext = sorted(s for s in ctx.installed_skills if any(h in s.lower() for h in _EXT_SKILL_HINTS))
+    for name in ext:
+        evidence.append(f"skill {name}: external-service capability")
+
+    surface_count = len([line for line in evidence if not line.startswith("global egress restriction")])
+    if not surface_count:
+        return _finding(
+            "C014", UNKNOWN,
+            "No outbound-capable channels, MCP servers, skills, or tools detected.",
+            "Run on the OpenClaw home with channels, skills, and MCP config present.",
+        )
+    if restricted:
+        return _finding(
+            "C014", PASS,
+            f"Egress inventory: {surface_count} outbound-capable surface(s) found; explicit restriction signals are present — see evidence.",
+            "Keep outbound-capable tools, MCP endpoints, and channels on tight allowlists and retain approval on high-impact actions.",
+            evidence=evidence,
+        )
+    return _finding(
+        "C014", WARN,
+        f"Egress inventory: {surface_count} outbound-capable surface(s) found with no explicit restriction signals — see evidence.",
+        "Add hostname/egress allowlists where supported, keep outbound channels narrow, and require approval for exec/send-style actions.",
+        evidence=evidence,
+    )
+
+
 # ---------- B15: MCP server trust ----------
 def _mcp_servers(cfg: dict) -> dict:
     out = {}
@@ -7083,7 +7190,7 @@ CHECKS = [
     check_sandbox, check_supply_chain, check_bootstrap_injection,
     check_memory_poisoning, check_human_approval, check_leak,
     check_audit_log, check_tls, check_local_first,
-    check_installed_skills, check_egress, check_mcp, check_mcp_hardening,
+    check_installed_skills, check_egress, check_egress_inventory, check_mcp, check_mcp_hardening,
     check_mcp_external_endpoint,
     check_monitoring, check_autonomy, check_subagents, check_data_atrest,
     check_bootstrap_write_protection, check_self_modification, check_backups,
