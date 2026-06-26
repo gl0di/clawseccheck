@@ -2,7 +2,7 @@
 from clawseccheck import audit
 from clawseccheck.baseline import apply, fingerprint, load_ignore
 from clawseccheck.catalog import CRITICAL, FAIL, HIGH, PASS, WARN, Finding
-from clawseccheck.report import render_report
+from clawseccheck.report import render_json, render_report
 from clawseccheck.scoring import compute
 
 
@@ -38,6 +38,14 @@ def test_suppressed_critical_does_not_cap_score():
     r = compute([keep, supp])
     assert r.score == 100 and r.capped is False
 
+
+
+
+def test_suppressed_flag_in_json_output():
+    supp = _f("B2", CRITICAL, FAIL, "gateway exposed")
+    supp.suppressed = True
+    out = render_json([supp], compute([supp]))
+    assert '"suppressed": true' in out
 
 def test_suppressed_excluded_from_report():
     supp = _f("B2", CRITICAL, FAIL, "x")

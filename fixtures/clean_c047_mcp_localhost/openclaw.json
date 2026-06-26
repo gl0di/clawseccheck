@@ -1,0 +1,8 @@
+{
+  "mcp": {
+    "servers": {
+      "local-sse": { "url": "http://localhost:8123/sse" },
+      "local-stdio": { "command": "npx", "args": ["server-fs"] }
+    }
+  }
+}

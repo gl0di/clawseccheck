@@ -83,12 +83,12 @@ stamped here):
 
 | ASI threat class | ClawSecCheck checks |
 |---|---|
-| Goal hijacking / prompt injection | A1, B6, B21, B23, B26, B28 |
+| Goal hijacking / prompt injection | A1, B6, B21, B23, B26; B28 is an unshipped provenance gap |
 | Tool misuse (unsafe delegation / parameter injection) | B3, B18, B31, B45, B46, B47 |
 | Identity & privilege abuse (multi-agent delegation chains) | B30, B45, B46, B47 |
 | Runtime supply chain (dynamic tool/plugin composition) | B5, B13, B25, B33, B42 |
 | Unexpected RCE (sandboxing failures) | B4, B48, C5 |
-| Memory & context poisoning | B7, B20, B28 |
+| Memory & context poisoning | B7, B20; B28 is an unshipped provenance gap |
 | Insecure inter-agent communication | B47, B2, B32 |
 | Cascading failures / blast-radius amplification | B41, B43, B45, B46, B47 |
 | Human-agent trust / decision-fatigue | B8, B18, B23 |

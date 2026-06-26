@@ -3,6 +3,20 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.22.0] — 2026-06-26
+
+Four new checks (C047, C048, C074, B66/C078) and two extended checks (B58/C073, B59/C077) covering MCP exfil surfaces, cron persistence, HTML-attribute injection, persona jailbreak, hidden-text obfuscation, and data-bearing hyperlinks.
+
+### Added
+- **C047** (`check_mcp_external_endpoint`): advisory UNKNOWN listing for `mcp.servers` entries whose URL is non-local (not `127.0.0.1`, `localhost`, or a Unix socket) — surfaces potential exfil sinks for manual review; never FAILs.
+- **C048** (`check_cron_scheduler`): advisory UNKNOWN when the top-level `cron` field is present — static config cannot distinguish a legitimate schedule from attacker-planted persistence; never FAILs.
+- **C074** (`check_image_attr_injection`): WARN when injection-like phrases are found in HTML `<img>` `alt`, `title`, or `aria-label` attributes — catches instruction smuggling via image metadata.
+- **B66 / C078** (`check_persona_jailbreak`): FAIL on explicit persona-substitution jailbreak phrases ("pretend you are DAN", "developer mode enabled", etc.) in bootstrap and skill content; WARN on ambiguous role-play directives.
+
+### Changed
+- **B58 extended (C073)**: Unicode obfuscation check now also decodes HTML/CSS hidden-text (`display:none`, `visibility:hidden`, `font-size:0`), HTML comments, base64-encoded blobs, URL-percent-encoding, and HTML entities before applying injection pattern matching.
+- **B59 extended (C077)**: Markdown-image exfil check now also flags hyperlinks (not just images) whose URLs carry data-bearing query parameters (`token=`, `key=`, `secret=`, `password=`, `data=`) — WARN-only to limit false positives on legitimate analytics links.
+
 ## [1.21.0] — 2026-06-26
 
 New `--self-test` composite harness, tighter B43 blast-radius logic, and terminal-injection hardening in `--vet` output.

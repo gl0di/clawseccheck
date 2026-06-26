@@ -230,6 +230,15 @@ CATALOG: list[CheckMeta] = [
     # UNKNOWN nudge, never a FAIL. Advisory (not scored).
     CheckMeta("C6", "Hook-composition tool-policy drop (pre-v2026.6.10)",
               LOW, "advisory", "Patch hygiene", scored=False),
+    CheckMeta("C047", "Non-local MCP server endpoint (manual review)",
+              LOW, "advisory", "MCP / External Endpoint Review", scored=False),
+    # C048: top-level cron scheduler persistence surface. Advisory UNKNOWN-only when
+    # the real OpenClaw `cron` field is present; config alone cannot distinguish a
+    # legitimate schedule from attacker-planted persistence, so this never FAILs.
+    CheckMeta("C048", "Cron scheduler persistence surface (top-level cron)",
+              LOW, "advisory", "Persistence / Scheduled Execution", scored=False),
+    CheckMeta("C074", "Injection-like text in HTML image attributes",
+              MEDIUM, "advisory", "Prompt Injection / HTML Attribute", scored=False),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

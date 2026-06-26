@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import html
 import os
 import re
 import shutil
 import unicodedata
+from urllib.parse import unquote, urlparse
 from pathlib import Path
 
 from . import attest as _attest
@@ -2649,6 +2651,23 @@ def _mcp_has_remote(spec) -> bool:
     return str(spec.get("transport", "")).lower() in _MCP_REMOTE_TRANSPORTS
 
 
+def _mcp_url_is_local(url: str) -> bool:
+    if not isinstance(url, str) or not url.strip():
+        return False
+    raw = url.strip()
+    lower = raw.lower()
+    if lower.startswith(("unix://", "file://")):
+        return True
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    if host in LOOPBACK:
+        return True
+    return host.startswith("127.")
+
+
 def check_mcp(ctx: Context) -> Finding:
     servers = _mcp_servers(ctx.config)
     if not servers:
@@ -2825,6 +2844,40 @@ def check_mcp_hardening(ctx: Context) -> Finding:
         "B24", PASS,
         f"{n} MCP server(s) configured ({names_preview}); no hardening issues detected.",
         "Keep MCP server specs pinned, env vars minimal, and allowedHosts restricted.",
+    )
+
+
+def check_mcp_external_endpoint(ctx: Context) -> Finding:
+    """C047 — advisory UNKNOWN for non-local MCP server URLs.
+
+    A remote MCP endpoint can act as an exfiltration sink, but config alone cannot
+    prove whether it is legitimate or attacker-controlled. This is UNKNOWN-only on
+    non-local URLs and PASS when MCP is absent or limited to local/stdio endpoints.
+    """
+    servers = _mcp_servers(ctx.config)
+    external = []
+    for name, spec in servers.items():
+        if not isinstance(spec, dict):
+            continue
+        url = spec.get("url") or spec.get("endpoint")
+        if not isinstance(url, str) or not url.strip():
+            continue
+        if _mcp_url_is_local(url):
+            continue
+        external.append(f"{name}: non-local MCP URL {_obf_clip(url.strip())}")
+
+    if external:
+        return _finding(
+            "C047", UNKNOWN,
+            "Non-local MCP server endpoint(s) require manual review: " + "; ".join(external[:4]),
+            "Review each non-local MCP server URL, confirm the owner and trust boundary, "
+            "and prefer localhost/stdio or a Unix socket when a remote endpoint is not required.",
+            external,
+        )
+    return _finding(
+        "C047", PASS,
+        "No non-local MCP server URLs detected.",
+        "Keep MCP endpoints local where possible and review any future remote URLs before enabling them.",
     )
 
 
@@ -3352,6 +3405,32 @@ def check_hook_policy_bypass(ctx: Context) -> Finding:
         "C6", PASS,
         "No pre-v2026.6.10 hook-composition tool-policy-drop exposure detected.",
         "Keep OpenClaw updated and re-verify tools.exec.mode after upgrades.",
+    )
+
+
+def check_cron_scheduler(ctx: Context) -> Finding:
+    """C048 — advisory UNKNOWN for the top-level OpenClaw `cron` field.
+
+    The presence of `cron` confirms a recurring scheduler surface, but static config
+    cannot tell legitimate schedules from attacker-planted persistence. This check is
+    therefore UNKNOWN-only on presence and PASS when the field is absent.
+    """
+    cron = dig(ctx.config, "cron")
+    if cron:
+        return _finding(
+            "C048", UNKNOWN,
+            "Top-level `cron` scheduler is configured. Recurring scheduled tasks can "
+            "become a persistence surface, but static config cannot distinguish a "
+            "legitimate schedule from attacker-planted automation — manual review required.",
+            "Review each scheduled cron task and confirm it was intentionally configured. "
+            "Treat cron as a persistence surface and verify scheduled actions cannot run "
+            "untrusted instructions unattended.",
+            evidence=["top-level `cron` field is present"],
+        )
+    return _finding(
+        "C048", PASS,
+        "No top-level `cron` scheduler is configured.",
+        "Keep recurring schedules disabled unless they are explicitly required and reviewed.",
     )
 
 
@@ -5501,210 +5580,6 @@ def check_plugin_permission_mode(ctx: Context) -> Finding:
     )
 
 
-def check_unicode_obfuscation(ctx: Context) -> Finding:
-    """B58 — Unicode-obfuscated injection / hidden-text evasion.
-
-    Scans bootstrap files and installed skills for Unicode obfuscation that
-    hides injection directives from plain-text scanners.
-
-    FAIL    — an injection pattern matches the NORMALIZED text but NOT the raw
-              text (positive evidence of evasion: obfuscation was concealing a
-              real injection directive).
-    WARN    — invisible / bidi / confusable characters found but no hidden
-              injection underneath (could be legitimate i18n usage).
-    PASS    — normalization changes nothing meaningful; no injection found.
-    UNKNOWN — nothing to inspect (no bootstrap and no installed skills).
-    """
-    if not ctx.bootstrap and not ctx.installed_skills:
-        return _finding(
-            "B58", UNKNOWN,
-            "No bootstrap files or installed skills found — nothing to inspect for "
-            "Unicode obfuscation.",
-            "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and installed "
-            "skills live.",
-        )
-
-    fail_ev: list[str] = []   # evasion delta: injection hidden by obfuscation
-    warn_ev: list[str] = []   # obfuscation present but no hidden injection
-
-    # --- Bootstrap files ---
-    for fname, text in ctx.bootstrap.items():
-        norm = normalize_for_scan(text)
-        signals = obfuscation_signals(text)
-        if not signals:
-            continue
-        # Check whether normalization REVEALS an injection that was not visible raw.
-        hidden = False
-        for pat in INJECTION_PATTERNS:
-            if pat.search(norm) and not pat.search(text):
-                fail_ev.append(
-                    f"{fname}: obfuscation hides injection matching "
-                    f"'{pat.pattern[:40]}…' ({'; '.join(signals)})"
-                )
-                hidden = True
-                break
-        if not hidden:
-            warn_ev.append(
-                f"{fname}: Unicode obfuscation signals present "
-                f"({'; '.join(signals)}) but no hidden injection detected"
-            )
-
-    # --- Installed skills ---
-    for skill_name, blob in ctx.installed_skills.items():
-        norm = normalize_for_scan(blob)
-        signals = obfuscation_signals(blob)
-        if not signals:
-            continue
-        hidden = False
-        for pat in INJECTION_PATTERNS:
-            if pat.search(norm) and not pat.search(blob):
-                fail_ev.append(
-                    f"{skill_name}: obfuscation hides injection matching "
-                    f"'{pat.pattern[:40]}…' ({'; '.join(signals)})"
-                )
-                hidden = True
-                break
-        if not hidden:
-            warn_ev.append(
-                f"{skill_name}: Unicode obfuscation signals present "
-                f"({'; '.join(signals)}) but no hidden injection detected"
-            )
-
-    if fail_ev:
-        return _finding(
-            "B58", FAIL,
-            "Unicode obfuscation concealing injection directive(s): "
-            + "; ".join(fail_ev[:4]),
-            "Remove Unicode lookalike / invisible characters from bootstrap files "
-            "and installed skills. Re-run the audit to confirm no injection remains "
-            "after normalization.",
-            fail_ev,
-        )
-    if warn_ev:
-        return _finding(
-            "B58", WARN,
-            "Unicode obfuscation signals found (no hidden injection confirmed): "
-            + "; ".join(warn_ev[:4]),
-            "Review the flagged files for intentional Unicode obfuscation. Legitimate "
-            "RTL / i18n content is expected; invisible zero-width or Cyrillic/Greek "
-            "lookalike characters in ASCII-context prose are suspicious.",
-            warn_ev,
-        )
-    return _finding(
-        "B58", PASS,
-        "No Unicode obfuscation signals found in bootstrap files or installed skills.",
-        "Keep bootstrap files free of invisible / bidi-control / confusable characters "
-        "in ASCII-context prose.",
-    )
-
-
-
-# ---------------------------------------------------------------------------
-# B59 — Markdown-image data-exfil via remote URL
-# ---------------------------------------------------------------------------
-
-# Markdown form: ![alt](https://...?param=...)
-_B59_MD_IMG_RE = re.compile(
-    r"!\[[^\]]*\]\(\s*https?://[^)\s]*[?&][^)\s]*=",
-    re.IGNORECASE,
-)
-# HTML form: <img ... src="https://...?param=...">
-_B59_HTML_IMG_RE = re.compile(
-    r"""<img\b[^>]*\bsrc\s*=\s*["']https?://[^"']*[?&][^"']*=[^"']*["'][^>]*>""",
-    re.IGNORECASE,
-)
-
-
-def check_markdown_image_exfil(ctx: Context) -> Finding:
-    """B59 — Markdown-image / markdown-link / anchor data-exfil via remote URL.
-
-    Detects Markdown image and markdown-link syntax or HTML image/anchor tags where
-    the URL is remote ``http(s)://`` and carries a query string with at least one
-    parameter (``?key=`` or ``&key=``). Such constructs can exfiltrate context
-    data to an attacker-controlled server as the remote content is fetched.
-
-    WARN  — remote URL with a data-bearing query string found.
-    PASS  — no such construct detected.
-    UNKNOWN — nothing to inspect.
-    """
-    if not ctx.bootstrap and not ctx.installed_skills:
-        return _finding(
-            "B59", UNKNOWN,
-            "No bootstrap files or installed skills found — nothing to inspect for "
-            "markdown-image exfiltration.",
-            "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and installed "
-            "skills are located.",
-        )
-
-    evidence: list[str] = []
-
-    markdown_link_re = re.compile(
-        r"(?<!\!)\[[^\]]+\]\([^\)\n]*\)",
-        re.IGNORECASE,
-    )
-    html_anchor_re = re.compile(
-        r"<a[^>]*href\s*=\s*[\"']https?://[^\"']+[\"']",
-        re.IGNORECASE,
-    )
-
-    def _scan_markdown_links(blob: str, source: str) -> None:
-        fr = _fence_ranges(blob)
-
-        for m in _B59_MD_IMG_RE.finditer(blob):
-            if _is_code_example(blob, m.start(), fr):
-                continue
-            evidence.append(f"{source}: markdown image URL with query params: {m.group()[:80]}")
-
-        for m in markdown_link_re.finditer(blob):
-            if _is_code_example(blob, m.start(), fr):
-                continue
-            raw = m.group()
-            url = raw.split("(", 1)[1][:-1].strip()
-            if "?" not in url or "=" not in url.split("?", 1)[1]:
-                continue
-            if not (url.startswith("http://") or url.startswith("https://")):
-                continue
-            evidence.append(f"{source}: markdown link URL with query params: {raw[:80]}")
-
-        for m in _B59_HTML_IMG_RE.finditer(blob):
-            if _is_code_example(blob, m.start(), fr):
-                continue
-            evidence.append(f"{source}: HTML img src URL with query params: {m.group()[:80]}")
-
-        for m in html_anchor_re.finditer(blob):
-            if _is_code_example(blob, m.start(), fr):
-                continue
-            href_text = m.group()
-            if "?" not in href_text or "=" not in href_text.split("?", 1)[1]:
-                continue
-            evidence.append(f"{source}: HTML anchor href URL with query params: {href_text[:80]}")
-
-    for fname, text in ctx.bootstrap.items():
-        _scan_markdown_links(normalize_for_scan(text), fname)
-
-    for skill_name, blob in ctx.installed_skills.items():
-        _scan_markdown_links(normalize_for_scan(blob), skill_name)
-
-    if evidence:
-        return _finding(
-            "B59", WARN,
-            "Remote image URL(s) with data-bearing query parameters found: "
-            + "; ".join(evidence[:4]),
-            "Remove or replace image references that include query parameters in bootstrap "
-            "files and installed skills. Use static CDN URLs without query strings, or "
-            "reference images locally.",
-            evidence,
-        )
-    return _finding(
-        "B59", PASS,
-        "No remote image URLs with data-bearing query parameters found in bootstrap "
-        "files or installed skills.",
-        "Keep image references free of query parameters unless the URL is a trusted, "
-        "static resource with no data payload.",
-    )
-
-
-# ---------------------------------------------------------------------------
 # B60 — Prompt self-replication / propagation directive (ATLAS AML.T0061)
 # ---------------------------------------------------------------------------
 
@@ -6754,6 +6629,454 @@ def check_persona_jailbreak(ctx: Context) -> Finding:
     )
 
 
+def _obf_clip(text: str, max_len: int = 80) -> str:
+    text = text.strip()
+    return text if len(text) <= max_len else text[: max_len - 3] + "..."
+
+
+# ---------------------------------------------------------------------------
+# B58 — Unicode-obfuscated injection / hidden-text evasion
+# ---------------------------------------------------------------------------
+
+_B58_JS_HEX_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
+_B58_JS_UHEX_RE = re.compile(r"\\u\{([0-9a-fA-F]{1,6})\}")
+_B58_JS_UNI_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
+_B58_JS_OCTAL_RE = re.compile(r"\\([0-7]{1,3})(?![0-9A-Fa-f])")
+_B58_CSS_RE = re.compile(r"\\([0-9A-Fa-f]{1,6})(?:\s+)?")
+_B58_HTML_COMMENT_RE = re.compile(r"<!--(.*?)-->", re.IGNORECASE | re.DOTALL)
+_B58_HIDDEN_TAG_RE = re.compile(r"<(?P<tag>[A-Za-z][\w:-]*)(?P<attrs>[^>]*)>(?P<body>.*?)</(?P=tag)>", re.IGNORECASE | re.DOTALL)
+_B58_HIDDEN_STYLE_RE = re.compile(
+    r"display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?:px|em|rem|%)?|"
+    r"color\s*:\s*(?:white|#fff(?:fff)?|rgb\(255\s*,\s*255\s*,\s*255\s*\))",
+    re.IGNORECASE,
+)
+_B58_BASE64_RE = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{16,}={0,2}(?![A-Za-z0-9+/=])")
+
+
+def _b58_decode_percent(text: str) -> str:
+    try:
+        return unquote(text)
+    except Exception:
+        return text
+
+
+def _b58_decode_html_entities(text: str) -> str:
+    return html.unescape(text)
+
+
+def _decode_codepoint(raw: str) -> str:
+    try:
+        value = int(raw, 16)
+    except ValueError:
+        return ""
+    if value > 0x10FFFF:
+        return ""
+    if 0xD800 <= value <= 0xDFFF:
+        return ""
+    try:
+        return chr(value)
+    except (TypeError, ValueError):
+        return ""
+
+
+def _b58_decode_js_css(text: str) -> str:
+    out = _B58_JS_HEX_RE.sub(
+        lambda m: _decode_codepoint(m.group(1)),
+        text,
+    )
+    out = _B58_JS_UHEX_RE.sub(
+        lambda m: _decode_codepoint(m.group(1)),
+        out,
+    )
+    out = _B58_JS_UNI_RE.sub(
+        lambda m: _decode_codepoint(m.group(1)),
+        out,
+    )
+    out = _B58_JS_OCTAL_RE.sub(
+        lambda m: _decode_codepoint(m.group(1)),
+        out,
+    )
+    out = _B58_CSS_RE.sub(
+        lambda m: _decode_codepoint(m.group(1)),
+        out,
+    )
+    return out
+
+
+def _b58_decode_variants(text: str, rounds: int = 2) -> list[tuple[str, str]]:
+    """Return decoded variants plus a compact source-label summary."""
+    variants: list[tuple[str, str]] = []
+    frontier = [(text, frozenset())]
+    seen = {text}
+
+    for _ in range(rounds):
+        next_frontier: list[tuple[str, frozenset[str]]] = []
+        for value, labels in frontier:
+            for label, decoder in (
+                ("percent-decoding", _b58_decode_percent),
+                ("html-entity", _b58_decode_html_entities),
+                ("js/css-escape", _b58_decode_js_css),
+            ):
+                decoded = decoder(value)
+                if decoded == value:
+                    continue
+                next_labels = frozenset((*labels, label))
+                if decoded in seen:
+                    continue
+                seen.add(decoded)
+                variants.append((decoded, "; ".join(sorted(next_labels))))
+                next_frontier.append((decoded, next_labels))
+        frontier = next_frontier
+
+    return variants
+
+
+def _b58_hidden_segments(text: str) -> list[tuple[str, str]]:
+    segments: list[tuple[str, str]] = []
+    for m in _B58_HTML_COMMENT_RE.finditer(text):
+        body = normalize_for_scan(html.unescape(m.group(1)))
+        if body.strip():
+            segments.append((body, "html-comment"))
+    for m in _B58_HIDDEN_TAG_RE.finditer(text):
+        attrs = m.group("attrs") or ""
+        if not _B58_HIDDEN_STYLE_RE.search(attrs):
+            continue
+        body = re.sub(r"<[^>]+>", " ", m.group("body") or "")
+        body = normalize_for_scan(html.unescape(body))
+        if body.strip():
+            segments.append((body, "hidden-html/css"))
+    return segments
+
+
+def _b58_base64_variants(text: str) -> list[tuple[str, str]]:
+    variants: list[tuple[str, str]] = []
+    for m in _B58_BASE64_RE.finditer(text):
+        token = m.group(0)
+        if len(token) % 4 != 0:
+            continue
+        try:
+            raw = base64.b64decode(token, validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        if not raw:
+            continue
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        decoded = normalize_for_scan(decoded)
+        if decoded.strip():
+            variants.append((decoded, f"base64:{_obf_clip(token, 32)}"))
+    return variants
+
+
+def _check_unicode_obfuscation(ctx: Context) -> Finding:
+    """Compatibility implementation of B58 with decode-aware hidden-injection detection."""
+    if not ctx.bootstrap and not ctx.installed_skills:
+        return _finding(
+            "B58", UNKNOWN,
+            "No bootstrap files or installed skills found — nothing to inspect for "
+            "Unicode obfuscation.",
+            "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and installed "
+            "skills are available.",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+
+    def _scan(source_name: str, text: str):
+        norm = normalize_for_scan(text)
+        raw_signals = obfuscation_signals(text)
+        hidden_segments = _b58_hidden_segments(text)
+        base64_variants = _b58_base64_variants(text)
+
+        signal_parts = list(raw_signals)
+        if hidden_segments:
+            signal_parts.extend(sorted({label for _, label in hidden_segments}))
+        if base64_variants:
+            signal_parts.append("base64")
+        base_signal_text = "; ".join(signal_parts)
+
+        variants: list[tuple[str, str]] = [(norm, base_signal_text)]
+        seen = {norm}
+        for decoded, labels in _b58_decode_variants(text):
+            n = normalize_for_scan(decoded)
+            if n in seen:
+                continue
+            seen.add(n)
+            merged_signals = []
+            if base_signal_text:
+                merged_signals.append(base_signal_text)
+            if labels:
+                merged_signals.append(labels)
+            variants.append((n, "; ".join([s for s in merged_signals if s])))
+
+        for decoded, labels in hidden_segments + base64_variants:
+            n = normalize_for_scan(decoded)
+            merged_signals = []
+            if base_signal_text:
+                merged_signals.append(base_signal_text)
+            if labels:
+                merged_signals.append(labels)
+            variants.append((n, "; ".join([s for s in merged_signals if s])))
+
+        hidden = False
+        for variant, signals in variants:
+            if not signals:
+                continue
+            for pat in INJECTION_PATTERNS:
+                if pat.search(variant) and (variant != norm or not pat.search(text) or "hidden-html/css" in signals or "html-comment" in signals or "base64:" in signals):
+                    fail_ev.append(
+                        f"{source_name}: obfuscation hides injection matching "
+                        f"'{pat.pattern[:40]}…' ({signals})"
+                    )
+                    hidden = True
+                    break
+            if hidden:
+                break
+
+        if not hidden and signal_parts:
+            warn_ev.append(
+                f"{source_name}: Unicode obfuscation signals present ("
+                f"{base_signal_text}) but no hidden injection detected"
+            )
+
+    for fname, text in ctx.bootstrap.items():
+        _scan(fname, text)
+
+    for skill_name, blob in ctx.installed_skills.items():
+        _scan(skill_name, blob)
+
+    if fail_ev:
+        return _finding(
+            "B58", FAIL,
+            "Unicode obfuscation concealing injection directive(s): "
+            + "; ".join(fail_ev[:4]),
+            "Remove Unicode lookalike / invisible characters from bootstrap files "
+            "and installed skills. Re-run the audit to confirm no injection remains "
+            "after normalization.",
+            fail_ev,
+        )
+    if warn_ev:
+        return _finding(
+            "B58", WARN,
+            "Unicode obfuscation signals found (no hidden injection confirmed): "
+            + "; ".join(warn_ev[:4]),
+            "Review the flagged files for intentional Unicode obfuscation. Legitimate "
+            "RTL / i18n content is expected; invisible zero-width or Cyrillic/Greek "
+            "lookalike characters in ASCII-context prose are suspicious.",
+            warn_ev,
+        )
+    return _finding(
+        "B58", PASS,
+        "No Unicode obfuscation signals found in bootstrap files or installed skills.",
+        "Keep bootstrap files free of invisible / bidi-control / confusable characters "
+        "in ASCII-context prose.",
+    )
+
+
+def check_unicode_obfuscation(ctx: Context) -> Finding:
+    """B58 — Unicode-obfuscated injection / hidden-text evasion."""
+    return _check_unicode_obfuscation(ctx)
+
+
+# ---------------------------------------------------------------------------
+# B59 — Markdown-image data-exfil via remote URL
+# ---------------------------------------------------------------------------
+
+_B59_MD_IMG_RE = re.compile(r"!\[[^\]]*\]\(([^)\n]+)\)", re.IGNORECASE)
+_B59_MD_LINK_RE = re.compile(r"(?<!\!)\[[^\]]+\]\(([^)\n]+)\)", re.IGNORECASE)
+_B59_HTML_TAG_RE = re.compile(r"<(?:img|a)\b[^>]*>", re.IGNORECASE)
+_B59_HTML_ATTR_RE = re.compile(
+    r"\b(?P<name>src|data-src|srcset|data-srcset|poster|href)\b"
+    r"\s*=\s*(?:\'(?P<single>[^\']*)\'|\"(?P<double>[^\"]*)\"|(?P<bare>[^\s>]+))",
+    re.IGNORECASE,
+)
+_B59_IMG_TEXT_ATTR_RE = re.compile(
+    r"\b(?P<name>alt|title|aria-label)\b"
+    r"\s*=\s*(?:\'(?P<single>[^\']*)\'|\"(?P<double>[^\"]*)\"|(?P<bare>[^\s>]+))",
+    re.IGNORECASE,
+)
+
+
+def _b59_url_has_data_query(url: str) -> bool:
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return False
+    q = url.find("?")
+    if q == -1:
+        return False
+    return "=" in url[q + 1:]
+
+
+def _b59_markdown_url(raw: str) -> str | None:
+    if not raw:
+        return None
+    target = raw.strip()
+    if target.startswith("<"):
+        close = target.find(">")
+        if close != -1:
+            target = target[1:close]
+    return target.split()[0].strip() if target else None
+
+
+def _b59_split_srcset(urls: str) -> list[str]:
+    out: list[str] = []
+    for part in urls.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        candidate = item.split(None, 1)[0].strip()
+        if candidate:
+            out.append(candidate)
+    return out
+
+
+def _scan_b59_html_attr(evidence: list[str], source: str, tag: str, name: str, value: str):
+    if not value:
+        return
+    attr = name.lower()
+    if tag == "a" and attr != "href":
+        return
+    if tag == "img" and attr == "href":
+        return
+
+    urls = _b59_split_srcset(value) if attr in {"srcset", "data-srcset"} else [value]
+    for item in urls:
+        if not _b59_url_has_data_query(item):
+            continue
+        label = {
+            "src": "HTML img src URL with query params",
+            "srcset": "HTML img srcset URL with query params",
+            "data-src": "HTML img data-src URL with query params",
+            "data-srcset": "HTML img data-srcset URL with query params",
+            "poster": "HTML media poster URL with query params",
+            "href": "HTML anchor href URL with query params",
+        }.get(attr, "HTML URL with query params")
+        evidence.append(f"{source}: {label}: {_obf_clip(item)}")
+
+
+def _check_markdown_image_exfil(ctx: Context) -> Finding:
+    """Compatibility implementation of B59 with srcset/data-* expansion."""
+    if not ctx.bootstrap and not ctx.installed_skills:
+        return _finding(
+            "B59", UNKNOWN,
+            "No bootstrap files or installed skills found — nothing to inspect for "
+            "markdown-image exfiltration.",
+            "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md and "
+            "installed skills are located.",
+        )
+
+    evidence: list[str] = []
+
+    def _scan(blob: str, source: str) -> None:
+        norm = normalize_for_scan(blob)
+        fr = _fence_ranges(norm)
+
+        for m in _B59_MD_IMG_RE.finditer(norm):
+            if _is_code_example(norm, m.start(), fr):
+                continue
+            url = _b59_markdown_url(m.group(1))
+            if url and _b59_url_has_data_query(url):
+                evidence.append(f"{source}: markdown image URL with query params: {_obf_clip(url)}")
+
+        for m in _B59_MD_LINK_RE.finditer(norm):
+            if _is_code_example(norm, m.start(), fr):
+                continue
+            url = _b59_markdown_url(m.group(1))
+            if url and _b59_url_has_data_query(url):
+                evidence.append(f"{source}: markdown link URL with query params: {_obf_clip(url)}")
+
+        for m in _B59_HTML_TAG_RE.finditer(norm):
+            if _is_code_example(norm, m.start(), fr):
+                continue
+            tag = m.group(0)
+            tag_name_match = re.match(r"<\s*([A-Za-z0-9-]+)", tag)
+            tag_name = (tag_name_match.group(1).lower() if tag_name_match else "").lower()
+            for a in _B59_HTML_ATTR_RE.finditer(tag):
+                name = a.group("name")
+                value = a.group("single") or a.group("double") or a.group("bare") or ""
+                _scan_b59_html_attr(evidence, source, tag_name, name, value)
+
+    for fname, text in ctx.bootstrap.items():
+        _scan(text, fname)
+
+    for skill_name, blob in ctx.installed_skills.items():
+        _scan(blob, skill_name)
+
+    if evidence:
+        return _finding(
+            "B59", WARN,
+            "Remote image URL(s) with data-bearing query parameters found: "
+            + "; ".join(evidence[:4]),
+            "Remove or replace image references that include query parameters in bootstrap "
+            "files and installed skills. Use static CDN URLs without query strings, or "
+            "reference images locally.",
+            evidence,
+        )
+    return _finding(
+        "B59", PASS,
+        "No remote image URLs with data-bearing query parameters found in bootstrap "
+        "files or installed skills.",
+        "Keep image references free of query parameters unless the URL is a trusted, "
+        "static resource with no data payload.",
+    )
+
+
+def check_markdown_image_exfil(ctx: Context) -> Finding:
+    return _check_markdown_image_exfil(ctx)
+
+
+def check_image_attr_injection(ctx: Context) -> Finding:
+    """C074 — advisory WARN for injection-like text hidden in HTML image attrs."""
+    if not ctx.bootstrap and not ctx.installed_skills:
+        return _finding(
+            "C074", UNKNOWN,
+            "No bootstrap files or installed skills found — nothing to inspect for image attribute injection.",
+            "Run on the host where workspace bootstrap files and installed skills are located.",
+        )
+
+    evidence: list[str] = []
+
+    def _scan(blob: str, source: str) -> None:
+        norm = normalize_for_scan(blob)
+        fr = _fence_ranges(norm)
+        for m in _B59_HTML_TAG_RE.finditer(norm):
+            if _is_code_example(norm, m.start(), fr):
+                continue
+            tag = m.group(0)
+            tag_name_match = re.match(r"<\s*([A-Za-z0-9-]+)", tag)
+            tag_name = (tag_name_match.group(1).lower() if tag_name_match else "").lower()
+            if tag_name != "img":
+                continue
+            for a in _B59_IMG_TEXT_ATTR_RE.finditer(tag):
+                name = a.group("name").lower()
+                value = a.group("single") or a.group("double") or a.group("bare") or ""
+                value = normalize_for_scan(html.unescape(value))
+                for pat in INJECTION_PATTERNS:
+                    if pat.search(value):
+                        evidence.append(
+                            f"{source}: HTML img {name} attribute contains injection-like text: {_obf_clip(value)}"
+                        )
+                        break
+
+    for fname, value in ctx.bootstrap.items():
+        _scan(value, fname)
+    for skill_name, blob in ctx.installed_skills.items():
+        _scan(blob, skill_name)
+
+    if evidence:
+        return _finding(
+            "C074", WARN,
+            "HTML image attribute injection indicator(s) detected: " + "; ".join(evidence[:4]),
+            "Remove instruction-like text from HTML image alt/title/aria-label attributes in bootstrap files and installed skills.",
+            evidence,
+        )
+    return _finding(
+        "C074", PASS,
+        "No injection-like text found in HTML image alt/title/aria-label attributes.",
+        "Keep HTML image text attributes descriptive and free of instruction content.",
+    )
+
 
 CHECKS = [
     check_trifecta, check_secrets, check_gateway, check_least_privilege,
@@ -6761,6 +7084,7 @@ CHECKS = [
     check_memory_poisoning, check_human_approval, check_leak,
     check_audit_log, check_tls, check_local_first,
     check_installed_skills, check_egress, check_mcp, check_mcp_hardening,
+    check_mcp_external_endpoint,
     check_monitoring, check_autonomy, check_subagents, check_data_atrest,
     check_bootstrap_write_protection, check_self_modification, check_backups,
     check_version, check_tool_output_trust, check_approval_bypass,
@@ -6777,8 +7101,10 @@ CHECKS = [
     check_fs_write_exposure,
     check_controlui_origins, check_plugin_permission_mode,
     check_hook_policy_bypass,
+    check_cron_scheduler,
     check_unicode_obfuscation,
     check_markdown_image_exfil,
+    check_image_attr_injection,
     check_prompt_self_replication,
     check_agent_snooping,
     check_capability_intent_mismatch,
