@@ -21,8 +21,9 @@ from . import attest as _attest
 from .catalog import (
     ATTESTED, BY_ID, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding,
 )
-from .collector import _OWN_SKILL_NAMES, Context, _read_skill_text, dig, read_skill_python
+from .collector import _OWN_SKILL_NAMES, BOOTSTRAP_FILES, SKILL_DIRS, Context, _read_skill_text, dig, read_skill_python
 from .skillast import analyze_python, simulate_effects as _simulate_effects
+from .safeio import walk_dir_safely
 from .textnorm import normalize_for_scan, obfuscation_signals
 
 
@@ -111,6 +112,25 @@ INJECTION_PATTERNS = [
 INPUT_TOOL_HINTS = ("email", "imap", "gmail", "rss", "feed", "web", "browse", "fetch", "file_read", "inbox")
 SENSITIVE_TOOL_HINTS = ("db", "sql", "postgres", "supabase", "secret", "credential", "vault", "fs_read", "files")
 OUTBOUND_TOOL_HINTS = ("send", "email_send", "webhook", "http_post", "exec", "shell", "fs_write", "deploy", "publish")
+# C015 mirrors logsafe's additional secret token shapes so the home-file scan catches
+# the same secret families the logger already redacts, without ever echoing values.
+_C015_EXTRA_SECRET_PATTERNS = [
+    re.compile(r"gh[opsur]_[A-Za-z0-9]{20,}"),
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"sk_(?:live|test)_[A-Za-z0-9]{10,}"),
+    re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
+    re.compile(
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        re.DOTALL,
+    ),
+]
+_C015_TEXT_EXTS = {
+    ".env", ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".conf", ".md", ".txt", ".properties", ".service", ".sh", ".envrc",
+}
+_C015_MAX_SCAN_FILES = 500
+_C015_MAX_BYTES = 200_000
 # B55: filesystem-write tool names. Grounded: fs_write is in OUTBOUND_TOOL_HINTS and
 # apply_patch is the canonical patch-writer (see B31 — "apply_patch/exec still write").
 # Matched as substrings so write_file / writeFile variants of the same capability count.
@@ -334,6 +354,80 @@ def check_trifecta(ctx: Context) -> Finding:
 
 
 # ---------------------------------------------------------------- Block B
+def _c015_candidate_files(ctx: Context) -> list[Path]:
+    skip_roots = [(ctx.home / rel).resolve() for rel in SKILL_DIRS]
+    out: list[Path] = []
+    for path in walk_dir_safely(ctx.home, max_files=_C015_MAX_SCAN_FILES, exclude_pycache=True):
+        if not path.is_file():
+            continue
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if any(resolved == root or root in resolved.parents for root in skip_roots if root.exists()):
+            continue
+        name = path.name.lower()
+        if path.suffix.lower() in _C015_TEXT_EXTS or name in {"openclaw.json", "openclaw.jsonc"} or name.startswith(".env") or name in BOOTSTRAP_FILES:
+            out.append(path)
+    return out
+
+
+def _c015_has_secret(text: str) -> bool:
+    for pat in SECRET_PATTERNS:
+        if pat.search(text):
+            return True
+    for pat in _C015_EXTRA_SECRET_PATTERNS:
+        if pat.search(text):
+            return True
+    return False
+
+
+def check_secrets_at_rest_home(ctx: Context) -> Finding:
+    """C015 — read-only scan for plaintext secret-shaped values in the OpenClaw home.
+
+    This complements B1: B1 owns openclaw.json/bootstrap semantics and permissions, while
+    C015 inventories any user-owned text file under the audited home (excluding installed
+    skill dirs) that appears to contain an inline secret/token value. Evidence names files
+    only — secret values are never echoed.
+    """
+    candidates = _c015_candidate_files(ctx)
+    if not candidates:
+        return _finding(
+            "C015", UNKNOWN,
+            "No candidate home files found for secrets-at-rest scan.",
+            "Run on the OpenClaw home with config/bootstrap/env files present.",
+        )
+
+    hits = []
+    for path in candidates:
+        try:
+            if path.stat().st_size > _C015_MAX_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _c015_has_secret(text):
+            try:
+                rel = path.relative_to(ctx.home)
+            except ValueError:
+                rel = path
+            hits.append(f"{rel}: secret-like value detected")
+
+    if hits:
+        detail = f"Plaintext secret-shaped value(s) found in {len(hits)} home file(s) — see evidence."
+        return _finding(
+            "C015", WARN,
+            detail,
+            "Move plaintext secrets into `openclaw secrets configure` or narrowly-scoped environment variables, and keep bootstrap/config files free of inline tokens.",
+            evidence=hits[:12],
+        )
+    return _finding(
+        "C015", PASS,
+        f"Scanned {len(candidates)} home file(s); no plaintext secret-shaped values detected.",
+        "Keep secrets out of home files; prefer the OpenClaw secrets store or environment injection.",
+    )
+
+
 def check_secrets(ctx: Context) -> Finding:
     cfg = ctx.config
     ev = []
@@ -7186,7 +7280,7 @@ def check_image_attr_injection(ctx: Context) -> Finding:
 
 
 CHECKS = [
-    check_trifecta, check_secrets, check_gateway, check_least_privilege,
+    check_trifecta, check_secrets, check_secrets_at_rest_home, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
     check_memory_poisoning, check_human_approval, check_leak,
     check_audit_log, check_tls, check_local_first,

@@ -232,6 +232,8 @@ CATALOG: list[CheckMeta] = [
               LOW, "advisory", "Patch hygiene", scored=False),
     CheckMeta("C014", "Egress inventory (outbound-capable surface enumeration)",
               LOW, "advisory", "Egress Inventory", scored=False),
+    CheckMeta("C015", "Secrets-at-rest scan of the OpenClaw home",
+              MEDIUM, "advisory", "Secrets / Filesystem", scored=False, confidence="MEDIUM"),
     CheckMeta("C047", "Non-local MCP server endpoint (manual review)",
               LOW, "advisory", "MCP / External Endpoint Review", scored=False),
     # C048: top-level cron scheduler persistence surface. Advisory UNKNOWN-only when

@@ -407,6 +407,7 @@ TITLES: dict[str, dict[str, str]] = {
     "C5": {"he": "בטיחות PATH של בינארי מקומי"},
     "C6": {"he": "השמטת מדיניות כלים בהרכבת hooks (לפני v2026.6.10)"},
     "C014": {"he": "מלאי יציאה (מיפוי משטחים בעלי יכולת יציאה)"},
+    "C015": {"he": "סריקת סודות במנוחה בספריית הבית של OpenClaw"},
     "C047": {"he": "נקודת קצה חיצונית של שרת MCP (בדיקה ידנית)"},
     "C048": {"he": "משטח התמדה של מתזמן cron (cron ברמת root)"},
     "C074": {"he": "טקסט דמוי-הזרקה במאפייני תמונת HTML"},
@@ -1497,6 +1498,20 @@ PHRASES: dict[str, dict[str, str]] = {
     },
     "Add hostname/egress allowlists where supported, keep outbound channels narrow, and require approval for exec/send-style actions.": {
         "he": "הוסף רשימות היתר ל-hostname/egress היכן שנתמך, צמצם ערוצים יוצאים, ודרוש אישור לפעולות בסגנון exec/send.",
+    },
+
+    # ---- C015: secrets at rest in home files ----
+    "No candidate home files found for secrets-at-rest scan.": {
+        "he": "לא נמצאו קבצי בית מתאימים לסריקת סודות במנוחה.",
+    },
+    "Run on the OpenClaw home with config/bootstrap/env files present.": {
+        "he": "הרץ על ספריית הבית של OpenClaw עם קובצי config/bootstrap/env קיימים.",
+    },
+    "Move plaintext secrets into `openclaw secrets configure` or narrowly-scoped environment variables, and keep bootstrap/config files free of inline tokens.": {
+        "he": "העבר סודות גלויים אל `openclaw secrets configure` או משתני סביבה מצומצמים, והשאר קובצי bootstrap/config נקיים מאסימונים מוטבעים.",
+    },
+    "Keep secrets out of home files; prefer the OpenClaw secrets store or environment injection.": {
+        "he": "השאר סודות מחוץ לקבצי הבית; העדף את מאגר הסודות של OpenClaw או הזרקת משתני סביבה.",
     },
 
     # ---- B15: MCP Trust ----
@@ -2955,6 +2970,20 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
     raw.append((
         r"global egress restriction configured",
         {"he": r"הוגדרה הגבלת יציאה גלובלית"},
+    ))
+
+    # ---- C015: secrets at rest in home files ----
+    raw.append((
+        r"Plaintext secret-shaped value\(s\) found in (\d+) home file\(s\) — see evidence\.",
+        {"he": r"נמצאו ערכי סוד גלויים ב-\1 קובצי בית — ראה ראיות."},
+    ))
+    raw.append((
+        r"Scanned (\d+) home file\(s\); no plaintext secret-shaped values detected\.",
+        {"he": r"נסרקו \1 קובצי בית; לא זוהו ערכי סוד גלויים."},
+    ))
+    raw.append((
+        r"(.+): secret-like value detected",
+        {"he": r"\1: זוהה ערך דמוי-סוד"},
     ))
 
     # ---- C048: top-level cron scheduler persistence surface ----
