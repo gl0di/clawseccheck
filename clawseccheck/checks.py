@@ -4838,6 +4838,55 @@ def check_host_firewall(ctx: Context) -> Finding:
 # they return UNKNOWN, so the default static audit and its score are unchanged. Their
 # findings carry ATTESTED confidence (set on the CheckMeta) — weaker than a config fact.
 
+
+
+_AUTO_GATE_BLAST = {
+    "exec": ("EXEC",),
+    "send": ("EGRESS",),
+    "write": ("DESTRUCTIVE", "MAILBOX_CONFIG"),
+}
+
+
+def _has_heartbeat_signal(ctx: Context) -> bool:
+    """True when config/bootstrap indicates scheduled/heartbeat execution."""
+    cfg = ctx.config
+    return (
+        any(path.endswith("HEARTBEAT.md") for path in getattr(ctx, "bootstrap", []))
+        or dig(cfg, "agents.defaults.heartbeat")
+        or any(
+            dig(agent, "heartbeat")
+            for agent in (dig(cfg, "agents.list") or [])
+            if isinstance(agent, dict)
+        )
+    )
+
+
+def _approval_bypass_actors(
+    ctx: Context,
+    auto_gate_classes: set[str],
+    high_classes: set[str],
+) -> list[str]:
+    """Return actor paths that can repeatedly bypass approvals for high-blast actions.
+
+    We only return auto-actors for action classes that map to held high-blast classes.
+    """
+    if not auto_gate_classes or not high_classes:
+        return []
+    relevant = set()
+    for cls in auto_gate_classes:
+        mapped = _AUTO_GATE_BLAST.get(cls, ())
+        if any(c in high_classes for c in mapped):
+            relevant.add(cls)
+    if not relevant:
+        return []
+
+    actors = []
+    if _has_heartbeat_signal(ctx):
+        actors.append("heartbeat")
+    if dig(ctx.config, "cron"):
+        actors.append("cron")
+    return actors
+
 def check_capability_blast_radius(ctx: Context) -> Finding:
     """B43 — classify the agent's REAL held verbs by blast radius.
 
@@ -4883,12 +4932,15 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
         )
     evidence = [f"{cls}: {', '.join(sorted(set(names)))}" for cls, names in high.items()]
     label = ", ".join(c.lower().replace("_", "-") for c in high)
-    if _attest.is_ungated(att):
+    bypass_actors = _approval_bypass_actors(ctx, set(_attest.approval_gates_auto(att)), set(high))
+    if bypass_actors or _attest.is_ungated(att):
+        if bypass_actors:
+            evidence.append(f"approval bypass actor(s): {', '.join(sorted(set(bypass_actors)))}")
         return _finding(
             "B43", FAIL,
             f"The agent holds high-blast-radius verbs ({label}) AND a side-effect "
-            f"can fire without human approval — a single injected instruction can "
-            f"reach exfil / destruction / a persistent forwarding rule.",
+            "can fire without human approval — a single injected instruction can "
+            "reach exfil / destruction / a persistent forwarding rule.",
             "Drop the dangerous verbs the agent does not need (least privilege at "
             "the capability level), or require human approval before send/exec/write "
             "and for any mailbox-config change.",

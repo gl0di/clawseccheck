@@ -346,13 +346,26 @@ def attested_delegation(att: dict) -> list[dict]:
 def is_ungated(att: dict) -> bool:
     """True when the self-report says a side-effect can fire without approval.
 
-    Either ``untrusted_to_action == 'ungated'`` or any approval gate is 'auto'.
+    We require explicit attestation that untrusted input can drive side-effects:
+    ``untrusted_to_action == "ungated"``.
+
+    This keeps the FAIL outcome in B43 to real, evidenced behavior rather than
+    merely a config shorthand like ``approval_gates: {"...": "auto"}``.
     """
     if not isinstance(att, dict):
         return False
-    if att.get("untrusted_to_action") == "ungated":
-        return True
+    return isinstance(att.get("untrusted_to_action"), str) and att.get("untrusted_to_action").strip().lower() == "ungated"
+
+
+def approval_gates_auto(att: dict) -> list[str]:
+    """Return action classes where the attester claims approval is not required."""
+    if not isinstance(att, dict):
+        return []
     gates = att.get("approval_gates")
-    if isinstance(gates, dict):
-        return any(gates.get(k) == "auto" for k in GATE_CLASSES)
-    return False
+    if not isinstance(gates, dict):
+        return []
+    out: list[str] = []
+    for cls in GATE_CLASSES:
+        if str(gates.get(cls, "")).strip().lower() == "auto":
+            out.append(cls)
+    return out

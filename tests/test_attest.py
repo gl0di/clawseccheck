@@ -192,10 +192,17 @@ def test_template_is_valid_and_complete():
 
 def test_is_ungated():
     assert attest.is_ungated({"untrusted_to_action": "ungated"}) is True
-    assert attest.is_ungated({"approval_gates": {"send": "auto"}}) is True
+    assert attest.is_ungated({"untrusted_to_action": " Ungated "}) is True
     assert attest.is_ungated({"untrusted_to_action": "gated"}) is False
-    assert attest.is_ungated({"approval_gates": {"send": "required"}}) is False
+    assert attest.is_ungated({"approval_gates": {"send": "auto"}}) is False
     assert attest.is_ungated({}) is False
+
+
+def test_approval_gates_auto():
+    assert attest.approval_gates_auto({"approval_gates": {"write": "auto", "send": "required", "exec": "AUTO"}}) == ["exec", "write"]
+    assert attest.approval_gates_auto({"approval_gates": {"send": "required", "write": "unknown"}}) == []
+    assert attest.approval_gates_auto({"approval_gates": {"send": "Auto "}}) == ["send"]
+    assert attest.approval_gates_auto({"approval_gates": []}) == []
 
 
 # --------------------------------------------------------------- B43 verdicts
@@ -235,10 +242,17 @@ def test_b43_fail_high_blast_and_ungated():
     assert any("MAILBOX_CONFIG" in e for e in f.evidence)
 
 
-def test_b43_fail_when_a_gate_is_auto():
+def test_b43_warn_when_a_gate_is_auto_without_bypass_signal():
     att = {"tools": ["delete_forever"], "approval_gates": {"write": "auto"}}
     f = check_capability_blast_radius(_ctx(attestation=att))
+    assert f.status == WARN
+
+
+def test_b43_fail_when_a_gate_is_auto_with_cron_or_heartbeat_bypass():
+    att = {"tools": ["delete_forever"], "approval_gates": {"write": "auto"}}
+    f = check_capability_blast_radius(_ctx(config={"cron": "daily"}, attestation=att))
     assert f.status == FAIL
+    assert any("approval bypass actor(s):" in e for e in f.evidence)
 
 
 # --------------------------------------------------------------- B44 verdicts

@@ -12,8 +12,10 @@ import logging
 import os
 import re
 import sys
+from pathlib import Path
 
 from .checks import SECRET_KEY_RE, SECRET_PATTERNS
+from .safeio import secure_append_text
 
 __all__ = ["redact", "get_logger"]
 
@@ -153,6 +155,22 @@ class _RedactingFilter(logging.Filter):
         return True
 
 
+class _SecureFileHandler(logging.Handler):
+    """File handler that always opens destination with O_NOFOLLOW and 0600 mode."""
+
+    def __init__(self, path: str | Path):
+        super().__init__()
+        self.path = Path(path)
+        self.terminator = "\n"
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            secure_append_text(self.path.expanduser(), msg + self.terminator)
+        except Exception:  # pragma: no cover — safety net; logging should never raise
+            self.handleError(record)
+
+
 def get_logger(
     verbose: bool = False,
     debug: bool = False,
@@ -203,8 +221,7 @@ def get_logger(
 
     # Handler 2: file (only when explicitly requested — respects "writes nothing by default")
     if logfile is not None:
-        path = os.path.expanduser(logfile)
-        file_handler = logging.FileHandler(path, encoding="utf-8")
+        file_handler = _SecureFileHandler(os.path.expanduser(logfile))
         file_handler.setFormatter(fmt)
         file_handler.addFilter(filt)
         logger.addHandler(file_handler)

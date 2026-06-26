@@ -102,6 +102,27 @@ def test_sarif_prints_confirmation(tmp_path, capsys):
     assert "SARIF written to" in captured
 
 
+def test_badge_writes_file(tmp_path, capsys):
+    out = tmp_path / "badge.svg"
+    rc = main(["--home", VULN] + BASE + ["--badge", str(out)])
+    assert rc == 0
+    assert out.is_file()
+
+
+def test_html_writes_file(tmp_path, capsys):
+    out = tmp_path / "report.html"
+    rc = main(["--home", VULN] + BASE + ["--html", str(out)])
+    assert rc == 0
+    assert out.is_file()
+
+
+def test_save_writes_file(tmp_path, capsys):
+    out = tmp_path / "report.txt"
+    rc = main(["--home", VULN] + BASE + ["--save", str(out)])
+    assert rc == 0
+    assert out.is_file()
+
+
 # ---------------------------------------------------------------------------
 # --percentile
 # ---------------------------------------------------------------------------

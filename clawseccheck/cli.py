@@ -3,7 +3,9 @@
 Exposed as the `clawseccheck` console script (see pyproject.toml), as `python -m clawseccheck`,
 and via the bundled skill entrypoint `python3 {baseDir}/audit.py`.
 
-Read-only. No network. No writes by default. Pure stdlib. Cross-platform.
+Read-only with respect to OpenClaw config.
+Writes local ~/.clawseccheck score history by default unless --no-history/--trend/--monitor.
+No network. Pure stdlib. Cross-platform.
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
 from .report import render_html
+from .report import _sanitize
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE
 from .redteam import make_suite, render_suite
 from .dryrun import make_scenarios, render_dryrun
@@ -32,6 +35,7 @@ from .sarif import render_sarif
 from .history import DEFAULT_HISTORY, load as history_load, record as history_record, render_trend
 from .percentile import render_percentile
 from .logsafe import get_logger
+from .safeio import secure_write_text
 
 
 def _default_lang() -> str:
@@ -99,6 +103,8 @@ def main(argv=None) -> int:
                         "default is a fresh random seed each run")
     p.add_argument("--dryrun", action="store_true",
                    help="print a behavioral dry-run harness (prompt-injection self-test across all sources)")
+    p.add_argument("--self-test", action="store_true",
+                   help="run canary + live red-team + dry-run harnesses together")
     p.add_argument("--ask", action="store_true",
                    help="emit an attestation template (JSON) for the agent to self-report "
                         "facts the config can't show; fill it, then pass --attest")
@@ -170,14 +176,15 @@ def main(argv=None) -> int:
         return 0
 
     if args.vet:
-        from .report import _sanitize
         f = vet_skill(args.vet)
         # Side output: SARIF file (mirrors the full-audit --sarif behavior, incl.
         # the same graceful handling of an unwritable path — B-014).
         if args.sarif:
             try:
-                Path(args.sarif).expanduser().write_text(
-                    render_sarif([f], tool_version=__version__, ctx=getattr(f, "ctx", None)), encoding="utf-8")
+                secure_write_text(
+                    Path(args.sarif).expanduser(),
+                    render_sarif([f], tool_version=__version__, ctx=getattr(f, "ctx", None)),
+                )
                 _emit(f"(SARIF written to {args.sarif})")
             except OSError as exc:
                 _emit(f"(could not write SARIF: {exc})")
@@ -189,7 +196,8 @@ def main(argv=None) -> int:
                    "UNKNOWN": "could not assess"}[f.status]
         icon = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}[f.status] \
             if ascii_only else {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔"}[f.status]
-        lines = [f"{icon} Vetting '{args.vet}': {verdict} [{f.severity}]", f"    {_sanitize(f.detail)}"]
+        safe_vet = _sanitize(args.vet)
+        lines = [f"{icon} Vetting '{safe_vet}': {verdict} [{f.severity}]", f"    {_sanitize(f.detail)}"]
         if f.evidence:
             bullet = "*" if ascii_only else "•"
             lines.append("    Evidence:")
@@ -197,20 +205,21 @@ def main(argv=None) -> int:
                 lines.append(f"      {bullet} {_sanitize(ev)}")
             if len(f.evidence) > 12:
                 lines.append(f"      {bullet} (+{len(f.evidence) - 12} more)")
-        lines.append(f"    {f.fix}")
+        lines.append(f"    {_sanitize(f.fix)}")
         _emit("\n".join(lines))
         return 0 if f.status in ("PASS", "UNKNOWN") else 1
 
     if args.vet_mcp is not None:
-        from .report import _sanitize
         target = args.vet_mcp if args.vet_mcp else None
         findings = vet_mcp(target=target, home=args.home)
         # Side output: SARIF file (mirrors the full-audit --sarif behavior, incl.
         # the same graceful handling of an unwritable path — B-014).
         if args.sarif:
             try:
-                Path(args.sarif).expanduser().write_text(
-                    render_sarif(findings, tool_version=__version__), encoding="utf-8")
+                secure_write_text(
+                    Path(args.sarif).expanduser(),
+                    render_sarif(findings, tool_version=__version__),
+                )
                 _emit(f"(SARIF written to {args.sarif})")
             except OSError as exc:
                 _emit(f"(could not write SARIF: {exc})")
@@ -249,7 +258,7 @@ def main(argv=None) -> int:
             if f.evidence:
                 for ev in f.evidence[:4]:
                     _emit(f"    - {_sanitize(ev)}")
-            _emit(f"    fix: {f.fix}")
+            _emit(f"    fix: {_sanitize(f.fix)}")
             _emit("")
         return 0 if worst_status in ("PASS", "UNKNOWN") else 1
 
@@ -263,6 +272,15 @@ def main(argv=None) -> int:
         return 0
 
     if args.dryrun:
+        _emit(render_dryrun(make_scenarios(), ascii_only))
+        return 0
+
+    if args.self_test:
+        seed = args.seed if args.seed is not None else secrets.token_hex(8)
+        _emit(render_canary(make_canary(), ascii_only))
+        _emit("")
+        _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
+        _emit("")
         _emit(render_dryrun(make_scenarios(), ascii_only))
         return 0
 
@@ -324,7 +342,7 @@ def main(argv=None) -> int:
 
     if args.badge:
         try:
-            Path(args.badge).expanduser().write_text(render_svg(score, findings), encoding="utf-8")
+            secure_write_text(Path(args.badge).expanduser(), render_svg(score, findings))
             _emit(f"(badge written to {args.badge})")
         except OSError as exc:
             _emit(f"(could not write badge: {exc})")
@@ -332,9 +350,10 @@ def main(argv=None) -> int:
 
     if args.html:
         try:
-            Path(args.html).expanduser().write_text(
+            secure_write_text(
+                Path(args.html).expanduser(),
                 render_html(findings, score, native=ctx.native, lang=args.lang),
-                encoding="utf-8")
+            )
             _emit(f"(HTML report written to {args.html})")
         except OSError as exc:
             _emit(f"(could not write HTML report: {exc})")
@@ -342,9 +361,7 @@ def main(argv=None) -> int:
 
     if args.sarif:
         try:
-            Path(args.sarif).expanduser().write_text(
-                render_sarif(findings, score, __version__, ctx=ctx),
-                encoding="utf-8")
+            secure_write_text(Path(args.sarif).expanduser(), render_sarif(findings, score, __version__, ctx=ctx))
             _emit(f"(SARIF written to {args.sarif})")
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
@@ -397,7 +414,7 @@ def main(argv=None) -> int:
                                openclaw_detected=ctx.config_found),
                  "", render_card(score, findings, ascii_only, lang=args.lang)]
         if ctx.errors:
-            parts.append("\nnotes:\n" + "\n".join(f"  - {e}" for e in ctx.errors))
+            parts.append("\nnotes:\n" + "\n".join(f"  - {_sanitize(e)}" for e in ctx.errors))
         parts.append("")
         parts.append(render_next_actions(
             suggest_actions(findings, score), ascii_only, lang=args.lang))
@@ -407,7 +424,7 @@ def main(argv=None) -> int:
 
     if args.save:
         try:
-            Path(args.save).expanduser().write_text(body, encoding="utf-8")
+            secure_write_text(Path(args.save).expanduser(), body)
             _emit(f"\n(report saved to {args.save})")
         except OSError as exc:
             _emit(f"\n(could not save report: {exc})")

@@ -91,6 +91,21 @@ introduced:
 ## Release validation protocol
 
 A release must pass local validation before merge/tag:
+## Post-release operational backlog (v1.20.6)
+
+- [impact:quality][owner:maintainer][difficulty:1-2h] Confirm B43/B44 confidence wording matches implementation after post-release changes.
+  [что проверить] Compare behavior in `tests/test_attest.py` and `clawseccheck/checks.py` for `approval_gates_auto` and `approval bypass` evidence.
+  [критерий Done] Behavior remains consistent with runtime docs and user-facing findings.
+
+- [impact:release][owner:release-eng][difficulty:1-2h] Keep operational docs synchronized after each tag.
+  [что проверить] README/CHANGELOG/SECURITY/SECURITY_MODEL/SKILL/SKILL_HE entries mention the same release steps and smoke commands.
+  [критерий Done] No stale check IDs or argument contracts between docs and parser behavior.
+
+- [impact:ops][owner:release-eng][difficulty:1 day] Run explicit post-release smoke for installability/repeatability.
+  [что проверить] `clawseccheck --self-test --ascii`; `python3 -m pytest tests/test_cli.py tests/test_cli_flags.py tests/test_attest.py`; `python3 -m pytest tests/test_features.py::test_canary_token_and_payload tests/test_features.py::test_canary_evaluate tests/test_features.py::test_canary_deterministic_per_seed`; and `--attest` flow for `B43/B44`.
+  [критерий Done] Same commands succeed on a clean environment or the limitation is recorded in release notes.
+
+
 - `python3 -m ruff check .`
 - `python3 -m pytest`
 - targeted checks for the changed modules.

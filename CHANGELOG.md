@@ -3,6 +3,24 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.21.0] — 2026-06-26
+
+New `--self-test` composite harness, tighter B43 blast-radius logic, and terminal-injection hardening in `--vet` output.
+
+### Added
+- **`--self-test` flag**: runs canary + live red-team + dry-run harnesses in one command — replaces the need to chain three separate flags when validating an installation.
+- **`approval_gates_auto()`** in `attest.py`: new public helper that returns the list of action classes where the attestation says approval is not required; used internally by B43 and available for downstream tooling.
+- **`_SecureFileHandler`** in `logsafe.py`: file log handler that opens the destination with `O_NOFOLLOW` and `0600` permissions via `safeio.secure_append_text`, preventing symlink-based log-file hijack.
+
+### Fixed
+- **Terminal-injection in `--vet` output**: the skill path passed to `--vet` is now run through `_sanitize()` before being printed, so a maliciously named directory (e.g. containing ANSI escape sequences) cannot inject colour codes into the terminal.
+- **`--vet` fix-text unsanitized**: `f.fix` is now also passed through `_sanitize()` before display.
+- **SARIF write uses `secure_write_text`**: `--vet` and `--vet-mcp` SARIF output now written via `safeio.secure_write_text` instead of bare `Path.write_text`, matching the security posture of the rest of the tool.
+
+### Changed
+- **B43 WARN vs FAIL distinction**: `approval_gates: {…: "auto"}` alone now produces a **WARN** instead of FAIL. FAIL is reserved for cases where a concrete bypass actor (heartbeat signal or `cron` config key) is also present — reducing false-positive FAILs on configs that set auto-gates without a persistent scheduler.
+- **`is_ungated()` is now stricter**: only an explicit `untrusted_to_action: "ungated"` (case-insensitive, whitespace-stripped) triggers the ungated path; `approval_gates: auto` alone no longer counts, as that is now handled by `approval_gates_auto()` + bypass-actor check.
+
 ## [1.20.6] — 2026-06-25
 
 Cleaned up i18n/compliance drift and resolved test-environment edge cases discovered during the final pre-release sweep.
