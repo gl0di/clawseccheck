@@ -1,4 +1,6 @@
 """C015 — secrets-at-rest scan of the OpenClaw home."""
+from __future__ import annotations
+
 from pathlib import Path
 
 from clawseccheck import audit
