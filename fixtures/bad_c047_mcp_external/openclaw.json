@@ -1,0 +1,7 @@
+{
+  "mcp": {
+    "servers": {
+      "corp-remote": { "url": "https://mcp.example.com/api" }
+    }
+  }
+}

@@ -406,6 +406,9 @@ TITLES: dict[str, dict[str, str]] = {
     "C4": {"he": "גרסת OpenClaw / היגיינת עדכון"},
     "C5": {"he": "בטיחות PATH של בינארי מקומי"},
     "C6": {"he": "השמטת מדיניות כלים בהרכבת hooks (לפני v2026.6.10)"},
+    "C047": {"he": "נקודת קצה חיצונית של שרת MCP (בדיקה ידנית)"},
+    "C048": {"he": "משטח התמדה של מתזמן cron (cron ברמת root)"},
+    "C074": {"he": "טקסט דמוי-הזרקה במאפייני תמונת HTML"},
 }
 
 
@@ -913,6 +916,50 @@ PHRASES: dict[str, dict[str, str]] = {
     "tools.exec.security are enforced as intended.": {
         "he": "שדרג ל-OpenClaw v2026.6.10 ומעלה, ואז ודא מחדש ש-tools.exec.mode "
               "ו-tools.exec.security נאכפים כמתוכנן.",
+    },
+    "Top-level `cron` scheduler is configured. Recurring scheduled tasks can "
+    "become a persistence surface, but static config cannot distinguish a "
+    "legitimate schedule from attacker-planted automation — manual review required.": {
+        "he": "מתזמן `cron` ברמת root מוגדר. משימות מתוזמנות חוזרות עשויות להפוך "
+              "למשטח התמדה, אך תצורה סטטית אינה יכולה להבחין בין תזמון לגיטימי לבין "
+              "אוטומציה שהושתלה על ידי תוקף — נדרשת בדיקה ידנית.",
+    },
+    "Review each scheduled cron task and confirm it was intentionally configured. "
+    "Treat cron as a persistence surface and verify scheduled actions cannot run "
+    "untrusted instructions unattended.": {
+        "he": "בדוק כל משימת cron מתוזמנת ואשר שהוגדרה בכוונה. התייחס ל-cron כמשטח "
+              "התמדה וודא שפעולות מתוזמנות אינן מריצות הנחיות לא מהימנות ללא פיקוח.",
+    },
+    "No top-level `cron` scheduler is configured.": {
+        "he": "לא מוגדר מתזמן `cron` ברמת root.",
+    },
+    "Keep recurring schedules disabled unless they are explicitly required and reviewed.": {
+        "he": "השאר תזמונים חוזרים כבויים אלא אם הם נדרשים במפורש ונבדקו.",
+    },
+    "Non-local MCP server endpoint(s) require manual review: ": {
+        "he": "נקודת/ות קצה MCP לא-מקומיות דורשות בדיקה ידנית: ",
+    },
+    "Review each non-local MCP server URL, confirm the owner and trust boundary, "
+    "and prefer localhost/stdio or a Unix socket when a remote endpoint is not required.": {
+        "he": "בדוק כל URL לא-מקומי של שרת MCP, אשר את הבעלות וגבול האמון, והעדף localhost/stdio או Unix socket כאשר אין צורך בנקודת קצה מרוחקת.",
+    },
+    "No non-local MCP server URLs detected.": {
+        "he": "לא זוהו URL-ים לא-מקומיים של שרתי MCP.",
+    },
+    "Keep MCP endpoints local where possible and review any future remote URLs before enabling them.": {
+        "he": "השאר נקודות קצה של MCP מקומיות ככל האפשר ובדוק כל URL מרוחק עתידי לפני הפעלתו.",
+    },
+    "HTML image attribute injection indicator(s) detected: ": {
+        "he": "זוהו אינדיקטורים להזרקה במאפייני תמונת HTML: ",
+    },
+    "Remove instruction-like text from HTML image alt/title/aria-label attributes in bootstrap files and installed skills.": {
+        "he": "הסר טקסט דמוי-הנחיה ממאפייני HTML image alt/title/aria-label בקובצי bootstrap ובמיומנויות מותקנות.",
+    },
+    "No injection-like text found in HTML image alt/title/aria-label attributes.": {
+        "he": "לא נמצא טקסט דמוי-הזרקה במאפייני HTML image alt/title/aria-label.",
+    },
+    "Keep HTML image text attributes descriptive and free of instruction content.": {
+        "he": "השאר מאפייני טקסט של תמונות HTML תיאוריים וללא תוכן הנחייתי.",
     },
 
     # ---- B-019 / C-056: he for runtime-assembled FIX fragments (split on "; ") ----
@@ -2863,6 +2910,24 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
     raw.append((
         r"Foreign-agent config path\(s\) referenced in installed skill\(s\): (.+)",
         {"he": r"נתיב/י תצורה של סוכן אחר מוזכרים במיומנות/ות מותקנת/ות: \1"},
+    ))
+
+    # ---- C048: top-level cron scheduler persistence surface ----
+    raw.append((
+        r"top-level `cron` field is present",
+        {"he": r"שדה `cron` ברמת root קיים"},
+    ))
+
+    # ---- C047: non-local MCP endpoint review ----
+    raw.append((
+        r"(.+): non-local MCP URL (.+)",
+        {"he": r"\1: URL MCP לא-מקומי \2"},
+    ))
+
+    # ---- C074: HTML image attribute injection ----
+    raw.append((
+        r"(.+): HTML img (alt|title|aria-label) attribute contains injection-like text: (.+)",
+        {"he": r"\1: מאפיין HTML img \2 מכיל טקסט דמוי-הזרקה: \3"},
     ))
     # B61 per-skill WARN evidence: "<skill>: foreign-agent config path literal '<path>' found (no read verb in context)"
     raw.append((

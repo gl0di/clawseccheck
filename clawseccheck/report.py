@@ -358,6 +358,7 @@ def _finding_to_dict(f: Finding) -> dict:
             "status": f.status, "detail": _sanitize(f.detail),
             "fix": _sanitize(f.fix), "framework": f.framework,
             "confidence": getattr(f, "confidence", "HIGH"),
+            "suppressed": bool(getattr(f, "suppressed", False)),
             "owasp": list(owasp_for(f.id)),
             "remediation": remediation_for(f.id),
             "evidence": [_sanitize(e) for e in (f.evidence or [])]}
