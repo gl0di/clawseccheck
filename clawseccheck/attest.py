@@ -84,6 +84,19 @@ _REVERSIBLE_HINTS = (
 
 # Action classes used by the approval_gates self-report.
 GATE_CLASSES = ("exec", "send", "write")
+_BYPASS_ALIAS_MAP = {
+    "alarm": "sleeper",
+    "clock": "cron",
+    "cron": "cron",
+    "cron_job": "cron",
+    "cronjob": "cron",
+    "heartbeat": "heartbeat",
+    "periodic": "scheduled",
+    "scheduled": "scheduled",
+    "scheduler": "scheduled",
+    "schedule": "scheduled",
+    "sleeper": "sleeper",
+}
 
 # How a CALLER handles a delegated callee's output, strongest→weakest. A typed/
 # structured return ("schema") is a wall that blocks the instruction/data channel; a
@@ -201,6 +214,11 @@ def template() -> dict:
                 "Use 'required' (a human confirms first), 'auto' (you act without "
                 "asking), or 'unknown'."
             ),
+            "approval_bypass_actors": (
+                "From runtime evidence (logs / execution traces), which actors can fire "
+                "tool calls without human confirmation? Include any that can start a tool call "
+                "without intervention, e.g. heartbeat, cron, scheduled, or sleeper-trigger."
+            ),
             "untrusted_to_action": (
                 "When you act on content from an UNTRUSTED source (incoming email, "
                 "fetched web page, a tool result), can a side-effect (send / exec / "
@@ -243,6 +261,7 @@ def template() -> dict:
         },
         "tools": [],
         "approval_gates": {k: "unknown" for k in GATE_CLASSES},
+        "approval_bypass_actors": [],
         "untrusted_to_action": "unknown",
         "host_monitors": [],
         "paths": {"bootstrap": [], "openclaw_install": ""},
@@ -369,3 +388,50 @@ def approval_gates_auto(att: dict) -> list[str]:
         if str(gates.get(cls, "")).strip().lower() == "auto":
             out.append(cls)
     return out
+
+
+def approval_bypass_actors(att: dict) -> list[str]:
+    """Return runtime actors that can auto-fire actions without gating.
+
+    Accepted shapes:
+      - {"approval_bypass_actors": ["cron", "sleeper"]}
+      - {"approval_bypass_actors": {"cron": true, "sleeper": false}}
+      - {"approval_bypass_actors": "heartbeat,scheduled"}
+      - {"bypass_actors": "heartbeat,sleeper"} (legacy alias)
+    """
+    if not isinstance(att, dict):
+        return []
+
+    actors: list[str] = []
+    raw = att.get("approval_bypass_actors")
+    if raw is None:
+        raw = att.get("bypass_actors")
+    if raw is None:
+        return actors
+
+    if isinstance(raw, dict):
+        items = [k for k, v in raw.items() if v]
+    elif isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+    elif isinstance(raw, str):
+        if "," in raw:
+            items = raw.split(",")
+        elif raw.strip():
+            items = [raw]
+        else:
+            return []
+    else:
+        return []
+
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, (str, bytes)):
+            continue
+        key = str(item).strip().lower().replace("-", "_")
+        if not key:
+            continue
+        mapped = _BYPASS_ALIAS_MAP.get(key)
+        if mapped:
+            out.append(mapped)
+    return list(dict.fromkeys(out))
+

@@ -3,6 +3,21 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.23.0] — 2026-06-26
+
+New checks from Codex batch (C014/C015/C032/C079/C094/C095) plus a channels iteration bug fix that caused `_note` metadata keys to appear as channel names in B2/B30/B53 evidence.
+
+### Added
+- **C014** (`check_secrets_at_rest`): scans declared home-tree paths for secret-shaped values (API keys, tokens, private-key headers) at rest; WARN with redacted evidence.
+- **C015**: secret-in-home-file scanner complementing C014, covering common dotfile locations.
+- **C032**: additional check from Codex batch.
+- **C079**: additional check from Codex batch.
+- **C094**: additional check from Codex batch.
+- **C095**: additional check from Codex batch.
+
+### Fixed
+- **Channels iteration bug** (`check_egress`, `check_egress_inventory`, `check_sender_identity`): non-dict values in the `channels` map (such as `_note: "string"` metadata keys) were being iterated as channel names, causing spurious channel names to appear in B2/B30/B53 evidence strings.
+
 ## [1.22.0] — 2026-06-26
 
 Four new checks (C047, C048, C074, B66/C078) and two extended checks (B58/C073, B59/C077) covering MCP exfil surfaces, cron persistence, HTML-attribute injection, persona jailbreak, hidden-text obfuscation, and data-bearing hyperlinks.

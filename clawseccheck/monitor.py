@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from .catalog import BY_ID, FAIL
@@ -35,6 +36,134 @@ DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
 
 def _h(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+_MEMORY_MAX_BYTES = 200_000
+_MEMORY_MAX_FILES = 256
+_MEMORY_TEXT_EXTS = {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg"}
+_MEMORY_FILE_NAMES = {
+    "SOUL.md", "AGENTS.md", "TOOLS.md", "MEMORY.md", "memory.md",
+}
+_MEMORY_INJECTION_PATTERNS = (
+    re.compile(r"ignore (all|any|previous|prior) (instructions|messages)", re.I),
+    re.compile(r"obey (all|any|every|whatever)", re.I),
+    re.compile(r"follow (all|any|every|whatever) (instruction|command|request)", re.I),
+    re.compile(r"do (whatever|anything) (the )?(user|sender|message|email) (says|asks|wants)", re.I),
+)
+_MEMORY_URL_RE = re.compile(r"https?://[^\s]+", re.I)
+
+
+def _has_memory_name(path: str) -> bool:
+    lower = path.lower()
+    return any(lower.endswith(name.lower()) for name in _MEMORY_FILE_NAMES)
+
+
+def _extract_memory_signals(text: str) -> dict:
+    signals: list[str] = []
+    for pattern in _MEMORY_INJECTION_PATTERNS:
+        if pattern.search(text):
+            signals.append(pattern.pattern)
+
+    raw_urls = _MEMORY_URL_RE.findall(text)
+    urls = sorted({u.rstrip(")>\"") for u in raw_urls if u})
+    return {
+        "signals": sorted(signals),
+        "urls": urls,
+    }
+
+
+def _snapshot_memory_text(path: str, text: str) -> dict:
+    return {
+        "path": path,
+        "hash": _h(text),
+        **_extract_memory_signals(text),
+    }
+
+
+def _snapshot_memory_files(ctx) -> dict:
+    from .collector import WORKSPACE_DIRS
+
+    seen: set[Path] = set()
+    out: dict[str, dict] = {}
+
+    for name, text in ctx.bootstrap.items():
+        if _has_memory_name(name):
+            out[name] = _snapshot_memory_text(name, text)
+
+    for ws in WORKSPACE_DIRS:
+        mem_dir = ctx.home / ws / "memory"
+        if not mem_dir.is_dir():
+            continue
+        for p in sorted(mem_dir.rglob("*")):
+            if len(out) >= _MEMORY_MAX_FILES:
+                break
+            if p.is_symlink() or not p.is_file():
+                continue
+            if p.suffix.lower() not in _MEMORY_TEXT_EXTS and p.suffix:
+                continue
+            try:
+                rel = p.relative_to(ctx.home)
+            except OSError:
+                rel = p
+            if rel in seen:
+                continue
+            seen.add(rel)
+            try:
+                raw = p.read_bytes()
+            except OSError:
+                continue
+            if len(raw) > _MEMORY_MAX_BYTES or b"\x00" in raw:
+                continue
+            try:
+                text = raw.decode("utf-8", "replace")
+            except UnicodeError:
+                continue
+            out[str(rel)] = _snapshot_memory_text(str(rel), text)
+
+    return out
+
+
+def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]]) -> None:
+    pm, cm = prev.get("memory", {}), curr.get("memory", {})
+    for path in sorted(cm.keys() - pm.keys()):
+        entry = cm[path]
+        if entry.get("signals") or entry.get("urls"):
+            alerts.append((
+                "MEDIUM",
+                f"New persistent memory file '{path}' appears with suspicious content.",
+            ))
+
+    for path in sorted(pm.keys() & cm.keys()):
+        p = pm[path]
+        c = cm[path]
+        if not isinstance(p, dict) or not isinstance(c, dict):
+            continue
+        if p.get("hash") == c.get("hash"):
+            continue
+
+        p_signals = set(p.get("signals", []))
+        c_signals = set(c.get("signals", []))
+        p_urls = set(p.get("urls", []))
+        c_urls = set(c.get("urls", []))
+
+        added_signals = sorted(c_signals - p_signals)
+        added_urls = sorted(c_urls - p_urls)
+
+        if added_signals:
+            alerts.append((
+                "HIGH",
+                f"Potential memory-poisoning change in '{path}' — new instruction override patterns: "
+                + ", ".join(added_signals) + ".",
+            ))
+        elif added_urls:
+            alerts.append((
+                "MEDIUM",
+                f"Persistent memory file '{path}' changed and now includes new endpoint(s): "
+                + ", ".join(added_urls) + ".",
+            ))
+
+    for path in sorted(pm.keys() - cm.keys()):
+        alerts.append(("INFO", f"Persistent memory file removed since last check: '{path}'."))
 
 
 def _mcp_sig(ctx) -> dict:
@@ -119,6 +248,7 @@ def snapshot(ctx, findings, score) -> dict:
                    if not getattr(f, "suppressed", False)},
         "skills": {n: _h(b) for n, b in ctx.installed_skills.items()},
         "bootstrap": {n: _h(t) for n, t in ctx.bootstrap.items()},
+        "memory": _snapshot_memory_files(ctx),
         "native_count": native_count,
         "ignore_hash": _ignore_hash(ctx.home),
         # Agent Watch — connection / trust surface, so drift in what the agent is
@@ -161,6 +291,8 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                                    "poisoning (drift)."))
     for name in sorted(cb.keys() - pb.keys()):
         alerts.append(("INFO", f"New bootstrap file appeared: {name}."))
+
+    _append_memory_alerts(prev, curr, alerts)
 
     if curr.get("score", 0) < prev.get("score", 0):
         alerts.append(("HIGH", f"Security score dropped: {prev.get('grade')} {prev.get('score')} "

@@ -1,0 +1,8 @@
+{
+  "tools": {
+    "allow": ["exec"],
+    "exec": {
+      "mode": "ask"
+    }
+  }
+}

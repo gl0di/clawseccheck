@@ -184,7 +184,7 @@ def test_parse_attestation_no_schema_ok():
 def test_template_is_valid_and_complete():
     t = attest.template()
     assert t["schema"] == attest.SCHEMA_ID
-    for key in ("tools", "approval_gates", "untrusted_to_action", "host_monitors"):
+    for key in ("tools", "approval_gates", "untrusted_to_action", "approval_bypass_actors", "host_monitors"):
         assert key in t
     # round-trips through json (it's what --ask emits)
     assert json.loads(json.dumps(t))["schema"] == attest.SCHEMA_ID
@@ -203,6 +203,15 @@ def test_approval_gates_auto():
     assert attest.approval_gates_auto({"approval_gates": {"send": "required", "write": "unknown"}}) == []
     assert attest.approval_gates_auto({"approval_gates": {"send": "Auto "}}) == ["send"]
     assert attest.approval_gates_auto({"approval_gates": []}) == []
+
+
+def test_approval_bypass_actors():
+    att = {"approval_bypass_actors": ["Cron", "unknown", "heartbeat", "sleeper", "CRON"]}
+    assert attest.approval_bypass_actors(att) == ["cron", "heartbeat", "sleeper"]
+
+    legacy = {"bypass_actors": "heartbeat, scheduled, cron"}
+    assert set(attest.approval_bypass_actors(legacy)) == {"heartbeat", "scheduled", "cron"}
+
 
 
 # --------------------------------------------------------------- B43 verdicts
@@ -246,6 +255,28 @@ def test_b43_warn_when_a_gate_is_auto_without_bypass_signal():
     att = {"tools": ["delete_forever"], "approval_gates": {"write": "auto"}}
     f = check_capability_blast_radius(_ctx(attestation=att))
     assert f.status == WARN
+
+
+def test_b43_fail_when_a_gate_is_auto_with_runtime_sleeper_bypass():
+    att = {
+        "tools": ["delete_forever"],
+        "approval_gates": {"write": "auto"},
+        "approval_bypass_actors": ["sleeper"],
+    }
+    f = check_capability_blast_radius(_ctx(attestation=att))
+    assert f.status == FAIL
+    assert any("approval bypass actor(s):" in e for e in f.evidence)
+
+
+def test_b43_warn_when_a_gate_is_auto_with_unknown_bypass_actor():
+    att = {
+        "tools": ["delete_forever"],
+        "approval_gates": {"write": "auto"},
+        "approval_bypass_actors": ["unknown"]
+    }
+    f = check_capability_blast_radius(_ctx(attestation=att))
+    assert f.status == WARN
+    assert not any("approval bypass actor(s):" in e for e in f.evidence)
 
 
 def test_b43_fail_when_a_gate_is_auto_with_cron_or_heartbeat_bypass():

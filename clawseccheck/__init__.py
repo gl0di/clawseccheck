@@ -31,7 +31,7 @@ from .history import load as history_load, record as history_record, render_tren
 from .guide import suggest_actions, render_next_actions
 from .update import update_notice, read_latest_hint, DEFAULT_LATEST
 
-__version__ = "1.22.0"
+__version__ = "1.23.0"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
 __released__ = "2026-06-26"
 

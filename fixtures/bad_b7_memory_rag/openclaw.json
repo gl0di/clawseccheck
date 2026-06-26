@@ -1,0 +1,18 @@
+{
+  "memory": {
+    "backend": "qmd",
+    "vectorStore": {
+      "scope": "workspace",
+      "update": {
+        "batch": 128
+      }
+    },
+    "qmd": {
+      "command": "qmd-memory"
+    },
+    "citations": false
+  },
+  "tools": {
+    "profile": "minimal"
+  }
+}

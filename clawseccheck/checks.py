@@ -21,8 +21,9 @@ from . import attest as _attest
 from .catalog import (
     ATTESTED, BY_ID, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding,
 )
-from .collector import _OWN_SKILL_NAMES, Context, _read_skill_text, dig, read_skill_python
+from .collector import _OWN_SKILL_NAMES, BOOTSTRAP_FILES, SKILL_DIRS, Context, _read_skill_text, dig, read_skill_python
 from .skillast import analyze_python, simulate_effects as _simulate_effects
+from .safeio import walk_dir_safely
 from .textnorm import normalize_for_scan, obfuscation_signals
 
 
@@ -111,6 +112,25 @@ INJECTION_PATTERNS = [
 INPUT_TOOL_HINTS = ("email", "imap", "gmail", "rss", "feed", "web", "browse", "fetch", "file_read", "inbox")
 SENSITIVE_TOOL_HINTS = ("db", "sql", "postgres", "supabase", "secret", "credential", "vault", "fs_read", "files")
 OUTBOUND_TOOL_HINTS = ("send", "email_send", "webhook", "http_post", "exec", "shell", "fs_write", "deploy", "publish")
+# C015 mirrors logsafe's additional secret token shapes so the home-file scan catches
+# the same secret families the logger already redacts, without ever echoing values.
+_C015_EXTRA_SECRET_PATTERNS = [
+    re.compile(r"gh[opsur]_[A-Za-z0-9]{20,}"),
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"sk_(?:live|test)_[A-Za-z0-9]{10,}"),
+    re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
+    re.compile(
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        re.DOTALL,
+    ),
+]
+_C015_TEXT_EXTS = {
+    ".env", ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".conf", ".md", ".txt", ".properties", ".service", ".sh", ".envrc",
+}
+_C015_MAX_SCAN_FILES = 500
+_C015_MAX_BYTES = 200_000
 # B55: filesystem-write tool names. Grounded: fs_write is in OUTBOUND_TOOL_HINTS and
 # apply_patch is the canonical patch-writer (see B31 — "apply_patch/exec still write").
 # Matched as substrings so write_file / writeFile variants of the same capability count.
@@ -201,6 +221,21 @@ def _enabled_tools(cfg: dict) -> list[str]:
     if isinstance(listed, list):
         tools.extend(str(t) for t in listed)
     return tools
+
+
+def _trusted_proxies_ok(value) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip()) and value.strip() != "*"
+    if isinstance(value, list):
+        if not value:
+            return False
+        for item in value:
+            if not isinstance(item, str):
+                return False
+            if not item.strip() or item.strip() == "*":
+                return False
+        return True
+    return False
 
 
 def _hint(names, hints) -> bool:
@@ -334,6 +369,80 @@ def check_trifecta(ctx: Context) -> Finding:
 
 
 # ---------------------------------------------------------------- Block B
+def _c015_candidate_files(ctx: Context) -> list[Path]:
+    skip_roots = [(ctx.home / rel).resolve() for rel in SKILL_DIRS]
+    out: list[Path] = []
+    for path in walk_dir_safely(ctx.home, max_files=_C015_MAX_SCAN_FILES, exclude_pycache=True):
+        if not path.is_file():
+            continue
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if any(resolved == root or root in resolved.parents for root in skip_roots if root.exists()):
+            continue
+        name = path.name.lower()
+        if path.suffix.lower() in _C015_TEXT_EXTS or name in {"openclaw.json", "openclaw.jsonc"} or name.startswith(".env") or name in BOOTSTRAP_FILES:
+            out.append(path)
+    return out
+
+
+def _c015_has_secret(text: str) -> bool:
+    for pat in SECRET_PATTERNS:
+        if pat.search(text):
+            return True
+    for pat in _C015_EXTRA_SECRET_PATTERNS:
+        if pat.search(text):
+            return True
+    return False
+
+
+def check_secrets_at_rest_home(ctx: Context) -> Finding:
+    """C015 — read-only scan for plaintext secret-shaped values in the OpenClaw home.
+
+    This complements B1: B1 owns openclaw.json/bootstrap semantics and permissions, while
+    C015 inventories any user-owned text file under the audited home (excluding installed
+    skill dirs) that appears to contain an inline secret/token value. Evidence names files
+    only — secret values are never echoed.
+    """
+    candidates = _c015_candidate_files(ctx)
+    if not candidates:
+        return _finding(
+            "C015", UNKNOWN,
+            "No candidate home files found for secrets-at-rest scan.",
+            "Run on the OpenClaw home with config/bootstrap/env files present.",
+        )
+
+    hits = []
+    for path in candidates:
+        try:
+            if path.stat().st_size > _C015_MAX_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _c015_has_secret(text):
+            try:
+                rel = path.relative_to(ctx.home)
+            except ValueError:
+                rel = path
+            hits.append(f"{rel}: secret-like value detected")
+
+    if hits:
+        detail = f"Plaintext secret-shaped value(s) found in {len(hits)} home file(s) — see evidence."
+        return _finding(
+            "C015", WARN,
+            detail,
+            "Move plaintext secrets into `openclaw secrets configure` or narrowly-scoped environment variables, and keep bootstrap/config files free of inline tokens.",
+            evidence=hits[:12],
+        )
+    return _finding(
+        "C015", PASS,
+        f"Scanned {len(candidates)} home file(s); no plaintext secret-shaped values detected.",
+        "Keep secrets out of home files; prefer the OpenClaw secrets store or environment injection.",
+    )
+
+
 def check_secrets(ctx: Context) -> Finding:
     cfg = ctx.config
     ev = []
@@ -646,15 +755,79 @@ def check_bootstrap_injection(ctx: Context) -> Finding:
 
 
 def check_memory_poisoning(ctx: Context) -> Finding:
-    has_mem = any(n.endswith(("MEMORY.md", "memory.md")) for n in ctx.bootstrap)
-    if not has_mem:
+    """Detect vector-memory / RAG-backed memory poisoning surface.
+
+    Safe, schema-driven behavior:
+    - PASS: vector-memory backend is configured and store access control exists
+      (`auth` / `readOnly` present under memory.vectorStore).
+    - UNKNOWN: vector-memory backend appears configured, but access control is not
+      statically discoverable.
+    - WARN / UNKNOWN fallback: legacy MEMORY.md file-only scenarios.
+    """
+    memory_cfg = ctx.config.get("memory")
+    if not isinstance(memory_cfg, dict):
+        memory_cfg = {}
+
+    has_mem = any(name.endswith(("MEMORY.md", "memory.md")) for name in ctx.bootstrap)
+
+    # Real schema signal: explicit vector/memory backend config.
+    backend = memory_cfg.get("backend")
+    backend_is_vector = (
+        isinstance(backend, str)
+        and backend.strip().lower() not in ("", "builtin")
+    )
+    has_qmd = isinstance(memory_cfg.get("qmd"), dict)
+    has_vector_store = isinstance(memory_cfg.get("vectorStore"), dict)
+
+    # Additional legacy-compatible signals (safe to check via cfg shape; no dig path).
+    rag_cfg = ctx.config.get("rag")
+    retrieval_cfg = ctx.config.get("retrieval")
+    rag_enabled = (
+        isinstance(rag_cfg, dict) and bool(rag_cfg.get("enabled"))
+    ) or bool(rag_cfg is True)
+    has_retrieval_cfg = bool(isinstance(retrieval_cfg, dict) and retrieval_cfg)
+
+    has_vector_surface = (
+        backend_is_vector
+        or has_qmd
+        or has_vector_store
+        or rag_enabled
+        or has_retrieval_cfg
+    )
+
+    # Access control is only explicit when memory.vectorStore has auth/readOnly.
+    vs = memory_cfg.get("vectorStore")
+    has_vs_control = False
+    if isinstance(vs, dict):
+        has_vs_control = "auth" in vs or "readOnly" in vs
+        if not has_vs_control:
+            # Backward-compatible fallback: any nested path that is explicitly read-only.
+            # (prevents missing controls when adapters place this under a nested object)
+            for v in vs.values():
+                if isinstance(v, dict) and ("auth" in v or "readOnly" in v):
+                    has_vs_control = True
+                    break
+
+    if not has_vector_surface:
+        if has_mem:
+            return _finding(
+                "B7", WARN,
+                "Agent has persistent memory; confirm it is not written from untrusted input.",
+                "Restrict memory writes to the owner; sanitize anything derived from external content.",
+            )
         return _finding("B7", UNKNOWN, "No memory file found.", "—")
-    # memory.writeFromChannels / memory.untrustedWrite do NOT exist in the OpenClaw schema.
-    # Real memory config keys: memory.backend, memory.citations, memory.qmd.*
-    # OpenClaw has no config field for channel-write restrictions; the risk must be evaluated
-    # by reviewing bootstrap file contents and channel policies.
-    return _finding("B7", WARN, "Agent has persistent memory; confirm it is not written from untrusted input.",
-                    "Restrict memory writes to the owner; sanitize anything derived from external content.")
+
+    if has_vs_control:
+        return _finding(
+            "B7", PASS,
+            "Memory backend uses explicit vector-store access control.",
+            "Keep vector-store access controls enabled and review ingestion isolation.",
+        )
+    return _finding(
+        "B7", UNKNOWN,
+        "Agent has persistent memory; confirm it is not written from untrusted input.",
+        "Restrict memory writes to the owner; sanitize anything derived from external content.",
+    )
 
 
 def _has_approval_gate(cfg: dict) -> bool:
@@ -2593,7 +2766,7 @@ def check_egress(ctx: Context) -> Finding:
     allow = (dig(cfg, "gateway.egress") or dig(cfg, "network.egress")
              or cfg.get("egress") or dig(cfg, "tools.http.allow"))
     surface = []
-    chans = list(_channels(cfg))
+    chans = [n for n, c in _channels(cfg).items() if isinstance(c, dict)]
     if chans:
         surface.append(f"channels ({', '.join(chans[:4])})")
     ext = [s for s in ctx.installed_skills if any(h in s.lower() for h in _EXT_SKILL_HINTS)]
@@ -2612,6 +2785,113 @@ def check_egress(ctx: Context) -> Finding:
                        "external-service skills. Every outbound-capable skill can exfiltrate data "
                        "(this is the third leg of the Lethal Trifecta).")
     return _custom("B14", MEDIUM, UNKNOWN, "No outbound channels / skills / tools detected.", "—")
+
+
+def check_egress_inventory(ctx: Context) -> Finding:
+    """C014 — read-only inventory of outbound-capable surfaces and restriction signals.
+
+    Complements B14's short summary with per-surface evidence: channels, outbound-capable
+    tools, MCP servers, and clearly external-service skills. Advisory only: it surfaces the
+    raw egress posture, not a blocking verdict.
+    """
+    cfg = ctx.config
+    evidence = []
+    restricted = False
+
+    global_allow = (dig(cfg, "gateway.egress") or dig(cfg, "network.egress")
+                    or cfg.get("egress") or dig(cfg, "tools.http.allow"))
+    if global_allow:
+        restricted = True
+        evidence.append("global egress restriction configured")
+
+    channels = _channels(cfg)
+    for name, chan in channels.items():
+        if not isinstance(chan, dict):
+            continue
+        dm = chan.get("dmPolicy")
+        group = chan.get("groupPolicy")
+        bits = []
+        if dm:
+            bits.append(f"dmPolicy={dm}")
+            if str(dm).lower() in ("allowlist", "owner", "owner-only"):
+                restricted = True
+        if group:
+            bits.append(f"groupPolicy={group}")
+            if str(group).lower() in ("allowlist", "owner", "owner-only"):
+                restricted = True
+        suffix = ", ".join(bits) if bits else "policy unspecified"
+        evidence.append(f"channel {name}: outbound-capable path ({suffix})")
+
+    tool_names = sorted({
+        t for t in _enabled_tools(cfg)
+        if t == "elevated" or _hint([t], OUTBOUND_TOOL_HINTS)
+    })
+    for tool in tool_names:
+        notes = []
+        if tool == "exec":
+            if _has_approval_gate(cfg):
+                restricted = True
+                notes.append("approval gate present")
+            else:
+                notes.append("no approval gate detected")
+        if tool == "elevated":
+            allow_from = dig(cfg, "tools.elevated.allowFrom")
+            if allow_from:
+                restricted = True
+                notes.append("sender allowlist configured")
+            else:
+                notes.append("no sender allowlist detected")
+        if tool != "elevated" and global_allow:
+            notes.append("global egress restriction configured")
+        evidence.append(
+            f"tool {tool}: outbound-capable ({'; '.join(notes) or 'no explicit restriction signal'})"
+        )
+
+    for name, spec in _mcp_servers(cfg).items():
+        if not isinstance(spec, dict):
+            continue
+        parts = []
+        if _mcp_has_remote(spec):
+            parts.append("remote MCP endpoint")
+            allowed_hosts = spec.get("allowedHosts")
+            if allowed_hosts:
+                restricted = True
+                parts.append("allowedHosts restricted")
+            else:
+                parts.append("no allowedHosts restriction")
+            url = spec.get("url") or spec.get("endpoint")
+            if isinstance(url, str) and _mcp_url_is_local(url):
+                restricted = True
+                parts.append("local URL")
+        else:
+            restricted = True
+            parts.append("local stdio subprocess")
+        evidence.append(f"MCP {name}: {'; '.join(parts)}")
+
+    ext = sorted(s for s in ctx.installed_skills if any(h in s.lower() for h in _EXT_SKILL_HINTS))
+    for name in ext:
+        evidence.append(f"skill {name}: external-service capability")
+
+    surface_count = len([line for line in evidence if not line.startswith("global egress restriction")])
+    if not surface_count:
+        return _finding(
+            "C014", UNKNOWN,
+            "No outbound-capable channels, MCP servers, skills, or tools detected.",
+            "Run on the OpenClaw home with channels, skills, and MCP config present.",
+        )
+    if restricted:
+        return _finding(
+            "C014", PASS,
+            f"Egress inventory: {surface_count} outbound-capable surface(s) found; explicit restriction signals are present — see evidence.",
+            "Keep outbound-capable tools, MCP endpoints, and channels on tight allowlists and retain approval on high-impact actions.",
+            evidence=evidence,
+        )
+    return _finding(
+        "C014", WARN,
+        f"Egress inventory: {surface_count} outbound-capable surface(s) found with no explicit restriction signals — see evidence.",
+        "Add hostname/egress allowlists where supported, keep outbound channels narrow, and require approval for exec/send-style actions.",
+        evidence=evidence,
+    )
 
 
 # ---------- B15: MCP server trust ----------
@@ -2878,6 +3158,45 @@ def check_mcp_external_endpoint(ctx: Context) -> Finding:
         "C047", PASS,
         "No non-local MCP server URLs detected.",
         "Keep MCP endpoints local where possible and review any future remote URLs before enabling them.",
+    )
+
+
+def check_proxy_header_forging(ctx: Context) -> Finding:
+    """C032 — advisory UNKNOWN when real-IP fallback lacks trusted proxy allow-list.
+
+    If ``gateway.allowRealIpFallback`` is enabled, OpenClaw will parse forwarded
+    client-address headers. Without an explicit proxy allow-list, that logic can be
+    abused when an untrusted component injects spoofed values. The OpenClaw schema
+    does not guarantee a single field-name shape for proxy trust across versions,
+    so this check is intentionally conservative: it raises UNKNOWN rather than
+    FAIL when fallback is enabled but trusted-proxy data is absent/invalid.
+    """
+    fallback = dig(ctx.config, "gateway.allowRealIpFallback")
+    if not fallback:
+        return _finding(
+            "C032", PASS,
+            "Real-IP fallback is not enabled, so proxied source headers are not broadly trusted.",
+            "Enable proxy-source trust only when a reverse-proxy chain is in place and "
+            "trusted proxy source values are explicit.",
+        )
+    trusted = dig(ctx.config, "gateway.trustedProxies")
+    if _trusted_proxies_ok(trusted):
+        return _finding(
+            "C032", PASS,
+            "Real-IP fallback has an explicit trusted-proxy allow-list configured.",
+            "Keep ``gateway.trustedProxies`` aligned with the actual trusted proxy chain.",
+            evidence=[f"gateway.trustedProxies={trusted!r}"],
+        )
+    detail = (
+        "gateway.allowRealIpFallback is enabled but gateway.trustedProxies "
+        "is not configured with an explicit allow-list."
+    )
+    return _finding(
+        "C032", UNKNOWN,
+        detail,
+        "Constrain gateway.allowRealIpFallback to a declared proxy chain by setting"
+        " gateway.trustedProxies to proxy IPs/CIDRs that are actually permitted.",
+        evidence=[f"gateway.allowRealIpFallback is enabled; trustedProxies={trusted!r}"],
     )
 
 
@@ -3966,7 +4285,7 @@ def check_sender_identity(ctx: Context) -> Finding:
     PASS   — channels exist and neither dangerous flag is set.
     UNKNOWN — no channels configured (cannot assess).
     """
-    ch = _channels(ctx.config)
+    ch = {k: v for k, v in _channels(ctx.config).items() if isinstance(v, dict)}
     if not ch:
         return _finding(
             "B30", UNKNOWN,
@@ -4945,9 +5264,10 @@ def _approval_bypass_actors(
     auto_gate_classes: set[str],
     high_classes: set[str],
 ) -> list[str]:
-    """Return actor paths that can repeatedly bypass approvals for high-blast actions.
+    """Return actor paths that can bypass approvals for high-blast actions.
 
-    We only return auto-actors for action classes that map to held high-blast classes.
+    We only return auto-actors for action classes that map to held high-blast
+    classes, and runtime actors declared in attestation evidence.
     """
     if not auto_gate_classes or not high_classes:
         return []
@@ -4959,12 +5279,13 @@ def _approval_bypass_actors(
     if not relevant:
         return []
 
-    actors = []
+    actors = set(_attest.approval_bypass_actors(ctx.attestation))
     if _has_heartbeat_signal(ctx):
-        actors.append("heartbeat")
+        actors.add("heartbeat")
     if dig(ctx.config, "cron"):
-        actors.append("cron")
-    return actors
+        actors.add("cron")
+    return list(actors)
+
 
 def check_capability_blast_radius(ctx: Context) -> Finding:
     """B43 — classify the agent's REAL held verbs by blast radius.
@@ -7079,12 +7400,13 @@ def check_image_attr_injection(ctx: Context) -> Finding:
 
 
 CHECKS = [
-    check_trifecta, check_secrets, check_gateway, check_least_privilege,
+    check_trifecta, check_secrets, check_secrets_at_rest_home, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
     check_memory_poisoning, check_human_approval, check_leak,
     check_audit_log, check_tls, check_local_first,
-    check_installed_skills, check_egress, check_mcp, check_mcp_hardening,
+    check_installed_skills, check_egress, check_egress_inventory, check_mcp, check_mcp_hardening,
     check_mcp_external_endpoint,
+    check_proxy_header_forging,
     check_monitoring, check_autonomy, check_subagents, check_data_atrest,
     check_bootstrap_write_protection, check_self_modification, check_backups,
     check_version, check_tool_output_trust, check_approval_bypass,

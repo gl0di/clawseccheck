@@ -1,0 +1,21 @@
+{
+  "tools": {
+    "allow": ["exec", "webhook", "http_post"],
+    "exec": {
+      "mode": "full"
+    }
+  },
+  "channels": {
+    "discord": {
+      "dmPolicy": "open",
+      "groupPolicy": "open"
+    }
+  },
+  "mcp": {
+    "servers": {
+      "remote": {
+        "url": "https://mcp.example.com/sse"
+      }
+    }
+  }
+}

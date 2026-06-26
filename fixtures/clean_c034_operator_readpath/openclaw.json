@@ -1,0 +1,9 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": {"mode": "token", "token": "123456789012345678901234"}
+  },
+  "tools": {
+    "allow": ["sessions.list", "chat.history"]
+  }
+}
