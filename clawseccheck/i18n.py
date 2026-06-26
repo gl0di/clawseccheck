@@ -409,6 +409,7 @@ TITLES: dict[str, dict[str, str]] = {
     "C014": {"he": "מלאי יציאה (מיפוי משטחים בעלי יכולת יציאה)"},
     "C015": {"he": "סריקת סודות במנוחה בספריית הבית של OpenClaw"},
     "C047": {"he": "נקודת קצה חיצונית של שרת MCP (בדיקה ידנית)"},
+    "C032": {"he": "שמירה על trust של כותרות מקור דרך פרוקסי עם real-ip fallback"},
     "C048": {"he": "משטח התמדה של מתזמן cron (cron ברמת root)"},
     "C074": {"he": "טקסט דמוי-הזרקה במאפייני תמונת HTML"},
 }
@@ -465,6 +466,21 @@ PHRASES: dict[str, dict[str, str]] = {
     },
     "Keep transport encrypted and credential files locked down.": {
         "he": "השאר את התעבורה מוצפנת וקבצי האישורים נעולים.",
+    },
+    "Real-IP fallback is not enabled, so proxied source headers are not broadly trusted.": {
+        "he": "כיון ש־Real-IP fallback אינו מופעל, כותרות המקור דרך פרוקסי אינן מהימנות בהיקף רחב.",
+    },
+    "Real-IP fallback has an explicit trusted-proxy allow-list configured.": {
+        "he": "Real-IP fallback מוגדר עם allow-list מפורש של פרוקסי מהימן.",
+    },
+    "Constrain gateway.allowRealIpFallback to a declared proxy chain by setting gateway.trustedProxies to proxy IPs/CIDRs that are actually permitted.": {
+        "he": "הגבל את gateway.allowRealIpFallback לשרשרת פרוקסים מוצהרת, על ידי הגדרת gateway.trustedProxies לכתובות IP/CIDR של פרוקסים מורשים בפועל.",
+    },
+    "Keep ``gateway.trustedProxies`` aligned with the actual trusted proxy chain.": {
+        "he": "התאם את gateway.trustedProxies לשרשרת הפרוקסי המוצהרת בפועל.",
+    },
+    "gateway.allowRealIpFallback is enabled but gateway.trustedProxies is not configured with an explicit allow-list.": {
+        "he": "gateway.allowRealIpFallback מופעל אך gateway.trustedProxies אינו מוגדר עם allow-list מפורש.",
     },
 
     "Remove hidden conditional actions that execute on user-trigger phrases. Keep sensitive behavior explicit, permission-gated, and impossible to activate covertly.": {

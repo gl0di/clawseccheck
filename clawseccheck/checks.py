@@ -223,6 +223,21 @@ def _enabled_tools(cfg: dict) -> list[str]:
     return tools
 
 
+def _trusted_proxies_ok(value) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip()) and value.strip() != "*"
+    if isinstance(value, list):
+        if not value:
+            return False
+        for item in value:
+            if not isinstance(item, str):
+                return False
+            if not item.strip() or item.strip() == "*":
+                return False
+        return True
+    return False
+
+
 def _hint(names, hints) -> bool:
     blob = " ".join(names).lower()
     return any(h in blob for h in hints)
@@ -3079,6 +3094,45 @@ def check_mcp_external_endpoint(ctx: Context) -> Finding:
         "C047", PASS,
         "No non-local MCP server URLs detected.",
         "Keep MCP endpoints local where possible and review any future remote URLs before enabling them.",
+    )
+
+
+def check_proxy_header_forging(ctx: Context) -> Finding:
+    """C032 — advisory UNKNOWN when real-IP fallback lacks trusted proxy allow-list.
+
+    If ``gateway.allowRealIpFallback`` is enabled, OpenClaw will parse forwarded
+    client-address headers. Without an explicit proxy allow-list, that logic can be
+    abused when an untrusted component injects spoofed values. The OpenClaw schema
+    does not guarantee a single field-name shape for proxy trust across versions,
+    so this check is intentionally conservative: it raises UNKNOWN rather than
+    FAIL when fallback is enabled but trusted-proxy data is absent/invalid.
+    """
+    fallback = dig(ctx.config, "gateway.allowRealIpFallback")
+    if not fallback:
+        return _finding(
+            "C032", PASS,
+            "Real-IP fallback is not enabled, so proxied source headers are not broadly trusted.",
+            "Enable proxy-source trust only when a reverse-proxy chain is in place and "
+            "trusted proxy source values are explicit.",
+        )
+    trusted = dig(ctx.config, "gateway.trustedProxies")
+    if _trusted_proxies_ok(trusted):
+        return _finding(
+            "C032", PASS,
+            "Real-IP fallback has an explicit trusted-proxy allow-list configured.",
+            "Keep ``gateway.trustedProxies`` aligned with the actual trusted proxy chain.",
+            evidence=[f"gateway.trustedProxies={trusted!r}"],
+        )
+    detail = (
+        "gateway.allowRealIpFallback is enabled but gateway.trustedProxies "
+        "is not configured with an explicit allow-list."
+    )
+    return _finding(
+        "C032", UNKNOWN,
+        detail,
+        "Constrain gateway.allowRealIpFallback to a declared proxy chain by setting"
+        " gateway.trustedProxies to proxy IPs/CIDRs that are actually permitted.",
+        evidence=[f"gateway.allowRealIpFallback is enabled; trustedProxies={trusted!r}"],
     )
 
 
@@ -7286,6 +7340,7 @@ CHECKS = [
     check_audit_log, check_tls, check_local_first,
     check_installed_skills, check_egress, check_egress_inventory, check_mcp, check_mcp_hardening,
     check_mcp_external_endpoint,
+    check_proxy_header_forging,
     check_monitoring, check_autonomy, check_subagents, check_data_atrest,
     check_bootstrap_write_protection, check_self_modification, check_backups,
     check_version, check_tool_output_trust, check_approval_bypass,

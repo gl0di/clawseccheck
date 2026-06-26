@@ -230,6 +230,8 @@ CATALOG: list[CheckMeta] = [
     # UNKNOWN nudge, never a FAIL. Advisory (not scored).
     CheckMeta("C6", "Hook-composition tool-policy drop (pre-v2026.6.10)",
               LOW, "advisory", "Patch hygiene", scored=False),
+    CheckMeta("C032", "Proxy header trust when real-IP fallback is enabled",
+              LOW, "advisory", "Gateway / Proxy Header Trust", scored=False),
     CheckMeta("C014", "Egress inventory (outbound-capable surface enumeration)",
               LOW, "advisory", "Egress Inventory", scored=False),
     CheckMeta("C015", "Secrets-at-rest scan of the OpenClaw home",
