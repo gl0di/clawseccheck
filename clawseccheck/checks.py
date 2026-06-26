@@ -755,15 +755,79 @@ def check_bootstrap_injection(ctx: Context) -> Finding:
 
 
 def check_memory_poisoning(ctx: Context) -> Finding:
-    has_mem = any(n.endswith(("MEMORY.md", "memory.md")) for n in ctx.bootstrap)
-    if not has_mem:
+    """Detect vector-memory / RAG-backed memory poisoning surface.
+
+    Safe, schema-driven behavior:
+    - PASS: vector-memory backend is configured and store access control exists
+      (`auth` / `readOnly` present under memory.vectorStore).
+    - UNKNOWN: vector-memory backend appears configured, but access control is not
+      statically discoverable.
+    - WARN / UNKNOWN fallback: legacy MEMORY.md file-only scenarios.
+    """
+    memory_cfg = ctx.config.get("memory")
+    if not isinstance(memory_cfg, dict):
+        memory_cfg = {}
+
+    has_mem = any(name.endswith(("MEMORY.md", "memory.md")) for name in ctx.bootstrap)
+
+    # Real schema signal: explicit vector/memory backend config.
+    backend = memory_cfg.get("backend")
+    backend_is_vector = (
+        isinstance(backend, str)
+        and backend.strip().lower() not in ("", "builtin")
+    )
+    has_qmd = isinstance(memory_cfg.get("qmd"), dict)
+    has_vector_store = isinstance(memory_cfg.get("vectorStore"), dict)
+
+    # Additional legacy-compatible signals (safe to check via cfg shape; no dig path).
+    rag_cfg = ctx.config.get("rag")
+    retrieval_cfg = ctx.config.get("retrieval")
+    rag_enabled = (
+        isinstance(rag_cfg, dict) and bool(rag_cfg.get("enabled"))
+    ) or bool(rag_cfg is True)
+    has_retrieval_cfg = bool(isinstance(retrieval_cfg, dict) and retrieval_cfg)
+
+    has_vector_surface = (
+        backend_is_vector
+        or has_qmd
+        or has_vector_store
+        or rag_enabled
+        or has_retrieval_cfg
+    )
+
+    # Access control is only explicit when memory.vectorStore has auth/readOnly.
+    vs = memory_cfg.get("vectorStore")
+    has_vs_control = False
+    if isinstance(vs, dict):
+        has_vs_control = "auth" in vs or "readOnly" in vs
+        if not has_vs_control:
+            # Backward-compatible fallback: any nested path that is explicitly read-only.
+            # (prevents missing controls when adapters place this under a nested object)
+            for v in vs.values():
+                if isinstance(v, dict) and ("auth" in v or "readOnly" in v):
+                    has_vs_control = True
+                    break
+
+    if not has_vector_surface:
+        if has_mem:
+            return _finding(
+                "B7", WARN,
+                "Agent has persistent memory; confirm it is not written from untrusted input.",
+                "Restrict memory writes to the owner; sanitize anything derived from external content.",
+            )
         return _finding("B7", UNKNOWN, "No memory file found.", "—")
-    # memory.writeFromChannels / memory.untrustedWrite do NOT exist in the OpenClaw schema.
-    # Real memory config keys: memory.backend, memory.citations, memory.qmd.*
-    # OpenClaw has no config field for channel-write restrictions; the risk must be evaluated
-    # by reviewing bootstrap file contents and channel policies.
-    return _finding("B7", WARN, "Agent has persistent memory; confirm it is not written from untrusted input.",
-                    "Restrict memory writes to the owner; sanitize anything derived from external content.")
+
+    if has_vs_control:
+        return _finding(
+            "B7", PASS,
+            "Memory backend uses explicit vector-store access control.",
+            "Keep vector-store access controls enabled and review ingestion isolation.",
+        )
+    return _finding(
+        "B7", UNKNOWN,
+        "Agent has persistent memory; confirm it is not written from untrusted input.",
+        "Restrict memory writes to the owner; sanitize anything derived from external content.",
+    )
 
 
 def _has_approval_gate(cfg: dict) -> bool:

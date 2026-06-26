@@ -1,0 +1,14 @@
+{
+  "memory": {
+    "backend": "qmd",
+    "vectorStore": {
+      "auth": {
+        "mode": "key"
+      },
+      "readOnly": true
+    }
+  },
+  "tools": {
+    "profile": "minimal"
+  }
+}
