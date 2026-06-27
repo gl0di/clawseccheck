@@ -3,6 +3,23 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.27.0] — 2026-06-27
+
+Major release batch: new RISK-18 attack-chain rule, blast-radius display per FAIL, confidence tiers on findings, 10 new ClawRange corpus scenarios, complete docs coverage, and B33 Hebrew i18n fix.
+
+### Added
+- **RISK-18 — Persistent foothold chain** (`risk.py`): fires when ALL three legs co-occur — `channels.<p>.contextVisibility == "all"` (untrusted input visible) + top-level `cron` key (scheduler surface) + `agents.defaults.heartbeat` (autonomous re-execution). Conjunctive = zero-FP-safe. Bilingual evidence.
+- **Blast-radius / exposure estimate per FAIL** (`report.py`): each FAIL finding now includes an estimated attacker gain — reachable secrets count, egress channels, exec/write surface — turning findings into actionable impact statements.
+- **Confidence tiers** (`catalog.py`, `checks.py`): adds a `confidence` dimension to `CheckMeta`/`Finding` (verified vs no-signal), surfaced in report and SARIF so a green result no longer implies false safety.
+- **`docs/ATTESTATION.md`**: public protocol doc for `--ask`/`--attest` round-trip, the frozen `clawseccheck-attest/1` JSON schema, field meanings, and which checks flip UNKNOWN→verdict at ATTESTED (B43, B44, B45, B47).
+- **`docs/FAQ.md`**: troubleshooting reference — why UNKNOWN, why grade F, suppressing false positives, permission errors, config-age staleness nudge, `--home` flag, `--ask`/`--attest`.
+- **ClawRange: B20 bootstrap-perm runtime chmod** (`runner.py`, `range.py`): `pin_bootstrap_perms()` + `bootstrap_mode` in `expect.json` lets corpus scenarios exercise group/world-writable bootstrap files deterministically across machines.
+- **ClawRange: 10 new corpus scenarios** (SCN-08 through SCN-17): `bootstrap_injection`, `audit_monitoring_gap`, `mcp_hardened`, `autonomous_agent`, `self_modification_risk`, `identity_trust`, `exposure_advanced`, `multiagent_complex`, `filesystem_ui`, `content_injection`. Corpus now 27 scenarios, covering ~95% of shipped checks.
+- **ClawRange: CI advisory hunt step** (`.github/workflows/ci.yml`): L2 hunt (`fneg`/`fuzz`/`metamorphic`) runs in advisory mode on every push, gracefully skipping when the private ClawRange repo is absent.
+
+### Fixed
+- **B33 Hebrew i18n** (`i18n.py`): the fix string `"Upgrade OpenClaw to >= <ver> to remediate <GHSA-id>."` and FAIL detail/PASS strings were rendering as raw English in `--lang he` reports. Added `PHRASES` static entries and `DETAIL_RULES` regex patterns so all B33 paths translate correctly.
+
 ## [1.26.0] — 2026-06-27
 
 New per-source trust-contract check (B67), frozen output schema docs, and OpenClaw audit-log recon grounding for E-014.
