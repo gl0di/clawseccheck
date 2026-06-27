@@ -1145,3 +1145,23 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Fix:
   Remove sleeper-trigger instructions, disable cron or heartbeat where they are not
   needed, and gate exec/write tools behind human approval.
+
+### RISK-18 - Untrusted context + cron + heartbeat = persistent autonomous foothold
+
+- Severity: HIGH
+- Pattern: HIGH (RISK-18): contextVisibility=all + cron + heartbeat = persistent foothold.
+- Chain: channel '{ch_label}' contextVisibility='all' → prompt injection via untrusted input -> injected instruction schedules a cron task (persistent scheduler surface) -> heartbeat re-executes cron task autonomously with no human review -> persistent autonomous foothold
+- Why:
+  A channel exposes full untrusted context to the agent
+  (channels.<p>.contextVisibility='all'), a cron scheduler surface is active, and the
+  agent runs autonomously on a heartbeat (agents.defaults.heartbeat). A prompt-injection
+  in untrusted input can plant a cron task that the heartbeat re-executes indefinitely —
+  no human approval is required after the initial injection. The result is a persistent
+  autonomous foothold that survives restarts and continues running without further
+  attacker interaction.
+- Fix:
+  Set channels.<provider>.contextVisibility (or channels.defaults.contextVisibility) to
+  'allowlist' or 'allowlist_quote' to prevent untrusted content from reaching the agent.
+  Disable the cron scheduler (remove the top-level 'cron' key) if scheduled tasks are not
+  required. Set agents.defaults.heartbeat to a falsy value or add a human-approval gate
+  for autonomous re-execution. Breaking any one leg breaks the chain.

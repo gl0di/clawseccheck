@@ -347,11 +347,42 @@ def _secret_reachability_lines(ctx, lang: str = "en") -> list[str]:
     return lines
 
 
-def _render_finding(lines, icon, f, lang: str = "en"):
+def compute_blast_radius(cfg: dict, finding_cid: str) -> dict:  # noqa: ARG001
+    """Estimate attacker gain if this FAIL finding is exploited.
+
+    Returns a dict with four fields:
+      open_channels  – count of messaging channels with dmPolicy or groupPolicy='open'
+      has_exec       – True if tools.exec.mode is configured
+      has_write      – True if fs_write or apply_patch appears in tools.allow
+      secret_paths   – count of dotted config paths that hold a secret-bearing value
+
+    ``finding_cid`` is accepted for future per-check weighting; unused today.
+    """
+    from .checks import _open_channels, _secret_paths  # noqa: PLC0415
+    from .collector import dig  # noqa: PLC0415
+
+    open_channels = len(_open_channels(cfg))
+    has_exec = dig(cfg, "tools.exec.mode") is not None
+    allow = dig(cfg, "tools.allow") or dig(cfg, "gateway.tools.allow") or []
+    has_write = isinstance(allow, list) and any(
+        str(item) in ("fs_write", "apply_patch") for item in allow
+    )
+    secret_paths = len(_secret_paths(cfg))
+    return {
+        "open_channels": open_channels,
+        "has_exec": has_exec,
+        "has_write": has_write,
+        "secret_paths": secret_paths,
+    }
+
+
+def _render_finding(lines, icon, f, lang: str = "en", cfg: dict | None = None):
     conf = getattr(f, "confidence", "HIGH")
     tag = f"  (confidence: {conf.lower()})" if conf != "HIGH" and f.status in (FAIL, WARN) else ""
+    pc = getattr(f, "pass_confidence", None)
+    pass_tag = f"  ({pc.replace('_', ' ')})" if f.status == PASS and pc else ""
     lines.append(f"{icon[f.status]} [{f.severity}] "
-                 f"{_sanitize(title_for(f.id, f.title, lang))}{tag}")
+                 f"{_sanitize(title_for(f.id, f.title, lang))}{tag}{pass_tag}")
     if f.detail:
         lines.append(f"    {t('report.label_why', lang)}: {_sanitize(tp(f.detail, lang))}")
     # Surface the concrete evidence (e.g. the exact verbs B43/B44 flagged) when a
@@ -364,15 +395,27 @@ def _render_finding(lines, icon, f, lang: str = "en"):
             # and falls back to itself verbatim. For lang="en" tp() is a no-op.
             lines.append(f"      - {_sanitize(tp(ev, lang))}")
     lines.append(f"    {t('report.label_fix', lang)}: {_sanitize(tp(f.fix, lang))}")
+    # Blast-radius summary: only emitted when the caller supplies cfg (verbose mode).
+    if f.status == FAIL and cfg is not None:
+        br = compute_blast_radius(cfg, f.id)
+        lines.append(
+            f"  blast: channels={br['open_channels']} "
+            f"exec={str(br['has_exec']).lower()} "
+            f"write={str(br['has_write']).lower()} "
+            f"secrets={br['secret_paths']}"
+        )
     lines.append("")
 
 
 def render_report(findings: list[Finding], score: ScoreResult,
                   ascii_only: bool = False, native=None, lang: str = "en",
                   *, risk=None, update_notice: list[str] | None = None,
-                  openclaw_detected: bool = True, ctx=None) -> str:
+                  openclaw_detected: bool = True, ctx=None,
+                  verbose: bool = False) -> str:
     icon = _ICON_ASCII if ascii_only else _ICON
     ok = "[OK]" if ascii_only else "✅"
+    # Supply cfg to _render_finding only in verbose mode so blast-radius lines appear.
+    _blast_cfg: dict | None = (getattr(ctx, "config", {}) or {}) if (verbose and ctx is not None) else None
     suppressed_count = sum(1 for f in findings if getattr(f, "suppressed", False))
     issues = [f for f in findings
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
@@ -401,6 +444,17 @@ def render_report(findings: list[Finding], score: ScoreResult,
     lines.append(t("report.score_breakdown", lang,
                    score=score.raw_score, n_scored=n_scored,
                    n_pass=n_pass, n_warn=n_warn, n_fail=n_fail))
+    pc_verified = sum(1 for f in scored_findings
+                      if f.status == PASS and getattr(f, "pass_confidence", None) == "verified")
+    pc_no_signal = sum(1 for f in scored_findings
+                       if f.status == PASS and getattr(f, "pass_confidence", None) == "no_signal")
+    if pc_verified or pc_no_signal:
+        _pc_parts = []
+        if pc_verified:
+            _pc_parts.append(f"{pc_verified} verified")
+        if pc_no_signal:
+            _pc_parts.append(f"{pc_no_signal} no-signal")
+        lines.append(f"  PASS breakdown: {', '.join(_pc_parts)}")
     if n_fail > 0 or n_warn > 0:
         _sev_counts: dict[str, int] = {}
         for f in scored_findings:
@@ -444,7 +498,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append(t("report.to_fix", lang, n=len(issues)))
         lines.append("")
         for f in issues:
-            _render_finding(lines, icon, f, lang)
+            _render_finding(lines, icon, f, lang, cfg=_blast_cfg)
 
     if suppressed_count:
         lines.append(t("report.suppressed_count", lang, n=suppressed_count))
@@ -466,7 +520,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 lines.append(t("report.native_additional", lang, n=len(nf)))
                 lines.append("")
                 for f in nf:
-                    _render_finding(lines, icon, f, lang)
+                    _render_finding(lines, icon, f, lang, cfg=_blast_cfg)
             else:
                 lines.append(t("report.native_clean", lang))
         else:
@@ -627,6 +681,7 @@ def _finding_to_dict(f: Finding) -> dict:
             "status": f.status, "detail": _sanitize(f.detail),
             "fix": _sanitize(f.fix), "framework": f.framework,
             "confidence": getattr(f, "confidence", "HIGH"),
+            "pass_confidence": getattr(f, "pass_confidence", None),
             "suppressed": bool(getattr(f, "suppressed", False)),
             "owasp": list(owasp_for(f.id)),
             "remediation": remediation_for(f.id),
@@ -706,6 +761,14 @@ def render_vet_json(findings: list[Finding], *, mode: str, target: str,
 def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
                 ctx=None) -> str:
     actions = suggest_actions(findings, score)
+    _json_cfg: dict | None = (getattr(ctx, "config", {}) or {}) if ctx is not None else None
+
+    def _finding_dict_json(f: Finding) -> dict:
+        d = _finding_to_dict(f)
+        if f.status == FAIL and _json_cfg is not None:
+            d["blast_radius"] = compute_blast_radius(_json_cfg, f.id)
+        return d
+
     payload: dict = {
         "score": score.score,
         "grade": score.grade,
@@ -713,7 +776,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         "raw_score": score.raw_score,
         "trifecta": _trifecta_ratio(findings),
         "findings": [
-            _finding_to_dict(f)
+            _finding_dict_json(f)
             for f in findings
         ],
         "next_actions": [

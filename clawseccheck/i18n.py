@@ -1986,6 +1986,18 @@ PHRASES: dict[str, dict[str, str]] = {
         ),
     },
 
+    # ---- B33: known-advisory version gate ----
+    # fix (PASS path) — static string from checks.py
+    "Keep OpenClaw updated and re-check after new advisories are published.": {
+        "he": "שמור על OpenClaw מעודכן ובדוק שוב לאחר פרסום ייעוצים חדשים.",
+    },
+    # fix (UNKNOWN path) — static string from checks.py
+    "Verify your version string (expected dotted-integer format like '2026.1.29') "
+    "and keep OpenClaw current.": {
+        "he": "אמת את מחרוזת הגרסה שלך (פורמט מספרים מופרדים בנקודות כגון '2026.1.29') "
+              "ושמור על OpenClaw עדכני.",
+    },
+
     # ---- C4: Version ----
     # detail (UNKNOWN — no version in config)
     "OpenClaw version not recorded in config.": {
@@ -2785,6 +2797,23 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
         (
             r"Backups present \(([^)]+)\)\.",
             {"he": r"גיבויים קיימים (\1)."},
+        ),
+
+        # ---- B33: known-advisory version gate (dynamic FAIL strings) ----
+        # fix (FAIL): "Upgrade OpenClaw to >= <ver> to remediate <GHSA-id>."
+        (
+            r"Upgrade OpenClaw to >= (.+) to remediate (.+)\.",
+            {"he": r"שדרג את OpenClaw ל->= \1 כדי לטפל ב-\2."},
+        ),
+        # detail (FAIL): "OpenClaw <ver> is affected by <GHSA>: <desc>. Versions <= <max> are vulnerable."
+        (
+            r"OpenClaw (.+) is affected by (.+): (.+)\. Versions <= (.+) are vulnerable\.",
+            {"he": r"OpenClaw \1 מושפע מ-\2: \3. גרסאות <= \4 פגיעות."},
+        ),
+        # detail (PASS): "OpenClaw <ver> is at or past all known-advisory fixes."
+        (
+            r"OpenClaw (.+) is at or past all known-advisory fixes\.",
+            {"he": r"OpenClaw \1 נמצא בגרסה שתיקנה את כל הייעוצים הידועים או מעבר לה."},
         ),
 
         # ---- C4: version advisory (PASS) detail ----

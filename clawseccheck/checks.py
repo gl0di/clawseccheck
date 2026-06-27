@@ -145,11 +145,12 @@ def _meta(cid: str):
     return BY_ID[cid]
 
 
-def _finding(cid, status, detail, fix, evidence=None, confidence=None) -> Finding:
+def _finding(cid, status, detail, fix, evidence=None, confidence=None, pass_confidence=None) -> Finding:
     m = _meta(cid)
     return Finding(m.id, m.title, m.severity, status, detail, fix,
                    m.framework, m.scored, evidence or [],
-                   confidence=confidence or m.confidence)
+                   confidence=confidence or m.confidence,
+                   pass_confidence=pass_confidence)
 
 
 def _channels(cfg: dict) -> dict:
@@ -469,10 +470,13 @@ def check_secrets(ctx: Context) -> Finding:
                         "bootstrap files; `chmod 600 ~/.openclaw/openclaw.json` and `chmod 700 "
                         "~/.openclaw` so config-stored tokens are not readable by others.", ev)
     note = ""
+    pc = "verified"
     if secret_paths:
         note = f" ({len(secret_paths)} token(s) in config, but file perms are tight)"
+        pc = "no_signal"
     return _finding("B1", PASS, f"No exposed plaintext secrets.{note}",
-                    "Keep secrets out of bootstrap files and keep config perms at 600.")
+                    "Keep secrets out of bootstrap files and keep config perms at 600.",
+                    pass_confidence=pc)
 
 
 def check_gateway(ctx: Context) -> Finding:
@@ -751,7 +755,8 @@ def check_bootstrap_injection(ctx: Context) -> Finding:
                         "from SOUL.md/AGENTS.md/TOOLS.md. Add an explicit rule: treat content from "
                         "channels/web/email as untrusted data, never as instructions.", ev)
     return _finding("B6", PASS, "No blanket-obedience / injection-prone directives in bootstrap files.",
-                    "Keep a trusted/untrusted separation rule in SOUL.md.")
+                    "Keep a trusted/untrusted separation rule in SOUL.md.",
+                    pass_confidence="verified")
 
 
 def check_memory_poisoning(ctx: Context) -> Finding:
@@ -5642,6 +5647,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         "B48", PASS,
         "No dangerous break-glass override flags enabled.",
         "Keep these break-glass toggles off unless an incident temporarily requires one.",
+        pass_confidence="verified",
     )
 
 

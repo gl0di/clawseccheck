@@ -930,3 +930,47 @@ def test_risk15_no_ssrf_flag_no_fire():
 
 def test_risk15_empty_config_no_fire():
     assert not any(p.id == "RISK-15" for p in _paths({}))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule RISK-18: contextVisibility=all + cron + heartbeat -> persistent foothold
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _risk18_cfg(context_vis="all", cron=True, heartbeat=True):
+    cfg = {
+        "channels": {"telegram": {"contextVisibility": context_vis,
+                                  "dmPolicy": "allowlist", "groupPolicy": "allowlist"}},
+    }
+    if cron:
+        cfg["cron"] = {"nightly": {"task": "cleanup"}}
+    if heartbeat:
+        cfg.setdefault("agents", {})["defaults"] = {"heartbeat": {"everyMinutes": 5}}
+    return cfg
+
+
+def test_risk18_fires():
+    paths = _paths(_risk18_cfg())
+    p = next((p for p in paths if p.id == "RISK-18"), None)
+    assert p is not None, [x.id for x in paths]
+    assert p.severity == HIGH
+    assert "cron" in " ".join(p.chain).lower()
+    assert "heartbeat" in " ".join(p.chain).lower()
+
+
+def test_risk18_clean_no_cron():
+    # Missing cron leg -> no fire
+    assert not any(p.id == "RISK-18" for p in _paths(_risk18_cfg(cron=False)))
+
+
+def test_risk18_clean_no_heartbeat():
+    # Missing heartbeat leg -> no fire
+    assert not any(p.id == "RISK-18" for p in _paths(_risk18_cfg(heartbeat=False)))
+
+
+def test_risk18_clean_restricted_context():
+    # contextVisibility restricted -> no fire even with cron + heartbeat
+    assert not any(p.id == "RISK-18" for p in _paths(_risk18_cfg(context_vis="allowlist")))
+
+
+def test_risk18_empty_config_no_fire():
+    assert not any(p.id == "RISK-18" for p in _paths({}))

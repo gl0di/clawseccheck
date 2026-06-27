@@ -99,6 +99,32 @@ def _open_channel_labels(cfg: dict) -> list[str]:
     return labels
 
 
+def _channels_with_visibility_all(cfg: dict) -> list[str]:
+    """Channel names where effective contextVisibility is 'all' (untrusted input exposed).
+
+    Mirrors B26's effective-visibility logic: per-channel value takes precedence, then
+    channels.defaults.contextVisibility, then the OpenClaw default of 'all'. Returns []
+    when no channels are configured (zero-FP on empty/absent channels key).
+    """
+    channels = cfg.get("channels")
+    if not isinstance(channels, dict):
+        return []
+    defaults_node = channels.get("defaults")
+    global_default = (
+        defaults_node.get("contextVisibility")
+        if isinstance(defaults_node, dict)
+        else None
+    )
+    result = []
+    for name, c in channels.items():
+        if name == "defaults" or not isinstance(c, dict):
+            continue
+        effective = c.get("contextVisibility") or global_default or "all"
+        if effective == "all":
+            result.append(name)
+    return result
+
+
 def _wildcard_elevated_providers(cfg: dict) -> list[str]:
     """Providers whose tools.elevated.allowFrom grants '*' (every sender).
 
@@ -846,6 +872,58 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
     )
 
 
+def _rule_persistent_foothold(ctx: Context, findings: list[Finding],
+                              cfg: dict) -> RiskPath | None:
+    """HIGH (RISK-18): contextVisibility=all + cron + heartbeat = persistent foothold.
+
+    Indirect prompt injection via a contextVisibility='all' channel plants a cron task
+    that re-runs under heartbeat autonomy, creating a persistent autonomous foothold.
+    Fires only when ALL THREE legs are explicitly confirmed → zero-FP.
+
+    Attack path (ATLAS AML.T0054 / OWASP Agentic A05):
+      1. Untrusted input reaches the agent via a channel with contextVisibility='all'.
+      2. The injected instruction abuses the cron scheduler to schedule a persistent task.
+      3. The heartbeat autonomously re-executes that task with no further human review.
+    """
+    vis_all_channels = _channels_with_visibility_all(cfg)
+    if not vis_all_channels:
+        return None
+    if not dig(cfg, "cron"):
+        return None
+    if not dig(cfg, "agents.defaults.heartbeat"):
+        return None
+    ch_label = vis_all_channels[0]
+    return RiskPath(
+        id="RISK-18",
+        severity=HIGH,
+        title="Untrusted context + cron + heartbeat = persistent autonomous foothold",
+        chain=[
+            f"channel '{ch_label}' contextVisibility='all' → prompt injection via untrusted input",
+            "injected instruction schedules a cron task (persistent scheduler surface)",
+            "heartbeat re-executes cron task autonomously with no human review",
+            "persistent autonomous foothold",
+        ],
+        why=(
+            "A channel exposes full untrusted context to the agent "
+            "(channels.<p>.contextVisibility='all'), a cron scheduler surface is active, "
+            "and the agent runs autonomously on a heartbeat "
+            "(agents.defaults.heartbeat). A prompt-injection in untrusted input can "
+            "plant a cron task that the heartbeat re-executes indefinitely — no human "
+            "approval is required after the initial injection. The result is a persistent "
+            "autonomous foothold that survives restarts and continues running without "
+            "further attacker interaction."
+        ),
+        fix=(
+            "Set channels.<provider>.contextVisibility (or channels.defaults.contextVisibility) "
+            "to 'allowlist' or 'allowlist_quote' to prevent untrusted content from reaching "
+            "the agent. Disable the cron scheduler (remove the top-level 'cron' key) if "
+            "scheduled tasks are not required. Set agents.defaults.heartbeat to a falsy value "
+            "or add a human-approval gate for autonomous re-execution. Breaking any one leg "
+            "breaks the chain."
+        ),
+    )
+
+
 def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
     """Compute dangerous capability chains from config + existing findings.
 
@@ -923,6 +1001,10 @@ def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
         candidates.append(path)
 
     path = _rule_injection_browser_ssrf(ctx, findings, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_persistent_foothold(ctx, findings, cfg)
     if path:
         candidates.append(path)
 

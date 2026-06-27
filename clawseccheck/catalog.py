@@ -405,3 +405,7 @@ class Finding:
     evidence: list[str] = field(default_factory=list)
     suppressed: bool = False
     confidence: str = "HIGH"
+    # PASS-specific confidence tier: 'verified' = check found positive evidence of security;
+    # 'no_signal' = PASS by absence of a bad signal (config absent/default).
+    # None for FAIL/WARN/UNKNOWN findings (not meaningful there).
+    pass_confidence: str | None = None
