@@ -3,6 +3,18 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.24.0] — 2026-06-27
+
+Monitor rug-pull coverage extended to tool-description drift; delegation boundary and sleeper-instruction checks tightened; static capability graph added to JSON report.
+
+### Added
+- **RP4/RP5** (`monitor.py`): new tool appeared in MCP server manifest or a declared tool's description changed under the same trusted server name — both now raise HIGH alerts in `--monitor` mode, closing the tool-surface drift vector.
+- **Capability graph** (`report.py`): new `capability_graph` section in `--json` output — static per-agent summary of secrets-visibility, tools, memory-write, and egress derived from config + attestation.
+
+### Changed
+- **B47** (`check_delegation_reassembly`): when any delegation edge has an undeclared return contract, WARN detail and fix now include an explicit "cannot prove output treated as data" nudge aligned with C-084 scope.
+- **B65** (`check_sleeper_instructions`): delay-trigger vocabulary extended — patterns like "later", "next time", "from now on", "ever" now also anchor the condition window alongside existing query-phrase triggers, reducing false-negatives on temporal sleeper instructions.
+
 ## [1.23.0] — 2026-06-26
 
 New checks from Codex batch (C014/C015/C032/C079/C094/C095) plus a channels iteration bug fix that caused `_note` metadata keys to appear as channel names in B2/B30/B53 evidence.

@@ -269,6 +269,44 @@ def test_rugpull_rp3_url_repoint_high_alert():
     assert "evil.com" in rp3[0][1] or "trusted.com" in rp3[0][1]
 
 
+def test_rugpull_rp4_new_tool_appears_high_alert():
+    """RP4: a new tool appearing under the same server should alert."""
+    prev = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "svc-mcp", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "read",
+        "tool_sigs": {"alpha": "aaa"},
+    }})
+    curr = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "svc-mcp", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "read",
+        "tool_sigs": {"alpha": "aaa", "beta": "bbb"},
+    }})
+    alerts = diff(prev, curr)
+    rp4 = [(lvl, msg) for lvl, msg in alerts if "RP4" in msg]
+    assert rp4, "expected RP4 alert for a new tool"
+    assert rp4[0][0] == "HIGH"
+    assert "beta" in rp4[0][1]
+
+
+def test_rugpull_rp5_tool_description_change_high_alert():
+    """RP5: a declared tool description changing should alert."""
+    prev = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "svc-mcp", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "read",
+        "tool_sigs": {"alpha": "hash-a"},
+    }})
+    curr = _make_mcp_snap({"svc": {
+        "command": "npx", "args0": "svc-mcp", "transport": "",
+        "url": "", "env_keys": [], "oauth_scope": "read",
+        "tool_sigs": {"alpha": "hash-b"},
+    }})
+    alerts = diff(prev, curr)
+    rp5 = [(lvl, msg) for lvl, msg in alerts if "RP5" in msg]
+    assert rp5, "expected RP5 alert for a changed tool description"
+    assert rp5[0][0] == "HIGH"
+    assert "alpha" in rp5[0][1]
+
+
 def test_rugpull_new_server_is_not_a_rugpull():
     """A brand-new MCP server appearing is NOT a rug-pull (handled by existing mcp hash diff)."""
     prev = _make_mcp_snap({})

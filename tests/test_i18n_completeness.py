@@ -58,6 +58,22 @@ def _prose_findings():
                 yield home, f
 
 
+def _detail_fragments():
+    """Yield (cid, fragment) for every prose fragment of a FAIL/WARN finding's detail."""
+    for home in _fixture_homes():
+        try:
+            _, findings, _ = audit(home, include_native=False)
+        except Exception:  # noqa: BLE001 — a broken fixture is a separate concern
+            continue
+        for f in findings:
+            if f.status not in ("FAIL", "WARN"):
+                continue
+            for frag in (f.detail or "").split("; "):
+                frag = frag.strip()
+                if frag and _PROSE.search(frag):
+                    yield f.id, frag
+
+
 def test_fixture_homes_discovered():
     """Guard against a vacuously-green suite if fixture discovery breaks."""
     assert _fixture_homes(), "no fixture homes found"
@@ -94,7 +110,7 @@ def test_en_detail_is_byte_identical():
 
 
 # ---------------------------------------------------------------------------
-# C-056: the same guard, extended to FIX prose at the fragment level.
+# C-056/C-021: the same guard, extended to FIX and DETAIL prose at the fragment level.
 # Dynamically-assembled fix strings (joined on "; ") used to leak English after
 # the Hebrew label even when the detail was localized (B-019). The detail guard
 # above is whole-block only; this one splits the fix on "; " and checks each
@@ -147,3 +163,22 @@ def test_en_fix_is_byte_identical():
     for _home, f in _prose_findings():
         if f.fix:
             assert tp(f.fix, "en") == f.fix
+
+
+def test_some_detail_fragments_exercised():
+    """Guard is meaningful only if fixtures actually produce prose detail fragments."""
+    assert any(True for _ in _detail_fragments()), "no FAIL/WARN detail fragments fired"
+
+
+def test_every_failwarn_detail_fragment_is_localized_he():
+    """No FAIL/WARN detail fragment may render in English in the Hebrew report."""
+    leaks: dict[str, str] = {}
+    for cid, frag in _detail_fragments():
+        if not _HEBREW.search(tp(frag, "he")):
+            leaks.setdefault(f"{cid}::{frag[:60]}", frag)
+
+    assert not leaks, (
+        "FAIL/WARN detail fragments NOT localized to Hebrew "
+        "(add the he PHRASES/DETAIL_RULES entry in the same change):\n"
+        + "\n".join(f"  {k}: {txt[:100]}" for k, txt in sorted(leaks.items()))
+    )
