@@ -1051,6 +1051,22 @@ These paths are computed from multiple checks. They fire only when every leg is 
   channels to 'allowlist'. Removing the fs_write/apply_patch grant entirely also breaks
   the chain.
 
+### RISK-13 - Markdown-image exfil + writable memory/bootstrap = persistence / exfil
+
+- Severity: HIGH
+- Pattern: HIGH (RISK-13): markdown-image exfil + writable bootstrap/memory = persistence/exfil.
+- Chain: remote markdown image URL with data-bearing query params -> writable bootstrap / memory files -> persisted payload + exfiltration channel
+- Why:
+  B59 shows that a remote markdown/image URL can carry data out of the agent context. If
+  bootstrap or memory files are writable (B20 or B22 fails), the same attacker can write a
+  payload or instruction back into files the agent reloads later. The result is a
+  persistence-plus-exfil chain: steal data now, leave behind code or instructions that
+  survive restart.
+- Fix:
+  Remove remote markdown/image URLs from untrusted content, keep bootstrap and memory
+  files read-only, and require approval for any filesystem write that could persist
+  instructions.
+
 ### RISK-14 - Wildcard-elevated sender + heartbeat = self-escalating autonomy loop
 
 - Severity: HIGH
@@ -1103,3 +1119,17 @@ These paths are computed from multiple checks. They fire only when every leg is 
   root-level host binds from agents.defaults.sandbox.docker.binds, and stop storing
   gateway.auth.password in plaintext (use gateway.auth.mode='token' with a secret from the
   environment / a manager). Breaking any one leg breaks the chain.
+
+### RISK-17 - Conditional sleeper trigger + scheduled execution = delayed RCE
+
+- Severity: HIGH
+- Pattern: HIGH (RISK-17): conditional sleeper trigger + scheduled exec = delayed RCE.
+- Chain: conditional sleeper trigger in bootstrap or skill -> {schedule_label} keeps the agent running later -> exec/write tool fires when the trigger condition appears -> delayed RCE
+- Why:
+  B65 surfaces hidden instructions that wait for a future trigger. If the agent also runs
+  on a schedule and can execute code or write files, the hidden payload can sit dormant
+  until the trigger appears and then run without another review. That turns a delayed
+  instruction into a delayed remote code execution path.
+- Fix:
+  Remove sleeper-trigger instructions, disable cron or heartbeat where they are not
+  needed, and gate exec/write tools behind human approval.

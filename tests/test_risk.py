@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from clawseccheck.collector import Context
+from clawseccheck.collector import Context, collect
 from clawseccheck.checks import run_all
 from clawseccheck.scoring import compute
 from clawseccheck.risk import RiskPath, risk_paths, render_risk_paths
@@ -724,6 +724,12 @@ def _b13_fail() -> Finding:
                    "Uninstall and rotate secrets.", "Supply Chain / ClawHavoc")
 
 
+def _b20_fail() -> Finding:
+    return Finding("B20", "Bootstrap / memory write protection", HIGH, FAIL,
+                   "Writable bootstrap / memory files", "Lock them down.",
+                   "Write Integrity")
+
+
 def test_risk09_malicious_skill_plus_channel_egress_is_critical():
     # A flagged skill (B13 FAIL) + a configured channel (egress) -> active exfil path.
     cfg = {"channels": {"telegram": {"groupPolicy": "allowlist"}}}
@@ -748,6 +754,50 @@ def test_risk09_malicious_skill_but_no_egress_no_path():
     cfg = {"agents": {"defaults": {"model": {"primary": "local/llama"}}}}
     paths = _paths(cfg, extra_findings=[_b13_fail()])
     assert not any(p.id == "RISK-09" for p in paths)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule RISK-13: markdown-image exfil + writable bootstrap/memory -> persistence
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_risk13_markdown_image_exfil_plus_writable_memory_fires():
+    ctx = collect(FIXTURES / "bad_b59_md_image_exfil")
+    ctx.config = {}
+    findings = _findings(ctx) + [_b20_fail()]
+    paths = risk_paths(ctx, findings)
+    p = next((p for p in paths if p.id == "RISK-13"), None)
+    assert p is not None, [x.id for x in paths]
+    assert p.severity == HIGH
+    assert "markdown" in " ".join(p.chain).lower()
+
+
+def test_risk13_b59_alone_does_not_fire():
+    ctx = collect(FIXTURES / "bad_b59_md_image_exfil")
+    ctx.config = {}
+    assert not any(p.id == "RISK-13" for p in risk_paths(ctx, _findings(ctx)))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule RISK-17: conditional sleeper trigger + scheduled exec -> delayed RCE
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_risk17_sleeper_trigger_plus_cron_exec_fires():
+    ctx = collect(FIXTURES / "bad_b65_conditional_trigger")
+    ctx.config = {
+        "cron": {"nightly": {"task": "cleanup"}},
+        "tools": {"exec": {"security": "full"}},
+    }
+    paths = risk_paths(ctx, _findings(ctx))
+    p = next((p for p in paths if p.id == "RISK-17"), None)
+    assert p is not None, [x.id for x in paths]
+    assert p.severity == HIGH
+    assert "cron" in " ".join(p.chain).lower()
+
+
+def test_risk17_sleeper_without_schedule_no_fire():
+    ctx = collect(FIXTURES / "bad_b65_conditional_trigger")
+    ctx.config = {"tools": {"exec": {"security": "full"}}}
+    assert not any(p.id == "RISK-17" for p in risk_paths(ctx, _findings(ctx)))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

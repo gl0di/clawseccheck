@@ -642,6 +642,82 @@ def _rule_fs_write_tamper(ctx: Context, findings: list[Finding],
     )
 
 
+def _rule_markdown_image_persistence(ctx: Context, findings: list[Finding]) -> RiskPath | None:
+    """HIGH (RISK-13): markdown-image exfil + writable bootstrap/memory = persistence/exfil.
+
+    B59 already shows that remote markdown/HTML image URLs can leak data out of the
+    agent context. If bootstrap or memory files are writable (B20 or B22 fail), the
+    same attacker can write a payload or instruction back into files the agent reloads
+    later. That turns a one-shot exfil channel into a persistence-plus-exfil path.
+    """
+    if _finding_status(findings, "B59") not in (FAIL, WARN):
+        return None
+    if not (_bootstrap_writable(findings) or _self_mod_exec(findings)):
+        return None
+    return RiskPath(
+        id="RISK-13",
+        severity=HIGH,
+        title="Markdown-image exfil + writable memory/bootstrap = persistence / exfil",
+        chain=[
+            "remote markdown image URL with data-bearing query params",
+            "writable bootstrap / memory files",
+            "persisted payload + exfiltration channel",
+        ],
+        why=(
+            "B59 shows that a remote markdown/image URL can carry data out of the agent "
+            "context. If bootstrap or memory files are writable (B20 or B22 fails), the "
+            "same attacker can write a payload or instruction back into files the agent "
+            "reloads later. The result is a persistence-plus-exfil chain: steal data now, "
+            "leave behind code or instructions that survive restart."
+        ),
+        fix=(
+            "Remove remote markdown/image URLs from untrusted content, keep bootstrap and "
+            "memory files read-only, and require approval for any filesystem write that "
+            "could persist instructions."
+        ),
+    )
+
+
+def _rule_sleeper_delayed_rce(ctx: Context, findings: list[Finding],
+                              tools: list[str], cfg: dict) -> RiskPath | None:
+    """HIGH (RISK-17): conditional sleeper trigger + scheduled exec = delayed RCE.
+
+    B65 already flags conditional sleeper instructions that wait for a later trigger.
+    If the agent also runs on a schedule (cron or heartbeat) and can execute code or
+    write files, the hidden payload can sit dormant until the trigger occurs and then
+    run without another review step.
+    """
+    if _finding_status(findings, "B65") not in (FAIL, WARN):
+        return None
+    scheduled = bool(dig(cfg, "cron")) or _has_heartbeat_cfg(cfg)
+    if not scheduled:
+        return None
+    if not (_has_exec_or_write_tools(tools) or "elevated" in tools):
+        return None
+    schedule_label = "cron scheduler" if dig(cfg, "cron") else "heartbeat"
+    return RiskPath(
+        id="RISK-17",
+        severity=HIGH,
+        title="Conditional sleeper trigger + scheduled execution = delayed RCE",
+        chain=[
+            "conditional sleeper trigger in bootstrap or skill",
+            f"{schedule_label} keeps the agent running later",
+            "exec/write tool fires when the trigger condition appears",
+            "delayed RCE",
+        ],
+        why=(
+            "B65 surfaces hidden instructions that wait for a future trigger. If the agent "
+            "also runs on a schedule and can execute code or write files, the hidden payload "
+            "can sit dormant until the trigger appears and then run without another review. "
+            "That turns a delayed instruction into a delayed remote code execution path."
+        ),
+        fix=(
+            "Remove sleeper-trigger instructions, disable cron or heartbeat where they are not "
+            "needed, and gate exec/write tools behind human approval."
+        ),
+    )
+
+
 def _rule_self_escalating_autonomy(ctx: Context, findings: list[Finding],
                                    tools: list[str], cfg: dict) -> RiskPath | None:
     """HIGH (RISK-14): wildcard-elevated sender + heartbeat = self-escalating loop.
@@ -827,6 +903,14 @@ def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
         candidates.append(path)
 
     path = _rule_fs_write_tamper(ctx, findings, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_markdown_image_persistence(ctx, findings)
+    if path:
+        candidates.append(path)
+
+    path = _rule_sleeper_delayed_rce(ctx, findings, tools, cfg)
     if path:
         candidates.append(path)
 
