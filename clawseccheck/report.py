@@ -8,6 +8,7 @@ unicode icons/box (e.g. a legacy Windows cp1252 console).
 """
 from __future__ import annotations
 
+import difflib
 import html
 import json
 import re
@@ -499,9 +500,9 @@ def _finding_to_dict(f: Finding) -> dict:
 def render_fix(findings: list[Finding], ascii_only: bool = False, lang: str = "en") -> str:
     """Render the paste-ready remediation block for current FAIL/WARN findings.
 
-    Output only — ClawSecCheck never applies these (read-only by default, §2). Commands
-    are exact shell with allowlisted verbs; config items are path+value guidance for
-    openclaw.json (the user edits their own file), never a paste-over blob.
+    Output only - ClawSecCheck never applies these (read-only by default, §2). Commands
+    stay as exact shell snippets; config items are shown as unified diffs so the user can
+    review the suggested change without writing anything.
     """
     actionable = []
     for f in findings:
@@ -515,24 +516,33 @@ def render_fix(findings: list[Finding], ascii_only: bool = False, lang: str = "e
         out = t("fix.none", lang) + "\n"
         return _asciify(out) if ascii_only else out
 
-    arrow = "->" if ascii_only else "→"
     lines = [t("fix.header", lang), "=" * 44, "", t("fix.note", lang), ""]
     for f, rem in actionable:
         lines.append(f"[{f.status}] {f.id} — {_sanitize(title_for(f.id, f.title, lang))}")
-        for cmd in rem["commands"]:
-            lines.append(f"  $ {_sanitize(cmd)}")
-        for c in rem["config"]:
-            path = _sanitize(c["path"])
-            note = _sanitize(tp(c.get("note", ""), lang))
-            label = t("fix.config_label", lang)
-            if c.get("set") is None:
-                lines.append(f"  {label}: {path} — {note}")
-            else:
-                lines.append(f"  {label}: set {path} {arrow} {json.dumps(c['set'])}  ({note})")
+        if rem["commands"]:
+            lines.append("  commands:")
+            for cmd in rem["commands"]:
+                lines.append(f"    $ {_sanitize(cmd)}")
+        if rem["config"]:
+            lines.append("  diff:")
+            for c in rem["config"]:
+                path = _sanitize(c["path"])
+                note = _sanitize(tp(c.get("note", ""), lang))
+                before = f"{path} = <current>"
+                if c.get("set") is None:
+                    after = f"{path} = {note}" if note else f"{path} = <configure manually>"
+                else:
+                    after = f"{path} = {json.dumps(c['set'])}"
+                    if note:
+                        after += f"  # {note}"
+                diff_lines = difflib.unified_diff(
+                    [before], [after], fromfile=f"a/{path}", tofile=f"b/{path}", lineterm=""
+                )
+                for dl in diff_lines:
+                    lines.append(f"    {dl}")
         lines.append("")
     out = "\n".join(lines).rstrip() + "\n"
     return _asciify(out) if ascii_only else out
-
 
 def render_vet_json(findings: list[Finding], *, mode: str, target: str,
                     version: str) -> str:

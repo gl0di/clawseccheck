@@ -62,8 +62,10 @@ def test_render_fix_shows_commands_and_does_not_apply_banner():
     findings, _ = _ctx_findings(FIXTURES / "home_vuln")
     out = render_fix(findings)
     assert "does NOT apply" in out
+    assert "commands:" in out
     assert "chmod 600 ~/.openclaw/openclaw.json" in out      # B1 command
-    assert "set tools.exec.mode" in out                       # a config guidance line
+    assert "diff:" in out
+    assert "--- a/" in out and "+++ b/" in out and "@@" in out
 
 
 def test_render_fix_empty_when_no_actionable():
