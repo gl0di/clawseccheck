@@ -220,6 +220,13 @@ CATALOG: list[CheckMeta] = [
     CheckMeta("B66", "Persona / role jailbreak detector",
               HIGH, "hardening", "Prompt Injection / Persona Injection",
               confidence="MEDIUM"),
+    # B67 (C-092): per-source tool-output trust contracts.
+    # Complements B21 (generic trust boundary): checks that bootstrap has
+    # channel-specific DATA/instruction declarations for each active high-risk
+    # channel (browser, email, MCP, search, docs).
+    CheckMeta("B67", "Per-source tool-output trust contracts",
+              MEDIUM, "hardening", "Prompt Injection / Trust Boundary",
+              confidence="MEDIUM"),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False),
     CheckMeta("C4", "OpenClaw version / update hygiene", LOW, "advisory", "Patch hygiene", scored=False),
@@ -324,6 +331,8 @@ OWASP_MAP = {
     "B65": ("LLM06", "LLM09"),
     # B66: persona / role jailbreak patterns that aim to reset safety constraints.
     "B66": ("LLM06", "LLM09"),
+    # B67: per-source trust contracts — prompt injection via channel-specific gaps.
+    "B67": ("LLM01", "LLM02"),
     "C4": ("LLM03",),
     "C5": ("LLM03",),
 }

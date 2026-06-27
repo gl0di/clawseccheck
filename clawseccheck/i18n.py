@@ -410,6 +410,7 @@ TITLES: dict[str, dict[str, str]] = {
     "B64": {"he": "גלאי עקיפת היררכיית הנחיות (השתלטות סמנטית)"},
     "B65": {"he": "גלאי טריגר מותנה (C-080)"},
     "B66": {"he": "גלאי דליפת תפקיד/פרסונה (C-078)"},
+    "B67": {"he": "חוזי אמון פר-מקור לפלט כלים (C-092)"},
     "C3": {"he": "גיבויים של SOUL.md / זיכרון"},
     "C4": {"he": "גרסת OpenClaw / היגיינת עדכון"},
     "C5": {"he": "בטיחות PATH של בינארי מקומי"},
@@ -2995,6 +2996,38 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
     raw.append((
         r"(.+): persona override pattern: (.+)",
         {"he": r"\1: דפוס עקיפת פרסונה: \2"},
+    ))
+
+    # ---- B67: per-source tool-output trust contracts (C-092) ----
+    # B67 WARN detail: "Active high-risk channel(s) lack a per-source trust declaration: <ch>. Covered: <rest>."
+    raw.append((
+        r"Active high-risk channel\(s\) lack a per-source trust declaration: ([^.]+)\. Covered: (.+)\.",
+        {"he": r"ערוצי סיכון גבוה פעילים חסרים הצהרת אמון ייחודית: \1. מכוסים: \2."},
+    ))
+    raw.append((
+        r"Active high-risk channel\(s\) lack a per-source trust declaration: ([^.]+)\.",
+        {"he": r"ערוצי סיכון גבוה פעילים חסרים הצהרת אמון ייחודית: \1."},
+    ))
+    # B67 UNKNOWN (no bootstrap):
+    raw.append((
+        r"No bootstrap files found — cannot assess per-source trust contracts\.",
+        {"he": "לא נמצאו קבצי bootstrap — לא ניתן להעריך חוזי אמון פר-מקור."},
+    ))
+    # B67 UNKNOWN (no channels):
+    raw.append((
+        r"No high-risk channels \(browser, email, MCP, search, docs\) detected in config "
+        r"— per-source trust contracts cannot be assessed\.",
+        {"he": "לא זוהו ערוצי סיכון גבוה בתצורה — לא ניתן להעריך חוזי אמון פר-מקור."},
+    ))
+    # B67 PASS detail:
+    raw.append((
+        r"Bootstrap has per-source trust declarations for all active high-risk channels \(([^)]+)\)\.",
+        {"he": r"ה-Bootstrap כולל הצהרות אמון ייחודיות לכל הערוצים הפעילים (\1)."},
+    ))
+    # B67 per-item evidence: "missing per-source trust declaration for: <channel>"
+    raw.append((
+        r"missing per-source trust declaration for: (.+)",
+        {"he": r"חסרה הצהרת אמון ייחודית עבור: \1"},
     ))
 
     # ---- B61: Cross-agent config snooping / credential theft ----
