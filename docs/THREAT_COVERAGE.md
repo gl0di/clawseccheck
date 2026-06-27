@@ -2,9 +2,9 @@
 
 Honest map of what ClawSecCheck checks today, what it does **not** yet check, and where
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
-all (so they can't even surface as a finding). Updated 2026-06-22 for v1.8.1.
+all (so they can't even surface as a finding). Updated 2026-06-27 for v1.23.0.
 
-Current catalog: `A1, B1–B26, B30–B33, B38, B39, B41–B48, B50–B54, C3–C5`, plus the
+Current catalog: `A1, B1–B26, B30–B33, B38, B39, B41–B48, B50–B66, C3–C5`, plus the
 combinational risk engine `RISK-01..RISK-11`, the install-time vetters `--vet` (B13 on
 an uninstalled skill, now AST- and injection-aware) / `--vet-mcp`, and the **attestation
 layer** (`--ask` / `--attest`, with a guided interrogation protocol so the agent self-builds
@@ -44,7 +44,7 @@ the report; `--attest -` reads stdin) that feeds the agent's self-report into B4
 | Backups of identity/memory | C3 | |
 | Native binary PATH safety | C5 | |
 | **Host defensive posture** | B50–B54 | Is the agent's *host* watched: network IDS, host audit, file-integrity, EDR/AV, firewall — read-only, WARN only for a high-privilege agent, never FAIL (v0.20). A self-reported `host_monitors` entry (attestation) upgrades a gap to an `ATTESTED` PASS for a monitor the scan can't see; static detection still wins (v0.28) |
-| **Combinational attack chains** | RISK-01..10 | Lethal trifecta, untrusted→exec, control-plane takeover, malicious-skill→exfil, powerful-agent-on-unmonitored-host (RISK-10), etc. |
+| **Combinational attack chains** | RISK-01..11 | Lethal trifecta, untrusted→exec, control-plane takeover, malicious-skill→exfil, powerful-agent-on-unmonitored-host (RISK-10/11), etc. |
 
 ## Framework mapping (OWASP)
 
