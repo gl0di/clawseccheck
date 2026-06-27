@@ -203,6 +203,20 @@ def _mcp_detail_sig(ctx) -> dict:
                 )
         oauth = spec.get("oauth") or {}
         oauth_scope = str(oauth.get("scope") or "") if isinstance(oauth, dict) else ""
+        tool_sigs: dict[str, str] = {}
+        tools = spec.get("tools")
+        if isinstance(tools, list):
+            for tool in tools:
+                if isinstance(tool, dict):
+                    tool_name = str(tool.get("name") or "").strip()
+                    if not tool_name:
+                        continue
+                    tool_desc = str(tool.get("description") or "")
+                    tool_sigs[tool_name] = _h(tool_desc)
+                elif isinstance(tool, (str, bytes)):
+                    tool_name = str(tool).strip()
+                    if tool_name:
+                        tool_sigs[tool_name] = ""
         out[name] = {
             "command": str(spec.get("command") or ""),
             "args0": args0,
@@ -210,6 +224,7 @@ def _mcp_detail_sig(ctx) -> dict:
             "url": str(spec.get("url") or ""),
             "env_keys": sorted(env_keys),
             "oauth_scope": oauth_scope,
+            "tool_sigs": dict(sorted(tool_sigs.items())),
         }
     return out
 
@@ -393,6 +408,22 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                                f"MCP server '{name}' rug-pull RP3: url repointed "
                                f"'{p_url}' -> '{c_url}' "
                                "— trusted endpoint changed, verify the destination."))
+
+            # RP4/RP5 — tool surface drift (HIGH): new tool appeared or a declared tool's
+            # description changed under the same trusted server name.
+            p_tools = ps.get("tool_sigs") or {}
+            c_tools = cs.get("tool_sigs") or {}
+            if isinstance(p_tools, dict) and isinstance(c_tools, dict):
+                for tool in sorted(set(c_tools) - set(p_tools)):
+                    alerts.append(("HIGH",
+                                   f"MCP server '{name}' rug-pull RP4: new tool '{tool}' "
+                                   "appeared in the manifest — re-vet the tool surface."))
+                for tool in sorted(set(p_tools) & set(c_tools)):
+                    if p_tools[tool] != c_tools[tool]:
+                        alerts.append(("HIGH",
+                                       f"MCP server '{name}' rug-pull RP5: tool description "
+                                       f"changed for '{tool}' — re-review the server's "
+                                       "declared affordances."))
 
     if "channels" in prev and "channels" in curr:
         pch, cch = prev["channels"], curr["channels"]

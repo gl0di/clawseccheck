@@ -88,6 +88,133 @@ def _trifecta_ratio(findings: list[Finding]) -> str:
     return "?/3"
 
 
+def _bool_word(value: bool, lang: str) -> str:
+    return "כן" if value and lang == "he" else ("לא" if lang == "he" else ("yes" if value else "no"))
+
+
+def _capability_graph(ctx) -> dict:
+    """Static capability summary (config + attestation), for the report/json output."""
+    from .attest import attested_agents  # noqa: PLC0415
+    from .checks import (  # noqa: PLC0415
+        INPUT_TOOL_HINTS,
+        OUTBOUND_TOOL_HINTS,
+        SENSITIVE_TOOL_HINTS,
+        _agent_legs,
+        _enabled_tools,
+        _hint,
+        _mcp_has_remote,
+        _mcp_servers,
+        _open_channels,
+    )
+    from .collector import dig  # noqa: PLC0415
+
+    cfg = getattr(ctx, "config", {}) or {}
+    att = getattr(ctx, "attestation", {}) or {}
+    nodes: list[dict] = []
+    edges: list[tuple[str, str]] = []
+
+    input_surfaces = sorted({*_open_channels(cfg), *[t for t in _enabled_tools(cfg) if _hint([t], INPUT_TOOL_HINTS)]})
+    main_tools = sorted({t for t in _enabled_tools(cfg)})
+    main_secrets = bool(
+        dig(cfg, "gateway.auth.password")
+        or dig(cfg, "gateway.token")
+        or (getattr(ctx, "home", None) and (ctx.home / "credentials").is_dir())
+        or any(_hint([t], SENSITIVE_TOOL_HINTS) for t in main_tools)
+    )
+    main_write = bool(
+        any(_hint([t], ("fs_write", "write", "apply_patch")) for t in main_tools)
+        or dig(cfg, "agents.defaults.sandbox.workspaceAccess") == "rw"
+    )
+    main_egress = bool(
+        any(_hint([t], OUTBOUND_TOOL_HINTS) for t in main_tools)
+        or dig(cfg, "tools.elevated.allowFrom")
+        or input_surfaces
+    )
+
+    nodes.append({
+        "id": "input",
+        "label": "input",
+        "kind": "ingress",
+        "tools": input_surfaces,
+        "secrets_visible": False,
+        "can_write_memory": False,
+        "can_egress": bool(input_surfaces),
+    })
+    nodes.append({
+        "id": "main",
+        "label": "main",
+        "kind": "agent",
+        "tools": main_tools,
+        "secrets_visible": main_secrets,
+        "can_write_memory": main_write,
+        "can_egress": main_egress,
+    })
+    if input_surfaces:
+        edges.append(("input", "main"))
+
+    agents = attested_agents(att)
+    for agent in agents:
+        name = str(agent.get("name") or "<unnamed>")
+        tools = [str(t) for t in agent.get("tools") or [] if isinstance(t, (str, bytes))]
+        legs = _agent_legs(tools)
+        node_id = f"subagent:{name}"
+        nodes.append({
+            "id": node_id,
+            "label": name,
+            "kind": "subagent",
+            "tools": tools,
+            "secrets_visible": bool(legs.get("sensitive data")),
+            "can_write_memory": any(_hint([t], ("fs_write", "write", "apply_patch")) for t in tools),
+            "can_egress": bool(legs.get("outbound actions")),
+        })
+        edges.append(("main", node_id))
+
+    for name, spec in sorted(_mcp_servers(cfg).items()):
+        if not isinstance(spec, dict):
+            continue
+        tool_nodes: list[str] = []
+        tools = spec.get("tools")
+        if isinstance(tools, list):
+            for tool in tools:
+                if isinstance(tool, dict):
+                    tool_name = str(tool.get("name") or "").strip()
+                    if tool_name:
+                        tool_nodes.append(tool_name)
+                elif isinstance(tool, (str, bytes)) and str(tool).strip():
+                    tool_nodes.append(str(tool).strip())
+        node_id = f"mcp:{name}"
+        nodes.append({
+            "id": node_id,
+            "label": name,
+            "kind": "mcp",
+            "tools": sorted(dict.fromkeys(tool_nodes)),
+            "secrets_visible": bool(spec.get("env") or spec.get("oauth")),
+            "can_write_memory": False,
+            "can_egress": _mcp_has_remote(spec),
+        })
+        edges.append(("main", node_id))
+
+    return {"nodes": nodes, "edges": edges}
+
+
+def _capability_graph_lines(ctx, lang: str = "en") -> list[str]:
+    graph = _capability_graph(ctx)
+    if not graph:
+        return []
+    lines = [t("report.capability_graph_title", lang), t("report.capability_graph_intro", lang)]
+    for node in graph["nodes"]:
+        tools = ", ".join(node["tools"]) if node["tools"] else "none"
+        lines.append(
+            f"- {node['label']} ({node['kind']}): tools={tools}; "
+            f"secrets_visible={_bool_word(node['secrets_visible'], lang)}; "
+            f"can_write_memory={_bool_word(node['can_write_memory'], lang)}; "
+            f"can_egress={_bool_word(node['can_egress'], lang)}"
+        )
+    if graph["edges"]:
+        lines.append("flow: input -> main -> subagents -> MCP -> fs/network")
+    return lines
+
+
 def _render_finding(lines, icon, f, lang: str = "en"):
     conf = getattr(f, "confidence", "HIGH")
     tag = f"  (confidence: {conf.lower()})" if conf != "HIGH" and f.status in (FAIL, WARN) else ""
@@ -111,7 +238,7 @@ def _render_finding(lines, icon, f, lang: str = "en"):
 def render_report(findings: list[Finding], score: ScoreResult,
                   ascii_only: bool = False, native=None, lang: str = "en",
                   *, risk=None, update_notice: list[str] | None = None,
-                  openclaw_detected: bool = True) -> str:
+                  openclaw_detected: bool = True, ctx=None) -> str:
     icon = _ICON_ASCII if ascii_only else _ICON
     ok = "[OK]" if ascii_only else "✅"
     suppressed_count = sum(1 for f in findings if getattr(f, "suppressed", False))
@@ -155,6 +282,11 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append(t("report.score_breakdown_detail", lang,
                        n_fail=n_fail, n_warn=n_warn, sev_summary=sev_summary))
     lines.append(t("report.scope_note", lang))
+    cap_lines = _capability_graph_lines(ctx, lang) if ctx is not None else []
+    if cap_lines:
+        lines.append("")
+        lines.extend(cap_lines)
+        lines.append("")
     # Honest framing for non-OpenClaw / custom setups (B-017): when there is no
     # openclaw.json the config-driven checks come back UNKNOWN. UNKNOWN is neutral
     # (never counted against the score), but without context a hardened custom setup
@@ -456,6 +588,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
             }
             for p in risk
         ]
+    payload["capability_graph"] = _capability_graph(ctx) if ctx is not None else {"nodes": [], "edges": []}
     # F-020: Structured Attestation Requests — always present in --json output.
     # Empty list when no B62 mismatches; one entry per mismatch-flagged skill.
     # Machine-readable only; no Hebrew rendering needed.

@@ -5663,6 +5663,8 @@ def check_delegation_reassembly(ctx: Context) -> Finding:
     ATTESTED confidence, advisory (scored=False): the verdict rests on the self-declared
     graph the static config cannot corroborate.
     """
+    delegation = _attest.attested_delegation(ctx.attestation)
+    has_unknown_return = any(e.get("returns") == "unknown" for e in delegation)
     r = _reassembly(ctx)
     if r is None:
         return _finding(
@@ -5670,7 +5672,9 @@ def check_delegation_reassembly(ctx: Context) -> Finding:
             "No delegation graph attested — cross-agent trifecta reassembly cannot be "
             "assessed (OpenClaw config has no delegation edges; only the agent knows them).",
             "Declare your delegation edges in the attestation 'delegation' block "
-            "([{from, to, returns}]) and re-run with '--attest <file>'.",
+            "([{from, to, returns}]) and re-run with '--attest <file>'. Make return "
+            "contracts explicit (schema/filtered/raw) so subagent-output and tool-output "
+            "share the same data-vs-instruction contract.",
         )
     if not r["reachable"]:
         return _finding(
@@ -5693,15 +5697,29 @@ def check_delegation_reassembly(ctx: Context) -> Finding:
             "text passthrough.",
             evidence=[f"reachable via walls only: {chain}"],
         )
-    return _finding(
-        "B47", WARN,
+    detail = (
         "An untrusted-input agent can reassemble the full trifecta across delegation via "
         "an edge that is not a structural wall (raw passthrough, text filter, or "
         "undeclared) — a single injection at the entry agent can orchestrate the others to "
-        "exfiltrate or act.",
+        "exfiltrate or act."
+    )
+    if has_unknown_return:
+        detail += " Subagent return-handling undeclared — cannot prove output treated as data."
+
+    fix = (
         "Break the reassembly: constrain the edge to a typed/structured return (a wall), "
         "or remove the delegation reach so the untrusted-input agent cannot drive both a "
-        "sensitive-data and an outbound agent.",
+        "sensitive-data and an outbound agent."
+    )
+    if has_unknown_return:
+        fix += (
+            " Make each return contract explicit (schema/filtered/raw) so subagent-output "
+            "and tool-output share the same data-vs-instruction contract."
+        )
+    return _finding(
+        "B47", WARN,
+        detail,
+        fix,
         evidence=[f"reassembly chain: {chain}",
                   f"weakest edge tier: {_TIER_NAME.get(r['weakest_tier'], 'raw/unknown (passthrough)')}"],
     )
@@ -6768,6 +6786,10 @@ _B65_QUERY_RE = re.compile(
     r"\btrigger\s+(?:word|phrase|token)\b",
     re.IGNORECASE,
 )
+_B65_DELAY_RE = re.compile(
+    r"\b(?:later|next time|from now on|in the future|ever)\b",
+    re.IGNORECASE,
+)
 _B65_ACTION_RE = re.compile(
     r"\b(?:send|forward|post|call|invoke|execute|run|open|download|upload|"
     r"curl|wget|fetch|read|write|delete|exfiltrat|harvest|relay|"
@@ -6787,7 +6809,8 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         start = max(0, m.start() - _B65_WINDOW)
         end = min(len(text), m.end() + _B65_WINDOW)
         window = text[start:end]
-        if not (_B65_QUERY_RE.search(window) and _B65_ACTION_RE.search(window)):
+        if not ((_B65_QUERY_RE.search(window) or _B65_DELAY_RE.search(window))
+                and _B65_ACTION_RE.search(window)):
             continue
         snippet = window.strip().replace("\n", " ")
         if len(snippet) > 120:

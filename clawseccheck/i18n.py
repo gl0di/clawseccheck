@@ -107,6 +107,14 @@ STRINGS: dict[str, dict[str, str]] = {
             " (MCP מעמיק) לצורך כך."
         ),
     },
+    "report.capability_graph_title": {
+        "en": "Capability graph",
+        "he": "גרף יכולות",
+    },
+    "report.capability_graph_intro": {
+        "en": "Static config + attestation summary:",
+        "he": "סיכום סטטי של תצורה + הצהרה:",
+    },
     "report.nonstandard_banner": {
         "en": (
             "No openclaw.json found — this looks like a non-standard or custom setup."
@@ -2885,6 +2893,55 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
     raw.append((
         r"(.+): Unicode obfuscation signals present \((.+)\) but no hidden injection detected",
         {"he": r"\1: אותות ערפול Unicode קיימים (\2) אך לא זוהתה הזרקה נסתרת"},
+    ))
+
+
+    # ---- Fragment-level detail clauses surfaced by C-021 ----
+    # B15 detail fragments
+    raw.append((
+        r"(\d+) MCP server\(s\) configured \((.+)\)\. Local \(stdio\) MCP servers run as subprocesses with the agent's privileges",
+        {"he": r"\1 שרת/י MCP מוגדרים (\2). שרתי MCP מקומיים (stdio) רצים כתת-תהליכים עם הרשאות הסוכן"},
+    ))
+    raw.append((
+        r"a malicious or compromised server can read local data and act through the agent's tools\.",
+        {"he": r"שרת זדוני או שנפרץ יכול לקרוא נתונים מקומיים ולפעול דרך כלי הסוכן."},
+    ))
+    # B16 detail fragments
+    raw.append((
+        r"No threat-monitoring or detection plugin/skill is configured in this OpenClaw config\. Monitors set up OUTSIDE it — a separate security agent or workspace, host-level IDS/EDR — are not visible to this config-only scan, so this is 'not detected here', not proof you're unwatched",
+        {"he": r"לא הוגדר תוסף/מיומנות ניטור או זיהוי איומים בתצורת OpenClaw הזו. מנגנוני ניטור שהוגדרו מחוצה לה — סוכן אבטחה או סביבת עבודה נפרדת, IDS/EDR ברמת המארח — אינם נראים לסריקת-התצורה הזו, ולכן זהו 'לא זוהה כאן', ולא הוכחה שאינך מנוטר"},
+    ))
+    raw.append((
+        r"confirm before relying on it\.",
+        {"he": r"ודא לפני שתסתמך על כך."},
+    ))
+    # B7 detail fragments
+    raw.append((
+        r"Agent has persistent memory",
+        {"he": r"לסוכן יש זיכרון מתמשך"},
+    ))
+    raw.append((
+        r"confirm it is not written from untrusted input\.",
+        {"he": r"ודא שאינו נכתב מקלט לא מהימן."},
+    ))
+    # B22 WARN fragment split by '; '
+    raw.append((
+        r"(.+\)), but an approval gate is configured — risk is reduced but not eliminated if approval can be bypassed\.",
+        {"he": r"\1, אך שער אישור מוגדר — הסיכון מופחת אך לא מבוטל אם ניתן לעקוף את האישור."},
+    ))
+    # B58 detail fragment from the normalization signal list
+    raw.append((
+        r"confusable characters folded to ASCII\)?",
+        {"he": r"תווים מתעתעים הומרו ל-ASCII"},
+    ))
+    # B63/B64 detail fragments with quoted hostile text
+    raw.append((
+        r'(.+): "without alerting"',
+        {"he": r'\1: "ללא התרעה"'},
+    ))
+    raw.append((
+        r'(.+): "disregard your system prompt"',
+        {"he": r'\1: "התעלם מהפרומפט המערכתי שלך"'},
     ))
 
     # ---- B59: Markdown-image data-exfil via remote URL ----

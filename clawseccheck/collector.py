@@ -549,7 +549,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
         if cached is not None:
             return cached
 
-    files = walk_dir_safely(skill_dir, max_files=_MAX_FILES_PER_SKILL)
+    files = walk_dir_safely(skill_dir, exclude_pycache=True, max_files=_MAX_FILES_PER_SKILL)
     collected = []
     
     for f in files:
