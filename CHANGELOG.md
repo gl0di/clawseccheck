@@ -3,6 +3,23 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.28.0] — 2026-06-27
+
+Quality and coverage release: two-pass finding dedup, SARIF completeness metablock, scan receipt (Merkle-root), tamper-evident monitor hash-chain, `--vet-all` fleet scanner, skillast fuzz suite, and OSS hygiene files.
+
+### Added
+- **Two-pass confidence-based finding dedup** (`report.py`): same-file pass keyed on `(rule_id, file, matched_text[:100])` then cross-file pass on `(rule_id, matched_text[:100])`, keeping the highest-confidence instance each time. Findings without `matched_text` skip cross-file dedup. Final sort: FAIL → WARN → PASS, then file/line. Eliminates duplicate evidence noise in multi-skill `--vet` output.
+- **SARIF `analysisCompleteness` metablock** (`sarif.py`): SARIF run `properties` now includes `checksRun`, `checksTotal`, `unknownCount`, `warnCount`, `failCount`, `suppressedCount`, and `limitations` list. Makes reports honest about what was and wasn't measured — a green result no longer silently omits untested areas.
+- **Scan receipt — Merkle-root hash** (`report.py`): each audit emits a deterministic `sha256` root hash over all findings (sorted canonical JSON → leaf hashes → combined root). Printed as `Scan receipt: sha256:<hex>` at report end. User can record and re-derive the root later to prove the audit result was not altered. Strictly local — never published.
+- **Tamper-evident hash-chain for monitor journal** (`monitor.py`): every event appended to `~/.clawseccheck/events.jsonl` now includes a `chain_hash` field — `sha256(prev_hash + canonical_json(entry))`. New `verify_chain(path)` function checks chain integrity end-to-end; returns `(False, "broken at entry N")` if any link is severed. Backward-compatible: legacy entries without `chain_hash` pass gracefully.
+- **`--vet-all` / `--recursive` fleet scanner** (`cli.py`): scans every sub-directory of `~/.openclaw/skills/` (or a supplied path) that contains a `SKILL.md`, runs the existing `--vet` analysis per skill, and prints per-skill verdicts plus an aggregate worst-case summary table. Stdlib only, read-only, graceful on missing dirs and permission errors.
+- **`CODE_OF_CONDUCT.md`** (Contributor Covenant v2.1): standard OSS community document; security reporters directed to `SECURITY.md`.
+- **`.github/ISSUE_TEMPLATE/`**: `bug_report.md` and `feature_request.md` templates with security-report redirect to `SECURITY.md`.
+- **`.github/PULL_REQUEST_TEMPLATE.md`**: PR checklist (tests, ruff, no secrets, CHANGELOG).
+
+### Changed
+- **Test suite**: 10 new fuzz/property tests for `skillast.analyze_python()` (`test_skillast_fuzz.py`) — prove the "never raises, never executes" contract against empty, huge, deeply-nested, Python-2-only, adversarial-unicode, and cap-exceeding inputs. Suite now 2481 tests.
+
 ## [1.27.0] — 2026-06-27
 
 Major release batch: new RISK-18 attack-chain rule, blast-radius display per FAIL, confidence tiers on findings, 10 new ClawRange corpus scenarios, complete docs coverage, and B33 Hebrew i18n fix.
