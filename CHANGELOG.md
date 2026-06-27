@@ -3,6 +3,19 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.25.0] — 2026-06-27
+
+Static secret-reachability map by class, two new combinational attack-chains, copy-pasteable unified-diff remediation, and a generated per-check catalog — all read-only, local, stdlib.
+
+### Added
+- **Secret reachability map** (`report.py`): new static section enumerating which secret *classes* are reachable from the setup — `env`, `mcp-passthrough`, `.env`, `keychain`, `cookies`, `ssh`, `cloud` — each with `reachable` true/false and **redacted** evidence (paths and classes only, never values; routed through `logsafe`). Complements B41 credential-blast-radius with a per-class inventory.
+- **RISK-13** (`risk.py`): markdown-image exfil (B63) combined with a writable bootstrap/memory target — turns a one-shot exfil channel into a persistence-plus-exfil chain. Fires only on positive evidence from both legs.
+- **RISK-17** (`risk.py`): a conditional/sleeper trigger (B65) combined with scheduled execution — escalates a delayed instruction to a delayed remote-code-execution path.
+- **`docs/CHECKS.md`** — generated per-check catalog (every B/C/RISK check: what it inspects, the threat, PASS/FAIL/UNKNOWN meaning, remediation), produced by `scripts/gen_checks_docs.py` from `catalog.py` to avoid drift; linked from README and guarded by a test.
+
+### Changed
+- **Remediation rendering** (`report.py`): config-item fixes are now shown as **unified diffs** (`difflib.unified_diff`) so the change is copy-pasteable; shell-snippet fixes stay as exact commands. Stays strictly read-only — the diff is displayed, never applied.
+
 ## [1.24.0] — 2026-06-27
 
 Monitor rug-pull coverage extended to tool-description drift; delegation boundary and sleeper-instruction checks tightened; static capability graph added to JSON report.
