@@ -9,9 +9,11 @@ unicode icons/box (e.g. a legacy Windows cp1252 console).
 from __future__ import annotations
 
 import difflib
+import os
 import html
 import json
 import re
+from pathlib import Path
 
 from .catalog import (
     CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, owasp_for, remediation_for,
@@ -216,6 +218,135 @@ def _capability_graph_lines(ctx, lang: str = "en") -> list[str]:
     return lines
 
 
+def _secret_reachability(ctx) -> list[dict]:
+    from .checks import SECRET_KEY_RE, _mcp_servers  # noqa: PLC0415
+    from .collector import WORKSPACE_DIRS, dig  # noqa: PLC0415
+
+    cfg = getattr(ctx, "config", {}) or {}
+    home = getattr(ctx, "home", None)
+    home_path = Path(home) if home is not None else None
+
+    def _rel(path: Path) -> str:
+        try:
+            return str(path.relative_to(home_path)) if home_path is not None else str(path)
+        except Exception:
+            return str(path)
+
+    def _summarize(items: list[str], label: str) -> str:
+        if not items:
+            return ""
+        items = sorted(dict.fromkeys(items))
+        head = ", ".join(items[:4])
+        tail = f" (+{len(items) - 4} more)" if len(items) > 4 else ""
+        return f"{label}: {head}{tail}" if head else ""
+
+    entries: list[dict] = []
+
+    env_keys = sorted(k for k in os.environ if SECRET_KEY_RE.search(k))
+    env_evidence: list[str] = []
+    if env_keys:
+        env_evidence.append(_summarize(env_keys, "process env secret-like keys"))
+
+    entries.append({"class": "env", "reachable": bool(env_evidence), "evidence": env_evidence})
+
+    mcp_passthrough: list[str] = []
+    for name, spec in sorted(_mcp_servers(cfg).items()):
+        if not isinstance(spec, dict):
+            continue
+        env = spec.get("env")
+        has_env_passthrough = False
+        if isinstance(env, dict):
+            if any(str(k) == "*" or str(v) == "*" for k, v in env.items()):
+                has_env_passthrough = True
+            if any(SECRET_KEY_RE.search(str(k)) for k in env):
+                has_env_passthrough = True
+        if has_env_passthrough or spec.get("tokenPassthrough") is True or spec.get("token-passthrough") is True:
+            mcp_passthrough.append(name)
+    mcp_evidence = []
+    if mcp_passthrough:
+        mcp_evidence.append(_summarize(mcp_passthrough, "MCP env/token passthrough"))
+    entries.append({"class": "mcp-passthrough", "reachable": bool(mcp_evidence), "evidence": mcp_evidence})
+
+    dotenv_hits: list[str] = []
+    if home_path is not None and home_path.exists():
+        candidates = [home_path / ".env", home_path / ".envrc"]
+        for ws in WORKSPACE_DIRS:
+            candidates.append(home_path / ws / ".env")
+            candidates.append(home_path / ws / ".envrc")
+        for cand in candidates:
+            if cand.is_file():
+                dotenv_hits.append(_rel(cand))
+    entries.append({"class": ".env", "reachable": bool(dotenv_hits), "evidence": dotenv_hits})
+
+    keychain_hits: list[str] = []
+    if home_path is not None and home_path.exists():
+        for rel in (
+            "Library/Keychains",
+            ".local/share/keyrings",
+            ".gnupg",
+        ):
+            p = home_path / rel
+            if p.exists():
+                keychain_hits.append(_rel(p))
+    entries.append({"class": "keychain", "reachable": bool(keychain_hits), "evidence": keychain_hits})
+
+    cookie_hits: list[str] = []
+    if home_path is not None and home_path.exists():
+        for rel in (
+            ".config/google-chrome/Default/Cookies",
+            ".config/chromium/Default/Cookies",
+            ".config/BraveSoftware/Brave-Browser/Default/Cookies",
+            ".mozilla/firefox",
+            "Library/Cookies/Cookies.binarycookies",
+        ):
+            p = home_path / rel
+            if p.is_file():
+                cookie_hits.append(_rel(p))
+            elif p.is_dir():
+                for child in p.rglob("cookies.sqlite"):
+                    if child.is_file():
+                        cookie_hits.append(_rel(child))
+    entries.append({"class": "cookies", "reachable": bool(cookie_hits), "evidence": cookie_hits})
+
+    ssh_hits: list[str] = []
+    if home_path is not None and home_path.exists():
+        ssh_dir = home_path / ".ssh"
+        if ssh_dir.is_dir():
+            ssh_hits.append(_rel(ssh_dir))
+            for name in ("id_rsa", "id_ed25519", "config", "known_hosts"):
+                p = ssh_dir / name
+                if p.is_file():
+                    ssh_hits.append(_rel(p))
+    entries.append({"class": "ssh", "reachable": bool(ssh_hits), "evidence": ssh_hits})
+
+    profiles = dig(cfg, "auth.profiles") or {}
+    providers: list[str] = []
+    if isinstance(profiles, dict):
+        seen: set[str] = set()
+        for key in profiles:
+            provider = str(key).split(":", 1)[0]
+            if provider and provider not in seen:
+                seen.add(provider)
+                providers.append(provider)
+    cloud_hits: list[str] = []
+    if providers:
+        cloud_hits.append(_summarize(sorted(providers), "auth.profiles providers"))
+    if dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token"):
+        cloud_hits.append("gateway token present")
+    entries.append({"class": "cloud", "reachable": bool(cloud_hits), "evidence": cloud_hits})
+
+    return entries
+
+
+def _secret_reachability_lines(ctx, lang: str = "en") -> list[str]:
+    map_ = _secret_reachability(ctx)
+    lines = ["Secret reachability map", "Static config + file-system inventory:"]
+    for item in map_:
+        evidence = "; ".join(item["evidence"]) if item["evidence"] else "none"
+        lines.append(f"- {item['class']}: reachable={_bool_word(item['reachable'], lang)}; {evidence}")
+    return lines
+
+
 def _render_finding(lines, icon, f, lang: str = "en"):
     conf = getattr(f, "confidence", "HIGH")
     tag = f"  (confidence: {conf.lower()})" if conf != "HIGH" and f.status in (FAIL, WARN) else ""
@@ -287,6 +418,11 @@ def render_report(findings: list[Finding], score: ScoreResult,
     if cap_lines:
         lines.append("")
         lines.extend(cap_lines)
+        lines.append("")
+    secret_lines = _secret_reachability_lines(ctx, lang) if ctx is not None else []
+    if secret_lines:
+        lines.append("")
+        lines.extend(secret_lines)
         lines.append("")
     # Honest framing for non-OpenClaw / custom setups (B-017): when there is no
     # openclaw.json the config-driven checks come back UNKNOWN. UNKNOWN is neutral
@@ -602,6 +738,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     # F-020: Structured Attestation Requests — always present in --json output.
     # Empty list when no B62 mismatches; one entry per mismatch-flagged skill.
     # Machine-readable only; no Hebrew rendering needed.
+    payload["secret_reachability"] = _secret_reachability(ctx) if ctx is not None else []
     if ctx is not None:
         from .sar import build_sars  # noqa: PLC0415
         payload["intentAttestationRequests"] = build_sars(ctx)
