@@ -3,6 +3,17 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.26.0] — 2026-06-27
+
+New per-source trust-contract check (B67), frozen output schema docs, and OpenClaw audit-log recon grounding for E-014.
+
+### Added
+- **B67 — Per-source tool-output trust contracts** (`checks.py`, `catalog.py`, `i18n.py`): complements B21 (generic trust boundary) by verifying that the bootstrap has *channel-specific* DATA/instruction declarations for each active high-risk channel (browser, email, MCP, search, docs). B21=PASS with a generic rule + B67=WARN means individual channels are not called out. MEDIUM severity, static over bootstrap + config, no new config-field reads, zero false-positive risk. Bilingual (en/he). 14 new tests.
+- **`docs/OUTPUT_SCHEMA.md`**: frozen public API contract documenting the `--json` full-audit envelope, Finding object shape, `--risk` extension, SARIF 2.1.0 structure, and `--vet` mode output. Integrators (CI, dashboards, SIEM) now have an explicit field-level reference.
+
+### Changed
+- **CHECKS.md** regenerated to include B67.
+
 ## [1.25.0] — 2026-06-27
 
 Static secret-reachability map by class, two new combinational attack-chains, copy-pasteable unified-diff remediation, and a generated per-check catalog — all read-only, local, stdlib.

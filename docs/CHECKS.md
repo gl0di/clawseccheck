@@ -733,6 +733,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B67 - Per-source tool-output trust contracts
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Prompt Injection / Trust Boundary
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: LLM01 Prompt Injection, LLM02 Sensitive Information Disclosure
+- What it checks: Per-source tool-output trust contracts
+- Remediation:
+  - none
+
 ## Advisory checks
 
 ### C3 - Backups of SOUL.md / memory
