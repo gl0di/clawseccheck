@@ -110,6 +110,8 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
   file → send it out"). Sources are credential files only, not env vars, so the legit "read
   `OPENAI_API_KEY`, send as auth header" pattern is never flagged. (AST is Python-only; JS/shell stay
   on the regex engine.)
+- Per-check reference: [`docs/CHECKS.md`](docs/CHECKS.md) for the generated catalog of checks,
+  verdict semantics, remediation, and compound risk chains.
 - **B14 — egress surface:** where the agent can reach out (channels, external skills, tools).
 - **B15 — MCP server trust** boundaries.
 - **B16 — threat monitoring:** whether you actually have monitoring/detection set up at all.
