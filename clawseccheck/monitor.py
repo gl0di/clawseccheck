@@ -38,6 +38,58 @@ def _h(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
 
 
+def _chain_hash(prev_hash: str, entry: dict) -> str:
+    """Return sha256(prev_hash + canonical_json(entry)) as a hex digest.
+
+    *entry* must not contain the 'chain_hash' key itself.
+    *prev_hash* is '' for the genesis entry.
+    """
+    canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+    raw = (prev_hash + canonical).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
+    """Verify the hash-chain integrity of an events.jsonl file.
+
+    Returns (True, "OK") when:
+    - the file is absent or empty, or
+    - all entries lack a 'chain_hash' field (legacy graceful mode), or
+    - every 'chain_hash' field matches the recomputed value.
+
+    Returns (False, "broken at entry N") on the first mismatch.
+    Never raises — any IO/parse error causes (True, "OK") (graceful).
+    """
+    p = Path(events_path).expanduser()
+    try:
+        if not p.is_file():
+            return True, "OK"
+        lines = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        return True, "OK"
+
+    prev_hash = ""
+    for idx, line in enumerate(lines):
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        stored = entry.get("chain_hash")
+        if stored is None:
+            # Legacy entry — skip chain verification for this entry, carry prev_hash
+            continue
+
+        # Recompute over the entry *without* the chain_hash field
+        base = {k: v for k, v in entry.items() if k != "chain_hash"}
+        expected = _chain_hash(prev_hash, base)
+        if stored != expected:
+            return False, f"broken at entry {idx}"
+        prev_hash = stored
+
+    return True, "OK"
+
+
 _MEMORY_MAX_BYTES = 200_000
 _MEMORY_MAX_FILES = 256
 _MEMORY_TEXT_EXTS = {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg"}
@@ -470,20 +522,50 @@ def save_state(path: str | Path, snap: dict) -> None:
     secure_write_text(p, json.dumps(snap, indent=2))
 
 
+def _last_chain_hash(p: Path) -> str:
+    """Return the 'chain_hash' of the last entry in a JSONL file, or '' if none."""
+    if not p.is_file():
+        return ""
+    try:
+        lines = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+            val = entry.get("chain_hash")
+            if val is not None:
+                return str(val)
+        except json.JSONDecodeError:
+            continue
+    return ""
+
+
 def record_events(alerts, path: str | Path = DEFAULT_EVENTS, when: str | None = None) -> None:
     """Append each drift alert to a local, owner-only event journal (a timeline of
-    what changed when). No-op when there are no alerts. Never uploaded — local only."""
+    what changed when). No-op when there are no alerts. Never uploaded — local only.
+
+    Each entry carries a 'chain_hash' field: sha256(prev_chain_hash + canonical_json)
+    so the journal is tamper-evident. Existing entries without 'chain_hash' are treated
+    as the chain genesis (backward compatible).
+    """
     if not alerts:
         return
     if when is None:
         from datetime import datetime  # noqa: PLC0415
         when = datetime.now().isoformat(timespec="seconds")
     p = Path(path).expanduser()
-    body = "".join(json.dumps({"ts": when, "level": lvl, "message": msg}) + "\n"
-                   for lvl, msg in alerts)
     try:  # symlink-safe append; never raise from the event journal
         secure_dir(p.parent)
-        secure_append_text(p, body)
+        prev_hash = _last_chain_hash(p)
+        lines_out: list[str] = []
+        for lvl, msg in alerts:
+            base = {"ts": when, "level": lvl, "message": msg}
+            ch = _chain_hash(prev_hash, base)
+            entry = {**base, "chain_hash": ch}
+            lines_out.append(json.dumps(entry))
+            prev_hash = ch
+        secure_append_text(p, "\n".join(lines_out) + "\n")
     except OSError:
         pass
 

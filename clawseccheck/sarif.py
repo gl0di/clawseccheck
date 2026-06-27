@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from .catalog import CATALOG, CRITICAL, FAIL, HIGH, WARN, Finding, remediation_for
+from .catalog import CATALOG, CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding, remediation_for
 from .report import _sanitize
 from .scoring import ScoreResult
 
@@ -30,6 +30,37 @@ _SEV_LEVEL = {
     "MEDIUM": "warning",
     "LOW": "note",
 }
+
+
+def _build_analysis_completeness(
+    findings: list[Finding],
+    checks_run: int,
+    checks_total: int,
+) -> dict:
+    """Return the ``analysisCompleteness`` metablock for SARIF run.properties.
+
+    Parameters
+    ----------
+    findings:
+        All findings from the audit (all statuses including PASS/UNKNOWN/suppressed).
+    checks_run:
+        Number of checks actually executed in this run.
+    checks_total:
+        Total checks registered in the CHECKS catalogue; ``-1`` when unknown.
+    """
+    return {
+        "checksRun": checks_run,
+        "checksTotal": checks_total,
+        "unknownCount": sum(1 for f in findings if f.status == UNKNOWN),
+        "passCount": sum(1 for f in findings if f.status == PASS),
+        "warnCount": sum(1 for f in findings if f.status == WARN),
+        "failCount": sum(1 for f in findings if f.status == FAIL),
+        "suppressedCount": sum(1 for f in findings if f.suppressed),
+        "limitations": [
+            "host-posture checks require --host",
+            "attestation checks require --attest",
+        ],
+    }
 
 
 def render_sarif(
@@ -131,6 +162,21 @@ def render_sarif(
             }
         ],
     }
+
+    # Always emit the analysisCompleteness metablock so consumers know the
+    # scope of the run regardless of whether a full Context is available.
+    try:
+        from .checks import CHECKS as _CHECKS  # noqa: PLC0415
+        _checks_total = len(_CHECKS)
+    except Exception:
+        _checks_total = -1
+    _checks_run = _checks_total if _checks_total >= 0 else len(findings)
+    _run = sarif_log["runs"][0]
+    if "properties" not in _run:
+        _run["properties"] = {}
+    _run["properties"]["analysisCompleteness"] = _build_analysis_completeness(
+        findings, _checks_run, _checks_total
+    )
 
     if ctx is not None:
         total_files_inspected = getattr(ctx, "total_files_inspected", 0)

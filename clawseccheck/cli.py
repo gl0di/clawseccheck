@@ -67,6 +67,93 @@ def _emit(text: str) -> None:
         print(text.encode("ascii", "replace").decode("ascii"))
 
 
+def vet_all(home_dir: Path, ascii_only: bool = False) -> int:
+    """Vet every installed skill under home_dir/skills/.
+
+    Finds all subdirectories of home_dir/skills/ that contain a SKILL.md file,
+    runs vet_skill on each, prints per-skill verdicts and an aggregate summary
+    table, then returns 0 if all findings are PASS/UNKNOWN, or 1 if any WARN/FAIL.
+    """
+    skills_dir = home_dir / "skills"
+    if not skills_dir.exists():
+        _emit(f"No skills directory found at {skills_dir}")
+        return 0
+
+    skill_paths: list[Path] = []
+    try:
+        for entry in sorted(skills_dir.iterdir()):
+            if entry.is_dir() and (entry / "SKILL.md").exists():
+                skill_paths.append(entry)
+    except PermissionError as exc:
+        _emit(f"(could not read skills directory: {exc})")
+        return 0
+
+    if not skill_paths:
+        _emit(f"No skills found under {skills_dir}")
+        return 0
+
+    _ASCII = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}
+    _UNI = {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔"}
+    _VERDICT = {
+        "FAIL": "DANGEROUS", "WARN": "SUSPICIOUS",
+        "PASS": "looks SAFE", "UNKNOWN": "could not assess",
+    }
+
+    results: list[tuple[str, str, int]] = []  # (name, status, evidence_count)
+    worst = "PASS"
+
+    for skill_dir in skill_paths:
+        skill_name = skill_dir.name
+        _emit(f"\n=== {_sanitize(skill_name)} ===")
+        try:
+            f = vet_skill(str(skill_dir))
+        except Exception as exc:  # noqa: BLE001
+            _emit(f"  (error vetting {_sanitize(skill_name)}: {_sanitize(str(exc))})")
+            results.append((skill_name, "UNKNOWN", 0))
+            continue
+
+        if f.status == "FAIL":
+            worst = "FAIL"
+        elif f.status == "WARN" and worst != "FAIL":
+            worst = "WARN"
+
+        icon = _ASCII[f.status] if ascii_only else _UNI[f.status]
+        lines = [
+            f"{icon} '{_sanitize(skill_name)}': {_VERDICT[f.status]} [{f.severity}]",
+            f"    {_sanitize(f.detail)}",
+        ]
+        if f.evidence:
+            bullet = "*" if ascii_only else "•"
+            lines.append("    Evidence:")
+            for ev in f.evidence[:12]:
+                lines.append(f"      {bullet} {_sanitize(ev)}")
+            if len(f.evidence) > 12:
+                lines.append(f"      {bullet} (+{len(f.evidence) - 12} more)")
+        lines.append(f"    {_sanitize(f.fix)}")
+        _emit("\n".join(lines))
+
+        results.append((skill_name, f.status, len(f.evidence) if f.evidence else 0))
+
+    # Aggregate summary table
+    _emit("")
+    _emit("=" * 50)
+    _emit("Aggregate summary:")
+    col_w = max(len(r[0]) for r in results) + 2
+    _emit(f"  {'Skill':<{col_w}} {'Verdict':<12} Evidence items")
+    _emit(f"  {'-' * col_w} {'-' * 12} --------------")
+    for name, status, ev_count in results:
+        icon = _ASCII[status] if ascii_only else _UNI[status]
+        _emit(f"  {name:<{col_w}} {icon} {_VERDICT[status]:<13} {ev_count}")
+
+    total = len(results)
+    fails = sum(1 for _, s, _ in results if s == "FAIL")
+    warns = sum(1 for _, s, _ in results if s == "WARN")
+    safe = total - fails - warns
+    _emit(f"\n  {total} skill(s) checked | {safe} safe | {warns} suspicious | {fails} dangerous")
+
+    return 0 if worst in ("PASS", "UNKNOWN") else 1
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="clawseccheck",
                                 description="ClawSecCheck OpenClaw security self-audit (read-only).")
@@ -94,6 +181,8 @@ def main(argv=None) -> int:
                    help="vet a skill (dir or SKILL.md) for malware BEFORE installing it")
     p.add_argument("--vet-mcp", nargs="?", const="", metavar="NAME|FILE",
                    help="vet configured MCP servers (or a NAME/FILE) for supply-chain risk before trusting them")
+    p.add_argument("--vet-all", "--recursive", action="store_true", dest="vet_all",
+                   help="vet every installed skill under ~/.openclaw/skills/* (one verdict per skill + aggregate)")
     p.add_argument("--canary", action="store_true",
                    help="active prompt-injection canary self-test")
     p.add_argument("--redteam", action="store_true",
@@ -208,6 +297,10 @@ def main(argv=None) -> int:
         lines.append(f"    {_sanitize(f.fix)}")
         _emit("\n".join(lines))
         return 0 if f.status in ("PASS", "UNKNOWN") else 1
+
+    if args.vet_all:
+        home_dir = Path(args.home).expanduser()
+        return vet_all(home_dir, ascii_only=ascii_only)
 
     if args.vet_mcp is not None:
         target = args.vet_mcp if args.vet_mcp else None

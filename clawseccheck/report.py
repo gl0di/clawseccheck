@@ -9,6 +9,7 @@ unicode icons/box (e.g. a legacy Windows cp1252 console).
 from __future__ import annotations
 
 import difflib
+import hashlib
 import os
 import html
 import json
@@ -18,6 +19,7 @@ from pathlib import Path
 from .catalog import (
     CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, owasp_for, remediation_for,
 )
+from .dedup import deduplicate_findings
 from .guide import suggest_actions
 from .i18n import is_rtl, t, title_for, tp
 from .scoring import ScoreResult
@@ -53,6 +55,34 @@ _ASCII_MAP = str.maketrans({
 def _asciify(text: str) -> str:
     """Fold the unicode we emit down to pure ASCII for legacy consoles."""
     return text.translate(_ASCII_MAP).encode("ascii", "replace").decode("ascii")
+
+
+def compute_scan_receipt(findings) -> str:
+    """Compute a deterministic Merkle-style root hash over all findings.
+
+    Each finding is hashed individually; hashes are sorted then combined.
+    Returns a 64-char hex string. Empty/None findings → sha256 of empty bytes.
+    Pure stdlib, local-only. Never raises.
+    """
+    try:
+        def finding_digest(f):
+            canonical = json.dumps({
+                "check_id": str(getattr(f, "check_id", "") or getattr(f, "rule_id", "")),
+                "verdict": str(getattr(f, "verdict", "") or getattr(f, "severity", "")),
+                "path": str(getattr(f, "path", "") or getattr(f, "file", "")),
+                "line": int(getattr(f, "line", 0) or 0),
+                "detail": str(getattr(f, "detail", "") or "")[:200],
+            }, sort_keys=True, ensure_ascii=True)
+            return hashlib.sha256(canonical.encode()).hexdigest()
+
+        if not findings:
+            return hashlib.sha256(b"").hexdigest()
+
+        leaf_hashes = sorted(finding_digest(f) for f in findings)
+        combined = "".join(leaf_hashes)
+        return hashlib.sha256(combined.encode()).hexdigest()
+    except Exception:  # noqa: BLE001
+        return "error-computing-receipt"
 
 
 _RLM = "‏"   # RIGHT-TO-LEFT MARK — sets RTL base direction at line start
@@ -412,6 +442,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
                   *, risk=None, update_notice: list[str] | None = None,
                   openclaw_detected: bool = True, ctx=None,
                   verbose: bool = False) -> str:
+    findings = deduplicate_findings(findings)
     icon = _ICON_ASCII if ascii_only else _ICON
     ok = "[OK]" if ascii_only else "✅"
     # Supply cfg to _render_finding only in verbose mode so blast-radius lines appear.
@@ -541,6 +572,10 @@ def render_report(findings: list[Finding], score: ScoreResult,
         for i, ln in enumerate(update_notice):
             prefix = f"{bullet} " if i == 0 else "   "
             lines.append(f"{prefix}{_sanitize(ln)}")
+
+    # Scan receipt: deterministic Merkle-style hash for audit traceability
+    lines.append("")
+    lines.append(f"Scan receipt: sha256:{compute_scan_receipt(findings)}")
 
     out = "\n".join(lines).rstrip() + "\n"
     if ascii_only:
@@ -807,6 +842,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         payload["intentAttestationRequests"] = build_sars(ctx)
     else:
         payload["intentAttestationRequests"] = []
+    payload["scan_receipt"] = f"sha256:{compute_scan_receipt(findings)}"
     return json.dumps(payload, ensure_ascii=True, indent=2)
 
 

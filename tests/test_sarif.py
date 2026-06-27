@@ -298,8 +298,37 @@ def test_default_tool_version():
 # ---------------------------------------------------------------------------
 
 def test_analysis_completeness_omitted_without_ctx():
+    # analysisCompleteness is always added, so properties is always present.
+    # The ctx-dependent snake_case key (analysis_completeness) must be absent.
     doc = json.loads(render_sarif([], ctx=None))
-    assert "properties" not in doc["runs"][0]
+    run = doc["runs"][0]
+    assert "properties" in run
+    assert "analysisCompleteness" in run["properties"]
+    assert "analysis_completeness" not in run["properties"]
+
+
+def test_analysis_completeness_metablock_always_present():
+    """analysisCompleteness is in run.properties regardless of ctx."""
+    findings = [
+        _finding("B1", FAIL, severity=CRITICAL),
+        _finding("B2", WARN),
+        _finding("B3", PASS),
+        _finding("B4", UNKNOWN),
+        _finding("B5", FAIL, suppressed=True),
+    ]
+    doc = json.loads(render_sarif(findings, ctx=None))
+    props = doc["runs"][0]["properties"]
+    ac = props["analysisCompleteness"]
+    # All required keys present
+    for key in ("checksRun", "checksTotal", "unknownCount", "warnCount", "failCount"):
+        assert key in ac, f"missing key: {key}"
+        assert isinstance(ac[key], int) and ac[key] >= 0, f"{key} must be int >= 0"
+    # Counts match the findings list
+    assert ac["failCount"] == 2   # B1 + B5 (suppressed still counted by status)
+    assert ac["warnCount"] == 1
+    assert ac["unknownCount"] == 1
+    assert ac["passCount"] == 1
+    assert ac["suppressedCount"] == 1
 
 
 def test_analysis_completeness_populated_with_ctx():

@@ -197,10 +197,15 @@ def test_sarif_effect_profile_absent_when_no_effects():
 
 
 def test_sarif_effect_profile_omitted_without_ctx():
-    """When render_sarif is called with ctx=None, no effectProfile appears."""
+    """When render_sarif is called with ctx=None, no effectProfile appears.
+
+    analysisCompleteness is always present, so properties itself is present;
+    only the ctx-dependent effectProfile key must be absent.
+    """
     sarif_text = render_sarif([])
     doc = json.loads(sarif_text)
-    assert "properties" not in doc["runs"][0]
+    props = doc["runs"][0].get("properties", {})
+    assert "effectProfile" not in props
 
 
 def test_sarif_effect_profile_is_deterministic():
