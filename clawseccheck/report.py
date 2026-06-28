@@ -421,10 +421,12 @@ def render_report(findings: list[Finding], score: ScoreResult,
     issues = [f for f in findings
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
+    trifecta_ratio = _trifecta_ratio(findings)
     lines = [t("report.title"), "=" * 44,
              t("report.score_line",
-               score=score.score, grade=score.grade,
-               trifecta=_trifecta_ratio(findings))]
+               score=score.score, grade=score.grade)]
+    if trifecta_ratio == "3/3":
+        lines.append(t("report.trifecta_fail"))
     if score.capped:
         lines.append(t("report.capped",
                        raw=score.raw_score,
@@ -445,17 +447,6 @@ def render_report(findings: list[Finding], score: ScoreResult,
     lines.append(t("report.score_breakdown",
                    score=score.raw_score, n_scored=n_scored,
                    n_pass=n_pass, n_warn=n_warn, n_fail=n_fail))
-    pc_verified = sum(1 for f in scored_findings
-                      if f.status == PASS and getattr(f, "pass_confidence", None) == "verified")
-    pc_no_signal = sum(1 for f in scored_findings
-                       if f.status == PASS and getattr(f, "pass_confidence", None) == "no_signal")
-    if pc_verified or pc_no_signal:
-        _pc_parts = []
-        if pc_verified:
-            _pc_parts.append(f"{pc_verified} verified")
-        if pc_no_signal:
-            _pc_parts.append(f"{pc_no_signal} no-signal")
-        lines.append(f"  PASS breakdown: {', '.join(_pc_parts)}")
     if n_fail > 0 or n_warn > 0:
         _sev_counts: dict[str, int] = {}
         for f in scored_findings:
@@ -469,16 +460,6 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append(t("report.score_breakdown_detail",
                        n_fail=n_fail, n_warn=n_warn, sev_summary=sev_summary))
     lines.append(t("report.scope_note"))
-    cap_lines = _capability_graph_lines(ctx) if ctx is not None else []
-    if cap_lines:
-        lines.append("")
-        lines.extend(cap_lines)
-        lines.append("")
-    secret_lines = _secret_reachability_lines(ctx) if ctx is not None else []
-    if secret_lines:
-        lines.append("")
-        lines.extend(secret_lines)
-        lines.append("")
     # Honest framing for non-OpenClaw / custom setups (B-017): when there is no
     # openclaw.json the config-driven checks come back UNKNOWN. UNKNOWN is neutral
     # (never counted against the score), but without context a hardened custom setup
@@ -500,6 +481,17 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append("")
         for f in issues:
             _render_finding(lines, icon, f, cfg=_blast_cfg)
+
+    cap_lines = _capability_graph_lines(ctx) if ctx is not None else []
+    if cap_lines:
+        lines.append("")
+        lines.extend(cap_lines)
+        lines.append("")
+    secret_lines = _secret_reachability_lines(ctx) if ctx is not None else []
+    if secret_lines:
+        lines.append("")
+        lines.extend(secret_lines)
+        lines.append("")
 
     if suppressed_count:
         lines.append(t("report.suppressed_count", n=suppressed_count))

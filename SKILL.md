@@ -209,40 +209,60 @@ Present all seven sections below **in one message**, in order.
 
 **Section 1 — Grade card**
 
+When `trifecta == "3/3"`:
 ```
 🛡️ OpenClaw Security Audit — Grade {grade} · {score}/100
-{score-bar}  ·  Lethal Trifecta {trifecta} {chip}  ·  {N} issues
+{score-bar}  ·  Lethal Trifecta 3/3 🔴  ·  {N} issues
+```
+
+When trifecta is 2/3 or below:
+```
+🛡️ OpenClaw Security Audit — Grade {grade} · {score}/100
+{score-bar}  ·  {N} issues
 ```
 
 - Score-bar: 16 cells; `filled = round(score / 100 * 16)`. Use `█` for filled, `░` for empty.
   Score 49 example: `████████░░░░░░░░`.
-- Trifecta chip: use the `trifecta` field (e.g. `"1/3"`). Append ✅ for 0/3 or 1/3 · ⚠️ for 2/3 · 🔴 for 3/3.
+- Trifecta chip: only shown on line 2 when `trifecta == "3/3"` — append `· Lethal Trifecta 3/3 🔴`.
+  At 2/3 or below, omit it from line 2 entirely (the A1 finding covers it in the findings list).
 - Issue count: non-suppressed findings with `status` `FAIL` or `WARN`.
 
 **Section 2 — FIX FIRST + projection**
 
 Read `projection.top1` and `projection.cumulative` from the JSON.
 
+When `projection.top1.projected_grade` **differs** from the current grade (fixing the top issue improves the grade):
 ```
 ▶ FIX FIRST
 {plain-language description of the top1 finding — what the risk actually is, in one sentence}
 Projected (estimated): fix this → {top1.projected_grade} ({top1.projected_score}) · fix all Critical+High → {cumulative.projected_grade} ({cumulative.projected_score})
 ```
 
-Always label the projected grades **estimated** — they assume each fixed finding flips cleanly to
+When `projection.top1.projected_grade` **equals** the current grade (fixing the top issue alone won't improve it):
+```
+▶ FIX FIRST
+{plain-language description of the top1 finding — what the risk actually is, in one sentence}
+Projected: fixing the top issue won't change the grade alone — {N} Critical+High findings must all be addressed to reach {cumulative.projected_grade}.
+```
+
+Where `{N}` is the count of Critical+High findings captured in `projection.cumulative`, and
+`{cumulative.projected_grade}` is `projection.cumulative.projected_grade`.
+
+Always label projected grades **estimated** — they assume each fixed finding flips cleanly to
 PASS; actual hardening may reveal new issues. Never present a projected grade as the current grade.
 If `projection.top1` is `null` (no fixable FAILs), skip this block and say "No high-priority issues found."
 
-**Section 3 — Findings by OpenClaw surface family**
+**Section 3 — Findings (severity-first)**
 
-Group non-suppressed FAIL and WARN findings by the 7 dashboard families, using each finding's
-`surface` field and `coverage.families` from the JSON. Sort severity within each family: CRITICAL →
-HIGH → MEDIUM → LOW. Skip families with no actionable findings.
+List all non-suppressed FAIL and WARN findings sorted globally by severity: CRITICAL → HIGH →
+MEDIUM → LOW. Within the same severity level, any order is fine. Skip findings with no actionable
+result.
 
 **Pull findings with `confidence` = `"MEDIUM"` or `"ATTESTED"` out of this section** — they appear
 in Section 5 ("Worth a glance") instead.
 
-The 7 families and their surface membership:
+The 7 surface families (used as inline tags on each finding — look up each finding's `surface`
+field and map it to the family name using the table below):
 
 | Icon | Family | Surfaces |
 |------|--------|---------|
@@ -254,17 +274,20 @@ The 7 families and their surface membership:
 | 🛰️ | Detection & Host | monitoring · host |
 | 🔧 | Automation & Maintenance | hooks · update |
 
-Per non-empty family: show severity dot counts (🔴 CRITICAL · 🟠 HIGH · 🟡 MEDIUM/WARN · ⚪ LOW)
-and per finding: a plain-language description + the relevant config path as secondary text. Match
-the worked example layout:
+For each finding: severity dot + severity label + plain-language title + surface family tag in
+brackets, then `why:` and `fix:` indented on the next lines. Match the worked example layout:
 
 ```
-— Findings by OpenClaw surface —
-🌐 Exposure & Network        🔴1 🟡1
-  🔴 insecure control-UI auth        gateway.controlUi.allowInsecureAuth
-  🟡 Telegram context too broad      channels.telegram.contextVisibility
-🔑 Privilege & Execution     🟠1
-  🟠 tool profile broader than minimal   tools.profile
+— Findings —
+🔴 CRITICAL  insecure control-UI auth  [Surface: Exposure & Network]
+    why: gateway.controlUi.allowInsecureAuth is set to true — anyone on your network can send commands to your agent
+    fix: set gateway.controlUi.allowInsecureAuth to false
+🟠 HIGH  tool profile broader than minimal  [Surface: Privilege & Execution]
+    why: tools.profile grants more permissions than the task requires
+    fix: set tools.profile to "minimal"
+🟡 MEDIUM  Telegram context too broad  [Surface: Exposure & Network]
+    why: channels.telegram.contextVisibility exposes more context than necessary
+    fix: set channels.telegram.contextVisibility to "restricted"
 ```
 
 **Section 4 — Coverage of OpenClaw surfaces**
@@ -308,8 +331,8 @@ Append immediately at the end of the Dashboard (see Step 4 for routing detail):
 
 ```
 Next — ✅ read-only · ⚡ touches live agent (asks)
-  1 ✅ Copy-paste fixes   2 ✅ Deeper scan (resolve UNKNOWN)
-  3 ⚡ Live injection test  4 ✅ Turn on monitoring   Start with 1?
+  a ✅ Copy-paste fixes   b ✅ Deeper scan (resolve UNKNOWN)
+  c ⚡ Live injection test  d ✅ Turn on monitoring   Start with a?
 ```
 
 ### Step 4 — Next menu routing
@@ -320,16 +343,16 @@ before running an active test).
 
 | Menu item | Tag | Maps to |
 |-----------|-----|---------|
-| 1 Copy-paste fixes | ✅ | Step 5 "fix help" → `--prompts` |
-| 2 Deeper scan | ✅ | Step 5 "deeper / capability check" → `--ask` then `--attest` |
-| 3 Live injection test | ⚡ | Step 5 "live test" → `--canary` then `--dryrun` (then optionally `--redteam`) |
-| 4 Turn on monitoring | ✅ | Step 5 "monitoring" → `--monitor` (tell user about snapshot first) |
+| a Copy-paste fixes | ✅ | Step 5 "fix help" → `--prompts` |
+| b Deeper scan | ✅ | Step 5 "deeper / capability check" → `--ask` then `--attest` |
+| c Live injection test | ⚡ | Step 5 "live test" → `--canary` then `--dryrun` (then optionally `--redteam`) |
+| d Turn on monitoring | ✅ | Step 5 "monitoring" → `--monitor` (tell user about snapshot first) |
 
 Adapt the menu to the audit result:
-- **Always offer item 1** if there are any FAIL findings.
-- **Offer item 2** if `coverage.summary.partial` > 0 (UNKNOWN surfaces remain).
-- **Offer item 3** if grade is C or worse, or if the user asks about injection resistance.
-- **Offer item 4** unless the user has recently run `--monitor`.
+- **Always offer item a** if there are any FAIL findings.
+- **Offer item b** if `coverage.summary.partial` > 0 (UNKNOWN surfaces remain).
+- **Offer item c** if grade is C or worse, or if the user asks about injection resistance.
+- **Offer item d** unless the user has recently run `--monitor`.
 - **If grade is A or B with no critical issues**, lean toward monitoring and canary testing rather
   than fix prompts.
 
