@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 
 from .catalog import (
+    BY_ID,
     CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, owasp_for, remediation_for,
 )
 from .dedup import deduplicate_findings
@@ -440,6 +441,7 @@ def _render_finding(lines, icon, f, lang: str = "en", cfg: dict | None = None):
 def render_report(findings: list[Finding], score: ScoreResult,
                   ascii_only: bool = False, native=None, lang: str = "en",
                   *, risk=None, update_notice: list[str] | None = None,
+                  freshness_notice: list[str] | None = None,
                   openclaw_detected: bool = True, ctx=None,
                   verbose: bool = False) -> str:
     findings = deduplicate_findings(findings)
@@ -572,6 +574,15 @@ def render_report(findings: list[Finding], score: ScoreResult,
         for i, ln in enumerate(update_notice):
             prefix = f"{bullet} " if i == 0 else "   "
             lines.append(f"{prefix}{_sanitize(ln)}")
+
+    # Coverage freshness advisory — human report only, advisory only. Each element is one
+    # complete capability notice; rendered with its own bullet so both can appear together.
+    # Never alters score, grade, or findings (purely additive output).
+    if freshness_notice:
+        bullet = "*" if ascii_only else "⏳"
+        lines.append("")
+        for ln in freshness_notice:
+            lines.append(f"{bullet} {_sanitize(ln)}")
 
     # Scan receipt: deterministic Merkle-style hash for audit traceability
     lines.append("")
@@ -712,6 +723,7 @@ _VET_STATUS_RANK = {FAIL: 3, WARN: 2, UNKNOWN: 1, "SKILL_ARCHIVE_PATH_TRAVERSAL"
 
 def _finding_to_dict(f: Finding) -> dict:
     """Serialize one Finding to the frozen public JSON shape (shared by every renderer)."""
+    _meta = BY_ID.get(f.id)
     return {"id": f.id, "title": _sanitize(f.title), "severity": f.severity,
             "status": f.status, "detail": _sanitize(f.detail),
             "fix": _sanitize(f.fix), "framework": f.framework,
@@ -720,7 +732,8 @@ def _finding_to_dict(f: Finding) -> dict:
             "suppressed": bool(getattr(f, "suppressed", False)),
             "owasp": list(owasp_for(f.id)),
             "remediation": remediation_for(f.id),
-            "evidence": [_sanitize(e) for e in (f.evidence or [])]}
+            "evidence": [_sanitize(e) for e in (f.evidence or [])],
+            "surface": _meta.surface if _meta is not None else ""}
 
 
 def render_fix(findings: list[Finding], ascii_only: bool = False, lang: str = "en") -> str:
@@ -842,6 +855,11 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         payload["intentAttestationRequests"] = build_sars(ctx)
     else:
         payload["intentAttestationRequests"] = []
+    # F-031: surface/coverage/projection — Dashboard data (additive, back-compat).
+    from .coverage import coverage as _coverage  # noqa: PLC0415
+    from .scoring import project as _project  # noqa: PLC0415
+    payload["coverage"] = _coverage(findings)
+    payload["projection"] = _project(findings)
     payload["scan_receipt"] = f"sha256:{compute_scan_receipt(findings)}"
     return json.dumps(payload, ensure_ascii=True, indent=2)
 

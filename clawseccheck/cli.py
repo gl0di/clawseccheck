@@ -23,6 +23,7 @@ from . import (
 )
 from . import __released__, __version__
 from .update import update_notice
+from .ledger import freshness_notice as _compute_freshness, load_ledger, record_run
 from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
@@ -194,6 +195,10 @@ def main(argv=None) -> int:
                    help="print a behavioral dry-run harness (prompt-injection self-test across all sources)")
     p.add_argument("--self-test", action="store_true",
                    help="run canary + live red-team + dry-run harnesses together")
+    p.add_argument("--full", action="store_true",
+                   help="run audit + self-test + vet-mcp in one command "
+                        "(human output path; self-test emits deterministic test material only, "
+                        "does not attack; extra sections skipped in --json / --card mode)")
     p.add_argument("--ask", action="store_true",
                    help="emit an attestation template (JSON) for the agent to self-report "
                         "facts the config can't show; fill it, then pass --attest")
@@ -227,6 +232,9 @@ def main(argv=None) -> int:
     p.add_argument("--no-update-notice", action="store_true",
                    help="suppress the offline 'your build may be stale' reminder "
                         "(also suppressible via CLAWSECCHECK_NO_UPDATE_NOTICE=1; offline, never a network call)")
+    p.add_argument("--no-freshness-notice", action="store_true",
+                   help="suppress the coverage-freshness reminder for opt-in tests "
+                        "(also suppressible via CLAWSECCHECK_NO_FRESHNESS_NOTICE=1; offline, never a network call)")
     p.add_argument("--next", action="store_true",
                    help="print recommended next actions based on the audit result")
     p.add_argument("--risk-paths", action="store_true",
@@ -327,12 +335,14 @@ def main(argv=None) -> int:
                     break
                 if f.status == "WARN" and worst != "FAIL":
                     worst = "WARN"
+            record_run("vet_mcp")
             return 0 if worst in ("PASS", "UNKNOWN") else 1
         # "No servers configured" case: single UNKNOWN finding.
         if len(findings) == 1 and findings[0].status == "UNKNOWN":
             f = findings[0]
             icon = "[?]" if ascii_only else "❔"
             _emit(f"{icon} {f.detail}")
+            record_run("vet_mcp")
             return 0
         worst_status = "PASS"
         for f in findings:
@@ -353,19 +363,23 @@ def main(argv=None) -> int:
                     _emit(f"    - {_sanitize(ev)}")
             _emit(f"    fix: {_sanitize(f.fix)}")
             _emit("")
+        record_run("vet_mcp")
         return 0 if worst_status in ("PASS", "UNKNOWN") else 1
 
     if args.canary:
         _emit(render_canary(make_canary(), ascii_only))
+        record_run("self_test")
         return 0
 
     if args.redteam:
         seed = args.seed if args.seed is not None else secrets.token_hex(8)
         _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
+        record_run("self_test")
         return 0
 
     if args.dryrun:
         _emit(render_dryrun(make_scenarios(), ascii_only))
+        record_run("self_test")
         return 0
 
     if args.self_test:
@@ -375,6 +389,7 @@ def main(argv=None) -> int:
         _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
         _emit("")
         _emit(render_dryrun(make_scenarios(), ascii_only))
+        record_run("self_test")
         return 0
 
     if args.ask:
@@ -502,8 +517,14 @@ def main(argv=None) -> int:
         notice = []
         if not args.no_update_notice and not os.environ.get("CLAWSECCHECK_NO_UPDATE_NOTICE"):
             notice = update_notice(__version__, released=__released__)
+        # Coverage freshness advisory — human report only; never in --json/--card/--sarif.
+        # Reads only the local coverage ledger and the local clock; makes no network call.
+        # Advisory only: never alters score, grade, or findings.
+        f_notice: list[str] = []
+        if not args.no_freshness_notice and not os.environ.get("CLAWSECCHECK_NO_FRESHNESS_NOTICE"):
+            f_notice = _compute_freshness(load_ledger(), lang=args.lang)
         parts = [render_report(findings, score, ascii_only, native=ctx.native, lang=args.lang,
-                               risk=paths, update_notice=notice,
+                               risk=paths, update_notice=notice, freshness_notice=f_notice,
                                openclaw_detected=ctx.config_found, ctx=ctx),
                  "", render_card(score, findings, ascii_only, lang=args.lang)]
         if ctx.errors:
@@ -514,6 +535,44 @@ def main(argv=None) -> int:
         body = "\n".join(parts)
 
     _emit(body)
+
+    if args.full and not args.json and not args.card:
+        # --- Self-test section (canary + red-team + dry-run) ---
+        seed = args.seed if args.seed is not None else secrets.token_hex(8)
+        _emit("")
+        _emit("=" * 60)
+        _emit("CLAWSECCHECK SELF-TEST")
+        _emit("=" * 60)
+        _emit(render_canary(make_canary(), ascii_only))
+        _emit("")
+        _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
+        _emit("")
+        _emit(render_dryrun(make_scenarios(), ascii_only))
+        record_run("self_test")
+        # --- vet-mcp section ---
+        _emit("")
+        _emit("=" * 60)
+        _emit("CLAWSECCHECK VET-MCP")
+        _emit("=" * 60)
+        vm_findings = vet_mcp(target=None, home=args.home)
+        if len(vm_findings) == 1 and vm_findings[0].status == "UNKNOWN":
+            vmf = vm_findings[0]
+            vm_icon = "[?]" if ascii_only else "❔"
+            _emit(f"{vm_icon} {vmf.detail}")
+        else:
+            _VM_ICON_A = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}
+            _VM_ICON_U = {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔"}
+            _VM_VERDICT = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS": "SAFE", "UNKNOWN": "UNKNOWN"}
+            for vmf in vm_findings:
+                vm_icon = _VM_ICON_A[vmf.status] if ascii_only else _VM_ICON_U[vmf.status]
+                vm_verdict = _VM_VERDICT[vmf.status]
+                _emit(f"{vm_icon} {vm_verdict}: {_sanitize(vmf.title)}")
+                if vmf.evidence:
+                    for vm_ev in vmf.evidence[:4]:
+                        _emit(f"    - {_sanitize(vm_ev)}")
+                _emit(f"    fix: {_sanitize(vmf.fix)}")
+                _emit("")
+        record_run("vet_mcp")
 
     if args.save:
         try:

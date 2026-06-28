@@ -28,6 +28,8 @@ versioning §6 in `CLAUDE.md`).
 | `capability_graph` | `object` | yes | Static capability map of the inspected agent. See §5. |
 | `secret_reachability` | `array[SecretClass]` | yes | Per-class secret-exposure analysis. See §6. |
 | `intentAttestationRequests` | `array[SAR]` | yes | Structured Attestation Requests for B62 capability-intent mismatches. See §7. |
+| `coverage` | `object` | yes | Surface/family coverage map for the Dashboard. See §8. |
+| `projection` | `object` | yes | What-if score projections for the Dashboard. See §9. |
 
 ### Skeleton
 
@@ -42,7 +44,9 @@ versioning §6 in `CLAUDE.md`).
   "next_actions": [ ... ],
   "capability_graph": { "nodes": [], "edges": [] },
   "secret_reachability": [ ... ],
-  "intentAttestationRequests": []
+  "intentAttestationRequests": [],
+  "coverage": { "surfaces": {}, "families": {}, "gaps": {}, "summary": {} },
+  "projection": { "current": {}, "top1": null, "cumulative": {} }
 }
 ```
 
@@ -66,6 +70,7 @@ Shared by `--json`, `--json` with `--risk`, and `--vet` mode.
 | `owasp` | `array[str]` | OWASP LLM Top 10 codes that apply, e.g. `["LLM01", "LLM02"]`. May be empty. |
 | `remediation` | `object` | Paste-ready remediation. Keys: `commands` (`array[str]`) and `config` (`array[object]`). |
 | `evidence` | `array[str]` | Supporting evidence strings (sanitised; no raw secrets). May be empty. |
+| `surface` | `str` | OpenClaw surface slug this check belongs to (e.g. `"gateway"`, `"tools"`, `"bootstrap"`). `""` for findings not in the CATALOG (e.g. MCP-vet diagnostics). One of the 14 slugs in `catalog.SURFACES` or `""`. |
 
 ### `remediation` object
 
@@ -100,7 +105,8 @@ item describes a manual configuration step.
     "commands": [],
     "config": []
   },
-  "evidence": ["tools.output.sanitize = false"]
+  "evidence": ["tools.output.sanitize = false"],
+  "surface": "bootstrap"
 }
 ```
 
@@ -240,7 +246,120 @@ One entry per skill flagged by check B62.
 
 ---
 
-## 8. SARIF 2.1.0 Output (`--sarif`)
+## 8. `coverage` Object (F-031)
+
+Always present in `--json` output. Describes check coverage across the 13 OpenClaw
+bucket surfaces and the 7 security families they roll up to. Used by the Dashboard
+to render the coverage heat-map.
+
+```json
+{
+  "surfaces": {
+    "gateway": { "state": "checked", "counts": {"pass": 2, "warn": 1, "fail": 0, "unknown": 0} },
+    "tools":   { "state": "partial", "counts": {"pass": 0, "warn": 0, "fail": 0, "unknown": 3} }
+  },
+  "families": {
+    "exposure":  { "surfaces": ["gateway", "channels", "sessions"],
+                   "counts":   {"pass": 2, "warn": 1, "fail": 0, "unknown": 0},
+                   "worst":    "warn" },
+    "privilege": { "surfaces": ["tools", "agents"],
+                   "counts":   {"pass": 0, "warn": 0, "fail": 0, "unknown": 5},
+                   "worst":    "unknown" }
+  },
+  "gaps": {
+    "not_checkable": ["outbound egress allowlist"],
+    "roadmap": []
+  },
+  "summary": {
+    "checked": 8,
+    "partial": 5,
+    "not_checkable": 1,
+    "roadmap": 0
+  }
+}
+```
+
+### `surfaces` map
+
+Each key is a surface slug (one of the 13 bucket surfaces; `"trifecta"` is excluded — it
+is a cross-cutting headline chip, not a coverage bucket). Value fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `state` | `str` | `"checked"` if ≥1 finding returned PASS/FAIL/WARN; `"partial"` if all findings were UNKNOWN or none ran. |
+| `counts` | `object` | `{"pass": N, "warn": N, "fail": N, "unknown": N}` — finding totals for this surface. |
+
+### `families` map
+
+Keys are the 7 security family slugs: `"exposure"`, `"privilege"`, `"supply_chain"`,
+`"content_integrity"`, `"secrets"`, `"detection"`, `"automation"`. Value fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `surfaces` | `array[str]` | Member surface slugs in canonical order. |
+| `counts` | `object` | Aggregated `{"pass", "warn", "fail", "unknown"}` across all member surfaces. |
+| `worst` | `str` | Worst status across the family: `"fail"`, `"warn"`, `"pass"`, or `"unknown"`. |
+
+### `gaps` object
+
+| Field | Type | Description |
+|---|---|---|
+| `not_checkable` | `array[str]` | Static list of OpenClaw surfaces with no auditable config control. |
+| `roadmap` | `array[str]` | Surfaces not yet covered by ClawSecCheck (extensible; currently empty). |
+
+### `summary` object
+
+| Field | Type | Description |
+|---|---|---|
+| `checked` | `int` | Surfaces with ≥1 non-UNKNOWN finding. |
+| `partial` | `int` | Surfaces where all findings are UNKNOWN. |
+| `not_checkable` | `int` | Count of `gaps.not_checkable` entries. |
+| `roadmap` | `int` | Count of `gaps.roadmap` entries. |
+
+---
+
+## 9. `projection` Object (F-031)
+
+Always present in `--json` output. Estimates the score impact of fixing FAIL findings.
+Used by the Dashboard to render the "fix this one thing" call-to-action.
+
+```json
+{
+  "current":    {"score": 52, "grade": "D"},
+  "top1":       {"finding_id": "B1", "projected_score": 72, "projected_grade": "C", "delta": 20},
+  "cumulative": {"projected_score": 81, "projected_grade": "B", "delta": 29}
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `current` | `object` | `{"score": int, "grade": str}` — current audit score (mirrors top-level `score`/`grade`). |
+| `top1` | `object \| null` | The single highest-leverage fix. `null` when there are no fixable (scored, non-suppressed) FAIL findings. |
+| `cumulative` | `object` | Projected score after fixing all CRITICAL + HIGH FAILs simultaneously. `delta` is 0 when none exist. |
+
+### `top1` fields
+
+| Field | Type | Description |
+|---|---|---|
+| `finding_id` | `str` | Check ID of the recommended fix (e.g. `"B1"`). |
+| `projected_score` | `int` | Estimated score if this finding were resolved. |
+| `projected_grade` | `str` | Corresponding letter grade. |
+| `delta` | `int` | `projected_score − current.score`. |
+
+### `cumulative` fields
+
+| Field | Type | Description |
+|---|---|---|
+| `projected_score` | `int` | Score after all CRITICAL + HIGH FAILs are fixed. |
+| `projected_grade` | `str` | Corresponding letter grade. |
+| `delta` | `int` | `projected_score − current.score`. 0 when no CRITICAL/HIGH FAILs exist. |
+
+> **Projection is estimated**, not guaranteed. It assumes each fixing finding flips
+> cleanly to PASS; actual hardening may unlock or reveal new findings.
+
+---
+
+## 10. SARIF 2.1.0 Output (`--sarif`)
 
 Schema: `https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json`
 
@@ -324,7 +443,7 @@ Keys are skill names; values are arrays of effect-profile entry objects.
 
 ---
 
-## 9. `--vet` Mode Output
+## 11. `--vet` Mode Output
 
 Produced by `--vet` and `--vet-mcp`. Simpler than the full audit — no score, no
 `next_actions`, no `capability_graph`.
@@ -362,7 +481,7 @@ Produced by `--vet` and `--vet-mcp`. Simpler than the full audit — no score, n
 
 ---
 
-## 10. Stability Policy
+## 12. Stability Policy
 
 ### Frozen (breaking change requires major version bump)
 

@@ -13,7 +13,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dc_replace
 
 from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, WEIGHT, Finding
 
@@ -90,3 +90,98 @@ def compute(findings: list[Finding]) -> ScoreResult:
         assessable=True,
         cap_severity=cap_severity,
     )
+
+
+def project(findings: list[Finding]) -> dict:
+    """What-if projection: estimate the score impact of fixing FAIL findings.
+
+    Returns a dict with three keys:
+
+    - ``"current"``:    ``{"score": int, "grade": str}``
+    - ``"top1"``:       ``{"finding_id": str, "projected_score": int,
+                           "projected_grade": str, "delta": int}`` or ``None``
+                        if there are no fixable (scored, non-suppressed) FAILs.
+    - ``"cumulative"``: ``{"projected_score": int, "projected_grade": str,
+                           "delta": int}`` — result of flipping all
+                        CRITICAL + HIGH FAILs to PASS simultaneously.
+
+    Selection rules for ``top1``:
+    - Candidates: scored, non-suppressed FAIL findings only.
+    - Primary key: highest projected score (compute with that one finding flipped
+      to PASS; all others unchanged).
+    - Tie-break 1: cap-lifting candidates (CRITICAL or HIGH severity) preferred.
+    - Tie-break 2: severity order (CRITICAL > HIGH > MEDIUM > LOW).
+    - Tie-break 3: WEIGHT (heavier first).
+    - Tie-break 4: finding ``id`` alphabetically (stable across calls).
+
+    Input findings are **never mutated**; modified copies are built with
+    ``dataclasses.replace``.  Projection is *estimated* — labeling is the
+    renderer's responsibility.
+    """
+    current_result = compute(findings)
+    current_score = current_result.score
+    current_grade = current_result.grade
+
+    fixable = [
+        f for f in findings
+        if f.scored and not getattr(f, "suppressed", False) and f.status == FAIL
+    ]
+
+    # ── top1: the single highest-leverage fix ────────────────────────────────
+    top1: dict | None = None
+    if fixable:
+        # Pre-compute projected score for each candidate (one compute() per candidate).
+        # Uses object identity (``is``) to replace only the target finding.
+        candidates: list[tuple[Finding, int, str]] = []
+        for f in fixable:
+            modified = [
+                dc_replace(x, status=PASS) if x is f else x
+                for x in findings
+            ]
+            proj = compute(modified)
+            candidates.append((f, proj.score, proj.grade))
+
+        def _rank(item: tuple) -> tuple:
+            f, proj_score, _ = item
+            return (
+                -proj_score,                              # highest projected score first
+                -int(f.severity in (CRITICAL, HIGH)),    # cap-lifting preferred
+                _SEV_ORDER.index(f.severity),             # most-severe first
+                -WEIGHT[f.severity],                      # heavier weight first
+                f.id,                                     # stable alphabetic tie-break
+            )
+
+        best_f, best_score, best_grade = sorted(candidates, key=_rank)[0]
+        top1 = {
+            "finding_id": best_f.id,
+            "projected_score": best_score,
+            "projected_grade": best_grade,
+            "delta": best_score - current_score,
+        }
+
+    # ── cumulative: fix all Critical + High FAILs simultaneously ─────────────
+    # Use object-id set to avoid hashability requirements on Finding.
+    crit_high_oids = {id(f) for f in fixable if f.severity in (CRITICAL, HIGH)}
+    if crit_high_oids:
+        modified_all = [
+            dc_replace(x, status=PASS) if id(x) in crit_high_oids else x
+            for x in findings
+        ]
+        cum_result = compute(modified_all)
+        cumulative = {
+            "projected_score": cum_result.score,
+            "projected_grade": cum_result.grade,
+            "delta": cum_result.score - current_score,
+        }
+    else:
+        cumulative = {
+            "projected_score": current_score,
+            "projected_grade": current_grade,
+            "delta": 0,
+        }
+
+    return {
+        "current": {"score": current_score, "grade": current_grade},
+        "top1": top1,
+        "cumulative": cumulative,
+    }

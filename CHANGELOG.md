@@ -3,6 +3,22 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.29.0] — 2026-06-28
+
+UX redesign release (pass 1 of 3): a Dashboard-style report organised by OpenClaw surface, an estimated grade projection, a coverage map of what is and isn't checked, a pre-scan menu, an offline freshness nudge, and a documented context-firewall pattern for isolated analysis of untrusted content. Presentation and additive JSON only — the A–F grade, score, and findings are unchanged, so this carries no false-positive risk.
+
+### Added
+- **Surface taxonomy** (`catalog.py`): every check now carries a `surface` field mapping it to one of 13 OpenClaw data surfaces (gateway, channels, sessions, tools, agents, skills, mcp, bootstrap, secrets, monitoring, host, hooks, update) grouped into 7 dashboard families. Foundation for the surface-organised Dashboard.
+- **Coverage map** (`coverage.py`): new `coverage(findings)` summarises each surface as checked / partial-UNKNOWN / roadmap / not-checkable, with grounded `not_checkable` gaps (outbound egress allowlist, `talk.*` surface, per-agent tool allowlist) where OpenClaw exposes no config to audit.
+- **Grade projection** (`scoring.py`): new `project(findings)` returns the current grade plus an *estimated* projection of fixing the single highest-impact finding and of fixing all Critical+High findings. Pure — uses `dataclasses.replace`, never mutates inputs.
+- **Freshness ledger** (`ledger.py`): records opt-in capability runs (self-test, vet-mcp) to `~/.clawseccheck/coverage.json` and emits an offline "you haven't run X in N days" nudge. Strictly local; `today`/`home` are injectable for deterministic tests. Suppress with `--no-freshness-notice` (or `CLAWSECCHECK_NO_FRESHNESS_NOTICE=1`).
+- **`--full` flag** (`cli.py`): one-shot opt-in that runs the audit followed by self-test material and vet-mcp, so the user can request everything in a single call. Guarded off for `--json`/`--card`.
+- **Additive JSON fields** (`report.py`): `render_json` now emits top-level `coverage` and `projection` objects, and each finding gains a `surface` field. SARIF and `--card` output are unchanged; existing consumers are unaffected.
+
+### Changed
+- **SKILL.md driver rewritten** to a Dashboard flow: a pre-scan menu shown every run (Quick/Deeper/Full/What-changed plus private/vet/verify/update shortcuts), a seven-section Dashboard (grade card, fix-first + projection, findings by surface family, coverage map, worth-a-glance, scope, next menu), and a new "Isolated analysis for untrusted content" section documenting the locked-down `sessions_spawn` context-firewall pattern (no tools, `maxSpawnDepth: 1`, ephemeral, typed-verdict only) with single-agent inline fallback. `SKILL_HE.md` kept structurally in sync.
+- **Output schema docs** (`docs/OUTPUT_SCHEMA.md`): documented the new `surface`, `coverage`, and `projection` fields.
+
 ## [1.28.0] — 2026-06-27
 
 Quality and coverage release: two-pass finding dedup, SARIF completeness metablock, scan receipt (Merkle-root), tamper-evident monitor hash-chain, `--vet-all` fleet scanner, skillast fuzz suite, and OSS hygiene files.

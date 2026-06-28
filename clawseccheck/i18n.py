@@ -313,6 +313,63 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "Only the grade + score is shared, never your findings.",
         "he": "רק הדירוג + הניקוד משותף, לעולם לא הממצאים שלך.",
     },
+    # ---------------------------------------------------------------------------
+    # Freshness ledger — coverage-gap advisory (ledger.freshness_notice)
+    # ---------------------------------------------------------------------------
+    "freshness.self_test_never": {
+        "en": (
+            "Coverage gap: prompt-injection tests (--self-test / --redteam / --dryrun / --canary)"
+            " have never been run."
+            " Run periodically to test live resistance, not just config."
+            " (offline notice; ClawSecCheck made no network call)"
+        ),
+        "he": (
+            "פער כיסוי: בדיקות הזרקת prompt (--self-test / --redteam / --dryrun / --canary)"
+            " מעולם לא הופעלו."
+            " הרץ מדי פעם כדי לבדוק עמידות חיה, לא רק תצורה."
+            " (הודעה מקוונת; ClawSecCheck לא ביצע קריאת רשת)"
+        ),
+    },
+    "freshness.self_test_stale": {
+        "en": (
+            "Coverage gap: prompt-injection tests (--self-test / --redteam / --dryrun / --canary)"
+            " last run {age} days ago (threshold: {threshold} days)."
+            " Run again to keep resistance tests current."
+            " (offline notice; ClawSecCheck made no network call)"
+        ),
+        "he": (
+            "פער כיסוי: בדיקות הזרקת prompt (--self-test / --redteam / --dryrun / --canary)"
+            " הופעלו לאחרונה לפני {age} ימים (סף: {threshold} ימים)."
+            " הרץ שוב כדי שבדיקות העמידות יישארו עדכניות."
+            " (הודעה מקוונת; ClawSecCheck לא ביצע קריאת רשת)"
+        ),
+    },
+    "freshness.vet_mcp_never": {
+        "en": (
+            "Coverage gap: MCP supply-chain vetting (--vet-mcp) has never been run."
+            " Run periodically to check your MCP servers for supply-chain risk."
+            " (offline notice; ClawSecCheck made no network call)"
+        ),
+        "he": (
+            "פער כיסוי: בדיקת שרשרת אספקה של MCP (--vet-mcp) מעולם לא הופעלה."
+            " הרץ מדי פעם כדי לבדוק את שרתי ה-MCP שלך לסיכוני שרשרת אספקה."
+            " (הודעה מקוונת; ClawSecCheck לא ביצע קריאת רשת)"
+        ),
+    },
+    "freshness.vet_mcp_stale": {
+        "en": (
+            "Coverage gap: MCP supply-chain vetting (--vet-mcp) last run {age} days ago"
+            " (threshold: {threshold} days)."
+            " Run again to keep your MCP server vetting current."
+            " (offline notice; ClawSecCheck made no network call)"
+        ),
+        "he": (
+            "פער כיסוי: בדיקת שרשרת אספקה של MCP (--vet-mcp) הופעלה לאחרונה לפני {age} ימים"
+            " (סף: {threshold} ימים)."
+            " הרץ שוב כדי לשמור על בדיקת שרתי ה-MCP עדכנית."
+            " (הודעה מקוונת; ClawSecCheck לא ביצע קריאת רשת)"
+        ),
+    },
 }
 
 
