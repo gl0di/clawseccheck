@@ -54,7 +54,24 @@ jobs:
             --ignore CHANGELOG.md \
             --config .markdownlint.jsonc
 
-  # ── L3: secret scan ────────────────────────────────────────────────────────
+  # ── L3: dependency review (PRs only) ─────────────────────────────────────
+  dependency-review:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dependency Review
+        # Blocks PRs that introduce HIGH or CRITICAL vulnerable dependencies.
+        # The project has zero runtime deps today; this guards against accidental
+        # additions. Fixtures/ requirements.txt files are test vectors — not scanned
+        # by this action (it only checks changed deps in the PR diff).
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
+          comment-summary-in-pr: always
+
+  # ── L4: secret scan ────────────────────────────────────────────────────────
   secret-scan:
     runs-on: ubuntu-latest
     steps:
