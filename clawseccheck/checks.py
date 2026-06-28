@@ -7948,6 +7948,208 @@ def check_discovery_mdns_mode(ctx: Context) -> Finding:
     )
 
 
+# ---------------------------------------------------------------------------
+# B74 — Forged-provenance content detector
+# ---------------------------------------------------------------------------
+_B74_ROLE_BLOCK_RE = re.compile(
+    normalize_for_scan(
+        r"(?:"
+        # fake SYSTEM: role markers (line-start or bracket-wrapped)
+        r"(?:^|\n)\s*SYSTEM\s*:"
+        r"|\[\s*SYSTEM\s*[:\]]"
+        r"|===\s*SYSTEM\s*==="
+        r"|---\s*SYSTEM\s*---"
+        r"|<\s*system\s*>"
+        r"|<\s*/\s*system\s*>"
+        # fake role-turn injection markers
+        r"|\[\s*ASSISTANT\s*[:\]]"
+        r"|\[\s*USER\s*[:\]]"
+        r")"
+    ),
+    re.I | re.M,
+)
+
+_B74_FALSE_PROVENANCE_RE = re.compile(
+    normalize_for_scan(
+        r"(?:"
+        r"you\s+wrote\s+this\s+(?:yesterday|earlier|before|previously)"
+        r"|as\s+you\s+(?:agreed|confirmed|authorized|approved|promised|told\s+me)"
+        r"|you\s+previously\s+(?:agreed|said|confirmed|authorized|approved)"
+        r"|as\s+(?:we|you)\s+discussed\s+(?:yesterday|earlier|before|previously)"
+        r"|you\s+(?:authorized|approved)\s+this"
+        r"|you\s+told\s+me\s+to"
+        r"|per\s+your\s+(?:earlier|previous)\s+(?:instruction|agreement|approval)"
+        r")"
+    ),
+    re.I,
+)
+
+
+def check_forged_provenance(ctx: Context) -> Finding:
+    """B74 — Forged-provenance content detector.
+
+    Scans bootstrap files, installed skills, and MCP tool descriptions for:
+    (a) fake SYSTEM:/role-block markers injected to override the instruction
+        hierarchy (FAIL — high-confidence forgery attempt);
+    (b) false-authorship attribution phrases that gaslight the model into
+        thinking it previously agreed to something (WARN).
+
+    Extension of B64 (hierarchy-override); uses the same fence-aware scan loop.
+    UNKNOWN when no scannable content is present.
+    """
+    servers = _mcp_servers(ctx.config)
+    has_tools = any(
+        isinstance(spec.get("tools"), list) and spec["tools"]
+        for spec in servers.values()
+    )
+    if not ctx.bootstrap and not ctx.installed_skills and not has_tools:
+        return _finding(
+            "B74", UNKNOWN,
+            "No bootstrap files, installed skills, or MCP tools found to inspect "
+            "for forged-provenance or fake role-block markers.",
+            "Run on a host with bootstrap files or installed skills.",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+
+    def _scan(source_name: str, text: str) -> None:
+        norm = normalize_for_scan(text)
+        fr = _fence_ranges(norm)
+        for m in _B74_ROLE_BLOCK_RE.finditer(norm):
+            if _is_code_example(norm, m.start(), fr):
+                continue
+            snippet = m.group().strip()
+            if len(snippet) > 80:
+                snippet = snippet[:77] + "..."
+            fail_ev.append(f"{source_name}: \"{snippet}\"")
+        for m in _B74_FALSE_PROVENANCE_RE.finditer(norm):
+            if _is_code_example(norm, m.start(), fr):
+                continue
+            snippet = m.group().strip()
+            if len(snippet) > 80:
+                snippet = snippet[:77] + "..."
+            warn_ev.append(f"{source_name}: \"{snippet}\"")
+
+    for fname, text in ctx.bootstrap.items():
+        _scan(fname, text)
+    for skill_name, blob in ctx.installed_skills.items():
+        _scan(skill_name, blob)
+    for sname, spec in servers.items():
+        tools = spec.get("tools")
+        if isinstance(tools, list):
+            for tool in tools:
+                if isinstance(tool, dict):
+                    tool_name = str(tool.get("name", "<unnamed>"))
+                    desc = str(tool.get("description", ""))
+                    if desc:
+                        _scan(f"mcp:{sname}/{tool_name}", desc)
+
+    if fail_ev:
+        ev_summary = "; ".join(fail_ev[:4])
+        extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
+        return _finding(
+            "B74", FAIL,
+            "Forged role/system block detected — content contains fake SYSTEM: or "
+            "role markers that attempt to hijack the model's instruction hierarchy: "
+            + ev_summary + extra,
+            "Remove all fake SYSTEM:/role-block markers from bootstrap files, skills, "
+            "and MCP tool descriptions. These mimic system-prompt formatting to override "
+            "safety controls and inject unauthorized instructions.",
+            fail_ev,
+        )
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
+        return _finding(
+            "B74", WARN,
+            "False-provenance attribution phrases found — content claims the model "
+            "previously agreed to or authorized something: " + ev_summary + extra,
+            "Review the flagged content. Legitimate instructions do not claim the model "
+            "previously agreed to them. If this is documentation, move it into a fenced "
+            "code block (```) so it is treated as an example.",
+            warn_ev,
+        )
+    return _finding(
+        "B74", PASS,
+        "No forged role/system blocks or false-provenance attribution found in "
+        "bootstrap files, installed skills, or MCP tool descriptions.",
+        "Ensure bootstrap files and skills do not contain fake SYSTEM: markers or "
+        "false-authorship claims.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# B75 — MCP tool-inheritance bypass (attested)
+# ---------------------------------------------------------------------------
+
+def check_mcp_tool_inheritance(ctx: Context) -> Finding:
+    """B75 — MCP tool-inheritance bypass check (attestation-based).
+
+    Grounded on GitHub issue #63399: globally-registered mcp.servers tools were
+    auto-injected into ALL agents, bypassing per-agent tools.allow/deny filters.
+    A narrow-role agent still receives every MCP tool namespace.
+
+    UNKNOWN — no attestation provided (config alone cannot prove per-agent MCP reach).
+    WARN    — one or more attested agents hold MCP-namespaced tools that leak past
+              the per-agent filter (evidence: agent name + tool count).
+    PASS    — attestation present but no agent shows unexpected MCP tool bleed.
+
+    Advisory (scored=False): never FAILs — WARN only, consistent with §5.
+    """
+    agents = _attest.attested_agents(ctx.attestation)
+    if not agents:
+        # No attestation -> cannot determine per-agent MCP reachability.
+        return _finding(
+            "B75", UNKNOWN,
+            "No attestation provided — cannot determine whether MCP tools bypass "
+            "per-agent tool filters at runtime (GitHub issue #63399).",
+            "Run with --attest and include each agent's real tool list. "
+            "MCP tools may be accessible to all agents regardless of per-agent "
+            "tools.allow/deny configuration.",
+        )
+
+    mcp_servers = _mcp_servers(ctx.config)
+    has_mcp = bool(mcp_servers)
+
+    bleed_ev: list[str] = []
+    for agent in agents:
+        name = agent["name"]
+        tools = agent["tools"]
+        # MCP tools are namespaced: mcp__server__verb or server__verb (double underscore)
+        mcp_tools = [t for t in tools if "__" in t]
+        if mcp_tools:
+            count = len(mcp_tools)
+            sample = ", ".join(mcp_tools[:3])
+            extra = f" (+{count - 3} more)" if count > 3 else ""
+            bleed_ev.append(
+                f"agent '{name}' holds {count} MCP-namespaced tool(s): {sample}{extra}"
+            )
+
+    if bleed_ev and has_mcp:
+        ev_summary = "; ".join(bleed_ev[:3])
+        extra = f" (+{len(bleed_ev) - 3} more)" if len(bleed_ev) > 3 else ""
+        return _finding(
+            "B75", WARN,
+            "MCP tools appear accessible to named agents despite per-agent tool "
+            "filters — consistent with OpenClaw issue #63399 (MCP bypass): "
+            + ev_summary + extra,
+            "Verify each agent's effective tool list with 'openclaw tools list --agent <name>'. "
+            "Until issue #63399 is resolved, treat every named agent as having access to all "
+            "registered MCP tools and apply compensating controls (least-privilege roles, "
+            "sandbox.tools restrictions).",
+            bleed_ev,
+        )
+
+    return _finding(
+        "B75", PASS,
+        "Attested agents do not show unexpected MCP-namespaced tools, or no MCP "
+        "servers are configured.",
+        "Keep per-agent tool inventories minimal. Re-run after adding MCP servers "
+        "to verify no unintended tool bleed.",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_secrets_at_rest_home, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -7990,6 +8192,8 @@ CHECKS = [
     check_node_denycommands_ineffective,
     check_subagents_allow_agents,
     check_discovery_mdns_mode,
+    check_forged_provenance,
+    check_mcp_tool_inheritance,
 ]
 
 

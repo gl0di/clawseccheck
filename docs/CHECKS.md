@@ -817,6 +817,30 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B74 - Forged role/system block or false-provenance attribution in content
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Prompt Injection / Provenance Forgery
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Forged role/system block or false-provenance attribution in content
+- Remediation:
+  - none
+
+### B75 - MCP tool-inheritance bypass — per-agent filter circumvented (attested)
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / MCP Tool Inheritance
+- Scored: no
+- Confidence: ATTESTED
+- OWASP: none
+- What it checks: MCP tool-inheritance bypass — per-agent filter circumvented (attested)
+- Remediation:
+  - none
+
 ## Advisory checks
 
 ### C3 - Backups of SOUL.md / memory
