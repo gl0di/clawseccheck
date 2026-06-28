@@ -267,7 +267,8 @@ Projected (estimated): fix this → {top1.projected_grade} ({top1.projected_scor
 
 ```
 — Coverage of OpenClaw surfaces —
-✅ Checked {checked} · ◑ Partial/UNKNOWN {partial} · ○ Roadmap {roadmap} · ⊘ Not-checkable {not_checkable}  (of 13)
+✅ Checked {checked} · ◑ Partial/UNKNOWN {partial}  (of 13 surfaces)
+○ Roadmap {roadmap} · ⊘ Not-checkable {not_checkable}  (known gaps — separate axis, not part of the 13)
 ```
 
 לכל משטח חלקי (כל הממצאים החזירו UNKNOWN): ציין שסריקה עמוקה (מצב 2) עשויה לפתור אותו.

@@ -273,7 +273,8 @@ Read `coverage.summary` and `coverage.gaps` from the JSON.
 
 ```
 — Coverage of OpenClaw surfaces —
-✅ Checked {checked} · ◑ Partial/UNKNOWN {partial} · ○ Roadmap {roadmap} · ⊘ Not-checkable {not_checkable}  (of 13)
+✅ Checked {checked} · ◑ Partial/UNKNOWN {partial}  (of 13 surfaces)
+○ Roadmap {roadmap} · ⊘ Not-checkable {not_checkable}  (known gaps — separate axis, not part of the 13)
 ```
 
 For each partial surface (all findings returned UNKNOWN): note that Deeper scan (mode 2) may
