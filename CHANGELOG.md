@@ -3,6 +3,13 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.31.0] — 2026-06-28
+
+Skill-vetting depth (ЗАХОД-2, checks wave): broadens `--vet`/B13 exfiltration detection beyond network sinks to local data-bearing channels. Additive — no change to the A–F config grade or scoring semantics.
+
+### Added
+- **F-023 — local-sink exfil-breadth detector** (`--vet`/B13): flags a credential/secret source co-occurring on the same source line with a local data-bearing sink — log/debug (`logging`/`print`/`console`/`sys.std*`/`raise XError`), temp-file (`tempfile`/`/tmp` paths), or report/output file. Closes the channel-breadth gap left by B59 (markdown-image), B14 (config egress) and B9 (redaction). WARN-only/advisory under B13, fence-aware, and source-gated first so a benign `logging.info(...)` or scratch tempfile never fires (zero false positives). Static slice only — runtime debug/error output, the agent's live summary reply, and undeclared tool-args are explicitly out of scope and deferred to the planned runtime-evidence layer. Evidence reports fixed channel labels only; the matched line (which may carry a secret) is never echoed. Ships with 5 fixtures and full Hebrew localization.
+
 ## [1.30.0] — 2026-06-28
 
 Quality and coherence pass — self-review and live-verify follow-ups from the 1.29.0 release. Fail-safe fixes to the offline advisories, `--full --exit-code` now reflects MCP vetting, B55's Hebrew localization gap closed, and a leaner always-loaded `SKILL.md`. No change to the A–F grade, scoring, or findings.
