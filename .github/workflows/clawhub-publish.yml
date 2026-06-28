@@ -29,7 +29,7 @@ jobs:
     # repo Settings → Environments → "release" for this gate to actually block.
     environment: release
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v5
         with:
