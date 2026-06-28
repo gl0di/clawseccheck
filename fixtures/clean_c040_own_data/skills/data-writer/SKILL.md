@@ -16,7 +16,7 @@ with open("results.json", "w") as f:
 
 Some users run this periodically using cron. A typical cron entry might look like:
 
-```
+```text
 0 * * * * /path/to/runner.sh
 ```
 

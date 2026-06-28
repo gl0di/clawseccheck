@@ -1,0 +1,32 @@
+{
+  // ClawSecCheck markdownlint config.
+  "default": true,
+  // MD013: line length -- disabled; security docs use long lines for snippets/tables.
+  "MD013": false,
+  // MD033: inline HTML -- disabled; README uses HTML tables.
+  "MD033": false,
+  // MD041: first-line H1 -- disabled; some docs start with a blockquote or badge.
+  "MD041": false,
+  // MD024: duplicate headings -- disabled; CHANGELOG uses repeated "### Added" etc.
+  "MD024": false,
+  // MD034: bare URLs -- disabled; fixture SKILL.md files contain intentional bare URLs
+  // (adversarial test vectors, e.g. https://evil.example.com/payload).
+  "MD034": false,
+  // MD045: image alt text -- disabled; fixture files use images without alt text
+  // as adversarial test vectors.
+  "MD045": false,
+  // MD036: emphasis as heading -- disabled; SKILL.md (ClawHub skill manifest) uses
+  // bold "Section X" labels as structural anchors, not headings.
+  "MD036": false,
+  // MD027: multiple spaces in blockquote -- disabled; SKILL.md uses aligned blockquotes
+  // for the guided-mode menu presentation (intentional alignment).
+  "MD027": false,
+  // MD052: reference link definitions -- disabled; SECURITY_MODEL.md uses tag-style
+  // notation [impact:X][owner:Y] that is not intended as markdown links.
+  "MD052": false,
+  // MD031: blanks around fences -- disabled; SKILL.md script blocks are embedded
+  // in list items where surrounding blank lines break list parsing.
+  "MD031": false,
+  // MD007: unordered list indent -- 2-space indent (project standard).
+  "MD007": { "indent": 2 }
+}

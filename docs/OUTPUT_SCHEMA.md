@@ -4,6 +4,11 @@ This document is the frozen public API contract for the machine-readable outputs
 produced by `--json` and `--sarif`. Integrators (CI pipelines, dashboards, SIEM
 connectors) may rely on the field names, types, and envelope shapes described here.
 
+**Contract baseline:** v2.0.0 (2026-06-28). Breaking changes vs v1.x:
+
+- `--lang` / `--lang he` CLI flag removed; output is English-only.
+- No `lang` field in any JSON or SARIF output.
+
 **Stability rule:** field names and top-level envelope shapes are frozen. New
 **optional** top-level fields may be added in any minor release. Fields will not
 be removed or renamed without a major version bump (see `CHANGELOG.md` and
@@ -66,6 +71,7 @@ Shared by `--json`, `--json` with `--risk`, and `--vet` mode.
 | `fix` | `str` | Short remediation hint (sanitised). |
 | `framework` | `str` | Threat-framework reference, e.g. `"OWASP LLM01"`. |
 | `confidence` | `str` | `"HIGH"`, `"MEDIUM"`, or `"LOW"`. |
+| `pass_confidence` | `str \| null` | For PASS findings only: `"verified"` (evidence-based pass), `"no_signal"` (check found nothing but couldn't confirm safety), or `null` (FAIL/WARN/UNKNOWN — not applicable). |
 | `suppressed` | `bool` | `true` if the finding was suppressed by the user's baseline. |
 | `owasp` | `array[str]` | OWASP LLM Top 10 codes that apply, e.g. `["LLM01", "LLM02"]`. May be empty. |
 | `ast` | `array[str]` | OWASP Agentic Skills Top 10 (2026) codes that apply, e.g. `["AST03", "AST05"]`. May be empty. Additive metadata only — no scoring or verdict impact. |
@@ -462,6 +468,7 @@ Produced by `--vet` and `--vet-mcp`. Simpler than the full audit — no score, n
 | `findings` | `array[Finding]` | All check results. Same Finding shape as §2. |
 
 `verdict` is derived from the worst finding status:
+
 - `FAIL` → `"DANGEROUS"`
 - `WARN` → `"SUSPICIOUS"`
 - `UNKNOWN` → `"UNKNOWN"`

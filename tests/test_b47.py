@@ -5,17 +5,10 @@ Tool names classify unambiguously (same as test_b45):
 """
 from pathlib import Path
 
-import re
 
 from clawseccheck.checks import check_delegation_reassembly
 from clawseccheck.collector import Context
-from clawseccheck.report import render_report
 from clawseccheck.risk import risk_paths
-from clawseccheck.scoring import compute
-
-
-def _has_hebrew(s):
-    return bool(re.search(r"[֐-׿]", s))
 
 
 def _ctx(attestation=None):
@@ -132,19 +125,3 @@ def test_risk11_absent_without_attestation():
 
 
 # ---- he report: B47 WARN evidence prose is translated, the chain (data) is preserved ----
-def test_b47_warn_evidence_renders_hebrew():
-    att = _att([{"from": "researcher", "to": "vault", "returns": "raw"},
-                {"from": "researcher", "to": "sender", "returns": "raw"}])
-    f = check_delegation_reassembly(_ctx(att))
-    assert f.status == "WARN"
-    he = render_report([f], compute([f]), lang="he")
-    chain_lines = [ln for ln in he.splitlines() if "researcher" in ln]
-    assert chain_lines, "B47 chain evidence not rendered"
-    # prose prefix is Hebrew; the chain names (data) survive verbatim; English prose gone
-    assert _has_hebrew(chain_lines[0])
-    assert "researcher" in chain_lines[0] and "vault" in chain_lines[0]
-    assert "reassembly chain" not in chain_lines[0]
-    # the weakest-tier bullet is translated too (no leftover English prose)
-    tier_lines = [ln for ln in he.splitlines() if "raw/unknown" in ln]
-    assert tier_lines and _has_hebrew(tier_lines[0])
-    assert "weakest edge tier" not in tier_lines[0]

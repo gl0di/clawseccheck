@@ -15,7 +15,6 @@ from pathlib import Path
 from clawseccheck.catalog import PASS, UNKNOWN
 from clawseccheck.checks import check_hook_policy_bypass
 from clawseccheck.collector import Context, collect
-from clawseccheck.i18n import tp
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 _HEBREW = re.compile(r"[֐-׿]")
@@ -71,11 +70,6 @@ def test_never_fails_even_with_dangerous_policy():
            "tools": {"exec": {"mode": "full"}, "elevated": {"allowFrom": {"telegram": ["*"]}}}}
     assert check_hook_policy_bypass(_ctx(cfg)).status == UNKNOWN  # advisory, not FAIL
 
-
-def test_unknown_detail_localized_he():
-    cfg = {"meta": {"lastTouchedVersion": "2026.6.9"}, "tools": {"exec": {"mode": "ask"}}}
-    f = check_hook_policy_bypass(_ctx(cfg))
-    assert _HEBREW.search(tp(f.detail, "he")), f"C6 UNKNOWN detail not localized: {f.detail!r}"
 
 
 def test_bad_fixture_unknown():

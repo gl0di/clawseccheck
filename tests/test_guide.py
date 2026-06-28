@@ -358,28 +358,6 @@ class TestRenderNextActions:
         out = render_next_actions(actions, ascii_only=True)
         out.encode("ascii")  # must not raise
 
-    def test_he_header_is_hebrew(self):
-        actions = self._sample_actions()
-        out = render_next_actions(actions, lang="he")
-        # STRINGS["guide.next_header"]["he"]
-        assert "מה אתה יכול לעשות עכשיו:" in out
-
-    def test_he_run_label_is_hebrew(self):
-        actions = self._sample_actions()
-        out = render_next_actions(actions, lang="he")
-        assert "הרץ:" in out
-
-    def test_he_title_is_localised(self):
-        """fix_guidance title must come from i18n when lang=he."""
-        actions = [Action(id="fix_guidance", title="English title",
-                          command="clawseccheck --prompts", why="English why", priority=0)]
-        out = render_next_actions(actions, lang="he")
-        assert "ראה בדיוק כיצד לתקן" in out
-
-    def test_he_all_clear_is_hebrew(self):
-        out = render_next_actions([], lang="he")
-        assert "בטוח" in out or "הרץ" in out
-
     def test_en_default_uses_english(self):
         actions = self._sample_actions()
         out = render_next_actions(actions)

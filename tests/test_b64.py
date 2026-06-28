@@ -9,7 +9,6 @@ from pathlib import Path
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_instruction_hierarchy_override
 from clawseccheck.collector import Context, collect
-from clawseccheck.i18n import tp
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -19,9 +18,6 @@ def _ctx(bootstrap=None, skills=None, config=None):
     c.bootstrap = bootstrap or {}
     c.installed_skills = skills or {}
     return c
-
-def _has_hebrew(text: str) -> bool:
-    return any("֐" <= ch <= "׿" for ch in text)
 
 # --------------------------------------------------------------------------- UNKNOWN
 
@@ -139,17 +135,3 @@ def test_b64_mcp_tool_description():
     assert "mcp:evil/do_dev" in f.evidence[0]
 
 # --------------------------------------------------------------------------- i18n
-
-def test_b64_fail_localized_he():
-    ctx = collect(FIXTURES / "bad_b64_fail")
-    f = check_instruction_hierarchy_override(ctx)
-    assert f.status == FAIL
-    localized = tp(f.detail.strip(), "he")
-    assert _has_hebrew(localized), f"FAIL detail not localized to Hebrew: {localized}"
-
-def test_b64_warn_localized_he():
-    ctx = collect(FIXTURES / "bad_b64_warn")
-    f = check_instruction_hierarchy_override(ctx)
-    assert f.status == WARN
-    localized = tp(f.detail.strip(), "he")
-    assert _has_hebrew(localized), f"WARN detail not localized to Hebrew: {localized}"

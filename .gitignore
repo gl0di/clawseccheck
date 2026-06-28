@@ -6,6 +6,12 @@ __pycache__/
 # CI publish staging dir (clawhub-publish.yml stages the artifact here).
 /dist/
 
-# Dev-only agent instructions live in the workspace root, never inside the
-# published skill — keep CLAUDE.md out of the distributed artifact.
+# AI-agent config — never ships in the published skill.
 CLAUDE.md
+CLAUDE.local.md
+.claude/
+.cursorrules
+.cursor/
+.aider*
+.continue/
+.copilot/

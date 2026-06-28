@@ -19,7 +19,6 @@ from pathlib import Path
 from clawseccheck.catalog import FAIL, PASS
 from clawseccheck.checks import check_sandbox
 from clawseccheck.collector import Context
-from clawseccheck.i18n import tp
 
 _HEBREW = re.compile(r"[֐-׿]")
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -253,19 +252,6 @@ def test_unnamed_agent_evidence_contains_unnamed_placeholder():
 # ---------------------------------------------------------------------------
 # New FAIL detail is localized to Hebrew
 # ---------------------------------------------------------------------------
-
-def test_peragent_fail_detail_localized_he():
-    cfg = {
-        "agents": {
-            "defaults": {"sandbox": {"mode": "all"}},
-            "list": [{"name": "Gary", "sandbox": {"mode": "off"}}],
-        }
-    }
-    f = check_sandbox(_ctx(cfg))
-    assert f.status == FAIL
-    assert _HEBREW.search(tp(f.detail, "he")), (
-        f"C-058 FAIL detail not localized to Hebrew: {f.detail!r}"
-    )
 
 
 # ---------------------------------------------------------------------------

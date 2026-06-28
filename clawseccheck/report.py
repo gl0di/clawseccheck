@@ -22,7 +22,7 @@ from .catalog import (
 )
 from .dedup import deduplicate_findings
 from .guide import suggest_actions
-from .i18n import is_rtl, t, title_for, tp
+from .i18n import t
 from .scoring import ScoreResult
 
 # Findings, skill names, decoded payload previews and native-audit fields are UNTRUSTED
@@ -86,35 +86,6 @@ def compute_scan_receipt(findings) -> str:
         return "error-computing-receipt"
 
 
-_RLM = "‏"   # RIGHT-TO-LEFT MARK — sets RTL base direction at line start
-_LRI = "⁦"   # LEFT-TO-RIGHT ISOLATE
-_PDI = "⁩"   # POP DIRECTIONAL ISOLATE
-# A left-to-right "token" (English field name, check code, file path, number) that must
-# stay internally LTR inside an RTL line. ASCII-only classes so it never swallows Hebrew.
-_LTR_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-/=':@%+]*")
-
-
-def _rtl_format(text: str) -> str:
-    """Make a plain-text report render correctly in RTL chat clients / terminals.
-
-    Each non-blank line gets an RLM prefix (RTL base direction) and every embedded LTR
-    token is wrapped in an isolate so the client's bidi algorithm doesn't scramble the
-    line order (numbers, punctuation and English field names jumping sides).
-
-    Safety: only SAFE isolate marks (LRI/PDI) and the RLM are added, and only to our own
-    final output — untrusted finding evidence was already bidi-stripped by `_sanitize`
-    before assembly, so this cannot be used to spoof. No directional *overrides* are used.
-    """
-    out_lines = []
-    for line in text.split("\n"):
-        if not line.strip():
-            out_lines.append(line)
-            continue
-        isolated = _LTR_TOKEN_RE.sub(lambda m: _LRI + m.group(0) + _PDI, line)
-        out_lines.append(_RLM + isolated)
-    return "\n".join(out_lines)
-
-
 def _trifecta_ratio(findings: list[Finding]) -> str:
     for f in findings:
         if f.id == "A1":
@@ -122,8 +93,8 @@ def _trifecta_ratio(findings: list[Finding]) -> str:
     return "?/3"
 
 
-def _bool_word(value: bool, lang: str) -> str:
-    return "כן" if value and lang == "he" else ("לא" if lang == "he" else ("yes" if value else "no"))
+def _bool_word(value: bool) -> str:
+    return "yes" if value else "no"
 
 
 def _capability_graph(ctx) -> dict:
@@ -231,18 +202,18 @@ def _capability_graph(ctx) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
-def _capability_graph_lines(ctx, lang: str = "en") -> list[str]:
+def _capability_graph_lines(ctx) -> list[str]:
     graph = _capability_graph(ctx)
     if not graph:
         return []
-    lines = [t("report.capability_graph_title", lang), t("report.capability_graph_intro", lang)]
+    lines = [t("report.capability_graph_title"), t("report.capability_graph_intro")]
     for node in graph["nodes"]:
         tools = ", ".join(node["tools"]) if node["tools"] else "none"
         lines.append(
             f"- {node['label']} ({node['kind']}): tools={tools}; "
-            f"secrets_visible={_bool_word(node['secrets_visible'], lang)}; "
-            f"can_write_memory={_bool_word(node['can_write_memory'], lang)}; "
-            f"can_egress={_bool_word(node['can_egress'], lang)}"
+            f"secrets_visible={_bool_word(node['secrets_visible'])}; "
+            f"can_write_memory={_bool_word(node['can_write_memory'])}; "
+            f"can_egress={_bool_word(node['can_egress'])}"
         )
     if graph["edges"]:
         lines.append("flow: input -> main -> subagents -> MCP -> fs/network")
@@ -369,12 +340,12 @@ def _secret_reachability(ctx) -> list[dict]:
     return entries
 
 
-def _secret_reachability_lines(ctx, lang: str = "en") -> list[str]:
+def _secret_reachability_lines(ctx) -> list[str]:
     map_ = _secret_reachability(ctx)
     lines = ["Secret reachability map", "Static config + file-system inventory:"]
     for item in map_:
         evidence = "; ".join(item["evidence"]) if item["evidence"] else "none"
-        lines.append(f"- {item['class']}: reachable={_bool_word(item['reachable'], lang)}; {evidence}")
+        lines.append(f"- {item['class']}: reachable={_bool_word(item['reachable'])}; {evidence}")
     return lines
 
 
@@ -407,25 +378,22 @@ def compute_blast_radius(cfg: dict, finding_cid: str) -> dict:  # noqa: ARG001
     }
 
 
-def _render_finding(lines, icon, f, lang: str = "en", cfg: dict | None = None):
+def _render_finding(lines, icon, f, cfg: dict | None = None):
     conf = getattr(f, "confidence", "HIGH")
     tag = f"  (confidence: {conf.lower()})" if conf != "HIGH" and f.status in (FAIL, WARN) else ""
     pc = getattr(f, "pass_confidence", None)
     pass_tag = f"  ({pc.replace('_', ' ')})" if f.status == PASS and pc else ""
     lines.append(f"{icon[f.status]} [{f.severity}] "
-                 f"{_sanitize(title_for(f.id, f.title, lang))}{tag}{pass_tag}")
+                 f"{_sanitize(f.title)}{tag}{pass_tag}")
     if f.detail:
-        lines.append(f"    {t('report.label_why', lang)}: {_sanitize(tp(f.detail, lang))}")
+        lines.append(f"    {t('report.label_why')}: {_sanitize(f.detail)}")
     # Surface the concrete evidence (e.g. the exact verbs B43/B44 flagged) when a
     # FAIL/WARN carries it — naming the specific item is the value of the finding.
     if f.evidence and f.status in (FAIL, WARN):
         for ev in f.evidence[:12]:
-            # Evidence runs through the SAME i18n pipeline as detail/fix (tp): a bullet
-            # that matches a PHRASES key or a DETAIL_RULES pattern is translated; a
-            # dynamic data bullet (path, verb name, perm bits, agent name) has no match
-            # and falls back to itself verbatim. For lang="en" tp() is a no-op.
-            lines.append(f"      - {_sanitize(tp(ev, lang))}")
-    lines.append(f"    {t('report.label_fix', lang)}: {_sanitize(tp(f.fix, lang))}")
+            # Evidence is emitted verbatim (already bidi-stripped by _sanitize).
+            lines.append(f"      - {_sanitize(ev)}")
+    lines.append(f"    {t('report.label_fix')}: {_sanitize(f.fix)}")
     # Blast-radius summary: only emitted when the caller supplies cfg (verbose mode).
     if f.status == FAIL and cfg is not None:
         br = compute_blast_radius(cfg, f.id)
@@ -439,7 +407,7 @@ def _render_finding(lines, icon, f, lang: str = "en", cfg: dict | None = None):
 
 
 def render_report(findings: list[Finding], score: ScoreResult,
-                  ascii_only: bool = False, native=None, lang: str = "en",
+                  ascii_only: bool = False, native=None,
                   *, risk=None, update_notice: list[str] | None = None,
                   freshness_notice: list[str] | None = None,
                   openclaw_detected: bool = True, ctx=None,
@@ -453,12 +421,12 @@ def render_report(findings: list[Finding], score: ScoreResult,
     issues = [f for f in findings
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
-    lines = [t("report.title", lang), "=" * 44,
-             t("report.score_line", lang,
+    lines = [t("report.title"), "=" * 44,
+             t("report.score_line",
                score=score.score, grade=score.grade,
                trifecta=_trifecta_ratio(findings))]
     if score.capped:
-        lines.append(t("report.capped", lang,
+        lines.append(t("report.capped",
                        raw=score.raw_score,
                        sev=score.cap_severity or "CRITICAL"))
 
@@ -474,7 +442,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # reconciles with the pass/warn/fail counts. When a cap fired, the separate
     # `report.capped` line above already discloses raw -> capped, so showing the
     # raw value here is internally consistent instead of self-contradicting (B-013).
-    lines.append(t("report.score_breakdown", lang,
+    lines.append(t("report.score_breakdown",
                    score=score.raw_score, n_scored=n_scored,
                    n_pass=n_pass, n_warn=n_warn, n_fail=n_fail))
     pc_verified = sum(1 for f in scored_findings
@@ -498,15 +466,15 @@ def render_report(findings: list[Finding], score: ScoreResult,
             if sev in _sev_counts:
                 sev_parts.append(f"{_sev_counts[sev]} {sev}")
         sev_summary = ", ".join(sev_parts)
-        lines.append(t("report.score_breakdown_detail", lang,
+        lines.append(t("report.score_breakdown_detail",
                        n_fail=n_fail, n_warn=n_warn, sev_summary=sev_summary))
-    lines.append(t("report.scope_note", lang))
-    cap_lines = _capability_graph_lines(ctx, lang) if ctx is not None else []
+    lines.append(t("report.scope_note"))
+    cap_lines = _capability_graph_lines(ctx) if ctx is not None else []
     if cap_lines:
         lines.append("")
         lines.extend(cap_lines)
         lines.append("")
-    secret_lines = _secret_reachability_lines(ctx, lang) if ctx is not None else []
+    secret_lines = _secret_reachability_lines(ctx) if ctx is not None else []
     if secret_lines:
         lines.append("")
         lines.extend(secret_lines)
@@ -520,21 +488,21 @@ def render_report(findings: list[Finding], score: ScoreResult,
         n_unknown = sum(1 for f in findings if f.status in (UNKNOWN, "SKILL_ARCHIVE_PATH_TRAVERSAL"))
         warn_icon = "[!]" if ascii_only else "⚠️"
         lines.append("")
-        lines.append(f"{warn_icon} {t('report.nonstandard_banner', lang)}")
+        lines.append(f"{warn_icon} {t('report.nonstandard_banner')}")
         if n_unknown:
-            lines.append(t("report.nonstandard_unknown", lang,
+            lines.append(t("report.nonstandard_unknown",
                            n=n_unknown, n_scored=n_scored))
     lines.append("")
     if not issues:
-        lines.append(t("report.no_issues", lang, ok=ok))
+        lines.append(t("report.no_issues", ok=ok))
     else:
-        lines.append(t("report.to_fix", lang, n=len(issues)))
+        lines.append(t("report.to_fix", n=len(issues)))
         lines.append("")
         for f in issues:
-            _render_finding(lines, icon, f, lang, cfg=_blast_cfg)
+            _render_finding(lines, icon, f, cfg=_blast_cfg)
 
     if suppressed_count:
-        lines.append(t("report.suppressed_count", lang, n=suppressed_count))
+        lines.append(t("report.suppressed_count", n=suppressed_count))
         # Surface suppressed findings that either cap the score (a FAILed CRITICAL→49 / HIGH→79)
         # or hit a sensitive check (B1/B2/B13/B20). Hiding these silently could turn an F into an
         # A via one .clawseccheckignore line, so they stay visible no matter what the ignore says.
@@ -543,21 +511,21 @@ def render_report(findings: list[Finding], score: ScoreResult,
             if not getattr(f, "suppressed", False):
                 continue
             if (f.status == FAIL and f.severity in (CRITICAL, HIGH)) or f.id in _SENSITIVE_IDS:
-                lines.append(t("report.gov_warning", lang, id=f.id, sev=f.severity))
+                lines.append(t("report.gov_warning", id=f.id, sev=f.severity))
 
     if native is not None:
-        lines.append(t("report.native_header", lang))
+        lines.append(t("report.native_header"))
         if getattr(native, "status", "") == "ok":
             nf = sorted(native.findings, key=lambda f: _SEV_ORDER.get(f.severity, 9))
             if nf:
-                lines.append(t("report.native_additional", lang, n=len(nf)))
+                lines.append(t("report.native_additional", n=len(nf)))
                 lines.append("")
                 for f in nf:
-                    _render_finding(lines, icon, f, lang, cfg=_blast_cfg)
+                    _render_finding(lines, icon, f, cfg=_blast_cfg)
             else:
-                lines.append(t("report.native_clean", lang))
+                lines.append(t("report.native_clean"))
         else:
-            lines.append(t("report.native_not_included", lang, note=native.note))
+            lines.append(t("report.native_not_included", note=native.note))
         lines.append("")
 
     if risk:
@@ -591,17 +559,14 @@ def render_report(findings: list[Finding], score: ScoreResult,
     out = "\n".join(lines).rstrip() + "\n"
     if ascii_only:
         return _asciify(out)
-    if is_rtl(lang):
-        out = _rtl_format(out)
     return out
 
 
-def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = False,
-                lang: str = "en") -> str:
+def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = False) -> str:
     """Shareable badge — grade + score + trifecta ONLY. No findings, ever."""
-    l1 = f"  {t('card.security_label', lang)}: {score.grade:<2} ({score.score:>3}/100)"
-    l2 = f"  {t('card.trifecta_label', lang)}: {_trifecta_ratio(findings)}"
-    l3 = f"  {t('card.audited_by', lang)}" + ("" if ascii_only else " 🔍")
+    l1 = f"  {t('card.security_label')}: {score.grade:<2} ({score.score:>3}/100)"
+    l2 = f"  {t('card.trifecta_label')}: {_trifecta_ratio(findings)}"
+    l3 = f"  {t('card.audited_by')}" + ("" if ascii_only else " 🔍")
     width = 39
     if ascii_only:
         top = bot = "+" + "-" * width + "+"
@@ -619,19 +584,19 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
 
 
 def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
-                   baseline: bool = False, lang: str = "en") -> str:
+                   baseline: bool = False) -> str:
     mark = {"CRITICAL": "[X]", "HIGH": "[!]", "MEDIUM": "[~]", "INFO": "[i]"} if ascii_only \
         else {"CRITICAL": "⛔", "HIGH": "⚠️", "MEDIUM": "🔶", "INFO": "ℹ️"}
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "INFO": 3}
     ok = "[OK]" if ascii_only else "✅"
-    lines = [t("monitor.title", lang), "=" * 30,
-             t("monitor.current", lang, score=score.score, grade=score.grade)]
+    lines = [t("monitor.title"), "=" * 30,
+             t("monitor.current", score=score.score, grade=score.grade)]
     if baseline:
-        lines += ["", t("monitor.baseline", lang)]
+        lines += ["", t("monitor.baseline")]
     elif not alerts:
-        lines += ["", t("monitor.no_threats", lang, ok=ok)]
+        lines += ["", t("monitor.no_threats", ok=ok)]
     else:
-        lines += ["", t("monitor.changes", lang, n=len(alerts)), ""]
+        lines += ["", t("monitor.changes", n=len(alerts)), ""]
         for level, msg in sorted(alerts, key=lambda a: order.get(a[0], 9)):
             lines.append(f"{mark.get(level, '[*]')} {_sanitize(msg)}")
     out = "\n".join(lines).rstrip() + "\n"
@@ -690,17 +655,16 @@ _UNTRUSTED_BOUNDARY = (
 )
 
 
-def render_prompts(findings: list[Finding], ascii_only: bool = False,
-                   lang: str = "en") -> str:
+def render_prompts(findings: list[Finding], ascii_only: bool = False) -> str:
     """One copy-paste remediation prompt per finding — paste into your agent."""
     issues = [f for f in findings if f.status in (FAIL, WARN)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
     if not issues:
         ok = "[OK]" if ascii_only else "✅"
-        out = t("prompts.nothing", lang, ok=ok) + "\n"
+        out = t("prompts.nothing", ok=ok) + "\n"
         return out
-    lines = [t("prompts.title", lang), "=" * 36,
-             t("prompts.intro", lang), "",
+    lines = [t("prompts.title"), "=" * 36,
+             t("prompts.intro"), "",
              _UNTRUSTED_BOUNDARY, ""]
     for i, f in enumerate(issues, 1):
         title_s = _sanitize(f.title)
@@ -737,7 +701,7 @@ def _finding_to_dict(f: Finding) -> dict:
             "surface": _meta.surface if _meta is not None else ""}
 
 
-def render_fix(findings: list[Finding], ascii_only: bool = False, lang: str = "en") -> str:
+def render_fix(findings: list[Finding], ascii_only: bool = False) -> str:
     """Render the paste-ready remediation block for current FAIL/WARN findings.
 
     Output only - ClawSecCheck never applies these (read-only by default, §2). Commands
@@ -753,12 +717,12 @@ def render_fix(findings: list[Finding], ascii_only: bool = False, lang: str = "e
             actionable.append((f, rem))
 
     if not actionable:
-        out = t("fix.none", lang) + "\n"
+        out = t("fix.none") + "\n"
         return _asciify(out) if ascii_only else out
 
-    lines = [t("fix.header", lang), "=" * 44, "", t("fix.note", lang), ""]
+    lines = [t("fix.header"), "=" * 44, "", t("fix.note"), ""]
     for f, rem in actionable:
-        lines.append(f"[{f.status}] {f.id} — {_sanitize(title_for(f.id, f.title, lang))}")
+        lines.append(f"[{f.status}] {f.id} — {_sanitize(f.title)}")
         if rem["commands"]:
             lines.append("  commands:")
             for cmd in rem["commands"]:
@@ -767,7 +731,7 @@ def render_fix(findings: list[Finding], ascii_only: bool = False, lang: str = "e
             lines.append("  diff:")
             for c in rem["config"]:
                 path = _sanitize(c["path"])
-                note = _sanitize(tp(c.get("note", ""), lang))
+                note = _sanitize(c.get("note", ""))
                 before = f"{path} = <current>"
                 if c.get("set") is None:
                     after = f"{path} = {note}" if note else f"{path} = <configure manually>"
@@ -865,8 +829,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     return json.dumps(payload, ensure_ascii=True, indent=2)
 
 
-def render_html(findings: list[Finding], score: ScoreResult, native=None,
-                lang: str = "en") -> str:
+def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str:
     """Standalone self-contained HTML report (inline CSS, no external assets).
 
     Includes grade badge (colored by _GRADE_COLOR), score, Lethal Trifecta ratio,
@@ -882,25 +845,21 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     badge_color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
     trifecta = _trifecta_ratio(findings)
 
-    rtl = is_rtl(lang)
-    html_lang_attr = f'lang="{lang}"' + (' dir="rtl"' if rtl else "")
-    rtl_css = "\n        body{text-align:right}" if rtl else ""
-
-    label_score = t("html.label_score", lang)
-    label_trifecta = t("html.label_trifecta", lang)
-    label_capped = t("html.label_capped", lang)
-    label_why = t("html.label_why2", lang)
-    label_fix = t("html.label_fix2", lang)
-    h1_text = t("html.h1", lang)
-    title_text = t("html.title", lang)
-    private_title = t("html.private_title", lang)
-    private_body = t("html.private_body", lang)
-    section_findings = t("html.section_findings", lang)
+    label_score = t("html.label_score")
+    label_trifecta = t("html.label_trifecta")
+    label_capped = t("html.label_capped")
+    label_why = t("html.label_why2")
+    label_fix = t("html.label_fix2")
+    h1_text = t("html.h1")
+    title_text = t("html.title")
+    private_title = t("html.private_title")
+    private_body = t("html.private_body")
+    section_findings = t("html.section_findings")
 
     # Build the findings HTML
     findings_html = ""
     if not issues:
-        no_issues_text = html.escape(t("html.no_issues", lang))
+        no_issues_text = html.escape(t("html.no_issues"))
         findings_html = f'<div style="padding:1rem;background:#f0f8f0;border-radius:0.5rem;color:#0a4;font-weight:500;">{no_issues_text}</div>'
     else:
         findings_html = '<div style="padding:0;">'
@@ -927,12 +886,12 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     if score.capped:
         sev_str = "CRITICAL" if score.failed_critical else "HIGH"
         capped_html = (f'<div style="color:#d9534f;"><strong>{html.escape(label_capped)}</strong> '
-                       f'{t("html.capped_detail", lang, raw=score.raw_score, sev=sev_str)}</div>')
+                       f'{t("html.capped_detail", raw=score.raw_score, sev=sev_str)}</div>')
     else:
         capped_html = ""
 
     html_body = f'''<!doctype html>
-<html {html_lang_attr}>
+<html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -949,7 +908,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             color: #333;
             background: #f5f5f5;
             padding: 2rem 1rem;
-        }}{rtl_css}
+        }}
         .container {{
             max-width: 900px;
             margin: 0 auto;

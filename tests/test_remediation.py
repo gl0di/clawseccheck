@@ -109,10 +109,3 @@ def test_cli_fix_returns_zero_and_prints_block(capsys):
     out = capsys.readouterr().out
     assert "Remediation" in out and "does NOT apply" in out
 
-
-def test_cli_fix_he_translates_header(capsys):
-    main(["--home", str(FIXTURES / "home_vuln"), "--no-native", "--no-host",
-          "--no-history", "--fix", "--lang", "he"])
-    out = capsys.readouterr().out
-    assert "העתק-הדבק" in out          # he header
-    assert "chmod 600 ~/.openclaw/openclaw.json" in out   # command stays verbatim

@@ -5,7 +5,6 @@ from clawseccheck import audit
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_egress_inventory
 from clawseccheck.collector import Context, collect
-from clawseccheck.i18n import tp
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -47,12 +46,6 @@ def test_c014_passes_when_restriction_signals_exist():
     assert f.status == PASS
     assert any("global egress restriction configured" in item for item in f.evidence)
 
-
-def test_c014_detail_localizes_to_hebrew():
-    ctx = _ctx({"tools": {"allow": ["exec"], "exec": {"mode": "full"}}})
-    f = check_egress_inventory(ctx)
-    translated = tp(f.detail, "he")
-    assert translated != f.detail
 
 
 def test_fixture_bad_c014_warns():

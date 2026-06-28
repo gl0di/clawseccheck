@@ -7,7 +7,6 @@ from clawseccheck import audit
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_secrets_at_rest_home
 from clawseccheck.collector import Context, collect
-from clawseccheck.i18n import tp
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -56,17 +55,6 @@ def test_c015_bad_fixture_can_be_seeded_at_runtime(tmp_path):
     f = check_secrets_at_rest_home(_ctx(tmp_path))
     assert f.status == WARN
 
-
-def test_c015_hebrew_detail_translation(tmp_path):
-    secret = _runtime_secret()
-    (tmp_path / "openclaw.json").write_text("{}\n", encoding="utf-8")
-    (tmp_path / "workspace-home").mkdir()
-    (tmp_path / "workspace-home" / "SOUL.md").write_text(
-        "token=" + secret + "\n", encoding="utf-8"
-    )
-    f = check_secrets_at_rest_home(_ctx(tmp_path))
-    translated = tp(f.detail, "he")
-    assert translated != f.detail
 
 
 def test_c015_present_in_audit_results(tmp_path):

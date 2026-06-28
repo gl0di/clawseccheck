@@ -10,7 +10,6 @@ from pathlib import Path
 from clawseccheck.catalog import PASS, UNKNOWN
 from clawseccheck.checks import check_mcp_external_endpoint
 from clawseccheck.collector import Context, collect
-from clawseccheck.i18n import tp
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 _HEBREW = re.compile(r"[֐-׿]")
@@ -55,12 +54,6 @@ def test_c047_unix_socket_url_passes():
     f = check_mcp_external_endpoint(_mcp({"sock": {"url": "unix:///tmp/mcp.sock"}}))
     assert f.status == PASS
 
-
-def test_c047_unknown_detail_localized_he():
-    f = check_mcp_external_endpoint(_mcp({"corp": {"url": "https://mcp.example.com/api"}}))
-    assert f.status == UNKNOWN
-    translated = tp(f.detail, "he")
-    assert _HEBREW.search(translated), f"C047 UNKNOWN detail not localized: {f.detail!r}"
 
 
 def test_c047_bad_fixture_unknown():

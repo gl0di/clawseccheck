@@ -1,0 +1,22 @@
+# Gitleaks configuration for ClawSecCheck.
+# The skill tests intentionally use fragments (never contiguous secrets) per §2.3.
+# Real secrets must never appear anywhere; this config tunes noise only.
+
+title = "ClawSecCheck gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fixture configs contain intentionally bad example values (not real secrets)"
+paths = [
+  "fixtures/",
+  "tests/",
+]
+stopwords = [
+  "example",
+  "placeholder",
+  "fake",
+  "test",
+  "fixture",
+]

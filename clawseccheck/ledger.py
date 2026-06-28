@@ -106,7 +106,7 @@ def record_run(capability: str, *, home: str | None = None,
 
 
 def freshness_notice(ledger: dict[str, str], *, today: date | None = None,
-                     lang: str = "en", skip: tuple[str, ...] = ()) -> list[str]:
+                     skip: tuple[str, ...] = ()) -> list[str]:
     """Return advisory lines when a capability is stale or has never been run.
 
     Returns an empty list if all capabilities are within their thresholds.
@@ -121,8 +121,6 @@ def freshness_notice(ledger: dict[str, str], *, today: date | None = None,
         The map returned by ``load_ledger()``.
     today:
         Override the current date (for testing).  ``None`` → ``date.today()``.
-    lang:
-        Output language (``"en"`` or ``"he"``).
     skip:
         Capability keys to omit from the advisory — used when the caller is
         refreshing those capabilities in the same run (e.g. ``--full``), so a
@@ -144,7 +142,7 @@ def freshness_notice(ledger: dict[str, str], *, today: date | None = None,
 
         if last is None:
             # Capability has never been run.
-            lines.append(t(f"freshness.{cap}_never", lang, threshold=threshold))
+            lines.append(t(f"freshness.{cap}_never", threshold=threshold))
         else:
             try:
                 last_date = date.fromisoformat(str(last).strip()[:10])
@@ -152,12 +150,12 @@ def freshness_notice(ledger: dict[str, str], *, today: date | None = None,
                 # Corrupted/blank ledger entry → fail SAFE: treat it as never-run
                 # so the advisory still nudges, rather than silently swallowing it
                 # (fails-open is exactly what this tool warns others about).
-                lines.append(t(f"freshness.{cap}_never", lang, threshold=threshold))
+                lines.append(t(f"freshness.{cap}_never", threshold=threshold))
                 continue
             age = (today - last_date).days
             if age > threshold:
                 lines.append(
-                    t(f"freshness.{cap}_stale", lang, age=age, threshold=threshold)
+                    t(f"freshness.{cap}_stale", age=age, threshold=threshold)
                 )
 
     return lines

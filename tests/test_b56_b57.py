@@ -16,7 +16,6 @@ from pathlib import Path
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN
 from clawseccheck.checks import check_controlui_origins, check_plugin_permission_mode
 from clawseccheck.collector import Context, collect
-from clawseccheck.i18n import tp
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 _HEBREW = re.compile(r"[֐-׿]")
@@ -54,10 +53,6 @@ def test_b56_unset_is_unknown():
     f = check_controlui_origins(_ctx({"gateway": {"controlUi": {"enabled": True}}}))
     assert f.status == UNKNOWN
 
-
-def test_b56_fail_detail_localized_he():
-    f = check_controlui_origins(_ctx({"gateway": {"controlUi": {"allowedOrigins": ["*"]}}}))
-    assert _HEBREW.search(tp(f.detail, "he")), f"B56 FAIL detail not localized: {f.detail!r}"
 
 
 def test_b56_bad_fixture_fails():
@@ -98,11 +93,6 @@ def test_b57_ask_passes():
 def test_b57_no_plugins_is_unknown():
     assert check_plugin_permission_mode(_ctx({"gateway": {}})).status == UNKNOWN
 
-
-def test_b57_fail_detail_localized_he():
-    cfg = {"plugins": {"entries": {"acpx": {"config": {"permissionMode": "approve-all"}}}}}
-    f = check_plugin_permission_mode(_ctx(cfg))
-    assert _HEBREW.search(tp(f.detail, "he")), f"B57 FAIL detail not localized: {f.detail!r}"
 
 
 def test_b57_bad_fixture_fails():

@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Monitor GitHub Actions for updates only.
+  # The Python package itself has zero runtime dependencies (pyproject.toml: dependencies=[]).
+  # The requirements.txt files under fixtures/ are intentional test vectors for checks C044/F022
+  # and must NOT be updated — they model real-world vulnerable configs on purpose.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "ci"
+    commit-message:
+      prefix: "ci"

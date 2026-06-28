@@ -32,7 +32,7 @@ Two more checks are assisted (not blocked) by attestation:
 
 ## Round-trip
 
-```
+```text
 # 1 — emit a filled-default template
 clawseccheck --ask > answers.json
 

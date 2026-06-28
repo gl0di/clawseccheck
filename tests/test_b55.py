@@ -10,7 +10,6 @@ from clawseccheck import audit
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.collector import collect
 from clawseccheck.checks import check_fs_write_exposure
-from clawseccheck.i18n import tp
 from clawseccheck.risk import risk_paths
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -22,10 +21,6 @@ def _by_id(findings):
 
 def _b55(home: Path):
     return check_fs_write_exposure(collect(home))
-
-
-def _has_hebrew(text: str) -> bool:
-    return any("֐" <= ch <= "׿" for ch in text)
 
 
 def _write_config(tmp_path: Path, body: str) -> Path:
@@ -115,21 +110,4 @@ def test_risk12_silent_on_scoped_config():
 
 
 # --------------------------------------------------------------------------- i18n
-def test_b55_fail_detail_localized_he():
-    f = _b55(FIXTURES / "bad_b55_fs_write_broad")
-    assert _has_hebrew(tp(f.detail.strip(), "he")), (
-        "B55 FAIL detail not localized to Hebrew (missing DETAIL_RULES entry)"
-    )
 
-
-def test_b55_warn_detail_localized_he(tmp_path):
-    home = _write_config(
-        tmp_path,
-        '{"channels": {"telegram": {"dmPolicy": "allowlist"}},'
-        ' "tools": {"allow": ["apply_patch"]}}',
-    )
-    f = _b55(home)
-    assert f.status == WARN
-    assert _has_hebrew(tp(f.detail.strip(), "he")), (
-        "B55 WARN detail not localized to Hebrew (missing DETAIL_RULES entry)"
-    )

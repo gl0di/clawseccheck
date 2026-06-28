@@ -5,14 +5,15 @@ on:
   pull_request:
 
 jobs:
+  # -- L1: lint + test ----------------------------------------------------------
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.9", "3.12"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install test tools (the package itself has zero runtime deps)
@@ -22,17 +23,107 @@ jobs:
       - name: Tests
         run: python -m pytest -q
       - name: Hunt advisory (ClawRange L2)
-        # ClawRange is a private internal test polygon that lives alongside the
-        # skill repo but is never published. In the public CI environment it will
-        # not be checked out, so this step gracefully skips when the file is absent.
-        # When available (e.g. on the maintainer's machine via act, or a private
-        # fork that co-checks-out clawrange/) it runs in advisory mode: findings
-        # are emitted to the log but never fail the build. Hard fuzz crashes are
-        # also surfaced here for awareness; the blocking fuzz gate runs locally via
-        # `python3 release-gate/gate.py` before tagging a release.
         run: |
           if [ -f "${{ github.workspace }}/../clawrange/hunt.py" ]; then
             python ../clawrange/hunt.py --all || true
           else
-            echo "ClawRange hunt.py not available in this CI context (private repo) — skipped"
+            echo "ClawRange hunt.py not available in this CI context (private repo) -- skipped"
+          fi
+
+  # -- L2: markdown quality -----------------------------------------------------
+  markdownlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install markdownlint-cli
+        run: npm install -g markdownlint-cli@0.44.0
+      - name: Lint Markdown
+        run: |
+          markdownlint '**/*.md' \
+            --ignore node_modules \
+            --ignore CHANGELOG.md \
+            --ignore SKILL.md \
+            --ignore SECURITY.md \
+            --ignore SECURITY_MODEL.md \
+            --config .markdownlint.jsonc
+
+  # -- L3: dependency review (PRs only) ----------------------------------------
+  dependency-review:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  # -- L4: secret scan ----------------------------------------------------------
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          VERSION="8.27.2"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+      - name: Scan for secrets (gitleaks)
+        run: gitleaks detect --source=. --config=.gitleaks.toml --redact --no-banner
+
+  # -- L5: commit integrity -----------------------------------------------------
+  commit-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: No AI-agent co-author in commits
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}..HEAD"
+          else
+            RANGE="HEAD~1..HEAD"
+          fi
+          FOUND=$(git log "$RANGE" --format="%H %B" \
+            | grep -iE "co-authored-by:.*(claude|anthropic|cursor|copilot|aider|codeium)" || true)
+          if [ -n "$FOUND" ]; then
+            echo "::error::AI co-author tag detected in commit(s):"
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "OK: no AI co-author tags"
+
+      - name: No agent config files in git tree
+        run: |
+          FORBIDDEN="CLAUDE.md CLAUDE.local.md .claude .cursorrules .cursor .aider .copilot"
+          FOUND=""
+          for f in $FORBIDDEN; do
+            MATCH=$(git ls-files "$f" 2>/dev/null || true)
+            [ -n "$MATCH" ] && FOUND="$FOUND $f"
+          done
+          if [ -n "$FOUND" ]; then
+            echo "::error::Agent config file(s) found in git tree:$FOUND"
+            echo "Add them to .gitignore and untrack with 'git rm --cached'."
+            exit 1
+          fi
+          echo "OK: no agent config files in git tree"
+
+      - name: Author identity check (gl0di only)
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}..HEAD"
+          else
+            RANGE="HEAD~1..HEAD"
+          fi
+          OTHERS=$(git log "$RANGE" --format="%an <%ae>" \
+            | grep -v "gl0di" || true)
+          if [ -n "$OTHERS" ]; then
+            echo "::warning::Non-canonical author(s) in this push:"
+            echo "$OTHERS"
+            echo "Expected: gl0di <gl0di@users.noreply.github.com>"
+          else
+            echo "OK: author identity canonical (gl0di)"
           fi

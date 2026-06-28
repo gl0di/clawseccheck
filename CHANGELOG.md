@@ -3,9 +3,46 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.0.0] — 2026-06-28
+
+English-only output. The `--lang` flag and all Hebrew strings are removed.
+This is a BREAKING change for any integrator that relied on `--lang he` output.
+
+### Breaking
+
+- **`--lang` CLI flag removed.** Passing `--lang` (or `--lang he`) now raises an
+  error. Output is English-only; no language selection is possible.
+- **`SKILL_HE.md` deleted.** ClawHub Hebrew skill variant is gone.
+- **`i18n.py` API collapsed.** `tp()`, `title_for()`, `is_rtl()` removed.
+  Only `t(key, **kw)` remains. Any code that called the removed functions
+  must be updated.
+- **`pass_confidence` field added to `--json` output** (see `docs/OUTPUT_SCHEMA.md`).
+  New optional field — not breaking for readers, but schema validators that
+  use `additionalProperties: false` must be updated.
+
+### Changed
+
+- `i18n.py` collapsed from ~3 500 lines to ~95 lines. Flat `STRINGS` dict +
+  single `t(key, **kw)` function. Extra kwargs silently ignored (Python
+  `str.format` behaviour — no exception, correct output).
+- `cli.py`: `--lang` flag removed, bilingual section headers removed.
+- All callers updated to use `t()` directly.
+- `report.py`: inlined `lang="en"` attribute; removed dead variable.
+- `docs/OUTPUT_SCHEMA.md`: v2.0.0 contract baseline documented;
+  `pass_confidence` field added to Finding Object table.
+
+### Added
+
+- CI: `markdownlint`, `secret-scan` (gitleaks binary), `commit-integrity`,
+  `dependency-review` jobs. All run on every push and PR.
+- CI: `CODEOWNERS` (`@gl0di` owns all files), `dependabot.yml`
+  (GitHub Actions weekly), `.gitleaks.toml`.
+- `.gitignore`: agent config files (CLAUDE.md, .claude/, .cursor, etc.)
+  blocked from ever shipping in the published skill.
+
 ## [1.32.0] — 2026-06-28
 
-Framework mapping (ЗАХОД-2): maps the skill checks to the OWASP Agentic Skills Top 10, the skill-specific threat taxonomy, and fills the OWASP-LLM gaps for the prompt-injection / excessive-agency families. Pure additive metadata — no change to the A–F grade, scoring, or verdicts.
+Framework mapping (wave-2): maps the skill checks to the OWASP Agentic Skills Top 10, the skill-specific threat taxonomy, and fills the OWASP-LLM gaps for the prompt-injection / excessive-agency families. Pure additive metadata — no change to the A–F grade, scoring, or verdicts.
 
 ### Added
 - **OWASP Agentic Skills Top 10 (2026) mapping**: each finding now carries an additive `ast` array in `--json` (alongside `owasp`), mapping 60 skill-relevant checks to AST01–AST10 — the agent-skill-specific threat classes (e.g. AST01 Malicious Skills, AST03 Over-Privileged Skills, AST05 Untrusted External Instructions, AST06 Weak Isolation). IDs/titles are verified against the canonical OWASP project page (v1.0 2026 candidate edition). New `OWASP_AST_2026` / `AST_MAP` / `ast_for()` in `catalog.py`, mirroring the existing OWASP-LLM structures. `AST10 Cross-Platform Reuse` is a documented coverage gap (single-install scope).
@@ -18,7 +55,7 @@ Framework mapping (ЗАХОД-2): maps the skill checks to the OWASP Agentic Ski
 
 ## [1.31.0] — 2026-06-28
 
-Skill-vetting depth (ЗАХОД-2, checks wave): broadens `--vet`/B13 exfiltration detection beyond network sinks to local data-bearing channels. Additive — no change to the A–F config grade or scoring semantics.
+Skill-vetting depth (wave-2, checks wave): broadens `--vet`/B13 exfiltration detection beyond network sinks to local data-bearing channels. Additive — no change to the A–F config grade or scoring semantics.
 
 ### Added
 - **F-023 — local-sink exfil-breadth detector** (`--vet`/B13): flags a credential/secret source co-occurring on the same source line with a local data-bearing sink — log/debug (`logging`/`print`/`console`/`sys.std*`/`raise XError`), temp-file (`tempfile`/`/tmp` paths), or report/output file. Closes the channel-breadth gap left by B59 (markdown-image), B14 (config egress) and B9 (redaction). WARN-only/advisory under B13, fence-aware, and source-gated first so a benign `logging.info(...)` or scratch tempfile never fires (zero false positives). Static slice only — runtime debug/error output, the agent's live summary reply, and undeclared tool-args are explicitly out of scope and deferred to the planned runtime-evidence layer. Evidence reports fixed channel labels only; the matched line (which may carry a secret) is never echoed. Ships with 5 fixtures and full Hebrew localization.

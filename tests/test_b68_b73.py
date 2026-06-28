@@ -28,7 +28,6 @@ from clawseccheck.checks import (
     check_discovery_mdns_mode,
 )
 from clawseccheck.collector import Context, collect
-from clawseccheck.i18n import tp
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 _HEBREW = re.compile(r"[֐-׿]")
@@ -64,12 +63,6 @@ def test_b68_unset_passes():
     f = check_exec_applypatch_workspace(_ctx({"tools": {"profile": "minimal"}}))
     assert f.status == PASS
 
-
-def test_b68_warn_detail_localized_he():
-    f = check_exec_applypatch_workspace(
-        _ctx({"tools": {"exec": {"applyPatch": {"workspaceOnly": False}}}})
-    )
-    assert _HEBREW.search(tp(f.detail, "he")), f"B68 WARN detail not localized: {f.detail!r}"
 
 
 def test_b68_bad_fixture_warns():
@@ -124,12 +117,6 @@ def test_b69_unset_is_unknown():
     assert f.status == UNKNOWN
 
 
-def test_b69_warn_detail_localized_he():
-    f = check_exec_strict_inline_eval(
-        _ctx({"tools": {"exec": {"mode": "ask", "strictInlineEval": False}}})
-    )
-    assert _HEBREW.search(tp(f.detail, "he")), f"B69 WARN detail not localized: {f.detail!r}"
-
 
 def test_b69_bad_fixture_warns():
     assert check_exec_strict_inline_eval(
@@ -176,13 +163,6 @@ def test_b70_unset_is_unknown():
     f = check_trustedproxy_loopback(_ctx({"gateway": {"bind": "0.0.0.0:8080"}}))
     assert f.status == UNKNOWN
 
-
-def test_b70_warn_detail_localized_he():
-    f = check_trustedproxy_loopback(
-        _ctx({"gateway": {"bind": "0.0.0.0:8080",
-                          "auth": {"trustedProxy": {"allowLoopback": True}}}})
-    )
-    assert _HEBREW.search(tp(f.detail, "he")), f"B70 WARN detail not localized: {f.detail!r}"
 
 
 def test_b70_bad_fixture_warns():
@@ -249,12 +229,6 @@ def test_b71_empty_list_is_unknown():
     assert f.status == UNKNOWN
 
 
-def test_b71_warn_detail_localized_he():
-    f = check_node_denycommands_ineffective(
-        _ctx({"gateway": {"nodes": {"denyCommands": ["system.run --foo"]}}})
-    )
-    assert _HEBREW.search(tp(f.detail, "he")), f"B71 WARN detail not localized: {f.detail!r}"
-
 
 def test_b71_bad_fixture_warns():
     assert check_node_denycommands_ineffective(
@@ -304,12 +278,6 @@ def test_b72_unset_is_unknown():
     f = check_subagents_allow_agents(_ctx({"tools": {"profile": "minimal"}}))
     assert f.status == UNKNOWN
 
-
-def test_b72_warn_detail_localized_he():
-    f = check_subagents_allow_agents(
-        _ctx({"agents": {"defaults": {"subagents": {"allowAgents": ["*"]}}}})
-    )
-    assert _HEBREW.search(tp(f.detail, "he")), f"B72 WARN detail not localized: {f.detail!r}"
 
 
 def test_b72_bad_fixture_warns():
@@ -366,13 +334,6 @@ def test_b73_unset_passes():
     f = check_discovery_mdns_mode(_ctx({"gateway": {"bind": "0.0.0.0:8080"}}))
     assert f.status == PASS
 
-
-def test_b73_warn_detail_localized_he():
-    f = check_discovery_mdns_mode(
-        _ctx({"gateway": {"bind": "0.0.0.0:8080"},
-              "discovery": {"mdns": {"mode": "full"}}})
-    )
-    assert _HEBREW.search(tp(f.detail, "he")), f"B73 WARN detail not localized: {f.detail!r}"
 
 
 def test_b73_bad_fixture_warns():
