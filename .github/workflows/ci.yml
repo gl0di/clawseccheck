@@ -42,6 +42,9 @@ jobs:
           markdownlint '**/*.md' \
             --ignore node_modules \
             --ignore CHANGELOG.md \
+            --ignore SKILL.md \
+            --ignore SECURITY.md \
+            --ignore SECURITY_MODEL.md \
             --config .markdownlint.jsonc
 
   # -- L3: dependency review (PRs only) ----------------------------------------

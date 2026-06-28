@@ -254,7 +254,7 @@ ask: a report file (`--save`), the `--monitor` snapshot (`~/.clawseccheck/state.
 
 The **only** external command it can run is your own, fixed and read-only:
 
-```
+```text
 openclaw security audit --json
 ```
 
@@ -564,7 +564,7 @@ one entry per line, either a check id (`B14`) or a finding fingerprint (`B14:ab1
 with `--show-suppressed`). Suppressed findings drop out of the **score**, the **report**, and
 **monitor** alerts — so re-runs and `--monitor` stop nagging about things you've accepted.
 
-```
+```text
 # ~/.openclaw/.clawseccheckignore
 B14            # accept the egress-surface advisory
 B12:1a2b3c4d   # accept one specific local-model finding
@@ -591,6 +591,7 @@ positives on real configs.
 > A planned **2.0.0** will deliberately exercise this rule — batching the accumulated breaking changes (e.g. English-only output, finalized grade semantics, schema tidy) into one major bump. Until then, 1.x stays additive.
 
 **Frozen contract (breaking these → major bump):**
+
 - **CLI flags** and their documented meaning (`--json`, `--sarif`, `--card`, `--monitor`,
   `--fail-under`, `--exit-code`, …).
 - **`--json` schema:** top-level `score`, `grade`, `capped`, `raw_score`, `trifecta`,
@@ -605,6 +606,7 @@ positives on real configs.
   checks (`scored=False`) never move the grade.
 
 **Explicitly experimental within 1.x (may change without a major bump, by design):**
+
 - The **attestation layer**: the `clawseccheck-attest/1` self-report schema (note the `/1` — it is
   explicitly versioned to evolve), the `--ask`/`--attest` flow, the B43 **verb→blast-radius
   taxonomy**, and B44. The `ATTESTED` confidence tier exists to mark exactly this: a self-report is
@@ -649,12 +651,15 @@ MIT — see [LICENSE](LICENSE).
 Before merging a release, follow this checklist:
 
 ### 1) Tests before release
+
 - `python3 -m ruff check .`
 - `python3 -m pytest`
 - Run the most relevant test subset for the touched area if the full suite is too large for your CI window.
 
 ### 2) Documentation and protocol alignment
+
 Update all of the following files (in order):
+
 - `CHANGELOG.md`
 - `README.md`
 - `SECURITY.md`
@@ -662,4 +667,5 @@ Update all of the following files (in order):
 - `SKILL.md`
 
 ### 3) Pre-release review gate
+
 - Re-read the release notes and verify that check IDs, remediation text, and examples match the implemented code/tests.

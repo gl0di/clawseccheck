@@ -112,7 +112,7 @@ can suppress by:
 
 - **Bare check ID** — suppresses every finding for that check, regardless of detail:
 
-  ```
+  ```text
   # I accept the current egress surface; reviewed 2026-06-01
   B14
   ```
@@ -121,7 +121,7 @@ can suppress by:
   produced that fingerprint hash. Use this when a check fires multiple findings and you
   only want to accept one of them:
 
-  ```
+  ```text
   B14:ab12cd34
   ```
 
@@ -188,9 +188,9 @@ you may see `UNKNOWN` for any check that depends on a file that does not exist.
 
 After the main report, you may see a notice like:
 
-```
+```text
 This ClawSecCheck build is 63 days old (v0.19.0, released 2026-04-25).
-Security tooling should be kept current — check your ClawHub client for a newer version.
+Security tooling should be kept current -- check your ClawHub client for a newer version.
 (offline notice: based only on the build date; ClawSecCheck made no network call)
 ```
 

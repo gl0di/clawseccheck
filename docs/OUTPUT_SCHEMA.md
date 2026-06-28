@@ -5,6 +5,7 @@ produced by `--json` and `--sarif`. Integrators (CI pipelines, dashboards, SIEM
 connectors) may rely on the field names, types, and envelope shapes described here.
 
 **Contract baseline:** v2.0.0 (2026-06-28). Breaking changes vs v1.x:
+
 - `--lang` / `--lang he` CLI flag removed; output is English-only.
 - No `lang` field in any JSON or SARIF output.
 
@@ -467,6 +468,7 @@ Produced by `--vet` and `--vet-mcp`. Simpler than the full audit — no score, n
 | `findings` | `array[Finding]` | All check results. Same Finding shape as §2. |
 
 `verdict` is derived from the worst finding status:
+
 - `FAIL` → `"DANGEROUS"`
 - `WARN` → `"SUSPICIOUS"`
 - `UNKNOWN` → `"UNKNOWN"`
