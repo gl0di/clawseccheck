@@ -98,7 +98,7 @@ A release must pass local validation before merge/tag:
   [критерий Done] Behavior remains consistent with runtime docs and user-facing findings.
 
 - [impact:release][owner:release-eng][difficulty:1-2h] Keep operational docs synchronized after each tag.
-  [что проверить] README/CHANGELOG/SECURITY/SECURITY_MODEL/SKILL/SKILL_HE entries mention the same release steps and smoke commands.
+  [что проверить] README/CHANGELOG/SECURITY/SECURITY_MODEL/SKILL entries mention the same release steps and smoke commands.
   [критерий Done] No stale check IDs or argument contracts between docs and parser behavior.
 
 - [impact:ops][owner:release-eng][difficulty:1 day] Run explicit post-release smoke for installability/repeatability.
@@ -116,6 +116,5 @@ Also verify that release documentation is synchronized:
 - `SECURITY.md`
 - `SECURITY_MODEL.md`
 - `SKILL.md`
-- `SKILL_HE.md`
 
 Keep this list current whenever release rules change so the model of operational security stays consistent with the shipped version.

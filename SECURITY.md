@@ -66,6 +66,5 @@ Then update and verify release-facing documentation files:
 - `SECURITY.md`
 - `SECURITY_MODEL.md`
 - `SKILL.md`
-- `SKILL_HE.md`
 
 This prevents release drift (code/review/protocol mismatch) and keeps the operational security guidance aligned with shipped behavior.

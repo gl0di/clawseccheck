@@ -506,7 +506,6 @@ preserving backward compatibility.
 | Skip native audit / host posture | `clawseccheck --no-native` · `clawseccheck --no-host` |
 | Disable local history / age notice | `clawseccheck --no-history` · `clawseccheck --no-update-notice` |
 | CI gate | `clawseccheck --fail-under 70` · `clawseccheck --exit-code` |
-| Hebrew (RTL) output | `clawseccheck --lang he` |
 | Verify the engine itself | `clawseccheck --verify-self` |
 
 ```bash
@@ -521,7 +520,6 @@ python3 audit.py --badge badge.svg          # write a shareable SVG grade badge
 python3 audit.py --html report.html         # standalone HTML report (private — owner view)
 python3 audit.py --verify-self               # SHA-256 of ClawSecCheck's own source (anti-tamper)
 python3 audit.py --prompts                   # a copy-paste "ask your agent to fix it" per finding
-python3 audit.py --lang he                   # Hebrew report (right-to-left); default auto-detects locale
 python3 audit.py --trend                     # print local score trend (stored in ~/.clawseccheck/history.jsonl)
 python3 audit.py --percentile                # show where your score sits vs. an offline reference profile
 python3 audit.py --history ~/.clawseccheck/history.jsonl  # custom history file path (default shown)
@@ -662,8 +660,6 @@ Update all of the following files (in order):
 - `SECURITY.md`
 - `SECURITY_MODEL.md`
 - `SKILL.md`
-- `SKILL_HE.md`
 
 ### 3) Pre-release review gate
 - Re-read the release notes and verify that check IDs, remediation text, and examples match the implemented code/tests.
-- Confirm that `SKILL.md` and `SKILL_HE.md` contain the same release/protocol expectations.
