@@ -3,6 +3,21 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.0.3] — 2026-06-28
+
+Removes all Hebrew locale content from the project — SKILL.md metadata, test
+fixtures, and test data — leaving a clean single-language (English) codebase.
+
+### Removed
+- Hebrew locale from `SKILL.md` frontmatter (`display_name.he`, `display_description.he`, `tags.he`)
+- `fixtures/clean_b58_hebrew_bootstrap/` directory (used for Hebrew-bootstrap B58 test)
+- Dead `_HEBREW = re.compile(...)` definitions from 15 test files (were defined but never asserted)
+- Hebrew string literals from `test_checks_b58.py`, `test_textnorm.py`, `test_logsafe_property.py`
+
+### Changed
+- Replaced Hebrew-language B58 test cases with equivalent non-Hebrew Unicode tests covering
+  the same code paths (non-ASCII prose, bidi marks without injection)
+
 ## [2.0.2] — 2026-06-28
 
 Six check-logic fixes, improved SKILL.md Deeper-Scan Step 3 self-answer, and ClawHub
