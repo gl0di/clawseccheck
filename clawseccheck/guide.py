@@ -130,30 +130,24 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
 def render_next_actions(
     actions: list[Action],
     ascii_only: bool = False,
-    lang: str = "en",
     limit: int = 5,
 ) -> str:
     """Render a plain-language "What you can do next" block.
 
     Up to *limit* numbered items, each with a run-command line and a why
     explanation. If *actions* is empty, returns a single friendly line.
-    *ascii_only* avoids unicode. *lang* controls localisation.
+    *ascii_only* avoids unicode.
     """
     if not actions:
-        return t("guide.all_clear", lang) + "\n"
+        return t("guide.all_clear") + "\n"
 
-    header = t("guide.next_header", lang)
-    run_label = t("guide.run_label", lang)
+    header = t("guide.next_header")
+    run_label = t("guide.run_label")
 
     lines = [header]
     for i, action in enumerate(actions[:limit], 1):
-        # Re-localise title/why when lang != "en"
-        if lang != "en":
-            title = t(f"guide.{action.id}.title", lang)
-            why = t(f"guide.{action.id}.why", lang)
-        else:
-            title = action.title
-            why = action.why
+        title = action.title
+        why = action.why
         lines.append(f"{i}. {title}")
         lines.append(f"   {run_label} {action.command}")
         lines.append(f"   {why}")

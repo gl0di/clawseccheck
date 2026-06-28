@@ -25,7 +25,7 @@ from .report import (
 )
 from .risk import risk_paths, render_risk_paths
 from .scoring import ScoreResult, compute
-from .i18n import t, tp, title_for, is_rtl
+from .i18n import t
 from .sarif import render_sarif
 from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
 from .guide import suggest_actions, render_next_actions
@@ -78,7 +78,7 @@ __all__ = [
     "update_notice", "read_latest_hint", "DEFAULT_LATEST",
     "record_events", "load_events", "render_events", "DEFAULT_EVENTS",
     "load_ignore", "apply_baseline", "fingerprint",
-    "t", "tp", "title_for", "is_rtl",
+    "t",
     "render_sarif",
     "history_load", "history_record", "render_trend", "DEFAULT_HISTORY",
     "suggest_actions", "render_next_actions",

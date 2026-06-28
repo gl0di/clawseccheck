@@ -10,7 +10,6 @@ from pathlib import Path
 from clawseccheck.catalog import FAIL, UNKNOWN, WARN
 from clawseccheck.checks import check_mcp, check_mcp_hardening, check_sandbox
 from clawseccheck.collector import Context
-from clawseccheck.i18n import tp
 
 _HEBREW = re.compile(r"[֐-׿]")
 
@@ -41,11 +40,6 @@ def test_b4_phantom_sandbox_no_exec_is_unknown_and_explains():
     assert f.status == UNKNOWN
     assert "top-level 'sandbox'" in f.detail
 
-
-def test_b4_phantom_warn_detail_localized_he():
-    cfg = {"sandbox": {"mode": "enabled"}, "tools": {"allow": ["exec"]}}
-    f = check_sandbox(_ctx(cfg))
-    assert _HEBREW.search(tp(f.detail, "he")), f"B4 phantom detail not localized: {f.detail!r}"
 
 
 def test_b4_no_phantom_keeps_original_warn():
@@ -80,11 +74,6 @@ def test_b15_remote_transport_uses_remote_framing():
     assert "Remote MCP servers" in f.detail
 
 
-def test_b15_stdio_detail_localized_he():
-    cfg = {"mcp": {"servers": {"local-fs": {"command": "npx"}}}}
-    f = check_mcp(_ctx(cfg))
-    assert _HEBREW.search(tp(f.detail, "he")), f"B15 stdio detail not localized: {f.detail!r}"
-
 
 # ---------------------------------------------------------------------------
 # B24: dedup — specifics in evidence, detail is a summary (no doubled line)
@@ -101,9 +90,3 @@ def test_b24_detail_is_summary_not_doubled():
     # the detailed reason text should not be duplicated inside the summary detail
     assert reason not in f.detail
 
-
-def test_b24_summary_detail_localized_he():
-    cfg = {"mcp": {"servers": {"local-fs": {"command": "npx -y @scope/pkg@latest"}}}}
-    f = check_mcp_hardening(_ctx(cfg))
-    if f.status in (WARN, FAIL):
-        assert _HEBREW.search(tp(f.detail, "he")), f"B24 summary not localized: {f.detail!r}"

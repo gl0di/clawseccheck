@@ -8,7 +8,6 @@ from pathlib import Path
 from clawseccheck.catalog import UNKNOWN, PASS, WARN
 from clawseccheck.checks import check_memory_poisoning
 from clawseccheck.collector import Context, collect
-from clawseccheck.i18n import tp
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 _HEBREW = re.compile(r"[֐-׿]")
@@ -34,7 +33,6 @@ def test_b7_warn_when_memory_file_without_config_surface():
     ))
     assert f.status == WARN
     assert "untrusted input" in f.detail
-    assert _HEBREW.search(tp(f.detail, "he"))
 
 
 def test_b7_unknown_when_vector_surface_without_access_control():

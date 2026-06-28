@@ -229,15 +229,9 @@ def test_freshness_notice_offline_marker_in_output():
 _HEBREW_RE = re.compile(r"[֐-׿]")
 
 
-def test_freshness_notice_he_contains_hebrew():
-    lines = freshness_notice({}, today=TODAY, lang="he")
-    assert lines, "expected at least one advisory line"
-    for ln in lines:
-        assert _HEBREW_RE.search(ln), f"Hebrew notice line has no Hebrew chars: {ln!r}"
-
 
 def test_freshness_notice_en_default():
-    lines = freshness_notice({}, today=TODAY, lang="en")
+    lines = freshness_notice({}, today=TODAY)
     assert any("Coverage gap" in ln for ln in lines)
 
 

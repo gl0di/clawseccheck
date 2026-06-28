@@ -9,7 +9,6 @@ from pathlib import Path
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_silent_instruction
 from clawseccheck.collector import Context, collect
-from clawseccheck.i18n import tp
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -19,9 +18,6 @@ def _ctx(bootstrap=None, skills=None):
     c.bootstrap = bootstrap or {}
     c.installed_skills = skills or {}
     return c
-
-def _has_hebrew(text: str) -> bool:
-    return any("֐" <= ch <= "׿" for ch in text)
 
 # --------------------------------------------------------------------------- UNKNOWN
 
@@ -74,17 +70,3 @@ def test_b63_warn_bad_bare_fixture():
     assert len(f.evidence) > 0
 
 # --------------------------------------------------------------------------- i18n
-
-def test_b63_fail_localized_he():
-    ctx = collect(FIXTURES / "bad_b63_silent_action")
-    f = check_silent_instruction(ctx)
-    assert f.status == FAIL
-    localized = tp(f.detail.strip(), "he")
-    assert _has_hebrew(localized), f"FAIL detail not localized to Hebrew: {localized}"
-
-def test_b63_warn_localized_he():
-    ctx = collect(FIXTURES / "bad_b63_silent_bare")
-    f = check_silent_instruction(ctx)
-    assert f.status == WARN
-    localized = tp(f.detail.strip(), "he")
-    assert _has_hebrew(localized), f"WARN detail not localized to Hebrew: {localized}"

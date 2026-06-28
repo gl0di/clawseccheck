@@ -20,7 +20,6 @@ import json
 from pathlib import Path
 
 from clawseccheck.checks import _vet_mcp_least_privilege, vet_mcp
-from clawseccheck.i18n import tp
 
 
 # ---------------------------------------------------------------------------
@@ -305,31 +304,7 @@ def test_vet_mcp_write_scope_no_lp1(tmp_path):
 # i18n: LP1 detail strings have Hebrew translations
 # ---------------------------------------------------------------------------
 
-def test_lp1_detail_translates_to_hebrew():
-    """The LP1 bare detail string (after server-name strip) has a he DETAIL_RULE."""
-    bare = "oauth.scope='read' appears read-only but command exercises network capabilities — under-declared scope (LP1)"
-    he = tp(bare, "he")
-    # Must contain at least one Hebrew character.
-    import re
-    assert re.search(r"[֐-׿]", he), (
-        f"LP1 detail not translated to Hebrew: {he!r}"
-    )
 
-
-def test_lp1_prefixed_detail_translates_to_hebrew():
-    """The LP1 prefixed detail string (with server name) also translates."""
-    prefixed = "net-tool: oauth.scope='read' appears read-only but command exercises network capabilities — under-declared scope (LP1)"
-    he = tp(prefixed, "he")
-    import re
-    assert re.search(r"[֐-׿]", he), (
-        f"LP1 prefixed detail not translated to Hebrew: {he!r}"
-    )
-
-
-def test_lp1_english_tp_is_noop():
-    """tp(detail, 'en') is always a no-op for LP1 strings."""
-    bare = "oauth.scope='read' appears read-only but command exercises network capabilities — under-declared scope (LP1)"
-    assert tp(bare, "en") == bare
 
 
 # ---------------------------------------------------------------------------

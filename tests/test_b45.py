@@ -6,17 +6,10 @@ trifecta legs. Tool names are chosen to classify unambiguously:
   postgres_query-> sensitive data
   shell_exec    -> outbound/exec
 """
-import re
 from pathlib import Path
 
 from clawseccheck.checks import check_agent_separation
 from clawseccheck.collector import Context
-from clawseccheck.report import render_report
-from clawseccheck.scoring import compute
-
-
-def _has_hebrew(s):
-    return bool(re.search(r"[֐-׿]", s))
 
 
 def _ctx(attestation=None):
@@ -105,18 +98,3 @@ def test_b45_never_fails():
 
 
 # ---- he report: the WARN evidence bullet is translated, the agent name is preserved ----
-def test_b45_warn_evidence_renders_hebrew():
-    att = {"agents": [{"name": "mono", "tools": ["web_fetch", "postgres_query", "shell_exec"]}]}
-    f = check_agent_separation(_ctx(att))
-    assert f.status == "WARN"
-    findings = [f]
-    he = render_report(findings, compute(findings), lang="he")
-    # the only line mentioning the agent name is the evidence bullet (detail is generic);
-    # bidi isolates may wrap the name, so match on the substring, not line position.
-    ev_lines = [ln for ln in he.splitlines() if "mono" in ln]
-    assert ev_lines, "B45 evidence bullet not rendered"
-    line = ev_lines[0]
-    # prose is Hebrew; the agent name 'mono' (data) survives verbatim; English prose gone
-    assert _has_hebrew(line)
-    assert "mono" in line
-    assert "holds all 3 legs" not in line

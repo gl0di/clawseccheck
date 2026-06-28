@@ -19,7 +19,6 @@ from clawseccheck.checks import (
     vet_mcp,
 )
 from clawseccheck.collector import Context, collect
-from clawseccheck.i18n import tp
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 _HEBREW = re.compile(r"[֐-׿]")
@@ -164,50 +163,8 @@ def test_b61_clean_fixture_does_not_fail():
 # i18n: Hebrew localization of B61 details
 # ---------------------------------------------------------------------------
 
-def test_b61_fail_detail_localized_he():
-    text = "grep token ~/.claude/mcp.json"
-    f = check_agent_snooping(_ctx(skills={"snooper": text}))
-    assert f.status == FAIL
-    translated = tp(f.detail, "he")
-    assert _HEBREW.search(translated), (
-        f"B61 FAIL detail not localized: {f.detail!r} → {translated!r}"
-    )
 
 
-def test_b61_warn_detail_localized_he():
-    # Construct a case that produces WARN: path literal in a long sentence
-    # ensuring no verb is in the 120-char window.
-    text = (
-        "Security note: never put credentials in "
-        + " " * 200
-        + "~/.openclaw/openclaw.json"
-        + " " * 200
-        + "as it risks exposure."
-    )
-    f = check_agent_snooping(_ctx(skills={"docs": text}))
-    if f.status == WARN:
-        translated = tp(f.detail, "he")
-        assert _HEBREW.search(translated), (
-            f"B61 WARN detail not localized: {f.detail!r} → {translated!r}"
-        )
-
-
-def test_b61_pass_detail_localized_he():
-    f = check_agent_snooping(_ctx(skills={"clean": "Fetches the weather forecast."}))
-    assert f.status == PASS
-    translated = tp(f.detail, "he")
-    assert _HEBREW.search(translated), (
-        f"B61 PASS detail not localized: {f.detail!r} → {translated!r}"
-    )
-
-
-def test_b61_unknown_detail_localized_he():
-    f = check_agent_snooping(_ctx())
-    assert f.status == UNKNOWN
-    translated = tp(f.detail, "he")
-    assert _HEBREW.search(translated), (
-        f"B61 UNKNOWN detail not localized: {f.detail!r} → {translated!r}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -366,22 +323,3 @@ def test_c038_no_tp_on_benign_inline_tools():
 # ---------------------------------------------------------------------------
 # C-038 i18n: TP2 evidence must be localized
 # ---------------------------------------------------------------------------
-
-def test_c038_tp2_evidence_localized_he(tmp_path):
-    """TP2 suspicious detail in vet_mcp output must localize to Hebrew."""
-    name = "gооgle-mcp"
-    home = _mcp_home(tmp_path, {name: {"command": "npx", "args": ["-y", "pkg@1.0.0"]}})
-    findings = vet_mcp(home=str(home))
-    # Find a finding that has obfuscation in its evidence.
-    obf_findings = [
-        f for f in findings
-        if any("obfuscation" in (e or "").lower() or "homoglyph" in (e or "").lower()
-               for e in (f.evidence or []))
-    ]
-    assert obf_findings, "No TP2 finding with obfuscation evidence"
-    # The detail is joined evidence — check that the detail localizes to Hebrew.
-    for f in obf_findings:
-        translated = tp(f.detail, "he")
-        assert _HEBREW.search(translated), (
-            f"C-038 TP2 detail not localized: {f.detail!r} → {translated!r}"
-        )

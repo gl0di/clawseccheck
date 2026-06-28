@@ -39,15 +39,6 @@ from .logsafe import get_logger
 from .safeio import secure_write_text
 
 
-def _default_lang() -> str:
-    """Infer output language from the environment (LC_ALL then LANG)."""
-    for var in ("LC_ALL", "LANG"):
-        val = os.environ.get(var, "")
-        if val.startswith("he"):
-            return "he"
-    return "en"
-
-
 def _unicode_ok() -> bool:
     """Best-effort: make stdout UTF-8 and report whether unicode is safe to print."""
     enc = (getattr(sys.stdout, "encoding", "") or "").lower()
@@ -220,8 +211,6 @@ def main(argv=None) -> int:
                    help="list suppressed finding ids + fingerprints and exit")
     p.add_argument("--verify-self", action="store_true",
                    help="print the SHA-256 digest of the ClawSecCheck engine source for tamper detection")
-    p.add_argument("--lang", choices=("en", "he"), default=_default_lang(),
-                   help="output language (en|he; he is right-to-left)")
     p.add_argument("--sarif", metavar="PATH",
                    help="write a SARIF 2.1.0 report to PATH")
     p.add_argument("--fail-under", metavar="N", type=int, default=None,
@@ -449,7 +438,7 @@ def main(argv=None) -> int:
         return 0
 
     if args.fix:
-        _emit(render_fix(findings, ascii_only=ascii_only, lang=args.lang))
+        _emit(render_fix(findings, ascii_only=ascii_only))
         return 0
 
     if args.badge:
@@ -464,7 +453,7 @@ def main(argv=None) -> int:
         try:
             secure_write_text(
                 Path(args.html).expanduser(),
-                render_html(findings, score, native=ctx.native, lang=args.lang),
+                render_html(findings, score, native=ctx.native),
             )
             _emit(f"(HTML report written to {args.html})")
         except OSError as exc:
@@ -491,18 +480,18 @@ def main(argv=None) -> int:
         return 0
 
     if args.prompts:
-        _emit(render_prompts(findings, ascii_only, lang=args.lang))
+        _emit(render_prompts(findings, ascii_only))
         return 0
 
     if args.next:
-        _emit(render_next_actions(suggest_actions(findings, score), ascii_only, lang=args.lang))
+        _emit(render_next_actions(suggest_actions(findings, score), ascii_only))
         return 0
 
     if args.monitor:
         prev = load_state(args.state)
         snap = snapshot(ctx, findings, score)
         alerts = diff(prev, snap)
-        _emit(render_monitor(alerts, score, ascii_only, baseline=prev is None, lang=args.lang))
+        _emit(render_monitor(alerts, score, ascii_only, baseline=prev is None))
         try:
             save_state(args.state, snap)
         except OSError as exc:
@@ -514,7 +503,7 @@ def main(argv=None) -> int:
     if args.json:
         body = render_json(findings, score, risk=paths, ctx=ctx)
     elif args.card:
-        body = render_card(score, findings, ascii_only, lang=args.lang)
+        body = render_card(score, findings, ascii_only)
     else:
         # Offline staleness advisory — human report only; never in --json/--card/--sarif.
         # Reads only the local clock + an optional local hint file; makes no network call.
@@ -531,16 +520,16 @@ def main(argv=None) -> int:
             # freshness lines here — otherwise the report prints "never run" directly
             # above the sections that run them (the freshness is computed pre-run).
             _refreshed = ("self_test", "vet_mcp") if args.full else ()
-            f_notice = _compute_freshness(load_ledger(), lang=args.lang, skip=_refreshed)
-        parts = [render_report(findings, score, ascii_only, native=ctx.native, lang=args.lang,
+            f_notice = _compute_freshness(load_ledger(), skip=_refreshed)
+        parts = [render_report(findings, score, ascii_only, native=ctx.native,
                                risk=paths, update_notice=notice, freshness_notice=f_notice,
                                openclaw_detected=ctx.config_found, ctx=ctx),
-                 "", render_card(score, findings, ascii_only, lang=args.lang)]
+                 "", render_card(score, findings, ascii_only)]
         if ctx.errors:
             parts.append("\nnotes:\n" + "\n".join(f"  - {_sanitize(e)}" for e in ctx.errors))
         parts.append("")
         parts.append(render_next_actions(
-            suggest_actions(findings, score), ascii_only, lang=args.lang))
+            suggest_actions(findings, score), ascii_only))
         body = "\n".join(parts)
 
     _emit(body)

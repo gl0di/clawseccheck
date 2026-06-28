@@ -13,10 +13,6 @@ from clawseccheck.report import render_report
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
-def _has_hebrew(text: str) -> bool:
-    return any("֐" <= ch <= "׿" for ch in text)
-
-
 # ---------------------------------------------------------------- collector flag
 def test_config_found_false_when_no_openclaw_json(tmp_path):
     assert collect(tmp_path).config_found is False
@@ -61,8 +57,3 @@ def test_default_assumes_openclaw_detected():
 
 
 # ---------------------------------------------------------------- i18n
-def test_banner_localized_he(tmp_path):
-    ctx, findings, score = audit(tmp_path)
-    out = render_report(findings, score, lang="he", openclaw_detected=ctx.config_found)
-    assert _has_hebrew(out)
-    assert "openclaw.json" in out  # the filename stays Latin inside the he sentence

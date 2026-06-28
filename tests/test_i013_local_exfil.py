@@ -30,7 +30,6 @@ from clawseccheck.checks import (
     _local_sink_exfil_hits,
 )
 from clawseccheck.collector import Context
-from clawseccheck.i18n import tp
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -303,59 +302,5 @@ def test_clean_i013_doc_example_passes():
 _HEBREW = re.compile(r"[֐-׿]")
 
 
-def test_he_detail_is_localized():
-    """B13 WARN detail for F-023 must produce Hebrew when translated."""
-    from clawseccheck.checks import check_installed_skills
-
-    body = 'logging.error("creds: " + open(os.path.expanduser("~/.aws/credentials")).read())'
-    ctx = _ctx_with_skill("cred-he", body)
-    f = check_installed_skills(ctx)
-    assert f.status == WARN
-    he_detail = tp(f.detail, "he")
-    assert _HEBREW.search(he_detail), (
-        f"Hebrew detail must contain Hebrew chars; got: {he_detail!r}"
-    )
 
 
-def test_he_fix_is_localized():
-    """B13 WARN fix string for F-023 must produce Hebrew when translated."""
-    from clawseccheck.checks import check_installed_skills
-
-    body = 'logging.error("creds: " + open(os.path.expanduser("~/.aws/credentials")).read())'
-    ctx = _ctx_with_skill("cred-he-fix", body)
-    f = check_installed_skills(ctx)
-    assert f.status == WARN
-    he_fix = tp(f.fix, "he")
-    assert _HEBREW.search(he_fix), (
-        f"Hebrew fix must contain Hebrew chars; got: {he_fix!r}"
-    )
-
-
-def test_he_fix_fragments_localized():
-    """Each '; '-split fragment of the F-023 fix must produce Hebrew."""
-    from clawseccheck.checks import check_installed_skills
-
-    body = 'logging.error("creds: " + open(os.path.expanduser("~/.aws/credentials")).read())'
-    ctx = _ctx_with_skill("cred-he-frags", body)
-    f = check_installed_skills(ctx)
-    assert f.status == WARN
-    for frag in f.fix.split("; "):
-        frag = frag.strip()
-        if not frag:
-            continue
-        he_frag = tp(frag, "he")
-        assert _HEBREW.search(he_frag), (
-            f"Fix fragment not localized to Hebrew: {frag!r} → {he_frag!r}"
-        )
-
-
-def test_en_detail_unchanged():
-    """tp(detail, 'en') must be a no-op — English path must not mutate."""
-    from clawseccheck.checks import check_installed_skills
-
-    body = 'logging.error("creds: " + open(os.path.expanduser("~/.aws/credentials")).read())'
-    ctx = _ctx_with_skill("cred-en", body)
-    f = check_installed_skills(ctx)
-    assert f.status == WARN
-    assert tp(f.detail, "en") == f.detail
-    assert tp(f.fix, "en") == f.fix

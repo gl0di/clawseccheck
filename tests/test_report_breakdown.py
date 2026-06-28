@@ -58,7 +58,7 @@ class TestBreakdownCounts:
     def test_breakdown_line_appears_in_report(self):
         findings = _mixed_findings()
         score = compute(findings)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         assert "Why" in out
         assert "/100" in out
 
@@ -66,32 +66,32 @@ class TestBreakdownCounts:
         """UNKNOWN (T8) and advisory/scored=False (T9) must be excluded."""
         findings = _mixed_findings()
         score = compute(findings)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         # 7 scored + non-UNKNOWN entries: T1..T7
         assert "7 scored checks" in out
 
     def test_n_pass_count_is_three(self):
         findings = _mixed_findings()
         score = compute(findings)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         assert "3 pass" in out
 
     def test_n_warn_count_is_two(self):
         findings = _mixed_findings()
         score = compute(findings)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         assert "2 warn" in out
 
     def test_n_fail_count_is_two(self):
         findings = _mixed_findings()
         score = compute(findings)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         assert "2 fail" in out
 
     def test_breakdown_detail_line_appears_when_fails_or_warns_exist(self):
         findings = _mixed_findings()
         score = compute(findings)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         # The detail line lists severity counts of FAIL+WARN items
         assert "FAIL" in out or "WARN" in out
 
@@ -102,7 +102,7 @@ class TestBreakdownCounts:
             _finding("P2", PASS, MEDIUM),
         ]
         score = compute(findings)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         # No "(N FAIL, N WARN — incl. ...)" parenthetical line
         assert "incl." not in out
 
@@ -115,7 +115,7 @@ class TestBreakdownCounts:
             _finding("P1", PASS, MEDIUM),
         ]
         score = compute(findings)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         assert "1 CRITICAL" in out
         assert "2 HIGH" in out
 
@@ -123,7 +123,7 @@ class TestBreakdownCounts:
         """An all-UNKNOWN set must still produce a breakdown with 0 scored."""
         findings = [_finding("U1", UNKNOWN, HIGH)]
         score = _score(score=0, grade="F", capped=False, raw_score=0)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         assert "0 scored checks" in out
 
     def test_suppressed_findings_excluded_from_breakdown(self):
@@ -135,7 +135,7 @@ class TestBreakdownCounts:
         f_pass = _finding("P1", PASS, MEDIUM)
         findings = [f_supp, f_pass]
         score = _score(score=100, grade="A", capped=False, raw_score=100)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         # Only 1 scored non-suppressed check (P1); template always uses "scored checks"
         assert "1 scored checks" in out
         assert "1 pass" in out
@@ -157,7 +157,7 @@ class TestBreakdownCapExplanation:
         ]
         score = compute(findings)
         assert score.capped, "fixture must produce a capped score"
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         assert "capped" in out.lower()
         assert "CRITICAL" in out
 
@@ -168,7 +168,7 @@ class TestBreakdownCapExplanation:
         ]
         score = compute(findings)
         assert score.capped, "fixture must produce a capped score"
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         assert "capped" in out.lower()
         assert "HIGH" in out
 
@@ -180,7 +180,7 @@ class TestBreakdownCapExplanation:
         findings.append(_finding("C1", FAIL, CRITICAL))
         score = compute(findings)
         assert score.capped and score.raw_score != score.score
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         # The breakdown explains the RAW number...
         assert f"Why {score.raw_score}/100" in out
         # ...and the separate capped line discloses raw -> capped.
@@ -195,7 +195,7 @@ class TestBreakdownCapExplanation:
         ]
         score = compute(findings)
         assert score.capped and score.cap_severity == MEDIUM
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         assert "MEDIUM" in out
 
     def test_cap_line_absent_when_no_critical_or_high_fail(self):
@@ -205,7 +205,7 @@ class TestBreakdownCapExplanation:
         ]
         score = compute(findings)
         assert not score.capped, "fixture must not produce a capped score"
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         # The capped line uses the literal "(capped from"
         assert "(capped from" not in out
 
@@ -218,25 +218,25 @@ class TestScopeNote:
     def test_scope_note_appears_in_report(self):
         findings = _mixed_findings()
         score = compute(findings)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         assert "This score reflects your configuration" in out
 
     def test_scope_note_mentions_canary(self):
         findings = _mixed_findings()
         score = compute(findings)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         assert "--canary" in out
 
     def test_scope_note_mentions_vet_mcp(self):
         findings = _mixed_findings()
         score = compute(findings)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         assert "--vet-mcp" in out
 
     def test_scope_note_appears_on_clean_report(self):
         """The scope note must appear even when there are no issues."""
         score = _score(score=100, grade="A", capped=False, raw_score=100)
-        out = render_report([], score, lang="en")
+        out = render_report([], score)
         assert "--canary" in out
         assert "--vet-mcp" in out
 
@@ -244,53 +244,5 @@ class TestScopeNote:
         """The scope note must not be repeated."""
         findings = _mixed_findings()
         score = compute(findings)
-        out = render_report(findings, score, lang="en")
+        out = render_report(findings, score)
         assert out.count("--vet-mcp") == 1
-
-
-# ---------------------------------------------------------------------------
-# Hebrew (lang="he") path — no KeyError / missing-string crash
-# ---------------------------------------------------------------------------
-
-class TestHebrewPath:
-    def test_he_render_does_not_raise(self):
-        findings = _mixed_findings()
-        score = compute(findings)
-        out = render_report(findings, score, lang="he")
-        assert out  # non-empty
-
-    def test_he_breakdown_present(self):
-        """Hebrew report must contain the breakdown (no missing-key crash)."""
-        findings = _mixed_findings()
-        score = compute(findings)
-        out = render_report(findings, score, lang="he")
-        # Hebrew score breakdown starts with "מדוע"
-        assert "מדוע" in out
-
-    def test_he_scope_note_present(self):
-        findings = _mixed_findings()
-        score = compute(findings)
-        out = render_report(findings, score, lang="he")
-        out = out.replace("‏", "").replace("⁦", "").replace("⁩", "")  # drop RTL marks
-        # Both flag names are literal ASCII in Hebrew text too
-        assert "--canary" in out
-        assert "--vet-mcp" in out
-
-    def test_he_capped_report_does_not_raise(self):
-        findings = [
-            _finding("C1", FAIL, CRITICAL),
-            _finding("P1", PASS, HIGH),
-        ]
-        score = compute(findings)
-        out = render_report(findings, score, lang="he")
-        assert out
-
-    def test_he_breakdown_detail_present_when_fails_exist(self):
-        findings = [
-            _finding("F1", FAIL, HIGH),
-            _finding("P1", PASS, MEDIUM),
-        ]
-        score = compute(findings)
-        out = render_report(findings, score, lang="he")
-        # Hebrew detail line contains "נכשלות" (failures)
-        assert "נכשלות" in out
