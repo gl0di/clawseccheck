@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .catalog import (
     BY_ID,
-    CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, owasp_for, remediation_for,
+    CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
 from .dedup import deduplicate_findings
 from .guide import suggest_actions
@@ -731,6 +731,7 @@ def _finding_to_dict(f: Finding) -> dict:
             "pass_confidence": getattr(f, "pass_confidence", None),
             "suppressed": bool(getattr(f, "suppressed", False)),
             "owasp": list(owasp_for(f.id)),
+            "ast": list(ast_for(f.id)),
             "remediation": remediation_for(f.id),
             "evidence": [_sanitize(e) for e in (f.evidence or [])],
             "surface": _meta.surface if _meta is not None else ""}

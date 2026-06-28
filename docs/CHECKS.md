@@ -628,7 +628,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: Prompt Injection / Unicode Evasion
 - Scored: yes
 - Confidence: MEDIUM
-- OWASP: none
+- OWASP: LLM01 Prompt Injection
 - What it checks: Unicode-obfuscated injection / hidden-text evasion
 - Remediation:
   - none
@@ -640,7 +640,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: Data Exfiltration / Markdown Injection
 - Scored: yes
 - Confidence: MEDIUM
-- OWASP: none
+- OWASP: LLM02 Sensitive Information Disclosure, LLM01 Prompt Injection
 - What it checks: Markdown-image data-exfil via remote URL
 - Remediation:
   - none
@@ -652,7 +652,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: Agentic Worm / Self-Replication
 - Scored: yes
 - Confidence: MEDIUM
-- OWASP: none
+- OWASP: LLM01 Prompt Injection
 - What it checks: Prompt self-replication / propagation directive
 - Remediation:
   - none
@@ -664,7 +664,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: Credential Theft / Supply Chain
 - Scored: yes
 - Confidence: MEDIUM
-- OWASP: none
+- OWASP: LLM02 Sensitive Information Disclosure, LLM01 Prompt Injection
 - What it checks: Cross-agent config snooping / credential theft
 - Remediation:
   - none
@@ -704,7 +704,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: Prompt Injection / Instruction Hierarchy
 - Scored: yes
 - Confidence: MEDIUM
-- OWASP: none
+- OWASP: LLM01 Prompt Injection
 - What it checks: Instruction-hierarchy override detector
 - Remediation:
   - none
@@ -752,7 +752,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: Least Privilege / Filesystem Write
 - Scored: no
 - Confidence: HIGH
-- OWASP: none
+- OWASP: LLM06 Excessive Agency
 - What it checks: apply_patch workspace-only restriction disabled
 - Remediation:
   - none
@@ -764,7 +764,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: Least Privilege / Inline Eval
 - Scored: no
 - Confidence: HIGH
-- OWASP: none
+- OWASP: LLM06 Excessive Agency
 - What it checks: exec inline-eval gate missing when exec enabled
 - Remediation:
   - none
@@ -788,7 +788,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: Least Privilege / Node Commands
 - Scored: no
 - Confidence: HIGH
-- OWASP: none
+- OWASP: LLM06 Excessive Agency
 - What it checks: gateway.nodes.denyCommands ineffective patterns (non-exact entries)
 - Remediation:
   - none
@@ -800,7 +800,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: Least Privilege / Subagents
 - Scored: no
 - Confidence: HIGH
-- OWASP: none
+- OWASP: LLM06 Excessive Agency
 - What it checks: subagents.allowAgents wildcard (any agent as spawn target)
 - Remediation:
   - none
@@ -910,7 +910,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: MCP / External Endpoint Review
 - Scored: no
 - Confidence: HIGH
-- OWASP: none
+- OWASP: LLM03 Supply Chain
 - What it checks: Non-local MCP server endpoint (manual review)
 - Remediation:
   - none
@@ -934,7 +934,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: Prompt Injection / HTML Attribute
 - Scored: no
 - Confidence: HIGH
-- OWASP: none
+- OWASP: LLM01 Prompt Injection
 - What it checks: Injection-like text in HTML image attributes
 - Remediation:
   - none

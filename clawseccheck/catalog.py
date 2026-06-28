@@ -396,6 +396,89 @@ OWASP_LLM_2025 = {
     "LLM10": "Unbounded Consumption",
 }
 
+# OWASP Agentic Skills Top 10 (2026 Edition) — agent-SKILL-specific threat classes.
+# Grounded against owasp.org/www-project-agentic-skills-top-10 (v1.0 2026, status:
+# "candidate / active development"). Titles verbatim from the published list.
+OWASP_AST_2026 = {
+    "AST01": "Malicious Skills",
+    "AST02": "Supply Chain Compromise",
+    "AST03": "Over-Privileged Skills",
+    "AST04": "Insecure Metadata",
+    "AST05": "Untrusted External Instructions",
+    "AST06": "Weak Isolation",
+    "AST07": "Update Drift",
+    "AST08": "Poor Scanning",
+    "AST09": "No Governance",
+    "AST10": "Cross-Platform Reuse",
+}
+
+# Each skill-relevant check -> OWASP Agentic Skills Top 10 (2026) class(es). Only clean
+# fits are tagged; agent-/network-only or pure-config-hygiene checks are intentionally
+# left out (ast_for returns ()). AST10 Cross-Platform Reuse has no catalog member
+# (single-install scope) — a documented coverage gap.
+AST_MAP = {
+    "B13": ("AST01", "AST02"),
+    "C048": ("AST01",),
+    "B5": ("AST02",),
+    "B15": ("AST02",),
+    "B24": ("AST02",),
+    "B42": ("AST02",),
+    "C5": ("AST02",),
+    "C047": ("AST02",),
+    "B3": ("AST03",),
+    "B8": ("AST03",),
+    "B17": ("AST03",),
+    "B18": ("AST03",),
+    "B31": ("AST03",),
+    "B32": ("AST03",),
+    "B41": ("AST03",),
+    "B43": ("AST03",),
+    "B45": ("AST03",),
+    "B46": ("AST03",),
+    "B47": ("AST03",),
+    "B55": ("AST03",),
+    "B68": ("AST03",),
+    "B69": ("AST03",),
+    "B71": ("AST03",),
+    "B72": ("AST03",),
+    "B6": ("AST04", "AST05"),
+    "B44": ("AST03", "AST04"),
+    "B62": ("AST04",),
+    "B7": ("AST05",),
+    "B20": ("AST05",),
+    "B21": ("AST05",),
+    "B23": ("AST05", "AST03"),
+    "B26": ("AST05",),
+    "B30": ("AST05",),
+    "B58": ("AST05",),
+    "B59": ("AST05",),
+    "B60": ("AST01", "AST05"),
+    "B61": ("AST05",),
+    "B63": ("AST01", "AST05"),
+    "B64": ("AST05",),
+    "B65": ("AST01", "AST05"),
+    "B66": ("AST05",),
+    "B67": ("AST05",),
+    "C074": ("AST05",),
+    "B4": ("AST06",),
+    "B22": ("AST03", "AST06"),
+    "B39": ("AST06",),
+    "B48": ("AST06", "AST03"),
+    "B70": ("AST06",),
+    "B25": ("AST02", "AST07"),
+    "B33": ("AST07",),
+    "C4": ("AST07",),
+    "C6": ("AST07",),
+    "B16": ("AST08", "AST09"),
+    "B10": ("AST09",),
+    "B50": ("AST09",),
+    "B51": ("AST09",),
+    "B52": ("AST09",),
+    "B53": ("AST09",),
+    "B54": ("AST09",),
+    "B57": ("AST02", "AST03"),
+}
+
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
 # surface. Only clear fits are tagged; checks with no clean LLM-Top-10 analog (host-watch
 # B50–B54, logging B10, monitoring B16, SSRF B38, backups C3) are intentionally left
@@ -457,12 +540,30 @@ OWASP_MAP = {
     "B67": ("LLM01", "LLM02"),
     "C4": ("LLM03",),
     "C5": ("LLM03",),
+    # Gap-fill additions (E-013): content-injection and config-hygiene checks now mapped.
+    "B58": ("LLM01",),
+    "B59": ("LLM02", "LLM01"),
+    "B60": ("LLM01",),
+    "B61": ("LLM02", "LLM01"),
+    "B64": ("LLM01",),
+    "B68": ("LLM06",),
+    "B69": ("LLM06",),
+    "B71": ("LLM06",),
+    "B72": ("LLM06",),
+    "C074": ("LLM01",),
+    "C047": ("LLM03",),
 }
 
 
 def owasp_for(check_id: str) -> tuple:
     """OWASP-LLM-2025 code(s) a check maps to, or () if it has no clean LLM-Top-10 analog."""
     return OWASP_MAP.get(check_id, ())
+
+
+def ast_for(check_id: str) -> tuple:
+    """OWASP Agentic Skills Top 10 (2026) code(s) a check maps to, or () if it has
+    no clean agent-skill analog (agent-/network-only or pure config hygiene)."""
+    return AST_MAP.get(check_id, ())
 
 
 # ── Paste-ready remediation (additive; surfaced by --fix / --json / SARIF) ────────

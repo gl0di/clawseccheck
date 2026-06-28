@@ -58,12 +58,12 @@ OWASP Agentic (ASI) classes below, not stretched into a category they don't fit.
 
 | Code | Category | ClawSecCheck checks |
 |---|---|---|
-| LLM01 | Prompt Injection | A1, B2, B6, B21, B23, B26, B30, B48 |
-| LLM02 | Sensitive Information Disclosure | B1, B9, B11, B14, B19, B39, B41 |
-| LLM03 | Supply Chain | B5, B13, B15, B24, B25, B33, B42, C4, C5 |
+| LLM01 | Prompt Injection | A1, B2, B6, B21, B23, B26, B30, B48, B58, B60, B64, C074 |
+| LLM02 | Sensitive Information Disclosure | B1, B9, B11, B14, B19, B39, B41, B59, B61 |
+| LLM03 | Supply Chain | B5, B13, B15, B24, B25, B33, B42, C4, C5, C047 |
 | LLM04 | Data and Model Poisoning | B7, B20, B22 |
 | LLM05 | Improper Output Handling | B21, B47 |
-| LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48 |
+| LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B68, B69, B71, B72 |
 | LLM07 | System Prompt Leakage | B9 |
 | LLM08 | Vector and Embedding Weaknesses | — (no agent-config surface; RAG/embedding concern) |
 | LLM09 | Misinformation | — (model output / overreliance; out of scope) |
@@ -74,12 +74,41 @@ ClawSecCheck reads. **Excessive Agency (LLM06)** is where the tool is densest �
 multi-agent privilege-separation arc (B45/B46/B47) lands here, exactly the agent-specific
 surface a web/code reviewer never sees.
 
-### OWASP Agentic (ASI) threat classes — by name
+### OWASP Agentic Skills Top 10 (2026)
 
-The agent-specific framework is the **OWASP Agentic Security Initiative (ASI)** taxonomy.
-Mapped by threat *name* (the exact ASI numbering should be reconciled against the published
-ASI Top 10 / Agentic Threats & Mitigations doc before being treated as canonical — not
-stamped here):
+> **Status:** candidate / active development.
+> **Source:** <https://owasp.org/www-project-agentic-skills-top-10> (v1.0 2026).
+
+The machine-readable mapping is `catalog.AST_MAP` / `ast_for(id)` and is surfaced per
+finding in `--json` (`"ast": [...]`).
+
+| AST code | Category | ClawSecCheck checks |
+|---|---|---|
+| AST01 | Malicious Skills | B13, B60, B63, B65, C048 |
+| AST02 | Supply Chain Compromise | B5, B13, B15, B24, B25, B42, B57, C5, C047 |
+| AST03 | Over-Privileged Skills | B3, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B68, B69, B71, B72 |
+| AST04 | Insecure Metadata | B6, B44, B62 |
+| AST05 | Untrusted External Instructions | B6, B7, B20, B21, B23, B26, B30, B58, B59, B61, B63, B64, B65, B66, B67, C074 |
+| AST06 | Weak Isolation | B4, B22, B39, B48, B70 |
+| AST07 | Update Drift | B25, B33, C4, C6 |
+| AST08 | Poor Scanning | B16 |
+| AST09 | No Governance | B10, B16, B50, B51, B52, B53, B54 |
+| AST10 | Cross-Platform Reuse | — (documented coverage gap: single-install scope) |
+
+**Coverage notes:**
+
+- **AST10** (Cross-Platform Reuse) has no catalog check — ClawSecCheck audits a single
+  install; cross-platform reuse hazards require a multi-deployment view that is out of
+  scope for this tool.
+- **B7** (Memory poisoning) and **B57** (Plugin auto-approve) placements diverge
+  intentionally from a naive surface mapping: B7 maps to AST05 (external instructions
+  reaching memory), not AST04; B57 maps to AST02/AST03 (supply-chain + privilege),
+  reflecting its dual exposure.
+
+### OWASP Agentic Security Initiative (ASI) — by threat name
+
+The original ASI taxonomy (pre-AST-2026 numbering) mapped by threat *name*; retained for
+historical continuity. The numbered AST-2026 table above supersedes this for new integrations.
 
 | ASI threat class | ClawSecCheck checks |
 |---|---|
@@ -94,12 +123,9 @@ stamped here):
 | Human-agent trust / decision-fatigue | B8, B18, B23 |
 | Rogue agent misalignment | B17, B22 (partial) |
 
-This is the honest positioning: ClawSecCheck covers the **agent-specific** OWASP classes —
-tool misuse, multi-agent identity/privilege abuse, inter-agent communication, cascading
-blast-radius — that an app-code / OWASP-web reviewer does not touch at all.
-
 **Sources (grounded):** OWASP Top 10 for LLM Applications 2025
-(<https://genai.owasp.org/llm-top-10/>); OWASP Agentic Security Initiative
+(<https://genai.owasp.org/llm-top-10/>); OWASP Agentic Skills Top 10 2026
+(<https://owasp.org/www-project-agentic-skills-top-10>); OWASP Agentic Security Initiative
 (<https://genai.owasp.org/initiatives/agentic-security-initiative/>) and Agentic AI — Threats
 and Mitigations (<https://genai.owasp.org/resource/agentic-ai-threats-and-mitigations/>).
 

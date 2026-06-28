@@ -68,6 +68,7 @@ Shared by `--json`, `--json` with `--risk`, and `--vet` mode.
 | `confidence` | `str` | `"HIGH"`, `"MEDIUM"`, or `"LOW"`. |
 | `suppressed` | `bool` | `true` if the finding was suppressed by the user's baseline. |
 | `owasp` | `array[str]` | OWASP LLM Top 10 codes that apply, e.g. `["LLM01", "LLM02"]`. May be empty. |
+| `ast` | `array[str]` | OWASP Agentic Skills Top 10 (2026) codes that apply, e.g. `["AST03", "AST05"]`. May be empty. Additive metadata only — no scoring or verdict impact. |
 | `remediation` | `object` | Paste-ready remediation. Keys: `commands` (`array[str]`) and `config` (`array[object]`). |
 | `evidence` | `array[str]` | Supporting evidence strings (sanitised; no raw secrets). May be empty. |
 | `surface` | `str` | OpenClaw surface slug this check belongs to (e.g. `"gateway"`, `"tools"`, `"bootstrap"`). `""` for findings not in the CATALOG (e.g. MCP-vet diagnostics). One of the 14 slugs in `catalog.SURFACES` or `""`. |
@@ -101,6 +102,7 @@ item describes a manual configuration step.
   "confidence": "HIGH",
   "suppressed": false,
   "owasp": ["LLM02"],
+  "ast": [],
   "remediation": {
     "commands": [],
     "config": []
