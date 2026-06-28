@@ -232,6 +232,13 @@ When trifecta is 1/3 or 0/3:
 - Trifecta chip: shown on line 2 at 3/3 (🔴 — all three legs active) and at 2/3 (🦞 — one step
   away; still dangerous). At 1/3 or 0/3, omit it from line 2 (the A1 finding covers it if present).
 - Issue count: non-suppressed findings with `status` `FAIL` or `WARN`.
+- **When trifecta is 2/3 or 3/3**, add a plain-language explanation on the very next line (before
+  the FIX FIRST block). Read `findings[id="A1"].evidence` to know which legs are active.
+  The three legs are: **(1) untrusted input** — external channels/skills feed into the model;
+  **(2) sensitive data** — secrets, memory, or credentials are in scope; **(3) outbound actions** —
+  the agent can take actions online (web, MCP, exec). Example lines:
+  - 3/3: "All three Lethal Trifecta legs are active: your agent receives outside input, has access to sensitive data, and can act online. One injected prompt is enough to exfiltrate everything."
+  - 2/3: "Two of three Lethal Trifecta legs are active: [name the two active legs]. If a third leg activates — even temporarily — the combination becomes immediately exploitable."
 
 **Section 2 — FIX FIRST + projection**
 
@@ -281,19 +288,23 @@ field and map it to the family name using the table below):
 | 🔧 | Automation & Maintenance | hooks · update |
 
 For each finding: severity dot + severity label + plain-language title + surface family tag in
-brackets, then `why:` and `fix:` indented on the next lines. Match the worked example layout:
+brackets, then **mandatory** `why:` and `fix:` indented on the next lines.
+
+**`why:` and `fix:` are required for every single finding — never skip them.** One line each.
+`why:` = what an attacker can actually do, or what goes wrong. `fix:` = the concrete config change.
+Do NOT just restate the title. Do NOT omit these lines to save space.
 
 ```
 — Findings —
-🔴 CRITICAL  insecure control-UI auth  [Surface: Exposure & Network]
-    why: gateway.controlUi.allowInsecureAuth is set to true — anyone on your network can send commands to your agent
-    fix: set gateway.controlUi.allowInsecureAuth to false
-🟠 HIGH  tool profile broader than minimal  [Surface: Privilege & Execution]
-    why: tools.profile grants more permissions than the task requires
-    fix: set tools.profile to "minimal"
-🟡 MEDIUM  Telegram context too broad  [Surface: Exposure & Network]
-    why: channels.telegram.contextVisibility exposes more context than necessary
-    fix: set channels.telegram.contextVisibility to "restricted"
+🔴 CRITICAL  insecure control-UI auth  [Exposure & Network]
+    why: anyone on your local network can send commands to your agent right now — no pairing or auth required
+    fix: set gateway.controlUi.allowInsecureAuth to false in openclaw.json
+🟠 HIGH  tool profile broader than minimal  [Privilege & Execution]
+    why: the "coding" profile gives the agent filesystem write, shell, and package-install access — a hijacked agent can run arbitrary code
+    fix: change tools.profile to "minimal"; add only the tools you actually use
+🟡 MEDIUM  Telegram context too broad  [Exposure & Network]
+    why: every message in the channel feeds into the model — a malicious message can inject instructions or leak prior conversation
+    fix: set channels.telegram.contextVisibility to "allowlist" or "allowlist_quote"
 ```
 
 **Section 4 — Coverage of OpenClaw surfaces**
@@ -316,10 +327,13 @@ If any findings have `confidence` = `"MEDIUM"` or `"ATTESTED"`:
 
 ```
 👀 Worth a glance — lower-confidence heuristics, confirm before acting:
-  • {plain-language description}
+  • {plain-language title}: {what the specific concern is and why it matters}
+    → to confirm: {one action the user can take to verify or dismiss it}
 ```
 
-Frame as heuristics — not definitive findings. The user should confirm before acting on them.
+Frame as heuristics — not definitive findings. Each bullet must say **what was seen and why it
+could matter** — never just a label. Include a concrete confirmation step so the user knows what
+to do next. The user should confirm before acting on them.
 
 **Section 6 — Scope + history**
 
