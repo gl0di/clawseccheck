@@ -745,6 +745,78 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B68 - apply_patch workspace-only restriction disabled
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Filesystem Write
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: apply_patch workspace-only restriction disabled
+- Remediation:
+  - none
+
+### B69 - exec inline-eval gate missing when exec enabled
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Inline Eval
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: exec inline-eval gate missing when exec enabled
+- Remediation:
+  - none
+
+### B70 - trustedProxy allowLoopback on non-loopback bind (header-spoof surface)
+
+- Severity: LOW
+- Block: hardening
+- Framework: Zero Trust / Proxy Headers
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: trustedProxy allowLoopback on non-loopback bind (header-spoof surface)
+- Remediation:
+  - none
+
+### B71 - gateway.nodes.denyCommands ineffective patterns (non-exact entries)
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Node Commands
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: gateway.nodes.denyCommands ineffective patterns (non-exact entries)
+- Remediation:
+  - none
+
+### B72 - subagents.allowAgents wildcard (any agent as spawn target)
+
+- Severity: LOW
+- Block: hardening
+- Framework: Least Privilege / Subagents
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: subagents.allowAgents wildcard (any agent as spawn target)
+- Remediation:
+  - none
+
+### B73 - mDNS full advertisement on non-loopback gateway bind
+
+- Severity: LOW
+- Block: hardening
+- Framework: Least Privilege / Discovery
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: mDNS full advertisement on non-loopback gateway bind
+- Remediation:
+  - none
+
 ## Advisory checks
 
 ### C3 - Backups of SOUL.md / memory

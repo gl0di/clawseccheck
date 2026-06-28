@@ -318,6 +318,27 @@ CATALOG: list[CheckMeta] = [
               MEDIUM, "hardening", "Prompt Injection / Trust Boundary",
               confidence="MEDIUM",
               surface="bootstrap"),
+    # B68–B73 (v1.20.0): advisory WARN-only config-fact checks. scored=False so they
+    # never move the A–F grade. Each fires only on the explicit dangerous value;
+    # default/absent → UNKNOWN or PASS (zero false-positive FAILs on real configs).
+    CheckMeta("B68", "apply_patch workspace-only restriction disabled",
+              MEDIUM, "hardening", "Least Privilege / Filesystem Write", scored=False,
+              surface="tools"),
+    CheckMeta("B69", "exec inline-eval gate missing when exec enabled",
+              MEDIUM, "hardening", "Least Privilege / Inline Eval", scored=False,
+              surface="tools"),
+    CheckMeta("B70", "trustedProxy allowLoopback on non-loopback bind (header-spoof surface)",
+              LOW, "hardening", "Zero Trust / Proxy Headers", scored=False,
+              surface="gateway"),
+    CheckMeta("B71", "gateway.nodes.denyCommands ineffective patterns (non-exact entries)",
+              MEDIUM, "hardening", "Least Privilege / Node Commands", scored=False,
+              surface="gateway"),
+    CheckMeta("B72", "subagents.allowAgents wildcard (any agent as spawn target)",
+              LOW, "hardening", "Least Privilege / Subagents", scored=False,
+              surface="agents"),
+    CheckMeta("B73", "mDNS full advertisement on non-loopback gateway bind",
+              LOW, "hardening", "Least Privilege / Discovery", scored=False,
+              surface="gateway"),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False,
               surface="bootstrap"),

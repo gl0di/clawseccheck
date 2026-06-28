@@ -7556,6 +7556,259 @@ def check_per_source_trust_contracts(ctx: Context) -> Finding:
     )
 
 
+# ── B68–B73 (v1.20.0): advisory WARN-only config-fact checks ──────────────────
+
+_B71_INEFFECTIVE_RE = re.compile(r"[ *|&;/]|--")
+
+
+def check_exec_applypatch_workspace(ctx: Context) -> Finding:
+    """B68 — apply_patch workspace-only restriction.
+
+    Grounded (docs.openclaw.ai/tools/exec): tools.exec.applyPatch.workspaceOnly (bool,
+    default true). When false, apply_patch may write or delete files outside the workspace
+    root, expanding the write blast radius.
+
+    PASS — field is true or unset (safe default).
+    WARN — field is explicitly false.
+    """
+    cfg = ctx.config
+    val = dig(cfg, "tools.exec.applyPatch.workspaceOnly")
+    if val is False:
+        return _finding(
+            "B68", WARN,
+            "tools.exec.applyPatch.workspaceOnly is false — apply_patch may write or delete "
+            "files outside the workspace root, expanding the write blast radius.",
+            "Set tools.exec.applyPatch.workspaceOnly to true so apply_patch is restricted "
+            "to the workspace directory.",
+            evidence=["tools.exec.applyPatch.workspaceOnly=false (workspace restriction disabled)"],
+        )
+    return _finding(
+        "B68", PASS,
+        "apply_patch is restricted to the workspace (workspaceOnly=true or default).",
+        "Keep tools.exec.applyPatch.workspaceOnly set to true.",
+    )
+
+
+def check_exec_strict_inline_eval(ctx: Context) -> Finding:
+    """B69 — exec inline-eval approval gate.
+
+    Grounded (docs.openclaw.ai/tools/exec): tools.exec.strictInlineEval (bool). With
+    interpreter tools allowlisted, setting this true ensures inline eval still requires
+    approval even when exec mode would allow automated execution.
+
+    UNKNOWN — field not set; only relevant when interpreter tools are allowlisted.
+    WARN    — field is false AND tools.exec.mode is set and not "deny".
+    PASS    — field is true, or exec mode is "deny" / absent.
+    """
+    cfg = ctx.config
+    val = dig(cfg, "tools.exec.strictInlineEval")
+    if val is None:
+        return _finding(
+            "B69", UNKNOWN,
+            "tools.exec.strictInlineEval is not set; the field is only relevant when "
+            "interpreter tools are allowlisted alongside exec.",
+            "If interpreter tools are allowlisted with exec enabled, set "
+            "tools.exec.strictInlineEval to true.",
+        )
+    exec_mode = dig(cfg, "tools.exec.mode")
+    if val is False and exec_mode is not None and exec_mode != "deny":
+        return _finding(
+            "B69", WARN,
+            "tools.exec.strictInlineEval is false while exec is enabled — inline eval "
+            "in interpreter tools can run without an approval gate.",
+            "Set tools.exec.strictInlineEval to true so inline eval in interpreter "
+            "tools still requires approval.",
+            evidence=[
+                "tools.exec.strictInlineEval=false",
+                f"tools.exec.mode={exec_mode!r} (exec active)",
+            ],
+        )
+    return _finding(
+        "B69", PASS,
+        "exec inline-eval approval is enforced or exec is not active.",
+        "Keep tools.exec.strictInlineEval set to true when exec is enabled with "
+        "interpreter tools.",
+    )
+
+
+def check_trustedproxy_loopback(ctx: Context) -> Finding:
+    """B70 — trustedProxy allowLoopback on non-loopback bind.
+
+    Grounded (docs.openclaw.ai/gateway/security): gateway.auth.trustedProxy.allowLoopback
+    (bool). Trusted-proxy auth delegates authentication to a reverse-proxy header; on a
+    non-loopback bind an attacker can forge that header.
+
+    UNKNOWN — field not set; trusted-proxy auth not configured.
+    PASS    — allowLoopback=true AND gateway bind is loopback (legitimate local setup).
+    WARN    — allowLoopback=true AND gateway bind is non-loopback (header-spoof surface).
+    """
+    cfg = ctx.config
+    val = dig(cfg, "gateway.auth.trustedProxy.allowLoopback")
+    if val is None:
+        return _finding(
+            "B70", UNKNOWN,
+            "gateway.auth.trustedProxy.allowLoopback is not set — trusted-proxy auth is "
+            "not configured.",
+            "If you use a reverse proxy, configure gateway.auth.trustedProxy explicitly "
+            "and bind the gateway to loopback.",
+        )
+    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    if val is True and bind_host not in LOOPBACK:
+        return _finding(
+            "B70", WARN,
+            "gateway.auth.trustedProxy.allowLoopback is true and the gateway is bound to a "
+            "non-loopback address — a header-spoofing attacker can forge the trusted-proxy "
+            "header.",
+            "Bind the gateway to loopback (127.0.0.1) when using trustedProxy auth, or "
+            "disable gateway.auth.trustedProxy.allowLoopback.",
+            evidence=[
+                "gateway.auth.trustedProxy.allowLoopback=true",
+                f"gateway.bind host={bind_host!r} (non-loopback)",
+            ],
+        )
+    return _finding(
+        "B70", PASS,
+        "Trusted-proxy auth is loopback-only or not configured (no header-spoof risk).",
+        "Keep gateway.auth.trustedProxy.allowLoopback disabled or ensure the gateway "
+        "binds to loopback.",
+    )
+
+
+def check_node_denycommands_ineffective(ctx: Context) -> Finding:
+    """B71 — gateway.nodes.denyCommands ineffective patterns.
+
+    Grounded (docs.openclaw.ai/gateway/nodes): denyCommands matching is exact command-name
+    only (e.g. 'system.run'); entries containing spaces, shell metacharacters, globs, or
+    path separators are silently ineffective.
+
+    UNKNOWN — denyCommands absent or empty; no deny list configured.
+    WARN    — denyCommands non-empty and at least one entry looks non-exact.
+    PASS    — all entries are bare exact command names.
+    """
+    cfg = ctx.config
+    deny = dig(cfg, "gateway.nodes.denyCommands")
+    if not deny or not isinstance(deny, list):
+        return _finding(
+            "B71", UNKNOWN,
+            "gateway.nodes.denyCommands is absent or empty — no node command deny list "
+            "is configured.",
+            "If you want to block specific node commands, set gateway.nodes.denyCommands "
+            "to bare exact command names (e.g. 'system.run').",
+        )
+    offenders = [str(e) for e in deny if isinstance(e, str) and _B71_INEFFECTIVE_RE.search(e)]
+    if offenders:
+        return _finding(
+            "B71", WARN,
+            "gateway.nodes.denyCommands contains entries with spaces, shell metacharacters, "
+            "globs, or path separators — these patterns are silently ineffective because "
+            "matching is exact command-name only.",
+            "Replace ineffective denyCommands entries with bare exact command names only "
+            "(e.g. 'system.run', not 'system.run --flag' or 'system*').",
+            evidence=[f"ineffective denyCommands entry: {e!r}" for e in offenders],
+        )
+    return _finding(
+        "B71", PASS,
+        "All gateway.nodes.denyCommands entries are bare exact command names.",
+        "Keep gateway.nodes.denyCommands entries as bare exact command names without "
+        "spaces, globs, or path separators.",
+    )
+
+
+def check_subagents_allow_agents(ctx: Context) -> Finding:
+    """B72 — subagents.allowAgents wildcard.
+
+    Grounded (docs.openclaw.ai/agents/subagents): agents.defaults.subagents.allowAgents
+    (list) and agents.list[].subagents.allowAgents. '*' allows any configured agent as a
+    spawn target; the default restricts spawning to the requesting agent only.
+
+    UNKNOWN — neither defaults nor any per-agent allowAgents is configured.
+    WARN    — any allowAgents list contains '*'.
+    PASS    — all allowAgents use explicit non-'*' lists.
+    """
+    cfg = ctx.config
+    defaults_allow = dig(cfg, "agents.defaults.subagents.allowAgents")
+    agent_list = dig(cfg, "agents.list") or []
+    offenders = []
+    if isinstance(defaults_allow, list) and "*" in defaults_allow:
+        offenders.append("agents.defaults.subagents.allowAgents contains \"*\"")
+    for i, agent in enumerate(agent_list):
+        if not isinstance(agent, dict):
+            continue
+        per = dig(agent, "subagents.allowAgents")
+        if isinstance(per, list) and "*" in per:
+            name = agent.get("name", str(i))
+            offenders.append(f"agents.list[{name}].subagents.allowAgents contains \"*\"")
+    if offenders:
+        return _finding(
+            "B72", WARN,
+            "agents.defaults.subagents.allowAgents (or a per-agent override) contains "
+            "\"*\" — any configured agent can be spawned as a subagent, enabling broad "
+            "delegation.",
+            "Replace the \"*\" wildcard in subagents.allowAgents with an explicit list "
+            "of permitted target agents.",
+            evidence=offenders,
+        )
+    has_config = isinstance(defaults_allow, list) or any(
+        isinstance(a, dict) and dig(a, "subagents.allowAgents") is not None
+        for a in agent_list
+    )
+    if not has_config:
+        return _finding(
+            "B72", UNKNOWN,
+            "agents.defaults.subagents.allowAgents is not configured — the default "
+            "restricts subagent spawning to the requesting agent only.",
+            "The default is safe; only configure agents.defaults.subagents.allowAgents "
+            "if you explicitly need cross-agent delegation.",
+        )
+    return _finding(
+        "B72", PASS,
+        "All subagents.allowAgents configurations use explicit agent lists (no \"*\" wildcard).",
+        "Keep subagents.allowAgents as an explicit agent list to restrict delegation scope.",
+    )
+
+
+def check_discovery_mdns_mode(ctx: Context) -> Finding:
+    """B73 — mDNS full advertisement on non-loopback gateway bind.
+
+    Grounded (docs.openclaw.ai/gateway/discovery): discovery.mdns.mode enum
+    ('minimal' default / 'off' / 'full'). 'full' with a non-loopback gateway bind
+    broadly advertises the agent on the local network.
+
+    PASS — mode is 'minimal', 'off', unset (default 'minimal'), or 'full' with loopback.
+    WARN — mode == 'full' AND gateway bind is non-loopback.
+    """
+    cfg = ctx.config
+    mode = dig(cfg, "discovery.mdns.mode")
+    if mode != "full":
+        return _finding(
+            "B73", PASS,
+            "mDNS discovery is minimal, off, or limited to a loopback bind (no broad "
+            "advertisement risk).",
+            "Keep discovery.mdns.mode at 'minimal' or 'off' when the gateway is exposed "
+            "beyond loopback.",
+        )
+    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    if bind_host in LOOPBACK:
+        return _finding(
+            "B73", PASS,
+            "mDNS discovery is minimal, off, or limited to a loopback bind (no broad "
+            "advertisement risk).",
+            "Keep discovery.mdns.mode at 'minimal' or 'off' when the gateway is exposed "
+            "beyond loopback.",
+        )
+    return _finding(
+        "B73", WARN,
+        "discovery.mdns.mode is 'full' with the gateway bound to a non-loopback address "
+        "— this broadly advertises the agent on the local network.",
+        "Set discovery.mdns.mode to 'minimal' or 'off', or bind the gateway to loopback "
+        "when using full mDNS advertisement.",
+        evidence=[
+            "discovery.mdns.mode=full",
+            f"gateway.bind host={bind_host!r} (non-loopback)",
+        ],
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_secrets_at_rest_home, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -7592,6 +7845,12 @@ CHECKS = [
     check_conditional_sleeper_trigger,
     check_persona_jailbreak,
     check_per_source_trust_contracts,
+    check_exec_applypatch_workspace,
+    check_exec_strict_inline_eval,
+    check_trustedproxy_loopback,
+    check_node_denycommands_ineffective,
+    check_subagents_allow_agents,
+    check_discovery_mdns_mode,
 ]
 
 
