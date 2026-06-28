@@ -3,6 +3,43 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.0.0] — 2026-06-28
+
+English-only output. The `--lang` flag and all Hebrew strings are removed.
+This is a BREAKING change for any integrator that relied on `--lang he` output.
+
+### Breaking
+
+- **`--lang` CLI flag removed.** Passing `--lang` (or `--lang he`) now raises an
+  error. Output is English-only; no language selection is possible.
+- **`SKILL_HE.md` deleted.** ClawHub Hebrew skill variant is gone.
+- **`i18n.py` API collapsed.** `tp()`, `title_for()`, `is_rtl()` removed.
+  Only `t(key, **kw)` remains. Any code that called the removed functions
+  must be updated.
+- **`pass_confidence` field added to `--json` output** (see `docs/OUTPUT_SCHEMA.md`).
+  New optional field — not breaking for readers, but schema validators that
+  use `additionalProperties: false` must be updated.
+
+### Changed
+
+- `i18n.py` collapsed from ~3 500 lines to ~95 lines. Flat `STRINGS` dict +
+  single `t(key, **kw)` function. Extra kwargs silently ignored (Python
+  `str.format` behaviour — no exception, correct output).
+- `cli.py`: `--lang` flag removed, bilingual section headers removed.
+- All callers updated to use `t()` directly.
+- `report.py`: inlined `lang="en"` attribute; removed dead variable.
+- `docs/OUTPUT_SCHEMA.md`: v2.0.0 contract baseline documented;
+  `pass_confidence` field added to Finding Object table.
+
+### Added
+
+- CI: `markdownlint`, `secret-scan` (gitleaks binary), `commit-integrity`,
+  `dependency-review` jobs. All run on every push and PR.
+- CI: `CODEOWNERS` (`@gl0di` owns all files), `dependabot.yml`
+  (GitHub Actions weekly), `.gitleaks.toml`.
+- `.gitignore`: agent config files (CLAUDE.md, .claude/, .cursor, etc.)
+  blocked from ever shipping in the published skill.
+
 ## [1.32.0] — 2026-06-28
 
 Framework mapping (ЗАХОД-2): maps the skill checks to the OWASP Agentic Skills Top 10, the skill-specific threat taxonomy, and fills the OWASP-LLM gaps for the prompt-injection / excessive-agency families. Pure additive metadata — no change to the A–F grade, scoring, or verdicts.
