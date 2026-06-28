@@ -3,6 +3,22 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.0.1] — 2026-06-28
+
+Two trifecta false-negatives fixed: the untrusted-input leg now counts `allowlist` and
+`paired` channels (not just `open`), and the thin-surface guard prevents a spurious PASS
+when the agent's runtime tools are unknown from config.
+
+### Fixed
+- **B-032**: `_open_channels()` was used for trifecta/B41/risk untrusted-input detection,
+  missing agents reachable via `allowlist` or `paired` Telegram/Discord channels.
+  Introduced `_external_input_channels()` (policies: `open | allowlist | paired`) for
+  all external-ingress callers; `_open_channels()` retained for B2 ("anyone can command").
+- **B-033**: `check_trifecta()` returned PASS when `openclaw.json` had no `tools` block
+  and no external channels, silently ignoring runtime-granted tools (`message`,
+  `exec_command`, `web_*`). Now returns `WARN` with an explicit "Runtime tools not
+  visible in config" note, prompting `--ask` attestation or manual trifecta review.
+
 ## [2.0.0] — 2026-06-28
 
 English-only output. The `--lang` flag and all Hebrew strings are removed.
