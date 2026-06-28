@@ -255,14 +255,16 @@ def test_risk06_b32_fail_plus_open_channel():
     assert r06.severity == CRITICAL
 
 
-def test_risk06_b32_fail_no_open_surface_no_fire():
+def test_risk06_b32_fail_owner_only_surface_no_fire():
+    # owner-only channel = no external ingress → RISK-06 must not fire even with B32 FAIL.
+    # allowlist channels ARE external ingress (B-032), so use owner-only here.
     from clawseccheck.catalog import Finding
     fake_b32 = Finding(
         id="B32", title="Control plane exposed", severity=CRITICAL,
         status=FAIL, detail="test", fix="test",
         framework="Control Plane", scored=False,
     )
-    cfg = {"channels": {"telegram": {"dmPolicy": "allowlist"}}}
+    cfg = {"channels": {"telegram": {"dmPolicy": "owner-only"}}}
     ctx = _ctx(cfg)
     f = _findings(ctx) + [fake_b32]
     paths = risk_paths(ctx, f)

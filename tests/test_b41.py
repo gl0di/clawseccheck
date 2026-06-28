@@ -143,12 +143,13 @@ def test_b41_open_channel_but_no_outbound_passes():
 
 
 def test_b41_outbound_tool_but_no_ingress_passes():
-    # Outbound capability (deploy) but no open/input ingress — reachable=False.
+    # Outbound capability (deploy) but no external ingress (owner-only channel) — reachable=False.
     # Note: "email_send" contains the substring "email" which matches INPUT_TOOL_HINTS,
     # so it counts as both ingress and outbound.  Use "deploy" (pure outbound) instead.
+    # allowlist channels ARE considered external ingress (B-032), so use owner-only here.
     cfg = {
         "auth": {"profiles": {"google:owner@example.com": {}}},
-        "channels": {"telegram": {"dmPolicy": "allowlist"}},
+        "channels": {"telegram": {"dmPolicy": "owner-only"}},
         "tools": {"allow": ["deploy"]},
     }
     f = check_credential_blast_radius(_ctx(cfg))

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from clawseccheck import audit
-from clawseccheck.catalog import FAIL, PASS, UNKNOWN
+from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -89,3 +89,57 @@ def test_read_only_no_writes(tmp_path):
     audit(tmp_path)
     after = {p: p.stat().st_mtime_ns for p in tmp_path.rglob("*")}
     assert before == after
+
+
+# ── B-032: _open_channels() must count paired/allowlist as untrusted input ─────
+
+def test_a1_paired_channel_counts_as_untrusted_input(tmp_path):
+    """paired Telegram raises the untrusted-input leg (B-032)."""
+    (tmp_path / "openclaw.json").write_text(
+        '{"channels": {"telegram": {"dmPolicy": "paired"}}}'
+    )
+    (tmp_path / "openclaw.json").chmod(0o600)
+    f = _by_id(audit(tmp_path)[1])["A1"]
+    assert "untrusted input" in (f.evidence or [])
+
+
+def test_a1_allowlist_channel_counts_as_untrusted_input(tmp_path):
+    """allowlist Telegram raises the untrusted-input leg (B-032)."""
+    (tmp_path / "openclaw.json").write_text(
+        '{"channels": {"telegram": {"dmPolicy": "allowlist"}}}'
+    )
+    (tmp_path / "openclaw.json").chmod(0o600)
+    f = _by_id(audit(tmp_path)[1])["A1"]
+    assert "untrusted input" in (f.evidence or [])
+
+
+def test_a1_owner_only_channel_not_untrusted_input(tmp_path):
+    """owner-only channel must NOT raise the untrusted-input leg."""
+    (tmp_path / "openclaw.json").write_text(
+        '{"channels": {"telegram": {"dmPolicy": "owner-only"}}}'
+    )
+    (tmp_path / "openclaw.json").chmod(0o600)
+    f = _by_id(audit(tmp_path)[1])["A1"]
+    assert "untrusted input" not in (f.evidence or [])
+
+
+# ── B-033: check_trifecta() thin-surface guard ──────────────────────────────────
+
+def test_a1_thin_surface_warns_not_passes(tmp_path):
+    """No tool config + no channels → WARN for undetectable runtime capabilities (B-033)."""
+    (tmp_path / "openclaw.json").write_text('{"gateway": {"bind": "127.0.0.1"}}')
+    (tmp_path / "openclaw.json").chmod(0o600)
+    f = _by_id(audit(tmp_path)[1])["A1"]
+    assert f.status == WARN
+    assert "Runtime tools" in f.detail
+
+
+def test_a1_explicit_tools_suppress_thin_surface_warn(tmp_path):
+    """Explicit tools.allow present → thin-surface branch does not fire."""
+    (tmp_path / "openclaw.json").write_text(
+        '{"tools": {"allow": ["exec_command"]}, '
+        '"channels": {"telegram": {"dmPolicy": "allowlist"}}}'
+    )
+    (tmp_path / "openclaw.json").chmod(0o600)
+    f = _by_id(audit(tmp_path)[1])["A1"]
+    assert "Runtime tools" not in f.detail

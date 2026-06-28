@@ -158,7 +158,19 @@ def _channels(cfg: dict) -> dict:
     return ch if isinstance(ch, dict) else {}
 
 
+# Policies that admit ANY non-owner external sender — authenticated source ≠ trusted content.
+# "owner" / "owner-only" / absent / "ask" (per-message approval) are intentionally excluded.
+# _open_channels() uses only "open" for B2 ("anyone can command"); _external_input_channels()
+# uses the full set for trifecta / blast-radius / ingress-path checks (B-032 fix).
+_UNTRUSTED_INPUT_POLICIES = frozenset({"open", "allowlist", "paired"})
+
+
 def _open_channels(cfg: dict) -> list[str]:
+    """Channels where dmPolicy/groupPolicy == 'open' (truly public — anyone can command).
+
+    Used by B2 (gateway auth check) and risk label rendering. For the broader
+    'any external input arrives here' question use _external_input_channels().
+    """
     out = []
     for name, c in _channels(cfg).items():
         if not isinstance(c, dict):
@@ -167,6 +179,28 @@ def _open_channels(cfg: dict) -> list[str]:
         for node in nodes:
             if isinstance(node, dict) and (
                 node.get("dmPolicy") == "open" or node.get("groupPolicy") == "open"
+            ):
+                out.append(name)
+                break
+    return out
+
+
+def _external_input_channels(cfg: dict) -> list[str]:
+    """Channels that admit external (non-owner) senders regardless of how restricted.
+
+    Includes open, allowlist, and paired modes — all of which carry untrusted content
+    that could be crafted by (or injected into) the sender. Used for the trifecta
+    'untrusted input' leg and credential / ingress-path checks (B-032).
+    """
+    out = []
+    for name, c in _channels(cfg).items():
+        if not isinstance(c, dict):
+            continue
+        nodes = [c] + list((c.get("accounts") or {}).values())
+        for node in nodes:
+            if isinstance(node, dict) and (
+                node.get("dmPolicy") in _UNTRUSTED_INPUT_POLICIES
+                or node.get("groupPolicy") in _UNTRUSTED_INPUT_POLICIES
             ):
                 out.append(name)
                 break
@@ -254,7 +288,7 @@ def _trifecta_legs(ctx: Context) -> dict:
     """
     cfg = ctx.config
     tools = _enabled_tools(cfg)
-    open_ch = _open_channels(cfg)
+    open_ch = _external_input_channels(cfg)
     return {
         "untrusted input": bool(open_ch) or _hint(tools, INPUT_TOOL_HINTS),
         "sensitive data": (
@@ -365,6 +399,26 @@ def check_trifecta(ctx: Context) -> Finding:
             "human approval, or move sensitive data out of the agent's reach.",
             evidence=active,
         )
+
+    # Thin-surface guard (B-033): when no tool configuration is visible, runtime tools
+    # granted at session start (message, exec_command, web_*, memory_*) are invisible to
+    # static analysis.  False ≠ safe — report WARN so the caller knows the result may
+    # understate the real surface.
+    cfg = ctx.config
+    _tool_unknown = [k for k, v in legs.items() if not v
+                     and k in ("untrusted input", "outbound actions")]
+    if not _enabled_tools(cfg) and _tool_unknown:
+        return _finding(
+            "A1", WARN,
+            detail + (
+                f" Cannot determine from config: {', '.join(_tool_unknown)}."
+                " Runtime tools (e.g. message, exec_command, web_*) granted at"
+                " session start are not reflected in openclaw.json."
+            ),
+            "Run with --ask to attest runtime capabilities, or treat as possible 3/3.",
+            evidence=active,
+        )
+
     return _finding("A1", PASS, detail, "Keep it at ≤2 of 3 — do not add the third capability.",
                     evidence=active)
 
@@ -4911,8 +4965,7 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
 
     # --- assess reachability ---
     tools = _enabled_tools(cfg)
-    open_ch = _open_channels(cfg)
-    has_untrusted_ingress = bool(open_ch) or _hint(tools, INPUT_TOOL_HINTS)
+    has_untrusted_ingress = bool(_external_input_channels(cfg)) or _hint(tools, INPUT_TOOL_HINTS)
     has_outbound = _hint(tools, OUTBOUND_TOOL_HINTS) or bool(
         dig(cfg, "tools.elevated.allowFrom")
     )
@@ -5190,7 +5243,7 @@ def _agent_is_powerful(ctx: Context) -> bool:
     cfg = ctx.config
     tools = _enabled_tools(cfg)
     can_act = _hint(tools, ("exec", "shell", "fs_write", "deploy")) or "elevated" in tools
-    reachable = bool(_open_channels(cfg)) or _hint(tools, INPUT_TOOL_HINTS)
+    reachable = bool(_external_input_channels(cfg)) or _hint(tools, INPUT_TOOL_HINTS)
     return can_act and reachable
 
 

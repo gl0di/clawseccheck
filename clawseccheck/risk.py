@@ -13,9 +13,9 @@ from dataclasses import dataclass
 from .catalog import CRITICAL, FAIL, HIGH, MEDIUM, WARN, Finding
 from .checks import (
     _enabled_tools,
+    _external_input_channels,
     _has_approval_gate,
     _hint,
-    _open_channels,
     _reassembly,
     SENSITIVE_TOOL_HINTS,
     INPUT_TOOL_HINTS,
@@ -173,8 +173,12 @@ def _host_reaching_bind(cfg: dict) -> str | None:
 
 
 def _has_untrusted_ingress(tools: list[str], cfg: dict) -> bool:
-    """True when there is at least one vector for untrusted content to reach the agent."""
-    return bool(_open_channels(cfg)) or _hint(tools, INPUT_TOOL_HINTS)
+    """True when there is at least one vector for untrusted content to reach the agent.
+
+    Uses _external_input_channels (open + allowlist + paired) rather than _open_channels
+    (open only) so that restricted-but-external channels are correctly counted as ingress.
+    """
+    return bool(_external_input_channels(cfg)) or _hint(tools, INPUT_TOOL_HINTS)
 
 
 def _sandbox_off(cfg: dict) -> bool:
