@@ -1,9 +1,9 @@
 ---
 name: clawseccheck
-version: 2.0.1
-description: Free, local, read-only security self-audit for your own OpenClaw agent. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
+version: 2.0.2
+description: Free, local security self-audit for your own OpenClaw agent. Inspects your config read-only; audit history saved locally to ~/.clawseccheck/. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
 license: MIT
-metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit","he":"ClawSecCheck — ביקורת אבטחה ל-OpenClaw"},"display_description":{"en":"Free, local, read-only security self-audit for your own OpenClaw agent. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.","he":"כלי חינמי, מקומי וקריאה-בלבד לביקורת אבטחה עצמית של סוכן ה-OpenClaw שלך. נותן ציון A–F, מאתר את הפרצות הדחופות ביותר ומספק תיקונים מוכנים להדבקה. ללא מפתח API — שום מידע לא יוצא מהמחשב שלך."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","read-only","self-audit","sarif"],"he":["אבטחה","ביקורת","סוכני-AI","אבטחת-LLM","זריקת-פרומפט","קריאה-בלבד","OpenClaw"]}}
+metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit","he":"ClawSecCheck — ביקורת אבטחה ל-OpenClaw"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Inspects your config read-only; audit history saved locally to ~/.clawseccheck/. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.","he":"כלי חינמי, מקומי וקריאה-בלבד לביקורת אבטחה עצמית של סוכן ה-OpenClaw שלך. נותן ציון A–F, מאתר את הפרצות הדחופות ביותר ומספק תיקונים מוכנים להדבקה. ללא מפתח API — שום מידע לא יוצא מהמחשב שלך."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","read-only","self-audit","sarif"],"he":["אבטחה","ביקורת","סוכני-AI","אבטחת-LLM","זריקת-פרומפט","קריאה-בלבד","OpenClaw"]}}
 ---
 
 # ClawSecCheck — OpenClaw Security Self-Audit
@@ -398,14 +398,16 @@ actually invoke in this session — read them off your own tool definitions, do 
 names. This is the most important field: it is what lets the audit see whether a `send` / `forward`
 / `delete_forever` / `create_filter` verb is even in your hands. If you have none of those, say so.
 
-**Step 3 — ask the user what only THEY know.** Ask these in plain language (one short message), because
-they describe the *harness/policy* around you, which you cannot fully see:
-> - "When I take an action like sending a message or running a command, does your setup make me ask
->    you first, or can I just do it?" → `approval_gates`
-> - "If I'm working from an email or a web page I fetched, could a send / run / delete happen without
->    you approving it?" → `untrusted_to_action` (`gated` / `ungated`)
-> - "Any security monitoring on this machine a file scan wouldn't see — a work EDR agent, a network
->    IDS on the gateway?" → `host_monitors`
+**Step 3 — answer what you can from your own context; ask the user only what they alone know.**
+
+For **approval_gates** — answer this yourself:
+> Look at your own tool grants and session parameters. If you are required to call `request_approval` or `ask_user` before every side-effecting action → `gated`. Otherwise → `ungated`.
+
+For **untrusted_to_action** — answer this yourself:
+> Combine: do you have any channel with open/allowlist/paired dmPolicy or groupPolicy (external ingress exists)? AND do you have outbound tools (email, webhook, exec, deploy, etc.) without an approval gate? If both → `ungated`. If approval gate present → `gated`.
+
+For **host_monitors** — ask the user (they know, you can't see):
+> "Is there any security monitoring on this machine that a file scan wouldn't see — a work EDR agent, a network IDS on the gateway?" → `host_monitors`
 
 If the user doesn't know, leave the field `unknown` — never invent an answer.
 

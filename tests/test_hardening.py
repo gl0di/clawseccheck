@@ -84,6 +84,18 @@ def test_c3_warns_when_no_backups(tmp_path):
     assert f.status == "WARN"
 
 
+def test_c3_passes_when_backup_exists_outside_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    (backup_dir / "SOUL.md.bak").write_text("you are an agent")
+    ctx = Context(home=workspace)
+    ctx.bootstrap = {"workspace/SOUL.md": "you are an agent"}
+    f = {x.id: x for x in run_all(ctx)}["C3"]
+    assert f.status == "PASS"
+
+
 # ---- monitor state perms ----
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
 def test_monitor_state_is_owner_only(tmp_path):

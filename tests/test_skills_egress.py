@@ -155,6 +155,21 @@ def test_c4_version_advisory():
     assert "CVE" not in c4.detail
 
 
+def test_c4_root_level_version_returns_pass():
+    ctx = Context(home=Path("/x"))
+    ctx.config = {"lastTouchedVersion": "2.0.0"}
+    c4 = _ids(run_all(ctx))["C4"]
+    assert c4.status == PASS
+    assert "2.0.0" in c4.detail
+
+
+def test_c4_unknown_when_version_absent():
+    ctx = Context(home=Path("/x"))
+    ctx.config = {}
+    c4 = _ids(run_all(ctx))["C4"]
+    assert c4.status == UNKNOWN
+
+
 # ---------------------------------------------------------------------------
 # B13 extended signature regression tests
 # ---------------------------------------------------------------------------

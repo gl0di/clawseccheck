@@ -79,6 +79,22 @@ def test_gateway_bind_ipv4_loopback_is_not_public():
     assert check_gateway(_ctx(cfg)).status == "PASS"
 
 
+# ---- B11: funnel mode does not suppress TLS warning ----
+def test_b11_funnel_mode_non_loopback_no_tls_warns():
+    from clawseccheck.checks import check_tls
+    cfg = {
+        "gateway": {
+            "bind": "0.0.0.0:8080",
+            "tailscale": {"mode": "funnel"},
+        }
+    }
+    ctx = _ctx(cfg)
+    ctx.config_mode = 0o600
+    f = check_tls(ctx)
+    assert f.status == "WARN"
+    assert "non-loopback" in f.detail
+
+
 # ---- H5: IPv6 zone-id stripping ----
 def test_parse_bind_host_ipv6_loopback_with_zone_id():
     # ::1%eth0 must parse to ::1 (the zone id is not part of the address).

@@ -978,7 +978,7 @@ def check_tls(ctx: Context) -> Finding:
     ev = []
     exposed = bind in EXPOSED_BINDS or (bind and bind not in LOOPBACK)
     # Real tailscale field: gateway.tailscale.mode == "funnel" (not gateway.tailscale.funnel bool)
-    if exposed and not tls and dig(cfg, "gateway.tailscale.mode") != "funnel":
+    if exposed and not tls:
         ev.append(f"gateway.bind={bind} is non-loopback without TLS configured")
     if _perms_loose(ctx):
         ev.append(f"openclaw.json is group/world-readable ({oct(ctx.config_mode)[-3:]}) — at-rest risk")
@@ -2890,8 +2890,6 @@ _EXT_SKILL_HINTS = ("slack", "github", "notion", "google", "gmail", "web", "rese
 
 def check_egress(ctx: Context) -> Finding:
     cfg = ctx.config
-    allow = (dig(cfg, "gateway.egress") or dig(cfg, "network.egress")
-             or cfg.get("egress") or dig(cfg, "tools.http.allow"))
     surface = []
     chans = [n for n, c in _channels(cfg).items() if isinstance(c, dict)]
     if chans:
@@ -2901,10 +2899,6 @@ def check_egress(ctx: Context) -> Finding:
         surface.append(f"{len(ext)} external-service skill(s)")
     if _hint(_enabled_tools(cfg), OUTBOUND_TOOL_HINTS):
         surface.append("outbound tools (send/webhook/exec)")
-    if allow:
-        return _custom("B14", MEDIUM, PASS,
-                       f"Egress allowlist configured. Reachable surface: {', '.join(surface) or 'minimal'}.",
-                       "Keep the egress allowlist tight.")
     if surface:
         return _custom("B14", MEDIUM, WARN,
                        f"No egress allowlist — the agent can reach out via: {', '.join(surface)}.",
@@ -3075,12 +3069,22 @@ def _mcp_url_is_local(url: str) -> bool:
     return host.startswith("127.")
 
 
+def _mcp_has_tool_restrictions(spec: dict) -> bool:
+    tools = spec.get("tools")
+    return isinstance(tools, list) and len(tools) > 0
+
+
 def check_mcp(ctx: Context) -> Finding:
     servers = _mcp_servers(ctx.config)
     if not servers:
         return _finding("B15", UNKNOWN, "No MCP servers configured.", "—")
     names = ", ".join(list(servers)[:5])
     n = len(servers)
+    if all(_mcp_has_tool_restrictions(spec) for spec in servers.values()):
+        return _finding("B15", PASS,
+                        f"{n} MCP server(s) configured ({names}). "
+                        "All servers have explicit tool allowlists configured.",
+                        "Keep per-server tool allowlists tight and review them after updates.")
     # Frame by transport so a local stdio server isn't described as a "remote" risk (C-057).
     if any(_mcp_has_remote(spec) for spec in servers.values()):
         return _finding("B15", WARN,
@@ -3330,7 +3334,7 @@ def check_proxy_header_forging(ctx: Context) -> Finding:
 # ---------- B16: is threat monitoring / detection set up? ----------
 _MONITORING_HINTS = ("clawsec", "security-monitor", "openclaw-security-monitor", "sentinel",
                      "falco", "osquery", "wazuh", "trent", "threat", "intrusion", "watchdog",
-                     "-ids", "edr", "monitor")
+                     "ids", "-ids", "edr", "monitor")
 
 
 def check_monitoring(ctx: Context) -> Finding:
@@ -3801,7 +3805,7 @@ def check_self_modification(ctx: Context) -> Finding:
 
 # ---------- C4: version / update hygiene (advisory) ----------
 def check_version(ctx: Context) -> Finding:
-    ver = dig(ctx.config, "meta.lastTouchedVersion")
+    ver = dig(ctx.config, "meta.lastTouchedVersion") or dig(ctx.config, "lastTouchedVersion")
     if not ver:
         return _custom("C4", BY_ID["C4"].severity, UNKNOWN,
                        "OpenClaw version not recorded in config.", "—")
@@ -3887,15 +3891,26 @@ def check_backups(ctx: Context) -> Finding:
     if not has_bootstrap:
         return _finding("C3", UNKNOWN, "No bootstrap/memory files found to back up.", "—")
     found = []
-    try:
-        for entry in ctx.home.rglob("*"):
-            n = entry.name.lower()
-            if entry.is_file() and (n.endswith((".bak", ".backup")) or "backup" in entry.parent.name.lower()):
-                found.append(entry.name)
-                if len(found) >= 5:
-                    break
-    except OSError:
-        pass
+    _backup_search_roots = [ctx.home]
+    for _candidate in (
+        ctx.home.parent / "backups",
+        ctx.home.parent / ".backups",
+        Path.home() / ".backups",
+    ):
+        if _candidate != ctx.home and _candidate not in _backup_search_roots:
+            _backup_search_roots.append(_candidate)
+    for _root in _backup_search_roots:
+        try:
+            for entry in _root.rglob("*"):
+                n = entry.name.lower()
+                if entry.is_file() and (n.endswith((".bak", ".backup")) or "backup" in entry.parent.name.lower()):
+                    found.append(entry.name)
+                    if len(found) >= 5:
+                        break
+        except OSError:
+            pass
+        if len(found) >= 5:
+            break
     if found:
         return _finding("C3", PASS,
                         f"Backups present ({', '.join(found[:3])}{'…' if len(found) > 3 else ''}).",
