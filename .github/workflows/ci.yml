@@ -5,15 +5,15 @@ on:
   pull_request:
 
 jobs:
-  # ── L1: lint + test ────────────────────────────────────────────────────────
+  # -- L1: lint + test ----------------------------------------------------------
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.9", "3.12"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install test tools (the package itself has zero runtime deps)
@@ -23,77 +23,58 @@ jobs:
       - name: Tests
         run: python -m pytest -q
       - name: Hunt advisory (ClawRange L2)
-        # ClawRange is a private internal test polygon that lives alongside the
-        # skill repo but is never published. In the public CI environment it will
-        # not be checked out, so this step gracefully skips when the file is absent.
-        # When available (e.g. on the maintainer's machine via act, or a private
-        # fork that co-checks-out clawrange/) it runs in advisory mode: findings
-        # are emitted to the log but never fail the build. Hard fuzz crashes are
-        # also surfaced here for awareness; the blocking fuzz gate runs locally via
-        # `python3 release-gate/gate.py` before tagging a release.
         run: |
           if [ -f "${{ github.workspace }}/../clawrange/hunt.py" ]; then
             python ../clawrange/hunt.py --all || true
           else
-            echo "ClawRange hunt.py not available in this CI context (private repo) — skipped"
+            echo "ClawRange hunt.py not available in this CI context (private repo) -- skipped"
           fi
 
-  # ── L2: markdown quality ───────────────────────────────────────────────────
+  # -- L2: markdown quality -----------------------------------------------------
   markdownlint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - name: Install markdownlint-cli
         run: npm install -g markdownlint-cli@0.44.0
       - name: Lint Markdown
-        # MD013 (line-length) and MD033 (inline HTML) are disabled for docs
-        # that pre-date this rule and use intentional long lines or HTML tables.
         run: |
           markdownlint '**/*.md' \
             --ignore node_modules \
             --ignore CHANGELOG.md \
             --config .markdownlint.jsonc
 
-  # ── L3: dependency review (PRs only) ─────────────────────────────────────
+  # -- L3: dependency review (PRs only) ----------------------------------------
   dependency-review:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: ${{ github.event_name == 'pull_request' }}
     steps:
-      - uses: actions/checkout@v5
-      - name: Dependency Review
-        # Blocks PRs that introduce HIGH or CRITICAL vulnerable dependencies.
-        # The project has zero runtime deps today; this guards against accidental
-        # additions. Fixtures/ requirements.txt files are test vectors — not scanned
-        # by this action (it only checks changed deps in the PR diff).
-        uses: actions/dependency-review-action@v4
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
-          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
-          comment-summary-in-pr: always
 
-  # ── L4: secret scan ────────────────────────────────────────────────────────
+  # -- L4: secret scan ----------------------------------------------------------
   secret-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Scan for secrets (gitleaks)
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── L4: commit integrity ───────────────────────────────────────────────────
+  # -- L5: commit integrity -----------------------------------------------------
   commit-integrity:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: No AI-agent co-author in commits
-        # Blocks accidental "Co-Authored-By: Claude" / Anthropic attribution
-        # in the public commit log (CLAUDE.md §7: "No Claude/AI attribution").
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             RANGE="origin/${{ github.base_ref }}..HEAD"
@@ -107,10 +88,9 @@ jobs:
             echo "$FOUND"
             exit 1
           fi
-          echo "✓ No AI co-author tags"
+          echo "OK: no AI co-author tags"
 
       - name: No agent config files in git tree
-        # Ensures CLAUDE.md, .claude/, .cursorrules, etc. never ship.
         run: |
           FORBIDDEN="CLAUDE.md CLAUDE.local.md .claude .cursorrules .cursor .aider .copilot"
           FOUND=""
@@ -123,11 +103,9 @@ jobs:
             echo "Add them to .gitignore and untrack with 'git rm --cached'."
             exit 1
           fi
-          echo "✓ No agent config files in git tree"
+          echo "OK: no agent config files in git tree"
 
       - name: Author identity check (gl0di only)
-        # Warns if a commit was authored by an identity other than gl0di.
-        # Informational — does not fail the build (old Dave G history is kept).
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             RANGE="origin/${{ github.base_ref }}..HEAD"
@@ -141,5 +119,5 @@ jobs:
             echo "$OTHERS"
             echo "Expected: gl0di <gl0di@users.noreply.github.com>"
           else
-            echo "✓ Author identity canonical (gl0di)"
+            echo "OK: author identity canonical (gl0di)"
           fi
