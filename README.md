@@ -666,6 +666,10 @@ Update all of the following files (in order):
 - `SECURITY_MODEL.md`
 - `SKILL.md`
 
-### 3) Pre-release review gate
+### 3) Dependabot — merge open PRs
+
+- `gh pr list --author app/dependabot` — merge all open dependabot PRs before tagging.
+
+### 4) Pre-release review gate
 
 - Re-read the release notes and verify that check IDs, remediation text, and examples match the implemented code/tests.
