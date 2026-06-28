@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .catalog import FAIL, UNKNOWN, WARN, Finding
-from .i18n import t
 from .scoring import ScoreResult
 
 
@@ -47,9 +46,9 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         priority = 0 if (has_fail or score.capped) else 2
         actions.append(Action(
             id="fix_guidance",
-            title=t("guide.fix_guidance.title"),
+            title="See exactly how to fix each issue, most urgent first",
             command="clawseccheck --prompts",
-            why=t("guide.fix_guidance.why"),
+            why="Get a copy-paste fix you can hand to your agent.",
             priority=priority,
         ))
 
@@ -58,9 +57,9 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
     if b13 is not None and b13.status in (FAIL, WARN):
         actions.append(Action(
             id="vet_skills",
-            title=t("guide.vet_skills.title"),
+            title="Double-check your installed skills for malware",
             command="clawseccheck --vet <skill-folder>",
-            why=t("guide.vet_skills.why"),
+            why="Installed skills run with your agent's full permissions.",
             priority=1,
         ))
 
@@ -69,9 +68,9 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
     if b16 is not None and b16.status in (FAIL, WARN):
         actions.append(Action(
             id="setup_monitoring",
-            title=t("guide.setup_monitoring.title"),
+            title="Turn on ongoing monitoring so you're alerted if something changes",
             command="clawseccheck --monitor",
-            why=t("guide.setup_monitoring.why"),
+            why="An agent with no monitoring won't warn you if it's compromised.",
             priority=3,
         ))
 
@@ -85,9 +84,9 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
     if a1_trifecta or b17_hit or b21_hit:
         actions.append(Action(
             id="live_test",
-            title=t("guide.live_test.title"),
+            title="Run a live prompt-injection test to see if your agent actually resists",
             command="clawseccheck --canary   (then --dryrun / --redteam)",
-            why=t("guide.live_test.why"),
+            why="Passive checks tell you the config; this tests real behavior.",
             priority=4,
         ))
 
@@ -99,27 +98,27 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
     if b15_active or b24_active:
         actions.append(Action(
             id="review_mcp",
-            title=t("guide.review_mcp.title"),
+            title="Vet your connected MCP servers for supply-chain risk",
             command="clawseccheck --vet-mcp",
-            why=t("guide.review_mcp.why"),
+            why="MCP servers can inject prompts or reach internal services.",
             priority=5,
         ))
 
     # track_trend: ALWAYS
     actions.append(Action(
         id="track_trend",
-        title=t("guide.track_trend.title"),
+        title="Track your security score over time",
         command="clawseccheck --trend",
-        why=t("guide.track_trend.why"),
+        why="See if you're getting safer or drifting.",
         priority=8,
     ))
 
     # share_grade: ALWAYS
     actions.append(Action(
         id="share_grade",
-        title=t("guide.share_grade.title"),
+        title="Share your grade (safe — findings stay private)",
         command="clawseccheck --badge grade.svg",
-        why=t("guide.share_grade.why"),
+        why="Only the grade + score is shared, never your findings.",
         priority=9,
     ))
 
@@ -139,10 +138,10 @@ def render_next_actions(
     *ascii_only* avoids unicode.
     """
     if not actions:
-        return t("guide.all_clear") + "\n"
+        return "You're in good shape — re-run anytime to stay safe.\n"
 
-    header = t("guide.next_header")
-    run_label = t("guide.run_label")
+    header = "What you can do next:"
+    run_label = "run:"
 
     lines = [header]
     for i, action in enumerate(actions[:limit], 1):

@@ -22,7 +22,6 @@ from .catalog import (
 )
 from .dedup import deduplicate_findings
 from .guide import suggest_actions
-from .i18n import t
 from .scoring import ScoreResult
 
 # Findings, skill names, decoded payload previews and native-audit fields are UNTRUSTED
@@ -206,7 +205,7 @@ def _capability_graph_lines(ctx) -> list[str]:
     graph = _capability_graph(ctx)
     if not graph:
         return []
-    lines = [t("report.capability_graph_title"), t("report.capability_graph_intro")]
+    lines = ["Capability graph", "Static config + attestation summary:"]
     for node in graph["nodes"]:
         tools = ", ".join(node["tools"]) if node["tools"] else "none"
         lines.append(
@@ -386,14 +385,14 @@ def _render_finding(lines, icon, f, cfg: dict | None = None):
     lines.append(f"{icon[f.status]} [{f.severity}] "
                  f"{_sanitize(f.title)}{tag}{pass_tag}")
     if f.detail:
-        lines.append(f"    {t('report.label_why')}: {_sanitize(f.detail)}")
+        lines.append(f"    why: {_sanitize(f.detail)}")
     # Surface the concrete evidence (e.g. the exact verbs B43/B44 flagged) when a
     # FAIL/WARN carries it — naming the specific item is the value of the finding.
     if f.evidence and f.status in (FAIL, WARN):
         for ev in f.evidence[:12]:
             # Evidence is emitted verbatim (already bidi-stripped by _sanitize).
             lines.append(f"      - {_sanitize(ev)}")
-    lines.append(f"    {t('report.label_fix')}: {_sanitize(f.fix)}")
+    lines.append(f"    fix: {_sanitize(f.fix)}")
     # Blast-radius summary: only emitted when the caller supplies cfg (verbose mode).
     if f.status == FAIL and cfg is not None:
         br = compute_blast_radius(cfg, f.id)
@@ -422,15 +421,12 @@ def render_report(findings: list[Finding], score: ScoreResult,
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
     trifecta_ratio = _trifecta_ratio(findings)
-    lines = [t("report.title"), "=" * 44,
-             t("report.score_line",
-               score=score.score, grade=score.grade)]
+    lines = ["ClawSecCheck - OpenClaw Security Audit", "=" * 44,
+             f"Score: {score.score}/100   Grade: {score.grade}"]
     if trifecta_ratio == "3/3":
-        lines.append(t("report.trifecta_fail"))
+        lines.append("⛔ Lethal Trifecta: 3/3 — all three legs active. Break one leg before anything else.")
     if score.capped:
-        lines.append(t("report.capped",
-                       raw=score.raw_score,
-                       sev=score.cap_severity or "CRITICAL"))
+        lines.append(f"(capped from {score.raw_score} - open {score.cap_severity or 'CRITICAL'} finding)")
 
     # --- "Why this score" breakdown ---
     scored_findings = [f for f in findings if getattr(f, "scored", True)
@@ -444,9 +440,11 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # reconciles with the pass/warn/fail counts. When a cap fired, the separate
     # `report.capped` line above already discloses raw -> capped, so showing the
     # raw value here is internally consistent instead of self-contradicting (B-013).
-    lines.append(t("report.score_breakdown",
-                   score=score.raw_score, n_scored=n_scored,
-                   n_pass=n_pass, n_warn=n_warn, n_fail=n_fail))
+    lines.append(
+        f"Why {score.raw_score}/100: weighted pass-rate over {n_scored} scored checks"
+        f" — {n_pass} pass, {n_warn} warn (half weight), {n_fail} fail."
+        " UNKNOWN/advisory checks are excluded."
+    )
     if n_fail > 0 or n_warn > 0:
         _sev_counts: dict[str, int] = {}
         for f in scored_findings:
@@ -457,9 +455,13 @@ def render_report(findings: list[Finding], score: ScoreResult,
             if sev in _sev_counts:
                 sev_parts.append(f"{_sev_counts[sev]} {sev}")
         sev_summary = ", ".join(sev_parts)
-        lines.append(t("report.score_breakdown_detail",
-                       n_fail=n_fail, n_warn=n_warn, sev_summary=sev_summary))
-    lines.append(t("report.scope_note"))
+        lines.append(f"({n_fail} FAIL, {n_warn} WARN — incl. {sev_summary})")
+    lines.append(
+        "This score reflects your configuration. It does not test live"
+        " prompt-injection resistance or do a deep MCP supply-chain vet —"
+        " run `--canary` / `--redteam` / `--dryrun` (live injection) and"
+        " `--vet-mcp` (deep MCP) for those."
+    )
     # Honest framing for non-OpenClaw / custom setups (B-017): when there is no
     # openclaw.json the config-driven checks come back UNKNOWN. UNKNOWN is neutral
     # (never counted against the score), but without context a hardened custom setup
@@ -469,15 +471,23 @@ def render_report(findings: list[Finding], score: ScoreResult,
         n_unknown = sum(1 for f in findings if f.status in (UNKNOWN, "SKILL_ARCHIVE_PATH_TRAVERSAL"))
         warn_icon = "[!]" if ascii_only else "⚠️"
         lines.append("")
-        lines.append(f"{warn_icon} {t('report.nonstandard_banner')}")
+        lines.append(
+            f"{warn_icon} No openclaw.json found — this looks like a non-standard or"
+            " custom setup. ClawSecCheck is calibrated for OpenClaw, the only"
+            " fully-supported target right now, so checks that need the standard"
+            " config could not be assessed."
+        )
         if n_unknown:
-            lines.append(t("report.nonstandard_unknown",
-                           n=n_unknown, n_scored=n_scored))
+            lines.append(
+                f"{n_unknown} check(s) were not assessed (UNKNOWN) and are NOT"
+                f" counted against your score — the grade reflects only the"
+                f" {n_scored} assessable check(s)."
+            )
     lines.append("")
     if not issues:
-        lines.append(t("report.no_issues", ok=ok))
+        lines.append(f"No issues found by ClawSecCheck. Keep it that way. {ok}")
     else:
-        lines.append(t("report.to_fix", n=len(issues)))
+        lines.append(f"{len(issues)} thing(s) to fix (ClawSecCheck) - most urgent first:")
         lines.append("")
         for f in issues:
             _render_finding(lines, icon, f, cfg=_blast_cfg)
@@ -494,7 +504,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append("")
 
     if suppressed_count:
-        lines.append(t("report.suppressed_count", n=suppressed_count))
+        lines.append(f"({suppressed_count} finding(s) suppressed via .clawseccheckignore)")
         # Surface suppressed findings that either cap the score (a FAILed CRITICAL→49 / HIGH→79)
         # or hit a sensitive check (B1/B2/B13/B20). Hiding these silently could turn an F into an
         # A via one .clawseccheckignore line, so they stay visible no matter what the ignore says.
@@ -503,21 +513,25 @@ def render_report(findings: list[Finding], score: ScoreResult,
             if not getattr(f, "suppressed", False):
                 continue
             if (f.status == FAIL and f.severity in (CRITICAL, HIGH)) or f.id in _SENSITIVE_IDS:
-                lines.append(t("report.gov_warning", id=f.id, sev=f.severity))
+                lines.append(
+                    f"WARNING: a {f.severity} finding ({f.id}) is suppressed via"
+                    " .clawseccheckignore — it still counts against your real security;"
+                    " review your ignore list."
+                )
 
     if native is not None:
-        lines.append(t("report.native_header"))
+        lines.append("--- Also from OpenClaw's built-in `security audit` ---")
         if getattr(native, "status", "") == "ok":
             nf = sorted(native.findings, key=lambda f: _SEV_ORDER.get(f.severity, 9))
             if nf:
-                lines.append(t("report.native_additional", n=len(nf)))
+                lines.append(f"{len(nf)} additional finding(s) the platform's own audit reports:")
                 lines.append("")
                 for f in nf:
                     _render_finding(lines, icon, f, cfg=_blast_cfg)
             else:
-                lines.append(t("report.native_clean"))
+                lines.append("Clean — openclaw security audit found nothing.")
         else:
-            lines.append(t("report.native_not_included", note=native.note))
+            lines.append(f"(not included: {native.note})")
         lines.append("")
 
     if risk:
@@ -556,9 +570,9 @@ def render_report(findings: list[Finding], score: ScoreResult,
 
 def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = False) -> str:
     """Shareable badge — grade + score + trifecta ONLY. No findings, ever."""
-    l1 = f"  {t('card.security_label')}: {score.grade:<2} ({score.score:>3}/100)"
-    l2 = f"  {t('card.trifecta_label')}: {_trifecta_ratio(findings)}"
-    l3 = f"  {t('card.audited_by')}" + ("" if ascii_only else " 🔍")
+    l1 = f"  OpenClaw Security: {score.grade:<2} ({score.score:>3}/100)"
+    l2 = f"  Lethal Trifecta: {_trifecta_ratio(findings)}"
+    l3 = "  audited by ClawSecCheck" + ("" if ascii_only else " 🔍")
     width = 39
     if ascii_only:
         top = bot = "+" + "-" * width + "+"
@@ -581,14 +595,14 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
         else {"CRITICAL": "⛔", "HIGH": "⚠️", "MEDIUM": "🔶", "INFO": "ℹ️"}
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "INFO": 3}
     ok = "[OK]" if ascii_only else "✅"
-    lines = [t("monitor.title"), "=" * 30,
-             t("monitor.current", score=score.score, grade=score.grade)]
+    lines = ["ClawSecCheck - Threat Monitor", "=" * 30,
+             f"Current: {score.score}/100  Grade: {score.grade}"]
     if baseline:
-        lines += ["", t("monitor.baseline")]
+        lines += ["", "Baseline saved. Future runs will alert on what changes since now."]
     elif not alerts:
-        lines += ["", t("monitor.no_threats", ok=ok)]
+        lines += ["", f"No new threats since last check. {ok}"]
     else:
-        lines += ["", t("monitor.changes", n=len(alerts)), ""]
+        lines += ["", f"{len(alerts)} change(s) detected since last check:", ""]
         for level, msg in sorted(alerts, key=lambda a: order.get(a[0], 9)):
             lines.append(f"{mark.get(level, '[*]')} {_sanitize(msg)}")
     out = "\n".join(lines).rstrip() + "\n"
@@ -653,10 +667,10 @@ def render_prompts(findings: list[Finding], ascii_only: bool = False) -> str:
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
     if not issues:
         ok = "[OK]" if ascii_only else "✅"
-        out = t("prompts.nothing", ok=ok) + "\n"
+        out = f"Nothing to fix. {ok}" + "\n"
         return out
-    lines = [t("prompts.title"), "=" * 36,
-             t("prompts.intro"), "",
+    lines = ["ClawSecCheck - copy-paste fix prompts", "=" * 36,
+             "Paste each into your OpenClaw agent to fix it:", "",
              _UNTRUSTED_BOUNDARY, ""]
     for i, f in enumerate(issues, 1):
         title_s = _sanitize(f.title)
@@ -709,10 +723,11 @@ def render_fix(findings: list[Finding], ascii_only: bool = False) -> str:
             actionable.append((f, rem))
 
     if not actionable:
-        out = t("fix.none") + "\n"
+        out = "Nothing to paste-apply — no current FAIL/WARN has a paste-ready fix.\n"
         return _asciify(out) if ascii_only else out
 
-    lines = [t("fix.header"), "=" * 44, "", t("fix.note"), ""]
+    lines = ["Remediation (copy-paste)", "=" * 44, "",
+             "ClawSecCheck does NOT apply these — review and run them yourself.", ""]
     for f, rem in actionable:
         lines.append(f"[{f.status}] {f.id} — {_sanitize(f.title)}")
         if rem["commands"]:
@@ -837,21 +852,24 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
     badge_color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
     trifecta = _trifecta_ratio(findings)
 
-    label_score = t("html.label_score")
-    label_trifecta = t("html.label_trifecta")
-    label_capped = t("html.label_capped")
-    label_why = t("html.label_why2")
-    label_fix = t("html.label_fix2")
-    h1_text = t("html.h1")
-    title_text = t("html.title")
-    private_title = t("html.private_title")
-    private_body = t("html.private_body")
-    section_findings = t("html.section_findings")
+    label_score = "Score:"
+    label_trifecta = "Lethal Trifecta:"
+    label_capped = "Capped:"
+    label_why = "Why:"
+    label_fix = "Fix:"
+    h1_text = "🔍 ClawSecCheck Security Audit Report"
+    title_text = "ClawSecCheck Security Audit Report"
+    private_title = "⚠ Private Report"
+    private_body = (
+        "This report contains detailed security findings and must"
+        " <strong>NOT</strong> be shared publicly."
+    )
+    section_findings = "Findings"
 
     # Build the findings HTML
     findings_html = ""
     if not issues:
-        no_issues_text = html.escape(t("html.no_issues"))
+        no_issues_text = html.escape("No issues found. Keep it that way.")
         findings_html = f'<div style="padding:1rem;background:#f0f8f0;border-radius:0.5rem;color:#0a4;font-weight:500;">{no_issues_text}</div>'
     else:
         findings_html = '<div style="padding:0;">'
@@ -878,7 +896,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
     if score.capped:
         sev_str = "CRITICAL" if score.failed_critical else "HIGH"
         capped_html = (f'<div style="color:#d9534f;"><strong>{html.escape(label_capped)}</strong> '
-                       f'{t("html.capped_detail", raw=score.raw_score, sev=sev_str)}</div>')
+                       f'from {score.raw_score} (open {sev_str} finding)</div>')
     else:
         capped_html = ""
 

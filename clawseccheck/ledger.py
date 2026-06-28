@@ -126,7 +126,31 @@ def freshness_notice(ledger: dict[str, str], *, today: date | None = None,
         refreshing those capabilities in the same run (e.g. ``--full``), so a
         stale/never nudge for them would be self-contradictory.
     """
-    from .i18n import t  # avoid top-level import cycle
+    _NEVER_MSGS: dict[str, str] = {
+        "self_test": (
+            "Coverage gap: prompt-injection tests (--self-test / --redteam / --dryrun / --canary)"
+            " have never been run. Run periodically to test live resistance, not just config."
+            " (offline notice; ClawSecCheck made no network call)"
+        ),
+        "vet_mcp": (
+            "Coverage gap: MCP supply-chain vetting (--vet-mcp) has never been run."
+            " Run periodically to check your MCP servers for supply-chain risk."
+            " (offline notice; ClawSecCheck made no network call)"
+        ),
+    }
+    _STALE_TEMPLATES: dict[str, str] = {
+        "self_test": (
+            "Coverage gap: prompt-injection tests (--self-test / --redteam / --dryrun / --canary)"
+            " last run {age} days ago (threshold: {threshold} days)."
+            " Run again to keep resistance tests current."
+            " (offline notice; ClawSecCheck made no network call)"
+        ),
+        "vet_mcp": (
+            "Coverage gap: MCP supply-chain vetting (--vet-mcp) last run {age} days ago"
+            " (threshold: {threshold} days). Run again to keep your MCP server vetting current."
+            " (offline notice; ClawSecCheck made no network call)"
+        ),
+    }
 
     today = today or date.today()
     lines: list[str] = []
@@ -142,7 +166,8 @@ def freshness_notice(ledger: dict[str, str], *, today: date | None = None,
 
         if last is None:
             # Capability has never been run.
-            lines.append(t(f"freshness.{cap}_never", threshold=threshold))
+            if cap in _NEVER_MSGS:
+                lines.append(_NEVER_MSGS[cap])
         else:
             try:
                 last_date = date.fromisoformat(str(last).strip()[:10])
@@ -150,12 +175,11 @@ def freshness_notice(ledger: dict[str, str], *, today: date | None = None,
                 # Corrupted/blank ledger entry → fail SAFE: treat it as never-run
                 # so the advisory still nudges, rather than silently swallowing it
                 # (fails-open is exactly what this tool warns others about).
-                lines.append(t(f"freshness.{cap}_never", threshold=threshold))
+                if cap in _NEVER_MSGS:
+                    lines.append(_NEVER_MSGS[cap])
                 continue
             age = (today - last_date).days
-            if age > threshold:
-                lines.append(
-                    t(f"freshness.{cap}_stale", age=age, threshold=threshold)
-                )
+            if age > threshold and cap in _STALE_TEMPLATES:
+                lines.append(_STALE_TEMPLATES[cap].format(age=age, threshold=threshold))
 
     return lines
