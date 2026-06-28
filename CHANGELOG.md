@@ -3,6 +3,19 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [1.32.0] — 2026-06-28
+
+Framework mapping (ЗАХОД-2): maps the skill checks to the OWASP Agentic Skills Top 10, the skill-specific threat taxonomy, and fills the OWASP-LLM gaps for the prompt-injection / excessive-agency families. Pure additive metadata — no change to the A–F grade, scoring, or verdicts.
+
+### Added
+- **OWASP Agentic Skills Top 10 (2026) mapping**: each finding now carries an additive `ast` array in `--json` (alongside `owasp`), mapping 60 skill-relevant checks to AST01–AST10 — the agent-skill-specific threat classes (e.g. AST01 Malicious Skills, AST03 Over-Privileged Skills, AST05 Untrusted External Instructions, AST06 Weak Isolation). IDs/titles are verified against the canonical OWASP project page (v1.0 2026 candidate edition). New `OWASP_AST_2026` / `AST_MAP` / `ast_for()` in `catalog.py`, mirroring the existing OWASP-LLM structures. `AST10 Cross-Platform Reuse` is a documented coverage gap (single-install scope).
+
+### Changed
+- **OWASP-LLM mapping gap-fill**: the injection/agency family that previously had no OWASP-LLM tag is now mapped — B58/B59/B60/B61/B64 (LLM01/LLM02 prompt-injection & info-disclosure) and B68/B69/B71/B72 (LLM06 excessive agency), plus C047 (LLM03) and C074 (LLM01). Documented in `docs/THREAT_COVERAGE.md`; the `ast` field is documented in `docs/OUTPUT_SCHEMA.md`.
+
+### Deferred
+- MITRE ATLAS technique IDs beyond the already-grounded B60 → AML.T0061 await a per-ID live-verification pass (§4) and are not asserted here.
+
 ## [1.31.0] — 2026-06-28
 
 Skill-vetting depth (ЗАХОД-2, checks wave): broadens `--vet`/B13 exfiltration detection beyond network sinks to local data-bearing channels. Additive — no change to the A–F config grade or scoring semantics.
