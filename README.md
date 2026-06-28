@@ -1,23 +1,24 @@
 <p align="center">
-  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=700&size=32&duration=3000&pause=900&color=39D353&center=true&vCenter=true&width=640&lines=ClawSecCheck+%F0%9F%94%8D;OpenClaw+Security+Self-Audit;Free.+Local.+Read-only.;Score+Your+Agent+A%E2%80%93F" alt="ClawSecCheck" />
+  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=700&size=32&duration=3000&pause=900&color=E34234&center=true&vCenter=true&width=660&lines=ClawSecCheck+%F0%9F%A6%9E;OpenClaw+Security+Self-Audit;Free.+Local.+Read-only.;Score+Your+Agent+A%E2%80%93F" alt="ClawSecCheck" />
 </p>
 
 <p align="center">
-  <b>🔍 A free, local, read-only security self-audit for your own OpenClaw agent.</b>
+  <b>🦞 A free, local, read-only security self-audit for your own OpenClaw agent.</b><br>
+  <sub><i>The claw that checks your claws — scores you A–F, finds the holes, hands you copy-paste fixes.</i></sub>
 </p>
 
 <p align="center">
-  <a href="https://github.com/gl0di/clawseccheck/releases"><img src="https://img.shields.io/github/v/tag/gl0di/clawseccheck?label=version&color=39D353" alt="version"></a>
-  <a href="https://clawhub.ai/gl0di/clawseccheck"><img src="https://img.shields.io/badge/ClawHub-clawseccheck-7C3AED" alt="ClawHub"></a>
-  <img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python 3.9+">
-  <img src="https://img.shields.io/badge/dependencies-zero-success" alt="Zero dependencies">
-  <img src="https://img.shields.io/badge/network-none-critical" alt="No network">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://github.com/gl0di/clawseccheck/releases"><img src="https://img.shields.io/github/v/tag/gl0di/clawseccheck?label=version&color=E34234&labelColor=2b2b2b" alt="version"></a>
+  <a href="https://clawhub.ai/gl0di/clawseccheck"><img src="https://img.shields.io/badge/ClawHub-clawseccheck-FF6B47?labelColor=2b2b2b" alt="ClawHub"></a>
+  <img src="https://img.shields.io/badge/python-3.9%2B-E8A33D?labelColor=2b2b2b" alt="Python 3.9+">
+  <img src="https://img.shields.io/badge/dependencies-zero-C1272D?labelColor=2b2b2b" alt="Zero dependencies">
+  <img src="https://img.shields.io/badge/network-none-8B0000?labelColor=2b2b2b" alt="No network">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-E34234?labelColor=2b2b2b" alt="License: MIT"></a>
   <a href="https://github.com/gl0di/clawseccheck/stargazers"><img src="https://img.shields.io/github/stars/gl0di/clawseccheck.svg?style=social" alt="GitHub stars"></a>
 </p>
 
 <p align="center">
-  <b>Free · Local · Read-only · No API key · Your data never leaves your machine</b>
+  <b>🦞 Free&nbsp;·&nbsp;🔒 Local&nbsp;·&nbsp;👀 Read-only&nbsp;·&nbsp;🚫 No API key&nbsp;·&nbsp;🏠 Your data never leaves your machine</b>
 </p>
 
 ---
@@ -301,6 +302,24 @@ py audit.py --card --ascii
 
 Cross-platform: pure Python stdlib, pathlib-based paths, POSIX file-permission checks are
 skipped on Windows (NTFS uses ACLs), and all output has an ASCII fallback.
+
+---
+
+## 🦞 The OpenClaw ecosystem
+
+ClawSecCheck is one skill in a fast-growing OpenClaw ecosystem — and that growth is exactly
+why a local, read-only vetting tool exists. Browse more, but **vet before you trust**:
+
+| | Resource | What it is |
+|---|---|---|
+| 🦞 | **[ClawHub — clawseccheck](https://clawhub.ai/gl0di/clawseccheck)** | This skill's page — install, current version, changelog |
+| 📚 | [awesome-openclaw-skills](https://github.com/VoltAgent/awesome-openclaw-skills) | 5,300+ community skills, organized by category |
+| 🤖 | [awesome-openclaw-agents](https://github.com/mergisi/awesome-openclaw-agents) | Agent templates, real-world use cases & integrations |
+| 🛡️ | [OpenClaw gateway security docs](https://docs.openclaw.ai/gateway/security) | The platform's own hardening guide |
+
+> 🦞 **Before installing anything from these lists** (this skill included): read the source,
+> vet it — `clawseccheck --vet <path>` — and pin a known release. The ClawHavoc wave proved
+> that *"popular on a list"* is not the same as *"safe to run."*
 
 ---
 
