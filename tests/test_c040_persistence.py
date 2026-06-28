@@ -14,7 +14,6 @@ Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from clawseccheck import audit
@@ -23,7 +22,6 @@ from clawseccheck.checks import check_installed_skills
 from clawseccheck.collector import Context
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
-_HEBREW = re.compile(r"[֐-׿]")
 
 
 # ---------------------------------------------------------------------------

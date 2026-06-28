@@ -130,7 +130,7 @@ def test_idempotent_over_random_secrets():
 
 def test_never_raises_and_returns_str_on_arbitrary_input():
     rng = random.Random(2468)
-    pool = ALNUM + string.punctuation + " \t\n" + "אבגש……🔍​‮"
+    pool = ALNUM + string.punctuation + " \t\n" + "……🔍​‮"
     for _ in range(_ITER):
         garbage = _rand(pool, rng.randint(0, 120), rng)
         out = redact(garbage)

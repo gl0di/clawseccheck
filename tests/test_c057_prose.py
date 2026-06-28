@@ -4,14 +4,12 @@ Accuracy is unchanged (no verdict flips); these assert the wording is clearer.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from clawseccheck.catalog import FAIL, UNKNOWN, WARN
 from clawseccheck.checks import check_mcp, check_mcp_hardening, check_sandbox
 from clawseccheck.collector import Context
 
-_HEBREW = re.compile(r"[֐-׿]")
 
 
 def _ctx(cfg: dict) -> Context:

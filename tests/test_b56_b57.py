@@ -10,7 +10,6 @@ Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN
@@ -18,7 +17,6 @@ from clawseccheck.checks import check_controlui_origins, check_plugin_permission
 from clawseccheck.collector import Context, collect
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
-_HEBREW = re.compile(r"[֐-׿]")
 
 
 def _ctx(cfg: dict) -> Context:

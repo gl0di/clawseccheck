@@ -4,7 +4,6 @@ Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from clawseccheck.catalog import PASS, UNKNOWN
@@ -12,7 +11,6 @@ from clawseccheck.checks import check_mcp_external_endpoint
 from clawseccheck.collector import Context, collect
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
-_HEBREW = re.compile(r"[֐-׿]")
 
 
 def _ctx(cfg: dict) -> Context:

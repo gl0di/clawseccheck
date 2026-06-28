@@ -18,7 +18,6 @@ Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -299,7 +298,6 @@ def test_clean_i013_doc_example_passes():
 # Hebrew localisation guard
 # ---------------------------------------------------------------------------
 
-_HEBREW = re.compile(r"[֐-׿]")
 
 
 

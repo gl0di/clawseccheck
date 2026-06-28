@@ -9,7 +9,6 @@ Covers:
 from __future__ import annotations
 
 import json
-import re
 from datetime import date
 from pathlib import Path
 
@@ -220,13 +219,6 @@ def test_freshness_notice_offline_marker_in_output():
     """Advisory lines must mention 'no network call' so users know it's local."""
     lines = freshness_notice({}, today=TODAY)
     assert all("no network call" in ln for ln in lines)
-
-
-# ---------------------------------------------------------------------------
-# i18n: Hebrew output contains Hebrew characters
-# ---------------------------------------------------------------------------
-
-_HEBREW_RE = re.compile(r"[֐-׿]")
 
 
 

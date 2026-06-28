@@ -13,14 +13,12 @@ Grounded fields (docs.openclaw.ai):
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 from clawseccheck.catalog import FAIL, PASS
 from clawseccheck.checks import check_sandbox
 from clawseccheck.collector import Context
 
-_HEBREW = re.compile(r"[֐-׿]")
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
