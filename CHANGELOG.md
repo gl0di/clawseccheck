@@ -3,6 +3,21 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.0.4] — 2026-06-28
+
+Fixes a false-negative in the Lethal Trifecta: configured channels were
+not counted as an outbound surface, causing the third leg to read UNKNOWN
+even when the agent could clearly reply/send on those channels.
+
+### Fixed
+- Trifecta outbound-leg detection now includes configured channels
+  (`_trifecta_legs` in `checks.py`, `_has_outbound` in `risk.py`).
+  Channels are bidirectional — an agent that receives on Telegram/WhatsApp
+  can also send replies, making them an outbound surface. Previously,
+  only explicit tool names and `tools.elevated.allowFrom` were checked,
+  so A1 and RISK-02 could miss the third leg entirely when no outbound
+  tool was listed but channels were present.
+
 ## [2.0.3] — 2026-06-28
 
 Removes all Hebrew locale content from the project — SKILL.md metadata, test
