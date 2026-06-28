@@ -3,6 +3,26 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.3.0] — 2026-06-28
+
+Two new content-scan checks targeting prompt-injection attacks on the
+instruction hierarchy and a previously undetected MCP tool-inheritance
+bypass (OpenClaw issue #63399).
+
+### Added
+- **B74 — Forged-provenance detector:** scans bootstrap files, installed
+  skills, and MCP tool descriptions for fake `SYSTEM:`/role-block markers
+  (`[SYSTEM:`, `===SYSTEM===`, `<system>`, line-start `SYSTEM:`) — FAIL on
+  high-confidence forgery; WARN on false-authorship attribution phrases
+  ("as you agreed yesterday", "you authorized this"). Extension of B64's
+  fence-aware scan loop; 15 new tests.
+- **B75 — MCP tool-inheritance bypass (attested):** advisory check
+  (`scored=False`, `confidence="ATTESTED"`) grounded on OpenClaw issue
+  #63399 where globally-registered `mcp.servers` tools bypass per-agent
+  `tools.allow/deny` filters. UNKNOWN without `--attest`; WARN when an
+  attested agent holds MCP-namespaced tools and `mcp.servers` is configured;
+  12 new tests.
+
 ## [2.2.0] — 2026-06-28
 
 Recalibrate B2 gateway severity: `allowInsecureAuth` alone is now WARN
