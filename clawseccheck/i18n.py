@@ -992,6 +992,30 @@ PHRASES: dict[str, dict[str, str]] = {
               "(שרשרת אספקה AST02/AST04). הסר אם לא ניתן לאמת את המקור.",
     },
 
+    # ---- F-023: local-sink credential exposure — fix strings ----
+    # whole fix string
+    "A skill writes a credential/secret onto the same line as a local log, temp "
+    "file, or report sink. Route sensitive values through redaction; never log or "
+    "persist raw secrets. Remove the sink or scrub the value before it is written.": {
+        "he": (
+            "כישור כותב סוד/אישור באותה שורה עם ערוץ לוג מקומי, קובץ זמני, "
+            "או קובץ דוח. נתב ערכים רגישים דרך מנגנון החלפה; לעולם אל תרשום "
+            "או תשמור סודות גולמיים. הסר את ערוץ הכתיבה או נקה את הערך לפני הכתיבה."
+        ),
+    },
+    # "; "-split fragment 1 of the fix (before the first "; ")
+    "A skill writes a credential/secret onto the same line as a local log, temp "
+    "file, or report sink. Route sensitive values through redaction": {
+        "he": (
+            "כישור כותב סוד/אישור באותה שורה עם ערוץ לוג מקומי, קובץ זמני, "
+            "או קובץ דוח. נתב ערכים רגישים דרך מנגנון החלפה"
+        ),
+    },
+    # "; "-split fragment 2 of the fix (after the first "; ")
+    "never log or persist raw secrets. Remove the sink or scrub the value before it is written.": {
+        "he": "לעולם אל תרשום או תשמור סודות גולמיים. הסר את ערוץ הכתיבה או נקה את הערך לפני הכתיבה.",
+    },
+
     # ---- C6 (C-052): hook-composition tool-policy drop (UNKNOWN advisory) ----
     "This OpenClaw version predates v2026.6.10, which fixed a hook-registry "
     "composition bug that could silently drop trusted tool policies at runtime. "
@@ -2587,6 +2611,28 @@ def _build_rules() -> list[tuple[re.Pattern[str], dict[str, str]]]:
         (
             r"(.+): '([^']+)' name resembles '([^']+)' \(possible typosquat, edit distance (\d+)\)",
             {"he": r"\1: השם '\2' דומה ל-'\3' (חשד לחיקוי, מרחק עריכה \4)"},
+        ),
+
+        # ---- F-023: local-sink credential exposure ----
+        # F-023: B13 HIGH WARN detail (whole-string form, captures evidence tail incl. "; ")
+        (
+            r"Possible local-sink secret exposure in installed skill\(s\): (.+)",
+            {"he": r"חשיפה אפשרית של סוד/ות לערוץ מקומי בכישור/ים מותקנים: \1"},
+        ),
+        # F-023: per-skill evidence fragment — log/debug sink channel
+        (
+            r"(.+): credential/secret reaches a local log/debug sink \(logging/print/console\)",
+            {"he": r"\1: סוד/אישורים הגיעו לערוץ לוג/debug מקומי (logging/print/console)"},
+        ),
+        # F-023: per-skill evidence fragment — temp-file sink channel
+        (
+            r"(.+): credential/secret reaches a temp-file sink \(tempfile or /tmp path\)",
+            {"he": r"\1: סוד/אישורים הגיעו לקובץ זמני (tempfile או /tmp)"},
+        ),
+        # F-023: per-skill evidence fragment — report/output file sink channel
+        (
+            r"(.+): credential/secret reaches a report/output file sink",
+            {"he": r"\1: סוד/אישורים הגיעו לקובץ דוח/פלט"},
         ),
 
         # ---- C-040: persistence / rogue-agent B13 detectors ----

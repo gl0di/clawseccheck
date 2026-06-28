@@ -1205,6 +1205,32 @@ _EXFIL_RE = re.compile(
     r"ngrok(?:-free)?\.(?:io|app)|pipedream\.net",
     re.I,
 )
+# F-023: local-sink credential exposure — same-line credential source + local data-bearing sink.
+# WARN-only/advisory; never FAIL. Static slice only (runtime debug text is E-014 scope).
+_SINK_LOG_RE = re.compile(
+    r"\blogging\.(?:debug|info|warning|warn|error|critical|exception|log)\s*\("
+    r"|\b\w{0,40}log(?:ger)?\.(?:debug|info|warning|warn|error|critical|exception)\s*\("
+    r"|\bprint\s*\("
+    r"|\bconsole\.(?:log|debug|info|warn|error)\s*\("
+    r"|\bsys\.std(?:out|err)\.write\s*\("
+    r"|\braise\s+\w{1,40}(?:Error|Exception)\s*\(",
+    re.I)
+_SINK_TEMPFILE_RE = re.compile(
+    r"\btempfile\.(?:NamedTemporaryFile|mkstemp|mkdtemp|TemporaryFile|gettempdir)\b"
+    r"|\bopen\s*\(\s*[^)\n]{0,60}(?:/tmp/|/var/tmp/|/private/tmp/)"
+    r"|\bPath\s*\(\s*['\"][^'\"\n]{0,60}(?:/tmp/|/var/tmp/)"
+    r"|>>?\s*/(?:tmp|var/tmp)/",
+    re.I)
+_SINK_REPORT_RE = re.compile(
+    r"\bopen\s*\(\s*[^)\n]{0,60}(?:report|summary|output|results?)[\w./-]{0,20}\.(?:md|txt|json|html|csv|log)['\"]"
+    r"|\.write(?:_text)?\s*\([^)\n]{0,60}(?:summary|report)\b",
+    re.I)
+_LOCAL_SINK_CHANNELS = [
+    ("credential/secret reaches a local log/debug sink (logging/print/console)", _SINK_LOG_RE),
+    ("credential/secret reaches a temp-file sink (tempfile or /tmp path)", _SINK_TEMPFILE_RE),
+    ("credential/secret reaches a report/output file sink", _SINK_REPORT_RE),
+]
+
 # HIGH: suspicious but sometimes legitimate — flag for human review, don't hard-fail.
 _SKILL_HIGH = [
     ("download-and-run a package over http",
@@ -1772,6 +1798,32 @@ def _has_cred_exfil_outside_fence(blob: str, fence_ranges: list[tuple[int, int]]
     return False
 
 
+def _local_sink_exfil_hits(name: str, blob: str,
+                           fence_ranges: list[tuple[int, int]]) -> list[str]:
+    """F-023: same-line credential-source AND local-sink (log/tempfile/report), fence-aware.
+
+    One finding per channel per skill. Mirrors _has_cred_exfil_outside_fence zero-FP
+    discipline. Static slice only; runtime debug/error text and undeclared-tool-args
+    are out of scope (E-014).
+    """
+    hits: list[str] = []
+    seen: set[str] = set()
+    pos = 0
+    for ln in blob.splitlines():
+        ln_start = pos
+        pos += len(ln) + 1  # +1 for the stripped newline
+        if _in_fence(ln_start, fence_ranges):
+            continue
+        if not _CRED_RE.search(ln):
+            continue
+        for label, rx in _LOCAL_SINK_CHANNELS:
+            if rx.search(ln) and label not in seen:
+                seen.add(label)
+                hits.append(f"{name}: {label}")
+                break
+    return hits
+
+
 def _suspicious_pipe_hosts(blob: str) -> list[str]:
     hosts = []
     for host in _PIPE_SHELL_RE.findall(blob):
@@ -1893,7 +1945,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         return _custom("B13", HIGH, UNKNOWN,
                        "No installed third-party skills found to inspect.",
                        "Run on the host where installed skills live (~/.openclaw/skills, workspace/skills).")
-    crit, high, _persist_warn = [], [], []
+    crit, high, _persist_warn, warns_local_exfil = [], [], [], []
     for name, blob in skills.items():
         # C-041: precompute fence ranges once per blob so every check below can
         # skip matches that are purely inside a documented code example.
@@ -1930,6 +1982,10 @@ def check_installed_skills(ctx: Context) -> Finding:
         # instruction/context noun in a 300-char window — all outside code examples.
         for rf_url in _runtime_fetch_matches(blob, _fr):
             high.append(f"{name}: runtime-external-fetch instruction (OWASP AST05): {rf_url}")
+
+        # F-023: same-line credential-source + local data-bearing sink (log/tempfile/report).
+        # WARN-only; collected outside the HIGH bucket so it never escalates to FAIL.
+        warns_local_exfil.extend(_local_sink_exfil_hits(name, blob, _fr))
 
         # Pipe-to-shell: use finditer so we have match positions for FP filter.
         for pm in _PIPE_SHELL_RE.finditer(blob):
@@ -2059,6 +2115,18 @@ def check_installed_skills(ctx: Context) -> Finding:
                        "Review whether the skill legitimately needs a background process; "
                        "a skill that detaches subprocesses (nohup/disown/setsid) can "
                        "establish hidden persistence on the host.", _persist_warn)
+
+    # F-023: local-sink secret exposure — WARN-only (never FAIL).
+    # Only reached when no CRIT/HIGH patterns and no _persist_warn fired.
+    if warns_local_exfil:
+        extra = f" (+{len(warns_local_exfil) - 6} more)" if len(warns_local_exfil) > 6 else ""
+        return _custom("B13", HIGH, WARN,
+                       "Possible local-sink secret exposure in installed skill(s): "
+                       + "; ".join(warns_local_exfil[:6]) + extra,
+                       "A skill writes a credential/secret onto the same line as a local log, temp "
+                       "file, or report sink. Route sensitive values through redaction; never log or "
+                       "persist raw secrets. Remove the sink or scrub the value before it is written.",
+                       warns_local_exfil)
 
     # Path traversal check
     if getattr(ctx, "path_traversal_violations", None):
