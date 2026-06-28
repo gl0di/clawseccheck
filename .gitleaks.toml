@@ -1,0 +1,31 @@
+# Gitleaks configuration for ClawSecCheck.
+# The skill tests intentionally use fragments (never contiguous secrets) per §2.3.
+# Real secrets must never appear anywhere; this config tunes noise only.
+
+title = "ClawSecCheck gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+# The CLAWHUB_TOKEN secret is referenced in workflows by name only —
+# never a real clh_ value in source.
+id = "clawhub-token-ref"
+description = "ClawHub token reference (not a real token)"
+regex = '''CLAWHUB_TOKEN'''
+allowlist.regexes = ['''secrets\.CLAWHUB_TOKEN''', '''env\.CLAWHUB_TOKEN''']
+
+[allowlist]
+description = "Fixture configs contain intentionally bad example values (not real secrets)"
+paths = [
+  "fixtures/",
+  "tests/",
+]
+# Gitleaks commit-range scanning — scan full history on PRs, HEAD~1 on push.
+stopwords = [
+  "example",
+  "placeholder",
+  "fake",
+  "test",
+  "fixture",
+]

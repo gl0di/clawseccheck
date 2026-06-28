@@ -90,7 +90,7 @@ jobs:
         # clawseccheck/ package during the cp.
         run: |
           rm -rf dist && mkdir -p dist/clawseccheck
-          cp -r clawseccheck SKILL.md SKILL_HE.md README.md LICENSE \
+          cp -r clawseccheck SKILL.md README.md LICENSE \
                 SECURITY.md SECURITY_MODEL.md CHANGELOG.md pyproject.toml docs audit.py \
                 dist/clawseccheck/
           find dist/clawseccheck -name '__pycache__' -type d -prune -exec rm -rf {} + || true

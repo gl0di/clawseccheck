@@ -5,6 +5,7 @@ on:
   pull_request:
 
 jobs:
+  # ── L1: lint + test ────────────────────────────────────────────────────────
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -35,4 +36,93 @@ jobs:
             python ../clawrange/hunt.py --all || true
           else
             echo "ClawRange hunt.py not available in this CI context (private repo) — skipped"
+          fi
+
+  # ── L2: markdown quality ───────────────────────────────────────────────────
+  markdownlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install markdownlint-cli
+        run: npm install -g markdownlint-cli@0.44.0
+      - name: Lint Markdown
+        # MD013 (line-length) and MD033 (inline HTML) are disabled for docs
+        # that pre-date this rule and use intentional long lines or HTML tables.
+        run: |
+          markdownlint '**/*.md' \
+            --ignore node_modules \
+            --ignore CHANGELOG.md \
+            --config .markdownlint.jsonc
+
+  # ── L3: secret scan ────────────────────────────────────────────────────────
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Scan for secrets (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── L4: commit integrity ───────────────────────────────────────────────────
+  commit-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: No AI-agent co-author in commits
+        # Blocks accidental "Co-Authored-By: Claude" / Anthropic attribution
+        # in the public commit log (CLAUDE.md §7: "No Claude/AI attribution").
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}..HEAD"
+          else
+            RANGE="HEAD~1..HEAD"
+          fi
+          FOUND=$(git log "$RANGE" --format="%H %B" \
+            | grep -iE "co-authored-by:.*(claude|anthropic|cursor|copilot|aider|codeium)" || true)
+          if [ -n "$FOUND" ]; then
+            echo "::error::AI co-author tag detected in commit(s):"
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "✓ No AI co-author tags"
+
+      - name: No agent config files in git tree
+        # Ensures CLAUDE.md, .claude/, .cursorrules, etc. never ship.
+        run: |
+          FORBIDDEN="CLAUDE.md CLAUDE.local.md .claude .cursorrules .cursor .aider .copilot"
+          FOUND=""
+          for f in $FORBIDDEN; do
+            MATCH=$(git ls-files "$f" 2>/dev/null || true)
+            [ -n "$MATCH" ] && FOUND="$FOUND $f"
+          done
+          if [ -n "$FOUND" ]; then
+            echo "::error::Agent config file(s) found in git tree:$FOUND"
+            echo "Add them to .gitignore and untrack with 'git rm --cached'."
+            exit 1
+          fi
+          echo "✓ No agent config files in git tree"
+
+      - name: Author identity check (gl0di only)
+        # Warns if a commit was authored by an identity other than gl0di.
+        # Informational — does not fail the build (old Dave G history is kept).
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}..HEAD"
+          else
+            RANGE="HEAD~1..HEAD"
+          fi
+          OTHERS=$(git log "$RANGE" --format="%an <%ae>" \
+            | grep -v "gl0di" || true)
+          if [ -n "$OTHERS" ]; then
+            echo "::warning::Non-canonical author(s) in this push:"
+            echo "$OTHERS"
+            echo "Expected: gl0di <gl0di@users.noreply.github.com>"
+          else
+            echo "✓ Author identity canonical (gl0di)"
           fi

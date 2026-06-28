@@ -1,0 +1,16 @@
+{
+  // ClawSecCheck markdownlint config.
+  // Extends the default ruleset with relaxations for long-form security docs.
+  "default": true,
+  // MD013: line length — disabled; security docs intentionally use long lines
+  // for command snippets and table cells.
+  "MD013": false,
+  // MD033: inline HTML — disabled; README uses HTML tables for the check matrix.
+  "MD033": false,
+  // MD041: first-line H1 — disabled; some docs start with a blockquote or badge.
+  "MD041": false,
+  // MD024: duplicate headings — disabled; CHANGELOG uses repeated "### Added" etc.
+  "MD024": false,
+  // MD007: unordered list indent — 2-space indent (project standard).
+  "MD007": { "indent": 2 }
+}
