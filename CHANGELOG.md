@@ -3,6 +3,36 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.1.0] — 2026-06-28
+
+Report UX overhaul: demote Trifecta from the headline, reorder CLI output
+so findings come before diagnostics, switch dashboard to severity-first
+ordering, and remove the i18n layer that had no purpose after v2.0.0's
+English-only migration.
+
+### Changed
+- Lethal Trifecta removed from the score-line header; now appears only as
+  a standalone ⛔ alert when all three legs are active (3/3). At 2/3 it
+  shows naturally in the findings list without false prominence.
+- CLI report reordered: "things to fix" list now precedes the capability
+  graph and secret-reachability blocks (diagnostic detail moved after
+  actionable findings).
+- Dashboard section 3 is now severity-first globally; surface family
+  appears as an inline tag `[Supply Chain]` rather than a grouping header
+  that broke severity ordering.
+- Post-report Next menu uses `a/b/c/d` to avoid ambiguity with the
+  pre-scan `1/2/3/4` mode-select menu.
+- No-op grade projection replaced with an explanatory note when fixing
+  the top issue alone would not change the grade.
+- Redundant PASS-breakdown line removed (third consecutive restatement of
+  the same counts).
+
+### Removed
+- `clawseccheck/i18n.py` deleted — the multi-language layer was removed in
+  v2.0.0; the file had become a plain English-strings dict with no purpose.
+  All `t()` call-sites inlined to literal strings/f-strings. `"t"` dropped
+  from `__all__`.
+
 ## [2.0.4] — 2026-06-28
 
 Fixes a false-negative in the Lethal Trifecta: configured channels were
