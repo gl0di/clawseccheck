@@ -3,6 +3,29 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.5.0] — 2026-06-29
+
+Runtime evidence layer: three new advisory checks (B77–B79) read real OpenClaw
+on-disk log files to surface config-write anomalies, integrity alerts, and
+approval-policy posture. Also fixes the release-gate to match v2.0.0 de-i18n
+(SKILL_HE.md removed) and aligns staging path with the CI workflow.
+
+### Added
+- **B77 — Config-write audit log review:** reads `~/.openclaw/logs/config-audit.jsonl`;
+  WARNs when a non-openclaw process wrote the config or OpenClaw itself flagged
+  suspicious activity (unexpected diff, mode change). `scored=False`.
+- **B78 — Config-health integrity alert:** reads `~/.openclaw/logs/config-health.json`;
+  WARNs when `lastObservedSuspiciousSignature` is non-null. `scored=False`.
+- **B79 — Codex session approval-policy posture:** samples the last 5 Codex session
+  JSONL files; WARNs when every sampled turn has `approval_policy=never`. `scored=False`.
+
+### Fixed
+- Release-gate L1: removed stale SKILL_HE.md requirement (deleted in v2.0.0 E-015).
+- Release-gate staging: corrected `dist-skill` path mismatch to `dist/clawseccheck`
+  to match the CI workflow's actual staging directory.
+- Release-gate ClawRange: missing `fuzz.py` is now advisory (skipped), not a hard
+  FAIL — ClawRange is an unbuilt internal tool.
+
 ## [2.4.0] — 2026-06-29
 
 Scored twin of B75: B76 raises grade impact for agents that hold high-blast MCP tools
