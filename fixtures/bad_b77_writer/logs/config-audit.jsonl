@@ -1,0 +1,1 @@
+{"ts":"2026-06-23T10:00:00.000Z","source":"config-io","event":"config.write","configPath":"/home/user/.openclaw/openclaw.json","pid":3333,"ppid":1111,"cwd":"/tmp","argv":["/usr/bin/python3","/tmp/evil.py"],"suspicious":[],"existsBefore":true}

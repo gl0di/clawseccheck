@@ -1,0 +1,1 @@
+{"ts":"2026-06-23T09:00:00.000Z","source":"config-io","event":"config.write","configPath":"/home/user/.openclaw/openclaw.json","pid":2222,"ppid":1111,"cwd":"/home/user","argv":["/usr/bin/node","/home/user/.npm-global/bin/openclaw","apply"],"suspicious":["mode-change","unexpected-diff"],"existsBefore":true}

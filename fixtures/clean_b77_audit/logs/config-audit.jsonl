@@ -1,0 +1,2 @@
+{"ts":"2026-06-22T14:32:28.689Z","source":"config-io","event":"config.write","configPath":"/home/user/.openclaw/openclaw.json","pid":1313405,"ppid":1312774,"cwd":"/home/user","argv":["/usr/bin/node","/home/user/.npm-global/bin/openclaw","onboard"],"suspicious":[],"existsBefore":false}
+{"ts":"2026-06-23T08:00:00.000Z","source":"config-io","event":"config.write","configPath":"/home/user/.openclaw/openclaw.json","pid":1400000,"ppid":1399999,"cwd":"/home/user","argv":["/usr/bin/node","/home/user/.npm-global/bin/openclaw","apply"],"suspicious":[],"existsBefore":true}

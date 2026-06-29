@@ -853,6 +853,42 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B77 - Config-write audit log review (suspicious / unexpected writer)
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Audit Log / Config Provenance
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Config-write audit log review (suspicious / unexpected writer)
+- Remediation:
+  - none
+
+### B78 - Config-health integrity alert (observed suspicious signature)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Config Integrity / Tamper Detection
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Config-health integrity alert (observed suspicious signature)
+- Remediation:
+  - none
+
+### B79 - Codex session approval-policy posture (approval=never)
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Human Approval
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Codex session approval-policy posture (approval=never)
+- Remediation:
+  - none
+
 ## Advisory checks
 
 ### C3 - Backups of SOUL.md / memory

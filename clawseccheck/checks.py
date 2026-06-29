@@ -8234,6 +8234,217 @@ def check_mcp_bypass_highblast(ctx: Context) -> Finding:
     )
 
 
+# ---------------------------------------------------------------------------
+# B77 — Config-write audit log review
+# ---------------------------------------------------------------------------
+def check_config_audit_log(ctx: Context) -> Finding:
+    import json as _json
+
+    log_path = ctx.home / "logs" / "config-audit.jsonl"
+    if not log_path.is_file():
+        return _finding(
+            "B77", UNKNOWN,
+            "config audit log not found — cannot verify config change history.",
+            "Keep the config-io audit log (logs/config-audit.jsonl) enabled so config "
+            "writes stay attributable and reviewable.",
+        )
+    try:
+        raw = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return _finding(
+            "B77", UNKNOWN,
+            "config audit log present but unreadable — cannot verify config change history.",
+            "Ensure logs/config-audit.jsonl is readable by the owner.",
+        )
+
+    evidence: list[str] = []
+    total = 0
+    for ln in raw.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            rec = _json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        total += 1
+
+        suspicious = rec.get("suspicious")
+        if isinstance(suspicious, list) and suspicious:
+            event = str(rec.get("event", "config.write"))
+            labels = ", ".join(str(s) for s in suspicious[:5])
+            evidence.append(f"{event}: flagged suspicious [{labels}]")
+
+        argv = rec.get("argv")
+        if isinstance(argv, list) and argv:
+            if not any("openclaw" in str(a).lower() for a in argv):
+                proc = os.path.basename(str(argv[0]))
+                evidence.append(f"config written by unexpected process: {proc}")
+
+    if total == 0:
+        return _finding(
+            "B77", UNKNOWN,
+            "config audit log present but contains no parseable config-write records.",
+            "Keep the config-io audit log (logs/config-audit.jsonl) enabled so config "
+            "writes stay attributable and reviewable.",
+        )
+    if evidence:
+        n = len(evidence)
+        return _finding(
+            "B77", WARN,
+            f"config-write audit log shows {n} entr{'y' if n == 1 else 'ies'} of concern "
+            f"across {total} recorded write(s): suspicious markers and/or writes from an "
+            "unexpected process.",
+            "Review each flagged config write. A write you did not initiate — or one "
+            "carrying a suspicious marker — may indicate config tampering; restore from a "
+            "known-good backup and rotate any exposed credentials.",
+            evidence=evidence[:10],
+        )
+    return _finding(
+        "B77", PASS,
+        f"all {total} recorded config write(s) are clean and openclaw-originated.",
+        "Periodically review logs/config-audit.jsonl for unexpected config writers.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# B78 — Config-health integrity tracker review
+# ---------------------------------------------------------------------------
+def check_config_health_integrity(ctx: Context) -> Finding:
+    import json as _json
+
+    health_path = ctx.home / "logs" / "config-health.json"
+    if not health_path.is_file():
+        return _finding(
+            "B78", UNKNOWN,
+            "config-health integrity file not found — cannot evaluate config integrity history.",
+            "Keep config-health tracking (logs/config-health.json) enabled so OpenClaw can "
+            "detect and flag suspicious config states.",
+        )
+    try:
+        data = _json.loads(health_path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return _finding(
+            "B78", UNKNOWN,
+            "config-health integrity file present but unreadable or malformed — cannot "
+            "evaluate config integrity history.",
+            "Ensure logs/config-health.json is valid JSON and owner-readable.",
+        )
+
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, dict) or not entries:
+        return _finding(
+            "B78", UNKNOWN,
+            "config-health file has no tracked config entries — nothing to evaluate.",
+            "Keep config-health tracking (logs/config-health.json) enabled so OpenClaw can "
+            "detect and flag suspicious config states.",
+        )
+
+    evidence: list[str] = []
+    for path, info in entries.items():
+        if not isinstance(info, dict):
+            continue
+        if info.get("lastObservedSuspiciousSignature") is not None:
+            name = os.path.basename(str(path)) or "config"
+            evidence.append(f"suspicious integrity signature observed for {name}")
+
+    if evidence:
+        n = len(evidence)
+        return _finding(
+            "B78", WARN,
+            f"config integrity alert: {n} tracked config(s) recorded a suspicious signature "
+            "— OpenClaw observed a config state it could not verify as known-good.",
+            "Treat this as possible config tampering: compare the live config against the "
+            "last-known-good, restore from a trusted backup if it diverged, and rotate any "
+            "credentials that may have been exposed.",
+            evidence=evidence[:10],
+        )
+    return _finding(
+        "B78", PASS,
+        f"all {len(entries)} tracked config(s) have a clean integrity history "
+        "(no suspicious signatures observed).",
+        "Keep config-health tracking enabled and review it after any unexpected config change.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# B79 — Codex session approval-policy posture
+# ---------------------------------------------------------------------------
+def check_session_approval_policy(ctx: Context) -> Finding:
+    import json as _json
+
+    base = ctx.home / "agents" / "main" / "agent" / "codex-home" / "sessions"
+    no_sessions = _finding(
+        "B79", UNKNOWN,
+        "no Codex session logs found — cannot determine approval policy.",
+        "Run sensitive sessions with a human approval gate (approval_policy other than "
+        "\"never\"), or confirm this agent is intended to run fully autonomous.",
+    )
+    if not base.is_dir():
+        return no_sessions
+
+    files = [p for p in walk_dir_safely(base) if p.name.endswith(".jsonl")]
+    if not files:
+        return no_sessions
+
+    recent = sorted(files)[-5:]
+
+    total_turns = 0
+    never_turns = 0
+    for fp in recent:
+        try:
+            raw = fp.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for ln in raw.splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                rec = _json.loads(ln)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict) or rec.get("type") != "turn_context":
+                continue
+            payload = rec.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            total_turns += 1
+            if payload.get("approval_policy") == "never":
+                never_turns += 1
+
+    if total_turns == 0:
+        return _finding(
+            "B79", UNKNOWN,
+            "Codex session logs found but no turn_context events recorded — cannot "
+            "determine approval policy.",
+            "Confirm whether recent sessions ran with a human approval gate.",
+        )
+    if never_turns == total_turns:
+        return _finding(
+            "B79", WARN,
+            f"all {total_turns} recent Codex turn(s) sampled (across {len(recent)} session "
+            "file(s)) ran with approval_policy=\"never\" — human approval was never required.",
+            "If this agent performs sensitive or destructive actions, run at least some "
+            "sessions with a human approval gate (approval_policy other than \"never\"). "
+            "Fully unattended approval=never removes the human checkpoint before tool execution.",
+            evidence=[
+                f"turns sampled: {total_turns}",
+                f"approval_policy=never: {never_turns}",
+                f"session files sampled: {len(recent)}",
+            ],
+        )
+    return _finding(
+        "B79", PASS,
+        f"recent Codex sessions include human-approval gates "
+        f"({never_turns}/{total_turns} sampled turns were approval=never).",
+        "Keep requiring human approval for sensitive actions; avoid defaulting all sessions "
+        "to approval_policy=\"never\".",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_secrets_at_rest_home, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -8279,6 +8490,9 @@ CHECKS = [
     check_forged_provenance,
     check_mcp_tool_inheritance,
     check_mcp_bypass_highblast,
+    check_config_audit_log,
+    check_config_health_integrity,
+    check_session_approval_policy,
 ]
 
 
