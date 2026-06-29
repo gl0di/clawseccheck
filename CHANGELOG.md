@@ -3,6 +3,24 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.5.4] — 2026-06-29
+
+Follow-up to the v2.5.3 capability-graph audit: align B46 multi-agent exposure with the
+trifecta input-leg definition of untrusted ingress, and lock the deliberately-narrower B55
+FAIL boundary so a future "consistency" refactor can't turn it into a false positive.
+
+### Fixed
+- **B46 multi-agent exposure** now counts **allowlist/paired** ingress, not just fully-open
+  channels, in its partial-trifecta branch — matching the trifecta input leg
+  (`_external_input_channels`). An `allowlist channel + elevated sender scope + subagents`
+  setup previously slipped through as `PASS`; it now correctly `WARN`s. B46 stays WARN-capped,
+  so this adds **no new FAIL** on real configs.
+
+### Changed
+- **B55 fs-write exposure** keeps `_open_channels` (open-only) at its **FAIL** gate **by
+  design** — an allowlist/paired channel stays `WARN`, never a hard `FAIL`. The boundary is
+  now documented in-code and locked with explicit regression tests (no behavior change).
+
 ## [2.5.3] — 2026-06-29
 
 Cross-agent audit fixes — multi-agent session posture, bootstrap-root discovery,
