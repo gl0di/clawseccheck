@@ -692,37 +692,41 @@ def test_render_json_without_risk_byte_identical():
 # (risk paths are a separate layer; scored findings must not change)
 # ──────────────────────────────────────────────────────────────────────────────
 
-FLEET_CONFIGS = [
-    "/home/glodi/Backups/.openclaw/openclaw.json",
-    "/home/glodi/Backups/.openclaw-analyst/openclaw.json",
-    "/home/glodi/Backups/.openclaw-architect/openclaw.json",
-    "/home/glodi/Backups/.openclaw-builder/openclaw.json",
-    "/home/glodi/Backups/.openclaw-designer/openclaw.json",
-    "/home/glodi/Backups/.openclaw-qa/openclaw.json",
-    "/home/glodi/Backups/n/.openclaw/openclaw.json",
-]
+def _fleet_home_dirs() -> list[str]:
+    """Return home dirs to exercise in fleet tests.
+
+    Always includes the two committed fixture homes so CI is never vacuous.
+    Appends the real local ~/.openclaw if it exists (dev-box convenience only;
+    skipped in CI where the directory is absent).
+    """
+    dirs: list[str] = [
+        str(FIXTURES / "home_safe"),
+        str(FIXTURES / "home_vuln"),
+    ]
+    real = Path.home() / ".openclaw"
+    if real.is_dir():
+        dirs.append(str(real))
+    return dirs
 
 
-@pytest.mark.parametrize("cfg_path", [p for p in FLEET_CONFIGS if Path(p).is_file()])
-def test_fleet_config_score_unaffected_by_risk(cfg_path):
+@pytest.mark.parametrize("home_dir", _fleet_home_dirs())
+def test_fleet_config_score_unaffected_by_risk(home_dir):
     """Risk paths are additive; the A-F score must not change."""
     from clawseccheck import audit
     from clawseccheck.risk import risk_paths as compute_paths
-    home = str(Path(cfg_path).parent)
-    ctx, findings, score = audit(home)
+    ctx, findings, score = audit(home_dir)
     compute_paths(ctx, findings)  # smoke: must run without affecting the score
     score2 = compute(findings)
-    assert score.score == score2.score, f"Score changed for {cfg_path}"
-    assert score.grade == score2.grade, f"Grade changed for {cfg_path}"
+    assert score.score == score2.score, f"Score changed for {home_dir}"
+    assert score.grade == score2.grade, f"Grade changed for {home_dir}"
 
 
-@pytest.mark.parametrize("cfg_path", [p for p in FLEET_CONFIGS if Path(p).is_file()])
-def test_fleet_config_risk_paths_are_list(cfg_path):
+@pytest.mark.parametrize("home_dir", _fleet_home_dirs())
+def test_fleet_config_risk_paths_are_list(home_dir):
     """risk_paths() always returns a list (possibly empty) for fleet configs."""
     from clawseccheck import audit
     from clawseccheck.risk import risk_paths as compute_paths
-    home = str(Path(cfg_path).parent)
-    ctx, findings, score = audit(home)
+    ctx, findings, score = audit(home_dir)
     paths = compute_paths(ctx, findings)
     assert isinstance(paths, list)
     for p in paths:
