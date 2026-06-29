@@ -8375,71 +8375,114 @@ def check_config_health_integrity(ctx: Context) -> Finding:
 def check_session_approval_policy(ctx: Context) -> Finding:
     import json as _json
 
-    base = ctx.home / "agents" / "main" / "agent" / "codex-home" / "sessions"
     no_sessions = _finding(
         "B79", UNKNOWN,
         "no Codex session logs found — cannot determine approval policy.",
         "Run sensitive sessions with a human approval gate (approval_policy other than "
         "\"never\"), or confirm this agent is intended to run fully autonomous.",
     )
-    if not base.is_dir():
-        return no_sessions
+    # Evaluate EACH agent independently (N=5 most-recent files per agent).
+    # Worst-case posture wins: a single fully-auto-approving agent triggers WARN
+    # regardless of how safe other agents are — safe agents cannot dilute a dangerous one.
+    agents_root = ctx.home / "agents"
+    agent_dirs: list[Path] = []
+    if agents_root.is_dir():
+        agent_dirs = sorted(
+            p for p in agents_root.iterdir()
+            if p.is_dir() and not p.is_symlink()
+        )
 
-    files = [p for p in walk_dir_safely(base) if p.name.endswith(".jsonl")]
-    if not files:
-        return no_sessions
+    any_sessions = False   # at least one .jsonl file found anywhere
+    any_turns = False      # at least one turn_context event parsed
 
-    recent = sorted(files)[-5:]
+    # Worst-agent tracking (the most dangerous individual agent posture).
+    worst_agent: str | None = None
+    worst_total = 0
+    worst_never = 0
+    worst_files = 0
 
-    total_turns = 0
-    never_turns = 0
-    for fp in recent:
-        try:
-            raw = fp.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+    # Grand totals used only for the PASS finding message.
+    grand_total = 0
+    grand_never = 0
+
+    for agent_dir in agent_dirs:
+        sessions_dir = agent_dir / "agent" / "codex-home" / "sessions"
+        if not sessions_dir.is_dir():
             continue
-        for ln in raw.splitlines():
-            ln = ln.strip()
-            if not ln:
-                continue
-            try:
-                rec = _json.loads(ln)
-            except ValueError:
-                continue
-            if not isinstance(rec, dict) or rec.get("type") != "turn_context":
-                continue
-            payload = rec.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            total_turns += 1
-            if payload.get("approval_policy") == "never":
-                never_turns += 1
+        agent_files = [p for p in walk_dir_safely(sessions_dir) if p.name.endswith(".jsonl")]
+        if not agent_files:
+            continue
+        any_sessions = True
+        recent = sorted(agent_files)[-5:]
 
-    if total_turns == 0:
+        a_total = 0
+        a_never = 0
+        for fp in recent:
+            try:
+                raw = fp.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for ln in raw.splitlines():
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    rec = _json.loads(ln)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict) or rec.get("type") != "turn_context":
+                    continue
+                payload = rec.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                a_total += 1
+                any_turns = True
+                if payload.get("approval_policy") == "never":
+                    a_never += 1
+
+        grand_total += a_total
+        grand_never += a_never
+
+        # Record this agent if it is fully auto-approving (all recent turns = never).
+        # Keep the agent with the highest never count as the representative worst case.
+        if a_total > 0 and a_never == a_total:
+            if worst_agent is None or a_never > worst_never:
+                worst_agent = agent_dir.name
+                worst_total = a_total
+                worst_never = a_never
+                worst_files = len(recent)
+
+    if not any_sessions:
+        return no_sessions
+
+    if not any_turns:
         return _finding(
             "B79", UNKNOWN,
             "Codex session logs found but no turn_context events recorded — cannot "
             "determine approval policy.",
             "Confirm whether recent sessions ran with a human approval gate.",
         )
-    if never_turns == total_turns:
+
+    if worst_agent is not None:
         return _finding(
             "B79", WARN,
-            f"all {total_turns} recent Codex turn(s) sampled (across {len(recent)} session "
-            "file(s)) ran with approval_policy=\"never\" — human approval was never required.",
+            f"all {worst_total} recent Codex turn(s) sampled (across {worst_files} session "
+            f"file(s)) for agent \"{worst_agent}\" ran with approval_policy=\"never\" — "
+            "human approval was never required.",
             "If this agent performs sensitive or destructive actions, run at least some "
             "sessions with a human approval gate (approval_policy other than \"never\"). "
             "Fully unattended approval=never removes the human checkpoint before tool execution.",
             evidence=[
-                f"turns sampled: {total_turns}",
-                f"approval_policy=never: {never_turns}",
-                f"session files sampled: {len(recent)}",
+                f"agent: {worst_agent}",
+                f"turns sampled: {worst_total}",
+                f"approval_policy=never: {worst_never}",
+                f"session files sampled: {worst_files}",
             ],
         )
     return _finding(
         "B79", PASS,
         f"recent Codex sessions include human-approval gates "
-        f"({never_turns}/{total_turns} sampled turns were approval=never).",
+        f"({grand_never}/{grand_total} sampled turns were approval=never).",
         "Keep requiring human approval for sensitive actions; avoid defaulting all sessions "
         "to approval_policy=\"never\".",
     )
