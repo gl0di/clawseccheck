@@ -742,17 +742,32 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     else:
         ctx.errors.append(f"config not found: {cfg_path}")
 
-    for ws in WORKSPACE_DIRS:
-        wdir = home / ws
+    # Scan the home root first, then workspace sub-directories.  The root is
+    # included so bootstrap files that live outside the three named workspace
+    # dirs are not invisible (§6: never hardcode one layout).
+    # Resolved paths are tracked so a symlink from a workspace dir back to a
+    # root file is not read twice.
+    _seen_bootstrap: set[Path] = set()
+    for _ws in [""] + list(WORKSPACE_DIRS):
+        wdir = home if _ws == "" else home / _ws
         if not wdir.is_dir():
             continue
         for name in BOOTSTRAP_FILES:
             f = wdir / name
-            if f.is_file():
-                try:
-                    ctx.bootstrap[f"{ws}/{name}"] = f.read_text(encoding="utf-8")
-                except OSError as exc:
-                    ctx.errors.append(f"could not read {f}: {exc}")
+            if not f.is_file():
+                continue
+            try:
+                real = f.resolve()
+            except OSError:
+                real = f
+            if real in _seen_bootstrap:
+                continue
+            _seen_bootstrap.add(real)
+            key = name if _ws == "" else f"{_ws}/{name}"
+            try:
+                ctx.bootstrap[key] = f.read_text(encoding="utf-8")
+            except OSError as exc:
+                ctx.errors.append(f"could not read {f}: {exc}")
 
     _read_installed_skills(home, ctx)
     return ctx
