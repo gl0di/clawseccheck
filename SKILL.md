@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 2.3.0
+version: 2.4.0
 description: Free, local security self-audit for your own OpenClaw agent. Inspects your config read-only; audit history saved locally to ~/.clawseccheck/. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
 license: MIT
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Inspects your config read-only; audit history saved locally to ~/.clawseccheck/. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}

@@ -841,6 +841,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B76 - High-blast MCP tool-inheritance bypass (attested)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Least Privilege / MCP Tool Inheritance
+- Scored: yes
+- Confidence: ATTESTED
+- OWASP: none
+- What it checks: High-blast MCP tool-inheritance bypass (attested)
+- Remediation:
+  - none
+
 ## Advisory checks
 
 ### C3 - Backups of SOUL.md / memory

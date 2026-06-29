@@ -3,6 +3,22 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.4.0] — 2026-06-29
+
+Scored twin of B75: B76 raises grade impact for agents that hold high-blast MCP tools
+despite per-agent filters (OpenClaw #63399 — EXEC/EGRESS/DESTRUCTIVE/MAILBOX_CONFIG).
+
+### Added
+- **B76 — High-blast MCP tool-inheritance bypass (attested, scored):** scored=True
+  companion to B75. Focuses on MCP-namespaced tools whose verb classifies as
+  EXEC, EGRESS, DESTRUCTIVE, or MAILBOX_CONFIG — the primitives that enable code
+  execution, exfiltration, irreversible deletion, or persistent mailbox takeover.
+  `classify_verb()` strips the MCP namespace before matching so provider names
+  (e.g. `SendGrid`) never inflate the verdict. UNKNOWN without `--attest`; WARN
+  (grade-affecting) when any attested agent holds high-blast MCP tools and
+  `mcp.servers` is configured; PASS when all attested MCP tools are low-blast
+  (search/read/draft verbs only). 16 new tests.
+
 ## [2.3.0] — 2026-06-28
 
 Two new content-scan checks targeting prompt-injection attacks on the

@@ -8150,6 +8150,90 @@ def check_mcp_tool_inheritance(ctx: Context) -> Finding:
     )
 
 
+
+
+# B76 — High-blast MCP tool-inheritance bypass (scored, attested)
+# ---------------------------------------------------------------------------
+
+def check_mcp_bypass_highblast(ctx: Context) -> Finding:
+    """B76 — High-blast MCP tool-inheritance bypass (attestation-based, scored).
+
+    Grounded on OpenClaw #63399: globally-registered mcp.servers tools bypass
+    per-agent filters and are injected into ALL agents at runtime.
+
+    B75 (scored=False) flags any MCP bleed broadly.  B76 (scored=True) targets only
+    the subset that materially raises attack blast radius: agents holding MCP-namespaced
+    tools whose verb classifies as EXEC, EGRESS, DESTRUCTIVE, or MAILBOX_CONFIG.
+    These are the primitives that enable code execution, exfiltration, irreversible
+    deletion, or persistent mailbox takeover.
+
+    classify_verb() strips MCP namespace before matching so provider names cannot
+    inflate the verdict (e.g. 'mcp__SendGrid__list_templates' → verb='list_templates'
+    → REVERSIBLE, not EGRESS).
+
+    UNKNOWN — no attestation provided.
+    WARN    — one or more attested agents hold high-blast MCP tools + mcp.servers set.
+    PASS    — no high-blast MCP tools found, or no mcp.servers configured.
+    """
+    agents = _attest.attested_agents(ctx.attestation)
+    if not agents:
+        return _finding(
+            "B76", UNKNOWN,
+            "No attestation provided — cannot determine whether high-blast MCP tools "
+            "bypass per-agent filters at runtime (OpenClaw #63399).",
+            "Run with --attest including each agent's real tool list. High-blast MCP "
+            "tools (EXEC/EGRESS/DESTRUCTIVE/MAILBOX_CONFIG verbs) may be reachable by "
+            "all agents regardless of per-agent tool configuration.",
+        )
+
+    mcp_servers = _mcp_servers(ctx.config)
+    if not mcp_servers:
+        return _finding(
+            "B76", PASS,
+            "No MCP servers configured — high-blast MCP tool inheritance bypass not applicable.",
+            "This check activates when mcp.servers (or mcpServers) are registered.",
+        )
+
+    blast_ev: list[str] = []
+    for agent in agents:
+        name = agent["name"]
+        tools = agent["tools"]
+        mcp_tools = [t for t in tools if "__" in t]
+        high_blast = [
+            t for t in mcp_tools
+            if _attest.classify_verb(t) in _attest.HIGH_BLAST_CLASSES
+        ]
+        if high_blast:
+            count = len(high_blast)
+            sample = ", ".join(high_blast[:3])
+            extra = f" (+{count - 3} more)" if count > 3 else ""
+            blast_ev.append(
+                f"agent '{name}' holds {count} high-blast MCP tool(s): {sample}{extra}"
+            )
+
+    if blast_ev:
+        ev_summary = "; ".join(blast_ev[:3])
+        extra_ev = f" (+{len(blast_ev) - 3} more agents)" if len(blast_ev) > 3 else ""
+        return _finding(
+            "B76", WARN,
+            "Attested agents hold high-blast MCP tools that bypass per-agent filters "
+            "(OpenClaw #63399 — EXEC/EGRESS/DESTRUCTIVE/MAILBOX_CONFIG verbs): "
+            + ev_summary + extra_ev,
+            "High-blast MCP tools increase the blast radius of prompt-injection or "
+            "rogue-agent attacks. Until #63399 is resolved: disable MCP servers not "
+            "needed by all agents, use sandbox.tools restrictions, or add per-source "
+            "deny lists via toolsBySender.",
+            blast_ev,
+        )
+
+    return _finding(
+        "B76", PASS,
+        "No attested agent holds high-blast MCP tools despite MCP servers configured.",
+        "Current MCP tool inventory contains only low-blast verbs (search/read/draft). "
+        "Re-run after adding MCP servers or changing tool configurations.",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_secrets_at_rest_home, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -8194,6 +8278,7 @@ CHECKS = [
     check_discovery_mdns_mode,
     check_forged_provenance,
     check_mcp_tool_inheritance,
+    check_mcp_bypass_highblast,
 ]
 
 

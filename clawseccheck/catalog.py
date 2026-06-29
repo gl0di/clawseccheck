@@ -346,6 +346,10 @@ CATALOG: list[CheckMeta] = [
               MEDIUM, "hardening", "Least Privilege / MCP Tool Inheritance",
               scored=False, confidence=ATTESTED,
               surface="agents"),
+    CheckMeta("B76", "High-blast MCP tool-inheritance bypass (attested)",
+              HIGH, "hardening", "Least Privilege / MCP Tool Inheritance",
+              scored=True, confidence=ATTESTED,
+              surface="agents"),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False,
               surface="bootstrap"),
