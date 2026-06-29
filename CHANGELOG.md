@@ -5,10 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
 
 ## [2.5.5] — 2026-06-29
 
-Sharper lethal-trifecta (A1) detection plus a batch of schema-variant and
-threat-mapping fixes. A1 now reads real capability surfaces it previously missed,
-so some setups that genuinely hold all three trifecta legs may now correctly FAIL
-where they were a "cannot determine" WARN before.
+Sharper, more precise lethal-trifecta (A1) detection plus a batch of schema-variant
+and threat-mapping fixes. A1 now reads real capability surfaces it previously missed
+(e.g. web fetch), so some setups that genuinely hold all three legs may now correctly
+FAIL where they were a "cannot determine" WARN before — while several false positives
+are closed (approval-gated group bots; a gateway password miscounted as agent data).
 
 ### Added
 - A1 detects an enabled web fetch/browse tool (`tools.web.fetch.enabled`) as both
@@ -27,6 +28,11 @@ where they were a "cannot determine" WARN before.
   a real `--attest` roster) resolves the leg.
 - **A1:** a channel marked `enabled: false` no longer raises the input/outbound
   legs (it ingests and sends nothing).
+- **A1 false positive (gateway password):** `gateway.auth.password` no longer counts
+  toward the sensitive-data leg — it is the gateway's own auth secret, not data the
+  agent can read, so "web fetch + a gateway password" no longer reaches a spurious
+  3/3. Real data access (a data tool, `fs_read`, or a credentials dir) still raises
+  the leg; B1 still flags the password as a plaintext secret.
 - **B39:** reads an accounts-nested DM allowlist under `session.dmScope: "main"`
   (previously a false PASS).
 - **B33 / C6:** read the root-level `lastTouchedVersion` alias so the version/CVE
@@ -43,14 +49,6 @@ where they were a "cannot determine" WARN before.
   out of scope); they map to LLM06 (Excessive Agency). Previously unmapped checks
   are now tied to OWASP LLM and Agentic-Skills classes (B12, B74, B76, B79, C014,
   C015 → LLM; B38, B73, B74, B76, B77, B78, B79, C032 → AST).
-
-### Known limitations
-- A1 can over-report on the narrow shape "web fetch enabled + a gateway password
-  set, with no agent-readable private data (no file/exec tools, no credentials)":
-  the gateway password is counted toward the sensitive-data leg even though the
-  agent cannot read it. A precise fix (model exec/filesystem access as data access;
-  stop treating the gateway password as the sensitive signal) is in progress. Real
-  agents with any data or exec capability are unaffected.
 
 ## [2.5.4] — 2026-06-29
 

@@ -171,6 +171,22 @@ def test_a1_web_fetch_enabled_is_untrusted_input():
     assert "untrusted input" in (a1.evidence or [])
 
 
+def test_a1_gateway_password_alone_is_not_sensitive_data():
+    """§5 false-positive guard: gateway.auth.password is the gateway's own auth secret,
+    NOT agent-readable private data, so it must not constitute the sensitive-data leg.
+    web_fetch fills input + outbound, so counting the gateway password as sensitive would
+    let "web browsing + a gateway password" reach a spurious 3/3 FAIL. B1 still flags the
+    password as a plaintext secret — that is its proper home."""
+    a1 = _a1({"tools": {"web": {"fetch": {"enabled": True}}},
+              "gateway": {"auth": {"password": "x"}}})
+    assert "sensitive data" not in (a1.evidence or [])
+    assert a1.status != FAIL
+    # contrast: web_fetch + a REAL data tool (fs_read) IS a genuine 3/3 lethal trifecta
+    real = _a1({"tools": {"web": {"fetch": {"enabled": True}}, "allow": ["fs_read"]}})
+    assert real.status == FAIL
+    assert "sensitive data" in (real.evidence or [])
+
+
 def test_a1_open_group_bot_is_untrusted_input():
     """D4: a group bot whose groupPolicy admits non-owner senders (open/allowlist/paired)
     is untrusted input — the same allowlist the rest of the engine uses

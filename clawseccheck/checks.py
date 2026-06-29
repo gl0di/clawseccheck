@@ -387,9 +387,13 @@ def _trifecta_legs(ctx: Context) -> dict:
             or web_fetch
         ),
         "sensitive data": (
+            # Agent-readable private data: a data tool (db/credential/vault/fs_read/...)
+            # or a credentials/ dir under the home. NOT gateway.auth.password — that is
+            # the gateway's own auth secret, not data the agent can read/exfiltrate
+            # (B1 flags it as a plaintext secret, which is its proper home). Counting it
+            # here let "web fetch + a gateway password" reach a spurious 3/3 (§5).
             _hint(tools, SENSITIVE_TOOL_HINTS)
             or (ctx.home / "credentials").is_dir()
-            or bool(dig(cfg, "gateway.auth.password"))
         ),
         "outbound actions": (
             _hint(tools, OUTBOUND_TOOL_HINTS)

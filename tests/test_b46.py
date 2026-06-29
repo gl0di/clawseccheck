@@ -17,14 +17,14 @@ def _ctx(config):
 
 
 # A config whose GLOBAL surface has all three trifecta legs active:
-#   open DM channel        -> untrusted input
-#   gateway.auth.password  -> sensitive data
-#   send tool / elevated   -> outbound
+#   open DM channel  -> untrusted input
+#   fs_read tool     -> sensitive data (agent-readable private data)
+#   send tool        -> outbound
+# (gateway.auth.password is a B1 plaintext-secret signal, NOT an A1 sensitive-data leg.)
 def _full_trifecta():
     return {
         "channels": {"tg": {"dmPolicy": "open"}},
-        "gateway": {"auth": {"password": "x"}},
-        "tools": {"allow": ["send_email"]},
+        "tools": {"allow": ["fs_read", "send_email"]},
     }
 
 

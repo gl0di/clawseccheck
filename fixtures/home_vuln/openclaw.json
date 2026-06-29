@@ -3,7 +3,7 @@
     "bind": "0.0.0.0:8080",
     "auth": { "mode": "none", "password": "hunter2" },
     "tailscale": { "mode": "funnel" },
-    "tools": { "allow": ["exec", "email_send", "fs_write"] }
+    "tools": { "allow": ["exec", "email_send", "fs_write", "fs_read"] }
   },
   "hooks": { "token": "abc" },
   "tools": {
