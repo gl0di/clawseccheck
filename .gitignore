@@ -6,8 +6,9 @@ __pycache__/
 # CI publish staging dir (clawhub-publish.yml stages the artifact here).
 /dist/
 
-# Internal design docs — never ships in the published skill.
+# Internal docs — never ships in the published skill.
 docs/superpowers/
+references/maintainers.md
 
 # AI-agent config — never ships in the published skill.
 CLAUDE.md
