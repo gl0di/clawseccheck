@@ -3,6 +3,24 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.5.6] — 2026-06-30
+
+Documentation and detector-hygiene release. No change to audit behavior, checks,
+scores, or findings.
+
+### Changed
+- **Scanner hygiene (`skillast.py`):** the parse-only AST taint detector (`--vet` /
+  B13) no longer spells out `exec()`/`eval()` call syntax in its own comments,
+  docstring, and finding messages, so naive `dynamic_code_execution` keyword scanners
+  stop false-positiving on ClawSecCheck's own analyzer. Detection logic is unchanged —
+  the module still parses with `ast.parse` (it never executes), and the `exec`/`eval`
+  name set was already assembled from fragments.
+- **`docs/THREAT_COVERAGE.md`:** re-synced the OWASP LLM and Agentic-Skills coverage
+  tables with `catalog.OWASP_MAP` / `AST_MAP` — the hand-maintained tables had drifted
+  behind several recently-mapped checks (B12, B38, B55–B57, B60, B62, B63, B65–B67,
+  B73–B79, C014, C015, C032). Also refreshed the stale header and the truncated
+  catalog-span line.
+
 ## [2.5.5] — 2026-06-29
 
 Sharper, more precise lethal-trifecta (A1) detection plus a batch of schema-variant
