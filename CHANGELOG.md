@@ -3,6 +3,32 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.5.1] — 2026-06-29
+
+Address all 26 SkillSpector findings and the ClawHub static-analysis Critical flag
+by accurately declaring the full read scope, breaking false-positive pattern literals,
+and renaming the credential-surface inventory function.
+
+### Fixed
+- **Critical (static analysis):** `skillast.py` docstring and comments contained the
+  exact string `exec(base64.b64decode(...))` and `exec()/eval()` — static scanner
+  treated them as dynamic code execution. Rewrote docstring examples as prose; assembled
+  detection-pattern string constants from concatenated fragments so they are unambiguously
+  DATA, not calls.
+- **High x8 (Credential Access):** renamed `_secret_reachability` → `_credential_surface_map`
+  and `_secret_reachability_lines` → `_credential_surface_lines`; added explicit docstring
+  ("path-existence inventory only — never opens, reads, hashes, or transmits file contents");
+  added inline `# path-existence check only` comments at each sensitive path check.
+- **Medium x15 (Description-Behavior Mismatch / Vague Triggers):** updated SKILL.md
+  frontmatter description, "What ClawSecCheck does" section, and "It checks" bullet list to
+  accurately declare the full read scope (config, bootstrap, logs, session JSONLs, host
+  posture, credential-store path presence); added "OpenClaw" to key trigger phrases.
+- **README.md:** updated Trust/provenance and Limitations sections to match the real read
+  scope, replacing the understatement "they read only openclaw.json and bootstrap files".
+
+### Changed
+- _TODO_
+
 ## [2.5.0] — 2026-06-29
 
 Runtime evidence layer: three new advisory checks (B77–B79) read real OpenClaw

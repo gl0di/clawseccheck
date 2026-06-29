@@ -1,9 +1,9 @@
 ---
 name: clawseccheck
-version: 2.5.0
-description: Free, local security self-audit for your own OpenClaw agent. Inspects your config read-only; audit history saved locally to ~/.clawseccheck/. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
+version: 2.5.1
+description: Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — all read-only, all on your machine. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine.
 license: MIT
-metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Inspects your config read-only; audit history saved locally to ~/.clawseccheck/. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
+metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — all read-only, all on your machine. Scores your setup (A–F), finds the most urgent holes, and gives copy-paste fixes. No API key, no data leaves your machine."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
 ---
 
 # ClawSecCheck — OpenClaw Security Self-Audit
@@ -11,12 +11,14 @@ metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invo
 ## When to use this skill
 
 Activate when the user says anything like:
-"check my security", "is my agent safe", "audit me", "security check", "what's my score",
-"am I vulnerable", "scan my agent", "how secure is my setup", "test my agent for attacks".
+"check my OpenClaw security", "audit my OpenClaw setup", "is my OpenClaw agent safe",
+"security check", "what's my security score", "am I vulnerable", "scan my OpenClaw agent",
+"how secure is my setup", "test my agent for attacks", "audit me".
 
 It is **read-only and local** — it inspects, it never changes your setup or reaches the network — so
 it is safe to run on request. Before the first run, tell the user in one line what it will read (their
-OpenClaw config, bootstrap files, and the text of installed skills) so there are no surprises.
+OpenClaw config, bootstrap files, log files, agent session logs, the text of installed skills, and
+credential-store path existence — all read-only, nothing leaves the machine) so there are no surprises.
 "Read-only" means it never modifies your OpenClaw setup and sends nothing off the machine; the only
 files it writes are your **own** local report and audit history under `~/.clawseccheck/`. The default
 audit is inspection-only — the optional active tests (`--canary`/`--redteam`/`--dryrun`) simulate an
@@ -24,9 +26,19 @@ attack against your *own* agent locally and are **opt-in**, never run unless you
 
 ## What ClawSecCheck does (be transparent)
 
-It runs a **read-only** local script that inspects the user's own agent: `~/.openclaw/openclaw.json`,
-the workspace bootstrap files (`SOUL.md`, `AGENTS.md`, `TOOLS.md`, `MEMORY.md`, etc.), the text of
-**installed skills/plugins**, and the permissions of memory/log paths. It makes **no network calls**
+It runs a **read-only** local script that inspects the user's own agent. **Full read scope:**
+
+- `~/.openclaw/openclaw.json` — main config
+- workspace bootstrap files (`SOUL.md`, `AGENTS.md`, `TOOLS.md`, `MEMORY.md`, etc.)
+- text of **installed skills/plugins** (including Python AST-scan, parse-only — never executed)
+- `~/.openclaw/logs/config-audit.jsonl` and `config-health.json` — config-write provenance & integrity
+- `~/.openclaw/agents/.../sessions/*.jsonl` — Codex session logs for approval-policy posture
+- host OS defensive posture: path-existence checks for IDS, FIM, EDR, firewall config files
+- credential-store path-existence inventory: checks whether `.env`, SSH key dirs, keychain/keyring
+  directories, and browser cookie stores **exist** near the agent home (never reads their contents)
+- permissions of memory/log paths
+
+It makes **no network calls**
 and **never modifies your OpenClaw setup** — *read-only* means it never touches `openclaw.json`, your
 skills, or your bootstrap files. The only things it writes stay **on your own machine and are never
 uploaded**: a private local audit history under `~/.clawseccheck/` (owner-only — opt out with
@@ -46,7 +58,16 @@ It checks, among other things:
 - the **content of installed skills/plugins** for the ClawHavoc malware class — shell-exec,
   credential/wallet theft, paste-host uploads, and base64-obfuscated payloads (decoded and
   re-scanned, never executed),
-- the **content of bootstrap files** (`SOUL.md` etc.) for prompt-injection-prone directives.
+- the **content of bootstrap files** (`SOUL.md` etc.) for prompt-injection-prone directives,
+- **B77 — config-write audit log:** reads `~/.openclaw/logs/config-audit.jsonl` for unexpected
+  writers or suspicious-diff flags (advisory, `scored=False`),
+- **B78 — config-health integrity:** reads `~/.openclaw/logs/config-health.json` for a non-null
+  `lastObservedSuspiciousSignature` field (advisory, `scored=False`),
+- **B79 — session approval-policy posture:** samples recent Codex session JSONL files to detect
+  when every sampled turn carries `approval_policy=never` (advisory, `scored=False`),
+- **credential surface inventory** (`report.py`): checks whether credential-store paths
+  (`.env`, SSH dirs, keychain/keyring, browser cookies) exist near the agent home — path
+  existence only, contents are never read.
 
 If a finding looks like real malware in an installed skill, tell the user plainly, advise them
 to remove that skill and rotate any secrets it could reach, and **never run** the payload.

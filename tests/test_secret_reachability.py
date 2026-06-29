@@ -51,5 +51,5 @@ def test_secret_reachability_map_is_in_json_and_report(tmp_path, monkeypatch):
     assert "aws-runtime-secret" not in body
 
     report = render_report(findings, score, ctx=ctx)
-    assert "Secret reachability map" in report
+    assert "Credential surface map" in report
     assert "mcp-passthrough" in report

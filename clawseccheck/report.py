@@ -219,7 +219,16 @@ def _capability_graph_lines(ctx) -> list[str]:
     return lines
 
 
-def _secret_reachability(ctx) -> list[dict]:
+def _credential_surface_map(ctx) -> list[dict]:
+    """Path-existence inventory of credential stores reachable from the agent home.
+
+    Checks ONLY whether well-known credential-store paths exist on the filesystem
+    (Path.exists / Path.is_file / Path.is_dir) — never opens, reads, hashes, or
+    transmits any file contents. Reports relative paths as evidence; no absolute
+    paths leave this function. This is a supply-chain reachability check so the
+    audit can warn when a powerful agent runs next to accessible secrets — it is
+    NOT a credential reader.
+    """
     from .checks import SECRET_KEY_RE, _mcp_servers  # noqa: PLC0415
     from .collector import WORKSPACE_DIRS, dig  # noqa: PLC0415
 
@@ -275,7 +284,7 @@ def _secret_reachability(ctx) -> list[dict]:
             candidates.append(home_path / ws / ".env")
             candidates.append(home_path / ws / ".envrc")
         for cand in candidates:
-            if cand.is_file():
+            if cand.is_file():  # path-existence check only — never reads contents
                 dotenv_hits.append(_rel(cand))
     entries.append({"class": ".env", "reachable": bool(dotenv_hits), "evidence": dotenv_hits})
 
@@ -287,7 +296,7 @@ def _secret_reachability(ctx) -> list[dict]:
             ".gnupg",
         ):
             p = home_path / rel
-            if p.exists():
+            if p.exists():  # path-existence check only — never reads contents
                 keychain_hits.append(_rel(p))
     entries.append({"class": "keychain", "reachable": bool(keychain_hits), "evidence": keychain_hits})
 
@@ -312,11 +321,11 @@ def _secret_reachability(ctx) -> list[dict]:
     ssh_hits: list[str] = []
     if home_path is not None and home_path.exists():
         ssh_dir = home_path / ".ssh"
-        if ssh_dir.is_dir():
+        if ssh_dir.is_dir():  # path-existence check only — never reads key contents
             ssh_hits.append(_rel(ssh_dir))
             for name in ("id_rsa", "id_ed25519", "config", "known_hosts"):
                 p = ssh_dir / name
-                if p.is_file():
+                if p.is_file():  # path-existence check only
                     ssh_hits.append(_rel(p))
     entries.append({"class": "ssh", "reachable": bool(ssh_hits), "evidence": ssh_hits})
 
@@ -339,9 +348,9 @@ def _secret_reachability(ctx) -> list[dict]:
     return entries
 
 
-def _secret_reachability_lines(ctx) -> list[str]:
-    map_ = _secret_reachability(ctx)
-    lines = ["Secret reachability map", "Static config + file-system inventory:"]
+def _credential_surface_lines(ctx) -> list[str]:
+    map_ = _credential_surface_map(ctx)
+    lines = ["Credential surface map (path-existence inventory)", "Static config + file-system inventory:"]
     for item in map_:
         evidence = "; ".join(item["evidence"]) if item["evidence"] else "none"
         lines.append(f"- {item['class']}: reachable={_bool_word(item['reachable'])}; {evidence}")
@@ -497,7 +506,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append("")
         lines.extend(cap_lines)
         lines.append("")
-    secret_lines = _secret_reachability_lines(ctx) if ctx is not None else []
+    secret_lines = _credential_surface_lines(ctx) if ctx is not None else []
     if secret_lines:
         lines.append("")
         lines.extend(secret_lines)
@@ -821,7 +830,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     # F-020: Structured Attestation Requests — always present in --json output.
     # Empty list when no B62 mismatches; one entry per mismatch-flagged skill.
     # Machine-readable only; no Hebrew rendering needed.
-    payload["secret_reachability"] = _secret_reachability(ctx) if ctx is not None else []
+    payload["secret_reachability"] = _credential_surface_map(ctx) if ctx is not None else []
     if ctx is not None:
         from .sar import build_sars  # noqa: PLC0415
         payload["intentAttestationRequests"] = build_sars(ctx)

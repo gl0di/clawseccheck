@@ -244,9 +244,16 @@ ClawSecCheck score (kept deterministic). Disable with `--no-native`.
 ## 🛡️ Trust / provenance
 
 ClawSecCheck is **open source and zero-dependency (Python stdlib only)**. Its own checks are
-**read-only and offline** — they read only `~/.openclaw/openclaw.json` and your workspace
-bootstrap markdown files, and make **no network calls**. It never touches your OpenClaw config or
-data, and **nothing ever leaves your machine**. The only thing it writes by default is a one-line
+**read-only and offline** — they make **no network calls** and never touch your OpenClaw config.
+**Nothing ever leaves your machine.** Full read scope:
+
+- `~/.openclaw/openclaw.json` and workspace bootstrap files (`SOUL.md`, `AGENTS.md`, etc.)
+- text of installed skills/plugins (Python files are AST-parsed, never executed)
+- `~/.openclaw/logs/config-audit.jsonl` and `config-health.json` (B77/B78 log checks)
+- `~/.openclaw/agents/.../sessions/*.jsonl` (B79 approval-policy posture)
+- host OS path-existence checks for IDS/FIM/EDR/firewall config (B50–B54)
+- credential-store path-existence inventory: whether `.env`, SSH key dirs, keychain/keyring
+  directories, and browser cookie stores **exist** near the agent home — contents never read The only thing it writes by default is a one-line
 entry to a **private, owner-only** local score history (`~/.clawseccheck/history.jsonl`) so you can
 track your grade over time — opt out with `--no-history`. Everything else is written only when you
 ask: a report file (`--save`), the `--monitor` snapshot (`~/.clawseccheck/state.json`), a badge
@@ -624,8 +631,9 @@ positives on real configs.
   point, not a substitute for adversarial testing against a running agent.
 - **May produce false positives and false negatives.** Evidence-gating keeps noise low,
   but heuristics can miss novel attack patterns and can misread edge-case configurations.
-- **Read scope is bounded:** config file, bootstrap markdown files, and installed-skill
-  text — not an exhaustive scan of your filesystem.
+- **Read scope is bounded:** config, bootstrap markdown, installed-skill text, OpenClaw log
+  files, agent session logs, host OS path-existence checks, and credential-store path presence
+  — not an exhaustive scan of your filesystem, and credential-store contents are never read.
 - **UNKNOWN is not PASS.** Unreadable files or unparseable configs are reported as
   UNKNOWN and excluded from the score, never silently marked safe.
 
