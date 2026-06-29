@@ -209,6 +209,41 @@ def test_b39_main_scope_no_channels_does_not_fail():
     assert f.status != FAIL
 
 
+# --- B-058 regression: account-nested + paired ingress (was a false PASS) ---
+# check_session_visibility previously read only top-level dmPolicy/groupPolicy, so a DM
+# allowlist nested under channels.<p>.accounts.<id> slipped through as PASS on a real
+# cross-user-leak config. It now routes through _external_input_channels (accounts-aware,
+# open/allowlist/paired), so neither the account nesting nor the paired policy can hide.
+def test_b39_main_scope_account_nested_allowlist_fails():
+    cfg = {
+        "session": {"dmScope": "main"},
+        "channels": {"telegram": {"accounts": {"main": {"dmPolicy": "allowlist"}}}},
+    }
+    f = check_session_visibility(_ctx(cfg))
+    assert f.status == FAIL, f.detail
+    assert f.evidence
+
+
+def test_b39_main_scope_account_nested_paired_fails():
+    cfg = {
+        "session": {"dmScope": "main"},
+        "channels": {"telegram": {"accounts": {"m": {"dmPolicy": "paired"}}}},
+    }
+    assert check_session_visibility(_ctx(cfg)).status == FAIL
+
+
+def test_b39_main_scope_paired_channel_fails():
+    # paired = external (non-owner) ingress, now counted alongside open/allowlist
+    cfg = {"session": {"dmScope": "main"}, "channels": {"tg": {"dmPolicy": "paired"}}}
+    assert check_session_visibility(_ctx(cfg)).status == FAIL
+
+
+# clean control: an owner-only channel is NOT external ingress -> no cross-user risk
+def test_b39_main_scope_owner_only_channel_passes():
+    cfg = {"session": {"dmScope": "main"}, "channels": {"tg": {"dmPolicy": "owner"}}}
+    assert check_session_visibility(_ctx(cfg)).status == PASS
+
+
 # --- FAIL takes priority over WARN ---
 
 def test_b39_fail_takes_priority_over_warn():

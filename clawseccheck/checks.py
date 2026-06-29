@@ -3837,7 +3837,7 @@ def check_hook_policy_bypass(ctx: Context) -> Finding:
     been dropped). Everything else PASSes, so there is no UNKNOWN flood.
     """
     cfg = ctx.config
-    raw = dig(cfg, "meta.lastTouchedVersion")
+    raw = dig(cfg, "meta.lastTouchedVersion") or dig(cfg, "lastTouchedVersion")
     parsed = _parse_version(str(raw)) if raw else None
     has_policy = (
         bool(dig(cfg, "tools.exec.mode"))
@@ -3852,7 +3852,7 @@ def check_hook_policy_bypass(ctx: Context) -> Finding:
             "runtime evaluation-order effect that cannot be read from config — state unknown.",
             "Upgrade to OpenClaw v2026.6.10 or later, then re-verify that tools.exec.mode and "
             "tools.exec.security are enforced as intended.",
-            evidence=[f"meta.lastTouchedVersion={raw} (predates the v2026.6.10 fix)"],
+            evidence=[f"lastTouchedVersion={raw} (predates the v2026.6.10 fix)"],
         )
     return _finding(
         "C6", PASS,
@@ -4688,7 +4688,7 @@ def check_session_visibility(ctx: Context) -> Finding:
     """B39 — Session visibility / cross-user transcript leak.
 
     FAIL    — session.dmScope == "main" AND any channel allows non-owner senders
-              (open/allowlist groups — real cross-user contamination risk).
+              (open/allowlist/paired, incl. per-account policies — cross-user risk).
     WARN    — tools.sessions.visibility in ("agent", "all") regardless of dmScope
               (one session can read other sessions' transcripts).
     PASS    — dmScope is per-peer-ish AND visibility is "self" or "tree".
@@ -4717,17 +4717,11 @@ def check_session_visibility(ctx: Context) -> Finding:
     # (when dmScope=="main" all DM senders contaminate the same session)
     fail_ev: list[str] = []
     if dm_scope == "main":
-        # Check whether any channel accepts non-owner senders
-        open_ch = _open_channels(cfg)
-        # Also check for allowlist channels (non-owner senders can still DM the bot)
-        allowlist_ch = []
-        for name, val in _channels(cfg).items():
-            if not isinstance(val, dict):
-                continue
-            if (val.get("dmPolicy") == "allowlist"
-                    or val.get("groupPolicy") == "allowlist"):
-                allowlist_ch.append(name)
-        non_owner_channels = open_ch + [c for c in allowlist_ch if c not in open_ch]
+        # Any channel that admits non-owner senders (open/allowlist/paired), INCLUDING
+        # policies nested under channels.<p>.accounts.<id>. _external_input_channels is
+        # accounts-aware; the previous top-level-only allowlist read missed account-nested
+        # DM allowlists (B-058), returning a false PASS on a real cross-user-leak config.
+        non_owner_channels = _external_input_channels(cfg)
         if non_owner_channels:
             fail_ev.append(
                 "session.dmScope=\"main\" — all DM peers share ONE session "
@@ -4897,12 +4891,12 @@ def check_known_vulns(ctx: Context) -> Finding:
     PASS    — installed version is past all known advisory fixes.
     UNKNOWN — meta.lastTouchedVersion is missing or cannot be parsed.
     """
-    raw_ver = dig(ctx.config, "meta.lastTouchedVersion")
+    raw_ver = dig(ctx.config, "meta.lastTouchedVersion") or dig(ctx.config, "lastTouchedVersion")
     if not raw_ver:
         return _finding(
             "B33", UNKNOWN,
-            "OpenClaw version unknown (meta.lastTouchedVersion not set) — "
-            "cannot check against known advisories.",
+            "OpenClaw version unknown (meta.lastTouchedVersion / lastTouchedVersion "
+            "not set) — cannot check against known advisories.",
             "Set meta.lastTouchedVersion in openclaw.json (or upgrade to a current "
             "release) and keep OpenClaw current.",
         )

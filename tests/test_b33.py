@@ -173,6 +173,36 @@ def test_b33_version_earlier_minor_fails():
 
 
 # ---------------------------------------------------------------------------
+# B-059 regression: root-level lastTouchedVersion alias
+# Some OpenClaw builds record the version at the config root, not under meta. B33 read
+# meta.lastTouchedVersion only, so a root-alias build silently returned UNKNOWN and
+# skipped the CVE gate. It now mirrors C4: meta.lastTouchedVersion or lastTouchedVersion.
+# ---------------------------------------------------------------------------
+
+def test_b33_root_alias_affected_version_fails():
+    """Root-level lastTouchedVersion in the vulnerable range -> FAIL (was UNKNOWN)."""
+    result = check_known_vulns(_ctx({"lastTouchedVersion": "2026.1.20"}))
+    assert result.status == FAIL
+    assert "GHSA-g8p2-7wf7-98mq" in result.detail
+
+
+def test_b33_root_alias_safe_version_passes():
+    """Root-level lastTouchedVersion past the fix -> PASS."""
+    assert check_known_vulns(_ctx({"lastTouchedVersion": "2026.2.9"})).status == PASS
+
+
+def test_b33_meta_takes_precedence_over_root_alias():
+    """When both are set, meta.lastTouchedVersion wins (mirrors C4's `meta or root`)."""
+    cfg = {"meta": {"lastTouchedVersion": "2026.1.20"}, "lastTouchedVersion": "2026.2.9"}
+    assert check_known_vulns(_ctx(cfg)).status == FAIL  # meta (affected) wins
+
+
+def test_b33_neither_meta_nor_root_unknown():
+    """Neither meta nor root version set -> UNKNOWN."""
+    assert check_known_vulns(_ctx({"gateway": {}})).status == UNKNOWN
+
+
+# ---------------------------------------------------------------------------
 # PASS cases — past all known advisory fixes
 # ---------------------------------------------------------------------------
 

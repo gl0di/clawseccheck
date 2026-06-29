@@ -69,6 +69,28 @@ def test_never_fails_even_with_dangerous_policy():
     assert check_hook_policy_bypass(_ctx(cfg)).status == UNKNOWN  # advisory, not FAIL
 
 
+# --- B-059 regression: root-level lastTouchedVersion alias ---
+# C6 read meta.lastTouchedVersion only; a root-alias build skipped the nudge. Now mirrors
+# C4/B33 (meta.lastTouchedVersion or lastTouchedVersion).
+def test_root_alias_old_version_with_policy_is_unknown():
+    cfg = {"lastTouchedVersion": "2026.5.20", "tools": {"exec": {"mode": "ask"}}}
+    f = check_hook_policy_bypass(_ctx(cfg))
+    assert f.status == UNKNOWN
+    assert any("2026.5.20" in e for e in f.evidence)
+
+
+def test_root_alias_old_version_without_policy_passes():
+    # clean control: old root-alias version but no tool policy -> PASS (no flood)
+    assert check_hook_policy_bypass(_ctx({"lastTouchedVersion": "2026.5.20"})).status == PASS
+
+
+def test_c6_meta_takes_precedence_over_root_alias():
+    # meta wins; a fixed meta version -> PASS even if the root alias is old
+    cfg = {"meta": {"lastTouchedVersion": "2026.6.10"}, "lastTouchedVersion": "2026.5.1",
+           "tools": {"exec": {"mode": "ask"}}}
+    assert check_hook_policy_bypass(_ctx(cfg)).status == PASS
+
+
 
 def test_bad_fixture_unknown():
     assert check_hook_policy_bypass(collect(FIXTURES / "bad_c6_hook_policy_oldver")).status == UNKNOWN
