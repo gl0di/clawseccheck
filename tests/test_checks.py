@@ -1,13 +1,27 @@
 from pathlib import Path
 
-from clawseccheck import audit
+from clawseccheck import audit, run_all
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
+from clawseccheck.collector import Context
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
 def _by_id(findings):
     return {f.id: f for f in findings}
+
+
+def _a1(cfg: dict, attestation: dict | None = None, home: str = "/nonexistent"):
+    """Run all checks against an in-memory config and return the A1 finding.
+
+    home defaults to a nonexistent path so the `credentials/` dir does not
+    silently raise the sensitive-data leg in leg-isolation tests.
+    """
+    ctx = Context(home=Path(home))
+    ctx.config = cfg
+    if attestation:
+        ctx.attestation = attestation
+    return {x.id: x for x in run_all(ctx)}["A1"]
 
 
 def test_vulnerable_setup_scores_low_and_fails_criticals():
@@ -134,12 +148,73 @@ def test_a1_thin_surface_warns_not_passes(tmp_path):
     assert "Runtime tools" in f.detail
 
 
-def test_a1_explicit_tools_suppress_thin_surface_warn(tmp_path):
-    """Explicit tools.allow present → thin-surface branch does not fire."""
+def test_a1_no_warn_when_runtime_legs_already_active(tmp_path):
+    """Both runtime legs already active (untrusted via allowlist, outbound via exec
+    tool) → nothing is 'cannot determine', so no thin-surface WARN."""
     (tmp_path / "openclaw.json").write_text(
         '{"tools": {"allow": ["exec_command"]}, '
         '"channels": {"telegram": {"dmPolicy": "allowlist"}}}'
     )
     (tmp_path / "openclaw.json").chmod(0o600)
     f = _by_id(audit(tmp_path)[1])["A1"]
-    assert "Runtime tools" not in f.detail
+    assert "Cannot determine" not in f.detail
+
+
+# ── A1 leg-detection fixes: web.fetch, group bots, enabled flag, no-op guard,
+#    attestation resolution ─────────────────────────────────────────────────────
+
+def test_a1_web_fetch_enabled_is_untrusted_input():
+    """D1: an enabled web-fetch tool pulls untrusted remote content into the agent."""
+    a1 = _a1({"tools": {"web": {"fetch": {"enabled": True}}}})
+    assert "untrusted input" in (a1.evidence or [])
+
+
+def test_a1_enabled_group_bot_is_untrusted_input():
+    """D4: an enabled group bot (groups block, no owner-only policy) is untrusted input,
+    matching the rest of the engine's group-context model (B26)."""
+    a1 = _a1({"channels": {"telegram": {"groups": {"*": {"requireMention": True}}}}})
+    assert "untrusted input" in (a1.evidence or [])
+
+
+def test_a1_owner_only_group_bot_not_untrusted_input():
+    """Guard against over-broadening: a group bot locked to owner-only is NOT untrusted."""
+    a1 = _a1({"channels": {"telegram": {"groups": {"*": {}}, "groupPolicy": "owner-only"}}})
+    assert "untrusted input" not in (a1.evidence or [])
+
+
+def test_a1_disabled_channel_contributes_no_legs():
+    """enabled:false → the channel ingests/sends nothing (untrusted and outbound off)."""
+    a1 = _a1({"channels": {"telegram": {"enabled": False, "dmPolicy": "open"}}})
+    assert "untrusted input" not in (a1.evidence or [])
+    assert "outbound actions" not in (a1.evidence or [])
+
+
+def test_a1_noop_tool_does_not_suppress_warn():
+    """D7: a no-op tools.allow entry must NOT flip the 'cannot determine' WARN to PASS."""
+    a1 = _a1({"tools": {"allow": ["noop"]},
+              "channels": {"telegram": {"dmPolicy": "owner-only"}}})
+    assert a1.status == WARN
+    assert "Cannot determine" in a1.detail
+
+
+def test_a1_attestation_clears_thin_surface_warn():
+    """D3: a real attestation roster clears the 'cannot determine' WARN that a thin
+    config raises — unlike a no-op tools.allow entry (which must not)."""
+    thin = _a1({"gateway": {"bind": "x"}})
+    assert thin.status == WARN
+    assert "Cannot determine" in thin.detail
+    attested = _a1({"gateway": {"bind": "x"}},
+                   attestation={"agents": [{"name": "a", "tools": ["chat"]}]})
+    assert attested.status != WARN
+    assert "Cannot determine" not in attested.detail
+
+
+def test_a1_attestation_clears_warn_without_adding_leg():
+    """D3/D7: a real attestation declaring no input/outbound tools positively resolves
+    the leg as off and clears the WARN — unlike a no-op tools.allow entry."""
+    a1 = _a1(
+        {"channels": {"telegram": {"dmPolicy": "owner-only"}}},
+        attestation={"agents": [{"name": "chatbot", "tools": ["chat"]}]},
+    )
+    assert a1.status == PASS
+    assert "Cannot determine" not in a1.detail

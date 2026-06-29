@@ -278,6 +278,101 @@ def _hint(names, hints) -> bool:
     return any(h in blob for h in hints)
 
 
+# -- A1-local capability detection ------------------------------------------------
+# These enrich the trifecta reading WITHOUT widening the shared _enabled_tools /
+# _external_input_channels / _channels helpers, which ~15 other checks rely on.
+# Keeping the broader, more aggressive reading local to A1 (and B46, which shares
+# _trifecta_legs) bounds the blast radius of the fix.
+
+# Tool profiles that grant exec / filesystem-write capability (outbound leg).
+# "minimal"/"readonly"/"chat" stay safe; an unknown-but-powerful profile name is
+# still caught by the "exec"/"code" substring fallback in _profile_is_powerful().
+_POWERFUL_PROFILES = frozenset({
+    "coding", "code", "full", "dev", "developer", "admin", "power", "all", "max",
+})
+# Channel policy values meaning owner-only / closed — NOT an untrusted-input surface.
+_TRUSTED_CHANNEL_POLICIES = frozenset({
+    "owner", "owner-only", "owner_only", "none", "disabled", "off", "closed",
+})
+
+
+def _profile_is_powerful(profile) -> bool:
+    p = str(profile or "").lower()
+    return p in _POWERFUL_PROFILES or "exec" in p or "code" in p
+
+
+def _web_fetch_enabled(cfg: dict) -> bool:
+    """An enabled web fetch/browse tool: pulls arbitrary remote content into the
+    agent (untrusted input) and can exfiltrate via request URLs (outbound)."""
+    web = dig(cfg, "tools.web")
+    if not isinstance(web, dict):
+        return False
+    if web.get("enabled"):
+        return True
+    return any(isinstance(sub, dict) and sub.get("enabled") for sub in web.values())
+
+
+def _active_channels(cfg: dict) -> dict:
+    """Channels that are not explicitly disabled (`enabled` is not False)."""
+    return {n: c for n, c in _channels(cfg).items()
+            if not (isinstance(c, dict) and c.get("enabled") is False)}
+
+
+def _untrusted_input_channels(cfg: dict) -> list[str]:
+    """Enabled channels that can receive non-owner (untrusted) input.
+
+    Extends _external_input_channels (which keys purely off dmPolicy/groupPolicy
+    strings) with two real cases it misses: (1) a disabled channel ingests nothing;
+    (2) an enabled channel sitting in groups (a group bot) is reachable by untrusted
+    group members unless its group policy is explicitly owner-only — consistent with
+    B26's group-context model.
+    """
+    out = []
+    for name, c in _channels(cfg).items():
+        if not isinstance(c, dict) or c.get("enabled") is False:
+            continue
+        nodes = [c] + list((c.get("accounts") or {}).values())
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            dm = node.get("dmPolicy")
+            gp = node.get("groupPolicy")
+            if dm in _UNTRUSTED_INPUT_POLICIES or gp in _UNTRUSTED_INPUT_POLICIES:
+                out.append(name)
+                break
+            if node.get("groups") and gp not in _TRUSTED_CHANNEL_POLICIES:
+                out.append(name)
+                break
+    return out
+
+
+def _meaningful_tool_surface(ctx: Context) -> bool:
+    """Whether the config exposes a RECOGNIZED capability surface (or the user has
+    attested the agent's tools), so the A1 legs can be trusted instead of hedged with
+    the thin-surface WARN. A no-op tools.allow entry that matches no capability hint
+    does NOT count — that was the old PASS-wash (add 'noop' → WARN flips to PASS).
+
+    Note: this is single-agent A1's notion of 'tool config is visible'; cross-agent
+    aggregation deliberately stays out (B45/B46/B47 own the multi-agent reassembly)."""
+    cfg = ctx.config
+    tools = _enabled_tools(cfg)
+    if (_hint(tools, INPUT_TOOL_HINTS) or _hint(tools, SENSITIVE_TOOL_HINTS)
+            or _hint(tools, OUTBOUND_TOOL_HINTS)):
+        return True
+    if _web_fetch_enabled(cfg) or _profile_is_powerful(dig(cfg, "tools.profile")):
+        return True
+    if bool(dig(cfg, "tools.elevated.allowFrom")):
+        return True
+    return _capabilities_attested(ctx)
+
+
+def _capabilities_attested(ctx: Context) -> bool:
+    """True when the user supplied an attestation roster (`--attest`): an OFF
+    input/outbound leg can then be trusted instead of flagged 'cannot determine'.
+    Unlike a no-op tools.allow entry, this is a real, deliberate declaration."""
+    return bool(_attest.attested_agents(getattr(ctx, "attestation", {}) or {}))
+
+
 # ---------------------------------------------------------------- Block A
 def _trifecta_legs(ctx: Context) -> dict:
     """The three lethal-trifecta legs computed from the GLOBAL config surface.
@@ -288,9 +383,14 @@ def _trifecta_legs(ctx: Context) -> dict:
     """
     cfg = ctx.config
     tools = _enabled_tools(cfg)
-    open_ch = _external_input_channels(cfg)
+    untrusted_ch = _untrusted_input_channels(cfg)
+    web_fetch = _web_fetch_enabled(cfg)
     return {
-        "untrusted input": bool(open_ch) or _hint(tools, INPUT_TOOL_HINTS),
+        "untrusted input": (
+            bool(untrusted_ch)
+            or _hint(tools, INPUT_TOOL_HINTS)
+            or web_fetch
+        ),
         "sensitive data": (
             _hint(tools, SENSITIVE_TOOL_HINTS)
             or (ctx.home / "credentials").is_dir()
@@ -299,7 +399,9 @@ def _trifecta_legs(ctx: Context) -> dict:
         "outbound actions": (
             _hint(tools, OUTBOUND_TOOL_HINTS)
             or bool(dig(cfg, "tools.elevated.allowFrom"))
-            or bool(_channels(cfg))  # channels are bidirectional: receive = can also reply
+            or _profile_is_powerful(dig(cfg, "tools.profile"))
+            or web_fetch
+            or bool(_active_channels(cfg))  # enabled channels are bidirectional
         ),
     }
 
@@ -401,22 +503,24 @@ def check_trifecta(ctx: Context) -> Finding:
             evidence=active,
         )
 
-    # Thin-surface guard (B-033): when no tool configuration is visible, runtime tools
-    # granted at session start (message, exec_command, web_*, memory_*) are invisible to
-    # static analysis.  False ≠ safe — report WARN so the caller knows the result may
-    # understate the real surface.
-    cfg = ctx.config
-    _tool_unknown = [k for k, v in legs.items() if not v
-                     and k in ("untrusted input", "outbound actions")]
-    if not _enabled_tools(cfg) and _tool_unknown:
+    # Thin-surface guard (B-033): runtime tools granted at session start (message,
+    # exec_command, web_*, memory_*) are NOT written to openclaw.json, so an
+    # input/outbound leg that looks OFF can still be live. We only trust an OFF leg
+    # when the user has attested the agent's real tool inventory (--attest). An
+    # unrelated tools.allow entry must NOT silence this — a no-op name was previously
+    # enough to flip WARN→PASS without changing real exposure.
+    runtime_unknown = [k for k, v in legs.items() if not v
+                       and k in ("untrusted input", "outbound actions")]
+    if runtime_unknown and not _meaningful_tool_surface(ctx):
         return _finding(
             "A1", WARN,
             detail + (
-                f" Cannot determine from config: {', '.join(_tool_unknown)}."
+                f" Cannot determine from config: {', '.join(runtime_unknown)}."
                 " Runtime tools (e.g. message, exec_command, web_*) granted at"
                 " session start are not reflected in openclaw.json."
             ),
-            "Run with --ask to attest runtime capabilities, or treat as possible 3/3.",
+            "Run `clawseccheck --ask` to generate an attestation template, then re-run"
+            " with `--attest <file>` so these legs resolve — or treat as possible 3/3.",
             evidence=active,
         )
 
