@@ -269,7 +269,18 @@ def main(argv=None) -> int:
         return 0
 
     if args.vet:
+        vet_target = Path(args.vet).expanduser()
         f = vet_skill(args.vet)
+        # rc: FAIL/WARN → 1 (dangerous/suspicious skill);
+        # UNKNOWN + target absent (not found / path unusable) → 1;
+        # UNKNOWN + target exists (valid skill, inconclusive assessment) → 0;
+        # PASS → 0.
+        if f.status in ("FAIL", "WARN"):
+            _vet_rc = 1
+        elif f.status == "UNKNOWN" and not vet_target.exists():
+            _vet_rc = 1
+        else:
+            _vet_rc = 0
         # Side output: SARIF file (mirrors the full-audit --sarif behavior, incl.
         # the same graceful handling of an unwritable path — B-014).
         if args.sarif:
@@ -284,7 +295,7 @@ def main(argv=None) -> int:
         # Primary output: machine-readable JSON, else the human text report.
         if args.json:
             _emit(render_vet_json([f], mode="vet", target=args.vet, version=__version__))
-            return 0 if f.status in ("PASS", "UNKNOWN") else 1
+            return _vet_rc
         verdict = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS": "looks SAFE",
                    "UNKNOWN": "could not assess"}[f.status]
         icon = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}[f.status] \
@@ -300,7 +311,7 @@ def main(argv=None) -> int:
                 lines.append(f"      {bullet} (+{len(f.evidence) - 12} more)")
         lines.append(f"    {_sanitize(f.fix)}")
         _emit("\n".join(lines))
-        return 0 if f.status in ("PASS", "UNKNOWN") else 1
+        return _vet_rc
 
     if args.vet_all:
         home_dir = Path(args.home).expanduser()
@@ -445,9 +456,10 @@ def main(argv=None) -> int:
         try:
             secure_write_text(Path(args.badge).expanduser(), render_svg(score, findings))
             _emit(f"(badge written to {args.badge})")
+            return 0
         except OSError as exc:
             _emit(f"(could not write badge: {exc})")
-        return 0
+            return 1
 
     if args.html:
         try:
@@ -456,17 +468,19 @@ def main(argv=None) -> int:
                 render_html(findings, score, native=ctx.native),
             )
             _emit(f"(HTML report written to {args.html})")
+            return 0
         except OSError as exc:
             _emit(f"(could not write HTML report: {exc})")
-        return 0
+            return 1
 
     if args.sarif:
         try:
             secure_write_text(Path(args.sarif).expanduser(), render_sarif(findings, score, __version__, ctx=ctx))
             _emit(f"(SARIF written to {args.sarif})")
+            return 0
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
-        return 0
+            return 1
 
     if args.trend:
         history_record(score, args.history)
@@ -571,15 +585,20 @@ def main(argv=None) -> int:
                 _emit("")
         record_run("vet_mcp")
 
+    _save_failed = False
     if args.save:
         try:
             secure_write_text(Path(args.save).expanduser(), body)
             _emit(f"\n(report saved to {args.save})")
         except OSError as exc:
             _emit(f"\n(could not save report: {exc})")
+            _save_failed = True
 
     if not args.no_history and not args.trend and not args.monitor:
         history_record(score, args.history)
+
+    if _save_failed:
+        return 1
 
     if args.fail_under is not None and score.score < args.fail_under:
         return 1
