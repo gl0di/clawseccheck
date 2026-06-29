@@ -3,6 +3,25 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.5.2] — 2026-06-29
+
+Documentation/transparency accuracy: align the tool's stated local-write surface with what
+it actually writes (everything still under `~/.clawseccheck/`). Surfaced by an adversarial
+publish-surface review; **no behavior, check logic, scoring, or output bytes changed.**
+
+### Changed
+- **SKILL.md + README:** the enumeration of files ClawSecCheck writes now includes the
+  freshness ledger `~/.clawseccheck/coverage.json` recorded by the opt-in active self-tests
+  (`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`).
+- **SKILL.md `--monitor` consent script:** now names all three files it writes
+  (`state.json`, `events.jsonl`, `history.jsonl`) instead of saying "nothing else", so the
+  spoken consent matches the actual write set.
+
+### Fixed
+- **`history.py` docstring:** corrected to state that `record()` runs by default on every
+  audit (opt out with `--no-history`); it previously claimed it was never automatic, which
+  contradicted the code and the (accurate) user-facing docs.
+
 ## [2.5.1] — 2026-06-29
 
 Address all 26 SkillSpector findings and the ClawHub static-analysis Critical flag
