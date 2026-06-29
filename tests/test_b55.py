@@ -87,6 +87,30 @@ def test_ungated_write_without_broad_reach_warns(tmp_path):
     assert any("apply_patch" in e for e in f.evidence)
 
 
+# B-057 invariant: the FAIL gate uses _open_channels (open-only) BY DESIGN. An allowlist
+# or paired channel is untrusted *content* but not proven-broad reach, so a write tool
+# behind one stays WARN — never FAIL. Widening the gate to _external_input_channels would
+# flip these to FAIL: a §5 false-positive. These lock that boundary explicitly.
+def test_b55_allowlist_channel_does_not_escalate_to_fail(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"dmPolicy": "allowlist"}},'
+        ' "tools": {"allow": ["fs_write"]}}',
+    )
+    f = _b55(home)
+    assert f.status == WARN, f.detail
+    assert f.status != FAIL
+
+
+def test_b55_paired_channel_does_not_escalate_to_fail(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"dmPolicy": "paired"}},'
+        ' "tools": {"allow": ["fs_write"]}}',
+    )
+    assert _b55(home).status == WARN
+
+
 # --------------------------------------------------------------------------- UNKNOWN
 def test_no_tool_allowlist_is_unknown(tmp_path):
     home = _write_config(tmp_path, '{"gateway": {"bind": "127.0.0.1:8080"}}')

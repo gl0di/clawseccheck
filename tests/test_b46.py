@@ -82,6 +82,52 @@ def test_b46_elevated_only_triggers_warn_for_open_channel():
     assert r.status == "WARN"
 
 
+# ---- partial-trifecta branch counts allowlist/paired ingress, not just open (B-057) ----
+# An allowlist/paired channel is untrusted ingress (authenticated sender != trusted
+# content), consistent with the trifecta input leg in _trifecta_legs(). This branch
+# previously used _open_channels and silently PASSed an allowlist+elevated+subagents config.
+def test_b46_allowlist_channel_with_elevated_warns():
+    cfg = {
+        "channels": {"tg": {"dmPolicy": "allowlist"}},  # untrusted ingress, NOT open
+        "tools": {"allow": ["send_email"], "elevated": {"allowFrom": ["owner-111"]}},
+        "agents": {"subagents": {"maxConcurrent": 4}},
+    }
+    r = check_multiagent_exposure(_ctx(cfg))
+    assert r.status == "WARN"
+    assert r.scored is True
+
+
+def test_b46_paired_channel_with_elevated_warns():
+    cfg = {
+        "channels": {"tg": {"dmPolicy": "paired"}},  # paired is still external ingress
+        "tools": {"allow": ["send_email"], "elevated": {"allowFrom": ["owner-111"]}},
+        "agents": {"subagents": {"maxConcurrent": 4}},
+    }
+    assert check_multiagent_exposure(_ctx(cfg)).status == "WARN"
+
+
+# clean control: the partial branch only fires WITH elevated sender scope — an allowlist
+# channel + subagents but no elevated.allowFrom must stay PASS (the fix is not over-wide).
+def test_b46_allowlist_channel_without_elevated_passes():
+    cfg = {
+        "channels": {"tg": {"dmPolicy": "allowlist"}},
+        "tools": {"allow": ["send_email"]},  # no elevated.allowFrom
+        "agents": {"subagents": {"maxConcurrent": 4}},
+    }
+    assert check_multiagent_exposure(_ctx(cfg)).status == "PASS"
+
+
+# boundary: an owner-only channel is NOT external ingress, so the branch must not fire
+# even with elevated sender scope (proves "external" means non-owner, not "any channel").
+def test_b46_owner_only_channel_with_elevated_passes():
+    cfg = {
+        "channels": {"tg": {"dmPolicy": "owner"}},  # excluded from untrusted ingress
+        "tools": {"allow": ["send_email"], "elevated": {"allowFrom": ["owner-111"]}},
+        "agents": {"subagents": {"maxConcurrent": 4}},
+    }
+    assert check_multiagent_exposure(_ctx(cfg)).status == "PASS"
+
+
 # ---- B46 is capped at WARN: it must NEVER FAIL (cannot add new FAILs on real configs) ----
 def test_b46_never_fails():
     for cfg in (

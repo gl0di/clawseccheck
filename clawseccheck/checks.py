@@ -5623,8 +5623,8 @@ def check_multiagent_exposure(ctx: Context) -> Finding:
 
     WARN    — multi-agent topology with no approval gate and either:
               (a) global trifecta fully active, or
-              (b) open ingress + elevated tool sender scope despite missing explicit
-                  sensitive-data leg.
+              (b) external (non-owner) ingress + elevated tool sender scope despite
+                  missing explicit sensitive-data leg.
     PASS    — multi-agent topology present but none of the warn conditions apply, or a gate
               exists.
     UNKNOWN — no multi-agent topology (single agent; A1 already covers that case).
@@ -5637,19 +5637,23 @@ def check_multiagent_exposure(ctx: Context) -> Finding:
             "trifecta exposure does not apply (single-agent trifecta is covered by A1).",
             "—",
         )
-    open_ch = _open_channels(cfg)
+    # Untrusted ingress = open/allowlist/paired (authenticated sender != trusted
+    # content), matching the trifecta input leg computed in _trifecta_legs(); an
+    # allowlist channel is ingress here too. NB: B55's FAIL gate deliberately uses
+    # _open_channels (open-only) instead — see check_fs_write_exposure.
+    ext_ch = _external_input_channels(cfg)
     legs = _trifecta_legs(ctx)
     if not all(legs.values()):
-        if open_ch and bool(dig(cfg, "tools.elevated.allowFrom")) and not _has_approval_gate(cfg):
+        if ext_ch and bool(dig(cfg, "tools.elevated.allowFrom")) and not _has_approval_gate(cfg):
             return _finding(
                 "B46", WARN,
-                "Multiple agents/subagents can be spawned, open ingress exists, and "
-                "elevated tools are sender-restricted (not tightly approval-gated), "
-                "so a multi-agent topology can still amplify an injection via elevated "
-                "actions.",
+                "Multiple agents/subagents can be spawned, external (non-owner) ingress "
+                "exists (open/allowlist/paired), and elevated tools are sender-restricted "
+                "(not tightly approval-gated), so a multi-agent topology can still amplify "
+                "an injection via elevated actions.",
                 "Reduce sender surface for elevated tooling and/or set an approval "
                 "gate (tools.exec.mode='ask'/'allowlist'). Do not rely on "
-                "coarse allowFrom for elevated tooling with open channels.",
+                "coarse allowFrom for elevated tooling with externally-reachable channels.",
             )
         return _finding(
             "B46", PASS,
@@ -5924,6 +5928,13 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
         isinstance(allow_from, list) and bool(allow_from) and "*" not in allow_from
     )
     wildcard = allow_from == "*" or (isinstance(allow_from, list) and "*" in allow_from)
+    # DELIBERATE: _open_channels (open-only), NOT _external_input_channels. This feeds the
+    # FAIL gate below; a hard FAIL ("arbitrary writes reachable by untrusted senders")
+    # requires proven-broad reach — a wildcard sender or a truly-open/public channel. An
+    # allowlist/paired channel carries untrusted *content* but is not broad reach, so it
+    # stays the WARN fallback (locked by test_ungated_write_without_broad_reach_warns).
+    # Widening this to _external_input_channels would flip allowlist configs WARN->FAIL,
+    # a §5 false-positive FAIL. B46 uses the broader helper because it is WARN-capped.
     open_ch = _open_channels(cfg)
 
     # Approval via tools.exec affects exec/shell-like actions; it is not a
