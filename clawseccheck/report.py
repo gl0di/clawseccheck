@@ -105,10 +105,10 @@ def _capability_graph(ctx) -> dict:
         SENSITIVE_TOOL_HINTS,
         _agent_legs,
         _enabled_tools,
+        _external_input_channels,
         _hint,
         _mcp_has_remote,
         _mcp_servers,
-        _open_channels,
     )
     from .collector import dig  # noqa: PLC0415
 
@@ -117,7 +117,7 @@ def _capability_graph(ctx) -> dict:
     nodes: list[dict] = []
     edges: list[tuple[str, str]] = []
 
-    input_surfaces = sorted({*_open_channels(cfg), *[t for t in _enabled_tools(cfg) if _hint([t], INPUT_TOOL_HINTS)]})
+    input_surfaces = sorted({*_external_input_channels(cfg), *[t for t in _enabled_tools(cfg) if _hint([t], INPUT_TOOL_HINTS)]})
     main_tools = sorted({t for t in _enabled_tools(cfg)})
     main_secrets = bool(
         dig(cfg, "gateway.auth.password")
