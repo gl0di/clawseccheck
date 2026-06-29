@@ -3,6 +3,55 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.5.5] — 2026-06-29
+
+Sharper lethal-trifecta (A1) detection plus a batch of schema-variant and
+threat-mapping fixes. A1 now reads real capability surfaces it previously missed,
+so some setups that genuinely hold all three trifecta legs may now correctly FAIL
+where they were a "cannot determine" WARN before.
+
+### Added
+- A1 detects an enabled web fetch/browse tool (`tools.web.fetch.enabled`) as both
+  an untrusted-input surface (untrusted remote content) and an outbound surface
+  (exfiltration via request URLs).
+- Regression coverage (clean + bad) for the core checks B1–B12.
+
+### Fixed
+- **A1 false positive (group bots):** the untrusted-input leg now keys off the
+  documented untrusted-policy allowlist (`open`/`allowlist`/`paired`) only. An
+  owner-approved group bot (`groupPolicy: "ask"`, per-message approval) is no
+  longer flagged as untrusted input, matching the engine's DM behaviour.
+- **A1 PASS-wash:** a no-op `tools.allow` entry no longer flips the
+  "cannot determine" thin-surface WARN to PASS; only a recognized capability (a
+  tool hint, web fetch, a powerful `tools.profile`, `tools.elevated.allowFrom`, or
+  a real `--attest` roster) resolves the leg.
+- **A1:** a channel marked `enabled: false` no longer raises the input/outbound
+  legs (it ingests and sends nothing).
+- **B39:** reads an accounts-nested DM allowlist under `session.dmScope: "main"`
+  (previously a false PASS).
+- **B33 / C6:** read the root-level `lastTouchedVersion` alias so the version/CVE
+  gate is no longer silently UNKNOWN.
+- **B25:** reads the legacy flat plugin/skill shape (`plugins.<name>` without an
+  `entries` wrapper).
+- **B48:** reads per-account break-glass webhook flags
+  (`channels.<provider>.accounts.<id>.*`).
+- Python 3.9 compatibility for new test helpers (deferred-annotation imports for
+  PEP 604 unions); CI runs on 3.9 and 3.12.
+
+### Changed
+- **Threat mapping:** B63/B65/B66 no longer map to OWASP LLM09 (Misinformation,
+  out of scope); they map to LLM06 (Excessive Agency). Previously unmapped checks
+  are now tied to OWASP LLM and Agentic-Skills classes (B12, B74, B76, B79, C014,
+  C015 → LLM; B38, B73, B74, B76, B77, B78, B79, C032 → AST).
+
+### Known limitations
+- A1 can over-report on the narrow shape "web fetch enabled + a gateway password
+  set, with no agent-readable private data (no file/exec tools, no credentials)":
+  the gateway password is counted toward the sensitive-data leg even though the
+  agent cannot read it. A precise fix (model exec/filesystem access as data access;
+  stop treating the gateway password as the sensitive signal) is in progress. Real
+  agents with any data or exec capability are unaffected.
+
 ## [2.5.4] — 2026-06-29
 
 Follow-up to the v2.5.3 capability-graph audit: align B46 multi-agent exposure with the
