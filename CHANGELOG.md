@@ -3,6 +3,34 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.5.3] — 2026-06-29
+
+Cross-agent audit fixes — multi-agent session posture, bootstrap-root discovery,
+capability-graph/A1 consistency, and stricter CLI exit codes. Surfaced by independent
+testing of the skill on separate setups, each fix verified against current code and
+locked with regression tests.
+
+### Fixed
+- **B79 session approval-policy** is now evaluated across **all** agents (per-agent
+  worst-case), not just `agents/main`. A non-`main` agent running `approval_policy="never"`
+  was previously invisible, so the check under-reported auto-approval risk.
+- **Bootstrap discovery** now includes the home **root**, not only `workspace-*` dirs, so
+  root-level `SOUL.md`/`AGENTS.md`/`TOOLS.md`/`HEARTBEAT.md` no longer fall to a false
+  `UNKNOWN` in B6 and related content checks (symlink-deduped).
+- **Capability graph** (`--json`) derives its input surface from `_external_input_channels`
+  (open + allowlist + paired), consistent with the A1 Lethal-Trifecta verdict — fixing
+  self-contradictory output (3/3 trifecta but an empty input surface) on allowlist/paired ingress.
+
+### Changed
+- **CLI exit codes now reflect operational failures.** `--badge`/`--html`/`--sarif`/`--save`
+  exit non-zero when the write fails, and `--vet` on a non-existent target exits non-zero (a
+  valid target that vets `UNKNOWN` still exits `0`). Previously all returned `0`, which let
+  automation read a silent failure as success.
+
+### Security
+- Removed hardcoded personal filesystem paths from the test suite (privacy/cleanliness; the
+  fleet regression tests now run against repo fixtures instead of machine-specific paths).
+
 ## [2.5.2] — 2026-06-29
 
 Documentation/transparency accuracy: align the tool's stated local-write surface with what
