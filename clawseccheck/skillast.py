@@ -419,7 +419,8 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         f = node.func
         ln = getattr(node, "lineno", 0)
 
-        # exec()/eval() — obfuscated (decoded/tainted arg) = crit; plain = info
+        # A call to a dynamic-evaluation builtin (the names in _EXEC_NAMES):
+        # an obfuscated/decoded or tainted argument = crit; a plain one = info.
         if isinstance(f, ast.Name) and f.id in _EXEC_NAMES and node.args:
             arg = node.args[0]
             if _subtree_has_decode(arg) or (_names_in(arg) & tainted):
