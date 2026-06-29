@@ -552,14 +552,15 @@ OWASP_MAP = {
     "B57": ("LLM06", "LLM03"),
     # B62: Excessive Agency (LLM06) — skill acts beyond its declared scope.
     "B62": ("LLM06",),
-    # B63: Improper Output Handling (LLM09) / Excessive Agency (LLM06) — hiding
-    # actions from the user undermines transparency and human oversight.
-    "B63": ("LLM09", "LLM06"),
+    # B63: Excessive Agency (LLM06) — instructing the agent to hide its actions
+    # undermines human oversight. NOT LLM09 "Misinformation" (a model-output/RAG concern
+    # the agent config can't see; LLM09 is out of scope per docs/THREAT_COVERAGE.md).
+    "B63": ("LLM06",),
     # B65: conditional/sleeper trigger instructions — hidden conditional malware-like
-    # behavior under a user-query gate.
-    "B65": ("LLM06", "LLM09"),
+    # behavior under a user-query gate (Excessive Agency, not Misinformation).
+    "B65": ("LLM06",),
     # B66: persona / role jailbreak patterns that aim to reset safety constraints.
-    "B66": ("LLM06", "LLM09"),
+    "B66": ("LLM06",),
     # B67: per-source trust contracts — prompt injection via channel-specific gaps.
     "B67": ("LLM01", "LLM02"),
     "C4": ("LLM03",),

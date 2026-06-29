@@ -136,3 +136,14 @@ def test_b58_b61_owasp_now_mapped():
     assert owasp_for("B60") == ("LLM01",)
     assert "LLM02" in owasp_for("B61")
     assert owasp_for("B64") == ("LLM01",)
+
+
+# ---- LLM09 Misinformation is out of scope per THREAT_COVERAGE.md (B-060) ----
+def test_llm09_misinformation_has_no_checks():
+    # B63/B65/B66 were mis-mapped to LLM09; they are Excessive Agency (LLM06). LLM09 is a
+    # model-output/RAG concern the agent config can't see — out of scope (THREAT_COVERAGE.md).
+    for cid in ("B63", "B65", "B66"):
+        assert "LLM09" not in owasp_for(cid), f"{cid} must not map to LLM09 Misinformation"
+        assert "LLM06" in owasp_for(cid), f"{cid} should map to LLM06 Excessive Agency"
+    assert not any("LLM09" in codes for codes in OWASP_MAP.values()), \
+        "LLM09 is out of scope — no check should map to it"

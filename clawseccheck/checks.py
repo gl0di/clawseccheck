@@ -4141,18 +4141,33 @@ _PINNED_REF_RE = re.compile(
 )
 
 
+# Keys under plugins/skills that are structural config, not installable entries.
+_NON_ENTRY_KEYS = frozenset({"entries", "allow", "deny", "mcp", "items"})
+
+
 def _iter_entries(cfg: dict):
-    """Yield (namespace, name, entry_dict) for plugins.entries and skills.entries."""
+    """Yield (namespace, name, entry_dict) for plugins/skills entries, supporting BOTH
+    the nested `<ns>.entries.<name>` shape and the legacy flat `<ns>.<name>` shape.
+
+    In the legacy fallback, structural keys (entries/allow/deny/mcp/items) are skipped so
+    a non-plugin block such as plugins.mcp is never mistaken for an installable entry; the
+    caller's source/version guard (an entry with no ref info is skipped) is a second line
+    of defense. Previously the flat shape was dropped entirely → a legacy unpinned plugin
+    silently went UNKNOWN instead of WARN.
+    """
     for ns in ("plugins", "skills"):
         block = cfg.get(ns)
         if not isinstance(block, dict):
             continue
         entries = block.get("entries")
-        if not isinstance(entries, dict):
-            continue
-        for name, entry in entries.items():
-            if isinstance(entry, dict):
-                yield ns, name, entry
+        if isinstance(entries, dict):
+            for name, entry in entries.items():
+                if isinstance(entry, dict):
+                    yield ns, name, entry
+        else:
+            for name, entry in block.items():
+                if name not in _NON_ENTRY_KEYS and isinstance(entry, dict):
+                    yield ns, name, entry
 
 
 def check_update_pinning(ctx: Context) -> Finding:
@@ -5740,13 +5755,19 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
     for name, c in _channels(cfg).items():
         if not isinstance(c, dict):
             continue
-        if c.get("dangerouslyDisableSignatureValidation"):
+        # Check the provider object AND per-account sub-objects: these break-glass flags
+        # can be set per-account (channels.<p>.accounts.<id>.*), mirroring B30 (B-060).
+        nodes = [c]
+        accounts = c.get("accounts")
+        if isinstance(accounts, dict):
+            nodes.extend(v for v in accounts.values() if isinstance(v, dict))
+        if any(n.get("dangerouslyDisableSignatureValidation") for n in nodes):
             warns.append(f"channels.{name}.dangerouslyDisableSignatureValidation — "
                          "webhook signature validation disabled (spoofable untrusted input)")
-        if c.get("dangerouslyAllowInheritedWebhookPath"):
+        if any(n.get("dangerouslyAllowInheritedWebhookPath") for n in nodes):
             warns.append(f"channels.{name}.dangerouslyAllowInheritedWebhookPath — "
                          "inherited webhook path accepted")
-        if dig(c, "network.dangerouslyAllowPrivateNetwork"):
+        if any(dig(n, "network.dangerouslyAllowPrivateNetwork") for n in nodes):
             warns.append(f"channels.{name}.network.dangerouslyAllowPrivateNetwork — "
                          "private-network access from this channel (SSRF)")
 
@@ -6603,8 +6624,8 @@ def check_capability_intent_mismatch(ctx: Context) -> Finding:
 # ---------------------------------------------------------------------------
 #
 # Detects directives that instruct the agent to hide its actions from the
-# user — undermining human-oversight transparency (OWASP LLM09, NIST AI 600-1
-# §4.2).  These are ALWAYS malicious in a healthy agent setup; no legitimate
+# user — undermining human-oversight transparency (OWASP LLM06 Excessive Agency,
+# NIST AI 600-1 §4.2).  These are ALWAYS malicious in a healthy agent setup; no legitimate
 # skill or bootstrap file needs to say "don't tell the user".
 #
 # Detection uses a dual-signal proximity gate:
@@ -6740,7 +6761,7 @@ def check_silent_instruction(ctx: Context) -> Finding:
             "hide actions from the user: " + ev_summary + extra,
             "Remove ALL directives that instruct the agent to suppress output, hide "
             "actions, or withhold information from the user. Transparency is a core "
-            "AI safety requirement (OWASP LLM09 / NIST AI 600-1). A legitimate skill "
+            "AI safety requirement (OWASP LLM06 / NIST AI 600-1). A legitimate skill "
             "never needs to say 'don't tell the user'.",
             fail_ev,
         )

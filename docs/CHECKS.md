@@ -692,7 +692,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: Human Oversight / Transparency
 - Scored: yes
 - Confidence: HIGH
-- OWASP: LLM09 Misinformation, LLM06 Excessive Agency
+- OWASP: LLM06 Excessive Agency
 - What it checks: Silent-instruction directive (hidden actions from user)
 - Remediation:
   - none
@@ -716,7 +716,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: Prompt Injection / Conditional Trigger
 - Scored: yes
 - Confidence: MEDIUM
-- OWASP: LLM06 Excessive Agency, LLM09 Misinformation
+- OWASP: LLM06 Excessive Agency
 - What it checks: Conditional sleeper-trigger detector
 - Remediation:
   - none
@@ -728,7 +728,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Framework: Prompt Injection / Persona Injection
 - Scored: yes
 - Confidence: MEDIUM
-- OWASP: LLM06 Excessive Agency, LLM09 Misinformation
+- OWASP: LLM06 Excessive Agency
 - What it checks: Persona / role jailbreak detector
 - Remediation:
   - none

@@ -80,6 +80,46 @@ def test_b48_plugin_private_network_warns():
     assert check_dangerous_overrides(_ctx(cfg)).status == "WARN"
 
 
+# ---- B-060: per-account channel break-glass flags (channels.<p>.accounts.<id>.*) ----
+# These webhook flags can be set per-account; B48 read top-level only and missed them
+# (false PASS). It now descends into accounts, mirroring B30.
+def test_b48_account_nested_signature_validation_disabled_warns():
+    cfg = {"channels": {"telegram": {"accounts": {
+        "main": {"dangerouslyDisableSignatureValidation": True}}}}}
+    r = check_dangerous_overrides(_ctx(cfg))
+    assert r.status == "WARN"
+    assert any("telegram" in e and "SignatureValidation" in e for e in r.evidence)
+
+
+def test_b48_account_nested_inherited_webhook_path_warns():
+    cfg = {"channels": {"synology-chat": {"accounts": {
+        "a": {"dangerouslyAllowInheritedWebhookPath": True}}}}}
+    assert check_dangerous_overrides(_ctx(cfg)).status == "WARN"
+
+
+def test_b48_account_nested_private_network_warns():
+    cfg = {"channels": {"slack": {"accounts": {
+        "w": {"network": {"dangerouslyAllowPrivateNetwork": True}}}}}}
+    assert check_dangerous_overrides(_ctx(cfg)).status == "WARN"
+
+
+def test_b48_account_and_provider_flag_no_duplicate_warn():
+    # flag at BOTH provider and account -> a single warn for that channel/flag (any-dedup)
+    cfg = {"channels": {"sms": {
+        "dangerouslyDisableSignatureValidation": True,
+        "accounts": {"a": {"dangerouslyDisableSignatureValidation": True}}}}}
+    r = check_dangerous_overrides(_ctx(cfg))
+    assert r.status == "WARN"
+    sig = [e for e in r.evidence if "SignatureValidation" in e and "sms" in e]
+    assert len(sig) == 1
+
+
+def test_b48_account_with_no_dangerous_flags_passes():
+    # clean control: an account sub-object with no break-glass flag -> PASS
+    cfg = {"channels": {"telegram": {"accounts": {"main": {"dmPolicy": "open"}}}}}
+    assert check_dangerous_overrides(_ctx(cfg)).status == "PASS"
+
+
 # ---- gateway.nodes.allowCommands: non-empty array WARNs, empty does not ----
 def test_b48_node_allow_commands_nonempty_warns():
     assert check_dangerous_overrides(

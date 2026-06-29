@@ -193,3 +193,40 @@ def test_b25_skills_floating_ref_warns():
 def test_b25_skills_pinned_passes():
     cfg = _skills_entries({"myskill": {"source": "https://example.com/x", "version": "v3.1.0"}})
     assert check_update_pinning(_ctx(cfg)).status == "PASS"
+
+
+# ---- Legacy flat shape: <ns>.<name> directly, no `entries` wrapper (B-060) ----
+# Previously dropped entirely -> a legacy unpinned plugin silently went UNKNOWN. _plugins
+# already tolerates this shape; _iter_entries now does too (structural keys skipped).
+
+def test_b25_legacy_flat_floating_ref_warns():
+    cfg = {"plugins": {"my-plugin": {"source": "https://example.com/x", "version": "main"}}}
+    f = check_update_pinning(_ctx(cfg))
+    assert f.status == "WARN"
+    assert len(f.evidence) >= 1
+
+
+def test_b25_legacy_flat_skills_floating_warns():
+    cfg = {"skills": {"my-skill": {"source": "https://example.com/x", "ref": "latest"}}}
+    assert check_update_pinning(_ctx(cfg)).status == "WARN"
+
+
+def test_b25_legacy_flat_pinned_passes():
+    cfg = {"plugins": {"my-plugin": {"source": "https://example.com/x", "version": "v1.2.3"}}}
+    assert check_update_pinning(_ctx(cfg)).status == "PASS"
+
+
+def test_b25_legacy_flat_no_source_unknown():
+    # legacy entry with no ref info -> still nothing determinable -> UNKNOWN
+    cfg = {"plugins": {"my-plugin": {"enabled": True}}}
+    assert check_update_pinning(_ctx(cfg)).status == "UNKNOWN"
+
+
+def test_b25_legacy_structural_keys_not_treated_as_entries():
+    # plugins.mcp / plugins.allow are structural config, not installable plugins ->
+    # they must NOT be mistaken for unpinned entries (no false WARN).
+    cfg = {"plugins": {
+        "mcp": {"server": {"url": "https://example.com/mcp"}},
+        "allow": ["some-plugin"],
+    }}
+    assert check_update_pinning(_ctx(cfg)).status == "UNKNOWN"
