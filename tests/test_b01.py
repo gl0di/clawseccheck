@@ -10,6 +10,8 @@ Verdict map:
         explicit paths and bootstrap scan, which carry no platform dependency).
 No WARN or UNKNOWN path exists.
 """
+from __future__ import annotations
+
 from pathlib import Path
 
 from clawseccheck.catalog import FAIL, PASS

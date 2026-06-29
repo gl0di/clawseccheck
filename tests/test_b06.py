@@ -19,6 +19,8 @@ Note: "without (asking|confirmation)" was deliberately removed from patterns
 (see comment at checks.py:107-110), so protective directives like "do not run
 destructive commands without asking" must NOT trigger FAIL.
 """
+from __future__ import annotations
+
 from pathlib import Path
 
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN
