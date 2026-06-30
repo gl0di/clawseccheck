@@ -3,6 +3,44 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.6.1] — 2026-06-30
+
+§5 false-positive sweep: a channel marked `enabled: false` no longer drives any
+"reachable by untrusted senders" verdict, and the least-privilege check stops claiming
+it verified something it cannot see.
+
+### Fixed
+- **Disabled channels no longer trigger false positives (B-041):** the two channel
+  resolvers that feed FAIL/WARN checks — `_open_channels` and `_external_input_channels`
+  — were not skipping channels marked `enabled: false`, unlike the enabled-aware
+  `_active_channels` / `_untrusted_input_channels`. A disabled channel ingests nothing,
+  so counting it produced **§5 hard-FAIL false positives** and spurious WARNs across
+  several checks. Both resolvers now skip `enabled: false` channels (and B30 assesses
+  only live channels). Concretely fixed:
+  - **B2** (gateway auth) — a loopback+token gateway with only a *disabled* open channel
+    no longer FAILs "anyone can command it".
+  - **B39** (session visibility) — `dmScope:"main"` + only a *disabled* allowlist/paired
+    channel no longer FAILs "cross-user contamination" (it also no longer contradicts A1).
+  - **B55** (broad fs-write) — `fs_write` reachable only via a *disabled* open channel no
+    longer hard-FAILs.
+  - **B30** (sender identity) — a *disabled* channel's `dangerouslyAllowNameMatching` /
+    group-history flag is no longer reported as a live bypass.
+  - **B41** (credential blast radius) and **B46** (multi-agent exposure) — a *disabled*
+    untrusted channel no longer raises a spurious WARN; the combinational risk engine
+    (`risk.py`) and the host-posture WARNs likewise stop counting disabled ingress.
+  - The fix only *narrows* matches, so it can never create a new FAIL/WARN (no §5
+    regression); enabled channels are unaffected. New regression coverage:
+    `tests/test_disabled_channel_b041.py`.
+
+### Changed
+- **B3 (least privilege) no longer overclaims (B-042):** its PASS message said "Elevated
+  tools are restricted and tool reachability is constrained" even on a thin config and
+  even with `exec`/`web_fetch`/`fs_read` granted — runtime-granted tools aren't visible
+  to static config audit. The PASS now states only what it verified: "No over-broad
+  elevated-tool grant or profile/plugin escalation in config (runtime-granted tools are
+  not visible to static config audit)." (A follow-up task tracks hedging this to UNKNOWN
+  when the privilege surface is entirely undeclared, mirroring A1's thin-surface guard.)
+
 ## [2.6.0] — 2026-06-30
 
 A1 lethal-trifecta engine sharpens its read of `exec` and tells you how close a 2/3

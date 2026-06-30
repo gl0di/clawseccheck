@@ -173,7 +173,10 @@ def _open_channels(cfg: dict) -> list[str]:
     """
     out = []
     for name, c in _channels(cfg).items():
-        if not isinstance(c, dict):
+        # B-041: a channel with enabled:false ingests nothing — skip it, matching the
+        # enabled-aware _active_channels/_untrusted_input_channels helpers. Without this a
+        # DISABLED open channel produced §5 hard-FAIL false positives (B2/B55).
+        if not isinstance(c, dict) or c.get("enabled") is False:
             continue
         nodes = [c] + list((c.get("accounts") or {}).values())
         for node in nodes:
@@ -194,7 +197,10 @@ def _external_input_channels(cfg: dict) -> list[str]:
     """
     out = []
     for name, c in _channels(cfg).items():
-        if not isinstance(c, dict):
+        # B-041: skip enabled:false channels (a disabled channel admits no external
+        # input), matching _untrusted_input_channels. A disabled allowlist/paired channel
+        # otherwise drove §5 hard-FAIL false positives (B39) and spurious WARNs (B41/B46).
+        if not isinstance(c, dict) or c.get("enabled") is False:
             continue
         nodes = [c] + list((c.get("accounts") or {}).values())
         for node in nodes:
@@ -779,7 +785,14 @@ def check_least_privilege(ctx: Context) -> Finding:
     if soft:
         return _finding("B3", WARN, "; ".join(soft),
                         "; ".join(fixes), soft)
-    return _finding("B3", PASS, "Elevated tools are restricted and tool reachability is constrained.",
+    # B-042: PASS verifies a CONFIG-level least-privilege posture only (no over-broad
+    # elevated grant, no profile/plugin escalation). It must NOT claim runtime "tool
+    # reachability is constrained" — runtime-granted tools (message/exec_command/web_*)
+    # are not in openclaw.json. (A separate task tracks hedging this to UNKNOWN when the
+    # privilege surface is entirely undeclared, mirroring A1's _meaningful_tool_surface.)
+    return _finding("B3", PASS,
+                    "No over-broad elevated-tool grant or profile/plugin escalation in "
+                    "config (runtime-granted tools are not visible to static config audit).",
                     "Keep least privilege: explicit allowlists only.")
 
 
@@ -4594,7 +4607,11 @@ def check_sender_identity(ctx: Context) -> Finding:
     PASS   — channels exist and neither dangerous flag is set.
     UNKNOWN — no channels configured (cannot assess).
     """
-    ch = {k: v for k, v in _channels(ctx.config).items() if isinstance(v, dict)}
+    # B-041: assess only live channels — a channel with enabled:false matches nobody,
+    # so its dangerouslyAllowNameMatching/history flags are not a live bypass (a §5
+    # hard-FAIL false positive otherwise). All-disabled → UNKNOWN below.
+    ch = {k: v for k, v in _channels(ctx.config).items()
+          if isinstance(v, dict) and v.get("enabled") is not False}
     if not ch:
         return _finding(
             "B30", UNKNOWN,
