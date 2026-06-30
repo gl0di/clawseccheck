@@ -131,7 +131,3 @@ def test_risk12_silent_on_scoped_config():
     ctx, findings, _ = audit(FIXTURES / "clean_b55_fs_write_scoped")
     ids = {p.id for p in risk_paths(ctx, findings)}
     assert "RISK-12" not in ids
-
-
-# --------------------------------------------------------------------------- i18n
-

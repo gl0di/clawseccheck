@@ -68,5 +68,3 @@ def test_b63_warn_bad_bare_fixture():
     f = check_silent_instruction(ctx)
     assert f.status == WARN
     assert len(f.evidence) > 0
-
-# --------------------------------------------------------------------------- i18n

@@ -28,7 +28,7 @@ Trust model:
   - Pure presentation/serialisation layer over what B62 already determined.
   - Does NOT re-run any check; reads only ctx.effect_profiles and ctx.installed_skills.
   - All text routed through logsafe.redact so no raw secrets appear in the SAR.
-  - JSON-only output (machine-readable); no Hebrew/i18n needed.
+  - JSON-only output (machine-readable).
 
 Stdlib only.  No network, no subprocess, no writes.
 """

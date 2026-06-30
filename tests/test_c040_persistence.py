@@ -330,10 +330,3 @@ def test_c040_nohup_in_fence_suppressed():
     assert f.status == PASS, (
         f"nohup in fence should be suppressed, got {f.status!r}: {f.detail!r}"
     )
-
-
-# ===========================================================================
-# i18n: Hebrew localization of C-040 evidence strings
-# ===========================================================================
-
-

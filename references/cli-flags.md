@@ -6,7 +6,6 @@ kept here so the always-loaded playbook stays lean.
 
 - `--ascii` — plain output for terminals that cannot render unicode (auto-detected).
 - `--save PATH` — write the report to a local file.
-- `--lang he` — Hebrew output, right-to-left (auto-detected from `LANG`/`LC_ALL`).
 - `--sarif PATH` — write a local SARIF 2.1.0 file (for CI / GitHub Code Scanning; never uploaded).
   Works with `--vet`/`--vet-mcp` too, as a side output alongside the human report.
 - `--json` with `--vet`/`--vet-mcp` — emits a vetting JSON object (`mode`, `target`, `verdict`,

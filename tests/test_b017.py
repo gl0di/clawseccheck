@@ -54,6 +54,3 @@ def test_default_assumes_openclaw_detected():
     _, findings, score = audit(FIXTURES / "home_safe")
     out = render_report(findings, score)
     assert "No openclaw.json found" not in out
-
-
-# ---------------------------------------------------------------- i18n

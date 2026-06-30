@@ -4,7 +4,7 @@ Detects dangerous CAPABILITY CHAINS — not isolated property checks. A chain
 fires only on POSITIVE evidence for every link; UNKNOWN inputs yield no chain
 (zero false-positives by design).
 
-English-only for v1 (no i18n). Read-only. Pure stdlib.
+English-only. Read-only. Pure stdlib.
 """
 from __future__ import annotations
 

@@ -134,11 +134,6 @@ def test_b59_bad_fixture_warns():
     assert f.status == WARN, f"Expected WARN, got {f.status}: {f.detail}"
 
 
-# --- i18n ---
-
-
-
-
 # --- Wired into audit ---
 
 def test_b59_registered_in_audit():
@@ -263,11 +258,6 @@ def test_b60_bad_fixture_warns():
     ctx = collect(FIXTURES / "bad_b60_self_replication")
     f = check_prompt_self_replication(ctx)
     assert f.status == WARN, f"Expected WARN, got {f.status}: {f.detail}"
-
-
-# --- i18n ---
-
-
 
 
 # --- Wired into audit ---

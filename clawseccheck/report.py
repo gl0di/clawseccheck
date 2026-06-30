@@ -834,7 +834,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     payload["capability_graph"] = _capability_graph(ctx) if ctx is not None else {"nodes": [], "edges": []}
     # F-020: Structured Attestation Requests — always present in --json output.
     # Empty list when no B62 mismatches; one entry per mismatch-flagged skill.
-    # Machine-readable only; no Hebrew rendering needed.
+    # Machine-readable only.
     payload["secret_reachability"] = _credential_surface_map(ctx) if ctx is not None else []
     if ctx is not None:
         from .sar import build_sars  # noqa: PLC0415

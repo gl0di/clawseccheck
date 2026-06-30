@@ -292,13 +292,3 @@ def test_clean_i013_doc_example_passes():
     assert f.status == PASS, (
         f"doc-example fixture must not WARN; got {f.status}: {f.detail}"
     )
-
-
-# ---------------------------------------------------------------------------
-# Hebrew localisation guard
-# ---------------------------------------------------------------------------
-
-
-
-
-

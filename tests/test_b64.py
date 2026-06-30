@@ -133,5 +133,3 @@ def test_b64_mcp_tool_description():
     ))
     assert f.status == WARN
     assert "mcp:evil/do_dev" in f.evidence[0]
-
-# --------------------------------------------------------------------------- i18n

@@ -132,7 +132,7 @@ def test_json_sanitizes_finding_fields():
 
 
 def test_json_sanitizes_action_title_and_command():
-    """render_json must sanitize next_actions title and command (sourced from i18n, but guard anyway)."""
+    """render_json must sanitize next_actions title and command."""
     f = _hostile_finding()
     out = render_json([f], _score([f]))
     payload = json.loads(out)

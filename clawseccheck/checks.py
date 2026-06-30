@@ -719,7 +719,7 @@ def check_gateway(ctx: Context) -> Finding:
     # B-020: build the remediation from the conditions that ACTUALLY fired, one clause per
     # trigger, so the fix names the real problem (e.g. allowInsecureAuth alone -> "Disable
     # gateway.controlUi.allowInsecureAuth", not generic boilerplate the config already meets).
-    # Clauses join with "; " so the Hebrew renderer (tp) localizes each fragment.
+    # Clauses join with "; " so each fired condition contributes one fragment.
     fixes = []
     bind = parse_bind_host(dig(cfg, "gateway.bind", ""))
     auth = dig(cfg, "gateway.auth.mode")
