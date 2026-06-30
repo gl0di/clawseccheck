@@ -3,6 +3,38 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.7.1] — 2026-06-30
+
+The CLI no longer silently drops a second mode flag or a modifier the chosen mode can't
+use — it names what was ignored — plus a cleanup of leftover i18n references.
+
+### Added
+- **Flag-coherence notes (B-066/B-067):** when more than one mode is selected, or a global
+  modifier the resolved mode can't honor is passed, ClawSecCheck prints a `note: …` to
+  **stderr** naming what was ignored and continues. Notes go to stderr so machine-readable
+  stdout (`--json`/`--sarif`) stays clean; no mode's behavior or exit code changes.
+- **`--vet` records a coverage-ledger run (C-128):** symmetric with `--vet-mcp`. The
+  freshness advisory has no `vet` threshold, so this adds no staleness nudge — it just keeps
+  the two vet modes consistent.
+
+### Fixed
+- **B-066 — global modifiers no longer silently ignored by side modes:** `--json` with
+  `--fix`/`--next`/`--prompts`, `--save` with a non-report mode, and `--exit-code` with
+  `--sarif` each now emit a `note: … has no effect with …`. `--no-history` is honored on the
+  default path and noted (not silently dropped) under `--trend`/`--monitor`, which record a
+  score point as part of their job. `--vet`/`--vet-mcp` still honor `--json` (primary) and
+  `--sarif` (side output) with no note.
+- **B-067 — mutually-exclusive mode flags no longer silently override each other:** e.g.
+  `--card --json` → `note: --card ignored (running --json)`; `--vet X --redteam` →
+  `note: --redteam ignored (running --vet)`.
+
+### Changed
+- **Removed leftover i18n references after the v2.0.0 de-i18n:** a stale `--lang he` line in
+  `references/cli-flags.md` (a flag that no longer exists), orphaned `Hebrew localization`
+  section dividers in 10 test files, and dead Hebrew-renderer comments in
+  `checks.py`/`report.py`/`sar.py`/`risk.py`. The Hebrew-block guard in `textnorm.py`
+  (U+0590–05FF must never be confusable-folded) and RTL content-analysis logic are unchanged.
+
 ## [2.7.0] — 2026-06-30
 
 The least-privilege check now says "I can't tell" instead of a falsely-reassuring "pass"
