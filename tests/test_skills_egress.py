@@ -170,6 +170,14 @@ def test_c4_unknown_when_version_absent():
     assert c4.status == UNKNOWN
 
 
+def test_c4_last_touched_version_absent_direct_unknown():
+    """B-039: C4 returns UNKNOWN when neither meta.lastTouchedVersion nor lastTouchedVersion is set."""
+    from clawseccheck.checks import check_version
+    ctx = Context(home=Path("/x"))
+    ctx.config = {"gateway": {"bind": "127.0.0.1:9000"}, "agents": {}}
+    assert check_version(ctx).status == UNKNOWN
+
+
 # ---------------------------------------------------------------------------
 # B13 extended signature regression tests
 # ---------------------------------------------------------------------------

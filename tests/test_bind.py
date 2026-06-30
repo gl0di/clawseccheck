@@ -160,3 +160,23 @@ def test_gateway_bind_ipv6_loopback_with_zone_id_not_flagged():
     # [::1%eth0]:8765 is still IPv6 loopback — zone ID must not cause a false FAIL.
     cfg = {"gateway": {"bind": "[::1%eth0]:8765", "auth": {"mode": "none"}}}
     assert check_gateway(_ctx(cfg)).status == "PASS"
+
+
+# ---- B-034: B11 fires on non-loopback bind without TLS ----
+
+def test_b11_private_ip_no_tls_warns():
+    """B-034: B11 WARNs on a non-loopback private IP bind without TLS configured."""
+    cfg = {"gateway": {"bind": "192.168.1.10:9000"}}
+    ctx = _ctx(cfg)
+    ctx.config_mode = 0o600
+    f = check_tls(ctx)
+    assert f.status == "WARN"
+    assert "non-loopback" in f.detail
+
+
+def test_b11_loopback_no_tls_required_passes():
+    """B-034: loopback bind is the clean control — B11 passes without TLS when bind is local."""
+    cfg = {"gateway": {"bind": "127.0.0.1:9000"}}
+    ctx = _ctx(cfg)
+    ctx.config_mode = 0o600
+    assert check_tls(ctx).status == "PASS"

@@ -54,3 +54,18 @@ def test_b15_warn_when_tools_is_empty_list():
 def test_b15_unknown_when_no_servers():
     f = check_mcp(_ctx({}))
     assert f.status == UNKNOWN
+
+
+def test_b15_mcpservers_legacy_key_with_restrictions_passes():
+    """B-038: B15 PASSes when legacy mcpServers key is used and all servers have tool allowlists."""
+    cfg = {
+        "mcpServers": {
+            "filesystem": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+                "tools": ["read_file", "list_directory"],
+            }
+        }
+    }
+    f = check_mcp(_ctx(cfg))
+    assert f.status == PASS

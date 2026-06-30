@@ -287,6 +287,18 @@ def test_a1_gated_exec_plus_channel_is_not_sensitive():
     assert a1.status != FAIL
 
 
+def test_a1_sandbox_without_exec_not_lethal():
+    """B-064 §5 regression: a Docker SANDBOX (a hardening control) plus an open channel,
+    with NO declared exec tool, must NOT be read as ungated exec. The sandbox-inferred
+    'exec' (from agents.defaults.sandbox.mode != 'off') must not raise the sensitive leg,
+    so this stays 2/3, not a spurious 3/3 FAIL."""
+    a1 = _a1({"agents": {"defaults": {"sandbox": {"mode": "docker"}}},
+              "channels": {"telegram": {"dmPolicy": "open"}}})
+    assert a1.status != FAIL
+    assert "sensitive data" not in (a1.evidence or [])
+    assert set(a1.evidence or []) == {"untrusted input", "outbound actions"}
+
+
 # ── F-036: distance-to-trifecta note for 2/3 configs ─────────────────────────────
 
 def test_a1_distance_note_names_missing_sensitive_leg():

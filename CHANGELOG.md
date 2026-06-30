@@ -3,6 +3,36 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.6.2] — 2026-06-30
+
+§5 hotfix: a configured sandbox no longer inflates the lethal-trifecta count, plus a
+batch of missing test coverage.
+
+### Fixed
+- **A sandbox no longer infers an exec leg (B-064):** a config that declares **no**
+  exec/shell tool but sets a defensive `agents.defaults.sandbox.mode` (anything but
+  `off`) was scored as a **3/3 lethal trifecta (A1 FAIL, grade F)** when it should be
+  2/3 — a hardening control *raised* the trifecta count. Root cause: the shared
+  `_enabled_tools()` infers a synthetic `"exec"` from `sandbox.mode != "off"` (correct
+  for B4's posture reasoning, wrong for A1), and the v2.6.0 B-061 sensitive-leg predicate
+  treated that phantom exec as ungated. A1 now derives the exec capability from a new
+  `_real_exec_enabled()` — a **declared** exec signal only (`tools.exec.*`, a powerful
+  `tools.profile`, or an `exec`/`shell` name in `tools.allow`/`gateway.tools.allow`) —
+  never from the sandbox inference. Measured: the false 3/3 drops to a correct 2/3; six
+  sandbox-only fixtures tighten 2/3→1/3 (all still PASS); `home_vuln` and `bad_c014`
+  (real ungated exec) stay FAIL; zero `clean_*`/`home_safe` FAILs. A sandbox-as-
+  containment relaxation was considered and **rejected** — it would mask a genuinely
+  escapable sandbox (`docker.sock` + `network:host`) + ungated exec as a false negative.
+  New test `test_a1_sandbox_without_exec_not_lethal`.
+
+### Added
+- **Test coverage backfill (B-034…B-040):** B11 private-IP-no-TLS WARN + loopback-clean
+  control; B16 no-monitoring-skill WARN; C3 backup-present PASS; B15 legacy `mcpServers`
+  with restrictions PASS; C4 version-absent UNKNOWN; B6 bootstrap-absent UNKNOWN; and a
+  B14 characterization test. (B14 has no PASS branch by design — OpenClaw exposes no
+  egress-allowlist field it could verify — so the B14 case asserts the current WARN and
+  flags the gap rather than forcing a PASS; tracked separately.)
+
 ## [2.6.1] — 2026-06-30
 
 §5 false-positive sweep: a channel marked `enabled: false` no longer drives any

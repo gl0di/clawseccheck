@@ -303,6 +303,27 @@ def _profile_is_powerful(profile) -> bool:
     return p in _POWERFUL_PROFILES or "exec" in p or "code" in p
 
 
+def _real_exec_enabled(cfg: dict) -> bool:
+    """A genuinely-DECLARED exec/shell capability — not a mere containment control.
+
+    B-064: the shared _enabled_tools() infers a synthetic "exec" from
+    `agents.defaults.sandbox.mode != "off"` (correct for B4's "exec present but
+    sandbox unset" reasoning, wrong for the trifecta). A sandbox is a HARDENING
+    control, not evidence an exec tool is granted, so it must not raise A1's sensitive
+    leg (§4: don't assert a capability the config doesn't declare). Real signals only:
+    an explicit tools.exec.* field, a powerful tools.profile, or an "exec"/"shell"
+    name in tools.allow / gateway.tools.allow.
+    """
+    if (dig(cfg, "tools.exec.security") is not None
+            or dig(cfg, "tools.exec.host") is not None
+            or dig(cfg, "tools.exec.mode") is not None):
+        return True
+    if _profile_is_powerful(dig(cfg, "tools.profile")):
+        return True
+    listed = dig(cfg, "tools.allow") or dig(cfg, "gateway.tools.allow") or []
+    return isinstance(listed, list) and _hint([str(t) for t in listed], ("exec", "shell"))
+
+
 def _web_fetch_enabled(cfg: dict) -> bool:
     """An enabled web fetch/browse tool: pulls arbitrary remote content into the
     agent (untrusted input) and can exfiltrate via request URLs (outbound)."""
@@ -394,7 +415,10 @@ def _trifecta_legs(ctx: Context) -> dict:
     # mode='ask' exec and would flip to a spurious 3/3. Only ungated exec (mode='full')
     # reaches sensitive. Outbound already counts exec via OUTBOUND_TOOL_HINTS (gated or
     # not), so the outbound leg below is intentionally left unchanged.
-    exec_enabled = _hint(tools, ("exec", "shell")) and not _has_approval_gate(cfg)
+    # B-064: use _real_exec_enabled (declared exec signals) NOT _hint(tools, ...) — the
+    # latter matches the synthetic "exec" _enabled_tools infers from a configured sandbox
+    # (a hardening control, not an exec grant), which produced a spurious 3/3 FAIL.
+    exec_enabled = _real_exec_enabled(cfg) and not _has_approval_gate(cfg)
     return {
         "untrusted input": (
             bool(untrusted_ch)

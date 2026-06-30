@@ -39,3 +39,20 @@ def test_b14_unknown_when_no_surface():
 def test_b14_warn_with_external_skill():
     f = check_egress(_ctx({}, skills=["slack-connector"]))
     assert f.status == WARN
+
+
+# B-035: B14 has NO PASS branch (by design — OpenClaw exposes no built-in egress allowlist).
+# Configured restriction signals (tools.http.allow, channel allowlists) do NOT flip B14 to
+# PASS; they are recorded by C014 (check_egress_inventory) instead.
+# TODO(B-035): If a future OpenClaw schema adds a verifiable egress-allowlist field that
+# B14 can read, add a PASS branch in check_egress and a corresponding PASS test here.
+
+def test_b14_tools_http_allow_still_warns():
+    """B-035: even with tools.http.allow set, check_egress WARNs (no PASS branch)."""
+    cfg = {
+        "tools": {"allow": ["exec", "http_post"], "http": {"allow": ["api.example.com"]}},
+        "channels": {"slack": {"dmPolicy": "allowlist"}},
+    }
+    f = check_egress(_ctx(cfg))
+    # Current behavior: surfaces detected → WARN regardless of restriction signals.
+    assert f.status == WARN

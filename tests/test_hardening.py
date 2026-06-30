@@ -96,6 +96,19 @@ def test_c3_passes_when_backup_exists_outside_workspace(tmp_path):
     assert f.status == "PASS"
 
 
+def test_c3_backup_bak_file_in_dot_backups_passes(tmp_path):
+    """B-037: C3 PASSes when a .bak backup exists in a sibling .backups directory."""
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    dot_backups = tmp_path / ".backups"
+    dot_backups.mkdir()
+    (dot_backups / "MEMORY.md.bak").write_text("memory backup content")
+    ctx = Context(home=workspace)
+    ctx.bootstrap = {"agent/MEMORY.md": "current memory content"}
+    f = {x.id: x for x in run_all(ctx)}["C3"]
+    assert f.status == "PASS"
+
+
 # ---- monitor state perms ----
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
 def test_monitor_state_is_owner_only(tmp_path):

@@ -31,3 +31,11 @@ def test_b16_pass_with_dash_ids_suffix_skill():
 def test_b16_warn_when_no_monitoring():
     f = check_monitoring(_ctx())
     assert f.status == WARN
+
+
+def test_b16_no_monitoring_skill_in_config_warns():
+    """B-036: B16 WARNs when no monitoring skill/plugin is detected in any config field."""
+    ctx = _ctx(skills=[])
+    ctx.config = {"agents": {"defaults": {"model": {"primary": "gpt-4"}}}}
+    f = check_monitoring(ctx)
+    assert f.status == WARN
