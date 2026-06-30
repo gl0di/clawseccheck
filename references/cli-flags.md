@@ -24,3 +24,10 @@ kept here so the always-loaded playbook stays lean.
   and B44 (self-report ⇄ config drift) at `ATTESTED` confidence. Read-only; introspection only.
 - `--watch-log` — print the Agent Watch event journal (a local timeline of what changed across
   `--monitor` runs); `--events PATH` points it at a different journal file.
+
+**Mode precedence.** Most flags above select a single mode; only one runs per invocation
+(resolved in a fixed order, `--json` winning over `--card` on the default report path). If you
+pass a second mode, or a modifier the chosen mode can't use (e.g. `--save` with `--fix`, or
+`--exit-code` with `--sarif`), ClawSecCheck prints a `note: …` to **stderr** naming what was
+ignored and continues — machine-readable stdout (`--json`/`--sarif`) stays clean. `--no-history`
+is honored everywhere except `--trend`/`--monitor`, which record a score point as part of their job.

@@ -153,6 +153,93 @@ def vet_all(home_dir: Path, ascii_only: bool = False) -> int:
     return 0 if worst in ("PASS", "UNKNOWN") else 1
 
 
+# --- Flag-coherence pre-flight (B-066 / B-067) ---------------------------------
+# main() resolves "modes" via a fixed-order cascade of early returns; a second mode
+# flag, or a global modifier the chosen mode doesn't honor, would otherwise be dropped
+# silently. We never change a mode's behavior — we only surface, on stderr (so
+# machine-readable stdout stays clean), what is being ignored. Warn-and-continue.
+
+# Primary modes in the EXACT precedence order main() resolves them below.
+# kind "opt" → active when the value is not None; "bool" → active when truthy.
+_PRIMARY_MODES = [
+    ("verify_self", "--verify-self", "bool"),
+    ("vet", "--vet", "opt"),
+    ("vet_all", "--vet-all", "bool"),
+    ("vet_mcp", "--vet-mcp", "opt"),
+    ("canary", "--canary", "bool"),
+    ("redteam", "--redteam", "bool"),
+    ("dryrun", "--dryrun", "bool"),
+    ("self_test", "--self-test", "bool"),
+    ("ask", "--ask", "bool"),
+    ("show_suppressed", "--show-suppressed", "bool"),
+    ("watch_log", "--watch-log", "bool"),
+    ("risk_paths", "--risk-paths", "bool"),
+    ("fix", "--fix", "bool"),
+    ("badge", "--badge", "opt"),
+    ("html", "--html", "opt"),
+    ("sarif", "--sarif", "opt"),
+    ("trend", "--trend", "bool"),
+    ("percentile", "--percentile", "bool"),
+    ("prompts", "--prompts", "bool"),
+    ("next", "--next", "bool"),
+    ("monitor", "--monitor", "bool"),
+]
+
+# Which tracked global modifiers each primary mode actually honors. The default
+# report path (no primary mode) honors all of them. --sarif additionally rides
+# along as a side output under --vet/--vet-mcp (handled specially below).
+_MODE_HONORS = {
+    "vet": frozenset({"json"}),
+    "vet_mcp": frozenset({"json"}),
+}
+
+
+def _mode_active(args, attr: str, kind: str) -> bool:
+    v = getattr(args, attr, None)
+    return v is not None if kind == "opt" else bool(v)
+
+
+def _flag_coherence_notes(args) -> list[str]:
+    """Notes for ignored modes / no-effect global modifiers. Never mutates args."""
+    active = [(a, f) for a, f, k in _PRIMARY_MODES if _mode_active(args, a, k)]
+    notes: list[str] = []
+    if not active:
+        # No primary mode: the default path resolves output as --json > --card > text.
+        # If both format flags are set, --json wins and --card is silently dropped.
+        if bool(getattr(args, "json", False)) and bool(getattr(args, "card", False)):
+            notes.append("note: --card ignored (running --json)")
+        return notes  # the default path honors every tracked global modifier
+    win_attr, win_flag = active[0]
+    ignored = [
+        f for a, f in active[1:]
+        # --sarif is a side output under --vet/--vet-mcp, not an ignored mode.
+        if not (a == "sarif" and win_attr in ("vet", "vet_mcp"))
+    ]
+    # --card is a default-path output selector; any primary mode supersedes it.
+    if bool(getattr(args, "card", False)):
+        ignored.append("--card")
+    if ignored:
+        notes.append(f"note: {', '.join(ignored)} ignored (running {win_flag})")
+    honored = _MODE_HONORS.get(win_attr, frozenset())
+    no_effect: list[str] = []
+    if bool(getattr(args, "json", False)) and "json" not in honored:
+        no_effect.append("--json")
+    if getattr(args, "save", None) is not None and "save" not in honored:
+        no_effect.append("--save")
+    if bool(getattr(args, "exit_code", False)) and "exit_code" not in honored:
+        no_effect.append("--exit-code")
+    if getattr(args, "fail_under", None) is not None and "fail_under" not in honored:
+        no_effect.append("--fail-under")
+    # --trend / --monitor record a score-history point as part of their job, so
+    # --no-history cannot suppress it there (every other mode either records on the
+    # default path or writes no history at all, where --no-history is a no-op).
+    if win_attr in ("trend", "monitor") and bool(getattr(args, "no_history", False)):
+        no_effect.append("--no-history")
+    if no_effect:
+        notes.append(f"note: {', '.join(no_effect)} has no effect with {win_flag}")
+    return notes
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="clawseccheck",
                                 description="ClawSecCheck OpenClaw security self-audit (read-only).")
@@ -245,6 +332,12 @@ def main(argv=None) -> int:
                    help="also write log output to PATH (only when given)")
     args = p.parse_args(argv)
 
+    # Surface (on stderr) any second mode flag or global modifier the resolved mode
+    # won't honor, so nothing is dropped silently (B-066 / B-067). Warn-and-continue:
+    # the cascade below is unchanged.
+    for _note in _flag_coherence_notes(args):
+        print(_note, file=sys.stderr)
+
     ascii_only = args.ascii or not _unicode_ok()
 
     # Set up safe logger early — level from --verbose/--debug; file only when --log given.
@@ -281,6 +374,10 @@ def main(argv=None) -> int:
             _vet_rc = 1
         else:
             _vet_rc = 0
+        # Record the run in the coverage ledger, symmetric with --vet-mcp (C-128).
+        # freshness_notice has no "vet" threshold, so this updates the ledger without
+        # adding a staleness nudge — it just keeps the two vet modes consistent.
+        record_run("vet")
         # Side output: SARIF file (mirrors the full-audit --sarif behavior, incl.
         # the same graceful handling of an unwritable path — B-014).
         if args.sarif:
@@ -483,6 +580,9 @@ def main(argv=None) -> int:
             return 1
 
     if args.trend:
+        # --trend's job is to record the point AND show the trend, so it records even
+        # under --no-history (a documented, tested contract). The conflict is surfaced
+        # as a stderr note by _flag_coherence_notes rather than silently honored (B-066).
         history_record(score, args.history)
         rows = history_load(args.history)
         _emit(render_trend(rows, ascii_only))
@@ -511,6 +611,9 @@ def main(argv=None) -> int:
         except OSError as exc:
             _emit(f"\n(could not save monitor state: {exc})")
         record_events(alerts, args.events)  # Agent Watch: append the drift to the local journal
+        # --monitor records a score-history point as part of tracking drift, even under
+        # --no-history; the conflict is surfaced as a stderr note (B-066), not silently
+        # honored, to keep monitor's drift baseline intact.
         history_record(score, args.history)
         return 0
 
