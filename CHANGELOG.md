@@ -3,6 +3,31 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.7.0] — 2026-06-30
+
+The least-privilege check now says "I can't tell" instead of a falsely-reassuring "pass"
+when a config declares no tool surface at all.
+
+### Changed
+- **B3 (least privilege) hedges to UNKNOWN on an undeclared surface (B-065):** B3
+  previously returned **PASS** whenever no over-broad elevated grant / profile / plugin
+  escalation was *declared* — including on a config that declares **nothing** (no
+  `tools.elevated.allowFrom`, no `tools.profile`, no plugins, no recognized tool surface,
+  no `--attest` roster). That is "absence of evidence = evidence of safety": runtime-
+  granted tools are invisible to a static config audit, so there is nothing to verify as
+  constrained. B3 now returns **UNKNOWN** in that case, mirroring A1's
+  `_meaningful_tool_surface` thin-surface guard (the B-033 doctrine). A **declared-and-
+  clean** surface (a small `allowFrom`, a `minimal` profile, allow-listed plugins, or any
+  recognized `tools.allow` capability such as `exec`/`web_fetch`) still **PASSes** — the
+  gate is deliberately narrow.
+  - **Scoring impact:** UNKNOWN is excluded from scoring, so a thin config no longer banks
+    a free HIGH PASS for B3. `home_safe` is unaffected (A/93 — it declares
+    `tools.elevated.allowFrom` + `tools.profile`); `home_vuln` unaffected (F, capped).
+    Five internal fixtures with no declared privilege surface tighten one letter
+    (`bad_c015_home_secrets`, `bad`/`clean_c032_proxy_headers`, `bad`/`clean_b79_sessions`:
+    B → C) — an honesty gain, not a regression: §5 holds (UNKNOWN is never a FAIL; zero
+    `clean_*`/`home_safe` FAILs). Completes the B3 fix begun in v2.6.1 (wording).
+
 ## [2.6.2] — 2026-06-30
 
 §5 hotfix: a configured sandbox no longer inflates the lethal-trifecta count, plus a

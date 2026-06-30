@@ -7,12 +7,16 @@ Verdict map:
         string/list value), OR total entries in allowFrom > 25.
 - WARN: tools.profile != 'minimal' (non-empty value), OR plugins.entries present
         without a plugins.allow reachability allowlist.
-- PASS: no elevated wildcard, entries <= 25, minimal/absent profile, plugins constrained.
-No UNKNOWN path exists.
+- PASS: no elevated wildcard, entries <= 25, minimal/absent profile, plugins constrained,
+        AND at least one privilege surface is declared (so there is something to verify).
+- UNKNOWN (B-065): the privilege surface is ENTIRELY undeclared — no tools.elevated, no
+        tools.profile, no plugins, no recognized tool surface, no --attest roster — so
+        least privilege is indeterminate (runtime-granted tools are invisible to a static
+        config audit). Mirrors A1's _meaningful_tool_surface thin-surface guard.
 """
 from pathlib import Path
 
-from clawseccheck.catalog import FAIL, PASS, WARN
+from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_least_privilege
 from clawseccheck.collector import Context
 
@@ -23,11 +27,34 @@ def _ctx(cfg: dict) -> Context:
     return c
 
 
-# ---- PASS ----
+# ---- UNKNOWN: privilege surface entirely undeclared (B-065 thin-surface hedge) ----
 
-def test_b03_empty_config_pass():
-    assert check_least_privilege(_ctx({})).status == PASS
+def test_b03_empty_config_unknown():
+    """No config at all -> nothing to verify constrained -> UNKNOWN, not a silent PASS."""
+    assert check_least_privilege(_ctx({})).status == UNKNOWN
 
+
+def test_b03_opaque_tools_allow_unknown():
+    """A tools.allow that matches no recognized capability hint is not a real surface
+    (the old PASS-wash) -> still UNKNOWN."""
+    cfg = {"tools": {"allow": ["noop_widget"]}}
+    assert check_least_privilege(_ctx(cfg)).status == UNKNOWN
+
+
+def test_b03_gateway_only_config_unknown():
+    """Gateway settings declare no tool surface -> UNKNOWN."""
+    cfg = {"gateway": {"bind": "loopback"}}
+    assert check_least_privilege(_ctx(cfg)).status == UNKNOWN
+
+
+def test_b03_recognized_tools_allow_stays_pass():
+    """A recognized capability (exec/web_fetch/...) IS a real declared surface -> PASS.
+    The narrow gate must not over-fire on a genuinely-declared tool surface."""
+    cfg = {"tools": {"allow": ["exec"]}}
+    assert check_least_privilege(_ctx(cfg)).status == PASS
+
+
+# ---- PASS: any declared-and-clean privilege surface ----
 
 def test_b03_small_allowfrom_dict_pass():
     cfg = {"tools": {"elevated": {"allowFrom": {"discord": ["user-123", "user-456"]}}}}

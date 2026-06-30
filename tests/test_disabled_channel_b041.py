@@ -118,7 +118,9 @@ def test_b30_disabled_channel_namematch_not_failed():
 # ── B3 (B-042): PASS message must not overclaim runtime reachability ─────────────
 
 def test_b3_pass_does_not_claim_runtime_reachability():
-    cfg = {"gateway": {"bind": "loopback"}}
+    # A declared-but-clean surface (tools.profile=minimal) so B3 PASSes — without a
+    # declared surface B-065 now (correctly) hedges to UNKNOWN, which is a different arm.
+    cfg = {"gateway": {"bind": "loopback"}, "tools": {"profile": "minimal"}}
     b3 = _run(cfg)["B3"]
     assert b3.status == PASS
     assert "tool reachability is constrained" not in b3.detail

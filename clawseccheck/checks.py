@@ -809,11 +809,33 @@ def check_least_privilege(ctx: Context) -> Finding:
     if soft:
         return _finding("B3", WARN, "; ".join(soft),
                         "; ".join(fixes), soft)
+    # B-065: hedge to UNKNOWN when the privilege surface is ENTIRELY undeclared,
+    # mirroring A1's _meaningful_tool_surface thin-surface guard (B-033 gold standard).
+    # NARROW gate: only when EVERY privilege signal is absent — no elevated grant, no
+    # tool profile, no plugins, no RECOGNIZED tool surface, and no --attest roster. A
+    # declared-but-clean surface (small allowFrom, minimal profile, allow-listed plugins,
+    # a recognized tools.allow entry) still PASSes. _capabilities_attested is redundant
+    # with the tail of _meaningful_tool_surface but kept for self-documenting intent.
+    surface_undeclared = (
+        dig(cfg, "tools.elevated.allowFrom") is None
+        and dig(cfg, "tools.profile") is None
+        and not _plugins(cfg)
+        and not _meaningful_tool_surface(ctx)
+        and not _capabilities_attested(ctx)
+    )
+    if surface_undeclared:
+        return _finding(
+            "B3", UNKNOWN,
+            "Least-privilege posture is indeterminate: the config declares no elevated-tool "
+            "grant, tool profile, plugins, or recognized tool surface (runtime-granted tools "
+            "are not visible to a static config audit), so there is nothing to verify as "
+            "constrained.",
+            "Declare the agent's tool surface (tools.profile / tools.allow / "
+            "tools.elevated.allowFrom) or pass --attest so least privilege can be assessed.")
     # B-042: PASS verifies a CONFIG-level least-privilege posture only (no over-broad
     # elevated grant, no profile/plugin escalation). It must NOT claim runtime "tool
     # reachability is constrained" — runtime-granted tools (message/exec_command/web_*)
-    # are not in openclaw.json. (A separate task tracks hedging this to UNKNOWN when the
-    # privilege surface is entirely undeclared, mirroring A1's _meaningful_tool_surface.)
+    # are not in openclaw.json.
     return _finding("B3", PASS,
                     "No over-broad elevated-tool grant or profile/plugin escalation in "
                     "config (runtime-granted tools are not visible to static config audit).",
