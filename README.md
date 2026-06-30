@@ -113,6 +113,8 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
   on the regex engine.)
 - Per-check reference: [`docs/CHECKS.md`](docs/CHECKS.md) for the generated catalog of checks,
   verdict semantics, remediation, and compound risk chains.
+- Full command/mode reference: [`docs/USAGE.md`](docs/USAGE.md) — every flag (what it does, why,
+  how to run it) plus the A–F scoring breakdown.
 - **B14 — egress surface:** where the agent can reach out (channels, external skills, tools).
 - **B15 — MCP server trust** boundaries.
 - **B16 — threat monitoring:** whether you actually have monitoring/detection set up at all.
