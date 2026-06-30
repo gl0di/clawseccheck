@@ -3,6 +3,39 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.6.0] — 2026-06-30
+
+A1 lethal-trifecta engine sharpens its read of `exec` and tells you how close a 2/3
+config is to becoming lethal — both grounded against the real OpenClaw schema and
+guarded so no safe config gains a spurious FAIL.
+
+### Added
+- **A1 "distance to trifecta" (F-036):** for a config with exactly **2 of 3** legs
+  active, the A1 detail now names the single missing leg and the concrete config toggle
+  that would complete the lethal set (e.g. *"the missing leg is 'sensitive data'. Avoid
+  enabling … ungated exec (tools.exec.mode='full') …"*). The capability union is
+  monotonic, so this is the actionable warning: *you are one step from lethal — do not
+  enable X*. Purely additive — no scoring change for already-3/3 (FAIL) or for <2/3.
+
+### Fixed
+- **A1 counts ungated `exec` as two legs, not one (B-061):** arbitrary code execution
+  can both read any private file (**sensitive data**) and exfiltrate it (**outbound
+  actions**). Previously `exec` raised only the outbound leg, so an `exec` + untrusted-
+  input config under-counted to 2/3 and **passed** — a false negative on the single most
+  dangerous capability. Ungated `exec` (`tools.exec.mode='full'`) now raises the
+  sensitive leg as well.
+  - **§5 guard:** the new sensitive leg is gated on `not _has_approval_gate` — approval-
+    gated exec (`mode` deny/allowlist/ask/auto, `security` deny/ask, `ask` on-miss/always)
+    is **not** autonomous (a human signs each call), so it does **not** raise sensitive.
+    This keeps every clean fixture and real safe config FAIL-free; only a genuine
+    untrusted-input + ungated-exec + outbound config reaches a true-positive 3/3.
+
+### Changed
+- A1 leg computation (`_trifecta_legs`) now derives the exec capability from a single
+  `exec_enabled` predicate shared by the sensitive and outbound legs, so the engine
+  speaks with one voice on `exec`. The per-agent attestation leg model (`_agent_legs`,
+  used by B45/B47) is unchanged — config-level signals stay out of per-agent reasoning.
+
 ## [2.5.7] — 2026-06-30
 
 Final detector scanner-hygiene step. No change to audit behavior, checks, scores, or

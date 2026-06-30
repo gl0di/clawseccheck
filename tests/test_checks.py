@@ -151,10 +151,13 @@ def test_a1_thin_surface_warns_not_passes(tmp_path):
 
 
 def test_a1_no_warn_when_runtime_legs_already_active(tmp_path):
-    """Both runtime legs already active (untrusted via allowlist, outbound via exec
-    tool) → nothing is 'cannot determine', so no thin-surface WARN."""
+    """Both runtime legs already active (untrusted via allowlist, outbound via send
+    tool) → nothing is 'cannot determine', so no thin-surface WARN. Uses a non-exec
+    outbound tool deliberately: post-B-061 an ungated `exec` tool would add the
+    sensitive leg and make this a 3/3 FAIL, changing the scenario under test (the
+    no-WARN path on a determinable 2/3 config)."""
     (tmp_path / "openclaw.json").write_text(
-        '{"tools": {"allow": ["exec_command"]}, '
+        '{"tools": {"allow": ["send"]}, '
         '"channels": {"telegram": {"dmPolicy": "allowlist"}}}'
     )
     (tmp_path / "openclaw.json").chmod(0o600)
@@ -253,3 +256,62 @@ def test_a1_attestation_clears_warn_without_adding_leg():
     )
     assert a1.status == PASS
     assert "Cannot determine" not in a1.detail
+
+
+# ── B-061: ungated exec raises BOTH sensitive + outbound legs ────────────────────
+
+def test_a1_exec_alone_is_lethal_capable():
+    """Ungated exec (no channels/web) = exactly 2 legs: sensitive + outbound.
+    No untrusted-input channel, so it is NOT a 3/3 FAIL (an owner-only local CLI
+    agent with exec stays non-FAIL — the §5 case the B-061 decision protects)."""
+    a1 = _a1({"tools": {"exec": {"mode": "full"}}})
+    assert set(a1.evidence or []) == {"sensitive data", "outbound actions"}
+    assert a1.status != FAIL
+
+
+def test_a1_exec_plus_open_channel_is_trifecta():
+    """Ungated exec + an open (untrusted) channel = full 3/3 lethal trifecta FAIL."""
+    a1 = _a1({"tools": {"exec": {"mode": "full"}},
+              "channels": {"telegram": {"dmPolicy": "open"}}})
+    assert a1.status == FAIL
+    assert len(a1.evidence) == 3
+
+
+def test_a1_gated_exec_plus_channel_is_not_sensitive():
+    """§5 guard: approval-gated exec (mode='ask') does NOT raise the sensitive leg,
+    so an untrusted channel + gated exec stays 2/3 (not FAIL). Protects home_safe and
+    clean_b55/b68/b69/c014/c6, which all share this shape."""
+    a1 = _a1({"tools": {"exec": {"mode": "ask"}},
+              "channels": {"telegram": {"dmPolicy": "open"}}})
+    assert "sensitive data" not in (a1.evidence or [])
+    assert a1.status != FAIL
+
+
+# ── F-036: distance-to-trifecta note for 2/3 configs ─────────────────────────────
+
+def test_a1_distance_note_names_missing_sensitive_leg():
+    """2/3 (untrusted channel + outbound) names 'sensitive data' as the missing leg."""
+    a1 = _a1({"channels": {"telegram": {"dmPolicy": "open"}}})
+    assert "the missing leg is 'sensitive data'" in a1.detail
+    assert "2 of 3 lethal-trifecta legs present" in a1.detail
+
+
+def test_a1_distance_note_names_missing_outbound_leg():
+    """2/3 (input tool + sensitive tool, no outbound) names 'outbound actions'."""
+    a1 = _a1({"tools": {"allow": ["imap", "fs_read"]}})
+    assert "the missing leg is 'outbound actions'" in a1.detail
+
+
+def test_a1_distance_note_names_missing_untrusted_leg():
+    """2/3 (sensitive + outbound, no untrusted input) names 'untrusted input'."""
+    a1 = _a1({"tools": {"allow": ["fs_read", "deploy"]}})
+    assert "the missing leg is 'untrusted input'" in a1.detail
+
+
+def test_a1_distance_note_absent_when_not_two_legs():
+    """No distance note for 3/3 (FAIL) or <2/3 — additive only at exactly 2/3."""
+    full = _a1({"tools": {"allow": ["imap", "fs_read", "webhook"]}})
+    assert full.status == FAIL
+    assert "missing leg" not in full.detail
+    empty = _a1({"gateway": {"bind": "loopback"}})
+    assert "missing leg" not in empty.detail

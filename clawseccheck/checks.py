@@ -380,6 +380,15 @@ def _trifecta_legs(ctx: Context) -> dict:
     tools = _enabled_tools(cfg)
     untrusted_ch = _untrusted_input_channels(cfg)
     web_fetch = _web_fetch_enabled(cfg)
+    # B-061: ungated exec/shell can read any private file (sensitive) AND exfiltrate
+    # (outbound). Approval-gated exec (tools.exec.mode=deny/allowlist/ask/auto,
+    # security=deny/ask, ask=on-miss/always — see _has_approval_gate) is NOT autonomous:
+    # a human signs each call, so it must NOT raise the sensitive leg. Without this guard
+    # §5 breaks — home_safe + clean_b55/b68/b69/c014/c6 pair an untrusted channel with
+    # mode='ask' exec and would flip to a spurious 3/3. Only ungated exec (mode='full')
+    # reaches sensitive. Outbound already counts exec via OUTBOUND_TOOL_HINTS (gated or
+    # not), so the outbound leg below is intentionally left unchanged.
+    exec_enabled = _hint(tools, ("exec", "shell")) and not _has_approval_gate(cfg)
     return {
         "untrusted input": (
             bool(untrusted_ch)
@@ -394,6 +403,7 @@ def _trifecta_legs(ctx: Context) -> dict:
             # here let "web fetch + a gateway password" reach a spurious 3/3 (§5).
             _hint(tools, SENSITIVE_TOOL_HINTS)
             or (ctx.home / "credentials").is_dir()
+            or exec_enabled  # B-061: ungated arbitrary code can read private files
         ),
         "outbound actions": (
             _hint(tools, OUTBOUND_TOOL_HINTS)
@@ -488,10 +498,46 @@ def _reassembly(ctx: Context):
     return best if best is not None else none_result
 
 
+# F-036: for a 2/3 config, name the one missing leg + the concrete field that would
+# complete the trifecta. Grounded only in field paths the engine already reads
+# (_untrusted_input_channels / INPUT_TOOL_HINTS + web for input; SENSITIVE_TOOL_HINTS,
+# ungated exec, credentials/ for sensitive; OUTBOUND_TOOL_HINTS, exec, elevated, web for
+# outbound). No new schema invented.
+_MISSING_LEG_ACTIVATORS = {
+    "untrusted input": (
+        "a non-owner channel (channels.<name>.dmPolicy/groupPolicy in "
+        "open/allowlist/paired), an input tool (tools.allow: web/email/imap/rss/fetch), "
+        "or tools.web.fetch.enabled"
+    ),
+    "sensitive data": (
+        "a private-data tool (tools.allow: fs_read/db/sql/vault/credential), "
+        "ungated exec (tools.exec.mode='full'), or a readable credentials/ dir"
+    ),
+    "outbound actions": (
+        "an outbound tool (tools.allow: send/webhook/http_post/fs_write/deploy), "
+        "tools.exec, tools.elevated.allowFrom, or tools.web.fetch.enabled"
+    ),
+}
+
+
+def _distance_note(active: list) -> str:
+    """F-036: when exactly 2 of 3 legs are active, return a sentence naming the single
+    missing leg and the concrete config toggle that would complete 3/3. Returns '' for
+    any other count, so it is a no-op for already-3/3 (FAIL) and for <2/3."""
+    if len(active) != 2:
+        return ""
+    missing = next(k for k in _LEG_KEYS if k not in active)
+    return (
+        f" 2 of 3 lethal-trifecta legs present; the missing leg is '{missing}'."
+        f" Avoid enabling {_MISSING_LEG_ACTIVATORS[missing]}, which would complete 3/3."
+    )
+
+
 def check_trifecta(ctx: Context) -> Finding:
     legs = _trifecta_legs(ctx)
     active = [k for k, v in legs.items() if v]
     detail = f"Active legs {len(active)}/3: {', '.join(active) or 'none'}. Rule: keep ≤2 of 3."
+    detail += _distance_note(active)
 
     if len(active) >= 3:
         return _finding(
