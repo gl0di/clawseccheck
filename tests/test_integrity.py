@@ -101,6 +101,44 @@ def test_pycache_is_excluded(tmp_path):
     assert set(per_file.keys()) == {"engine.py"}
 
 
+def test_non_source_cache_dirs_are_excluded(tmp_path):
+    """Regenerated local caches / VCS metadata must never enter the digest (B-069).
+
+    A dev/CI checkout (or any tree where ruff/pytest/mypy/git has run) grows these
+    dirs inside the package; folding them in made --verify-self environment-dependent.
+    The digest must cover only shipped source, so planting them must not change it and
+    they must not appear in the per-file map.
+    """
+    (tmp_path / "engine.py").write_text("# engine", encoding="utf-8")
+    baseline, base_map = package_digest(pkg_dir=tmp_path)
+
+    # Plant the realistic ruff-cache shape (the file that triggered B-069) plus the
+    # other regenerated dirs, including a nested one.
+    for d, fname, content in [
+        (".ruff_cache", "CACHEDIR.TAG", "Signature: ruff"),
+        (".ruff_cache/0.15.15", "5829738269752342185", "cachekey"),
+        (".mypy_cache", "cache.json", "{}"),
+        (".pytest_cache", "lastfailed", "{}"),
+        (".git", "HEAD", "ref: refs/heads/main"),
+    ]:
+        sub = tmp_path / d
+        sub.mkdir(parents=True, exist_ok=True)
+        (sub / fname).write_text(content, encoding="utf-8")
+
+    after, after_map = package_digest(pkg_dir=tmp_path)
+
+    # None of the cache/VCS files leak into the per-file map...
+    assert set(after_map.keys()) == {"engine.py"}
+    assert not any(
+        part in name
+        for name in after_map
+        for part in (".ruff_cache", ".mypy_cache", ".pytest_cache", ".git")
+    )
+    # ...and the combined digest is unchanged by their presence (reproducible).
+    assert after == baseline
+    assert after_map == base_map
+
+
 def test_added_foreign_file_changes_digest(tmp_path):
     """Dropping ANY new file (even non-.py, even nested) must change the digest —
     the flat top-level *.py scan was blind to this (B-008)."""
