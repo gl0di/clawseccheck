@@ -19,7 +19,7 @@ from pathlib import Path
 from .catalog import (
     BY_ID,
     FAMILY_LABEL, FAMILY_OF, FAMILY_ORDER,
-    CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
+    ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
 from .dedup import deduplicate_findings
 from .guide import suggest_actions
@@ -643,6 +643,56 @@ def render_report(findings: list[Finding], score: ScoreResult,
     if ascii_only:
         return _asciify(out)
     return out
+
+
+def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = False) -> str:
+    """Deterministic, framed Findings block for the chat Dashboard (SKILL.md Step 3, Section 3).
+
+    Emits ONLY what Section 3 must contain, so the host agent PASTES this verbatim instead
+    of re-composing it (models drop the open 3-sided frame otherwise):
+      - non-suppressed FAIL/WARN findings only (PASS/UNKNOWN live in Sections 4 & 6);
+      - MEDIUM/ATTESTED-confidence findings excluded (they surface in Section 5);
+      - families with no qualifying finding are omitted (no empty "— clear" headers);
+      - each family under the same open 3-sided frame render_report uses.
+    """
+    findings = deduplicate_findings(findings)
+    icon = _ICON_ASCII if ascii_only else _ICON
+    qualifying = [
+        f for f in findings
+        if f.status in (FAIL, WARN)
+        and not getattr(f, "suppressed", False)
+        and getattr(f, "confidence", "HIGH") not in (MEDIUM, ATTESTED)
+    ]
+    if not qualifying:
+        ok = "[OK]" if ascii_only else "✅"
+        out = f"No high-confidence issues to fix. {ok}\n"
+        return _asciify(out) if ascii_only else out
+
+    grouped: dict = {}
+    for f in qualifying:
+        grouped.setdefault(_family_of(f), []).append(f)
+
+    lines: list = []
+    for fam_key in (*FAMILY_ORDER, None):
+        members = grouped.get(fam_key)
+        if not members:
+            continue
+        members.sort(key=lambda f: (_STATUS_ORDER.get(f.status, 9), _SEV_ORDER.get(f.severity, 9)))
+        label = FAMILY_LABEL.get(fam_key, "Other")
+        count_text = f"{len(members)} to fix"
+        if ascii_only:
+            lines.append(f"[{label}] — {count_text}")
+        else:
+            _rule = "─" * 30
+            lines.append(f"┌{_rule}")
+            lines.append(f"│ {label} — {count_text}")
+            lines.append(f"└{_rule}")
+        for f in members:
+            _render_finding(lines, icon, f, cfg=None)
+        lines.append("")
+
+    out = "\n".join(lines).rstrip() + "\n"
+    return _asciify(out) if ascii_only else out
 
 
 def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = False) -> str:
