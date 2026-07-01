@@ -3,6 +3,31 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [2.8.0] — 2026-07-01
+
+Redesign of the standalone `--html` report: a long flat list of findings now reads as
+coverage-by-area, with light/dark theming, a score bar, and a severity summary — same
+information, far easier to scan.
+
+### Added
+- **Grouped HTML report:** findings are grouped by the seven OpenClaw surface families
+  (Exposure & Network, Privilege & Execution, …), matching the conversational Dashboard,
+  with a per-group jump nav and counts so dozens of findings stay navigable.
+- **At-a-glance header:** a score progress bar and a per-severity summary strip
+  (Critical/High/Medium/Low counts) sit above the findings.
+- **Dark mode:** the report follows `prefers-color-scheme` via CSS custom properties;
+  still a single self-contained file with inline CSS and **no external assets**.
+
+### Fixed
+- **Private-warning line breaks:** the `.warning-box strong` block rule forced the inline
+  `NOT` onto its own line, splitting the "must **NOT** be shared" sentence. The warning
+  now renders as one flowing line.
+
+### Changed
+- **Finding cards:** each finding is a bordered card with a severity-tinted accent, a
+  severity pill, and clearer `Why:`/`Fix:` typography, replacing the flat bordered rows.
+  Report content, escaping, and the private-owner-view contract are unchanged.
+
 ## [2.7.1] — 2026-06-30
 
 The CLI no longer silently drops a second mode flag or a modifier the chosen mode can't

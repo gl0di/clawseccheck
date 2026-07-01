@@ -921,8 +921,9 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
 
     badge_color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
     trifecta = _trifecta_ratio(findings)
+    sev_color = {CRITICAL: "#e05d44", HIGH: "#fe7d37",
+                 MEDIUM: "#dfb317", LOW: "#97ca00"}
 
-    label_score = "Score:"
     label_trifecta = "Lethal Trifecta:"
     label_capped = "Capped:"
     label_why = "Why:"
@@ -936,140 +937,235 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
     )
     section_findings = "Findings"
 
-    # Build the findings HTML
-    findings_html = ""
+    esc = html.escape
+
+    # Severity tally across the actionable issues, for the summary strip.
+    sev_counts = {sev: sum(1 for f in issues if f.severity == sev)
+                  for sev in (CRITICAL, HIGH, MEDIUM, LOW)}
+
+    def _finding_card(f: Finding) -> str:
+        color = sev_color.get(f.severity, "#999")
+        icon_char = "✕" if f.status == FAIL else "⚠"
+        f_title = esc(_sanitize(f.title))
+        f_detail = esc(_sanitize(f.detail)) if f.detail else ""
+        f_fix = esc(_sanitize(f.fix))
+        why_html = (f'<p class="finding-line"><span class="finding-key">{esc(label_why)}</span> '
+                    f'{f_detail}</p>') if f.detail else ""
+        return f'''
+                <article class="finding" style="--sev:{color};">
+                    <div class="finding-head">
+                        <span class="finding-icon" aria-hidden="true">{esc(icon_char)}</span>
+                        <span class="finding-title">{f_title}</span>
+                        <span class="sev-pill">{esc(f.severity)}</span>
+                    </div>
+                    {why_html}
+                    <p class="finding-line"><span class="finding-key">{esc(label_fix)}</span> {f_fix}</p>
+                </article>'''
+
+    # Build the findings body: grouped by the 7 OpenClaw surface families so a long
+    # list (dozens of findings) reads as coverage-by-area, matching the Dashboard.
     if not issues:
-        no_issues_text = html.escape("No issues found. Keep it that way.")
-        findings_html = f'<div style="padding:1rem;background:#f0f8f0;border-radius:0.5rem;color:#0a4;font-weight:500;">{no_issues_text}</div>'
+        no_issues_text = esc("No issues found across the audited surfaces. Keep it that way.")
+        findings_html = f'<div class="all-clear">✓ {no_issues_text}</div>'
+        nav_html = ""
     else:
-        findings_html = '<div style="padding:0;">'
+        grouped: dict = {}
         for f in issues:
-            severity_color = {CRITICAL: "#e05d44", HIGH: "#fe7d37",
-                            MEDIUM: "#dfb317", LOW: "#97ca00"}.get(f.severity, "#999")
-            icon_char = "✕" if f.status == FAIL else "⚠"
-            f_title = html.escape(_sanitize(f.title))
-            f_detail = html.escape(_sanitize(f.detail)) if f.detail else ""
-            f_fix = html.escape(_sanitize(f.fix))
-            findings_html += f'''
-            <div style="margin-bottom:1.5rem;border-left:4px solid {severity_color};padding-left:1rem;">
-                <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
-                    <span style="font-size:1.2rem;color:{severity_color};">{html.escape(icon_char)}</span>
-                    <strong style="color:#333;">{f_title}</strong>
-                    <span style="background:{severity_color};color:#fff;padding:0.125rem 0.5rem;border-radius:0.25rem;font-size:0.85rem;font-weight:600;">{html.escape(f.severity)}</span>
-                </div>
-                {f'<div style="color:#666;margin:0.5rem 0;"><strong>{html.escape(label_why)}</strong> {f_detail}</div>' if f.detail else ''}
-                <div style="color:#666;"><strong>{html.escape(label_fix)}</strong> {f_fix}</div>
-            </div>
-            '''
-        findings_html += '</div>'
+            grouped.setdefault(_family_of(f), []).append(f)
+
+        nav_items = []
+        sections = []
+        for fam_key in (*FAMILY_ORDER, None):
+            fam_issues = grouped.get(fam_key)
+            if not fam_issues:
+                continue
+            label = FAMILY_LABEL.get(fam_key, "Other")
+            anchor = "fam-" + (fam_key or "other")
+            nav_items.append(
+                f'<a class="nav-chip" href="#{anchor}">{esc(label)} '
+                f'<span class="nav-count">{len(fam_issues)}</span></a>')
+            cards = "".join(_finding_card(f) for f in fam_issues)
+            sections.append(f'''
+            <section class="family" id="{anchor}">
+                <h3 class="family-head">{esc(label)}<span class="family-count">{len(fam_issues)}</span></h3>
+                {cards}
+            </section>''')
+        nav_html = f'<nav class="famnav" aria-label="Jump to finding group">{"".join(nav_items)}</nav>'
+        findings_html = "".join(sections)
+
+    # Severity summary chips (only the severities that actually occur).
+    summary_chips = "".join(
+        f'<span class="sev-chip" style="--sev:{sev_color[sev]};">'
+        f'<span class="sev-chip-n">{n}</span>{esc(sev)}</span>'
+        for sev, n in sev_counts.items() if n)
+    summary_html = f'<div class="summary">{summary_chips}</div>' if summary_chips else ""
 
     if score.capped:
         sev_str = "CRITICAL" if score.failed_critical else "HIGH"
-        capped_html = (f'<div style="color:#d9534f;"><strong>{html.escape(label_capped)}</strong> '
-                       f'from {score.raw_score} (open {sev_str} finding)</div>')
+        capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
+                       f'from {score.raw_score} (open {sev_str} finding)</p>')
     else:
         capped_html = ""
+
+    pct = max(0, min(100, int(score.score)))
 
     html_body = f'''<!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>{html.escape(title_text)}</title>
+    <title>{esc(title_text)}</title>
     <style>
-        * {{
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
+        :root {{
+            --bg: #eef1f5;
+            --card: #ffffff;
+            --ink: #1f2733;
+            --muted: #5b6673;
+            --line: #e6e9ef;
+            --key: #303a47;
+            --grade: {badge_color};
+            --warn-bg: #fff8e1;
+            --warn-line: #f0c040;
+            --warn-ink: #7a5c00;
+            --shadow: 0 6px 24px rgba(18,28,45,0.10);
         }}
+        @media (prefers-color-scheme: dark) {{
+            :root {{
+                --bg: #0f141b;
+                --card: #182029;
+                --ink: #e7ecf2;
+                --muted: #9aa7b4;
+                --line: #263140;
+                --key: #cdd6e0;
+                --warn-bg: #2a2413;
+                --warn-line: #6b5713;
+                --warn-ink: #e8cf7a;
+                --shadow: 0 6px 24px rgba(0,0,0,0.45);
+            }}
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             line-height: 1.6;
-            color: #333;
-            background: #f5f5f5;
+            color: var(--ink);
+            background: var(--bg);
             padding: 2rem 1rem;
+            -webkit-font-smoothing: antialiased;
         }}
         .container {{
-            max-width: 900px;
+            max-width: 880px;
             margin: 0 auto;
-            background: #fff;
-            border-radius: 0.5rem;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            padding: 2rem;
+            background: var(--card);
+            border-radius: 16px;
+            box-shadow: var(--shadow);
+            padding: 2.25rem;
         }}
-        .header {{
-            text-align: center;
-            margin-bottom: 2rem;
-            border-bottom: 1px solid #eee;
-            padding-bottom: 1.5rem;
-        }}
-        .header h1 {{
-            font-size: 1.8rem;
-            margin-bottom: 1rem;
-            color: #222;
-        }}
+        .header {{ text-align: center; padding-bottom: 1.5rem; border-bottom: 1px solid var(--line); }}
+        .header h1 {{ font-size: 1.55rem; font-weight: 700; letter-spacing: -0.01em; }}
         .grade-badge {{
-            display: inline-block;
-            background: {badge_color};
-            color: #fff;
-            padding: 0.5rem 1rem;
-            border-radius: 0.375rem;
-            font-size: 2rem;
-            font-weight: 700;
-            margin: 1rem 0;
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 84px; height: 84px; margin: 1.25rem auto 0.75rem;
+            background: var(--grade); color: #fff;
+            border-radius: 20px; font-size: 2.6rem; font-weight: 800;
+            box-shadow: 0 4px 14px color-mix(in srgb, var(--grade) 45%, transparent);
         }}
-        .score-info {{
-            font-size: 1rem;
-            color: #666;
-            margin-top: 1rem;
+        .scorewrap {{ max-width: 360px; margin: 0.5rem auto 0; }}
+        .scoreline {{ display: flex; justify-content: space-between; font-size: 0.95rem; color: var(--muted); margin-bottom: 0.35rem; }}
+        .scoreline strong {{ color: var(--ink); }}
+        .scorebar {{ height: 10px; border-radius: 999px; background: var(--line); overflow: hidden; }}
+        .scorebar > i {{ display: block; height: 100%; width: {pct}%; background: var(--grade); border-radius: 999px; }}
+        .meta {{ margin-top: 0.85rem; font-size: 0.95rem; color: var(--muted); }}
+        .meta strong {{ color: var(--ink); }}
+        .capped {{ margin-top: 0.35rem; color: #d9534f; font-size: 0.9rem; }}
+        .summary {{ display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; margin-top: 1.1rem; }}
+        .sev-chip {{
+            display: inline-flex; align-items: center; gap: 0.4rem;
+            padding: 0.28rem 0.7rem; border-radius: 999px; font-size: 0.8rem; font-weight: 600;
+            color: var(--sev); border: 1px solid color-mix(in srgb, var(--sev) 40%, transparent);
+            background: color-mix(in srgb, var(--sev) 12%, transparent);
         }}
-        .section {{
-            margin-bottom: 2rem;
-        }}
-        .section h2 {{
-            font-size: 1.3rem;
-            margin-bottom: 1rem;
-            color: #222;
-            border-bottom: 2px solid #eee;
-            padding-bottom: 0.5rem;
+        .sev-chip-n {{
+            display: inline-flex; align-items: center; justify-content: center; min-width: 1.25rem;
+            padding: 0 0.25rem; height: 1.25rem; border-radius: 999px;
+            background: var(--sev); color: #fff; font-size: 0.72rem; font-weight: 700;
         }}
         .warning-box {{
-            background: #fff3cd;
-            border: 1px solid #ffc107;
-            border-radius: 0.5rem;
-            padding: 1rem;
-            margin-bottom: 1.5rem;
-            color: #856404;
+            display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.35rem;
+            background: var(--warn-bg); border: 1px solid var(--warn-line);
+            border-radius: 12px; padding: 0.85rem 1rem; margin: 1.75rem 0;
+            color: var(--warn-ink); font-size: 0.92rem;
         }}
-        .warning-box strong {{
-            display: block;
-            margin-bottom: 0.5rem;
+        .warning-box .warn-title {{ font-weight: 700; margin-right: 0.25rem; }}
+        .warning-box code {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; padding: 0.05rem 0.3rem; border-radius: 5px; background: color-mix(in srgb, var(--warn-line) 25%, transparent); }}
+        .famnav {{ display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0.5rem 0 1.75rem; }}
+        .nav-chip {{
+            display: inline-flex; align-items: center; gap: 0.4rem; text-decoration: none;
+            padding: 0.3rem 0.7rem; border-radius: 999px; font-size: 0.82rem; font-weight: 600;
+            color: var(--ink); background: var(--bg); border: 1px solid var(--line);
         }}
+        .nav-chip:hover {{ border-color: var(--muted); }}
+        .nav-count {{ color: var(--muted); font-weight: 700; }}
+        .section-title {{ font-size: 1.15rem; font-weight: 700; margin: 0 0 0.25rem; }}
+        .family {{ margin-top: 1.75rem; scroll-margin-top: 1rem; }}
+        .family-head {{
+            display: flex; align-items: center; gap: 0.6rem;
+            font-size: 1.02rem; font-weight: 700; color: var(--ink);
+            padding-bottom: 0.5rem; border-bottom: 1px solid var(--line); margin-bottom: 1rem;
+        }}
+        .family-count {{
+            font-size: 0.75rem; font-weight: 700; color: var(--muted);
+            background: var(--bg); border: 1px solid var(--line);
+            border-radius: 999px; padding: 0.05rem 0.5rem;
+        }}
+        .finding {{
+            border: 1px solid var(--line); border-left: 4px solid var(--sev);
+            border-radius: 10px; padding: 0.9rem 1.05rem; margin-bottom: 0.85rem;
+            background: color-mix(in srgb, var(--sev) 4%, var(--card));
+        }}
+        .finding-head {{ display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }}
+        .finding-icon {{ color: var(--sev); font-weight: 700; }}
+        .finding-title {{ font-weight: 700; color: var(--ink); flex: 1 1 auto; }}
+        .sev-pill {{
+            background: var(--sev); color: #fff; padding: 0.12rem 0.55rem;
+            border-radius: 999px; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em;
+        }}
+        .finding-line {{ margin-top: 0.5rem; color: var(--muted); font-size: 0.94rem; }}
+        .finding-key {{ color: var(--key); font-weight: 700; }}
+        .all-clear {{
+            padding: 1.1rem 1.25rem; border-radius: 12px; font-weight: 600;
+            color: #1a7f37; background: color-mix(in srgb, #1a7f37 12%, transparent);
+            border: 1px solid color-mix(in srgb, #1a7f37 35%, transparent);
+        }}
+        .footer {{ margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
+            text-align: center; color: var(--muted); font-size: 0.8rem; }}
+        @media (max-width: 560px) {{ .container {{ padding: 1.4rem; }} .header h1 {{ font-size: 1.3rem; }} }}
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>{html.escape(h1_text)}</h1>
-            <div class="grade-badge">{html.escape(score.grade)}</div>
-            <div class="score-info">
-                <div><strong>{html.escape(label_score)}</strong> {score.score}/100</div>
-                <div><strong>{html.escape(label_trifecta)}</strong> {html.escape(trifecta)}</div>
-                {capped_html}
+    <main class="container">
+        <header class="header">
+            <h1>{esc(h1_text)}</h1>
+            <div class="grade-badge" aria-label="Grade {esc(score.grade)}">{esc(score.grade)}</div>
+            <div class="scorewrap">
+                <div class="scoreline"><span>Security score</span><strong>{score.score}/100</strong></div>
+                <div class="scorebar" role="img" aria-label="Score {score.score} of 100"><i></i></div>
             </div>
-        </div>
+            <p class="meta"><strong>{esc(label_trifecta)}</strong> {esc(trifecta)}</p>
+            {capped_html}
+            {summary_html}
+        </header>
 
         <div class="warning-box">
-            <strong>{html.escape(private_title)}</strong>
-            {private_body}
-            Use the shareable badge instead (available via <code>--badge</code>).
+            <span class="warn-title">{esc(private_title)}</span>
+            <span>{private_body} Use the shareable badge instead (available via <code>--badge</code>).</span>
         </div>
 
-        <div class="section">
-            <h2>{html.escape(section_findings)}</h2>
-            {findings_html}
-        </div>
-    </div>
+        <h2 class="section-title">{esc(section_findings)}</h2>
+        {nav_html}
+        {findings_html}
+
+        <footer class="footer">Generated locally by ClawSecCheck · read-only · this report never leaves your machine</footer>
+    </main>
 </body>
 </html>'''
 
