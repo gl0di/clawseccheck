@@ -1426,6 +1426,76 @@ def analyze_python_package(files) -> list[ASTFinding]:
     return out
 
 
+# --- Shell (.sh/.bash/.zsh) semantic pass (F-050) ----------------------------
+# Credential FILES whose contents are secrets (mirrors the Python _CRED_PATH_RE intent).
+_SH_CRED_FILE_RE = re.compile(
+    r"\.ssh/id_[a-z0-9_]+|\bid_rsa\b|\bid_ed25519\b|\.aws/credentials|\.netrc\b|"
+    r"login\.keychain|wallet\.dat|\.docker/config\b|\.kube/config\b|\.npmrc\b|\.pypirc\b|"
+    r"\.openclaw/|/\.config/[^/\s\"']+/", re.I)
+# Outbound commands that can send data off the machine.
+_SH_OUTBOUND_RE = re.compile(r"\b(?:curl|wget|nc|ncat|netcat)\b|/dev/tcp/", re.I)
+# curl|wget URL piped into a NON-shell interpreter (download -> exec) — extends the
+# sh/bash-only _PIPE_SHELL_RE (checks.py) to python/node/perl/ruby/php/deno.
+_SH_PIPE_INTERP_RE = re.compile(
+    r"(?:curl|wget)\b[^\n|]{0,256}?https?://[^\n|]{0,256}\|\s*(?:sudo\s+)?"
+    r"(?:python3?|node|perl|ruby|php|deno)\b", re.I)
+# VAR=$(cat ~/.ssh/id_rsa) / VAR=`cat .aws/credentials` / VAR=$(< ~/.netrc): a shell
+# variable whose value derives from reading a credential file.
+_SH_CRED_ASSIGN_RE = re.compile(
+    r"(?P<var>[A-Za-z_][A-Za-z0-9_]*)=[^\n]*?(?:cat|less|head|tail|<)\s*[^\n]*?"
+    r"(?:\.ssh/id_|id_rsa|id_ed25519|\.aws/credentials|\.netrc|keychain|wallet\.dat|"
+    r"\.docker/config|\.kube/config|\.npmrc|\.pypirc|\.openclaw/)", re.I)
+
+
+def _sh_mask_comments(source: str) -> str:
+    """Blank whole-line shell comments while preserving line numbers, so a documented
+    'curl ... | sh' example in a comment can't fire."""
+    return "\n".join("" if ln.lstrip().startswith("#") else ln for ln in source.splitlines())
+
+
+def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
+    """Conservative regex pass over a bundled .sh/.bash/.zsh file (F-050). No shell AST;
+    stdlib regex only; never raises, never executes. Flags two high-confidence shapes:
+
+      SHELL_CRED_EXFIL (crit) — a credential file is read and its contents reach an
+        outbound command (curl/wget/nc//dev/tcp): read a secret -> send it out.
+      SHELL_PIPE_INTERP (crit) — a remote payload is downloaded and piped straight into a
+        non-shell interpreter (curl URL | python/node/perl/...): remote code execution.
+
+    Whole-line comments are ignored so documentation examples stay clean. env-var->outbound
+    and $()-command-injection are deliberately out of scope here (FP-prone in shell)."""
+    out: list[ASTFinding] = []
+    seen: set = set()
+
+    def add(rule: str, sev: str, ln: int, reason: str) -> None:
+        if (rule, ln) not in seen:
+            seen.add((rule, ln))
+            out.append(ASTFinding(rule, sev, ln, reason))
+
+    masked = _sh_mask_comments(source)
+
+    for m in _SH_PIPE_INTERP_RE.finditer(masked):
+        ln = masked.count("\n", 0, m.start()) + 1
+        add("SHELL_PIPE_INTERP", "crit", ln,
+            "downloads a remote payload and pipes it into an interpreter "
+            "(curl/wget ... | python/node/perl/...) — remote code execution")
+
+    cred_vars = {m.group("var") for m in _SH_CRED_ASSIGN_RE.finditer(masked)}
+    for i, raw in enumerate(masked.splitlines(), 1):
+        if not _SH_OUTBOUND_RE.search(raw):
+            continue
+        if _SH_CRED_FILE_RE.search(raw):
+            add("SHELL_CRED_EXFIL", "crit", i,
+                "reads a credential file and sends it to an outbound command "
+                "(curl/wget/nc) — credential exfiltration")
+            continue
+        if any(re.search(r"\$\{?" + re.escape(v) + r"\b", raw) for v in cred_vars):
+            add("SHELL_CRED_EXFIL", "crit", i,
+                "a credential-file value flows into an outbound command "
+                "(curl/wget/nc) — credential exfiltration")
+    return out
+
+
 def simulate_effects(source: str, filename: str = "<skill>") -> list[dict]:
     """Analyze Python source to simulate reachable effects and guarding conditions under seeds.
     

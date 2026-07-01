@@ -21,8 +21,11 @@ from . import attest as _attest
 from .catalog import (
     ATTESTED, BY_ID, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding,
 )
-from .collector import _OWN_SKILL_NAMES, BOOTSTRAP_FILES, SKILL_DIRS, Context, _read_skill_text, dig, read_skill_python
-from .skillast import analyze_python, analyze_python_package, simulate_effects as _simulate_effects
+from .collector import (
+    _OWN_SKILL_NAMES, BOOTSTRAP_FILES, SKILL_DIRS, Context, _read_skill_text, dig,
+    read_skill_python, read_skill_shell,
+)
+from .skillast import analyze_python, analyze_python_package, analyze_shell, simulate_effects as _simulate_effects
 from .safeio import walk_dir_safely
 from .textnorm import normalize_for_scan, obfuscation_signals
 
@@ -2367,6 +2370,11 @@ def check_installed_skills(ctx: Context) -> Finding:
         # already carries the importing file:line and the source module.
         for af in analyze_python_package(ctx.installed_skill_py.get(name, [])):
             crit.append(f"{name}: {af.reason}")
+        # F-050: bundled shell (.sh/.bash/.zsh) semantic pass — cred-file read -> outbound
+        # exfil, or download piped into a non-shell interpreter. Both are crit -> FAIL.
+        for relpath, src in ctx.installed_skill_shell.get(name, []):
+            for af in analyze_shell(src, relpath):
+                crit.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
     # C-044: unpinned dependency scan — collect across all skills; WARN severity.
     # Runs after the main CRIT/HIGH loop to avoid polluting the main evidence lists.
     warns_unpinned: list[str] = []
@@ -2586,6 +2594,7 @@ def vet_skill(path: str | Path) -> Finding:
             return finding
         text, name = _read_skill_text(p, ctx), p.name
         py_sources = read_skill_python(p, ctx)
+        shell_sources = read_skill_shell(p, ctx)
     elif p.is_file():
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
@@ -2595,12 +2604,14 @@ def vet_skill(path: str | Path) -> Finding:
             return finding
         name = p.parent.name or p.stem
         py_sources = [(p.name, text)] if p.suffix == ".py" else []
+        shell_sources = [(p.name, text)] if p.suffix in (".sh", ".bash", ".zsh") else []
     else:
         finding = _custom("B13", HIGH, UNKNOWN, f"no skill found at {p}", "Point --vet at a skill dir or SKILL.md.")
         finding.ctx = ctx
         return finding
     ctx.installed_skills = {name or "skill": text}
     ctx.installed_skill_py = {name or "skill": py_sources}
+    ctx.installed_skill_shell = {name or "skill": shell_sources}
     finding = check_installed_skills(ctx)
     # F-048: also run the shared content-security ring. check_installed_skills has already
     # populated ctx.effect_profiles (so B62 can compare declared vs actual capability), and

@@ -69,6 +69,7 @@ class Context:
     include_host: bool = False                      # host-filesystem scanning enabled (audit(include_host=True) / not --no-host)
     installed_skills: dict = field(default_factory=dict)  # skill name -> concatenated text
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
+    installed_skill_shell: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .sh/.bash
     attestation: dict = field(default_factory=dict)  # agent self-report (--attest); see attest.py
     _collected_skill_files: dict[str, list[dict]] = field(default_factory=dict)
 
@@ -689,7 +690,29 @@ def read_skill_python(skill_dir: Path, ctx: Context | None = None) -> list[tuple
         out.append((item["relpath"], text))
         total += len(text)
         file_count += 1
-        
+
+    return out
+
+
+def read_skill_shell(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str, str]]:
+    """Collect the shell source files (.sh/.bash/.zsh) of one skill for a read-only
+    regex/token pass (F-050). Returns a list of (relative-path, source) pairs. Same byte /
+    file caps as the Python collector so a padded bundle can't blow up the scan."""
+    collected = collect_skill_files(skill_dir, ctx)
+    out: list[tuple[str, str]] = []
+    total = 0
+    file_count = 0
+    for item in collected:
+        if total >= _MAX_PY_BYTES_PER_SKILL or file_count >= _MAX_FILES_PER_SKILL:
+            break
+        if item["classification"] != "TEXT":
+            continue
+        if not item["relpath"].lower().endswith((".sh", ".bash", ".zsh")):
+            continue
+        text = item["content"].decode(encoding="utf-8", errors="replace")
+        out.append((item["relpath"], text))
+        total += len(text)
+        file_count += 1
     return out
 
 
@@ -713,6 +736,7 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
             try:
                 ctx.installed_skills[key] = _read_skill_text(sd, ctx)
                 ctx.installed_skill_py[key] = read_skill_python(sd, ctx)
+                ctx.installed_skill_shell[key] = read_skill_shell(sd, ctx)
             except OSError as exc:
                 ctx.errors.append(f"could not read skill {key}: {exc}")
 
