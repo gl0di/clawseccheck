@@ -1316,6 +1316,116 @@ class EffectSimulator:
         return results
 
 
+def _module_stem(relpath: str) -> str:
+    """The importable module stem for a bundled skill file: 'a.py' -> 'a',
+    'pkg/util.py' -> 'util' (skills are usually flat; the last path component wins)."""
+    name = relpath.replace("\\", "/").rsplit("/", 1)[-1]
+    return name[:-3] if name.endswith(".py") else name
+
+
+def _package_tainted_exports(trees: dict) -> dict:
+    """{module_stem: {exported name, ...}} for module-level names whose value derives from
+    a decode/decompress expression — an obfuscated blob that is dangerous to exec. A small
+    within-module alias fixpoint carries `y = x` when x is already tainted. Decode-only on
+    purpose: exec of a cross-file *decoded* value is the split-payload pattern; broadening
+    the source would add false positives on ordinary multi-file skills."""
+    exports: dict = {}
+    for stem, tree in trees.items():
+        tainted: set = set()
+        body_assigns = [n for n in getattr(tree, "body", []) if isinstance(n, ast.Assign)]
+        for _ in range(3):
+            changed = False
+            for a in body_assigns:
+                if _subtree_has_decode(a.value) or (_names_in(a.value) & tainted):
+                    for t in a.targets:
+                        if isinstance(t, ast.Name) and t.id not in tainted:
+                            tainted.add(t.id)
+                            changed = True
+            if not changed:
+                break
+        if tainted:
+            exports[stem] = tainted
+    return exports
+
+
+def analyze_python_package(files) -> list[ASTFinding]:
+    """Cross-file / import-graph taint (H1): a decode-derived module-level value defined in
+    one skill file, imported and executed (exec/eval/os.system/subprocess) in another. The
+    per-file engine (analyze_python) misses this because each half is clean in isolation —
+    file A holds the obfuscated blob, file B imports and exec()s it.
+
+    `files` is an iterable of (relpath, source). Stdlib ast only; never raises, never
+    executes; deterministic. Returns ASTFindings whose reason is self-contained (it names
+    the importing file, the sink, and the source module)."""
+    trees: dict = {}
+    stem_to_rel: dict = {}
+    for relpath, src in files:
+        stem = _module_stem(relpath)
+        try:
+            trees[stem] = ast.parse(src)
+        except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+            continue  # parse failures are surfaced per-file (AST_UNANALYZABLE), not here
+        stem_to_rel[stem] = relpath
+    if len(trees) < 2:
+        return []  # cross-file taint needs at least two parseable sibling modules
+    exports = _package_tainted_exports(trees)
+    if not exports:
+        return []
+
+    out: list = []
+    seen: set = set()
+    for stem, tree in trees.items():
+        rel = stem_to_rel[stem]
+        tainted_locals: dict = {}   # `from <mod> import <name>` local name -> source stem
+        module_aliases: dict = {}   # `import <mod> [as x]` alias -> source stem
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                mod = (node.module or "").split(".")[-1]
+                if mod in exports and mod != stem:
+                    for alias in node.names:
+                        if alias.name in exports[mod]:
+                            tainted_locals[alias.asname or alias.name] = mod
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    m = alias.name.split(".")[-1]
+                    if m in exports and m != stem:
+                        module_aliases[alias.asname or alias.name.split(".")[0]] = m
+        if not tainted_locals and not module_aliases:
+            continue
+        local_set = set(tainted_locals)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            is_exec, sink = _is_exec_sink_call(node.func)
+            if not is_exec:
+                continue
+            ln = getattr(node, "lineno", 0)
+            src_mod = None
+            # (a) a `from`-imported tainted name reaches the exec sink.
+            if local_set and _call_args_tainted(node, local_set)[0]:
+                hit = next((n for n in _names_in(node) if n in tainted_locals), None)
+                src_mod = tainted_locals.get(hit)
+            # (b) an `alias.export` attribute reaches the exec sink.
+            if src_mod is None:
+                for arg in (*node.args, *(kw.value for kw in node.keywords)):
+                    for sub in ast.walk(arg):
+                        if (isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name)
+                                and sub.value.id in module_aliases
+                                and sub.attr in exports[module_aliases[sub.value.id]]):
+                            src_mod = module_aliases[sub.value.id]
+                            break
+                    if src_mod is not None:
+                        break
+            if src_mod is not None and (rel, ln) not in seen:
+                seen.add((rel, ln))
+                src_rel = stem_to_rel.get(src_mod, src_mod + ".py")
+                out.append(ASTFinding(
+                    "CROSS_FILE_EXEC", "crit", ln,
+                    f"{rel}:{ln} {sink} executes a decode-derived value imported from sibling "
+                    f"module {src_rel} — cross-file obfuscated payload split to evade per-file scanning"))
+    return out
+
+
 def simulate_effects(source: str, filename: str = "<skill>") -> list[dict]:
     """Analyze Python source to simulate reachable effects and guarding conditions under seeds.
     

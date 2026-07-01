@@ -22,7 +22,7 @@ from .catalog import (
     ATTESTED, BY_ID, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding,
 )
 from .collector import _OWN_SKILL_NAMES, BOOTSTRAP_FILES, SKILL_DIRS, Context, _read_skill_text, dig, read_skill_python
-from .skillast import analyze_python, simulate_effects as _simulate_effects
+from .skillast import analyze_python, analyze_python_package, simulate_effects as _simulate_effects
 from .safeio import walk_dir_safely
 from .textnorm import normalize_for_scan, obfuscation_signals
 
@@ -2361,6 +2361,12 @@ def check_installed_skills(ctx: Context) -> Finding:
                 _skill_ep_results.append(annotated)
         if _skill_ep_results:
             ctx.effect_profiles[name] = _skill_ep_results
+        # F-056: cross-file / import-graph taint. A decode-derived value defined in one of
+        # this skill's files, imported and exec()'d in another, is invisible to the per-file
+        # pass above (each half is clean alone). CROSS_FILE_EXEC is crit -> FAIL; the reason
+        # already carries the importing file:line and the source module.
+        for af in analyze_python_package(ctx.installed_skill_py.get(name, [])):
+            crit.append(f"{name}: {af.reason}")
     # C-044: unpinned dependency scan — collect across all skills; WARN severity.
     # Runs after the main CRIT/HIGH loop to avoid polluting the main evidence lists.
     warns_unpinned: list[str] = []
