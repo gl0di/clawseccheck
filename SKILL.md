@@ -326,9 +326,18 @@ and `fix:` indented on the next lines.
 `why:` = what an attacker can actually do, or what goes wrong. `fix:` = the concrete config change.
 Do NOT just restate the title. Do NOT omit these lines to save space.
 
+**Frame each family header** so the categories stand out as distinct sections. Draw a
+top rule, the emoji + family name on a `│`-prefixed line, then a bottom rule — an
+**open 3-sided box (no right border)**. Both rules are the same length (~30 `─`). Do
+**not** close the box on the right: emoji render at variable width, so a right border
+would visibly misalign — the open frame always lines up. The findings for that family go
+**below** its frame, not inside it.
+
 ```
 — Findings —
-🌐 Exposure & Network
+┌──────────────────────────────
+│ 🌐 Exposure & Network
+└──────────────────────────────
 🔴 CRITICAL  insecure control-UI auth
     why: anyone on your local network can send commands to your agent right now — no pairing or auth required
     fix: set gateway.controlUi.allowInsecureAuth to false in openclaw.json
@@ -336,7 +345,9 @@ Do NOT just restate the title. Do NOT omit these lines to save space.
     why: every message in the channel feeds into the model — a malicious message can inject instructions or leak prior conversation
     fix: set channels.telegram.contextVisibility to "allowlist" or "allowlist_quote"
 
-🔑 Privilege & Execution
+┌──────────────────────────────
+│ 🔑 Privilege & Execution
+└──────────────────────────────
 🔴 CRITICAL  Lethal Trifecta — all three legs active
     why: All three Lethal Trifecta legs are active: your agent receives outside input, has access to sensitive data, and can act online. One injected prompt is enough to exfiltrate everything.
     fix: Break the trifecta — remove one leg: lock channels to owner-only, gate outbound/exec behind approval, or move sensitive data out of reach.

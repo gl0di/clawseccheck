@@ -13,10 +13,16 @@ channels OpenClaw delivers on. English-only (the former `i18n.py` he/en layer wa
 ClawSecCheck produces **text the host OpenClaw agent relays to the user over whatever
 channel they're on** — Telegram, Discord, Slack, web ControlUI, or a terminal. Those
 channels have **different rendering capabilities**, so there is **no single fixed visual
-skeleton**. Box-drawing + "type 1-4" is a *terminal* assumption that breaks on Telegram.
+skeleton**. Alignment-dependent box-drawing (closed boxes, columns) + "type 1-4" is a
+*terminal* assumption that breaks on Telegram.
 
-The current `SKILL.md` Dashboard (Step 3) already reflects this — it uses emoji +
-indentation + markdown, **not** box-art. The design system formalizes that instinct.
+The `SKILL.md` Dashboard (Step 3) applies this everywhere **except** the family section
+headers, which use an **open 3-sided frame** (`┌─ / │ label / └─`, no right border) so the
+seven categories visibly stand apart. That single exception is deliberate (see Layer 2 and
+Component 3): with no right border there is nothing to align, so the frame renders as three
+short lines in a monospace surface (terminal, ControlUI) **and** degrades to harmless plain
+lines in a proportional one — and Telegram flattens the Dashboard through `delivery-mirror`
+regardless. Everything else stays emoji + indentation + markdown, **not** box-art.
 
 ### Surface capability matrix
 
@@ -86,7 +92,7 @@ pure rendering switch.
 | 1 | **Welcome** (pre-scan menu) | guided | Step 1 / audit request | ✅ drawn |
 | 2 | **Next-actions** (post-result menu) | guided | Step 4 | ▢ todo |
 | **Results** ||||
-| 3 | **Dashboard** (A–F audit) | guided + CLI | Step 3 / `audit.py` | ▢ next |
+| 3 | **Dashboard** (A–F audit) | guided + CLI | Step 3 / `audit.py` | ✅ drawn |
 | 4 | **What-changed** (diff vs last) | guided + CLI | `--monitor` | ▢ todo |
 | 5 | **Vet verdict** (skill / MCP supply-chain) | guided + CLI | `--vet` / `--vet-mcp` | ▢ todo |
 | 6 | **Self-test** (canary · red-team · dry-run) | guided + CLI | `--self-test` | ▢ todo |
@@ -96,7 +102,7 @@ pure rendering switch.
 | 9 | **Notices** (freshness / update / private) | both | inline | ▢ stub |
 | **Artifacts** ||||
 | 10 | **Badge / card** (shareable) | CLI | `--card` | ▢ todo |
-| 11 | **HTML report** | CLI | `--html` | ▢ todo |
+| 11 | **HTML report** | CLI | `--html` | ✅ drawn |
 | **Discovery & onboarding** ||||
 | 12 | **Menu / All functions** (capability palette) | guided | "menu" / `?` / `[More…]` | ✅ drawn |
 | 13 | **No-config / first-run** (`~/.openclaw` missing) | guided + CLI | empty/missing home | ▢ todo |
@@ -111,9 +117,12 @@ One component → up to three renderings. **`text` is the contract every screen 
 `mono` and `interactive` are progressive enhancements, never required to operate.
 
 - **`text` — baseline, ALL channels.** Markdown headers + emoji severity + numbered choices
-  ("say 1 / go") + indentation. **No box-art, no color, no buttons.** If a screen works
-  here, it works everywhere.
-- **`mono` — terminal / TUI enhancement.** May add box-drawing, aligned columns, ANSI color.
+  ("say 1 / go") + indentation. **No color, no buttons, and no alignment-dependent box-art**
+  (closed boxes, aligned columns) — those need monospace and break on Telegram. The **one
+  sanctioned frame** is the family-header **open 3-sided box** (`┌─ / │ label / └─`, no right
+  border): with nothing to align on the right it survives proportional fonts as three short
+  lines instead of a broken grid. If a screen works here, it works everywhere.
+- **`mono` — terminal / TUI enhancement.** May add closed box-drawing, aligned columns, ANSI color.
   `--ascii` strips emoji + box back toward `text`.
 - **`interactive` — button-capable channels (Telegram, Discord, Slack, Teams, Mattermost,
   Feishu).** `Choices[]`/`Actions[]` → native buttons via `MessagePresentation`. Grounded.
@@ -224,12 +233,16 @@ instead of a standalone headline. Source: `audit.py --json` (guided) / `audit.py
 Projected: fix this → C (74) · fix all Critical+High → B (81)
 
 — Findings —
-🌐 Exposure & Network
+┌──────────────────────────────
+│ 🌐 Exposure & Network
+└──────────────────────────────
 🔴 CRITICAL  insecure control-UI auth
     why: anyone on your local network can send commands to your agent right now
     fix: set gateway.controlUi.allowInsecureAuth to false in openclaw.json
 
-🔑 Privilege & Execution
+┌──────────────────────────────
+│ 🔑 Privilege & Execution
+└──────────────────────────────
 🔴 CRITICAL  Lethal Trifecta — all three legs active
     why: your agent receives outside input, has access to sensitive data, and can act
     online — one injected prompt is enough to exfiltrate everything
@@ -252,6 +265,16 @@ Next — ✅ read-only · ⚡ touches live agent (asks)
   peers in the same surface. Order is fixed (`catalog.FAMILY_ORDER`); a family with nothing
   to fix is simply omitted from the chat Dashboard (the CLI text report still prints an empty
   "— clear" header per family — useful there for coverage-proof, noisy here).
+- **Family headers are framed (open 3-sided box).** Each family title renders inside
+  `┌─ / │ 🌐 Exposure & Network / └─` so the seven categories read as distinct sections
+  instead of blending into the finding list. The box is **open on the right on purpose**: a
+  closed box (`│ … │`) needs the right border to line up, and emoji render at variable width
+  so it visibly breaks; with no right border there is nothing to misalign, so the frame holds
+  in monospace surfaces and degrades to three harmless lines elsewhere. This is the single
+  box-art exception to the `text` baseline (Layer 2). The findings sit **below** the frame,
+  not inside it. The CLI text report (`render_report`) keeps its own `[Family] — N to fix`
+  header (it doubles as a per-family fix-count, and framing it would break
+  `test_dashboard_families`); framing the CLI header is a possible future follow-up.
 - **No Lethal Trifecta headline chip.** It moved from Section 1 (grade card) into Section 3
   as the A1 finding inside Privilege & Execution — a agent-behavior signal among its peers,
   not a separate "the one thing that matters" banner. The 3-legs plain-language explanation
@@ -288,8 +311,30 @@ _Stub. The ℹ lines: config-age nudge, update result, "private" (no-history) co
 ### 10. Badge / card — `--card`
 _Stub. Shareable badge._
 
-### 11. HTML report — `--html`
-_Stub. Standalone HTML report variant._
+### 11. HTML report — `--html`   _(v2 — 2.8.0)_
+
+The private owner-view export (`clawseccheck/report.py:render_html`). A **single
+self-contained `.html` file** — inline `<style>`, **no external assets** (no CDN, no
+`<link>`, no web fonts), enforced by `tests/test_html.py`. This is the one surface that is
+*not* channel-relayed text: it's a file the owner opens locally, so it uses the full visual
+budget a browser gives (real color, layout, responsive) that the `text` profile can't.
+
+**Slots (same semantics as Component 3, richer render):** GradeCard (grade badge + score
+**progress bar** + Lethal Trifecta ratio + capped note) · Private-warning notice · Severity
+summary strip (Critical/High/Medium/Low counts) · Findings **grouped by the 7 families**
+(Component 3's grouping) with a per-group jump-nav and counts · Footer (local · read-only).
+
+**Decisions baked in:**
+- **Grouped by family, matching the Dashboard.** A `--html` on a real fleet is dozens of
+  findings; the same 7-family grouping + in-page anchor nav keeps it navigable instead of an
+  endless scroll.
+- **Color is fair game here (unlike the `text` profile).** Severity drives card accents and
+  the summary chips; the grade drives the badge + score bar. This surface is a browser, so
+  the "severity = emoji not color" token (Layer 0) is relaxed to "emoji **and** color".
+- **Light + dark via `prefers-color-scheme`** (CSS custom properties), still one file.
+- **Private, not shareable.** Renders the full finding detail with an explicit "must NOT be
+  shared publicly — use `--badge`" notice; the warning is a normal flowing line (the old
+  `.warning-box strong { display:block }` bug that split "must **NOT** be shared" is fixed).
 
 ### 12. Menu / All functions — capability palette · "menu" / `?` / `[More…]`
 
