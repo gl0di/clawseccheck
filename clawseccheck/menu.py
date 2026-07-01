@@ -84,6 +84,41 @@ def compute_ages(*, released=None, last_check=None, today=None):
     return build_age, last_days
 
 
+def render_onboarding(*, reason: str, home: str, n_checks: int | None = None,
+                      ascii_only: bool = False) -> str:
+    """Screen 13 — first-run onboarding when there is nothing to audit.
+
+    Shown instead of a wall of UNKNOWNs when the OpenClaw home is *missing*
+    (``reason="missing"``) or an *empty* directory (``reason="empty"``). Pure —
+    no I/O; the caller passes the (already-sanitized) home path and check count.
+    English only; the host agent localizes. Read-only, fabricates no findings.
+    """
+    sep = " - " if ascii_only else " · "
+    head = f"ClawSecCheck{sep}welcome" if ascii_only else f"🦞 ClawSecCheck{sep}welcome"
+
+    if reason == "empty":
+        lead = f"{home} is here, but it's empty — no OpenClaw config in it yet."
+    else:
+        lead = f"I looked for an OpenClaw setup at {home}, but there's nothing there."
+
+    count = str(n_checks) if n_checks else "the full set of"
+    bullet = "-" if ascii_only else "•"
+    lines = [
+        head,
+        "",
+        lead,
+        "",
+        "ClawSecCheck audits an OpenClaw setup for security holes — I just need to find yours:",
+        f"  {bullet} Default location:  ~/.openclaw",
+        f"  {bullet} Config elsewhere?  re-run with  --home <path>",
+        f"  {bullet} No OpenClaw yet?   install it, then run me again.",
+        "",
+        f'Once I can see it, say "check" and I\'ll run {count} security checks across your setup.',
+    ]
+    out = "\n".join(lines)
+    return _ascii(out) if ascii_only else out
+
+
 def render_menu(*, version, build_age_days=None, last_check_days=None,
                 stale: bool = False, ascii_only: bool = False) -> str:
     """Render the capability menu as plain text. Pure — no I/O, no clock read."""

@@ -36,7 +36,7 @@ from .redteam import make_suite, render_suite
 from .dryrun import make_scenarios, render_dryrun
 from .sarif import render_sarif
 from .history import DEFAULT_HISTORY, load as history_load, record as history_record, render_trend
-from .menu import compute_ages, render_menu
+from .menu import compute_ages, render_menu, render_onboarding
 from .palette import render_palette
 from .percentile import render_percentile
 from .logsafe import get_logger
@@ -245,6 +245,25 @@ def _flag_coherence_notes(args) -> list[str]:
     if no_effect:
         notes.append(f"note: {', '.join(no_effect)} has no effect with {win_flag}")
     return notes
+
+
+def _onboarding_reason(home: Path) -> str | None:
+    """Screen-13 trigger: is there genuinely nothing to audit?
+
+    Returns ``"missing"`` (home path absent), ``"empty"`` (home is a bare directory),
+    or ``None`` (something is there — hand off to the normal audit path). A home that
+    exists but is unreadable (perms) returns ``None`` on purpose: that is the "config
+    present but unreadable" case, which the dashboard/error path surfaces distinctly —
+    onboarding must not hide a real, permission-blocked setup behind a welcome screen.
+    """
+    if not home.exists():
+        return "missing"
+    try:
+        if home.is_dir() and not any(home.iterdir()):
+            return "empty"
+    except OSError:
+        return None
+    return None
 
 
 def main(argv=None) -> int:
@@ -671,6 +690,23 @@ def main(argv=None) -> int:
         # honored, to keep monitor's drift baseline intact.
         history_record(score, args.history)
         return 0
+
+    # First-run onboarding (Screen 13): when there is genuinely nothing to audit —
+    # ~/.openclaw missing, or an empty directory — don't render a wall of UNKNOWNs;
+    # show a friendly "point me at your config" screen. Human path only: --json/--card
+    # keep their machine/badge contract (an empty setup still yields UNKNOWNs / N/A there).
+    if not args.json and not args.card:
+        first_run = _onboarding_reason(Path(args.home).expanduser())
+        # Only a *clean* empty/missing home is a first run. "config not found" is the
+        # benign, expected signal of one; any OTHER collection error (a permission
+        # problem, an unreadable skill, a parse failure) is a diagnostic case, not
+        # onboarding — fall through so the dashboard surfaces it.
+        real_errors = [e for e in ctx.errors if not e.startswith("config not found")]
+        if first_run and not real_errors:
+            from .checks import CHECKS  # noqa: PLC0415
+            _emit(render_onboarding(reason=first_run, home=_sanitize(args.home),
+                                    n_checks=len(CHECKS), ascii_only=ascii_only))
+            return 0
 
     if args.json:
         body = render_json(findings, score, risk=paths, ctx=ctx)

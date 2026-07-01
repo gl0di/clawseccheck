@@ -107,7 +107,7 @@ pure rendering switch.
 | 11 | **HTML report** | CLI | `--html` | ✅ drawn |
 | **Discovery & onboarding** ||||
 | 12 | **Menu / All functions** (capability palette) | guided | "menu" / `?` / `[More…]` | ✅ drawn |
-| 13 | **No-config / first-run** (`~/.openclaw` missing) | guided + CLI | empty/missing home | ▢ todo |
+| 13 | **No-config / first-run** (`~/.openclaw` missing) | guided + CLI | empty/missing home | ✅ drawn |
 | 14 | **Update flow** (check → result → offer) | guided | "update" / `[Check update]` | ▢ todo |
 
 > Also pending: a **clean-result Dashboard** variant (Grade A / 0 issues) — Component 3 must
@@ -427,3 +427,38 @@ every `_PRIMARY_MODES` flag is either present in the palette or listed in
 `palette.EXEMPT_FROM_PALETTE` (the container/internal flags `--menu`, `--functions`,
 `--dashboard-findings`) — so the palette can't fall behind `cli.py`. `--ascii` folds ⚡→`(live)`
 and drops emoji.
+
+### 13. No-config / first-run onboarding — `~/.openclaw` missing or empty
+
+The friendly landing when there is **nothing to audit** — don't render a wall of UNKNOWNs or a
+scary F. Shown on the default human path only (`--json`/`--card` keep their machine/badge
+contract). Read-only; fabricates no findings.
+
+**When it fires (grounded in `cli._onboarding_reason`):**
+
+- **missing** — the `--home` path (default `~/.openclaw`) does not exist.
+- **empty** — the home is a bare directory (no entries at all).
+
+It deliberately does **not** fire when anything is present — a readable config, an *unreadable*
+config (perms), installed skills, or even junk. A present-but-unreadable `openclaw.json` keeps its
+entry, so the dir isn't empty and the dashboard/error path surfaces the permission problem instead
+of hiding it behind a welcome. A first run's benign `config not found` note is expected; any *other*
+collection error (perms / parse / unreadable skill) also routes to the dashboard, not onboarding.
+
+```
+🦞 ClawSecCheck · welcome
+
+I looked for an OpenClaw setup at ~/.openclaw, but there's nothing there.
+
+ClawSecCheck audits an OpenClaw setup for security holes — I just need to find yours:
+  • Default location:  ~/.openclaw
+  • Config elsewhere?  re-run with  --home <path>
+  • No OpenClaw yet?   install it, then run me again.
+
+Once I can see it, say "check" and I'll run {N} security checks across your setup.
+```
+
+**Implemented (F-046):** `menu.render_onboarding()` renders it (reusing menu's `_ascii` fold, so
+`--ascii` drops 🦞 and folds `•`→`-`); the home path is `report._sanitize`d before display.
+`tests/test_onboarding.py` covers both reasons, the present-but-unreadable / junk exclusions, the
+`--json` machine-contract, and ASCII purity. `mono`/`interactive` reuse the `text` body verbatim.
