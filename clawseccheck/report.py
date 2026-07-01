@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .catalog import (
     BY_ID,
+    FAMILY_LABEL, FAMILY_OF, FAMILY_ORDER,
     CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
 from .dedup import deduplicate_findings
@@ -43,6 +44,8 @@ def _sanitize(s: str) -> str:
     return s
 
 _SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}
+# Within a family: FAIL/WARN (the actionable items) before PASS/UNKNOWN (context).
+_STATUS_ORDER = {FAIL: 0, WARN: 1, UNKNOWN: 2, PASS: 3}
 _ICON = {FAIL: "⛔", WARN: "⚠️", PASS: "✅", UNKNOWN: "❔", "SKILL_ARCHIVE_PATH_TRAVERSAL": "❔"}
 _ICON_ASCII = {FAIL: "[X]", WARN: "[!]", PASS: "[OK]", UNKNOWN: "[?]", "SKILL_ARCHIVE_PATH_TRAVERSAL": "[?]"}
 
@@ -391,6 +394,28 @@ def compute_blast_radius(cfg: dict, finding_cid: str) -> dict:  # noqa: ARG001
     }
 
 
+def _family_of(f) -> str | None:
+    """Map a finding to one of the 7 Dashboard families via its catalog surface.
+
+    A1 (Lethal Trifecta) is cross-cutting in the catalog (surface="trifecta", no
+    family bucket) but it IS an agent-behavior signal, so the Dashboard routes it
+    to Privilege & Execution rather than giving it a standalone headline (F-044).
+    Findings with an id outside CATALOG (native-audit passthrough, test doubles)
+    return None -> the "Other" bucket, so nothing is ever silently dropped.
+    """
+    if f.id == "A1":
+        return "privilege"
+    meta = BY_ID.get(f.id)
+    if meta is None:
+        return None
+    return FAMILY_OF.get(meta.surface)
+
+
+def _render_finding_compact(lines, icon, f):
+    """One-line roster entry for PASS/UNKNOWN — full detail would bury the FAILs/WARNs."""
+    lines.append(f"  {icon[f.status]} [{f.severity}] {_sanitize(f.title)}")
+
+
 def _render_finding(lines, icon, f, cfg: dict | None = None):
     conf = getattr(f, "confidence", "HIGH")
     tag = f"  (confidence: {conf.lower()})" if conf != "HIGH" and f.status in (FAIL, WARN) else ""
@@ -434,11 +459,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
     issues = [f for f in findings
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
-    trifecta_ratio = _trifecta_ratio(findings)
     lines = ["ClawSecCheck - OpenClaw Security Audit", "=" * 44,
              f"Score: {score.score}/100   Grade: {score.grade}"]
-    if trifecta_ratio == "3/3":
-        lines.append("⛔ Lethal Trifecta: 3/3 — all three legs active. Break one leg before anything else.")
     if score.capped:
         lines.append(f"(capped from {score.raw_score} - open {score.cap_severity or 'CRITICAL'} finding)")
 
@@ -498,13 +520,47 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 f" {n_scored} assessable check(s)."
             )
     lines.append("")
-    if not issues:
+    unsuppressed_all = [f for f in findings if not getattr(f, "suppressed", False)]
+    if not unsuppressed_all:
         lines.append(f"No issues found by ClawSecCheck. Keep it that way. {ok}")
     else:
-        lines.append(f"{len(issues)} thing(s) to fix (ClawSecCheck) - most urgent first:")
+        if issues:
+            lines.append(f"{len(issues)} thing(s) to fix, grouped by area — most urgent first within each:")
+        else:
+            lines.append(f"No issues found by ClawSecCheck. Keep it that way. {ok}")
         lines.append("")
-        for f in issues:
-            _render_finding(lines, icon, f, cfg=_blast_cfg)
+        # Group EVERY finding (not just FAIL/WARN) by its OpenClaw surface family so the
+        # Dashboard reads as coverage-by-category rather than a flat severity dump, and so
+        # the Lethal Trifecta (A1) shows up as one Privilege & Execution finding among
+        # others instead of a standalone headline (F-044). PASS/UNKNOWN are collapsed to a
+        # one-line roster per family — still listed (nothing hidden), just not walled in green.
+        grouped: dict[str | None, list[Finding]] = {}
+        for f in unsuppressed_all:
+            grouped.setdefault(_family_of(f), []).append(f)
+        for fam_key in (*FAMILY_ORDER, None):
+            members = grouped.get(fam_key)
+            if not members:
+                continue
+            members.sort(key=lambda f: (_STATUS_ORDER.get(f.status, 9), _SEV_ORDER.get(f.severity, 9)))
+            label = FAMILY_LABEL.get(fam_key, "Other")
+            n_bad = sum(1 for f in members if f.status in (FAIL, WARN))
+            lines.append(f"[{label}] — {n_bad} to fix" if n_bad else f"[{label}] — clear")
+            n_unknown = 0
+            for f in members:
+                if f.status in (FAIL, WARN):
+                    _render_finding(lines, icon, f, cfg=_blast_cfg)
+                elif f.status == PASS:
+                    _render_finding_compact(lines, icon, f)
+                else:
+                    # UNKNOWN: tallied, not enumerated one-by-one — a wall of near-identical
+                    # "not assessed" lines adds noise, not information; the honest count is
+                    # what matters (nothing hidden, just not spelled out per check).
+                    n_unknown += 1
+            if n_unknown:
+                unk_icon = icon.get(UNKNOWN, "?")
+                lines.append(f"  {unk_icon} {n_unknown} not assessed (config can't tell) —"
+                             " resolve via `--ask` then `--attest`")
+            lines.append("")
 
     cap_lines = _capability_graph_lines(ctx) if ctx is not None else []
     if cap_lines:

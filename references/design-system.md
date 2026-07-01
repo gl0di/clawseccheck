@@ -175,12 +175,97 @@ button returns its label as the spoken choice (`callback_data`).
   `--ask`/`--attest`, html, sarif, percentile, risk-paths, prompts, the `private` modifier)
   lives behind **"Menu"** — reachable, but off the minimal front door.
 
-### 2. Next-actions — post-result menu · guided Step 4
-_Stub. After the Dashboard: what to do next (fixes, deeper, vet, monitor). Reuses Choices[]._
+### 2. Next-actions — post-result menu · guided Step 4   _(v2 — F-043/C-132)_
 
-### 3. Dashboard — audit result · guided Step 3
-_Stub (next). A–F score banner + Lethal-Trifecta line + ranked plain-language Findings[].
-Source: `audit.py --json`._
+Appended to the end of every Dashboard message (Section 7), not a separate turn. Five
+lettered items, always the same five slots — no "deeper scan" pick (folded into the scan
+itself, see Component 3) and no confirmation redundancy (picking a lettered item **is** the
+consent, same principle as Welcome item 1).
+
+**`text` profile:**
+
+```
+Next — ✅ read-only · ⚡ touches live agent (asks)
+  a ✅ Copy-paste fixes     b ⚡ Live injection test
+  c ✅ Turn on monitoring   d ✅ Save full report   e ✅ Menu   Start with a?
+```
+
+**Decisions baked in:**
+- **No "deeper" item.** Pre-F-043 this was a 5th lettered pick ("resolve UNKNOWN"). The
+  capability self-report (`--ask`→`--attest`) now runs automatically the first time the
+  user picks Welcome item 1 (see `SKILL.md` Step 2) — offering it again here would be
+  asking the user to re-confirm something that already happened.
+- **d/e are standing, not conditional.** a/b/c adapt to the audit result (SKILL.md Step 4
+  routing table); "save full report" and "back to menu" are always useful regardless of
+  grade, so they're unconditional — this is what "в конце дать файл/отчёт/меню" (the design
+  session's closing-menu ask) resolved to.
+- **d maps to `--save`**, not `--html`/`--sarif` — those stay Menu-only (item 4 → Screen 12)
+  since they're export formats, not the default "give me the report" ask.
+
+### 3. Dashboard — audit result · guided Step 3   _(v2 — F-044)_
+
+The full scan result. Seven sections in one message (SKILL.md Step 3); Section 3 (Findings)
+is the part this version reworked — grouped by OpenClaw surface family instead of a flat
+severity list, with the Lethal Trifecta folded in as one Privilege & Execution finding
+instead of a standalone headline. Source: `audit.py --json` (guided) / `audit.py --full`
+(CLI text — `clawseccheck/report.py:render_report`, same grouping, F-044).
+
+**Slots:** GradeCard · FixFirst · Findings[grouped by 7 families] · Coverage · WorthAGlance
+· ScopeNote · NextActions (Component 2).
+
+**`text` profile (abridged — full section-by-section spec lives in `SKILL.md` Step 3):**
+
+```
+🦞 OpenClaw Security Audit — Grade F · 49/100
+████████░░░░░░░░  ·  21 issues
+
+▶ FIX FIRST
+{plain-language top1 finding}
+Projected: fix this → C (74) · fix all Critical+High → B (81)
+
+— Findings —
+🌐 Exposure & Network
+🔴 CRITICAL  insecure control-UI auth
+    why: anyone on your local network can send commands to your agent right now
+    fix: set gateway.controlUi.allowInsecureAuth to false in openclaw.json
+
+🔑 Privilege & Execution
+🔴 CRITICAL  Lethal Trifecta — all three legs active
+    why: your agent receives outside input, has access to sensitive data, and can act
+    online — one injected prompt is enough to exfiltrate everything
+    fix: break the trifecta — remove one leg
+🟠 HIGH  tool profile broader than minimal
+    why: the "coding" profile gives filesystem write, shell, and package-install access
+    fix: change tools.profile to "minimal"
+
+— Coverage of OpenClaw surfaces —
+✅ Checked 11 · ◑ Partial/UNKNOWN 2  (of 13 surfaces)
+
+Next — ✅ read-only · ⚡ touches live agent (asks)
+  a ✅ Copy-paste fixes     b ⚡ Live injection test
+  c ✅ Turn on monitoring   d ✅ Save full report   e ✅ Menu   Start with a?
+```
+
+**Decisions baked in:**
+- **Grouped by family, not severity-flat (F-044).** Reading "here's what's wrong with your
+  network exposure" beats a mixed CRITICAL→LOW dump — findings only make sense next to their
+  peers in the same surface. Order is fixed (`catalog.FAMILY_ORDER`); a family with nothing
+  to fix is simply omitted from the chat Dashboard (the CLI text report still prints an empty
+  "— clear" header per family — useful there for coverage-proof, noisy here).
+- **No Lethal Trifecta headline chip.** It moved from Section 1 (grade card) into Section 3
+  as the A1 finding inside Privilege & Execution — a agent-behavior signal among its peers,
+  not a separate "the one thing that matters" banner. The 3-legs plain-language explanation
+  that used to live in the headline now becomes A1's `why:` line.
+- **"Show all findings"**, not just FAIL/WARN: the CLI text report (`render_report`) lists
+  PASS as one-line confirmations per family and tallies UNKNOWN as a single count
+  ("N not assessed — resolve via `--ask` then `--attest`") rather than enumerating each one
+  — proves coverage without a wall of near-identical "not assessed" lines. The chat Dashboard
+  stays FAIL/WARN-only in Section 3 (PASS/UNKNOWN already have their own sections — 4 and 6
+  — so duplicating them here would repeat content across the same message).
+- **"deeper" is not a Section-3/7 pick anymore (F-043).** The capability self-report
+  (B43/B44) runs automatically in Step 2 the first time item 1 is chosen, so by the time this
+  screen renders those UNKNOWNs are usually already resolved — Section 4's coverage note only
+  suggests `--ask`/`--attest` for surfaces attestation can't already have covered.
 
 ### 4. What-changed — `--monitor`
 _Stub. Diff vs last snapshot._
@@ -222,7 +307,7 @@ grounding flag (in parens) so this palette and `cli.py` can't silently drift —
 
 Scan  ✅ read-only
   Quick scan        "go" / "1"        {N} checks across your OpenClaw setup        (default)
-  Deeper scan       "deeper" / "2"    + facts config can't show; I self-report them (--ask→--attest)
+  Capability re-check "deeper"       standalone self-report re-run (Check everything already does this once, automatically — F-043) (--ask→--attest)
   Full check        "full" / "3"      Quick + self-test + a vet of your MCP servers (--full)
   What changed      "what changed"    diff vs your last scan                        (--monitor)
   Fix it            "fix"             paste-ready fixes for findings (doesn't apply) (--fix / --prompts)

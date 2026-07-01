@@ -200,10 +200,10 @@ rest on demand. The number, the phrase, or a tap all select an item; free phrasi
 
 | Choice | Flag(s) | Notes |
 |--------|---------|-------|
-| 1 Check everything ("check" / "go") | `--full` | Read-only audit **+** live self-test (canary/dryrun/redteam) **+** MCP vet, in one go. The ⚡ live test is disclosed in the label, so picking item 1 **is** the consent — run the read-only audit first, present the dashboard, *then* the live test. |
+| 1 Check everything ("check" / "go") | `--full` (+ auto capability self-report, see Step 2) | Read-only audit **+** capability self-report (resolves B43/B44 inline instead of leaving them UNKNOWN for a separate "deeper" step — F-043) **+** live self-test (canary/dryrun/redteam) **+** MCP vet, in one go. The ⚡ live test is disclosed in the label, so picking item 1 **is** the consent — run the read-only audit first, present the dashboard, *then* the live test. |
 | 2 Check before install | `--vet <path>` (skill / plugin) · `--vet-mcp [name]` (MCP) | Supply-chain check on something you're about to trust. See vet flow in Step 5. |
 | 3 Report & history | default report · `--save <path>` · `--trend` · `--badge <path>` | Show or save the last result, the score trend, or a shareable badge. |
-| 4 Menu | `--menu` (this screen) | "menu" reveals everything else: `--verify-self`, `--monitor` (what changed), deeper `--ask`/`--attest` (B43/B44), `--html`, `--sarif`, `--percentile`, `--risk-paths`, `--prompts`. |
+| 4 Menu | `--menu` (this screen) | "menu" reveals everything else: `--verify-self`, `--monitor` (what changed), a standalone `--ask`/`--attest` re-run (B43/B44 — item 1 already does this once automatically), `--html`, `--sarif`, `--percentile`, `--risk-paths`, `--prompts`. |
 | "private" modifier | Add `--no-history` to any mode | "1 private" = Check everything + `--no-history`. Nothing written to `~/.clawseccheck/`. |
 | "update" | Offline notice + agent check | ClawSecCheck never phones home. On "update" the **host agent** checks ClawHub for a newer version and, if there is one, offers `openclaw skills update clawseccheck` — the tool itself stays offline. |
 
@@ -211,7 +211,23 @@ After the user chooses (or says "check" / "go"), proceed to Step 2.
 
 ### Step 2 — Run the audit
 
-Run the bundled audit script. Pick the right interpreter for the OS:
+**If item 1 (Check everything) was chosen**, first resolve the capability self-report so B43/B44
+come back assessed instead of UNKNOWN — this used to be a separate post-scan "deeper" pick; now it's
+folded into the single scan itself (F-043). Run the interrogation protocol documented in full under
+Step 5 "Choice: deeper / capability check": answer your own tool/verb inventory, `approval_gates`,
+and `untrusted_to_action` from your own runtime (you already know these), ask the user only the one
+`host_monitors` question you can't see yourself, then assemble and feed the attestation in the SAME
+turn as the scan — one interaction, not two:
+
+```
+python3 {baseDir}/audit.py --full --attest <path-or- ->
+```
+
+If the user doesn't know the `host_monitors` answer, leave it `unknown` — never invent one — and
+proceed with the scan anyway; an unanswered field just means that one sub-check stays UNKNOWN.
+
+**For any other item**, run the flag for that mode directly — no self-report needed. Pick the right
+interpreter for the OS:
 
 - **Linux / macOS:** `python3 {baseDir}/audit.py`
 - **Windows:** `python {baseDir}\audit.py` (or `py {baseDir}\audit.py`)
@@ -236,19 +252,6 @@ Present all seven sections below **in one message**, in order.
 
 **Section 1 — Grade card**
 
-When `trifecta == "3/3"`:
-```
-🦞 OpenClaw Security Audit — Grade {grade} · {score}/100
-{score-bar}  ·  Lethal Trifecta 3/3 🔴  ·  {N} issues
-```
-
-When `trifecta == "2/3"`:
-```
-🦞 OpenClaw Security Audit — Grade {grade} · {score}/100
-{score-bar}  ·  Lethal Trifecta 2/3 🦞  ·  {N} issues
-```
-
-When trifecta is 1/3 or 0/3:
 ```
 🦞 OpenClaw Security Audit — Grade {grade} · {score}/100
 {score-bar}  ·  {N} issues
@@ -256,16 +259,10 @@ When trifecta is 1/3 or 0/3:
 
 - Score-bar: 16 cells; `filled = round(score / 100 * 16)`. Use `█` for filled, `░` for empty.
   Score 49 example: `████████░░░░░░░░`.
-- Trifecta chip: shown on line 2 at 3/3 (🔴 — all three legs active) and at 2/3 (🦞 — one step
-  away; still dangerous). At 1/3 or 0/3, omit it from line 2 (the A1 finding covers it if present).
 - Issue count: non-suppressed findings with `status` `FAIL` or `WARN`.
-- **When trifecta is 2/3 or 3/3**, add a plain-language explanation on the very next line (before
-  the FIX FIRST block). Read `findings[id="A1"].evidence` to know which legs are active.
-  The three legs are: **(1) untrusted input** — external channels/skills feed into the model;
-  **(2) sensitive data** — secrets, memory, or credentials are in scope; **(3) outbound actions** —
-  the agent can take actions online (web, MCP, exec). Example lines:
-  - 3/3: "All three Lethal Trifecta legs are active: your agent receives outside input, has access to sensitive data, and can act online. One injected prompt is enough to exfiltrate everything."
-  - 2/3: "Two of three Lethal Trifecta legs are active: [name the two active legs]. If a third leg activates — even temporarily — the combination becomes immediately exploitable."
+- **No standalone Lethal Trifecta chip here (F-044).** Trifecta state is one Privilege & Execution
+  finding among others, not a headline metric — it renders in Section 3 with the rest of that
+  family. See Section 3 for how to write A1's `why:` line when 2/3 or 3/3 legs are active.
 
 **Section 2 — FIX FIRST + projection**
 
@@ -292,30 +289,38 @@ Always label projected grades **estimated** — they assume each fixed finding f
 PASS; actual hardening may reveal new issues. Never present a projected grade as the current grade.
 If `projection.top1` is `null` (no fixable FAILs), skip this block and say "No high-priority issues found."
 
-**Section 3 — Findings (severity-first)**
+**Section 3 — Findings, grouped by area**
 
-List all non-suppressed FAIL and WARN findings sorted globally by severity: CRITICAL → HIGH →
-MEDIUM → LOW. Within the same severity level, any order is fine. Skip findings with no actionable
-result.
+Group all non-suppressed FAIL and WARN findings into the 7 OpenClaw surface families below — not a
+flat severity list (matches `--full`'s grouped text report, F-044). Render families in this fixed
+order; skip a family entirely if it has no FAIL/WARN findings (an empty "clear" header is useful in
+the raw CLI text report, but is noise in a chat Dashboard — omit it here). Within a family, most
+severe first: CRITICAL → HIGH → MEDIUM → LOW. Skip findings with no actionable result.
 
 **Pull findings with `confidence` = `"MEDIUM"` or `"ATTESTED"` out of this section** — they appear
 in Section 5 ("Worth a glance") instead.
 
-The 7 surface families (used as inline tags on each finding — look up each finding's `surface`
-field and map it to the family name using the table below):
-
 | Icon | Family | Surfaces |
 |------|--------|---------|
 | 🌐 | Exposure & Network | gateway · channels · sessions |
-| 🔑 | Privilege & Execution | tools · agents |
+| 🔑 | Privilege & Execution | tools · agents (**+ A1, the Lethal Trifecta — see below**) |
 | 📦 | Supply Chain | skills · mcp |
 | 📝 | Content & Memory Integrity | bootstrap |
 | 🔒 | Secrets & Data | secrets |
 | 🛰️ | Detection & Host | monitoring · host |
 | 🔧 | Automation & Maintenance | hooks · update |
 
-For each finding: severity dot + severity label + plain-language title + surface family tag in
-brackets, then **mandatory** `why:` and `fix:` indented on the next lines.
+**A1 (Lethal Trifecta) renders inside Privilege & Execution, not as its own headline (F-044)** — it's
+an agent-behavior finding like any other in that family. When A1 is FAIL with 2 or 3 legs active,
+give it a richer `why:` than usual: read `findings[id="A1"].evidence` to know which legs are active.
+The three legs are: **(1) untrusted input** — external channels/skills feed into the model;
+**(2) sensitive data** — secrets, memory, or credentials are in scope; **(3) outbound actions** —
+the agent can act online (web, MCP, exec).
+- 3/3: "All three Lethal Trifecta legs are active: your agent receives outside input, has access to sensitive data, and can act online. One injected prompt is enough to exfiltrate everything."
+- 2/3: "Two of three Lethal Trifecta legs are active: [name the two active legs]. If a third leg activates — even temporarily — the combination becomes immediately exploitable."
+
+For each finding: severity dot + severity label + plain-language title, then **mandatory** `why:`
+and `fix:` indented on the next lines.
 
 **`why:` and `fix:` are required for every single finding — never skip them.** One line each.
 `why:` = what an attacker can actually do, or what goes wrong. `fix:` = the concrete config change.
@@ -323,15 +328,21 @@ Do NOT just restate the title. Do NOT omit these lines to save space.
 
 ```
 — Findings —
-🔴 CRITICAL  insecure control-UI auth  [Exposure & Network]
+🌐 Exposure & Network
+🔴 CRITICAL  insecure control-UI auth
     why: anyone on your local network can send commands to your agent right now — no pairing or auth required
     fix: set gateway.controlUi.allowInsecureAuth to false in openclaw.json
-🟠 HIGH  tool profile broader than minimal  [Privilege & Execution]
-    why: the "coding" profile gives the agent filesystem write, shell, and package-install access — a hijacked agent can run arbitrary code
-    fix: change tools.profile to "minimal"; add only the tools you actually use
-🟡 MEDIUM  Telegram context too broad  [Exposure & Network]
+🟡 MEDIUM  Telegram context too broad
     why: every message in the channel feeds into the model — a malicious message can inject instructions or leak prior conversation
     fix: set channels.telegram.contextVisibility to "allowlist" or "allowlist_quote"
+
+🔑 Privilege & Execution
+🔴 CRITICAL  Lethal Trifecta — all three legs active
+    why: All three Lethal Trifecta legs are active: your agent receives outside input, has access to sensitive data, and can act online. One injected prompt is enough to exfiltrate everything.
+    fix: Break the trifecta — remove one leg: lock channels to owner-only, gate outbound/exec behind approval, or move sensitive data out of reach.
+🟠 HIGH  tool profile broader than minimal
+    why: the "coding" profile gives the agent filesystem write, shell, and package-install access — a hijacked agent can run arbitrary code
+    fix: change tools.profile to "minimal"; add only the tools you actually use
 ```
 
 **Section 4 — Coverage of OpenClaw surfaces**
@@ -344,9 +355,12 @@ Read `coverage.summary` and `coverage.gaps` from the JSON.
 ○ Roadmap {roadmap} · ⊘ Not-checkable {not_checkable}  (known gaps — separate axis, not part of the 13)
 ```
 
-For each partial surface (all findings returned UNKNOWN): note that a deeper check (say "menu"
-→ deeper, i.e. `--ask` then `--attest`) may resolve it. For each entry in `coverage.gaps.not_checkable`: note it is out of static scope —
-OpenClaw has no config control to audit there.
+For each partial surface (all findings returned UNKNOWN): if it's Privilege & Execution (B43/B44)
+and item 1 already ran the capability self-report in Step 2, it's likely already resolved — don't
+tell the user to run something that just ran. For any other still-partial surface, note that
+answering `--ask` then `--attest` (Step 5 "deeper / capability check") may resolve it. For each
+entry in `coverage.gaps.not_checkable`: note it is out of static scope — OpenClaw has no config
+control to audit there.
 
 **Section 5 — Worth a glance**
 
@@ -374,12 +388,14 @@ attack, choose the live test from the menu below."
 
 **Section 7 — Next menu (inline, same message)**
 
-Append immediately at the end of the Dashboard (see Step 4 for routing detail):
+Append immediately at the end of the Dashboard (see Step 4 for routing detail). No "deeper scan"
+item — the capability self-report already ran automatically in Step 2 (F-043), so there's nothing
+left to offer as a separate follow-up (C-132).
 
 ```
 Next — ✅ read-only · ⚡ touches live agent (asks)
-  a ✅ Copy-paste fixes   b ✅ Deeper scan (resolve UNKNOWN)
-  c ⚡ Live injection test  d ✅ Turn on monitoring   Start with a?
+  a ✅ Copy-paste fixes     b ⚡ Live injection test
+  c ✅ Turn on monitoring   d ✅ Save full report   e ✅ Menu   Start with a?
 ```
 
 ### Step 4 — Next menu routing
@@ -391,15 +407,17 @@ before running an active test).
 | Menu item | Tag | Maps to |
 |-----------|-----|---------|
 | a Copy-paste fixes | ✅ | Step 5 "fix help" → `--prompts` |
-| b Deeper scan | ✅ | Step 5 "deeper / capability check" → `--ask` then `--attest` |
-| c Live injection test | ⚡ | Step 5 "live test" → `--canary` then `--dryrun` (then optionally `--redteam`) |
-| d Turn on monitoring | ✅ | Step 5 "monitoring" → `--monitor` (tell user about snapshot first) |
+| b Live injection test | ⚡ | Step 5 "live test" → `--canary` then `--dryrun` (then optionally `--redteam`) |
+| c Turn on monitoring | ✅ | Step 5 "monitoring" → `--monitor` (tell user about snapshot first) |
+| d Save full report | ✅ | `--save <path>` (or `--html <path>` / `--sarif <path>` if the user wants that format) — writes the same Dashboard content to a local file. |
+| e Menu | ✅ | Back to Step 1 (`--menu` / the pre-scan screen) |
 
 Adapt the menu to the audit result:
 - **Always offer item a** if there are any FAIL findings.
-- **Offer item b** if `coverage.summary.partial` > 0 (UNKNOWN surfaces remain).
-- **Offer item c** if grade is C or worse, or if the user asks about injection resistance.
-- **Offer item d** unless the user has recently run `--monitor`.
+- **Offer item b** if grade is C or worse, or if the user asks about injection resistance.
+- **Offer item c** unless the user has recently run `--monitor`.
+- **Always offer d and e** — save/report and back-to-menu are standing closing choices, not
+  conditional on the audit result.
 - **If grade is A or B with no critical issues**, lean toward monitoring and canary testing rather
   than fix prompts.
 
@@ -448,6 +466,11 @@ Remind the user: this is a static config check only, entirely local and read-onl
 connect to the MCP server and does not change any configuration.
 
 #### Choice: deeper / capability check / "what dangerous actions can my agent take" / "least privilege" / "check my tools"
+
+This is the same interrogation protocol Step 2 already runs automatically the first time the user
+picks "Check everything" (F-043 — there's no separate post-scan "deeper" menu pick anymore). Use
+this section directly when the user asks about capability/blast-radius **outside** a fresh scan —
+mid-conversation, on an older result, or to refresh self-report data since the last `--full` run.
 
 The static scan reads config files only. It cannot see the agent's **real tool/verb inventory**,
 whether untrusted input can reach a side-effect, or host monitors a file scan can't detect — none

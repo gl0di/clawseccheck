@@ -402,8 +402,10 @@ clobber your other keys. Also surfaced per finding in `--json` (`"remediation"`)
 When you run the skill inside OpenClaw, the agent executes `audit.py`, captures its output,
 and shows it to you **right there in the chat** — no terminal, no setup. You see:
 
-1. your **Score / Grade / Lethal Trifecta** ratio,
-2. the **fix list, most urgent first**, in plain language, and
+1. your **Score / Grade**,
+2. **findings grouped by area** (network, privilege, supply chain, secrets, …), most urgent
+   first within each — the Lethal Trifecta shows up here too, as a Privilege & Execution
+   finding, not a separate headline, and
 3. a **shareable card** — grade + score + Lethal Trifecta ratio, safe to post (the findings stay
    private; `--badge` writes the same grade + score as an SVG).
 

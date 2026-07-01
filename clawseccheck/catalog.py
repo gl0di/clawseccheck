@@ -54,6 +54,20 @@ FAMILY_OF: dict[str, str] = {
     "update":     "automation",
 }
 
+# Human-facing family labels, in the fixed order the Dashboard renders them.
+# "trifecta" (A1) is routed to "privilege" by the report renderer — it's an
+# agent-behavior signal, not its own bucket (unblocks F-044).
+FAMILY_LABEL: dict[str, str] = {
+    "exposure":          "Exposure & Network",
+    "privilege":         "Privilege & Execution",
+    "supply_chain":      "Supply Chain",
+    "content_integrity": "Content & Memory Integrity",
+    "secrets":           "Secrets & Data",
+    "detection":         "Detection & Host",
+    "automation":        "Automation & Maintenance",
+}
+FAMILY_ORDER: tuple[str, ...] = tuple(FAMILY_LABEL.keys())
+
 
 @dataclass(frozen=True)
 class CheckMeta:
