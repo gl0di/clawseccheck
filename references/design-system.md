@@ -108,7 +108,7 @@ pure rendering switch.
 | **Discovery & onboarding** ||||
 | 12 | **Menu / All functions** (capability palette) | guided | "menu" / `?` / `[More…]` | ✅ drawn |
 | 13 | **No-config / first-run** (`~/.openclaw` missing) | guided + CLI | empty/missing home | ✅ drawn |
-| 14 | **Update flow** (check → result → offer) | guided | "update" / `[Check update]` | ▢ todo |
+| 14 | **Update flow** (check → result → offer) | guided | "update" / `[Check update]` | ✅ drawn |
 
 > Also pending: a **clean-result Dashboard** variant (Grade A / 0 issues) — Component 3 must
 > cover the "all good" state, not just the vulnerable case.
@@ -462,3 +462,31 @@ Once I can see it, say "check" and I'll run {N} security checks across your setu
 `--ascii` drops 🦞 and folds `•`→`-`); the home path is `report._sanitize`d before display.
 `tests/test_onboarding.py` covers both reasons, the present-but-unreadable / junk exclusions, the
 `--json` machine-contract, and ASCII purity. `mono`/`interactive` reuse the `text` body verbatim.
+
+### 14. Update flow — check → result → offer · "update"
+
+The staleness → refresh path behind Welcome's 🆙 affordance ("say update", F-042) and the report
+footer's update notice. **Golden rule #1 holds: the tool never phones home.** ClawSecCheck only
+ever reads two *local* signals — the build date (`__released__`) and an optional local hint file
+`~/.clawseccheck/latest.json` (`update.read_latest_hint`, tolerant of missing/malformed) — and
+`update.update_notice()` turns them into the advisory. The **network step is the host agent's**,
+not the tool's: an outbound *version query* to ClawHub carrying zero user data.
+
+**The advisory (tool-side, offline) — `update.update_notice()`, in the report footer:**
+
+- newer version known locally: `A newer ClawSecCheck is available: v{latest} (you have v{current}).`
+- else, stale build: `This ClawSecCheck build is {age} days old (v{current}, released {date}).`
+- every advisory ends with the honesty tag: `(offline notice: … ClawSecCheck made no network call)`.
+- silence when neither signal fires; suppressible via `--no-update-notice` / `CLAWSECCHECK_NO_UPDATE_NOTICE`.
+
+**The flow (two steps, on "update"):**
+
+1. **Check** — the host agent queries ClawHub for the latest version (outbound, version-only).
+2. **Result → offer** — if newer, it offers `openclaw skills update clawseccheck`; on yes, the agent
+   runs it. If current, it says so. The tool is never in the network path — it only *emitted* the
+   nudge and *reads* the local hint the client may have dropped.
+
+**Profiles:** `text`/`mono` render the notice lines (🆙 in the menu, ⏳ bullet in the report footer;
+`--ascii` folds to `*`). `interactive` MAY offer an `[Update]` button that re-emits "update"; degrades
+to the text nudge. **SKILL.md** routes the spoken "update" per Step 1's mode map — the agent does the
+ClawHub check and the offer; the tool stays offline throughout.
