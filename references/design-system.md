@@ -125,7 +125,11 @@ One component → up to three renderings. **`text` is the contract every screen 
   border): with nothing to align on the right it survives proportional fonts as three short
   lines instead of a broken grid. If a screen works here, it works everywhere.
 - **`mono` — terminal / TUI enhancement.** May add closed box-drawing, aligned columns, ANSI color.
-  `--ascii` strips emoji + box back toward `text`.
+  `--ascii` strips emoji + box back toward `text`. The CLI report (`report.py`) implements the
+  colour tier: grade letter, score-bar fill and severity icons are ANSI-painted **only** for an
+  interactive TTY, and switched off by `--no-color` / `NO_COLOR` (piped output is plain). Colour
+  is purely additive — `ansi.strip_ansi()` restores the exact `text` bytes, so `--save` files
+  and non-terminal consumers never carry escape codes.
 - **`interactive` — button-capable channels (Telegram, Discord, Slack, Teams, Mattermost,
   Feishu).** `Choices[]`/`Actions[]` → native buttons via `MessagePresentation`. Grounded.
   **Must degrade gracefully:** buttons are capability-gated (Telegram default `allowlist`,

@@ -299,8 +299,14 @@ python3 audit.py --menu          # the capability menu (what you can do)
 python3 audit.py --json          # machine-readable
 python3 audit.py --card          # just the badge
 python3 audit.py --ascii         # plain output (no unicode icons/box)
+python3 audit.py --no-color      # disable ANSI colour (see below)
 python3 audit.py --home ~/.openclaw
 ```
+
+The terminal report is colourised (grade, score-bar, severity icons) **only** when output is
+an interactive terminal. Colour is switched off automatically when the output is piped or
+redirected, by `--no-color`, or by the [`NO_COLOR`](https://no-color.org) environment variable;
+`FORCE_COLOR` forces it on. Saved reports (`--save`) are always written as plain text.
 
 On **Windows** use `python` (or `py`); the script auto-detects consoles that can't render
 unicode and falls back to ASCII, or force it with `--ascii`:

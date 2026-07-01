@@ -21,6 +21,7 @@ from .catalog import (
     FAMILY_LABEL, FAMILY_OF, FAMILY_ORDER,
     ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
+from .ansi import paint
 from .dedup import deduplicate_findings
 from .guide import suggest_actions
 from .scoring import ScoreResult
@@ -48,6 +49,92 @@ _SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}
 _STATUS_ORDER = {FAIL: 0, WARN: 1, UNKNOWN: 2, PASS: 3}
 _ICON = {FAIL: "⛔", WARN: "⚠️", PASS: "✅", UNKNOWN: "❔", "SKILL_ARCHIVE_PATH_TRAVERSAL": "❔"}
 _ICON_ASCII = {FAIL: "[X]", WARN: "[!]", PASS: "[OK]", UNKNOWN: "[?]", "SKILL_ARCHIVE_PATH_TRAVERSAL": "[?]"}
+
+# ── ANSI colour palette (opt-in; see ansi.py) ────────────────────────────────
+# Grade → colour for the header grade letter + score-bar fill.
+_GRADE_COLOR = {"A": "green", "B": "green", "C": "yellow", "D": "bright_yellow", "F": "red"}
+# Status → colour for finding icons / coverage states.
+_STATUS_COLOR = {
+    FAIL: "red", WARN: "yellow", PASS: "green", UNKNOWN: "grey",
+    "SKILL_ARCHIVE_PATH_TRAVERSAL": "grey",
+}
+
+
+def _grade_color(grade: str) -> str:
+    """Map a grade label (possibly 'A+', 'B-', …) to a palette colour name."""
+    return _GRADE_COLOR.get((grade or "")[:1].upper(), "grey")
+
+
+def _color_icons(icon: dict, color: bool) -> dict:
+    """Return an icon map with each glyph pre-painted by status (or the map as-is)."""
+    if not color:
+        return icon
+    return {k: paint(v, _STATUS_COLOR.get(k, "grey"), enabled=True) for k, v in icon.items()}
+
+
+def _score_bar(score: int, grade: str, *, ascii_only: bool = False, color: bool = False) -> str:
+    """Render a 16-cell score bar. Unicode ``█░`` by default; ``[####----]`` under --ascii.
+
+    The fill is proportional to score/100 (rounded, clamped to 0..16). When colour is on
+    the filled run takes the grade colour and the empty run is dimmed; brackets stay plain.
+    """
+    cells = 16
+    filled = max(0, min(cells, round(score / 100 * cells)))
+    empty = cells - filled
+    if ascii_only:
+        fill_s, empty_s, lb, rb = "#" * filled, "-" * empty, "[", "]"
+    else:
+        fill_s, empty_s, lb, rb = "█" * filled, "░" * empty, "", ""
+    if color:
+        fill_s = paint(fill_s, _grade_color(grade), enabled=True)
+        empty_s = paint(empty_s, "grey", enabled=True)
+    return f"{lb}{fill_s}{empty_s}{rb}"
+
+
+# Coverage-map state glyphs (unicode / ascii) + colour, keyed to coverage.py states.
+_COV_GLYPH = {"checked": "✅", "partial": "◑", "roadmap": "○", "not_checkable": "⊘"}
+_COV_GLYPH_ASCII = {"checked": "[OK]", "partial": "[~]", "roadmap": "[ ]", "not_checkable": "[x]"}
+_COV_COLOR = {"checked": "green", "partial": "yellow", "roadmap": "grey", "not_checkable": "grey"}
+
+
+def _coverage_lines(findings: list[Finding], *, ascii_only: bool = False,
+                    color: bool = False) -> list[str]:
+    """Render the OpenClaw-surface coverage map for the terminal report.
+
+    Grounded strictly in ``coverage.coverage()`` output — the 13 config surfaces split into
+    ``checked``/``partial``, plus the static, recon-grounded ``not_checkable`` names and any
+    ``roadmap`` gaps. Nothing is invented: only states the engine actually produced appear.
+    """
+    from .coverage import coverage as _coverage  # noqa: PLC0415
+
+    cov = _coverage(findings)
+    summary = cov["summary"]
+    glyph = _COV_GLYPH_ASCII if ascii_only else _COV_GLYPH
+    dot, rule = ("|", "--") if ascii_only else ("·", "—")
+
+    def _g(state: str) -> str:
+        g = glyph[state]
+        return paint(g, _COV_COLOR[state], enabled=True) if color else g
+
+    total = summary["checked"] + summary["partial"]  # the 13 config-checkable surfaces
+    lines = [f"{rule} Coverage of OpenClaw surfaces {rule}"]
+    lines.append(
+        f"{_g('checked')} checked {summary['checked']} {dot} "
+        f"{_g('partial')} partial/unknown {summary['partial']}  "
+        f"(of {total} config surfaces)"
+    )
+    not_checkable = cov["gaps"]["not_checkable"]
+    if not_checkable:
+        names = ", ".join(_sanitize(n) for n in not_checkable)
+        lines.append(
+            f"{_g('not_checkable')} not-checkable {len(not_checkable)} "
+            f"(no OpenClaw config control): {names}"
+        )
+    roadmap = cov["gaps"]["roadmap"]
+    if roadmap:
+        names = ", ".join(_sanitize(n) for n in roadmap)
+        lines.append(f"{_g('roadmap')} roadmap {len(roadmap)} (no check yet): {names}")
+    return lines
 
 _ASCII_MAP = str.maketrans({
     "×": "x", "≤": "<=", "≥": ">=", "—": "-", "–": "-", "…": "...",
@@ -449,9 +536,9 @@ def render_report(findings: list[Finding], score: ScoreResult,
                   *, risk=None, update_notice: list[str] | None = None,
                   freshness_notice: list[str] | None = None,
                   openclaw_detected: bool = True, ctx=None,
-                  verbose: bool = False) -> str:
+                  verbose: bool = False, color: bool = False) -> str:
     findings = deduplicate_findings(findings)
-    icon = _ICON_ASCII if ascii_only else _ICON
+    icon = _color_icons(_ICON_ASCII if ascii_only else _ICON, color)
     ok = "[OK]" if ascii_only else "✅"
     # Supply cfg to _render_finding only in verbose mode so blast-radius lines appear.
     _blast_cfg: dict | None = (getattr(ctx, "config", {}) or {}) if (verbose and ctx is not None) else None
@@ -459,8 +546,10 @@ def render_report(findings: list[Finding], score: ScoreResult,
     issues = [f for f in findings
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
+    grade_disp = paint(score.grade, _grade_color(score.grade), "bold", enabled=True) if color else score.grade
     lines = ["ClawSecCheck - OpenClaw Security Audit", "=" * 44,
-             f"Score: {score.score}/100   Grade: {score.grade}"]
+             f"Score: {score.score}/100   Grade: {grade_disp}",
+             _score_bar(score.score, score.grade, ascii_only=ascii_only, color=color)]
     if score.capped:
         lines.append(f"(capped from {score.raw_score} - open {score.cap_severity or 'CRITICAL'} finding)")
 
@@ -543,14 +632,15 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 continue
             members.sort(key=lambda f: (_STATUS_ORDER.get(f.status, 9), _SEV_ORDER.get(f.severity, 9)))
             label = FAMILY_LABEL.get(fam_key, "Other")
+            label_disp = paint(label, "bold", enabled=True) if color else label
             n_bad = sum(1 for f in members if f.status in (FAIL, WARN))
             count_text = f"{n_bad} to fix" if n_bad else "clear"
             if ascii_only:
-                lines.append(f"[{label}] — {count_text}")
+                lines.append(f"[{label_disp}] — {count_text}")
             else:
                 _rule = "─" * 30
                 lines.append(f"┌{_rule}")
-                lines.append(f"│ {label} — {count_text}")
+                lines.append(f"│ {label_disp} — {count_text}")
                 lines.append(f"└{_rule}")
             n_unknown = 0
             for f in members:
@@ -568,6 +658,14 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 lines.append(f"  {unk_icon} {n_unknown} not assessed (config can't tell) —"
                              " resolve via `--ask` then `--attest`")
             lines.append("")
+
+    # Coverage map — "check OpenClaw the platform" framing: how many config surfaces this
+    # run actually assessed, honestly split checked / partial / not-checkable (F-031 data,
+    # C-102 terminal render). Read-only derivation over the findings; never alters the score.
+    if findings:
+        lines.append("")
+        lines.extend(_coverage_lines(findings, ascii_only=ascii_only, color=color))
+        lines.append("")
 
     cap_lines = _capability_graph_lines(ctx) if ctx is not None else []
     if cap_lines:

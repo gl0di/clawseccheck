@@ -30,6 +30,7 @@ from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
 from .report import render_html
 from .report import _sanitize
+from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE
 from .redteam import make_suite, render_suite
 from .dryrun import make_scenarios, render_dryrun
@@ -256,6 +257,9 @@ def main(argv=None) -> int:
     p.add_argument("--menu", action="store_true",
                    help="print the capability menu (the guided Welcome screen) and exit")
     p.add_argument("--ascii", action="store_true", help="ASCII-only output (no unicode icons/box)")
+    p.add_argument("--no-color", action="store_true",
+                   help="disable ANSI colour (also honoured via the NO_COLOR env var; "
+                        "colour is auto-off when output is not a terminal)")
     p.add_argument("--no-native", action="store_true",
                    help="do not also run the built-in `openclaw security audit`")
     p.add_argument("--no-host", action="store_true",
@@ -348,6 +352,10 @@ def main(argv=None) -> int:
         print(_note, file=sys.stderr)
 
     ascii_only = args.ascii or not _unicode_ok()
+    # Colour is a terminal-only presentation layer: auto-off when piped/redirected,
+    # always overridable by --no-color / NO_COLOR (see ansi.should_color). Saved reports
+    # are stripped back to plain text below so files never carry escape codes.
+    use_color = should_color(no_color_flag=args.no_color)
 
     # Set up safe logger early — level from --verbose/--debug; file only when --log given.
     logger = get_logger(
@@ -675,7 +683,7 @@ def main(argv=None) -> int:
             f_notice = _compute_freshness(load_ledger(), skip=_refreshed)
         parts = [render_report(findings, score, ascii_only, native=ctx.native,
                                risk=paths, update_notice=notice, freshness_notice=f_notice,
-                               openclaw_detected=ctx.config_found, ctx=ctx),
+                               openclaw_detected=ctx.config_found, ctx=ctx, color=use_color),
                  "", render_card(score, findings, ascii_only)]
         if ctx.errors:
             parts.append("\nnotes:\n" + "\n".join(f"  - {_sanitize(e)}" for e in ctx.errors))
@@ -726,7 +734,9 @@ def main(argv=None) -> int:
     _save_failed = False
     if args.save:
         try:
-            secure_write_text(Path(args.save).expanduser(), body)
+            # Persist plain text — a saved report must never carry ANSI escape codes,
+            # even when the on-screen copy was colourised for the terminal.
+            secure_write_text(Path(args.save).expanduser(), strip_ansi(body))
             _emit(f"\n(report saved to {args.save})")
         except OSError as exc:
             _emit(f"\n(could not save report: {exc})")
