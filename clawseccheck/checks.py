@@ -1904,6 +1904,66 @@ _SKILL_INJECTION = [
                 r"bypass\s+the\s+(confirmation|approval)\s+(prompt|step|dialog)|"
                 r"don'?t\s+ask\s+(the\s+user\s+)?for\s+(permission|confirmation|approval)", re.I)),
 ]
+
+# F-052: safety-subversion (AR1-3) & system-prompt/tool-definition leak (P6-8) directives in
+# skill prose. Unlike the dual-use _SKILL_INJECTION entries these are malicious on their own
+# (no cred/exfil co-signal), but they are also the exact phrases a *security* skill quotes as
+# examples — so each hit is dampened by _in_example_context (fence + negation + a wider
+# security-documentation vocabulary window) to hold zero false positives.
+_SKILL_SAFETY_SUBVERSION = [
+    ("anti-refusal directive",
+     re.compile(r"\b(?:you\s+(?:must|will|should)\s+)?never\s+refuse\b|"
+                r"\bdo\s+not\s+refuse\s+(?:any|the|to|my)\b|"
+                r"\brefuse\s+nothing\b|"
+                r"\bcomply\s+with\s+(?:any|all|every|each)\s+(?:request|instruction|command)", re.I)),
+    ("safety-policy override directive",
+     re.compile(r"\b(?:ignore|disregard|bypass|override|disable|turn\s+off|forget)\s+"
+                r"(?:your\s+|the\s+|all\s+)?(?:safety|security|content|moderation|ethical)\s+"
+                r"(?:guidelines?|guardrails?|guard\s?rails?|policy|policies|rules?|filters?|"
+                r"restrictions?|constraints?)", re.I)),
+    ("no-warnings directive",
+     re.compile(r"\bdo\s+not\s+(?:add|include|show|give|display|write|append)\s+(?:any\s+)?"
+                r"(?:warnings?|disclaimers?|caveats?|safety\s+notices?)\b|"
+                r"\bwithout\s+(?:any\s+)?(?:warnings?|disclaimers?|caveats?)\b|"
+                r"\bomit\s+(?:all\s+)?(?:warnings?|disclaimers?|caveats?)\b", re.I)),
+    ("system-prompt leak directive",
+     re.compile(r"\b(?:print|output|reveal|repeat|echo|display|reproduce|dump|show)\s+"
+                r"(?:me\s+)?(?:your\s+|the\s+)?(?:full\s+|entire\s+|complete\s+|exact\s+)?"
+                r"system\s+(?:prompt|instructions|message)\b|"
+                r"\byour\s+(?:system\s+)?(?:prompt|instructions)\s+"
+                r"(?:verbatim|word.for.word|exactly|in\s+full)\b|"
+                r"\bwhat\s+are\s+your\s+(?:system\s+)?(?:instructions|prompt)\b", re.I)),
+    ("tool-definition leak directive",
+     re.compile(r"\b(?:reveal|dump|print|output|list|show)\s+(?:me\s+)?(?:all\s+)?"
+                r"(?:your\s+|the\s+)?(?:tool|function)\s+"
+                r"(?:definitions?|schemas?|signatures?|specs?)\b|"
+                r"\b(?:reveal|dump|list|enumerate)\s+(?:all\s+)?(?:the\s+)?tools?\s+"
+                r"(?:you\s+have\s+access\s+to|available\s+to\s+you|you\s+can\s+use)\b", re.I)),
+]
+
+# Wider "this is a documented example, not a live instruction" vocabulary than
+# _negation_context: a security skill that quotes these attack phrases surrounds them with
+# words like e.g. / malicious / attacker / scanner / detect / flag / like. Any of these within
+# _SAFETY_EXAMPLE_WINDOW chars of the hit dampens it.
+_SAFETY_EXAMPLE_WINDOW = 160
+_SAFETY_EXAMPLE_RE = re.compile(
+    r"\b(?:e\.?g\.?|i\.?e\.?|for\s+example|for\s+instance|such\s+as|examples?|"
+    r"malicious|malware|attacker|adversar|phish|red[\s-]?team|injection|jailbreak|"
+    r"detect|detector|flag(?:s|ged|ging)?|scan(?:s|ner|ning)?|audit|review|"
+    r"never\s+(?:say|write|include|use)|avoid|instead\s+of|rather\s+than|"
+    r"looks?\s+like|might\s+(?:say|instruct|ask|contain)|would\s+(?:say|instruct)|"
+    r"such\s+directives?|these\s+(?:phrases?|patterns?|directives?)|watch\s+(?:out\s+)?for)\b",
+    re.I)
+
+
+def _in_example_context(blob: str, pos: int, fence_ranges: list[tuple[int, int]]) -> bool:
+    """True when the match at *pos* is a documented example, not a live directive — either
+    inside a fence / negation window (_is_code_example) or surrounded by security-doc
+    vocabulary (_SAFETY_EXAMPLE_RE) within _SAFETY_EXAMPLE_WINDOW chars."""
+    if _is_code_example(blob, pos, fence_ranges):
+        return True
+    seg = blob[max(0, pos - _SAFETY_EXAMPLE_WINDOW): pos + _SAFETY_EXAMPLE_WINDOW]
+    return bool(_SAFETY_EXAMPLE_RE.search(seg))
 # `curl URL | sh` is how uv/rustup/brew/deno legitimately install — only suspicious when the
 # host is NOT a well-known installer domain.
 _REPUTABLE_INSTALL_HOSTS = (
@@ -2300,6 +2360,15 @@ def check_installed_skills(ctx: Context) -> Finding:
         for label, standalone, rx in _SKILL_INJECTION:
             if rx.search(_blob_norm) and (standalone or cred_exfil_signal):
                 high.append(f"{name}: injection directive — {label}")
+
+        # F-052: anti-refusal + system-prompt/tool-definition leak directives. Malicious on
+        # their own (no co-signal), but dampened by _in_example_context so a security skill
+        # that quotes them as examples stays clean. Fence-position-aware -> search raw blob.
+        for label, rx in _SKILL_SAFETY_SUBVERSION:
+            for m in rx.finditer(blob):
+                if not _in_example_context(blob, m.start(), _fr):
+                    high.append(f"{name}: injection directive — {label}")
+                    break
 
         # C-040: persistence / rogue-agent patterns — HIGH (self-mod, cron/startup)
         # and WARN (backgrounding/daemonize). Fence-aware via _is_code_example.
