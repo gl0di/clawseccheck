@@ -87,7 +87,12 @@ def test_vet_sarif_writes_valid_file(tmp_path, capsys):
     assert sarif["version"] == "2.1.0"
     run = sarif["runs"][0]
     results = run["results"]
-    assert len(results) == 1 and results[0]["ruleId"] == "B13"
+    # F-048: --vet SARIF now carries the content-ring findings alongside B13. The dirty
+    # skill trips B13 (exec, CRITICAL) as the primary verdict plus B64 (instruction-
+    # hierarchy override) from the ring.
+    rule_ids = [r["ruleId"] for r in results]
+    assert results[0]["ruleId"] == "B13"
+    assert "B64" in rule_ids
     # text report still printed alongside the SARIF side output
     assert "DANGEROUS" in capsys.readouterr().out
 

@@ -2490,6 +2490,39 @@ def _is_own_source(p: Path) -> bool:
     return all(m in head for m in _OWN_ENGINE_MARKERS)
 
 
+# F-048: the pre-install vet path runs the shared SKILL_CONTENT_RING (defined near the
+# CHECKS list) in addition to check_installed_skills, so --vet reaches the same
+# skill-intelligence checks the full audit applies to already-installed skills.
+_VET_MERGE_RANK = {FAIL: 3, WARN: 2, UNKNOWN: 1, PASS: 0}
+
+
+def _run_content_ring(ctx: Context) -> list[Finding]:
+    """Run SKILL_CONTENT_RING against `ctx` and return only the actionable (FAIL/WARN)
+    findings, de-duplicated by (id, detail).
+
+    PASS/UNKNOWN ring results are dropped on purpose: for a pre-install verdict they add
+    no signal, and an UNKNOWN would wrongly outrank a clean PASS (flipping a safe skill to
+    "could not assess"). Every ring check is defensive — it returns PASS/UNKNOWN when its
+    inputs are absent — so a skill-only ctx (no bootstrap/config) never yields a spurious
+    FAIL. A ring check must never break --vet, so a failing check is skipped.
+    """
+    out: list[Finding] = []
+    seen: set[tuple[str, str]] = set()
+    for check in SKILL_CONTENT_RING:
+        try:
+            fx = check(ctx)
+        except Exception:  # noqa: BLE001 — a ring check must never break --vet
+            continue
+        if fx.status not in (FAIL, WARN):
+            continue
+        key = (fx.id, fx.detail)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(fx)
+    return out
+
+
 def vet_skill(path: str | Path) -> Finding:
     """Vet a skill BEFORE installing it: run the B13 scan on a local skill dir or SKILL.md."""
     p = Path(path).expanduser()
@@ -2523,6 +2556,19 @@ def vet_skill(path: str | Path) -> Finding:
     ctx.installed_skills = {name or "skill": text}
     ctx.installed_skill_py = {name or "skill": py_sources}
     finding = check_installed_skills(ctx)
+    # F-048: also run the shared content-security ring. check_installed_skills has already
+    # populated ctx.effect_profiles (so B62 can compare declared vs actual capability), and
+    # ctx.installed_skills / ctx.installed_skill_py are set above. Fold in only the
+    # actionable (FAIL/WARN) ring results: surface the worst as the primary verdict and
+    # carry the rest on .ring_findings for the JSON / human / SARIF renderers.
+    ring = _run_content_ring(ctx)
+    if ring:
+        pool = [finding, *ring]
+        primary = max(pool, key=lambda fx: _VET_MERGE_RANK.get(fx.status, 0))
+        primary.ring_findings = [fx for fx in pool
+                                 if fx is not primary and fx.status in (FAIL, WARN)]
+        primary.ctx = ctx
+        return primary
     finding.ctx = ctx
     return finding
 
@@ -8726,6 +8772,38 @@ def check_session_approval_policy(ctx: Context) -> Finding:
     )
 
 
+# ---------------------------------------------------------------------------
+# SKILL_CONTENT_RING — single source of truth for content-security ring checks.
+#
+# These checks all read ctx.installed_skills (and optionally ctx.bootstrap,
+# ctx.installed_skill_py, ctx.effect_profiles) and are therefore meaningful
+# both in the full audit (where they already appear in CHECKS below) AND in
+# the pre-install vet path (vet_skill), which populates ctx.installed_skills
+# before running them.
+#
+# Rules for membership:
+#   - Must read ctx.installed_skills (so a skill-free vet path returns UNKNOWN,
+#     not a false FAIL).
+#   - Must keep its existing calibration / severity — no upgrades here.
+#   - B67 (per-source trust contracts) is included; it returns UNKNOWN when
+#     ctx.bootstrap is empty, which is the correct result for a --vet run that
+#     has no bootstrap files to inspect.
+# ---------------------------------------------------------------------------
+SKILL_CONTENT_RING = (
+    check_markdown_image_exfil,           # B59 — MD-image data-exfil
+    check_image_attr_injection,            # C074 — HTML img-attr injection
+    check_prompt_self_replication,         # B60 — self-replication directive
+    check_agent_snooping,                  # B61 — cross-agent config snooping
+    check_capability_intent_mismatch,      # B62 — capability–intent mismatch
+    check_silent_instruction,              # B63 — "don't tell the user"
+    check_instruction_hierarchy_override,  # B64 — instruction-hierarchy override
+    check_conditional_sleeper_trigger,     # B65 — conditional sleeper-trigger
+    check_persona_jailbreak,               # B66 — persona / DAN jailbreak
+    check_per_source_trust_contracts,      # B67 — per-source trust contracts
+    check_forged_provenance,               # B74 — forged role / false-provenance
+    check_install_policy,                  # B42 — install-time policy (hooks + dir perms)
+)
+
 CHECKS = [
     check_trifecta, check_secrets, check_secrets_at_rest_home, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -8741,7 +8819,7 @@ CHECKS = [
     check_sender_identity, check_control_plane_mutation,
     check_browser_ssrf, check_session_visibility,
     check_untrusted_context, check_known_vulns,
-    check_credential_blast_radius, check_effective_tools, check_install_policy,
+    check_credential_blast_radius, check_effective_tools,
     check_host_network_ids, check_host_audit, check_host_file_integrity,
     check_host_edr, check_host_firewall,
     check_capability_blast_radius, check_attestation_mismatch,
@@ -8752,23 +8830,16 @@ CHECKS = [
     check_hook_policy_bypass,
     check_cron_scheduler,
     check_unicode_obfuscation,
-    check_markdown_image_exfil,
-    check_image_attr_injection,
-    check_prompt_self_replication,
-    check_agent_snooping,
-    check_capability_intent_mismatch,
-    check_silent_instruction,
-    check_instruction_hierarchy_override,
-    check_conditional_sleeper_trigger,
-    check_persona_jailbreak,
-    check_per_source_trust_contracts,
+    # Content-security ring — single source of truth (also consumed by vet_skill).
+    # SKILL_CONTENT_RING is defined just above; changing it updates both the full audit
+    # and the --vet path so they can never drift apart.
+    *SKILL_CONTENT_RING,
     check_exec_applypatch_workspace,
     check_exec_strict_inline_eval,
     check_trustedproxy_loopback,
     check_node_denycommands_ineffective,
     check_subagents_allow_agents,
     check_discovery_mdns_mode,
-    check_forged_provenance,
     check_mcp_tool_inheritance,
     check_mcp_bypass_highblast,
     check_config_audit_log,

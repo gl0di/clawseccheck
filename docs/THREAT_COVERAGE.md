@@ -6,8 +6,9 @@ all (so they can't even surface as a finding). Updated 2026-06-30 for v2.5.5.
 
 Current catalog: A1 plus the B-series (B1–B79) and C-series (C3–C074) — 81 checks total;
 see `docs/CHECKS.md` for the full generated list, plus the
-combinational risk engine `RISK-01..RISK-17`, the install-time vetters `--vet` (B13 on
-an uninstalled skill, now AST- and injection-aware) / `--vet-mcp`, and the **attestation
+combinational risk engine `RISK-01..RISK-17`, the install-time vetters `--vet` (B13 plus
+the content-security ring — B59–B67 / B74 / B42 — on an uninstalled skill; AST-, injection-,
+and capability-intent-aware) / `--vet-mcp`, and the **attestation
 layer** (`--ask` / `--attest`, with a guided interrogation protocol so the agent self-builds
 the report; `--attest -` reads stdin) that feeds the agent's self-report into B43/B44.
 

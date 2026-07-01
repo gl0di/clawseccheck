@@ -544,7 +544,10 @@ python3 audit.py --log audit.log            # also write log to a local file
   first, then shows only the prioritised next-steps list. Same content as the block appended to
   the default report; useful if you want to re-check recommendations without re-reading the full
   report.
-- **`--vet PATH`** runs the B13 malware scan on a skill *before* you install it (point it at a
+- **`--vet PATH`** runs the full skill-content security scan on a skill *before* you install it —
+  the B13 malware scan **plus** the content-security ring (capability-intent mismatch, cross-agent
+  snooping, silent-instruction / jailbreak / forged-provenance directives) the full audit runs on
+  installed skills (point it at a
   downloaded folder or `SKILL.md`; for a URL, clone it first, then vet the local copy). Verdict:
   SAFE / SUSPICIOUS / DANGEROUS. Add `--json` for a machine-readable verdict + findings (no score —
   vetting isn't a scored audit), or `--sarif PATH` to drop a SARIF file for CI / code scanning;

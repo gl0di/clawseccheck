@@ -400,14 +400,16 @@ def main(argv=None) -> int:
             try:
                 secure_write_text(
                     Path(args.sarif).expanduser(),
-                    render_sarif([f], tool_version=__version__, ctx=getattr(f, "ctx", None)),
+                    render_sarif([f, *getattr(f, "ring_findings", [])],
+                                 tool_version=__version__, ctx=getattr(f, "ctx", None)),
                 )
                 _emit(f"(SARIF written to {args.sarif})")
             except OSError as exc:
                 _emit(f"(could not write SARIF: {exc})")
         # Primary output: machine-readable JSON, else the human text report.
         if args.json:
-            _emit(render_vet_json([f], mode="vet", target=args.vet, version=__version__))
+            _emit(render_vet_json([f, *getattr(f, "ring_findings", [])],
+                                  mode="vet", target=args.vet, version=__version__))
             return _vet_rc
         verdict = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS": "looks SAFE",
                    "UNKNOWN": "could not assess"}[f.status]
@@ -423,6 +425,14 @@ def main(argv=None) -> int:
             if len(f.evidence) > 12:
                 lines.append(f"      {bullet} (+{len(f.evidence) - 12} more)")
         lines.append(f"    {_sanitize(f.fix)}")
+        ring = getattr(f, "ring_findings", [])
+        if ring:
+            bullet = "*" if ascii_only else "•"
+            lines.append("    Additional signals:")
+            for rf in ring[:12]:
+                lines.append(f"      {bullet} [{rf.status}] {rf.id} — {_sanitize(rf.detail)}")
+            if len(ring) > 12:
+                lines.append(f"      {bullet} (+{len(ring) - 12} more)")
         _emit("\n".join(lines))
         return _vet_rc
 

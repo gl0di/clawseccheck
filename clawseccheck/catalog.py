@@ -688,3 +688,8 @@ class Finding:
     # 'no_signal' = PASS by absence of a bad signal (config absent/default).
     # None for FAIL/WARN/UNKNOWN findings (not meaningful there).
     pass_confidence: str | None = None
+    # vet_skill() attaches per-check ring findings here (content-ring checks B59–B67, B74,
+    # B42) so callers can inspect individual check results without changing the return type.
+    # Not used by the full audit (stays empty); not rendered by report.py / sarif.py
+    # (those iterate the outer finding list, not this field).
+    ring_findings: list = field(default_factory=list)

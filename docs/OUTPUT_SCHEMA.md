@@ -467,6 +467,10 @@ Produced by `--vet` and `--vet-mcp`. Simpler than the full audit — no score, n
 | `verdict` | `str` | `"SAFE"`, `"SUSPICIOUS"`, `"DANGEROUS"`, or `"UNKNOWN"`. |
 | `findings` | `array[Finding]` | All check results. Same Finding shape as §2. |
 
+For `--vet`, `findings` carries the B13 verdict **plus** any content-security ring check
+(B59–B67 / B74 / B42) that fired on the skill — so a single `--vet` run can return several
+findings, and `verdict` reflects the worst of them.
+
 `verdict` is derived from the worst finding status:
 
 - `FAIL` → `"DANGEROUS"`

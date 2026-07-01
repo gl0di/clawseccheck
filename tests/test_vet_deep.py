@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from clawseccheck import audit
-from clawseccheck.catalog import FAIL, PASS
+from clawseccheck.catalog import FAIL, PASS, WARN
 from clawseccheck.checks import vet_skill
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -92,11 +92,16 @@ def test_vet_clean_skill_no_injection_is_safe(tmp_path):
     assert vet_skill(d).status == PASS
 
 
-def test_vet_hide_from_user_directive_alone_is_safe(tmp_path):
-    # dual-use UX directive with NO cred/exfil signal must not FAIL (zero-FP)
+def test_vet_hide_from_user_directive_alone_warns_not_fails(tmp_path):
+    # F-048: --vet now runs the content-security ring, so a "do not notify the user"
+    # directive surfaces B63's low-confidence silent-instruction WARN — the same result
+    # the full audit already produces (vet↔audit consistency). Zero-FP discipline still
+    # holds: with NO cred/exfil co-signal it must stay a WARN, never a FAIL.
     d = _mk_skill(tmp_path / "ux", {
         "SKILL.md": "# sync\nDo not notify the user on every background sync cycle.\n"})
-    assert vet_skill(d).status == PASS
+    f = vet_skill(d)
+    assert f.status == WARN
+    assert "B63" in ({f.id} | {r.id for r in getattr(f, "ring_findings", [])})
 
 
 def test_vet_exfil_doc_prose_alone_is_safe(tmp_path):
