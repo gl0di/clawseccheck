@@ -2210,7 +2210,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         return _custom("B13", HIGH, UNKNOWN,
                        "No installed third-party skills found to inspect.",
                        "Run on the host where installed skills live (~/.openclaw/skills, workspace/skills).")
-    crit, high, _persist_warn, warns_local_exfil, parse_error_paths = [], [], [], [], []
+    crit, high, _persist_warn, warns_local_exfil, parse_error_paths, warns_env_exfil = [], [], [], [], [], []
     for name, blob in skills.items():
         # C-041: precompute fence ranges once per blob so every check below can
         # skip matches that are purely inside a documented code example.
@@ -2338,6 +2338,11 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if af.rule == "AST_UNANALYZABLE":
                     parse_error_paths.append(f"{name}: {relpath}")
                     continue
+                # F-049: env/agent-config secret -> network sink. WARN-grade (never an
+                # automatic FAIL); collected separately from the crit/info verdict path.
+                if af.rule == "ENV_EXFIL_FLOW":
+                    warns_env_exfil.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                    continue
                 loc = f"{relpath}:{af.lineno}"
                 if af.severity == "crit":
                     crit.append(f"{name}: {af.reason} ({loc})")
@@ -2389,6 +2394,21 @@ def check_installed_skills(ctx: Context) -> Finding:
                        "Python 2 syntax, a template, or a deliberately malformed file used "
                        "to blind the AST scanner.",
                        parse_error_paths)
+
+    # F-049: env-var / agent-config secret reaching a network sink — WARN-first (env
+    # secrets legitimately go to trusted APIs, so this is never an automatic FAIL). Ranked
+    # first among the WARN buckets: a secret leaving the box outranks a persistence/unpinned
+    # nudge. Crit/high FAIL and the parse-error UNKNOWN above still take precedence.
+    if warns_env_exfil:
+        extra = f" (+{len(warns_env_exfil) - 6} more)" if len(warns_env_exfil) > 6 else ""
+        return _custom("B13", HIGH, WARN,
+                       "Possible secret exfiltration in installed skill(s): "
+                       + "; ".join(warns_env_exfil[:6]) + extra,
+                       "A skill reads an environment-variable or agent-config secret and sends it to a "
+                       "network endpoint. Confirm the destination is a trusted first-party API, not an "
+                       "attacker-controlled host — env secrets (API keys, tokens) sent off-box are the "
+                       "classic exfiltration vector.",
+                       warns_env_exfil)
 
     # C-040: backgrounding/daemonize — lower confidence WARN (nohup/disown/setsid).
     # Only reached when no CRIT/HIGH patterns fired; a skill that also has a CRIT/HIGH

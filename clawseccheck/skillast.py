@@ -52,6 +52,19 @@ _MAX_FINDINGS_PER_FILE = 25
 # Taint (CRED_EXFIL_FLOW): a credential-FILE's contents flowing into a network sink.
 # Sources are credential FILE paths ONLY — NOT environment variables — so the common
 # legit "read OPENAI_API_KEY, send it as an auth header" pattern is never flagged.
+
+# Taint (ENV_EXFIL_FLOW): env-var reads and agent-config-file reads flowing into a
+# network sink.  Severity is "info" so the WARN path in checks.py controls escalation;
+# FAIL is never automatic because legitimate skills routinely send API keys to trusted
+# endpoints (e.g. posting ANTHROPIC_API_KEY to api.anthropic.com).
+_AGENT_CONFIG_PATH_RE = re.compile(
+    r"\.openclaw/|~/.openclaw|~\\\.openclaw|~/\.config/[^/\"']+/", re.I)
+
+# Sink keyword args that carry a credential as intended auth material (env key ->
+# Authorization header is the normal way a skill talks to its own API). A secret here is
+# NOT exfiltration; only a secret in the URL, body, params, or a positional arg is.
+_ENV_AUTH_KWARGS = frozenset({"headers", "auth", "cert"})
+
 _CRED_PATH_RE = re.compile(
     r"\.ssh/id_|\bid_rsa\b|\bid_ed25519\b|\.aws/credentials|login\.keychain|wallet\.dat|"
     r"keystore\.json|\.npmrc|\.pypirc|\.netrc|\.docker/config|\.kube/config|"
@@ -346,6 +359,142 @@ def _file_tainted(source: str, tree: ast.AST) -> set[str]:
     return _file_read_tainted_names(tree)
 
 
+def _is_env_read_value(node: ast.AST) -> bool:
+    """True if *node* is a direct env-var read call (os.getenv, os.environ.get, os.environ[...]).
+
+    Does NOT include file reads, network reads, or any other external source — env-var
+    reads only, so the taint set stays tightly scoped to the ENV_EXFIL_FLOW rule.
+    """
+    if isinstance(node, ast.Call):
+        f = node.func
+        # os.getenv("X")
+        if isinstance(f, ast.Attribute) and f.attr == "getenv" and _attr_base(f.value) == "os":
+            return True
+        # os.environ.get("X") — func is Attribute(value=Attribute(value=Name("os"), attr="environ"), attr="get")
+        if isinstance(f, ast.Attribute) and f.attr == "get":
+            base = f.value
+            if isinstance(base, ast.Attribute) and base.attr == "environ" and _attr_base(base.value) == "os":
+                return True
+            # environ.get("X") when environ was imported directly
+            if isinstance(base, ast.Name) and base.id == "environ":
+                return True
+    return False
+
+
+def _env_tainted_names(tree: ast.AST) -> set[str]:
+    """Names whose value derives from an env-var read (transitively).
+
+    Sources: os.getenv(), os.environ.get(), os.environ[...] subscript, environ[...].
+    Propagation: simple assignment fixpoint (up to 4 iterations).
+    """
+    tainted: set[str] = set()
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    for _ in range(4):
+        changed = False
+        for a in assigns:
+            rhs = a.value
+            sourced = (
+                _is_env_read_value(rhs)
+                or _rhs_has_subscript_environ(rhs)
+                or bool(_names_in(rhs) & tainted)
+            )
+            if not sourced:
+                # Walk into f-strings and BinOp so  url + os.getenv("KEY") also taints url+key
+                for sub in ast.walk(rhs):
+                    if sub is rhs:
+                        continue
+                    if _is_env_read_value(sub) or _rhs_has_subscript_environ(sub):
+                        sourced = True
+                        break
+            if sourced:
+                for t in a.targets:
+                    if isinstance(t, ast.Name) and t.id not in tainted:
+                        tainted.add(t.id)
+                        changed = True
+                    elif isinstance(t, (ast.Tuple, ast.List)):
+                        for elt in t.elts:
+                            if isinstance(elt, ast.Name) and elt.id not in tainted:
+                                tainted.add(elt.id)
+                                changed = True
+        if not changed:
+            break
+    return tainted
+
+
+def _has_agent_config_path_const(node: ast.AST) -> bool:
+    """True if the subtree contains a string constant naming an agent config file path."""
+    for n in ast.walk(node):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and _AGENT_CONFIG_PATH_RE.search(n.value):
+            return True
+    return False
+
+
+def _agent_config_file_tainted_names(source: str, tree: ast.AST) -> set[str]:
+    """Names whose value derives from reading an agent-config file (transitively).
+
+    Like _file_read_tainted_names but restricted to file-reads whose path argument
+    contains an agent-config path literal (.openclaw/, ~/.config/<agent>/).
+    Returns an empty set when no agent-config path appears in the source (fast path).
+    """
+    if not _AGENT_CONFIG_PATH_RE.search(source):
+        return set()
+    tainted: set[str] = set()
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    for _ in range(4):
+        changed = False
+        for a in assigns:
+            rhs = a.value
+            sourced = (
+                bool(_names_in(rhs) & tainted)
+                or _is_agent_config_read_value(rhs, tainted)
+            )
+            if sourced:
+                for t in a.targets:
+                    if isinstance(t, ast.Name) and t.id not in tainted:
+                        tainted.add(t.id)
+                        changed = True
+        if not changed:
+            break
+    return tainted
+
+
+def _is_agent_config_read_value(node: ast.AST, tainted: set[str]) -> bool:
+    """True if *node* is a file-read on a path that is an agent-config path literal,
+    or references a name already tainted by such a read."""
+    if isinstance(node, ast.Name) and node.id in tainted:
+        return True
+    if isinstance(node, ast.Call):
+        f = node.func
+        # .read() / .read_text() / .readlines() / .read_bytes() on an open() call
+        # whose path argument is an agent-config path literal.
+        if isinstance(f, ast.Attribute) and f.attr in _FILE_READ_METHOD_ATTRS:
+            # The object being called on may be an open(path) call.
+            if _is_agent_config_open_call(f.value):
+                return True
+            # Or a tainted name (propagation).
+            if isinstance(f.value, ast.Name) and f.value.id in tainted:
+                return True
+        # open(path) or Path(path).read_text() etc — check if path has agent-config literal.
+        if isinstance(f, ast.Name) and f.id in _FILE_OPEN_NAMES:
+            if node.args and _has_agent_config_path_const(node.args[0]):
+                return True
+        # Recurse for chained calls.
+        for child in ast.iter_child_nodes(node):
+            if _is_agent_config_read_value(child, tainted):
+                return True
+    return False
+
+
+def _is_agent_config_open_call(node: ast.AST) -> bool:
+    """True if *node* is an open(path) call where path is an agent-config path literal."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    if isinstance(f, ast.Name) and f.id in _FILE_OPEN_NAMES:
+        return bool(node.args and _has_agent_config_path_const(node.args[0]))
+    return False
+
+
 def _has_cred_path_const(node: ast.AST) -> bool:
     """True if the subtree contains a string constant naming a credential file."""
     for n in ast.walk(node):
@@ -528,6 +677,39 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                         and (_names_in(node) & cred_tainted)):
                     add("CRED_EXFIL_FLOW", "crit", getattr(node, "lineno", 0),
                         "credential-file contents flow into a network sink (read secret -> send out)")
+
+    # F-049: env-var / agent-config secret reaching a network sink (SkillSpector E2 env
+    # harvesting + E1 external transmission).  Severity is "info" and checks.py routes it
+    # to a WARN — never an automatic FAIL — because legit skills DO post an env secret to a
+    # trusted endpoint (e.g. ANTHROPIC_API_KEY -> api.anthropic.com) and the scanner cannot
+    # know the destination.  The taint must actually connect: a name assigned from an
+    # env/config read appears in the sink's args, OR an env read is inline in the args.  An
+    # env read that feeds a local sink, or an unrelated network call, never fires.
+    if "environ" in source or "getenv" in source or _AGENT_CONFIG_PATH_RE.search(source):
+        env_src_tainted = _env_tainted_names(tree) | _agent_config_file_tainted_names(source, tree)
+        for node in ast.walk(tree):
+            if len(out) >= _MAX_FINDINGS_PER_FILE:
+                break
+            if not (isinstance(node, ast.Call) and _is_net_sink(node.func)):
+                continue
+            # Only a BODY / URL / params position counts. A secret in headers=/auth= is the
+            # normal way a skill authenticates to its own API (env key -> Authorization
+            # header) and is NOT flagged; exfiltration puts the secret in the URL, request
+            # body, query params, or a positional argument.
+            arg_subtrees = [*node.args,
+                            *(kw.value for kw in node.keywords if kw.arg not in _ENV_AUTH_KWARGS)]
+            hit = False
+            for arg in arg_subtrees:
+                if env_src_tainted and (_names_in(arg) & env_src_tainted):
+                    hit = True
+                    break
+                if any(_is_env_read_value(s) or _rhs_has_subscript_environ(s) for s in ast.walk(arg)):
+                    hit = True
+                    break
+            if hit:
+                add("ENV_EXFIL_FLOW", "info", getattr(node, "lineno", 0),
+                    "an environment-variable or agent-config secret flows into a network "
+                    "sink's URL or body — verify the destination is trusted (possible exfiltration)")
 
     # Extended taint rules: TT5 (external-input -> exec), TT4 (file-read -> network),
     # SSRF (tainted URL -> network-fetch).  Compute external taint once and reuse.
