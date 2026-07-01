@@ -395,6 +395,9 @@ to do next. The user should confirm before acting on them.
 
 ```
 ℹ️ Grades how your OpenClaw is configured, not live-attack resistance.
+   A static audit bounds what your agent *can* do, not how it *behaves* at runtime —
+   OpenClaw core has no runtime egress/taint gate, so a clean Lethal Trifecta here isn't
+   a runtime guarantee; a high grade means "not statically lethal-capable", not "runtime-proof".
    History: ~/.clawseccheck/ (--no-history to skip).
 ```
 

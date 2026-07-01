@@ -587,6 +587,17 @@ def render_report(findings: list[Finding], score: ScoreResult,
         " run `--canary` / `--redteam` / `--dryrun` (live injection) and"
         " `--vet-mcp` (deep MCP) for those."
     )
+    # Capability-vs-behavior honesty (F-038): a static audit bounds what the agent CAN do,
+    # not what it DOES at runtime. OpenClaw core ships no runtime egress/taint gate, so a
+    # clean Lethal Trifecta here is not a runtime guarantee — a high grade means "not
+    # statically lethal-capable", never "protected against the trifecta at runtime".
+    lines.append(
+        "Static audit — this bounds what your agent *can* do, not how it *behaves* under a"
+        " live attack. OpenClaw core has no runtime egress/taint gate, so even a clean"
+        " Lethal Trifecta here can still be chained by prompt-injection at runtime: a high"
+        " grade means \"not statically lethal-capable\", not \"runtime-proof\". Use the live"
+        " tests above to probe actual resistance."
+    )
     # Honest framing for non-OpenClaw / custom setups (B-017): when there is no
     # openclaw.json the config-driven checks come back UNKNOWN. UNKNOWN is neutral
     # (never counted against the score), but without context a hardened custom setup

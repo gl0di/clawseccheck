@@ -246,3 +246,30 @@ class TestScopeNote:
         score = compute(findings)
         out = render_report(findings, score)
         assert out.count("--vet-mcp") == 1
+
+
+class TestL1L2Framing:
+    """F-038: a static audit bounds capability, not runtime behavior — grade A is not
+    a runtime guarantee against the Lethal Trifecta."""
+
+    def test_static_framing_line_appears(self):
+        findings = _mixed_findings()
+        out = render_report(findings, compute(findings))
+        assert "Static audit" in out
+        assert "not statically lethal-capable" in out
+
+    def test_names_runtime_chaining_honestly(self):
+        out = render_report(_mixed_findings(), compute(_mixed_findings()))
+        assert "runtime" in out
+        assert "Lethal Trifecta" in out  # ties the caveat to the trifecta
+
+    def test_appears_on_a_clean_grade_a_report(self):
+        # The whole point: even a perfect config must not read as "runtime-proof".
+        score = _score(score=100, grade="A", capped=False, raw_score=100)
+        out = render_report([], score)
+        assert "Static audit" in out
+        assert "runtime-proof" in out
+
+    def test_framing_appears_exactly_once(self):
+        out = render_report(_mixed_findings(), compute(_mixed_findings()))
+        assert out.count("Static audit —") == 1
