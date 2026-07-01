@@ -34,6 +34,7 @@ from .redteam import make_suite, render_suite
 from .dryrun import make_scenarios, render_dryrun
 from .sarif import render_sarif
 from .history import DEFAULT_HISTORY, load as history_load, record as history_record, render_trend
+from .menu import compute_ages, render_menu
 from .percentile import render_percentile
 from .logsafe import get_logger
 from .safeio import secure_write_text
@@ -162,6 +163,7 @@ def vet_all(home_dir: Path, ascii_only: bool = False) -> int:
 # Primary modes in the EXACT precedence order main() resolves them below.
 # kind "opt" → active when the value is not None; "bool" → active when truthy.
 _PRIMARY_MODES = [
+    ("menu", "--menu", "bool"),
     ("verify_self", "--verify-self", "bool"),
     ("vet", "--vet", "opt"),
     ("vet_all", "--vet-all", "bool"),
@@ -249,6 +251,8 @@ def main(argv=None) -> int:
     p.add_argument("--home", default="~/.openclaw", help="OpenClaw home dir (default: ~/.openclaw)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--card", action="store_true", help="print only the shareable badge")
+    p.add_argument("--menu", action="store_true",
+                   help="print the capability menu (the guided Welcome screen) and exit")
     p.add_argument("--ascii", action="store_true", help="ASCII-only output (no unicode icons/box)")
     p.add_argument("--no-native", action="store_true",
                    help="do not also run the built-in `openclaw security audit`")
@@ -359,6 +363,18 @@ def main(argv=None) -> int:
         lines.append("Compare the 'combined' value against the digest printed by a trusted release.")
         lines.append("Any mismatch means a source file was modified after that release.")
         _emit("\n".join(lines))
+        return 0
+
+    if args.menu:
+        # The guided Welcome screen as a runnable command. Read-only: reads local
+        # score history for the "last check" nudge and the offline staleness hint;
+        # no network, no writes, no record_run().
+        rows = history_load(args.history)
+        last_check = rows[-1]["date"] if rows else None
+        build_age, last_days = compute_ages(released=__released__, last_check=last_check)
+        stale = bool(update_notice(__version__, released=__released__))
+        _emit(render_menu(version=__version__, build_age_days=build_age,
+                          last_check_days=last_days, stale=stale, ascii_only=ascii_only))
         return 0
 
     if args.vet:

@@ -167,7 +167,7 @@ own audit rewards, rather than a contradiction of it. Any other spawn form is of
 ### Step 1 — Pre-scan menu (show every time)
 
 Show this screen **every time** the user requests an audit. Do NOT auto-run the scan — present the
-menu and wait for a choice. Saying "go" or "1" means Quick scan (the default).
+menu and wait for a choice. Saying "check", "go", or "1" runs item 1 — Check everything (the default).
 
 Get the version and build age from:
 
@@ -177,33 +177,37 @@ python3 {baseDir}/audit.py --version
 
 This prints `clawseccheck X.Y.Z (YYYY-MM-DD)`. Compute the age in days from the release date to today.
 
-Present:
+Present (or just run `python3 {baseDir}/audit.py --menu`, which renders this exact
+screen with the version, last-check age, and offline staleness nudge already
+filled in):
 
-> Before I scan — pick one, or just say "go":
+> 🦞 ClawSecCheck · v{version}
 >
-> 🔍 ClawSecCheck {version} · built {N} days ago
->    Local-only — can't check for a newer version. Update via ClawHub if it's been a while.
+>   1  🔍 Check everything        config + live agent test ⚡
+>   2  📦 Check before install    skill · plugin · MCP
+>   3  📄 Report & history        show · save · trend · badge
+>   4  📋 Menu                    everything else: verify · version · HTML · SARIF…
 >
->   1. Quick scan     read-only, ~1s          (default — "go")
->   2. Deeper scan    +3 questions → checks config can't see
->   3. Full check     +live injection tests (confirm each)
->   4. What changed   diff vs last scan
->   add "private" to any · "vet \<skill>" · "verify" · "update"
+>   🕒 Last check: {N} days ago        ← "not checked yet" when there's no history
+>   🆙 Say "update" to check for a newer version   ← always shown; when the build is stale it gets louder: "Build is {N} days old — say update"
 
-**Mode map — each choice maps to an existing flag:**
+Keep it tiny: one comprehensive check, the pre-install vet, the report, and "Menu"
+for everything else. Don't dump a wall of flags — let "menu" (item 4) reveal the
+rest on demand. The number, the phrase, or a tap all select an item; free phrasing
+("scan me", "am I safe?") maps to the nearest item too.
+
+**Mode map — each choice maps to existing flags:**
 
 | Choice | Flag(s) | Notes |
 |--------|---------|-------|
-| 1 Quick (default / "go") | `python3 {baseDir}/audit.py` | Read-only, no side effects. |
-| 2 Deeper | `--ask` then `--attest <answers.json>` | Unlocks B43/B44 (capability blast-radius). See attestation flow in Step 5. |
-| 3 Full | `--self-test` | Runs canary + dryrun + redteam locally. Confirm before each active test. |
-| 4 What changed | `--monitor` | Diffs vs last snapshot. Tell the user it saves a local file; wait for consent before running. |
-| "private" modifier | Add `--no-history` to any mode | "2 private" = Deeper + `--no-history`. Nothing written to `~/.clawseccheck/`. |
-| "vet \<skill>" shortcut | `--vet <path>` | See vet flow in Step 5. |
-| "verify" shortcut | `--verify-self` | SHA-256 tamper-check of ClawSecCheck's own source. |
-| "update" shortcut | Offline notice only | ClawSecCheck cannot self-update. Tell the user to run `openclaw skills update clawseccheck` or `clawhub update --all` themselves. |
+| 1 Check everything ("check" / "go") | `--full` | Read-only audit **+** live self-test (canary/dryrun/redteam) **+** MCP vet, in one go. The ⚡ live test is disclosed in the label, so picking item 1 **is** the consent — run the read-only audit first, present the dashboard, *then* the live test. |
+| 2 Check before install | `--vet <path>` (skill / plugin) · `--vet-mcp [name]` (MCP) | Supply-chain check on something you're about to trust. See vet flow in Step 5. |
+| 3 Report & history | default report · `--save <path>` · `--trend` · `--badge <path>` | Show or save the last result, the score trend, or a shareable badge. |
+| 4 Menu | `--menu` (this screen) | "menu" reveals everything else: `--verify-self`, `--monitor` (what changed), deeper `--ask`/`--attest` (B43/B44), `--html`, `--sarif`, `--percentile`, `--risk-paths`, `--prompts`. |
+| "private" modifier | Add `--no-history` to any mode | "1 private" = Check everything + `--no-history`. Nothing written to `~/.clawseccheck/`. |
+| "update" | Offline notice + agent check | ClawSecCheck never phones home. On "update" the **host agent** checks ClawHub for a newer version and, if there is one, offers `openclaw skills update clawseccheck` — the tool itself stays offline. |
 
-After the user chooses (or says "go"), proceed to Step 2.
+After the user chooses (or says "check" / "go"), proceed to Step 2.
 
 ### Step 2 — Run the audit
 
@@ -340,8 +344,8 @@ Read `coverage.summary` and `coverage.gaps` from the JSON.
 ○ Roadmap {roadmap} · ⊘ Not-checkable {not_checkable}  (known gaps — separate axis, not part of the 13)
 ```
 
-For each partial surface (all findings returned UNKNOWN): note that Deeper scan (mode 2) may
-resolve it. For each entry in `coverage.gaps.not_checkable`: note it is out of static scope —
+For each partial surface (all findings returned UNKNOWN): note that a deeper check (say "menu"
+→ deeper, i.e. `--ask` then `--attest`) may resolve it. For each entry in `coverage.gaps.not_checkable`: note it is out of static scope —
 OpenClaw has no config control to audit there.
 
 **Section 5 — Worth a glance**
