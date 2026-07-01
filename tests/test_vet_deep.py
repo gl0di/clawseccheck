@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from clawseccheck import audit
-from clawseccheck.catalog import FAIL, PASS, WARN
+from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import vet_skill
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -60,9 +60,15 @@ def test_vet_legit_env_and_network_is_safe(tmp_path):
     assert vet_skill(d).status == PASS
 
 
-def test_vet_syntax_error_py_does_not_crash(tmp_path):
+def test_vet_unparseable_py_surfaces_unknown(tmp_path):
+    # F-057: a skill whose .py file cannot be parsed must not crash, and must
+    # not silently PASS — it must surface as UNKNOWN so the blind spot is visible.
     d = _mk_skill(tmp_path / "ok3", {"broken.py": "def (: not python\n"})
-    assert vet_skill(d).status == PASS
+    result = vet_skill(d)
+    assert result.status == UNKNOWN
+    # Detail or evidence must mention the parse failure
+    combined = (result.detail or "") + " " + " ".join(result.evidence or [])
+    assert "could not analyze" in combined.lower() or "parse" in combined.lower()
 
 
 # ---------------------------------------------------------------------------

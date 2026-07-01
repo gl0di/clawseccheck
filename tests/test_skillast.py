@@ -125,8 +125,17 @@ def test_legit_env_plus_network_no_finding():
 # robustness
 # ---------------------------------------------------------------------------
 
-def test_syntax_error_returns_empty():
-    assert analyze_python("def (: not python", "broken.py") == []
+def test_syntax_error_returns_unanalyzable_signal():
+    # F-057: parse failure must not silently return [] — it returns a single
+    # AST_UNANALYZABLE finding so callers can distinguish "clean" from "unparseable".
+    findings = analyze_python("def (: not python", "broken.py")
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.rule == "AST_UNANALYZABLE"
+    assert f.severity == "unknown"
+    assert f.lineno == 0
+    assert "broken.py" in f.reason
+    assert "could not parse" in f.reason
 
 
 def test_empty_source_returns_empty():

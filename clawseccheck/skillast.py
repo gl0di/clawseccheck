@@ -421,12 +421,23 @@ def _attr_base(value: ast.AST) -> str:
 
 
 def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
-    """Return AST findings for one Python source string. Never raises, never executes."""
+    """Return AST findings for one Python source string. Never raises, never executes.
+
+    On a parse failure (SyntaxError, Python 2 syntax, pathological nesting, etc.)
+    emits a single AST_UNANALYZABLE finding instead of returning an empty list, so
+    callers can distinguish "clean file" from "file the AST/taint layer could not scan".
+    """
     try:
         tree = ast.parse(source)
         tainted = _tainted_names(tree)
-    except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
-        return []
+    except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError) as exc:
+        err_type = type(exc).__name__
+        return [ASTFinding(
+            "AST_UNANALYZABLE",
+            "unknown",
+            0,
+            f"could not parse {filename} ({err_type}) — file not analyzed by the AST/taint layer",
+        )]
 
     out: list[ASTFinding] = []
     seen: set[tuple[str, int]] = set()

@@ -288,8 +288,10 @@ def test_clean_subprocess_no_param_not_flagged():
 # ---------------------------------------------------------------------------
 
 def test_analyze_never_raises_on_malformed():
+    # F-057: parse failure now emits AST_UNANALYZABLE instead of []; must not raise.
     result = analyze_python("def (broken syntax!!!", "bad.py")
-    assert result == []
+    assert len(result) == 1
+    assert result[0].rule == "AST_UNANALYZABLE"
 
 
 def test_analyze_never_raises_on_empty():
@@ -297,7 +299,10 @@ def test_analyze_never_raises_on_empty():
 
 
 def test_analyze_never_raises_on_bytes_garbage():
-    assert analyze_python("\x00\xff\xfe", "bin.py") == []
+    # F-057: binary garbage triggers a SyntaxError; must emit AST_UNANALYZABLE, not [].
+    result = analyze_python("\x00\xff\xfe", "bin.py")
+    assert len(result) == 1
+    assert result[0].rule == "AST_UNANALYZABLE"
 
 
 # ---------------------------------------------------------------------------

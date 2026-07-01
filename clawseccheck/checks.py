@@ -2210,7 +2210,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         return _custom("B13", HIGH, UNKNOWN,
                        "No installed third-party skills found to inspect.",
                        "Run on the host where installed skills live (~/.openclaw/skills, workspace/skills).")
-    crit, high, _persist_warn, warns_local_exfil = [], [], [], []
+    crit, high, _persist_warn, warns_local_exfil, parse_error_paths = [], [], [], [], []
     for name, blob in skills.items():
         # C-041: precompute fence ranges once per blob so every check below can
         # skip matches that are purely inside a documented code example.
@@ -2326,12 +2326,18 @@ def check_installed_skills(ctx: Context) -> Finding:
         # crit rules (obfuscated exec, getattr/import indirection) FAIL on their own;
         # info rules (plain shell sinks, deserialization) escalate only alongside a
         # credential/exfil signal, so a skill that merely uses subprocess is never failed.
+        # F-057: AST_UNANALYZABLE findings (parse failures) are collected separately so
+        # they surface as UNKNOWN rather than silently vanishing; they do not alter
+        # crit/high/verdict but rank above the WARN buckets below.
         # F-018: also run the abstract effect simulator on each Python file and accumulate
         # the per-entry-point results into ctx.effect_profiles[name].  This is strictly
         # additive — the simulator result is NEVER used to alter crit/high/verdict.
         _skill_ep_results: list[dict] = []
         for relpath, src in ctx.installed_skill_py.get(name, []):
             for af in analyze_python(src, relpath):
+                if af.rule == "AST_UNANALYZABLE":
+                    parse_error_paths.append(f"{name}: {relpath}")
+                    continue
                 loc = f"{relpath}:{af.lineno}"
                 if af.severity == "crit":
                     crit.append(f"{name}: {af.reason} ({loc})")
@@ -2369,6 +2375,20 @@ def check_installed_skills(ctx: Context) -> Finding:
                        "Suspicious patterns in installed skill(s): " + "; ".join(high[:6]),
                        "Review the flagged skills' source before trusting them; prefer pinned, "
                        "signed, VirusTotal-clean releases.", high)
+
+    # F-057: parse-error UNKNOWN — ranked above WARN buckets so an unparseable file is
+    # never silently masked by a low-confidence WARN or a spurious PASS.  Crit and high
+    # FAIL returns above still win, so a skill with real dangerous patterns is never
+    # downgraded to UNKNOWN — it FAILs as expected.
+    if parse_error_paths:
+        extra = f" (+{len(parse_error_paths) - 6} more)" if len(parse_error_paths) > 6 else ""
+        return _custom("B13", HIGH, UNKNOWN,
+                       "could not analyze " + "; ".join(parse_error_paths[:6]) + extra
+                       + " — parse error(s); file(s) not scanned by the AST/taint layer",
+                       "Inspect the flagged file(s) manually: a parse failure may indicate "
+                       "Python 2 syntax, a template, or a deliberately malformed file used "
+                       "to blind the AST scanner.",
+                       parse_error_paths)
 
     # C-040: backgrounding/daemonize — lower confidence WARN (nohup/disown/setsid).
     # Only reached when no CRIT/HIGH patterns fired; a skill that also has a CRIT/HIGH
