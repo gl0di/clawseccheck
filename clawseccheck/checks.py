@@ -22,8 +22,8 @@ from .catalog import (
     ATTESTED, BY_ID, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding,
 )
 from .collector import (
-    _OWN_SKILL_NAMES, BOOTSTRAP_FILES, SKILL_DIRS, Context, _read_skill_text, dig,
-    read_skill_python, read_skill_shell,
+    _OWN_SKILL_NAMES, BOOTSTRAP_FILES, SKILL_DIRS, Context, _read_skill_text,
+    classify_bytes, dig, read_skill_python, read_skill_shell,
 )
 from .skillast import analyze_python, analyze_python_package, analyze_shell, simulate_effects as _simulate_effects
 from .safeio import walk_dir_safely
@@ -2813,6 +2813,272 @@ def vet_skill(path: str | Path) -> Finding:
         primary.ctx = ctx
         return primary
     finding.ctx = ctx
+    return finding
+
+
+# ---------- vet_plugin: pre-install vet for OpenClaw plugins (E-020 / F-071) ----------
+# A plugin is a CONTAINER: an openclaw.plugin.json manifest + bundled skills + JS/TS
+# runtime code + npm packaging. This engine adds only the plugin-SPECIFIC manifest and
+# packaging checks and DISPATCHES bundled content to the existing engines (vet_skill per
+# bundled skill dir, vet_mcp per embedded MCP spec file) — never a second analyzer.
+# Grounding: every manifest / package.json field read here is documented in the
+# workspace recon doc §11 (openclaw-schema-recon.md, C-140).
+
+_PLUGIN_MANIFEST = "openclaw.plugin.json"
+# Packaging/metadata JSON that is never an embedded MCP server spec.
+_PLUGIN_MCP_SKIP = frozenset({
+    "package.json", "package-lock.json", "npm-shrinkwrap.json",
+    _PLUGIN_MANIFEST, "tsconfig.json", "jsconfig.json",
+})
+# Directories never swept inside a plugin: third-party deps + VCS/cache noise. The
+# node_modules exclusion is disclosed as a coverage note, not silently applied.
+_PLUGIN_SKIP_DIRS = frozenset({"node_modules", ".git", "__pycache__"})
+_PLUGIN_FILE_CAP = 400          # B-074: a cap hit is disclosed and downgrades to UNKNOWN
+_PLUGIN_SNIFF_BYTES = 512
+_VET_RANK_STATUS = {3: FAIL, 2: WARN, 1: UNKNOWN, 0: PASS}
+
+
+def _plugin_finding(severity, status, detail, fix, ev=None) -> Finding:
+    return Finding("PLUGIN-VET", "Plugin pre-install vet", severity, status,
+                   detail, fix, "Plugin Trust", False, ev or [])
+
+
+def _locate_plugin_root(p: Path) -> Path | None:
+    """Resolve the plugin package root (the dir carrying openclaw.plugin.json).
+
+    Accepts the root itself, the manifest file, or a host wrapper project dir
+    (~/.openclaw/npm/projects/<pkg>-<hash>__openclaw-generation__…/) whose real plugin
+    lives under node_modules/<pkg> or node_modules/@scope/<pkg> (recon §11.1).
+    """
+    if p.is_file() and p.name == _PLUGIN_MANIFEST:
+        return p.parent
+    if not p.is_dir():
+        return None
+    if (p / _PLUGIN_MANIFEST).is_file():
+        return p
+    nm = p / "node_modules"
+    if nm.is_dir():
+        hits = sorted(nm.glob("*/" + _PLUGIN_MANIFEST)) + sorted(nm.glob("@*/*/" + _PLUGIN_MANIFEST))
+        if len(hits) == 1:
+            return hits[0].parent
+    return None
+
+
+def vet_plugin(path: str | Path) -> Finding:
+    """Vet an OpenClaw plugin BEFORE installing it (container-dispatcher).
+
+    Plugin-specific checks (manifest sanity, npm lifecycle scripts, dependency
+    pinning, native-executable stowaways) run here; bundled skills are dispatched to
+    vet_skill() — they land on the skill auto-load surface via the
+    ~/.openclaw/plugin-skills symlink farm — and embedded MCP server specs to
+    vet_mcp(). Plugin runtime code is JS/TS and is NOT deeply analyzed (design
+    decision D2); that limit is disclosed in the evidence, never hidden by a PASS.
+    """
+    import json as _json
+    p = Path(str(path)).expanduser()
+    if not p.exists():
+        return _plugin_finding(HIGH, UNKNOWN, f"no plugin found at {p}",
+                               f"Point --vet-plugin at a plugin root (a dir carrying {_PLUGIN_MANIFEST}).")
+    root = _locate_plugin_root(p)
+    if root is None:
+        return _plugin_finding(
+            HIGH, UNKNOWN,
+            f"not an OpenClaw plugin: no {_PLUGIN_MANIFEST} found under {p}",
+            "A plugin root carries openclaw.plugin.json; for a skill directory use --vet.")
+    try:
+        manifest = _json.loads((root / _PLUGIN_MANIFEST).read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError) as exc:
+        return _plugin_finding(HIGH, UNKNOWN,
+                               f"could not parse {_PLUGIN_MANIFEST}: {exc}",
+                               "Inspect the manifest manually — the host would refuse this plugin too.")
+    if not isinstance(manifest, dict):
+        return _plugin_finding(HIGH, UNKNOWN, f"{_PLUGIN_MANIFEST} is not a JSON object",
+                               "Inspect the manifest manually — the host would refuse this plugin too.")
+
+    warns: list[str] = []
+    notes: list[str] = []       # coverage / informational evidence — never verdict-moving
+    subs: list[Finding] = []    # dispatched engine findings (vet_skill / vet_mcp)
+
+    # -- manifest sanity (required fields per recon §11.2; host blocks activation on error)
+    pid = manifest.get("id")
+    if not isinstance(pid, str) or not pid or not isinstance(manifest.get("configSchema"), dict):
+        warns.append("invalid manifest: required id/configSchema missing or wrong type — "
+                     "the host treats this as a plugin error and blocks activation")
+    pid = pid if isinstance(pid, str) and pid else root.name
+
+    # -- npm packaging (recon §11.3/§11.4)
+    pkg: dict = {}
+    pkg_path = root / "package.json"
+    if pkg_path.is_file():
+        try:
+            loaded = _json.loads(pkg_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            loaded = None
+        if isinstance(loaded, dict):
+            pkg = loaded
+        else:
+            warns.append("unreadable/unparseable package.json — npm packaging not assessed")
+    scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+    lifecycle = [k for k in ("preinstall", "install", "postinstall") if k in scripts]
+    if lifecycle:
+        warns.append("npm lifecycle script(s) declared: " + ", ".join(lifecycle)
+                     + " — `openclaw plugins install` runs npm with --ignore-scripts, so "
+                       "these only ever execute for manual `npm install` victims")
+    deps = pkg.get("dependencies") if isinstance(pkg.get("dependencies"), dict) else {}
+    # A missing lockfile is NOT a warn: bundled host extensions legitimately ship exact
+    # pins with no per-plugin lockfile (verified on the 66-plugin real fleet — 21 would
+    # have false-WARNed). Only *floating* version ranges are an actionable signal.
+    if deps and not (root / "npm-shrinkwrap.json").is_file() \
+            and not (root / "package-lock.json").is_file():
+        notes.append(f"coverage: {len(deps)} runtime dependency(ies) without a lockfile "
+                     "in the package — transitive pins not verifiable here")
+    floating = sorted(f"{n}@{v}" for n, v in deps.items()
+                      if isinstance(v, str)
+                      and (v.strip().startswith(("^", "~", ">", "<", "*"))
+                           or v.strip() in ("latest", "")))
+    if floating:
+        extra = f" (+{len(floating) - 4} more)" if len(floating) > 4 else ""
+        warns.append("floating dependency version(s): " + ", ".join(floating[:4]) + extra)
+
+    # -- coverage disclosure (D2): JS/TS runtime entry points are outside this vet's depth
+    oc = pkg.get("openclaw") if isinstance(pkg.get("openclaw"), dict) else {}
+    entries: list[str] = []
+    for key in ("extensions", "runtimeExtensions"):
+        val = oc.get(key)
+        if isinstance(val, list):
+            entries.extend(str(x) for x in val)
+    if entries:
+        notes.append("coverage: plugin runtime code is JS/TS (" + ", ".join(entries[:3])
+                     + ") — not deeply analyzed by this vet; review the entry files before trusting")
+    notes.append("coverage: node_modules/ (third-party npm deps) excluded from the content scan")
+    npm_spec = dig(pkg, "openclaw.install.npmSpec")
+    if isinstance(npm_spec, str) and npm_spec and "@" not in npm_spec.lstrip("@"):
+        notes.append(f"install spec is a bare package name ({npm_spec}) — "
+                     "resolves to latest at install time")
+
+    # -- bundled skills -> vet_skill (the plugin-skills auto-load surface, recon §11.1)
+    skill_dirs: list[Path] = []
+    try:
+        root_res = root.resolve()
+    except OSError:
+        root_res = root
+    skills_field = manifest.get("skills")
+    if isinstance(skills_field, list):
+        for entry in skills_field:
+            d = root / str(entry)
+            try:
+                escaped = not d.resolve().is_relative_to(root_res)
+            except OSError:
+                escaped = True
+            if escaped:
+                warns.append(f"manifest skills entry escapes the plugin root: {str(entry)!r}")
+                continue
+            if not d.is_dir():
+                notes.append(f"manifest skills entry not present in the package: {str(entry)!r}")
+                continue
+            if (d / "SKILL.md").is_file():
+                skill_dirs.append(d)
+            else:
+                kids = [c for c in sorted(d.iterdir()) if c.is_dir() and not c.is_symlink()]
+                skill_dirs.extend(kids if kids else [d])
+    for sd in skill_dirs:
+        try:
+            sf = vet_skill(sd)
+        except Exception:  # noqa: BLE001 — a dispatched engine must never break the vet
+            warns.append(f"bundled skill {sd.name!r} could not be vetted")
+            continue
+        sf.detail = f"[bundled skill {sd.name!r}] {sf.detail}"
+        subs.append(sf)
+
+    # -- capped tree sweep (skips node_modules; symlinks never followed) for embedded
+    #    MCP specs and native-executable stowaways outside the dispatched skill dirs
+    truncated = False
+    swept: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        dirnames[:] = sorted(d for d in dirnames if d not in _PLUGIN_SKIP_DIRS)
+        for fn in sorted(filenames):
+            fp = Path(dirpath) / fn
+            if fp.is_symlink():
+                continue
+            swept.append(fp)
+            if len(swept) >= _PLUGIN_FILE_CAP:
+                truncated = True
+                break
+        if truncated:
+            break
+    if truncated:
+        notes.append(f"scan hit the {_PLUGIN_FILE_CAP}-file cap — "
+                     "files beyond the cap were NOT scanned")
+
+    def _under_skills(fp: Path) -> bool:
+        return any(sd in fp.parents for sd in skill_dirs)
+
+    for fp in swept:
+        if _under_skills(fp):
+            continue  # bundled-skill content already dispatched to vet_skill above
+        if fp.suffix == ".json" and fp.name not in _PLUGIN_MCP_SKIP:
+            try:
+                data = _json.loads(fp.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, ValueError):
+                data = None
+            servers = None
+            if isinstance(data, dict):
+                servers = data.get("mcpServers") if isinstance(data.get("mcpServers"), dict) \
+                    else dig(data, "mcp.servers")
+            if isinstance(servers, dict) and servers:
+                try:
+                    mcp_findings = vet_mcp(fp)
+                except Exception:  # noqa: BLE001 — a dispatched engine must never break the vet
+                    mcp_findings = []
+                for mf in mcp_findings:
+                    mf.detail = f"[embedded MCP spec {fp.name}] {mf.detail}"
+                    subs.append(mf)
+        try:
+            size = fp.stat().st_size
+            with open(fp, "rb") as fh:
+                head = fh.read(_PLUGIN_SNIFF_BYTES)
+        except OSError:
+            continue
+        _cls, fmt = classify_bytes(head, size)
+        if fmt in ("ELF", "PE", "class") or (fmt or "").startswith("Mach-O"):
+            warns.append("native executable bundled in the plugin (stowaway): "
+                         f"{fp.relative_to(root)} ({fmt})")
+
+    # -- verdict: same merge rank as the skill vet; UNKNOWN floor on a capped sweep
+    sub_rank = max((_VET_MERGE_RANK.get(f.status, 0) for f in subs), default=0)
+    rank = max(sub_rank, 2 if warns else 0, 1 if truncated else 0)
+    status = _VET_RANK_STATUS[rank]
+
+    n_mcp = sum(1 for f in subs if f.id == "MCP-VET")
+    summary = f"plugin '{pid}' ({len(skill_dirs)} bundled skill(s), {n_mcp} embedded MCP spec(s))"
+    actionable = [f for f in subs if f.status in (FAIL, WARN, UNKNOWN)]
+    evidence = warns + [f"{f.status}: {f.detail}" for f in actionable] + notes
+
+    if status == FAIL:
+        worst = max(subs, key=lambda f: _VET_MERGE_RANK.get(f.status, 0))
+        sev = CRITICAL if worst.severity == CRITICAL else HIGH
+        finding = _plugin_finding(
+            sev, FAIL, f"dangerous bundled content in {summary}: {worst.detail}",
+            "Do NOT install this plugin. " + (worst.fix or "Review the flagged content."),
+            evidence)
+    elif status == WARN:
+        head_sig = warns[0] if warns else actionable[0].detail
+        label = "supply-chain / packaging signals" if warns else "bundled-content signals"
+        finding = _plugin_finding(
+            MEDIUM, WARN, f"{label} in {summary}: {head_sig}",
+            "Review the flagged signals before installing; prefer pinned, shrinkwrapped, "
+            "source-readable plugins.", evidence)
+    elif status == UNKNOWN:
+        finding = _plugin_finding(
+            HIGH, UNKNOWN, f"{summary}: content could not be fully assessed",
+            "Review the undisclosed portion manually or re-run against the unpacked plugin.",
+            evidence)
+    else:
+        finding = _plugin_finding(
+            LOW, PASS, f"{summary}: no manifest, packaging, or bundled-content signals",
+            "Still skim the JS/TS entry files — plugin runtime code is outside this vet's depth.",
+            evidence)
+    finding.ring_findings = actionable
     return finding
 
 
