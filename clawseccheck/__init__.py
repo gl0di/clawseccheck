@@ -12,7 +12,7 @@ from . import baseline as _baseline
 from .baseline import apply as apply_baseline
 from .baseline import fingerprint, load_ignore
 from .canary import evaluate, make_canary, render_canary
-from .checks import run_all, vet_mcp, vet_skill
+from .checks import detect_vet_type, run_all, vet_mcp, vet_plugin, vet_skill
 from .collector import collect
 from .hostwatch import detect as _host_detect
 from .monitor import (
@@ -71,7 +71,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
 __all__ = [
     "audit", "collect", "run_all", "compute", "ScoreResult", "run_native_audit",
     "render_report", "render_dashboard", "render_dashboard_findings", "render_card", "render_json", "render_monitor",
-    "render_svg", "render_vet_json", "vet_skill", "vet_mcp",
+    "render_svg", "render_vet_json", "vet_skill", "vet_mcp", "vet_plugin", "detect_vet_type",
     "make_canary", "evaluate", "render_canary",
     "snapshot", "diff", "load_state", "save_state", "__version__", "__released__",
     "update_notice", "read_latest_hint", "DEFAULT_LATEST",

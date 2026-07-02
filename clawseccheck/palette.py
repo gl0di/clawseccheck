@@ -68,8 +68,13 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "all three live tests at once"),
     )),
     PaletteCategory("Vet before you trust", READONLY, (
-        PaletteEntry("Vet a skill", 'vet <path>', "--vet",
-                     "malware / supply-chain check before you install"),
+        PaletteEntry("Vet anything", 'vet <target>', "--vet",
+                     "malware / supply-chain check before you install — "
+                     "skill, plugin or MCP, type autodetected"),
+        PaletteEntry("Vet a skill", 'vet skill <path>', "--vet-skill",
+                     "force the skill engine (dir or SKILL.md)"),
+        PaletteEntry("Vet a plugin", 'vet plugin <path>', "--vet-plugin",
+                     "force the plugin engine (root dir or openclaw.plugin.json)"),
         PaletteEntry("Vet an MCP server", 'vet-mcp <name>', "--vet-mcp",
                      "the same, for a configured MCP server"),
         PaletteEntry("Vet everything", 'vet all', "--vet-all",

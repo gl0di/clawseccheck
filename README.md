@@ -506,7 +506,8 @@ preserving backward compatibility.
 | Human report | `clawseccheck` |
 | JSON / SARIF output | `clawseccheck --json` · `clawseccheck --sarif results.sarif` |
 | Highest-risk chains | `clawseccheck --risk-paths` |
-| Vet a skill before install | `clawseccheck --vet ./skill` |
+| Vet anything before install (type autodetected) | `clawseccheck --vet ./target` |
+| Vet a skill / a plugin explicitly | `clawseccheck --vet-skill ./skill` · `clawseccheck --vet-plugin ./plugin` |
 | Vet connected MCP servers | `clawseccheck --vet-mcp` |
 | Active injection self-test | `clawseccheck --canary` · `clawseccheck --redteam` · `clawseccheck --dryrun` |
 | Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
@@ -521,7 +522,9 @@ preserving backward compatibility.
 
 ```bash
 python3 audit.py --next                    # print the "What you can do next" guidance block only
-python3 audit.py --vet ./some-skill        # vet a skill (dir or SKILL.md) BEFORE installing it
+python3 audit.py --vet ./some-target       # vet a skill / plugin / MCP spec BEFORE installing it (type autodetected)
+python3 audit.py --vet-skill ./some-skill  # force the skill engine (dir or SKILL.md)
+python3 audit.py --vet-plugin ./some-plugin # force the plugin engine (root dir or openclaw.plugin.json)
 python3 audit.py --vet ./some-skill --json # same, machine-readable (verdict + findings); --sarif PATH for CI
 python3 audit.py --vet-mcp                 # vet connected MCP servers for supply-chain risk BEFORE trusting them
 python3 audit.py --canary                   # active prompt-injection self-test (battle-tested)
@@ -542,7 +545,11 @@ python3 audit.py --log audit.log            # also write log to a local file
   first, then shows only the prioritised next-steps list. Same content as the block appended to
   the default report; useful if you want to re-check recommendations without re-reading the full
   report.
-- **`--vet PATH`** runs the full skill-content security scan on a skill *before* you install it —
+- **`--vet TARGET`** vets *anything* before you install it: the artifact type is autodetected by
+  content (a plugin manifest → plugin engine; an MCP server-spec JSON or configured server name →
+  MCP engine; otherwise the skill engine) and printed to stderr as `detected type: …`.
+  `--vet-skill` / `--vet-plugin` / `--vet-mcp` force a specific engine. For a skill it runs the
+  full skill-content security scan —
   the B13 malware scan **plus** the content-security ring (capability-intent mismatch, cross-agent
   snooping, silent-instruction / jailbreak / forged-provenance directives) the full audit runs on
   installed skills (point it at a
@@ -550,6 +557,12 @@ python3 audit.py --log audit.log            # also write log to a local file
   SAFE / SUSPICIOUS / DANGEROUS. Add `--json` for a machine-readable verdict + findings (no score —
   vetting isn't a scored audit), or `--sarif PATH` to drop a SARIF file for CI / code scanning;
   exit code is `1` on SUSPICIOUS/DANGEROUS so `--vet … || fail` gates an install pipeline.
+- **`--vet-plugin PATH`** vets an OpenClaw plugin (root dir, `openclaw.plugin.json`, or an
+  installed wrapper project) *before* you install it: manifest sanity, npm lifecycle scripts,
+  floating dependency versions, native-executable stowaways, and skills entries escaping the
+  plugin root — then dispatches bundled skills to the skill engine (they auto-load via
+  `~/.openclaw/plugin-skills/`) and embedded MCP specs to the MCP engine. Plugin runtime code is
+  JS/TS and is disclosed as outside this vet's static depth — review entry files before trusting.
 - **`--vet-mcp`** vets every MCP server listed under `mcp.servers.*` for supply-chain risk
   *before* you trust it. Flags unpinned installs (`npx @latest`, unversioned packages), `curl|sh`
   bootstrap, plaintext-HTTP remote transports, env-variable secret passthrough, and overly broad

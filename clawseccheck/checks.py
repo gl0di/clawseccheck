@@ -3082,6 +3082,48 @@ def vet_plugin(path: str | Path) -> Finding:
     return finding
 
 
+def detect_vet_type(target: str | Path, home: str | Path = "~/.openclaw") -> str:
+    """Classify a --vet target as 'plugin' / 'mcp' / 'skill' / 'unknown' by content.
+
+    Detection order (design D1, most specific first): a plugin manifest wins; then a
+    JSON file with an explicit MCP server-spec shape, or a server name found in the
+    config at *home*; then anything skill-shaped (today's --vet semantics). 'unknown'
+    means nothing matched — callers route it to the skill engine, which answers with
+    an honest UNKNOWN, never a guessed PASS.
+    """
+    import json as _json
+    p = Path(str(target)).expanduser()
+    if p.exists():
+        if _locate_plugin_root(p) is not None:
+            return "plugin"
+        if p.is_file() and p.suffix == ".json":
+            try:
+                data = _json.loads(p.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, ValueError):
+                data = None
+            # Strict spec shapes only (mcpServers / mcp.servers / a bare server spec) —
+            # _load_mcp_spec_file's loose {name: dict} fallback would misroute e.g. a
+            # tsconfig.json here.
+            if isinstance(data, dict) and (
+                    (isinstance(data.get("mcpServers"), dict) and data["mcpServers"])
+                    or (isinstance(dig(data, "mcp.servers"), dict) and dig(data, "mcp.servers"))
+                    or "command" in data or ("url" in data and "transport" in data)):
+                return "mcp"
+            return "unknown"
+        if p.is_dir() or p.is_file():
+            return "skill"
+        return "unknown"
+    # Not a path on disk: maybe a configured MCP server name.
+    cfg_file = Path(str(home)).expanduser() / "openclaw.json"
+    try:
+        cfg = _json.loads(cfg_file.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        cfg = {}
+    if isinstance(cfg, dict) and str(target) in _mcp_servers(cfg):
+        return "mcp"
+    return "unknown"
+
+
 # ---------- vet_mcp: supply-chain / trust vetting for MCP servers ----------
 # Install-vector commands that are pipe-to-run dangerous (execute arbitrary code).
 _VET_MCP_DANGEROUS_CMDS = frozenset({"curl", "wget", "bash", "sh", "iex", "powershell"})

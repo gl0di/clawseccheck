@@ -20,7 +20,7 @@ from . import (
     render_canary, render_card, render_dashboard, render_dashboard_findings, render_events,
     render_json, render_monitor,
     render_report, render_svg, render_vet_json, save_state, snapshot,
-    vet_mcp, vet_skill,
+    detect_vet_type, vet_mcp, vet_plugin, vet_skill,
 )
 from . import __released__, __version__
 from .update import update_notice
@@ -157,6 +157,62 @@ def vet_all(home_dir: Path, ascii_only: bool = False) -> int:
     return 0 if worst in ("PASS", "UNKNOWN") else 1
 
 
+def _run_vet_mcp(target, args, ascii_only: bool) -> int:
+    """Run vet_mcp on `target` (None = all configured servers) and render the
+    result — shared by the explicit --vet-mcp mode and the --vet autodetect
+    route (F-072), so the two entry points can never drift."""
+    findings = vet_mcp(target=target, home=args.home)
+    # Side output: SARIF file (mirrors the full-audit --sarif behavior, incl.
+    # the same graceful handling of an unwritable path — B-014).
+    if args.sarif:
+        try:
+            secure_write_text(
+                Path(args.sarif).expanduser(),
+                render_sarif(findings, tool_version=__version__),
+            )
+            _emit(f"(SARIF written to {args.sarif})")
+        except OSError as exc:
+            _emit(f"(could not write SARIF: {exc})")
+    # Primary output: machine-readable JSON (covers the no-servers UNKNOWN case too).
+    if args.json:
+        _emit(render_vet_json(findings, mode="vet-mcp",
+                              target=target or "configured", version=__version__))
+        worst = "PASS"
+        for f in findings:
+            if f.status == "FAIL":
+                worst = "FAIL"
+                break
+            if f.status == "WARN" and worst != "FAIL":
+                worst = "WARN"
+        record_run("vet_mcp")
+        return 0 if worst in ("PASS", "UNKNOWN") else 1
+    # "No servers configured" case: single UNKNOWN finding.
+    if len(findings) == 1 and findings[0].status == "UNKNOWN":
+        f = findings[0]
+        icon = "[?]" if ascii_only else "❔"
+        _emit(f"{icon} {f.detail}")
+        record_run("vet_mcp")
+        return 0
+    worst_status = "PASS"
+    for f in findings:
+        if f.status == "FAIL":
+            worst_status = "FAIL"
+            break
+        if f.status == "WARN" and worst_status != "FAIL":
+            worst_status = "WARN"
+    for f in findings:
+        icon = _VET_ICON_ASCII[f.status] if ascii_only else _VET_ICON_UNI[f.status]
+        verdict = _VET_VERDICT[f.status]
+        _emit(f"{icon} {verdict}: {_sanitize(f.title)}")
+        if f.evidence:
+            for ev in f.evidence[:4]:
+                _emit(f"    - {_sanitize(ev)}")
+        _emit(f"    fix: {_sanitize(f.fix)}")
+        _emit("")
+    record_run("vet_mcp")
+    return 0 if worst_status in ("PASS", "UNKNOWN") else 1
+
+
 # --- Flag-coherence pre-flight (B-066 / B-067) ---------------------------------
 # main() resolves "modes" via a fixed-order cascade of early returns; a second mode
 # flag, or a global modifier the chosen mode doesn't honor, would otherwise be dropped
@@ -170,6 +226,8 @@ _PRIMARY_MODES = [
     ("functions", "--functions", "bool"),
     ("verify_self", "--verify-self", "bool"),
     ("vet", "--vet", "opt"),
+    ("vet_skill", "--vet-skill", "opt"),
+    ("vet_plugin", "--vet-plugin", "opt"),
     ("vet_all", "--vet-all", "bool"),
     ("vet_mcp", "--vet-mcp", "opt"),
     ("canary", "--canary", "bool"),
@@ -196,6 +254,8 @@ _PRIMARY_MODES = [
 # along as a side output under --vet/--vet-mcp (handled specially below).
 _MODE_HONORS = {
     "vet": frozenset({"json"}),
+    "vet_skill": frozenset({"json"}),
+    "vet_plugin": frozenset({"json"}),
     "vet_mcp": frozenset({"json"}),
 }
 
@@ -226,7 +286,7 @@ def _flag_coherence_notes(args) -> list[str]:
     ignored = [
         f for a, f in active[1:]
         # --sarif is a side output under --vet/--vet-mcp, not an ignored mode.
-        if not (a == "sarif" and win_attr in ("vet", "vet_mcp"))
+        if not (a == "sarif" and win_attr in ("vet", "vet_skill", "vet_plugin", "vet_mcp"))
     ]
     # --card is a default-path output selector; any primary mode supersedes it.
     if bool(getattr(args, "card", False)):
@@ -312,8 +372,14 @@ def main(argv=None) -> int:
                    help=f"Agent Watch event journal (default: {DEFAULT_EVENTS})")
     p.add_argument("--watch-log", action="store_true",
                    help="print the Agent Watch event journal (timeline of what changed)")
-    p.add_argument("--vet", metavar="PATH",
+    p.add_argument("--vet", metavar="TARGET",
+                   help="vet a skill / plugin / MCP target BEFORE installing it — the type is "
+                        "autodetected by content (explicit flags below force an engine)")
+    p.add_argument("--vet-skill", metavar="PATH", dest="vet_skill",
                    help="vet a skill (dir or SKILL.md) for malware BEFORE installing it")
+    p.add_argument("--vet-plugin", metavar="PATH", dest="vet_plugin",
+                   help="vet an OpenClaw plugin (root dir or openclaw.plugin.json) "
+                        "BEFORE installing it")
     p.add_argument("--vet-mcp", nargs="?", const="", metavar="NAME|FILE",
                    help="vet configured MCP servers (or a NAME/FILE) for supply-chain risk before trusting them")
     p.add_argument("--vet-all", "--recursive", action="store_true", dest="vet_all",
@@ -435,12 +501,28 @@ def main(argv=None) -> int:
         _emit(render_palette(n_checks=len(CHECKS), ascii_only=ascii_only))
         return 0
 
+    # F-072 (D1): --vet autodetects the artifact type by content and routes to the
+    # right engine; --vet-skill / --vet-plugin / --vet-mcp are the explicit escape
+    # hatches. The detected-type note goes to stderr so machine stdout stays clean.
+    _vet_route = None  # (kind, target) with kind in {"skill", "plugin", "mcp"}
     if args.vet:
-        vet_target = Path(args.vet).expanduser()
-        f = vet_skill(args.vet)
-        # rc: FAIL/WARN → 1 (dangerous/suspicious skill);
+        detected = detect_vet_type(args.vet, home=args.home)
+        print(f"detected type: {detected}", file=sys.stderr)
+        # 'unknown' routes to the skill engine, which answers with an honest UNKNOWN —
+        # exactly today's --vet behavior for a non-skill target (never a guessed PASS).
+        _vet_route = (detected if detected in ("plugin", "mcp") else "skill", args.vet)
+    elif getattr(args, "vet_skill", None):
+        _vet_route = ("skill", args.vet_skill)
+    elif getattr(args, "vet_plugin", None):
+        _vet_route = ("plugin", args.vet_plugin)
+
+    if _vet_route and _vet_route[0] in ("skill", "plugin"):
+        vet_kind, vet_path = _vet_route
+        vet_target = Path(vet_path).expanduser()
+        f = vet_skill(vet_path) if vet_kind == "skill" else vet_plugin(vet_path)
+        # rc: FAIL/WARN → 1 (dangerous/suspicious target);
         # UNKNOWN + target absent (not found / path unusable) → 1;
-        # UNKNOWN + target exists (valid skill, inconclusive assessment) → 0;
+        # UNKNOWN + target exists (valid target, inconclusive assessment) → 0;
         # PASS → 0.
         if f.status in ("FAIL", "WARN"):
             _vet_rc = 1
@@ -450,8 +532,8 @@ def main(argv=None) -> int:
             _vet_rc = 0
         # Record the run in the coverage ledger, symmetric with --vet-mcp (C-128).
         # freshness_notice has no "vet" threshold, so this updates the ledger without
-        # adding a staleness nudge — it just keeps the two vet modes consistent.
-        record_run("vet")
+        # adding a staleness nudge — it just keeps the vet modes consistent.
+        record_run("vet" if vet_kind == "skill" else "vet_plugin")
         # Side output: SARIF file (mirrors the full-audit --sarif behavior, incl.
         # the same graceful handling of an unwritable path — B-014).
         if args.sarif:
@@ -467,13 +549,14 @@ def main(argv=None) -> int:
         # Primary output: machine-readable JSON, else the human text report.
         if args.json:
             _emit(render_vet_json([f, *getattr(f, "ring_findings", [])],
-                                  mode="vet", target=args.vet, version=__version__))
+                                  mode="vet" if vet_kind == "skill" else "vet-plugin",
+                                  target=vet_path, version=__version__))
             return _vet_rc
         verdict = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS": "looks SAFE",
                    "UNKNOWN": "could not assess"}[f.status]
         icon = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}[f.status] \
             if ascii_only else {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔"}[f.status]
-        safe_vet = _sanitize(args.vet)
+        safe_vet = _sanitize(vet_path)
         lines = [f"{icon} Vetting '{safe_vet}': {verdict} [{f.severity}]", f"    {_sanitize(f.detail)}"]
         if f.evidence:
             bullet = "*" if ascii_only else "•"
@@ -494,62 +577,17 @@ def main(argv=None) -> int:
         _emit("\n".join(lines))
         return _vet_rc
 
+    if _vet_route and _vet_route[0] == "mcp":
+        # --vet routed to the MCP engine: mode "vet" keeps its table precedence
+        # (above --vet-all), so the shared renderer runs here, not further below.
+        return _run_vet_mcp(_vet_route[1], args, ascii_only)
+
     if args.vet_all:
         home_dir = Path(args.home).expanduser()
         return vet_all(home_dir, ascii_only=ascii_only)
 
     if args.vet_mcp is not None:
-        target = args.vet_mcp if args.vet_mcp else None
-        findings = vet_mcp(target=target, home=args.home)
-        # Side output: SARIF file (mirrors the full-audit --sarif behavior, incl.
-        # the same graceful handling of an unwritable path — B-014).
-        if args.sarif:
-            try:
-                secure_write_text(
-                    Path(args.sarif).expanduser(),
-                    render_sarif(findings, tool_version=__version__),
-                )
-                _emit(f"(SARIF written to {args.sarif})")
-            except OSError as exc:
-                _emit(f"(could not write SARIF: {exc})")
-        # Primary output: machine-readable JSON (covers the no-servers UNKNOWN case too).
-        if args.json:
-            _emit(render_vet_json(findings, mode="vet-mcp",
-                                  target=target or "configured", version=__version__))
-            worst = "PASS"
-            for f in findings:
-                if f.status == "FAIL":
-                    worst = "FAIL"
-                    break
-                if f.status == "WARN" and worst != "FAIL":
-                    worst = "WARN"
-            record_run("vet_mcp")
-            return 0 if worst in ("PASS", "UNKNOWN") else 1
-        # "No servers configured" case: single UNKNOWN finding.
-        if len(findings) == 1 and findings[0].status == "UNKNOWN":
-            f = findings[0]
-            icon = "[?]" if ascii_only else "❔"
-            _emit(f"{icon} {f.detail}")
-            record_run("vet_mcp")
-            return 0
-        worst_status = "PASS"
-        for f in findings:
-            if f.status == "FAIL":
-                worst_status = "FAIL"
-                break
-            if f.status == "WARN" and worst_status != "FAIL":
-                worst_status = "WARN"
-        for f in findings:
-            icon = _VET_ICON_ASCII[f.status] if ascii_only else _VET_ICON_UNI[f.status]
-            verdict = _VET_VERDICT[f.status]
-            _emit(f"{icon} {verdict}: {_sanitize(f.title)}")
-            if f.evidence:
-                for ev in f.evidence[:4]:
-                    _emit(f"    - {_sanitize(ev)}")
-            _emit(f"    fix: {_sanitize(f.fix)}")
-            _emit("")
-        record_run("vet_mcp")
-        return 0 if worst_status in ("PASS", "UNKNOWN") else 1
+        return _run_vet_mcp(args.vet_mcp if args.vet_mcp else None, args, ascii_only)
 
     if args.canary:
         _emit(render_canary(make_canary(), ascii_only))
