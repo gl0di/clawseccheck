@@ -2640,6 +2640,9 @@ def check_installed_skills(ctx: Context) -> Finding:
         warnings.extend(ctx.mismatches)
     if getattr(ctx, "polyglots", None):
         warnings.extend(ctx.polyglots)
+    if getattr(ctx, "stowaway_files", None):  # F-054: native executables don't belong in a skill
+        warnings.append("native executable(s) bundled in the skill (stowaway): "
+                        + ", ".join(ctx.stowaway_files[:4]))
     if getattr(ctx, "binary_files", None):
         warnings.append(f"Binary files found: {len(ctx.binary_files)}")
 

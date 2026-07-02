@@ -83,6 +83,7 @@ class Context:
     mismatches: list[str] = field(default_factory=list)
     polyglots: list[str] = field(default_factory=list)
     binary_files: list[str] = field(default_factory=list)
+    stowaway_files: list[str] = field(default_factory=list)  # F-054: native executables bundled in a skill
     total_files_inspected: int = 0
     excluded_binary_files_count: int = 0
     archives_unpacked: int = 0
@@ -621,6 +622,11 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                 if ctx is not None:
                     ctx.excluded_binary_files_count += 1
                     ctx.binary_files.append(sub_relpath)
+                    # F-054: a native executable (ELF/PE/Mach-O/JVM class) bundled inside a
+                    # skill is a stowaway — skills are text/config; a compiled binary the
+                    # prose doesn't need has no business here. Recorded for a WARN.
+                    if sub_fmt in ("ELF", "PE", "class") or (sub_fmt or "").startswith("Mach-O"):
+                        ctx.stowaway_files.append(f"{sub_relpath} ({sub_fmt})")
             
             # Map statuses here!
             if ctx is not None:
