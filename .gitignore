@@ -19,3 +19,5 @@ CLAUDE.local.md
 .aider*
 .continue/
 .copilot/
+
+*.egg-info/
