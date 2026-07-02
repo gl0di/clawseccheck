@@ -562,7 +562,8 @@ def _distance_note(active: list) -> str:
     missing = next(k for k in _LEG_KEYS if k not in active)
     return (
         f" 2 of 3 lethal-trifecta legs present; the missing leg is '{missing}'."
-        f" Avoid enabling {_MISSING_LEG_ACTIVATORS[missing]}, which would complete 3/3."
+        f" Avoid enabling {_MISSING_LEG_ACTIVATORS[missing]}, which would complete 3/3 —"
+        f" once the third leg activates, one injected prompt can exfiltrate everything."
     )
 
 
@@ -570,6 +571,12 @@ def check_trifecta(ctx: Context) -> Finding:
     legs = _trifecta_legs(ctx)
     active = [k for k, v in legs.items() if v]
     detail = f"Active legs {len(active)}/3: {', '.join(active) or 'none'}. Rule: keep ≤2 of 3."
+    if len(active) >= 3:
+        detail += (
+            " All three legs are active — your agent takes outside input, can reach"
+            " sensitive data, and can act outbound; one injected prompt is enough to"
+            " exfiltrate everything."
+        )
     detail += _distance_note(active)
 
     if len(active) >= 3:
@@ -1964,6 +1971,47 @@ def _in_example_context(blob: str, pos: int, fence_ranges: list[tuple[int, int]]
         return True
     seg = blob[max(0, pos - _SAFETY_EXAMPLE_WINDOW): pos + _SAFETY_EXAMPLE_WINDOW]
     return bool(_SAFETY_EXAMPLE_RE.search(seg))
+
+
+# F-051 (SkillSpector TR1): overly-broad activation triggers — the skill claims to fire on
+# nearly any user action. WARN-first (many legit skills have broad-ish triggers).
+_SKILL_BROAD_TRIGGER_RE = re.compile(
+    r"\b(?:whenever|any\s?time|each\s+time)\s+the\s+user\s+"
+    r"(?:says|does|asks|types|sends|writes|mentions)\s+(?:anything|something)\b|"
+    r"\bon\s+every\s+(?:message|file|url|link|request|prompt|input|interaction|keystroke)\b|"
+    r"\b(?:for|on)\s+(?:any|all|every)\s+(?:user\s+)?(?:request|input|message|prompt|query|interaction)\b|"
+    r"\balways\s+(?:activate|trigger|invoke|run\s+this|use\s+this\s+skill)\b", re.I)
+
+# F-060 (H6): prose telling the agent to RUN a bundled relative script — local instruction
+# chain (the payload lives one hop away in a file the prose never quotes). Narrow to run/exec
+# verbs + a bundled dir prefix + a script extension so reading a doc (references/x.md) is NOT
+# flagged; WARN-first (delegation is common).
+_SKILL_LOCAL_CHAIN_RE = re.compile(
+    r"\b(?:run|execute|exec|source|bash|sh|invoke|launch)\s+(?:the\s+)?(?:file\s+|script\s+)?"
+    r"[`'\"]?(?:\./|scripts?/|bin/|lib/|tools?/)[\w./-]*\.(?:sh|bash|zsh|py|pl|rb)\b", re.I)
+
+# F-062 (H10): passive IOCs — Tor .onion hosts and bare public-IP URLs in prose/data.
+_IOC_ONION_RE = re.compile(r"\b[a-z2-7]{16,56}\.onion\b", re.I)
+_IOC_IPURL_RE = re.compile(r"\bhttps?://(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::\d{2,5})?\b")
+
+
+def _is_public_ip(ip: str) -> bool:
+    """True for a routable IPv4 — excludes private / loopback / link-local / TEST-NET doc
+    ranges so example addresses in documentation don't fire."""
+    try:
+        octs = [int(x) for x in ip.split(".")]
+    except ValueError:
+        return False
+    if len(octs) != 4 or any(o > 255 for o in octs):
+        return False
+    a, b = octs[0], octs[1]
+    if a in (0, 10, 127) or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31):
+        return False
+    if a == 169 and b == 254:                       # link-local
+        return False
+    if (a, b) in ((192, 0), (198, 51), (203, 0)):    # TEST-NET-1/2/3 documentation ranges
+        return False
+    return True
 # `curl URL | sh` is how uv/rustup/brew/deno legitimately install — only suspicious when the
 # host is NOT a well-known installer domain.
 _REPUTABLE_INSTALL_HOSTS = (
@@ -2275,6 +2323,7 @@ def check_installed_skills(ctx: Context) -> Finding:
                        "Run on the host where installed skills live (~/.openclaw/skills, workspace/skills).")
     crit, high, _persist_warn, warns_local_exfil, parse_error_paths, warns_env_exfil = [], [], [], [], [], []
     warns_timebomb: list[str] = []
+    warns_content: list[str] = []  # F-051/F-060/F-062 soft content signals (broad trigger, local chain, IOCs)
     for name, blob in skills.items():
         # C-041: precompute fence ranges once per blob so every check below can
         # skip matches that are purely inside a documented code example.
@@ -2370,6 +2419,27 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if not _in_example_context(blob, m.start(), _fr):
                     high.append(f"{name}: injection directive — {label}")
                     break
+
+        # F-051 / F-060 / F-062: soft content signals -> WARN (never FAIL on their own).
+        for m in _SKILL_BROAD_TRIGGER_RE.finditer(blob):
+            if not _in_example_context(blob, m.start(), _fr):
+                warns_content.append(f"{name}: overly-broad activation trigger — the skill "
+                                     "claims to fire on nearly any user action (TR1)")
+                break
+        for m in _SKILL_LOCAL_CHAIN_RE.finditer(blob):
+            if not _is_code_example(blob, m.start(), _fr):
+                warns_content.append(f"{name}: prose instructs running a bundled script "
+                                     f"({m.group(0)[:60]}) — review the referenced file (H6)")
+                break
+        for m in _IOC_ONION_RE.finditer(blob):
+            if not _is_code_example(blob, m.start(), _fr):
+                warns_content.append(f"{name}: references a Tor .onion address ({m.group(0)})")
+                break
+        for m in _IOC_IPURL_RE.finditer(blob):
+            if _is_public_ip(m.group(1)) and not _is_code_example(blob, m.start(), _fr):
+                warns_content.append(f"{name}: hardcoded public-IP URL ({m.group(0)}) — "
+                                     "unusual for a legitimate skill")
+                break
 
         # C-040: persistence / rogue-agent patterns — HIGH (self-mod, cron/startup)
         # and WARN (backgrounding/daemonize). Fence-aware via _is_code_example.
@@ -2521,6 +2591,19 @@ def check_installed_skills(ctx: Context) -> Finding:
                        "or environment condition is met — the classic way a payload stays dormant in "
                        "review/CI and detonates later. Read the guarded branch and confirm it is benign.",
                        warns_timebomb)
+
+    # F-051 / F-060 / F-062: soft content signals — broad activation trigger, delegation to a
+    # bundled script, or a Tor/.onion / public-IP IOC. WARN-first; individually weak, worth a
+    # human glance. Ranked below the exfil/time-bomb WARNs.
+    if warns_content:
+        extra = f" (+{len(warns_content) - 6} more)" if len(warns_content) > 6 else ""
+        return _custom("B13", HIGH, WARN,
+                       "Content signals worth a review in installed skill(s): "
+                       + "; ".join(warns_content[:6]) + extra,
+                       "These are soft signals (broad activation trigger, delegation to a bundled "
+                       "script, or a Tor/.onion or hardcoded-IP reference). Review the skill's prose "
+                       "and any referenced files before trusting it.",
+                       warns_content)
 
     # C-040: backgrounding/daemonize — lower confidence WARN (nohup/disown/setsid).
     # Only reached when no CRIT/HIGH patterns fired; a skill that also has a CRIT/HIGH
@@ -7369,9 +7452,12 @@ _B65_DELAY_RE = re.compile(
     re.IGNORECASE,
 )
 _B65_ACTION_RE = re.compile(
+    # Sensitive actions only. Pure output verbs (read/write/reply/respond/print/echo) were
+    # removed: combined with the near-universal "when the user asks …" trigger they fired on
+    # wholly benign skill descriptions (e.g. "use this when the user asks to write a git
+    # commit message") — a broad false positive. Exec / exfil / leak / destroy verbs remain.
     r"\b(?:send|forward|post|call|invoke|execute|run|open|download|upload|"
-    r"curl|wget|fetch|read|write|delete|exfiltrat|harvest|relay|"
-    r"reveal|steal|exfil|reply|respond|print|echo)\b",
+    r"curl|wget|fetch|delete|exfiltrat|harvest|relay|reveal|steal|exfil)\b",
     re.IGNORECASE,
 )
 
