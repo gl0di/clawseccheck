@@ -77,6 +77,8 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "force the plugin engine (root dir or openclaw.plugin.json)"),
         PaletteEntry("Vet an MCP server", 'vet-mcp <name>', "--vet-mcp",
                      "the same, for a configured MCP server"),
+        PaletteEntry("Vet a source before download", 'vet source <slug|url>', "--vet-source",
+                     "reputation gate on the name/URL alone — before anything is fetched"),
         PaletteEntry("Vet everything", 'vet all', "--vet-all",
                      "every installed skill, one verdict each"),
     )),

@@ -509,6 +509,7 @@ preserving backward compatibility.
 | Vet anything before install (type autodetected) | `clawseccheck --vet ./target` |
 | Vet a skill / a plugin explicitly | `clawseccheck --vet-skill ./skill` · `clawseccheck --vet-plugin ./plugin` |
 | Vet connected MCP servers | `clawseccheck --vet-mcp` |
+| Reputation gate before download | `clawseccheck --vet-source clawhub:some-skill` |
 | Active injection self-test | `clawseccheck --canary` · `clawseccheck --redteam` · `clawseccheck --dryrun` |
 | Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
 | Attestation template / feed it back | `clawseccheck --ask` · `clawseccheck --attest attest.json` |
@@ -527,6 +528,7 @@ python3 audit.py --vet-skill ./some-skill  # force the skill engine (dir or SKIL
 python3 audit.py --vet-plugin ./some-plugin # force the plugin engine (root dir or openclaw.plugin.json)
 python3 audit.py --vet ./some-skill --json # same, machine-readable (verdict + findings); --sarif PATH for CI
 python3 audit.py --vet-mcp                 # vet connected MCP servers for supply-chain risk BEFORE trusting them
+python3 audit.py --vet-source npm:some-pkg # reputation gate on a slug/URL/package spec BEFORE anything is fetched
 python3 audit.py --canary                   # active prompt-injection self-test (battle-tested)
 python3 audit.py --redteam                   # a multi-scenario adversarial payload suite (incl. tool-poisoning, MCP-response injection, memory-poisoning, multi-agent, approval-bypass, dirty-to-exfil)
 python3 audit.py --dryrun                     # runtime behavioral test (fake secret + fake tools; sources: email, web, MCP response, memory, subagent)
@@ -563,6 +565,14 @@ python3 audit.py --log audit.log            # also write log to a local file
   plugin root — then dispatches bundled skills to the skill engine (they auto-load via
   `~/.openclaw/plugin-skills/`) and embedded MCP specs to the MCP engine. Plugin runtime code is
   JS/TS and is disclosed as outside this vet's static depth — review entry files before trusting.
+- **`--vet-source SLUG|URL|PKG`** is the pre-download reputation gate: it judges a source's
+  *identity* — `clawhub:<slug>`, `npm:<pkg>`, `pypi:<pkg>`, `git:host/owner/repo[@ref]`, or a
+  URL — with zero network and nothing fetched. Exact match in the bundled known-compromised
+  catalog → KNOWN-BAD (do not fetch, exit 1); typosquat of a well-known name / raw paste or
+  bare-IP host / plaintext http / unpinned git ref → SUSPICIOUS (fetch only into an isolated
+  quarantine, exit 1); otherwise the honest answer is *no known-bad record* (exit 0) — an
+  identity check can never prove unseen code safe, so proceed via quarantine and run `--vet`
+  on the fetched copy before installing.
 - **`--vet-mcp`** vets every MCP server listed under `mcp.servers.*` for supply-chain risk
   *before* you trust it. Flags unpinned installs (`npx @latest`, unversioned packages), `curl|sh`
   bootstrap, plaintext-HTTP remote transports, env-variable secret passthrough, and overly broad

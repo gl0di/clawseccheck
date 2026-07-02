@@ -20,7 +20,7 @@ from . import (
     render_canary, render_card, render_dashboard, render_dashboard_findings, render_events,
     render_json, render_monitor,
     render_report, render_svg, render_vet_json, save_state, snapshot,
-    detect_vet_type, vet_mcp, vet_plugin, vet_skill,
+    detect_vet_type, vet_mcp, vet_plugin, vet_skill, vet_source,
 )
 from . import __released__, __version__
 from .update import update_notice
@@ -230,6 +230,7 @@ _PRIMARY_MODES = [
     ("vet_plugin", "--vet-plugin", "opt"),
     ("vet_all", "--vet-all", "bool"),
     ("vet_mcp", "--vet-mcp", "opt"),
+    ("vet_source", "--vet-source", "opt"),
     ("canary", "--canary", "bool"),
     ("redteam", "--redteam", "bool"),
     ("dryrun", "--dryrun", "bool"),
@@ -257,6 +258,7 @@ _MODE_HONORS = {
     "vet_skill": frozenset({"json"}),
     "vet_plugin": frozenset({"json"}),
     "vet_mcp": frozenset({"json"}),
+    "vet_source": frozenset({"json"}),
 }
 
 # Primary modes that run AFTER the --attest block in main()'s cascade: their findings
@@ -382,6 +384,9 @@ def main(argv=None) -> int:
                         "BEFORE installing it")
     p.add_argument("--vet-mcp", nargs="?", const="", metavar="NAME|FILE",
                    help="vet configured MCP servers (or a NAME/FILE) for supply-chain risk before trusting them")
+    p.add_argument("--vet-source", metavar="SLUG|URL|PKG", dest="vet_source",
+                   help="pre-download reputation gate: vet the identity of a source (IOC / typosquat / "
+                        "host heuristics) BEFORE fetching anything — zero network, bundled catalogs")
     p.add_argument("--vet-all", "--recursive", action="store_true", dest="vet_all",
                    help="vet every installed skill under ~/.openclaw/skills/* (one verdict per skill + aggregate)")
     p.add_argument("--canary", action="store_true",
@@ -588,6 +593,30 @@ def main(argv=None) -> int:
 
     if args.vet_mcp is not None:
         return _run_vet_mcp(args.vet_mcp if args.vet_mcp else None, args, ascii_only)
+
+    if getattr(args, "vet_source", None):
+        # F-073: pre-download reputation gate — identity only, zero network, no fetch.
+        f = vet_source(args.vet_source)
+        _src_rc = 1 if f.status in ("FAIL", "WARN") else 0
+        record_run("vet_source")
+        if args.json:
+            _emit(render_vet_json([f], mode="vet-source",
+                                  target=args.vet_source, version=__version__))
+            return _src_rc
+        band = {"FAIL": "KNOWN-BAD — do not fetch",
+                "WARN": "SUSPICIOUS — quarantine only",
+                "UNKNOWN": "no known-bad record — proceed via quarantine"}[f.status]
+        icon = {"FAIL": "[X]", "WARN": "[!]", "UNKNOWN": "[?]"}.get(f.status, "[?]") \
+            if ascii_only else {"FAIL": "⛔", "WARN": "⚠️", "UNKNOWN": "❔"}.get(f.status, "❔")
+        lines = [f"{icon} Source vet '{_sanitize(args.vet_source)}': {band} [{f.severity}]",
+                 f"    {_sanitize(f.detail)}"]
+        if f.evidence:
+            bullet = "*" if ascii_only else "•"
+            for ev in f.evidence[:8]:
+                lines.append(f"      {bullet} {_sanitize(ev)}")
+        lines.append(f"    {_sanitize(f.fix)}")
+        _emit("\n".join(lines))
+        return _src_rc
 
     if args.canary:
         _emit(render_canary(make_canary(), ascii_only))

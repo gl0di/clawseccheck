@@ -1343,7 +1343,8 @@ def _candidate_tokens(name: str) -> list[str]:
     return seen
 
 
-def _squat_hits(candidates: list[str]) -> list[tuple[str, str, int]]:
+def _squat_hits(candidates: list[str],
+                known: frozenset[str] = _KNOWN_NAMES) -> list[tuple[str, str, int]]:
     """For each candidate name, return (candidate, known, distance) if it closely
     resembles a known name without being an exact match.
 
@@ -1354,6 +1355,7 @@ def _squat_hits(candidates: list[str]) -> list[tuple[str, str, int]]:
     - Fire when: 0 < distance <= 2 AND candidate_form != K AND
       candidate_form not itself a known name.
     - Returns deduplicated hits, one per unique (candidate, known) pair.
+    `known` defaults to the curated brand list; vet_source passes ecosystem pools.
     """
     seen: set[tuple[str, str]] = set()
     hits: list[tuple[str, str, int]] = []
@@ -1366,17 +1368,17 @@ def _squat_hits(candidates: list[str]) -> list[tuple[str, str, int]]:
             if not form:
                 continue
             # If this form is itself a known name → legitimate use, skip.
-            if form in _KNOWN_NAMES:
+            if form in known:
                 continue
-            for known in _KNOWN_NAMES:
-                if len(known) < _TYPOSQUAT_MIN_KNOWN_LEN:
+            for kn in known:
+                if len(kn) < _TYPOSQUAT_MIN_KNOWN_LEN:
                     continue
-                d = _levenshtein(form, known)
+                d = _levenshtein(form, kn)
                 if 0 < d <= 2:
-                    key = (cand, known)
+                    key = (cand, kn)
                     if key not in seen:
                         seen.add(key)
-                        hits.append((cand, known, d))
+                        hits.append((cand, kn, d))
                         break  # one finding per (candidate, known) is enough
 
     return hits
@@ -3122,6 +3124,187 @@ def detect_vet_type(target: str | Path, home: str | Path = "~/.openclaw") -> str
     if isinstance(cfg, dict) and str(target) in _mcp_servers(cfg):
         return "mcp"
     return "unknown"
+
+
+# ---------- vet_source: pre-download reputation gate (E-020 F-073 = E-019 F-064) ----
+# "Check before download": judge a source's IDENTITY (slug / URL / package spec) with
+# zero network and zero fetch, from bundled local catalogs only. Verdict bands:
+#   FAIL    known-bad        — do not fetch, exact IOC match;
+#   WARN    suspicious       — fetch only into an isolated quarantine, extra scrutiny;
+#   UNKNOWN no known-bad     — proceed via quarantine and --vet the fetched copy.
+# NEVER a PASS: an identity check cannot prove unseen code safe (§ honesty).
+#
+# The known-bad catalog ships EMPTY by design (§2.4 — no fabricated IOCs): entries may
+# be added only from real, referenced advisories (e.g. ClawHavoc IOC feeds, npm/PyPI
+# advisory names), each with a source comment. Tests inject synthetic catalogs via the
+# known_bad/known_good parameters — no fake "malware" names ship in the package.
+# Ecosystem keys: "npm", "pypi", "clawhub", "git", "url", "any".
+_SOURCE_KNOWN_BAD: dict = {
+    "npm": frozenset(), "pypi": frozenset(), "clawhub": frozenset(),
+    "git": frozenset(), "url": frozenset(), "any": frozenset(),
+}
+
+# Known-good identity pools for typosquat comparison, per ecosystem, used ON TOP of
+# the global _KNOWN_NAMES brand list. "plugin-ids" is grounded on the real bundled
+# OpenClaw fleet (recon §11.1: dist/extensions/<id> + installed npm plugins) —
+# impersonating one of these ids ("telegramm", "cnavas") is exactly the squat this
+# gate exists to catch pre-download.
+_SOURCE_KNOWN_GOOD: dict = {
+    "clawhub": frozenset({"clawseccheck"}),
+    "npm": frozenset(),
+    "pypi": frozenset(),
+    "plugin-ids": frozenset({
+        "telegram", "brave", "canvas", "browser", "openai", "codex", "imessage",
+        "google", "github-copilot", "ollama", "anthropic", "deepgram", "elevenlabs",
+        "huggingface", "duckduckgo", "lmstudio", "litellm", "copilot-proxy",
+        "document-extract", "file-transfer", "azure-speech", "cohere",
+    }),
+}
+
+# Paste / raw-snippet hosts: no provenance, no review, no history — a classic drop
+# point for one-off malicious payloads (matched against the URL hostname).
+_SOURCE_PASTE_HOSTS = ("gist.githubusercontent.com", "gist.github.com",
+                       "pastebin.com", "paste.ee", "hastebin.com", "dpaste.org",
+                       "dpaste.com", "transfer.sh", "termbin.com", "0x0.st")
+
+_SOURCE_GIT_RE = re.compile(r"^git:(?P<host>[^/\s]+)/(?P<path>[^@\s]+?)(?:@(?P<ref>\S+))?$", re.I)
+_SOURCE_IP_RE = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
+
+
+def _parse_source_target(target: str) -> dict:
+    """Parse a --vet-source target into identity facts (never raises).
+
+    Recognized shapes mirror the real `openclaw plugins install` sources (recon
+    §11.4): `clawhub:<slug>`, `npm:<pkg>[@ver]`, `git:host/owner/repo[@ref]`, plus
+    `pypi:<pkg>[==ver]`, http(s) URLs, and a bare registry name (which OpenClaw
+    resolves to npm by default — checked against every catalog here).
+    """
+    t = str(target).strip()
+    low = t.lower()
+    out = {"ecosystem": "registry", "name": t, "version": None, "host": None,
+           "ref": None, "kind": None, "scheme": None}
+    if low.startswith(("http://", "https://")):
+        parsed = urlparse(t)
+        out.update(ecosystem="url", scheme=parsed.scheme,
+                   host=(parsed.hostname or "").lower(),
+                   name=(parsed.path.rstrip("/").rsplit("/", 1)[-1]
+                         or (parsed.hostname or t)))
+    else:
+        m = _SOURCE_GIT_RE.match(t)
+        if m:
+            out.update(ecosystem="git", host=m.group("host").lower(),
+                       name=m.group("path").rsplit("/", 1)[-1], ref=m.group("ref"))
+        elif low.startswith("npm:"):
+            spec = t[4:]
+            if spec.startswith("@"):
+                scope_name, _, ver = spec[1:].partition("@")
+                out.update(ecosystem="npm", name="@" + scope_name, version=ver or None)
+            else:
+                name, _, ver = spec.partition("@")
+                out.update(ecosystem="npm", name=name, version=ver or None)
+        elif low.startswith("pypi:"):
+            name, _, ver = t[5:].partition("==")
+            out.update(ecosystem="pypi", name=name, version=ver or None)
+        elif low.startswith("clawhub:"):
+            out.update(ecosystem="clawhub", name=t[8:])
+    # Kind guess (informational only — which per-type engine the fetched copy faces).
+    nlow = str(out["name"]).lower()
+    if out["ecosystem"] == "clawhub":
+        out["kind"] = "plugin" if nlow.endswith("-plugin") else "skill"
+    elif "mcp" in nlow:
+        out["kind"] = "mcp"
+    elif nlow.startswith("@openclaw/") or nlow.endswith("-plugin"):
+        out["kind"] = "plugin"
+    return out
+
+
+def vet_source(target: str, *, known_bad: dict | None = None,
+               known_good: dict | None = None) -> Finding:
+    """Pre-download reputation gate: vet a source's identity WITHOUT fetching it.
+
+    Zero network — catalogs are bundled/local. Returns a synthetic "SOURCE-VET"
+    Finding whose status is FAIL (known-bad, do not fetch), WARN (suspicious,
+    quarantine only) or UNKNOWN (no known-bad record — proceed via the quarantine
+    pipeline and --vet the fetched copy). Never PASS: identity cannot prove unseen
+    code safe.
+    """
+    bad = known_bad if known_bad is not None else _SOURCE_KNOWN_BAD
+    good = known_good if known_good is not None else _SOURCE_KNOWN_GOOD
+
+    def _f(severity, status, detail, fix, ev=None) -> Finding:
+        return Finding("SOURCE-VET", "Pre-download source reputation gate", severity,
+                       status, detail, fix, "Source Reputation", False, ev or [])
+
+    t = str(target).strip()
+    if not t:
+        return _f(HIGH, UNKNOWN, "empty --vet-source target",
+                  "Pass a slug (clawhub:name), package spec (npm:pkg / pypi:pkg), "
+                  "git:host/owner/repo@ref, or URL.")
+    info = _parse_source_target(t)
+    eco, name = info["ecosystem"], str(info["name"])
+    plain = name.lstrip("@").rsplit("/", 1)[-1].lower()
+
+    reasons_bad: list = []
+    reasons_susp: list = []
+    notes: list = [
+        "identity: ecosystem=" + eco
+        + (f" · kind≈{info['kind']}" if info.get("kind") else "")
+        + (f" · version={info['version']}" if info.get("version") else " · version=unpinned")
+    ]
+
+    # 1. Known-bad IOC — exact ecosystem+name match (a bare registry name is checked
+    #    against every ecosystem, mirroring OpenClaw's bare-spec resolution order).
+    eco_keys = [eco, "any"] if eco != "registry" else list(bad.keys())
+    for k in eco_keys:
+        pool = bad.get(k) or frozenset()
+        if name.lower() in pool or plain in pool:
+            reasons_bad.append(f"'{name}' is a known-compromised source "
+                               f"(exact IOC match, catalog: {k})")
+            break
+
+    # 2. Typosquat vs the brand list + ecosystem known-good pools + real plugin ids.
+    pool = set(_KNOWN_NAMES) | set(good.get("plugin-ids") or ())
+    pool |= set(good.get(eco) or ())
+    if eco == "registry":
+        for v in good.values():
+            pool |= set(v)
+    if plain not in pool:  # an exact known-good name is the real thing, not a squat
+        for cand, kn, d in _squat_hits([plain], known=frozenset(pool))[:3]:
+            reasons_susp.append(f"'{cand}' resembles well-known '{kn}' "
+                                f"(edit distance {d}) — possible typosquat")
+
+    # 3. Source heuristics.
+    host = info.get("host") or ""
+    if eco == "url":
+        if info.get("scheme") == "http":
+            reasons_susp.append("plaintext http:// source — no transport integrity")
+        if any(host == h or host.endswith("." + h) for h in _SOURCE_PASTE_HOSTS):
+            reasons_susp.append(f"raw paste/gist host '{host}' — no provenance, "
+                                "no review, no history")
+        if _SOURCE_IP_RE.fullmatch(host):
+            reasons_susp.append(f"bare-IP host '{host}' — no domain provenance")
+        if host.endswith(".onion"):
+            reasons_susp.append(f"anonymous .onion host '{host}'")
+    if eco == "git" and not info.get("ref"):
+        reasons_susp.append("git source without a pinned @ref (tag/sha) — content "
+                            "can change between this check and the fetch")
+
+    evidence = reasons_bad + reasons_susp + notes
+    if reasons_bad:
+        return _f(CRITICAL, FAIL,
+                  f"KNOWN-BAD source '{t}': " + reasons_bad[0],
+                  "Do NOT fetch or install this. If it is already installed, remove it "
+                  "and rotate any secrets the agent could reach.", evidence)
+    if reasons_susp:
+        return _f(MEDIUM, WARN,
+                  f"suspicious source identity '{t}': " + reasons_susp[0],
+                  "Fetch only into an isolated quarantine dir (never under ~/.openclaw) "
+                  "and run --vet on the fetched copy before any install.", evidence)
+    return _f(LOW, UNKNOWN,
+              f"no known-bad record for '{t}' — identity checks cannot prove unseen "
+              "code safe",
+              "Proceed via quarantine: fetch into an isolated dir and run --vet on the "
+              "fetched copy before installing.", evidence)
 
 
 # ---------- vet_mcp: supply-chain / trust vetting for MCP servers ----------
