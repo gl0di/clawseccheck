@@ -359,3 +359,33 @@ def test_clean_f022_typosquat_passes():
     assert f.status == PASS, (
         f"clean_f022_typosquat expected PASS, got {f.status!r}: {f.detail!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# B-079: OSA distance + short-name threshold calibration
+# ---------------------------------------------------------------------------
+
+def test_levenshtein_transposition_counts_as_one_edit():
+    """OSA: an adjacent swap is the classic squat shape — one edit, not two."""
+    assert _levenshtein("reqeusts", "requests") == 1
+    assert _levenshtein("cnavas", "canvas") == 1
+
+
+def test_squat_hits_short_name_two_substitutions_silent():
+    """B-079 regression: 'canvas' (6 chars, two independent substitutions away
+    from 'pandas') is a common word, not a squat — must stay silent."""
+    hits = _squat_hits(["canvas"], known=frozenset({"pandas"}))
+    assert not hits, f"'canvas' must not be flagged against 'pandas': {hits}"
+
+
+def test_squat_hits_short_name_transposition_still_fires():
+    """The threshold tightening must NOT lose real short-name squats: a
+    transposed 'cnavas' is one OSA edit from 'canvas' and still fires."""
+    hits = _squat_hits(["cnavas"], known=frozenset({"canvas"})) 
+    assert hits and hits[0][1] == "canvas"
+
+
+def test_squat_hits_long_name_two_edits_still_fires():
+    """Names of 7+ chars keep the distance-2 budget ('amthropicx' → 'anthropic')."""
+    hits = _squat_hits(["amthropicx"], known=frozenset({"anthropic"}))
+    assert hits and hits[0][2] == 2

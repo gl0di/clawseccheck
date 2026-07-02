@@ -1257,18 +1257,26 @@ def _custom(cid, severity, status, detail, fix, ev=None) -> Finding:
 # Severity: WARN (heuristic — near-miss name is suspicious, not proof).
 
 def _levenshtein(a: str, b: str) -> int:
-    """Wagner-Fischer edit distance between strings a and b. Pure stdlib, O(len(a)*len(b))."""
+    """Optimal String Alignment distance (Levenshtein + adjacent transposition).
+
+    A transposed pair ("reqeusts" / "requests") is the single most common squat
+    shape, so it counts as ONE edit — while two independent substitutions
+    ("canvas" / "pandas") honestly stay at two. Pure stdlib, O(len(a)*len(b)).
+    """
     m, n = len(a), len(b)
     if m < n:
         a, b, m, n = b, a, n, m
-    # prev[j] = distance(a[:i], b[:j])
-    prev = list(range(n + 1))
+    prev2: list = []            # distance row i-2 (for the transposition case)
+    prev = list(range(n + 1))   # prev[j] = distance(a[:i], b[:j])
     for i in range(1, m + 1):
         curr = [i] + [0] * n
         for j in range(1, n + 1):
             cost = 0 if a[i - 1] == b[j - 1] else 1
-            curr[j] = min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
-        prev = curr
+            d = min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
+            if (i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]):
+                d = min(d, prev2[j - 2] + 1)
+            curr[j] = d
+        prev2, prev = prev, curr
     return prev[n]
 
 
@@ -1374,7 +1382,11 @@ def _squat_hits(candidates: list[str],
                 if len(kn) < _TYPOSQUAT_MIN_KNOWN_LEN:
                     continue
                 d = _levenshtein(form, kn)
-                if 0 < d <= 2:
+                # B-079: two independent edits on a short name is weak evidence —
+                # 'canvas' is not a squat of 'pandas'. Short names must be within
+                # ONE edit (transpositions already count as one, OSA above).
+                allowed = 1 if min(len(form), len(kn)) <= 6 else 2
+                if 0 < d <= allowed:
                     key = (cand, kn)
                     if key not in seen:
                         seen.add(key)
