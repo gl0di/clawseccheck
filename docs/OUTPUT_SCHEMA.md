@@ -519,5 +519,5 @@ findings, and `verdict` reflects the worst of them.
   fields — these may change to improve accuracy without a version bump.
 - `runs[0].properties.*` SARIF extension fields — present only when context is
   available and may gain or lose sub-fields in minor releases.
-- The `--text` (human-readable) and `--prompts` output formats — not machine-parseable
+- The `--text` (human-readable) output format — not machine-parseable
   and not versioned.

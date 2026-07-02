@@ -2,7 +2,7 @@
 from pathlib import Path
 
 from clawseccheck import (
-    audit, evaluate, make_canary, render_prompts, render_svg, vet_skill,
+    audit, evaluate, make_canary, render_svg, vet_skill,
 )
 from clawseccheck.catalog import CRITICAL, FAIL, LOW, PASS, UNKNOWN
 
@@ -21,21 +21,6 @@ def test_svg_badge_is_valid_and_grade_coloured():
     assert "OpenClaw Security" in svg and score.grade in svg
     assert "#4c1" in svg          # grade A -> brightgreen
     svg.encode("ascii")           # SVG must be ASCII-safe
-
-
-# ---- fix prompts ----
-def test_fix_prompts_one_per_issue():
-    _, findings, score = audit(FIXTURES / "home_vuln")
-    out = render_prompts(findings)
-    assert "fix prompt" in out.lower()
-    assert "Please fix it" in out
-    assert out.count('"') >= 2     # at least one quoted prompt
-
-
-def test_fix_prompts_nothing_to_fix():
-    _, findings, _ = audit(FIXTURES / "home_safe")
-    clean = [f for f in findings if f.status not in ("FAIL", "WARN")]
-    assert "Nothing to fix" in render_prompts(clean)
 
 
 # ---- --vet (pre-install) ----

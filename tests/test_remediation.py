@@ -1,11 +1,14 @@
-"""Paste-ready remediation: REMEDIATION map, render_fix, --json/SARIF surfacing, --fix CLI.
+"""Remediation DATA: REMEDIATION map integrity + --json/SARIF surfacing.
 
-ClawSecCheck only PRINTS remediation — it never applies it (read-only by default).
+Reports-only (F-074): ClawSecCheck renders NO remediation for humans — --fix/--prompts
+and the fix: lines were removed. The structured remediation map stays as machine DATA
+in --json/SARIF (frozen public contract) for external tooling; these tests pin that
+boundary: data present in machine formats, absent from human renders, CLI flags gone.
 """
 import json
 from pathlib import Path
 
-from clawseccheck import audit, render_fix, render_json
+from clawseccheck import audit, render_json
 from clawseccheck.catalog import BY_ID, REMEDIATION, remediation_for
 from clawseccheck.cli import main
 from clawseccheck.sarif import render_sarif
@@ -52,34 +55,26 @@ def test_commands_use_only_allowlisted_safe_verbs():
                 assert bad not in cmd, f"{cid}: forbidden token {bad!r} in command {cmd!r}"
 
 
-# ---- render_fix ----
+# ---- human renders carry no remediation (F-074) ----
 def _ctx_findings(home):
     _, findings, score = audit(home, include_native=False, include_host=False)
     return findings, score
 
 
-def test_render_fix_shows_commands_and_does_not_apply_banner():
-    findings, _ = _ctx_findings(FIXTURES / "home_vuln")
-    out = render_fix(findings)
-    assert "does NOT apply" in out
-    assert "commands:" in out
-    assert "chmod 600 ~/.openclaw/openclaw.json" in out      # B1 command
-    assert "diff:" in out
-    assert "--- a/" in out and "+++ b/" in out and "@@" in out
+def test_render_fix_and_prompts_are_gone():
+    import clawseccheck
+    import clawseccheck.report as report
+    for name in ("render_fix", "render_prompts"):
+        assert not hasattr(clawseccheck, name)
+        assert not hasattr(report, name)
 
 
-def test_render_fix_empty_when_no_actionable():
-    # A clean finding set (no FAIL/WARN with remediation) -> "nothing" message.
-    out = render_fix([])
-    assert "Nothing to paste-apply" in out
-
-
-def test_render_fix_config_guidance_form_not_a_json_blob():
-    findings, _ = _ctx_findings(FIXTURES / "home_vuln")
-    out = render_fix(findings)
-    # guidance points at the dotted path; it must not dump a full JSON object to paste over
-    assert "agents.defaults.sandbox.mode" in out
-    assert '{\n' not in out  # no multi-line JSON blob
+def test_human_report_has_no_fix_lines():
+    from clawseccheck.report import render_dashboard, render_report
+    findings, score = _ctx_findings(FIXTURES / "home_vuln")
+    for out in (render_report(findings, score), render_dashboard(findings, score)):
+        assert "    fix:" not in out
+        assert "FIX FIRST" not in out
 
 
 # ---- --json / SARIF surfacing ----
@@ -101,11 +96,18 @@ def test_sarif_includes_fixes():
     assert results["B1"]["fixes"][0]["description"]["text"].startswith("openclaw secrets")
 
 
-# ---- --fix CLI ----
-def test_cli_fix_returns_zero_and_prints_block(capsys):
-    rc = main(["--home", str(FIXTURES / "home_vuln"), "--no-native", "--no-host",
-               "--no-history", "--fix"])
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "Remediation" in out and "does NOT apply" in out
+# ---- CLI flags removed ----
+def test_cli_fix_flag_is_gone(capsys):
+    import pytest
+    with pytest.raises(SystemExit) as exc:
+        main(["--home", str(FIXTURES / "home_vuln"), "--fix"])
+    assert exc.value.code == 2  # argparse: unrecognized argument
+    assert "unrecognized arguments" in capsys.readouterr().err
 
+
+def test_cli_prompts_flag_is_gone(capsys):
+    import pytest
+    with pytest.raises(SystemExit) as exc:
+        main(["--home", str(FIXTURES / "home_vuln"), "--prompts"])
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err

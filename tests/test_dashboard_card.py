@@ -1,9 +1,9 @@
 """Deterministic chat Dashboard card — `--dashboard` / render_dashboard (B-077).
 
-Live testing (F-070) showed the host LLM drops the 🦞 header, FIX FIRST block and
-family frame when asked to COMPOSE them, so Sections 1-3 are now one code-rendered
-paste. These tests pin that contract: mascot, score-bar, FIX FIRST projection,
-family emoji, severity dots, pure-ASCII degradation.
+Live testing (F-070) showed the host LLM drops the 🦞 header and family frame when
+asked to COMPOSE them, so Sections 1-2 are one code-rendered paste. These tests pin
+that contract: mascot, score-bar, family emoji, severity dots, pure-ASCII degradation
+— and, per the reports-only doctrine (F-074), the ABSENCE of any remediation surface.
 
 All tests are offline and deterministic — no network calls, no file writes.
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 
 from clawseccheck.catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, WARN, Finding
 from clawseccheck.cli import main
-from clawseccheck.report import _fix_first_lines, _sev_token, render_dashboard
+from clawseccheck.report import _sev_token, render_dashboard
 from clawseccheck.scoring import compute
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -47,40 +47,7 @@ class TestSevToken:
         assert strip_ansi(colored) == _sev_token(CRITICAL)
 
 
-# ─── FIX FIRST block ─────────────────────────────────────────────────────────
-
-class TestFixFirst:
-    def test_projection_line_when_grade_improves(self):
-        # One CRITICAL FAIL among many passes: fixing it lifts the cap → grade changes.
-        findings = [_f("C1", FAIL, CRITICAL)] + [_f(f"P{i}", PASS, HIGH) for i in range(9)]
-        score = compute(findings)
-        lines = _fix_first_lines(findings, score)
-        text = "\n".join(lines)
-        assert "▶ FIX FIRST" in text
-        assert "title C1" in text
-        assert "Projected (estimated): fix this →" in text
-        assert "fix all Critical+High" in text
-
-    def test_equal_grade_variant_names_remaining_count(self):
-        # Several CRITICAL FAILs: fixing one alone keeps the grade → the honest variant.
-        findings = [_f(f"C{i}", FAIL, CRITICAL) for i in range(3)]
-        score = compute(findings)
-        text = "\n".join(_fix_first_lines(findings, score))
-        assert "won't change the grade alone" in text
-        assert "3 Critical+High finding(s)" in text
-
-    def test_empty_when_no_fixable_fail(self):
-        findings = [_f("P1", PASS, HIGH), _f("W1", WARN, MEDIUM)]
-        assert _fix_first_lines(findings, compute(findings)) == []
-
-    def test_ascii_variant_is_pure_ascii(self):
-        findings = [_f("C1", FAIL, CRITICAL)] + [_f(f"P{i}", PASS, HIGH) for i in range(9)]
-        text = "\n".join(_fix_first_lines(findings, compute(findings), ascii_only=True))
-        assert text.isascii()
-        assert "> FIX FIRST" in text
-
-
-# ─── render_dashboard (Sections 1-3) ─────────────────────────────────────────
+# ─── render_dashboard (Sections 1-2) ─────────────────────────────────────────
 
 class TestRenderDashboard:
     def _out(self, **kw):
@@ -107,9 +74,12 @@ class TestRenderDashboard:
         # ALL issues; Section 3 below filters to high-confidence only).
         assert "3 issues" in bar_line
 
-    def test_fix_first_present(self):
+    def test_no_fix_surfaces(self):
+        # Reports-only (F-074): no FIX FIRST, no fix: lines, no projection offers.
         out, _ = self._out()
-        assert "▶ FIX FIRST" in out
+        assert "FIX FIRST" not in out
+        assert "fix:" not in out
+        assert "Projected" not in out
 
     def test_findings_header_and_family_emoji(self):
         out, _ = self._out()
@@ -131,7 +101,6 @@ class TestRenderDashboard:
     def test_ascii_is_pure_ascii(self):
         out, _ = self._out(ascii_only=True)
         assert out.isascii()
-        assert "> FIX FIRST" in out
         assert "[Exposure & Network]" in out
 
     def test_no_score_line_or_receipt(self):
@@ -150,7 +119,6 @@ class TestCliDashboard:
         assert rc == 0
         out = capsys.readouterr().out
         assert out.startswith("🦞 OpenClaw Security Audit")
-        assert "▶ FIX FIRST" in out
         assert "│ 🌐 Exposure & Network" in out
         assert "Scan receipt" not in out
 
@@ -160,4 +128,4 @@ class TestCliDashboard:
         assert rc == 0
         out = capsys.readouterr().out
         assert out.isascii()
-        assert "> FIX FIRST" in out
+        assert "[Exposure & Network]" in out

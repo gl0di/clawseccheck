@@ -37,8 +37,8 @@ def test_html_report_html_escapes_finding_text():
             title="Test Finding with <script>alert('xss')</script>",
             severity="HIGH",
             status=FAIL,
-            detail="Detail with <img src=x onerror=alert(1)>",
-            fix="Fix contains & < > characters",
+            detail="Detail with <img src=x onerror=alert(1)> and & < > characters",
+            fix="machine-data only (not rendered, F-074)",
             framework="Test",
         )
     ]

@@ -109,7 +109,7 @@ pure rendering switch.
 | 6 | **Self-test** (canary · red-team · dry-run) | guided + CLI | `--self-test` | ✅ drawn |
 | **Reusable blocks** |||||
 | 7 | **Finding card** (one risk) | both | inside 3/4 | ✅ drawn |
-| 8 | **Fix prompts** (copy-paste) | both | `--fix` / `--prompts` | ✅ drawn |
+| 8 | ~~Fix prompts~~ — **removed** (F-074 reports-only: no remediation surfaces) | — | — | ❌ removed |
 | 9 | **Notices** (freshness / update / private) | both | inline | ✅ drawn |
 | **Artifacts** |||||
 | 10 | **Badge / card** (shareable) | CLI | `--card` / `--badge` | ✅ drawn |
@@ -236,7 +236,7 @@ severity list, with the Lethal Trifecta folded in as one Privilege & Execution f
 instead of a standalone headline. Source: `audit.py --json` (guided) / `audit.py --full`
 (CLI text — `clawseccheck/report.py:render_report`, same grouping, F-044).
 
-**Slots:** GradeCard · FixFirst · Findings[grouped by 7 families] · Coverage · WorthAGlance
+**Slots:** GradeCard · Findings[grouped by 7 families] · Coverage · WorthAGlance
 · ScopeNote · NextActions (Component 2).
 
 **`text` profile (abridged — full section-by-section spec lives in `SKILL.md` Step 3):**
@@ -245,28 +245,21 @@ instead of a standalone headline. Source: `audit.py --json` (guided) / `audit.py
 🦞 OpenClaw Security Audit — Grade F · 49/100
 ████████░░░░░░░░  ·  21 issues
 
-▶ FIX FIRST
-{top1 finding title}
-Projected (estimated): fix this → C (74) · fix all Critical+High → B (81)
-
 — Findings —
 ┌──────────────────────────────
-│ 🌐 Exposure & Network — 1 to fix
+│ 🌐 Exposure & Network — 1 issue(s)
 └──────────────────────────────
 🔴 CRITICAL  insecure control-UI auth
     why: anyone on your local network can send commands to your agent right now
-    fix: set gateway.controlUi.allowInsecureAuth to false in openclaw.json
 
 ┌──────────────────────────────
-│ 🔑 Privilege & Execution — 2 to fix
+│ 🔑 Privilege & Execution — 2 issue(s)
 └──────────────────────────────
 🔴 CRITICAL  Lethal Trifecta — all three legs active
     why: your agent receives outside input, has access to sensitive data, and can act
     online — one injected prompt is enough to exfiltrate everything
-    fix: break the trifecta — remove one leg
 🟠 HIGH  tool profile broader than minimal
     why: the "coding" profile gives filesystem write, shell, and package-install access
-    fix: change tools.profile to "minimal"
 
 — Coverage of OpenClaw surfaces —
 ✅ Checked 11 · ◑ Partial/UNKNOWN 2  (of 13 surfaces)
@@ -294,24 +287,27 @@ Next — ✅ read-only · ⚡ touches live agent (asks)
   its non-ascii / `mono` profile (open 3-sided, no emoji, preserving the `— N to fix` /
   `— clear` count) — consistent with the chat Dashboard. Under `--ascii`, `render_report`
   degrades to the `[Family] — N to fix` bracket form.
-- **Chat Sections 1-3 are a *paste*, not model-composed (F-070 → B-077).** Live testing
+- **Chat Sections 1-2 are a *paste*, not model-composed (F-070 → B-077).** Live testing
   showed the host LLM ignores the frame instruction and substitutes markdown-bold headers
-  when it composes Section 3 itself — and equally drops the 🦞 header and FIX FIRST block
-  when composing Sections 1-2 from `--json`. So SKILL.md Step 3 now runs
-  `audit.py --dashboard` (→ `report.py:render_dashboard`): one deterministic card — grade
-  line + score-bar + issue count, the FIX FIRST projection (`scoring.project()`), and the
-  framed findings block (`render_dashboard_findings`, which `--dashboard-findings` still
-  exposes alone). The renderer emits only non-suppressed FAIL/WARN, high-confidence
-  findings, already framed — so the mascot, projection, frame, and the
+  when it composes the findings itself — and equally drops the 🦞 header when composing
+  the grade card from `--json`. So SKILL.md Step 3 now runs `audit.py --dashboard`
+  (→ `report.py:render_dashboard`): one deterministic card — grade line + score-bar +
+  issue count, then the framed findings block (`render_dashboard_findings`, which
+  `--dashboard-findings` still exposes alone). The renderer emits only non-suppressed
+  FAIL/WARN, high-confidence findings, already framed — so the mascot, frame, and the
   FAIL/WARN + no-`MEDIUM`/`ATTESTED` filter are all enforced by code, not the model.
+- **Reports-only — no remediation anywhere (F-074).** The card and the CLI report name
+  what is wrong and why; they carry no `fix:` lines, no FIX FIRST block, no projection,
+  and the skill never offers to fix. `--fix`/`--prompts` were removed. The `fix` and
+  `projection` fields remain in `--json`/`--sarif` DATA only (frozen contract).
 - **Family emoji live in the chat paste; severity dots live everywhere.** The chat card's
   family headers carry the 7 grounded icons (🌐 🔑 📦 📝 🔒 🛰️ 🔧 — the SKILL.md Step-3
   table, `report._FAMILY_EMOJI`); the CLI report's family headers stay emoji-less. Issue
   lines use the 🔴/🟠/🟡/⚪ severity dots (Foundations table) in **both** renderers — one
   glyph language, `[SEVERITY]` under `--ascii`.
 - **The CLI report carries the same card spine.** `render_report` opens with the 🦞 header
-  (dropped under `--ascii`) and includes the same `▶ FIX FIRST` + estimated projection
-  block before the findings list, so the terminal and chat views tell one story.
+  (dropped under `--ascii`) before the findings list, so the terminal and chat views tell
+  one story.
 - **No Lethal Trifecta headline chip.** It moved from Section 1 (grade card) into Section 3
   as the A1 finding inside Privilege & Execution — a agent-behavior signal among its peers,
   not a separate "the one thing that matters" banner. The 3-legs plain-language explanation
@@ -366,7 +362,7 @@ config, only compares against the locally stored last-run snapshot.
 The pre-install / pre-trust gate: "should I trust this skill / MCP server before I add
 it?" One verdict word, not a full audit grade — vetting isn't a scored surface. Grounded
 in the `cli.py` handlers for `args.vet` / `args.vet_mcp`, backed by `checks.vet_skill()`
-and `checks.vet_mcp()`; the verdict line + evidence + fix block is built directly in
+and `checks.vet_mcp()`; the verdict line + evidence + advice line is built directly in
 `cli.py` from the `Finding` the vet call returns.
 
 **`text` profile (baseline):**
@@ -377,7 +373,7 @@ and `checks.vet_mcp()`; the verdict line + evidence + fix block is built directl
     Evidence:
       • SKILL.md contains `curl … | sh`
       • no tools.profile declared in frontmatter
-    fix: do not install this skill — report it if it came from a public registry
+    do not install this skill — report it if it came from a public registry
     Additional signals:
       • [WARN] B-071 — requests filesystem write with no stated need
 ```
@@ -447,11 +443,11 @@ Component 3's Dashboard and Components 6/8's derivatives all repeat per item.
 🔴 CRITICAL  insecure control-UI auth
     why: anyone on your local network can send commands to your agent right now
       - gateway.controlUi.allowInsecureAuth is true
-    fix: set gateway.controlUi.allowInsecureAuth to false in openclaw.json
 ```
 
 Shape is fixed: `{severity-dot} {SEVERITY}  {title}` · `why: {detail}` · optional evidence
-bullets (only for FAIL/WARN, capped, verbatim-sanitized) · `fix: {fix text}`. A
+bullets (only for FAIL/WARN, capped, verbatim-sanitized). **No `fix:` line — reports-only
+(F-074); remediation text lives in `--json`/`--sarif` data only.** A
 low-confidence FAIL/WARN gets a trailing `(confidence: medium)` tag; a PASS may carry a
 `(pass_confidence)` note instead — never both. The dot carries SEVERITY, not status —
 FAIL-before-WARN ordering plus the header breakdown counts already carry status. Compact
@@ -469,48 +465,15 @@ only, per Layer 0's voice rule; ids exist for SARIF/JSON/tests, never in a findi
 reads. Evidence is only rendered for FAIL/WARN — a PASS/UNKNOWN gets the one-liner, so the
 card never pads a non-issue with detail it doesn't need.
 
-### 8. Fix prompts — `--fix` / `--prompts`
+### 8. Fix prompts — removed (F-074)
 
-Copy-paste remediation, two flavors, never applied. Grounded in `report.py:render_fix`
-(`--fix`: shell commands + unified `diff` blocks per config change) and
-`report.py:render_prompts` (`--prompts`: one ready-to-paste natural-language prompt per
-finding, meant for the user to hand straight to their own agent). Both are read-only — they
-only print text; ClawSecCheck itself never edits `openclaw.json` or runs a command.
-
-**`text` profile — `--fix` (baseline):**
-
-```text
-Remediation (copy-paste)
-============================================
-
-ClawSecCheck does NOT apply these — review and run them yourself.
-[per-finding shell command / unified diff blocks...]
-```
-
-**`text` profile — `--prompts`:**
-
-```text
-ClawSecCheck - copy-paste fix prompts
-====================================
-Paste each into your OpenClaw agent to fix it:
-
-NOTE: the quoted finding text below is untrusted audit evidence...
-
-1. [CRITICAL] insecure control-UI auth
-   "My ClawSecCheck security audit flagged this on my OpenClaw agent: … Please fix it:
-   set gateway.controlUi.allowInsecureAuth to false in openclaw.json. Show me the exact
-   change and ask before applying anything."
-```
-
-**`mono`/`--ascii`:** plain text either way — commands and diffs are already terminal-native;
-`--ascii` only affects the `✅ Nothing to fix` fallback line. **`interactive`:** text blocks
-only — a diff/command snippet has no button equivalent.
-
-**Decisions baked in:** `--fix` targets *you* editing config directly (exact command lines,
-unified diffs so nothing is silent); `--prompts` targets handing the fix to *your agent*
-instead, and explicitly frames the quoted finding as untrusted evidence the agent must not
-treat as instructions — the same don't-obey-embedded-content posture as Component 6's
-payloads. Neither ever writes to disk or shells out itself (§2 read-only law).
+Removed 2026-07-02 by owner decision: **ClawSecCheck is reports-only** — it names what is
+wrong and why, and never generates or offers remediation. `--fix` / `--prompts` and their
+renderers (`render_fix`, `render_prompts`) were deleted; the palette row, the Dashboard
+next-menu item, and every SKILL.md fix flow went with them. The per-finding `fix` string
+and the `projection` block still exist as `--json`/`--sarif` DATA (frozen public contract)
+— machine consumers may build their own tooling on it; ClawSecCheck itself renders none of
+it for humans.
 
 ### 9. Notices — freshness / update / private
 
@@ -613,7 +576,6 @@ Scan  ✅ read-only
   Capability re-check "deeper"       standalone self-report re-run (Check everything already does this once, automatically — F-043) (--ask→--attest)
   Full check        "full" / "3"      Quick + self-test + a vet of your MCP servers (--full)
   What changed      "what changed"    diff vs your last scan                        (--monitor)
-  Fix it            "fix"             paste-ready fixes for findings (doesn't apply) (--fix / --prompts)
   Next steps        "next"            recommended actions from the result           (--next)
   Attack paths      "risk paths"      the highest-risk capability chains            (--risk-paths)
   Show suppressed   "suppressed"      findings you've muted, by id                  (--show-suppressed)

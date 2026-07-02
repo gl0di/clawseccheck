@@ -49,12 +49,12 @@ def test_two_real_modes_note_the_ignored_one(tmp_path, capsys):
 
 
 # ------------------------- B-066: no-effect global modifiers -------------------------
-def test_fix_with_json_notes_no_effect(capsys):
-    rc = main(["--home", VULN, *COMMON, "--fix", "--json"])
+def test_risk_paths_with_json_notes_no_effect(capsys):
+    rc = main(["--home", VULN, *COMMON, "--risk-paths", "--json"])
     err = capsys.readouterr()
     assert rc == 0
-    assert "--json has no effect with --fix" in err.err
-    # --fix still produced its human text, not JSON.
+    assert "--json has no effect with --risk-paths" in err.err
+    # --risk-paths still produced its human text, not JSON.
     assert "{" not in err.out.splitlines()[0]
 
 
@@ -150,14 +150,14 @@ def test_vet_attest_notes_attest_ignored(tmp_path, capsys):
     assert "--attest has no effect with --vet" in capsys.readouterr().err
 
 
-def test_fix_attest_is_consumed_no_note(tmp_path, capsys):
-    # --fix runs after the attest block: audit() consumes the attestation, so the
-    # note must NOT fire (a false "ignored" would be its own coherence bug).
+def test_risk_paths_attest_is_consumed_no_note(tmp_path, capsys):
+    # --risk-paths runs after the attest block: audit() consumes the attestation, so
+    # the note must NOT fire (a false "ignored" would be its own coherence bug).
     import json
     from clawseccheck import attest
     att = tmp_path / "att.json"
     att.write_text(json.dumps({"schema": attest.SCHEMA_ID, "tools": []}), encoding="utf-8")
-    rc = main(["--home", VULN, *COMMON, "--fix", "--attest", str(att)])
+    rc = main(["--home", VULN, *COMMON, "--risk-paths", "--attest", str(att)])
     assert rc == 0
     assert "--attest has no effect" not in capsys.readouterr().err
 

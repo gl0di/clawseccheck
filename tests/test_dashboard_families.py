@@ -72,12 +72,12 @@ def test_pass_findings_shown_compact_no_why_fix():
     assert "fix: fix B3" not in out
 
 
-def test_fail_warn_findings_keep_full_detail():
+def test_fail_warn_findings_keep_why_but_no_fix():
     w = _f("B4", WARN, HIGH)
     out = render_report([w], compute([w]))
     assert "title B4" in out
     assert "why: detail B4" in out
-    assert "fix: fix B4" in out
+    assert "fix:" not in out  # reports-only (F-074)
 
 
 def test_all_suppressed_still_shows_clean_message():

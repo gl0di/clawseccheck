@@ -28,7 +28,7 @@ class PaletteEntry:
     prompt: str           # what the user says, rendered quoted ("go" / "1")
     flag: str | None      # the real cli.py flag this maps to (None = default audit path)
     blurb: str            # one-line description; "{n}" is filled with the check count
-    also: tuple[str, ...] = ()   # folded secondary flags (e.g. --fix also covers --prompts)
+    also: tuple[str, ...] = ()   # folded secondary flags (e.g. --badge also covers --card)
 
 
 @dataclass(frozen=True)
@@ -50,8 +50,6 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "Quick scan + self-test + a vet of your MCP servers"),
         PaletteEntry("What changed", 'what changed', "--monitor",
                      "diff against your last scan"),
-        PaletteEntry("Fix it", 'fix', "--fix",
-                     "paste-ready fixes for findings (never applies them)", ("--prompts",)),
         PaletteEntry("Next steps", 'next', "--next",
                      "recommended actions from the result"),
         PaletteEntry("Attack paths", 'risk paths', "--risk-paths",

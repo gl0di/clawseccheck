@@ -3,7 +3,7 @@
 Hostile skill names / file content can embed ANSI escape sequences, OSC-52
 clipboard sequences, Unicode bidi overrides, and zero-width characters to
 attack the terminal or spoof displayed text.  All rendering paths
-(render_prompts, render_json, render_sarif, render_html) must strip these
+(render_dashboard, render_json, render_sarif, render_html) must strip these
 before output.
 
 Sequences are assembled from escape literals at runtime so no contiguous
@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 
 from clawseccheck.catalog import FAIL, HIGH, Finding
-from clawseccheck.report import render_html, render_json, render_prompts
+from clawseccheck.report import render_dashboard, render_html, render_json
 from clawseccheck.sarif import render_sarif
 from clawseccheck.scoring import compute
 
@@ -64,45 +64,25 @@ def _score(findings):
 
 
 # ---------------------------------------------------------------------------
-# render_prompts — terminal / agent injection channel
+# render_dashboard — chat-paste injection channel
 # ---------------------------------------------------------------------------
 
-def test_render_prompts_strips_ansi_osc52():
-    """render_prompts must remove ESC bytes and OSC sequences from finding fields."""
+def test_render_dashboard_strips_ansi_osc52():
+    """The chat-paste card must remove ESC bytes and OSC sequences from finding fields."""
     f = _hostile_finding()
-    out = render_prompts([f])
-    assert _ESC not in out, "ESC byte leaked into render_prompts output"
-    assert _BEL not in out, "BEL byte from OSC-52 leaked into render_prompts output"
+    out = render_dashboard([f], _score([f]))
+    assert _ESC not in out, "ESC byte leaked into render_dashboard output"
+    assert _BEL not in out, "BEL byte from OSC-52 leaked into render_dashboard output"
     # Confirm the benign text still reaches the output
     assert "evil-payload" in out
 
 
-def test_render_prompts_strips_bidi_and_zerowidth():
-    """render_prompts must remove bidi overrides and zero-width characters."""
+def test_render_dashboard_strips_bidi_and_zerowidth():
+    """The chat-paste card must remove bidi overrides and zero-width characters."""
     f = _hostile_finding()
-    out = render_prompts([f])
-    assert _BIDI not in out, "Bidi override (U+202E) leaked into render_prompts output"
-    assert _ZWS not in out, "Zero-width space (U+200B) leaked into render_prompts output"
-
-
-def test_render_prompts_has_untrusted_boundary():
-    """render_prompts must include the untrusted-data boundary warning."""
-    f = _hostile_finding()
-    out = render_prompts([f])
-    # The boundary phrase must contain the key word "untrusted" and clarify
-    # that the content is data, not instructions.
-    assert "untrusted" in out.lower(), (
-        "render_prompts output is missing the untrusted-data boundary line"
-    )
-    assert "not instructions" in out.lower() or "data, not" in out.lower(), (
-        "render_prompts boundary line does not clarify that content is data, not instructions"
-    )
-
-
-def test_render_prompts_empty_findings_unaffected():
-    """render_prompts with no FAIL/WARN findings must still return the nothing-to-fix message."""
-    out = render_prompts([])
-    assert "Nothing to fix" in out or "nothing" in out.lower()
+    out = render_dashboard([f], _score([f]))
+    assert _BIDI not in out, "Bidi override leaked into render_dashboard output"
+    assert _ZWS not in out, "Zero-width char leaked into render_dashboard output"
 
 
 # ---------------------------------------------------------------------------

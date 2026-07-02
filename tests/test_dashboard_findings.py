@@ -32,12 +32,12 @@ def test_emits_open_three_sided_frame():
     out = render_dashboard_findings([f])
 
     assert "┌" in out
-    assert "│ 🌐 Exposure & Network — 1 to fix" in out
+    assert "│ 🌐 Exposure & Network — 1 issue(s)" in out
     assert "└" in out
 
     # The open 3-sided box must NOT close the right side
-    assert "to fix │" not in out
-    assert "to fix|" not in out
+    assert "issue(s) │" not in out
+    assert "issue(s)|" not in out
 
 
 # ─── 2. Only FAIL and WARN pass through ────────────────────────────────────
@@ -55,10 +55,10 @@ def test_only_fail_and_warn():
     assert "title B4" not in out
     assert "not assessed" not in out
 
-    # FAIL must appear with full detail
+    # FAIL must appear with its explanation — and NO remediation line (F-074)
     assert "title B2" in out
     assert "why: detail B2" in out
-    assert "fix: fix B2" in out
+    assert "fix:" not in out
 
 
 # ─── 3. MEDIUM and ATTESTED confidence excluded ────────────────────────────

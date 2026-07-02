@@ -1071,7 +1071,8 @@ def render_risk_paths(paths: list[RiskPath], ascii_only: bool = False) -> str:
         lines.append(f"{sev_tag} {p.id}: {p.title}")
         lines.append(f"  Chain : {arrow.join(p.chain)}")
         lines.append(f"  Why   : {p.why}")
-        lines.append(f"  Fix   : {p.fix}")
+        # Reports-only (F-074): the chain and why ARE the report; the structured
+        # remediation stays available as --json data (risk_paths[].fix) only.
         lines.append("")
 
     out = "\n".join(lines).rstrip() + "\n"

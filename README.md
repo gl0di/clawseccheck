@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>🦞 A free, local, read-only security self-audit for your own OpenClaw agent.</b><br>
-  <sub><i>The claw that checks your claws — scores you A–F, finds the holes, hands you copy-paste fixes.</i></sub>
+  <sub><i>The claw that checks your claws — scores you A–F and reports the holes. Reports only, never touches anything.</i></sub>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 ---
 
 A one-command security self-audit for *your own* OpenClaw agent. It scores your setup
-**A–F**, surfaces the most urgent holes in plain language, and gives copy-paste fixes —
+**A–F** and surfaces the most urgent holes in plain language — reports only, it never fixes or changes anything —
 plus a **shareable grade badge**.
 
 Because you run it on your own agent, there's no "scanning someone else" problem: no
@@ -267,7 +267,7 @@ The **only** external command it can run is your own, fixed and read-only:
 openclaw security audit --json
 ```
 
-No shell, never `--fix`, with a timeout; skip it entirely with `--no-native`. The entire
+No shell, read-only mode only, with a timeout; skip it entirely with `--no-native`. The entire
 source is in [`clawseccheck/`](clawseccheck/) — read it before you trust it. Amid the ClawHavoc
 malicious-skill wave, an audit skill should prove its own safety; this one does.
 
@@ -386,21 +386,14 @@ python3 audit.py --next          # print the next-steps block only (after runnin
 python3 audit.py --json          # includes a "next_actions" array in the JSON envelope
 ```
 
-The recommendations are driven by your actual results — open FAIL findings surface `--prompts`
-first; unvetted third-party skills surface `--vet`; no monitoring detected surfaces `--monitor`;
-and so on. When there is nothing urgent, the block tells you so and suggests the lighter follow-ups
-(trend tracking, grade sharing).
+The recommendations are driven by your actual results — unvetted third-party skills surface
+`--vet`; no monitoring detected surfaces `--monitor`; trifecta exposure surfaces the live
+injection tests; and so on. Every suggestion is a further **check** — never remediation.
 
-**ClawSecCheck never applies a fix or changes your config.** For every open finding, `--prompts`
-gives you a ready copy-paste prompt to hand to your agent (or apply yourself); the change is
-yours to make. Everything stays local.
-
-**`--fix` — paste-ready remediation.** Prints the exact, copy-paste fixes for your current
-FAIL/WARN findings: safe shell commands (e.g. `chmod 600 ~/.openclaw/openclaw.json`) and
-config guidance (`set tools.exec.mode → "ask"`). It is **output only** — ClawSecCheck does not
-apply anything; you review and run it. Config fixes are given as *set this dotted path to this
-value* guidance (so you edit your own `openclaw.json`), never a paste-over JSON blob that could
-clobber your other keys. Also surfaced per finding in `--json` (`"remediation"`) and SARIF (`fixes`).
+**ClawSecCheck is reports-only: it never fixes, suggests fixes, or changes your config.**
+The human report states what is wrong and why; acting on it is yours. For machine consumers,
+each finding still carries structured `"fix"`/`"remediation"` data in `--json` and SARIF —
+data for your own tooling, not something ClawSecCheck renders or offers.
 
 ---
 
@@ -512,7 +505,6 @@ preserving backward compatibility.
 |---|---|
 | Human report | `clawseccheck` |
 | JSON / SARIF output | `clawseccheck --json` · `clawseccheck --sarif results.sarif` |
-| Paste-ready fixes | `clawseccheck --fix` |
 | Highest-risk chains | `clawseccheck --risk-paths` |
 | Vet a skill before install | `clawseccheck --vet ./skill` |
 | Vet connected MCP servers | `clawseccheck --vet-mcp` |
@@ -538,7 +530,6 @@ python3 audit.py --dryrun                     # runtime behavioral test (fake se
 python3 audit.py --badge badge.svg          # write a shareable SVG grade badge
 python3 audit.py --html report.html         # standalone HTML report (private — owner view)
 python3 audit.py --verify-self               # SHA-256 of ClawSecCheck's own source (anti-tamper)
-python3 audit.py --prompts                   # a copy-paste "ask your agent to fix it" per finding
 python3 audit.py --trend                     # print local score trend (stored in ~/.clawseccheck/history.jsonl)
 python3 audit.py --percentile                # show where your score sits vs. an offline reference profile
 python3 audit.py --history ~/.clawseccheck/history.jsonl  # custom history file path (default shown)
@@ -569,7 +560,6 @@ python3 audit.py --log audit.log            # also write log to a local file
   agent — if the agent echoes the token, it obeyed an injection (**VULNERABLE**), otherwise
   **RESISTANT**. This is the live "battle-tested" complement to the passive checks.
 - **`--badge PATH`** writes a shields-style SVG (grade + score only) for your README / posts.
-- **`--prompts`** turns every finding into a ready prompt you paste into your agent to fix it.
 - **`--trend`** records the current audit result to a local append-only history file and prints
   a table of past scores with per-run arrows. History stays on your machine only.
 - **`--percentile`** compares your score against a bundled offline reference profile — no network,

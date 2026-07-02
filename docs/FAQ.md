@@ -66,14 +66,11 @@ everything else scores.
 
 **What to look at first:**
 
-1. Run `clawseccheck --fix` — it prints paste-ready remediation for every open FAIL and
-   WARN finding, most urgent first. No config is changed; you review the output and apply
-   it yourself.
+1. Re-read the FAIL findings in the report, most urgent first — each names exactly what
+   is wrong and why (ClawSecCheck is reports-only; how to remediate is your call, with
+   the OpenClaw docs).
 
-2. Run `clawseccheck --prompts` — this turns each finding into a ready-to-paste prompt
-   you can hand to your agent to fix it.
-
-3. Run `clawseccheck --risk-paths` — this shows the highest-risk capability chains. A
+2. Run `clawseccheck --risk-paths` — this shows the highest-risk capability chains. A
    chain only fires when every link has positive evidence, so the ones listed are the most
    actionable.
 

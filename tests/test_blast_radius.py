@@ -274,7 +274,7 @@ class TestRenderReportBlastRadius:
         # Everything in the non-verbose output should still be in verbose output
         # (blast lines are additive, not replacing anything).
         # Check a few anchor strings.
-        for anchor in ("Check B1", "fix", "blast:"):
+        for anchor in ("Check B1", "why", "blast:"):  # fix: lines removed (F-074)
             # anchor present in verbose
             assert anchor in verbose_out, f"'{anchor}' missing from verbose output"
         # The non-verbose output must NOT have blast:

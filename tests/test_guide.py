@@ -35,18 +35,12 @@ def _make_score(score=80, grade="B", capped=False, raw=80, fc=0, fh=0):
 # ---------------------------------------------------------------------------
 
 class TestSuggestActionsVuln:
-    def test_fix_guidance_present(self):
+    def test_no_fix_action_ever(self):
+        """Reports-only (F-074): no suggested action may generate or offer remediation."""
         findings, score = _audit_vuln()
-        actions = suggest_actions(findings, score)
-        ids = [a.id for a in actions]
-        assert "fix_guidance" in ids
-
-    def test_fix_guidance_priority_zero_when_fail_present(self):
-        """home_vuln has FAIL findings -> fix_guidance priority must be 0."""
-        findings, score = _audit_vuln()
-        actions = suggest_actions(findings, score)
-        fg = next(a for a in actions if a.id == "fix_guidance")
-        assert fg.priority == 0
+        for a in suggest_actions(findings, score):
+            assert a.id != "fix_guidance"
+            assert "--fix" not in a.command and "--prompts" not in a.command
 
     def test_actions_sorted_by_priority_then_id(self):
         findings, score = _audit_vuln()
@@ -83,18 +77,6 @@ class TestSuggestActionsVuln:
         sg = next(a for a in actions if a.id == "share_grade")
         assert sg.priority == 9
 
-    def test_fix_guidance_command(self):
-        findings, score = _audit_vuln()
-        actions = suggest_actions(findings, score)
-        fg = next(a for a in actions if a.id == "fix_guidance")
-        assert fg.command == "clawseccheck --prompts"
-
-    def test_fix_guidance_before_track_trend(self):
-        findings, score = _audit_vuln()
-        actions = suggest_actions(findings, score)
-        ids = [a.id for a in actions]
-        assert ids.index("fix_guidance") < ids.index("track_trend")
-
 
 # ---------------------------------------------------------------------------
 # suggest_actions on home_safe
@@ -111,17 +93,6 @@ class TestSuggestActionsSafe:
         ids = [a.id for a in suggest_actions(findings, score)]
         assert "share_grade" in ids
 
-    def test_no_fix_guidance_when_all_pass(self):
-        """If no unsuppressed FAIL/WARN, fix_guidance should not appear."""
-        score = _make_score(100, "A")
-        # build all-PASS findings list
-        findings = [
-            Finding(id="B1", title="t", severity="CRITICAL", status=PASS,
-                    detail="", fix="", framework="f"),
-        ]
-        ids = [a.id for a in suggest_actions(findings, score)]
-        assert "fix_guidance" not in ids
-
     def test_safe_has_fewer_urgent_actions_than_vuln(self):
         findings_v, score_v = _audit_vuln()
         findings_s, score_s = _audit_safe()
@@ -130,42 +101,6 @@ class TestSuggestActionsSafe:
         urgent_v = [a for a in actions_v if a.priority <= 3]
         urgent_s = [a for a in actions_s if a.priority <= 3]
         assert len(urgent_v) >= len(urgent_s)
-
-
-# ---------------------------------------------------------------------------
-# Fix-guidance priority: WARN-only -> priority 2, not 0
-# ---------------------------------------------------------------------------
-
-class TestFixGuidancePriority:
-    def test_warn_only_gives_priority_2(self):
-        score = _make_score(70, "C", capped=False)
-        findings = [
-            Finding(id="B9", title="t", severity="MEDIUM", status=WARN,
-                    detail="", fix="", framework="f"),
-        ]
-        actions = suggest_actions(findings, score)
-        fg = next(a for a in actions if a.id == "fix_guidance")
-        assert fg.priority == 2
-
-    def test_fail_gives_priority_0(self):
-        score = _make_score(40, "F", capped=True)
-        findings = [
-            Finding(id="B1", title="t", severity="CRITICAL", status=FAIL,
-                    detail="", fix="", framework="f"),
-        ]
-        actions = suggest_actions(findings, score)
-        fg = next(a for a in actions if a.id == "fix_guidance")
-        assert fg.priority == 0
-
-    def test_capped_score_gives_priority_0(self):
-        score = _make_score(49, "D", capped=True)
-        findings = [
-            Finding(id="B9", title="t", severity="MEDIUM", status=WARN,
-                    detail="", fix="", framework="f"),
-        ]
-        actions = suggest_actions(findings, score)
-        fg = next(a for a in actions if a.id == "fix_guidance")
-        assert fg.priority == 0
 
 
 # ---------------------------------------------------------------------------
@@ -274,13 +209,6 @@ class TestConditionalTriggers:
         ids = [a.id for a in suggest_actions([], score)]
         assert "review_mcp" not in ids
 
-    def test_suppressed_fail_does_not_trigger_fix_guidance(self):
-        score = _make_score()
-        f = Finding(id="B1", title="t", severity="CRITICAL", status=FAIL,
-                    detail="", fix="", framework="f", suppressed=True)
-        ids = [a.id for a in suggest_actions([f], score)]
-        assert "fix_guidance" not in ids
-
 
 # ---------------------------------------------------------------------------
 # render_next_actions
@@ -289,8 +217,8 @@ class TestConditionalTriggers:
 class TestRenderNextActions:
     def _sample_actions(self):
         return [
-            Action(id="fix_guidance", title="Fix issues",
-                   command="clawseccheck --prompts", why="Urgent.", priority=0),
+            Action(id="live_test", title="Run a live injection test",
+                   command="clawseccheck --canary", why="Urgent.", priority=0),
             Action(id="track_trend", title="Track score",
                    command="clawseccheck --trend", why="See drift.", priority=8),
             Action(id="share_grade", title="Share grade",
@@ -305,7 +233,7 @@ class TestRenderNextActions:
     def test_contains_command(self):
         actions = self._sample_actions()
         out = render_next_actions(actions)
-        assert "clawseccheck --prompts" in out
+        assert "clawseccheck --canary" in out
 
     def test_numbered_items(self):
         actions = self._sample_actions()

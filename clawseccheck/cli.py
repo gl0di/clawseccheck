@@ -17,9 +17,9 @@ from pathlib import Path
 
 from . import (
     audit, diff, fingerprint, load_events, load_ignore, load_state, make_canary, record_events,
-    render_canary, render_card, render_dashboard, render_dashboard_findings, render_events, render_fix,
+    render_canary, render_card, render_dashboard, render_dashboard_findings, render_events,
     render_json, render_monitor,
-    render_prompts, render_report, render_svg, render_vet_json, save_state, snapshot,
+    render_report, render_svg, render_vet_json, save_state, snapshot,
     vet_mcp, vet_skill,
 )
 from . import __released__, __version__
@@ -180,13 +180,11 @@ _PRIMARY_MODES = [
     ("show_suppressed", "--show-suppressed", "bool"),
     ("watch_log", "--watch-log", "bool"),
     ("risk_paths", "--risk-paths", "bool"),
-    ("fix", "--fix", "bool"),
     ("badge", "--badge", "opt"),
     ("html", "--html", "opt"),
     ("sarif", "--sarif", "opt"),
     ("trend", "--trend", "bool"),
     ("percentile", "--percentile", "bool"),
-    ("prompts", "--prompts", "bool"),
     ("next", "--next", "bool"),
     ("dashboard", "--dashboard", "bool"),
     ("dashboard_findings", "--dashboard-findings", "bool"),
@@ -204,8 +202,8 @@ _MODE_HONORS = {
 # Primary modes that run AFTER the --attest block in main()'s cascade: their findings
 # come from audit(attestation=...), so --attest is genuinely consumed there, not ignored.
 _ATTEST_CONSUMERS = frozenset({
-    "risk_paths", "fix", "badge", "html", "sarif", "trend", "percentile",
-    "prompts", "next", "dashboard", "dashboard_findings", "monitor",
+    "risk_paths", "badge", "html", "sarif", "trend", "percentile",
+    "next", "dashboard", "dashboard_findings", "monitor",
 })
 
 
@@ -343,8 +341,6 @@ def main(argv=None) -> int:
                         "use '-' to read the JSON from stdin")
     p.add_argument("--badge", metavar="PATH", help="write a shareable SVG badge to PATH")
     p.add_argument("--html", metavar="PATH", help="write a standalone HTML report to PATH")
-    p.add_argument("--prompts", action="store_true",
-                   help="print a copy-paste fix prompt for each finding")
     p.add_argument("--show-suppressed", action="store_true",
                    help="list suppressed finding ids + fingerprints and exit")
     p.add_argument("--verify-self", action="store_true",
@@ -379,8 +375,6 @@ def main(argv=None) -> int:
                         "(FAIL/WARN, high-confidence, grouped by family) and exit")
     p.add_argument("--risk-paths", action="store_true",
                    help="print only the highest-risk capability chains and exit")
-    p.add_argument("--fix", action="store_true",
-                   help="print paste-ready remediation for current findings (does NOT apply it)")
     p.add_argument("--verbose", action="store_true",
                    help="emit INFO-level log breadcrumbs to stderr")
     p.add_argument("--debug", action="store_true",
@@ -666,10 +660,6 @@ def main(argv=None) -> int:
         _emit(_risk.render_risk_paths(paths, ascii_only=ascii_only))
         return 0
 
-    if args.fix:
-        _emit(render_fix(findings, ascii_only=ascii_only))
-        return 0
-
     if args.badge:
         try:
             secure_write_text(Path(args.badge).expanduser(), render_svg(score, findings))
@@ -712,10 +702,6 @@ def main(argv=None) -> int:
 
     if args.percentile:
         _emit(render_percentile(score.score, ascii_only))
-        return 0
-
-    if args.prompts:
-        _emit(render_prompts(findings, ascii_only))
         return 0
 
     if args.next:

@@ -35,22 +35,10 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
     """
     idx = _by_id(findings)
     actions: list[Action] = []
-
-    # fix_guidance: any unsuppressed FAIL or WARN
-    unsuppressed_issues = [
-        f for f in findings
-        if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)
-    ]
-    if unsuppressed_issues:
-        has_fail = any(f.status == FAIL for f in unsuppressed_issues)
-        priority = 0 if (has_fail or score.capped) else 2
-        actions.append(Action(
-            id="fix_guidance",
-            title="See exactly how to fix each issue, most urgent first",
-            command="clawseccheck --prompts",
-            why="Get a copy-paste fix you can hand to your agent.",
-            priority=priority,
-        ))
+    # Reports-only doctrine (F-074): every suggestion below is a further CHECK
+    # (vet, monitor, live test, trend) — never remediation. `score` stays in the
+    # signature for API stability even though no current rule reads it.
+    _ = score
 
     # vet_skills: B13 is FAIL or WARN
     b13 = idx.get("B13")
