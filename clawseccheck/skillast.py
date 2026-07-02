@@ -559,6 +559,55 @@ def _subtree_has_decode(node: ast.AST) -> bool:
     return any(_is_decode_call(n) for n in ast.walk(node)) or _has_xor_decode(node)
 
 
+# F-058: code-level time-bomb / sandbox-evasion. Narrow on purpose — wall-clock date
+# (datetime.now()/date.today()/utcnow) and environment presence (os.environ / os.getenv)
+# only; NOT time.time() elapsed-timeouts or sys.platform checks, which are ordinary flow.
+_TIMEBOMB_DATE_HINTS = {"now", "today", "utcnow", "fromtimestamp", "datetime", "date"}
+
+
+def _suspicious_guard_kind(test: ast.AST) -> str:
+    """Classify an `if` test as a date/time or environment gate; '' if neither."""
+    for n in ast.walk(test):
+        if isinstance(n, ast.Attribute):
+            if n.attr in _TIMEBOMB_DATE_HINTS:
+                return "a wall-clock date"
+            if n.attr in ("environ", "getenv"):
+                return "an environment-variable"
+        if isinstance(n, ast.Name) and n.id in _TIMEBOMB_DATE_HINTS:
+            return "a wall-clock date"
+    return ""
+
+
+def _conditional_sink_findings(tree: ast.AST) -> list:
+    """A dangerous sink (exec/eval/os.system/subprocess or a network call) reachable only
+    under a date/time or environment guard — the code-level time-bomb / sandbox-evasion
+    pattern, distinct from B65's prose sleeper-trigger. WARN-grade (conditional execution
+    has legit uses): checks.py routes CONDITIONAL_SINK to a WARN, never an automatic FAIL."""
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        kind = _suspicious_guard_kind(node.test)
+        if not kind:
+            continue
+        found = False
+        for stmt in (*node.body, *node.orelse):
+            for sub in ast.walk(stmt):
+                if isinstance(sub, ast.Call):
+                    is_exec, sink = _is_exec_sink_call(sub.func)
+                    if is_exec or _is_net_sink(sub.func):
+                        ln = getattr(sub, "lineno", getattr(node, "lineno", 0))
+                        out.append(ASTFinding(
+                            "CONDITIONAL_SINK", "info", ln,
+                            f"a dangerous sink ({sink or 'network call'}) runs only under {kind} "
+                            "condition — possible time-bomb / sandbox-evasion gating"))
+                        found = True
+                        break
+            if found:
+                break
+    return out
+
+
 def _names_in(node: ast.AST) -> set[str]:
     return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
 
@@ -790,6 +839,7 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                             "externally-controlled URL flows into {sink} ({flow} flow) — SSRF risk".format(
                                 sink=ssrf_name, flow=flow_kind))
 
+    out.extend(_conditional_sink_findings(tree))
     return out
 
 

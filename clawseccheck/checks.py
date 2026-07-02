@@ -2274,6 +2274,7 @@ def check_installed_skills(ctx: Context) -> Finding:
                        "No installed third-party skills found to inspect.",
                        "Run on the host where installed skills live (~/.openclaw/skills, workspace/skills).")
     crit, high, _persist_warn, warns_local_exfil, parse_error_paths, warns_env_exfil = [], [], [], [], [], []
+    warns_timebomb: list[str] = []
     for name, blob in skills.items():
         # C-041: precompute fence ranges once per blob so every check below can
         # skip matches that are purely inside a documented code example.
@@ -2415,6 +2416,10 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if af.rule == "ENV_EXFIL_FLOW":
                     warns_env_exfil.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
                     continue
+                # F-058: code-level time-bomb / sandbox-evasion gate. WARN-grade.
+                if af.rule == "CONDITIONAL_SINK":
+                    warns_timebomb.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                    continue
                 loc = f"{relpath}:{af.lineno}"
                 if af.severity == "crit":
                     crit.append(f"{name}: {af.reason} ({loc})")
@@ -2492,6 +2497,19 @@ def check_installed_skills(ctx: Context) -> Finding:
                        "attacker-controlled host — env secrets (API keys, tokens) sent off-box are the "
                        "classic exfiltration vector.",
                        warns_env_exfil)
+
+    # F-058: a dangerous sink gated on a wall-clock date or an environment variable — a
+    # code-level time-bomb / sandbox-evasion pattern. WARN-first (conditional execution has
+    # legit uses); ranked among the WARN buckets, below crit/high FAIL and parse-UNKNOWN.
+    if warns_timebomb:
+        extra = f" (+{len(warns_timebomb) - 6} more)" if len(warns_timebomb) > 6 else ""
+        return _custom("B13", HIGH, WARN,
+                       "Time-bomb / environment-gated code in installed skill(s): "
+                       + "; ".join(warns_timebomb[:6]) + extra,
+                       "A skill runs a dangerous action (exec/subprocess/network) only when a date "
+                       "or environment condition is met — the classic way a payload stays dormant in "
+                       "review/CI and detonates later. Read the guarded branch and confirm it is benign.",
+                       warns_timebomb)
 
     # C-040: backgrounding/daemonize — lower confidence WARN (nohup/disown/setsid).
     # Only reached when no CRIT/HIGH patterns fired; a skill that also has a CRIT/HIGH
