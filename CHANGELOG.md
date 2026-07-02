@@ -3,6 +3,44 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.0.0] — 2026-07-02
+
+Vet-by-type: `--vet` now covers skills, plugins **and** MCP servers behind one
+autodetecting entry point, plus a pre-download reputation gate. Major because the
+human report is now reports-only — all remediation surfaces were removed from the
+rendered output (machine/SARIF consumers that parsed fix text must migrate).
+
+### Added
+- `vet_plugin()` + `--vet-plugin` — a container-dispatcher pre-install vet for OpenClaw
+  plugins: `openclaw.plugin.json` manifest sanity, npm lifecycle scripts, floating
+  dependency versions, native-executable stowaways, and skills entries escaping the
+  plugin root; bundled skills dispatch to the skill engine (they auto-load via
+  `~/.openclaw/plugin-skills/`) and embedded MCP specs to the MCP engine. JS/TS runtime
+  code depth and the `node_modules` exclusion are disclosed as coverage notes; a capped
+  sweep downgrades to UNKNOWN rather than a silent PASS.
+- `--vet` type autodetect — classifies its target by content (plugin manifest / MCP
+  server-spec / skill) and prints `detected type: …` on stderr; `--vet-skill` and
+  `--vet-plugin` force a specific engine. Existing `--vet <skill>` behaviour is
+  unchanged.
+- `--vet-source` — pre-download reputation gate: judges a source's identity
+  (`clawhub:` / `npm:` / `pypi:` / `git:` / URL / bare name) with zero network and
+  nothing fetched — known-compromised catalog, typosquat, paste/bare-IP host, unpinned
+  git ref. Verdicts KNOWN-BAD / SUSPICIOUS / no-known-bad-record; never PASS, since an
+  identity check cannot prove unseen code safe.
+
+### Fixed
+- Typosquat precision: `_levenshtein` now uses Optimal String Alignment so an adjacent
+  transposition counts as one edit, and short names (≤6 chars) require a single edit —
+  `canvas` is no longer flagged as a squat of `pandas`, while real short-name
+  transposition squats still fire.
+
+### Changed
+- **Breaking:** human reports are now reports-only — remediation/fix surfaces were
+  removed from the rendered output. The audit names what is wrong and why; fixing is
+  the operator's decision.
+- `--dashboard` card is now deterministic (severity dots, family emoji, FIX-FIRST
+  ordering).
+
 ## [Unreleased]
 
 ### Added
