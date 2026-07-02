@@ -453,7 +453,8 @@ Keys are skill names; values are arrays of effect-profile entry objects.
 
 ## 11. `--vet` Mode Output
 
-Produced by `--vet` and `--vet-mcp`. Simpler than the full audit — no score, no
+Produced by `--vet` / `--vet-skill` / `--vet-plugin`, `--vet-mcp`, and `--vet-source`.
+Simpler than the full audit — no score, no
 `next_actions`, no `capability_graph`.
 
 ### Fields
@@ -462,14 +463,18 @@ Produced by `--vet` and `--vet-mcp`. Simpler than the full audit — no score, n
 |---|---|---|
 | `tool` | `str` | Always `"clawseccheck"`. |
 | `version` | `str` | Tool version string. |
-| `mode` | `str` | `"vet"` or `"vet-mcp"`. |
-| `target` | `str` | Path or name of the vetted skill/MCP server. |
+| `mode` | `str` | `"vet"` (skill), `"vet-plugin"`, `"vet-mcp"`, or `"vet-source"`. |
+| `target` | `str` | Path, name, slug, or URL of the vetted skill / plugin / MCP server / source. |
 | `verdict` | `str` | `"SAFE"`, `"SUSPICIOUS"`, `"DANGEROUS"`, or `"UNKNOWN"`. |
 | `findings` | `array[Finding]` | All check results. Same Finding shape as §2. |
 
-For `--vet`, `findings` carries the B13 verdict **plus** any content-security ring check
-(B59–B67 / B74 / B42) that fired on the skill — so a single `--vet` run can return several
-findings, and `verdict` reflects the worst of them.
+For `--vet` on a skill, `findings` carries the B13 verdict **plus** any content-security ring
+check (B59–B67 / B74 / B42) that fired on the skill — so a single `--vet` run can return several
+findings, and `verdict` reflects the worst of them. For `--vet-plugin`, the primary finding uses
+the synthetic id `PLUGIN-VET` and `findings` also carries the dispatched per-engine results
+(bundled-skill B13/ring findings, embedded-MCP `MCP-VET` findings). For `--vet-source`, a single
+synthetic `SOURCE-VET` finding is returned; its status is never `PASS` — an identity check
+cannot prove unseen code safe, so the best verdict is `UNKNOWN` (no known-bad record).
 
 `verdict` is derived from the worst finding status:
 

@@ -1126,7 +1126,7 @@ def _has_approval_gate(cfg: dict) -> bool:
     # "Run allowlist matches, then use auto-review" — approval misses go through the
     # native auto-reviewer first, then fall back to the human approval route. Only "full"
     # ("Run host exec without prompts") is ungated, and it is intentionally excluded here.
-    # Do not re-flag "auto" as a false-PASS (see Pulse B-018, closed not-a-bug).
+    # Do not re-flag "auto" as a false-PASS (previously reported and closed not-a-bug).
     if mode in ("deny", "allowlist", "ask", "auto"):
         return True
     if security in ("deny", "ask"):
