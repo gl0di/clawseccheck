@@ -647,8 +647,12 @@ and drops emoji.
 ### 13. No-config / first-run onboarding — `~/.openclaw` missing or empty
 
 The friendly landing when there is **nothing to audit** — don't render a wall of UNKNOWNs or a
-scary F. Shown on the default human path only (`--json`/`--card` keep their machine/badge
-contract). Read-only; fabricates no findings.
+scary F. Shown on a **bare human run only**: any machine, CI, artifact, or work flag
+(`--json`/`--card`, `--fail-under`/`--exit-code`, `--save`, `--full`, `--badge`/`--html`/`--sarif`,
+`--attest`, or any primary mode) takes the normal audit path instead — so nothing is ever silently
+dropped and a CI `--fail-under` gate still fails loud on a missing home (B-075). Read-only;
+fabricates no findings. Checked **before** the scan runs, so a missing home never burns an audit
+or the native-audit subprocess just to print a welcome.
 
 **When it fires (grounded in `cli._onboarding_reason`):**
 
@@ -657,9 +661,9 @@ contract). Read-only; fabricates no findings.
 
 It deliberately does **not** fire when anything is present — a readable config, an *unreadable*
 config (perms), installed skills, or even junk. A present-but-unreadable `openclaw.json` keeps its
-entry, so the dir isn't empty and the dashboard/error path surfaces the permission problem instead
-of hiding it behind a welcome. A first run's benign `config not found` note is expected; any *other*
-collection error (perms / parse / unreadable skill) also routes to the dashboard, not onboarding.
+entry, so the dir isn't empty and the audit path runs instead; a home that can't be read at all is
+its own controlled outcome ("Cannot read the OpenClaw home at … — fix the permissions"), a
+plain-language error with rc 1, never a raw traceback (B-076).
 
 ```
 🦞 ClawSecCheck · welcome

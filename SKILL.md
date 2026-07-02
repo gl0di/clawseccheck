@@ -234,11 +234,13 @@ interpreter for the OS:
 
 Capture the output. The script is read-only and safe to run without any flags.
 
-**No OpenClaw config yet?** If `~/.openclaw` is missing or empty, the default run prints a short
-first-run **welcome** screen (Screen 13) instead of a Dashboard — "I looked for an OpenClaw setup
-at … but there's nothing there", with how to point it at the config (`--home <path>`). Relay that
-as-is and stop; there's nothing to score. (A config that *exists* but can't be read is a different
-case — that still runs the audit and surfaces the permission error.)
+**No OpenClaw config yet?** If `~/.openclaw` is missing or empty, a **bare** default run prints a
+short first-run **welcome** screen (Screen 13) instead of a Dashboard — "I looked for an OpenClaw
+setup at … but there's nothing there", with how to point it at the config (`--home <path>`). Relay
+that as-is and stop; there's nothing to score. Any CI/artifact/work flag (`--json`, `--save`,
+`--full`, `--fail-under`, `--badge`, …) skips the welcome and runs the real audit, so those flags
+are always honored. (A home that *exists* but can't be read is a different case — a plain
+"Cannot read the OpenClaw home" error, exit code 1.)
 
 ### Step 3 — Present the Dashboard
 
