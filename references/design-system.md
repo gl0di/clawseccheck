@@ -69,7 +69,7 @@ caveats that keep `text` the contract:** (1) Telegram buttons are **capability-g
 Every screen is a set of slots. The slots are channel-agnostic; **Layer 2** decides how they
 render.
 
-```
+```text
 Title      — what this screen is (context line)
 Intro      — optional transparency / framing text
 Choices[]  — selectable options (menu)
@@ -90,22 +90,22 @@ pure rendering switch.
 
 | # | Screen | Surface(s) | Trigger | Status |
 |---|---|---|---|---|
-| **Entry** ||||
+| **Entry** |||||
 | 1 | **Welcome** (pre-scan menu) | guided | Step 1 / audit request | ✅ drawn |
 | 2 | **Next-actions** (post-result menu) | guided | Step 4 | ▢ todo |
-| **Results** ||||
+| **Results** |||||
 | 3 | **Dashboard** (A–F audit) | guided + CLI | Step 3 / `audit.py` | ✅ drawn |
 | 4 | **What-changed** (diff vs last) | guided + CLI | `--monitor` | ✅ drawn |
 | 5 | **Vet verdict** (skill / MCP supply-chain) | guided + CLI | `--vet` / `--vet-mcp` | ✅ drawn |
 | 6 | **Self-test** (canary · red-team · dry-run) | guided + CLI | `--self-test` | ✅ drawn |
-| **Reusable blocks** ||||
+| **Reusable blocks** |||||
 | 7 | **Finding card** (one risk) | both | inside 3/4 | ✅ drawn |
 | 8 | **Fix prompts** (copy-paste) | both | `--fix` / `--prompts` | ✅ drawn |
 | 9 | **Notices** (freshness / update / private) | both | inline | ✅ drawn |
-| **Artifacts** ||||
+| **Artifacts** |||||
 | 10 | **Badge / card** (shareable) | CLI | `--card` / `--badge` | ✅ drawn |
 | 11 | **HTML report** | CLI | `--html` | ✅ drawn |
-| **Discovery & onboarding** ||||
+| **Discovery & onboarding** |||||
 | 12 | **Menu / All functions** (capability palette) | guided | "menu" / `?` / `[More…]` | ✅ drawn |
 | 13 | **No-config / first-run** (`~/.openclaw` missing) | guided + CLI | empty/missing home | ✅ drawn |
 | 14 | **Update flow** (check → result → offer) | guided | "update" / `[Check update]` | ✅ drawn |
@@ -141,7 +141,7 @@ One component → up to three renderings. **`text` is the contract every screen 
 
 ## Components
 
-### 1. Welcome — entry menu · guided Step 1   _(v3 — shipped as `--menu`)_
+### 1. Welcome — entry menu · guided Step 1   *(v3 — shipped as `--menu`)*
 
 The single front door. **Minimalist:** four items, not a wall of flags. Shipped as a real
 command — `clawseccheck --menu` renders this exact screen (`clawseccheck/menu.py`,
@@ -153,7 +153,7 @@ the staleness line from the offline `update_notice()` (no network).
 
 **`text` profile (baseline — Telegram / web / terminal — anywhere):**
 
-```
+```text
 🦞 ClawSecCheck · v{version}
 
   1  🔍 Check everything        config + live agent test ⚡
@@ -173,6 +173,7 @@ numbered/`text` list is the fallback when `capabilities.inlineButtons` is off. A
 button returns its label as the spoken choice (`callback_data`).
 
 **Decisions baked in:**
+
 - **One comprehensive check is the hero.** Item 1 = `--full` (read-only audit **+** live
   self-test **+** MCP vet). The ⚡ in the label **discloses** the live-agent test up front,
   so selecting item 1 **is** the consent — no separate "are you sure?" prompt (the user's
@@ -190,7 +191,7 @@ button returns its label as the spoken choice (`callback_data`).
   `--ask`/`--attest`, html, sarif, percentile, risk-paths, prompts, the `private` modifier)
   lives behind **"Menu"** — reachable, but off the minimal front door.
 
-### 2. Next-actions — post-result menu · guided Step 4   _(v2 — F-043/C-132)_
+### 2. Next-actions — post-result menu · guided Step 4   *(v2 — F-043/C-132)*
 
 Appended to the end of every Dashboard message (Section 7), not a separate turn. Five
 lettered items, always the same five slots — no "deeper scan" pick (folded into the scan
@@ -199,13 +200,14 @@ consent, same principle as Welcome item 1).
 
 **`text` profile:**
 
-```
+```text
 Next — ✅ read-only · ⚡ touches live agent (asks)
   a ✅ Copy-paste fixes     b ⚡ Live injection test
   c ✅ Turn on monitoring   d ✅ Save full report   e ✅ Menu   Start with a?
 ```
 
 **Decisions baked in:**
+
 - **No "deeper" item.** Pre-F-043 this was a 5th lettered pick ("resolve UNKNOWN"). The
   capability self-report (`--ask`→`--attest`) now runs automatically the first time the
   user picks Welcome item 1 (see `SKILL.md` Step 2) — offering it again here would be
@@ -217,7 +219,7 @@ Next — ✅ read-only · ⚡ touches live agent (asks)
 - **d maps to `--save`**, not `--html`/`--sarif` — those stay Menu-only (item 4 → Screen 12)
   since they're export formats, not the default "give me the report" ask.
 
-### 3. Dashboard — audit result · guided Step 3   _(v2 — F-044)_
+### 3. Dashboard — audit result · guided Step 3   *(v2 — F-044)*
 
 The full scan result. Seven sections in one message (SKILL.md Step 3); Section 3 (Findings)
 is the part this version reworked — grouped by OpenClaw surface family instead of a flat
@@ -230,7 +232,7 @@ instead of a standalone headline. Source: `audit.py --json` (guided) / `audit.py
 
 **`text` profile (abridged — full section-by-section spec lives in `SKILL.md` Step 3):**
 
-```
+```text
 🦞 OpenClaw Security Audit — Grade F · 49/100
 ████████░░░░░░░░  ·  21 issues
 
@@ -266,6 +268,7 @@ Next — ✅ read-only · ⚡ touches live agent (asks)
 ```
 
 **Decisions baked in:**
+
 - **Grouped by family, not severity-flat (F-044).** Reading "here's what's wrong with your
   network exposure" beats a mixed CRITICAL→LOW dump — findings only make sense next to their
   peers in the same surface. Order is fixed (`catalog.FAMILY_ORDER`); a family with nothing
@@ -314,7 +317,7 @@ reports either "nothing changed" or a leveled list of alerts.
 
 **`text` profile (baseline):**
 
-```
+```text
 ClawSecCheck - Threat Monitor
 ==============================
 Current: 74/100  Grade: C
@@ -347,7 +350,7 @@ and `checks.vet_mcp()`; the verdict line + evidence + fix block is built directl
 
 **`text` profile (baseline):**
 
-```
+```text
 ⛔ Vetting 'suspect-skill/': DANGEROUS [CRITICAL]
     a skill that shells out to a remote installer before declaring any tool profile
     Evidence:
@@ -385,7 +388,7 @@ does next (⚡ in Components 1/2/12).
 
 **`text` profile (baseline, abridged — one payload shown):**
 
-```
+```text
 ClawSecCheck - active canary self-test 🧪
 ====================================
 
@@ -419,7 +422,7 @@ Component 3's Dashboard and Components 6/8's derivatives all repeat per item.
 
 **`text` profile (baseline):**
 
-```
+```text
 ⛔ [CRITICAL] insecure control-UI auth
     why: anyone on your local network can send commands to your agent right now
       - gateway.controlUi.allowInsecureAuth is true
@@ -452,7 +455,7 @@ only print text; ClawSecCheck itself never edits `openclaw.json` or runs a comma
 
 **`text` profile — `--fix` (baseline):**
 
-```
+```text
 Remediation (copy-paste)
 ============================================
 
@@ -462,7 +465,7 @@ ClawSecCheck does NOT apply these — review and run them yourself.
 
 **`text` profile — `--prompts`:**
 
-```
+```text
 ClawSecCheck - copy-paste fix prompts
 ====================================
 Paste each into your OpenClaw agent to fix it:
@@ -517,7 +520,7 @@ ratio, and nothing else** — no findings, no titles, no evidence, ever.
 
 **`text` profile — `--card`:**
 
-```
+```text
 ┌───────────────────────────────────────┐
 │  OpenClaw Security: C  ( 74/100)      │
 │  Lethal Trifecta: 2/3                 │
@@ -541,7 +544,7 @@ extra signal allowed through because it's a coarse posture indicator ("2 of 3 le
 active"), not a specific vulnerability. The deliberate opposite of Component 11's HTML
 report, which is explicitly marked private/not-shareable for exactly this reason.
 
-### 11. HTML report — `--html`   _(v2 — 2.8.0)_
+### 11. HTML report — `--html`   *(v2 — 2.8.0)*
 
 The private owner-view export (`clawseccheck/report.py:render_html`). A **single
 self-contained `.html` file** — inline `<style>`, **no external assets** (no CDN, no
@@ -555,6 +558,7 @@ summary strip (Critical/High/Medium/Low counts) · Findings **grouped by the 7 f
 (Component 3's grouping) with a per-group jump-nav and counts · Footer (local · read-only).
 
 **Decisions baked in:**
+
 - **Grouped by family, matching the Dashboard.** A `--html` on a real fleet is dozens of
   findings; the same 7-family grouping + in-page anchor nav keeps it navigable instead of an
   endless scroll.
@@ -577,7 +581,7 @@ grounding flag (in parens) so this palette and `cli.py` can't silently drift —
 
 **`text` profile (baseline):**
 
-```
+```text
 🦞 ClawSecCheck — everything it can do
 
 Scan  ✅ read-only
@@ -665,7 +669,7 @@ entry, so the dir isn't empty and the audit path runs instead; a home that can't
 its own controlled outcome ("Cannot read the OpenClaw home at … — fix the permissions"), a
 plain-language error with rc 1, never a raw traceback (B-076).
 
-```
+```text
 🦞 ClawSecCheck · welcome
 
 I looked for an OpenClaw setup at ~/.openclaw, but there's nothing there.
