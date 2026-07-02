@@ -107,6 +107,9 @@ def test_cli_ctx_errors_are_sanitized(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr("clawseccheck.cli.render_next_actions", lambda *_args, **_kwargs: "")
     monkeypatch.setattr("clawseccheck.cli.render_card", lambda *_args, **_kwargs: "")
 
+    # Non-empty home so the bare-run onboarding (Screen 13) doesn't bail before the
+    # mocked audit — this test is about ctx.errors sanitization, not first-run UX.
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
     rc = main(["--home", str(tmp_path), "--no-native", "--no-host", "--no-history", "--ascii"])
     assert rc == 0
     out = capsys.readouterr().out

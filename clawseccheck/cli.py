@@ -602,10 +602,38 @@ def main(argv=None) -> int:
             _emit(f"⚠ could not read a valid attestation from {src} "
                   "(ignored; B43/B44 stay UNKNOWN). See 'clawseccheck --ask'.")
 
+    # First-run onboarding (Screen 13): when there is genuinely nothing to audit —
+    # ~/.openclaw missing, or an empty directory — don't render a wall of UNKNOWNs;
+    # show a friendly "point me at your config" screen. BARE human runs only: any
+    # machine/CI/artifact/work flag (--json/--card, --fail-under/--exit-code, --save,
+    # --full, --badge/--html/--sarif, --attest, or any primary mode) takes the normal
+    # audit path so nothing is silently dropped and CI gates keep failing loud (B-075).
+    # Checked BEFORE audit() so a missing home never burns a scan or the native-audit
+    # subprocess just to print a welcome.
+    _bare_run = (
+        not any(_mode_active(args, a, k) for a, _f, k in _PRIMARY_MODES)
+        and not args.json and not args.card and not args.save and not args.full
+        and args.fail_under is None and not args.exit_code and not args.attest
+    )
+    if _bare_run:
+        first_run = _onboarding_reason(Path(args.home).expanduser())
+        if first_run:
+            from .checks import CHECKS  # noqa: PLC0415
+            _emit(render_onboarding(reason=first_run, home=_sanitize(args.home),
+                                    n_checks=len(CHECKS), ascii_only=ascii_only))
+            return 0
+
     logger.info("auditing home=%s", args.home)
-    ctx, findings, score = audit(args.home, include_native=not args.no_native,
-                                 include_host=not args.no_host,
-                                 attestation=attestation)
+    # A home that exists but can't be read at all must be a controlled, honest outcome
+    # for a security tool — a plain-language error, never a raw traceback (B-076).
+    try:
+        ctx, findings, score = audit(args.home, include_native=not args.no_native,
+                                     include_host=not args.no_host,
+                                     attestation=attestation)
+    except (PermissionError, OSError) as exc:
+        _emit(f"Cannot read the OpenClaw home at {_sanitize(args.home)}: {_sanitize(str(exc))}")
+        _emit("Fix the permissions (or run as the owning user) and re-run the audit.")
+        return 1
     logger.debug("ran %d checks", len(findings))
     logger.info("score=%s grade=%s", score.score, score.grade)
 
@@ -690,23 +718,6 @@ def main(argv=None) -> int:
         # honored, to keep monitor's drift baseline intact.
         history_record(score, args.history)
         return 0
-
-    # First-run onboarding (Screen 13): when there is genuinely nothing to audit —
-    # ~/.openclaw missing, or an empty directory — don't render a wall of UNKNOWNs;
-    # show a friendly "point me at your config" screen. Human path only: --json/--card
-    # keep their machine/badge contract (an empty setup still yields UNKNOWNs / N/A there).
-    if not args.json and not args.card:
-        first_run = _onboarding_reason(Path(args.home).expanduser())
-        # Only a *clean* empty/missing home is a first run. "config not found" is the
-        # benign, expected signal of one; any OTHER collection error (a permission
-        # problem, an unreadable skill, a parse failure) is a diagnostic case, not
-        # onboarding — fall through so the dashboard surfaces it.
-        real_errors = [e for e in ctx.errors if not e.startswith("config not found")]
-        if first_run and not real_errors:
-            from .checks import CHECKS  # noqa: PLC0415
-            _emit(render_onboarding(reason=first_run, home=_sanitize(args.home),
-                                    n_checks=len(CHECKS), ascii_only=ascii_only))
-            return 0
 
     if args.json:
         body = render_json(findings, score, risk=paths, ctx=ctx)
