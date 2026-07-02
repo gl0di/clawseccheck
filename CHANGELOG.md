@@ -3,6 +3,21 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.1.1] — 2026-07-02
+
+Two false-positive fixes in the skill/MCP checks, upholding the zero-false-positive doctrine.
+
+### Fixed
+- **B-071 (`--vet-mcp`)** — a loopback plaintext-HTTP MCP endpoint (`http://localhost`,
+  `http://127.0.0.1`) is no longer flagged as DANGEROUS. Loopback traffic never leaves the
+  host, so there is no clear-text exfiltration risk; `_vet_mcp_server` now reuses the same
+  `_mcp_url_is_local` helper C047 uses, so the two checks agree. Remote plaintext HTTP is
+  still flagged.
+- **B61 (cross-agent config snooping)** — a first-party skill that merely *mentions* its own
+  `~/.openclaw/...` path with no read/exfil verb no longer raises a bare-mention WARN (it is
+  normal self-configuration, not cross-agent theft). A `~/.openclaw` path *with* a read/exfil
+  verb still FAILs, and foreign-agent paths (`.claude`/`.codex`/`.gemini`) are unchanged.
+
 ## [3.1.0] — 2026-07-02
 
 Four new advisory checks close DoS / exposure gaps, the B33 CVE gate catches three more
