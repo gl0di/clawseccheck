@@ -1,5 +1,5 @@
 {
-  "meta": { "lastTouchedVersion": "2026.1.29" },
+  "meta": { "lastTouchedVersion": "2026.2.14" },
   "gateway": {
     "bind": "127.0.0.1:8080",
     "auth": { "mode": "token", "token": "minimum-32-character-secure-token-here" }

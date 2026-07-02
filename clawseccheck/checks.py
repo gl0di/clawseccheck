@@ -5875,6 +5875,24 @@ _KNOWN_ADVISORIES: list[tuple[str, tuple[int, ...], str, str]] = [
         "2026.1.29",
         "Control UI gatewayUrl → gateway token exfiltration",
     ),
+    (
+        "GHSA-mc68-q9jw-2h3v",
+        (2026, 1, 28),
+        "2026.1.29",
+        "Docker sandbox authenticated command injection via unsafe PATH handling",
+    ),
+    (
+        "GHSA-g6q9-8fvw-f7rf",
+        (2026, 2, 13),
+        "2026.2.14",
+        "Gateway tool SSRF via unvalidated gatewayUrl override",
+    ),
+    (
+        "GHSA-cv7m-c9jx-vg7q",
+        (2026, 2, 13),
+        "2026.2.14",
+        "Browser upload path traversal via Playwright setInputFiles",
+    ),
 ]
 
 _VERSION_LEADING_INTS_RE = re.compile(r"^(\d+(?:\.\d+)*)")
@@ -9607,6 +9625,182 @@ SKILL_CONTENT_RING = (
     check_install_policy,                  # B42 — install-time policy (hooks + dir perms)
 )
 
+
+def check_gateway_rate_limit(ctx: Context) -> Finding:
+    """B80 — gateway auth without rate limiting on a non-loopback bind.
+
+    Grounded (recon: gateway.auth.rateLimit). A token/password-authenticated gateway
+    reachable beyond loopback with no rate limiting lets an attacker brute-force the
+    credential.
+
+    PASS — auth is not token/password, OR the bind is loopback, OR gateway.auth.rateLimit
+           is configured.
+    WARN — token/password auth AND non-loopback bind AND no gateway.auth.rateLimit.
+    """
+    cfg = ctx.config
+    mode = dig(cfg, "gateway.auth.mode")
+    if mode not in ("token", "password"):
+        return _finding(
+            "B80", PASS,
+            "Gateway auth does not rely on a brute-forceable token/password secret "
+            "(or is not configured).",
+            "If you enable token/password gateway auth on an exposed bind, configure "
+            "gateway.auth.rateLimit to throttle credential guessing.",
+        )
+    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    if bind_host in LOOPBACK:
+        return _finding(
+            "B80", PASS,
+            "Gateway is bound to loopback, so the auth endpoint is not exposed to remote "
+            "brute-force.",
+            "Keep the gateway on loopback, or add gateway.auth.rateLimit before exposing it.",
+        )
+    if dig(cfg, "gateway.auth.rateLimit"):
+        return _finding(
+            "B80", PASS,
+            "Gateway auth has rate limiting configured (gateway.auth.rateLimit).",
+            "Keep gateway.auth.rateLimit aligned with the exposure of the gateway.",
+        )
+    return _finding(
+        "B80", WARN,
+        "Gateway uses token/password auth on a non-loopback bind but has no "
+        "gateway.auth.rateLimit — the auth endpoint can be brute-forced.",
+        "Configure gateway.auth.rateLimit (max attempts / window) to throttle credential "
+        "guessing, or bind the gateway to loopback.",
+        evidence=[
+            f"gateway.auth.mode={mode!r}",
+            f"gateway.bind host={bind_host!r} (non-loopback)",
+            "gateway.auth.rateLimit is not set",
+        ],
+    )
+
+
+def check_subagent_spawn_limits(ctx: Context) -> Finding:
+    """B81 — subagent spawn limits raised beyond recommended defaults.
+
+    Grounded (recon: agents.defaults.subagents.{maxSpawnDepth,maxChildrenPerAgent,
+    maxConcurrent}). Defaults are safe (depth 1 / children 5 / concurrent 8). Raising
+    them while an untrusted channel can reach the agent widens a fork-bomb / cost-
+    exhaustion / runaway-delegation surface.
+
+    PASS — limits unset (safe defaults) or within recommended, OR no untrusted ingress.
+    WARN — a limit is explicitly raised beyond recommended AND an untrusted channel exists.
+    """
+    cfg = ctx.config
+    depth = dig(cfg, "agents.defaults.subagents.maxSpawnDepth")
+    children = dig(cfg, "agents.defaults.subagents.maxChildrenPerAgent")
+    concurrent = dig(cfg, "agents.defaults.subagents.maxConcurrent")
+    raised = []
+    if isinstance(depth, int) and depth > 2:
+        raised.append(f"maxSpawnDepth={depth} (recommended <= 2)")
+    if isinstance(children, int) and children > 5:
+        raised.append(f"maxChildrenPerAgent={children} (default 5)")
+    if isinstance(concurrent, int) and concurrent > 8:
+        raised.append(f"maxConcurrent={concurrent} (default 8)")
+    if not raised:
+        return _finding(
+            "B81", PASS,
+            "Subagent spawn limits are at or below the recommended defaults "
+            "(depth <= 2, children <= 5, concurrent <= 8).",
+            "Keep agents.defaults.subagents.{maxSpawnDepth,maxChildrenPerAgent,"
+            "maxConcurrent} at safe values to bound delegation fan-out.",
+        )
+    untrusted = _external_input_channels(cfg)
+    if not untrusted:
+        return _finding(
+            "B81", PASS,
+            "Subagent spawn limits are raised, but no untrusted channel can reach the "
+            "agent to trigger runaway delegation.",
+            "If you later expose an untrusted channel, lower agents.defaults.subagents.* "
+            "back toward the defaults.",
+            evidence=raised,
+        )
+    return _finding(
+        "B81", WARN,
+        "Subagent spawn limits are raised beyond the recommended defaults while an "
+        "untrusted channel can reach the agent — this widens a fork-bomb / cost-"
+        "exhaustion surface.",
+        "Lower agents.defaults.subagents.maxSpawnDepth (<= 2), maxChildrenPerAgent (<= 5), "
+        "and maxConcurrent (<= 8), or restrict the untrusted channels.",
+        evidence=raised + [f"untrusted channels: {', '.join(sorted(set(untrusted)))}"],
+    )
+
+
+def check_cachetrace_redaction(ctx: Context) -> Finding:
+    """B82 — cacheTrace transcripts persisted without tool-output redaction.
+
+    Grounded (recon: logging.cacheTrace.filePath, logging.redactSensitive). The
+    cache-trace JSONL persists full prompt/response transcripts to disk; without
+    redactSensitive="tools" those transcripts can carry secrets at rest.
+
+    PASS — cacheTrace is not configured, OR redactSensitive == "tools".
+    WARN — logging.cacheTrace.filePath is set AND redactSensitive != "tools".
+    """
+    cfg = ctx.config
+    trace_path = dig(cfg, "logging.cacheTrace.filePath")
+    if not trace_path:
+        return _finding(
+            "B82", PASS,
+            "No cache-trace transcript file is configured, so full transcripts are not "
+            "persisted to disk.",
+            "If you enable logging.cacheTrace.filePath, also set logging.redactSensitive "
+            "to \"tools\" so persisted transcripts don't carry secrets.",
+        )
+    redact = dig(cfg, "logging.redactSensitive")
+    if redact == "tools":
+        return _finding(
+            "B82", PASS,
+            "Cache-trace transcripts are persisted with tool-output redaction "
+            "(logging.redactSensitive=\"tools\").",
+            "Keep logging.redactSensitive at \"tools\" while cache-trace logging is on.",
+        )
+    return _finding(
+        "B82", WARN,
+        "logging.cacheTrace.filePath persists full transcripts to disk but "
+        "logging.redactSensitive is not \"tools\" — secrets can be written at rest.",
+        "Set logging.redactSensitive to \"tools\", or disable logging.cacheTrace.filePath.",
+        evidence=[
+            f"logging.cacheTrace.filePath={trace_path!r}",
+            f"logging.redactSensitive={redact!r}",
+        ],
+    )
+
+
+def check_webfetch_redirects(ctx: Context) -> Finding:
+    """B83 — web-fetch tool allows excessive redirect following.
+
+    Grounded (recon: tools.web.fetch.enabled, tools.web.fetch.maxRedirects). A high
+    redirect ceiling on the built-in fetch tool lets a fetched URL bounce the request
+    through redirect chains toward private/internal targets (SSRF-style).
+
+    PASS — fetch disabled, maxRedirects unset, or maxRedirects <= 5.
+    WARN — fetch enabled AND maxRedirects > 5.
+    """
+    cfg = ctx.config
+    if not dig(cfg, "tools.web.fetch.enabled"):
+        return _finding(
+            "B83", PASS,
+            "The built-in web-fetch tool is not enabled, so redirect-chain SSRF is not "
+            "reachable.",
+            "If you enable tools.web.fetch, keep tools.web.fetch.maxRedirects low (<= 5).",
+        )
+    redirects = dig(cfg, "tools.web.fetch.maxRedirects")
+    if not isinstance(redirects, int) or redirects <= 5:
+        return _finding(
+            "B83", PASS,
+            "The web-fetch tool follows a bounded number of redirects "
+            "(tools.web.fetch.maxRedirects <= 5 or default).",
+            "Keep tools.web.fetch.maxRedirects low (<= 5) to limit redirect-chain SSRF.",
+        )
+    return _finding(
+        "B83", WARN,
+        "tools.web.fetch.maxRedirects is high — a fetched URL can bounce through many "
+        "redirects toward private/internal targets (SSRF-style).",
+        "Lower tools.web.fetch.maxRedirects to <= 5, or disable the web-fetch tool.",
+        evidence=[f"tools.web.fetch.maxRedirects={redirects}"],
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_secrets_at_rest_home, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -9648,6 +9842,10 @@ CHECKS = [
     check_config_audit_log,
     check_config_health_integrity,
     check_session_approval_policy,
+    check_gateway_rate_limit,
+    check_subagent_spawn_limits,
+    check_cachetrace_redaction,
+    check_webfetch_redirects,
 ]
 
 

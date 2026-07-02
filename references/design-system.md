@@ -26,6 +26,15 @@ flattens the Dashboard through `delivery-mirror` regardless. The CLI text report
 same frame in its default (non-ascii) profile and falls back to `[Family] — N to fix` brackets
 under `--ascii`. Everything else stays emoji + indentation + markdown, **not** box-art.
 
+**Limits of chat rendering.** Everything above describes what ClawSecCheck's own renderers
+emit; what actually reaches the user in chat is **host-composed and best-effort** — the host
+agent re-relays (and sometimes re-fences or re-draws) that text over its channel, and
+ClawSecCheck cannot control that final step. The **deterministic, canonical artifacts are the
+saved files**: the `--save` report, `--html` export, and `--badge grade.svg`. Anything printed
+to chat is a courtesy view of the same data, not the source of truth. The host's own Telegram
+avatar/display name and its inline-SVG rendering support are entirely outside this skill's
+control — see Component 10 for the badge-specific consequence of this.
+
 ### Surface capability matrix
 
 | Surface | Box-art / monospace | Color | Text formatting | Native buttons (from a skill) |
@@ -508,12 +517,16 @@ ratio, and nothing else** — no findings, no titles, no evidence, ever.
 **`text` profile — `--card`:**
 
 ```text
+🦞 ClawSecCheck
 ┌───────────────────────────────────────┐
 │  OpenClaw Security: C  ( 74/100)      │
 │  Lethal Trifecta: 2/3                 │
 │  audited by ClawSecCheck 🔍           │
 └───────────────────────────────────────┘
 ```
+
+(the `🦞 ClawSecCheck` header line is dropped under `--ascii` to stay pure-ASCII, same
+convention as the Dashboard card.)
 
 **`--badge PATH` (SVG, written to disk, not printed):** a two-segment shields.io-style
 badge — label `OpenClaw Security` / value `{grade} {score}/100`, fill color keyed off the
@@ -530,6 +543,15 @@ findings a `--vet`/Dashboard/`--html` would show; the Lethal Trifecta ratio is t
 extra signal allowed through because it's a coarse posture indicator ("2 of 3 legs
 active"), not a specific vulnerability. The deliberate opposite of Component 11's HTML
 report, which is explicitly marked private/not-shareable for exactly this reason.
+
+**Delivery limit (host-composed):** the SVG written by `--badge PATH` is the canonical,
+deterministic artifact — it MUST be delivered to the user as that saved file, attached
+as-is. A host agent must never redraw, rasterize, or generate its own badge image in its
+place; it cannot reproduce the grade/score/color correctly, and doing so silently breaks
+the tiered-disclosure contract above. If the channel can't render an attached SVG, fall
+back to the `--card` text rendering instead of a host-invented image. This is a limit of
+the *delivery* step, not of `render_card`/`render_svg` themselves — see the "Limits of
+chat rendering" note near the top of this document.
 
 ### 11. HTML report — `--html`   *(v2 — 2.8.0)*
 

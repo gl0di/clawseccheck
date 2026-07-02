@@ -376,6 +376,18 @@ CATALOG: list[CheckMeta] = [
               MEDIUM, "hardening", "Human Approval",
               scored=False, confidence="MEDIUM",
               surface="tools"),
+    CheckMeta("B80", "Gateway auth without rate limiting on a non-loopback bind",
+              LOW, "hardening", "Least Privilege / Rate Limiting", scored=False,
+              surface="gateway"),
+    CheckMeta("B81", "Subagent spawn limits raised beyond recommended defaults",
+              LOW, "hardening", "Least Privilege / Subagents", scored=False,
+              surface="agents"),
+    CheckMeta("B82", "cacheTrace transcripts persisted without tool-output redaction",
+              MEDIUM, "hardening", "Secrets / At-Rest Redaction", scored=False,
+              surface="secrets"),
+    CheckMeta("B83", "Web-fetch tool allows excessive redirect following",
+              LOW, "hardening", "SSRF / Redirect Hardening", scored=False,
+              surface="tools"),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False,
               surface="bootstrap"),
@@ -524,6 +536,10 @@ AST_MAP = {
     "B78": ("AST09",),   # config-integrity tamper detection = governance (cf. B10)
     "B79": ("AST03",),   # approval_policy=never = over-autonomous agency (cf. B8)
     "C032": ("AST06",),  # trusting spoofable forwarded headers = weak boundary (cf. B70)
+    "B80": ("AST06",),   # no rate limiting on an exposed auth'd gateway = weak isolation (cf. B70)
+    "B81": ("AST03",),   # raised subagent spawn limits = over-privileged delegation (cf. B72)
+    "B82": ("AST02",),   # unredacted transcripts at rest = supply-chain/secret exposure (cf. C5)
+    "B83": ("AST06",),   # excessive redirect-follow on fetch = weak isolation/SSRF (cf. B38)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
@@ -608,6 +624,10 @@ OWASP_MAP = {
     "B79": ("LLM06",),   # approval_policy=never = Excessive Agency (cf. B8)
     "C014": ("LLM02",),  # outbound-surface inventory = data-disclosure surface (cf. B14)
     "C015": ("LLM02",),  # secrets-at-rest scan = Sensitive Info Disclosure (cf. B1)
+    "B80": ("LLM10",),   # no rate limiting on an exposed auth'd gateway = Unbounded Consumption
+    "B81": ("LLM06",),   # raised subagent spawn limits = Excessive Agency (cf. B72)
+    "B82": ("LLM02",),   # unredacted transcripts persisted at rest = Sensitive Info Disclosure
+    "B83": ("LLM02",),   # excessive redirect-follow on fetch = SSRF data-disclosure surface (cf. B38)
 }
 
 

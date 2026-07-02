@@ -96,7 +96,10 @@ def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
     else:
         arrow_up, arrow_down, arrow_flat = "▲", "▼", "·"
 
-    lines = ["ClawSecCheck - Score Trend", ""]
+    # 🦞 mascot header line, once (design-system Foundations); --ascii drops it to
+    # stay pure-ASCII, matching render_dashboard/render_card's convention.
+    lines = [] if ascii_only else ["🦞 ClawSecCheck"]
+    lines += ["ClawSecCheck - Score Trend", ""]
     for i, row in enumerate(rows):
         if i == 0:
             arrow = arrow_flat

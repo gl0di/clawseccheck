@@ -7,9 +7,15 @@ Logic under test (check_known_vulns + _parse_version):
            max_vulnerable_version_tuple (names the GHSA id, not a CVE).
 - PASS     when the parsed version is past all known advisory fixes.
 
-Confirmed advisory seeded in _KNOWN_ADVISORIES:
+Confirmed advisories seeded in _KNOWN_ADVISORIES:
   GHSA-g8p2-7wf7-98mq — OpenClaw/clawdbot <= 2026.1.28 vulnerable,
   fixed in 2026.1.29.  No CVE assigned.
+  GHSA-mc68-q9jw-2h3v — OpenClaw <= 2026.1.28 vulnerable (Docker sandbox
+  authenticated command injection via unsafe PATH handling), fixed in 2026.1.29.
+  GHSA-g6q9-8fvw-f7rf — OpenClaw <= 2026.2.13 vulnerable (Gateway tool SSRF via
+  unvalidated gatewayUrl override), fixed in 2026.2.14.
+  GHSA-cv7m-c9jx-vg7q — OpenClaw <= 2026.2.13 vulnerable (Browser upload path
+  traversal via Playwright setInputFiles), fixed in 2026.2.14.
 """
 from __future__ import annotations
 
@@ -187,8 +193,8 @@ def test_b33_root_alias_affected_version_fails():
 
 
 def test_b33_root_alias_safe_version_passes():
-    """Root-level lastTouchedVersion past the fix -> PASS."""
-    assert check_known_vulns(_ctx({"lastTouchedVersion": "2026.2.9"})).status == PASS
+    """Root-level lastTouchedVersion past all known-advisory fixes -> PASS."""
+    assert check_known_vulns(_ctx({"lastTouchedVersion": "2026.2.14"})).status == PASS
 
 
 def test_b33_meta_takes_precedence_over_root_alias():
@@ -206,21 +212,22 @@ def test_b33_neither_meta_nor_root_unknown():
 # PASS cases — past all known advisory fixes
 # ---------------------------------------------------------------------------
 
-def test_b33_version_2026_1_29_passes():
-    """2026.1.29 == first fixed version -> PASS (boundary: > max_vuln)."""
+def test_b33_version_2026_1_29_fixed_for_earlier_advisories_but_fails_newer():
+    """2026.1.29 fixes GHSA-g8p2/-mc68 but is still <= 2026.2.13 -> FAIL
+    against GHSA-g6q9-8fvw-f7rf / GHSA-cv7m-c9jx-vg7q."""
     result = check_known_vulns(_ver_ctx("2026.1.29"))
-    assert result.status == PASS
+    assert result.status == FAIL
 
 
-def test_b33_version_2026_2_9_passes():
-    """2026.2.9 > 2026.1.28 -> PASS."""
+def test_b33_version_2026_2_9_fails_newer_advisories():
+    """2026.2.9 > 2026.1.28 but <= 2026.2.13 -> FAIL (Gateway SSRF / browser upload)."""
     result = check_known_vulns(_ver_ctx("2026.2.9"))
-    assert result.status == PASS
+    assert result.status == FAIL
 
 
-def test_b33_version_2026_1_30_passes():
-    """2026.1.30 > 2026.1.28 -> PASS."""
-    result = check_known_vulns(_ver_ctx("2026.1.30"))
+def test_b33_version_2026_2_14_passes():
+    """2026.2.14 == fixed version for the newest advisories -> PASS."""
+    result = check_known_vulns(_ver_ctx("2026.2.14"))
     assert result.status == PASS
 
 
@@ -232,16 +239,17 @@ def test_b33_version_much_newer_passes():
 
 def test_b33_pass_detail_includes_version():
     """PASS detail should mention the installed version string."""
-    result = check_known_vulns(_ver_ctx("2026.2.9"))
+    result = check_known_vulns(_ver_ctx("2026.2.14"))
     assert result.status == PASS
-    assert "2026.2.9" in result.detail
+    assert "2026.2.14" in result.detail
 
 
 @pytest.mark.parametrize("version_str,expected_status", [
     ("2026.1.20", FAIL),
     ("2026.1.28", FAIL),
-    ("2026.1.29", PASS),
-    ("2026.2.9",  PASS),
+    ("2026.1.29", FAIL),  # fixed for GHSA-g8p2/-mc68 but now in GHSA-g6q9/-cv7m range
+    ("2026.2.9",  FAIL),  # still <= 2026.2.13 -> hits GHSA-g6q9-8fvw-f7rf / GHSA-cv7m-c9jx-vg7q
+    ("2026.2.14", PASS),
     ("nightly",   UNKNOWN),
     (None,        UNKNOWN),
 ])
@@ -249,3 +257,70 @@ def test_b33_parametrized_version_status(version_str, expected_status):
     """Parametrized sweep covering all outcome branches."""
     result = check_known_vulns(_ver_ctx(version_str))
     assert result.status == expected_status
+
+
+# ---------------------------------------------------------------------------
+# New advisories (S1): GHSA-mc68-q9jw-2h3v, GHSA-g6q9-8fvw-f7rf, GHSA-cv7m-c9jx-vg7q
+# ---------------------------------------------------------------------------
+
+def test_b33_ghsa_mc68_docker_sandbox_injection_fails_at_boundary():
+    """2026.1.28 <= max_vuln (2026, 1, 28) for GHSA-mc68-q9jw-2h3v -> FAIL."""
+    result = check_known_vulns(_ver_ctx("2026.1.28"))
+    assert result.status == FAIL
+    # GHSA-g8p2 is checked first (list order) and shares the same boundary/fix,
+    # so the FAIL fires on the first matching advisory in the table.
+    assert "GHSA-g8p2-7wf7-98mq" in result.detail or "GHSA-mc68-q9jw-2h3v" in result.detail
+
+
+def test_b33_ghsa_g6q9_gateway_ssrf_fails_at_2026_2_0():
+    """2026.2.0 <= 2026.2.13 -> FAIL against GHSA-g6q9-8fvw-f7rf (Gateway SSRF)."""
+    result = check_known_vulns(_ver_ctx("2026.2.0"))
+    assert result.status == FAIL
+    assert "GHSA-g6q9-8fvw-f7rf" in result.detail
+    assert "2026.2.14" in result.fix
+
+
+def test_b33_ghsa_g6q9_boundary_2026_2_13_fails():
+    """2026.2.13 == max_vuln boundary for GHSA-g6q9-8fvw-f7rf -> FAIL."""
+    result = check_known_vulns(_ver_ctx("2026.2.13"))
+    assert result.status == FAIL
+    assert "GHSA-g6q9-8fvw-f7rf" in result.detail
+
+
+def test_b33_ghsa_cv7m_browser_upload_traversal_shares_boundary():
+    """GHSA-cv7m-c9jx-vg7q also bounds at 2026.2.13/fixed 2026.2.14; table-order
+    means GHSA-g6q9 (listed first) reports for versions in the shared range —
+    both are present in the table and neither is skipped."""
+    ids = {ghsa for ghsa, *_ in __import__(
+        "clawseccheck.checks", fromlist=["_KNOWN_ADVISORIES"]
+    )._KNOWN_ADVISORIES}
+    assert "GHSA-cv7m-c9jx-vg7q" in ids
+    assert "GHSA-g6q9-8fvw-f7rf" in ids
+    assert "GHSA-mc68-q9jw-2h3v" in ids
+
+
+def test_b33_ghsa_g6q9_fixed_version_2026_2_14_passes():
+    """2026.2.14 == fixed version for the newest advisories -> PASS."""
+    result = check_known_vulns(_ver_ctx("2026.2.14"))
+    assert result.status == PASS
+
+
+def test_b33_version_2026_2_15_passes_all_advisories():
+    """Past every known advisory fix -> PASS."""
+    result = check_known_vulns(_ver_ctx("2026.2.15"))
+    assert result.status == PASS
+
+
+def test_b33_known_advisories_table_has_four_entries():
+    """S1 appended exactly 3 new advisories to the existing 1 -> 4 total."""
+    from clawseccheck.checks import _KNOWN_ADVISORIES
+    assert len(_KNOWN_ADVISORIES) == 4
+
+
+def test_b33_does_not_add_unverified_cve_2026_25593():
+    """Recon explicitly marks CVE-2026-25593 UNVERIFIED — must not be shipped."""
+    from clawseccheck.checks import _KNOWN_ADVISORIES
+    ghsa_ids = {ghsa for ghsa, *_ in _KNOWN_ADVISORIES}
+    assert "GHSA-2026-25593" not in ghsa_ids
+    for ghsa, *_ in _KNOWN_ADVISORIES:
+        assert "25593" not in ghsa

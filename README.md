@@ -221,6 +221,12 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
   C5 flags a group/world-writable openclaw binary dir, its install-tree ancestors (e.g. the npm
   package root — a binary-replacement vector), and writable PATH dirs before it. Sticky dirs like
   `/tmp` are exempt (the sticky bit blocks cross-owner replacement).
+- **B80–B83 — DoS / exposure hardening (advisory):** **B80** flags token/password gateway auth on a
+  non-loopback bind with no `gateway.auth.rateLimit` (brute-force surface); **B81** flags subagent
+  spawn limits raised past the safe defaults (`maxSpawnDepth`/`maxChildrenPerAgent`/`maxConcurrent`)
+  while an untrusted channel can reach the agent (fork-bomb / cost-exhaustion); **B82** flags a
+  `logging.cacheTrace` transcript file persisted without `redactSensitive:"tools"` (secrets at rest);
+  **B83** flags a high `tools.web.fetch.maxRedirects` ceiling (redirect-chain SSRF).
 - Plus your platform's own **`openclaw security audit`**, run for you and merged in.
 
 **Mapped to OWASP.** Each check is tagged with its **OWASP Top 10 for LLM Applications (2025)**
@@ -411,6 +417,11 @@ and shows it to you **right there in the chat** — no terminal, no setup. You s
 
 To keep a copy, add `--save report.txt` and ClawSecCheck writes the full report to that file
 (written only when you ask). For automation, `--json` gives a machine-readable result.
+
+Chat rendering is best-effort — the host agent relays and re-composes that text over its own
+channel. The **canonical, deterministic output is always a saved file**: `--save`, `--html`,
+or `--badge grade.svg`. If you need something you can rely on byte-for-byte (or attach as a
+real image, in the badge's case), use the saved file, not the chat paste.
 
 ---
 

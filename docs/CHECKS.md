@@ -889,6 +889,54 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B80 - Gateway auth without rate limiting on a non-loopback bind
+
+- Severity: LOW
+- Block: hardening
+- Framework: Least Privilege / Rate Limiting
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM10 Unbounded Consumption
+- What it checks: Gateway auth without rate limiting on a non-loopback bind
+- Remediation:
+  - none
+
+### B81 - Subagent spawn limits raised beyond recommended defaults
+
+- Severity: LOW
+- Block: hardening
+- Framework: Least Privilege / Subagents
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM06 Excessive Agency
+- What it checks: Subagent spawn limits raised beyond recommended defaults
+- Remediation:
+  - none
+
+### B82 - cacheTrace transcripts persisted without tool-output redaction
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Secrets / At-Rest Redaction
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM02 Sensitive Information Disclosure
+- What it checks: cacheTrace transcripts persisted without tool-output redaction
+- Remediation:
+  - none
+
+### B83 - Web-fetch tool allows excessive redirect following
+
+- Severity: LOW
+- Block: hardening
+- Framework: SSRF / Redirect Hardening
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM02 Sensitive Information Disclosure
+- What it checks: Web-fetch tool allows excessive redirect following
+- Remediation:
+  - none
+
 ## Advisory checks
 
 ### C3 - Backups of SOUL.md / memory

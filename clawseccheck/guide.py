@@ -106,7 +106,11 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         id="share_grade",
         title="Share your grade (safe — findings stay private)",
         command="clawseccheck --badge grade.svg",
-        why="Only the grade + score is shared, never your findings.",
+        why=(
+            "Only the grade + score is shared, never your findings. This writes a real "
+            "SVG file — attach grade.svg itself, do not redraw or regenerate the badge "
+            "image yourself."
+        ),
         priority=9,
     ))
 

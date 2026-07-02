@@ -730,7 +730,10 @@ def main(argv=None) -> int:
     if args.badge:
         try:
             secure_write_text(Path(args.badge).expanduser(), render_svg(score, findings))
-            _emit(f"(badge written to {args.badge})")
+            _emit(
+                f"(badge written to {args.badge} — attach this SVG file as-is; "
+                "do not redraw, rasterize, or generate your own badge image)"
+            )
             return 0
         except OSError as exc:
             _emit(f"(could not write badge: {exc})")

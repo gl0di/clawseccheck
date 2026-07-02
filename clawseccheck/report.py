@@ -883,6 +883,9 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
     l2 = f"  Lethal Trifecta: {_trifecta_ratio(findings)}"
     l3 = "  audited by ClawSecCheck" + ("" if ascii_only else " 🔍")
     width = 39
+    # 🦞 mascot header line, once (design-system Foundations); --ascii drops it to
+    # stay pure-ASCII, matching render_dashboard's convention.
+    header = "" if ascii_only else "🦞 ClawSecCheck\n"
     if ascii_only:
         top = bot = "+" + "-" * width + "+"
         body = "\n".join(f"|{ln:<{width}}|" for ln in (l1, l2, l3))
@@ -895,7 +898,7 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
         f"│{l2:<{width}}│",
         f"│{l3:<{width - 1}}│",
     ])
-    return f"{top}\n{body}\n{bot}"
+    return f"{header}{top}\n{body}\n{bot}"
 
 
 def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
