@@ -2440,6 +2440,10 @@ def check_installed_skills(ctx: Context) -> Finding:
                 warns_content.append(f"{name}: hardcoded public-IP URL ({m.group(0)}) — "
                                      "unusual for a legitimate skill")
                 break
+        # F-059: skill-manifest least-privilege — allowed-tools grant vs declared purpose.
+        _overgrant = _skill_tool_overgrant(blob, name)
+        if _overgrant:
+            warns_content.append(_overgrant)
 
         # C-040: persistence / rogue-agent patterns — HIGH (self-mod, cron/startup)
         # and WARN (backgrounding/daemonize). Fence-aware via _is_code_example.
@@ -6951,6 +6955,60 @@ def _b62_classify_category(name: str, description: str) -> str | None:
             return key
 
     return None
+
+
+# F-059: skill-manifest least-privilege (H7). Cross-check the skill's OWN declared
+# allowed-tools/tools grant against its declared purpose — the skill-level analogue of the
+# MCP over-scope check. Distinct from B62 (declared purpose vs ACTUAL code): this flags an
+# over-grant in the manifest even before any code exercises it. WARN-first.
+_SKILL_TOOLS_LINE_RE = re.compile(
+    r"^\s*(?:allowed[-_]tools|tools)\s*:\s*(\[[^\]]*\]|[^\n#]*)", re.I | re.MULTILINE)
+# Tool name -> capability family (aligned with _B62_EXPECTED's family vocabulary).
+_TOOL_FAMILY: dict[str, str] = {
+    "bash": "exec", "shell": "exec", "sh": "exec", "exec": "exec", "execute": "exec",
+    "terminal": "exec", "command": "exec", "subprocess": "exec", "run_command": "exec",
+    "write": "write", "edit": "write", "createfile": "write", "filewrite": "write",
+    "str_replace_editor": "write", "applypatch": "write", "apply_patch": "write",
+    "webfetch": "network", "fetch": "network", "browser": "network", "http": "network",
+    "network": "network", "curl": "network", "websearch": "network", "web_search": "network",
+    "read": "read", "grep": "read", "glob": "read", "view": "read", "ls": "read",
+}
+
+
+def _skill_declared_tools(blob: str) -> list[str]:
+    """Extract tool tokens from a skill's `allowed-tools:` / `tools:` frontmatter — the
+    inline `[a, b]` list or a same-line comma/space list. Block-list (`- item`) form is not
+    parsed (returns []) to stay conservative. Tokens are lowercased."""
+    m = _SKILL_TOOLS_LINE_RE.search(blob)
+    if not m:
+        return []
+    raw = m.group(1).strip().strip("[]").strip()
+    if not raw:
+        return []
+    return [t.strip().strip("'\"").lower() for t in re.split(r"[,\s]+", raw) if t.strip().strip("'\"")]
+
+
+def _skill_tool_overgrant(blob: str, skill_name: str) -> str | None:
+    """WARN message if a NARROW-purpose skill's manifest grants high-power tools
+    (exec/network/write/cred) beyond what its declared category needs; else None. Only
+    recognised narrow categories fire — PERMISSIVE/vague or unrecognised declarations, and
+    pure wildcard grants (already flagged HIGH elsewhere), never do."""
+    tools = _skill_declared_tools(blob)
+    if not tools:
+        return None
+    name, desc = _b62_extract_declaration(blob, skill_name)
+    cat = _b62_classify_category(name, desc)
+    if cat is None or cat == "PERMISSIVE":
+        return None
+    expected = _B62_EXPECTED.get(cat, frozenset())
+    granted = {_TOOL_FAMILY[t] for t in tools if t in _TOOL_FAMILY}
+    # Only high-power families count as over-grant (exec/network/cred, per _B62_HIGH_SURPRISE).
+    # `write` is too common/benign (a fetcher saving its download) to flag.
+    surprising = {f for f in granted if f not in expected and f in _B62_HIGH_SURPRISE}
+    if not surprising:
+        return None
+    return (f"{skill_name or name}: a '{cat}' skill grants {sorted(surprising)} capability "
+            f"({', '.join(sorted(tools))}) beyond its declared purpose (least-privilege)")
 
 
 def _b62_actual_families(
