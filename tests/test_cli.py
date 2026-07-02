@@ -164,4 +164,6 @@ def test_cli_attest_bad_file_warns_but_runs(tmp_path, capsys):
     rc = main(["--home", str(tmp_path), "--no-native", "--no-host",
                "--no-history", "--attest", str(bad)])
     assert rc == 0
-    assert "could not read a valid attestation" in capsys.readouterr().out
+    # The warning is a diagnostic: it lives on stderr so machine-readable stdout
+    # (--json/--sarif) stays clean (B-070).
+    assert "could not read a valid attestation" in capsys.readouterr().err

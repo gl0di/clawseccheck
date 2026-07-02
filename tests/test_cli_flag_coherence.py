@@ -133,3 +133,51 @@ def test_vet_records_run(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("clawseccheck.cli.record_run", lambda cap, **kw: seen.append(cap))
     main(["--vet", sk])
     assert "vet" in seen                            # symmetric with --vet-mcp
+
+
+# ------------------- B-068: --full / --attest silently defeated -------------------
+def test_vet_full_notes_full_ignored(tmp_path, capsys):
+    rc = main(["--vet", _dangerous_skill(tmp_path), "--full"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "--full has no effect with --vet" in err
+
+
+def test_vet_attest_notes_attest_ignored(tmp_path, capsys):
+    att = tmp_path / "att.json"
+    att.write_text("{}", encoding="utf-8")
+    main(["--vet", _dangerous_skill(tmp_path), "--attest", str(att)])
+    assert "--attest has no effect with --vet" in capsys.readouterr().err
+
+
+def test_fix_attest_is_consumed_no_note(tmp_path, capsys):
+    # --fix runs after the attest block: audit() consumes the attestation, so the
+    # note must NOT fire (a false "ignored" would be its own coherence bug).
+    import json
+    from clawseccheck import attest
+    att = tmp_path / "att.json"
+    att.write_text(json.dumps({"schema": attest.SCHEMA_ID, "tools": []}), encoding="utf-8")
+    rc = main(["--home", VULN, *COMMON, "--fix", "--attest", str(att)])
+    assert rc == 0
+    assert "--attest has no effect" not in capsys.readouterr().err
+
+
+# --------------- B-070: attest warning must not corrupt --json stdout ---------------
+def test_bad_attest_json_stdout_stays_machine(tmp_path, capsys):
+    import json
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    rc = main(["--home", VULN, *COMMON, "--attest", str(bad), "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    json.loads(captured.out)  # raises if the warning leaked into stdout
+    assert "could not read a valid attestation" in captured.err
+
+
+def test_bad_attest_warning_still_visible_on_human_path(tmp_path, capsys):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    rc = main(["--home", VULN, *COMMON, "--attest", str(bad)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "could not read a valid attestation" in captured.err

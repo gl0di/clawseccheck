@@ -200,6 +200,13 @@ _MODE_HONORS = {
     "vet_mcp": frozenset({"json"}),
 }
 
+# Primary modes that run AFTER the --attest block in main()'s cascade: their findings
+# come from audit(attestation=...), so --attest is genuinely consumed there, not ignored.
+_ATTEST_CONSUMERS = frozenset({
+    "risk_paths", "fix", "badge", "html", "sarif", "trend", "percentile",
+    "prompts", "next", "dashboard_findings", "monitor",
+})
+
 
 def _mode_active(args, attr: str, kind: str) -> bool:
     v = getattr(args, attr, None)
@@ -237,6 +244,15 @@ def _flag_coherence_notes(args) -> list[str]:
         no_effect.append("--exit-code")
     if getattr(args, "fail_under", None) is not None and "fail_under" not in honored:
         no_effect.append("--fail-under")
+    # --full / --attest are enrichment modifiers a winning primary mode can silently
+    # defeat (B-068). --full is consumed only on the default report path, so ANY
+    # winning mode drops it. --attest feeds audit(), so modes that run AFTER the
+    # attest block genuinely consume it (their findings reflect B43/B44) — only the
+    # early-returning modes (menu/vet/live-test family) truly ignore it.
+    if bool(getattr(args, "full", False)) and "full" not in honored:
+        no_effect.append("--full")
+    if getattr(args, "attest", None) is not None and win_attr not in _ATTEST_CONSUMERS:
+        no_effect.append("--attest")
     # --trend / --monitor record a score-history point as part of their job, so
     # --no-history cannot suppress it there (every other mode either records on the
     # default path or writes no history at all, where --no-history is a no-op).
@@ -599,8 +615,11 @@ def main(argv=None) -> int:
             attestation = _attest.load_attestation(Path(args.attest).expanduser())
             src = args.attest
         if not attestation:
-            _emit(f"⚠ could not read a valid attestation from {src} "
-                  "(ignored; B43/B44 stay UNKNOWN). See 'clawseccheck --ask'.")
+            # Diagnostic, not report content: keep machine-readable stdout (--json/--sarif)
+            # clean — a stdout warning here corrupts `--attest bad.json --json` (B-070).
+            print(f"⚠ could not read a valid attestation from {src} "
+                  "(ignored; B43/B44 stay UNKNOWN). See 'clawseccheck --ask'.",
+                  file=sys.stderr)
 
     # First-run onboarding (Screen 13): when there is genuinely nothing to audit —
     # ~/.openclaw missing, or an empty directory — don't render a wall of UNKNOWNs;
