@@ -540,8 +540,23 @@ def _is_decode_call(node: ast.AST) -> bool:
     return isinstance(f, ast.Attribute) and f.attr in _DECODE_ATTRS
 
 
+def _has_xor_decode(node: ast.AST) -> bool:
+    """F-053: True when the subtree builds a byte/char sequence via XOR — bytes(...^...),
+    bytearray(...^...), or a comprehension containing ^ — the common non-base64
+    obfuscation. A scalar `a ^ b` (bit flags) is NOT flagged: the XOR must sit inside a
+    sequence-builder or comprehension, which is the decode shape."""
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("bytes", "bytearray"):
+            if any(isinstance(s, ast.BinOp) and isinstance(s.op, ast.BitXor) for s in ast.walk(n)):
+                return True
+        if isinstance(n, (ast.ListComp, ast.GeneratorExp, ast.SetComp)):
+            if any(isinstance(s, ast.BinOp) and isinstance(s.op, ast.BitXor) for s in ast.walk(n)):
+                return True
+    return False
+
+
 def _subtree_has_decode(node: ast.AST) -> bool:
-    return any(_is_decode_call(n) for n in ast.walk(node))
+    return any(_is_decode_call(n) for n in ast.walk(node)) or _has_xor_decode(node)
 
 
 def _names_in(node: ast.AST) -> set[str]:
