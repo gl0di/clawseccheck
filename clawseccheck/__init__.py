@@ -32,7 +32,7 @@ from .update import update_notice, read_latest_hint, DEFAULT_LATEST
 
 __version__ = "2.8.0"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
-__released__ = "2026-07-01"
+__released__ = "2026-07-02"
 
 
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,

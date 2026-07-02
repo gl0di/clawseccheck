@@ -3,44 +3,76 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
-## [2.8.0] — 2026-07-01
+## [2.8.0] — 2026-07-02
 
-Redesign of the standalone `--html` report: a long flat list of findings now reads as
-coverage-by-area, with light/dark theming, a score bar, and a severity summary — same
-information, far easier to scan.
+The largest release of the 2.x line: a full **presentation redesign** — the conversational
+Dashboard, the CLI text report, the standalone HTML report, a new capability palette, and a
+first-run onboarding screen — alongside a major expansion of the **supply-chain vetting engine**
+(`--vet`) into a cross-file, content-aware scanner. Deterministic scan and scoring are unchanged;
+every new surface is presentation or a read-only detection. No breaking changes.
 
 ### Added
-- **Deterministic chat-Dashboard frames (`--dashboard-findings`):** a new agent-facing flag
-  prints only the Section-3 Findings block (non-suppressed FAIL/WARN, high-confidence, grouped
-  by family, already framed). SKILL.md Step 3 now **pastes** this verbatim instead of
-  re-composing the findings — the host LLM was dropping the family frame when it composed the
-  block itself. The renderer (`report.py:render_dashboard_findings`) enforces the FAIL/WARN +
-  no-`MEDIUM`/`ATTESTED` filter in code; `--ascii` degrades to `[Family] — N to fix` brackets.
-- **Grouped HTML report:** findings are grouped by the seven OpenClaw surface families
-  (Exposure & Network, Privilege & Execution, …), matching the conversational Dashboard,
-  with a per-group jump nav and counts so dozens of findings stay navigable.
-- **At-a-glance header:** a score progress bar and a per-severity summary strip
-  (Critical/High/Medium/Low counts) sit above the findings.
-- **Dark mode:** the report follows `prefers-color-scheme` via CSS custom properties;
-  still a single self-contained file with inline CSS and **no external assets**.
 
-### Fixed
-- **Private-warning line breaks:** the `.warning-box strong` block rule forced the inline
-  `NOT` onto its own line, splitting the "must **NOT** be shared" sentence. The warning
-  now renders as one flowing line.
+**Presentation & discovery**
+- **Welcome / capability menu (`--menu`):** a pre-scan entry screen — the four common things you
+  can do, plus a last-check age and an offline staleness nudge.
+- **Terminal Dashboard (`report.py`):** the CLI text report gained a **score-bar** in the grade
+  header (`████░░`; `--ascii` → `[####----]`), an honest OpenClaw-surface **coverage map**
+  (checked / partial-UNKNOWN / not-checkable, grounded in the coverage engine), and an **opt-in
+  ANSI colour** layer (new `clawseccheck/ansi.py`) — grade, score-bar and severity icons are
+  painted only for an interactive TTY, honour `--no-color` / `NO_COLOR` / `FORCE_COLOR`, and are
+  stripped back to plain text for `--save` files and pipes.
+- **Capability palette (`--functions`, Screen 12):** the full list of everything the skill can do
+  as speakable prompts grounded to their real flags (`clawseccheck/palette.py`); a drift-guard
+  test keeps it in lock-step with the CLI's mode table.
+- **First-run onboarding (Screen 13):** a bare run against a missing or empty `~/.openclaw` prints
+  a friendly "point me at your config" welcome instead of a wall of UNKNOWNs. Any machine/CI/
+  artifact flag (`--json`, `--fail-under`, `--save`, `--full`, `--badge`, …) still runs the real
+  audit, so nothing is silently dropped.
+- **Deterministic chat-Dashboard frames (`--dashboard-findings`):** an agent-facing flag that
+  prints only the framed Section-3 Findings block (`report.py:render_dashboard_findings`), so
+  SKILL.md Step 3 pastes it verbatim instead of the host LLM re-composing (and un-framing) it.
+- **Grouped HTML report (`--html`):** findings grouped by the seven OpenClaw surface families with
+  a per-group jump nav and counts, a score progress bar and per-severity summary strip, and dark
+  mode via `prefers-color-scheme` — still a single self-contained file with **no external assets**.
+
+**Supply-chain vetting (`--vet`)**
+- **Full content ring on every bundled file** (not just B13), with **cross-file import-graph taint**
+  that catches payloads split across a skill's files, and a semantic pass over bundled shell (`.sh`)
+  scripts.
+- New content detections: anti-refusal / system-prompt-leak directives, forged role markers,
+  XOR-loop and other obfuscated payloads, code-level time-bomb / sandbox-evasion gating, env-var /
+  agent-config secret exfiltration to the network, native-executable stowaways, trigger-abuse /
+  local instruction-chain / IOC signals, skill-manifest least-privilege gaps (granted vs declared
+  tools), and skipped symlinks / path-escapes / obfuscated filenames — with source-to-sink trace
+  evidence in the verdict.
 
 ### Changed
-- **Finding cards:** each finding is a bordered card with a severity-tinted accent, a
-  severity pill, and clearer `Why:`/`Fix:` typography, replacing the flat bordered rows.
-  Report content, escaping, and the private-owner-view contract are unchanged.
-- **Framed family headers (chat Dashboard + CLI text report):** both the conversational
-  Dashboard (`SKILL.md` Step 3) and the `--full` CLI text report (`render_report`) now draw
-  each of the seven surface families inside an open 3-sided frame (`┌─ / │ label / └─`) so the
-  categories stand apart. The frame is open on the right so variable-width emoji can't
-  misalign it, and it degrades to plain lines off monospace. Under `--ascii` the CLI report
-  keeps its `[Family] — N to fix` bracket form. `references/design-system.md` is updated to
-  bless this as the one box-art exception to the `text` baseline and to document the v2.8.0
-  HTML report (Component 11).
+- **Report honesty (L1/L2 framing):** the report now states a static audit bounds what your agent
+  *can* do, not how it *behaves* at runtime — a high grade means "not statically lethal-capable",
+  not "runtime-proof". Framing only; no scoring change.
+- **Dashboard grouping:** findings group under the seven surface families with an open 3-sided
+  frame header (`┌─ / │ label / └─`, open on the right so variable-width emoji can't misalign it);
+  the Lethal Trifecta is folded into Privilege & Execution rather than a standalone headline.
+  `--ascii` keeps the `[Family] — N to fix` bracket form. Applies to the chat Dashboard, the CLI
+  text report, and the HTML report; `references/design-system.md` documents all 14 screens.
+- **HTML finding cards:** bordered cards with a severity-tinted accent, a severity pill, and clearer
+  `Why:`/`Fix:` typography, replacing the flat rows. Content, escaping, and the private-owner-view
+  contract are unchanged.
+
+### Fixed
+- **First-run / CI correctness:** onboarding no longer turns a missing-home `--fail-under` gate
+  green or swallows `--save`/`--full` (B-075); an unreadable home is a controlled plain-language
+  error, not a raw traceback (B-076).
+- **`--vet` false-negatives → UNKNOWN, not silent PASS:** AST parse failures and truncated skill
+  scans now surface as UNKNOWN instead of a clean pass (B-074); subprocess argv-list injection is
+  classified as argument- not command-injection; a B65 false positive is fixed.
+- **Machine output & flag coherence:** the invalid-attestation warning goes to stderr so
+  `--attest bad.json --json` stays valid JSON (B-070); a winning primary mode now names dropped
+  `--full`/`--attest` (B-068); a mode-drift guard test ties `_PRIMARY_MODES` to `main()` (C-129).
+- **`--verify-self`:** the engine digest excludes lint/type/test caches and `.git`.
+- **HTML private-warning line breaks:** the "must **NOT** be shared" sentence renders as one
+  flowing line again.
 
 ## [2.7.1] — 2026-06-30
 
