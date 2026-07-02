@@ -32,7 +32,7 @@ def test_emits_open_three_sided_frame():
     out = render_dashboard_findings([f])
 
     assert "┌" in out
-    assert "│ Exposure & Network — 1 to fix" in out
+    assert "│ 🌐 Exposure & Network — 1 to fix" in out
     assert "└" in out
 
     # The open 3-sided box must NOT close the right side
@@ -101,8 +101,8 @@ def test_a1_lands_under_privilege():
 
     out = render_dashboard_findings([a1])
 
-    assert "│ Privilege & Execution" in out
-    priv_idx = out.index("│ Privilege & Execution")
+    assert "│ 🔑 Privilege & Execution" in out
+    priv_idx = out.index("│ 🔑 Privilege & Execution")
     title_idx = out.index("title A1")
     assert title_idx > priv_idx
 

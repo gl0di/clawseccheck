@@ -258,61 +258,45 @@ sentence. Examples:
 
 Present all seven sections below **in one message**, in order.
 
-**Section 1 — Grade card**
+**Sections 1-3 — the Dashboard card: do not compose it, paste it.**
+
+Live testing showed that when the model composes the grade card / FIX FIRST / findings
+sections itself, the 🦞 header, the projection line, and the family frame silently vanish.
+So Sections 1-3 are one deterministic render. Run:
 
 ```
-🦞 OpenClaw Security Audit — Grade {grade} · {score}/100
-{score-bar}  ·  {N} issues
+python3 {baseDir}/audit.py --dashboard
 ```
 
-- Score-bar: 16 cells; `filled = round(score / 100 * 16)`. Use `█` for filled, `░` for empty.
-  Score 49 example: `████████░░░░░░░░`.
-- Issue count: non-suppressed findings with `status` `FAIL` or `WARN`.
-- **No standalone Lethal Trifecta chip here (F-044).** Trifecta state is one Privilege & Execution
-  finding among others, not a headline metric — it renders in Section 3 with the rest of that
-  family. See Section 3 for how to write A1's `why:` line when 2/3 or 3/3 legs are active.
+and paste its **entire stdout here, verbatim**. It emits, in order:
 
-**Section 2 — FIX FIRST + projection**
+- **Section 1 — Grade card:** `🦞 OpenClaw Security Audit — Grade {grade} · {score}/100`,
+  a 16-cell score-bar, and the count of non-suppressed FAIL/WARN findings.
+  **No standalone Lethal Trifecta chip (F-044)** — trifecta state is one Privilege &
+  Execution finding among others in Section 3.
+- **Section 2 — FIX FIRST + projection:** the single highest-leverage fix and its
+  **estimated** projected grade (`Projected (estimated): fix this → … · fix all
+  Critical+High → …`, or the honest "won't change the grade alone" variant). The block
+  is omitted by the renderer when there is no fixable FAIL — in that case say
+  "No high-priority issues found." in your own prose.
+- **Section 3 — Findings, grouped by area** (details below).
 
-Read `projection.top1` and `projection.cumulative` from the JSON.
+Do **not** re-draw the frame, swap it for markdown bold, drop the rule lines, re-order, or
+restate projected grades as current grades — paste exactly what the command prints. Your own
+prose around the paste follows the plain-language rule; you may add a one-sentence
+plain-language description of the top FIX FIRST risk after the card.
 
-When `projection.top1.projected_grade` **differs** from the current grade (fixing the top issue improves the grade):
-```
-▶ FIX FIRST
-{plain-language description of the top1 finding — what the risk actually is, in one sentence}
-Projected (estimated): fix this → {top1.projected_grade} ({top1.projected_score}) · fix all Critical+High → {cumulative.projected_grade} ({cumulative.projected_score})
-```
+(`--dashboard-findings` still prints Section 3 alone, if you ever need just the findings block.)
 
-When `projection.top1.projected_grade` **equals** the current grade (fixing the top issue alone won't improve it):
-```
-▶ FIX FIRST
-{plain-language description of the top1 finding — what the risk actually is, in one sentence}
-Projected: fixing the top issue won't change the grade alone — {N} Critical+High findings must all be addressed to reach {cumulative.projected_grade}.
-```
+**Section 3 — what the pasted findings block contains**
 
-Where `{N}` is the count of Critical+High findings captured in `projection.cumulative`, and
-`{cumulative.projected_grade}` is `projection.cumulative.projected_grade`.
+The pasted card's findings block holds the FAIL/WARN findings already grouped into the
+7 OpenClaw surface families, each under an **open 3-sided frame**
+(`┌─ / │ {icon} {family} — {N} to fix / └─`, no right border), most-severe-first within a
+family, a `🔴/🟠/🟡/⚪` severity dot on every issue line, and the mandatory `why:` and
+`fix:` on every finding.
 
-Always label projected grades **estimated** — they assume each fixed finding flips cleanly to
-PASS; actual hardening may reveal new issues. Never present a projected grade as the current grade.
-If `projection.top1` is `null` (no fixable FAILs), skip this block and say "No high-priority issues found."
-
-**Section 3 — Findings, grouped by area**
-
-**Do not compose this section — paste it.** Composing the findings yourself is exactly why
-the family frame breaks: models substitute their own markdown headers for the box. Instead run:
-
-```
-python3 {baseDir}/audit.py --dashboard-findings
-```
-
-and paste its **entire stdout here, verbatim**. It emits the FAIL/WARN findings already grouped
-into the 7 OpenClaw surface families, each under an **open 3-sided frame**
-(`┌─ / │ {family} — {N} to fix / └─`, no right border), most-severe-first within a family, with
-the mandatory `why:` and `fix:` on every finding. Do **not** re-draw the frame, swap it for
-markdown bold, drop the rule lines, or re-order — paste exactly what the command prints.
-
-The command already guarantees the Section-3 contract, so **you filter nothing yourself**:
+The renderer already guarantees the Section-3 contract, so **you filter nothing yourself**:
 - **PASS/UNKNOWN are dropped** — coverage is Section 4's job, not here;
 - **`MEDIUM`/`ATTESTED`-confidence findings are dropped** — they surface in Section 5 ("Worth a glance");
 - families with nothing to fix are **omitted** (no empty "— clear" headers);
@@ -331,27 +315,35 @@ The 7 families, in the fixed order the command renders them:
 | 🛰️ | Detection & Host | monitoring · host |
 | 🔧 | Automation & Maintenance | hooks · update |
 
-Plain-language still governs **your own prose** around the pasted block (the Section-2 FIX FIRST
-line, any framing sentence) — never raw codes like "B2 FAIL". The block's `why:`/`fix:` lines are
-the tool's own plain-language text: leave them exactly as printed.
+Plain-language still governs **your own prose** around the pasted block (any framing
+sentence) — never raw codes like "B2 FAIL". The block's `why:`/`fix:` lines are the tool's
+own plain-language text: leave them exactly as printed.
 
-Example of what `--dashboard-findings` prints (paste the **real** output, not this sample):
+Example of what the `--dashboard` card prints (paste the **real** output, not this sample):
 
 ```
+🦞 OpenClaw Security Audit — Grade F · 49/100
+████████░░░░░░░░  ·  3 issues
+
+▶ FIX FIRST
+insecure control-UI auth
+Projected (estimated): fix this → C (74) · fix all Critical+High → B (81)
+
+— Findings —
 ┌──────────────────────────────
-│ Exposure & Network — 1 to fix
+│ 🌐 Exposure & Network — 1 to fix
 └──────────────────────────────
-⛔ [CRITICAL] insecure control-UI auth
+🔴 CRITICAL  insecure control-UI auth
     why: anyone on your local network can send commands to your agent right now — no pairing or auth required
     fix: set gateway.controlUi.allowInsecureAuth to false in openclaw.json
 
 ┌──────────────────────────────
-│ Privilege & Execution — 2 to fix
+│ 🔑 Privilege & Execution — 2 to fix
 └──────────────────────────────
-⛔ [CRITICAL] Lethal Trifecta (untrusted input × sensitive data × outbound)
+🔴 CRITICAL  Lethal Trifecta (untrusted input × sensitive data × outbound)
     why: all three legs are active — outside input, sensitive data, and outbound actions; one injected prompt is enough to exfiltrate everything
     fix: break the trifecta — remove one leg
-⚠️ [HIGH] tool profile broader than minimal
+🟠 HIGH  tool profile broader than minimal
     why: the "coding" profile gives the agent filesystem write, shell, and package-install access — a hijacked agent can run arbitrary code
     fix: change tools.profile to "minimal"
 ```
@@ -378,8 +370,8 @@ control to audit there.
 
 **Section 5 — Worth a glance**
 
-`--dashboard-findings` already excludes `MEDIUM`/`ATTESTED` findings from Section 3, so this
-section is their only home — you don't need to pull them out of Section 3 yourself.
+The pasted `--dashboard` card already excludes `MEDIUM`/`ATTESTED` findings from Section 3,
+so this section is their only home — you don't need to pull them out of Section 3 yourself.
 
 If any findings have `confidence` = `"MEDIUM"` or `"ATTESTED"`:
 

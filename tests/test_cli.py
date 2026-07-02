@@ -21,7 +21,7 @@ def test_cli_dashboard_findings_frames_and_slices(capsys):
                "--dashboard-findings"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "┌" in out and "│ Exposure & Network" in out and "└" in out
+    assert "┌" in out and "│ 🌐 Exposure & Network" in out and "└" in out
     # it is the findings SLICE, not the full report
     assert "Score:" not in out
     assert "Scan receipt" not in out

@@ -28,7 +28,9 @@ def test_trifecta_finding_lands_under_privilege_and_execution():
     out = render_report([a1], compute([a1]))
     assert "│ Privilege & Execution" in out
     idx_family = out.index("│ Privilege & Execution")
-    idx_finding = out.index("title A1")
+    # rindex: the FIX FIRST block (B-077) also names the top finding near the top of
+    # the report — the grouped listing is the LAST occurrence of the title.
+    idx_finding = out.rindex("title A1")
     assert idx_finding > idx_family
 
 
@@ -39,8 +41,10 @@ def test_findings_grouped_by_real_catalog_family():
     out = render_report([b1, b2], compute([b1, b2]))
     exposure_idx = out.index("│ Exposure & Network")
     secrets_idx = out.index("│ Secrets & Data")
-    b1_title_idx = out.index("title B1")
-    b2_title_idx = out.index("title B2")
+    # rindex: FIX FIRST (B-077) may repeat the top finding's title before the
+    # grouped listing — position checks target the LAST (grouped) occurrence.
+    b1_title_idx = out.rindex("title B1")
+    b2_title_idx = out.rindex("title B2")
     # Exposure & Network renders before Secrets & Data (fixed FAMILY_ORDER)
     assert exposure_idx < secrets_idx
     # each finding sits inside its own family's section, not the other's

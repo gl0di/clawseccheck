@@ -36,11 +36,14 @@ def test_ascii_rendering_is_pure_ascii():
     report.encode("ascii")
     card.encode("ascii")
     render_json(findings, score).encode("ascii")
-    assert "[X]" in report  # ascii status icon for a FAIL is present
+    assert "[CRITICAL]" in report  # ascii severity token for an issue line is present
     assert "ClawSecCheck" in card
 
 
 def test_unicode_rendering_still_default():
     _, findings, score = audit(FIXTURES / "home_safe")
-    # default (non-ascii) output uses real unicode status icons
-    assert "⚠️" in render_report(findings, score, ascii_only=False)
+    # default (non-ascii) output uses the real unicode glyph language: the 🦞 header
+    # mascot plus a severity dot on issue lines (home_safe carries WARNs).
+    out = render_report(findings, score, ascii_only=False)
+    assert "🦞" in out
+    assert "🟠" in out or "🟡" in out

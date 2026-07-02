@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import (
     audit, diff, fingerprint, load_events, load_ignore, load_state, make_canary, record_events,
-    render_canary, render_card, render_dashboard_findings, render_events, render_fix,
+    render_canary, render_card, render_dashboard, render_dashboard_findings, render_events, render_fix,
     render_json, render_monitor,
     render_prompts, render_report, render_svg, render_vet_json, save_state, snapshot,
     vet_mcp, vet_skill,
@@ -188,6 +188,7 @@ _PRIMARY_MODES = [
     ("percentile", "--percentile", "bool"),
     ("prompts", "--prompts", "bool"),
     ("next", "--next", "bool"),
+    ("dashboard", "--dashboard", "bool"),
     ("dashboard_findings", "--dashboard-findings", "bool"),
     ("monitor", "--monitor", "bool"),
 ]
@@ -204,7 +205,7 @@ _MODE_HONORS = {
 # come from audit(attestation=...), so --attest is genuinely consumed there, not ignored.
 _ATTEST_CONSUMERS = frozenset({
     "risk_paths", "fix", "badge", "html", "sarif", "trend", "percentile",
-    "prompts", "next", "dashboard_findings", "monitor",
+    "prompts", "next", "dashboard", "dashboard_findings", "monitor",
 })
 
 
@@ -370,6 +371,9 @@ def main(argv=None) -> int:
                         "(also suppressible via CLAWSECCHECK_NO_FRESHNESS_NOTICE=1; offline, never a network call)")
     p.add_argument("--next", action="store_true",
                    help="print recommended next actions based on the audit result")
+    p.add_argument("--dashboard", action="store_true",
+                   help="print the deterministic chat Dashboard card (grade + FIX FIRST "
+                        "projection + framed findings, Sections 1-3) and exit")
     p.add_argument("--dashboard-findings", action="store_true",
                    help="print only the framed Section-3 Findings block for the chat Dashboard "
                         "(FAIL/WARN, high-confidence, grouped by family) and exit")
@@ -716,6 +720,10 @@ def main(argv=None) -> int:
 
     if args.next:
         _emit(render_next_actions(suggest_actions(findings, score), ascii_only))
+        return 0
+
+    if args.dashboard:
+        _emit(render_dashboard(findings, score, ascii_only=ascii_only))
         return 0
 
     if args.dashboard_findings:

@@ -3,6 +3,33 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Deterministic chat Dashboard card (`--dashboard`):** one code-rendered paste for the chat
+  Dashboard's Sections 1-3 — the 🦞 grade-card header with score-bar and issue count, the
+  `▶ FIX FIRST` block with an *estimated* grade projection, and the framed findings block.
+  Live testing showed host LLMs silently drop the mascot, projection, and family frame when
+  asked to compose those sections from `--json`; now they paste instead
+  (`--dashboard-findings` still prints the findings block alone).
+- **`▶ FIX FIRST` in the CLI report:** `render_report` now shows the single
+  highest-leverage fix and its estimated projection (`scoring.project()`) before the
+  findings list — the terminal and chat views tell one story.
+
+### Changed
+
+- **Severity dots on issue lines:** FAIL/WARN findings now lead with a severity dot
+  (🔴 CRITICAL · 🟠 HIGH · 🟡 MEDIUM · ⚪ LOW) instead of the status icon + bracketed
+  severity (`⛔ [CRITICAL]`), in both the CLI report and the chat paste — one glyph
+  language, per the design-system mock. `--ascii` folds the dot+word to `[CRITICAL]`-style
+  brackets; PASS/UNKNOWN roster lines keep their ✅/❔ status icons.
+- **Family emoji in the chat paste:** the chat Dashboard's family headers now carry the
+  7 grounded icons (🌐 🔑 📦 📝 🔒 🛰️ 🔧) promised by the SKILL.md Step-3 table; the CLI
+  report's family headers stay emoji-less by design.
+- **🦞 header on the CLI report:** the mascot now opens the terminal report too
+  (dropped under `--ascii`), consistent with the menu, palette, and onboarding screens.
+
 ## [2.8.0] — 2026-07-02
 
 The largest release of the 2.x line: a full **presentation redesign** — the conversational

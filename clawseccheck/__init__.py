@@ -20,7 +20,7 @@ from .monitor import (
 )
 from .native import run_native_audit
 from .report import (
-    render_card, render_dashboard_findings, render_events, render_fix, render_json,
+    render_card, render_dashboard, render_dashboard_findings, render_events, render_fix, render_json,
     render_monitor, render_prompts, render_report, render_svg, render_vet_json,
 )
 from .risk import risk_paths, render_risk_paths
@@ -70,7 +70,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
 
 __all__ = [
     "audit", "collect", "run_all", "compute", "ScoreResult", "run_native_audit",
-    "render_report", "render_dashboard_findings", "render_card", "render_json", "render_monitor",
+    "render_report", "render_dashboard", "render_dashboard_findings", "render_card", "render_json", "render_monitor",
     "render_svg", "render_prompts", "render_fix", "render_vet_json", "vet_skill", "vet_mcp",
     "make_canary", "evaluate", "render_canary",
     "snapshot", "diff", "load_state", "save_state", "__version__", "__released__",

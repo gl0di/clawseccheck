@@ -115,9 +115,10 @@ _POWER_FLAGS = "--json, --fail-under, --exit-code, --home, --seed, --no-host"
 
 # cli._PRIMARY_MODES flags that legitimately have no palette row:
 #   --menu / --functions  → the container screens themselves (Welcome / this palette)
-#   --dashboard-findings   → an internal agent-only render hook (SKILL.md Step 3), not a
-#                            user-speakable capability.
-EXEMPT_FROM_PALETTE: frozenset[str] = frozenset({"--menu", "--functions", "--dashboard-findings"})
+#   --dashboard / --dashboard-findings → internal agent-only render hooks (SKILL.md
+#                            Step 3), not user-speakable capabilities.
+EXEMPT_FROM_PALETTE: frozenset[str] = frozenset(
+    {"--menu", "--functions", "--dashboard", "--dashboard-findings"})
 
 
 def grounded_flags() -> set[str]:

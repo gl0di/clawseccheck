@@ -50,6 +50,34 @@ _STATUS_ORDER = {FAIL: 0, WARN: 1, UNKNOWN: 2, PASS: 3}
 _ICON = {FAIL: "⛔", WARN: "⚠️", PASS: "✅", UNKNOWN: "❔", "SKILL_ARCHIVE_PATH_TRAVERSAL": "❔"}
 _ICON_ASCII = {FAIL: "[X]", WARN: "[!]", PASS: "[OK]", UNKNOWN: "[?]", "SKILL_ARCHIVE_PATH_TRAVERSAL": "[?]"}
 
+# Severity dot for FAIL/WARN finding lines (Component-2 mock, B-077): the glyph carries
+# SEVERITY, not status — FAIL-before-WARN ordering plus the breakdown counts already carry
+# status. PASS/UNKNOWN roster lines keep the ✅/❔ status icons above. --ascii folds the
+# dot+word to a single [SEVERITY] bracket (pure ASCII, no info loss).
+_SEV_GLYPH = {CRITICAL: "🔴", HIGH: "🟠", MEDIUM: "🟡", LOW: "⚪"}
+_SEV_COLOR = {CRITICAL: "red", HIGH: "red", MEDIUM: "yellow", LOW: "grey"}
+
+# Family → emoji for the chat Dashboard paste ONLY (SKILL.md Step-3 table). The CLI
+# report's family headers deliberately stay emoji-less (design-system.md Layer-2 decision).
+_FAMILY_EMOJI = {
+    "exposure": "🌐", "privilege": "🔑", "supply_chain": "📦",
+    "content_integrity": "📝", "secrets": "🔒", "detection": "🛰️",
+    "automation": "🔧",
+}
+
+
+def _sev_token(severity: str, *, ascii_only: bool = False, color: bool = False) -> str:
+    """`🔴 CRITICAL` severity marker for an issue line; `[CRITICAL]` under --ascii.
+
+    Colour (opt-in) paints the severity word only — the emoji dot is already coloured —
+    and stays purely additive (strip_ansi(colored) == plain).
+    """
+    word = paint(severity, _SEV_COLOR.get(severity, "grey"), "bold",
+                 enabled=True) if color else severity
+    if ascii_only:
+        return f"[{word}]"
+    return f"{_SEV_GLYPH.get(severity, '⚪')} {word}"
+
 # ── ANSI colour palette (opt-in; see ansi.py) ────────────────────────────────
 # Grade → colour for the header grade letter + score-bar fill.
 _GRADE_COLOR = {"A": "green", "B": "green", "C": "yellow", "D": "bright_yellow", "F": "red"}
@@ -503,12 +531,15 @@ def _render_finding_compact(lines, icon, f):
     lines.append(f"  {icon[f.status]} [{f.severity}] {_sanitize(f.title)}")
 
 
-def _render_finding(lines, icon, f, cfg: dict | None = None):
+def _render_finding(lines, f, cfg: dict | None = None, *,
+                    ascii_only: bool = False, color: bool = False):
     conf = getattr(f, "confidence", "HIGH")
     tag = f"  (confidence: {conf.lower()})" if conf != "HIGH" and f.status in (FAIL, WARN) else ""
     pc = getattr(f, "pass_confidence", None)
     pass_tag = f"  ({pc.replace('_', ' ')})" if f.status == PASS and pc else ""
-    lines.append(f"{icon[f.status]} [{f.severity}] "
+    # Issue lines lead with the severity dot (B-077 / Component-2 mock); PASS/UNKNOWN
+    # roster lines keep the status icons via _render_finding_compact.
+    lines.append(f"{_sev_token(f.severity, ascii_only=ascii_only, color=color)}  "
                  f"{_sanitize(f.title)}{tag}{pass_tag}")
     if f.detail:
         lines.append(f"    why: {_sanitize(f.detail)}")
@@ -531,6 +562,46 @@ def _render_finding(lines, icon, f, cfg: dict | None = None):
     lines.append("")
 
 
+def _fix_first_lines(findings: list[Finding], score: ScoreResult, *,
+                     ascii_only: bool = False) -> list[str]:
+    """`▶ FIX FIRST` block (Component 2, B-077): the single highest-leverage fix.
+
+    Grounded in ``scoring.project()`` — the projection is *estimated* (assumes the fixed
+    finding flips cleanly to PASS) and is always labeled so; it is never presented as the
+    current grade. Returns ``[]`` when there is no fixable FAIL to project.
+    """
+    from .scoring import project as _project  # noqa: PLC0415
+    proj = _project(findings)
+    top1 = proj.get("top1")
+    if not top1:
+        return []
+    by_id = {f.id: f for f in findings}
+    target = by_id.get(top1["finding_id"])
+    title = _sanitize(target.title) if target is not None else top1["finding_id"]
+    arrow, dot = ("->", "-") if ascii_only else ("→", "·")
+    marker = "> FIX FIRST" if ascii_only else "▶ FIX FIRST"
+    cum = proj["cumulative"]
+    out = ["", marker, title]
+    if top1["projected_grade"] != score.grade:
+        out.append(
+            f"Projected (estimated): fix this {arrow} {top1['projected_grade']}"
+            f" ({top1['projected_score']}) {dot} fix all Critical+High {arrow}"
+            f" {cum['projected_grade']} ({cum['projected_score']})"
+        )
+    else:
+        n_ch = sum(
+            1 for f in findings
+            if f.status == FAIL and f.severity in (CRITICAL, HIGH)
+            and getattr(f, "scored", True) and not getattr(f, "suppressed", False)
+        )
+        out.append(
+            f"Projected (estimated): fixing the top issue won't change the grade alone"
+            f" — {n_ch} Critical+High finding(s) must all be addressed to reach"
+            f" {cum['projected_grade']} ({cum['projected_score']})."
+        )
+    return out
+
+
 def render_report(findings: list[Finding], score: ScoreResult,
                   ascii_only: bool = False, native=None,
                   *, risk=None, update_notice: list[str] | None = None,
@@ -547,7 +618,10 @@ def render_report(findings: list[Finding], score: ScoreResult,
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
     grade_disp = paint(score.grade, _grade_color(score.grade), "bold", enabled=True) if color else score.grade
-    lines = ["ClawSecCheck - OpenClaw Security Audit", "=" * 44,
+    # 🦞 mascot: header line only, once (design-system Foundations); --ascii drops it.
+    head = "ClawSecCheck - OpenClaw Security Audit" if ascii_only \
+        else "🦞 ClawSecCheck - OpenClaw Security Audit"
+    lines = [head, "=" * 44,
              f"Score: {score.score}/100   Grade: {grade_disp}",
              _score_bar(score.score, score.grade, ascii_only=ascii_only, color=color)]
     if score.capped:
@@ -598,6 +672,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
         " grade means \"not statically lethal-capable\", not \"runtime-proof\". Use the live"
         " tests above to probe actual resistance."
     )
+    # ▶ FIX FIRST — the single highest-leverage fix + estimated projection (B-077).
+    lines.extend(_fix_first_lines(findings, score, ascii_only=ascii_only))
     # Honest framing for non-OpenClaw / custom setups (B-017): when there is no
     # openclaw.json the config-driven checks come back UNKNOWN. UNKNOWN is neutral
     # (never counted against the score), but without context a hardened custom setup
@@ -656,7 +732,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
             n_unknown = 0
             for f in members:
                 if f.status in (FAIL, WARN):
-                    _render_finding(lines, icon, f, cfg=_blast_cfg)
+                    _render_finding(lines, f, cfg=_blast_cfg,
+                                    ascii_only=ascii_only, color=color)
                 elif f.status == PASS:
                     _render_finding_compact(lines, icon, f)
                 else:
@@ -713,7 +790,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 lines.append(f"{len(nf)} additional finding(s) the platform's own audit reports:")
                 lines.append("")
                 for f in nf:
-                    _render_finding(lines, icon, f, cfg=_blast_cfg)
+                    _render_finding(lines, f, cfg=_blast_cfg,
+                                    ascii_only=ascii_only, color=color)
             else:
                 lines.append("Clean — openclaw security audit found nothing.")
         else:
@@ -765,7 +843,6 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
       - each family under the same open 3-sided frame render_report uses.
     """
     findings = deduplicate_findings(findings)
-    icon = _ICON_ASCII if ascii_only else _ICON
     qualifying = [
         f for f in findings
         if f.status in (FAIL, WARN)
@@ -792,15 +869,51 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
         if ascii_only:
             lines.append(f"[{label}] — {count_text}")
         else:
+            # Chat paste carries the family emoji (SKILL.md Step-3 table, B-077);
+            # the CLI report's family headers stay emoji-less by design.
+            emoji = _FAMILY_EMOJI.get(fam_key)
+            head = f"{emoji} {label}" if emoji else label
             _rule = "─" * 30
             lines.append(f"┌{_rule}")
-            lines.append(f"│ {label} — {count_text}")
+            lines.append(f"│ {head} — {count_text}")
             lines.append(f"└{_rule}")
         for f in members:
-            _render_finding(lines, icon, f, cfg=None)
+            _render_finding(lines, f, cfg=None, ascii_only=ascii_only)
         lines.append("")
 
     out = "\n".join(lines).rstrip() + "\n"
+    return _asciify(out) if ascii_only else out
+
+
+def render_dashboard(findings: list[Finding], score: ScoreResult, *,
+                     ascii_only: bool = False) -> str:
+    """Deterministic chat Dashboard card — Sections 1-3 of SKILL.md Step 3, pasted verbatim.
+
+    Live testing (F-070) showed the host LLM silently drops the 🦞 header, the FIX FIRST
+    block, and the family frame when asked to *compose* them, so the whole card is now
+    code-rendered (B-077): grade card + score-bar + issue count, the FIX FIRST projection,
+    and the framed findings block. The host agent pastes this output and only writes its
+    own prose *around* it. Sections 4-7 (coverage, worth-a-glance, scope, next actions)
+    stay model-composed from ``--json``.
+    """
+    findings = deduplicate_findings(findings)
+    n_issues = sum(
+        1 for f in findings
+        if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)
+    )
+    dash, dot = ("-", "-") if ascii_only else ("—", "·")
+    mascot = "" if ascii_only else "🦞 "
+    issues_word = "issue" if n_issues == 1 else "issues"
+    lines = [
+        f"{mascot}OpenClaw Security Audit {dash} Grade {score.grade} {dot} {score.score}/100",
+        f"{_score_bar(score.score, score.grade, ascii_only=ascii_only)}"
+        f"  {dot}  {n_issues} {issues_word}",
+    ]
+    lines.extend(_fix_first_lines(findings, score, ascii_only=ascii_only))
+    lines.append("")
+    lines.append(f"{dash} Findings {dash}")
+    body = render_dashboard_findings(findings, ascii_only=ascii_only).rstrip("\n")
+    out = "\n".join(lines) + "\n" + body + "\n"
     return _asciify(out) if ascii_only else out
 
 

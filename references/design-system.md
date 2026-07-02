@@ -54,15 +54,24 @@ caveats that keep `text` the contract:** (1) Telegram buttons are **capability-g
   Audit"*).
 - **Mascot:** 🦞 (the *Claw*) — header line only, once. ASCII mode drops it.
 - **Brand line:** `🦞 ClawSecCheck {version} · built {N} days ago`
-- **Severity = emoji, not color** (color doesn't survive most channels):
+- **Severity = emoji, not color** (color doesn't survive most channels). Issue lines carry
+  a severity **dot** (the Component-2 mock language, unified across CLI and chat in B-077);
+  PASS/UNKNOWN roster lines keep status icons:
 
   | Glyph | Meaning |
   |---|---|
-  | ⛔ | blocking / critical |
-  | ⚠️ | warning / caution |
-  | ✓ | pass / clean |
+  | 🔴 | CRITICAL issue |
+  | 🟠 | HIGH issue |
+  | 🟡 | MEDIUM issue |
+  | ⚪ | LOW issue |
+  | ✅ | pass / clean (roster line) |
+  | ❔ | unknown / not assessed |
   | ℹ | informational notice |
   | 🦞 | brand mascot (header only) |
+
+  Under `--ascii` the dot+word folds to a single `[CRITICAL]`-style bracket; the ⛔/⚠️
+  status glyphs survive only in the Monitor's drift alerts and the vet verdict line, where
+  they mark *events*, not finding severity.
 
 ### Layer 1 — Components (semantic slots, no visual commitment)
 
@@ -237,19 +246,19 @@ instead of a standalone headline. Source: `audit.py --json` (guided) / `audit.py
 ████████░░░░░░░░  ·  21 issues
 
 ▶ FIX FIRST
-{plain-language top1 finding}
-Projected: fix this → C (74) · fix all Critical+High → B (81)
+{top1 finding title}
+Projected (estimated): fix this → C (74) · fix all Critical+High → B (81)
 
 — Findings —
 ┌──────────────────────────────
-│ 🌐 Exposure & Network
+│ 🌐 Exposure & Network — 1 to fix
 └──────────────────────────────
 🔴 CRITICAL  insecure control-UI auth
     why: anyone on your local network can send commands to your agent right now
     fix: set gateway.controlUi.allowInsecureAuth to false in openclaw.json
 
 ┌──────────────────────────────
-│ 🔑 Privilege & Execution
+│ 🔑 Privilege & Execution — 2 to fix
 └──────────────────────────────
 🔴 CRITICAL  Lethal Trifecta — all three legs active
     why: your agent receives outside input, has access to sensitive data, and can act
@@ -285,12 +294,24 @@ Next — ✅ read-only · ⚡ touches live agent (asks)
   its non-ascii / `mono` profile (open 3-sided, no emoji, preserving the `— N to fix` /
   `— clear` count) — consistent with the chat Dashboard. Under `--ascii`, `render_report`
   degrades to the `[Family] — N to fix` bracket form.
-- **Chat Section 3 is a *paste*, not model-composed (F-070).** Live testing showed the host LLM
-  ignores the frame instruction and substitutes markdown-bold headers when it composes Section 3
-  itself. So SKILL.md Step 3 now runs `audit.py --dashboard-findings`
-  (→ `report.py:render_dashboard_findings`) and pastes the output verbatim: the renderer emits only
-  non-suppressed FAIL/WARN, high-confidence findings, already framed — so the frame is
-  deterministic and the FAIL/WARN + no-`MEDIUM`/`ATTESTED` filter is enforced by code, not the model.
+- **Chat Sections 1-3 are a *paste*, not model-composed (F-070 → B-077).** Live testing
+  showed the host LLM ignores the frame instruction and substitutes markdown-bold headers
+  when it composes Section 3 itself — and equally drops the 🦞 header and FIX FIRST block
+  when composing Sections 1-2 from `--json`. So SKILL.md Step 3 now runs
+  `audit.py --dashboard` (→ `report.py:render_dashboard`): one deterministic card — grade
+  line + score-bar + issue count, the FIX FIRST projection (`scoring.project()`), and the
+  framed findings block (`render_dashboard_findings`, which `--dashboard-findings` still
+  exposes alone). The renderer emits only non-suppressed FAIL/WARN, high-confidence
+  findings, already framed — so the mascot, projection, frame, and the
+  FAIL/WARN + no-`MEDIUM`/`ATTESTED` filter are all enforced by code, not the model.
+- **Family emoji live in the chat paste; severity dots live everywhere.** The chat card's
+  family headers carry the 7 grounded icons (🌐 🔑 📦 📝 🔒 🛰️ 🔧 — the SKILL.md Step-3
+  table, `report._FAMILY_EMOJI`); the CLI report's family headers stay emoji-less. Issue
+  lines use the 🔴/🟠/🟡/⚪ severity dots (Foundations table) in **both** renderers — one
+  glyph language, `[SEVERITY]` under `--ascii`.
+- **The CLI report carries the same card spine.** `render_report` opens with the 🦞 header
+  (dropped under `--ascii`) and includes the same `▶ FIX FIRST` + estimated projection
+  block before the findings list, so the terminal and chat views tell one story.
 - **No Lethal Trifecta headline chip.** It moved from Section 1 (grade card) into Section 3
   as the A1 finding inside Privilege & Execution — a agent-behavior signal among its peers,
   not a separate "the one thing that matters" banner. The 3-legs plain-language explanation
@@ -299,7 +320,7 @@ Next — ✅ read-only · ⚡ touches live agent (asks)
   PASS as one-line confirmations per family and tallies UNKNOWN as a single count
   ("N not assessed — resolve via `--ask` then `--attest`") rather than enumerating each one
   — proves coverage without a wall of near-identical "not assessed" lines. The chat Dashboard's
-  Section 3 (now a paste of `--dashboard-findings`, see above) is FAIL/WARN-only **and**
+  Section 3 (now part of the `--dashboard` paste, see above) is FAIL/WARN-only **and**
   high-confidence-only — the renderer drops PASS/UNKNOWN (they own Sections 4/6) and
   `MEDIUM`/`ATTESTED` (they own Section 5), so nothing is double-listed across the message.
 - **"deeper" is not a Section-3/7 pick anymore (F-043).** The capability self-report
@@ -423,21 +444,24 @@ Component 3's Dashboard and Components 6/8's derivatives all repeat per item.
 **`text` profile (baseline):**
 
 ```text
-⛔ [CRITICAL] insecure control-UI auth
+🔴 CRITICAL  insecure control-UI auth
     why: anyone on your local network can send commands to your agent right now
       - gateway.controlUi.allowInsecureAuth is true
     fix: set gateway.controlUi.allowInsecureAuth to false in openclaw.json
 ```
 
-Shape is fixed: `{icon} [{severity}] {title}` · `why: {detail}` · optional evidence
+Shape is fixed: `{severity-dot} {SEVERITY}  {title}` · `why: {detail}` · optional evidence
 bullets (only for FAIL/WARN, capped, verbatim-sanitized) · `fix: {fix text}`. A
 low-confidence FAIL/WARN gets a trailing `(confidence: medium)` tag; a PASS may carry a
-`(pass_confidence)` note instead — never both. (The chat Dashboard swaps the ⛔/⚠️ icons
-for its 🔴/🟡 severity dots, same fields.)
+`(pass_confidence)` note instead — never both. The dot carries SEVERITY, not status —
+FAIL-before-WARN ordering plus the header breakdown counts already carry status. Compact
+PASS/UNKNOWN roster lines (CLI report only) keep the ✅/❔ status icons. One glyph
+language across CLI and chat (B-077).
 
-**`mono`/`--ascii`:** the severity icon folds to `[X]`/`[!]`/`[OK]`/`[?]` (`_ICON_ASCII`);
-in `mono` under a TTY the icon can additionally be ANSI-painted (`_color_icons`), stripped
-back to plain `text` bytes for `--save`/pipes. **`interactive`:** no card-level button —
+**`mono`/`--ascii`:** the dot+word folds to a single `[CRITICAL]`-style bracket
+(`_sev_token`); roster lines fold to `[OK]`/`[?]` (`_ICON_ASCII`); in `mono` under a TTY
+the severity word can additionally be ANSI-painted (additive only), stripped back to plain
+`text` bytes for `--save`/pipes. **`interactive`:** no card-level button —
 the finding is a `text` block; only the enclosing screen attaches buttons.
 
 **Decisions baked in:** **no internal check ids (`B2`, `A1`) shown here** — plain language
