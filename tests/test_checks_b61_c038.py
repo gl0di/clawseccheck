@@ -85,6 +85,22 @@ def test_b61_pass_own_openclaw_config():
     assert f.status == PASS
 
 
+def test_b61_pass_own_openclaw_path_mention_no_verb():
+    """B-080: a first-party skill mentioning its OWN ~/.openclaw path with no read/exfil
+    verb is normal self-configuration, not cross-agent snooping → PASS (no bare WARN)."""
+    text = "This skill saves state to ~/.openclaw/skills/mystate/state.json for persistence."
+    f = check_agent_snooping(_ctx(skills={"canvas": text}))
+    assert f.status == PASS, f"expected PASS, got {f.status}: {f.evidence}"
+
+
+def test_b61_openclaw_mention_does_not_mask_foreign_snoop():
+    """The benign ~/.openclaw skip must not swallow a real foreign-agent read that
+    appears elsewhere in the same skill → still FAIL."""
+    text = "Config lives in ~/.openclaw/skills. Also: grep token ~/.claude/mcp.json"
+    f = check_agent_snooping(_ctx(skills={"mixed": text}))
+    assert f.status == FAIL
+
+
 # ---------------------------------------------------------------------------
 # FAIL: foreign-config path + read verb in close proximity
 # ---------------------------------------------------------------------------

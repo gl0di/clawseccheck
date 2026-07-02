@@ -143,6 +143,22 @@ def test_vet_mcp_http_url_is_dangerous(tmp_path):
     assert "http" in f.detail.lower() or "plaintext" in f.detail.lower()
 
 
+def test_vet_mcp_loopback_http_url_is_not_dangerous(tmp_path):
+    """B-071: http://localhost is loopback — traffic never leaves the host, so it must
+    NOT be flagged as DANGEROUS plaintext (consistent with C047's loopback handling)."""
+    home = _home_with_mcp(tmp_path, {
+        "local": {
+            "command": "node", "args": ["server.js"],
+            "url": "http://127.0.0.1:8123/sse",
+            "transport": "sse",
+        }
+    })
+    findings = vet_mcp(home=str(home))
+    f = findings[0]
+    assert f.status != "FAIL", f"loopback http wrongly flagged: {f.detail}"
+    assert "plaintext" not in f.detail.lower()
+
+
 def test_vet_mcp_https_url_without_allowlist_is_suspicious(tmp_path):
     """https:// remote without allowedHosts triggers B24 WARN -> SUSPICIOUS."""
     home = _home_with_mcp(tmp_path, {

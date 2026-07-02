@@ -3659,7 +3659,7 @@ def _vet_mcp_server(name: str, spec: dict) -> tuple[list[str], list[str]]:
     transport = str(spec.get("transport") or "")
     is_remote_transport = transport.lower() in ("streamable-http", "sse")
 
-    if url.startswith("http://"):
+    if url.startswith("http://") and not _mcp_url_is_local(url):
         dangerous.append(
             f"{name}: url uses plaintext HTTP ({url[:60]}) — credentials/data sent in clear"
         )
@@ -7302,6 +7302,13 @@ def check_agent_snooping(ctx: Context) -> Finding:
                     f"'{path_match}' with a read/exfil verb"
                 )
             else:
+                # A bare ~/.openclaw path is the host's OWN config: a first-party
+                # skill referencing its own config path with no read/exfil verb is
+                # normal self-configuration, not cross-agent snooping. Skip it and
+                # keep scanning for a foreign path or a verb'd read in the same skill.
+                # (A .openclaw path WITH a read/exfil verb still FAILs above.)
+                if ".openclaw" in path_match.lower():
+                    continue
                 warn_ev.append(
                     f"{skill_name}: foreign-agent config path literal "
                     f"'{path_match}' found (no read verb in context)"
