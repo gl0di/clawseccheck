@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 3.0.0
+version: 3.1.0
 description: Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — all read-only, all on your machine. Scores your setup (A–F) and reports the most urgent holes — reports only, it never changes anything. No API key, no data leaves your machine.
 license: MIT
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — all read-only, all on your machine. Scores your setup (A–F) and reports the most urgent holes — reports only, it never changes anything. No API key, no data leaves your machine."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
@@ -179,7 +179,8 @@ This prints `clawseccheck X.Y.Z (YYYY-MM-DD)`. Compute the age in days from the 
 
 Present (or just run `python3 {baseDir}/audit.py --menu`, which renders this exact
 screen with the version, last-check age, and offline staleness nudge already
-filled in):
+filled in). Render the menu as ordinary text — do NOT wrap it in a code block or
+monospace fence:
 
 > 🦞 ClawSecCheck · v{version}
 >
@@ -256,7 +257,10 @@ sentence. Examples:
 - "B1 FAIL" → "Your agent's config file is readable by anyone on this computer."
 - "C5 FAIL" → "One of your installed skills has code patterns used by malware."
 
-Present all six sections below **in one message**, in order.
+Present all six sections below **in one message**, in order. Render menus and prose
+sections (5-6) as ordinary text — do NOT wrap them in a code block or monospace fence;
+that rule does not apply to the Section 1-2 Dashboard card, which must be pasted exactly
+as the tool prints it (see below) because its frame relies on monospace alignment.
 
 **Sections 1-2 — the Dashboard card: do not compose it, paste it.**
 
@@ -393,13 +397,12 @@ attack, choose the live test from the menu below."
 
 Append immediately at the end of the Dashboard (see Step 4 for routing detail). No "deeper scan"
 item — the capability self-report already ran automatically in Step 2 (F-043), so there's nothing
-left to offer as a separate follow-up (C-132).
+left to offer as a separate follow-up (C-132). Render menus as ordinary text — do NOT wrap them
+in a code block or monospace fence:
 
-```
-Next — ✅ read-only · ⚡ touches live agent (asks)
-  a ⚡ Live injection test   b ✅ Turn on monitoring
-  c ✅ Save full report      d ✅ Menu   Start with a?
-```
+> Next — ✅ read-only · ⚡ touches live agent (asks)
+>   a ⚡ Live injection test   b ✅ Turn on monitoring
+>   c ✅ Save full report      d ✅ Menu   Start with a?
 
 ### Step 4 — Next menu routing
 
@@ -631,6 +634,10 @@ typical OpenClaw setups, based on a local reference distribution."
 python3 {baseDir}/audit.py --badge grade.svg
 python3 {baseDir}/audit.py --card
 ```
+
+Deliver the generated `grade.svg` file directly to the user. Do NOT generate, redraw, or
+rasterize your own badge image — you cannot reproduce the grade/score correctly. If the
+channel can't display SVG, paste the text card from `--card` instead.
 
 The badge and card show the grade, score, and trifecta ratio **only** — never the findings.
 Remind the user:

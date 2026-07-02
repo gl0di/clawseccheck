@@ -3,6 +3,44 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.1.0] — 2026-07-02
+
+Four new advisory checks close DoS / exposure gaps, the B33 CVE gate catches three more
+confirmed OpenClaw advisories, and the chat/badge rendering path is hardened so a host
+agent stops substituting its own broken image for the real badge.
+
+### Added
+- **B80** — gateway auth without rate limiting on a non-loopback bind: WARN when
+  `gateway.auth.mode` is `token`/`password` and the bind is exposed but no
+  `gateway.auth.rateLimit` is set (credential brute-force surface). Advisory.
+- **B81** — subagent spawn limits raised beyond the safe defaults
+  (`agents.defaults.subagents.maxSpawnDepth`/`maxChildrenPerAgent`/`maxConcurrent`) while
+  an untrusted channel can reach the agent (fork-bomb / cost-exhaustion). Advisory.
+- **B82** — `logging.cacheTrace` transcript file persisted without
+  `logging.redactSensitive:"tools"` — full prompt/response transcripts (incl. secrets) at
+  rest. Advisory.
+- **B83** — `tools.web.fetch.maxRedirects` set high — redirect-chain SSRF toward
+  private/internal targets. Advisory.
+
+### Fixed
+- **B33 CVE gate** now covers three more confirmed advisories in addition to the existing
+  one: GHSA-mc68-q9jw-2h3v (Docker sandbox command injection, fixed 2026.1.29),
+  GHSA-g6q9-8fvw-f7rf (Gateway tool SSRF, fixed 2026.2.14) and GHSA-cv7m-c9jx-vg7q (browser
+  upload path traversal, fixed 2026.2.14). Unverified advisories are deliberately excluded.
+
+### Changed
+- **Badge delivery** — the `--badge` success message and the guided share-grade step now
+  instruct the host agent to attach the generated SVG file as-is and explicitly *not* to
+  redraw or rasterize its own badge image (a host that improvises loses the grade/score).
+- **Chat menus** — SKILL.md now tells the host to render menus as ordinary text rather than
+  wrapping them in a monospace code fence.
+- **Branding** — the `🦞 ClawSecCheck` header is now emitted on the shareable card and the
+  score-trend view (dropped under `--ascii`), so branding survives host recomposition.
+- **Docs** — `references/design-system.md` and `README.md` now state that chat output is
+  best-effort/host-composed and the canonical artifacts are the saved files (`--save`,
+  `--html`, `--badge grade.svg`); host avatar/name and inline-SVG rendering are out of the
+  skill's control.
+
 ## [3.0.0] — 2026-07-02
 
 Vet-by-type: `--vet` now covers skills, plugins **and** MCP servers behind one
