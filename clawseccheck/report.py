@@ -541,14 +541,20 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
     # roster lines keep the status icons via _render_finding_compact.
     lines.append(f"{_sev_token(f.severity, ascii_only=ascii_only, color=color)}  "
                  f"{_sanitize(f.title)}{tag}{pass_tag}")
-    if f.detail:
-        lines.append(f"    why: {_sanitize(f.detail)}")
+    why_text = _sanitize(f.detail) if f.detail else ""
+    if why_text:
+        lines.append(f"    why: {why_text}")
     # Surface the concrete evidence (e.g. the exact verbs B43/B44 flagged) when a
     # FAIL/WARN carries it — naming the specific item is the value of the finding.
+    # B-078: many checks build `detail` by joining their evidence, so a bullet that is
+    # already quoted verbatim inside the why line is pure duplication — skip it. Bullets
+    # survive only when they ADD something the why line doesn't literally contain.
     if f.evidence and f.status in (FAIL, WARN):
         for ev in f.evidence[:12]:
-            # Evidence is emitted verbatim (already bidi-stripped by _sanitize).
-            lines.append(f"      - {_sanitize(ev)}")
+            ev_s = _sanitize(ev)
+            if ev_s and ev_s not in why_text:
+                # Evidence is emitted verbatim (already bidi-stripped by _sanitize).
+                lines.append(f"      - {ev_s}")
     lines.append(f"    fix: {_sanitize(f.fix)}")
     # Blast-radius summary: only emitted when the caller supplies cfg (verbose mode).
     if f.status == FAIL and cfg is not None:

@@ -27,6 +27,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
 - **Family emoji in the chat paste:** the chat Dashboard's family headers now carry the
   7 grounded icons (🌐 🔑 📦 📝 🔒 🛰️ 🔧) promised by the SKILL.md Step-3 table; the CLI
   report's family headers stay emoji-less by design.
+- **No duplicated evidence under `why:`:** an evidence bullet already quoted verbatim
+  inside the finding's `why:` line is dropped as pure duplication; bullets render only
+  when they add something the why line doesn't literally contain. Cuts the report's
+  vertical bulk with zero information loss.
 - **🦞 header on the CLI report:** the mascot now opens the terminal report too
   (dropped under `--ascii`), consistent with the menu, palette, and onboarding screens.
 

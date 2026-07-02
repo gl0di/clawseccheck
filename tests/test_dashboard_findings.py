@@ -164,3 +164,40 @@ def test_no_qualifying_findings_message():
     assert "┌" not in out
     assert "└" not in out
     assert "│" not in out
+
+
+# ─── 10. B-078: evidence bullets that duplicate the why line are dropped ────
+
+def test_duplicate_evidence_not_repeated_under_why():
+    """A bullet quoted verbatim inside `why:` is pure duplication — it must not render."""
+    f = _f("B2", FAIL, CRITICAL)
+    f.detail = "gateway.bind=0.0.0.0 exposed with auth.mode=none"
+    f.evidence = ["gateway.bind=0.0.0.0 exposed with auth.mode=none"]
+
+    out = render_dashboard_findings([f])
+
+    assert "why: gateway.bind=0.0.0.0 exposed with auth.mode=none" in out
+    assert "      - gateway.bind" not in out
+
+
+def test_additive_evidence_still_renders():
+    """Evidence the why line does NOT contain keeps its bullet — that's the finding's value."""
+    f = _f("B2", FAIL, CRITICAL)
+    f.detail = "Broad write capability reachable by untrusted senders."
+    f.evidence = ["filesystem-write tool granted: fs_write", "open-ingress channel(s): telegram"]
+
+    out = render_dashboard_findings([f])
+
+    assert "- filesystem-write tool granted: fs_write" in out
+    assert "- open-ingress channel(s): telegram" in out
+
+
+def test_mixed_evidence_filters_only_duplicates():
+    f = _f("B2", FAIL, CRITICAL)
+    f.detail = "gateway is exposed: bind=0.0.0.0; and more context"
+    f.evidence = ["bind=0.0.0.0", "auth.mode=none"]  # first is inside why, second is not
+
+    out = render_dashboard_findings([f])
+
+    assert "      - bind=0.0.0.0" not in out
+    assert "      - auth.mode=none" in out
