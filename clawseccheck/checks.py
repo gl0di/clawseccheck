@@ -2483,6 +2483,17 @@ def check_installed_skills(ctx: Context) -> Finding:
                        "to blind the AST scanner.",
                        parse_error_paths)
 
+    # B-074: scanning hit a size/file/nesting cap (text/py truncation or archive limits) —
+    # content beyond the cap was NOT scanned, so the result is UNKNOWN, never a clean PASS.
+    # Ranked above the WARN buckets (like the parse-error UNKNOWN): a payload padded past the
+    # cap must not read as covered. Crit/high FAIL above still take precedence.
+    if getattr(ctx, "limit_hits", None):
+        return _custom("B13", HIGH, UNKNOWN,
+                       "Skill scanning was truncated / hit limits — coverage is incomplete: "
+                       + "; ".join(ctx.limit_hits[:6]),
+                       "Content beyond the size/file cap was not scanned; a payload padded past the "
+                       "cap can hide there. Review the skill manually or split oversized files.")
+
     # F-049: env-var / agent-config secret reaching a network sink — WARN-first (env
     # secrets legitimately go to trusted APIs, so this is never an automatic FAIL). Ranked
     # first among the WARN buckets: a secret leaving the box outranks a persistence/unpinned
@@ -2539,12 +2550,6 @@ def check_installed_skills(ctx: Context) -> Finding:
         return _custom("B13", HIGH, "SKILL_ARCHIVE_PATH_TRAVERSAL",
                        "Archive path traversal detected: " + "; ".join(ctx.path_traversal_violations[:6]),
                        "Ensure archives inside skills do not attempt path traversal.")
-
-    # Limit hits check
-    if getattr(ctx, "limit_hits", None):
-        return _custom("B13", HIGH, UNKNOWN,
-                       "Skill scanning aborted due to limit hits: " + "; ".join(ctx.limit_hits[:6]),
-                       "Avoid placing excessively large or deeply nested archives in skill folders.")
 
     # Mismatch/polyglot/binary warnings
     warnings = []
