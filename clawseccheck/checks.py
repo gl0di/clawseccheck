@@ -2643,6 +2643,10 @@ def check_installed_skills(ctx: Context) -> Finding:
     if getattr(ctx, "stowaway_files", None):  # F-054: native executables don't belong in a skill
         warnings.append("native executable(s) bundled in the skill (stowaway): "
                         + ", ".join(ctx.stowaway_files[:4]))
+    if getattr(ctx, "symlink_skips", None):  # F-061: symlink / path-escape (was silently dropped)
+        warnings.append("symlink / path-escape not followed: " + "; ".join(ctx.symlink_skips[:4]))
+    if getattr(ctx, "filename_obfuscations", None):  # F-061: homoglyph/RTL/zero-width filename
+        warnings.append("obfuscated filename(s): " + ", ".join(ctx.filename_obfuscations[:4]))
     if getattr(ctx, "binary_files", None):
         warnings.append(f"Binary files found: {len(ctx.binary_files)}")
 

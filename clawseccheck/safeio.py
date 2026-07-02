@@ -89,11 +89,15 @@ def walk_dir_safely(
     base_dir: Path,
     exclude_pycache: bool = False,
     max_files: int | None = None,
+    skips: list | None = None,
 ) -> list[Path]:
     """Recursively walk base_dir, skipping symlinks and any file that escapes base_dir.
-    
+
     If exclude_pycache is True, ignores directories or files containing "__pycache__".
     If max_files is provided, stop after that many regular files are collected.
+    If `skips` (a list) is provided, each skipped symlink or path-escape is appended to it as
+    a (path, reason) tuple so a caller can surface the drop instead of losing it silently
+    (F-061) — the default (None) keeps the original behaviour for existing callers.
     """
     try:
         root = base_dir.resolve()
@@ -115,11 +119,19 @@ def walk_dir_safely(
             if exclude_pycache and "__pycache__" in p.parts:
                 continue
             if p.is_symlink():
+                if skips is not None:
+                    try:
+                        tgt = os.readlink(p)
+                    except OSError:
+                        tgt = "?"
+                    skips.append((str(p), f"symlink -> {tgt}"))
                 continue
 
             try:
                 real = p.resolve()
                 if root != real and root not in real.parents:  # escaped the base dir
+                    if skips is not None:
+                        skips.append((str(p), f"path-escape -> {real}"))
                     continue
             except OSError:
                 continue

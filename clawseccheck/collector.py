@@ -17,6 +17,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from .safeio import walk_dir_safely, is_safe_tar_member
+from .textnorm import obfuscation_signals
 
 # Bootstrap / prompt files injected into the system prompt as "trusted context".
 # The native `openclaw security audit` does not inspect these files; checks
@@ -89,6 +90,8 @@ class Context:
     archives_unpacked: int = 0
     path_traversal_violations: list[str] = field(default_factory=list)
     file_manifest: dict[str, str] = field(default_factory=dict)  # file relpath -> status
+    symlink_skips: list[str] = field(default_factory=list)        # F-061: skipped symlinks / path-escapes
+    filename_obfuscations: list[str] = field(default_factory=list)  # F-061: homoglyph/RTL/zero-width filenames
 
     @property
     def bootstrap_blob(self) -> str:
@@ -551,7 +554,18 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
         if cached is not None:
             return cached
 
-    files = walk_dir_safely(skill_dir, exclude_pycache=True, max_files=_MAX_FILES_PER_SKILL)
+    _skips: list = []
+    files = walk_dir_safely(skill_dir, exclude_pycache=True, max_files=_MAX_FILES_PER_SKILL, skips=_skips)
+    if ctx is not None and _skips:
+        # F-061: a skill shipping `data -> ~/.ssh/id_rsa` or `-> ../../openclaw.json` used to
+        # be skipped silently. Record the skip + its target so it surfaces as a WARN.
+        for spath, reason in _skips:
+            try:
+                rel = str(Path(spath).relative_to(skill_dir))
+            except (ValueError, OSError):
+                rel = spath
+            ctx.symlink_skips.append(f"{rel}: {reason}")
+            ctx.file_manifest.setdefault(rel, "skipped:" + reason.split(" ", 1)[0])
     collected = []
     
     for f in files:
@@ -645,6 +659,13 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                 "classification": sub_class,
                 "format": sub_fmt,
             })
+
+    # F-061: flag filenames carrying homoglyph / RTL-override / zero-width obfuscation
+    # (e.g. a Cyrillic-lookalike `helper.py`). Same detector used for MCP server names.
+    if ctx is not None:
+        for item in collected:
+            if obfuscation_signals(item["relpath"]):
+                ctx.filename_obfuscations.append(item["relpath"])
 
     if ctx is not None:
         ctx._collected_skill_files[str(skill_dir)] = collected
