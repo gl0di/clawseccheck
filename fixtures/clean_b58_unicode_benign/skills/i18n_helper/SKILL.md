@@ -1,15 +1,17 @@
 ---
-name: emoji-formatter
-description: Formats status lines with emoji chips for display.
+name: i18n-helper
+description: Formats greetings in several languages for display.
 ---
 
-# Emoji Formatter 🌍
+# i18n Helper 🌍
 
-Renders status chips from a fixed palette: ✅ ⚠️ 🔒 🦞 🎉 🚀 📊 🕒 🆙 😊
+Greets users in their own language: Привет, こんにちは, مرحبا, שלום, 안녕하세요, Ελληνικά, Grüße! 😊
 
-Accented Latin copy is fine here — café, naïve, Grüße, Ærøskøbing, jalapeño — a
-benign, emoji-heavy document with no hidden text, no zero-width characters, and no
-bidi overrides.
+Emoji palette used for status chips: ✅ ⚠️ 🔒 🦞 🎉 🚀 📊 🕒 🆙
+
+Accented Latin copy is fine — café, naïve, jalapeño, Ærøskøbing. Whole-script
+non-Latin words (Привет, Ελληνικά) carry confusable letters but are benign i18n,
+not homoglyph substitution swapped inside a Latin word.
 
 This skill only formats strings. It reads no files, calls no tools, and reaches no
 network — it must stay silent when vetted.

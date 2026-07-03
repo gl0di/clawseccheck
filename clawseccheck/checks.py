@@ -27,7 +27,11 @@ from .collector import (
 )
 from .skillast import analyze_python, analyze_python_package, analyze_shell, simulate_effects as _simulate_effects
 from .safeio import walk_dir_safely
-from .textnorm import normalize_for_scan, obfuscation_signals
+from .textnorm import (
+    confusable_in_ascii_context,
+    normalize_for_scan,
+    obfuscation_signals,
+)
 
 
 def _is_posix() -> bool:
@@ -8437,10 +8441,24 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                 break
 
         if not hidden and signal_parts:
-            warn_ev.append(
-                f"{source_name}: Unicode obfuscation signals present ("
-                f"{base_signal_text}) but no hidden injection detected"
-            )
+            # B-083: the bare "confusable characters folded to ASCII" signal fires on
+            # legitimate whole-script i18n (Cyrillic/Greek prose folds partially, e.g.
+            # 'Привет' → 'Пpивeт'). Only treat confusables as suspicious when they appear in
+            # ASCII-Latin CONTEXT — a homoglyph swapped into an otherwise-Latin word
+            # ('іgnore', 'оriginally') — not on whole-script runs, which contain no ASCII
+            # letters in the token. Invisible / bidi / hidden-markup / base64 signals have no
+            # benign explanation in prose and always warn. (A homoglyph that folds into an
+            # INJECTION_PATTERN already FAILs above.)
+            reasons = [s for s in signal_parts
+                       if s != "confusable characters folded to ASCII"]
+            if ("confusable characters folded to ASCII" in signal_parts
+                    and confusable_in_ascii_context(text)):
+                reasons.append("confusable characters in ASCII-Latin context")
+            if reasons:
+                warn_ev.append(
+                    f"{source_name}: Unicode obfuscation signals present ("
+                    f"{'; '.join(reasons)}) but no hidden injection detected"
+                )
 
     for fname, text in ctx.bootstrap.items():
         _scan(fname, text)

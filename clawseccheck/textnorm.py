@@ -120,3 +120,25 @@ def obfuscation_signals(text: str) -> list[str]:
         signals.append("confusable characters folded to ASCII")
 
     return signals
+
+
+_ASCII_LATIN = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+
+def confusable_in_ascii_context(text: str) -> bool:
+    """True when a confusable char (Cyrillic/Greek lookalike that folds to ASCII) sits in
+    the SAME word-token as plain ASCII-Latin letters — i.e. a homoglyph swapped into an
+    otherwise-Latin word (e.g. ``іgnore``, ``оriginally``).
+
+    Whole-script non-Latin runs (legitimate i18n like ``Привет`` or ``Ελληνικά``) contain
+    no ASCII-Latin letters within the token, so they are NOT flagged — this is what keeps
+    B58 from false-firing on multilingual prose while still catching homoglyph substitution
+    inside Latin-context text. Read-only, stdlib-only.
+    """
+    stripped = _INVISIBLE_RE.sub("", text)
+    for token in re.findall(r"\w+", stripped, re.UNICODE):
+        if not any(ch in _ASCII_LATIN for ch in token):
+            continue  # whole non-Latin (or all-digit) token — benign i18n, not a mix
+        if any(ord(ch) in _CONFUSABLES for ch in token):
+            return True
+    return False

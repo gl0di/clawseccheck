@@ -139,6 +139,15 @@ def test_b58_warn_confusable_no_injection():
     assert f.status == WARN
 
 
+def test_b58_pass_whole_script_i18n():
+    """B-083: whole-script multilingual prose (Cyrillic/Greek words carry confusable
+    letters, but no ASCII-Latin letter shares the token) is benign i18n — PASS, not WARN.
+    A homoglyph swapped INTO a Latin word ('оriginally') still WARNs (test above)."""
+    text = "Greets users: Привет, Ελληνικά, café, naïve — all legitimate i18n."
+    f = check_unicode_obfuscation(_ctx(bootstrap={"SOUL.md": text}))
+    assert f.status == PASS, f"whole-script i18n wrongly flagged {f.status}: {f.evidence}"
+
+
 def test_b58_warn_zero_width_no_injection():
     """Zero-width space in benign text — WARN, not FAIL."""
     text = "This text has a zero​width space but no injection."
