@@ -18,6 +18,7 @@ from urllib.parse import unquote, urlparse
 from pathlib import Path
 
 from . import attest as _attest
+from . import trajectory as _trajectory
 from .catalog import (
     ATTESTED, BY_ID, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding,
 )
@@ -6614,15 +6615,29 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
               this check needs runtime/log evidence, which most setups won't have).
     """
     att = ctx.attestation or {}
-    proven = _attest.attested_proven(att)
-    if not att or not proven:
+    # Prefer log-observed proven tool use (OpenClaw trajectory sidecar — HIGH confidence,
+    # grounded in recon §9.1) over the agent's self-report (attestation — ATTESTED). Reads
+    # only data.name (tool identity), never call/return payloads (§8).
+    observed, _tmeta = (
+        _trajectory.read_proven_tools(ctx.home) if isinstance(ctx.home, Path) else (set(), {})
+    )
+    if observed:
+        proven = {_attest.normalize_verb(v) for v in observed}
+        proven_source = "log-observed (trajectory sidecar)"
+        conf = "HIGH"
+    else:
+        proven = _attest.attested_proven(att)
+        proven_source = "agent attestation (self-report)"
+        conf = None  # fall back to the catalog's ATTESTED confidence
+    if not proven:
         return _finding(
             "B84", UNKNOWN,
-            "No proven-tool-use evidence attested — this check needs runtime/log "
-            "evidence of actual invocation, not just a held-capability self-report.",
-            "Run with '--attest' and cite 'proven_tools': verb names you have LOG or "
-            "TRACE evidence you ACTUALLY invoked. Leave empty if you have no "
-            "execution log to cite — the check stays UNKNOWN rather than guessing.",
+            "No proven-tool-use evidence found — no trajectory log records tool calls and "
+            "no 'proven_tools' were attested. This check reports ACTUAL invocation, not "
+            "held capability.",
+            "OpenClaw writes a per-session trajectory sidecar (on by default); run the "
+            "audit on the host where those logs live, or run with '--attest' and cite "
+            "'proven_tools'. With neither, the check stays UNKNOWN rather than guessing.",
         )
     declared = {
         _attest.normalize_verb(t) for t in (dig(ctx.config, "tools.allow") or [])
@@ -6644,6 +6659,7 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
             evidence.append(f"approval bypass actor(s): {', '.join(bypass_actors)}")
         elif _attest.is_ungated(att):
             evidence.append("untrusted_to_action: ungated")
+        evidence.append(f"proven source: {proven_source}")
         return _finding(
             "B84", WARN,
             "The agent has PROVEN (log/trace evidence, not just self-reported "
@@ -6653,9 +6669,10 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
             "Add a human-approval gate before this verb can fire, or remove the "
             "runtime actor that can trigger it without confirmation.",
             evidence=evidence,
+            confidence=conf,
         )
 
-    evidence = []
+    evidence = [f"proven source: {proven_source}"]
     dead_grants = sorted((declared or effective) - proven)
     if dead_grants:
         evidence.append(
@@ -6666,9 +6683,10 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
         "B84", PASS,
         "Proven tool use stays within the declared/effective grant, and no proven "
         "high-blast verb fired without an approval gate.",
-        "Keep citing 'proven_tools' from real logs/traces as the agent's behavior "
-        "evolves, so this check keeps reflecting actual invocation, not just intent.",
+        "Keep the trajectory sidecar (or attested 'proven_tools') current so this check "
+        "keeps reflecting actual invocation, not just intent.",
         evidence=evidence,
+        confidence=conf,
     )
 
 

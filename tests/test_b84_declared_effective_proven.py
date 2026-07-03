@@ -9,6 +9,7 @@ cited. Offline, deterministic, no network.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from clawseccheck import attest, audit
@@ -161,3 +162,49 @@ def test_b84_scored_false_never_moves_score(tmp_path):
     assert plain["B84"] == UNKNOWN
     att_findings = {f.id: f.status for f in f_att}
     assert att_findings["B84"] == WARN
+
+
+# ------------------------------------------------- log-observed (trajectory sidecar) leg
+def _home_with_traj(tmp_path: Path, call_names: list[str]) -> Path:
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    recs = [{"traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call",
+             "data": {"name": n, "arguments": {"x": "y"}, "toolCallId": f"c{i}"}}
+            for i, n in enumerate(call_names)]
+    (d / "s.trajectory.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in recs) + "\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_b84_log_observed_prefers_trajectory_over_attestation(tmp_path):
+    """A trajectory sidecar exists -> proven comes from the LOG (HIGH confidence), not the
+    self-report. The log shows only a low-blast verb, so an attested high-blast 'proven' +
+    ungated posture does NOT WARN — the log is authoritative over the self-report."""
+    home = _home_with_traj(tmp_path, ["memory_search"])
+    att = {"tools": ["send_email"], "proven_tools": ["send_email"],
+           "untrusted_to_action": "ungated"}
+    f = check_declared_effective_proven(Context(home=home, config={}, attestation=att))
+    assert f.status == PASS
+    assert f.confidence == "HIGH"
+    assert any("log-observed" in e for e in f.evidence)
+
+
+def test_b84_log_observed_high_blast_ungated_warns_at_high_confidence(tmp_path):
+    """Log proves a high-blast verb (bash) actually ran AND the attested posture is
+    ungated -> WARN at HIGH confidence (log-observed, not a self-report)."""
+    home = _home_with_traj(tmp_path, ["bash"])
+    att = {"untrusted_to_action": "ungated"}
+    f = check_declared_effective_proven(Context(home=home, config={}, attestation=att))
+    assert f.status == WARN
+    assert f.confidence == "HIGH"
+    assert any("log-observed" in e for e in f.evidence)
+
+
+def test_b84_log_observed_without_posture_passes_high_confidence(tmp_path):
+    """Log proves a high-blast verb ran but no ungated-posture evidence -> PASS
+    (informational), still HIGH confidence and sourced from the log."""
+    home = _home_with_traj(tmp_path, ["bash"])
+    f = check_declared_effective_proven(Context(home=home, config={}, attestation={}))
+    assert f.status == PASS
+    assert f.confidence == "HIGH"
+    assert any("log-observed" in e for e in f.evidence)
