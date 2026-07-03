@@ -3,6 +3,45 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.7.0] — 2026-07-03
+
+Four new skill-vet checks (B87–B90) that close documented supply-chain evasions, plus the
+first real entries in the pre-download known-bad catalog. Every check is advisory
+(`scored=False`) so the A–F grade is untouched, and each is zero-false-positive by
+construction — verified against our own SKILL.md and the shipped fixtures.
+
+### Added
+- **B87 — symlink escape to a sensitive host path (TAM-07).** Flags a skill/workspace
+  symlink whose `realpath` resolves into a credential/secret store (`~/.ssh`, `~/.aws`,
+  keychains, browser profiles, `.env`, credential files). F-061 already traversed such
+  links *safely* (never followed); B87 turns the link itself into a verdict —
+  FAIL (sensitive target) / WARN (escapes the tree) / PASS (intra-tree) / UNKNOWN (dangling).
+  Catches directory symlinks too, which the file-walk skip-list missed. OWASP-AST AST06.
+- **B88 — SKILL.md frontmatter authoring hygiene.** Flags an HTML/XML-tag-shaped value in
+  the frontmatter (a metadata-injection surface) and cross-skill trigger-squatting in the
+  description ("use this skill instead of other skills"). Coordinates with B58 (invisible
+  unicode) and F-051 (broad-trigger family) so nothing double-reports. OWASP-AST AST04.
+- **B89 — dormant-capability skill.** WARN when a skill is unreachable by BOTH the user
+  (`user-invocable: false`) AND the model (`disable-model-invocation: true`) yet still ships
+  executable code — inert code nobody can trigger, staged for later activation. Reads both
+  the top-level and nested `metadata.openclaw` invocation-flag forms. OWASP-AST AST01.
+- **B90 — cross-file split base64 payload.** Closes the documented ClawHavoc split-by-file
+  evasion: a base64 payload broken across string literals in different files and decoded
+  only at runtime. B90 reassembles the pure-base64 literals across a skill's sources and
+  fires only when a reassembly decodes to a mostly-printable shell/download payload AND the
+  skill carries a base64-decode sink. OWASP-AST AST01.
+- **Pre-download known-bad catalog seeded with real IOCs (C-145).** `vet_source`'s known-bad
+  pools, empty by design, now carry primary-source-verified indicators from the Koi Security
+  ClawHavoc (2026-02-01) and Palo Alto Unit 42 (2026-06-23) advisories — malicious ClawHub
+  slugs (`omnicogg`, `money-radar`, `letssendit`, the two `tradingview` skills) and
+  infrastructure hosts (`91.92.242.30`, `laosji.net`, `letssendit.fun`), each with a source
+  comment. A point-in-time snapshot, not a feed.
+
+### Changed
+- **`vet_source` now also matches a vetted URL's host** (incl. subdomains) against the
+  `url`/`any` known-bad pools — so a source served straight off known-bad C2 infrastructure
+  (e.g. a bare-IP C2) returns KNOWN-BAD, not merely the generic bare-IP WARN.
+
 ## [3.6.0] — 2026-07-03
 
 Two new bundled-code semantic passes plus the first defensibility-axis check — the
