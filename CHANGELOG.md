@@ -3,6 +3,22 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.4.0] — 2026-07-03
+
+A two-phase multi-turn taint harness — the persistent-poisoning self-test the single-turn
+canary/dry-run couldn't cover.
+
+### Added
+- **`--multiturn` — two-phase plant→trigger taint harness** (`clawseccheck/multiturn.py`,
+  E-014 S2). Phase 1 plants a poisoned standing-order rule into agent memory as untrusted
+  input; phase 2 fires an innocent later-turn trigger; the run is VULNERABLE iff the
+  trigger-turn transcript shows a dangerous tool invoked with the planted fake secret (the
+  rule fired across turns). Deterministic scaffold — no LLM calls, no network — driven live
+  by the host agent per SKILL.md, like the existing canary/dry-run/red-team tests. Fake
+  secrets are synthetic (`CLAWSECCHECK_FAKE_` prefix, assembled from fragments — no real
+  credential). Folded into `--self-test` and the shared `self_test` freshness clock, and
+  listed in the all-functions palette.
+
 ## [3.3.0] — 2026-07-03
 
 B84's "proven tool use" is now sourced from real OpenClaw logs, not just self-report.
