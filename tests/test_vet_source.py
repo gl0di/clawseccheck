@@ -4,16 +4,17 @@ Judges a source's IDENTITY (slug / URL / package spec) with zero network and zer
 fetch: exact known-bad IOC match → FAIL (do not fetch); typosquat / source
 heuristics → WARN (quarantine only); nothing known → UNKNOWN (proceed via
 quarantine + --vet the fetched copy). Never PASS — identity cannot prove unseen
-code safe. The shipped known-bad catalog is EMPTY by design (§2.4 — entries only
-from real advisories); tests inject synthetic catalogs, so no fake "malware" names
-ship in the package.
+code safe. The shipped known-bad catalog is seeded ONLY from real, primary-source-
+verified advisories (§2.4, C-145 — ClawHavoc / Unit 42), each entry citing its source;
+FAIL-path tests still inject synthetic catalogs so they never depend on the live snapshot.
 """
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from clawseccheck.catalog import FAIL, UNKNOWN, WARN
-from clawseccheck.checks import _parse_source_target, vet_source
+from clawseccheck.checks import _SOURCE_KNOWN_BAD, _parse_source_target, vet_source
 from clawseccheck.cli import main
 
 _BAD = {"npm": frozenset({"evil-agent-tool"}), "clawhub": frozenset({"badskill"}),
@@ -135,3 +136,59 @@ def test_cli_vet_source_json_purity(capsys):
     payload = json.loads(captured.out)
     assert payload["mode"] == "vet-source"
     assert payload["verdict"] == "SUSPICIOUS"
+
+
+# --------------------------------------------------------------------------- #
+# C-145: the shipped known-bad catalog (real, primary-source-verified IOCs).   #
+# These use the DEFAULT catalog (no known_bad= injection) — they assert the    #
+# real snapshot fires. Verified against the primary advisories on 2026-07-03.  #
+# --------------------------------------------------------------------------- #
+def test_shipped_clawhub_ioc_fails():
+    # Unit 42 (2026-06-23) skill slug — shipped in the real catalog.
+    f = vet_source("clawhub:omnicogg")
+    assert f.status == FAIL
+    assert "known-compromised" in f.detail
+
+
+def test_shipped_bare_name_ioc_fails():
+    # A bare registry name is checked against every ecosystem pool.
+    assert vet_source("money-radar").status == FAIL
+
+
+def test_shipped_malicious_host_fails():
+    # Infrastructure IOC matched against the URL host (not just the path segment).
+    f = vet_source("https://laosji.net/setup.sh")
+    assert f.status == FAIL
+    assert "known-compromised infrastructure" in f.detail
+
+
+def test_shipped_malicious_host_subdomain_fails():
+    assert vet_source("https://cdn.laosji.net/x").status == FAIL
+
+
+def test_shipped_c2_ip_host_is_fail_not_just_bare_ip_warn():
+    # 91.92.242.30 is a known C2 -> FAIL (upgraded from the generic bare-IP WARN).
+    f = vet_source("https://91.92.242.30/payload")
+    assert f.status == FAIL
+    assert "known-compromised infrastructure" in f.detail
+
+
+def test_clean_host_not_in_catalog_is_not_fail():
+    # Zero-FP: an unrelated host is never FAILed by the host check.
+    assert vet_source("https://github.com/openclaw/openclaw").status == UNKNOWN
+
+
+def test_near_miss_of_ioc_still_routes_through_typosquat_only():
+    # A near-miss of a shipped IOC is NOT an exact known-bad match; it is only ever a
+    # (typosquat) WARN or UNKNOWN — never a spurious FAIL from the known-bad pool.
+    assert vet_source("clawhub:omnicoggg").status in (WARN, UNKNOWN)
+
+
+def test_catalog_is_populated_and_source_cited():
+    # The shipped catalog is no longer empty, and its source block cites the advisories.
+    assert _SOURCE_KNOWN_BAD["clawhub"] and _SOURCE_KNOWN_BAD["url"]
+    src = Path(__file__).resolve().parent.parent / "clawseccheck" / "checks.py"
+    text = src.read_text(encoding="utf-8")
+    block = text.split("_SOURCE_KNOWN_BAD: dict = {", 1)[1].split("_SOURCE_KNOWN_GOOD", 1)[0]
+    assert "Unit 42" in block
+    assert "ClawHavoc" in block or "Koi" in block

@@ -3777,17 +3777,41 @@ def detect_vet_type(target: str | Path, home: str | Path = "~/.openclaw") -> str
 #   UNKNOWN no known-bad     — proceed via quarantine and --vet the fetched copy.
 # NEVER a PASS: an identity check cannot prove unseen code safe (§ honesty).
 #
-# The known-bad catalog ships EMPTY by design (§2.4 — no fabricated IOCs): entries may
-# be added only from real, referenced advisories (e.g. ClawHavoc IOC feeds, npm/PyPI
-# advisory names), each with a source comment. Tests inject synthetic catalogs via the
-# known_bad/known_good parameters — no fake "malware" names ship in the package.
-# Ecosystem keys: "npm", "pypi", "clawhub", "git", "url", "any".
+# The known-bad catalog is seeded ONLY from real, primary-source-verified public advisories
+# (§2.4 — no fabricated IOCs), each entry citing its advisory. It is a POINT-IN-TIME SNAPSHOT
+# (2026-07-03), not a live feed (the feed idea is I-004's territory). Every entry below was
+# verified against the PRIMARY advisory text before commit (§4 wall, C-145): indicators the
+# primary source did not confirm were left out — e.g. the "hightower6eu" publisher account
+# (unconfirmed on the Koi page, and vet_source has no publisher field to match it against).
+# Generic slugs ("update", "pdfcheck") and shared hosts (rentry.co, glot.io, *.vercel.app)
+# are excluded as false-positive-prone. Tests inject synthetic catalogs via the
+# known_bad/known_good parameters. Ecosystem keys: "npm", "pypi", "clawhub", "git", "url",
+# "any". Slug pools match a source's name; the "url"/"any" pools also match a URL's host.
 _SOURCE_KNOWN_BAD: dict = {
     "npm": frozenset(),
     "pypi": frozenset(),
-    "clawhub": frozenset(),
+    "clawhub": frozenset(
+        {
+            # Palo Alto Unit 42, "OpenClaw's Skill Marketplace and the Emerging AI Supply
+            # Chain Threat" (2026-06-23) — verified verbatim against
+            # unit42.paloaltonetworks.com/openclaw-ai-supply-chain-risk/.
+            "omnicogg",  # AMOS dropper hidden behind ~22 MB README padding (scanner evasion)
+            "money-radar",  # runtime affiliate-link injection abusing agent advisory authority
+            "letssendit",  # agentic meme-token front-running scheme
+            "ai-tradingview-assistant-for-macos",  # macOS infostealer delivery
+            "tradingview-ai-indicator-assistant",  # macOS infostealer delivery
+        }
+    ),
     "git": frozenset(),
-    "url": frozenset(),
+    "url": frozenset(
+        {
+            # Malicious infrastructure hosts (matched against a vetted URL's host, incl.
+            # subdomains). Koi Security "ClawHavoc" (2026-02-01, koi.ai) + Unit 42 (2026-06-23).
+            "91.92.242.30",  # shared ClawHavoc C2 — confirmed by BOTH Koi and Unit 42
+            "laosji.net",  # Unit 42 — payload / hosting infrastructure
+            "letssendit.fun",  # Unit 42 — letssendit campaign infrastructure
+        }
+    ),
     "any": frozenset(),
 }
 
@@ -3966,6 +3990,20 @@ def vet_source(
                 f"'{name}' is a known-compromised source (exact IOC match, catalog: {k})"
             )
             break
+
+    # 1b. Known-bad HOST — a URL (or git) whose host is, or is a subdomain of, a known-bad
+    #     domain/IP in the url/any pool. The name check above matches slugs/packages; this
+    #     matches infrastructure IOCs (a source served straight off known-bad C2 infra).
+    host_l = (info.get("host") or "").lower()
+    if host_l and not reasons_bad:
+        for k in (eco, "any"):
+            pool = bad.get(k) or frozenset()
+            if any(host_l == h or host_l.endswith("." + h) for h in pool):
+                reasons_bad.append(
+                    f"host '{host_l}' is known-compromised infrastructure "
+                    f"(exact IOC match, catalog: {k})"
+                )
+                break
 
     # 2. Typosquat vs the brand list + ecosystem known-good pools + real plugin ids.
     pool = set(_KNOWN_NAMES) | set(good.get("plugin-ids") or ())
