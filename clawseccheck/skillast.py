@@ -1986,6 +1986,116 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# analyze_javascript (F-064): lexical JS/TS pass — the JS blind spot.          #
+# Hybrid severity: eval/Function of a decoded blob and remote fetch-then-exec  #
+# are crit (obfuscated RCE, zero-FP); child_process-with-template and dynamic  #
+# require() are warn (often legit). No JS parser; stdlib regex only.           #
+# --------------------------------------------------------------------------- #
+# eval / new Function of a base64-decoded blob — obfuscated code execution.
+_JS_EVAL_DECODED_RE = re.compile(
+    r"\b(?:eval|(?:new\s+)?Function)\s*\(\s*"
+    r"(?:atob\s*\(|Buffer\.from\s*\([^)\n]*['\"]base64['\"])",
+    re.I,
+)
+# remote code fetched then executed: dynamic import of a URL, fetch(...).then(eval),
+# or eval(await ... fetch(...)).
+_JS_EVAL_REMOTE_RE = re.compile(
+    r"\bimport\s*\(\s*['\"]https?://"
+    r"|\.then\s*\(\s*eval\b"
+    r"|\beval\s*\(\s*await\b[^;\n]*\bfetch\s*\(",
+    re.I,
+)
+# child_process exec-family with an interpolated command — command-injection surface.
+_JS_CP_TEMPLATE_RE = re.compile(
+    r"\b(?:exec|execSync|execFile|spawn|spawnSync)\s*\(\s*`[^`]*\$\{",
+)
+# require() of a non-literal (bareword identifier or template) — dynamic module load.
+_JS_DYN_REQUIRE_RE = re.compile(
+    r"\brequire\s*\(\s*(?:`[^`]*\$\{|[A-Za-z_$][\w$.]*\s*[)+])",
+)
+
+
+def _js_mask_comments(source: str) -> str:
+    """Blank JS/TS comments while preserving line numbers, so a documented
+    `eval(atob(...))` example can't fire. A `//` preceded by ':' (i.e. inside a
+    URL like https://) is preserved so remote-import detection still works."""
+    def _blank_block(m):
+        return "\n" * m.group(0).count("\n")
+    no_block = re.sub(r"/\*.*?\*/", _blank_block, source, flags=re.S)
+    return "\n".join(re.sub(r"(?<!:)//.*$", "", ln) for ln in no_block.splitlines())
+
+
+def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFinding]:
+    """Conservative lexical pass over a bundled .js/.ts/.mjs/.cjs file (F-064). No JS
+    AST; stdlib regex only; never raises, never executes. Hybrid severity:
+
+      JS_EVAL_DECODED (crit) — eval / new Function of a base64-decoded blob
+        (eval(atob(...)) / new Function(Buffer.from(...,'base64'))): obfuscated RCE.
+      JS_EVAL_REMOTE (crit) — remote code fetched then executed: dynamic import of a
+        URL, fetch(...).then(eval), eval(await ... fetch(...)).
+      JS_CHILD_PROCESS_DYNAMIC (warn) — child_process exec-family called with an
+        interpolated command (exec(`git ${x}`)): command-injection surface. Only
+        emitted when the file references child_process (kills the RegExp.exec FP).
+      JS_DYNAMIC_REQUIRE (warn) — require() of a non-literal (variable / template):
+        an attacker-influenced module path.
+
+    Benign JS — static eval, JSON.parse(atob(token)), local require, base64 decode
+    without eval — stays silent. Comments are masked so documented examples don't fire."""
+    out: list[ASTFinding] = []
+    seen: set = set()
+
+    def add(rule: str, sev: str, ln: int, reason: str) -> None:
+        if (rule, ln) not in seen:
+            seen.add((rule, ln))
+            out.append(ASTFinding(rule, sev, ln, reason))
+
+    masked = _js_mask_comments(source)
+
+    for m in _JS_EVAL_DECODED_RE.finditer(masked):
+        ln = masked.count("\n", 0, m.start()) + 1
+        add(
+            "JS_EVAL_DECODED",
+            "crit",
+            ln,
+            "eval/Function of a base64-decoded blob (eval(atob(...))) — "
+            "obfuscated remote code execution",
+        )
+
+    for m in _JS_EVAL_REMOTE_RE.finditer(masked):
+        ln = masked.count("\n", 0, m.start()) + 1
+        add(
+            "JS_EVAL_REMOTE",
+            "crit",
+            ln,
+            "remote code is fetched and executed (import('http...') / "
+            "fetch(...).then(eval)) — remote code execution",
+        )
+
+    if "child_process" in masked:
+        for m in _JS_CP_TEMPLATE_RE.finditer(masked):
+            ln = masked.count("\n", 0, m.start()) + 1
+            add(
+                "JS_CHILD_PROCESS_DYNAMIC",
+                "warn",
+                ln,
+                "child_process exec/spawn with an interpolated command "
+                "(`git ${x}`) — command-injection surface",
+            )
+
+    for m in _JS_DYN_REQUIRE_RE.finditer(masked):
+        ln = masked.count("\n", 0, m.start()) + 1
+        add(
+            "JS_DYNAMIC_REQUIRE",
+            "warn",
+            ln,
+            "require() of a non-literal (variable/template) — a dynamic, "
+            "possibly attacker-influenced module path",
+        )
+
+    return out
+
+
 def simulate_effects(source: str, filename: str = "<skill>") -> list[dict]:
     """Analyze Python source to simulate reachable effects and guarding conditions under seeds.
 

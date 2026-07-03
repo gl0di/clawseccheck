@@ -71,6 +71,7 @@ class Context:
     installed_skills: dict = field(default_factory=dict)  # skill name -> concatenated text
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
     installed_skill_shell: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .sh/.bash
+    installed_skill_js: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .js/.ts
     attestation: dict = field(default_factory=dict)  # agent self-report (--attest); see attest.py
     _collected_skill_files: dict[str, list[dict]] = field(default_factory=dict)
 
@@ -776,6 +777,39 @@ def read_skill_shell(skill_dir: Path, ctx: Context | None = None) -> list[tuple[
     return out
 
 
+def read_skill_js(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str, str]]:
+    """Collect the JS/TS source files (.js/.ts/.mjs/.cjs) of one skill for a read-only
+    lexical pass (F-064). Returns a list of (relative-path, source) pairs. Same byte /
+    file caps as the Python and shell collectors so a padded bundle can't blow up the scan."""
+    collected = collect_skill_files(skill_dir, ctx)
+    out: list[tuple[str, str]] = []
+    total = 0
+    file_count = 0
+    truncated = False
+    for item in collected:
+        if total >= _MAX_PY_BYTES_PER_SKILL or file_count >= _MAX_FILES_PER_SKILL:
+            truncated = True
+            break
+        if item["classification"] != "TEXT":
+            continue
+        if not item["relpath"].lower().endswith((".js", ".ts", ".mjs", ".cjs")):
+            continue
+        text = item["content"].decode(encoding="utf-8", errors="replace")
+        out.append((item["relpath"], text))
+        total += len(text)
+        file_count += 1
+
+    # B-074: record when JS collection was capped so a padded JS payload beyond the cap
+    # surfaces as UNKNOWN rather than a clean PASS (mirrors read_skill_python/read_skill_shell).
+    if truncated and ctx is not None:
+        ctx.limit_hits.append(
+            f"js scan of skill '{skill_dir.name}' hit the "
+            f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap — "
+            "js content beyond the cap was NOT scanned")
+
+    return out
+
+
 def _read_installed_skills(home: Path, ctx: Context) -> None:
     seen = set()
     for rel in SKILL_DIRS:
@@ -797,6 +831,7 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                 ctx.installed_skills[key] = _read_skill_text(sd, ctx)
                 ctx.installed_skill_py[key] = read_skill_python(sd, ctx)
                 ctx.installed_skill_shell[key] = read_skill_shell(sd, ctx)
+                ctx.installed_skill_js[key] = read_skill_js(sd, ctx)
             except OSError as exc:
                 ctx.errors.append(f"could not read skill {key}: {exc}")
 

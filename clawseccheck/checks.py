@@ -43,9 +43,15 @@ from .collector import (
     dig,
     read_skill_python,
     read_skill_shell,
+    read_skill_js,
 )
 from .safeio import walk_dir_safely
-from .skillast import analyze_python, analyze_python_package, analyze_shell
+from .skillast import (
+    analyze_javascript,
+    analyze_python,
+    analyze_python_package,
+    analyze_shell,
+)
 from .skillast import simulate_effects as _simulate_effects
 from .textnorm import (
     confusable_in_ascii_context,
@@ -2767,6 +2773,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         [],
     )
     warns_timebomb: list[str] = []
+    warns_js: list[str] = []  # F-064: soft JS/TS signals (child_process template, dynamic require)
     warns_content: list[
         str
     ] = []  # F-051/F-060/F-062 soft content signals (broad trigger, local chain, IOCs)
@@ -2978,6 +2985,16 @@ def check_installed_skills(ctx: Context) -> Finding:
         for relpath, src in ctx.installed_skill_shell.get(name, []):
             for af in analyze_shell(src, relpath):
                 crit.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+        # F-064: bundled JS/TS (.js/.ts/.mjs/.cjs) lexical pass. eval-of-decoded and
+        # remote fetch-then-exec are crit -> FAIL; child_process-with-template and
+        # dynamic require() are warn -> the JS WARN bucket below.
+        for relpath, src in ctx.installed_skill_js.get(name, []):
+            for af in analyze_javascript(src, relpath):
+                msg = f"{name}: {af.reason} ({relpath}:{af.lineno})"
+                if af.severity == "crit":
+                    crit.append(msg)
+                else:
+                    warns_js.append(msg)
     # C-044: unpinned dependency scan — collect across all skills; WARN severity.
     # Runs after the main CRIT/HIGH loop to avoid polluting the main evidence lists.
     warns_unpinned: list[str] = []
@@ -3080,6 +3097,24 @@ def check_installed_skills(ctx: Context) -> Finding:
             "or environment condition is met — the classic way a payload stays dormant in "
             "review/CI and detonates later. Read the guarded branch and confirm it is benign.",
             warns_timebomb,
+        )
+
+    # F-064: soft JS/TS signals — child_process exec with an interpolated command, or a
+    # dynamic require() of a non-literal. WARN-first (both have legit uses); ranked among
+    # the WARN buckets, below crit/high FAIL and the exfil/time-bomb WARNs.
+    if warns_js:
+        extra = f" (+{len(warns_js) - 6} more)" if len(warns_js) > 6 else ""
+        return _custom(
+            "B13",
+            HIGH,
+            WARN,
+            "Dynamic JS/TS execution surface in installed skill(s): "
+            + "; ".join(warns_js[:6])
+            + extra,
+            "A bundled .js/.ts file runs child_process with an interpolated command or "
+            "require()s a non-literal module path — a command-injection / arbitrary-module "
+            "surface. Read the flagged call and confirm the inputs are trusted.",
+            warns_js,
         )
 
     # F-051 / F-060 / F-062: soft content signals — broad activation trigger, delegation to a
@@ -3309,6 +3344,7 @@ def vet_skill(path: str | Path) -> Finding:
         text, name = _read_skill_text(p, ctx), p.name
         py_sources = read_skill_python(p, ctx)
         shell_sources = read_skill_shell(p, ctx)
+        js_sources = read_skill_js(p, ctx)
     elif p.is_file():
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
@@ -3319,6 +3355,7 @@ def vet_skill(path: str | Path) -> Finding:
         name = p.parent.name or p.stem
         py_sources = [(p.name, text)] if p.suffix == ".py" else []
         shell_sources = [(p.name, text)] if p.suffix in (".sh", ".bash", ".zsh") else []
+        js_sources = [(p.name, text)] if p.suffix in (".js", ".ts", ".mjs", ".cjs") else []
     else:
         finding = _custom(
             "B13",
@@ -3332,6 +3369,7 @@ def vet_skill(path: str | Path) -> Finding:
     ctx.installed_skills = {name or "skill": text}
     ctx.installed_skill_py = {name or "skill": py_sources}
     ctx.installed_skill_shell = {name or "skill": shell_sources}
+    ctx.installed_skill_js = {name or "skill": js_sources}
     finding = check_installed_skills(ctx)
     # F-048: also run the shared content-security ring. check_installed_skills has already
     # populated ctx.effect_profiles (so B62 can compare declared vs actual capability), and
