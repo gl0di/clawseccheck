@@ -3,6 +3,31 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.3.0] — 2026-07-03
+
+B84's "proven tool use" is now sourced from real OpenClaw logs, not just self-report.
+
+### Added
+- **Log-observed proven tool use (`clawseccheck/trajectory.py`).** A read-only reader for
+  the OpenClaw trajectory sidecar (`<home>/agents/*/sessions/*.trajectory.jsonl`, on by
+  default) extracts the set of tool verbs the agent *actually invoked* from `tool.call`
+  records' `data.name`, version-gated on `traceSchema=openclaw-trajectory` /
+  `schemaVersion=1`. Grounded against a live install (recon §9.1).
+
+### Changed
+- **B84 now prefers log-observed evidence over the agent's self-report.** When a trajectory
+  sidecar is present, B84's "proven" column comes from the log at **HIGH** confidence
+  (upgraded from `ATTESTED`); it falls back to the attested `proven_tools` self-report when
+  no log exists, and stays UNKNOWN when neither is available. This closes the log-observed
+  leg of the declared-vs-effective-vs-proven diff (Pulse C-090) that earlier recon had
+  marked blocked — the real surface is the trajectory sidecar, not `logging.file` /
+  `cacheTrace` (which carry no discrete tool-call record).
+
+### Security
+- The trajectory reader reads **only** `data.name` (the tool identity, not a secret) — it
+  never touches `data.arguments` / `output` / `result` (the sensitive call/return payloads),
+  and bounds files/bytes scanned as a DoS guard. Read-only, local, no network.
+
 ## [3.2.0] — 2026-07-03
 
 Adds the first runtime-evidence check (B84) and clears a Unicode false positive (B58).
