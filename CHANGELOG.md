@@ -3,6 +3,29 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.2.0] — 2026-07-03
+
+Adds the first runtime-evidence check (B84) and clears a Unicode false positive (B58).
+
+### Added
+- **B84 — declared-vs-effective-vs-proven tool use** (runtime-evidence layer, first
+  slice). Extends B44 with a third column: **proven** behaviour. A new `proven_tools`
+  attestation field lets the agent cite verbs it has LOG/TRACE evidence it *actually
+  invoked*. B84 WARNs when a proven high-blast verb fired with an ungated approval posture
+  — "the agent did, ungated," not merely "could." UNKNOWN by default (no `--attest` / no
+  proven evidence cited), `scored=False`, `ATTESTED` confidence — it never moves the A–F
+  grade.
+
+### Fixed
+- **B58 no longer WARNs on whole-script multilingual (i18n) content.** The "confusable
+  characters folded to ASCII" signal fired on any Cyrillic/Greek prose (e.g. `Привет`,
+  `Ελληνικά` fold partially), so legitimate i18n skills WARNed once B58 joined the `--vet`
+  ring in 3.1.2. B58 now flags confusables only when they sit in **ASCII-Latin context** — a
+  homoglyph swapped into an otherwise-Latin word (`іgnore`, `оriginally`) — via a new
+  `textnorm.confusable_in_ascii_context()` token check. Whole-script non-Latin runs are
+  benign i18n and PASS; invisible / bidi / hidden-markup / base64 signals still WARN; a
+  homoglyph that folds into an injection pattern still FAILs.
+
 ## [3.1.2] — 2026-07-03
 
 `--vet` content-ring parity + truncation transparency (E-018 first slice).
