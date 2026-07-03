@@ -454,7 +454,7 @@ Keys are skill names; values are arrays of effect-profile entry objects.
 ## 11. `--vet` Mode Output — Risk Dossier
 
 Produced by `--vet` / `--vet-skill` / `--vet-plugin`, `--vet-mcp`, and `--vet-source`.
-**Since v4.0.0** the vet output is a **risk dossier**: the same per-finding results (§2 shape)
+**Since v3.8.0** the vet output is a **risk dossier**: the same per-finding results (§2 shape)
 plus a five-axis roll-up and an overall grade. No full-audit `next_actions` / `capability_graph`.
 
 ### Fields
@@ -510,7 +510,7 @@ itself an axis. `--vet-source` returns a single `SOURCE-VET` finding on the `dan
 ```json
 {
   "tool": "clawseccheck",
-  "version": "4.0.0",
+  "version": "3.8.0",
   "mode": "vet",
   "target": "/path/to/skill",
   "target_type": "skill",
@@ -543,10 +543,10 @@ SARIF: the vetting modes additionally carry the dossier roll-up on
 - `capability_graph` node `kind` enumeration (`ingress`, `agent`, `subagent`, `mcp`).
 - `secret_reachability` class enumeration.
 
-> **Changed in v4.0.0 (breaking):** the `--vet` envelope was restructured into the risk
-> dossier (§11) — `target_type`, `grade`, `score`, `axes`, `unmapped` added, and `verdict`
-> now derives from the overall dossier status rather than the single worst finding. The
-> per-finding `findings[]` shape (§2) is unchanged.
+> **Extended in v3.8.0 (additive):** the `--vet` envelope gained the risk-dossier fields
+> (§11) — `target_type`, `grade`, `score`, `axes`, `unmapped` — as additive top-level fields
+> (permitted in a minor release). `verdict` keeps its frozen enumeration but now derives from
+> the overall dossier status; the per-finding `findings[]` shape (§2) is unchanged.
 
 ### Stable additions (permitted in any minor release without breakage)
 

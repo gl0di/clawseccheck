@@ -3,7 +3,7 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
-## [4.0.0] — 2026-07-03
+## [3.8.0] — 2026-07-03
 
 `--vet` is now a **risk dossier**. Instead of a single "is this malicious?" verdict line,
 vetting any third-party artifact (skill / plugin / MCP / source) reports an overall A–F grade
@@ -24,10 +24,11 @@ layer (`dossier.py`), not new detection or a second engine.
   axes (e.g. unpinned spec → Build, wildcard env → Connections) instead of all reading Danger.
 
 ### Changed
-- **Breaking (major):** the `--vet` / `--vet-*` output was restructured into the dossier for
-  human, `--json`, and SARIF. The per-finding `findings[]` shape is unchanged; `verdict` now
-  derives from the overall dossier status rather than the single worst finding. See
-  `docs/OUTPUT_SCHEMA.md` §11.
+- The `--vet` / `--vet-*` output is now the dossier for human, `--json`, and SARIF.
+  Backward-compatible on the machine contract: the per-finding `findings[]` shape is
+  unchanged and the new envelope keys (`target_type`/`grade`/`score`/`axes`/`unmapped`) are
+  additive; `verdict` keeps its frozen enumeration but now derives from the overall dossier
+  status. See `docs/OUTPUT_SCHEMA.md` §11.
 - Honesty rules preserved: an axis a target type structurally cannot produce is `N/A`
   (excluded from the grade denominator) — an MCP spec's `persistence`, or every non-`danger`
   axis of a never-fetched `--vet-source`; an unmeasurable axis is `UNKNOWN`, never a fake PASS.

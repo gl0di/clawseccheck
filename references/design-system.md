@@ -79,8 +79,8 @@ caveats that keep `text` the contract:** (1) Telegram buttons are **capability-g
   | 🦞 | brand mascot (header only) |
 
   Under `--ascii` the dot+word folds to a single `[CRITICAL]`-style bracket; the ⛔/⚠️
-  status glyphs survive only in the Monitor's drift alerts and the vet verdict line, where
-  they mark *events*, not finding severity.
+  status glyphs survive only in the Monitor's drift alerts and the vet risk dossier, where
+  they mark *events* / per-axis status, not finding severity.
 
 ### Layer 1 — Components (semantic slots, no visual commitment)
 
@@ -114,7 +114,7 @@ pure rendering switch.
 | **Results** |||||
 | 3 | **Dashboard** (A–F audit) | guided + CLI | Step 3 / `audit.py` | ✅ drawn |
 | 4 | **What-changed** (diff vs last) | guided + CLI | `--monitor` | ✅ drawn |
-| 5 | **Vet verdict** (skill / MCP supply-chain) | guided + CLI | `--vet` / `--vet-mcp` | ✅ drawn |
+| 5 | **Vet risk dossier** (skill / plugin / MCP / source) | guided + CLI | `--vet` / `--vet-mcp` | ✅ drawn |
 | 6 | **Self-test** (canary · red-team · dry-run) | guided + CLI | `--self-test` | ✅ drawn |
 | **Reusable blocks** |||||
 | 7 | **Finding card** (one risk) | both | inside 3/4 | ✅ drawn |
@@ -366,40 +366,44 @@ Component 2's Next-actions.
 — the one thing that got worse belongs at the top. Read-only: `--monitor` never mutates
 config, only compares against the locally stored last-run snapshot.
 
-### 5. Vet verdict — `--vet` / `--vet-mcp`
+### 5. Vet risk dossier — `--vet` / `--vet-mcp`
 
-The pre-install / pre-trust gate: "should I trust this skill / MCP server before I add
-it?" One verdict word, not a full audit grade — vetting isn't a scored surface. Grounded
-in the `cli.py` handlers for `args.vet` / `args.vet_mcp`, backed by `checks.vet_skill()`
-and `checks.vet_mcp()`; the verdict line + evidence + advice line is built directly in
-`cli.py` from the `Finding` the vet call returns.
+The pre-install / pre-trust gate: "should I trust this skill / plugin / MCP server / source
+before I add it?" Since v3.8.0 this is a **risk dossier** — an overall A–F grade + verdict
+word over five axes (danger, build, behavior, persistence, connections). Grounded in the
+`cli.py` vet dispatch, backed by `checks.vet_skill()` / `vet_plugin()` / `vet_mcp()` /
+`vet_source()`; the per-engine `Finding`s are aggregated by `dossier.build_profile()` and
+rendered by `report.render_vet_dossier()` (human) / `render_vet_json()` (machine).
 
 **`text` profile (baseline):**
 
 ```text
-⛔ Vetting 'suspect-skill/': DANGEROUS [CRITICAL]
-    a skill that shells out to a remote installer before declaring any tool profile
-    Evidence:
-      • SKILL.md contains `curl … | sh`
-      • no tools.profile declared in frontmatter
-    do not install this skill — report it if it came from a public registry
-    Additional signals:
-      • [WARN] B-071 — requests filesystem write with no stated need
+⛔  RISK DOSSIER — skill 'suspect-skill'    Grade: F  (DANGEROUS)
+
+  Danger        ⛔ FAIL   shells out to a remote installer (curl … | sh)
+  Build quality ✅ PASS   no least-privilege / pinning / hygiene issue
+  Behavior      ✅ PASS   no override, jailbreak, or forged-provenance directive
+  Persistence   ❔ UNKNOWN  no executable code to analyze for staged behavior
+  Connections   ❔ UNKNOWN  no executable code to analyze for outbound connections
+
+  Fix (top): do not install this skill — report it if it came from a public registry
+
+  1 finding across 5 axes · run --json for full detail
 ```
 
-Four verdict bands map 1:1 from the underlying `Finding.status`: `FAIL`→**DANGEROUS**,
-`WARN`→**SUSPICIOUS**, `PASS`→**looks SAFE**, `UNKNOWN`→**could not assess** (never a
-fabricated PASS when the scan is inconclusive — law #4). "Additional signals" is the
-supply-chain content-ring's other FAIL/WARN hits folded in under the primary verdict
-(`ring_findings`), each still tagged with its severity so nothing is silently merged away.
+The verdict word maps 1:1 from the overall dossier status: `FAIL`→**DANGEROUS**,
+`WARN`→**SUSPICIOUS**, `PASS`→**SAFE**, `UNKNOWN`→**UNKNOWN** (never a fabricated PASS when
+inconclusive — law #4). Each axis carries its own status icon; an axis a target type can't
+produce shows **N/A** (`➖`) with its reason and is excluded from the grade — honesty over a
+fake pass. A `danger` FAIL floors the whole grade to F.
 
-**`mono`/`--ascii`:** icons fold to `[X]`/`[!]`/`[OK]`/`[?]`. **`interactive`:** plain
-text — a single verdict block, no buttons.
+**`mono`/`--ascii`:** icons fold to `[X]`/`[!]`/`[OK]`/`[?]`/`[-]`. **`interactive`:** plain
+text — one dossier block, no buttons.
 
-**Decisions baked in:** no internal check codes in the primary verdict line (plain
-language only, per Component 7); the ring signals *do* show their id since they're
-explicitly labeled "Additional signals" for the curious, not the headline. `--vet-mcp`
-with no target vets every configured server and adds a per-server verdict list.
+**Decisions baked in:** no internal check codes in the axis reason lines (plain language
+only, per Component 7); the full per-finding detail (with ids) rides in `--json`
+(`axes[].finding_ids` + `findings[]`). `--vet-mcp` with no target vets every configured
+server, merged into one dossier (per-server detail stays in `findings[]`).
 
 ### 6. Self-test — `--self-test`
 
