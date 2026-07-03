@@ -3,6 +3,24 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.1.2] — 2026-07-03
+
+`--vet` content-ring parity + truncation transparency (E-018 first slice).
+
+### Changed
+- **`--vet` now runs B58 (Unicode / hidden-text de-obfuscation).** B58 reads skill
+  content but sat outside `SKILL_CONTENT_RING`, so the full audit ran it while the
+  pre-install `--vet` path silently skipped it. It is now a ring member, closing the last
+  content-ring parity gap between the two engines. A new anti-drift test asserts the ring
+  is *complete* — any check that reads installed-skill content must be in the ring (or an
+  explicit audit-level exemption), so this can't silently regress again.
+
+### Fixed
+- **Shell-reader truncation is now recorded.** `read_skill_shell` capped large/padded
+  shell bundles like its text/Python siblings but did not append to `ctx.limit_hits`, so a
+  payload padded past the cap was dropped silently as a clean PASS. It now records the cap
+  hit, and `check_installed_skills` surfaces UNKNOWN instead of a false all-clear.
+
 ## [3.1.1] — 2026-07-02
 
 Two false-positive fixes in the skill/MCP checks, upholding the zero-false-positive doctrine.
