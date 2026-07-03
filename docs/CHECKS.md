@@ -979,6 +979,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B87 - Symlink escape to sensitive host path (skill / workspace)
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Weak Isolation / Path Escape
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Symlink escape to sensitive host path (skill / workspace)
+- Remediation:
+  - none
+
 ### C3 - Backups of SOUL.md / memory
 
 - Severity: LOW

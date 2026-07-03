@@ -815,6 +815,22 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # A skill/workspace symlink whose realpath resolves into a sensitive host path
+    # (~/.ssh, ~/.aws, keychains, browser profiles, .env, credential files) is a
+    # data-exfiltration primitive (TAM-07 symlink escape). F-061 already traverses
+    # such links *safely* (never followed); B87 turns the link itself into a verdict.
+    # Advisory (scored=False) so it never perturbs the static grade; the verdict is
+    # dynamic (FAIL sensitive / WARN escape / PASS intra-tree / UNKNOWN dangling).
+    CheckMeta(
+        "B87",
+        "Symlink escape to sensitive host path (skill / workspace)",
+        HIGH,
+        "advisory",
+        "Weak Isolation / Path Escape",
+        scored=False,
+        confidence="HIGH",
+        surface="skills",
+    ),
     # advisory (not scored)
     CheckMeta(
         "C3",
@@ -1037,6 +1053,7 @@ AST_MAP = {
     ),  # declared/effective/proven drift = over-privileged + insecure self-report (cf. B44)
     "B85": ("AST09",),  # tamperable/absent tool-use audit trail = weak governance (cf. B50/B77)
     "B86": ("AST02",),  # import-path hijack via writable sys.path = supply-chain tamper (cf. B5)
+    "B87": ("AST06",),  # symlink escape to a sensitive host path = boundary violation (cf. B38 SSRF)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT

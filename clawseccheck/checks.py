@@ -10950,18 +10950,292 @@ def check_import_from_writable(ctx: Context) -> Finding:
     )
 
 
+# ---------- B87 (TAM-07): symlink escape to a sensitive host path ----------
+# F-061 already makes vet traversal SAFE — a skill shipping `data -> ~/.ssh` has its
+# link skipped (never followed for content) and disclosed via ctx.symlink_skips. But a
+# skipped link is only a coverage note, never a verdict. B87 turns the link itself into
+# a finding: it enumerates every symlink (file OR directory) in the vetted dir (vet) or
+# the installed skill dirs + workspace (full audit), resolves the target with
+# os.path.realpath WITHOUT following it for content, and classifies:
+#   FAIL    — target resolves into a sensitive host-path class (credential / secret store)
+#   WARN    — target escapes the skill/workspace tree (non-sensitive)
+#   PASS    — link stays inside the skill/workspace tree (intra-dir relative link)
+#   UNKNOWN — broken / dangling / unresolvable link (disclosed, never a silent miss)
+# Sensitive matching is by path SEGMENT / basename (not the literal $HOME) so a target
+# fabricated inside a test tmp_path is flagged exactly like the real store. The scan is
+# bounded (B-074 discipline): a cap hit is disclosed and downgrades to UNKNOWN, never a
+# silent miss. walk_dir_safely (F-061) only records FILE symlinks; a directory symlink
+# like `data -> ~/.ssh` lands in os.walk's dirnames and is invisible to it — B87 walks
+# both dirnames and filenames so directory-symlink escapes are caught too.
+_SYMLINK_SCAN_CAP = 500  # max symlinks inspected across all roots; a cap hit is disclosed
+
+# Sensitive path *segments*: a resolved target whose parts include one of these is a
+# secret/credential store. Grounded against report.py's reachability inventory
+# (.ssh / keychain / keyrings / browser) + _CRED_RE's credential-path set.
+_SENSITIVE_PATH_SEGMENTS = frozenset(
+    {
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".kube",
+        ".docker",
+        "gcloud",  # ~/.config/gcloud
+        "keyrings",  # ~/.local/share/keyrings
+        "Keychains",  # ~/Library/Keychains
+        ".password-store",
+    }
+)
+# Browser profile roots (cookies / saved logins / session tokens live under these).
+_SENSITIVE_BROWSER_SEGMENTS = frozenset(
+    {"google-chrome", "chromium", "BraveSoftware", "Microsoft Edge", ".mozilla"}
+)
+# Sensitive file basenames (a link may point straight at the file, not the dir).
+_SENSITIVE_BASENAMES = frozenset(
+    {
+        ".env",
+        ".envrc",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        "credentials",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+        "id_dsa",
+        "known_hosts",
+        "wallet.dat",
+        "keystore.json",
+        "Cookies",
+        "cookies.sqlite",
+        "Login Data",
+    }
+)
+
+
+def _symlink_target_sensitive(real: Path) -> str | None:
+    """Return a short sensitive-class label if `real` resolves into a credential/secret
+    store, else None. Segment/basename based so it fires on a fabricated tmp_path target
+    exactly like the real store (never depends on the literal user $HOME)."""
+    parts = set(real.parts)
+    hit = _SENSITIVE_PATH_SEGMENTS & parts
+    if hit:
+        return sorted(hit)[0]
+    if _SENSITIVE_BROWSER_SEGMENTS & parts:
+        return "browser-profile"
+    if real.name in _SENSITIVE_BASENAMES:
+        return real.name
+    if _CRED_RE.search(str(real)):  # .ssh/id_*, .aws/credentials, keychain, wallets…
+        return "credential-path"
+    return None
+
+
+def _enumerate_symlinks(root: Path, state: dict) -> list[Path]:
+    """Every symlink (file OR directory) under `root`, NEVER followed for content.
+    Shared bound via state['count'] / state['cap']; directory symlinks are pruned from
+    the walk so traversal never descends through one."""
+    out: list[Path] = []
+    try:
+        walker = os.walk(root, topdown=True, followlinks=False)
+    except OSError:
+        return out
+    for dirpath, dirnames, filenames in walker:
+        dp = Path(dirpath)
+        keep: list[str] = []
+        for d in sorted(dirnames):
+            p = dp / d
+            if p.is_symlink():
+                if state["count"] >= _SYMLINK_SCAN_CAP:
+                    state["cap"] = True
+                    continue
+                out.append(p)
+                state["count"] += 1
+                # not kept -> os.walk will not descend the linked directory
+            else:
+                keep.append(d)
+        dirnames[:] = keep
+        for f in sorted(filenames):
+            p = dp / f
+            if p.is_symlink():
+                if state["count"] >= _SYMLINK_SCAN_CAP:
+                    state["cap"] = True
+                    continue
+                out.append(p)
+                state["count"] += 1
+    return out
+
+
+def _symlink_scan_roots(ctx: Context) -> list[Path]:
+    """Directories to enumerate for symlink escape, unifying both modes:
+    vet (ctx.home IS the vetted skill dir, marked by a root SKILL.md) and full audit
+    (ctx.home is the OpenClaw home -> each installed skill dir + each workspace dir).
+    A real OpenClaw home never carries a root SKILL.md, so the two never collide."""
+    from .collector import SKILL_DIRS, WORKSPACE_DIRS  # noqa: PLC0415
+
+    home = ctx.home
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(p: Path) -> None:
+        try:
+            if p.is_dir() and not p.is_symlink() and str(p) not in seen:
+                seen.add(str(p))
+                roots.append(p)
+        except OSError:
+            pass
+
+    try:
+        if (home / "SKILL.md").is_file():  # vet: the vetted dir itself
+            _add(home)
+    except OSError:
+        pass
+    for rel in SKILL_DIRS:  # full audit: each installed skill dir
+        base = home / rel
+        try:
+            if base.is_dir() and not base.is_symlink():
+                for sub in sorted(base.iterdir()):
+                    _add(sub)
+        except OSError:
+            continue
+    for ws in WORKSPACE_DIRS:  # full audit: workspace roots
+        _add(home / ws)
+    return roots
+
+
+def check_symlink_escape(ctx: Context) -> Finding:
+    """B87 (TAM-07) — a skill/workspace symlink resolving into a sensitive host path.
+
+    Runs in the full audit (installed skill dirs + workspace) and the pre-install vet
+    path (the vetted dir) via SKILL_CONTENT_RING. Read-only: links are resolved with
+    os.path.realpath but never opened. See the module comment above for the verdict rubric.
+    """
+    if not _is_posix():
+        return _custom(
+            "B87",
+            HIGH,
+            UNKNOWN,
+            "Symlink escape is not assessable on this platform (POSIX-only).",
+            "Run the audit / --vet on the POSIX host where the skills live.",
+        )
+
+    roots = _symlink_scan_roots(ctx)
+    if not roots:
+        return _custom(
+            "B87",
+            HIGH,
+            UNKNOWN,
+            "No skill/workspace directory found to inspect for symlink escape.",
+            "Run on a skill dir (--vet) or a host with installed skills / a workspace.",
+        )
+
+    try:
+        contain_root = ctx.home.resolve()
+    except OSError:
+        contain_root = ctx.home
+
+    state = {"count": 0, "cap": False}
+    fails: list[str] = []
+    warns: list[str] = []
+    unknowns: list[str] = []
+    for root in roots:
+        for link in _enumerate_symlinks(root, state):
+            try:
+                rel = str(link.relative_to(ctx.home))
+            except ValueError:
+                rel = str(link)
+            try:
+                raw = os.readlink(link)
+            except OSError:
+                raw = "?"
+            try:
+                real = Path(os.path.realpath(link))
+            except OSError:
+                unknowns.append(f"{rel} -> {raw} (unresolvable)")
+                continue
+            # Sensitivity is a property of the TARGET PATH, not of whether it currently
+            # exists on the vetting box: `data -> ~/.ssh` is an exfil primitive whether or
+            # not this host happens to have ~/.ssh. So classify sensitivity FIRST; only a
+            # non-sensitive dangling link is a genuine "can't assess" -> UNKNOWN.
+            sclass = _symlink_target_sensitive(real)
+            if sclass:
+                fails.append(f"{rel} -> {real} [{sclass}]")
+            elif not real.exists():  # follows the link: False == dangling
+                unknowns.append(f"{rel} -> {raw} (broken / dangling)")
+            elif real == contain_root or contain_root in real.parents:
+                pass  # PASS: stays inside the skill/workspace tree
+            else:
+                warns.append(f"{rel} -> {real} (escapes the skill/workspace tree)")
+
+    cap_note = (
+        f" (symlink scan cap of {_SYMLINK_SCAN_CAP} hit — some links not inspected)"
+        if state["cap"]
+        else ""
+    )
+    if fails:
+        extra = f" (+{len(fails) - 6} more)" if len(fails) > 6 else ""
+        return _custom(
+            "B87",
+            HIGH,
+            FAIL,
+            "Skill/workspace symlink resolves into a sensitive host path"
+            + cap_note
+            + ": "
+            + "; ".join(fails[:6])
+            + extra,
+            "Remove the symlink — a skill must not link to credential/secret stores "
+            "(~/.ssh, ~/.aws, keychains, browser profiles, .env). Reading through the "
+            "link hands the target's contents to the skill: it is an exfiltration primitive.",
+            fails,
+        )
+    if warns:
+        extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
+        return _custom(
+            "B87",
+            HIGH,
+            WARN,
+            "Skill/workspace symlink escapes the tree" + cap_note + ": "
+            + "; ".join(warns[:6])
+            + extra,
+            "Keep skill symlinks relative and inside the skill/workspace tree; a link that "
+            "resolves outside it cannot be vouched for and may be repointed at a secret store.",
+            warns,
+        )
+    if unknowns or state["cap"]:
+        detail = (
+            "Some skill/workspace symlinks could not be resolved" + cap_note
+            + (": " + "; ".join(unknowns[:6]) if unknowns else ".")
+        )
+        return _custom(
+            "B87",
+            HIGH,
+            UNKNOWN,
+            detail,
+            "Fix or remove broken links so their targets can be assessed.",
+            unknowns,
+        )
+    return _custom(
+        "B87",
+        HIGH,
+        PASS,
+        "No skill/workspace symlink resolves into a sensitive host path or escapes the tree.",
+        "Keep skill symlinks relative and inside the skill/workspace tree.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # SKILL_CONTENT_RING — single source of truth for content-security ring checks.
 #
-# These checks all read ctx.installed_skills (and optionally ctx.bootstrap,
+# Most of these read ctx.installed_skills (and optionally ctx.bootstrap,
 # ctx.installed_skill_py, ctx.effect_profiles) and are therefore meaningful
 # both in the full audit (where they already appear in CHECKS below) AND in
 # the pre-install vet path (vet_skill), which populates ctx.installed_skills
 # before running them.
 #
 # Rules for membership:
-#   - Must read ctx.installed_skills (so a skill-free vet path returns UNKNOWN,
-#     not a false FAIL).
+#   - Must return UNKNOWN (never a false FAIL) on a skill-free ctx. The content
+#     checks get this by keying off ctx.installed_skills; the filesystem members
+#     (B42 dir perms, B87 symlink escape) get it by resolving their scan roots
+#     from ctx.home — the vetted dir in --vet, the installed skill dirs +
+#     workspace in the full audit — and returning UNKNOWN when none exist.
 #   - Must keep its existing calibration / severity — no upgrades here.
 #   - B67 (per-source trust contracts) is included; it returns UNKNOWN when
 #     ctx.bootstrap is empty, which is the correct result for a --vet run that
@@ -10982,6 +11256,7 @@ SKILL_CONTENT_RING = (
     check_forged_provenance,  # B74 — forged role / false-provenance
     check_install_policy,  # B42 — install-time policy (hooks + dir perms)
     check_import_from_writable,  # B86 — defensibility: import-path hijack surface (D1)
+    check_symlink_escape,  # B87 — symlink escape to a sensitive host path (TAM-07)
 )
 
 
