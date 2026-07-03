@@ -845,6 +845,21 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # A skill that is unreachable by BOTH the user (user-invocable:false) AND the model
+    # (disable-model-invocation:true) yet still ships executable code is a dormant-capability
+    # shape: inert code nobody can trigger, staged for later activation. WARN-only heuristic
+    # (F-092 (b), narrowed from the raw "both disabled" signal so legit doc-only unreachable
+    # skills don't fire). Reads both invocation-flag forms (top-level + metadata.openclaw).
+    CheckMeta(
+        "B89",
+        "Dormant-capability skill (unreachable by user and model, yet ships code)",
+        MEDIUM,
+        "advisory",
+        "Dormant Capability / Malicious Skill",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # advisory (not scored)
     CheckMeta(
         "C3",
@@ -1069,6 +1084,7 @@ AST_MAP = {
     "B86": ("AST02",),  # import-path hijack via writable sys.path = supply-chain tamper (cf. B5)
     "B87": ("AST06",),  # symlink escape to a sensitive host path = boundary violation (cf. B38 SSRF)
     "B88": ("AST04",),  # tag-shaped frontmatter value / cross-skill squat = insecure metadata (cf. B62)
+    "B89": ("AST01",),  # unreachable-yet-code-bearing skill = staged/dormant malicious shape (cf. B13)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT

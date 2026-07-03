@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import binascii
 import html
+import json
 import os
 import re
 import shutil
@@ -11338,6 +11339,125 @@ def check_frontmatter_hygiene(ctx: Context) -> Finding:
     )
 
 
+# ---------- B89: dormant-capability skill (F-092 (b), narrowed) ----------
+# A skill that is unreachable by BOTH the user (user-invocable:false) AND the model
+# (disable-model-invocation:true) yet still ships executable code (py/shell/js) is a
+# dormant-capability shape: inert code nobody can trigger, staged for later activation.
+# Grounding (§4, recon §13): the bare "both invocation paths disabled" combo is used by
+# legitimate skills, so it is NOT a decoy signal on its own — B89 requires the skill to also
+# CARRY CODE. `user-invocable` has two real shapes (top-level YAML on Claude-Code skills;
+# nested `metadata.openclaw.user-invocable` on OpenClaw skills) — both are read. WARN-only.
+# Zero-FP: our own skill is user-invocable=true (never unreachable); clawstealth is
+# model-disabled but user-invocable (never both) — neither fires.
+
+# `disable-model-invocation` may also appear nested; both forms are checked.
+_FM_YAML_BOOL_RE_CACHE: dict[str, "re.Pattern[str]"] = {}
+
+
+def _fm_yaml_bool(fm: str, key: str) -> bool | None:
+    """Read a top-level YAML boolean (`key: true|false|yes|no`) from a frontmatter block.
+    Returns True/False, or None when the key is absent."""
+    rx = _FM_YAML_BOOL_RE_CACHE.get(key)
+    if rx is None:
+        rx = re.compile(rf"^{re.escape(key)}:\s*(true|false|yes|no)\b", re.I | re.M)
+        _FM_YAML_BOOL_RE_CACHE[key] = rx
+    m = rx.search(fm)
+    if not m:
+        return None
+    return m.group(1).lower() in ("true", "yes")
+
+
+_FM_METADATA_LINE_RE = re.compile(r"^metadata:\s*(\{.*\})\s*$", re.M)
+
+
+def _fm_metadata_obj(fm: str) -> dict:
+    """Parse the single-line JSON `metadata:` value from a frontmatter block, best-effort.
+    Returns {} when absent or not single-line JSON (multi-line YAML metadata is skipped —
+    B89 only needs the boolean invocation flags, which our fleet writes as inline JSON)."""
+    m = _FM_METADATA_LINE_RE.search(fm)
+    if not m:
+        return {}
+    try:
+        obj = json.loads(m.group(1))
+    except (ValueError, TypeError):
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _skill_is_unreachable(fm: str) -> bool:
+    """True when the skill is unreachable by BOTH the user and the model — reading both the
+    top-level and the nested `metadata.openclaw` forms of each flag (universal shape §6.6)."""
+    meta = _fm_metadata_obj(fm)
+    ui_top = _fm_yaml_bool(fm, "user-invocable")
+    ui_nested = dig(meta, "openclaw.user-invocable")
+    user_invocable_false = (ui_top is False) or (ui_nested is False)
+    if not user_invocable_false:
+        return False
+    md_top = _fm_yaml_bool(fm, "disable-model-invocation")
+    md_nested = dig(meta, "openclaw.disable-model-invocation")
+    model_disabled = (md_top is True) or (md_nested is True)
+    return model_disabled
+
+
+def check_dormant_capability(ctx: Context) -> Finding:
+    """B89 — a skill unreachable by user AND model that still ships code (see module comment)."""
+    skills = getattr(ctx, "installed_skills", None)
+    if not skills:
+        return _custom(
+            "B89",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for dormant capability.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    py = getattr(ctx, "installed_skill_py", {})
+    sh = getattr(ctx, "installed_skill_shell", {})
+    js = getattr(ctx, "installed_skill_js", {})
+    warns: list[str] = []
+    inspected = 0
+    for name, blob in skills.items():
+        fm = _skill_frontmatter_block(blob)
+        if fm is None:
+            continue
+        inspected += 1
+        if not _skill_is_unreachable(fm):
+            continue
+        ships_code = bool(py.get(name) or sh.get(name) or js.get(name))
+        if ships_code:
+            warns.append(
+                f"{name}: unreachable by both user and model "
+                "(user-invocable:false + disable-model-invocation:true) yet ships executable code"
+            )
+    if inspected == 0:
+        return _custom(
+            "B89",
+            MEDIUM,
+            UNKNOWN,
+            "No SKILL.md frontmatter found to assess skill reachability.",
+            "Run --vet on a skill whose SKILL.md carries a `---` frontmatter block.",
+        )
+    if warns:
+        extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
+        return _custom(
+            "B89",
+            MEDIUM,
+            WARN,
+            "Dormant-capability skill(s): " + "; ".join(warns[:6]) + extra,
+            "A skill nobody (user or model) can invoke has no reason to ship executable "
+            "code — this is the shape of a payload staged for later activation. Remove the "
+            "unused code, or make the skill reachable and review what the code does.",
+            warns,
+        )
+    return _custom(
+        "B89",
+        MEDIUM,
+        PASS,
+        f"Assessed {inspected} skill(s): none are unreachable-yet-code-bearing.",
+        "Keep skills either reachable or free of executable code — inert unreachable code "
+        "is a dormant-capability risk.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # SKILL_CONTENT_RING — single source of truth for content-security ring checks.
 #
@@ -11375,6 +11495,7 @@ SKILL_CONTENT_RING = (
     check_import_from_writable,  # B86 — defensibility: import-path hijack surface (D1)
     check_symlink_escape,  # B87 — symlink escape to a sensitive host path (TAM-07)
     check_frontmatter_hygiene,  # B88 — frontmatter authoring hygiene (tag values / squat)
+    check_dormant_capability,  # B89 — unreachable-yet-code-bearing skill (dormant capability)
 )
 
 
