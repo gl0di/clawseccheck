@@ -14,6 +14,7 @@ import json
 from typing import TYPE_CHECKING
 
 from .catalog import CATALOG, CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding, remediation_for
+from .dossier import VERDICT_WORD, axis_for
 from .report import _sanitize
 from .scoring import ScoreResult
 
@@ -68,6 +69,7 @@ def render_sarif(
     score: ScoreResult | None = None,
     tool_version: str = "0.0.0",
     ctx: Context | None = None,
+    profile=None,
 ) -> str:
     """Return a SARIF 2.1.0 JSON string representing *findings*.
 
@@ -122,6 +124,10 @@ def render_sarif(
             "properties": {"confidence": getattr(f, "confidence", "HIGH"),
                            "evidence": [_sanitize(e) for e in (f.evidence or [])]},
         }
+        # Risk-dossier axis (additive) so a SARIF viewer can group findings by axis.
+        _ax = axis_for(f)
+        if _ax is not None:
+            result["properties"]["axis"] = _ax
         # SARIF `fixes`: description-only (no artifactChanges — ClawSecCheck never edits
         # files). Built from the paste-ready remediation when the check has one.
         rem = remediation_for(f.id)
@@ -231,5 +237,27 @@ def render_sarif(
                 skill: list(entries)
                 for skill, entries in effect_profiles.items()
             }
+
+    # Risk-dossier summary (additive, non-breaking — an extension property outside the
+    # frozen SARIF contract). Per-finding results stay finding-oriented; this carries the
+    # axis roll-up + overall grade so a viewer can show the dossier alongside the results.
+    if profile is not None:
+        run = sarif_log["runs"][0]
+        run.setdefault("properties", {})
+        run["properties"]["vetProfile"] = {
+            "targetType": profile.target_type,
+            "grade": profile.overall_grade,
+            "verdict": VERDICT_WORD.get(profile.overall_status, "UNKNOWN"),
+            "score": profile.score,
+            "axes": [
+                {
+                    "axis": a.axis,
+                    "status": a.status,
+                    "reason": _sanitize(a.reason),
+                    "findingIds": [x.id for x in a.findings],
+                }
+                for a in profile.axes
+            ],
+        }
 
     return json.dumps(sarif_log, ensure_ascii=True, indent=2)

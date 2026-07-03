@@ -22,6 +22,7 @@ from .catalog import (
 )
 from .ansi import paint
 from .dedup import deduplicate_findings
+from .dossier import AXIS_LABEL
 from .guide import suggest_actions
 from .scoring import ScoreResult
 
@@ -989,27 +990,82 @@ def _finding_to_dict(f: Finding) -> dict:
             "surface": _meta.surface if _meta is not None else ""}
 
 
-def render_vet_json(findings: list[Finding], *, mode: str, target: str,
-                    version: str) -> str:
-    """Machine-readable output for --vet / --vet-mcp (no score: vetting is not a scored audit).
+# Per-axis status icons for the risk dossier (5 states incl. N/A).
+_AXIS_ICON_UNI = {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔", "N/A": "➖"}
+_AXIS_ICON_ASCII = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]", "N/A": "[-]"}
+_TOP_FIX_ORDER = {"FAIL": 0, "WARN": 1, "UNKNOWN": 2, "PASS": 3, "N/A": 4}
 
-    `mode` is "vet" or "vet-mcp"; `target` is the path/name vetted. `verdict` is the
-    worst finding status mapped to SAFE / SUSPICIOUS / DANGEROUS / UNKNOWN. Finding
-    dicts use the same frozen shape as the full audit (`_finding_to_dict`).
+
+def render_vet_json(profile, *, mode: str, version: str) -> str:
+    """Machine-readable risk dossier for the vetting modes (--vet / --vet-* ).
+
+    `mode` is the sub-command ("vet" / "vet-plugin" / "vet-mcp" / "vet-source"); the target
+    and everything else come from the ``VetProfile``. The envelope keeps the frozen
+    per-finding shape (`_finding_to_dict`) and adds the axis breakdown + overall grade.
     """
-    # Verdict = the worst finding status. Empty -> UNKNOWN (nothing to assess).
-    # Note: UNKNOWN outranks PASS, so a mix surfaces the honest "could not assess".
-    worst = (max((f.status for f in findings), key=lambda s: _VET_STATUS_RANK.get(s, 0))
-             if findings else UNKNOWN)
     payload = {
         "tool": "clawseccheck",
         "version": version,
         "mode": mode,
-        "target": target,
-        "verdict": _VET_VERDICT.get(worst, "UNKNOWN"),
-        "findings": [_finding_to_dict(f) for f in findings],
+        "target": profile.target,
+        "target_type": profile.target_type,
+        "verdict": _VET_VERDICT.get(profile.overall_status, "UNKNOWN"),
+        "grade": profile.overall_grade,
+        "score": profile.score,
+        "axes": [
+            {
+                "axis": a.axis,
+                "status": a.status,
+                "reason": _sanitize(a.reason),
+                "fix": _sanitize(a.fix),
+                "finding_ids": [f.id for f in a.findings],
+            }
+            for a in profile.axes
+        ],
+        "findings": [_finding_to_dict(f) for f in profile.findings],
+        "unmapped": list(profile.unmapped),
     }
     return json.dumps(payload, ensure_ascii=True, indent=2)
+
+
+def _dossier_top_fix(profile) -> str:
+    """The remediation of the worst axis that carries one (danger first, then WARN)."""
+    for a in sorted(profile.axes, key=lambda x: _TOP_FIX_ORDER.get(x.status, 5)):
+        if a.status in (FAIL, WARN) and a.fix:
+            return a.fix
+    return ""
+
+
+def render_vet_dossier(profile, ascii_only: bool = False) -> str:
+    """Human-readable risk dossier: the overall grade + a line per axis.
+
+    Reframes the vet verdict into how *dangerous* / how *built* / how it *behaves* / what
+    it *stores* / whom it *connects with*. N/A axes are shown (dimmed by icon) with their
+    reason, so the reader sees exactly what could not be assessed and why.
+    """
+    icons = _AXIS_ICON_ASCII if ascii_only else _AXIS_ICON_UNI
+    verdict = _VET_VERDICT.get(profile.overall_status, "UNKNOWN")
+    header_icon = icons.get(profile.overall_status, icons["UNKNOWN"])
+    name = _sanitize(Path(profile.target).name or profile.target)
+    lines = [
+        f"{header_icon}  RISK DOSSIER — {profile.target_type} '{name}'"
+        f"    Grade: {profile.overall_grade}  ({verdict})",
+        "",
+    ]
+    for a in profile.axes:
+        icon = icons.get(a.status, icons["UNKNOWN"])
+        lines.append(f"  {AXIS_LABEL[a.axis]:<13} {icon} {a.status:<5}  {_sanitize(a.reason)}")
+    top = _dossier_top_fix(profile)
+    if top:
+        lines += ["", f"  Fix (top): {_sanitize(top)}"]
+    n_find = len(profile.findings)
+    n_axes = sum(1 for a in profile.axes if a.status != "N/A")
+    sep = "*" if ascii_only else "·"
+    lines += ["", f"  {n_find} finding{'' if n_find == 1 else 's'} across {n_axes} axes "
+              f"{sep} run --json for full detail"]
+    if profile.unmapped:
+        lines.append(f"  (unmapped: {', '.join(profile.unmapped)})")
+    return "\n".join(lines)
 
 
 def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,

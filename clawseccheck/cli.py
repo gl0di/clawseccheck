@@ -29,7 +29,8 @@ from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
 from .report import render_html
-from .report import _sanitize
+from .report import _sanitize, render_vet_dossier
+from .dossier import build_profile
 from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE
 from .redteam import make_suite, render_suite
@@ -159,59 +160,29 @@ def vet_all(home_dir: Path, ascii_only: bool = False) -> int:
 
 
 def _run_vet_mcp(target, args, ascii_only: bool) -> int:
-    """Run vet_mcp on `target` (None = all configured servers) and render the
-    result — shared by the explicit --vet-mcp mode and the --vet autodetect
-    route (F-072), so the two entry points can never drift."""
+    """Run vet_mcp on `target` (None = all configured servers) and render the risk
+    dossier — shared by the explicit --vet-mcp mode and the --vet autodetect route
+    (F-072), so the two entry points can never drift."""
     findings = vet_mcp(target=target, home=args.home)
-    # Side output: SARIF file (mirrors the full-audit --sarif behavior, incl.
-    # the same graceful handling of an unwritable path — B-014).
+    profile = build_profile(findings, target or "configured", "mcp")
+    # Side output: SARIF file (mirrors the full-audit --sarif behavior, incl. the same
+    # graceful handling of an unwritable path — B-014).
     if args.sarif:
         try:
             secure_write_text(
                 Path(args.sarif).expanduser(),
-                render_sarif(findings, tool_version=__version__),
+                render_sarif(findings, tool_version=__version__, profile=profile),
             )
             _emit(f"(SARIF written to {args.sarif})")
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
-    # Primary output: machine-readable JSON (covers the no-servers UNKNOWN case too).
-    if args.json:
-        _emit(render_vet_json(findings, mode="vet-mcp",
-                              target=target or "configured", version=__version__))
-        worst = "PASS"
-        for f in findings:
-            if f.status == "FAIL":
-                worst = "FAIL"
-                break
-            if f.status == "WARN" and worst != "FAIL":
-                worst = "WARN"
-        record_run("vet_mcp")
-        return 0 if worst in ("PASS", "UNKNOWN") else 1
-    # "No servers configured" case: single UNKNOWN finding.
-    if len(findings) == 1 and findings[0].status == "UNKNOWN":
-        f = findings[0]
-        icon = "[?]" if ascii_only else "❔"
-        _emit(f"{icon} {f.detail}")
-        record_run("vet_mcp")
-        return 0
-    worst_status = "PASS"
-    for f in findings:
-        if f.status == "FAIL":
-            worst_status = "FAIL"
-            break
-        if f.status == "WARN" and worst_status != "FAIL":
-            worst_status = "WARN"
-    for f in findings:
-        icon = _VET_ICON_ASCII[f.status] if ascii_only else _VET_ICON_UNI[f.status]
-        verdict = _VET_VERDICT[f.status]
-        _emit(f"{icon} {verdict}: {_sanitize(f.title)}")
-        if f.evidence:
-            for ev in f.evidence[:4]:
-                _emit(f"    - {_sanitize(ev)}")
-        _emit(f"    fix: {_sanitize(f.fix)}")
-        _emit("")
     record_run("vet_mcp")
-    return 0 if worst_status in ("PASS", "UNKNOWN") else 1
+    _vet_rc = 1 if profile.overall_status in ("FAIL", "WARN") else 0
+    if args.json:
+        _emit(render_vet_json(profile, mode="vet-mcp", version=__version__))
+    else:
+        _emit(render_vet_dossier(profile, ascii_only=ascii_only))
+    return _vet_rc
 
 
 # --- Flag-coherence pre-flight (B-066 / B-067) ---------------------------------
@@ -530,13 +501,14 @@ def main(argv=None) -> int:
         vet_kind, vet_path = _vet_route
         vet_target = Path(vet_path).expanduser()
         f = vet_skill(vet_path) if vet_kind == "skill" else vet_plugin(vet_path)
-        # rc: FAIL/WARN → 1 (dangerous/suspicious target);
+        profile = build_profile(f, vet_path, vet_kind)
+        # rc: overall FAIL/WARN → 1 (dangerous/suspicious target);
         # UNKNOWN + target absent (not found / path unusable) → 1;
         # UNKNOWN + target exists (valid target, inconclusive assessment) → 0;
         # PASS → 0.
-        if f.status in ("FAIL", "WARN"):
+        if profile.overall_status in ("FAIL", "WARN"):
             _vet_rc = 1
-        elif f.status == "UNKNOWN" and not vet_target.exists():
+        elif profile.overall_status == "UNKNOWN" and not vet_target.exists():
             _vet_rc = 1
         else:
             _vet_rc = 0
@@ -551,40 +523,19 @@ def main(argv=None) -> int:
                 secure_write_text(
                     Path(args.sarif).expanduser(),
                     render_sarif([f, *getattr(f, "ring_findings", [])],
-                                 tool_version=__version__, ctx=getattr(f, "ctx", None)),
+                                 tool_version=__version__, ctx=getattr(f, "ctx", None),
+                                 profile=profile),
                 )
                 _emit(f"(SARIF written to {args.sarif})")
             except OSError as exc:
                 _emit(f"(could not write SARIF: {exc})")
-        # Primary output: machine-readable JSON, else the human text report.
+        # Primary output: machine-readable JSON dossier, else the human dossier.
         if args.json:
-            _emit(render_vet_json([f, *getattr(f, "ring_findings", [])],
+            _emit(render_vet_json(profile,
                                   mode="vet" if vet_kind == "skill" else "vet-plugin",
-                                  target=vet_path, version=__version__))
+                                  version=__version__))
             return _vet_rc
-        verdict = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS": "looks SAFE",
-                   "UNKNOWN": "could not assess"}[f.status]
-        icon = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}[f.status] \
-            if ascii_only else {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔"}[f.status]
-        safe_vet = _sanitize(vet_path)
-        lines = [f"{icon} Vetting '{safe_vet}': {verdict} [{f.severity}]", f"    {_sanitize(f.detail)}"]
-        if f.evidence:
-            bullet = "*" if ascii_only else "•"
-            lines.append("    Evidence:")
-            for ev in f.evidence[:12]:
-                lines.append(f"      {bullet} {_sanitize(ev)}")
-            if len(f.evidence) > 12:
-                lines.append(f"      {bullet} (+{len(f.evidence) - 12} more)")
-        lines.append(f"    {_sanitize(f.fix)}")
-        ring = getattr(f, "ring_findings", [])
-        if ring:
-            bullet = "*" if ascii_only else "•"
-            lines.append("    Additional signals:")
-            for rf in ring[:12]:
-                lines.append(f"      {bullet} [{rf.status}] {rf.id} — {_sanitize(rf.detail)}")
-            if len(ring) > 12:
-                lines.append(f"      {bullet} (+{len(ring) - 12} more)")
-        _emit("\n".join(lines))
+        _emit(render_vet_dossier(profile, ascii_only=ascii_only))
         return _vet_rc
 
     if _vet_route and _vet_route[0] == "mcp":
@@ -602,25 +553,13 @@ def main(argv=None) -> int:
     if getattr(args, "vet_source", None):
         # F-073: pre-download reputation gate — identity only, zero network, no fetch.
         f = vet_source(args.vet_source)
-        _src_rc = 1 if f.status in ("FAIL", "WARN") else 0
+        profile = build_profile(f, args.vet_source, "source")
+        _src_rc = 1 if profile.overall_status in ("FAIL", "WARN") else 0
         record_run("vet_source")
         if args.json:
-            _emit(render_vet_json([f], mode="vet-source",
-                                  target=args.vet_source, version=__version__))
+            _emit(render_vet_json(profile, mode="vet-source", version=__version__))
             return _src_rc
-        band = {"FAIL": "KNOWN-BAD — do not fetch",
-                "WARN": "SUSPICIOUS — quarantine only",
-                "UNKNOWN": "no known-bad record — proceed via quarantine"}[f.status]
-        icon = {"FAIL": "[X]", "WARN": "[!]", "UNKNOWN": "[?]"}.get(f.status, "[?]") \
-            if ascii_only else {"FAIL": "⛔", "WARN": "⚠️", "UNKNOWN": "❔"}.get(f.status, "❔")
-        lines = [f"{icon} Source vet '{_sanitize(args.vet_source)}': {band} [{f.severity}]",
-                 f"    {_sanitize(f.detail)}"]
-        if f.evidence:
-            bullet = "*" if ascii_only else "•"
-            for ev in f.evidence[:8]:
-                lines.append(f"      {bullet} {_sanitize(ev)}")
-        lines.append(f"    {_sanitize(f.fix)}")
-        _emit("\n".join(lines))
+        _emit(render_vet_dossier(profile, ascii_only=ascii_only))
         return _src_rc
 
     if args.canary:

@@ -95,7 +95,7 @@ def test_cli_vet_plugin_detection_and_output(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 0
     assert "detected type: plugin" in captured.err
-    assert "Vetting" in captured.out and "plugin 'demo'" in captured.out
+    assert "RISK DOSSIER" in captured.out and "plugin" in captured.out
 
 
 def test_cli_vet_skill_backwards_compatible(tmp_path, capsys):
@@ -128,7 +128,7 @@ def test_cli_explicit_vet_plugin_on_non_plugin_unknown(tmp_path, capsys):
     rc = main(["--vet-plugin", str(d)])
     captured = capsys.readouterr()
     assert rc == 0                                       # UNKNOWN + target exists → 0
-    assert "could not assess" in captured.out
+    assert "RISK DOSSIER" in captured.out and "UNKNOWN" in captured.out
 
 
 def test_cli_explicit_vet_plugin_missing_path_rc1(tmp_path, capsys):

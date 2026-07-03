@@ -8,6 +8,7 @@ from pathlib import Path
 
 from clawseccheck.catalog import CATALOG, Finding
 from clawseccheck.cli import main
+from clawseccheck.dossier import build_profile
 from clawseccheck.report import render_vet_json
 from clawseccheck.sarif import render_sarif
 
@@ -65,14 +66,20 @@ def test_vet_json_clean_is_safe(tmp_path, capsys):
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
     assert data["verdict"] == "SAFE"
-    # no score key: vetting is not a scored audit
-    assert "score" not in data
+    # the dossier reports the target type, an overall grade, and a per-axis breakdown
+    assert data["target_type"] == "skill"
+    assert data["grade"] == "A"
+    assert {a["axis"] for a in data["axes"]} == {
+        "danger", "build", "behavior", "persistence", "connections"}
 
 
-def test_vet_json_has_no_fabricated_score(tmp_path, capsys):
+def test_vet_json_dossier_grade_floors_dangerous_to_F(tmp_path, capsys):
+    # The dossier carries an honest overall grade; a malware verdict floors it to F.
     main(["--vet", str(_dirty_skill(tmp_path)), "--json"])
     data = json.loads(capsys.readouterr().out)
-    assert "score" not in data and "grade" not in data
+    assert data["grade"] == "F"
+    assert data["verdict"] == "DANGEROUS"
+    assert isinstance(data["score"], int)
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +102,21 @@ def test_vet_sarif_writes_valid_file(tmp_path, capsys):
     assert "B64" in rule_ids
     # text report still printed alongside the SARIF side output
     assert "DANGEROUS" in capsys.readouterr().out
+
+
+def test_vet_sarif_carries_dossier_profile(tmp_path):
+    """The dossier roll-up rides on run.properties.vetProfile (additive), and each result
+    is tagged with its axis — results themselves stay per-finding."""
+    out = tmp_path / "vet.sarif"
+    main(["--vet", str(_dirty_skill(tmp_path)), "--sarif", str(out)])
+    run = json.loads(out.read_text())["runs"][0]
+    vp = run["properties"]["vetProfile"]
+    assert vp["grade"] == "F"
+    assert vp["targetType"] == "skill"
+    assert {a["axis"] for a in vp["axes"]} == {
+        "danger", "build", "behavior", "persistence", "connections"}
+    b13 = next(r for r in run["results"] if r["ruleId"] == "B13")
+    assert b13["properties"]["axis"] == "danger"
 
 
 def test_vet_sarif_clean_has_no_results(tmp_path):
@@ -161,14 +183,16 @@ def _mk(status, fid="B13", sev="CRITICAL"):
 
 
 def test_render_vet_json_verdict_is_worst_status():
-    out = json.loads(render_vet_json(
-        [_mk("PASS"), _mk("FAIL"), _mk("WARN")], mode="vet", target="x", version="9.9.9"))
+    profile = build_profile([_mk("PASS"), _mk("FAIL"), _mk("WARN")], "x", "skill")
+    out = json.loads(render_vet_json(profile, mode="vet", version="9.9.9"))
     assert out["verdict"] == "DANGEROUS"
     assert out["version"] == "9.9.9"
+    assert out["grade"] == "F"  # a FAIL on the danger axis floors the grade
 
 
 def test_render_vet_json_empty_is_unknown():
-    out = json.loads(render_vet_json([], mode="vet", target="x", version="1.1.0"))
+    profile = build_profile([], "x", "skill")
+    out = json.loads(render_vet_json(profile, mode="vet", version="1.1.0"))
     assert out["verdict"] == "UNKNOWN"
     assert out["findings"] == []
 

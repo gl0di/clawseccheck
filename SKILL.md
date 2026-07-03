@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 3.7.1
+version: 4.0.0
 description: Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — all read-only, all on your machine. Scores your setup (A–F) and reports the most urgent holes — reports only, it never changes anything. No API key, no data leaves your machine.
 license: MIT
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — all read-only, all on your machine. Scores your setup (A–F) and reports the most urgent holes — reports only, it never changes anything. No API key, no data leaves your machine."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
@@ -442,11 +442,16 @@ python3 {baseDir}/audit.py --vet <path-to-skill>
 
 The path is a local folder or `SKILL.md` file. If the user gives a URL or registry slug, run
 `--vet-source` on it first (see below), then have them fetch it into an isolated temp folder —
-never under `~/.openclaw` — and vet the local copy. Report the verdict in plain language:
-- SAFE -> "This skill looks clean — no suspicious patterns found."
-- SUSPICIOUS -> "This skill has some patterns worth a closer look. I'd be cautious."
-- DANGEROUS -> "This skill contains patterns used by malware. Do not install it. If it's already
-  installed, remove it and rotate any secrets it could have accessed."
+never under `~/.openclaw` — and vet the local copy. The output is a **risk dossier**: an overall
+A–F grade + SAFE/SUSPICIOUS/DANGEROUS verdict over five axes — **danger** (how dangerous to use),
+**build** (how it's built), **behavior** (how it thinks / behaves), **persistence** (what it
+stages for later), **connections** (whom it reaches out to). Lead with the grade + verdict, then
+name any axis that is WARN/FAIL and why; note that N/A axes weren't assessable (e.g. a doc-only
+skill with no code). Report the verdict in plain language:
+- SAFE -> "Grade looks clean — no suspicious patterns on any axis."
+- SUSPICIOUS -> "A couple of axes are worth a closer look (I'll name them). I'd be cautious."
+- DANGEROUS -> "This skill contains patterns used by malware (the danger axis fails). Do not
+  install it. If it's already installed, remove it and rotate any secrets it could have accessed."
 
 #### Choice: check a plugin / "vet this plugin" / "is this plugin safe"
 

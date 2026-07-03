@@ -119,14 +119,14 @@ def test_cli_vet_source_unknown_rc0(capsys):
     rc = main(["--vet-source", "clawhub:my-totally-new-skill"])
     captured = capsys.readouterr()
     assert rc == 0
-    assert "proceed via quarantine" in captured.out
+    assert "RISK DOSSIER" in captured.out and "UNKNOWN" in captured.out
 
 
 def test_cli_vet_source_suspicious_rc1(capsys):
     rc = main(["--vet-source", "npm:reqeusts"])
     captured = capsys.readouterr()
     assert rc == 1
-    assert "SUSPICIOUS — quarantine only" in captured.out
+    assert "SUSPICIOUS" in captured.out
 
 
 def test_cli_vet_source_json_purity(capsys):

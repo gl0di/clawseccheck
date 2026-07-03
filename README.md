@@ -543,7 +543,7 @@ python3 audit.py --next                    # print the "What you can do next" gu
 python3 audit.py --vet ./some-target       # vet a skill / plugin / MCP spec BEFORE installing it (type autodetected)
 python3 audit.py --vet-skill ./some-skill  # force the skill engine (dir or SKILL.md)
 python3 audit.py --vet-plugin ./some-plugin # force the plugin engine (root dir or openclaw.plugin.json)
-python3 audit.py --vet ./some-skill --json # same, machine-readable (verdict + findings); --sarif PATH for CI
+python3 audit.py --vet ./some-skill --json # same, machine-readable risk dossier (grade + axes + findings); --sarif PATH for CI
 python3 audit.py --vet-mcp                 # vet connected MCP servers for supply-chain risk BEFORE trusting them
 python3 audit.py --vet-source npm:some-pkg # reputation gate on a slug/URL/package spec BEFORE anything is fetched
 python3 audit.py --canary                   # active prompt-injection self-test (battle-tested)
@@ -572,10 +572,13 @@ python3 audit.py --log audit.log            # also write log to a local file
   the B13 malware scan **plus** the content-security ring (capability-intent mismatch, cross-agent
   snooping, silent-instruction / jailbreak / forged-provenance directives) the full audit runs on
   installed skills (point it at a
-  downloaded folder or `SKILL.md`; for a URL, clone it first, then vet the local copy). Verdict:
-  SAFE / SUSPICIOUS / DANGEROUS. Add `--json` for a machine-readable verdict + findings (no score —
-  vetting isn't a scored audit), or `--sarif PATH` to drop a SARIF file for CI / code scanning;
-  exit code is `1` on SUSPICIOUS/DANGEROUS so `--vet … || fail` gates an install pipeline.
+  downloaded folder or `SKILL.md`; for a URL, clone it first, then vet the local copy). The output
+  is a **risk dossier** — one A–F grade over five axes: **danger** (how dangerous to use), **build**
+  (how it's built), **behavior** (how it thinks / behaves), **persistence** (what it stages for
+  later), and **connections** (whom it reaches out to) — with an overall SAFE / SUSPICIOUS /
+  DANGEROUS verdict. Add `--json` for the machine-readable dossier (grade + per-axis breakdown +
+  findings), or `--sarif PATH` to drop a SARIF file for CI / code scanning; exit code is `1` on
+  SUSPICIOUS/DANGEROUS so `--vet … || fail` gates an install pipeline.
 - **`--vet-plugin PATH`** vets an OpenClaw plugin (root dir, `openclaw.plugin.json`, or an
   installed wrapper project) *before* you install it: manifest sanity, npm lifecycle scripts,
   floating dependency versions, native-executable stowaways, and skills entries escaping the

@@ -451,11 +451,11 @@ Keys are skill names; values are arrays of effect-profile entry objects.
 
 ---
 
-## 11. `--vet` Mode Output
+## 11. `--vet` Mode Output — Risk Dossier
 
 Produced by `--vet` / `--vet-skill` / `--vet-plugin`, `--vet-mcp`, and `--vet-source`.
-Simpler than the full audit — no score, no
-`next_actions`, no `capability_graph`.
+**Since v4.0.0** the vet output is a **risk dossier**: the same per-finding results (§2 shape)
+plus a five-axis roll-up and an overall grade. No full-audit `next_actions` / `capability_graph`.
 
 ### Fields
 
@@ -464,38 +464,71 @@ Simpler than the full audit — no score, no
 | `tool` | `str` | Always `"clawseccheck"`. |
 | `version` | `str` | Tool version string. |
 | `mode` | `str` | `"vet"` (skill), `"vet-plugin"`, `"vet-mcp"`, or `"vet-source"`. |
-| `target` | `str` | Path, name, slug, or URL of the vetted skill / plugin / MCP server / source. |
-| `verdict` | `str` | `"SAFE"`, `"SUSPICIOUS"`, `"DANGEROUS"`, or `"UNKNOWN"`. |
+| `target` | `str` | Path, name, slug, or URL of the vetted artifact. |
+| `target_type` | `str` | `"skill"`, `"plugin"`, `"mcp"`, or `"source"`. |
+| `verdict` | `str` | `"SAFE"`, `"SUSPICIOUS"`, `"DANGEROUS"`, or `"UNKNOWN"` (derived from the overall status). |
+| `grade` | `str` | Overall letter grade `A`–`F`, or `"N/A"` when nothing is assessable. |
+| `score` | `int` | 0–100 axis pass-rate behind the grade (0 when not assessable). |
+| `axes` | `array[Axis]` | The five risk axes, in fixed order (below). |
 | `findings` | `array[Finding]` | All check results. Same Finding shape as §2. |
+| `unmapped` | `array[str]` | Finding ids that resolved to no axis (coverage diagnostic; normally empty). |
 
-For `--vet` on a skill, `findings` carries the B13 verdict **plus** any content-security ring
-check (B59–B67 / B74 / B42) that fired on the skill — so a single `--vet` run can return several
-findings, and `verdict` reflects the worst of them. For `--vet-plugin`, the primary finding uses
-the synthetic id `PLUGIN-VET` and `findings` also carries the dispatched per-engine results
-(bundled-skill B13/ring findings, embedded-MCP `MCP-VET` findings). For `--vet-source`, a single
-synthetic `SOURCE-VET` finding is returned; its status is never `PASS` — an identity check
-cannot prove unseen code safe, so the best verdict is `UNKNOWN` (no known-bad record).
+### Axis object
 
-`verdict` is derived from the worst finding status:
+| Field | Type | Description |
+|---|---|---|
+| `axis` | `str` | One of `danger`, `build`, `behavior`, `persistence`, `connections`. |
+| `status` | `str` | `"PASS"`, `"WARN"`, `"FAIL"`, `"UNKNOWN"`, or `"N/A"`. |
+| `reason` | `str` | One-line explanation (untrusted text; sanitized). |
+| `fix` | `str` | One-line remediation, or `""`. |
+| `finding_ids` | `array[str]` | Ids of the findings bucketed to this axis. |
 
-- `FAIL` → `"DANGEROUS"`
-- `WARN` → `"SUSPICIOUS"`
-- `UNKNOWN` → `"UNKNOWN"`
-- `PASS` (all) → `"SAFE"`
-- Empty findings list → `"UNKNOWN"` (nothing to assess).
+The five axes answer, together, "how risky is this to install?": **danger** (active malice
+/ known-bad — a FAIL here floors the grade to F), **build** (least-privilege, pinning,
+authoring hygiene), **behavior** (override / jailbreak / forged provenance / tool-poisoning),
+**persistence** (dormant / staged code, install hooks), **connections** (outbound surface,
+exfil channels, secret env passthrough).
+
+An axis a target type structurally cannot produce is `"N/A"` (excluded from the grade
+denominator) — never a fabricated PASS/FAIL. Examples: an MCP server spec has no on-disk
+code, so `persistence` is `"N/A"`; `--vet-source` never fetches the artifact, so every axis
+but `danger` is `"N/A"`. An axis with a producer but no measurable input (e.g. a skill with
+no executable code) is `"UNKNOWN"`, distinct from PASS. `verdict` maps the overall status:
+`FAIL`→DANGEROUS, `WARN`→SUSPICIOUS, `PASS`→SAFE, else UNKNOWN.
+
+`grade` derivation: `danger == FAIL` → `F`; otherwise a weighted pass-rate over the
+assessable axes (PASS=1, WARN=0.5, FAIL=0; N/A and UNKNOWN excluded), with any WARN capping
+below A and any non-danger FAIL capping at C. All-N/A/UNKNOWN → `"N/A"`.
+
+`--vet-plugin` decomposes into its dispatched sub-findings (bundled-skill B13/ring,
+embedded-MCP `MCP-VET`), which bucket onto the axes; the `PLUGIN-VET` container id is not
+itself an axis. `--vet-source` returns a single `SOURCE-VET` finding on the `danger` axis
+(never `PASS` — an identity check cannot prove unseen code safe).
 
 ### Skeleton
 
 ```json
 {
   "tool": "clawseccheck",
-  "version": "1.2.0",
+  "version": "4.0.0",
   "mode": "vet",
-  "target": "/path/to/skill.zip",
-  "verdict": "SAFE",
-  "findings": []
+  "target": "/path/to/skill",
+  "target_type": "skill",
+  "verdict": "DANGEROUS",
+  "grade": "F",
+  "score": 0,
+  "axes": [
+    {"axis": "danger", "status": "FAIL", "reason": "...", "fix": "...", "finding_ids": ["B13"]},
+    {"axis": "persistence", "status": "PASS", "reason": "...", "fix": "", "finding_ids": []}
+  ],
+  "findings": [],
+  "unmapped": []
 }
 ```
+
+SARIF: the vetting modes additionally carry the dossier roll-up on
+`runs[0].properties.vetProfile` and tag each result with `properties.axis` — both additive
+(the per-finding `results` stay finding-oriented).
 
 ---
 
@@ -509,6 +542,11 @@ cannot prove unseen code safe, so the best verdict is `UNKNOWN` (no known-bad re
 - `verdict` enumeration in `--vet` mode.
 - `capability_graph` node `kind` enumeration (`ingress`, `agent`, `subagent`, `mcp`).
 - `secret_reachability` class enumeration.
+
+> **Changed in v4.0.0 (breaking):** the `--vet` envelope was restructured into the risk
+> dossier (§11) — `target_type`, `grade`, `score`, `axes`, `unmapped` added, and `verdict`
+> now derives from the overall dossier status rather than the single worst finding. The
+> per-finding `findings[]` shape (§2) is unchanged.
 
 ### Stable additions (permitted in any minor release without breakage)
 

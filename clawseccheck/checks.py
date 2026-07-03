@@ -4477,6 +4477,38 @@ def _vet_mcp_server(name: str, spec: dict) -> tuple[list[str], list[str]]:
     return dangerous, suspicious
 
 
+# Route one MCP vet reason to a risk-dossier axis by its wording. Conservative: an
+# unclassifiable reason falls back by severity at the caller (dangerous→danger,
+# suspicious→build), so a signal is never dropped or silently downgraded.
+_MCP_AXIS_CONNECTIONS = (
+    "plaintext http", "non-https", "url uses", "transport=", "remote/streaming",
+    "passthrough", "wildcard", "secret-like", "forwards", "receives your secrets",
+    "sent in clear", "larger trust surface",
+)
+_MCP_AXIS_BEHAVIOR = (
+    "injection directive", "exfil", "tool-poisoning", "poison", "tool description",
+    "tool name", "tool '",
+)
+_MCP_AXIS_BUILD = (
+    "unpinned", "@latest", "supply-chain", "oauth.scope", "least-privilege",
+    "broad/wildcard", "wide permissions", "read-only",
+)
+
+
+def _mcp_reason_axis(reason: str) -> str | None:
+    """Best-effort axis for one MCP vet reason; None → let the caller default by severity."""
+    r = reason.lower()
+    if "pipe-to-run" in r or "pipe-to-shell" in r:
+        return "danger"
+    if any(k in r for k in _MCP_AXIS_CONNECTIONS):
+        return "connections"
+    if any(k in r for k in _MCP_AXIS_BEHAVIOR):
+        return "behavior"
+    if any(k in r for k in _MCP_AXIS_BUILD):
+        return "build"
+    return None
+
+
 def _load_mcp_spec_file(path: Path) -> dict[str, dict] | None:
     """Load a JSON file and normalise to {name: spec}.
 
@@ -4647,6 +4679,15 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
         clean = [r[len(_pfx) :] if r.startswith(_pfx) else r for r in all_reasons[:6]]
         more = f" (+{len(all_reasons) - 6} more)" if len(all_reasons) > 6 else ""
         detail = ("; ".join(clean) + more) if clean else "no supply-chain / trust risks detected"
+        # Split the reasons across risk-dossier axes with their own severity, so the
+        # dossier can show (e.g.) an unpinned spec under Build and a wildcard-env under
+        # Connections rather than lumping everything under Danger. {axis: [[status, text]]}.
+        axis_reasons: dict[str, list] = {}
+        for reason_status, reasons in ((FAIL, dangerous), (WARN, suspicious)):
+            for r in reasons:
+                disp = r[len(_pfx) :] if r.startswith(_pfx) else r
+                axis = _mcp_reason_axis(r) or ("danger" if reason_status == FAIL else "build")
+                axis_reasons.setdefault(axis, []).append([reason_status, disp])
         findings.append(
             Finding(
                 id="MCP-VET",
@@ -4658,6 +4699,7 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
                 framework="MCP Trust",
                 scored=False,
                 evidence=clean,
+                axis_reasons=axis_reasons,
             )
         )
 

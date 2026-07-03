@@ -1343,3 +1343,8 @@ class Finding:
     # Not used by the full audit (stays empty); not rendered by report.py / sarif.py
     # (those iterate the outer finding list, not this field).
     ring_findings: list = field(default_factory=list)
+    # vet_mcp() attaches per-axis reasons here so the risk dossier can split a single
+    # multi-reason MCP verdict across its axes (danger/build/behavior/connections) with the
+    # right per-axis severity. Shape: {axis: [[status, reason], ...]}. Empty for every other
+    # producer; not part of the frozen public JSON shape (internal to dossier bucketing).
+    axis_reasons: dict = field(default_factory=dict)

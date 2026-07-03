@@ -3,6 +3,36 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.0.0] — 2026-07-03
+
+`--vet` is now a **risk dossier**. Instead of a single "is this malicious?" verdict line,
+vetting any third-party artifact (skill / plugin / MCP / source) reports an overall A–F grade
+across five axes that answer, together, "how risky is this to install?": **danger** (how
+dangerous to use), **build** (how it's built), **behavior** (how it thinks / behaves),
+**persistence** (what it stages for later), and **connections** (whom it reaches out to). It
+reuses the signals the four vet engines already compute — this is an aggregation + grading
+layer (`dossier.py`), not new detection or a second engine.
+
+### Added
+- `clawseccheck/dossier.py` — `build_profile()` buckets each engine finding to an axis using
+  the catalog's own AST / surface metadata (plus a small id-override table), rolls the axes
+  up to a grade (reusing `scoring.grade_for`), and never touches `scoring.compute`.
+- Risk-dossier human output (`render_vet_dossier`) and the enriched `--json` envelope:
+  `target_type`, `grade`, `score`, `axes[]`, `unmapped[]` alongside the unchanged `findings[]`.
+- SARIF: additive `runs[0].properties.vetProfile` roll-up + per-result `properties.axis` tag.
+- MCP verdicts carry `Finding.axis_reasons` so a single server's reasons split across their
+  axes (e.g. unpinned spec → Build, wildcard env → Connections) instead of all reading Danger.
+
+### Changed
+- **Breaking (major):** the `--vet` / `--vet-*` output was restructured into the dossier for
+  human, `--json`, and SARIF. The per-finding `findings[]` shape is unchanged; `verdict` now
+  derives from the overall dossier status rather than the single worst finding. See
+  `docs/OUTPUT_SCHEMA.md` §11.
+- Honesty rules preserved: an axis a target type structurally cannot produce is `N/A`
+  (excluded from the grade denominator) — an MCP spec's `persistence`, or every non-`danger`
+  axis of a never-fetched `--vet-source`; an unmeasurable axis is `UNKNOWN`, never a fake PASS.
+  A `danger` FAIL floors the grade to F.
+
 ## [3.7.1] — 2026-07-03
 
 Cosmetic-only: quiets naive static scanners (e.g. ClawHub's publish-time audit) that

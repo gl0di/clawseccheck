@@ -8,8 +8,10 @@ kept here so the always-loaded playbook stays lean.
 - `--save PATH` — write the report to a local file.
 - `--sarif PATH` — write a local SARIF 2.1.0 file (for CI / GitHub Code Scanning; never uploaded).
   Works with `--vet`/`--vet-mcp` too, as a side output alongside the human report.
-- `--json` with `--vet`/`--vet-mcp` — emits a vetting JSON object (`mode`, `target`, `verdict`,
-  `findings[]`). No score: vetting is not a scored audit. Exit code is 1 on SUSPICIOUS/DANGEROUS.
+- `--json` with `--vet`/`--vet-mcp` — emits the risk-dossier JSON object (`mode`, `target`,
+  `target_type`, `verdict`, `grade`, `score`, `axes[]`, `findings[]`): the five risk axes
+  (danger / build / behavior / persistence / connections) plus an A–F grade. Exit code is 1 on
+  SUSPICIOUS/DANGEROUS. See `docs/OUTPUT_SCHEMA.md` §11.
 - `--fail-under N` — exit with code 1 if score is below N (useful for CI pipelines).
 - `--exit-code` — exit 1 if any unsuppressed FAIL finding exists.
 - `--verbose` / `--debug` / `--log PATH` — local logging with secret redaction.

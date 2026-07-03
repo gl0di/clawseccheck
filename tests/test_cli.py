@@ -89,7 +89,7 @@ def test_cli_vet_path_is_sanitized_in_output(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "\x1b[31m" not in out
     assert "\x1b[0m" not in out
-    assert "Vetting '" in out and "evil-RED" in out
+    assert "RISK DOSSIER" in out and "evil-RED" in out
 
 
 def test_cli_ctx_errors_are_sanitized(monkeypatch, tmp_path, capsys):
