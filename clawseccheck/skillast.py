@@ -16,6 +16,7 @@ IMPORTANT — this module contains string constants that name dangerous built-in
 decode functions. These are DETECTION PATTERN DATA assembled at import time; this
 module never calls or evaluates any of them.
 """
+
 from __future__ import annotations
 
 import ast
@@ -30,22 +31,46 @@ ASTFinding = namedtuple("ASTFinding", "rule severity lineno reason")
 # these string DATA constants for actual function calls or dynamic-evaluation use.
 # This module DETECTS these patterns; it does NOT call or evaluate any of them.
 _DECODE_FUNCS = {
-    "b64" + "decode", "urlsafe_b64" + "decode", "b16" + "decode",
-    "b32" + "decode", "b85" + "decode", "a85" + "decode",
-    "un" + "hexlify", "de" + "compress",
+    "b64" + "decode",
+    "urlsafe_b64" + "decode",
+    "b16" + "decode",
+    "b32" + "decode",
+    "b85" + "decode",
+    "a85" + "decode",
+    "un" + "hexlify",
+    "de" + "compress",
 }
 _DECODE_ATTRS = _DECODE_FUNCS | {"de" + "code", "from" + "hex", "join"}
 _EXEC_NAMES = {"ex" + "ec", "ev" + "al"}
 _DANGEROUS_ATTRS = {
-    "sys" + "tem", "po" + "pen", "ex" + "ec", "ev" + "al",
-    "spawn", "spawnl", "spawnv", "spawnve",
-    "call", "run", "check_output", "check_call", "Po" + "pen",
+    "sys" + "tem",
+    "po" + "pen",
+    "ex" + "ec",
+    "ev" + "al",
+    "spawn",
+    "spawnl",
+    "spawnv",
+    "spawnve",
+    "call",
+    "run",
+    "check_output",
+    "check_call",
+    "Po" + "pen",
 }
 _DESERIALIZE_MODS = {"pickle", "cpickle", "_pickle", "marshal", "dill"}
 # Objects on which a *dynamic* getattr(...)() is obfuscation rather than ordinary
 # dynamic dispatch: getattr(os, x)() is suspicious; getattr(plugin, handler)() is not.
-_DANGEROUS_OBJ = {"os", "subprocess", "sys", "builtins", "__builtins__",
-                  "importlib", "ctypes", "posix", "commands"}
+_DANGEROUS_OBJ = {
+    "os",
+    "subprocess",
+    "sys",
+    "builtins",
+    "__builtins__",
+    "importlib",
+    "ctypes",
+    "posix",
+    "commands",
+}
 
 _MAX_FINDINGS_PER_FILE = 25
 
@@ -58,7 +83,8 @@ _MAX_FINDINGS_PER_FILE = 25
 # FAIL is never automatic because legitimate skills routinely send API keys to trusted
 # endpoints (e.g. posting ANTHROPIC_API_KEY to api.anthropic.com).
 _AGENT_CONFIG_PATH_RE = re.compile(
-    r"\.openclaw/|~/.openclaw|~\\\.openclaw|~/\.config/[^/\"']+/", re.I)
+    r"\.openclaw/|~/.openclaw|~\\\.openclaw|~/\.config/[^/\"']+/", re.I
+)
 
 # Sink keyword args that carry a credential as intended auth material (env key ->
 # Authorization header is the normal way a skill talks to its own API). A secret here is
@@ -68,10 +94,21 @@ _ENV_AUTH_KWARGS = frozenset({"headers", "auth", "cert"})
 _CRED_PATH_RE = re.compile(
     r"\.ssh/id_|\bid_rsa\b|\bid_ed25519\b|\.aws/credentials|login\.keychain|wallet\.dat|"
     r"keystore\.json|\.npmrc|\.pypirc|\.netrc|\.docker/config|\.kube/config|"
-    r"\.config/gcloud|/\.?secrets?\b|cookies\.sqlite|Cookies\b", re.I)
+    r"\.config/gcloud|/\.?secrets?\b|cookies\.sqlite|Cookies\b",
+    re.I,
+)
 _NET_SINK_ATTRS_ANY = {"post", "put", "patch", "urlopen", "request"}
 _NET_SINK_ATTRS_BASED = {"send", "sendall", "sendto", "connect"}
-_NET_SINK_BASES = {"requests", "httpx", "urllib", "socket", "aiohttp", "smtplib", "ftplib", "session"}
+_NET_SINK_BASES = {
+    "requests",
+    "httpx",
+    "urllib",
+    "socket",
+    "aiohttp",
+    "smtplib",
+    "ftplib",
+    "session",
+}
 
 # ---------------------------------------------------------------------------
 # Extended taint: TT4 (file-read->network), TT5 (external->exec), SSRF
@@ -79,8 +116,7 @@ _NET_SINK_BASES = {"requests", "httpx", "urllib", "socket", "aiohttp", "smtplib"
 
 # Call names that signal external/tool/LLM output — conservative, noun-like result vars.
 # A variable assigned from ANY call whose name matches this pattern is treated as tainted.
-_TOOL_RESULT_CALL_RE = re.compile(
-    r"\b(response|result|completion|output|message|reply)\b", re.I)
+_TOOL_RESULT_CALL_RE = re.compile(r"\b(response|result|completion|output|message|reply)\b", re.I)
 
 # Network source attrs: a call to one of these reads data FROM the network.
 _NET_SOURCE_ATTRS = {"get", "urlopen", "urlretrieve", "read", "recv", "recvfrom"}
@@ -97,12 +133,22 @@ _EXEC_SINK_BASES_SUBP = {"subprocess"}
 _NET_OUT_SINK_DATA_ATTRS = {"post", "put", "patch"}
 _NET_OUT_SINK_SEND_ATTRS = {"send", "sendall", "sendto"}
 _NET_OUT_SINK_FETCH_ATTRS = {"get", "urlopen"}  # SSRF sinks
-_NET_OUT_SINK_BASES = {"requests", "httpx", "urllib", "urllib.request",
-                       "socket", "aiohttp", "smtplib", "ftplib", "session"}
+_NET_OUT_SINK_BASES = {
+    "requests",
+    "httpx",
+    "urllib",
+    "urllib.request",
+    "socket",
+    "aiohttp",
+    "smtplib",
+    "ftplib",
+    "session",
+}
 
 # Internal metadata / SSRF-attractive endpoints.
 _SSRF_LITERAL_RE = re.compile(
-    r"169\.254\.169\.254|metadata\.internal|localhost|127\.0\.0\.1|::1", re.I)
+    r"169\.254\.169\.254|metadata\.internal|localhost|127\.0\.0\.1|::1", re.I
+)
 
 # File-read call patterns for TT4 source detection.
 _FILE_READ_METHOD_ATTRS = {"read", "read_text", "readline", "readlines", "read_bytes"}
@@ -245,9 +291,9 @@ def _is_exec_sink_call(func: ast.AST) -> tuple:
     if isinstance(func, ast.Attribute):
         base = _attr_base(func.value)
         if base in _EXEC_SINK_BASES_OS and func.attr in _EXEC_SINK_OS_ATTRS:
-            return True, "os.{}".format(func.attr)
+            return True, f"os.{func.attr}"
         if base in _EXEC_SINK_BASES_SUBP and func.attr in _EXEC_SINK_SUBP_ATTRS:
-            return True, "subprocess.{}".format(func.attr)
+            return True, f"subprocess.{func.attr}"
     return False, ""
 
 
@@ -256,9 +302,9 @@ def _is_net_out_data_sink(func: ast.AST) -> tuple:
     if isinstance(func, ast.Attribute):
         base = _attr_base(func.value)
         if func.attr in _NET_OUT_SINK_DATA_ATTRS and base in _NET_OUT_SINK_BASES:
-            return True, "{}.{}".format(base, func.attr)
+            return True, f"{base}.{func.attr}"
         if func.attr in _NET_OUT_SINK_SEND_ATTRS and base in _NET_OUT_SINK_BASES:
-            return True, "{}.{}".format(base, func.attr)
+            return True, f"{base}.{func.attr}"
     return False, ""
 
 
@@ -269,7 +315,7 @@ def _is_ssrf_sink_call(func: ast.AST) -> tuple:
     if isinstance(func, ast.Attribute):
         base = _attr_base(func.value)
         if func.attr in _NET_OUT_SINK_FETCH_ATTRS and base in _NET_OUT_SINK_BASES:
-            return True, "{}.{}".format(base, func.attr)
+            return True, f"{base}.{func.attr}"
     return False, ""
 
 
@@ -290,12 +336,83 @@ def _call_args_tainted(node: ast.Call, tainted: set[str]) -> tuple:
                 break
         if any_tainted:
             break
-    direct = bool(node.args and isinstance(node.args[0], ast.Name)
-                  and node.args[0].id in tainted)
+    direct = bool(node.args and isinstance(node.args[0], ast.Name) and node.args[0].id in tainted)
     return any_tainted, direct
 
 
-def _subprocess_taint_is_command_injection(node: ast.Call, tainted: set) -> bool:
+def _scope_own_nodes(scope: ast.AST):
+    """Yield nodes belonging to `scope`'s own body, WITHOUT descending into nested
+    function/class/lambda scopes (whose local names are unrelated). Used so a local
+    name reused across sibling functions is resolved per-scope, not conflated."""
+    body = (
+        scope.body
+        if isinstance(scope, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef))
+        else [scope]
+    )
+    stack = list(body)
+    while stack:
+        n = stack.pop()
+        yield n
+        for child in ast.iter_child_nodes(n):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue  # nested scope — resolved on its own pass
+            stack.append(child)
+
+
+def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tuple]:
+    """Names bound EXACTLY ONCE to a list/tuple literal within `scope`'s own body,
+    with no later mutation that could change argv[0] (`cmd[0] = ...` / `cmd.insert(...)`).
+
+    Resolves the common real-world safe pattern where the command list is built in a
+    local before the call (`cmd = [prog, *args]; subprocess.run(cmd)`) rather than
+    passed inline. Conservative: a name reassigned, index-assigned, or `insert`-mutated
+    is omitted, so the caller falls back to the command-injection default rather than
+    risk a false downgrade.
+    """
+    assign_count: dict[str, int] = {}
+    bindings: dict[str, ast.List | ast.Tuple] = {}
+    unsafe: set[str] = set()
+    for n in _scope_own_nodes(scope):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    assign_count[t.id] = assign_count.get(t.id, 0) + 1
+                    if isinstance(n.value, (ast.List, ast.Tuple)):
+                        bindings[t.id] = n.value
+                    else:
+                        unsafe.add(t.id)  # bound to a non-literal -> unresolvable
+                elif isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name):
+                    unsafe.add(t.value.id)  # cmd[0] = ... could replace the program
+        elif isinstance(n, ast.Call):
+            f = n.func
+            if (
+                isinstance(f, ast.Attribute)
+                and f.attr == "insert"
+                and isinstance(f.value, ast.Name)
+            ):
+                unsafe.add(f.value.id)  # cmd.insert(0, ...) could shift argv[0]
+    return {k: v for k, v in bindings.items() if assign_count.get(k, 0) == 1 and k not in unsafe}
+
+
+def _list_bindings_by_call(tree: ast.AST) -> dict[ast.Call, dict[str, ast.List | ast.Tuple]]:
+    """Map each Call node to the single-list-bindings visible in its enclosing scope
+    (module scope for top-level calls). Per-scope so a local name reused across sibling
+    functions is not conflated into ambiguity."""
+    out: dict[ast.Call, dict[str, ast.List | ast.Tuple]] = {}
+    scopes = [tree] + [
+        n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    for scope in scopes:
+        binds = _single_list_bindings_local(scope)
+        for n in _scope_own_nodes(scope):
+            if isinstance(n, ast.Call):
+                out[n] = binds
+    return out
+
+
+def _subprocess_taint_is_command_injection(
+    node: ast.Call, tainted: set, list_bindings: dict[str, ast.List | ast.Tuple] | None = None
+) -> bool:
     """For a subprocess.* call with tainted input, is it command-injection grade?
 
     True  -> shell=True (or a non-literal shell value), OR a non-list first arg
@@ -305,6 +422,9 @@ def _subprocess_taint_is_command_injection(node: ast.Call, tainted: set) -> bool
              tainted value is only a non-program argument. That is argument injection
              (low risk: metacharacters are literal argv data passed to execve), NOT
              command injection. Regression guard for the B13 false-positive class.
+
+    The argv list may be inline (`run([prog, arg])`) or bound to a local resolved via
+    ``list_bindings`` (`cmd = [prog, arg]; run(cmd)`) — the dominant real-world form.
     """
     for kw in node.keywords:
         if kw.arg == "shell":
@@ -313,6 +433,8 @@ def _subprocess_taint_is_command_injection(node: ast.Call, tainted: set) -> bool
                 break  # explicit shell=False -> fall through to the argv-form check
             return True  # shell=True, or a dynamic value we cannot prove is False
     first = node.args[0] if node.args else None
+    if isinstance(first, ast.Name) and list_bindings:
+        first = list_bindings.get(first.id, first)  # resolve a var-bound command list
     if isinstance(first, (ast.List, ast.Tuple)):
         prog = first.elts[0] if first.elts else None
         if prog is not None and (_names_in(prog) & tainted):
@@ -373,7 +495,11 @@ def _is_env_read_value(node: ast.AST) -> bool:
         # os.environ.get("X") — func is Attribute(value=Attribute(value=Name("os"), attr="environ"), attr="get")
         if isinstance(f, ast.Attribute) and f.attr == "get":
             base = f.value
-            if isinstance(base, ast.Attribute) and base.attr == "environ" and _attr_base(base.value) == "os":
+            if (
+                isinstance(base, ast.Attribute)
+                and base.attr == "environ"
+                and _attr_base(base.value) == "os"
+            ):
                 return True
             # environ.get("X") when environ was imported directly
             if isinstance(base, ast.Name) and base.id == "environ":
@@ -424,7 +550,11 @@ def _env_tainted_names(tree: ast.AST) -> set[str]:
 def _has_agent_config_path_const(node: ast.AST) -> bool:
     """True if the subtree contains a string constant naming an agent config file path."""
     for n in ast.walk(node):
-        if isinstance(n, ast.Constant) and isinstance(n.value, str) and _AGENT_CONFIG_PATH_RE.search(n.value):
+        if (
+            isinstance(n, ast.Constant)
+            and isinstance(n.value, str)
+            and _AGENT_CONFIG_PATH_RE.search(n.value)
+        ):
             return True
     return False
 
@@ -444,10 +574,7 @@ def _agent_config_file_tainted_names(source: str, tree: ast.AST) -> set[str]:
         changed = False
         for a in assigns:
             rhs = a.value
-            sourced = (
-                bool(_names_in(rhs) & tainted)
-                or _is_agent_config_read_value(rhs, tainted)
-            )
+            sourced = bool(_names_in(rhs) & tainted) or _is_agent_config_read_value(rhs, tainted)
             if sourced:
                 for t in a.targets:
                     if isinstance(t, ast.Name) and t.id not in tainted:
@@ -498,7 +625,11 @@ def _is_agent_config_open_call(node: ast.AST) -> bool:
 def _has_cred_path_const(node: ast.AST) -> bool:
     """True if the subtree contains a string constant naming a credential file."""
     for n in ast.walk(node):
-        if isinstance(n, ast.Constant) and isinstance(n.value, str) and _CRED_PATH_RE.search(n.value):
+        if (
+            isinstance(n, ast.Constant)
+            and isinstance(n.value, str)
+            and _CRED_PATH_RE.search(n.value)
+        ):
             return True
     return False
 
@@ -546,7 +677,11 @@ def _has_xor_decode(node: ast.AST) -> bool:
     obfuscation. A scalar `a ^ b` (bit flags) is NOT flagged: the XOR must sit inside a
     sequence-builder or comprehension, which is the decode shape."""
     for n in ast.walk(node):
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("bytes", "bytearray"):
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id in ("bytes", "bytearray")
+        ):
             if any(isinstance(s, ast.BinOp) and isinstance(s.op, ast.BitXor) for s in ast.walk(n)):
                 return True
         if isinstance(n, (ast.ListComp, ast.GeneratorExp, ast.SetComp)):
@@ -597,10 +732,15 @@ def _conditional_sink_findings(tree: ast.AST) -> list:
                     is_exec, sink = _is_exec_sink_call(sub.func)
                     if is_exec or _is_net_sink(sub.func):
                         ln = getattr(sub, "lineno", getattr(node, "lineno", 0))
-                        out.append(ASTFinding(
-                            "CONDITIONAL_SINK", "info", ln,
-                            f"a dangerous sink ({sink or 'network call'}) runs only under {kind} "
-                            "condition — possible time-bomb / sandbox-evasion gating"))
+                        out.append(
+                            ASTFinding(
+                                "CONDITIONAL_SINK",
+                                "info",
+                                ln,
+                                f"a dangerous sink ({sink or 'network call'}) runs only under {kind} "
+                                "condition — possible time-bomb / sandbox-evasion gating",
+                            )
+                        )
                         found = True
                         break
             if found:
@@ -633,6 +773,47 @@ def _attr_base(value: ast.AST) -> str:
     return ""
 
 
+# D1 (defensibility / import-path hijack): world-writable prefixes an attacker on the
+# same host can typically write to, so a sys.path entry rooted there is hijackable.
+_WRITABLE_PATH_PREFIXES = ("/tmp/", "/var/tmp/", "/private/tmp/", "/dev/shm/")
+
+
+def _is_sys_path_mutation(call: ast.Call) -> ast.AST | None:
+    """If `call` is sys.path.insert(...)/sys.path.append(...), return the path-argument
+    node (the location being added to the import search path); else None."""
+    f = call.func
+    if not (
+        isinstance(f, ast.Attribute)
+        and f.attr in ("insert", "append")
+        and isinstance(f.value, ast.Attribute)
+        and f.value.attr == "path"
+        and isinstance(f.value.value, ast.Name)
+        and f.value.value.id == "sys"
+    ):
+        return None
+    if f.attr == "insert":
+        return call.args[1] if len(call.args) >= 2 else None
+    return call.args[0] if call.args else None
+
+
+def _is_writable_import_path(node: ast.AST) -> bool:
+    """True if a sys.path entry is attacker-influenceable — a relative or world-writable
+    string literal, or a value derived from an environment variable. The benign self-dir
+    form (anchored on __file__) is NOT flagged here: install-directory writability is a
+    separate defensibility signal, not an import-path hijack via an untrusted location.
+    """
+    if any(isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(node)):
+        return False
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        p = node.value
+        if p.startswith(_WRITABLE_PATH_PREFIXES) or p in ("/tmp", "/var/tmp"):
+            return True
+        return not p.startswith("/")  # relative path -> resolves against the CWD
+    if _rhs_has_subscript_environ(node) or any(_is_env_read_value(x) for x in ast.walk(node)):
+        return True
+    return False
+
+
 def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     """Return AST findings for one Python source string. Never raises, never executes.
 
@@ -645,12 +826,14 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         tainted = _tainted_names(tree)
     except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError) as exc:
         err_type = type(exc).__name__
-        return [ASTFinding(
-            "AST_UNANALYZABLE",
-            "unknown",
-            0,
-            f"could not parse {filename} ({err_type}) — file not analyzed by the AST/taint layer",
-        )]
+        return [
+            ASTFinding(
+                "AST_UNANALYZABLE",
+                "unknown",
+                0,
+                f"could not parse {filename} ({err_type}) — file not analyzed by the AST/taint layer",
+            )
+        ]
 
     out: list[ASTFinding] = []
     seen: set[tuple[str, int]] = set()
@@ -675,8 +858,12 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         if isinstance(f, ast.Name) and f.id in _EXEC_NAMES and node.args:
             arg = node.args[0]
             if _subtree_has_decode(arg) or (_names_in(arg) & tainted):
-                add("OBFUSCATED_EXEC", "crit", ln,
-                    f"a call to {f.id} on a decoded/obfuscated string (hidden payload execution)")
+                add(
+                    "OBFUSCATED_EXEC",
+                    "crit",
+                    ln,
+                    f"a call to {f.id} on a decoded/obfuscated string (hidden payload execution)",
+                )
             else:
                 add("DANGEROUS_SINK", "info", ln, f"a dynamic {f.id} call")
             continue
@@ -693,8 +880,12 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             dangerous_literal = literal_str and second.value in _DANGEROUS_ATTRS
             base_obj = _attr_base(first) if first is not None else ""
             if dangerous_literal or (dynamic and base_obj in _DANGEROUS_OBJ):
-                add("GETATTR_INDIRECTION", "crit", ln,
-                    "getattr(...)() indirection to a dangerous attribute (obfuscated call)")
+                add(
+                    "GETATTR_INDIRECTION",
+                    "crit",
+                    ln,
+                    "getattr(...)() indirection to a dangerous attribute (obfuscated call)",
+                )
             elif dynamic:
                 add("GETATTR_INDIRECTION", "info", ln, "dynamic getattr(...)() dispatch")
             continue
@@ -702,21 +893,43 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         # __import__("os").system(...) / importlib.import_module("os").system(...)
         if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Call):
             inner = f.value.func
-            is_dyn_import = (
-                (isinstance(inner, ast.Name) and inner.id == "__import__")
-                or (isinstance(inner, ast.Attribute) and inner.attr == "import_module")
+            is_dyn_import = (isinstance(inner, ast.Name) and inner.id == "__import__") or (
+                isinstance(inner, ast.Attribute) and inner.attr == "import_module"
             )
             if is_dyn_import and f.attr in _DANGEROUS_ATTRS:
-                add("DYNAMIC_IMPORT_EXEC", "crit", ln,
-                    f"__import__(...).{f.attr}() — dynamic import to evade static scan")
+                add(
+                    "DYNAMIC_IMPORT_EXEC",
+                    "crit",
+                    ln,
+                    f"__import__(...).{f.attr}() — dynamic import to evade static scan",
+                )
                 continue
+
+        # D1 (defensibility): sys.path.insert/append to a relative / writable / env-derived
+        # location — an import-path hijack surface. Anyone who can write that path drops a
+        # module the skill then imports. The benign self-dir form (dirname(__file__)) is clean.
+        _sp_arg = _is_sys_path_mutation(node)
+        if _sp_arg is not None:
+            if _is_writable_import_path(_sp_arg):
+                add(
+                    "IMPORT_FROM_WRITABLE",
+                    "info",
+                    ln,
+                    "sys.path is extended with a relative / writable / env-derived location — "
+                    "anyone able to write that path can hijack the skill's imports",
+                )
+            continue
 
         # pickle/marshal.loads(...) — info (code-exec only if the data is untrusted)
         if isinstance(f, ast.Attribute) and f.attr in ("loads", "load"):
             mod = _attr_base(f.value)
             if mod in _DESERIALIZE_MODS:
-                add("DESERIALIZE_CODE", "info", ln,
-                    f"{mod}.{f.attr}() deserialization (code-exec risk if data is untrusted)")
+                add(
+                    "DESERIALIZE_CODE",
+                    "info",
+                    ln,
+                    f"{mod}.{f.attr}() deserialization (code-exec risk if data is untrusted)",
+                )
                 continue
 
         # os.system/popen/exec*/spawn*, subprocess.* — info shell/exec sinks
@@ -724,9 +937,16 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             base = _attr_base(f.value)
             is_os = base == "os" and (
                 f.attr in ("system", "popen")
-                or f.attr.startswith("ex" + "ec") or f.attr.startswith("spawn"))
+                or f.attr.startswith("ex" + "ec")
+                or f.attr.startswith("spawn")
+            )
             is_subp = base == "subprocess" and f.attr in (
-                "run", "call", "check_output", "check_call", "Popen")
+                "run",
+                "call",
+                "check_output",
+                "check_call",
+                "Popen",
+            )
             if is_os or is_subp:
                 add("DANGEROUS_SINK", "info", ln, f"{base}.{f.attr}() shell/exec sink")
                 continue
@@ -737,10 +957,17 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         cred_tainted = _cred_tainted_names(tree)
         if cred_tainted:
             for node in ast.walk(tree):
-                if (isinstance(node, ast.Call) and _is_net_sink(node.func)
-                        and (_names_in(node) & cred_tainted)):
-                    add("CRED_EXFIL_FLOW", "crit", getattr(node, "lineno", 0),
-                        "credential-file contents flow into a network sink (read secret -> send out)")
+                if (
+                    isinstance(node, ast.Call)
+                    and _is_net_sink(node.func)
+                    and (_names_in(node) & cred_tainted)
+                ):
+                    add(
+                        "CRED_EXFIL_FLOW",
+                        "crit",
+                        getattr(node, "lineno", 0),
+                        "credential-file contents flow into a network sink (read secret -> send out)",
+                    )
 
     # F-049: env-var / agent-config secret reaching a network sink (SkillSpector E2 env
     # harvesting + E1 external transmission).  Severity is "info" and checks.py routes it
@@ -760,25 +987,34 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             # normal way a skill authenticates to its own API (env key -> Authorization
             # header) and is NOT flagged; exfiltration puts the secret in the URL, request
             # body, query params, or a positional argument.
-            arg_subtrees = [*node.args,
-                            *(kw.value for kw in node.keywords if kw.arg not in _ENV_AUTH_KWARGS)]
+            arg_subtrees = [
+                *node.args,
+                *(kw.value for kw in node.keywords if kw.arg not in _ENV_AUTH_KWARGS),
+            ]
             hit = False
             for arg in arg_subtrees:
                 if env_src_tainted and (_names_in(arg) & env_src_tainted):
                     hit = True
                     break
-                if any(_is_env_read_value(s) or _rhs_has_subscript_environ(s) for s in ast.walk(arg)):
+                if any(
+                    _is_env_read_value(s) or _rhs_has_subscript_environ(s) for s in ast.walk(arg)
+                ):
                     hit = True
                     break
             if hit:
-                add("ENV_EXFIL_FLOW", "info", getattr(node, "lineno", 0),
+                add(
+                    "ENV_EXFIL_FLOW",
+                    "info",
+                    getattr(node, "lineno", 0),
                     "an environment-variable or agent-config secret flows into a network "
-                    "sink's URL or body — verify the destination is trusted (possible exfiltration)")
+                    "sink's URL or body — verify the destination is trusted (possible exfiltration)",
+                )
 
     # Extended taint rules: TT5 (external-input -> exec), TT4 (file-read -> network),
     # SSRF (tainted URL -> network-fetch).  Compute external taint once and reuse.
     func_params = _collect_func_params(tree)
     ext_tainted = _external_tainted_names(tree, func_params)
+    bindings_by_call = _list_bindings_by_call(tree)
 
     if ext_tainted:
         for node in ast.walk(tree):
@@ -795,18 +1031,26 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 if any_t:
                     # A subprocess argv-list call (shell=False, fixed program) is only
                     # argument injection, not command injection — do not escalate to crit.
-                    if exec_name.startswith("subprocess.") and not _subprocess_taint_is_command_injection(
-                        node, ext_tainted
+                    if exec_name.startswith(
+                        "subprocess."
+                    ) and not _subprocess_taint_is_command_injection(
+                        node, ext_tainted, bindings_by_call.get(node)
                     ):
-                        add("TT5_ARG_INJECTION", "info", ln,
-                            "external input flows into {sink} as a non-program list argument "
-                            "(shell=False) — argument injection, not command injection".format(
-                                sink=exec_name))
+                        add(
+                            "TT5_ARG_INJECTION",
+                            "info",
+                            ln,
+                            f"external input flows into {exec_name} as a non-program list argument "
+                            "(shell=False) — argument injection, not command injection",
+                        )
                         continue
                     flow_kind = "direct" if direct else "indirect"
-                    add("TT5_CMD_INJECTION", "crit", ln,
-                        "external input flows into {sink} ({flow} flow) — command/code injection".format(
-                            sink=exec_name, flow=flow_kind))
+                    add(
+                        "TT5_CMD_INJECTION",
+                        "crit",
+                        ln,
+                        f"external input flows into {exec_name} ({flow_kind} flow) — command/code injection",
+                    )
                     continue
 
             # TT4: file-read tainted value flows into a data-bearing network sink.
@@ -817,9 +1061,12 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                     any_t, direct = _call_args_tainted(node, file_t)
                     if any_t:
                         flow_kind = "direct" if direct else "indirect"
-                        add("TT4_FILE_NET", "info", ln,
-                            "file-read contents flow into {sink} ({flow} flow) — data exfiltration risk".format(
-                                sink=net_name, flow=flow_kind))
+                        add(
+                            "TT4_FILE_NET",
+                            "info",
+                            ln,
+                            f"file-read contents flow into {net_name} ({flow_kind} flow) — data exfiltration risk",
+                        )
                     continue
 
             # SSRF: externally-tainted value flows into a network-fetch URL argument.
@@ -831,19 +1078,26 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                     has_internal = bool(_SSRF_LITERAL_RE.search(source))
                     flow_kind = "direct" if direct else "indirect"
                     if has_internal:
-                        add("TT_SSRF", "info", ln,
-                            "externally-controlled URL flows into {sink} with internal endpoint literal present ({flow} flow) — SSRF".format(
-                                sink=ssrf_name, flow=flow_kind))
+                        add(
+                            "TT_SSRF",
+                            "info",
+                            ln,
+                            f"externally-controlled URL flows into {ssrf_name} with internal endpoint literal present ({flow_kind} flow) — SSRF",
+                        )
                     else:
-                        add("TT_SSRF", "info", ln,
-                            "externally-controlled URL flows into {sink} ({flow} flow) — SSRF risk".format(
-                                sink=ssrf_name, flow=flow_kind))
+                        add(
+                            "TT_SSRF",
+                            "info",
+                            ln,
+                            f"externally-controlled URL flows into {ssrf_name} ({flow_kind} flow) — SSRF risk",
+                        )
 
     out.extend(_conditional_sink_findings(tree))
     return out
 
 
 # --- Abstract Effect Simulator ---
+
 
 class State:
     def __init__(self):
@@ -868,11 +1122,13 @@ class State:
 
     def register_effect(self, effect_type, sink_name):
         self.reachable_effects.add(effect_type)
-        self.reached_sinks.append({
-            "effect": effect_type,
-            "sink": sink_name,
-            "guards": [dict(g) for g in self.active_guards]
-        })
+        self.reached_sinks.append(
+            {
+                "effect": effect_type,
+                "sink": sink_name,
+                "guards": [dict(g) for g in self.active_guards],
+            }
+        )
 
 
 class EffectSimulator:
@@ -898,7 +1154,7 @@ class EffectSimulator:
 
     def get_assigned_variables(self, nodes):
         vars_set = set()
-        
+
         def walk_and_collect(n):
             if isinstance(n, ast.Assign):
                 for t in n.targets:
@@ -915,7 +1171,7 @@ class EffectSimulator:
                         vars_set.add(n.func.value.id)
             for child in ast.iter_child_nodes(n):
                 walk_and_collect(child)
-                
+
         def collect_targets(target):
             if isinstance(target, ast.Name):
                 vars_set.add(target.id)
@@ -928,10 +1184,10 @@ class EffectSimulator:
             elif isinstance(target, ast.Subscript):
                 if isinstance(target.value, ast.Name):
                     vars_set.add(target.value.id)
-                    
+
         for node in nodes:
             walk_and_collect(node)
-            
+
         return vars_set
 
     def check_expr_taint_sources(self, node, state, seed):
@@ -961,26 +1217,40 @@ class EffectSimulator:
                     func_name = node.func.attr
                     if isinstance(node.func.value, ast.Name):
                         func_obj = node.func.value.id
-                if func_name == "get" and func_obj in ("config", "settings", "options", "params", "self"):
+                if func_name == "get" and func_obj in (
+                    "config",
+                    "settings",
+                    "options",
+                    "params",
+                    "self",
+                ):
                     return True
                 if func_name == "getenv" or (func_name == "get" and func_obj == "environ"):
                     return True
 
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr":
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+        ):
             if len(node.args) >= 2:
                 obj_expr = node.args[0]
                 attr_expr = node.args[1]
-                is_attr_const = isinstance(attr_expr, ast.Constant) and isinstance(attr_expr.value, str)
+                is_attr_const = isinstance(attr_expr, ast.Constant) and isinstance(
+                    attr_expr.value, str
+                )
                 if not is_attr_const:
                     # Dynamic getattr over-approximation fallback
                     return True
-                if self.check_expr_taint_sources(obj_expr, state, seed) or self.check_expr_taint_sources(attr_expr, state, seed):
+                if self.check_expr_taint_sources(
+                    obj_expr, state, seed
+                ) or self.check_expr_taint_sources(attr_expr, state, seed):
                     return True
 
         for child in ast.iter_child_nodes(node):
             if self.check_expr_taint_sources(child, state, seed):
                 return True
-                
+
         return False
 
     def taint_target(self, target, is_tainted, state):
@@ -1002,7 +1272,9 @@ class EffectSimulator:
     def handle_method_call_updates(self, node, state, seed):
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
             call_node = node.value
-            if isinstance(call_node.func, ast.Attribute) and isinstance(call_node.func.value, ast.Name):
+            if isinstance(call_node.func, ast.Attribute) and isinstance(
+                call_node.func.value, ast.Name
+            ):
                 base_name = call_node.func.value.id
                 method_name = call_node.func.attr
                 if method_name in ("append", "extend", "insert", "update", "add"):
@@ -1028,17 +1300,19 @@ class EffectSimulator:
                 func_name = node.func.attr
                 if isinstance(node.func.value, ast.Name):
                     func_obj = node.func.value.id
-                    
+
             is_import = False
             if func_name == "__import__":
                 is_import = True
             elif func_name == "import_module" and func_obj == "importlib":
                 is_import = True
-                
+
             if is_import:
                 if node.args:
                     first_arg = node.args[0]
-                    is_const = isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str)
+                    is_const = isinstance(first_arg, ast.Constant) and isinstance(
+                        first_arg.value, str
+                    )
                     if not is_const:
                         state.register_effect("read", "importlib.import_module")
                         state.register_effect("write", "importlib.import_module")
@@ -1058,7 +1332,7 @@ class EffectSimulator:
     def check_sink_effects(self, node, state, seed):
         if not isinstance(node, ast.Call):
             return
-            
+
         sink_name = self.get_sink_name(node.func)
         any_arg_tainted = False
         for arg in node.args:
@@ -1070,7 +1344,7 @@ class EffectSimulator:
                 if self.check_expr_taint_sources(kw.value, state, seed):
                     any_arg_tainted = True
                     break
-                    
+
         is_base_tainted = False
         if isinstance(node.func, ast.Attribute):
             is_base_tainted = self.check_expr_taint_sources(node.func.value, state, seed)
@@ -1085,7 +1359,7 @@ class EffectSimulator:
             base_obj = self.get_sink_name(node.func.value)
             if base_obj in ("pickle", "marshal", "dill", "_pickle", "cpickle"):
                 is_eval = True
-                
+
         if is_eval and any_arg_tainted:
             state.register_effect("ev" + "al", sink_name)
             return
@@ -1101,17 +1375,21 @@ class EffectSimulator:
                 if isinstance(mode_arg, ast.Constant) and isinstance(mode_arg.value, str):
                     mode_val = mode_arg.value
             for kw in node.keywords:
-                if kw.arg == "mode" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                if (
+                    kw.arg == "mode"
+                    and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, str)
+                ):
                     mode_val = kw.value.value
             if any(c in mode_val for c in "wax+"):
                 is_write = True
-                
+
         if sink_name in write_funcs and any_arg_tainted:
             is_write = True
         elif isinstance(node.func, ast.Attribute) and node.func.attr in write_attrs:
             if any_arg_tainted or is_base_tainted:
                 is_write = True
-                
+
         if is_write:
             state.register_effect("write", sink_name)
             return
@@ -1125,26 +1403,57 @@ class EffectSimulator:
         elif isinstance(node.func, ast.Attribute) and node.func.attr in read_attrs:
             if any_arg_tainted or is_base_tainted:
                 is_read = True
-                
+
         if is_read:
             state.register_effect("read", sink_name)
             return
 
         # 4. network
         net_funcs = {"urlopen"}
-        net_attrs = {"post", "put", "patch", "get", "delete", "request", "connect", "send", "sendall", "sendto", "urlopen"}
+        net_attrs = {
+            "post",
+            "put",
+            "patch",
+            "get",
+            "delete",
+            "request",
+            "connect",
+            "send",
+            "sendall",
+            "sendto",
+            "urlopen",
+        }
         is_net = False
         if sink_name in net_funcs and any_arg_tainted:
             is_net = True
         elif isinstance(node.func, ast.Attribute) and node.func.attr in net_attrs:
             base_obj = self.get_sink_name(node.func.value)
-            if base_obj in ("requests", "httpx", "urllib", "urllib.request", "socket", "aiohttp", "smtplib", "ftplib", "session", "self"):
+            if base_obj in (
+                "requests",
+                "httpx",
+                "urllib",
+                "urllib.request",
+                "socket",
+                "aiohttp",
+                "smtplib",
+                "ftplib",
+                "session",
+                "self",
+            ):
                 if any_arg_tainted or is_base_tainted:
                     is_net = True
             elif any_arg_tainted or is_base_tainted:
-                if node.func.attr in ("connect", "send", "sendall", "sendto", "post", "put", "request"):
+                if node.func.attr in (
+                    "connect",
+                    "send",
+                    "sendall",
+                    "sendto",
+                    "post",
+                    "put",
+                    "request",
+                ):
                     is_net = True
-                    
+
         if is_net:
             state.register_effect("network", sink_name)
             return
@@ -1153,11 +1462,30 @@ class EffectSimulator:
         for node in ast.walk(test):
             if isinstance(node, ast.Call):
                 name = self.get_sink_name(node.func)
-                keywords = {"approve", "confirm", "verify", "authorized", "gate", "check", "permission", "auth", "safe", "allow"}
+                keywords = {
+                    "approve",
+                    "confirm",
+                    "verify",
+                    "authorized",
+                    "gate",
+                    "check",
+                    "permission",
+                    "auth",
+                    "safe",
+                    "allow",
+                }
                 if any(kw in name.lower() for kw in keywords):
                     return True
             elif isinstance(node, ast.Name):
-                keywords = {"approve", "confirm", "verify", "authorized", "gate", "safe", "approved"}
+                keywords = {
+                    "approve",
+                    "confirm",
+                    "verify",
+                    "authorized",
+                    "gate",
+                    "safe",
+                    "approved",
+                }
                 if any(kw in node.id.lower() for kw in keywords):
                     return True
         return False
@@ -1173,29 +1501,23 @@ class EffectSimulator:
     def simulate_if(self, node, state, seed):
         state_then = state.copy()
         state_else = state.copy()
-        
+
         is_safe = self.is_safety_check(node.test)
-        
+
         if is_safe:
             then_desc, else_desc = self.get_guard_descriptions(node.test)
-            guard_then = {
-                "condition_type": "approval-gate",
-                "description": then_desc
-            }
+            guard_then = {"condition_type": "approval-gate", "description": then_desc}
             state_then.active_guards.append(guard_then)
-            
-            guard_else = {
-                "condition_type": "approval-gate",
-                "description": else_desc
-            }
+
+            guard_else = {"condition_type": "approval-gate", "description": else_desc}
             state_else.active_guards.append(guard_else)
-            
+
         self.simulate_statements(node.body, state_then, seed)
         self.simulate_statements(node.orelse, state_else, seed)
-        
+
         state.reachable_effects.update(state_then.reachable_effects)
         state.reachable_effects.update(state_else.reachable_effects)
-        
+
         if state_then.terminated and state_else.terminated:
             state.terminated = True
             state.reached_sinks.extend(state_then.reached_sinks)
@@ -1223,24 +1545,24 @@ class EffectSimulator:
     def simulate_loop(self, node, state, seed):
         prev_tainted = set(state.tainted_vars)
         stabilized = False
-        
+
         for i in range(5):
             state_copy = state.copy()
             self.simulate_statements(node.body, state_copy, seed)
-            
+
             state.tainted_vars.update(state_copy.tainted_vars)
             state.reached_sinks.extend(state_copy.reached_sinks)
-            
+
             if state_copy.terminated:
                 state.terminated = True
                 break
-                
+
             current_tainted = set(state.tainted_vars)
             if current_tainted == prev_tainted:
                 stabilized = True
                 break
             prev_tainted = current_tainted
-            
+
         if not stabilized and not state.terminated:
             involved_vars = self.get_assigned_variables(node.body)
             state.tainted_vars.update(involved_vars)
@@ -1270,7 +1592,9 @@ class EffectSimulator:
                 self.check_dynamic_import_overapprox(sub, state, seed)
                 self.check_sink_effects(sub, state, seed)
         elif isinstance(stmt, ast.AugAssign):
-            is_tainted = self.check_expr_taint_sources(stmt.value, state, seed) or self.check_expr_taint_sources(stmt.target, state, seed)
+            is_tainted = self.check_expr_taint_sources(
+                stmt.value, state, seed
+            ) or self.check_expr_taint_sources(stmt.target, state, seed)
             self.taint_target(stmt.target, is_tainted, state)
             for sub in ast.walk(stmt):
                 self.check_dynamic_import_overapprox(sub, state, seed)
@@ -1301,23 +1625,23 @@ class EffectSimulator:
     def simulate(self):
         if not self.tree:
             return []
-            
+
         results = []
         entry_points = self.get_entry_points()
-        
+
         for entry in entry_points:
             entry_name = "<module>"
             if isinstance(entry, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 entry_name = entry.name
-                
+
             reachable_effects = set()
             guarding_conditions = []
-            
+
             sink_paths = {}
-            
+
             for seed in ("hostile-input", "poisoned-MCP", "attacker-controlled default"):
                 state = State()
-                
+
                 if isinstance(entry, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if seed == "hostile-input":
                         params = [arg.arg for arg in entry.args.args + entry.args.kwonlyargs]
@@ -1330,22 +1654,28 @@ class EffectSimulator:
                         defaults_names = []
                         num_defaults = len(entry.args.defaults)
                         if num_defaults > 0:
-                            defaults_names.extend([arg.arg for arg in entry.args.args[-num_defaults:]])
+                            defaults_names.extend(
+                                [arg.arg for arg in entry.args.args[-num_defaults:]]
+                            )
                         for kwarg, kw_default in zip(entry.args.kwonlyargs, entry.args.kw_defaults):
                             if kw_default is not None:
                                 defaults_names.append(kwarg.arg)
                         state.tainted_vars.update(defaults_names)
-                
-                body = entry.body if isinstance(entry, (ast.FunctionDef, ast.AsyncFunctionDef)) else entry.body
+
+                body = (
+                    entry.body
+                    if isinstance(entry, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    else entry.body
+                )
                 self.simulate_statements(body, state, seed)
-                
+
                 reachable_effects.update(state.reachable_effects)
                 for item in state.reached_sinks:
                     key = (item["effect"], item["sink"])
                     if key not in sink_paths:
                         sink_paths[key] = []
                     sink_paths[key].append(item["guards"])
-                    
+
             for (eff, sink), paths in sink_paths.items():
                 seen_guards = set()
                 for guards in paths:
@@ -1353,13 +1683,15 @@ class EffectSimulator:
                         guard_key = (g["condition_type"], g["description"])
                         if guard_key not in seen_guards:
                             seen_guards.add(guard_key)
-                            guarding_conditions.append({
-                                "effect": eff,
-                                "sink": sink,
-                                "condition_type": g["condition_type"],
-                                "description": g["description"]
-                            })
-                            
+                            guarding_conditions.append(
+                                {
+                                    "effect": eff,
+                                    "sink": sink,
+                                    "condition_type": g["condition_type"],
+                                    "description": g["description"],
+                                }
+                            )
+
             guarded_effects = set()
             unshielded_effects = set()
             for (eff, sink), paths in sink_paths.items():
@@ -1367,17 +1699,19 @@ class EffectSimulator:
                     unshielded_effects.add(eff)
                 else:
                     guarded_effects.add(eff)
-                    
+
             guarded_effects = guarded_effects - unshielded_effects
-            
-            results.append({
-                "entry_point": entry_name,
-                "reachable_effects": list(reachable_effects),
-                "guarding_conditions": guarding_conditions,
-                "guarded_effects": list(guarded_effects),
-                "unshielded_effects": list(unshielded_effects)
-            })
-            
+
+            results.append(
+                {
+                    "entry_point": entry_name,
+                    "reachable_effects": list(reachable_effects),
+                    "guarding_conditions": guarding_conditions,
+                    "guarded_effects": list(guarded_effects),
+                    "unshielded_effects": list(unshielded_effects),
+                }
+            )
+
         return results
 
 
@@ -1441,8 +1775,8 @@ def analyze_python_package(files) -> list[ASTFinding]:
     seen: set = set()
     for stem, tree in trees.items():
         rel = stem_to_rel[stem]
-        tainted_locals: dict = {}   # `from <mod> import <name>` local name -> source stem
-        module_aliases: dict = {}   # `import <mod> [as x]` alias -> source stem
+        tainted_locals: dict = {}  # `from <mod> import <name>` local name -> source stem
+        module_aliases: dict = {}  # `import <mod> [as x]` alias -> source stem
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 mod = (node.module or "").split(".")[-1]
@@ -1474,9 +1808,12 @@ def analyze_python_package(files) -> list[ASTFinding]:
             if src_mod is None:
                 for arg in (*node.args, *(kw.value for kw in node.keywords)):
                     for sub in ast.walk(arg):
-                        if (isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name)
-                                and sub.value.id in module_aliases
-                                and sub.attr in exports[module_aliases[sub.value.id]]):
+                        if (
+                            isinstance(sub, ast.Attribute)
+                            and isinstance(sub.value, ast.Name)
+                            and sub.value.id in module_aliases
+                            and sub.attr in exports[module_aliases[sub.value.id]]
+                        ):
                             src_mod = module_aliases[sub.value.id]
                             break
                     if src_mod is not None:
@@ -1484,10 +1821,15 @@ def analyze_python_package(files) -> list[ASTFinding]:
             if src_mod is not None and (rel, ln) not in seen:
                 seen.add((rel, ln))
                 src_rel = stem_to_rel.get(src_mod, src_mod + ".py")
-                out.append(ASTFinding(
-                    "CROSS_FILE_EXEC", "crit", ln,
-                    f"{rel}:{ln} {sink} executes a decode-derived value imported from sibling "
-                    f"module {src_rel} — cross-file obfuscated payload split to evade per-file scanning"))
+                out.append(
+                    ASTFinding(
+                        "CROSS_FILE_EXEC",
+                        "crit",
+                        ln,
+                        f"{rel}:{ln} {sink} executes a decode-derived value imported from sibling "
+                        f"module {src_rel} — cross-file obfuscated payload split to evade per-file scanning",
+                    )
+                )
     return out
 
 
@@ -1496,20 +1838,26 @@ def analyze_python_package(files) -> list[ASTFinding]:
 _SH_CRED_FILE_RE = re.compile(
     r"\.ssh/id_[a-z0-9_]+|\bid_rsa\b|\bid_ed25519\b|\.aws/credentials|\.netrc\b|"
     r"login\.keychain|wallet\.dat|\.docker/config\b|\.kube/config\b|\.npmrc\b|\.pypirc\b|"
-    r"\.openclaw/|/\.config/[^/\s\"']+/", re.I)
+    r"\.openclaw/|/\.config/[^/\s\"']+/",
+    re.I,
+)
 # Outbound commands that can send data off the machine.
 _SH_OUTBOUND_RE = re.compile(r"\b(?:curl|wget|nc|ncat|netcat)\b|/dev/tcp/", re.I)
 # curl|wget URL piped into a NON-shell interpreter (download -> exec) — extends the
 # sh/bash-only _PIPE_SHELL_RE (checks.py) to python/node/perl/ruby/php/deno.
 _SH_PIPE_INTERP_RE = re.compile(
     r"(?:curl|wget)\b[^\n|]{0,256}?https?://[^\n|]{0,256}\|\s*(?:sudo\s+)?"
-    r"(?:python3?|node|perl|ruby|php|deno)\b", re.I)
+    r"(?:python3?|node|perl|ruby|php|deno)\b",
+    re.I,
+)
 # VAR=$(cat ~/.ssh/id_rsa) / VAR=`cat .aws/credentials` / VAR=$(< ~/.netrc): a shell
 # variable whose value derives from reading a credential file.
 _SH_CRED_ASSIGN_RE = re.compile(
     r"(?P<var>[A-Za-z_][A-Za-z0-9_]*)=[^\n]*?(?:cat|less|head|tail|<)\s*[^\n]*?"
     r"(?:\.ssh/id_|id_rsa|id_ed25519|\.aws/credentials|\.netrc|keychain|wallet\.dat|"
-    r"\.docker/config|\.kube/config|\.npmrc|\.pypirc|\.openclaw/)", re.I)
+    r"\.docker/config|\.kube/config|\.npmrc|\.pypirc|\.openclaw/)",
+    re.I,
+)
 
 
 def _sh_mask_comments(source: str) -> str:
@@ -1541,29 +1889,41 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
 
     for m in _SH_PIPE_INTERP_RE.finditer(masked):
         ln = masked.count("\n", 0, m.start()) + 1
-        add("SHELL_PIPE_INTERP", "crit", ln,
+        add(
+            "SHELL_PIPE_INTERP",
+            "crit",
+            ln,
             "downloads a remote payload and pipes it into an interpreter "
-            "(curl/wget ... | python/node/perl/...) — remote code execution")
+            "(curl/wget ... | python/node/perl/...) — remote code execution",
+        )
 
     cred_vars = {m.group("var") for m in _SH_CRED_ASSIGN_RE.finditer(masked)}
     for i, raw in enumerate(masked.splitlines(), 1):
         if not _SH_OUTBOUND_RE.search(raw):
             continue
         if _SH_CRED_FILE_RE.search(raw):
-            add("SHELL_CRED_EXFIL", "crit", i,
+            add(
+                "SHELL_CRED_EXFIL",
+                "crit",
+                i,
                 "reads a credential file and sends it to an outbound command "
-                "(curl/wget/nc) — credential exfiltration")
+                "(curl/wget/nc) — credential exfiltration",
+            )
             continue
         if any(re.search(r"\$\{?" + re.escape(v) + r"\b", raw) for v in cred_vars):
-            add("SHELL_CRED_EXFIL", "crit", i,
+            add(
+                "SHELL_CRED_EXFIL",
+                "crit",
+                i,
                 "a credential-file value flows into an outbound command "
-                "(curl/wget/nc) — credential exfiltration")
+                "(curl/wget/nc) — credential exfiltration",
+            )
     return out
 
 
 def simulate_effects(source: str, filename: str = "<skill>") -> list[dict]:
     """Analyze Python source to simulate reachable effects and guarding conditions under seeds.
-    
+
     Never raises, returns an empty list on failure.
     """
     try:

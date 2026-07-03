@@ -967,6 +967,18 @@ Advisory checks are recorded for coverage but are not scored.
 
 ## Advisory checks
 
+### B86 - Import-path hijack surface (sys.path from writable/relative location)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Defensibility / Supply-Chain Tamper
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Import-path hijack surface (sys.path from writable/relative location)
+- Remediation:
+  - none
+
 ### C3 - Backups of SOUL.md / memory
 
 - Severity: LOW

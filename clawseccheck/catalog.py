@@ -2,6 +2,7 @@
 
 Grounded on docs/specs/openclaw-audit-skill-spec.md (v2). Pure stdlib, no deps.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -17,7 +18,7 @@ WEIGHT = {CRITICAL: 10, HIGH: 6, MEDIUM: 3, LOW: 1}
 # finding statuses
 PASS = "PASS"
 FAIL = "FAIL"
-WARN = "WARN"        # partial / likely-insecure default; counts half, does not hard-cap
+WARN = "WARN"  # partial / likely-insecure default; counts half, does not hard-cap
 UNKNOWN = "UNKNOWN"  # not determinable from config -> excluded from score denominator
 
 # Confidence tiers (orthogonal to severity/status). A self-report from the audited
@@ -30,41 +31,51 @@ ATTESTED = "ATTESTED"
 # 13 canonical OpenClaw security surfaces + "trifecta" (cross-cutting).
 # Grounded against docs/research/output-redesign-dashboard.md (2026-06-27).
 SURFACES: tuple[str, ...] = (
-    "gateway", "tools", "agents", "mcp", "skills",
-    "bootstrap", "channels", "sessions", "secrets",
-    "monitoring", "hooks", "host", "update",
-    "trifecta",   # cross-cutting: A1 headline check only — not a bucket surface
+    "gateway",
+    "tools",
+    "agents",
+    "mcp",
+    "skills",
+    "bootstrap",
+    "channels",
+    "sessions",
+    "secrets",
+    "monitoring",
+    "hooks",
+    "host",
+    "update",
+    "trifecta",  # cross-cutting: A1 headline check only — not a bucket surface
 )
 
 # 13-surface → 7-family roll-up (dashboard grouping; unblocks F-029).
 # "trifecta" is intentionally absent: it is a cross-cutting chip, never a family bucket.
 FAMILY_OF: dict[str, str] = {
-    "gateway":    "exposure",           # Exposure & Network
-    "channels":   "exposure",
-    "sessions":   "exposure",
-    "tools":      "privilege",          # Privilege & Execution
-    "agents":     "privilege",
-    "skills":     "supply_chain",       # Supply Chain
-    "mcp":        "supply_chain",
-    "bootstrap":  "content_integrity",  # Content & Memory Integrity
-    "secrets":    "secrets",            # Secrets & Data
-    "monitoring": "detection",          # Detection & Host
-    "host":       "detection",
-    "hooks":      "automation",         # Automation & Maintenance
-    "update":     "automation",
+    "gateway": "exposure",  # Exposure & Network
+    "channels": "exposure",
+    "sessions": "exposure",
+    "tools": "privilege",  # Privilege & Execution
+    "agents": "privilege",
+    "skills": "supply_chain",  # Supply Chain
+    "mcp": "supply_chain",
+    "bootstrap": "content_integrity",  # Content & Memory Integrity
+    "secrets": "secrets",  # Secrets & Data
+    "monitoring": "detection",  # Detection & Host
+    "host": "detection",
+    "hooks": "automation",  # Automation & Maintenance
+    "update": "automation",
 }
 
 # Human-facing family labels, in the fixed order the Dashboard renders them.
 # "trifecta" (A1) is routed to "privilege" by the report renderer — it's an
 # agent-behavior signal, not its own bucket (unblocks F-044).
 FAMILY_LABEL: dict[str, str] = {
-    "exposure":          "Exposure & Network",
-    "privilege":         "Privilege & Execution",
-    "supply_chain":      "Supply Chain",
+    "exposure": "Exposure & Network",
+    "privilege": "Privilege & Execution",
+    "supply_chain": "Supply Chain",
     "content_integrity": "Content & Memory Integrity",
-    "secrets":           "Secrets & Data",
-    "detection":         "Detection & Host",
-    "automation":        "Automation & Maintenance",
+    "secrets": "Secrets & Data",
+    "detection": "Detection & Host",
+    "automation": "Automation & Maintenance",
 }
 FAMILY_ORDER: tuple[str, ...] = tuple(FAMILY_LABEL.keys())
 
@@ -74,8 +85,8 @@ class CheckMeta:
     id: str
     title: str
     severity: str
-    block: str           # "trifecta" | "hardening" | "advisory"
-    framework: str       # human-facing taxonomy tag
+    block: str  # "trifecta" | "hardening" | "advisory"
+    framework: str  # human-facing taxonomy tag
     scored: bool = True
     # How sure we are a finding is correct: HIGH = a deterministic config-field fact;
     # MEDIUM = a heuristic match on free text / filesystem that may need a human look.
@@ -89,356 +100,820 @@ class CheckMeta:
 # Block B — Hardening ring (scored)
 # Block C — advisory (reported, NOT in score denominator)
 CATALOG: list[CheckMeta] = [
-    CheckMeta("A1", "Lethal Trifecta (untrusted input × sensitive data × outbound)",
-              CRITICAL, "trifecta", "Lethal Trifecta",
-              surface="trifecta"),
-    CheckMeta("B1", "Secrets in plaintext config / bootstrap files",
-              CRITICAL, "hardening", "Secrets Vault",
-              surface="secrets"),
-    CheckMeta("B2", "Gateway exposure & channel authentication",
-              CRITICAL, "hardening", "Zero Trust / Gateway",
-              surface="gateway"),
-    CheckMeta("B3", "Least privilege (elevated tools / allowlists)",
-              HIGH, "hardening", "Least Privilege",
-              surface="tools"),
-    CheckMeta("B4", "Execution sandbox",
-              HIGH, "hardening", "Least Privilege / Sandbox",
-              surface="agents"),
-    CheckMeta("B5", "Plugin / skill supply-chain integrity",
-              HIGH, "hardening", "Supply Chain",
-              surface="skills"),
-    CheckMeta("B6", "Bootstrap-file injection surface (SOUL.md/AGENTS.md/TOOLS.md)",
-              HIGH, "hardening", "Untrusted↔Trusted separation", confidence="MEDIUM",
-              surface="bootstrap"),
-    CheckMeta("B7", "Memory poisoning surface (MEMORY.md / memory dir)",
-              HIGH, "hardening", "Memory integrity",
-              surface="bootstrap"),
-    CheckMeta("B8", "Human approval on destructive actions",
-              HIGH, "hardening", "Human Approval",
-              surface="tools"),
-    CheckMeta("B9", "System-prompt / secret leak in tool output",
-              MEDIUM, "hardening", "Egress / Leak",
-              surface="secrets"),
-    CheckMeta("B10", "Audit log & sensitive redaction",
-              MEDIUM, "hardening", "Audit Log",
-              surface="monitoring"),
-    CheckMeta("B11", "Transport TLS & at-rest protection",
-              MEDIUM, "hardening", "TLS & Encryption",
-              surface="gateway"),
-    CheckMeta("B12", "Local-first & model hygiene",
-              LOW, "hardening", "Local First",
-              surface="secrets"),
-    CheckMeta("B13", "Installed skill / plugin safety (downloaded, not self-made)",
-              HIGH, "hardening", "Supply Chain / ClawHavoc", confidence="MEDIUM",
-              surface="skills"),
-    CheckMeta("B14", "Egress surface (where the agent can reach out)",
-              MEDIUM, "hardening", "Egress Control", scored=False,
-              surface="monitoring"),
-    CheckMeta("B15", "MCP server trust boundaries",
-              HIGH, "hardening", "MCP Trust",
-              surface="mcp"),
-    CheckMeta("B16", "Threat monitoring / detection in place",
-              MEDIUM, "hardening", "Monitoring",
-              surface="monitoring"),
-    CheckMeta("B17", "Autonomy / heartbeat actions",
-              MEDIUM, "hardening", "Autonomy Control",
-              surface="tools"),
-    CheckMeta("B18", "Subagent delegation",
-              MEDIUM, "hardening", "Least Privilege / Subagents",
-              surface="agents"),
-    CheckMeta("B19", "Data at-rest protection (memory/logs)",
-              MEDIUM, "hardening", "Data Protection",
-              surface="secrets"),
-    CheckMeta("B20", "Bootstrap / memory write protection",
-              MEDIUM, "hardening", "Write Integrity",
-              surface="bootstrap"),
-    CheckMeta("B21", "Tool-output / retrieved-content trust boundary",
-              MEDIUM, "hardening", "Prompt Injection / Trust Boundary", confidence="MEDIUM",
-              surface="bootstrap"),
-    CheckMeta("B22", "Self-modification risk (identity/skill files writable + tools enabled)",
-              HIGH, "hardening", "Write Integrity / Self-Modification",
-              surface="agents"),
-    CheckMeta("B23", "Approval-bypass directives in bootstrap",
-              HIGH, "hardening", "Human Approval", confidence="MEDIUM",
-              surface="bootstrap"),
-    CheckMeta("B24", "MCP server hardening",
-              HIGH, "hardening", "MCP Trust",
-              surface="mcp"),
-    CheckMeta("B25", "Update / pinning hygiene",
-              MEDIUM, "hardening", "Supply Chain",
-              surface="skills"),
-    CheckMeta("B30", "Sender identity strength (name-matching / mutable-ID bypass)",
-              MEDIUM, "hardening", "Sender Identity",
-              surface="channels"),
-    CheckMeta("B31", "Effective-tools bypass (illusory deny — write blocked but apply_patch/exec still write)",
-              MEDIUM, "hardening", "Least Privilege / Tool Policy",
-              surface="tools"),
-    CheckMeta("B32", "Control-plane mutation reachability via gateway",
-              HIGH, "hardening", "Control Plane",
-              surface="gateway"),
-    CheckMeta("B38", "Browser control / cookie & SSRF exposure",
-              HIGH, "hardening", "Browser / SSRF",
-              surface="sessions"),
-    CheckMeta("B39", "Session visibility / cross-user transcript leak",
-              MEDIUM, "hardening", "Session Isolation",
-              surface="sessions"),
-    CheckMeta("B26", "Untrusted-context exposure (channels.contextVisibility)",
-              MEDIUM, "hardening", "Injection Surface",
-              surface="channels"),
-    CheckMeta("B33", "Known-vulnerable OpenClaw version gate",
-              HIGH, "hardening", "Patch hygiene",
-              surface="update"),
-    CheckMeta("B41", "Credential blast-radius assessment",
-              MEDIUM, "advisory", "Credential / Blast Radius", scored=True,
-              surface="secrets"),
-    CheckMeta("B42", "Skill/plugin install-time policy (postinstall hooks, writable skill dirs)",
-              MEDIUM, "hardening", "Supply Chain / Install Policy", confidence="MEDIUM",
-              surface="skills"),
+    CheckMeta(
+        "A1",
+        "Lethal Trifecta (untrusted input × sensitive data × outbound)",
+        CRITICAL,
+        "trifecta",
+        "Lethal Trifecta",
+        surface="trifecta",
+    ),
+    CheckMeta(
+        "B1",
+        "Secrets in plaintext config / bootstrap files",
+        CRITICAL,
+        "hardening",
+        "Secrets Vault",
+        surface="secrets",
+    ),
+    CheckMeta(
+        "B2",
+        "Gateway exposure & channel authentication",
+        CRITICAL,
+        "hardening",
+        "Zero Trust / Gateway",
+        surface="gateway",
+    ),
+    CheckMeta(
+        "B3",
+        "Least privilege (elevated tools / allowlists)",
+        HIGH,
+        "hardening",
+        "Least Privilege",
+        surface="tools",
+    ),
+    CheckMeta(
+        "B4", "Execution sandbox", HIGH, "hardening", "Least Privilege / Sandbox", surface="agents"
+    ),
+    CheckMeta(
+        "B5",
+        "Plugin / skill supply-chain integrity",
+        HIGH,
+        "hardening",
+        "Supply Chain",
+        surface="skills",
+    ),
+    CheckMeta(
+        "B6",
+        "Bootstrap-file injection surface (SOUL.md/AGENTS.md/TOOLS.md)",
+        HIGH,
+        "hardening",
+        "Untrusted↔Trusted separation",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
+    CheckMeta(
+        "B7",
+        "Memory poisoning surface (MEMORY.md / memory dir)",
+        HIGH,
+        "hardening",
+        "Memory integrity",
+        surface="bootstrap",
+    ),
+    CheckMeta(
+        "B8",
+        "Human approval on destructive actions",
+        HIGH,
+        "hardening",
+        "Human Approval",
+        surface="tools",
+    ),
+    CheckMeta(
+        "B9",
+        "System-prompt / secret leak in tool output",
+        MEDIUM,
+        "hardening",
+        "Egress / Leak",
+        surface="secrets",
+    ),
+    CheckMeta(
+        "B10",
+        "Audit log & sensitive redaction",
+        MEDIUM,
+        "hardening",
+        "Audit Log",
+        surface="monitoring",
+    ),
+    CheckMeta(
+        "B11",
+        "Transport TLS & at-rest protection",
+        MEDIUM,
+        "hardening",
+        "TLS & Encryption",
+        surface="gateway",
+    ),
+    CheckMeta(
+        "B12", "Local-first & model hygiene", LOW, "hardening", "Local First", surface="secrets"
+    ),
+    CheckMeta(
+        "B13",
+        "Installed skill / plugin safety (downloaded, not self-made)",
+        HIGH,
+        "hardening",
+        "Supply Chain / ClawHavoc",
+        confidence="MEDIUM",
+        surface="skills",
+    ),
+    CheckMeta(
+        "B14",
+        "Egress surface (where the agent can reach out)",
+        MEDIUM,
+        "hardening",
+        "Egress Control",
+        scored=False,
+        surface="monitoring",
+    ),
+    CheckMeta("B15", "MCP server trust boundaries", HIGH, "hardening", "MCP Trust", surface="mcp"),
+    CheckMeta(
+        "B16",
+        "Threat monitoring / detection in place",
+        MEDIUM,
+        "hardening",
+        "Monitoring",
+        surface="monitoring",
+    ),
+    CheckMeta(
+        "B17",
+        "Autonomy / heartbeat actions",
+        MEDIUM,
+        "hardening",
+        "Autonomy Control",
+        surface="tools",
+    ),
+    CheckMeta(
+        "B18",
+        "Subagent delegation",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Subagents",
+        surface="agents",
+    ),
+    CheckMeta(
+        "B19",
+        "Data at-rest protection (memory/logs)",
+        MEDIUM,
+        "hardening",
+        "Data Protection",
+        surface="secrets",
+    ),
+    CheckMeta(
+        "B20",
+        "Bootstrap / memory write protection",
+        MEDIUM,
+        "hardening",
+        "Write Integrity",
+        surface="bootstrap",
+    ),
+    CheckMeta(
+        "B21",
+        "Tool-output / retrieved-content trust boundary",
+        MEDIUM,
+        "hardening",
+        "Prompt Injection / Trust Boundary",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
+    CheckMeta(
+        "B22",
+        "Self-modification risk (identity/skill files writable + tools enabled)",
+        HIGH,
+        "hardening",
+        "Write Integrity / Self-Modification",
+        surface="agents",
+    ),
+    CheckMeta(
+        "B23",
+        "Approval-bypass directives in bootstrap",
+        HIGH,
+        "hardening",
+        "Human Approval",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
+    CheckMeta("B24", "MCP server hardening", HIGH, "hardening", "MCP Trust", surface="mcp"),
+    CheckMeta(
+        "B25", "Update / pinning hygiene", MEDIUM, "hardening", "Supply Chain", surface="skills"
+    ),
+    CheckMeta(
+        "B30",
+        "Sender identity strength (name-matching / mutable-ID bypass)",
+        MEDIUM,
+        "hardening",
+        "Sender Identity",
+        surface="channels",
+    ),
+    CheckMeta(
+        "B31",
+        "Effective-tools bypass (illusory deny — write blocked but apply_patch/exec still write)",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Tool Policy",
+        surface="tools",
+    ),
+    CheckMeta(
+        "B32",
+        "Control-plane mutation reachability via gateway",
+        HIGH,
+        "hardening",
+        "Control Plane",
+        surface="gateway",
+    ),
+    CheckMeta(
+        "B38",
+        "Browser control / cookie & SSRF exposure",
+        HIGH,
+        "hardening",
+        "Browser / SSRF",
+        surface="sessions",
+    ),
+    CheckMeta(
+        "B39",
+        "Session visibility / cross-user transcript leak",
+        MEDIUM,
+        "hardening",
+        "Session Isolation",
+        surface="sessions",
+    ),
+    CheckMeta(
+        "B26",
+        "Untrusted-context exposure (channels.contextVisibility)",
+        MEDIUM,
+        "hardening",
+        "Injection Surface",
+        surface="channels",
+    ),
+    CheckMeta(
+        "B33",
+        "Known-vulnerable OpenClaw version gate",
+        HIGH,
+        "hardening",
+        "Patch hygiene",
+        surface="update",
+    ),
+    CheckMeta(
+        "B41",
+        "Credential blast-radius assessment",
+        MEDIUM,
+        "advisory",
+        "Credential / Blast Radius",
+        scored=True,
+        surface="secrets",
+    ),
+    CheckMeta(
+        "B42",
+        "Skill/plugin install-time policy (postinstall hooks, writable skill dirs)",
+        MEDIUM,
+        "hardening",
+        "Supply Chain / Install Policy",
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # Attestation layer (v0.26.0) — enriched by the agent's self-report (--attest).
     # ATTESTED confidence: weaker than a config fact; advisory (not scored) so the
     # static grade is unaffected when no attestation is supplied (finding -> UNKNOWN).
-    CheckMeta("B43", "Capability blast-radius / dangerous-verb inventory",
-              HIGH, "advisory", "Least Privilege / Blast Radius",
-              scored=False, confidence=ATTESTED,
-              surface="tools"),
-    CheckMeta("B44", "Attestation ⇄ config mismatch (undisclosed capability)",
-              MEDIUM, "advisory", "Trust Boundary / Drift",
-              scored=False, confidence=ATTESTED,
-              surface="tools"),
+    CheckMeta(
+        "B43",
+        "Capability blast-radius / dangerous-verb inventory",
+        HIGH,
+        "advisory",
+        "Least Privilege / Blast Radius",
+        scored=False,
+        confidence=ATTESTED,
+        surface="tools",
+    ),
+    CheckMeta(
+        "B44",
+        "Attestation ⇄ config mismatch (undisclosed capability)",
+        MEDIUM,
+        "advisory",
+        "Trust Boundary / Drift",
+        scored=False,
+        confidence=ATTESTED,
+        surface="tools",
+    ),
     # Multi-agent privilege separation (v1.4.0).
     # B45 reads the attested agent roster (config has no per-agent tool allowlist), so
     # it is ATTESTED + advisory like B43/B44 — UNKNOWN without --attest, no score impact.
     # B46 is config-only (grounded multi-agent topology + global trifecta + no gate); it
     # is scored but capped at WARN so it can never introduce a new FAIL on real configs.
-    CheckMeta("B45", "Per-agent privilege separation (trifecta decomposition)",
-              HIGH, "advisory", "Privilege Separation / Lethal Trifecta",
-              scored=False, confidence=ATTESTED,
-              surface="agents"),
-    CheckMeta("B46", "Multi-agent trifecta exposure",
-              MEDIUM, "hardening", "Least Privilege / Agents",
-              surface="agents"),
+    CheckMeta(
+        "B45",
+        "Per-agent privilege separation (trifecta decomposition)",
+        HIGH,
+        "advisory",
+        "Privilege Separation / Lethal Trifecta",
+        scored=False,
+        confidence=ATTESTED,
+        surface="agents",
+    ),
+    CheckMeta(
+        "B46",
+        "Multi-agent trifecta exposure",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Agents",
+        surface="agents",
+    ),
     # B47 (v1.5.0): cross-agent reassembly over the attested delegation graph. ATTESTED +
     # advisory like B45 — config has no delegation graph, so UNKNOWN without --attest.
-    CheckMeta("B47", "Cross-agent trifecta reassembly (delegation graph)",
-              HIGH, "advisory", "Privilege Separation / Delegation",
-              scored=False, confidence=ATTESTED,
-              surface="agents"),
+    CheckMeta(
+        "B47",
+        "Cross-agent trifecta reassembly (delegation graph)",
+        HIGH,
+        "advisory",
+        "Privilege Separation / Delegation",
+        scored=False,
+        confidence=ATTESTED,
+        surface="agents",
+    ),
     # B48 (v1.8.0): grounded registry of OpenClaw "dangerously*/allowUnsafe*" break-glass
     # toggles. Scored: FAIL on sandbox-escape / control-plane-auth-disable, WARN on the rest.
-    CheckMeta("B48", "Dangerous break-glass overrides enabled",
-              HIGH, "hardening", "Least Privilege / Break-Glass",
-              surface="tools"),
+    CheckMeta(
+        "B48",
+        "Dangerous break-glass overrides enabled",
+        HIGH,
+        "hardening",
+        "Least Privilege / Break-Glass",
+        surface="tools",
+    ),
     # Host Watch Posture — is anyone watching the machine the agent runs on?
     # Read-only host-monitor detection (hostwatch.detect). LOW + WARN-only (never
     # FAIL): the absence of host monitoring is flagged only when the agent is
     # high-privilege, so it never hard-caps the grade.
-    CheckMeta("B50", "Host network monitoring / IDS",
-              LOW, "hardening", "Host Watch / Network IDS",
-              surface="host"),
-    CheckMeta("B51", "Host audit / syscall logging",
-              LOW, "hardening", "Host Watch / Audit",
-              surface="host"),
-    CheckMeta("B52", "Host file-integrity monitoring",
-              LOW, "hardening", "Host Watch / FIM",
-              surface="host"),
-    CheckMeta("B53", "Host endpoint protection / EDR",
-              LOW, "hardening", "Host Watch / EDR",
-              surface="host"),
-    CheckMeta("B54", "Host firewall active",
-              LOW, "hardening", "Host Watch / Firewall",
-              surface="host"),
+    CheckMeta(
+        "B50",
+        "Host network monitoring / IDS",
+        LOW,
+        "hardening",
+        "Host Watch / Network IDS",
+        surface="host",
+    ),
+    CheckMeta(
+        "B51",
+        "Host audit / syscall logging",
+        LOW,
+        "hardening",
+        "Host Watch / Audit",
+        surface="host",
+    ),
+    CheckMeta(
+        "B52",
+        "Host file-integrity monitoring",
+        LOW,
+        "hardening",
+        "Host Watch / FIM",
+        surface="host",
+    ),
+    CheckMeta(
+        "B53",
+        "Host endpoint protection / EDR",
+        LOW,
+        "hardening",
+        "Host Watch / EDR",
+        surface="host",
+    ),
+    CheckMeta(
+        "B54", "Host firewall active", LOW, "hardening", "Host Watch / Firewall", surface="host"
+    ),
     # B55 (C-013): filesystem-write tool exposure. Advisory (scored=False) — it names
     # the fs-write capability and feeds RISK-12 (write + untrusted ingress = tamper /
     # persistence); the scored write/least-privilege dimensions stay with B3/B22/B31 so
     # this never introduces a new scored FAIL on real configs.
-    CheckMeta("B55", "Filesystem-write tool exposure (broad fs-write without scoping)",
-              HIGH, "hardening", "Least Privilege / Filesystem Write", scored=False,
-              surface="tools"),
+    CheckMeta(
+        "B55",
+        "Filesystem-write tool exposure (broad fs-write without scoping)",
+        HIGH,
+        "hardening",
+        "Least Privilege / Filesystem Write",
+        scored=False,
+        surface="tools",
+    ),
     # B56 (NC-4) / B57 (NC-8): real config-fact misconfigurations grounded against
     # docs.openclaw.ai/gateway/security. Both FAIL only on an explicit dangerous value
     # (allowedOrigins contains "*"; permissionMode=="approve-all"); a default/absent
     # config is UNKNOWN/PASS, so neither introduces a false-positive FAIL on real configs.
-    CheckMeta("B56", "Control-UI cross-origin allow-all (allowedOrigins \"*\")",
-              HIGH, "hardening", "Zero Trust / Control-UI Origin",
-              surface="gateway"),
-    CheckMeta("B57", "Plugin auto-approve (permissionMode=approve-all)",
-              HIGH, "hardening", "Least Privilege / Plugin Approval",
-              surface="skills"),
+    CheckMeta(
+        "B56",
+        'Control-UI cross-origin allow-all (allowedOrigins "*")',
+        HIGH,
+        "hardening",
+        "Zero Trust / Control-UI Origin",
+        surface="gateway",
+    ),
+    CheckMeta(
+        "B57",
+        "Plugin auto-approve (permissionMode=approve-all)",
+        HIGH,
+        "hardening",
+        "Least Privilege / Plugin Approval",
+        surface="skills",
+    ),
     # B58 (v1.17.0): Unicode de-obfuscation pre-pass — detects injections hidden behind
     # Cyrillic/Greek confusables, zero-width chars, and bidi-override controls.
     # FAIL only on a confirmed evasion delta (injection visible post-norm, invisible raw);
     # WARN on obfuscation presence without a confirmed injection (never a false-positive FAIL).
-    CheckMeta("B58", "Unicode-obfuscated injection / hidden-text evasion",
-              HIGH, "hardening", "Prompt Injection / Unicode Evasion", confidence="MEDIUM",
-              surface="bootstrap"),
+    CheckMeta(
+        "B58",
+        "Unicode-obfuscated injection / hidden-text evasion",
+        HIGH,
+        "hardening",
+        "Prompt Injection / Unicode Evasion",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
     # B59 (v1.17.0): Markdown/HTML image URLs with data-bearing query params — potential
     # exfiltration channel (image fetch carries context as query params to remote server).
     # WARN only — query-param images are common in legit docs; FAIL would risk FP.
-    CheckMeta("B59", "Markdown-image data-exfil via remote URL",
-              MEDIUM, "hardening", "Data Exfiltration / Markdown Injection", confidence="MEDIUM",
-              surface="bootstrap"),
+    CheckMeta(
+        "B59",
+        "Markdown-image data-exfil via remote URL",
+        MEDIUM,
+        "hardening",
+        "Data Exfiltration / Markdown Injection",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
     # B60 (v1.17.0): Prompt self-replication / propagation directive (ATLAS AML.T0061).
     # WARN only — highest FP risk among content checks; requires verb + target proximity.
-    CheckMeta("B60", "Prompt self-replication / propagation directive",
-              HIGH, "hardening", "Agentic Worm / Self-Replication", confidence="MEDIUM",
-              surface="bootstrap"),
+    CheckMeta(
+        "B60",
+        "Prompt self-replication / propagation directive",
+        HIGH,
+        "hardening",
+        "Agentic Worm / Self-Replication",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
     # B61 (v1.17.0): Cross-agent config snooping / credential theft (F-006 / SkillSpector
     # AS1–AS3). FAIL when a foreign-agent config path co-occurs with a read/exfil verb;
     # WARN on path-alone. Conservative gating (path + verb) prevents false-positive FAILs.
-    CheckMeta("B61", "Cross-agent config snooping / credential theft",
-              HIGH, "hardening", "Credential Theft / Supply Chain", confidence="MEDIUM",
-              surface="bootstrap"),
+    CheckMeta(
+        "B61",
+        "Cross-agent config snooping / credential theft",
+        HIGH,
+        "hardening",
+        "Credential Theft / Supply Chain",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
     # B62 (F-019): Capability–intent mismatch — declared purpose (SKILL.md name/description)
     # conflicts with actual reachable capabilities (effect_profiles + import-family scan).
     # The HIGHEST false-positive risk check in the project — WARN-only, MEDIUM, advisory.
     # UNKNOWN when no SKILL.md description, no Python, or a vague/permissive category.
     # Only fires when the declared category is CLEAR+NARROW and the surprising capability
     # is MEANINGFUL (high-surprise single family OR ≥2 co-occurring surprising families).
-    CheckMeta("B62", "Capability–intent mismatch (declared purpose vs actual behaviour)",
-              MEDIUM, "advisory", "Excessive Agency / Inaccurate Capability Declaration",
-              scored=False, confidence="MEDIUM",
-              surface="skills"),
+    CheckMeta(
+        "B62",
+        "Capability–intent mismatch (declared purpose vs actual behaviour)",
+        MEDIUM,
+        "advisory",
+        "Excessive Agency / Inaccurate Capability Declaration",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # B63 (C-075): Silent-instruction detector — directives that hide agent actions
     # from the user.  Always malicious (no legit skill says "don't tell the user").
     # FAIL on secrecy + action co-occurrence; WARN on bare secrecy phrase.
-    CheckMeta("B63", "Silent-instruction directive (hidden actions from user)",
-              HIGH, "hardening", "Human Oversight / Transparency",
-              confidence="HIGH",
-              surface="bootstrap"),
+    CheckMeta(
+        "B63",
+        "Silent-instruction directive (hidden actions from user)",
+        HIGH,
+        "hardening",
+        "Human Oversight / Transparency",
+        confidence="HIGH",
+        surface="bootstrap",
+    ),
     # B64 (C-076): Scan bootstrap files, installed skills, and MCP tool descriptions
     # for authority override phrases. FAIL on high confidence, WARN on weaker signals.
-    CheckMeta("B64", "Instruction-hierarchy override detector",
-              HIGH, "hardening", "Prompt Injection / Instruction Hierarchy",
-              confidence="MEDIUM",
-              surface="bootstrap"),
+    CheckMeta(
+        "B64",
+        "Instruction-hierarchy override detector",
+        HIGH,
+        "hardening",
+        "Prompt Injection / Instruction Hierarchy",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
     # B65 (C-080): conditional / sleeper-trigger detector.
     # Detects prompts that gate hidden actions behind a user-query trigger.
-    CheckMeta("B65", "Conditional sleeper-trigger detector",
-              HIGH, "hardening", "Prompt Injection / Conditional Trigger",
-              confidence="MEDIUM",
-              surface="bootstrap"),
+    CheckMeta(
+        "B65",
+        "Conditional sleeper-trigger detector",
+        HIGH,
+        "hardening",
+        "Prompt Injection / Conditional Trigger",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
     # B66 (C-078): persona / role jailbreak detector.
     # Detects role-play instructions like "pretend you are DAN" that weaken policy
     # hierarchy and can reset trust assumptions.
-    CheckMeta("B66", "Persona / role jailbreak detector",
-              HIGH, "hardening", "Prompt Injection / Persona Injection",
-              confidence="MEDIUM",
-              surface="bootstrap"),
+    CheckMeta(
+        "B66",
+        "Persona / role jailbreak detector",
+        HIGH,
+        "hardening",
+        "Prompt Injection / Persona Injection",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
     # B67 (C-092): per-source tool-output trust contracts.
     # Complements B21 (generic trust boundary): checks that bootstrap has
     # channel-specific DATA/instruction declarations for each active high-risk
     # channel (browser, email, MCP, search, docs).
-    CheckMeta("B67", "Per-source tool-output trust contracts",
-              MEDIUM, "hardening", "Prompt Injection / Trust Boundary",
-              confidence="MEDIUM",
-              surface="bootstrap"),
+    CheckMeta(
+        "B67",
+        "Per-source tool-output trust contracts",
+        MEDIUM,
+        "hardening",
+        "Prompt Injection / Trust Boundary",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
     # B68–B73 (v1.20.0): advisory WARN-only config-fact checks. scored=False so they
     # never move the A–F grade. Each fires only on the explicit dangerous value;
     # default/absent → UNKNOWN or PASS (zero false-positive FAILs on real configs).
-    CheckMeta("B68", "apply_patch workspace-only restriction disabled",
-              MEDIUM, "hardening", "Least Privilege / Filesystem Write", scored=False,
-              surface="tools"),
-    CheckMeta("B69", "exec inline-eval gate missing when exec enabled",
-              MEDIUM, "hardening", "Least Privilege / Inline Eval", scored=False,
-              surface="tools"),
-    CheckMeta("B70", "trustedProxy allowLoopback on non-loopback bind (header-spoof surface)",
-              LOW, "hardening", "Zero Trust / Proxy Headers", scored=False,
-              surface="gateway"),
-    CheckMeta("B71", "gateway.nodes.denyCommands ineffective patterns (non-exact entries)",
-              MEDIUM, "hardening", "Least Privilege / Node Commands", scored=False,
-              surface="gateway"),
-    CheckMeta("B72", "subagents.allowAgents wildcard (any agent as spawn target)",
-              LOW, "hardening", "Least Privilege / Subagents", scored=False,
-              surface="agents"),
-    CheckMeta("B73", "mDNS full advertisement on non-loopback gateway bind",
-              LOW, "hardening", "Least Privilege / Discovery", scored=False,
-              surface="gateway"),
-    CheckMeta("B74", "Forged role/system block or false-provenance attribution in content",
-              HIGH, "hardening", "Prompt Injection / Provenance Forgery",
-              surface="bootstrap"),
-    CheckMeta("B75", "MCP tool-inheritance bypass — per-agent filter circumvented (attested)",
-              MEDIUM, "hardening", "Least Privilege / MCP Tool Inheritance",
-              scored=False, confidence=ATTESTED,
-              surface="agents"),
-    CheckMeta("B76", "High-blast MCP tool-inheritance bypass (attested)",
-              HIGH, "hardening", "Least Privilege / MCP Tool Inheritance",
-              scored=True, confidence=ATTESTED,
-              surface="agents"),
-    CheckMeta("B77", "Config-write audit log review (suspicious / unexpected writer)",
-              MEDIUM, "hardening", "Audit Log / Config Provenance",
-              scored=False, confidence="MEDIUM",
-              surface="monitoring"),
-    CheckMeta("B78", "Config-health integrity alert (observed suspicious signature)",
-              HIGH, "hardening", "Config Integrity / Tamper Detection",
-              scored=False, confidence="MEDIUM",
-              surface="monitoring"),
-    CheckMeta("B79", "Codex session approval-policy posture (approval=never)",
-              MEDIUM, "hardening", "Human Approval",
-              scored=False, confidence="MEDIUM",
-              surface="tools"),
-    CheckMeta("B80", "Gateway auth without rate limiting on a non-loopback bind",
-              LOW, "hardening", "Least Privilege / Rate Limiting", scored=False,
-              surface="gateway"),
-    CheckMeta("B81", "Subagent spawn limits raised beyond recommended defaults",
-              LOW, "hardening", "Least Privilege / Subagents", scored=False,
-              surface="agents"),
-    CheckMeta("B82", "cacheTrace transcripts persisted without tool-output redaction",
-              MEDIUM, "hardening", "Secrets / At-Rest Redaction", scored=False,
-              surface="secrets"),
-    CheckMeta("B83", "Web-fetch tool allows excessive redirect following",
-              LOW, "hardening", "SSRF / Redirect Hardening", scored=False,
-              surface="tools"),
+    CheckMeta(
+        "B68",
+        "apply_patch workspace-only restriction disabled",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Filesystem Write",
+        scored=False,
+        surface="tools",
+    ),
+    CheckMeta(
+        "B69",
+        "exec inline-eval gate missing when exec enabled",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Inline Eval",
+        scored=False,
+        surface="tools",
+    ),
+    CheckMeta(
+        "B70",
+        "trustedProxy allowLoopback on non-loopback bind (header-spoof surface)",
+        LOW,
+        "hardening",
+        "Zero Trust / Proxy Headers",
+        scored=False,
+        surface="gateway",
+    ),
+    CheckMeta(
+        "B71",
+        "gateway.nodes.denyCommands ineffective patterns (non-exact entries)",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Node Commands",
+        scored=False,
+        surface="gateway",
+    ),
+    CheckMeta(
+        "B72",
+        "subagents.allowAgents wildcard (any agent as spawn target)",
+        LOW,
+        "hardening",
+        "Least Privilege / Subagents",
+        scored=False,
+        surface="agents",
+    ),
+    CheckMeta(
+        "B73",
+        "mDNS full advertisement on non-loopback gateway bind",
+        LOW,
+        "hardening",
+        "Least Privilege / Discovery",
+        scored=False,
+        surface="gateway",
+    ),
+    CheckMeta(
+        "B74",
+        "Forged role/system block or false-provenance attribution in content",
+        HIGH,
+        "hardening",
+        "Prompt Injection / Provenance Forgery",
+        surface="bootstrap",
+    ),
+    CheckMeta(
+        "B75",
+        "MCP tool-inheritance bypass — per-agent filter circumvented (attested)",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / MCP Tool Inheritance",
+        scored=False,
+        confidence=ATTESTED,
+        surface="agents",
+    ),
+    CheckMeta(
+        "B76",
+        "High-blast MCP tool-inheritance bypass (attested)",
+        HIGH,
+        "hardening",
+        "Least Privilege / MCP Tool Inheritance",
+        scored=True,
+        confidence=ATTESTED,
+        surface="agents",
+    ),
+    CheckMeta(
+        "B77",
+        "Config-write audit log review (suspicious / unexpected writer)",
+        MEDIUM,
+        "hardening",
+        "Audit Log / Config Provenance",
+        scored=False,
+        confidence="MEDIUM",
+        surface="monitoring",
+    ),
+    CheckMeta(
+        "B78",
+        "Config-health integrity alert (observed suspicious signature)",
+        HIGH,
+        "hardening",
+        "Config Integrity / Tamper Detection",
+        scored=False,
+        confidence="MEDIUM",
+        surface="monitoring",
+    ),
+    CheckMeta(
+        "B79",
+        "Codex session approval-policy posture (approval=never)",
+        MEDIUM,
+        "hardening",
+        "Human Approval",
+        scored=False,
+        confidence="MEDIUM",
+        surface="tools",
+    ),
+    CheckMeta(
+        "B80",
+        "Gateway auth without rate limiting on a non-loopback bind",
+        LOW,
+        "hardening",
+        "Least Privilege / Rate Limiting",
+        scored=False,
+        surface="gateway",
+    ),
+    CheckMeta(
+        "B81",
+        "Subagent spawn limits raised beyond recommended defaults",
+        LOW,
+        "hardening",
+        "Least Privilege / Subagents",
+        scored=False,
+        surface="agents",
+    ),
+    CheckMeta(
+        "B82",
+        "cacheTrace transcripts persisted without tool-output redaction",
+        MEDIUM,
+        "hardening",
+        "Secrets / At-Rest Redaction",
+        scored=False,
+        surface="secrets",
+    ),
+    CheckMeta(
+        "B83",
+        "Web-fetch tool allows excessive redirect following",
+        LOW,
+        "hardening",
+        "SSRF / Redirect Hardening",
+        scored=False,
+        surface="tools",
+    ),
     # B84 extends B44 with a THIRD column: PROVEN behavior (runtime/log evidence of
     # actual invocation), not just declared (config grant) vs effective (self-reported
     # inventory). ATTESTED confidence, advisory (not scored) — UNKNOWN without --attest
     # citing proven_tools, so the static grade is unaffected by default.
-    CheckMeta("B84", "Declared vs. effective vs. proven tool use",
-              HIGH, "advisory", "Least Privilege / Blast Radius",
-              scored=False, confidence=ATTESTED,
-              surface="tools"),
+    CheckMeta(
+        "B84",
+        "Declared vs. effective vs. proven tool use",
+        HIGH,
+        "advisory",
+        "Least Privilege / Blast Radius",
+        scored=False,
+        confidence=ATTESTED,
+        surface="tools",
+    ),
     # B85 (C-093 / E-014 S3) — incident readiness. OpenClaw's trajectory sidecar (recon
     # §9.1) is the attributable on-disk tool-call record; this is a filesystem-grounded
     # HIGH-confidence presence + tamper (group/world-writable) check, NOT attestation.
     # Advisory (scored=False); UNKNOWN when no sidecar exists so the static grade is
     # unaffected. Mirrors B50 (host-audit governance) → AST09, no clean LLM analog.
-    CheckMeta("B85", "Incident readiness — tool-use trail present and tamper-resistant",
-              MEDIUM, "hardening", "Incident Response / Audit Trail",
-              scored=False, surface="monitoring"),
+    CheckMeta(
+        "B85",
+        "Incident readiness — tool-use trail present and tamper-resistant",
+        MEDIUM,
+        "hardening",
+        "Incident Response / Audit Trail",
+        scored=False,
+        surface="monitoring",
+    ),
+    # B86 (defensibility axis — D1) — import-path hijack surface. A benign skill that
+    # extends sys.path with a relative / writable / env-derived location can be weaponized
+    # by its environment: anyone able to write that path drops a module the skill imports.
+    # Skill-as-target (confused deputy), not skill-as-attacker. Heuristic (MEDIUM),
+    # advisory (scored=False) so it never perturbs the static grade; WARN-only.
+    CheckMeta(
+        "B86",
+        "Import-path hijack surface (sys.path from writable/relative location)",
+        MEDIUM,
+        "advisory",
+        "Defensibility / Supply-Chain Tamper",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # advisory (not scored)
-    CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False,
-              surface="bootstrap"),
-    CheckMeta("C4", "OpenClaw version / update hygiene", LOW, "advisory", "Patch hygiene", scored=False,
-              surface="update"),
-    CheckMeta("C5", "Native binary PATH safety", LOW, "advisory", "Binary Integrity",
-              scored=False, confidence="MEDIUM",
-              surface="host"),
+    CheckMeta(
+        "C3",
+        "Backups of SOUL.md / memory",
+        LOW,
+        "advisory",
+        "Backups",
+        scored=False,
+        surface="bootstrap",
+    ),
+    CheckMeta(
+        "C4",
+        "OpenClaw version / update hygiene",
+        LOW,
+        "advisory",
+        "Patch hygiene",
+        scored=False,
+        surface="update",
+    ),
+    CheckMeta(
+        "C5",
+        "Native binary PATH safety",
+        LOW,
+        "advisory",
+        "Binary Integrity",
+        scored=False,
+        confidence="MEDIUM",
+        surface="host",
+    ),
     # C6 (C-052): pre-v2026.6.10 hook-composition could silently drop trusted tool
     # policies. Runtime evaluation-order effect, no static config field — an honest
     # UNKNOWN nudge, never a FAIL. Advisory (not scored).
-    CheckMeta("C6", "Hook-composition tool-policy drop (pre-v2026.6.10)",
-              LOW, "advisory", "Patch hygiene", scored=False,
-              surface="update"),
-    CheckMeta("C032", "Proxy header trust when real-IP fallback is enabled",
-              LOW, "advisory", "Gateway / Proxy Header Trust", scored=False,
-              surface="gateway"),
-    CheckMeta("C014", "Egress inventory (outbound-capable surface enumeration)",
-              LOW, "advisory", "Egress Inventory", scored=False,
-              surface="monitoring"),
-    CheckMeta("C015", "Secrets-at-rest scan of the OpenClaw home",
-              MEDIUM, "advisory", "Secrets / Filesystem", scored=False, confidence="MEDIUM",
-              surface="secrets"),
-    CheckMeta("C047", "Non-local MCP server endpoint (manual review)",
-              LOW, "advisory", "MCP / External Endpoint Review", scored=False,
-              surface="mcp"),
+    CheckMeta(
+        "C6",
+        "Hook-composition tool-policy drop (pre-v2026.6.10)",
+        LOW,
+        "advisory",
+        "Patch hygiene",
+        scored=False,
+        surface="update",
+    ),
+    CheckMeta(
+        "C032",
+        "Proxy header trust when real-IP fallback is enabled",
+        LOW,
+        "advisory",
+        "Gateway / Proxy Header Trust",
+        scored=False,
+        surface="gateway",
+    ),
+    CheckMeta(
+        "C014",
+        "Egress inventory (outbound-capable surface enumeration)",
+        LOW,
+        "advisory",
+        "Egress Inventory",
+        scored=False,
+        surface="monitoring",
+    ),
+    CheckMeta(
+        "C015",
+        "Secrets-at-rest scan of the OpenClaw home",
+        MEDIUM,
+        "advisory",
+        "Secrets / Filesystem",
+        scored=False,
+        confidence="MEDIUM",
+        surface="secrets",
+    ),
+    CheckMeta(
+        "C047",
+        "Non-local MCP server endpoint (manual review)",
+        LOW,
+        "advisory",
+        "MCP / External Endpoint Review",
+        scored=False,
+        surface="mcp",
+    ),
     # C048: top-level cron scheduler persistence surface. Advisory UNKNOWN-only when
     # the real OpenClaw `cron` field is present; config alone cannot distinguish a
     # legitimate schedule from attacker-planted persistence, so this never FAILs.
-    CheckMeta("C048", "Cron scheduler persistence surface (top-level cron)",
-              LOW, "advisory", "Persistence / Scheduled Execution", scored=False,
-              surface="hooks"),
-    CheckMeta("C074", "Injection-like text in HTML image attributes",
-              MEDIUM, "advisory", "Prompt Injection / HTML Attribute", scored=False,
-              surface="bootstrap"),
+    CheckMeta(
+        "C048",
+        "Cron scheduler persistence surface (top-level cron)",
+        LOW,
+        "advisory",
+        "Persistence / Scheduled Execution",
+        scored=False,
+        surface="hooks",
+    ),
+    CheckMeta(
+        "C074",
+        "Injection-like text in HTML image attributes",
+        MEDIUM,
+        "advisory",
+        "Prompt Injection / HTML Attribute",
+        scored=False,
+        surface="bootstrap",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -544,20 +1019,24 @@ AST_MAP = {
     "B54": ("AST09",),
     "B57": ("AST02", "AST03"),
     # Orphan-check fills (coverage-map P3): each mirrors a named sibling's AST class.
-    "B38": ("AST06",),   # headless browser without OS sandbox = Weak Isolation (cf. B4)
-    "B73": ("AST06",),   # mDNS full advertise on non-loopback exposes the agent (cf. B70)
-    "B74": ("AST05",),   # forged role/provenance = untrusted external instructions (cf. B64)
-    "B76": ("AST03",),   # MCP tool-inheritance bypass = over-privileged reach (cf. B75)
-    "B77": ("AST09",),   # config-write audit review = governance / audit-trail (cf. B10)
-    "B78": ("AST09",),   # config-integrity tamper detection = governance (cf. B10)
-    "B79": ("AST03",),   # approval_policy=never = over-autonomous agency (cf. B8)
+    "B38": ("AST06",),  # headless browser without OS sandbox = Weak Isolation (cf. B4)
+    "B73": ("AST06",),  # mDNS full advertise on non-loopback exposes the agent (cf. B70)
+    "B74": ("AST05",),  # forged role/provenance = untrusted external instructions (cf. B64)
+    "B76": ("AST03",),  # MCP tool-inheritance bypass = over-privileged reach (cf. B75)
+    "B77": ("AST09",),  # config-write audit review = governance / audit-trail (cf. B10)
+    "B78": ("AST09",),  # config-integrity tamper detection = governance (cf. B10)
+    "B79": ("AST03",),  # approval_policy=never = over-autonomous agency (cf. B8)
     "C032": ("AST06",),  # trusting spoofable forwarded headers = weak boundary (cf. B70)
-    "B80": ("AST06",),   # no rate limiting on an exposed auth'd gateway = weak isolation (cf. B70)
-    "B81": ("AST03",),   # raised subagent spawn limits = over-privileged delegation (cf. B72)
-    "B82": ("AST02",),   # unredacted transcripts at rest = supply-chain/secret exposure (cf. C5)
-    "B83": ("AST06",),   # excessive redirect-follow on fetch = weak isolation/SSRF (cf. B38)
-    "B84": ("AST03", "AST04"),  # declared/effective/proven drift = over-privileged + insecure self-report (cf. B44)
-    "B85": ("AST09",),   # tamperable/absent tool-use audit trail = weak governance (cf. B50/B77)
+    "B80": ("AST06",),  # no rate limiting on an exposed auth'd gateway = weak isolation (cf. B70)
+    "B81": ("AST03",),  # raised subagent spawn limits = over-privileged delegation (cf. B72)
+    "B82": ("AST02",),  # unredacted transcripts at rest = supply-chain/secret exposure (cf. C5)
+    "B83": ("AST06",),  # excessive redirect-follow on fetch = weak isolation/SSRF (cf. B38)
+    "B84": (
+        "AST03",
+        "AST04",
+    ),  # declared/effective/proven drift = over-privileged + insecure self-report (cf. B44)
+    "B85": ("AST09",),  # tamperable/absent tool-use audit trail = weak governance (cf. B50/B77)
+    "B86": ("AST02",),  # import-path hijack via writable sys.path = supply-chain tamper (cf. B5)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
@@ -636,17 +1115,21 @@ OWASP_MAP = {
     "C047": ("LLM03",),
     # Orphan-check fills (coverage-map P3): each mirrors a named sibling's LLM class.
     # SSRF B38, backups C3 and monitoring B77/B78 stay unmapped (no clean LLM analog).
-    "B12": ("LLM02",),   # cloud-model use = data egress to a 3rd party (cf. B14)
-    "B74": ("LLM01",),   # forged role/provenance = prompt injection (cf. B64)
-    "B76": ("LLM06",),   # MCP tool-inheritance bypass = Excessive Agency (cf. B31)
-    "B79": ("LLM06",),   # approval_policy=never = Excessive Agency (cf. B8)
+    "B12": ("LLM02",),  # cloud-model use = data egress to a 3rd party (cf. B14)
+    "B74": ("LLM01",),  # forged role/provenance = prompt injection (cf. B64)
+    "B76": ("LLM06",),  # MCP tool-inheritance bypass = Excessive Agency (cf. B31)
+    "B79": ("LLM06",),  # approval_policy=never = Excessive Agency (cf. B8)
     "C014": ("LLM02",),  # outbound-surface inventory = data-disclosure surface (cf. B14)
     "C015": ("LLM02",),  # secrets-at-rest scan = Sensitive Info Disclosure (cf. B1)
-    "B80": ("LLM10",),   # no rate limiting on an exposed auth'd gateway = Unbounded Consumption
-    "B81": ("LLM06",),   # raised subagent spawn limits = Excessive Agency (cf. B72)
-    "B82": ("LLM02",),   # unredacted transcripts persisted at rest = Sensitive Info Disclosure
-    "B83": ("LLM02",),   # excessive redirect-follow on fetch = SSRF data-disclosure surface (cf. B38)
-    "B84": ("LLM06",),   # proven high-blast verb with an ungated posture = Excessive Agency (cf. B43/B44)
+    "B80": ("LLM10",),  # no rate limiting on an exposed auth'd gateway = Unbounded Consumption
+    "B81": ("LLM06",),  # raised subagent spawn limits = Excessive Agency (cf. B72)
+    "B82": ("LLM02",),  # unredacted transcripts persisted at rest = Sensitive Info Disclosure
+    "B83": (
+        "LLM02",
+    ),  # excessive redirect-follow on fetch = SSRF data-disclosure surface (cf. B38)
+    "B84": (
+        "LLM06",
+    ),  # proven high-blast verb with an ungated posture = Excessive Agency (cf. B43/B44)
 }
 
 
@@ -671,31 +1154,90 @@ def ast_for(check_id: str) -> tuple:
 #             "set <path> -> <value>", NOT a paste-over JSON blob (a blob would clobber
 #             neighbouring keys). set=None means the value is descriptive (see note).
 REMEDIATION = {
-    "B1": {"commands": ["openclaw secrets configure",
-                        "chmod 600 ~/.openclaw/openclaw.json",
-                        "chmod 700 ~/.openclaw"]},
-    "B2": {"config": [{"path": "gateway.auth", "set": None,
-                       "note": "enable gateway auth and restrict channels to an allowlist"}]},
-    "B3": {"config": [{"path": "tools.elevated.allowFrom", "set": None,
-                       "note": "restrict to an explicit allowlist (no wildcards)"}]},
-    "B4": {"config": [{"path": "agents.defaults.sandbox.mode", "set": "non-main",
-                       "note": "run exec tools in a sandbox"}]},
-    "B8": {"config": [{"path": "tools.exec.mode", "set": "ask",
-                       "note": "require human approval before exec"}]},
+    "B1": {
+        "commands": [
+            "openclaw secrets configure",
+            "chmod 600 ~/.openclaw/openclaw.json",
+            "chmod 700 ~/.openclaw",
+        ]
+    },
+    "B2": {
+        "config": [
+            {
+                "path": "gateway.auth",
+                "set": None,
+                "note": "enable gateway auth and restrict channels to an allowlist",
+            }
+        ]
+    },
+    "B3": {
+        "config": [
+            {
+                "path": "tools.elevated.allowFrom",
+                "set": None,
+                "note": "restrict to an explicit allowlist (no wildcards)",
+            }
+        ]
+    },
+    "B4": {
+        "config": [
+            {
+                "path": "agents.defaults.sandbox.mode",
+                "set": "non-main",
+                "note": "run exec tools in a sandbox",
+            }
+        ]
+    },
+    "B8": {
+        "config": [
+            {"path": "tools.exec.mode", "set": "ask", "note": "require human approval before exec"}
+        ]
+    },
     "B19": {"commands": ["chmod 700 ~/.openclaw"]},
-    "B20": {"commands": ["chmod 700 <workspace>",
-                         "chmod 600 <workspace>/SOUL.md <workspace>/AGENTS.md "
-                         "<workspace>/TOOLS.md <workspace>/MEMORY.md"]},
+    "B20": {
+        "commands": [
+            "chmod 700 <workspace>",
+            "chmod 600 <workspace>/SOUL.md <workspace>/AGENTS.md "
+            "<workspace>/TOOLS.md <workspace>/MEMORY.md",
+        ]
+    },
     "B22": {"commands": ["chmod 600 <workspace>/SOUL.md", "chmod 700 <workspace>/skills"]},
-    "B23": {"config": [{"path": "tools.exec.mode", "set": "ask",
-                        "note": "enforce the approval gate; do not let bootstrap text weaken it"}]},
-    "B30": {"config": [{"path": "channels.<provider>.dangerouslyAllowNameMatching", "set": None,
-                        "note": "remove this flag — a mutable display-name allowlist is "
-                                "trivially bypassed"}]},
-    "B38": {"config": [{"path": "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork", "set": False,
-                        "note": "block private-network requests from the browser tool"}]},
-    "B39": {"config": [{"path": "session.dmScope", "set": None,
-                        "note": "isolate DM sessions per user; do not use \"main\""}]},
+    "B23": {
+        "config": [
+            {
+                "path": "tools.exec.mode",
+                "set": "ask",
+                "note": "enforce the approval gate; do not let bootstrap text weaken it",
+            }
+        ]
+    },
+    "B30": {
+        "config": [
+            {
+                "path": "channels.<provider>.dangerouslyAllowNameMatching",
+                "set": None,
+                "note": "remove this flag — a mutable display-name allowlist is trivially bypassed",
+            }
+        ]
+    },
+    "B38": {
+        "config": [
+            {
+                "path": "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork",
+                "set": False,
+                "note": "block private-network requests from the browser tool",
+            }
+        ]
+    },
+    "B39": {
+        "config": [
+            {
+                "path": "session.dmScope",
+                "set": None,
+                "note": 'isolate DM sessions per user; do not use "main"',
+            }
+        ]
+    },
     "C5": {"commands": ["chmod o-w,g-w <dir>"]},
 }
 
@@ -706,8 +1248,10 @@ def remediation_for(check_id: str) -> dict:
     Empty lists when the check has no deterministic paste-ready fix (its prose `fix` leads).
     """
     r = REMEDIATION.get(check_id, {})
-    return {"commands": list(r.get("commands", ())),
-            "config": [dict(c) for c in r.get("config", ())]}
+    return {
+        "commands": list(r.get("commands", ())),
+        "config": [dict(c) for c in r.get("config", ())],
+    }
 
 
 @dataclass

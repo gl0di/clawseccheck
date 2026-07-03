@@ -13,6 +13,7 @@ Tests cover:
 
 Offline, deterministic. No network calls, no writes outside tmp_path.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -32,24 +33,16 @@ def _rules(src: str) -> dict[str, object]:
 # TT5: external-input -> exec / shell sink (CRITICAL "crit")
 # ---------------------------------------------------------------------------
 
+
 def test_tt5_param_to_subprocess_direct():
-    src = (
-        "import subprocess\n"
-        "def run_cmd(cmd):\n"
-        "    subprocess.run(cmd, shell=True)\n"
-    )
+    src = "import subprocess\ndef run_cmd(cmd):\n    subprocess.run(cmd, shell=True)\n"
     r = _rules(src)
     assert "TT5_CMD_INJECTION" in r
     assert r["TT5_CMD_INJECTION"].severity == "crit"
 
 
 def test_tt5_param_to_subprocess_indirect():
-    src = (
-        "import subprocess\n"
-        "def run_cmd(cmd):\n"
-        "    s = cmd\n"
-        "    subprocess.run(s, shell=True)\n"
-    )
+    src = "import subprocess\ndef run_cmd(cmd):\n    s = cmd\n    subprocess.run(s, shell=True)\n"
     r = _rules(src)
     assert "TT5_CMD_INJECTION" in r
     assert r["TT5_CMD_INJECTION"].severity == "crit"
@@ -57,59 +50,35 @@ def test_tt5_param_to_subprocess_indirect():
 
 
 def test_tt5_param_to_os_system():
-    src = (
-        "import os\n"
-        "def run_cmd(cmd):\n"
-        "    os.system(cmd)\n"
-    )
+    src = "import os\ndef run_cmd(cmd):\n    os.system(cmd)\n"
     assert "TT5_CMD_INJECTION" in _rules(src)
 
 
 def test_tt5_param_to_eval():
-    src = (
-        "def run_code(code):\n"
-        "    eval(code)\n"
-    )
+    src = "def run_code(code):\n    eval(code)\n"
     r = _rules(src)
     assert "TT5_CMD_INJECTION" in r
     assert r["TT5_CMD_INJECTION"].severity == "crit"
 
 
 def test_tt5_input_to_exec():
-    src = (
-        "cmd = input('Enter command: ')\n"
-        "import os\n"
-        "os.system(cmd)\n"
-    )
+    src = "cmd = input('Enter command: ')\nimport os\nos.system(cmd)\n"
     assert "TT5_CMD_INJECTION" in _rules(src)
 
 
 def test_tt5_param_to_popen():
-    src = (
-        "import os\n"
-        "def run_it(user_input):\n"
-        "    os.popen(user_input)\n"
-    )
+    src = "import os\ndef run_it(user_input):\n    os.popen(user_input)\n"
     assert "TT5_CMD_INJECTION" in _rules(src)
 
 
 def test_tt5_direct_flow_evidence():
-    src = (
-        "import subprocess\n"
-        "def run_cmd(cmd):\n"
-        "    subprocess.run(cmd, shell=True)\n"
-    )
+    src = "import subprocess\ndef run_cmd(cmd):\n    subprocess.run(cmd, shell=True)\n"
     r = _rules(src)
     assert "direct" in r["TT5_CMD_INJECTION"].reason
 
 
 def test_tt5_indirect_flow_evidence():
-    src = (
-        "import subprocess\n"
-        "def run_cmd(cmd):\n"
-        "    s = cmd\n"
-        "    subprocess.run(s, shell=True)\n"
-    )
+    src = "import subprocess\ndef run_cmd(cmd):\n    s = cmd\n    subprocess.run(s, shell=True)\n"
     r = _rules(src)
     # s=cmd propagates taint; s is the direct first arg at the call site
     assert "flow" in r["TT5_CMD_INJECTION"].reason
@@ -118,6 +87,7 @@ def test_tt5_indirect_flow_evidence():
 # ---------------------------------------------------------------------------
 # TT4: file-read -> network data sink (HIGH "info")
 # ---------------------------------------------------------------------------
+
 
 def test_tt4_file_to_network_direct():
     src = (
@@ -163,27 +133,20 @@ def test_tt4_read_text_method():
 
 def test_tt4_file_read_without_network_is_silent():
     # Reading a file then returning it — no network sink — must NOT flag TT4.
-    src = (
-        "def get_config():\n"
-        "    data = open('config.txt').read()\n"
-        "    return data\n"
-    )
+    src = "def get_config():\n    data = open('config.txt').read()\n    return data\n"
     assert "TT4_FILE_NET" not in _rules(src)
 
 
 def test_tt4_network_without_file_is_silent():
     # No file read — env var posted to network — TT4 must NOT fire.
-    src = (
-        "import os, requests\n"
-        "secret = os.getenv('KEY')\n"
-        "requests.post('http://x', data=secret)\n"
-    )
+    src = "import os, requests\nsecret = os.getenv('KEY')\nrequests.post('http://x', data=secret)\n"
     assert "TT4_FILE_NET" not in _rules(src)
 
 
 # ---------------------------------------------------------------------------
 # TT_SSRF: externally-controlled URL -> network fetch
 # ---------------------------------------------------------------------------
+
 
 def test_ssrf_param_to_requests_get_with_internal_literal():
     src = (
@@ -199,11 +162,7 @@ def test_ssrf_param_to_requests_get_with_internal_literal():
 
 
 def test_ssrf_param_to_requests_get_without_internal():
-    src = (
-        "import requests\n"
-        "def fetch(url):\n"
-        "    return requests.get(url).text\n"
-    )
+    src = "import requests\ndef fetch(url):\n    return requests.get(url).text\n"
     r = _rules(src)
     assert "TT_SSRF" in r
     assert r["TT_SSRF"].severity == "info"
@@ -212,11 +171,7 @@ def test_ssrf_param_to_requests_get_without_internal():
 
 
 def test_ssrf_param_to_urlopen():
-    src = (
-        "from urllib.request import urlopen\n"
-        "def fetch(url):\n"
-        "    return urlopen(url).read()\n"
-    )
+    src = "from urllib.request import urlopen\ndef fetch(url):\n    return urlopen(url).read()\n"
     assert "TT_SSRF" in _rules(src)
 
 
@@ -246,6 +201,7 @@ def test_ssrf_no_param_no_finding():
 # FP-safety: clean patterns must NOT fire new rules
 # ---------------------------------------------------------------------------
 
+
 def test_clean_env_log_only_no_taint():
     # Reads env var, logs bool — no sink reached.
     src = (
@@ -264,10 +220,7 @@ def test_clean_env_log_only_no_taint():
 
 def test_clean_return_only_no_taint():
     # Reads a file and returns it — no network sink.
-    src = (
-        "def get_data():\n"
-        "    return open('notes.txt').read()\n"
-    )
+    src = "def get_data():\n    return open('notes.txt').read()\n"
     r = _rules(src)
     assert "TT5_CMD_INJECTION" not in r
     assert "TT4_FILE_NET" not in r
@@ -286,6 +239,7 @@ def test_clean_subprocess_no_param_not_flagged():
 # ---------------------------------------------------------------------------
 # Never-raises contract on malformed source
 # ---------------------------------------------------------------------------
+
 
 def test_analyze_never_raises_on_malformed():
     # F-057: parse failure now emits AST_UNANALYZABLE instead of []; must not raise.
@@ -308,6 +262,7 @@ def test_analyze_never_raises_on_bytes_garbage():
 # ---------------------------------------------------------------------------
 # B13 integration: vet_skill on fixture directories
 # ---------------------------------------------------------------------------
+
 
 def test_vet_cmdinject_fixture_is_critical_fail():
     """TT5 (crit): param->subprocess.run must produce FAIL/CRITICAL via B13."""
@@ -336,11 +291,25 @@ def test_vet_argv_listform_is_pass():
     assert f.status == PASS
 
 
+def test_vet_argv_var_listform_is_pass():
+    """B13 FP regression: a var-bound argv list (cmd = [prog, arg]; run(cmd)) with a
+    fixed program is argument injection, so vet_skill must PASS, not CRITICAL-FAIL.
+
+    This is the amz-cat-research / avatar-multi-scene class — the dominant real-world
+    form where the command list is built in a local (and the name reused across
+    functions) rather than passed inline.
+    """
+    skill_dir = FIXTURES / "clean_taint_argv_var_listform" / "skills" / "argvskill"
+    f = vet_skill(skill_dir)
+    assert f.status == PASS
+
+
 # ---------------------------------------------------------------------------
 # analyze_python direct checks for info-severity fixtures
 # (TT4/SSRF are "info" — vet_skill only escalates them with cred_exfil_signal;
 #  test at the analyzer level to confirm the rules fire correctly.)
 # ---------------------------------------------------------------------------
+
 
 def _py_source(fixture_name: str, skill: str, filename: str) -> str:
     p = FIXTURES / fixture_name / "skills" / skill / filename
@@ -398,6 +367,7 @@ def test_fixture_clean_logonly_is_silent():
 # class (smyx-payment): subprocess.run([prog, ..., tainted]) is not injectable.
 # ---------------------------------------------------------------------------
 
+
 def test_tt5_listform_argv_shell_false_is_arg_injection_not_crit():
     src = (
         "import subprocess, sys\n"
@@ -423,11 +393,7 @@ def test_tt5_listform_argv_default_shell_is_arg_injection_not_crit():
 
 def test_tt5_listform_tainted_program_stays_crit():
     # Tainted value IS the program (list element 0) -> arbitrary exec -> crit.
-    src = (
-        "import subprocess\n"
-        "def handle(prog):\n"
-        "    subprocess.run([prog, '--flag'])\n"
-    )
+    src = "import subprocess\ndef handle(prog):\n    subprocess.run([prog, '--flag'])\n"
     r = _rules(src)
     assert "TT5_CMD_INJECTION" in r
     assert r["TT5_CMD_INJECTION"].severity == "crit"
@@ -447,10 +413,74 @@ def test_tt5_listform_with_shell_true_stays_crit():
 
 def test_tt5_string_command_shell_false_stays_crit():
     # Non-list first arg with a tainted program path -> arbitrary program exec -> crit.
+    src = "import subprocess\ndef handle(prog):\n    subprocess.run(prog)\n"
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" in r
+
+
+# ---------------------------------------------------------------------------
+# Variable-bound argv list: the command list is built in a local, then passed
+# by name — `cmd = [prog, ..., tainted]; subprocess.run(cmd)`. This is the most
+# common real-world safe pattern (amz-cat-research, avatar-multi-scene). It is
+# argument injection (info), NOT command injection (crit). Regression for the
+# B13 FP class that the inline-literal fix missed.
+# ---------------------------------------------------------------------------
+
+
+def test_tt5_var_bound_listform_is_arg_injection_not_crit():
+    src = (
+        "import subprocess, sys\n"
+        "def handle(phone):\n"
+        "    cmd = [sys.executable, '-m', 'scripts.query', phone]\n"
+        "    subprocess.run(cmd)\n"
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" not in r
+    assert "TT5_ARG_INJECTION" in r
+
+
+def test_tt5_var_bound_listform_derived_arg_is_arg_injection_not_crit():
+    # amz-cat-research pattern: a tainted param derives an argv element (via
+    # os.path.join) that sits in a var-bound list with a fixed interpreter.
+    src = (
+        "import subprocess, sys, os\n"
+        "def handle(script_name):\n"
+        "    script_path = os.path.join('/skills', script_name)\n"
+        "    cmd = [sys.executable, script_path]\n"
+        "    subprocess.run(cmd, capture_output=True)\n"
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" not in r
+    assert "TT5_ARG_INJECTION" in r
+
+
+def test_tt5_var_bound_listform_name_reused_across_functions_not_crit():
+    # avatar-multi-scene pattern: the local name `cmd` is reused in two functions,
+    # each a safe fixed-program list. Scope-aware resolution must not conflate the two
+    # bindings into ambiguity and fall back to crit.
+    src = (
+        "import subprocess\n"
+        "def probe(path):\n"
+        "    cmd = ['ffprobe', '-i', str(path)]\n"
+        "    subprocess.run(cmd, check=True)\n"
+        "def encode(path):\n"
+        "    cmd = ['ffmpeg', '-i', str(path)]\n"
+        "    subprocess.run(cmd, check=True)\n"
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" not in r
+    assert "TT5_ARG_INJECTION" in r
+
+
+def test_tt5_var_bound_listform_tainted_program_stays_crit():
+    # The tainted value IS the program (argv[0]) via the variable -> arbitrary
+    # program execution -> stays crit.
     src = (
         "import subprocess\n"
         "def handle(prog):\n"
-        "    subprocess.run(prog)\n"
+        "    cmd = [prog, '--flag']\n"
+        "    subprocess.run(cmd)\n"
     )
     r = _rules(src)
     assert "TT5_CMD_INJECTION" in r
+    assert r["TT5_CMD_INJECTION"].severity == "crit"
