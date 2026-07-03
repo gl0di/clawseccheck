@@ -1015,6 +1015,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B90 - Cross-file split base64 payload (reassembled from string literals)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Obfuscation / Malicious Skill
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Cross-file split base64 payload (reassembled from string literals)
+- Remediation:
+  - none
+
 ### C3 - Backups of SOUL.md / memory
 
 - Severity: LOW

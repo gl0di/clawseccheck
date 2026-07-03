@@ -11496,6 +11496,150 @@ def check_dormant_capability(ctx: Context) -> Finding:
     )
 
 
+# ---------- B90: cross-file split base64 payload (F-092 / I-019) ----------
+# The documented ClawHavoc split-by-file evasion: a base64 payload is broken across several
+# string literals in different files so no single-pass scan ever sees the whole blob. B13's
+# _decoded_payloads reassembles WITHIN one blob (whitespace-strip + adjacent quoted-concat),
+# but literals assigned to different variables in different files, glued only at RUNTIME
+# (x=".."; y=".."; exec(b64decode(x+y))), are the residual gap (F-005 taint is intra-file).
+#
+# B90 collects the pure-base64 string literals across a skill's py/shell/js sources, tries
+# to reassemble a payload from them (full in-order join + sliding windows of 2–3), and fires
+# ONLY when a reassembly decodes to a shell/download payload (_DECODED_BAD_RE) AND the skill
+# carries a base64-DECODE sink (it must decode the base64 to use it). Zero-FP guards:
+#   • only pure-base64-alphabet literals (≥8 chars) are joined — prose/paths are ignored;
+#   • the decoded candidate must be ≥85% printable text — decoded binary assets (icons, test
+#     vectors) are rejected before the payload-keyword match, so multi-asset skills don't fire;
+#   • a decode sink must be present — a skill that merely EMBEDS base64 never fires;
+#   • bounded by a literal cap (B-074) → a cap hit is disclosed as UNKNOWN, never a silent miss;
+#   • our own source is exempt (vet_skill short-circuits it; the full audit never scans it).
+# WARN-only: whether the fragments are actually concatenated at runtime is an inference.
+_XFILE_LITERAL_CAP = 4000  # max string literals inspected per skill before disclosing a cap
+_XFILE_WINDOW_MAX_FRAGS = 300  # above this, only the full in-order join is tried (perf bound)
+_XFILE_STRING_LITERAL_RE = re.compile(r'"([^"\n]{8,})"|\'([^\'\n]{8,})\'')
+_XFILE_B64_FRAGMENT_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")  # a pure base64-alphabet literal
+_XFILE_DECODE_SINK_RE = re.compile(
+    r"\bb64decode\b|\burlsafe_b64decode\b|base64\.decode|codecs\.decode|\batob\s*\(",
+    re.I,
+)
+
+
+def _reassembles_to_payload(candidate: str) -> str | None:
+    """If `candidate` (a run of joined base64 literals) contains a base64 blob that decodes
+    to a mostly-printable shell/download payload, return an 80-char preview; else None."""
+
+    def _judge(decoded: str) -> str | None:
+        norm = unicodedata.normalize("NFKC", decoded)
+        head = norm[:400]
+        if not head:
+            return None
+        printable = sum(1 for c in head if c.isprintable() or c in "\t\n ")
+        if printable / len(head) < 0.85:  # decoded binary asset, not a text payload
+            return None
+        if len(norm) >= 6 and _DECODED_BAD_RE.search(norm):
+            return norm.strip().replace("\n", " ")[:80]
+        return None
+
+    for token in _B64_BLOB_RE.findall(candidate):
+        dec = _try_b64_decode(token, urlsafe=False)
+        if dec is not None:
+            hit = _judge(dec)
+            if hit:
+                return hit
+    for token in _B64URL_BLOB_RE.findall(candidate):
+        if not re.search(r"[-_]", token):
+            continue  # pure standard alphabet — already tried above
+        dec = _try_b64_decode(token, urlsafe=True)
+        if dec is not None:
+            hit = _judge(dec)
+            if hit:
+                return hit
+    return None
+
+
+def check_cross_file_payload(ctx: Context) -> Finding:
+    """B90 — a base64 payload reassembled from string literals split across a skill's files."""
+    from .logsafe import redact as _redact  # noqa: PLC0415 — decoded preview is attacker-controlled
+
+    skills = getattr(ctx, "installed_skills", None)
+    if not skills:
+        return _custom(
+            "B90",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for cross-file split payloads.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    warns: list[str] = []
+    cap_hit = False
+    for name in skills:
+        sources: list = []
+        for attr in ("installed_skill_py", "installed_skill_shell", "installed_skill_js"):
+            sources.extend(getattr(ctx, attr, {}).get(name, []))
+        if not sources:
+            continue
+        frags: list[str] = []
+        joined_src: list[str] = []
+        for _rel, src in sources:
+            joined_src.append(src)
+            for m in _XFILE_STRING_LITERAL_RE.finditer(src):
+                content = m.group(1) if m.group(1) is not None else m.group(2)
+                if content and _XFILE_B64_FRAGMENT_RE.match(content):
+                    frags.append(content)
+                    if len(frags) >= _XFILE_LITERAL_CAP:
+                        cap_hit = True
+                        break
+            if cap_hit:
+                break
+        # A "split" needs >=2 fragments AND a decode sink (the base64 must be decoded to run).
+        if len(frags) < 2 or not _XFILE_DECODE_SINK_RE.search("\n".join(joined_src)):
+            continue
+        candidates = ["".join(frags)]
+        if len(frags) <= _XFILE_WINDOW_MAX_FRAGS:
+            for w in (2, 3):
+                candidates.extend(
+                    "".join(frags[i : i + w]) for i in range(len(frags) - w + 1)
+                )
+        hit = None
+        for cand in candidates:
+            hit = _reassembles_to_payload(cand)
+            if hit:
+                break
+        if hit:
+            warns.append(
+                f"{name}: a base64 payload reassembles from {len(frags)} split string "
+                f"literal(s) and the skill has a base64-decode sink -> '{_redact(hit)}'"
+            )
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _custom(
+            "B90",
+            MEDIUM,
+            WARN,
+            "Cross-file split base64 payload(s): " + "; ".join(warns[:4]) + extra,
+            "A base64 payload broken across string literals and decoded at runtime is the "
+            "documented split-by-file scanner evasion. Read the reassembled command; if it "
+            "is not something you deliberately embedded, treat the skill as malicious.",
+            warns,
+        )
+    if cap_hit:
+        return _custom(
+            "B90",
+            MEDIUM,
+            UNKNOWN,
+            f"Skill string-literal scan hit the {_XFILE_LITERAL_CAP}-literal cap — a split "
+            "payload beyond the cap would not be seen.",
+            "Re-vet the skill after trimming generated/vendored data, or inspect it manually.",
+        )
+    return _custom(
+        "B90",
+        MEDIUM,
+        PASS,
+        "No base64 payload reassembles from string literals split across the skill's files.",
+        "Keep any legitimately-embedded base64 in one place and out of a decode-then-run path.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # SKILL_CONTENT_RING — single source of truth for content-security ring checks.
 #
@@ -11534,6 +11678,7 @@ SKILL_CONTENT_RING = (
     check_symlink_escape,  # B87 — symlink escape to a sensitive host path (TAM-07)
     check_frontmatter_hygiene,  # B88 — frontmatter authoring hygiene (tag values / squat)
     check_dormant_capability,  # B89 — unreachable-yet-code-bearing skill (dormant capability)
+    check_cross_file_payload,  # B90 — cross-file split base64 payload reassembly (I-019)
 )
 
 

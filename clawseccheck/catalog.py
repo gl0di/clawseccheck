@@ -860,6 +860,21 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # A base64 payload deliberately SPLIT across string literals (in different files) so no
+    # single-pass scan sees the whole blob — the documented ClawHavoc split-by-file evasion.
+    # B13 reassembles within one blob; B90 reassembles across a skill's source string
+    # literals and fires only when the join decodes to a shell/download payload AND the skill
+    # carries a base64-decode sink. WARN-only heuristic (F-092/I-019, narrowed for zero-FP).
+    CheckMeta(
+        "B90",
+        "Cross-file split base64 payload (reassembled from string literals)",
+        MEDIUM,
+        "advisory",
+        "Obfuscation / Malicious Skill",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # advisory (not scored)
     CheckMeta(
         "C3",
@@ -1085,6 +1100,7 @@ AST_MAP = {
     "B87": ("AST06",),  # symlink escape to a sensitive host path = boundary violation (cf. B38 SSRF)
     "B88": ("AST04",),  # tag-shaped frontmatter value / cross-skill squat = insecure metadata (cf. B62)
     "B89": ("AST01",),  # unreachable-yet-code-bearing skill = staged/dormant malicious shape (cf. B13)
+    "B90": ("AST01",),  # cross-file split base64 payload = hidden malicious code / scanner evasion (cf. B13)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
