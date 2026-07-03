@@ -34,6 +34,7 @@ from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE
 from .redteam import make_suite, render_suite
 from .dryrun import make_scenarios, render_dryrun
+from .multiturn import make_multiturn, render_multiturn
 from .sarif import render_sarif
 from .history import DEFAULT_HISTORY, load as history_load, record as history_record, render_trend
 from .menu import compute_ages, render_menu, render_onboarding
@@ -234,6 +235,7 @@ _PRIMARY_MODES = [
     ("canary", "--canary", "bool"),
     ("redteam", "--redteam", "bool"),
     ("dryrun", "--dryrun", "bool"),
+    ("multiturn", "--multiturn", "bool"),
     ("self_test", "--self-test", "bool"),
     ("ask", "--ask", "bool"),
     ("show_suppressed", "--show-suppressed", "bool"),
@@ -398,6 +400,9 @@ def main(argv=None) -> int:
                         "default is a fresh random seed each run")
     p.add_argument("--dryrun", action="store_true",
                    help="print a behavioral dry-run harness (prompt-injection self-test across all sources)")
+    p.add_argument("--multiturn", action="store_true",
+                   help="print a two-phase multi-turn taint harness (plant a poisoned rule, "
+                        "then trigger it in a later turn)")
     p.add_argument("--self-test", action="store_true",
                    help="run canary + live red-team + dry-run harnesses together")
     p.add_argument("--full", action="store_true",
@@ -634,6 +639,11 @@ def main(argv=None) -> int:
         record_run("self_test")
         return 0
 
+    if args.multiturn:
+        _emit(render_multiturn(make_multiturn(), ascii_only))
+        record_run("self_test")
+        return 0
+
     if args.self_test:
         seed = args.seed if args.seed is not None else secrets.token_hex(8)
         _emit(render_canary(make_canary(), ascii_only))
@@ -641,6 +651,8 @@ def main(argv=None) -> int:
         _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
         _emit("")
         _emit(render_dryrun(make_scenarios(), ascii_only))
+        _emit("")
+        _emit(render_multiturn(make_multiturn(), ascii_only))
         record_run("self_test")
         return 0
 
@@ -849,6 +861,8 @@ def main(argv=None) -> int:
         _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
         _emit("")
         _emit(render_dryrun(make_scenarios(), ascii_only))
+        _emit("")
+        _emit(render_multiturn(make_multiturn(), ascii_only))
         record_run("self_test")
         # --- vet-mcp section ---
         _emit("")

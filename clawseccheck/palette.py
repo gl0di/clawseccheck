@@ -64,8 +64,10 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "a payload suite to run against the agent"),
         PaletteEntry("Dry-run", 'dry-run', "--dryrun",
                      "trace what an injection would reach"),
+        PaletteEntry("Multi-turn", 'multi-turn', "--multiturn",
+                     "plant a poisoned rule, trigger it a turn later"),
         PaletteEntry("Self-test", 'self-test', "--self-test",
-                     "all three live tests at once"),
+                     "all live injection tests at once"),
     )),
     PaletteCategory("Vet before you trust", READONLY, (
         PaletteEntry("Vet anything", 'vet <target>', "--vet",
