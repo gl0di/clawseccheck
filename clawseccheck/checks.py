@@ -6591,6 +6591,87 @@ def check_attestation_mismatch(ctx: Context) -> Finding:
     )
 
 
+def check_declared_effective_proven(ctx: Context) -> Finding:
+    """B84 — declared (config) vs. effective (self-reported) vs. PROVEN (runtime-evidenced) tool use.
+
+    B44 cross-checks two columns: what config GRANTS vs. what the agent SELF-REPORTS
+    it holds. Neither proves the verb was ever actually exercised. B84 adds a third,
+    stronger-inside-the-self-report-layer column: verbs the agent has LOG/TRACE
+    evidence it ACTUALLY invoked (``proven_tools``). A proven high-blast verb fired
+    with no approval gate is the headline signal this check exists for — it is no
+    longer "the agent could" but "the agent did, ungated."
+
+    Still an agent self-report end to end (declared < effective < proven in trust,
+    but all three ultimately rest on what the agent chooses to disclose), so this
+    carries ATTESTED confidence and is advisory (not scored) like B43/B44.
+
+    PASS    — proven verbs are a subset of what's declared/effective and no proven
+              high-blast verb fired without an approval gate.
+    WARN    — a proven high-blast verb fired AND the attested posture is ungated
+              (untrusted_to_action == 'ungated', or a runtime approval-bypass actor
+              is reported) — evidence of an actual dangerous invocation, unguarded.
+    UNKNOWN — no attestation, or no 'proven_tools' evidence cited (silent by default;
+              this check needs runtime/log evidence, which most setups won't have).
+    """
+    att = ctx.attestation or {}
+    proven = _attest.attested_proven(att)
+    if not att or not proven:
+        return _finding(
+            "B84", UNKNOWN,
+            "No proven-tool-use evidence attested — this check needs runtime/log "
+            "evidence of actual invocation, not just a held-capability self-report.",
+            "Run with '--attest' and cite 'proven_tools': verb names you have LOG or "
+            "TRACE evidence you ACTUALLY invoked. Leave empty if you have no "
+            "execution log to cite — the check stays UNKNOWN rather than guessing.",
+        )
+    declared = {
+        _attest.normalize_verb(t) for t in (dig(ctx.config, "tools.allow") or [])
+        if isinstance(t, (str, bytes))
+    }
+    reported = att.get("tools")
+    effective = {
+        _attest.normalize_verb(t) for t in reported
+        if isinstance(reported, list) and isinstance(t, (str, bytes))
+    } if isinstance(reported, list) else set()
+
+    proven_high = sorted(v for v in proven if _attest.classify_verb(v) in _attest.HIGH_BLAST_CLASSES)
+    bypass_actors = sorted(set(_attest.approval_bypass_actors(att)))
+    ungated = _attest.is_ungated(att) or bool(bypass_actors)
+
+    if proven_high and ungated:
+        evidence = [f"proven high-blast verb: {v}" for v in proven_high]
+        if bypass_actors:
+            evidence.append(f"approval bypass actor(s): {', '.join(bypass_actors)}")
+        elif _attest.is_ungated(att):
+            evidence.append("untrusted_to_action: ungated")
+        return _finding(
+            "B84", WARN,
+            "The agent has PROVEN (log/trace evidence, not just self-reported "
+            "capability) that it actually invoked a high-blast-radius verb, and the "
+            "attested posture is ungated — this is no longer a theoretical capability, "
+            "it is an evidenced dangerous invocation with no approval gate.",
+            "Add a human-approval gate before this verb can fire, or remove the "
+            "runtime actor that can trigger it without confirmation.",
+            evidence=evidence,
+        )
+
+    evidence = []
+    dead_grants = sorted((declared or effective) - proven)
+    if dead_grants:
+        evidence.append(
+            f"declared/effective but never proven (informational, not a finding): "
+            f"{', '.join(dead_grants)}"
+        )
+    return _finding(
+        "B84", PASS,
+        "Proven tool use stays within the declared/effective grant, and no proven "
+        "high-blast verb fired without an approval gate.",
+        "Keep citing 'proven_tools' from real logs/traces as the agent's behavior "
+        "evolves, so this check keeps reflecting actual invocation, not just intent.",
+        evidence=evidence,
+    )
+
+
 # ---------- B45/B46: multi-agent privilege separation (v1.4.0) ----------
 def check_agent_separation(ctx: Context) -> Finding:
     """B45 — per-agent lethal-trifecta decomposition (privilege separation).
@@ -9846,6 +9927,7 @@ CHECKS = [
     check_host_network_ids, check_host_audit, check_host_file_integrity,
     check_host_edr, check_host_firewall,
     check_capability_blast_radius, check_attestation_mismatch,
+    check_declared_effective_proven,
     check_agent_separation, check_multiagent_exposure,
     check_delegation_reassembly, check_dangerous_overrides,
     check_fs_write_exposure,

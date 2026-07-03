@@ -209,6 +209,10 @@ def template() -> dict:
                 "lets the audit classify what blast radius is actually in your "
                 "hands. Config alone cannot see this."
             ),
+            "proven_tools": (
+                "Tool verbs you have LOG or TRACE evidence you ACTUALLY invoked (not "
+                "just hold) — leave empty if you have no execution log to cite."
+            ),
             "approval_gates": (
                 "For each action class, do you require human approval BEFORE acting? "
                 "Use 'required' (a human confirms first), 'auto' (you act without "
@@ -260,6 +264,7 @@ def template() -> dict:
             ),
         },
         "tools": [],
+        "proven_tools": [],
         "approval_gates": {k: "unknown" for k in GATE_CLASSES},
         "approval_bypass_actors": [],
         "untrusted_to_action": "unknown",
@@ -293,6 +298,26 @@ def attested_paths(att: dict) -> dict:
     if isinstance(inst, (str, bytes)) and str(inst).strip():
         out["openclaw_install"] = str(inst)
     return out
+
+
+def attested_proven(att: dict) -> set:
+    """Verb names the agent has LOG/TRACE evidence it ACTUALLY invoked (B84).
+
+    Distinct from ``tools`` (what the agent self-reports it HOLDS): this is a
+    stronger claim — runtime evidence of actual invocation, not just capability.
+    Still ATTESTED confidence (a self-report, not the engine's own observation), but
+    within the self-report layer it is the tightest signal available: declared
+    (config grant) > effective (self-reported inventory) > proven (self-reported
+    execution evidence). Tolerant of junk — returns a set of normalized verb names
+    (namespace-stripped, lowercased) so it compares directly against the other two
+    sets; non-string entries are skipped.
+    """
+    if not isinstance(att, dict):
+        return set()
+    proven = att.get("proven_tools")
+    if not isinstance(proven, list):
+        return set()
+    return {normalize_verb(t) for t in proven if isinstance(t, (str, bytes)) and str(t).strip()}
 
 
 def attested_agents(att: dict) -> list[dict]:

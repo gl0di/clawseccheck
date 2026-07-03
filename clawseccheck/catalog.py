@@ -388,6 +388,14 @@ CATALOG: list[CheckMeta] = [
     CheckMeta("B83", "Web-fetch tool allows excessive redirect following",
               LOW, "hardening", "SSRF / Redirect Hardening", scored=False,
               surface="tools"),
+    # B84 extends B44 with a THIRD column: PROVEN behavior (runtime/log evidence of
+    # actual invocation), not just declared (config grant) vs effective (self-reported
+    # inventory). ATTESTED confidence, advisory (not scored) — UNKNOWN without --attest
+    # citing proven_tools, so the static grade is unaffected by default.
+    CheckMeta("B84", "Declared vs. effective vs. proven tool use",
+              HIGH, "advisory", "Least Privilege / Blast Radius",
+              scored=False, confidence=ATTESTED,
+              surface="tools"),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False,
               surface="bootstrap"),
@@ -540,6 +548,7 @@ AST_MAP = {
     "B81": ("AST03",),   # raised subagent spawn limits = over-privileged delegation (cf. B72)
     "B82": ("AST02",),   # unredacted transcripts at rest = supply-chain/secret exposure (cf. C5)
     "B83": ("AST06",),   # excessive redirect-follow on fetch = weak isolation/SSRF (cf. B38)
+    "B84": ("AST03", "AST04"),  # declared/effective/proven drift = over-privileged + insecure self-report (cf. B44)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
@@ -628,6 +637,7 @@ OWASP_MAP = {
     "B81": ("LLM06",),   # raised subagent spawn limits = Excessive Agency (cf. B72)
     "B82": ("LLM02",),   # unredacted transcripts persisted at rest = Sensitive Info Disclosure
     "B83": ("LLM02",),   # excessive redirect-follow on fetch = SSRF data-disclosure surface (cf. B38)
+    "B84": ("LLM06",),   # proven high-blast verb with an ungated posture = Excessive Agency (cf. B43/B44)
 }
 
 

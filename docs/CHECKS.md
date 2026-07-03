@@ -939,6 +939,18 @@ Advisory checks are recorded for coverage but are not scored.
 
 ## Advisory checks
 
+### B84 - Declared vs. effective vs. proven tool use
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Least Privilege / Blast Radius
+- Scored: no
+- Confidence: ATTESTED
+- OWASP: LLM06 Excessive Agency
+- What it checks: Declared vs. effective vs. proven tool use
+- Remediation:
+  - none
+
 ### C3 - Backups of SOUL.md / memory
 
 - Severity: LOW
