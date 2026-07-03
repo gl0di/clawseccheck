@@ -9926,6 +9926,104 @@ def check_webfetch_redirects(ctx: Context) -> Finding:
     )
 
 
+def check_incident_readiness(ctx: Context) -> Finding:
+    """B85 — incident readiness: is the agent's tool-use trail present AND tamper-resistant?
+
+    After a compromise you need to reconstruct what the agent actually did. OpenClaw's
+    per-session trajectory sidecar (recon §9.1) is the on-disk, attributable record of tool
+    calls — the closest thing to an audit log OpenClaw has, and unlike ``logging.file`` /
+    ``cacheTrace`` it is a documented, greppable tool-call surface. This check answers two
+    filesystem questions and NEVER reads call contents (§8 — no ``data.arguments`` etc.):
+
+      1. present — does any trajectory sidecar exist (is tool use recorded at all)?
+      2. tamper  — are those files, or their ``sessions/`` directory, group/world-writable,
+                   so a local user (or the agent itself) could rewrite/delete the record?
+
+    HIGH confidence — these are filesystem facts, not a self-report. Advisory (scored=False)
+    so it never moves the static grade.
+
+    PASS    — a trajectory record is present AND no file/dir is group/world-writable.
+    WARN    — a trajectory record is present BUT a file or its ``sessions/`` dir is
+              group/world-writable — the incident trail is tamperable.
+    UNKNOWN — non-POSIX (NTFS ACLs unreadable), or no sidecar found (disabled via
+              ``OPENCLAW_TRAJECTORY=0``, relocated to ``OPENCLAW_TRAJECTORY_DIR``, or the
+              agent simply has not run yet). Never a false PASS/FAIL.
+
+    Only ``stat()`` is called — no trajectory file contents are read.
+    """
+    if not _is_posix():
+        return _finding(
+            "B85", UNKNOWN,
+            "On Windows, file security uses NTFS ACLs, not POSIX mode bits — ClawSecCheck "
+            "can't read those read-only, so the trajectory record's tamper-resistance is "
+            "UNKNOWN, never a false PASS.",
+            "Check the ACLs yourself: the trajectory sidecar files under "
+            "agents/<agent>/sessions/ should not grant write to Users / Everyone.")
+
+    home = ctx.home
+    files = _trajectory.find_trajectory_files(home) if isinstance(home, Path) else []
+    if not files:
+        return _finding(
+            "B85", UNKNOWN,
+            "No OpenClaw trajectory sidecar was found under agents/<agent>/sessions/, so "
+            "there is no on-disk record of the agent's tool calls to reconstruct an "
+            "incident from. This is UNKNOWN, not a failure: the record may be disabled "
+            "(OPENCLAW_TRAJECTORY=0), relocated (OPENCLAW_TRAJECTORY_DIR), or the agent "
+            "may simply not have run yet.",
+            "Keep trajectory tracing on (the default) so tool use is recorded, and run "
+            "this audit on the host where those session logs live.")
+
+    tamper: list[str] = []
+    seen_dirs: set = set()
+    for path in files:
+        try:
+            fmode = path.stat().st_mode & 0o777
+        except OSError:
+            continue
+        if fmode & 0o022:
+            tamper.append(f"{path.name} (mode {oct(fmode)[-3:]})")
+        parent = path.parent
+        try:
+            real = parent.resolve()
+        except OSError:
+            real = parent
+        if real in seen_dirs:
+            continue
+        seen_dirs.add(real)
+        try:
+            dmode = parent.stat().st_mode & 0o777
+        except OSError:
+            continue
+        if dmode & 0o022:
+            tamper.append(f"{parent.name}/ (dir, mode {oct(dmode)[-3:]})")
+
+    if tamper:
+        joined = "; ".join(tamper[:8])
+        extra = f" (+{len(tamper) - 8} more)" if len(tamper) > 8 else ""
+        return _finding(
+            "B85", WARN,
+            "The agent's trajectory record exists but is group/world-writable — a local "
+            "user (or the agent itself) could rewrite or delete the tool-use trail, "
+            f"destroying the evidence needed to reconstruct an incident: {joined}{extra}",
+            "Tighten permissions so only the owner can write the record: `chmod 600` the "
+            "*.trajectory.jsonl files and `chmod 700` their sessions/ directory.",
+            evidence=tamper,
+            confidence="HIGH",
+        )
+
+    return _finding(
+        "B85", PASS,
+        f"An attributable trajectory record of the agent's tool use is present "
+        f"({len(files)} session file(s) checked) and neither the files nor their "
+        "sessions/ directory are group/world-writable — an incident could be "
+        "reconstructed from a tamper-resistant trail.",
+        "Keep trajectory tracing on and its files owner-only so the incident trail stays "
+        "trustworthy.",
+        evidence=[f"trajectory files present: {len(files)}"],
+        confidence="HIGH",
+    )
+
+
 CHECKS = [
     check_trifecta, check_secrets, check_secrets_at_rest_home, check_gateway, check_least_privilege,
     check_sandbox, check_supply_chain, check_bootstrap_injection,
@@ -9971,6 +10069,7 @@ CHECKS = [
     check_subagent_spawn_limits,
     check_cachetrace_redaction,
     check_webfetch_redirects,
+    check_incident_readiness,
 ]
 
 

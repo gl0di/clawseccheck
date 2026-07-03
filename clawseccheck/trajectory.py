@@ -29,6 +29,27 @@ _MAX_FILES = 60
 _MAX_BYTES_PER_FILE = 8_000_000
 
 
+def find_trajectory_files(home: Path, *, max_files: int = _MAX_FILES) -> list[Path]:
+    """Return trajectory sidecar paths under *home* (newest-first, capped at *max_files*).
+
+    Read-only glob of the grounded sidecar layout
+    ``agents/*/sessions/*.trajectory.jsonl`` (recon §9.1). Returns ``[]`` on any error, or
+    when *home* is not a ``Path``, so callers can treat "no on-disk record" uniformly. Only
+    paths are returned — no file contents are read here (§8).
+    """
+    if not isinstance(home, Path):
+        return []
+    try:
+        files = list(home.glob("agents/*/sessions/*.trajectory.jsonl"))
+    except OSError:
+        return []
+    try:
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        pass
+    return files[:max_files]
+
+
 def read_proven_tools(
     home: Path,
     *,
@@ -47,21 +68,12 @@ def read_proven_tools(
     """
     verbs: set[str] = set()
     meta = {"present": False, "files_scanned": 0, "unknown_version": False}
-    if not isinstance(home, Path):
-        return verbs, meta
-    try:
-        files = list(home.glob("agents/*/sessions/*.trajectory.jsonl"))
-    except OSError:
-        return verbs, meta
+    files = find_trajectory_files(home, max_files=max_files)
     if not files:
         return verbs, meta
     meta["present"] = True
-    try:
-        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    except OSError:
-        pass
 
-    for path in files[:max_files]:
+    for path in files:
         try:
             read = 0
             with path.open("r", encoding="utf-8", errors="replace") as fh:

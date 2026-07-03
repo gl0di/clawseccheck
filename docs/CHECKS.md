@@ -951,6 +951,22 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
+### B85 - Incident readiness — tool-use trail present and tamper-resistant
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Incident Response / Audit Trail
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Incident readiness — tool-use trail present and tamper-resistant
+- Remediation:
+  - none
+
+## Advisory checks
+
 ### C3 - Backups of SOUL.md / memory
 
 - Severity: LOW

@@ -227,6 +227,12 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
   while an untrusted channel can reach the agent (fork-bomb / cost-exhaustion); **B82** flags a
   `logging.cacheTrace` transcript file persisted without `redactSensitive:"tools"` (secrets at rest);
   **B83** flags a high `tools.web.fetch.maxRedirects` ceiling (redirect-chain SSRF).
+- **B85 — incident readiness (advisory, HIGH-confidence):** checks OpenClaw's per-session
+  **trajectory sidecar** (`agents/<agent>/sessions/*.trajectory.jsonl`) — the on-disk,
+  attributable record of tool calls — for *presence* (is tool use recorded at all?) and
+  *tamper-resistance* (are the files or their `sessions/` dir group/world-writable, so the
+  incident trail could be rewritten/deleted?). `stat()`-only — it never reads call contents.
+  UNKNOWN when no sidecar exists (disabled/relocated/no runs yet), never a false FAIL.
 - Plus your platform's own **`openclaw security audit`**, run for you and merged in.
 
 **Mapped to OWASP.** Each check is tagged with its **OWASP Top 10 for LLM Applications (2025)**

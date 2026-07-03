@@ -396,6 +396,14 @@ CATALOG: list[CheckMeta] = [
               HIGH, "advisory", "Least Privilege / Blast Radius",
               scored=False, confidence=ATTESTED,
               surface="tools"),
+    # B85 (C-093 / E-014 S3) — incident readiness. OpenClaw's trajectory sidecar (recon
+    # §9.1) is the attributable on-disk tool-call record; this is a filesystem-grounded
+    # HIGH-confidence presence + tamper (group/world-writable) check, NOT attestation.
+    # Advisory (scored=False); UNKNOWN when no sidecar exists so the static grade is
+    # unaffected. Mirrors B50 (host-audit governance) → AST09, no clean LLM analog.
+    CheckMeta("B85", "Incident readiness — tool-use trail present and tamper-resistant",
+              MEDIUM, "hardening", "Incident Response / Audit Trail",
+              scored=False, surface="monitoring"),
     # advisory (not scored)
     CheckMeta("C3", "Backups of SOUL.md / memory", LOW, "advisory", "Backups", scored=False,
               surface="bootstrap"),
@@ -549,6 +557,7 @@ AST_MAP = {
     "B82": ("AST02",),   # unredacted transcripts at rest = supply-chain/secret exposure (cf. C5)
     "B83": ("AST06",),   # excessive redirect-follow on fetch = weak isolation/SSRF (cf. B38)
     "B84": ("AST03", "AST04"),  # declared/effective/proven drift = over-privileged + insecure self-report (cf. B44)
+    "B85": ("AST09",),   # tamperable/absent tool-use audit trail = weak governance (cf. B50/B77)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT

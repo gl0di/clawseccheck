@@ -3,6 +3,34 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.5.0] — 2026-07-03
+
+Incident-readiness check (B85) — turns the trajectory sidecar from a "proven tool use"
+source (v3.3.0) into an on-disk audit-trail integrity check, closing E-014 S3 / C-093.
+
+### Added
+- **B85 — incident readiness: tool-use trail present and tamper-resistant** (advisory,
+  HIGH confidence). OpenClaw's per-session trajectory sidecar
+  (`agents/<agent>/sessions/*.trajectory.jsonl`) is the closest thing OpenClaw has to an
+  attributable, on-disk audit log of tool calls (grounded in recon §9.1). B85 answers two
+  filesystem questions and **never reads call contents** (§8, `stat()` only):
+  *present?* — is tool use recorded at all; *tamper-resistant?* — are the sidecar files or
+  their `sessions/` directory group/world-writable, so a local user (or the agent itself)
+  could rewrite/delete the trail. **PASS** = present + tight perms; **WARN** = present but
+  group/world-writable; **UNKNOWN** = non-POSIX, or no sidecar (disabled via
+  `OPENCLAW_TRAJECTORY=0`, relocated to `OPENCLAW_TRAJECTORY_DIR`, or no runs yet) — never a
+  false FAIL. Scored=`False`, so it never moves the A–F grade. Mapped to AST09 (No
+  Governance), no clean OWASP-LLM analog (mirrors B50). `tests/test_b85_incident_readiness.py`.
+- `trajectory.find_trajectory_files()` — a read-only, DoS-bounded glob of the grounded
+  sidecar layout, now shared by both `read_proven_tools()` (B84) and B85.
+
+### Changed
+- This supersedes the 2026-06-27 C-093 verdict ("no audit-log surface → infeasible"): the
+  static presence + tamper legs are now answerable from the trajectory sidecar, without any
+  new config field (no `dig()` path added; `test_schema_grounding` unaffected). The pure
+  log-*content* retention/attribution leg stays config-UNKNOWN — no `audit.file` exists.
+  Recon §9.1 updated accordingly; `docs/CHECKS.md` regenerated; README §checks updated.
+
 ## [3.4.0] — 2026-07-03
 
 A two-phase multi-turn taint harness — the persistent-poisoning self-test the single-turn
