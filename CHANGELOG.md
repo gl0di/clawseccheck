@@ -3,6 +3,35 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.6.0] — 2026-07-03
+
+Two new bundled-code semantic passes plus the first defensibility-axis check — the
+installed-skill vet (B13) now reads JavaScript/TypeScript, catches more obfuscated shell,
+and flags import-path hijack surface. All additions are zero-false-positive by
+construction: crit rules fire only on unambiguous obfuscated-RCE / exfil shapes, softer
+signals land in WARN buckets.
+
+### Added
+- **B86 — import-path hijack surface (defensibility axis D1).** Flags a skill whose import
+  resolution can pull code from a writable directory (`IMPORT_FROM_WRITABLE`) — a
+  supply-chain tamper surface (cf. B5). First check on the new defensibility axis.
+- **`analyze_javascript` — bundled JS/TS semantic pass (F-064).** The vet was Python+shell
+  only; `.js`/`.ts`/`.mjs`/`.cjs` had no semantic pass. Hybrid severity: `JS_EVAL_DECODED`
+  (eval/Function of a base64-decoded blob) and `JS_EVAL_REMOTE` (dynamic `import()` of a
+  URL, `fetch(...).then(eval)`) are **crit → FAIL**; `JS_CHILD_PROCESS_DYNAMIC`
+  (child_process with an interpolated command) and `JS_DYNAMIC_REQUIRE` (require of a
+  non-literal) are **WARN**. Comments are masked (URLs preserved) so documented examples
+  don't fire.
+- **`analyze_shell` extended (F-050)** with three crit rules: `SHELL_DECODE_EXEC`
+  (base64/xxd/openssl `-d` piped into a shell/interpreter), `SHELL_EVAL_REMOTE`
+  (`eval`/`source` of a remote download), and `SHELL_ENV_EXFIL` (a credential-shaped env
+  var sent over a raw socket — `nc`//dev/tcp; auth headers to curl/wget stay silent).
+
+### Fixed
+- **B13 false positive** — a subprocess argv passed as a variable list
+  (`cmd = [prog, *args]; subprocess.run(cmd)`) is no longer escalated to
+  command-injection grade absent a credential/exfil signal.
+
 ## [3.5.0] — 2026-07-03
 
 Incident-readiness check (B85) — turns the trajectory sidecar from a "proven tool use"
