@@ -307,7 +307,7 @@ def _rule_open_sender_exec(ctx: Context, tools: list[str], cfg: dict) -> RiskPat
 
 
 def _rule_lethal_trifecta(ctx: Context, tools: list[str], cfg: dict) -> RiskPath | None:
-    """HIGH: dirty input + sensitive data + outbound/exec (the explicit Trifecta path)."""
+    """HIGH: dirty input + sensitive data + outbound/exec — the explicit Trifecta path."""
     has_input = _has_untrusted_ingress(tools, cfg)
     has_sensitive = _has_sensitive_data(tools, ctx)
     has_outbound = _has_outbound(tools, cfg)

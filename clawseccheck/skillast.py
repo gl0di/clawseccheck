@@ -1751,7 +1751,7 @@ def analyze_python_package(files) -> list[ASTFinding]:
     """Cross-file / import-graph taint (H1): a decode-derived module-level value defined in
     one skill file, imported and executed (exec/eval/os.system/subprocess) in another. The
     per-file engine (analyze_python) misses this because each half is clean in isolation —
-    file A holds the obfuscated blob, file B imports and exec()s it.
+    file A holds the obfuscated blob, file B imports and then runs it.
 
     `files` is an iterable of (relpath, source). Stdlib ast only; never raises, never
     executes; deterministic. Returns ASTFindings whose reason is self-contained (it names
@@ -1998,8 +1998,8 @@ _JS_EVAL_DECODED_RE = re.compile(
     r"(?:atob\s*\(|Buffer\.from\s*\([^)\n]*['\"]base64['\"])",
     re.I,
 )
-# remote code fetched then executed: dynamic import of a URL, fetch(...).then(eval),
-# or eval(await ... fetch(...)).
+# remote code fetched then executed: a dynamic import of a URL, a then-eval chained on a
+# fetch, or an eval over an awaited fetch.
 _JS_EVAL_REMOTE_RE = re.compile(
     r"\bimport\s*\(\s*['\"]https?://"
     r"|\.then\s*\(\s*eval\b"
@@ -2018,7 +2018,7 @@ _JS_DYN_REQUIRE_RE = re.compile(
 
 def _js_mask_comments(source: str) -> str:
     """Blank JS/TS comments while preserving line numbers, so a documented
-    `eval(atob(...))` example can't fire. A `//` preceded by ':' (i.e. inside a
+    eval-of-atob example can't fire. A `//` preceded by ':' (i.e. inside a
     URL like https://) is preserved so remote-import detection still works."""
     def _blank_block(m):
         return "\n" * m.group(0).count("\n")
@@ -2030,12 +2030,12 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
     """Conservative lexical pass over a bundled .js/.ts/.mjs/.cjs file (F-064). No JS
     AST; stdlib regex only; never raises, never executes. Hybrid severity:
 
-      JS_EVAL_DECODED (crit) — eval / new Function of a base64-decoded blob
-        (eval(atob(...)) / new Function(Buffer.from(...,'base64'))): obfuscated RCE.
-      JS_EVAL_REMOTE (crit) — remote code fetched then executed: dynamic import of a
-        URL, fetch(...).then(eval), eval(await ... fetch(...)).
-      JS_CHILD_PROCESS_DYNAMIC (warn) — child_process exec-family called with an
-        interpolated command (exec(`git ${x}`)): command-injection surface. Only
+      JS_EVAL_DECODED (crit) — eval / new Function over a base64-decoded blob
+        (an eval of an atob result, or a Function built from a base64 Buffer): obfuscated RCE.
+      JS_EVAL_REMOTE (crit) — remote code fetched then executed: a dynamic import of a
+        URL, a then-eval chained on a fetch, or an eval over an awaited fetch.
+      JS_CHILD_PROCESS_DYNAMIC (warn) — a child_process exec-family call with an
+        interpolated command (a template-string git command): command-injection surface. Only
         emitted when the file references child_process (kills the RegExp.exec FP).
       JS_DYNAMIC_REQUIRE (warn) — require() of a non-literal (variable / template):
         an attacker-influenced module path.
@@ -2058,7 +2058,7 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
             "JS_EVAL_DECODED",
             "crit",
             ln,
-            "eval/Function of a base64-decoded blob (eval(atob(...))) — "
+            "eval/Function over a base64-decoded blob — "
             "obfuscated remote code execution",
         )
 
@@ -2068,8 +2068,8 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
             "JS_EVAL_REMOTE",
             "crit",
             ln,
-            "remote code is fetched and executed (import('http...') / "
-            "fetch(...).then(eval)) — remote code execution",
+            "remote code is fetched and executed (a URL import, or a fetched "
+            "blob passed straight to eval) — remote code execution",
         )
 
     if "child_process" in masked:

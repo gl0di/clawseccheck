@@ -1170,7 +1170,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
 ### RISK-02 - Lethal Trifecta: untrusted input → sensitive data → outbound
 
 - Severity: HIGH
-- Pattern: HIGH: dirty input + sensitive data + outbound/exec (the explicit Trifecta path).
+- Pattern: HIGH: dirty input + sensitive data + outbound/exec — the explicit Trifecta path.
 - Chain: input_label -> sensitive_label -> outbound_label
 - Why:
   All three legs of the Lethal Trifecta are active simultaneously: the agent ingests

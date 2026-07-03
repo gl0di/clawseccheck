@@ -532,11 +532,11 @@ def _trifecta_legs(ctx: Context) -> dict:
     untrusted_ch = _untrusted_input_channels(cfg)
     web_fetch = _web_fetch_enabled(cfg)
     # B-061: ungated exec/shell can read any private file (sensitive) AND exfiltrate
-    # (outbound). Approval-gated exec (tools.exec.mode=deny/allowlist/ask/auto,
+    # (outbound). Approval-gated exec — tools.exec.mode is deny/allowlist/ask/auto,
     # security=deny/ask, ask=on-miss/always — see _has_approval_gate) is NOT autonomous:
     # a human signs each call, so it must NOT raise the sensitive leg. Without this guard
     # §5 breaks — home_safe + clean_b55/b68/b69/c014/c6 pair an untrusted channel with
-    # mode='ask' exec and would flip to a spurious 3/3. Only ungated exec (mode='full')
+    # mode='ask' exec and would flip to a spurious 3/3. Only ungated exec at mode='full'
     # reaches sensitive. Outbound already counts exec via OUTBOUND_TOOL_HINTS (gated or
     # not), so the outbound leg below is intentionally left unchanged.
     # B-064: use _real_exec_enabled (declared exec signals) NOT _hint(tools, ...) — the
@@ -671,7 +671,7 @@ _MISSING_LEG_ACTIVATORS = {
     ),
     "sensitive data": (
         "a private-data tool (tools.allow: fs_read/db/sql/vault/credential), "
-        "ungated exec (tools.exec.mode='full'), or a readable credentials/ dir"
+        "ungated exec, i.e. tools.exec.mode='full', or a readable credentials/ dir"
     ),
     "outbound actions": (
         "an outbound tool (tools.allow: send/webhook/http_post/fs_write/deploy), "
@@ -1879,9 +1879,9 @@ _SKILL_HIGH = [
         "powershell download-and-exec",
         re.compile(r"(iwr|invoke-webrequest)\b[^\n|]{0,200}\|\s*iex|Invoke-Expression", re.I),
     ),
-    # C-039: exec(requests.get(url).text) — downloads and immediately evals arbitrary remote code.
+    # C-039: a remote fetch fed straight to exec — downloads and immediately runs arbitrary remote code.
     (
-        "remote code fetch-and-exec (requests.get/urlopen piped to exec/eval)",
+        "remote code fetch-and-exec — requests.get/urlopen piped to exec or eval",
         re.compile(
             r"exec\s*\(\s*(?:requests?\.get|urllib\b[^\n]{0,60}urlopen)\s*\([^\n]{0,120}\)\s*"
             r"(?:\.text|\.read\s*\(\s*\)|\.content\b)",
@@ -2976,7 +2976,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         if _skill_ep_results:
             ctx.effect_profiles[name] = _skill_ep_results
         # F-056: cross-file / import-graph taint. A decode-derived value defined in one of
-        # this skill's files, imported and exec()'d in another, is invisible to the per-file
+        # this skill's files, imported and run in another, is invisible to the per-file
         # pass above (each half is clean alone). CROSS_FILE_EXEC is crit -> FAIL; the reason
         # already carries the importing file:line and the source module.
         for af in analyze_python_package(ctx.installed_skill_py.get(name, [])):
@@ -8558,7 +8558,7 @@ def check_agent_snooping(ctx: Context) -> Finding:
 #
 # Capability family names (used in effect_profiles + import scan):
 #   "network"  — outbound HTTP/socket/urllib/requests/aiohttp
-#   "exec"     — subprocess/os.system/eval/exec (process execution)
+#   "exec"     — subprocess/os.system/eval/exec, i.e. process execution
 #   "write"    — filesystem write (open-for-write / shutil.copy / os.rename / etc.)
 #   "read"     — filesystem read  (benign for most categories — never surprises)
 #   "cred"     — credential / env-var / secret-store access
@@ -11501,7 +11501,8 @@ def check_dormant_capability(ctx: Context) -> Finding:
 # string literals in different files so no single-pass scan ever sees the whole blob. B13's
 # _decoded_payloads reassembles WITHIN one blob (whitespace-strip + adjacent quoted-concat),
 # but literals assigned to different variables in different files, glued only at RUNTIME
-# (x=".."; y=".."; exec(b64decode(x+y))), are the residual gap (F-005 taint is intra-file).
+# (x=".."; y=".."; then an exec over the decoded x+y elsewhere), are the residual gap
+# (F-005 taint is intra-file).
 #
 # B90 collects the pure-base64 string literals across a skill's py/shell/js sources, tries
 # to reassemble a payload from them (full in-order join + sliding windows of 2–3), and fires
