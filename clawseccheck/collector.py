@@ -751,8 +751,10 @@ def read_skill_shell(skill_dir: Path, ctx: Context | None = None) -> list[tuple[
     out: list[tuple[str, str]] = []
     total = 0
     file_count = 0
+    truncated = False
     for item in collected:
         if total >= _MAX_PY_BYTES_PER_SKILL or file_count >= _MAX_FILES_PER_SKILL:
+            truncated = True
             break
         if item["classification"] != "TEXT":
             continue
@@ -762,6 +764,15 @@ def read_skill_shell(skill_dir: Path, ctx: Context | None = None) -> list[tuple[
         out.append((item["relpath"], text))
         total += len(text)
         file_count += 1
+
+    # B-074: record when shell collection was capped so a padded shell payload beyond the
+    # cap surfaces as UNKNOWN rather than a clean PASS (mirrors read_skill_python).
+    if truncated and ctx is not None:
+        ctx.limit_hits.append(
+            f"shell scan of skill '{skill_dir.name}' hit the "
+            f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap — "
+            "shell content beyond the cap was NOT scanned")
+
     return out
 
 

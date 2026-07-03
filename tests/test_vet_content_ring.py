@@ -15,6 +15,7 @@ Two firing shapes are exercised:
 """
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,41 @@ def test_ring_covers_the_headline_checks():
     assert check_capability_intent_mismatch in SKILL_CONTENT_RING
 
 
+# Audit-level checks that touch installed-skill data but are aggregators / posture checks,
+# NOT per-skill content-threat detectors — intentionally outside the pre-install ring.
+_RING_EXEMPT = {
+    "check_installed_skills",   # B13 — vet_skill invokes it directly, not via the ring
+    "check_egress",             # egress surface enumeration (audit posture)
+    "check_egress_inventory",   # outbound-capable inventory (audit posture)
+    "check_monitoring",         # threat-monitoring presence (audit posture)
+    "check_tool_output_trust",  # B21 — bootstrap trust-boundary posture (audit-level)
+}
+
+
+def test_ring_is_complete_no_content_check_left_out():
+    """Any check whose body reads installed-skill content must be in SKILL_CONTENT_RING
+    (so it also runs under --vet) or be an explicit audit-level exemption. Guards against
+    a new content-threat check landing in CHECKS but being forgotten in the ring — which
+    would run in the full audit yet silently skip --vet (the exact B58 drift this closes)."""
+    ring = set(SKILL_CONTENT_RING)
+    missing = []
+    for chk in CHECKS:
+        name = getattr(chk, "__name__", "")
+        if chk in ring or name in _RING_EXEMPT:
+            continue
+        try:
+            src = inspect.getsource(chk)
+        except (OSError, TypeError):
+            continue
+        if "installed_skill" in src:
+            missing.append(name)
+    assert not missing, (
+        "content checks read installed_skills but are missing from SKILL_CONTENT_RING "
+        f"(run in the full audit but NOT under --vet): {sorted(missing)} — add them to the "
+        "ring or, if audit-level, to _RING_EXEMPT with justification"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Native skill fixtures: the ring fires through vet_skill().                   #
 # --------------------------------------------------------------------------- #
@@ -75,6 +111,7 @@ def test_native_skill_fixture_fires_ring_via_vet(skill_rel, expect_id):
 # Relocated-payload fixtures: real SOUL.md trigger text moved into a SKILL.md. #
 # --------------------------------------------------------------------------- #
 _RELOCATED = [
+    ("bad_b58_unicode_injection", "B58"),
     ("bad_b59_md_image_exfil", "B59"),
     ("bad_b60_self_replication", "B60"),
     ("bad_b63_silent_action", "B63"),

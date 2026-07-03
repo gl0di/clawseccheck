@@ -9618,6 +9618,7 @@ def check_session_approval_policy(ctx: Context) -> Finding:
 #     has no bootstrap files to inspect.
 # ---------------------------------------------------------------------------
 SKILL_CONTENT_RING = (
+    check_unicode_obfuscation,             # B58 — unicode / hidden-text de-obfuscation
     check_markdown_image_exfil,           # B59 — MD-image data-exfil
     check_image_attr_injection,            # C074 — HTML img-attr injection
     check_prompt_self_replication,         # B60 — self-replication directive
@@ -9833,7 +9834,6 @@ CHECKS = [
     check_controlui_origins, check_plugin_permission_mode,
     check_hook_policy_bypass,
     check_cron_scheduler,
-    check_unicode_obfuscation,
     # Content-security ring — single source of truth (also consumed by vet_skill).
     # SKILL_CONTENT_RING is defined just above; changing it updates both the full audit
     # and the --vet path so they can never drift apart.
