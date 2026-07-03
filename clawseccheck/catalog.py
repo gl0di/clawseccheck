@@ -831,6 +831,20 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="skills",
     ),
+    # SKILL.md frontmatter authoring hygiene (F-082 a + e-gap): an HTML/XML-tag-shaped
+    # value inside a frontmatter value (metadata-injection surface) and cross-skill
+    # trigger-squatting in the description. Coordinates with B58 (invisible unicode) and
+    # F-051 (broad-trigger family) — B88 covers only what those don't. WARN-only advisory.
+    CheckMeta(
+        "B88",
+        "SKILL.md frontmatter authoring hygiene (tag-shaped values / cross-skill squatting)",
+        MEDIUM,
+        "advisory",
+        "Authoring Hygiene / Insecure Metadata",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # advisory (not scored)
     CheckMeta(
         "C3",
@@ -1054,6 +1068,7 @@ AST_MAP = {
     "B85": ("AST09",),  # tamperable/absent tool-use audit trail = weak governance (cf. B50/B77)
     "B86": ("AST02",),  # import-path hijack via writable sys.path = supply-chain tamper (cf. B5)
     "B87": ("AST06",),  # symlink escape to a sensitive host path = boundary violation (cf. B38 SSRF)
+    "B88": ("AST04",),  # tag-shaped frontmatter value / cross-skill squat = insecure metadata (cf. B62)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
@@ -1105,6 +1120,9 @@ OWASP_MAP = {
     "B57": ("LLM06", "LLM03"),
     # B62: Excessive Agency (LLM06) — skill acts beyond its declared scope.
     "B62": ("LLM06",),
+    # B88: a tag-shaped value hidden in SKILL.md frontmatter is a prompt-injection surface
+    # (Prompt Injection, LLM01); the cross-skill-squat half is metadata hygiene (AST04 only).
+    "B88": ("LLM01",),
     # B63: Excessive Agency (LLM06) — instructing the agent to hide its actions
     # undermines human oversight. NOT LLM09 "Misinformation" (a model-output/RAG concern
     # the agent config can't see; LLM09 is out of scope per docs/THREAT_COVERAGE.md).

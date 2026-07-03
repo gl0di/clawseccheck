@@ -11221,6 +11221,123 @@ def check_symlink_escape(ctx: Context) -> Finding:
     )
 
 
+# ---------- B88: SKILL.md frontmatter authoring hygiene (F-082 a + e-gap) ----------
+# Two deterministic frontmatter-scoped lints, each covering only what an existing check
+# does NOT — the E-008 "coordinate, don't duplicate" rule:
+#   (a) An HTML/XML-tag-shaped value `<tag …>` inside the SKILL.md frontmatter — a metadata
+#       injection surface: it renders as markup in a viewer, can break a YAML/JSON validator,
+#       and can smuggle an instruction the model reads. B58 owns invisible-unicode
+#       obfuscation and B59 owns markup in the BODY; neither flags a tag in a frontmatter value.
+#   (e-gap) Cross-skill trigger-squatting in the frontmatter (description) — wording that
+#       displaces OTHER skills ("use this skill instead of other skills", "ignore other
+#       skills", "the only skill you need"). F-051 already owns the broad-trigger family
+#       ("always use this skill", "on every request"); B88 covers only the cross-skill-squat
+#       phrasing F-051 does not, so the two never double-report.
+# WARN-only advisory (scored=False, MEDIUM). Reads ctx.installed_skills; UNKNOWN when there
+# is no SKILL.md frontmatter to inspect (so a frontmatter-free vet never false-WARNs).
+# Grounding (§4): SKILL.md frontmatter fields are documented in the workspace recon doc
+# (openclaw-schema-recon.md, "SKILL.md frontmatter" section) — the vet reads the block, it
+# does not depend on any specific optional field being present.
+
+# A frontmatter value shaped like an HTML/XML tag: `<` + (letter | `!` doctype/comment |
+# `/` closing). A bare `<` used as "less than" ("score < 5", "<=") never matches.
+_FM_TAG_RE = re.compile(r"<\s*[A-Za-z!/]")
+
+# Cross-skill trigger-squatting: displacing OTHER skills. Deliberately disjoint from F-051
+# (broad triggers) so the two never fire on the same phrase.
+_FM_CROSS_SKILL_SQUAT_RE = re.compile(
+    r"\buse\s+this\s+skill\s+instead\s+of\b|"
+    r"\binstead\s+of\s+(?:the\s+|any\s+|all\s+)?other\s+skills?\b|"
+    r"\b(?:ignore|disable|override|bypass|replace|suppress)\s+(?:all\s+|any\s+|the\s+)?other\s+skills?\b|"
+    r"\bthe\s+only\s+skill\s+(?:you|the\s+agent|anyone)\s+(?:will\s+ever\s+)?need\b|"
+    r"\b(?:always\s+)?prefer\s+this\s+skill\s+(?:over|instead\s+of)\b",
+    re.I,
+)
+
+# The SKILL.md frontmatter block. _read_skill_text prefixes each file with `# file: <name>`
+# (dir vet + full audit); a lone-file vet (vet_skill on a SKILL.md path) has no such header,
+# so the block may also start the blob. Both forms are handled by _skill_frontmatter_block.
+_FM_BLOCK_HEADERED_RE = re.compile(
+    r"^# file:\s+SKILL\.md\s*\n---\s*\n(?P<fm>(?:.*?\n)*?)^---\s*\n",
+    re.MULTILINE,
+)
+_FM_BLOCK_BARE_RE = re.compile(
+    r"\A---\s*\n(?P<fm>(?:.*?\n)*?)^---\s*\n",
+    re.MULTILINE,
+)
+
+
+def _skill_frontmatter_block(blob: str) -> str | None:
+    """Return the SKILL.md frontmatter text (between the first fenced `---` pair), or None
+    if the blob carries no frontmatter. Prefers the `# file: SKILL.md`-anchored form; falls
+    back to a blob that opens with frontmatter (lone-file vet)."""
+    m = _FM_BLOCK_HEADERED_RE.search(blob)
+    if m:
+        return m.group("fm")
+    m = _FM_BLOCK_BARE_RE.match(blob)
+    if m:
+        return m.group("fm")
+    return None
+
+
+def check_frontmatter_hygiene(ctx: Context) -> Finding:
+    """B88 — SKILL.md frontmatter authoring hygiene (see the module comment above)."""
+    skills = getattr(ctx, "installed_skills", None)
+    if not skills:
+        return _custom(
+            "B88",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for frontmatter authoring hygiene.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    warns: list[str] = []
+    inspected = 0
+    for name, blob in skills.items():
+        fm = _skill_frontmatter_block(blob)
+        if fm is None:
+            continue  # no frontmatter for this skill — nothing to lint
+        inspected += 1
+        if _FM_TAG_RE.search(fm):
+            warns.append(
+                f"{name}: HTML/XML-tag-shaped value in SKILL.md frontmatter "
+                "(metadata-injection surface)"
+            )
+        if _FM_CROSS_SKILL_SQUAT_RE.search(fm):
+            warns.append(
+                f"{name}: frontmatter wording displaces other skills "
+                "(cross-skill trigger squatting)"
+            )
+    if inspected == 0:
+        return _custom(
+            "B88",
+            MEDIUM,
+            UNKNOWN,
+            "No SKILL.md frontmatter found to inspect.",
+            "Run --vet on a skill whose SKILL.md carries a `---` frontmatter block.",
+        )
+    if warns:
+        extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
+        return _custom(
+            "B88",
+            MEDIUM,
+            WARN,
+            "SKILL.md frontmatter authoring hygiene: " + "; ".join(warns[:6]) + extra,
+            "Keep frontmatter values plain: no HTML/XML tags (use plain text — a tag is a "
+            "metadata-injection surface and can break the manifest validator), and describe "
+            "what the skill does without claiming to displace or override other skills.",
+            warns,
+        )
+    return _custom(
+        "B88",
+        MEDIUM,
+        PASS,
+        f"Frontmatter of {inspected} skill(s) is clean: no tag-shaped values and no "
+        "cross-skill trigger squatting.",
+        "Keep frontmatter values plain text and scoped to what the skill actually does.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # SKILL_CONTENT_RING — single source of truth for content-security ring checks.
 #
@@ -11257,6 +11374,7 @@ SKILL_CONTENT_RING = (
     check_install_policy,  # B42 — install-time policy (hooks + dir perms)
     check_import_from_writable,  # B86 — defensibility: import-path hijack surface (D1)
     check_symlink_escape,  # B87 — symlink escape to a sensitive host path (TAM-07)
+    check_frontmatter_hygiene,  # B88 — frontmatter authoring hygiene (tag values / squat)
 )
 
 

@@ -991,6 +991,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B88 - SKILL.md frontmatter authoring hygiene (tag-shaped values / cross-skill squatting)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Authoring Hygiene / Insecure Metadata
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: LLM01 Prompt Injection
+- What it checks: SKILL.md frontmatter authoring hygiene (tag-shaped values / cross-skill squatting)
+- Remediation:
+  - none
+
 ### C3 - Backups of SOUL.md / memory
 
 - Severity: LOW
