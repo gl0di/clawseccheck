@@ -1858,6 +1858,33 @@ _SH_CRED_ASSIGN_RE = re.compile(
     r"\.docker/config|\.kube/config|\.npmrc|\.pypirc|\.openclaw/)",
     re.I,
 )
+# decode-then-exec: an encoded blob is decoded (base64/xxd/openssl) and piped straight
+# into a shell/interpreter — the classic obfuscated-RCE dropper. Encode (no -d) and
+# decode-to-file (no `| interp`) stay silent.
+_SH_DECODE_EXEC_RE = re.compile(
+    r"\b(?:base64\s+-[a-z]*d[a-z]*|base64\s+--decode|xxd\s+-r|"
+    r"openssl\s+(?:base64|enc)\b[^\n|]*?-d)"
+    r"[^\n]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|ksh|dash|python3?|node|perl|ruby|php|deno)\b",
+    re.I,
+)
+# eval/source of a remote download — `eval "$(curl … http…)"` / `source <(wget … http…)`.
+# The tight, defensible slice of "$()-command-injection": only a remote fetch feeding
+# eval/source fires (a bare $(…) or a local eval stays silent).
+_SH_EVAL_REMOTE_RE = re.compile(
+    r"\b(?:eval|source)\b[^\n]*(?:\$\(|<\()\s*(?:sudo\s+)?(?:curl|wget)\b[^\n)]*https?://",
+    re.I,
+)
+# raw-socket outbound (nc//dev/tcp) — deliberately EXCLUDES curl/wget, which legitimately
+# carry an auth header to an API. Sending a secret over a raw socket is not legitimate.
+_SH_RAW_SOCKET_RE = re.compile(r"\b(?:nc|ncat|netcat)\b|/dev/tcp/", re.I)
+# a credential-shaped env-var NAME (contains TOKEN/SECRET/API_KEY/…). Gating env->outbound
+# on the name (not any $VAR) is what keeps this zero-FP against authed-API scripts.
+_SH_CRED_ENV_RE = re.compile(
+    r"\$\{?[A-Za-z0-9_]*"
+    r"(?:API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|ACCESS_?KEY|AUTH)"
+    r"[A-Za-z0-9_]*\}?",
+    re.I,
+)
 
 
 def _sh_mask_comments(source: str) -> str:
@@ -1868,15 +1895,23 @@ def _sh_mask_comments(source: str) -> str:
 
 def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     """Conservative regex pass over a bundled .sh/.bash/.zsh file (F-050). No shell AST;
-    stdlib regex only; never raises, never executes. Flags two high-confidence shapes:
+    stdlib regex only; never raises, never executes. Flags high-confidence shapes:
 
       SHELL_CRED_EXFIL (crit) — a credential file is read and its contents reach an
         outbound command (curl/wget/nc//dev/tcp): read a secret -> send it out.
       SHELL_PIPE_INTERP (crit) — a remote payload is downloaded and piped straight into a
         non-shell interpreter (curl URL | python/node/perl/...): remote code execution.
+      SHELL_DECODE_EXEC (crit) — an encoded blob is decoded (base64/xxd/openssl -d) and
+        piped straight into a shell/interpreter: obfuscated remote code execution.
+      SHELL_EVAL_REMOTE (crit) — eval/source of a remote download
+        (eval "$(curl … http…)" / source <(wget … http…)): remote code execution.
+      SHELL_ENV_EXFIL (crit) — a credential-shaped env var ($…TOKEN/$…SECRET/…) is sent
+        over a RAW socket (nc//dev/tcp): credential exfiltration.
 
-    Whole-line comments are ignored so documentation examples stay clean. env-var->outbound
-    and $()-command-injection are deliberately out of scope here (FP-prone in shell)."""
+    Whole-line comments are ignored so documentation examples stay clean. The naive
+    forms — any $VAR piped to curl (authed-API scripts), or any bare $() command
+    substitution — stay deliberately out of scope: SHELL_EVAL_REMOTE and SHELL_ENV_EXFIL
+    are the tight, zero-FP slices of those (remote-fed eval; raw-socket-only, cred-named)."""
     out: list[ASTFinding] = []
     seen: set = set()
 
@@ -1896,6 +1931,36 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             "downloads a remote payload and pipes it into an interpreter "
             "(curl/wget ... | python/node/perl/...) — remote code execution",
         )
+
+    for m in _SH_DECODE_EXEC_RE.finditer(masked):
+        ln = masked.count("\n", 0, m.start()) + 1
+        add(
+            "SHELL_DECODE_EXEC",
+            "crit",
+            ln,
+            "decodes an encoded blob and pipes it into a shell/interpreter "
+            "(base64/xxd/openssl -d | sh) — obfuscated remote code execution",
+        )
+
+    for m in _SH_EVAL_REMOTE_RE.finditer(masked):
+        ln = masked.count("\n", 0, m.start()) + 1
+        add(
+            "SHELL_EVAL_REMOTE",
+            "crit",
+            ln,
+            "eval/source of a remote download (eval \"$(curl ... http...)\") — "
+            "remote code execution",
+        )
+
+    for i, raw in enumerate(masked.splitlines(), 1):
+        if _SH_RAW_SOCKET_RE.search(raw) and _SH_CRED_ENV_RE.search(raw):
+            add(
+                "SHELL_ENV_EXFIL",
+                "crit",
+                i,
+                "a credential-shaped environment variable is sent over a raw socket "
+                "(nc//dev/tcp) — credential exfiltration",
+            )
 
     cred_vars = {m.group("var") for m in _SH_CRED_ASSIGN_RE.finditer(masked)}
     for i, raw in enumerate(masked.splitlines(), 1):
