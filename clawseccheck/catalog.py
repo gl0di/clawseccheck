@@ -465,6 +465,18 @@ CATALOG: list[CheckMeta] = [
     CheckMeta(
         "B54", "Host firewall active", LOW, "hardening", "Host Watch / Firewall", surface="host"
     ),
+    # B101 (F-084): outbound (egress) filtering posture — a firewall can be present
+    # and active (B54) while still defaulting to allow-all outbound. WARN-only when
+    # confirmed default-allow AND the agent is high-privilege; UNKNOWN when the
+    # policy can't be read (the expected result on most systems, never fabricated).
+    CheckMeta(
+        "B101",
+        "Outbound (egress) filtering posture",
+        LOW,
+        "hardening",
+        "Host Watch / Egress Posture",
+        surface="host",
+    ),
     # B55 (C-013): filesystem-write tool exposure. Advisory (scored=False) — it names
     # the fs-write capability and feeds RISK-12 (write + untrusted ingress = tamper /
     # persistence); the scored write/least-privilege dimensions stay with B3/B22/B31 so
@@ -875,6 +887,21 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # A base64 payload embedded directly in prose/markdown (not a code string literal)
+    # whose two halves sit in adjacent files, joining only across the `# file:`
+    # section-boundary marker our own concatenation inserts — a narrower residual
+    # distinct from B90 (which covers code string literals anywhere in a skill, not
+    # specifically at a boundary). WARN-only heuristic (F-086).
+    CheckMeta(
+        "B102",
+        "Base64 payload split exactly at a file-section boundary",
+        MEDIUM,
+        "advisory",
+        "Obfuscation / Malicious Skill",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # A sink reached via a COMPUTED name (getattr(os, 'sy'+'stem'), import_module(cfg['mod']))
     # rather than a literal token defeats a simple text/keyword scan. Reuses the existing
     # skillast.py AST rules (GETATTR_INDIRECTION, DYNAMIC_IMPORT_EXEC) — pure wiring, no new
@@ -1226,6 +1253,7 @@ AST_MAP = {
     "B52": ("AST09",),
     "B53": ("AST09",),
     "B54": ("AST09",),
+    "B101": ("AST09",),  # host-level egress posture = governance/no-isolation gap (cf. B50-B54)
     "B57": ("AST02", "AST03"),
     # Orphan-check fills (coverage-map P3): each mirrors a named sibling's AST class.
     "B38": ("AST06",),  # headless browser without OS sandbox = Weak Isolation (cf. B4)
@@ -1250,6 +1278,7 @@ AST_MAP = {
     "B88": ("AST04",),  # tag-shaped frontmatter value / cross-skill squat = insecure metadata (cf. B62)
     "B89": ("AST01",),  # unreachable-yet-code-bearing skill = staged/dormant malicious shape (cf. B13)
     "B90": ("AST01",),  # cross-file split base64 payload = hidden malicious code / scanner evasion (cf. B13)
+    "B102": ("AST01",),  # base64 split at a file-section boundary = hidden malicious code (cf. B90)
     "B91": ("AST01",),  # dynamic-dispatch sink obfuscation = hidden malicious code / scanner evasion (cf. B89/B90)
     "B92": ("AST02",),  # unsafe deserialization sink = RCE-from-data supply-chain tamper (cf. B86)
     "B93": ("AST04",),  # confusable trigger description = insecure metadata / trigger-squat (cf. B88)

@@ -78,6 +78,43 @@ ClawSecCheck practises this: it is open source, zero-dependency, read-only, and 
 does exactly this vetting on the skills you've *already* installed. Trust is earned by being
 readable — so read it.
 
+**Verifying ClawSecCheck itself hasn't been tampered with.** `clawseccheck --verify-self`
+prints a SHA-256 digest of the engine's own source — but a digest computed *from inside* a
+possibly-modified copy is only a tripwire, not proof (a tampered `integrity.py` could print
+anything). The trusted reference lives out-of-band: every GitHub Release publishes a
+`SHA256SUMS.txt` (same digest format `--verify-self` prints) signed with
+[cosign](https://github.com/sigstore/cosign) in keyless mode via the release workflow's own
+GitHub Actions OIDC identity — no private key for anyone to leak or steal. Verify it before
+trusting the comparison:
+
+```bash
+# Get the release assets (adjust the version):
+curl -LO https://github.com/gl0di/clawseccheck/releases/download/vX.Y.Z/SHA256SUMS.txt
+curl -LO https://github.com/gl0di/clawseccheck/releases/download/vX.Y.Z/SHA256SUMS.txt.sig
+curl -LO https://github.com/gl0di/clawseccheck/releases/download/vX.Y.Z/SHA256SUMS.txt.pem
+
+cosign verify-blob \
+  --certificate SHA256SUMS.txt.pem \
+  --signature SHA256SUMS.txt.sig \
+  --certificate-identity-regexp "^https://github.com/gl0di/clawseccheck/" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS.txt
+```
+
+A passing `cosign verify-blob` proves `SHA256SUMS.txt` was produced by *this repo's* release
+workflow and hasn't been altered since — not that the CI pipeline itself is uncompromisable.
+This closes the loop against opportunistic tampering of a downloaded copy; it is not a
+guarantee against a targeted adversary who also compromises the CI pipeline.
+
+**The same principle applies to the host itself.** If a machine is already compromised,
+anything running on it at your own privilege level — ClawSecCheck included — can in
+principle be tampered with so it hides the compromise; `--verify-self` catches lazy
+tampering, not a targeted adversary who patches the verifier too. The honest fix is to
+scan the suspect config from a separate, clean machine via `--home`, not to trust a
+self-check running on the box in question. See
+[What if the host is already compromised?](docs/FAQ.md#what-if-the-host-is-already-compromised)
+in the FAQ for the full protocol.
+
 ---
 
 ## 🤔 Why another audit tool?

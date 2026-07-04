@@ -585,6 +585,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B101 - Outbound (egress) filtering posture
+
+- Severity: LOW
+- Block: hardening
+- Framework: Host Watch / Egress Posture
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Outbound (egress) filtering posture
+- Remediation:
+  - none
+
 ### B55 - Filesystem-write tool exposure (broad fs-write without scoping)
 
 - Severity: HIGH
@@ -1024,6 +1036,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: MEDIUM
 - OWASP: none
 - What it checks: Cross-file split base64 payload (reassembled from string literals)
+- Remediation:
+  - none
+
+### B102 - Base64 payload split exactly at a file-section boundary
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Obfuscation / Malicious Skill
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Base64 payload split exactly at a file-section boundary
 - Remediation:
   - none
 

@@ -14,6 +14,7 @@ from clawseccheck.checks import (
     _agent_is_powerful,
     check_host_audit,
     check_host_edr,
+    check_host_egress_posture,
     check_host_file_integrity,
     check_host_firewall,
     check_host_network_ids,
@@ -116,6 +117,75 @@ def test_host_finding_never_fails():
 
 
 # ---------------------------------------------------------------------------
+# B101 egress posture (F-084) — NOT part of _host_finding's generic shape:
+# "active" here means "resolved policy is deny (True) / allow (False) / could
+# not be resolved (None)", not "is a monitor tool switched on".
+# ---------------------------------------------------------------------------
+
+def _host_egress(status="unknown", found=None, active=None, evidence=None, supported=True):
+    base = _host(supported=supported)
+    base["classes"]["egress_posture"] = {
+        "status": status,
+        "found": found or [],
+        "active": active,
+        "evidence": evidence if evidence is not None else (found or []),
+    }
+    return base
+
+
+def test_egress_default_deny_is_pass():
+    host = _host_egress(status="present", found=["nftables OUTPUT policy=drop"], active=True)
+    f = check_host_egress_posture(_ctx(_POWERFUL, host))
+    assert f.status == PASS
+    assert "nftables OUTPUT policy=drop" in (f.evidence or [])
+
+
+def test_egress_default_allow_powerful_agent_warns():
+    host = _host_egress(status="present", found=["ufw DEFAULT_OUTGOING_POLICY=allow"], active=False)
+    f = check_host_egress_posture(_ctx(_POWERFUL, host))
+    assert f.status == WARN
+
+
+def test_egress_default_allow_weak_agent_passes():
+    host = _host_egress(status="present", found=["ufw DEFAULT_OUTGOING_POLICY=allow"], active=False)
+    f = check_host_egress_posture(_ctx(_WEAK, host))
+    assert f.status == PASS
+
+
+def test_egress_unresolved_policy_is_unknown():
+    # a firewall's coarse presence contributed evidence, but no explicit deny/allow
+    # policy was resolved -> honest UNKNOWN, never a fabricated PASS/WARN.
+    host = _host_egress(
+        status="present", found=["firewalld active (egress policy not read — unmapped field)"],
+        active=None,
+    )
+    f = check_host_egress_posture(_ctx(_POWERFUL, host))
+    assert f.status == UNKNOWN
+
+
+def test_egress_no_config_found_is_unknown():
+    host = _host_egress(status="unknown", found=[], active=None)
+    f = check_host_egress_posture(_ctx(_POWERFUL, host))
+    assert f.status == UNKNOWN
+
+
+def test_egress_no_host_context_is_unknown():
+    f = check_host_egress_posture(_ctx(_POWERFUL, None))
+    assert f.status == UNKNOWN
+
+
+def test_egress_unsupported_host_is_unknown():
+    f = check_host_egress_posture(_ctx(_POWERFUL, _host_egress(supported=False)))
+    assert f.status == UNKNOWN
+
+
+def test_egress_never_fails():
+    for host in (None, _host_egress(), _host_egress(supported=False),
+                 _host_egress(status="present", found=["x"], active=False)):
+        assert check_host_egress_posture(_ctx(_POWERFUL, host)).status != "FAIL"
+
+
+# ---------------------------------------------------------------------------
 # wiring through audit(include_host=True)
 # ---------------------------------------------------------------------------
 
@@ -127,6 +197,14 @@ def test_audit_include_host_populates_ctx_and_b50(monkeypatch):
     assert ctx.host is crafted
     b50 = next(f for f in findings if f.id == "B50")
     assert b50.status == PASS
+
+
+def test_audit_include_host_wires_b101(monkeypatch):
+    crafted = _host_egress(status="present", found=["nftables OUTPUT policy=drop"], active=True)
+    monkeypatch.setattr(clawseccheck, "_host_detect", lambda root="/", **_: crafted)
+    _ctx_, findings, _score = clawseccheck.audit("fixtures/home_safe", include_host=True)
+    b101 = next(f for f in findings if f.id == "B101")
+    assert b101.status == PASS
 
 
 def test_audit_without_host_flag_leaves_b50_unknown():

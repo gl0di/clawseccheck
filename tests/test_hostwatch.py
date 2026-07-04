@@ -33,7 +33,14 @@ def test_linux_blind_host_all_absent(tmp_path):
     assert res["supported"] is True
     assert res["system"] == "Linux"
     for cls in hostwatch.CLASSES:
-        assert res["classes"][cls]["status"] == "absent"
+        if cls == hostwatch.EGRESS_POSTURE:
+            # Distinct semantics (F-084): "no readable egress-policy config found" is
+            # honestly UNKNOWN, not "absent" — unlike the other classes (where absence
+            # of a security TOOL is itself informative), a missing declarative config
+            # says nothing about the live kernel default, so UNKNOWN is the honest call.
+            assert res["classes"][cls]["status"] == "unknown"
+        else:
+            assert res["classes"][cls]["status"] == "absent"
 
 
 def test_linux_suricata_detected_by_config(tmp_path):
@@ -105,6 +112,86 @@ def test_linux_nftables_conf_alone_not_active(tmp_path):
     fw = res["classes"]["firewall"]
     assert "nftables" in fw["found"]
     assert fw["active"] is not True
+
+
+# ---------------------------------------------------------------------------
+# Egress (outbound) posture (F-084)
+# ---------------------------------------------------------------------------
+
+def test_linux_egress_nftables_output_drop_is_deny(tmp_path):
+    _touch(
+        tmp_path,
+        "etc/nftables.conf",
+        "table inet filter {\n"
+        "  chain output {\n"
+        "    type filter hook output priority 0; policy drop;\n"
+        "  }\n"
+        "}\n",
+    )
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    eg = res["classes"]["egress_posture"]
+    assert eg["status"] == "present"
+    assert eg["active"] is True
+    assert any("policy=drop" in e for e in eg["evidence"])
+
+
+def test_linux_egress_nftables_output_accept_is_allow(tmp_path):
+    _touch(
+        tmp_path,
+        "etc/nftables.conf",
+        "table inet filter {\n"
+        "  chain output {\n"
+        "    type filter hook output priority 0; policy accept;\n"
+        "  }\n"
+        "}\n",
+    )
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    eg = res["classes"]["egress_posture"]
+    assert eg["status"] == "present"
+    assert eg["active"] is False
+
+
+def test_linux_egress_ufw_outgoing_deny_is_deny(tmp_path):
+    _touch(tmp_path, "etc/ufw/ufw.conf", 'DEFAULT_OUTGOING_POLICY="deny"\n')
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    eg = res["classes"]["egress_posture"]
+    assert eg["status"] == "present"
+    assert eg["active"] is True
+
+
+def test_linux_egress_ufw_outgoing_allow_is_allow(tmp_path):
+    _touch(tmp_path, "etc/ufw/ufw.conf", 'DEFAULT_OUTGOING_POLICY="allow"\n')
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    eg = res["classes"]["egress_posture"]
+    assert eg["status"] == "present"
+    assert eg["active"] is False
+
+
+def test_linux_egress_no_config_is_unknown(tmp_path):
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    eg = res["classes"]["egress_posture"]
+    assert eg["status"] == "unknown"
+    assert eg["active"] is None
+
+
+def test_linux_egress_proxy_env_is_weak_signal_only(tmp_path, monkeypatch):
+    # A proxy env var alone must never read as a standalone deny/PASS signal —
+    # it says nothing about whether *direct* egress is also blocked.
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:8080")
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    eg = res["classes"]["egress_posture"]
+    assert eg["status"] == "unknown"
+    assert eg["active"] is None
+    assert any("http_proxy" in e for e in eg["evidence"])
+
+
+def test_macos_egress_is_unknown_only(tmp_path):
+    # No grounded, read-only-inspectable default-outbound field exists on stock
+    # macOS (ALF governs inbound only) — must stay honestly UNKNOWN, never fabricated.
+    res = detect(root=tmp_path, system="Darwin", which=_none)
+    eg = res["classes"]["egress_posture"]
+    assert eg["status"] == "unknown"
+    assert eg["active"] is None
 
 
 # ---------------------------------------------------------------------------

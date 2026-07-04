@@ -44,6 +44,7 @@ from .palette import render_palette
 from .percentile import render_percentile
 from .logsafe import get_logger
 from .safeio import secure_write_text
+from .sbom import render_sbom
 
 
 def _unicode_ok() -> bool:
@@ -220,6 +221,7 @@ _PRIMARY_MODES = [
     ("percentile", "--percentile", "bool"),
     ("next", "--next", "bool"),
     ("dashboard", "--dashboard", "bool"),
+    ("sbom", "--sbom", "bool"),
     ("dashboard_findings", "--dashboard-findings", "bool"),
     ("monitor", "--monitor", "bool"),
 ]
@@ -426,6 +428,9 @@ def main(argv=None) -> int:
                         "(FAIL/WARN, high-confidence, grouped by family) and exit")
     p.add_argument("--risk-paths", action="store_true",
                    help="print only the highest-risk capability chains and exit")
+    p.add_argument("--sbom", action="store_true",
+                   help="export a local bill-of-materials (skills, MCP servers, hashes, "
+                        "declared/unpinned deps) as deterministic JSON to stdout and exit")
     p.add_argument("--verbose", action="store_true",
                    help="emit INFO-level log breadcrumbs to stderr")
     p.add_argument("--debug", action="store_true",
@@ -464,6 +469,7 @@ def main(argv=None) -> int:
         lines.append("")
         lines.append("Compare the 'combined' value against the digest printed by a trusted release.")
         lines.append("Any mismatch means a source file was modified after that release.")
+        lines.append(f"Trusted digest: see SHA256SUMS.txt on the v{__version__} GitHub Release, signed via cosign.")
         _emit("\n".join(lines))
         return 0
 
@@ -750,6 +756,10 @@ def main(argv=None) -> int:
 
     if args.dashboard_findings:
         _emit(render_dashboard_findings(findings, ascii_only=ascii_only))
+        return 0
+
+    if args.sbom:
+        _emit(render_sbom(ctx))
         return 0
 
     if args.monitor:

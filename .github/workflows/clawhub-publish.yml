@@ -22,9 +22,12 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     # contents:write is needed to create the GitHub Release (the repo default token is
-    # read-only). Scoped to this job only.
+    # read-only). id-token:write is needed for cosign's keyless/OIDC signing below (it
+    # exchanges the job's short-lived GitHub Actions OIDC token for a Fulcio cert — no
+    # signing key/secret to manage or leak). Both scoped to this job only.
     permissions:
       contents: write
+      id-token: write
     # Manual-approval gate: configure required reviewers under
     # repo Settings → Environments → "release" for this gate to actually block.
     environment: release
@@ -68,6 +71,52 @@ jobs:
           python -m pytest -q
           ruff check .
           python -m compileall clawseccheck
+
+      - name: Generate trusted engine digest (SHA256SUMS.txt)
+        # Reuses clawseccheck/integrity.py's package_digest() — the exact same
+        # sorted "relpath:sha256hex" combine logic that `--verify-self` prints —
+        # so the file a user diffs against is byte-for-byte the same computation,
+        # just produced out-of-band (from this checked-out tag, in CI) instead of
+        # from inside their own possibly-tampered install.
+        run: |
+          python3 - <<'PYEOF'
+          from clawseccheck import __version__
+          from clawseccheck.integrity import package_digest
+
+          combined, per_file = package_digest()
+          lines = [
+              f"ClawSecCheck {__version__} — engine source digest (SHA-256)",
+              f"combined : {combined}",
+              "",
+          ]
+          for name, digest in sorted(per_file.items()):
+              lines.append(f"  {digest}  {name}")
+          lines.append("")
+          lines.append(
+              "Compare the 'combined' value against the output of `clawseccheck --verify-self`."
+          )
+          lines.append("Any mismatch means a source file was modified after this release.")
+          with open("SHA256SUMS.txt", "w") as f:
+              f.write("\n".join(lines) + "\n")
+          PYEOF
+          echo "Wrote SHA256SUMS.txt:" && cat SHA256SUMS.txt
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign SHA256SUMS.txt (cosign keyless/OIDC)
+        # Keyless signing: cosign exchanges this job's GitHub Actions OIDC token
+        # (id-token: write, above) for a short-lived cert from Fulcio, signs the
+        # blob, and uploads the signature to the public Rekor transparency log —
+        # no signing key or secret to generate, store, or rotate. Anyone can later
+        # verify SHA256SUMS.txt was produced by *this* repo's release workflow with
+        # `cosign verify-blob` (exact command published in README/FAQ), without ever
+        # trusting a key we'd have to keep secret.
+        run: |
+          cosign sign-blob --yes \
+            --output-signature SHA256SUMS.txt.sig \
+            --output-certificate SHA256SUMS.txt.pem \
+            SHA256SUMS.txt
+          echo "Signed SHA256SUMS.txt -> SHA256SUMS.txt.sig / SHA256SUMS.txt.pem"
 
       - name: Log in to ClawHub
         # Token is passed only via env — never echoed or printed.
@@ -113,6 +162,9 @@ jobs:
       # Create a matching GitHub Release so the "Latest release" badge tracks the tag.
       # Uses the runner's built-in gh CLI (no third-party action → respects the
       # github-owned+verified Actions policy). Notes are pulled from CHANGELOG.md.
+      # Also attaches the signed digest (SHA256SUMS.txt + cosign .sig/.pem) generated
+      # above, via the same `gh` CLI (`release upload`) rather than a second
+      # release-management action, so there is one mechanism for release assets.
       - name: Create GitHub Release
         if: github.ref_type == 'tag'
         env:
@@ -124,3 +176,6 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" --verify-tag \
             --title "ClawSecCheck ${GITHUB_REF_NAME}" --notes "$NOTES" \
             || echo "GitHub Release already exists for ${GITHUB_REF_NAME}"
+          gh release upload "${GITHUB_REF_NAME}" \
+            SHA256SUMS.txt SHA256SUMS.txt.sig SHA256SUMS.txt.pem \
+            --clobber

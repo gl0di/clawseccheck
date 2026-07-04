@@ -26,7 +26,9 @@ Result shape (per class)::
 """
 from __future__ import annotations
 
+import os
 import platform
+import re
 import shutil
 import struct
 from pathlib import Path
@@ -37,8 +39,14 @@ HOST_AUDIT = "host_audit"
 FILE_INTEGRITY = "file_integrity"
 EDR_AV = "edr_av"
 FIREWALL = "firewall"
+# Outbound (egress) filtering posture — is the default OUTPUT policy deny or
+# allow? Distinct from FIREWALL (which only asks "is a firewall present"):
+# a firewall can be installed and active with a wide-open default-allow
+# egress policy, which is exactly the gap this class targets (consumed by
+# check B101).
+EGRESS_POSTURE = "egress_posture"
 
-CLASSES = (NETWORK_IDS, HOST_AUDIT, FILE_INTEGRITY, EDR_AV, FIREWALL)
+CLASSES = (NETWORK_IDS, HOST_AUDIT, FILE_INTEGRITY, EDR_AV, FIREWALL, EGRESS_POSTURE)
 
 # The four *detection/visibility* classes (a firewall is prevention, not detection).
 # RISK-10 ("a breach would be invisible") keys off these only.
@@ -100,6 +108,65 @@ def _ufw_enabled(root: Path) -> bool | None:
     return None
 
 
+def _ufw_outgoing_policy(root: Path) -> str | None:
+    """DEFAULT_OUTGOING_POLICY from /etc/ufw/ufw.conf, lowercased ('deny'/'reject'/
+    'allow'/...), or None if the key or file is absent/unreadable."""
+    txt = _read_text(root / "etc/ufw/ufw.conf")
+    if txt is None:
+        return None
+    for line in txt.splitlines():
+        s = line.strip()
+        if s.lower().startswith("default_outgoing_policy"):
+            _, _, val = s.partition("=")
+            return val.strip().strip('"').strip("'").lower() or None
+    return None
+
+
+# nftables OUTPUT-chain default policy, e.g.:
+#   chain output {
+#       type filter hook output priority 0; policy drop;
+#   }
+# We only read the text — never invoke `nft` — so this is a best-effort regex over
+# the *declared* ruleset file, not the live kernel ruleset (which can differ if the
+# file was edited after `nft -f` last ran, or rules are loaded another way).
+_NFT_OUTPUT_CHAIN_RE = re.compile(
+    r"chain\s+output\s*\{([^}]*)\}", re.IGNORECASE | re.DOTALL
+)
+_NFT_POLICY_RE = re.compile(r"policy\s+(drop|reject|accept)\b", re.IGNORECASE)
+
+
+def _nftables_output_policy(root: Path) -> str | None:
+    """Default policy ('drop'/'reject'/'accept') of the OUTPUT chain in
+    /etc/nftables.conf, or None if the file/chain/policy can't be found."""
+    txt = _read_text(root / "etc/nftables.conf")
+    if txt is None:
+        return None
+    m = _NFT_OUTPUT_CHAIN_RE.search(txt)
+    if not m:
+        return None
+    pm = _NFT_POLICY_RE.search(m.group(1))
+    return pm.group(1).lower() if pm else None
+
+
+_PROXY_ENV_VARS = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")
+
+
+def _proxy_env_present() -> list[str]:
+    """Names of proxy-shaped env vars that are set (read-only os.environ read).
+
+    A weaker, non-conclusive signal: a proxy alone proves nothing about whether
+    *direct* egress is also allowed, so callers must never treat this as a
+    standalone PASS.
+    """
+    return [v for v in _PROXY_ENV_VARS if os.environ.get(v)]
+
+
+def _proxychains_present(root: Path) -> bool:
+    return _exists(
+        root, "etc/proxychains.conf", "etc/proxychains4.conf", "usr/local/etc/proxychains.conf"
+    )
+
+
 def _cls(found: list[str], active: bool | None = None) -> dict:
     """Build a class result from a found-list (present if non-empty, else absent)."""
     return {
@@ -112,6 +179,29 @@ def _cls(found: list[str], active: bool | None = None) -> dict:
 
 def _unknown_cls() -> dict:
     return {"status": "unknown", "found": [], "active": None, "evidence": []}
+
+
+def _egress_cls(found: list[str], deny: bool | None, weak: list[str]) -> dict:
+    """Build the egress-posture class result.
+
+    Shape matches the other classes for uniform consumption, but the fields carry
+    posture-specific meaning here:
+      status: "present" (a default policy was read from a config file) |
+              "unknown" (no readable egress-filtering config found at all)
+      active: True = default-deny outbound confirmed; False = default-allow
+              outbound confirmed; None = a config was found but its default
+              policy could not be determined.
+      evidence: the strong config-derived signals (found) plus, appended,
+                any weaker signals (proxy env vars / proxychains) so they are
+                visible but never mistaken for a standalone PASS.
+    """
+    status = "present" if found else "unknown"
+    return {
+        "status": status,
+        "found": found,
+        "active": deny if found else None,
+        "evidence": list(found) + list(weak),
+    }
 
 
 def _unsupported(system: str) -> dict:
@@ -198,6 +288,35 @@ def _detect_linux(root: Path, which) -> dict:
             active = True
     classes[FIREWALL] = _cls(found, active)
 
+    # Egress (outbound) filtering posture ---------------------------------------
+    # Default-deny outbound vs default-allow. We only ever read declared config
+    # text (never run `nft`/`ufw status`), so this reflects what's on disk, which
+    # can drift from the live kernel ruleset if rules are (re)loaded another way.
+    found, deny = [], None
+    nft_policy = _nftables_output_policy(root)
+    if nft_policy is not None:
+        found.append(f"nftables OUTPUT policy={nft_policy}")
+        deny = nft_policy in ("drop", "reject")
+    ufw_policy = _ufw_outgoing_policy(root)
+    if ufw_policy is not None:
+        found.append(f"ufw DEFAULT_OUTGOING_POLICY={ufw_policy}")
+        policy_deny = ufw_policy in ("deny", "reject")
+        # multiple confirmed sources: any confirmed default-allow is a real gap,
+        # so let a False win over an earlier True rather than silently hiding it.
+        deny = policy_deny if deny is None else (deny and policy_deny)
+    # firewalld: we cannot ground a specific egress-policy XML field without
+    # fabricating one (project law: honest UNKNOWN beats an invented field), so
+    # firewalld only contributes the coarse "a firewall is present/active" signal
+    # already computed for FIREWALL above — it never confirms deny or allow here.
+    if "firewalld" in classes[FIREWALL]["found"] and classes[FIREWALL]["active"]:
+        found.append("firewalld active (egress policy not read — unmapped field)")
+
+    weak = list(_proxy_env_present())
+    if _proxychains_present(root):
+        weak.append("proxychains config present")
+
+    classes[EGRESS_POSTURE] = _egress_cls(found, deny, weak)
+
     return {"system": "Linux", "supported": True, "classes": classes}
 
 
@@ -270,6 +389,16 @@ def _detect_macos(root: Path, which) -> dict:
         classes[FIREWALL] = _unknown_cls()
     else:
         classes[FIREWALL] = _cls(["macOS Application Firewall"], active=gs >= 1)
+
+    # Egress posture — the macOS Application Firewall (ALF) governs *inbound*
+    # connections only; there is no grounded, read-only-inspectable field for a
+    # default *outbound* policy on stock macOS (PF anchors could theoretically
+    # carry one, but we have no authoritative default path to check without
+    # fabricating it). Only the weak proxy-env signal is honest to report here.
+    weak = list(_proxy_env_present())
+    if _proxychains_present(root):
+        weak.append("proxychains config present")
+    classes[EGRESS_POSTURE] = _egress_cls([], None, weak)
 
     return {"system": "Darwin", "supported": True, "classes": classes}
 

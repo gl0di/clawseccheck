@@ -56,6 +56,8 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "the highest-risk capability chains"),
         PaletteEntry("Show suppressed", 'suppressed', "--show-suppressed",
                      "findings you've muted, by id"),
+        PaletteEntry("Bill of materials", 'bill of materials / sbom', "--sbom",
+                     "skills, MCP servers, hashes and pin state as local JSON"),
     )),
     PaletteCategory("Live tests", LIVE, (
         PaletteEntry("Canary", 'canary', "--canary",

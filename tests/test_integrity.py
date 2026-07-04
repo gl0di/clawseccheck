@@ -233,3 +233,16 @@ def test_cli_verify_self_is_deterministic(capsys):
     main(["--verify-self"])
     out2 = capsys.readouterr().out
     assert out1 == out2
+
+
+def test_cli_verify_self_points_to_signed_release_digest(capsys):
+    """--verify-self must point users at the signed, out-of-band trusted digest
+    (SHA256SUMS.txt on the GitHub Release, cosign-signed) instead of leaving the
+    'trusted release' reference in the earlier line unresolved (CLAWSECCHECK-F-091).
+    """
+    from clawseccheck import __version__
+    main(["--verify-self"])
+    out = capsys.readouterr().out
+    assert "SHA256SUMS.txt" in out
+    assert "cosign" in out
+    assert f"v{__version__}" in out

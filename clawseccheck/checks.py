@@ -35,6 +35,7 @@ from .catalog import (
     Finding,
 )
 from .collector import (
+    _MAX_BYTES_PER_SKILL,
     _OWN_SKILL_NAMES,
     BOOTSTRAP_FILES,
     SKILL_DIRS,
@@ -3242,6 +3243,25 @@ def check_installed_skills(ctx: Context) -> Finding:
     # Ranked above the WARN buckets (like the parse-error UNKNOWN): a payload padded past the
     # cap must not read as covered. Crit/high FAIL above still take precedence.
     if getattr(ctx, "limit_hits", None):
+        # F-087: padding_anomalies is a SEPARATE, narrower channel — only the text-slice
+        # path in collector.py writes it, and only when the discarded tail is low-entropy
+        # filler (the shape of deliberate cap-evasion padding). An archive-limit or
+        # py-cap hit alone never populates it, so those stay the honest UNKNOWN below;
+        # this WARN never happens on a genuine high-entropy oversized asset either.
+        if getattr(ctx, "padding_anomalies", None):
+            return _custom(
+                "B13",
+                HIGH,
+                WARN,
+                "Skill scanning was truncated by oversized LOW-ENTROPY padding — classic "
+                "cap-evasion (a real payload can be pushed past the "
+                f"{_MAX_BYTES_PER_SKILL // 1000}KB budget behind benign filler); content "
+                "beyond the cap was NOT scanned: " + "; ".join(ctx.padding_anomalies[:6]),
+                "The unscanned tail is uniform filler, the shape used to hide a payload "
+                "past the analysis limit. Split the oversized file(s) and re-vet, or "
+                "inspect manually.",
+                ctx.padding_anomalies,
+            )
         return _custom(
             "B13",
             HIGH,
@@ -7695,6 +7715,76 @@ def check_host_firewall(ctx: Context) -> Finding:
     return _host_finding("B54", "firewall", ctx)
 
 
+# B101 (F-084): outbound (egress) filtering posture — is the default OUTPUT policy
+# deny or allow? Distinct from B54 (which only asks "is a firewall present"): a
+# firewall can be installed and active with a wide-open default-allow egress
+# policy, which is exactly the gap this check targets. Does NOT reuse
+# _host_finding — that helper's "found = PASS regardless of active state" shape
+# fits "is a monitor tool present," not "is the resolved policy itself good or
+# bad" (a confirmed default-allow must read as a gap, not a PASS).
+def check_host_egress_posture(ctx: Context) -> Finding:
+    """B101 — outbound (egress) filtering posture (F-084)."""
+    host = getattr(ctx, "host", None)
+    if not host or not host.get("supported"):
+        return _finding(
+            "B101",
+            UNKNOWN,
+            "Host egress-filtering state not determined (host scan not run, or this "
+            "OS/path is not inspectable read-only).",
+            "Run ClawSecCheck on the agent's own host so it can inspect outbound "
+            "filtering policy, or confirm it manually.",
+        )
+    info = host.get("classes", {}).get("egress_posture", {})
+    active = info.get("active")
+    found = [str(x) for x in (info.get("found") or [])]
+    evidence = [str(x) for x in (info.get("evidence") or [])]
+
+    if active is None:
+        return _finding(
+            "B101",
+            UNKNOWN,
+            "Could not determine read-only whether outbound traffic defaults to "
+            "deny or allow on this host.",
+            "Verify manually whether outbound traffic defaults to deny (nftables/"
+            "iptables OUTPUT policy, ufw DEFAULT_OUTGOING_POLICY) — an unreadable "
+            "policy is the expected result on most systems.",
+            evidence=evidence,
+        )
+
+    if active is True:
+        return _finding(
+            "B101",
+            PASS,
+            f"Outbound traffic on this host defaults to deny: {', '.join(found)}.",
+            "Keep the default-deny egress policy and its allowlist rules current.",
+            evidence=evidence,
+        )
+
+    # active is False: a default-allow outbound policy was explicitly confirmed.
+    if _agent_is_powerful(ctx):
+        return _finding(
+            "B101",
+            WARN,
+            f"Outbound traffic on this host defaults to ALLOW ({', '.join(found)}), "
+            "and this agent is high-privilege (it can act on the host and is "
+            "reachable by untrusted input). A compromised skill/tool call can reach "
+            "any destination, including the cloud-metadata endpoint "
+            "(169.254.169.254) and other RFC1918 hosts.",
+            "Set a default-deny OUTPUT policy and explicitly allowlist only the "
+            "destinations the agent actually needs.",
+            evidence=evidence,
+        )
+    return _finding(
+        "B101",
+        PASS,
+        f"Outbound traffic on this host defaults to allow ({', '.join(found)}), but "
+        "this agent is low-privilege, so egress filtering is less critical here.",
+        "Consider a default-deny egress policy if you later grant this agent exec/"
+        "write tools or open it to untrusted channels.",
+        evidence=evidence,
+    )
+
+
 # ---------- B43/B44: attestation layer (v0.26.0) ----------
 # Both read ctx.attestation — the agent's self-report (--attest). With no attestation
 # they return UNKNOWN, so the default static audit and its score are unchanged. Their
@@ -11956,6 +12046,120 @@ def check_cross_file_payload(ctx: Context) -> Finding:
     )
 
 
+# ---------- B102 (F-086): base64 split exactly at a `# file:` boundary ----------
+# B90 (above) covers base64 split across CODE string literals in different files.
+# This is a narrower, distinct residual: base64 embedded directly in prose/markdown
+# (not a code string literal) whose two halves sit in adjacent files' bodies, such
+# that they would form one valid base64 blob if the tool had not inserted its own
+# `# file: <name>\n` marker between them — a payload split exactly at the boundary
+# our own concatenation creates.
+#
+# Deliberately NOT a general "re-scan the blob with markers stripped": that creates
+# false joins (a legit URL ending one file + a legit word starting the next can
+# synthesize a spurious signature hit) and the zero-FP calibration for that is not
+# confidently achievable in one pass (see architect note on F-086/CLAWSECCHECK-F-086).
+# Scoped to ONLY the two base64-alphabet runs immediately adjacent to a section
+# boundary, each independently long enough (>=16 chars) that a stray word can't
+# accidentally qualify — the false-join surface this creates is structurally tiny.
+_B102_EDGE_RUN_RE = re.compile(r"[A-Za-z0-9+/=_-]+")
+_B102_EDGE_SAMPLE = 512   # bounded — only the text immediately at the boundary
+_B102_MIN_EDGE_LEN = 16   # each side must independently clear this before joining
+_B102_MAX_ADJACENCY_JOINS = 200  # B-074: cap join attempts per skill, disclose on hit
+
+
+def _b102_trailing_run(text: str) -> str:
+    """The base64-alphabet run touching the END of *text*, if any (bounded sample).
+
+    `_read_skill_text` always joins file sections with a bare "\\n" (whether or not
+    the file's own content ended in one), so a section body captured by
+    `_MANIFEST_HEADER_RE` structurally ends in >=1 trailing newline before the next
+    `# file:` marker — strip only that whitespace, never non-whitespace content,
+    before checking the base64 run reaches the true end of the file's own text.
+    """
+    tail = text[-_B102_EDGE_SAMPLE:].rstrip("\r\n \t")
+    m = None
+    for m in _B102_EDGE_RUN_RE.finditer(tail):
+        pass
+    if m is None or m.end() != len(tail):
+        return ""
+    return m.group(0)
+
+
+def _b102_leading_run(text: str) -> str:
+    """The base64-alphabet run touching the START of *text*, if any (bounded sample)."""
+    head = text[:_B102_EDGE_SAMPLE]
+    m = _B102_EDGE_RUN_RE.match(head)
+    return m.group(0) if m else ""
+
+
+def check_cross_file_boundary_payload(ctx: Context) -> Finding:
+    """B102 — a base64 payload split exactly at a `# file:` section boundary."""
+    skills = getattr(ctx, "installed_skills", None)
+    if not skills:
+        return _custom(
+            "B102",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for boundary-split base64 payloads.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+
+    warns: list[str] = []
+    cap_hit = False
+    for name, blob in skills.items():
+        sections = [m.group("body") for m in _MANIFEST_HEADER_RE.finditer(blob)]
+        if len(sections) < 2:
+            continue
+        pairs = list(zip(sections, sections[1:]))
+        if len(pairs) > _B102_MAX_ADJACENCY_JOINS:
+            cap_hit = True
+            pairs = pairs[:_B102_MAX_ADJACENCY_JOINS]
+        hit = None
+        for left, right in pairs:
+            trailing = _b102_trailing_run(left)
+            leading = _b102_leading_run(right)
+            if len(trailing) < _B102_MIN_EDGE_LEN or len(leading) < _B102_MIN_EDGE_LEN:
+                continue
+            hit = _reassembles_to_payload(trailing + leading)
+            if hit:
+                break
+        if hit:
+            warns.append(
+                f"{name}: a base64 payload reassembles only when two adjacent files' "
+                f"content is joined -> '{hit}'"
+            )
+
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _custom(
+            "B102",
+            MEDIUM,
+            WARN,
+            "Boundary-split base64 payload(s): " + "; ".join(warns[:4]) + extra,
+            "A base64 payload that only decodes to a shell/download command when two "
+            "files are concatenated in order is the split-at-boundary scanner evasion. "
+            "Read the reassembled command; if it is not something you deliberately "
+            "embedded, treat the skill as malicious.",
+            warns,
+        )
+    if cap_hit:
+        return _custom(
+            "B102",
+            MEDIUM,
+            UNKNOWN,
+            f"Skill has more file-section boundaries than the {_B102_MAX_ADJACENCY_JOINS}-"
+            "join cap — a boundary-split payload beyond the cap would not be seen.",
+            "Re-vet the skill after trimming generated/vendored data, or inspect it manually.",
+        )
+    return _custom(
+        "B102",
+        MEDIUM,
+        PASS,
+        "No base64 payload reassembles from content split exactly at a file-section boundary.",
+        "Keep any legitimately-embedded base64 fully inside one file.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # SKILL_CONTENT_RING — single source of truth for content-security ring checks.
 #
@@ -12683,6 +12887,7 @@ SKILL_CONTENT_RING = (
     check_frontmatter_hygiene,  # B88 — frontmatter authoring hygiene (tag values / squat)
     check_dormant_capability,  # B89 — unreachable-yet-code-bearing skill (dormant capability)
     check_cross_file_payload,  # B90 — cross-file split base64 payload reassembly (I-019)
+    check_cross_file_boundary_payload,  # B102 — base64 split exactly at a file boundary (F-086)
     check_dynamic_dispatch_obfuscation,  # B91 — dynamic-dispatch sink obfuscation (F-102)
     check_unsafe_deserialization,  # B92 — unsafe deserialization sink (F-098)
     check_trigger_homoglyph,  # B93 — confusable characters in trigger description (F-103)
@@ -13034,6 +13239,7 @@ CHECKS = [
     check_host_file_integrity,
     check_host_edr,
     check_host_firewall,
+    check_host_egress_posture,
     check_capability_blast_radius,
     check_attestation_mismatch,
     check_declared_effective_proven,

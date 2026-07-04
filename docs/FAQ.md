@@ -335,6 +335,67 @@ written or changed.
 
 ---
 
+## What if the host is already compromised?
+
+Fair question, and worth answering honestly rather than papering over: if malware is
+already running on the machine, at your own privilege level, could it just tamper with
+ClawSecCheck's own files so the audit doesn't detect it? Yes, in principle it could.
+
+`clawseccheck --verify-self` prints a SHA-256 digest of the engine's own source for
+tamper detection, but the tool's own `integrity.py` says plainly that this is
+**advisory**: "self-integrity computed from inside the artifact is advisory — a modified
+`integrity.py` can print anything." A self-check that runs *on* the host it is checking
+can be rewritten by whatever already owns that host. `--verify-self` catches
+opportunistic or lazy tampering — a dropped-in backdoor that didn't bother patching the
+verifier too — but it is **not** a guarantee against a targeted adversary who patches the
+verifier alongside everything else.
+
+**The real answer is a protocol, not a flag: scan from a clean host.**
+
+Since the malware never executes in a separate, trusted machine's process, it cannot
+alter what that machine sees or reports. Copy or read-only-mount the suspect
+`~/.openclaw` directory onto a different machine you trust, then point ClawSecCheck at
+it with the existing `--home` flag:
+
+```bash
+# on the clean machine, with the suspect config mounted or copied read-only:
+clawseccheck --home /mnt/suspect-openclaw
+```
+
+Because the audit process itself is running on hardware the malware never touched, there
+is nothing on that host for it to tamper with. This is the primary recommendation
+whenever you have real reason to suspect the host, not just a routine run.
+
+**Secondary mitigations**, in rough order of usefulness:
+
+- **Use a fresh install of ClawSecCheck itself for the clean-host scan.** Don't reuse a
+  copy of the tool that could have been sitting on the compromised host — install it
+  fresh on the clean machine (`pipx install git+https://github.com/gl0di/clawseccheck` or
+  a fresh `openclaw skills install clawseccheck`) so the scanner's own binary is one the
+  malware never had a chance to touch either.
+- **Verify the engine digest out-of-band.** Compare `clawseccheck --verify-self`'s output
+  against `SHA256SUMS.txt` published on the corresponding GitHub Release, signed with
+  [cosign](https://github.com/sigstore/cosign) in keyless mode — see the
+  ["trust no one" section](../README.md#-important--trust-no-one-including-this-skill)
+  in the README for the exact `cosign verify-blob` command. This gives `--verify-self` a
+  trusted anchor to compare against, instead of just self-reporting.
+- **Reproducibility as a tripwire.** ClawSecCheck is deterministic and stdlib-only: given
+  the same config, a second clean install run should produce identical findings. If two
+  independent clean scans of the same exported data disagree, that divergence is itself a
+  red flag worth investigating.
+- **Pre-existing host monitoring is the only on-host layer that could have caught the
+  tampering as it happened.** File-integrity monitoring and audit/syscall logging (this
+  project's own **B51**/**B52** checks detect the *presence* of such tooling, e.g. auditd,
+  AIDE, Tripwire) can only help if they were already running *before* the compromise —
+  they cannot retroactively witness something they weren't watching for.
+
+**The underlying principle isn't unique to ClawSecCheck.** Any self-check that runs on an
+already-compromised host, at the user's own privilege level, is checking itself from
+inside the blast radius — treat an already-compromised host as fundamentally untrusted
+for self-checking purposes, and verify it from the outside instead.
+
+---
+
 *For more detail on any individual check, see [`docs/CHECKS.md`](CHECKS.md).*
 *To report a false positive or false negative, open an issue at
 <https://github.com/gl0di/clawseccheck/issues> with `clawseccheck --json` output (secrets

@@ -6,6 +6,7 @@ No network. No writes. Pure stdlib.
 from __future__ import annotations
 
 import json
+import math
 import re
 import io
 import zipfile
@@ -43,8 +44,44 @@ _ARCHIVE_MAX_FILE_BYTES = _MAX_FILE_BYTES
 _ARCHIVE_MAX_TOTAL_BYTES = 20_000_000
 _ARCHIVE_MAX_EXPANSION_RATIO = 100
 
+# F-087: padding-anomaly evasion signal. When a file is sliced by the text-scan cap,
+# the discarded tail is sampled (bounded — never re-reads gigabytes) and measured for
+# Shannon entropy. Low-entropy filler (a repeated byte, long whitespace/newline runs, a
+# giant comment block) is the shape of deliberate cap-evasion padding (standard §2.5,
+# "omnicogg"); a real high-entropy binary asset stays the honest UNKNOWN it is today.
+_ENTROPY_SAMPLE_BYTES = 65_536      # sample at most 64 KiB of the cut tail
+_ENTROPY_MIN_SAMPLE = 2_048         # below this, entropy is too noisy to judge
+# bits/byte. Empirically calibrated (not guessed): a repeated short benign English
+# line measures ~3.84, varied prose ~4.3, base64-of-random ~6.0 — but a single
+# repeated byte measures 0.0 and a whitespace run ~1.0. 3.0 cleanly separates
+# genuinely degenerate/uniform filler (the "omnicogg" padding shape) from any text
+# with ordinary character variety, even repetitive documentation. Err toward
+# honest-UNKNOWN on the boundary rather than widen and risk a false WARN.
+_PADDING_ENTROPY_THRESHOLD = 3.0
+
 _COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+
+
+def _shannon_entropy_bits(s: str) -> float:
+    """Shannon entropy (bits per byte) over the UTF-8 byte histogram of *s*.
+
+    Stdlib-only, single pass, bounded by the caller's sample slice — never call this
+    on more than a small bounded sample of a large tail.
+    """
+    data = s.encode("utf-8", "replace")
+    if not data:
+        return 0.0
+    counts = [0] * 256
+    for b in data:
+        counts[b] += 1
+    n = len(data)
+    ent = 0.0
+    for c in counts:
+        if c:
+            p = c / n
+            ent -= p * math.log2(p)
+    return ent
 
 
 def _loads_tolerant(text: str) -> dict:
@@ -93,6 +130,10 @@ class Context:
     file_manifest: dict[str, str] = field(default_factory=dict)  # file relpath -> status
     symlink_skips: list[str] = field(default_factory=list)        # F-061: skipped symlinks / path-escapes
     filename_obfuscations: list[str] = field(default_factory=list)  # F-061: homoglyph/RTL/zero-width filenames
+    # F-087: skill names whose text-scan was truncated by a LOW-ENTROPY cut tail — the
+    # shape of deliberate cap-evasion padding, distinct from limit_hits (which fires on
+    # ANY cap — archive/py/text — including a genuine high-entropy oversized asset).
+    padding_anomalies: list[str] = field(default_factory=list)
 
     @property
     def bootstrap_blob(self) -> str:
@@ -717,9 +758,20 @@ def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
             continue
 
         text = item["content"].decode(encoding="utf-8", errors="replace")
-        if len(text) > _MAX_BYTES_PER_SKILL - total:
+        budget = _MAX_BYTES_PER_SKILL - total
+        if len(text) > budget:
             truncated = True  # this file was sliced — its tail is unscanned
-        chunk = text[: _MAX_BYTES_PER_SKILL - total]
+            # F-087: sample the CUT tail (bounded — never re-reads the whole file) and
+            # measure its entropy. Low-entropy filler is the shape of deliberate
+            # cap-evasion padding; a real high-entropy asset leaves no anomaly signal.
+            tail_sample = text[budget : budget + _ENTROPY_SAMPLE_BYTES]
+            if (
+                ctx is not None
+                and len(tail_sample) >= _ENTROPY_MIN_SAMPLE
+                and _shannon_entropy_bits(tail_sample) < _PADDING_ENTROPY_THRESHOLD
+            ):
+                ctx.padding_anomalies.append(skill_dir.name)
+        chunk = text[:budget]
         parts.append(f"# file: {Path(item['relpath']).name}\n{chunk}")
         total += len(chunk)
         file_count += 1

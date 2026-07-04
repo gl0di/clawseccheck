@@ -3,6 +3,51 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.12.0] — 2026-07-04
+
+Standard-gap B: host & artifacts coverage (epic E-021) — host egress posture, a local
+AI-BOM export, a CI-signed release digest anchor, a padding-anomaly evasion signal, and
+a narrow cross-file split-payload residual check.
+
+### Added
+- **B101** — host outbound (egress) filtering posture: is the default OUTPUT policy
+  deny or allow, and is it read-only inspectable at all? Distinct from B54 (firewall
+  presence) — a firewall can be active with a wide-open default-allow egress policy.
+  Reads nftables/ufw config text only (never invokes `nft`/`ufw status`); WARN only
+  when default-allow is confirmed AND the agent is high-privilege; honest UNKNOWN
+  when the policy can't be read, which is the expected result on most systems (F-084).
+- **`--sbom`** — export a local, deterministic bill-of-materials as JSON: installed
+  skills (name, declared version, content hash, declared/unpinned deps) and MCP
+  servers (hash, transport, command, env key names, pin state). Hashes reuse
+  `monitor.py`'s own hashing scheme so a BOM correlates with `--monitor` drift
+  events. Redaction-safe: only key names, never secret values (F-085).
+- **CI-signed release digest**: every tagged release now publishes `SHA256SUMS.txt`
+  (the same digest `--verify-self` prints, computed out-of-band in CI from the exact
+  published tree) signed with [cosign](https://github.com/sigstore/cosign) in
+  keyless/OIDC mode and attached to the GitHub Release — giving `--verify-self` a
+  trusted, out-of-band anchor to compare against instead of only self-reporting
+  (F-091).
+- A new FAQ section, "What if the host is already compromised?", documenting the
+  honest answer: `--verify-self` is a tripwire, not a guarantee, and the real
+  mitigation is scanning the suspect config from a separate clean host via the
+  existing `--home` flag (C-149).
+- Padding-anomaly evasion signal: when a skill's text scan is truncated by the
+  60KB/500-file cap, the discarded tail is now sampled and measured for Shannon
+  entropy. A genuinely low-entropy cut tail (a repeated byte, a whitespace run — the
+  "omnicogg" cap-evasion shape) escalates B13's UNKNOWN to WARN; ordinary prose or a
+  real high-entropy asset stays the honest UNKNOWN it was before (F-087).
+- **B102** — a base64 payload split exactly at a `# file:` section boundary (prose/
+  markdown content, not a code string literal — a narrower, distinct residual from
+  B90's existing string-literal cross-file reassembly). Deliberately scoped to only
+  the two base64-alphabet runs immediately touching a section boundary, each
+  independently long enough to rule out a stray word — verified zero false
+  positives across a 500-skill random sample of the ClawBench corpus (F-086).
+
+### Fixed
+- `--sbom`'s new `--sbom` flag was missing from the guided-mode capability palette
+  (`palette.py`), which the project's own drift guard (`test_palette.py`) catches;
+  added a proper palette entry rather than exempting it.
+
 ## [3.11.0] — 2026-07-04
 
 Standard-gap A: tamper/authoring coverage (epic E-021) — capability-diff drift detection,
