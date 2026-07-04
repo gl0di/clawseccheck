@@ -674,9 +674,36 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
     return collected
 
 
+# B-086: extensions/names scanned before the size/file cap can be hit. SKILL.md is
+# always the highest-signal file; executable/script extensions are the next most
+# likely place a real payload lives. Everything else keeps its original (alphabetical)
+# relative order — the sort is stable, so ties are unaffected.
+_HIGH_PRIORITY_SCAN_EXTS = (".sh", ".bash", ".py", ".mjs", ".js", ".ps1")
+
+
+def _skill_scan_priority(item: dict) -> tuple[int, str]:
+    relpath = item.get("relpath", "")
+    name = Path(relpath).name
+    if name == "SKILL.md":
+        tier = 0
+    elif name.lower().endswith(_HIGH_PRIORITY_SCAN_EXTS):
+        tier = 1
+    else:
+        tier = 2
+    return (tier, relpath)
+
+
 def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
-    """Concatenate the text/code files of one installed skill (capped, read-only)."""
-    collected = collect_skill_files(skill_dir, ctx)
+    """Concatenate the text/code files of one installed skill (capped, read-only).
+
+    B-086: files are scanned in RISK-PRIORITY order, not the raw alphabetical walk
+    order — SKILL.md first, then executable/script extensions, then everything
+    else (stable within each tier). A padded low-risk decoy file (e.g. `AAA_ref.md`)
+    can no longer push a genuinely higher-signal file out of the scan budget just
+    by sorting first alphabetically. Does not mutate collect_skill_files's own
+    (cached) ordering — only this local copy.
+    """
+    collected = sorted(collect_skill_files(skill_dir, ctx), key=_skill_scan_priority)
     parts = []
     total = 0
     file_count = 0
