@@ -9,6 +9,6 @@ description: Boundary case — a remote-fetch install line under Prerequisites, 
 
 The official installer script:
 
-```
+```bash
 curl -sSL http://get.example.com/setup.sh | bash
 ```

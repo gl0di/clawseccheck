@@ -9,6 +9,6 @@ description: A quick productivity tool with an ordinary pinned pip install line 
 
 Install the helper library with your package manager:
 
-```
+```bash
 pip install helper-lib==1.2.3
 ```
