@@ -13374,5 +13374,44 @@ CHECKS = [
 ]
 
 
+def _check_error_finding(chk, exc: BaseException) -> Finding:
+    """Degrade a crashing check to one UNKNOWN finding (B-101).
+
+    A single check raising a non-OSError (KeyError/TypeError/re.error/RecursionError,
+    …) must not sink the whole audit — that is both an availability failure and an
+    evasion primitive (a malicious skill/config crafted to crash one check would
+    otherwise suppress the entire report). Only the exception *type* is surfaced —
+    never its message — so a path or config value in the error text can't leak (§8).
+    """
+    name = getattr(chk, "__name__", "unknown_check")
+    return Finding(
+        id=f"ERR:{name}",
+        title=f"Check '{name}' could not run",
+        severity=MEDIUM,
+        status=UNKNOWN,
+        detail=(
+            "This check raised an unexpected internal error and was skipped, so its "
+            "result is UNKNOWN (it neither passed nor failed). The rest of the audit "
+            "ran normally. Re-run with --debug to see the full traceback."
+        ),
+        fix=(
+            "Please report this check name and your OpenClaw version; re-run with "
+            "--debug for the traceback."
+        ),
+        framework="Engine robustness",
+        scored=False,
+        evidence=[f"error type: {type(exc).__name__}"],
+    )
+
+
 def run_all(ctx: Context) -> list[Finding]:
-    return [chk(ctx) for chk in CHECKS]
+    # Per-check isolation (B-101): one crashing check degrades to a single UNKNOWN
+    # finding instead of aborting the audit. Catch Exception (not BaseException) so
+    # KeyboardInterrupt / SystemExit still propagate. Mirrors the --vet ring's guard.
+    findings: list[Finding] = []
+    for chk in CHECKS:
+        try:
+            findings.append(chk(ctx))
+        except Exception as exc:  # noqa: BLE001 — a bad check must not sink the audit
+            findings.append(_check_error_finding(chk, exc))
+    return findings

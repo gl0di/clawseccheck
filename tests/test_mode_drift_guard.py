@@ -44,7 +44,7 @@ def _terminal_if_attrs() -> set[str]:
     """args attrs tested by `if` statements in main() whose direct body returns."""
     tree = ast.parse(CLI_PATH.read_text(encoding="utf-8"))
     main_fn = next(n for n in tree.body
-                   if isinstance(n, ast.FunctionDef) and n.name == "main")
+                   if isinstance(n, ast.FunctionDef) and n.name == "_main")
     attrs: set[str] = set()
     for node in ast.walk(main_fn):
         if not isinstance(node, ast.If):
@@ -69,7 +69,7 @@ class TestModeDriftGuard:
         # The reverse direction: a stale _PRIMARY_MODES entry whose branch was removed.
         tree = ast.parse(CLI_PATH.read_text(encoding="utf-8"))
         main_fn = next(n for n in tree.body
-                       if isinstance(n, ast.FunctionDef) and n.name == "main")
+                       if isinstance(n, ast.FunctionDef) and n.name == "_main")
         used = _attrs_in(main_fn)
         stale = {attr for attr, _f, _k in _PRIMARY_MODES} - used
         assert not stale, f"_PRIMARY_MODES entries with no args.<attr> use in main(): {sorted(stale)}"

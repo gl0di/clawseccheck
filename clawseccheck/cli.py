@@ -339,6 +339,29 @@ def _onboarding_reason(home: Path) -> str | None:
 
 
 def main(argv=None) -> int:
+    """Thin top-level guard (B-101): never dump a raw traceback at users.
+
+    Any unexpected error inside the audit/render pipeline becomes a clean one-line
+    stderr message (stdout stays clean for --json/--sarif). The full traceback is
+    shown only under --debug. KeyboardInterrupt / SystemExit propagate untouched —
+    they derive from BaseException, not Exception. Only the exception *type* is
+    named, never its message, so a path or config value can't leak (§8, B-076).
+    """
+    try:
+        return _main(argv)
+    except Exception as exc:  # noqa: BLE001 — a security tool must fail readably, not crash
+        raw = list(sys.argv[1:] if argv is None else argv)
+        if "--debug" in raw:
+            raise
+        print(
+            f"clawseccheck: unexpected internal error ({type(exc).__name__}); "
+            "re-run with --debug for the traceback.",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="clawseccheck",
                                 description="ClawSecCheck OpenClaw security self-audit (read-only).")
     p.add_argument("--version", action="version",
