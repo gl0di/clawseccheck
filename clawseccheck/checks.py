@@ -12060,6 +12060,59 @@ def check_unsafe_deserialization(ctx: Context) -> Finding:
     )
 
 
+def check_trigger_homoglyph(ctx: Context) -> Finding:
+    """B93 (F-103, L1-6) — confusable/mixed-script characters in a skill's trigger utterances.
+
+    F-022 already covers homoglyphs in the skill NAME (typosquatting); this covers the
+    frontmatter DESCRIPTION text — the actual trigger-phrase surface OpenClaw's model
+    invocation reads. A Cyrillic-а substituted into an otherwise-ASCII trigger phrase can
+    register as a distinct near-duplicate for preferential routing while looking identical
+    to a human reader. Reuses textnorm.py's confusable-canonicalization wholesale (the same
+    two-line pattern used for MCP server-name homoglyphs, C-038 TP2) — no new detection
+    logic. Advisory (scored=False); WARN-only.
+    """
+    if not getattr(ctx, "installed_skills", None):
+        return _custom(
+            "B93",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for trigger-phrase homoglyphs.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    warns: list[str] = []
+    for skill_name, blob in ctx.installed_skills.items():
+        _, description = _b62_extract_declaration(blob, skill_name)
+        if not description:
+            continue
+        signals = obfuscation_signals(description)
+        if signals and normalize_for_scan(description) != description:
+            warns.append(
+                f"{skill_name}: trigger description contains confusable/mixed-script "
+                f"characters ({'; '.join(signals)}) — may create a near-duplicate trigger"
+            )
+    if not warns:
+        return _custom(
+            "B93",
+            MEDIUM,
+            PASS,
+            "No confusable/mixed-script characters found in any skill's trigger description.",
+            "Keep trigger phrasing in a single, plain script (no invisible or lookalike "
+            "characters).",
+        )
+    extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
+    return _custom(
+        "B93",
+        MEDIUM,
+        WARN,
+        "Confusable characters in trigger description: " + "; ".join(warns[:6]) + extra,
+        "A lookalike character in a trigger phrase (e.g. Cyrillic а for Latin a) is "
+        "indistinguishable to a human but can register as a different phrase for routing "
+        "purposes. Verify the description is plain ASCII/expected-script text, not a "
+        "visually-identical substitute.",
+        warns,
+    )
+
+
 SKILL_CONTENT_RING = (
     check_unicode_obfuscation,  # B58 — unicode / hidden-text de-obfuscation
     check_markdown_image_exfil,  # B59 — MD-image data-exfil
@@ -12081,6 +12134,7 @@ SKILL_CONTENT_RING = (
     check_cross_file_payload,  # B90 — cross-file split base64 payload reassembly (I-019)
     check_dynamic_dispatch_obfuscation,  # B91 — dynamic-dispatch sink obfuscation (F-102)
     check_unsafe_deserialization,  # B92 — unsafe deserialization sink (F-098)
+    check_trigger_homoglyph,  # B93 — confusable characters in trigger description (F-103)
 )
 
 

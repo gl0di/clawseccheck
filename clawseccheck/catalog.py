@@ -904,6 +904,21 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # A confusable/mixed-script character in a skill's frontmatter DESCRIPTION (the actual
+    # trigger-phrase surface) can register as a distinct near-duplicate for preferential
+    # routing while looking identical to a human reader. F-022 already covers the skill NAME;
+    # this covers the description text (L1-6 / F-103). Reuses textnorm.py's existing
+    # confusable-canonicalization wholesale — no new detection logic. Advisory (scored=False).
+    CheckMeta(
+        "B93",
+        "Confusable/mixed-script characters in a skill's trigger description",
+        MEDIUM,
+        "advisory",
+        "Obfuscation / Trigger-Squatting",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # advisory (not scored)
     CheckMeta(
         "C3",
@@ -1132,6 +1147,7 @@ AST_MAP = {
     "B90": ("AST01",),  # cross-file split base64 payload = hidden malicious code / scanner evasion (cf. B13)
     "B91": ("AST01",),  # dynamic-dispatch sink obfuscation = hidden malicious code / scanner evasion (cf. B89/B90)
     "B92": ("AST02",),  # unsafe deserialization sink = RCE-from-data supply-chain tamper (cf. B86)
+    "B93": ("AST04",),  # confusable trigger description = insecure metadata / trigger-squat (cf. B88)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
