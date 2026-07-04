@@ -3,6 +3,46 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.10.0] — 2026-07-04
+
+**Layer-1 offline coverage.** Seven new advisory checks (B91–B97) close code/config/manifest
+vectors a parse-only scan previously missed entirely — all are `scored=False` and can never
+move a skill's letter grade, only surface for reviewer attention. Plus a coverage fix so the
+per-skill scan reads the highest-signal files first when a cap is hit.
+
+### Added
+- **B91 — dynamic-dispatch sink obfuscation.** `getattr(os, 'sy' + 'stem')(...)` or
+  `importlib.import_module(cfg['mod'])` reaches a dangerous sink without ever spelling it
+  out as a static string. Pure wiring onto the existing AST rules — no new logic.
+- **B92 — unsafe deserialization sink.** `pickle`/`marshal`/`dill`/`torch.load`, or
+  `yaml.load` without a `SafeLoader`/`BaseLoader`, can execute arbitrary code from what
+  looks like "just data" (a bundled model/config file). `yaml.safe_load` and `json.load`
+  stay clean automatically.
+- **B93 — confusable characters in a trigger description.** A Cyrillic-а (or other
+  confusable) substituted into an otherwise-Latin trigger phrase in SKILL.md's
+  `description` can register as a near-duplicate for preferential routing while looking
+  identical to a human. A whole-script non-Latin description (legitimate i18n) stays clean.
+- **B94 — extended lifecycle hooks.** npm's `prepare`/`preversion`/`postversion`/
+  `prepublish(Only)`/`pretest`/`posttest` run on install/version/publish/test just as
+  reliably as `postinstall`; a Python `setup.py` `cmdclass` override runs at pip-install time.
+- **B95 — dependency confusion.** An unpinned dependency whose name also resembles a
+  well-known package is the classic dependency-confusion combination — pure correlation
+  between the existing unpinned-dependency and typosquat detectors on the same name.
+- **B96 — config-driven trust widening (heuristic).** A bundled config value shaped like
+  an approve-all setting, or a telemetry/callback-named key holding a URL, is flagged as a
+  wording SHAPE — never a claim about a real OpenClaw config field, since none is grounded
+  for skill-bundled files.
+- **B97 — per-turn event-hook interceptor.** A skill shipping `hooks/openclaw/*.mjs`
+  registers a real, documented per-turn tool handler — not a hidden backdoor — but it fires
+  on every turn, so its presence is surfaced for review and escalated when the body reaches
+  a network sink, reads `process.env`, or mutates the turn/tool-call object.
+
+### Fixed
+- **The per-skill text scan reads SKILL.md and script files first.** Files were read in
+  raw alphabetical order, so a low-signal file that happened to sort first could push a
+  higher-signal script (or even SKILL.md itself) out of the 60KB scan budget. Files are now
+  read in risk-priority order before the cap applies.
+
 ## [3.9.1] — 2026-07-04
 
 **Security fix.** A bare structural signal — being inside a Markdown code fence, or sitting
