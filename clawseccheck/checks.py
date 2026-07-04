@@ -8642,6 +8642,16 @@ def check_agent_snooping(ctx: Context) -> Finding:
             if _defensive_context(norm, m.start(), fr, use_fence=False):
                 continue
             path_match = m.group(0)
+            # B-087: a skill referencing its OWN ~/.openclaw/skills/<self> (or
+            # memory/<self>) directory is self-access, not cross-agent snooping —
+            # skip it even when a read verb is nearby. The path regex stops at
+            # "skills"/"memory"; the owning slug is the next path segment, so a
+            # sibling skill's dir (a different slug) still FAILs below.
+            pl = path_match.lower()
+            if ".openclaw" in pl and (pl.endswith("/skills") or pl.endswith("/memory")):
+                seg = re.match(r"[\w.-]+", norm[m.end() :].lstrip("/"))
+                if seg and seg.group(0).split(".")[0].lower() == skill_name.lower():
+                    continue
             start = max(0, m.start() - _B61_WINDOW)
             end = min(len(norm), m.end() + _B61_WINDOW)
             window = norm[start:end]
@@ -11428,12 +11438,36 @@ def check_symlink_escape(ctx: Context) -> Finding:
 
 # A frontmatter value shaped like an HTML/XML tag: `<` + (letter | `!` doctype/comment |
 # `/` closing). A bare `<` used as "less than" ("score < 5", "<=") never matches.
-_FM_TAG_RE = re.compile(r"<\s*[A-Za-z!/]")
+# B-089: a real HTML/XML element in a frontmatter value is a metadata-injection
+# surface. Match a full <...> token, then _fm_tag_is_suspicious filters the common
+# NON-tag shapes that were false-positiving: RFC5322 email angle-addr (<a@b>), path
+# placeholders (/<locale>/), and prose placeholders (<product or technology desc>).
+_FM_TAG_RE = re.compile(r"<!--|<!\[?[A-Za-z]|</?[A-Za-z][^<>\n]*>")
+
+
+def _fm_tag_is_suspicious(fm: str, m) -> bool:
+    """True only for a real HTML/XML-tag-shaped value, excluding the benign shapes
+    that look tag-like: emails, path placeholders, and multi-word prose placeholders."""
+    tok = m.group(0)
+    if tok.startswith("<!"):  # HTML comment / declaration / CDATA — always a surface
+        return True
+    inner = tok[1:-1].lstrip("/").strip()
+    if "@" in inner:  # <support@auth0.com> — RFC5322 name-addr, not a tag
+        return False
+    lo, hi = m.start(), m.end()
+    if (lo > 0 and fm[lo - 1] == "/") or (hi < len(fm) and fm[hi] == "/"):
+        return False  # <locale> inside a path like screenshots/<locale>/<device>/
+    if " " in inner and "=" not in inner:
+        return False  # <product or technology description> — prose placeholder
+    return True
+
 
 # Cross-skill trigger-squatting: displacing OTHER skills. Deliberately disjoint from F-051
 # (broad triggers) so the two never fire on the same phrase.
 _FM_CROSS_SKILL_SQUAT_RE = re.compile(
-    r"\buse\s+this\s+skill\s+instead\s+of\b|"
+    # B-089: require a "skill(s)" object so "use this skill instead of calling the
+    # API directly" (a legit statement) no longer matches — only skill-displacement.
+    r"\buse\s+this\s+skill\s+instead\s+of\s+(?:[\w-]+\s+){0,3}skills?\b|"
     r"\binstead\s+of\s+(?:the\s+|any\s+|all\s+)?other\s+skills?\b|"
     r"\b(?:ignore|disable|override|bypass|replace|suppress)\s+(?:all\s+|any\s+|the\s+)?other\s+skills?\b|"
     r"\bthe\s+only\s+skill\s+(?:you|the\s+agent|anyone)\s+(?:will\s+ever\s+)?need\b|"
@@ -11485,7 +11519,7 @@ def check_frontmatter_hygiene(ctx: Context) -> Finding:
         if fm is None:
             continue  # no frontmatter for this skill — nothing to lint
         inspected += 1
-        if _FM_TAG_RE.search(fm):
+        if any(_fm_tag_is_suspicious(fm, m) for m in _FM_TAG_RE.finditer(fm)):
             warns.append(
                 f"{name}: HTML/XML-tag-shaped value in SKILL.md frontmatter "
                 "(metadata-injection surface)"
