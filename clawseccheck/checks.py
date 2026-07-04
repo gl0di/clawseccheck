@@ -9994,8 +9994,14 @@ _B58_JS_UNI_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 _B58_JS_OCTAL_RE = re.compile(r"\\([0-7]{1,3})(?![0-9A-Fa-f])")
 _B58_CSS_RE = re.compile(r"\\([0-9A-Fa-f]{1,6})(?:\s+)?")
 _B58_HTML_COMMENT_RE = re.compile(r"<!--(.*?)-->", re.IGNORECASE | re.DOTALL)
+# B-102: body length-bounded so `<tag>…</tag>` stays O(n) on adversarial input (many
+# unclosed same-name tags previously made `.*?` scan to EOF at every start → quadratic).
+# A hidden-injection payload inside one styled tag is far under 4KB; the loop is also
+# gated on a global hidden-style pre-check (see _b58_hidden_segments) so the common case
+# (no hidden style anywhere) skips the scan entirely.
 _B58_HIDDEN_TAG_RE = re.compile(
-    r"<(?P<tag>[A-Za-z][\w:-]*)(?P<attrs>[^>]*)>(?P<body>.*?)</(?P=tag)>", re.IGNORECASE | re.DOTALL
+    r"<(?P<tag>[A-Za-z][\w:-]*)(?P<attrs>[^>]*)>(?P<body>.{0,4096}?)</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
 )
 _B58_HIDDEN_STYLE_RE = re.compile(
     r"display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?:px|em|rem|%)?|"
@@ -10089,7 +10095,11 @@ def _b58_hidden_segments(text: str) -> list[tuple[str, str]]:
         body = normalize_for_scan(html.unescape(m.group(1)))
         if body.strip():
             segments.append((body, "html-comment"))
-    for m in _B58_HIDDEN_TAG_RE.finditer(text):
+    # B-102: a hidden-styled tag can only exist if a hidden-style token exists somewhere
+    # in the text; this cheap linear pre-check lets the common (and adversarial all-tags)
+    # case skip the O(n)-per-tag body scan entirely. Lossless — attrs ⊂ text.
+    tag_scan = _B58_HIDDEN_TAG_RE.finditer(text) if _B58_HIDDEN_STYLE_RE.search(text) else ()
+    for m in tag_scan:
         attrs = m.group("attrs") or ""
         if not _B58_HIDDEN_STYLE_RE.search(attrs):
             continue

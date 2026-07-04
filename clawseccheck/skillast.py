@@ -1880,8 +1880,12 @@ _SH_PIPE_INTERP_RE = re.compile(
 )
 # VAR=$(cat ~/.ssh/id_rsa) / VAR=`cat .aws/credentials` / VAR=$(< ~/.netrc): a shell
 # variable whose value derives from reading a credential file.
+# B-102: the quantifiers are length-bounded so the pattern stays O(n) on adversarial
+# input (e.g. a 40KB identifier run has no '=' and previously backtracked at every start
+# → quadratic). A real credential-read assignment line is short, so the bounds (128-char
+# var, 256-char gaps) never clip a genuine match.
 _SH_CRED_ASSIGN_RE = re.compile(
-    r"(?P<var>[A-Za-z_][A-Za-z0-9_]*)=[^\n]*?(?:cat|less|head|tail|<)\s*[^\n]*?"
+    r"(?P<var>[A-Za-z_][A-Za-z0-9_]{0,127})=[^\n]{0,256}?(?:cat|less|head|tail|<)\s*[^\n]{0,256}?"
     r"(?:\.ssh/id_|id_rsa|id_ed25519|\.aws/credentials|\.netrc|keychain|wallet\.dat|"
     r"\.docker/config|\.kube/config|\.npmrc|\.pypirc|\.openclaw/)",
     re.I,
