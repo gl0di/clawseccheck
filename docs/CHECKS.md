@@ -1039,6 +1039,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B92 - Unsafe deserialization sink (pickle/marshal/dill/torch.load, unsafe yaml.load)
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Supply-Chain Tamper / Malicious Skill
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Unsafe deserialization sink (pickle/marshal/dill/torch.load, unsafe yaml.load)
+- Remediation:
+  - none
+
 ### C3 - Backups of SOUL.md / memory
 
 - Severity: LOW

@@ -889,6 +889,21 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # An unsafe deserialization sink (pickle/marshal/dill/torch.load, or yaml.load without a
+    # safe Loader) executes arbitrary code from what looks like "just data" — RCE from a
+    # bundled model/config file (L1-1 / F-098). json.load / yaml.safe_load never reach this
+    # rule at all (different attribute name) and stay clean automatically. Advisory
+    # (scored=False); WARN-only.
+    CheckMeta(
+        "B92",
+        "Unsafe deserialization sink (pickle/marshal/dill/torch.load, unsafe yaml.load)",
+        HIGH,
+        "advisory",
+        "Supply-Chain Tamper / Malicious Skill",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # advisory (not scored)
     CheckMeta(
         "C3",
@@ -1116,6 +1131,7 @@ AST_MAP = {
     "B89": ("AST01",),  # unreachable-yet-code-bearing skill = staged/dormant malicious shape (cf. B13)
     "B90": ("AST01",),  # cross-file split base64 payload = hidden malicious code / scanner evasion (cf. B13)
     "B91": ("AST01",),  # dynamic-dispatch sink obfuscation = hidden malicious code / scanner evasion (cf. B89/B90)
+    "B92": ("AST02",),  # unsafe deserialization sink = RCE-from-data supply-chain tamper (cf. B86)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT

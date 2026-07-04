@@ -57,7 +57,12 @@ _DANGEROUS_ATTRS = {
     "check_call",
     "Po" + "pen",
 }
-_DESERIALIZE_MODS = {"pickle", "cpickle", "_pickle", "marshal", "dill"}
+_DESERIALIZE_MODS = {"pickle", "cpickle", "_pickle", "marshal", "dill", "torch"}
+# yaml.load(...) is unconditionally unsafe with NO Loader= kwarg (older pyyaml defaults to
+# the arbitrary-code-execution Loader) or an explicit unsafe Loader; yaml.safe_load(...) has
+# a different attribute name entirely and is never touched by this rule. Only a Loader of
+# SafeLoader/CSafeLoader/BaseLoader/CBaseLoader makes yaml.load(...) itself safe (F-098/L1-1).
+_YAML_SAFE_LOADERS = {"SafeLoader", "CSafeLoader", "BaseLoader", "CBaseLoader"}
 # Objects on which a *dynamic* getattr(...)() is obfuscation rather than ordinary
 # dynamic dispatch: getattr(os, x)() is suspicious; getattr(plugin, handler)() is not.
 _DANGEROUS_OBJ = {
@@ -920,9 +925,32 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 )
             continue
 
-        # pickle/marshal.loads(...) — info (code-exec only if the data is untrusted)
+        # pickle/marshal/dill/torch.loads/load(...) — info (code-exec only if data untrusted).
+        # yaml.load(...) is a special case (F-098/L1-1): unsafe unless an explicit safe
+        # Loader= kwarg is given; yaml.safe_load has a different attr name and never reaches
+        # here at all, so it stays clean without any special-casing.
         if isinstance(f, ast.Attribute) and f.attr in ("loads", "load"):
             mod = _attr_base(f.value)
+            if mod == "yaml" and f.attr == "load":
+                loader_kw = next((kw for kw in node.keywords if kw.arg == "Loader"), None)
+                loader_name = (
+                    loader_kw.value.attr
+                    if loader_kw is not None and isinstance(loader_kw.value, ast.Attribute)
+                    else (
+                        loader_kw.value.id
+                        if loader_kw is not None and isinstance(loader_kw.value, ast.Name)
+                        else None
+                    )
+                )
+                if loader_name not in _YAML_SAFE_LOADERS:
+                    add(
+                        "DESERIALIZE_CODE",
+                        "info",
+                        ln,
+                        "yaml.load() without a safe Loader (SafeLoader/BaseLoader) — "
+                        "arbitrary-code-execution risk if the data is untrusted",
+                    )
+                continue
             if mod in _DESERIALIZE_MODS:
                 add(
                     "DESERIALIZE_CODE",

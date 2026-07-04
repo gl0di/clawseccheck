@@ -12012,6 +12012,54 @@ def check_dynamic_dispatch_obfuscation(ctx: Context) -> Finding:
     )
 
 
+def check_unsafe_deserialization(ctx: Context) -> Finding:
+    """B92 (F-098, L1-1) — unsafe deserialization sink on a bundled data file.
+
+    ``pickle.load``/``marshal.loads``/``torch.load``/an unsafe ``yaml.load`` (no
+    SafeLoader/BaseLoader) can execute arbitrary code from what looks like "just data" — a
+    bundled model/config file becomes an RCE vector. Reuses the existing skillast.py
+    DESERIALIZE_CODE rule (extended for torch + yaml as part of this task) — no separate AST
+    pass. Advisory (scored=False, never alters the static grade); ``json.load``/``yaml.safe_load``
+    never reach this rule at all (different attribute name), so they stay clean automatically.
+    """
+    if not getattr(ctx, "installed_skills", None):
+        return _custom(
+            "B92",
+            HIGH,
+            UNKNOWN,
+            "No installed skill sources to inspect for unsafe deserialization sinks.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    hits: list[str] = []
+    for name, files in getattr(ctx, "installed_skill_py", {}).items():
+        for relpath, src in files:
+            for af in analyze_python(src, relpath):
+                if af.rule == "DESERIALIZE_CODE":
+                    hits.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+    if not hits:
+        return _custom(
+            "B92",
+            HIGH,
+            PASS,
+            "No unsafe deserialization sink found: no pickle/marshal/dill/torch.load and no "
+            "yaml.load() without a safe Loader.",
+            "Prefer json/yaml.safe_load for data files; if pickle/torch.load is required, "
+            "only load files the skill itself produced, never attacker-influenceable input.",
+        )
+    extra = f" (+{len(hits) - 6} more)" if len(hits) > 6 else ""
+    return _custom(
+        "B92",
+        HIGH,
+        WARN,
+        "Unsafe deserialization sink in installed skill(s): " + "; ".join(hits[:6]) + extra,
+        "A pickle/marshal/dill/torch.load call (or yaml.load without a safe Loader) can "
+        "execute arbitrary code from its input. Confirm the loaded file is fully trusted "
+        "(bundled by the skill itself, never user- or network-supplied) or switch to a "
+        "safe format (json, yaml.safe_load).",
+        hits,
+    )
+
+
 SKILL_CONTENT_RING = (
     check_unicode_obfuscation,  # B58 — unicode / hidden-text de-obfuscation
     check_markdown_image_exfil,  # B59 — MD-image data-exfil
@@ -12032,6 +12080,7 @@ SKILL_CONTENT_RING = (
     check_dormant_capability,  # B89 — unreachable-yet-code-bearing skill (dormant capability)
     check_cross_file_payload,  # B90 — cross-file split base64 payload reassembly (I-019)
     check_dynamic_dispatch_obfuscation,  # B91 — dynamic-dispatch sink obfuscation (F-102)
+    check_unsafe_deserialization,  # B92 — unsafe deserialization sink (F-098)
 )
 
 
