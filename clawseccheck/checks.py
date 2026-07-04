@@ -11965,6 +11965,53 @@ def check_cross_file_payload(ctx: Context) -> Finding:
 #     ctx.bootstrap is empty, which is the correct result for a --vet run that
 #     has no bootstrap files to inspect.
 # ---------------------------------------------------------------------------
+
+
+def check_dynamic_dispatch_obfuscation(ctx: Context) -> Finding:
+    """B91 (F-102, L1-5) — sink built from a computed/dynamic name, not a literal token.
+
+    ``getattr(os, 'sy' + 'stem')`` or ``importlib.import_module(cfg['mod']).run()`` reaches
+    a dangerous sink without ever spelling it out as a static string a line-scan could catch.
+    Reuses the existing skillast.py AST rules (GETATTR_INDIRECTION, DYNAMIC_IMPORT_EXEC) —
+    pure wiring, no new AST logic. Advisory (scored=False, never alters the static grade).
+    """
+    if not getattr(ctx, "installed_skills", None):
+        return _custom(
+            "B91",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skill sources to inspect for dynamic-dispatch obfuscation.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    hits: list[str] = []
+    for name, files in getattr(ctx, "installed_skill_py", {}).items():
+        for relpath, src in files:
+            for af in analyze_python(src, relpath):
+                if af.rule in ("GETATTR_INDIRECTION", "DYNAMIC_IMPORT_EXEC"):
+                    hits.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+    if not hits:
+        return _custom(
+            "B91",
+            MEDIUM,
+            PASS,
+            "No dynamic-dispatch obfuscation: sinks are reached via literal attribute/module "
+            "names, not a computed or decoded name.",
+            "Keep attribute and module names as static literals so static analysis can see "
+            "what a skill actually calls.",
+        )
+    extra = f" (+{len(hits) - 6} more)" if len(hits) > 6 else ""
+    return _custom(
+        "B91",
+        MEDIUM,
+        WARN,
+        "Dynamic-dispatch sink obfuscation in installed skill(s): " + "; ".join(hits[:6]) + extra,
+        "Review the flagged call(s): a getattr()/import_module() built from a computed or "
+        "decoded name reaches its target without ever appearing as a literal string, which "
+        "defeats a simple text/keyword scan. Confirm the computed name isn't attacker-influenced.",
+        hits,
+    )
+
+
 SKILL_CONTENT_RING = (
     check_unicode_obfuscation,  # B58 — unicode / hidden-text de-obfuscation
     check_markdown_image_exfil,  # B59 — MD-image data-exfil
@@ -11984,6 +12031,7 @@ SKILL_CONTENT_RING = (
     check_frontmatter_hygiene,  # B88 — frontmatter authoring hygiene (tag values / squat)
     check_dormant_capability,  # B89 — unreachable-yet-code-bearing skill (dormant capability)
     check_cross_file_payload,  # B90 — cross-file split base64 payload reassembly (I-019)
+    check_dynamic_dispatch_obfuscation,  # B91 — dynamic-dispatch sink obfuscation (F-102)
 )
 
 

@@ -1027,6 +1027,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B91 - Dynamic-dispatch sink obfuscation (computed getattr/import_module name)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Obfuscation / Malicious Skill
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Dynamic-dispatch sink obfuscation (computed getattr/import_module name)
+- Remediation:
+  - none
+
 ### C3 - Backups of SOUL.md / memory
 
 - Severity: LOW

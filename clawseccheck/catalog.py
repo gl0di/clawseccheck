@@ -875,6 +875,20 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # A sink reached via a COMPUTED name (getattr(os, 'sy'+'stem'), import_module(cfg['mod']))
+    # rather than a literal token defeats a simple text/keyword scan. Reuses the existing
+    # skillast.py AST rules (GETATTR_INDIRECTION, DYNAMIC_IMPORT_EXEC) — pure wiring, no new
+    # AST logic (L1-5 / F-102). Advisory (scored=False); WARN-only.
+    CheckMeta(
+        "B91",
+        "Dynamic-dispatch sink obfuscation (computed getattr/import_module name)",
+        MEDIUM,
+        "advisory",
+        "Obfuscation / Malicious Skill",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # advisory (not scored)
     CheckMeta(
         "C3",
@@ -1101,6 +1115,7 @@ AST_MAP = {
     "B88": ("AST04",),  # tag-shaped frontmatter value / cross-skill squat = insecure metadata (cf. B62)
     "B89": ("AST01",),  # unreachable-yet-code-bearing skill = staged/dormant malicious shape (cf. B13)
     "B90": ("AST01",),  # cross-file split base64 payload = hidden malicious code / scanner evasion (cf. B13)
+    "B91": ("AST01",),  # dynamic-dispatch sink obfuscation = hidden malicious code / scanner evasion (cf. B89/B90)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
