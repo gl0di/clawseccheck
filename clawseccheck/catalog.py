@@ -948,6 +948,21 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # A skill that ships hooks/openclaw/*.mjs installs a PER-TURN event handler — a real,
+    # documented OpenClaw tool-registration mechanism, not a hidden backdoor, but it fires on
+    # EVERY turn (persistent point of review), distinct from B42's install-time hook scan
+    # (L1-7 / F-104). Presence = WARN (reviewer should read it); escalate on network sink /
+    # process.env / turn-object mutation. Advisory (scored=False); UNKNOWN on minified bodies.
+    CheckMeta(
+        "B97",
+        "Per-turn event-hook file shipped in a skill (hooks/openclaw/*)",
+        HIGH,
+        "advisory",
+        "Persistent Review Surface / Malicious Skill",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # advisory (not scored)
     CheckMeta(
         "C3",
@@ -1179,6 +1194,7 @@ AST_MAP = {
     "B93": ("AST04",),  # confusable trigger description = insecure metadata / trigger-squat (cf. B88)
     "B94": ("AST02",),  # extended lifecycle hooks = supply-chain tamper on install/version/publish (cf. B42)
     "B95": ("AST02",),  # dependency confusion (unpinned + typosquat name) = supply-chain tamper (cf. B13)
+    "B97": ("AST09",),  # per-turn event-hook file = persistent review/audit surface (cf. B77/B85)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT

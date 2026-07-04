@@ -1087,6 +1087,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B97 - Per-turn event-hook file shipped in a skill (hooks/openclaw/*)
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Persistent Review Surface / Malicious Skill
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Per-turn event-hook file shipped in a skill (hooks/openclaw/*)
+- Remediation:
+  - none
+
 ### C3 - Backups of SOUL.md / memory
 
 - Severity: LOW

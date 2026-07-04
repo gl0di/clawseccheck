@@ -12238,6 +12238,100 @@ def check_dependency_confusion(ctx: Context) -> Finding:
     )
 
 
+# B97 (F-104, L1-7): a per-turn event-hook file (hooks/openclaw/*.mjs) is a REAL, documented
+# OpenClaw tool-registration mechanism (confirmed against a real installed skill's own
+# hooks/openclaw/HOOK.md) — not a hidden backdoor convention. It fires on EVERY turn though,
+# unlike an install-time hook (B42 scans package.json scripts, not hook file bodies), so it
+# deserves reviewer visibility even when benign — escalated when the body reaches a network
+# sink, reads process.env, or mutates the turn/tool-call object.
+_EVENT_HOOK_PATH_RE = re.compile(r"(?:^|/)hooks/openclaw/[^/]+\.(?:mjs|cjs|js|ts)$", re.I)
+_HOOK_NET_SINK_RE = re.compile(
+    r"\bfetch\s*\(|\bXMLHttpRequest\b|\bWebSocket\s*\(|"
+    r"\brequire\s*\(\s*['\"](?:https?|node:https?|axios|node-fetch|undici)['\"]\s*\)|"
+    r"\bimport\b[^;\n]*['\"](?:https?|node:https?|axios|node-fetch|undici)['\"]|"
+    r"\b(?:https?)\.request\s*\(",
+    re.I,
+)
+_HOOK_ENV_READ_RE = re.compile(r"\bprocess\.env\b")
+_HOOK_MUTATE_RE = re.compile(
+    r"\bargs\s*\[[^\]]+\]\s*=(?!=)|"
+    r"\b(?:toolCall|tool_call|event|turn|message|transcript)\s*\.\s*\w+\s*=(?!=)|"
+    r"\b(?:event|turn)\.(?:args|arguments|input|params)\s*=(?!=)",
+    re.I,
+)
+_HOOK_MINIFIED_LINE = 2000  # a single physical line longer than this -> treat as minified
+
+
+def check_event_hook_interceptor(ctx: Context) -> Finding:
+    """B97 — a per-turn event-hook file (hooks/openclaw/*.mjs) shipped inside a skill."""
+    js = getattr(ctx, "installed_skill_js", None)
+    if not js:
+        return _custom(
+            "B97",
+            HIGH,
+            UNKNOWN,
+            "No installed skills to inspect for per-turn event-hook files.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+
+    warns: list[str] = []
+    unknowns: list[str] = []
+    for name, sources in js.items():
+        for relpath, src in sources:
+            if not _EVENT_HOOK_PATH_RE.search(relpath.replace("\\", "/")):
+                continue
+            longest = max((len(ln) for ln in src.splitlines()), default=0)
+            if longest >= _HOOK_MINIFIED_LINE:
+                unknowns.append(f"{name}: {relpath} (minified — unreadable)")
+                continue
+            signals = []
+            if _HOOK_NET_SINK_RE.search(src):
+                signals.append("network sink")
+            if _HOOK_ENV_READ_RE.search(src):
+                signals.append("process.env read")
+            if _HOOK_MUTATE_RE.search(src):
+                signals.append("turn/tool-call mutation")
+            if signals:
+                warns.append(f"{name}: {relpath} fires every turn AND {', '.join(signals)}")
+            else:
+                warns.append(
+                    f"{name}: {relpath} registers a per-turn event hook (no sink/mutation "
+                    "seen — this is a normal tool-registration mechanism, but review it)"
+                )
+
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _custom(
+            "B97",
+            HIGH,
+            WARN,
+            "Per-turn event-hook file(s) shipped in a skill: " + "; ".join(warns[:4]) + extra,
+            "A hooks/openclaw/* handler runs on EVERY turn and can register real tools — a "
+            "legitimate, documented mechanism — but it can also rewrite tool-call arguments "
+            "or forward the transcript. Read the hook's full source and confirm its behavior "
+            "matches what the skill claims to do.",
+            warns + unknowns,
+        )
+    if unknowns:
+        return _custom(
+            "B97",
+            HIGH,
+            UNKNOWN,
+            "A per-turn event-hook file could not be read (minified/one-line): "
+            + "; ".join(unknowns[:4]),
+            "Beautify or manually inspect the hook file — a minified per-turn handler is "
+            "hard to review.",
+            unknowns,
+        )
+    return _custom(
+        "B97",
+        HIGH,
+        PASS,
+        "No per-turn event-hook (hooks/openclaw/*) files shipped inside an installed skill.",
+        "A per-turn hook is a standing point of review; keep it minimal and readable.",
+    )
+
+
 SKILL_CONTENT_RING = (
     check_unicode_obfuscation,  # B58 — unicode / hidden-text de-obfuscation
     check_markdown_image_exfil,  # B59 — MD-image data-exfil
@@ -12262,6 +12356,7 @@ SKILL_CONTENT_RING = (
     check_trigger_homoglyph,  # B93 — confusable characters in trigger description (F-103)
     check_lifecycle_hooks_extended,  # B94 — extended lifecycle hooks beyond postinstall (F-099)
     check_dependency_confusion,  # B95 — unpinned dep name resembling a well-known package (F-101)
+    check_event_hook_interceptor,  # B97 — per-turn event-hook interceptor in a skill (F-104)
 )
 
 
