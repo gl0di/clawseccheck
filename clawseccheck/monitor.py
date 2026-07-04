@@ -29,7 +29,7 @@ def _ignore_hash(home: Path) -> str:
         return ""
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
 
-SNAPSHOT_VERSION = 1
+SNAPSHOT_VERSION = 2
 DEFAULT_STATE = "~/.clawseccheck/state.json"
 DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
 
@@ -304,6 +304,31 @@ def _gateway_bind(ctx) -> str:
                            or dig(ctx.config, "gateway.host") or "")
 
 
+_SKILL_VERSION_RE = re.compile(r"(?im)^\s*version:\s*['\"]?([\w.\-+]+)['\"]?\s*$")
+
+
+def _b62_families(name: str, ctx) -> "frozenset":
+    """Thin wrapper around checks._b62_actual_families (lazy import, B62 substrate)."""
+    from .checks import _b62_actual_families  # noqa: PLC0415
+    return _b62_actual_families(name, ctx, ctx.installed_skill_py.get(name, []))
+
+
+def _skill_sig(ctx) -> dict:
+    """name -> {hash, caps, version} — content hash plus the capability-family
+    set (B62-derived) and any declared frontmatter version. Old snapshots stored
+    a bare hash string; diff() sniffs str-vs-dict for back-compat.
+    """
+    out = {}
+    for name, blob in ctx.installed_skills.items():
+        m = _SKILL_VERSION_RE.search(blob)
+        out[name] = {
+            "hash": _h(blob),
+            "caps": sorted(_b62_families(name, ctx)),
+            "version": m.group(1) if m else None,
+        }
+    return out
+
+
 def snapshot(ctx, findings, score) -> dict:
     native = getattr(ctx, "native", None)
     native_count = len(getattr(native, "findings", []) or []) if native else 0
@@ -313,7 +338,7 @@ def snapshot(ctx, findings, score) -> dict:
         "grade": score.grade,
         "checks": {f.id: f.status for f in findings
                    if not getattr(f, "suppressed", False)},
-        "skills": {n: _h(b) for n, b in ctx.installed_skills.items()},
+        "skills": _skill_sig(ctx),
         "bootstrap": {n: _h(t) for n, t in ctx.bootstrap.items()},
         "memory": _snapshot_memory_files(ctx),
         "native_count": native_count,
@@ -340,14 +365,53 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
         return []
     alerts: list[tuple[str, str]] = []
 
+    def _skill_entry(v):
+        if isinstance(v, dict):
+            return v.get("hash", ""), v.get("caps"), v.get("version")
+        return v, None, None          # legacy bare-hash snapshot
+
+    def _ver_tuple(s: str) -> tuple:
+        toks = re.split(r"[.\-+]", s)
+        return tuple((0, int(t)) if t.isdigit() else (1, t) for t in toks)
+
     ps, cs = prev.get("skills", {}), curr.get("skills", {})
     for name in sorted(cs.keys() - ps.keys()):
         alerts.append(("CRITICAL",
                        f"NEW skill installed since last check: '{name}' — vet its source "
                        "before trusting it (this is when malware lands)."))
     for name in sorted(ps.keys() & cs.keys()):
-        if ps[name] != cs[name]:
+        p_hash, p_caps, p_ver = _skill_entry(ps[name])
+        c_hash, c_caps, c_ver = _skill_entry(cs[name])
+        if p_hash != c_hash:
             alerts.append(("HIGH", f"Installed skill '{name}' CHANGED since last check — re-review it."))
+
+        # Capability diff — only when BOTH sides carry structured caps (new-format
+        # snapshots); a legacy/UNKNOWN side skips silently rather than fabricating a diff.
+        if p_caps is not None and c_caps is not None:
+            added = set(c_caps) - set(p_caps)
+            removed = set(p_caps) - set(c_caps)
+            if added:
+                alerts.append(("HIGH",
+                               f"Installed skill '{name}' UPDATE EXPANDED its capabilities: "
+                               f"+{', '.join(sorted(added))} — the new version can now do more "
+                               "than the version you last reviewed; re-vet it."))
+            elif removed:
+                alerts.append(("INFO",
+                               f"Skill '{name}' capabilities shrank: -{', '.join(sorted(removed))}."))
+
+        # Version regression — best-effort static downgrade signal only. Real TAM-09
+        # "replay an old *signed* manifest" semantics require verifying a signature
+        # against a trust root, which is impossible read-only/offline; this merely
+        # compares the declared frontmatter version string across snapshots.
+        if p_ver and c_ver:
+            try:
+                if _ver_tuple(c_ver) < _ver_tuple(p_ver):
+                    alerts.append(("MEDIUM",
+                                   f"Skill '{name}' declared version went BACKWARD: "
+                                   f"{p_ver} -> {c_ver} — a manifest replay / downgrade signal "
+                                   "(TAM-09, best-effort static)."))
+            except TypeError:
+                pass
     for name in sorted(ps.keys() - cs.keys()):
         alerts.append(("INFO", f"Skill '{name}' was removed."))
 

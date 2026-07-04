@@ -1111,6 +1111,42 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B98 - Undeclared capabilities (risky effects, no allowed-tools manifest)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Least Privilege / Excessive Agency
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Undeclared capabilities (risky effects, no allowed-tools manifest)
+- Remediation:
+  - none
+
+### B99 - Executable .pth file / sitecustomize auto-execution persistence
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Defensibility / Supply-Chain Tamper
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Executable .pth file / sitecustomize auto-execution persistence
+- Remediation:
+  - none
+
+### B100 - ClickFix-style paste-into-terminal setup instruction
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Supply Chain / ClawHavoc
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: ClickFix-style paste-into-terminal setup instruction
+- Remediation:
+  - none
+
 ### C3 - Backups of SOUL.md / memory
 
 - Severity: LOW

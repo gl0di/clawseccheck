@@ -15,7 +15,7 @@ def _levels(alerts):
 def test_snapshot_has_expected_shape():
     ctx, findings, score = audit(FIXTURES / "home_safe")
     snap = snapshot(ctx, findings, score)
-    assert snap["version"] == 1 and snap["grade"] in "ABCDF"
+    assert snap["version"] == 2 and snap["grade"] in "ABCDF"
     assert "checks" in snap and "skills" in snap and "bootstrap" in snap
     assert snap["bootstrap"]  # home_safe has a SOUL.md
 
@@ -42,6 +42,74 @@ def test_changed_skill_and_bootstrap_drift():
     assert "CHANGED" in msgs and "drift" in msgs
 
 
+# ---- capability-diff gate (F-079) ----
+
+def test_legacy_str_prev_vs_dict_curr_no_crash_no_cap_alert():
+    """Old bare-hash snapshot vs new dict-shaped snapshot: no crash, no capability
+    alert (only the pre-existing hash-changed alert logic applies if hash differs).
+    """
+    prev = {"score": 90, "grade": "A", "skills": {"s": "h1"}, "bootstrap": {}, "checks": {}}
+    curr = {"score": 90, "grade": "A",
+            "skills": {"s": {"hash": "h1", "caps": ["network"], "version": "1.0.0"}},
+            "bootstrap": {}, "checks": {}}
+    alerts = diff(prev, curr)
+    assert not any("CHANGED" in m for _, m in alerts)
+    assert not any("capabilities" in m for _, m in alerts)
+
+
+def test_legacy_str_prev_vs_dict_curr_hash_changed_still_alerts():
+    prev = {"score": 90, "grade": "A", "skills": {"s": "h1"}, "bootstrap": {}, "checks": {}}
+    curr = {"score": 90, "grade": "A",
+            "skills": {"s": {"hash": "h2", "caps": ["network"], "version": "1.0.0"}},
+            "bootstrap": {}, "checks": {}}
+    alerts = diff(prev, curr)
+    assert any("CHANGED" in m for _, m in alerts)
+    assert not any("capabilities" in m for _, m in alerts)
+
+
+def test_capability_expand_is_high_alert():
+    prev = {"score": 90, "grade": "A",
+            "skills": {"s": {"hash": "h1", "caps": ["read"], "version": "1.0.0"}},
+            "bootstrap": {}, "checks": {}}
+    curr = {"score": 90, "grade": "A",
+            "skills": {"s": {"hash": "h1", "caps": ["read", "network"], "version": "1.0.0"}},
+            "bootstrap": {}, "checks": {}}
+    alerts = diff(prev, curr)
+    assert "HIGH" in _levels(alerts)
+    assert any("UPDATE EXPANDED its capabilities" in m and "network" in m for _, m in alerts)
+
+
+def test_capability_shrink_is_info_alert():
+    prev = {"score": 90, "grade": "A",
+            "skills": {"s": {"hash": "h1", "caps": ["read", "network"], "version": "1.0.0"}},
+            "bootstrap": {}, "checks": {}}
+    curr = {"score": 90, "grade": "A",
+            "skills": {"s": {"hash": "h1", "caps": ["read"], "version": "1.0.0"}},
+            "bootstrap": {}, "checks": {}}
+    alerts = diff(prev, curr)
+    assert "INFO" in _levels(alerts)
+    assert any("capabilities shrank" in m and "network" in m for _, m in alerts)
+
+
+def test_version_regression_is_medium_alert():
+    prev = {"score": 90, "grade": "A",
+            "skills": {"s": {"hash": "h1", "caps": ["read"], "version": "1.2.0"}},
+            "bootstrap": {}, "checks": {}}
+    curr = {"score": 90, "grade": "A",
+            "skills": {"s": {"hash": "h1", "caps": ["read"], "version": "1.1.0"}},
+            "bootstrap": {}, "checks": {}}
+    alerts = diff(prev, curr)
+    assert "MEDIUM" in _levels(alerts)
+    assert any("went BACKWARD" in m and "1.2.0 -> 1.1.0" in m for _, m in alerts)
+
+
+def test_unchanged_caps_and_version_no_new_alert():
+    entry = {"hash": "h1", "caps": ["read", "network"], "version": "1.2.0"}
+    prev = {"score": 90, "grade": "A", "skills": {"s": dict(entry)}, "bootstrap": {}, "checks": {}}
+    curr = {"score": 90, "grade": "A", "skills": {"s": dict(entry)}, "bootstrap": {}, "checks": {}}
+    assert diff(prev, curr) == []
+
+
 def test_score_drop_and_new_failing_check():
     prev = {"score": 85, "grade": "B", "skills": {}, "bootstrap": {}, "checks": {"B2": "PASS"}}
     curr = {"score": 49, "grade": "F", "skills": {}, "bootstrap": {}, "checks": {"B2": "FAIL"}}
@@ -61,6 +129,19 @@ def test_state_roundtrip(tmp_path):
     save_state(path, snap)
     assert load_state(path) == snap
     assert load_state(tmp_path / "missing.json") is None
+
+
+def test_state_roundtrip_dict_shaped_skill_entry(tmp_path):
+    """v2 snapshots store {hash, caps, version} per skill; verify plain JSON round-trip
+    needs no code change (save_state/load_state are shape-agnostic).
+    """
+    snap = {"version": 2, "score": 78, "grade": "C",
+            "skills": {"pdf-tools": {"hash": "a1b2c3d4e5f60718",
+                                      "caps": ["read", "write"], "version": "1.2.0"}},
+            "bootstrap": {}, "checks": {}}
+    path = tmp_path / "state.json"
+    save_state(path, snap)
+    assert load_state(path) == snap
 
 
 def test_monitor_end_to_end_detects_new_skill(tmp_path):

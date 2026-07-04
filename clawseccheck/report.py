@@ -572,7 +572,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
                   *, risk=None, update_notice: list[str] | None = None,
                   freshness_notice: list[str] | None = None,
                   openclaw_detected: bool = True, ctx=None,
-                  verbose: bool = False, color: bool = False) -> str:
+                  verbose: bool = False, color: bool = False,
+                  tamper: ScoreResult | None = None) -> str:
     findings = deduplicate_findings(findings)
     icon = _color_icons(_ICON_ASCII if ascii_only else _ICON, color)
     ok = "[OK]" if ascii_only else "✅"
@@ -591,6 +592,15 @@ def render_report(findings: list[Finding], score: ScoreResult,
              _score_bar(score.score, score.grade, ascii_only=ascii_only, color=color)]
     if score.capped:
         lines.append(f"(capped from {score.raw_score} - open {score.cap_severity or 'CRITICAL'} finding)")
+
+    # Tamper Score sub-grade — human-report-only addition (like update_notice below).
+    # Presentation-layer only: never alters score/grade above; None (default) renders
+    # nothing so the main Score/Grade line stays byte-identical to before this existed.
+    if tamper is not None:
+        lines.append(
+            f"Tamper posture: {tamper.grade} ({tamper.score}/100 — tamper-defense"
+            " sub-grade over B20/B22/B42/B78/B85/B86/C5 + monitor state)"
+        )
 
     # --- "Why this score" breakdown ---
     scored_findings = [f for f in findings if getattr(f, "scored", True)
@@ -1065,6 +1075,137 @@ def render_vet_dossier(profile, ascii_only: bool = False) -> str:
               f"{sep} run --json for full detail"]
     if profile.unmapped:
         lines.append(f"  (unmapped: {', '.join(profile.unmapped)})")
+    return "\n".join(lines)
+
+
+# ---- B98 / F-083: --emit-manifest — a proposed permission manifest, hand-built YAML-shaped
+# text (stdlib only, no PyYAML: this project has zero runtime deps). Never silently renders
+# an all-false/empty manifest for an unprofilable skill — that would read as "safe" when the
+# truth is "unknown". Every capability field is either a real true/false derived from static
+# effect analysis, or an explicit `unknown` — the honesty rule the whole renderer exists for.
+_MANIFEST_FAMILY_ALIASES = {
+    "eval": "exec",  # skillast folds eval into exec for capability purposes (cf. B62)
+}
+
+
+def _manifest_effect_union(ctx, skill_name: str) -> tuple[set, set, set, int]:
+    """Aggregate reachable/unshielded/guarded effect families across all entry points of
+    *skill_name* in ctx.effect_profiles. Returns (reachable, unshielded, guarded,
+    entry_point_count)."""
+    reachable: set = set()
+    unshielded: set = set()
+    guarded: set = set()
+    entry_points = ctx.effect_profiles.get(skill_name, []) if ctx is not None else []
+    for ep in entry_points:
+        for eff in ep.get("reachable_effects", []):
+            reachable.add(_MANIFEST_FAMILY_ALIASES.get(eff, eff))
+        for eff in ep.get("unshielded_effects", []):
+            unshielded.add(_MANIFEST_FAMILY_ALIASES.get(eff, eff))
+        for eff in ep.get("guarded_effects", []):
+            guarded.add(_MANIFEST_FAMILY_ALIASES.get(eff, eff))
+    return reachable, unshielded, guarded, len(entry_points)
+
+
+def render_permission_manifest(ctx, target: str) -> str:
+    """A proposed permission manifest (YAML-shaped, hand-built text) derived from static
+    effect analysis of a single vetted skill — printed by `--vet <skill> --emit-manifest`.
+
+    `target` is the path/name passed to `--vet`; the skill-name key vet_skill() uses in
+    ctx.effect_profiles / ctx.installed_skills is that path's basename (`Path(target).name`
+    — mirrors vet_skill()'s own `name = p.name` / `p.parent.name` derivation), so that key
+    is looked up here rather than the raw path string.
+
+    Never emits a silently-safe manifest: if the skill could not be statically profiled
+    (`ctx` is None, or the skill has no entry in `ctx.effect_profiles`), every capability
+    field is the explicit string `unknown` (never `false`), plus `unprofilable: true`.
+
+    KNOWN GAP (tracked separately, not fixed here): `shell.exec` reflects only the effect
+    simulator's own sink coverage — a bare `eval`/`exec`/`compile` call (or a pickle/
+    marshal/dill `load`/`loads`) with a tainted argument. It does NOT track
+    `os.system`/`subprocess.*` invocation, which is not one of the simulator's registered
+    sink categories. A skill that shells out via `subprocess.run(..., shell=True)` will
+    still show `shell.exec: false` here even though B98/B91 may separately flag it. This
+    is a genuine blind spot in the manifest's "shell" section, not a `false`-means-safe
+    guarantee for that field specifically.
+    """
+    skill_key = Path(target).expanduser().name or str(target)
+    name = _sanitize(skill_key)
+    header = [
+        f"# proposed-permission-manifest for: {name}",
+        "# derived from static analysis (ClawSecCheck effect simulator) "
+        "— NOT a guarantee of completeness",
+        "# fields marked 'unknown' mean the script was opaque/unparseable, not that the "
+        "capability is absent",
+        "version: 1",
+        f"skill: {name}",
+    ]
+
+    effect_profiles = getattr(ctx, "effect_profiles", None) if ctx is not None else None
+    # ctx.effect_profiles is keyed by the skill name vet_skill() assigned (the dir/file
+    # name), matching _b62_actual_families' own lookup convention.
+    entry_points = (effect_profiles or {}).get(skill_key, []) if effect_profiles else []
+    unprofilable = ctx is None or not entry_points
+
+    if unprofilable:
+        lines = header + [
+            "# unable to statically analyze this skill (opaque/unparseable or no Python "
+            "source) -- treat every capability below as POSSIBLE, not absent",
+            "unprofilable: true",
+            "filesystem:",
+            "  read: unknown",
+            "  write: unknown",
+            "  deny: []               # always empty in v1 — we propose grants, not denies "
+            "(documented)",
+            "network:",
+            "  allowlist: []           # host/path extraction not available from static "
+            "effect analysis",
+            "  reachable: unknown",
+            "shell:",
+            "  exec: unknown",
+            "memory:",
+            "  read: unknown           # not profiled by the effect sim -> explicit unknown, "
+            "never false",
+            "  write: unknown",
+            "secrets:",
+            "  reads_credentials: unknown",
+            "analysis:",
+            "  entry_points: 0",
+            "  unshielded_effects: []",
+            "  guarded_effects: []",
+            "  unprofilable: true",
+        ]
+        return "\n".join(lines)
+
+    reachable, unshielded, guarded, n_entry = _manifest_effect_union(ctx, skill_key)
+
+    def _b(fam: str) -> str:
+        return "true" if fam in reachable else "false"
+
+    lines = header + [
+        "unprofilable: false",
+        "filesystem:",
+        f"  read: {_b('read')}",
+        f"  write: {_b('write')}",
+        "  deny: []               # always empty in v1 — we propose grants, not denies "
+        "(documented)",
+        "network:",
+        "  allowlist: []           # host/path extraction not available from static "
+        "effect analysis",
+        f"  reachable: {_b('network')}",
+        "shell:",
+        f"  exec: {_b('exec')}",
+        "memory:",
+        "  read: unknown           # not profiled by the effect sim -> explicit unknown, "
+        "never false",
+        "  write: unknown",
+        "secrets:",
+        f"  reads_credentials: {_b('cred')}",
+        "analysis:",
+        f"  entry_points: {n_entry}",
+        f"  unshielded_effects: [{', '.join(sorted(_sanitize(e) for e in unshielded))}]",
+        f"  guarded_effects: [{', '.join(sorted(_sanitize(e) for e in guarded))}]",
+        "  unprofilable: false",
+    ]
     return "\n".join(lines)
 
 

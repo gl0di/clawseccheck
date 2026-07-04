@@ -979,6 +979,51 @@ CATALOG: list[CheckMeta] = [
         confidence="LOW",
         surface="skills",
     ),
+    # A skill that reaches fs-write / network / exec effects but declares no
+    # allowed-tools/tools manifest is exercising undeclared privilege — a reviewer reading
+    # only the manifest would under-estimate the skill's real capability. Reuses B62's
+    # declared-tools parser and actual-capability extraction. Advisory (scored=False);
+    # WARN-only, never FAIL; UNKNOWN when no Python sources exist to profile.
+    CheckMeta(
+        "B98",
+        "Undeclared capabilities (risky effects, no allowed-tools manifest)",
+        MEDIUM,
+        "advisory",
+        "Least Privilege / Excessive Agency",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
+    # A shipped `.pth` file with an executable `import` line, or a bundled
+    # sitecustomize.py/usercustomize.py, auto-runs on every Python interpreter start
+    # (CPython `site` module behavior) — even without anyone ever importing the
+    # package. The TeamPCP/LiteLLM v1.82.8 supply-chain payload used exactly this
+    # vector. Advisory (scored=False); WARN-only, never FAIL.
+    CheckMeta(
+        "B99",
+        "Executable .pth file / sitecustomize auto-execution persistence",
+        HIGH,
+        "advisory",
+        "Defensibility / Supply-Chain Tamper",
+        scored=False,
+        confidence="HIGH",
+        surface="skills",
+    ),
+    # A Prerequisites/Setup/Installation heading whose body instructs the reader to
+    # paste a remote-fetch shell command into a terminal is the ClickFix 2.0 / ClawHavoc
+    # delivery technique (standard §2.1) — distinct from B13's bare remote-fetch WARN,
+    # this looks at the natural-language paste-into-terminal framing itself. Advisory
+    # (scored=False); WARN-only, never FAIL.
+    CheckMeta(
+        "B100",
+        "ClickFix-style paste-into-terminal setup instruction",
+        HIGH,
+        "advisory",
+        "Supply Chain / ClawHavoc",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # advisory (not scored)
     CheckMeta(
         "C3",
@@ -1212,6 +1257,9 @@ AST_MAP = {
     "B95": ("AST02",),  # dependency confusion (unpinned + typosquat name) = supply-chain tamper (cf. B13)
     "B97": ("AST09",),  # per-turn event-hook file = persistent review/audit surface (cf. B77/B85)
     "B96": ("AST04",),  # config-driven trust widening (heuristic) = insecure metadata (cf. B62/B88)
+    "B98": ("AST04",),  # missing capability declaration = insecure/absent least-privilege metadata (cf. B62/B88/B96)
+    "B99": ("AST02",),  # .pth/sitecustomize auto-execution persistence = supply-chain tamper (cf. B86/B94)
+    "B100": ("AST01", "AST02"),  # ClickFix paste-into-terminal + remote-fetch = malicious skill / supply-chain (cf. B13)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT

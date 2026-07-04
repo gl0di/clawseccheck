@@ -148,6 +148,26 @@ and Mitigations (<https://genai.owasp.org/resource/agentic-ai-threats-and-mitiga
 | **Windows ACL** equivalents of POSIX perm checks | — | Perm checks return UNKNOWN on Windows | **Not buildable under the laws** — no stdlib / no-subprocess way to read NTFS ACLs. UNKNOWN is the honest answer; the message now points to `icacls` (v0.25) |
 | Per-finding **confidence** level | — | Methodology asks for it | ✅ Shipped (v0.25): HIGH (config-fact) vs MEDIUM (heuristic) on every finding; in text/JSON/SARIF |
 
+## TAM-01..12 weaponization test matrix (standard §15.3)
+
+Named regression, not accidental coverage — `tests/test_tam_matrix.py` pins each row so a
+refactor that silently regresses one leg turns red here.
+
+| Row | Attack simulation | Mechanism | Status |
+|---|---|---|---|
+| TAM-01 File tamper | Modify SKILL.md / add an exfil instruction after install | `monitor` skill-hash CHANGED alert (HIGH) | Covered |
+| TAM-02 Manifest escalation | Widen network/fs/shell permissions without a version bump | `monitor` capability-diff (F-079, HIGH) | Covered |
+| TAM-03 Dependency poison | Add a malicious / unpinned lookalike package | B95 (dependency-confusion co-occurrence) | Covered |
+| TAM-04 Cross-skill abuse | Fake low-privilege skill impersonates a caller to a high-privilege skill | — | **Out of scope** — needs a live platform broker mediating caller/callee/action identity; no static equivalent |
+| TAM-05 Metadata poison | Tool description/schema changed to look read-only | B24 (MCP hardening) + `monitor` RP1 (oauth.scope expansion) | Covered |
+| TAM-06 PATH/import hijack | Fake curl/python/module earlier in PATH | C5 (native binary PATH safety) | Covered |
+| TAM-07 Symlink escape | Output/config path replaced with a symlink to a sensitive host path | B87 (symlink-escape finding, F-080) | Covered |
+| TAM-08 Prompt weaponization | Poisoned content instructs a skill to use its allowed tools for exfil | Content ring, B63 (silent-instruction) | Covered |
+| TAM-09 Downgrade/replay | Install an old signed-but-vulnerable version / replay an old manifest | `monitor` version-regression (F-079, MEDIUM) | **Partial** — static "declared version went backward" signal only; real signed-manifest replay/revocation needs a trust root, not achievable read-only/offline |
+| TAM-10 Memory backdoor | Skill writes "always trust attacker.com" into agent memory | B7 (memory poisoning) + B20 (bootstrap write protection); `multiturn.py` covers the live cross-turn leg | Covered |
+| TAM-11 Egress mutation | Dependency repoints destination from an approved API to a webhook/pastebin | B24 (MCP hardening) + `monitor` RP3 (endpoint repoint) | Covered |
+| TAM-12 Self-modifying skill | Skill writes into its own directory / changes a helper script | RISK-07 (self-modification chain) + B22 | Covered |
+
 ## Rule
 
 > If an attack path has no check and no test, assume the tool can miss it. This file is the

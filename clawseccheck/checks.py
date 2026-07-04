@@ -12332,6 +12332,264 @@ def check_event_hook_interceptor(ctx: Context) -> Finding:
     )
 
 
+# B98: a skill that exercises a HIGH-CONFIDENCE code-execution primitive but declares no
+# allowed-tools/tools manifest is exercising undeclared privilege — the manifest (if any)
+# says nothing about the capability the skill actually reaches. Reuses B62's declared-
+# tools parser (_skill_declared_tools). Deliberately narrower than reusing
+# _b62_actual_families' full family set: an empirical full-suite run showed that "network"
+# and bare-import "exec" (e.g. plain `import subprocess` with safe list-form/shell=False
+# calls) are FAR too common in ordinary, legitimate skills — every existing clean_* fixture
+# with a socket-based downloader or a safe subprocess.run([...]) call tripped a
+# family-based version of this check, because literally no fixture in the corpus (clean or
+# bad) declares a formal manifest today. Scoping to actual dangerous-primitive invocations
+# (os.system/os.exec*/eval/exec, or subprocess with shell=True) keeps the signal genuinely
+# rare and actionable instead of firing on almost every skill that does real work. Advisory
+# (scored=False), WARN-only (never FAIL) — a heuristic gap in declared metadata, not proof
+# of malice.
+_B98_DANGEROUS_PRIMITIVE_RE = re.compile(
+    r"\bos\.system\s*\(|\bos\.exec[lv]p?e?\s*\(|\beval\s*\(|\bexec\s*\("
+    r"|subprocess\.(?:run|call|Popen|check_call|check_output)\s*\([^)]*shell\s*=\s*True",
+    re.I,
+)
+
+
+def check_manifest_absent(ctx: Context) -> Finding:
+    """B98 — a skill invokes a high-confidence code-execution primitive
+    (os.system/os.exec*/eval/exec, or subprocess with shell=True) but declares no
+    allowed-tools/tools manifest (undeclared privilege). Reuses B62's declared-tools
+    parser; uses its own narrower dangerous-primitive scan rather than B62's broad
+    family extraction (see module comment above for why)."""
+    if not ctx.installed_skills:
+        return _custom(
+            "B98",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for undeclared capabilities.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+
+    warns: list[str] = []
+    any_with_py = False
+    for name, blob in ctx.installed_skills.items():
+        py_sources = ctx.installed_skill_py.get(name, [])
+        if not py_sources:
+            # No Python source to profile -> unprofilable for this skill, not a PASS/WARN.
+            continue
+        any_with_py = True
+
+        declared = _skill_declared_tools(blob)
+        risky = any(
+            _B98_DANGEROUS_PRIMITIVE_RE.search(src) for _relpath, src in py_sources
+        )
+        if risky and not declared:
+            warns.append(
+                f"{name}: invokes a code-execution primitive (os.system/exec/eval/"
+                "shell=True) but declares no allowed-tools/tools manifest"
+            )
+
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _custom(
+            "B98",
+            MEDIUM,
+            WARN,
+            "Undeclared capabilities: " + "; ".join(warns[:4]) + extra,
+            "Add an explicit allowed-tools/tools manifest to the skill's SKILL.md "
+            "frontmatter naming the tools it actually needs (least privilege) — an "
+            "undeclared code-execution primitive means a reviewer reading the manifest "
+            "alone would under-estimate the skill's real capability.",
+            warns,
+        )
+    if not any_with_py:
+        return _custom(
+            "B98",
+            MEDIUM,
+            UNKNOWN,
+            "No Python source files found in installed skills — "
+            "undeclared capabilities cannot be assessed.",
+            "Ensure skill Python files are present and readable for capability analysis.",
+        )
+    return _custom(
+        "B98",
+        MEDIUM,
+        PASS,
+        "No undeclared code-execution primitive found — skills invoking os.system/"
+        "exec/eval/shell=True declare an allowed-tools/tools manifest, or none exist.",
+        "Keep the allowed-tools/tools manifest accurate as a skill's capabilities evolve.",
+    )
+
+
+# B99 (F-088, L1): .pth / sitecustomize auto-execution persistence. A `.pth` file whose
+# lines start with `import ` executes on every Python interpreter start via `site`
+# module processing — even without anyone ever importing the package (the TeamPCP/
+# LiteLLM v1.82.8 supply-chain vector). `sitecustomize.py`/`usercustomize.py` shipped
+# anywhere in a skill/vendored-dep tree auto-runs the same way. Reuses the existing
+# `# file: <name>` blob-section splitting (_MANIFEST_HEADER_RE, same convention as the
+# unpinned-deps scan above) rather than a new file-collection pass. Read-only: only the
+# .pth TEXT content is inspected, never executed (§2). A benign path-only .pth (no
+# `import` line) is not flagged.
+_PTH_IMPORT_LINE_RE = re.compile(r"^\s*import\s+\S", re.MULTILINE)
+_SITECUSTOMIZE_FILENAMES = frozenset({"sitecustomize.py", "usercustomize.py"})
+
+
+def check_pth_persistence(ctx: Context) -> Finding:
+    """B99 (F-088, L1) — .pth / sitecustomize auto-execution persistence detector.
+
+    WARN when a shipped `.pth` file contains an executable `import` line, or when a
+    `sitecustomize.py`/`usercustomize.py` is shipped anywhere in the skill tree — both
+    auto-run on every Python interpreter start (CPython `site` module behavior), not
+    just when the package is imported. PASS when no such file is present, or `.pth`
+    files present are path-only (no `import` line). Advisory (scored=False).
+    """
+    if not ctx.installed_skills:
+        return _custom(
+            "B99",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for .pth/sitecustomize auto-execution.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+
+    warns: list[str] = []
+    for name, blob in ctx.installed_skills.items():
+        for m in _MANIFEST_HEADER_RE.finditer(blob):
+            fname = m.group("name").strip()
+            fname_lower = fname.lower()
+            if fname_lower.endswith(".pth"):
+                if _PTH_IMPORT_LINE_RE.search(m.group("body")):
+                    warns.append(
+                        f"{name}: {fname} contains an executable 'import' line — runs on "
+                        "every Python interpreter start (site module processing), even "
+                        "without anyone importing the package"
+                    )
+            elif fname_lower in _SITECUSTOMIZE_FILENAMES:
+                warns.append(
+                    f"{name}: ships {fname} — auto-runs on every Python interpreter start"
+                )
+
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _custom(
+            "B99",
+            HIGH,
+            WARN,
+            "Auto-execution persistence risk: " + "; ".join(warns[:4]) + extra,
+            "Keep .pth files path-only (no 'import' line), and avoid shipping "
+            "sitecustomize.py/usercustomize.py unless the interpreter-start "
+            "auto-execution is genuinely required — document why if so.",
+            warns,
+        )
+    return _custom(
+        "B99",
+        MEDIUM,
+        PASS,
+        "No executable .pth import lines or sitecustomize/usercustomize "
+        "auto-execution files found.",
+        "Keep .pth files path-only and avoid shipping sitecustomize/usercustomize.",
+    )
+
+
+# B100 (F-090, L1): ClickFix Prerequisites/Setup-section detector. A "## Prerequisites"/
+# "## Setup"/"## Installation" heading whose body instructs the human (or agent) to
+# copy-paste a shell command into a terminal — especially one that fetches remote
+# content — is the ClawHavoc/ClickFix 2.0 delivery technique (standard §2.1). Reuses
+# F-097's own heading detector (_INSTALL_HEADING_RE / _under_install_heading /
+# _nearest_heading) rather than a second heading regex. B13 already WARNs on a bare
+# remote-fetch under an install heading (F-097 down-rank); this check is a distinct,
+# narrower signal — the natural-language "paste this into your terminal" imperative
+# framing itself, which B13 does not look at. Zero-FP by design: the trigger is the
+# imperative phrase COMBINED WITH a remote-fetch/obfuscation shape, not either alone —
+# an ordinary pinned `pip install foo==1.2.3` line under the same heading, with neither
+# signal, must not WARN.
+_CLICKFIX_IMPERATIVE_RE = re.compile(
+    r"(?:"
+    # English
+    r"paste\s+(?:this|it|the\s+following)?\s*(?:command|code|script)?\s*into\s+"
+    r"(?:your\s+|the\s+)?terminal"
+    r"|run\s+the\s+following\s+(?:command|script)?\s*to\s+continue"
+    r"|copy\s+and\s+paste\s+the\s+following"
+    r"|open\s+(?:a\s+|your\s+)?terminal\s+and\s+(?:paste|run)"
+    r"|paste\s+the\s+command\s+below"
+    # Russian
+    r"|вставьте\s+(?:это|следующ\w+\s+команду)\s+в\s+терминал"
+    r"|скопируйте\s+и\s+вставьте"
+    r"|выполните\s+следующ\w+\s+команду"
+    r")",
+    re.I,
+)
+_CLICKFIX_REMOTE_FETCH_RE = re.compile(
+    r"curl\s+[^\n|]{0,200}\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b"
+    r"|wget\s+[^\n|]{0,200}\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b"
+    r"|bash\s+<\(\s*curl"
+    r"|(?:iwr|invoke-webrequest)\b[^\n|]{0,200}\|\s*iex"
+    r"|invoke-expression"
+    r"|npx\s+-y\s+https?://"
+    r"|pip\s+install\s+https?://",
+    re.I,
+)
+_CLICKFIX_PROXIMITY_WINDOW = 300  # chars, matching B63's proximity-window convention
+
+
+def check_clickfix_setup_section(ctx: Context) -> Finding:
+    """B100 (F-090, L1) — ClickFix Prerequisites/Setup-section detector.
+
+    WARN when, under an install/setup/prerequisites heading, a remote-fetch/obfuscation
+    shell pattern (curl|bash, wget|sh, bash <(curl), iwr|iex, npx -y https://, pip
+    install https://) co-occurs within a proximity window with a natural-language
+    "paste this into your terminal"-style imperative. Advisory (scored=False), WARN-only.
+
+    Deliberately NOT fence-gated (unlike B58/B59/B63/etc.): a fenced code block is the
+    normal Markdown convention for "the command to copy" — it is exactly how a real
+    ClickFix payload is presented, not a signal that it's "just a documented example."
+    Fence-suppressing this check would defeat its purpose.
+    """
+    if not ctx.installed_skills:
+        return _custom(
+            "B100",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for ClickFix-style setup instructions.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+
+    warns: list[str] = []
+    for name, blob in ctx.installed_skills.items():
+        for m in _CLICKFIX_REMOTE_FETCH_RE.finditer(blob):
+            if not _under_install_heading(blob, m.start()):
+                continue
+            window_start = max(0, m.start() - _CLICKFIX_PROXIMITY_WINDOW)
+            window = blob[window_start : m.end() + _CLICKFIX_PROXIMITY_WINDOW]
+            if not _CLICKFIX_IMPERATIVE_RE.search(window):
+                continue
+            heading = (_nearest_heading(blob, m.start()) or "").strip("# \n")
+            warns.append(
+                f"{name}: '{heading}' section instructs pasting a remote-fetch command "
+                "into a terminal (ClickFix pattern)"
+            )
+            break  # one finding per skill is enough
+
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _custom(
+            "B100",
+            HIGH,
+            WARN,
+            "ClickFix-style setup instruction: " + "; ".join(warns[:4]) + extra,
+            "Replace the paste-into-terminal instruction with a documented package-"
+            "manager install command the user runs on their own initiative — do not "
+            "instruct the reader (human or agent) to copy-paste a remote-fetch command.",
+            warns,
+        )
+    return _custom(
+        "B100",
+        MEDIUM,
+        PASS,
+        "No ClickFix-style paste-into-terminal + remote-fetch instruction found "
+        "under an install/setup section.",
+        "Keep setup instructions to a documented, pinned package-manager command.",
+    )
+
+
 # B96 (F-100, L1-3): config-driven trust widening. GROUNDING-GATED (§4): no skill-bundled
 # "telemetry endpoint" / "auto-approve" field name is documented anywhere in
 # docs/research/openclaw-schema-recon.md, so this is deliberately HEURISTIC-ONLY — it flags
@@ -12431,6 +12689,9 @@ SKILL_CONTENT_RING = (
     check_lifecycle_hooks_extended,  # B94 — extended lifecycle hooks beyond postinstall (F-099)
     check_dependency_confusion,  # B95 — unpinned dep name resembling a well-known package (F-101)
     check_event_hook_interceptor,  # B97 — per-turn event-hook interceptor in a skill (F-104)
+    check_manifest_absent,  # B98 — undeclared privilege: risky effects, no tools manifest
+    check_pth_persistence,  # B99 — .pth/sitecustomize auto-execution persistence (F-088)
+    check_clickfix_setup_section,  # B100 — ClickFix paste-into-terminal + remote-fetch (F-090)
     check_config_trust_widening,  # B96 — config-driven trust widening, heuristic-only (F-100)
 )
 

@@ -21,6 +21,7 @@ CLI_PATH = Path(__file__).resolve().parent.parent / "clawseccheck" / "cli.py"
 # consciously adding it here — either way the drift is now a visible, reviewed choice.
 NON_MODE_ATTRS = frozenset({
     "json", "card", "save", "full", "attest",          # output / enrichment modifiers
+    "emit_manifest",                                   # --vet-skill side output (B98/F-083)
     "fail_under", "exit_code", "no_history",           # CI gates / history plumbing
     "trend", "monitor",                                # also modes, kept for cascade logic
     "home", "history", "state", "events", "seed",      # value plumbing read in branches

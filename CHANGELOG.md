@@ -3,6 +3,50 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.11.0] — 2026-07-04
+
+Standard-gap A: tamper/authoring coverage (epic E-021) — capability-diff drift detection,
+a Tamper Score sub-grade, an undeclared-privilege check + proposed-manifest generator,
+persistence/social-engineering detectors, and a named TAM-01..12 regression contract.
+
+### Added
+- `--monitor` now tracks each installed skill's capability-family set and declared
+  version alongside its content hash: an update that silently expands capability
+  (e.g. read → read+network+write) fires a new HIGH alert distinct from the existing
+  hash-changed alert; a capability shrink fires INFO; a version that goes backward
+  fires a best-effort static downgrade signal (MEDIUM) — TAM-02/TAM-09 (F-079).
+- A new **Tamper Score** sub-grade (A–F), rendered as an additional "Tamper posture"
+  line in the human report — derived purely from existing findings (B20/B22/B42/B78/
+  B85/B86/C5) plus whether `--monitor` baseline state exists at all. Presentation-layer
+  only; never alters the main A–F grade (F-081).
+- **B98** — undeclared capabilities: a skill invoking a high-confidence code-execution
+  primitive (`os.system`/`os.exec*`/`eval`/`exec`, or `subprocess` with `shell=True`)
+  but declaring no `allowed-tools`/`tools` manifest (F-083).
+- **`--emit-manifest`** (with `--vet`/`--vet-skill`): prints a proposed permission
+  manifest (YAML-shaped, hand-built, no PyYAML dependency) derived from static effect
+  analysis of a single vetted skill — every field is either a real `true`/`false` or an
+  explicit `unknown`, never a silently-safe empty manifest (F-083).
+- **B99** — `.pth` file with an executable `import` line, or a bundled
+  `sitecustomize.py`/`usercustomize.py`: both auto-run on every Python interpreter
+  start via CPython's `site` module, independent of ever importing the package (the
+  TeamPCP/LiteLLM v1.82.8 supply-chain vector) (F-088).
+- **B100** — a ClickFix-style setup instruction: a Prerequisites/Setup/Installation
+  section that combines a paste-into-terminal imperative with a remote-fetch shell
+  pattern (curl\|bash, iwr\|iex, `bash <(curl …)`, etc.) — the ClawHavoc/ClickFix 2.0
+  delivery technique (F-090).
+- `tests/test_tam_matrix.py` — a named regression pinning each row of the standard's
+  TAM-01..12 weaponization test matrix to the mechanism that should fire, plus a
+  coverage table in `docs/THREAT_COVERAGE.md`. Two rows (TAM-04 cross-skill abuse,
+  and TAM-09's live-replay/revocation semantics) are documented as read-only/offline
+  out-of-scope rather than faked (C-146/C-147).
+
+### Fixed
+- An earlier, broader version of B98 (keying off any network/write/exec effect,
+  matching B62's family extraction) false-positived on ordinary skills with no formal
+  manifest convention to follow — a socket-based downloader, or a safe
+  `subprocess.run([...])` call, both tripped it. Narrowed to the high-confidence
+  code-execution primitives above before shipping.
+
 ## [3.10.0] — 2026-07-04
 
 **Layer-1 offline coverage.** Seven new advisory checks (B91–B97) close code/config/manifest

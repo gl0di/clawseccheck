@@ -29,10 +29,11 @@ from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
 from .report import render_html
-from .report import _sanitize, render_vet_dossier
+from .report import _sanitize, render_permission_manifest, render_vet_dossier
 from .dossier import build_profile
 from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE
+from .tamperscore import tamper_subgrade
 from .redteam import make_suite, render_suite
 from .dryrun import make_scenarios, render_dryrun
 from .multiturn import make_multiturn, render_multiturn
@@ -362,6 +363,9 @@ def main(argv=None) -> int:
                         "host heuristics) BEFORE fetching anything — zero network, bundled catalogs")
     p.add_argument("--vet-all", "--recursive", action="store_true", dest="vet_all",
                    help="vet every installed skill under ~/.openclaw/skills/* (one verdict per skill + aggregate)")
+    p.add_argument("--emit-manifest", action="store_true", dest="emit_manifest",
+                   help="print a proposed permission manifest (YAML-shaped) derived from "
+                        "static effect analysis; use with --vet/--vet-skill on a single skill")
     p.add_argument("--canary", action="store_true",
                    help="active prompt-injection canary self-test")
     p.add_argument("--redteam", action="store_true",
@@ -497,6 +501,12 @@ def main(argv=None) -> int:
     elif getattr(args, "vet_plugin", None):
         _vet_route = ("plugin", args.vet_plugin)
 
+    if args.emit_manifest and not (_vet_route and _vet_route[0] == "skill"):
+        print(
+            "note: --emit-manifest requires --vet/--vet-skill on a single skill; ignored",
+            file=sys.stderr,
+        )
+
     if _vet_route and _vet_route[0] in ("skill", "plugin"):
         vet_kind, vet_path = _vet_route
         vet_target = Path(vet_path).expanduser()
@@ -512,6 +522,11 @@ def main(argv=None) -> int:
             _vet_rc = 1
         else:
             _vet_rc = 0
+        # --emit-manifest: a stdout side output, single-skill vet only (B98/F-083).
+        # Never runs the normal dossier/JSON render below — this is a distinct artifact.
+        if args.emit_manifest and vet_kind == "skill":
+            _emit(render_permission_manifest(getattr(f, "ctx", None), vet_path))
+            return _vet_rc
         # Record the run in the coverage ledger, symmetric with --vet-mcp (C-128).
         # freshness_notice has no "vet" threshold, so this updates the ledger without
         # adding a staleness nudge — it just keeps the vet modes consistent.
@@ -774,9 +789,15 @@ def main(argv=None) -> int:
             # above the sections that run them (the freshness is computed pre-run).
             _refreshed = ("self_test", "vet_mcp") if args.full else ()
             f_notice = _compute_freshness(load_ledger(), skip=_refreshed)
+        # Tamper Score sub-grade — human report only; presentation-layer only, never
+        # alters score/grade/findings. mon_present reflects whether a --monitor
+        # baseline snapshot already exists on disk for this state file.
+        mon_present = load_state(args.state) is not None
+        tamper = tamper_subgrade(findings, mon_present)
         parts = [render_report(findings, score, ascii_only, native=ctx.native,
                                risk=paths, update_notice=notice, freshness_notice=f_notice,
-                               openclaw_detected=ctx.config_found, ctx=ctx, color=use_color),
+                               openclaw_detected=ctx.config_found, ctx=ctx, color=use_color,
+                               tamper=tamper),
                  "", render_card(score, findings, ascii_only)]
         if ctx.errors:
             parts.append("\nnotes:\n" + "\n".join(f"  - {_sanitize(e)}" for e in ctx.errors))

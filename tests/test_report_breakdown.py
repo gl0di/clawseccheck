@@ -273,3 +273,35 @@ class TestL1L2Framing:
     def test_framing_appears_exactly_once(self):
         out = render_report(_mixed_findings(), compute(_mixed_findings()))
         assert out.count("Static audit —") == 1
+
+
+class TestTamperPostureLine:
+    """F-081: an optional 'Tamper posture' sub-grade line, human-report only.
+
+    Presentation-layer only — must never change the main Score/Grade line."""
+
+    def test_main_score_line_byte_identical_with_or_without_tamper(self):
+        findings = _mixed_findings()
+        score = compute(findings)
+        tamper = ScoreResult(score=89, grade="B", capped=True, raw_score=95,
+                              failed_critical=0, failed_high=0, cap_severity="WARN")
+        out_without = render_report(findings, score)
+        out_with = render_report(findings, score, tamper=tamper)
+        score_line = f"Score: {score.score}/100   Grade: {score.grade}"
+        assert score_line in out_without
+        assert score_line in out_with
+
+    def test_tamper_posture_line_absent_when_tamper_none(self):
+        findings = _mixed_findings()
+        score = compute(findings)
+        out = render_report(findings, score)
+        assert "Tamper posture" not in out
+
+    def test_tamper_posture_line_present_with_correct_grade(self):
+        findings = _mixed_findings()
+        score = compute(findings)
+        tamper = ScoreResult(score=49, grade="F", capped=True, raw_score=90,
+                              failed_critical=0, failed_high=1, cap_severity="B22-FAIL")
+        out = render_report(findings, score, tamper=tamper)
+        assert "Tamper posture: F (49/100" in out
+        assert "B20/B22/B42/B78/B85/B86/C5" in out
