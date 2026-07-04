@@ -2401,6 +2401,90 @@ def _in_example_context(blob: str, pos: int, fence_ranges: list[tuple[int, int]]
     return bool(_SAFETY_EXAMPLE_RE.search(seg))
 
 
+# ---------- F-096: shared defensive-context guard ----------
+# A leaner, check-agnostic sibling of _in_example_context: a broad negation window
+# (not tied to security-doc vocabulary) plus a "nearest preceding heading names a
+# defensive section" test. Callers decide whether fence-awareness applies (B61's
+# bad fixture hides its payload inside a fence, so it must opt OUT via use_fence=False).
+_BROAD_NEGATION_RE = re.compile(
+    r"\b(?:never|avoid|do\s?n['o]?t|don't|must\s+not|should\s+not|"
+    r"shouldn't|mustn't|cannot|can't|refuse\s+to)\s+\w+",
+    re.I,
+)
+_BROAD_NEGATION_WINDOW = 200
+
+# A negator sitting *immediately* before the trigger ("Never silently install"):
+# the lookback window ends at the trigger word, so a following-word pattern can't
+# see it — this catches the adjacent-negator case (the "never silently install" FP).
+_IMMEDIATE_NEGATOR_RE = re.compile(
+    r"\b(?:never|avoid|do\s?n['o]?t|don't|must\s+not|should\s+not|refuse\s+to)\s+$",
+    re.I,
+)
+
+_DEFENSIVE_HEADING_RE = re.compile(
+    r"^[^\S\n]{0,3}#{1,6}[^\S\n]*.*?\b(?:"
+    r"known\s+risks?|mitigations?|anti[-\s]?patterns?|security|threat\s+model|"
+    r"safe(?:ty|guards?)?|what\s+not\s+to\s+do|caveats?|warnings?|"
+    r"do\s+not|don'?t|bad\s+examples?|red\s+flags?"
+    r")\b",
+    re.I | re.MULTILINE,
+)
+_ANY_HEADING_RE = re.compile(r"^[^\S\n]{0,3}#{1,6}[^\S\n]*\S.*$", re.MULTILINE)
+
+
+def _nearest_heading(blob: str, pos: int) -> str | None:
+    """Return the text of the closest Markdown heading at or before *pos*, or None."""
+    last = None
+    for m in _ANY_HEADING_RE.finditer(blob, 0, pos):
+        last = m
+    return last.group(0) if last is not None else None
+
+
+def _under_defensive_heading(blob: str, pos: int) -> bool:
+    """True when the nearest preceding heading names a defensive/security section."""
+    heading = _nearest_heading(blob, pos)
+    if heading is None:
+        return False
+    return bool(_DEFENSIVE_HEADING_RE.match(heading))
+
+
+def _defensive_context(blob, pos, fence_ranges, *, use_fence=True):
+    """Shared guard: True when the match at *pos* sits in defensive documentation
+    rather than a live instruction.
+
+    Criteria (any is sufficient):
+    - *use_fence* is True and the position is inside a fenced code example or is
+      narrowly negated (_is_code_example = fence OR _negation_context) — callers
+      whose bad fixtures hide the payload inside a fence (e.g. B61) must pass
+      use_fence=False or they will suppress the true positive.  We deliberately use
+      the NARROW _is_code_example here, not _in_example_context: the latter's
+      security-doc vocabulary matches the bare word "example" (e.g. an
+      ``example.com``/``.example`` URL) and would suppress real triggers.
+    - A broad negation marker (never / don't / must not / ...) appears within
+      _BROAD_NEGATION_WINDOW chars before *pos*, or immediately precedes the trigger.
+    - The nearest preceding heading names a defensive section (Known Risks,
+      Mitigations, Security, Threat Model, ...).
+    """
+    if use_fence and _is_code_example(blob, pos, fence_ranges):
+        return True
+    window = blob[max(0, pos - _BROAD_NEGATION_WINDOW) : pos]
+    if _BROAD_NEGATION_RE.search(window):
+        return True
+    if _IMMEDIATE_NEGATOR_RE.search(blob[max(0, pos - 24) : pos]):
+        return True
+    return _under_defensive_heading(blob, pos)
+
+
+def _whole_text_is_defensive(blob: str) -> bool:
+    """Conservative whole-document gate for B58's base variant: True only when the
+    document BOTH has a defensive heading AND contains a broad negation somewhere.
+    Deliberately stricter than _defensive_context (heading alone is not enough) so
+    decoded/hidden/base64 variants — which never call this — stay fully gated."""
+    if not _DEFENSIVE_HEADING_RE.search(blob):
+        return False
+    return bool(_BROAD_NEGATION_RE.search(blob))
+
+
 # F-051 (SkillSpector TR1): overly-broad activation triggers — the skill claims to fire on
 # nearly any user action. WARN-first (many legit skills have broad-ish triggers).
 _SKILL_BROAD_TRIGGER_RE = re.compile(
@@ -8553,7 +8637,10 @@ def check_agent_snooping(ctx: Context) -> Finding:
 
     for skill_name, blob in ctx.installed_skills.items():
         norm = normalize_for_scan(blob)
+        fr = _fence_ranges(norm)
         for m in _B61_CONFIG_PATH_RE.finditer(norm):
+            if _defensive_context(norm, m.start(), fr, use_fence=False):
+                continue
             path_match = m.group(0)
             start = max(0, m.start() - _B61_WINDOW)
             end = min(len(norm), m.end() + _B61_WINDOW)
@@ -9090,7 +9177,7 @@ def _b63_scan(text: str, fence_ranges: list[tuple[int, int]]) -> list[tuple[str,
     """
     hits: list[tuple[str, bool]] = []
     for m in _B63_SECRECY_RE.finditer(text):
-        if _is_code_example(text, m.start(), fence_ranges):
+        if _defensive_context(text, m.start(), fence_ranges):
             continue
         start = max(0, m.start() - _B63_WINDOW)
         end = min(len(text), m.end() + _B63_WINDOW)
@@ -9384,7 +9471,7 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
     """Scan *text* for conditional sleeper-trigger snippets."""
     hits: list[str] = []
     for m in _B65_TRIGGER_RE.finditer(text):
-        if _is_code_example(text, m.start(), fr):
+        if _defensive_context(text, m.start(), fr):
             continue
         start = max(0, m.start() - _B65_WINDOW)
         end = min(len(text), m.end() + _B65_WINDOW)
@@ -9755,8 +9842,11 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
             variants.append((n, "; ".join([s for s in merged_signals if s])))
 
         hidden = False
+        base_defensive = _whole_text_is_defensive(norm)
         for variant, signals in variants:
             if not signals:
+                continue
+            if variant == norm and base_defensive:
                 continue
             for pat in INJECTION_PATTERNS:
                 if pat.search(variant) and (
