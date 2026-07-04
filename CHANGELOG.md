@@ -3,6 +3,58 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.9.0] — 2026-07-04
+
+**Vet-precision overhaul.** A measured pass over `--vet` false positives: the content-ring
+and B13 checks now understand *context* — a dangerous-looking phrase that is documented,
+negated, or a legitimate installer no longer reads as an attack, while every genuine
+signal (obfuscated exec, hardcoded-IP fetch, agent-config writes, real injection directives)
+still FAILs. Plus a headline-honesty fix so a truncated scan can never read as "SAFE".
+
+### Changed
+- **Shared defensive-context guard for the content ring (B58/B61/B63/B65).** A dangerous
+  phrase that sits under a *Known Risks / Mitigations / Security / Threat Model* heading, is
+  negated in prose ("never silently install"), or is a fenced example no longer false-
+  positives — a new `_defensive_context` helper routes those checks through fence-, negation-,
+  and section-awareness. B61 keeps FAILing a payload hidden inside a fence (it opts out of
+  fence-suppression); the guard uses a narrow example test so the bare word "example" in a
+  URL can't suppress a real trigger.
+- **B13 documented installers are a capability, not malice.** A `curl … | bash` /
+  remote-fetch under an *Install / Setup / Usage / Prerequisites* heading, or one pointing at
+  the skill's own declared homepage host, now WARNs instead of FAILs. Obfuscated exec
+  (`iwr|iex`, base64), foreign/IP-host fetches, and agent-config-persistence writes are NOT
+  down-ranked and stay FAIL.
+- **B61 own-directory access is not snooping.** A skill reading its own
+  `~/.openclaw/skills/<self>` (or `memory/<self>`) directory is self-access, not cross-agent
+  credential theft — it PASSes even with a read verb; a *sibling* skill's directory (a
+  different slug) and `~/.claude|codex|gemini/` paths still FAIL.
+
+### Fixed
+- **A truncated `--vet` scan can no longer read as "SAFE".** A skill padded past the
+  60KB/500-file scan cap correctly set the Danger axis to UNKNOWN, but the dossier still
+  rolled up a confident Grade A / SAFE headline. The rollup now distinguishes a
+  coverage-limit-hit UNKNOWN (not benign) from a nothing-to-scan UNKNOWN (benign) and caps
+  the headline at a non-SAFE grade for the former.
+- **B88 frontmatter hygiene stops flagging non-tags.** The tag check now matches a real
+  HTML/XML element and excludes email angle-addresses (`<a@b>`), path placeholders
+  (`/<locale>/`), and multi-word prose placeholders (`<product or technology description>`);
+  HTML comments and declarations still flag. The cross-skill-squat rule now requires a
+  "skill(s)" object, so "use this skill instead of calling the API directly" no longer WARNs
+  while "instead of other skills" still does.
+- **B58 no longer flags legitimate emoji.** An emoji ZWJ sequence (U+200D joining two
+  pictographs — a profession or family emoji, incl. skin-tone variants) is no longer counted
+  as a hidden zero-width character; a ZWJ splicing two letters (`sys<zwj>tem`) and
+  U+200B/FEFF/2060 still are.
+- **B13 no longer reads a defensive note as a write.** A mitigation note that *names*
+  `AGENTS.md` as a file to protect ("review edits … AGENTS.md `<br>`") no longer trips the
+  agent-config-persistence detector — an inline HTML tag's `>` was being matched as a shell
+  redirect; tags are now stripped from the write-verb window. A real `echo >> AGENTS.md`
+  still FAILs.
+- **B63 catches paraphrased silent-instruction cues.** The transparency check now flags the
+  "does not need to be called out / mentioned / disclosed" disclosure-suppression paraphrase
+  (a confirmed bypass that previously read as a clean grade), still gated on an action verb
+  so benign phrasing does not false-positive.
+
 ## [3.8.1] — 2026-07-04
 
 Patch release: two robustness/safety fixes. No detection, scoring, or check-surface change —
