@@ -12078,9 +12078,10 @@ def check_trigger_homoglyph(ctx: Context) -> Finding:
     frontmatter DESCRIPTION text — the actual trigger-phrase surface OpenClaw's model
     invocation reads. A Cyrillic-а substituted into an otherwise-ASCII trigger phrase can
     register as a distinct near-duplicate for preferential routing while looking identical
-    to a human reader. Reuses textnorm.py's confusable-canonicalization wholesale (the same
-    two-line pattern used for MCP server-name homoglyphs, C-038 TP2) — no new detection
-    logic. Advisory (scored=False); WARN-only.
+    to a human reader. Gated on confusable_in_ascii_context (the same B58 anti-FP discipline)
+    so a whole-script non-Latin description (legitimate i18n, e.g. pure Russian/Greek prose)
+    is never flagged — only a confusable swapped INTO an otherwise-Latin word. Advisory
+    (scored=False); WARN-only.
     """
     if not getattr(ctx, "installed_skills", None):
         return _custom(
@@ -12095,11 +12096,10 @@ def check_trigger_homoglyph(ctx: Context) -> Finding:
         _, description = _b62_extract_declaration(blob, skill_name)
         if not description:
             continue
-        signals = obfuscation_signals(description)
-        if signals and normalize_for_scan(description) != description:
+        if obfuscation_signals(description) and confusable_in_ascii_context(description):
             warns.append(
-                f"{skill_name}: trigger description contains confusable/mixed-script "
-                f"characters ({'; '.join(signals)}) — may create a near-duplicate trigger"
+                f"{skill_name}: trigger description contains a confusable character mixed "
+                "into an otherwise-Latin word — may create a near-duplicate trigger"
             )
     if not warns:
         return _custom(

@@ -40,6 +40,18 @@ def test_plain_ascii_description_passes():
     assert f.status != WARN
 
 
+def test_whole_script_non_latin_description_is_not_flagged():
+    # regression: a whole-script Cyrillic/Greek description is legitimate i18n, not
+    # homoglyph masking (ClawRange anti-FP anchor i18n_not_confusable) — must stay clean
+    # even though the individual letters fold to ASCII confusables.
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.installed_skills = {
+        "x": _blob("Многоязычный навык для ведения истории обслуживания любого актива.")
+    }
+    f = check_trigger_homoglyph(ctx)
+    assert f.status != WARN, f.detail
+
+
 # --- vet-level: B93 surfaces as WARN on the bad fixture, PASS on the clean one ---
 
 def test_vet_bad_trigger_homoglyph_is_warn():
