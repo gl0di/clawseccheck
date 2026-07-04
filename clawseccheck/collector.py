@@ -963,7 +963,19 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
             _seen_bootstrap.add(real)
             key = name if _ws == "" else f"{_ws}/{name}"
             try:
-                ctx.bootstrap[key] = f.read_text(encoding="utf-8")
+                # B-103: cap the read like the skill path — a huge/padded bootstrap
+                # file must not load whole into memory (memory DoS) or turn the B58
+                # quadratic regex unbounded. _read_with_limit streams up to the cap
+                # (never over-allocates); a slice records a limit_hit so checks over
+                # ctx.bootstrap surface UNKNOWN instead of scanning a clipped file.
+                with open(f, "rb") as fp:
+                    raw, truncated = _read_with_limit(fp, _MAX_FILE_BYTES)
+                ctx.bootstrap[key] = raw.decode("utf-8", errors="replace")
+                if truncated:
+                    ctx.limit_hits.append(
+                        f"bootstrap file '{key}' exceeded the "
+                        f"{_MAX_FILE_BYTES // 1000}KB cap — content beyond the cap "
+                        "was NOT scanned")
             except OSError as exc:
                 ctx.errors.append(f"could not read {f}: {exc}")
 
