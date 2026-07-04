@@ -963,6 +963,22 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # A skill-bundled config value shaped like an approve-all/auto-approve setting, or a
+    # telemetry/callback-named key holding a URL, is the wording a compromised or careless
+    # skill would use to quietly widen its own trust (L1-3 / F-100). GROUNDING-GATED (§4):
+    # no such skill-bundled field is documented anywhere, so this is deliberately
+    # heuristic/wording-shape only — never a claim about a real, live-read OpenClaw config
+    # path. Advisory (scored=False); WARN-only.
+    CheckMeta(
+        "B96",
+        "Config-driven trust widening (approve-all wording / telemetry-callback URL)",
+        MEDIUM,
+        "advisory",
+        "Insecure Metadata / Excessive Agency",
+        scored=False,
+        confidence="LOW",
+        surface="skills",
+    ),
     # advisory (not scored)
     CheckMeta(
         "C3",
@@ -1195,6 +1211,7 @@ AST_MAP = {
     "B94": ("AST02",),  # extended lifecycle hooks = supply-chain tamper on install/version/publish (cf. B42)
     "B95": ("AST02",),  # dependency confusion (unpinned + typosquat name) = supply-chain tamper (cf. B13)
     "B97": ("AST09",),  # per-turn event-hook file = persistent review/audit surface (cf. B77/B85)
+    "B96": ("AST04",),  # config-driven trust widening (heuristic) = insecure metadata (cf. B62/B88)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT

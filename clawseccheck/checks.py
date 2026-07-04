@@ -12332,6 +12332,80 @@ def check_event_hook_interceptor(ctx: Context) -> Finding:
     )
 
 
+# B96 (F-100, L1-3): config-driven trust widening. GROUNDING-GATED (§4): no skill-bundled
+# "telemetry endpoint" / "auto-approve" field name is documented anywhere in
+# docs/research/openclaw-schema-recon.md, so this is deliberately HEURISTIC-ONLY — it flags
+# wording SHAPES that would widen trust or exfiltrate telemetry if a config-reading component
+# ever honored them, never asserting any of these is a real, live-read OpenClaw config path.
+_TRUST_WIDENING_KV_RE = re.compile(
+    r'"(?:permission[_-]?mode|auto[_-]?approve\w*|approval[_-]?policy)"\s*:\s*'
+    r'(?:"(?:approve[_-]?all|all|never|none)"|true)',
+    re.I,
+)
+_TELEMETRY_URL_KEY_RE = re.compile(
+    r'"(?:telemetry|analytics|callback|webhook|beacon|collector|report[_-]?url|'
+    r'phone[_-]?home)[_a-z]*"\s*:\s*"(https?://[^"]{4,200})"',
+    re.I,
+)
+_TRUST_WIDENING_FILE_EXTS = (".yaml", ".yml", ".json", ".toml", ".cfg", ".ini")
+
+
+def check_config_trust_widening(ctx: Context) -> Finding:
+    """B96 (F-100, L1-3) — a skill-bundled config value that LOOKS like it widens agent
+    trust (an approve-all/auto-approve-shaped key) or stages telemetry exfiltration (a
+    telemetry/callback/webhook-named key holding a URL). Heuristic and advisory only
+    (§4 grounding wall: no such skill-bundled field is documented anywhere) — this never
+    claims any of these is a real OpenClaw config path, only that the wording SHAPE is
+    the kind a compromised or careless skill would use to quietly widen its own trust.
+    """
+    if not getattr(ctx, "installed_skills", None):
+        return _custom(
+            "B96",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for config-driven trust widening.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    warns: list[str] = []
+    for name, blob in ctx.installed_skills.items():
+        for m in _MANIFEST_HEADER_RE.finditer(blob):
+            fname = m.group("name").strip()
+            if not fname.lower().endswith(_TRUST_WIDENING_FILE_EXTS):
+                continue
+            body = m.group("body")
+            if _TRUST_WIDENING_KV_RE.search(body):
+                warns.append(
+                    f"{name}: {fname} contains an approve-all/auto-approve-shaped setting"
+                )
+            for um in _TELEMETRY_URL_KEY_RE.finditer(body):
+                warns.append(
+                    f"{name}: {fname} points a telemetry/callback-named key at "
+                    f"'{um.group(1)[:80]}'"
+                )
+    if not warns:
+        return _custom(
+            "B96",
+            MEDIUM,
+            PASS,
+            "No bundled config value resembling an approve-all setting or a "
+            "telemetry/callback URL.",
+            "Keep bundled config files free of auto-approve-shaped settings and "
+            "telemetry/callback endpoints the skill did not clearly document.",
+        )
+    extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
+    return _custom(
+        "B96",
+        MEDIUM,
+        WARN,
+        "Config-driven trust-widening wording found: " + "; ".join(warns[:6]) + extra,
+        "This is a heuristic, wording-shape match, not a confirmed live OpenClaw config "
+        "field — review the flagged file to see whether the skill actually reads and "
+        "acts on this value, and whether the telemetry/callback endpoint (if any) is "
+        "one you recognize and expect.",
+        warns,
+    )
+
+
 SKILL_CONTENT_RING = (
     check_unicode_obfuscation,  # B58 — unicode / hidden-text de-obfuscation
     check_markdown_image_exfil,  # B59 — MD-image data-exfil
@@ -12357,6 +12431,7 @@ SKILL_CONTENT_RING = (
     check_lifecycle_hooks_extended,  # B94 — extended lifecycle hooks beyond postinstall (F-099)
     check_dependency_confusion,  # B95 — unpinned dep name resembling a well-known package (F-101)
     check_event_hook_interceptor,  # B97 — per-turn event-hook interceptor in a skill (F-104)
+    check_config_trust_widening,  # B96 — config-driven trust widening, heuristic-only (F-100)
 )
 
 

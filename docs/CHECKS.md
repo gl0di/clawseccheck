@@ -1099,6 +1099,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B96 - Config-driven trust widening (approve-all wording / telemetry-callback URL)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Insecure Metadata / Excessive Agency
+- Scored: no
+- Confidence: LOW
+- OWASP: none
+- What it checks: Config-driven trust widening (approve-all wording / telemetry-callback URL)
+- Remediation:
+  - none
+
 ### C3 - Backups of SOUL.md / memory
 
 - Severity: LOW
