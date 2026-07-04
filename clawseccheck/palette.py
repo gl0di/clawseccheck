@@ -58,6 +58,9 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "findings you've muted, by id"),
         PaletteEntry("Bill of materials", 'bill of materials / sbom', "--sbom",
                      "skills, MCP servers, hashes and pin state as local JSON"),
+        PaletteEntry("Incident evidence pack", 'incident pack', "--incident",
+                     "findings + hashes + rotation list — a preservation aid, "
+                     "never rotates or deletes anything"),
     )),
     PaletteCategory("Live tests", LIVE, (
         PaletteEntry("Canary", 'canary', "--canary",
@@ -85,6 +88,12 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "reputation gate on the name/URL alone — before anything is fetched"),
         PaletteEntry("Vet everything", 'vet all', "--vet-all",
                      "every installed skill, one verdict each"),
+        PaletteEntry("Plan a zero-network vet", 'vet plan <slug|url|pkg>', "--vet-plan",
+                     "print the fetch+isolate+advise+cleanup commands — the tool "
+                     "never touches the network"),
+        PaletteEntry("Get an install recommendation", 'advise <path>', "--advise",
+                     "INSTALL / CAUTION / DO-NOT-INSTALL for a quarantined skill or "
+                     "plugin, with reasons + a cleanup command"),
     )),
     PaletteCategory("Track over time", READONLY, (
         PaletteEntry("Trend", 'trend', "--trend",

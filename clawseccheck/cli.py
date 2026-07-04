@@ -29,7 +29,14 @@ from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
 from .report import render_html
-from .report import _sanitize, render_permission_manifest, render_vet_dossier
+from .report import (
+    _sanitize,
+    render_advise,
+    render_advise_json,
+    render_permission_manifest,
+    render_vet_dossier,
+    render_vet_plan,
+)
 from .dossier import build_profile
 from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE
@@ -50,6 +57,7 @@ from .palette import render_palette
 from .percentile import render_percentile
 from .logsafe import get_logger
 from .safeio import secure_write_text
+from .incident import render_incident
 from .sbom import render_sbom
 
 
@@ -212,6 +220,8 @@ _PRIMARY_MODES = [
     ("vet_all", "--vet-all", "bool"),
     ("vet_mcp", "--vet-mcp", "opt"),
     ("vet_source", "--vet-source", "opt"),
+    ("advise", "--advise", "opt"),
+    ("vet_plan", "--vet-plan", "opt"),
     ("canary", "--canary", "bool"),
     ("redteam", "--redteam", "bool"),
     ("dryrun", "--dryrun", "bool"),
@@ -229,6 +239,7 @@ _PRIMARY_MODES = [
     ("next", "--next", "bool"),
     ("dashboard", "--dashboard", "bool"),
     ("sbom", "--sbom", "bool"),
+    ("incident", "--incident", "bool"),
     ("dashboard_findings", "--dashboard-findings", "bool"),
     ("monitor", "--monitor", "bool"),
 ]
@@ -242,6 +253,7 @@ _MODE_HONORS = {
     "vet_plugin": frozenset({"json"}),
     "vet_mcp": frozenset({"json"}),
     "vet_source": frozenset({"json"}),
+    "advise": frozenset({"json"}),
 }
 
 # Primary modes that run AFTER the --attest block in main()'s cascade: their findings
@@ -372,6 +384,19 @@ def main(argv=None) -> int:
                         "host heuristics) BEFORE fetching anything — zero network, bundled catalogs")
     p.add_argument("--vet-all", "--recursive", action="store_true", dest="vet_all",
                    help="vet every installed skill under ~/.openclaw/skills/* (one verdict per skill + aggregate)")
+    p.add_argument("--advise", metavar="PATH", dest="advise",
+                   help="INSTALL / CAUTION / DO-NOT-INSTALL recommendation for a quarantined "
+                        "skill or plugin (dir autodetected same as --vet), with reasons + a "
+                        "cleanup command — pairs with --vet-plan")
+    p.add_argument("--vet-plan", metavar="SLUG|URL|PKG", dest="vet_plan",
+                   help="print the zero-network fetch+isolate+advise+cleanup commands for "
+                        "vetting a source before installing it (the tool never touches the "
+                        "network — you or your agent run these commands)")
+    p.add_argument("--incident", action="store_true",
+                   help="print a local, read-only incident-response evidence pack: findings "
+                        "snapshot, skill/MCP hashes (--sbom), trajectory-sidecar hashes, the "
+                        "credential rotation list, and monitor event history — never rotates "
+                        "or deletes anything itself")
     p.add_argument("--emit-manifest", action="store_true", dest="emit_manifest",
                    help="print a proposed permission manifest (YAML-shaped) derived from "
                         "static effect analysis; use with --vet/--vet-skill on a single skill")
@@ -490,6 +515,11 @@ def main(argv=None) -> int:
         _emit(f"History chain BROKEN ({args.history}): {msg}")
         return 1
 
+    if getattr(args, "vet_plan", None):
+        # F-065: zero-network plan emitter — prints commands, touches nothing itself.
+        _emit(render_vet_plan(args.vet_plan))
+        return 0
+
     if args.menu:
         # The guided Welcome screen as a runnable command. Read-only: reads local
         # score history for the "last check" nudge and the offline staleness hint;
@@ -599,6 +629,22 @@ def main(argv=None) -> int:
             return _src_rc
         _emit(render_vet_dossier(profile, ascii_only=ascii_only))
         return _src_rc
+
+    if getattr(args, "advise", None):
+        # F-067: same vet engines/profile as --vet, reframed as an install decision.
+        advise_target = args.advise
+        detected = detect_vet_type(advise_target, home=args.home)
+        print(f"detected type: {detected}", file=sys.stderr)
+        advise_kind = detected if detected in ("plugin",) else "skill"
+        f = vet_skill(advise_target) if advise_kind == "skill" else vet_plugin(advise_target)
+        profile = build_profile(f, advise_target, advise_kind)
+        _advise_rc = 1 if profile.overall_status in ("FAIL", "WARN") else 0
+        record_run("vet" if advise_kind == "skill" else "vet_plugin")
+        if args.json:
+            _emit(render_advise_json(profile, version=__version__))
+            return _advise_rc
+        _emit(render_advise(profile, ascii_only=ascii_only))
+        return _advise_rc
 
     if args.canary:
         _emit(render_canary(make_canary(), ascii_only))
@@ -777,6 +823,10 @@ def main(argv=None) -> int:
 
     if args.sbom:
         _emit(render_sbom(ctx))
+        return 0
+
+    if args.incident:
+        _emit(render_incident(ctx, findings, score))
         return 0
 
     if args.monitor:

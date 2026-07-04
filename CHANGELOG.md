@@ -3,6 +3,35 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.14.0] — 2026-07-04
+
+Zero-network vet pipeline (epic E-019 subset) — a full check-before-install flow that
+never makes the tool touch the network: a plan emitter, an install-recommendation
+renderer, and a read-only incident evidence-pack builder.
+
+### Added
+- **`--vet-plan <slug|url|pkg>`** — prints the exact fetch+isolate+advise+cleanup
+  commands for vetting a source before installing it: a `mktemp -d` quarantine outside
+  every OpenClaw auto-load path, the right fetch verb for the target's ecosystem
+  (`npm pack`, `pip download`, `git clone`, `curl`, detected via the same parser
+  `--vet-source` already uses), then `--advise` on the result, then cleanup. The tool
+  itself never fetches anything — mirrors `--fix`'s "prints, never executes" doctrine
+  (F-065).
+- **`--advise <path>`** — reframes the same risk dossier `--vet` already computes as an
+  install decision: **INSTALL** / **CAUTION** / **DO-NOT-INSTALL**, with reasons (each
+  finding's own detail text, which already carries a source→sink trace for taint
+  findings) and a cleanup command. An inconclusive (UNKNOWN) assessment always maps to
+  CAUTION, never a false INSTALL. Detects whether the target is actually a temp-dir
+  quarantine copy before suggesting an unconditional `rm -rf` — pointed at a real
+  installed skill instead, it warns rather than handing out a live delete command
+  (F-067).
+- **`--incident`** — a local, read-only evidence-pack builder for incident response: a
+  findings snapshot, skill/MCP hashes (the same data `--sbom` exports), trajectory-log
+  hashes (proving integrity without ever reading tool-call arguments), a credential
+  rotation list (provider names only, never account/email fragments), and monitor event
+  history if present. Framed honestly as a preservation aid for the IR playbook — it
+  never rotates, deletes, or remediates anything itself (I-020).
+
 ## [3.13.0] — 2026-07-04
 
 Dogfood + doc/quality debt (epic E-022) — the tool turns its own audit discipline on

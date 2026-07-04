@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 3.13.0
+version: 3.14.0
 description: Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — all read-only, all on your machine. Scores your setup (A–F) and reports the most urgent holes — reports only, it never changes anything. No API key, no data leaves your machine.
 license: MIT
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — all read-only, all on your machine. Scores your setup (A–F) and reports the most urgent holes — reports only, it never changes anything. No API key, no data leaves your machine."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
@@ -484,6 +484,19 @@ refs. Relay the band honestly:
   safe. Fetch it into an isolated temp folder and I'll run the full vet on the copy before
   you install." Once fetched, run `--vet <quarantine-path>` and remove the folder afterwards.
 
+**Full guided pipeline (zero network in the tool, every step).** For "check before I install
+X" end to end: (1) `--vet-source <target>` — the identity gate above; stop here on KNOWN-BAD.
+(2) `--vet-plan <target>` prints the exact fetch+isolate+cleanup commands for *you* (the agent)
+to run — a temp quarantine dir outside every OpenClaw auto-load path, the right fetch verb for
+the target's ecosystem (npm/pypi/git/url), never executed by the tool itself. (3) Run those
+commands yourself. (4) `--advise <quarantine-path>` — reframes the same risk dossier as an
+install decision: **INSTALL** / **CAUTION** / **DO-NOT-INSTALL**, with reasons and a cleanup
+command. Relay it directly:
+- INSTALL -> "No FAIL/WARN findings across every assessable axis — looks clean."
+- CAUTION -> "Some findings worth reviewing before trusting this (I'll name them)."
+- DO-NOT-INSTALL -> "This has patterns used by malware — do not install it."
+(5) Run the cleanup command from step 4 to remove the quarantine copy, whatever the verdict.
+
 #### Choice: MCP vetting / "is my MCP safe" / "check my connected servers" / "vet my MCP servers"
 
 ```
@@ -661,6 +674,7 @@ Use this to map what the user says to the right command:
 | "vet", "scan this skill", "is this safe to install", "check before I install" | `--vet <path>` — type autodetected; `--vet-skill <path>` forces the skill engine (add `--json` or `--sarif PATH` for machine-readable / CI output) |
 | "vet this plugin", "is this plugin safe" | `--vet-plugin <path>` (plugin root or `openclaw.plugin.json`; `--vet <path>` autodetects too) |
 | "is this safe to download", "check this link / package before I fetch it" | `--vet-source <slug|url|pkg>` — zero network, identity only; then quarantine + `--vet` the fetched copy |
+| "walk me through vetting this before I install it", "should I install this" | `--vet-source` -> `--vet-plan <target>` (prints the fetch+isolate commands, you run them) -> `--advise <quarantine-path>` for an INSTALL/CAUTION/DO-NOT-INSTALL call |
 | "is my MCP safe", "check my connected servers", "vet my MCP", "are my MCP servers trusted", "MCP supply chain" | `--vet-mcp` (add `--json` or `--sarif PATH` for machine-readable / CI output) |
 | "what dangerous actions can my agent take", "least privilege", "check my tools", "capability", "blast radius", "deeper check" | `--ask` then `--attest <filled.json>` |
 | "monitor", "watch", "alert me", "ongoing", "keep checking" | `--monitor` (ask first) |

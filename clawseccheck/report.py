@@ -13,6 +13,7 @@ import os
 import html
 import json
 import re
+import tempfile
 from pathlib import Path
 
 from .catalog import (
@@ -1076,6 +1077,150 @@ def render_vet_dossier(profile, ascii_only: bool = False) -> str:
     if profile.unmapped:
         lines.append(f"  (unmapped: {', '.join(profile.unmapped)})")
     return "\n".join(lines)
+
+
+# ---- F-067: --advise — the same VetProfile the risk dossier already computes, reframed
+# as an install decision rather than a risk breakdown. DANGEROUS/SUSPICIOUS/SAFE/UNKNOWN
+# relabel to INSTALL/CAUTION/DO-NOT-INSTALL; UNKNOWN maps to CAUTION (not INSTALL) — an
+# inconclusive assessment is never presented as a green light. "Reasons" reuse each
+# finding's own detail text verbatim, which already carries F-055's source->sink trace for
+# taint findings — no separate trace plumbing needed. Read-only: this only prints; the
+# agent/user decides whether to actually remove the quarantine dir.
+_ADVISE_VERDICT = {FAIL: "DO-NOT-INSTALL", WARN: "CAUTION", PASS: "INSTALL", UNKNOWN: "CAUTION"}
+_ADVISE_ICON_UNI = {"DO-NOT-INSTALL": "⛔", "CAUTION": "⚠️", "INSTALL": "✅"}
+_ADVISE_ICON_ASCII = {"DO-NOT-INSTALL": "[X]", "CAUTION": "[!]", "INSTALL": "[OK]"}
+
+
+def _advise_reasons(profile, limit: int = 5) -> list[str]:
+    """Top FAIL/WARN findings' detail text, worst-first, deduplicated by id."""
+    worst_first = sorted(
+        (f for f in profile.findings if f.status in (FAIL, WARN)),
+        key=lambda f: (0 if f.status == FAIL else 1, f.id),
+    )
+    return [f"{f.id} ({f.status}): {_sanitize(f.detail)}" for f in worst_first[:limit]]
+
+
+def _looks_like_quarantine(target: str) -> bool:
+    """True if *target* sits under the system temp dir (a --vet-plan quarantine copy),
+    False otherwise. --advise can be pointed at ANY path, including a real installed
+    skill — never suggest an unconditional `rm -rf` outside temp, or a user could paste
+    it against their live install."""
+    try:
+        resolved = Path(target).expanduser().resolve()
+        tmp = Path(tempfile.gettempdir()).resolve()
+        return resolved == tmp or tmp in resolved.parents
+    except OSError:
+        return False
+
+
+def render_advise(profile, ascii_only: bool = False) -> str:
+    """Human-readable install recommendation: INSTALL / CAUTION / DO-NOT-INSTALL.
+
+    Built from the exact same VetProfile as render_vet_dossier — a different framing
+    of the same signals, not a second analysis pass.
+    """
+    icons = _ADVISE_ICON_ASCII if ascii_only else _ADVISE_ICON_UNI
+    verdict = _ADVISE_VERDICT.get(profile.overall_status, "CAUTION")
+    name = _sanitize(Path(profile.target).name or profile.target)
+    lines = [f"{icons[verdict]}  {verdict} — {profile.target_type} '{name}'", ""]
+
+    reasons = _advise_reasons(profile)
+    if reasons:
+        lines.append("Reasons:")
+        lines.extend(f"  - {r}" for r in reasons)
+        lines.append("")
+    elif verdict == "CAUTION":
+        lines.append("Reasons: assessment is inconclusive (UNKNOWN) — not enough signal "
+                      "to say INSTALL; review manually before trusting this source.")
+        lines.append("")
+    else:
+        lines.append("No FAIL/WARN findings across every assessable axis.")
+        lines.append("")
+
+    lines.append("Next steps:")
+    if verdict != "INSTALL":
+        lines.append("  Review the reasons above before proceeding; when you're done:")
+    if _looks_like_quarantine(profile.target):
+        lines.append(f"  rm -rf {profile.target}    # remove the quarantine copy — do this either way")
+    else:
+        lines.append(f"  '{profile.target}' is not under the system temp dir — this does not")
+        lines.append("  look like a --vet-plan quarantine copy. If it IS one, remove it with:")
+        lines.append(f"    rm -rf {profile.target}")
+        lines.append("  If this is your real installed skill, do NOT delete it — act on the")
+        lines.append("  verdict above instead (e.g. uninstall through your normal flow).")
+    lines.append("  (run --json for the full finding list + axis breakdown)")
+    return "\n".join(lines)
+
+
+def render_advise_json(profile, *, version: str) -> str:
+    """Machine-readable install recommendation — same envelope as render_vet_json plus
+    the advise-specific verdict, reasons, and cleanup command."""
+    from .coverage import coverage as _coverage  # noqa: PLC0415
+
+    is_quarantine = _looks_like_quarantine(profile.target)
+    payload = json.loads(render_vet_json(profile, mode="advise", version=version))
+    payload["advise_verdict"] = _ADVISE_VERDICT.get(profile.overall_status, "CAUTION")
+    payload["reasons"] = _advise_reasons(profile)
+    payload["is_quarantine_path"] = is_quarantine
+    payload["cleanup"] = (
+        f"rm -rf {profile.target}" if is_quarantine else
+        f"# '{profile.target}' is not under the system temp dir — only run "
+        f"'rm -rf {profile.target}' if you're sure this is a --vet-plan quarantine "
+        "copy, not your real installed skill"
+    )
+    payload["coverage"] = _coverage(profile.findings)
+    return json.dumps(payload, ensure_ascii=True, indent=2)
+
+
+# ---- F-065: --vet-plan — the zero-network default path. This tool never fetches
+# anything (§2); it only PRINTS the commands a human or host agent would run to fetch a
+# source into an isolated quarantine dir, vet it, and clean up — mirroring --fix's
+# "prints, never executes" doctrine. Ecosystem detection reuses F-073's own parser
+# (_parse_source_target) so the fetch verb matches exactly what --vet-source already
+# identified. Only real, standard package-manager verbs are suggested (git/npm/pip);
+# for "clawhub" and unresolved bare names there is no single verified CLI flag to name,
+# so the plan gives generic guidance rather than fabricating one.
+def render_vet_plan(target: str) -> str:
+    from .checks import _parse_source_target  # noqa: PLC0415
+
+    info = _parse_source_target(target)
+    eco, name, version = info["ecosystem"], info["name"], info.get("version")
+    ver_suffix = f"@{version}" if version else ""
+
+    if eco == "npm":
+        fetch = f"npm pack {name}{ver_suffix} --pack-destination \"$QUARANTINE\""
+    elif eco == "pypi":
+        fetch = f"pip download --no-deps -d \"$QUARANTINE\" {name}{'==' + version if version else ''}"
+    elif eco == "git":
+        # info only keeps host + the repo-name tail, not the full owner/repo path — pull
+        # host/path back out of the raw "git:<host>/<path>[@ref]" target instead of
+        # reconstructing it from parsed fields (which would drop the owner segment).
+        path = target[len("git:"):]
+        ref = info.get("ref")
+        if ref:
+            path = path.rsplit("@", 1)[0]
+        branch_flag = f" --branch {ref}" if ref else ""
+        fetch = f"git clone --depth 1{branch_flag} https://{path} \"$QUARANTINE/repo\""
+    elif eco == "clawhub":
+        fetch = (f"# resolve '{name}' via your ClawHub client's normal pull/install path, "
+                  "but redirect the output into \"$QUARANTINE\" instead of the live skills dir")
+    else:  # "url" or an unresolved bare "registry" name
+        fetch = (f"curl -fsSL {target} -o \"$QUARANTINE/download\"" if eco == "url" else
+                  f"# '{name}' has no resolvable ecosystem — fetch via your package manager's "
+                  "normal lookup, into \"$QUARANTINE\"")
+
+    return "\n".join([
+        "Zero-network plan — clawseccheck never touches the network. Run these yourself",
+        "(or have your agent run them), then feed the result back in:",
+        "",
+        "  QUARANTINE=$(mktemp -d)   # outside every OpenClaw auto-load path",
+        f"  {fetch}",
+        "  clawseccheck --advise \"$QUARANTINE\"",
+        "  rm -rf \"$QUARANTINE\"    # cleanup — run this regardless of the verdict",
+        "",
+        "Before fetching anything, also run: "
+        f"clawseccheck --vet-source {target}   # identity check, zero network, no fetch",
+    ])
 
 
 # ---- B98 / F-083: --emit-manifest — a proposed permission manifest, hand-built YAML-shaped
