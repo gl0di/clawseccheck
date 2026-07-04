@@ -12181,6 +12181,63 @@ def check_lifecycle_hooks_extended(ctx: Context) -> Finding:
     )
 
 
+_B95_UNPINNED_PKG_RE = re.compile(r"'([^']+)' unpinned")
+
+
+def check_dependency_confusion(ctx: Context) -> Finding:
+    """B95 (F-101, L1-4) — an UNPINNED dependency whose name also resembles a well-known
+    package (a possible typosquat) is the classic dependency-confusion combination: a wide
+    version range means the resolver can silently pick up a newer (or differently-scoped)
+    release of a name that was already chosen to look like something trusted. B13 already
+    flags unpinned deps (C-044) and typosquat names (F-022) as SEPARATE signals; this is
+    the co-occurrence on the SAME package name, a materially higher-risk combination.
+    Pure correlation over existing infrastructure — no new fuzzy-matching logic. Advisory
+    (scored=False); WARN-only.
+    """
+    if not getattr(ctx, "installed_skills", None):
+        return _custom(
+            "B95",
+            HIGH,
+            UNKNOWN,
+            "No installed skills to inspect for dependency-confusion risk.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    warns: list[str] = []
+    for name, blob in ctx.installed_skills.items():
+        unpinned_names = {
+            m.group(1) for m in _B95_UNPINNED_PKG_RE.finditer("\n".join(_unpinned_deps_in_skill(name, blob)))
+        }
+        if not unpinned_names:
+            continue
+        for cand, known, d in _squat_hits(_dep_names_in_skill(blob)):
+            if cand in unpinned_names:
+                warns.append(
+                    f"{name}: '{cand}' is unpinned AND resembles well-known '{known}' "
+                    f"(edit distance {d}) — dependency-confusion risk"
+                )
+    if not warns:
+        return _custom(
+            "B95",
+            HIGH,
+            PASS,
+            "No dependency declares both an unpinned version range and a name resembling "
+            "a well-known package.",
+            "Pin dependencies to exact versions, especially any whose name is close to a "
+            "popular package.",
+        )
+    extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
+    return _custom(
+        "B95",
+        HIGH,
+        WARN,
+        "Dependency-confusion risk in installed skill(s): " + "; ".join(warns[:6]) + extra,
+        "Pin this dependency to an exact version and verify it is the package you actually "
+        "intend to depend on, not a similarly-named impostor that a wide version range "
+        "could silently resolve to.",
+        warns,
+    )
+
+
 SKILL_CONTENT_RING = (
     check_unicode_obfuscation,  # B58 — unicode / hidden-text de-obfuscation
     check_markdown_image_exfil,  # B59 — MD-image data-exfil
@@ -12204,6 +12261,7 @@ SKILL_CONTENT_RING = (
     check_unsafe_deserialization,  # B92 — unsafe deserialization sink (F-098)
     check_trigger_homoglyph,  # B93 — confusable characters in trigger description (F-103)
     check_lifecycle_hooks_extended,  # B94 — extended lifecycle hooks beyond postinstall (F-099)
+    check_dependency_confusion,  # B95 — unpinned dep name resembling a well-known package (F-101)
 )
 
 

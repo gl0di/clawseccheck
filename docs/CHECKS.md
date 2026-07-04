@@ -1075,6 +1075,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B95 - Dependency confusion (unpinned version + name resembling a well-known package)
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Supply-Chain Tamper / Malicious Skill
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Dependency confusion (unpinned version + name resembling a well-known package)
+- Remediation:
+  - none
+
 ### C3 - Backups of SOUL.md / memory
 
 - Severity: LOW

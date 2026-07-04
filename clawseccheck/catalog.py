@@ -933,6 +933,21 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # An UNPINNED dependency whose name also resembles a well-known package is the classic
+    # dependency-confusion combination: a wide version range lets the resolver silently pick
+    # up a release of a name chosen to look trusted (L1-4 / F-101). B13 already flags unpinned
+    # (C-044) and typosquat (F-022) separately; this is the co-occurrence on the SAME name, a
+    # materially higher-risk combination. Pure correlation, no new fuzzy-matching. Advisory.
+    CheckMeta(
+        "B95",
+        "Dependency confusion (unpinned version + name resembling a well-known package)",
+        HIGH,
+        "advisory",
+        "Supply-Chain Tamper / Malicious Skill",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # advisory (not scored)
     CheckMeta(
         "C3",
@@ -1163,6 +1178,7 @@ AST_MAP = {
     "B92": ("AST02",),  # unsafe deserialization sink = RCE-from-data supply-chain tamper (cf. B86)
     "B93": ("AST04",),  # confusable trigger description = insecure metadata / trigger-squat (cf. B88)
     "B94": ("AST02",),  # extended lifecycle hooks = supply-chain tamper on install/version/publish (cf. B42)
+    "B95": ("AST02",),  # dependency confusion (unpinned + typosquat name) = supply-chain tamper (cf. B13)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
