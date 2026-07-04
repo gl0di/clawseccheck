@@ -2025,6 +2025,10 @@ _DAEMONIZE_RE = re.compile(
 )
 
 _PERSIST_WINDOW = 200  # chars around agent-context filename to look for a write verb
+# B-085: an inline HTML tag's '>' (e.g. <br>, </div>) sits in the window and looks like a
+# shell redirect '>' — strip tags first so a defensive note that merely names AGENTS.md as
+# a file to protect ("review edits ... AGENTS.md <br>") isn't read as a write to it.
+_HTML_TAG_RE = re.compile(r"<[^>\n]{0,60}>")
 
 
 # C-040: persistence/rogue-agent patterns
@@ -2062,7 +2066,7 @@ def _agent_config_write_hits(
         fname = m.group(0)
         win_start = max(0, m.start() - _PERSIST_WINDOW)
         win_end = min(len(blob), m.end() + _PERSIST_WINDOW)
-        window = blob[win_start:win_end]
+        window = _HTML_TAG_RE.sub(" ", blob[win_start:win_end])  # B-085: drop inline tag '>'
         if _PERSIST_WRITE_VERB_RE.search(window):
             key = name
             if key not in seen_skills:
@@ -9247,6 +9251,11 @@ _B63_SECRECY_RE = re.compile(
         r"|hide\s+(?:this|the\s+(?:action|output|result|command|response))\s+(?:from\s+(?:the\s+)?user)"
         r"|keep\s+(?:this|it)\s+(?:secret|hidden|quiet|private)\s+(?:from\s+(?:the\s+)?user)"
         r"|(?:invisible|hidden|covert|stealth)\s+(?:mode|execution|operation)"
+        # B-091: paraphrased disclosure-suppression ("act, then don't mention it") — the
+        # confirmed live-fire bypass. Kept narrow (the specific "does not need to be called
+        # out/mentioned/..." family) so a benign "no need to mention the version" does not
+        # match; still gated on Signal B (action) for FAIL and on _defensive_context.
+        r"|(?:does\s+not|doesn'?t)\s+need\s+to\s+be\s+(?:called\s+out|mentioned|reported|noted|disclosed|surfaced|flagged)"
         # Russian
         r"|не\s+(?:сообщай|говори|показывай|уведомляй|информируй)\s+(?:пользовател[юя]|юзер[ау])"
         r"|скрой\s+(?:от\s+(?:пользовател[яю]|юзер[ау])|это|результат|действи[ея])"
