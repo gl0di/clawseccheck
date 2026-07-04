@@ -11158,6 +11158,30 @@ def check_mcp_bypass_highblast(ctx: Context) -> Finding:
 # ---------------------------------------------------------------------------
 # B77 — Config-write audit log review
 # ---------------------------------------------------------------------------
+_JSONL_SCAN_CAP = 1_000_000  # B-104: byte budget for tailing append-only JSONL logs
+
+
+def _read_jsonl_tail(path: Path, cap: int = _JSONL_SCAN_CAP) -> tuple[str, bool]:
+    """Read at most the last ``cap`` bytes of a (possibly huge) append-only JSONL log.
+
+    Session / config-audit logs can reach GB; a whole-file read + splitlines OOMs on
+    long-running agents (B-104). We tail the most-recent ``cap`` bytes — the entries a
+    posture check cares about — and drop a possibly-partial leading line (callers already
+    skip unparseable lines). Returns (text, truncated).
+    """
+    size = path.stat().st_size
+    if size <= cap:
+        return path.read_text(encoding="utf-8", errors="replace"), False
+    with open(path, "rb") as fp:
+        fp.seek(size - cap)
+        data = fp.read(cap)
+    text = data.decode("utf-8", errors="replace")
+    nl = text.find("\n")
+    if nl != -1:
+        text = text[nl + 1:]
+    return text, True
+
+
 def check_config_audit_log(ctx: Context) -> Finding:
     import json as _json
 
@@ -11171,7 +11195,7 @@ def check_config_audit_log(ctx: Context) -> Finding:
             "writes stay attributable and reviewable.",
         )
     try:
-        raw = log_path.read_text(encoding="utf-8", errors="replace")
+        raw, _ = _read_jsonl_tail(log_path)
     except OSError:
         return _finding(
             "B77",
@@ -11348,7 +11372,7 @@ def check_session_approval_policy(ctx: Context) -> Finding:
         a_never = 0
         for fp in recent:
             try:
-                raw = fp.read_text(encoding="utf-8", errors="replace")
+                raw, _ = _read_jsonl_tail(fp)
             except OSError:
                 continue
             for ln in raw.splitlines():
