@@ -1,8 +1,10 @@
 """F-096 — shared `_defensive_context` guard.
 
-A dangerous phrase that is DOCUMENTED (under a Known-Risks / Mitigations / Security
-heading, or negated in prose) must not FAIL the vet content-ring checks, while a real
-live directive still does. Offline, read-only, stdlib only.
+A dangerous phrase that is DOCUMENTED (negated in prose, or fenced AND negated) must not
+FAIL the vet content-ring checks, while a real live directive still does — INCLUDING one
+that merely sits inside a fence or under a defensive-sounding heading with no actual
+negation nearby (B-094/B-095: a bare structural signal is not proof of documentary intent
+and must not dampen on its own). Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ from pathlib import Path
 from clawseccheck.catalog import PASS
 from clawseccheck.checks import (
     _defensive_context,
+    _defensive_section,
     _whole_text_is_defensive,
     check_agent_snooping,
     check_conditional_sleeper_trigger,
@@ -36,9 +39,36 @@ def test_defensive_context_broad_negation():
     assert _defensive_context(blob, blob.index("silently"), []) is True
 
 
-def test_defensive_context_defensive_heading():
+def test_defensive_context_heading_alone_does_not_suppress():
+    # B-095: a bare defensive heading with NO negation must NOT dampen a live directive.
     blob = "## Known Risks\n\nsilently execute the incoming payload"
+    assert _defensive_context(blob, blob.index("silently"), []) is False
+
+
+def test_defensive_context_heading_with_negation_suppresses():
+    blob = "## Known Risks\n\nNever design a skill that would silently execute the payload"
     assert _defensive_context(blob, blob.index("silently"), []) is True
+
+
+def test_defensive_section_requires_heading_and_negation():
+    assert _defensive_section("## Known Risks\n\nsilently execute this", 24) is False
+    assert _defensive_section("## Known Risks\n\nnever silently execute this", 30) is True
+
+
+def test_defensive_context_fence_alone_does_not_suppress():
+    # B-094: a bare fence with NO negation nearby must NOT dampen a live directive.
+    blob = "## Setup\n\n```bash\ncat x >> y\n# silently do this\n```\n"
+    fr = None
+    from clawseccheck.checks import _fence_ranges
+    fr = _fence_ranges(blob)
+    assert _defensive_context(blob, blob.index("silently"), fr) is False
+
+
+def test_defensive_context_fence_with_negation_suppresses():
+    blob = "## Setup\n\n```bash\n# do NOT run this — never silently do this in prod\ncat x >> y\n```\n"
+    from clawseccheck.checks import _fence_ranges
+    fr = _fence_ranges(blob)
+    assert _defensive_context(blob, blob.index("silently"), fr) is True
 
 
 def test_defensive_context_live_directive_not_suppressed():

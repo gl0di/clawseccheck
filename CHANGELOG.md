@@ -3,6 +3,39 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.9.1] — 2026-07-04
+
+**Security fix.** A bare structural signal — being inside a Markdown code fence, or sitting
+under a security-themed heading — was treated as sufficient proof that a dangerous phrase
+was documentation rather than a live instruction. It wasn't: the exact literal trigger
+phrase B63 is built to catch (e.g. "without telling the user") survived verbatim inside a
+` ```fence``` ` or under a `## Known Risks` heading, reading a confident Grade A / SAFE
+instead of the Grade F a plain-text version of the same instruction correctly received.
+
+### Fixed
+- **A fenced live instruction is no longer waved through.** Being inside a code fence now
+  requires an accompanying negation marker nearby (the existing narrow `_negation_context`)
+  before it dampens a match — a bare fence alone is no longer sufficient. Closes the
+  cheapest bypass found in adversarial testing: no paraphrasing, no encoding, just three
+  backticks.
+- **A defensive-sounding heading is no longer waved through on its own.** `## Known Risks` /
+  `## Security` / `## Mitigations` (etc.) now requires an actual negation in the same
+  section before it dampens a match — a bare heading match alone is no longer sufficient.
+  This affected B63/B65, which route through the shared `_defensive_context` guard added
+  in v3.9.0; both are fixed at that one shared call site.
+- Recognized `"an example of what NOT to do"` as an explicit negation marker (a common,
+  legitimate documentation idiom that the existing narrow negation patterns missed) so this
+  tightening does not regress genuinely-documented security examples.
+
+### Added
+- Two regression fixtures (`bad_b63_fenced_bypass`, `bad_b63_heading_bypass`) pinning the
+  exact bypass shapes so this class of gap can never silently regress.
+
+Scope note: B58 was already safe (its whole-text gate already required heading AND
+negation). B59/B64/B66/B74 and the B13 local-first/content-ring loops call the lower-level
+fence helper directly rather than through the shared guard and still carry a form of this
+gap — tracked as a follow-up, not blocking this release.
+
 ## [3.9.0] — 2026-07-04
 
 **Vet-precision overhaul.** A measured pass over `--vet` false positives: the content-ring

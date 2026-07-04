@@ -2452,31 +2452,48 @@ def _under_defensive_heading(blob: str, pos: int) -> bool:
     return bool(_DEFENSIVE_HEADING_RE.match(heading))
 
 
+def _defensive_section(blob: str, pos: int) -> bool:
+    """True only when the nearest preceding heading is defensive AND a broad
+    negation ('never build a skill that...', "don't design...") sits in the
+    lookback window before *pos*. Mirrors _whole_text_is_defensive's "heading
+    alone is not enough" discipline, scoped to this position instead of the
+    whole blob (B-095: a bare defensive-sounding heading is not proof the
+    content under it is documentary rather than a live instruction)."""
+    if not _under_defensive_heading(blob, pos):
+        return False
+    window = blob[max(0, pos - _BROAD_NEGATION_WINDOW) : pos]
+    return bool(_BROAD_NEGATION_RE.search(window))
+
+
 def _defensive_context(blob, pos, fence_ranges, *, use_fence=True):
     """Shared guard: True when the match at *pos* sits in defensive documentation
     rather than a live instruction.
 
     Criteria (any is sufficient):
-    - *use_fence* is True and the position is inside a fenced code example or is
-      narrowly negated (_is_code_example = fence OR _negation_context) — callers
-      whose bad fixtures hide the payload inside a fence (e.g. B61) must pass
-      use_fence=False or they will suppress the true positive.  We deliberately use
-      the NARROW _is_code_example here, not _in_example_context: the latter's
+    - *use_fence* is True and the position is inside a fenced code example AND
+      narrowly negated nearby (_negation_context) — a bare fence is NOT enough
+      on its own (B-094: a live instruction hidden in a ```fence``` with no
+      negation is not documentation). Callers whose bad fixtures hide the
+      payload inside a fence (e.g. B61) must pass use_fence=False or they will
+      suppress the true positive. We deliberately use the NARROW
+      _negation_context here, not _in_example_context: the latter's
       security-doc vocabulary matches the bare word "example" (e.g. an
       ``example.com``/``.example`` URL) and would suppress real triggers.
     - A broad negation marker (never / don't / must not / ...) appears within
       _BROAD_NEGATION_WINDOW chars before *pos*, or immediately precedes the trigger.
     - The nearest preceding heading names a defensive section (Known Risks,
-      Mitigations, Security, Threat Model, ...).
+      Mitigations, Security, Threat Model, ...) AND a broad negation sits in
+      the same lookback window (B-095: a bare defensive heading is NOT enough
+      on its own — see _defensive_section).
     """
-    if use_fence and _is_code_example(blob, pos, fence_ranges):
+    if use_fence and _in_fence(pos, fence_ranges) and _negation_context(blob, pos):
         return True
     window = blob[max(0, pos - _BROAD_NEGATION_WINDOW) : pos]
     if _BROAD_NEGATION_RE.search(window):
         return True
     if _IMMEDIATE_NEGATOR_RE.search(blob[max(0, pos - 24) : pos]):
         return True
-    return _under_defensive_heading(blob, pos)
+    return _defensive_section(blob, pos)
 
 
 def _whole_text_is_defensive(blob: str) -> bool:
@@ -2652,7 +2669,7 @@ _NEGATION_RE = re.compile(
     r"\bfor\s+example\b|e\.g\.|(?:^|\s)#\s*(?:note|warning|danger|bad|example|avoid)\b|"
     r"\bdo\s+not\b|\bdo\s+NOT\b|\bdon'?t\s+(?:do|run|use|execute)\b|"
     r"\bnever\s+run\b|\bnever\s+use\b|\bavoid\s+(?:running|using|this)\b|"
-    r"\bexample:\s*$|documentation\b|"
+    r"\bexample:\s*$|documentation\b|\bwhat\s+not\s+to\s+do\b|"
     r"[✅❌]\s*(?:\*\*)?(?:don|never|avoid|bad|no\b)",
     re.I | re.MULTILINE,
 )

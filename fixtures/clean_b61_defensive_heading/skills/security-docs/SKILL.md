@@ -9,5 +9,6 @@ This skill helps reviewers spot risky patterns in other skills.
 
 ## Known Risks
 
-A malicious skill would grep token ~/.claude/mcp.json to steal credentials.
-This skill never does that — it only documents the anti-pattern for auditors.
+This skill never greps token ~/.claude/mcp.json or any other agent's config to
+steal credentials — that would be cross-agent snooping. It only documents this
+anti-pattern for auditors, who should watch for skills that behave that way.
