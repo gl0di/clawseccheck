@@ -1941,9 +1941,11 @@ _SKILL_HIGH = [
             # "execute arbitrary commands" / "run any code" variants
             r"\b(?:execute|run)\s+(?:arbitrary|any)\s+(?:commands?|code|scripts?)\b|"
             # Skill manifest declaring wildcard tool grant: tools: ["*"] / tools: [*] / tools: "*"
-            r"^\s*tools\s*:\s*\[?\s*[\"']?\*[\"']?\s*\]?\s*$|"
+            # B-100: leading indent is [ \t]* (horizontal only) so ^\s* can't gobble a
+            # multi-line whitespace run across \n under re.M and backtrack per line (quadratic).
+            r"^[ \t]*tools\s*:\s*\[?\s*[\"']?\*[\"']?\s*\]?\s*$|"
             # permissions: all / permissions: "all"
-            r"^\s*permissions\s*:\s*[\"']?all[\"']?\s*$",
+            r"^[ \t]*permissions\s*:\s*[\"']?all[\"']?\s*$",
             re.I | re.MULTILINE,
         ),
     ),
@@ -9187,8 +9189,11 @@ def _b62_classify_category(name: str, description: str) -> str | None:
 # allowed-tools/tools grant against its declared purpose — the skill-level analogue of the
 # MCP over-scope check. Distinct from B62 (declared purpose vs ACTUAL code): this flags an
 # over-grant in the manifest even before any code exercises it. WARN-first.
+# B-100: leading indent is [ \t]* (horizontal only) so ^\s* can't gobble a multi-line
+# whitespace run across \n under re.M and backtrack per line (quadratic). A frontmatter
+# key sits at the start of one line.
 _SKILL_TOOLS_LINE_RE = re.compile(
-    r"^\s*(?:allowed[-_]tools|tools)\s*:\s*(\[[^\]]*\]|[^\n#]*)", re.I | re.MULTILINE
+    r"^[ \t]*(?:allowed[-_]tools|tools)\s*:\s*(\[[^\]]*\]|[^\n#]*)", re.I | re.MULTILINE
 )
 # Tool name -> capability family (aligned with _B62_EXPECTED's family vocabulary).
 _TOOL_FAMILY: dict[str, str] = {
@@ -10880,7 +10885,10 @@ _B74_ROLE_BLOCK_RE = re.compile(
     normalize_for_scan(
         r"(?:"
         # fake SYSTEM: role markers (line-start or bracket-wrapped)
-        r"(?:^|\n)\s*SYSTEM\s*:"
+        # B-100: leading indent is [ \t]* (horizontal only) so it can't gobble a
+        # multi-line whitespace run across \n and backtrack per line — that made the
+        # alternation quadratic on whitespace-padded input. A role marker is single-line.
+        r"(?:^|\n)[ \t]*SYSTEM\s*:"
         r"|\[\s*SYSTEM\s*[:\]]"
         r"|===\s*SYSTEM\s*==="
         r"|---\s*SYSTEM\s*---"
