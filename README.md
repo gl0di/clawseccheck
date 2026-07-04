@@ -446,6 +446,34 @@ data for your own tooling, not something ClawSecCheck renders or offers.
 
 ---
 
+## 🍳 Recipes / common prompts
+
+Most people never type a flag — you talk to your agent, it has the skill installed, and it runs
+the right command for you. Here are ready-to-say prompts for common goals: what to tell your
+agent, what happens, and (for the CLI-minded) the underlying command. Every recipe below is
+audit/report only — nothing here ever changes your config.
+
+(This is the human-facing cookbook. For the full agent-facing phrase-to-flag routing table the
+skill itself uses, see [`SKILL.md`](SKILL.md#natural-language-to-tool-quick-map).)
+
+| You say | What happens | Under the hood |
+|---|---|---|
+| "Audit my setup, what's my grade?" | Runs the full audit, shows Score + Grade (A–F) and findings grouped by area, most urgent first. | `clawseccheck` (no flags) |
+| "Is this skill safe to install?" / "Vet this before I install it" | Scans the skill's content for malware patterns, injection directives, and supply-chain risk *before* you enable it — type is autodetected. | `--vet <path>` (or `--vet-skill <path>` / `--vet-plugin <path>` to force an engine) |
+| "Is this safe to even download?" | Checks the *source*'s identity (typosquat, known-bad, unpinned ref) with zero network before anything is fetched. | `--vet-source <slug\|url\|pkg>` |
+| "Are my MCP servers trustworthy?" | Vets every connected MCP server for supply-chain risk (unpinned installs, plaintext transports, broad OAuth scopes). | `--vet-mcp` |
+| "What's the single most important thing to fix?" | Prints a prioritised "what you can do next" list based on your actual findings — still just further checks, never auto-fixes. | `--next` |
+| "Give me copy-paste fixes" | The default report already states, per finding, what's wrong and a fix suggestion in plain language; `--json`/SARIF carry the same as structured `fix` data for tooling. ClawSecCheck never applies a fix itself. | `clawseccheck` (read the report) / `--json` |
+| "Am I vulnerable to prompt injection?" | Runs live self-tests: a benign injection canary, a broader dry-run harness, or both plus red-team payloads together. | `--canary` · `--dryrun` · `--self-test` |
+| "What dangerous actions can my agent actually take?" | Emits a self-report template for your agent to fill in with its real tool/verb inventory, then scores the blast radius (EXEC, DESTRUCTIVE, EGRESS, …) once you feed it back. | `--ask` then `--attest <file>` |
+| "Watch for changes over time" | Re-audits and alerts on what changed since last time (new skill, config drift, a check flipping PASS→FAIL). **Note:** this is the one opt-in exception to read-only — it writes a small local snapshot (`~/.clawseccheck/state.json`) so it has something to diff against next run. | `--monitor` |
+| "Am I improving? How do I rank?" | Shows your score history over time, or how your current score compares to an offline reference profile — no network either way. | `--trend` · `--percentile` |
+| "Share my grade without leaking my findings" | Produces just the grade + score (+ Lethal Trifecta ratio) — safe to post; your actual findings never appear. | `--card` (prints it) · `--badge grade.svg` (writes an SVG) |
+| "What's actually installed — skills, MCP servers, versions?" | Exports a local bill-of-materials (skills, MCP servers, hashes, declared/unpinned dependencies) as JSON. | `--sbom` |
+| "Gate my CI on this" | Machine-readable output plus a non-zero exit when the score drops below a bar or an unsuppressed FAIL exists — wire straight into a pipeline. | `--json` · `--sarif results.sarif` · `--fail-under 70` · `--exit-code` |
+
+---
+
 ## 📋 How you get the report
 
 When you run the skill inside OpenClaw, the agent executes `audit.py`, captures its output,

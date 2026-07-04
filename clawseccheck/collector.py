@@ -117,7 +117,7 @@ class Context:
     # Each value is a list of entry-point result dicts (see skillast.simulate_effects).
     effect_profiles: dict = field(default_factory=dict)
 
-    # Integrity & analysis metadata blocks (CLAWSECCHECK-E-009)
+    # Integrity & analysis metadata blocks
     limit_hits: list[str] = field(default_factory=list)
     mismatches: list[str] = field(default_factory=list)
     polyglots: list[str] = field(default_factory=list)

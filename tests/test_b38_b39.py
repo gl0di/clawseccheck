@@ -155,6 +155,67 @@ def test_b38_allowlist_present_no_sandbox_key_passes():
     assert f.status == PASS
 
 
+# --- QUALITY: wildcard / user-content hosts downgrade PASS to WARN ---
+
+def test_b38_wildcard_allowlist_entry_warns_not_pass():
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["*.example.com"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == WARN
+    assert "*.example.com" in " ".join(f.evidence)
+
+
+def test_b38_bare_wildcard_allowlist_entry_warns():
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["*"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == WARN
+
+
+def test_b38_known_user_content_host_warns_not_pass():
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["pastebin.com"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == WARN
+    assert "pastebin.com" in " ".join(f.evidence)
+
+
+def test_b38_user_content_host_subdomain_warns():
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["raw.githubusercontent.com"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == WARN
+
+
+def test_b38_clean_tight_allowlist_still_passes():
+    # No false positives: a clean, specific allowlist with no wildcards/user-content
+    # hosts must still PASS.
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["example.com", "api.myservice.io"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == PASS
+
+
 # --- Evidence populated on FAIL ---
 
 def test_b38_fail_evidence_populated():

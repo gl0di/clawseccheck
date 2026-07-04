@@ -38,7 +38,13 @@ from .redteam import make_suite, render_suite
 from .dryrun import make_scenarios, render_dryrun
 from .multiturn import make_multiturn, render_multiturn
 from .sarif import render_sarif
-from .history import DEFAULT_HISTORY, load as history_load, record as history_record, render_trend
+from .history import (
+    DEFAULT_HISTORY,
+    load as history_load,
+    record as history_record,
+    render_trend,
+    verify as history_verify,
+)
 from .menu import compute_ages, render_menu, render_onboarding
 from .palette import render_palette
 from .percentile import render_percentile
@@ -199,6 +205,7 @@ _PRIMARY_MODES = [
     ("menu", "--menu", "bool"),
     ("functions", "--functions", "bool"),
     ("verify_self", "--verify-self", "bool"),
+    ("verify_history", "--verify-history", "bool"),
     ("vet", "--vet", "opt"),
     ("vet_skill", "--vet-skill", "opt"),
     ("vet_plugin", "--vet-plugin", "opt"),
@@ -412,6 +419,8 @@ def main(argv=None) -> int:
                    help=f"path for trend history file (default: {DEFAULT_HISTORY})")
     p.add_argument("--no-history", action="store_true",
                    help="do not record this run to the local score history (default: record)")
+    p.add_argument("--verify-history", action="store_true",
+                   help="verify the score history file's tamper-evident hash-chain and exit")
     p.add_argument("--no-update-notice", action="store_true",
                    help="suppress the offline 'your build may be stale' reminder "
                         "(also suppressible via CLAWSECCHECK_NO_UPDATE_NOTICE=1; offline, never a network call)")
@@ -472,6 +481,14 @@ def main(argv=None) -> int:
         lines.append(f"Trusted digest: see SHA256SUMS.txt on the v{__version__} GitHub Release, signed via cosign.")
         _emit("\n".join(lines))
         return 0
+
+    if args.verify_history:
+        ok, msg = history_verify(args.history)
+        if ok:
+            _emit(f"History chain OK ({args.history}): {msg}")
+            return 0
+        _emit(f"History chain BROKEN ({args.history}): {msg}")
+        return 1
 
     if args.menu:
         # The guided Welcome screen as a runnable command. Read-only: reads local

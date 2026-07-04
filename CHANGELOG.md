@@ -3,6 +3,55 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.13.0] — 2026-07-04
+
+Dogfood + doc/quality debt (epic E-022) — the tool turns its own audit discipline on
+itself: a tamper-evident history trail, a JSON output contract with a CI drift guard,
+egress-allowlist quality grading, a published threat model, and a public-boundary leak
+guard that already caught two internal references before they shipped.
+
+### Added
+- **`--verify-history`** — verify the local score history's (`~/.clawseccheck/
+  history.jsonl`) tamper-evident hash chain. Each entry now carries a `chain_hash`
+  covering the previous entry, reusing the exact scheme `--monitor`'s event journal
+  already used; an absent/empty/legacy pre-chain file verifies OK for backward
+  compatibility, and a tampered/reordered/deleted entry reports exactly where the
+  chain broke (F-094).
+- **Egress-allowlist quality grading** — B38 (`browser.ssrfPolicy.hostnameAllowlist`)
+  and C014 (per-MCP-server `allowedHosts`) now downgrade a "restricted" verdict when
+  the allowlist itself is a weak mitigation: a wildcard entry, or a known anonymous
+  paste/gist/webhook host that could stage a payload despite being a "trusted"
+  domain. Host-level allow is not content-level trust (F-037).
+- Lethal Trifecta (A1) wording: the 2-of-3 case now names both active legs by name and
+  states that a third leg activating "becomes immediately exploitable"; a config that
+  declares more than one agent under `agents.list` now gets an explicit note that A1's
+  reading is the aggregated global surface, not any single named agent's actual grants
+  — OpenClaw exposes no field to resolve which one you run as default (C-139).
+- **`SECURITY_MODEL.md`** gained a full capability-surface declaration: least-privilege
+  posture, a deny-by-construction vs. runtime-policy doctrine statement for any future
+  fix/apply capability, secrets/data handling, the new tamper-evident audit trail, and
+  a note for other scanners auditing this repo about the intentional dangerous-token
+  strings in the detection code itself (C-150, F-093).
+- A new **"🍳 Recipes / common prompts"** section in the README: a user-facing cookbook
+  of natural-language prompts mapped to the real CLI mode each one triggers (C-130).
+- `docs/OUTPUT_SCHEMA.md` is now enforced by a CI drift-guard test
+  (`tests/test_json_schema.py`) that fails the build if the real `--json` output ever
+  emits an undocumented key or drops a documented one (C-136).
+- `tests/test_public_boundary.py` — an in-repo guard scanning every file that actually
+  ships (parsed from the publish workflow itself) for internal-only markers (the
+  internal Pulse hostname, task-ID shapes, local absolute paths) before they ever
+  reach a release (C-125).
+
+### Fixed
+- `docs/OUTPUT_SCHEMA.md` had drifted from the real JSON output: `risk_paths` was
+  documented as gated behind a `--risk` flag that no longer exists (it's always
+  computed); the `blast_radius` (FAIL-only) and `scan_receipt` (always-present) keys
+  were undocumented entirely. Caught while building the new schema drift-guard test
+  above, not by inspection (C-136).
+- Two internal Pulse task-ID references had leaked into source code comments
+  (`collector.py`, `checks.py`) — caught by the new public-boundary guard above on its
+  first run against the real repo, and removed (C-125).
+
 ## [3.12.0] — 2026-07-04
 
 Standard-gap B: host & artifacts coverage (epic E-021) — host egress posture, a local

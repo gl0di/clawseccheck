@@ -667,6 +667,27 @@ def _reassembly(ctx: Context):
     return best if best is not None else none_result
 
 
+# F-040: OpenClaw exposes agents.list[] (multiple named agents) but no field to
+# resolve which one is "default" (no agents.defaultId / agents.active — grounded
+# absence, see openclaw-schema-recon.md). A1's legs are computed from the GLOBAL
+# config surface, so a multi-agent install's trifecta view is an aggregate, not any
+# single agent's real exposure. Reframed from an interactive guide.py question (F-039)
+# to this static note: no id/name field exists to let a static check or a headless
+# CLI invocation (the tool's primary usage — see SKILL.md) resolve or ask about a
+# specific agent, and a blocking input() prompt would hang under that invocation mode.
+def _multi_agent_note(ctx: Context) -> str:
+    agent_list = dig(ctx.config, "agents.list")
+    n = len(agent_list) if isinstance(agent_list, list) else 0
+    if n <= 1:
+        return ""
+    return (
+        f" Note: config declares {n} agents under agents.list — this trifecta view is"
+        f" the aggregated global surface. OpenClaw exposes no field to resolve which"
+        f" one you run as default, so if you run a specific named agent, its own"
+        f" effective grants may differ from this global reading."
+    )
+
+
 # F-036: for a 2/3 config, name the one missing leg + the concrete field that would
 # complete the trifecta. Grounded only in field paths the engine already reads
 # (_untrusted_input_channels / INPUT_TOOL_HINTS + web for input; SENSITIVE_TOOL_HINTS,
@@ -697,9 +718,11 @@ def _distance_note(active: list) -> str:
         return ""
     missing = next(k for k in _LEG_KEYS if k not in active)
     return (
-        f" 2 of 3 lethal-trifecta legs present; the missing leg is '{missing}'."
-        f" Avoid enabling {_MISSING_LEG_ACTIVATORS[missing]}, which would complete 3/3 —"
-        f" once the third leg activates, one injected prompt can exfiltrate everything."
+        f" Two of three lethal-trifecta legs are active ({active[0]} and {active[1]});"
+        f" the missing leg is '{missing}'. Avoid enabling"
+        f" {_MISSING_LEG_ACTIVATORS[missing]}, which would complete 3/3 — if a third leg"
+        f" activates it becomes immediately exploitable: one injected prompt is enough"
+        f" to exfiltrate everything."
     )
 
 
@@ -714,6 +737,7 @@ def check_trifecta(ctx: Context) -> Finding:
             " exfiltrate everything."
         )
     detail += _distance_note(active)
+    detail += _multi_agent_note(ctx)
 
     if len(active) >= 3:
         return _finding(
@@ -5048,9 +5072,15 @@ def check_egress_inventory(ctx: Context) -> Finding:
         if _mcp_has_remote(spec):
             parts.append("remote MCP endpoint")
             allowed_hosts = spec.get("allowedHosts")
-            if allowed_hosts:
+            weak_hosts = _weak_allowlist_entries(allowed_hosts)
+            if allowed_hosts and not weak_hosts:
                 restricted = True
                 parts.append("allowedHosts restricted")
+            elif allowed_hosts and weak_hosts:
+                parts.append(
+                    "allowedHosts present but contains a wildcard/user-content "
+                    f"host (weak mitigation): {', '.join(weak_hosts)}"
+                )
             else:
                 parts.append("no allowedHosts restriction")
             url = spec.get("url") or spec.get("endpoint")
@@ -6829,6 +6859,54 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
     )
 
 
+# ---------- Shared: egress-allowlist quality (weak-mitigation detection) ----------
+# An allowlist entry can be technically "present" yet still a weak mitigation if it
+# admits (a) a wildcard pattern, or (b) a domain that hosts anonymous/user-generated
+# content an attacker could stage a payload on despite the host being "trusted".
+# Used by both B38 (browser.ssrfPolicy.hostnameAllowlist) and C014 (MCP allowedHosts).
+_USER_CONTENT_HOSTS = frozenset(
+    {
+        "pastebin.com",
+        "paste.ee",
+        "hastebin.com",
+        "gist.github.com",
+        "gist.githubusercontent.com",
+        "raw.githubusercontent.com",
+        "ix.io",
+        "transfer.sh",
+        "0x0.st",
+        "discord.com",
+        "webhook.site",
+    }
+)
+
+
+def _weak_allowlist_entries(allowlist) -> list[str]:
+    """Return the subset of an allowlist that is a weak mitigation.
+
+    Flags wildcard patterns (bare "*" or "*.example.com") and known user-content /
+    anonymous-paste / webhook hosts (matched by exact host or domain suffix, after
+    stripping a leading "*." if present). Non-string / malformed entries are ignored
+    (best-effort, no FAIL on unparseable data).
+    """
+    weak: list[str] = []
+    if not isinstance(allowlist, list):
+        return weak
+    for entry in allowlist:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        host = entry.strip().lower()
+        if host == "*" or host.startswith("*."):
+            weak.append(entry)
+            continue
+        bare = host[2:] if host.startswith("*.") else host
+        if bare in _USER_CONTENT_HOSTS or any(
+            bare == h or bare.endswith("." + h) for h in _USER_CONTENT_HOSTS
+        ):
+            weak.append(entry)
+    return weak
+
+
 # ---------- B38: Browser Control / Cookie & SSRF Exposure ----------
 # browser.ssrfPolicy.dangerouslyAllowPrivateNetwork (bool) — lets the agent browser
 # reach internal/metadata IPs (cloud-credential theft via 169.254.169.254).
@@ -6845,9 +6923,12 @@ def check_browser_ssrf(ctx: Context) -> Finding:
               private-network access enables cloud-metadata credential theft;
               no-sandbox means the headless browser can escape OS isolation.
     WARN    — browser is configured but ssrfPolicy.hostnameAllowlist is absent
-              (open egress surface — the browser can reach any external host).
+              (open egress surface — the browser can reach any external host);
+              OR the hostnameAllowlist is present but contains a wildcard entry or a
+              known user-content/anonymous-paste/webhook host — a weak mitigation an
+              attacker could stage payloads on despite the host being "trusted".
     PASS    — browser is configured AND sandboxed AND private network is blocked
-              AND a hostnameAllowlist is present.
+              AND a hostnameAllowlist is present with no weak entries.
     UNKNOWN — no browser config (not applicable).
     """
     cfg = ctx.config
@@ -6900,6 +6981,24 @@ def check_browser_ssrf(ctx: Context) -> Finding:
             "Add browser.ssrfPolicy.hostnameAllowlist listing only the domains the "
             "browser legitimately needs to reach; set "
             "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false.",
+        )
+
+    # QUALITY: allowlist present but contains a wildcard or known user-content host —
+    # downgrade PASS to WARN. Still additive/advisory: does not touch FAIL behaviour.
+    weak_entries = _weak_allowlist_entries(allowlist)
+    if weak_entries:
+        return _finding(
+            "B38",
+            WARN,
+            "Browser hostnameAllowlist is present but contains weak entries "
+            f"(wildcard and/or known user-content/paste/webhook host): {', '.join(weak_entries)} — "
+            "an attacker could stage a payload on a wildcard match or an anonymous "
+            "content host despite the allowlist.",
+            "Replace wildcard entries with explicit hostnames, and avoid allowlisting "
+            "anonymous paste/gist/webhook hosts (e.g. pastebin.com, gist.github.com, "
+            "raw.githubusercontent.com, webhook.site) — an attacker-controlled payload "
+            "can be staged there even though the host itself is 'trusted'.",
+            evidence=weak_entries,
         )
 
     return _finding(
@@ -12057,7 +12156,7 @@ def check_cross_file_payload(ctx: Context) -> Finding:
 # Deliberately NOT a general "re-scan the blob with markers stripped": that creates
 # false joins (a legit URL ending one file + a legit word starting the next can
 # synthesize a spurious signature hit) and the zero-FP calibration for that is not
-# confidently achievable in one pass (see architect note on F-086/CLAWSECCHECK-F-086).
+# confidently achievable in one pass (see architect note on F-086).
 # Scoped to ONLY the two base64-alphabet runs immediately adjacent to a section
 # boundary, each independently long enough (>=16 chars) that a stray word can't
 # accidentally qualify — the false-join surface this creates is structurally tiny.

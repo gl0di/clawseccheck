@@ -29,12 +29,13 @@ versioning §6 in `CLAUDE.md`).
 | `trifecta` | `str` | yes | Lethal Trifecta sub-score expressed as `"<n>/3"` (e.g. `"2/3"`). `"?/3"` means check A1 did not run. |
 | `findings` | `array[Finding]` | yes | All check results. See §2. |
 | `next_actions` | `array[NextAction]` | yes | Prioritised remediation suggestions. See §3. |
-| `risk_paths` | `array[RiskPath]` | only with `--risk` | Combinational attack chains. See §4. |
+| `risk_paths` | `array[RiskPath]` | yes | Combinational attack chains. See §4. May be an empty array. |
 | `capability_graph` | `object` | yes | Static capability map of the inspected agent. See §5. |
 | `secret_reachability` | `array[SecretClass]` | yes | Per-class secret-exposure analysis. See §6. |
 | `intentAttestationRequests` | `array[SAR]` | yes | Structured Attestation Requests for B62 capability-intent mismatches. See §7. |
 | `coverage` | `object` | yes | Surface/family coverage map for the Dashboard. See §8. |
 | `projection` | `object` | yes | What-if score projections for the Dashboard. See §9. |
+| `scan_receipt` | `str` | yes | Deterministic content-integrity hash over all findings, formatted `"sha256:<64-hex-chars>"`. Same findings set (any order) always yields the same receipt; a changed finding set changes it. Not a security signature — a drift/tamper-evidence checksum for the scan output itself. |
 
 ### Skeleton
 
@@ -47,11 +48,13 @@ versioning §6 in `CLAUDE.md`).
   "trifecta": "1/3",
   "findings": [ ... ],
   "next_actions": [ ... ],
+  "risk_paths": [ ... ],
   "capability_graph": { "nodes": [], "edges": [] },
   "secret_reachability": [ ... ],
   "intentAttestationRequests": [],
   "coverage": { "surfaces": {}, "families": {}, "gaps": {}, "summary": {} },
-  "projection": { "current": {}, "top1": null, "cumulative": {} }
+  "projection": { "current": {}, "top1": null, "cumulative": {} },
+  "scan_receipt": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 }
 ```
 
@@ -78,6 +81,25 @@ Shared by `--json`, `--json` with `--risk`, and `--vet` mode.
 | `remediation` | `object` | Paste-ready remediation. Keys: `commands` (`array[str]`) and `config` (`array[object]`). |
 | `evidence` | `array[str]` | Supporting evidence strings (sanitised; no raw secrets). May be empty. |
 | `surface` | `str` | OpenClaw surface slug this check belongs to (e.g. `"gateway"`, `"tools"`, `"bootstrap"`). `""` for findings not in the CATALOG (e.g. MCP-vet diagnostics). One of the 14 slugs in `catalog.SURFACES` or `""`. |
+| `blast_radius` | `object` | **Only present when `status` is `"FAIL"` and a config context is available** (always true for the real `clawseccheck --json` CLI path; absent in library calls to `render_json()` made without `ctx`). Estimated attacker gain if this finding is exploited. See below. |
+
+### `blast_radius` object (FAIL findings only)
+
+```json
+{
+  "open_channels": 1,
+  "has_exec": true,
+  "has_write": false,
+  "secret_paths": 3
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `open_channels` | `int` | Count of messaging channels with `dmPolicy` or `groupPolicy` set to `"open"`. |
+| `has_exec` | `bool` | `true` if `tools.exec.mode` is configured. |
+| `has_write` | `bool` | `true` if `fs_write` or `apply_patch` appears in the tool allowlist. |
+| `secret_paths` | `int` | Count of dotted config paths holding a secret-bearing value. |
 
 ### `remediation` object
 
@@ -114,7 +136,13 @@ item describes a manual configuration step.
     "config": []
   },
   "evidence": ["tools.output.sanitize = false"],
-  "surface": "bootstrap"
+  "surface": "bootstrap",
+  "blast_radius": {
+    "open_channels": 1,
+    "has_exec": true,
+    "has_write": false,
+    "secret_paths": 3
+  }
 }
 ```
 
@@ -134,9 +162,14 @@ Items in `next_actions` are ordered by ascending `priority` (lower = more urgent
 
 ---
 
-## 4. `--json` with `--risk` — Attack Chain Extension
+## 4. `risk_paths` — Attack Chain Array
 
-When `--risk` is passed, `risk_paths` is added to the top-level envelope.
+`risk_paths` is always present in the real `clawseccheck --json` CLI output (combinational
+attack chains are computed unconditionally per audit; there is no `--risk` gate — that was
+true of an older CLI shape and is corrected here). It may be an empty array when no chain
+condition matches. Library callers of `render_json()` directly can omit the `risk` keyword
+(or pass `risk=None`) to suppress the key entirely — that path is for unit/library use, not
+the shipped CLI.
 
 | Field | Type | Description |
 |---|---|---|
@@ -147,7 +180,8 @@ When `--risk` is passed, `risk_paths` is added to the top-level envelope.
 | `why` | `str` | Narrative explanation of the attack path. |
 | `fix` | `str` | Recommended mitigation. |
 
-`risk_paths` is absent (not `null`, not `[]`) when `--risk` was not passed.
+`risk_paths` is absent (not `null`, not `[]`) only when `render_json()` is called as a
+library function without a `risk` argument.
 
 ---
 

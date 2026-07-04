@@ -47,6 +47,51 @@ def test_c014_passes_when_restriction_signals_exist():
     assert any("global egress restriction configured" in item for item in f.evidence)
 
 
+# --- QUALITY: MCP allowedHosts wildcard / user-content host is a weak mitigation ---
+
+def test_c014_mcp_wildcard_allowed_hosts_not_counted_as_restricted():
+    # allowedHosts is the ONLY restriction signal for this MCP entry and it's a
+    # wildcard — must not flip restricted=True for that surface, so the overall
+    # verdict stays WARN (no other restriction signal anywhere else in the config).
+    ctx = _ctx({
+        "mcp": {"servers": {"remote": {
+            "url": "https://mcp.example.com/sse",
+            "allowedHosts": ["*.mcp.example.com"],
+        }}},
+    })
+    f = check_egress_inventory(ctx)
+    assert f.status == WARN
+    assert any("weak mitigation" in item for item in f.evidence)
+    assert any("*.mcp.example.com" in item for item in f.evidence)
+
+
+def test_c014_mcp_known_user_content_host_not_counted_as_restricted():
+    ctx = _ctx({
+        "mcp": {"servers": {"remote": {
+            "url": "https://mcp.example.com/sse",
+            "allowedHosts": ["webhook.site"],
+        }}},
+    })
+    f = check_egress_inventory(ctx)
+    assert f.status == WARN
+    assert any("weak mitigation" in item for item in f.evidence)
+    assert any("webhook.site" in item for item in f.evidence)
+
+
+def test_c014_mcp_clean_tight_allowed_hosts_passes():
+    # No false positives: a clean, specific allowedHosts list must still count as
+    # a restriction signal and PASS.
+    ctx = _ctx({
+        "mcp": {"servers": {"remote": {
+            "url": "https://mcp.example.com/sse",
+            "allowedHosts": ["mcp.example.com"],
+        }}},
+    })
+    f = check_egress_inventory(ctx)
+    assert f.status == PASS
+    assert any("allowedHosts restricted" in item for item in f.evidence)
+
+
 
 def test_fixture_bad_c014_warns():
     assert check_egress_inventory(collect(FIXTURES / "bad_c014_egress_inventory")).status == WARN

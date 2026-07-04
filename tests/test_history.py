@@ -1,12 +1,15 @@
 """Tests for clawseccheck/history.py — local score history (JSONL, chmod 600)."""
 from __future__ import annotations
 
+import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from clawseccheck.history import DEFAULT_HISTORY, load, record, render_trend
+from clawseccheck.cli import main
+from clawseccheck.history import DEFAULT_HISTORY, load, record, render_trend, verify
 
 
 # ---------------------------------------------------------------------------
@@ -204,3 +207,109 @@ def test_render_trend_single_entry_full(tmp_path):
 
 def test_default_history_constant():
     assert DEFAULT_HISTORY == "~/.clawseccheck/history.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# F-094: tamper-evident hash-chain
+# ---------------------------------------------------------------------------
+
+def test_record_writes_chain_hash(tmp_path):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(72, "C"), path=path, when="2026-06-15")
+    line = json.loads(Path(path).read_text(encoding="utf-8").splitlines()[0])
+    assert "chain_hash" in line
+    assert isinstance(line["chain_hash"], str) and len(line["chain_hash"]) == 64
+
+
+def test_verify_ok_on_untampered_chain(tmp_path):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(72, "C"), path=path, when="2026-06-15")
+    record(_score(81, "B"), path=path, when="2026-06-17")
+    record(_score(90, "A"), path=path, when="2026-06-19")
+    ok, msg = verify(path)
+    assert ok is True
+    assert msg == "OK"
+
+
+def test_verify_ok_on_missing_file(tmp_path):
+    ok, msg = verify(str(tmp_path / "nonexistent.jsonl"))
+    assert ok is True
+    assert msg == "OK"
+
+
+def test_verify_ok_on_empty_file(tmp_path):
+    path = tmp_path / "history.jsonl"
+    path.write_text("", encoding="utf-8")
+    ok, msg = verify(str(path))
+    assert ok is True
+    assert msg == "OK"
+
+
+def test_verify_ok_on_legacy_entries_without_chain_hash(tmp_path):
+    path = tmp_path / "history.jsonl"
+    path.write_text(
+        '{"date":"2026-06-15","score":72,"grade":"C"}\n'
+        '{"date":"2026-06-17","score":81,"grade":"B"}\n',
+        encoding="utf-8",
+    )
+    ok, msg = verify(str(path))
+    assert ok is True
+    assert msg == "OK"
+
+
+def test_verify_detects_tampered_entry(tmp_path):
+    path = tmp_path / "history.jsonl"
+    record(_score(72, "C"), path=str(path), when="2026-06-15")
+    record(_score(81, "B"), path=str(path), when="2026-06-17")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    tampered = json.loads(lines[0])
+    tampered["score"] = 100  # attacker rewrites the score, leaves chain_hash untouched
+    lines[0] = json.dumps(tampered)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    ok, msg = verify(str(path))
+    assert ok is False
+    assert "entry 0" in msg
+
+
+def test_verify_detects_deleted_entry(tmp_path):
+    path = tmp_path / "history.jsonl"
+    record(_score(72, "C"), path=str(path), when="2026-06-15")
+    record(_score(81, "B"), path=str(path), when="2026-06-17")
+    record(_score(90, "A"), path=str(path), when="2026-06-19")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    del lines[1]  # drop the middle entry — breaks the chain for entry after it
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    ok, msg = verify(str(path))
+    assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# F-094: CLI --verify-history integration tests
+# ---------------------------------------------------------------------------
+
+def test_cli_verify_history_exits_zero_on_untampered_chain(tmp_path, capsys):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(72, "C"), path=path, when="2026-06-15")
+    rc = main(["--verify-history", "--history", path])
+    assert rc == 0
+    assert "OK" in capsys.readouterr().out
+
+
+def test_cli_verify_history_exits_zero_on_missing_file(tmp_path, capsys):
+    path = str(tmp_path / "nonexistent.jsonl")
+    rc = main(["--verify-history", "--history", path])
+    assert rc == 0
+
+
+def test_cli_verify_history_exits_one_on_tampered_chain(tmp_path, capsys):
+    path = tmp_path / "history.jsonl"
+    record(_score(72, "C"), path=str(path), when="2026-06-15")
+    record(_score(81, "B"), path=str(path), when="2026-06-17")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    tampered = json.loads(lines[0])
+    tampered["score"] = 100
+    lines[0] = json.dumps(tampered)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    rc = main(["--verify-history", "--history", str(path)])
+    assert rc == 1
+    assert "BROKEN" in capsys.readouterr().out

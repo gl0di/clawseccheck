@@ -12,13 +12,14 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from .monitor import _chain_hash, _last_chain_hash, verify_chain
 from .safeio import secure_append_text, secure_dir
 
 DEFAULT_HISTORY = "~/.clawseccheck/history.jsonl"
 
 
 def record(score, path: str = DEFAULT_HISTORY, when: str | None = None) -> None:
-    """Append one JSON line {date, score, grade} to the history file.
+    """Append one JSON line {date, score, grade, chain_hash} to the history file.
 
     Parameters
     ----------
@@ -28,21 +29,38 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None) -> None:
         Path to the history JSONL file.  ``~`` is expanded.
     when:
         ISO date string (``YYYY-MM-DD``).  Defaults to today's date.
+
+    F-094: each entry carries a 'chain_hash' — sha256(prev_chain_hash +
+    canonical_json(entry)), the same tamper-evident scheme monitor.py's event
+    journal already uses (see verify()/monitor.verify_chain). A planted or edited
+    line breaks the chain from that point forward.
     """
     if when is None:
         when = datetime.now().strftime("%Y-%m-%d")
 
     p = Path(path).expanduser()
-    row = {"date": when, "score": int(score.score), "grade": str(score.grade)}
+    base = {"date": when, "score": int(score.score), "grade": str(score.grade)}
     # Symlink-safe: dir 0700 and an O_NOFOLLOW append, so a planted symlink at
     # history.jsonl can never redirect this default-path write to another file.
     # record() runs by default on every audit, so it degrades quietly (refuse =
     # skip) instead of crashing the audit when the target is a symlink/unwritable.
     try:
         secure_dir(p.parent)
+        prev_hash = _last_chain_hash(p)
+        row = {**base, "chain_hash": _chain_hash(prev_hash, base)}
         secure_append_text(p, json.dumps(row) + "\n")
     except OSError:
         pass
+
+
+def verify(path: str = DEFAULT_HISTORY) -> "tuple[bool, str]":
+    """Verify the hash-chain integrity of the score history file.
+
+    Delegates to monitor.verify_chain (same generic entry-agnostic algorithm).
+    Returns (True, "OK") for an absent/empty/legacy-no-chain-hash file, or
+    (False, "broken at entry N") on the first tampered/reordered/deleted entry.
+    """
+    return verify_chain(path)
 
 
 def load(path: str = DEFAULT_HISTORY) -> list[dict]:

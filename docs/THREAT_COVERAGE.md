@@ -147,6 +147,7 @@ and Mitigations (<https://genai.owasp.org/resource/agentic-ai-threats-and-mitiga
 | **Suppression governance** (suppressed CRITICAL stays visible; reason/expiry) | — | A suppressed CRITICAL silently uncaps the score | ✅ Done (H3): suppressed HIGH/CRITICAL stay visible in the report |
 | **Windows ACL** equivalents of POSIX perm checks | — | Perm checks return UNKNOWN on Windows | **Not buildable under the laws** — no stdlib / no-subprocess way to read NTFS ACLs. UNKNOWN is the honest answer; the message now points to `icacls` (v0.25) |
 | Per-finding **confidence** level | — | Methodology asks for it | ✅ Shipped (v0.25): HIGH (config-fact) vs MEDIUM (heuristic) on every finding; in text/JSON/SARIF |
+| Credential **lifetime / rotation** signal (long-lived static secrets vs short-lived scoped ones, NHI7 §13) | — | A static, never-expiring API key is a standing exfil target even with tight blast-radius scoping | **Not buildable under the laws** — `auth.profiles` exists as a dict but ships no documented expiry/TTL/rotation sub-field (§8 of the schema recon), and no statically-recognizable long-lived-vs-short-lived token shape exists without decoding secret material (§8 never echoes secrets). Covered today only indirectly via B1 (at-rest secrets), C015 (OpenClaw home scan), B41 (blast-radius/reachability). Re-ground if OpenClaw ever exposes a real expiry field on a credential record |
 
 ## TAM-01..12 weaponization test matrix (standard §15.3)
 

@@ -305,7 +305,15 @@ def test_a1_distance_note_names_missing_sensitive_leg():
     """2/3 (untrusted channel + outbound) names 'sensitive data' as the missing leg."""
     a1 = _a1({"channels": {"telegram": {"dmPolicy": "open"}}})
     assert "the missing leg is 'sensitive data'" in a1.detail
-    assert "2 of 3 lethal-trifecta legs present" in a1.detail
+    assert "Two of three lethal-trifecta legs are active" in a1.detail
+
+
+def test_a1_distance_note_names_the_two_active_legs():
+    """C-139: 2/3 wording names the two active legs by name and warns that a third
+    activating makes it immediately exploitable (not just 'avoid enabling X')."""
+    a1 = _a1({"channels": {"telegram": {"dmPolicy": "open"}}})
+    assert "untrusted input and outbound actions" in a1.detail
+    assert "immediately exploitable" in a1.detail
 
 
 def test_a1_distance_note_names_missing_outbound_leg():
@@ -327,3 +335,24 @@ def test_a1_distance_note_absent_when_not_two_legs():
     assert "missing leg" not in full.detail
     empty = _a1({"gateway": {"bind": "loopback"}})
     assert "missing leg" not in empty.detail
+
+
+# ── F-040: multi-agent aggregation caveat (static note, no interactive prompt) ────
+
+def test_a1_notes_multi_agent_aggregation_when_agents_list_has_multiple():
+    a1 = _a1({
+        "channels": {"telegram": {"dmPolicy": "open"}},
+        "agents": {"list": [{"sandbox": {"mode": "off"}}, {"sandbox": {"mode": "off"}}]},
+    })
+    assert "declares 2 agents under agents.list" in a1.detail
+    assert "aggregated global surface" in a1.detail
+
+
+def test_a1_no_multi_agent_note_for_single_or_no_agents():
+    single = _a1({
+        "channels": {"telegram": {"dmPolicy": "open"}},
+        "agents": {"list": [{"sandbox": {"mode": "off"}}]},
+    })
+    assert "agents.list" not in single.detail
+    none_configured = _a1({"channels": {"telegram": {"dmPolicy": "open"}}})
+    assert "agents.list" not in none_configured.detail

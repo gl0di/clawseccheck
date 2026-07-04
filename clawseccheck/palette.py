@@ -107,6 +107,8 @@ _PALETTE: tuple[PaletteCategory, ...] = (
     PaletteCategory("Integrity", READONLY, (
         PaletteEntry("Verify self", 'verify', "--verify-self",
                      "SHA-256 of the engine source — a tamper check"),
+        PaletteEntry("Verify history", 'verify history', "--verify-history",
+                     "check the score history's hash-chain hasn't been tampered with"),
     )),
 )
 

@@ -38,6 +38,10 @@ ClawSecCheck is a **local, read-only** audit tool. It reads only the files it is
 pointed at (OpenClaw config, bootstrap markdown, installed-skill text) and writes
 nothing by default. It makes no network calls. Findings stay on your machine.
 
+For the full breakdown of the tool's own capability surface, least-privilege posture,
+data-handling/redaction discipline, tamper-evident audit trail, and the forward-looking
+policy for any future fix/apply mode, see [`SECURITY_MODEL.md`](SECURITY_MODEL.md).
+
 In-scope issues include:
 - Logic bugs that produce false PASS results for genuinely unsafe configs.
 - Output channels that could be exploited for prompt injection (e.g. `--prompts`).
