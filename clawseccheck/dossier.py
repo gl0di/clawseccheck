@@ -126,6 +126,10 @@ _STATUS_RANK: dict[str, int] = {FAIL: 3, WARN: 2, UNKNOWN: 1, PASS: 0}
 # further grade (mirrors scoring.FAIL_CAPS[HIGH] — "one real failure always costs a grade").
 _WARN_CAP = 89
 _NON_DANGER_FAIL_CAP = 79
+# B-092: a Danger-axis UNKNOWN caused by a coverage-limit hit (a payload padded past the
+# 60KB/500-file scan cap could hide unscanned) must never read as "A / SAFE" — cap it at
+# the top of the C band, same ceiling scoring.py gives a real HIGH finding.
+_COVERAGE_GAP_DANGER_CAP = 79
 
 
 @dataclass
@@ -173,6 +177,31 @@ def _worst(findings: list):
     if not findings:
         return None
     return max(findings, key=lambda f: _STATUS_RANK.get(f.status, 0))
+
+
+def _danger_coverage_gap(danger_bucket: list, ctx) -> bool:
+    """True iff the Danger axis is UNKNOWN *because scanning hit a coverage limit* —
+    e.g. a payload padded past the 60KB/500-file per-skill cap in collector.py — rather
+    than the benign "nothing to scan" UNKNOWN (no code, no MCP servers, etc.).
+
+    B-092: those two UNKNOWN flavors must not be conflated. "Nothing to scan" is a
+    legitimately clean result and stays excluded from scoring as before. "Scan coverage
+    hit a limit" means real content may exist and was never looked at — that is not
+    benign, so the caller floors the headline grade instead of letting it read A/SAFE.
+
+    Primary signal: ``ctx.limit_hits`` (collector.py appends to it on every size/file/
+    nesting cap hit). Falls back to matching the bucket's own UNKNOWN finding detail text
+    when no ctx is attached (e.g. a hand-built Finding in a unit test) — checks.py's B13
+    limit-hit branch always phrases it "coverage is incomplete".
+    """
+    if not danger_bucket:
+        return False
+    if any(s.status == UNKNOWN for s in danger_bucket) and getattr(ctx, "limit_hits", None):
+        return True
+    return any(
+        f.status == UNKNOWN and "coverage is incomplete" in (f.detail or "")
+        for f in danger_bucket
+    )
 
 
 def _normalize_pool(engine_output) -> list:
@@ -328,7 +357,8 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
             reason, fix = _reason_and_fix(bucket, axis, empty_reason=_clean_reason(axis, families))
         axes.append(AxisResult(axis=axis, status=status, reason=reason, fix=fix, findings=list(bucket)))
 
-    overall_status, score, grade = _grade_profile(axes)
+    danger_coverage_gap = _danger_coverage_gap(buckets["danger"], ctx)
+    overall_status, score, grade = _grade_profile(axes, danger_coverage_gap=danger_coverage_gap)
     return VetProfile(
         target=target,
         target_type=target_type,
@@ -341,8 +371,17 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     )
 
 
-def _grade_profile(axes: list) -> tuple[str, int, str]:
-    """Roll axis results up to (overall_status, score, grade). Reuses scoring.grade_for."""
+def _grade_profile(axes: list, *, danger_coverage_gap: bool = False) -> tuple[str, int, str]:
+    """Roll axis results up to (overall_status, score, grade). Reuses scoring.grade_for.
+
+    ``danger_coverage_gap`` (B-092): the Danger axis reads UNKNOWN not because there was
+    nothing to scan, but because scanning hit a size/file cap — a payload padded past the
+    cap could be hiding unscanned. That must never roll up to a confident "A / SAFE"
+    headline one line above the axis's own "coverage incomplete" note, so it is treated
+    like a real non-danger-axis problem: WARN-equivalent overall status (→ verdict
+    SUSPICIOUS, the existing non-SAFE word — no new verdict enum value) and the same
+    grade ceiling a HIGH finding gets, never A/B.
+    """
     by_axis = {a.axis: a for a in axes}
 
     # Danger floor: a confirmed-dangerous artifact is F, full stop.
@@ -352,6 +391,12 @@ def _grade_profile(axes: list) -> tuple[str, int, str]:
 
     scorable = [a for a in axes if a.status in (PASS, WARN, FAIL)]  # exclude N/A + UNKNOWN
     if not scorable:
+        if danger_coverage_gap:
+            # Every axis is otherwise N/A/UNKNOWN, but the Danger scan itself was
+            # incomplete — that is not the honest "nothing to assess" N/A; it is a real
+            # coverage gap on the floor axis, so it gets the same ceiling a HIGH finding
+            # would (never a fabricated N/A / SAFE).
+            return (WARN, _COVERAGE_GAP_DANGER_CAP, grade_for(_COVERAGE_GAP_DANGER_CAP))
         # Nothing measurable (e.g. source with only N/A axes, or an unreadable target).
         return (UNKNOWN, 0, "N/A")
 
@@ -362,11 +407,13 @@ def _grade_profile(axes: list) -> tuple[str, int, str]:
         score = min(score, _WARN_CAP)
     if any(a.status == FAIL for a in scorable):
         score = min(score, _NON_DANGER_FAIL_CAP)
+    if danger_coverage_gap:
+        score = min(score, _COVERAGE_GAP_DANGER_CAP)
     grade = grade_for(score)
 
     if any(a.status == FAIL for a in axes):
         overall = FAIL
-    elif any(a.status == WARN for a in axes):
+    elif any(a.status == WARN for a in axes) or danger_coverage_gap:
         overall = WARN
     elif any(a.status == PASS for a in axes):
         overall = PASS
