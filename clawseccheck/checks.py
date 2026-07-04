@@ -2485,6 +2485,57 @@ def _whole_text_is_defensive(blob: str) -> bool:
     return bool(_BROAD_NEGATION_RE.search(blob))
 
 
+# ---------- F-097: capability-not-malice reclass helpers (B13) ----------
+# An installer curl|bash / remote-fetch documented under an Install/Setup/Usage heading, or
+# a fetch pointing at the skill's OWN declared homepage host, is a capability, not proof of
+# malice — down-rank FAIL->WARN. Obfuscated exec, IP hosts, and agent-config persistence fail
+# on OTHER signals and stay FAIL.
+_INSTALL_HEADING_RE = re.compile(
+    r"\b(?:install(?:ation)?|setup|set[-\s]?up|usage|prerequisites?|"
+    r"getting\s+started|quick[-\s]?start|requirements?|一键安装|安装)\b",
+    re.I,
+)
+
+
+def _under_install_heading(blob: str, pos: int) -> bool:
+    """True when the nearest preceding Markdown heading names an install/usage/prereq
+    section — the F-097 capability-not-malice context for a curl|bash / fetch finding."""
+    heading = _nearest_heading(blob, pos)
+    return bool(heading and _INSTALL_HEADING_RE.search(heading))
+
+
+_FM_HOMEPAGE_RE = re.compile(
+    r"^\s*(?:homepage|repository|repo|url)\s*:\s*[\"']?(https?://[^\s\"'#]+)",
+    re.I | re.MULTILINE,
+)
+_URL_HOST_RE = re.compile(r"https?://([^/:\s\"'<>)\]]+)", re.I)
+
+
+def _skill_own_host(blob: str):
+    """Host of the skill's declared homepage/repository frontmatter URL (lowercased), or
+    None when the frontmatter declares no such field. Conservative: only real homepage/
+    repo/url keys count — not an icon CDN or a demo link."""
+    fm = _skill_frontmatter_block(blob)
+    if fm is None:
+        return None
+    m = _FM_HOMEPAGE_RE.search(fm)
+    if m is None:
+        return None
+    hm = _URL_HOST_RE.match(m.group(1))
+    return hm.group(1).lower() if hm else None
+
+
+def _url_matches_own_host(url: str, own_host) -> bool:
+    """True when *url*'s host equals the skill's own declared host (exact or subdomain)."""
+    if not own_host:
+        return False
+    hm = _URL_HOST_RE.match(url)
+    if hm is None:
+        return False
+    h = hm.group(1).lower()
+    return h == own_host or h.endswith("." + own_host)
+
+
 # F-051 (SkillSpector TR1): overly-broad activation triggers — the skill claims to fire on
 # nearly any user action. WARN-first (many legit skills have broad-ish triggers).
 _SKILL_BROAD_TRIGGER_RE = re.compile(
@@ -2866,6 +2917,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         [],
     )
     warns_timebomb: list[str] = []
+    warns_install_curl: list[str] = []  # F-097: down-ranked install-doc curl|bash / fetch
     warns_js: list[str] = []  # F-064: soft JS/TS signals (child_process template, dynamic require)
     warns_content: list[
         str
@@ -2874,6 +2926,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         # C-041: precompute fence ranges once per blob so every check below can
         # skip matches that are purely inside a documented code example.
         _fr = _fence_ranges(blob)
+        _own_host = _skill_own_host(blob)  # F-097: skill's own declared homepage host
 
         # CRIT patterns: iterate all matches; drop those that are code examples.
         for label, rx in _SKILL_CRIT:
@@ -2898,14 +2951,31 @@ def check_installed_skills(ctx: Context) -> Finding:
         for label, rx in _SKILL_HIGH:
             for m in rx.finditer(blob):
                 if not _is_code_example(blob, m.start(), _fr):
-                    high.append(f"{name}: {label}")
+                    # F-097: an http download-and-run under an install/setup heading is a
+                    # documented installer (capability, not malice) -> WARN. The obfuscation/
+                    # powershell/git entries are NOT gated and stay FAIL.
+                    if label == "download-and-run a package over http" and (
+                        _under_install_heading(blob, m.start())
+                        or _under_defensive_heading(blob, m.start())
+                    ):
+                        warns_install_curl.append(f"{name}: {label}")
+                    else:
+                        high.append(f"{name}: {label}")
                     break
 
         # F-021: runtime-external-fetch instruction (OWASP AST05).
         # Fires when a skill's text contains fetch/load verb + external http(s) URL +
         # instruction/context noun in a 300-char window — all outside code examples.
         for rf_url in _runtime_fetch_matches(blob, _fr):
-            high.append(f"{name}: runtime-external-fetch instruction (OWASP AST05): {rf_url}")
+            # F-097: a fetch to the skill's own declared host, or documented under an
+            # install/setup heading, is capability not malice -> WARN. A foreign/IP host
+            # fetch (e.g. agentos' hardcoded IP) is not down-ranked and stays FAIL.
+            _pos = blob.find(rf_url)
+            _downrank = _url_matches_own_host(rf_url, _own_host) or (
+                _pos != -1 and _under_install_heading(blob, _pos)
+            )
+            msg = f"{name}: runtime-external-fetch instruction (OWASP AST05): {rf_url}"
+            (warns_install_curl if _downrank else high).append(msg)
 
         # F-023: same-line credential-source + local data-bearing sink (log/tempfile/report).
         # WARN-only; collected outside the HIGH bucket so it never escalates to FAIL.
@@ -2918,7 +2988,14 @@ def check_installed_skills(ctx: Context) -> Finding:
             if any(h == r or h.endswith("." + r) for r in _REPUTABLE_INSTALL_HOSTS):
                 continue
             if not _is_code_example(blob, pm.start(), _fr):
-                high.append(f"{name}: pipe-to-shell from non-reputable host {host}")
+                msg = f"{name}: pipe-to-shell from non-reputable host {host}"
+                # F-097: pipe-to-shell to the skill's own host or under an install/setup
+                # heading is a documented installer -> WARN; else it stays FAIL.
+                _own = _own_host is not None and (h == _own_host or h.endswith("." + _own_host))
+                if _own or _under_install_heading(blob, pm.start()):
+                    warns_install_curl.append(msg)
+                else:
+                    high.append(msg)
 
         # Cross-skill cred+exfil: run against the blob with fenced spans blanked so
         # a credential path that only appears inside a documentation example does not
@@ -3152,6 +3229,25 @@ def check_installed_skills(ctx: Context) -> Finding:
             + "; ".join(ctx.limit_hits[:6]),
             "Content beyond the size/file cap was not scanned; a payload padded past the "
             "cap can hide there. Review the skill manually or split oversized files.",
+        )
+
+    # F-097: install-doc curl|bash / remote-fetch — capability, not malice. WARN, not FAIL.
+    # Ranked below crit/high FAIL and the parse/truncation UNKNOWNs above (so a real danger
+    # or an incomplete scan still wins), among the WARN buckets.
+    if warns_install_curl:
+        extra = f" (+{len(warns_install_curl) - 6} more)" if len(warns_install_curl) > 6 else ""
+        return _custom(
+            "B13",
+            HIGH,
+            WARN,
+            "Installer/setup fetch in installed skill(s): "
+            + "; ".join(warns_install_curl[:6])
+            + extra,
+            "The skill documents a curl|bash / remote-fetch installer under an Install/Setup/"
+            "Usage heading, or fetches from its own declared host — a capability, not proof of "
+            "malice. Review the installer URL before running: confirm the host is the vendor's, "
+            "over HTTPS, and not an IP or paste site.",
+            warns_install_curl,
         )
 
     # F-049: env-var / agent-config secret reaching a network sink — WARN-first (env
