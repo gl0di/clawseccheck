@@ -919,6 +919,20 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # npm's prepare/preversion/postversion/prepublish(Only)/pretest/posttest scripts run on
+    # install/version/publish/test just as reliably as postinstall (B42's existing scope), but
+    # a reviewer scanning only for "postinstall" misses them; a Python setup.py cmdclass
+    # override runs at pip-install time (L1-2 / F-099). Advisory (scored=False); WARN-only.
+    CheckMeta(
+        "B94",
+        "Extended lifecycle hooks (npm prepare/preversion/..., setup.py cmdclass override)",
+        HIGH,
+        "advisory",
+        "Supply-Chain Tamper / Malicious Skill",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # advisory (not scored)
     CheckMeta(
         "C3",
@@ -1148,6 +1162,7 @@ AST_MAP = {
     "B91": ("AST01",),  # dynamic-dispatch sink obfuscation = hidden malicious code / scanner evasion (cf. B89/B90)
     "B92": ("AST02",),  # unsafe deserialization sink = RCE-from-data supply-chain tamper (cf. B86)
     "B93": ("AST04",),  # confusable trigger description = insecure metadata / trigger-squat (cf. B88)
+    "B94": ("AST02",),  # extended lifecycle hooks = supply-chain tamper on install/version/publish (cf. B42)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT

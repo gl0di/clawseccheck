@@ -1063,6 +1063,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B94 - Extended lifecycle hooks (npm prepare/preversion/..., setup.py cmdclass override)
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Supply-Chain Tamper / Malicious Skill
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Extended lifecycle hooks (npm prepare/preversion/..., setup.py cmdclass override)
+- Remediation:
+  - none
+
 ### C3 - Backups of SOUL.md / memory
 
 - Severity: LOW

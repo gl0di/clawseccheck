@@ -7412,6 +7412,17 @@ _HOOK_EXEC_RE = re.compile(
     r"base64|\biex\b|invoke-expression|powershell|https?://|eval\s*\(",
     re.I,
 )
+# B94 (F-099, L1-2): npm lifecycle hooks BEYOND pre/postinstall (B42's scope) — these run on
+# `npm install`/`npm version`/`npm publish`/`npm test` just as reliably as postinstall, but a
+# reviewer scanning only for "postinstall" misses them. Separate from _POSTINSTALL_RE so B42's
+# existing calibration/tests are untouched.
+_LIFECYCLE_HOOK_RE = re.compile(
+    r'"(prepare|preversion|postversion|prepublish|prepublishOnly|pretest|posttest)"\s*:\s*"([^"]{1,200})"',
+    re.I,
+)
+# A setup.py that overrides the install/build_ext command class can run arbitrary code at
+# `pip install` time, same class of risk as npm lifecycle hooks, on the Python side.
+_SETUP_CMDCLASS_RE = re.compile(r"\bcmdclass\s*=\s*\{")
 
 
 def _writable_skill_dirs(ctx: Context):
@@ -12113,6 +12124,63 @@ def check_trigger_homoglyph(ctx: Context) -> Finding:
     )
 
 
+def check_lifecycle_hooks_extended(ctx: Context) -> Finding:
+    """B94 (F-099, L1-2) — lifecycle hooks beyond pre/postinstall (B42's existing scope).
+
+    npm's `prepare`/`preversion`/`postversion`/`prepublish(Only)`/`pretest`/`posttest`
+    scripts run on `npm install`/`version`/`publish`/`test` just as reliably as
+    postinstall, but a reviewer scanning only for "postinstall" misses them. On the
+    Python side, a setup.py that overrides `cmdclass` runs arbitrary code at `pip
+    install` time. Advisory (scored=False); WARN-only, never alters the static grade.
+    """
+    from .logsafe import redact as _redact  # noqa: PLC0415
+
+    skills = getattr(ctx, "installed_skills", None)
+    if not skills:
+        return _custom(
+            "B94",
+            HIGH,
+            UNKNOWN,
+            "No installed skills to inspect for extended lifecycle hooks.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    warns: list[str] = []
+    for name, blob in skills.items():
+        for m in _LIFECYCLE_HOOK_RE.finditer(blob):
+            kind, cmd = m.group(1), m.group(2)
+            if _HOOK_EXEC_RE.search(cmd):
+                warns.append(
+                    f"{name}: '{kind}' lifecycle hook runs code on npm "
+                    f"install/version/publish/test -> '{_redact(cmd)[:80]}'"
+                )
+        if _SETUP_CMDCLASS_RE.search(blob) and _HOOK_EXEC_RE.search(blob):
+            warns.append(
+                f"{name}: setup.py overrides cmdclass AND contains an exec/fetch-shaped "
+                "string — can run arbitrary code at pip-install time"
+            )
+    if not warns:
+        return _custom(
+            "B94",
+            HIGH,
+            PASS,
+            "No extended lifecycle hooks (npm prepare/preversion/postversion/prepublish/"
+            "pretest/posttest, or a setup.py cmdclass override) run code on install/update.",
+            "Review any lifecycle hook before trusting a skill's package manifest.",
+        )
+    extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
+    return _custom(
+        "B94",
+        HIGH,
+        WARN,
+        "Extended lifecycle hook risk: " + "; ".join(warns[:6]) + extra,
+        "Review/disable any lifecycle hook you haven't read — these run on npm "
+        "install/version/publish/test (or pip install for a cmdclass override), not just "
+        "postinstall. Pin skills to a reviewed commit; turn off skill auto-update until "
+        "each hook is trusted.",
+        warns,
+    )
+
+
 SKILL_CONTENT_RING = (
     check_unicode_obfuscation,  # B58 — unicode / hidden-text de-obfuscation
     check_markdown_image_exfil,  # B59 — MD-image data-exfil
@@ -12135,6 +12203,7 @@ SKILL_CONTENT_RING = (
     check_dynamic_dispatch_obfuscation,  # B91 — dynamic-dispatch sink obfuscation (F-102)
     check_unsafe_deserialization,  # B92 — unsafe deserialization sink (F-098)
     check_trigger_homoglyph,  # B93 — confusable characters in trigger description (F-103)
+    check_lifecycle_hooks_extended,  # B94 — extended lifecycle hooks beyond postinstall (F-099)
 )
 
 

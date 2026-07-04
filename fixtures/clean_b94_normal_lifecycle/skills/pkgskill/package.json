@@ -1,0 +1,8 @@
+{
+  "name": "pkgskill",
+  "version": "1.0.0",
+  "scripts": {
+    "prepare": "npm run build",
+    "pretest": "npm run lint"
+  }
+}
