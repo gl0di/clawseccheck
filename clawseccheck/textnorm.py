@@ -72,6 +72,90 @@ assert all(0x0590 > cp or cp > 0x05FF for cp in _CONFUSABLES), (
 )
 
 
+# ---------------------------------------------------------------------------
+# Emoji / pictographic codepoint ranges (B-088 / A3).
+#
+# unicodedata (stdlib) does not expose the Unicode "Extended_Pictographic"
+# property, so this is a small, explicit range list covering the blocks that
+# matter for detecting legitimate emoji ZWJ sequences (e.g. 🧑‍⚖️, family
+# emoji, profession emoji). Not a complete emoji-property implementation —
+# just enough to distinguish "ZWJ between two emoji" (benign) from "ZWJ
+# splicing ASCII/other text" (obfuscation).
+#
+# Ranges (grounded in the Unicode emoji blocks):
+#   U+1F300–1F5FF : Miscellaneous Symbols and Pictographs
+#   U+1F600–1F64F : Emoticons
+#   U+1F680–1F6FF : Transport and Map Symbols
+#   U+1F700–1FAFF : Symbols/Pictographs Extended-A, Supplemental Symbols, etc.
+#   U+2600–27BF   : Miscellaneous Symbols + Dingbats (☀ ✂ etc.)
+#   U+2B00–2BFF   : Miscellaneous Symbols and Arrows (⭐ etc.)
+#   U+1F000–1F0FF : Mahjong/Domino/Playing Cards (rare, but pictographic)
+#   U+2190–21FF   : Arrows block (a few are used as emoji, e.g. ↔️ ↩️)
+#   U+1F1E6–1F1FF : Regional indicator symbols (flag emoji pairs)
+#   U+1F3FB–1F3FF : Emoji skin-tone modifiers (Fitzpatrick modifiers)
+#   U+FE0F        : Variation Selector-16 (emoji presentation selector)
+#   U+20E3        : Combining enclosing keycap (keycap emoji, e.g. 1️⃣)
+#   U+1F9B0–1F9B3 : Emoji hair-style components (red hair, curly hair, ...)
+# ---------------------------------------------------------------------------
+_EMOJI_RANGES: tuple[tuple[int, int], ...] = (
+    (0x1F300, 0x1F5FF),
+    (0x1F600, 0x1F64F),
+    (0x1F680, 0x1F6FF),
+    (0x1F700, 0x1FAFF),
+    (0x2600, 0x27BF),
+    (0x2B00, 0x2BFF),
+    (0x1F000, 0x1F0FF),
+    (0x2190, 0x21FF),
+    (0x1F1E6, 0x1F1FF),
+    (0x1F3FB, 0x1F3FF),
+    (0xFE0F, 0xFE0F),
+    (0x20E3, 0x20E3),
+    (0x1F9B0, 0x1F9B3),
+)
+
+
+def _is_emoji_codepoint(cp: int) -> bool:
+    """True when *cp* (an integer code point) falls in one of the emoji /
+    pictographic blocks in *_EMOJI_RANGES* — including emoji modifiers
+    (skin tones, variation selector, keycap) that flank a ZWJ in real
+    emoji ZWJ sequences (e.g. the skin-toned 🧑🏽‍⚖️).
+    """
+    return any(lo <= cp <= hi for lo, hi in _EMOJI_RANGES)
+
+
+# Codepoints that are "emoji-adjacent" modifiers rather than emoji themselves
+# — when scanning outward from a ZWJ, skip over these before checking
+# whether the next real character is an emoji.
+_EMOJI_MODIFIERS = frozenset({0xFE0F, *range(0x1F3FB, 0x1F400)})
+
+
+def _is_zwj_between_emoji(chars: list[str], idx: int) -> bool:
+    """True when the ZWJ at *chars[idx]* sits between two emoji code points,
+    i.e. it is part of a legitimate emoji ZWJ sequence (professions, family
+    groupings, skin-toned variants, etc.) rather than obfuscation splicing
+    unrelated text.
+
+    Skips over emoji modifiers (variation selector, skin-tone modifiers)
+    immediately adjacent to the ZWJ before checking the flanking character,
+    so ``🧑🏽‍⚖️`` (person + skin-tone + ZWJ + scales + VS-16) is recognised.
+    """
+    # Walk left, skipping modifiers, to find the nearest substantive char.
+    left = idx - 1
+    while left >= 0 and ord(chars[left]) in _EMOJI_MODIFIERS:
+        left -= 1
+    # Walk right, skipping modifiers, to find the nearest substantive char.
+    right = idx + 1
+    while right < len(chars) and ord(chars[right]) in _EMOJI_MODIFIERS:
+        right += 1
+
+    if left < 0 or right >= len(chars):
+        return False  # ZWJ at start/end of string — never exempt
+
+    return _is_emoji_codepoint(ord(chars[left])) and _is_emoji_codepoint(
+        ord(chars[right])
+    )
+
+
 def normalize_for_scan(text: str) -> str:
     """Return a de-obfuscated copy of *text* suitable for pattern matching.
 
@@ -88,6 +172,35 @@ def normalize_for_scan(text: str) -> str:
     stripped = _INVISIBLE_RE.sub("", text)
     nfkc = unicodedata.normalize("NFKC", stripped)
     return nfkc.translate(_CONFUSABLES_TABLE)
+
+
+def _has_suspicious_zero_width(text: str, zero_width_re: "re.Pattern[str]") -> bool:
+    """True when *text* contains a zero-width / invisible char that is NOT
+    explained away as part of a legitimate emoji ZWJ sequence (B-088 / A3).
+
+    U+200B (zero-width space), U+FEFF (BOM), and U+2060 (word joiner) are
+    always suspicious — there is no legitimate reason for them to appear in
+    bootstrap/skill text. U+200D (ZWJ) is suspicious UNLESS it sits between
+    two emoji code points (see *_is_zwj_between_emoji*), in which case it is
+    a normal emoji ZWJ sequence (e.g. 🧑‍⚖️) and must not be flagged.
+
+    Iterates over Python ``str`` code points directly (each element of a
+    Python 3 ``str`` is already a full code point, astral chars included —
+    no UTF-16 surrogate handling needed).
+    """
+    match = zero_width_re.search(text)
+    if not match:
+        return False
+
+    chars = list(text)
+    # Re-scan by code-point index so ZWJ neighbours can be inspected.
+    for idx, ch in enumerate(chars):
+        if not zero_width_re.match(ch):
+            continue
+        if ord(ch) == 0x200D and _is_zwj_between_emoji(chars, idx):
+            continue  # legitimate emoji ZWJ sequence — not suspicious
+        return True
+    return False
 
 
 def obfuscation_signals(text: str) -> list[str]:
@@ -109,7 +222,7 @@ def obfuscation_signals(text: str) -> list[str]:
         "[‪-‮⁦-⁩]"
     )
 
-    if _ZERO_WIDTH_RE.search(text):
+    if _has_suspicious_zero_width(text, _ZERO_WIDTH_RE):
         signals.append("zero-width / invisible characters found")
     if _BIDI_RE.search(text):
         signals.append("bidi-override / embedding controls found")

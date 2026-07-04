@@ -158,3 +158,70 @@ def test_signals_bom_detected():
 def test_signals_soft_hyphen_detected():
     signals = obfuscation_signals("in­structions")
     assert "zero-width / invisible characters found" in signals
+
+
+# ---------------------------------------------------------------------------
+# B-088 / A3: emoji ZWJ sequences must NOT false-positive as obfuscation.
+# Strings built via chr()/\u escapes only — never a raw invisible literal.
+# ---------------------------------------------------------------------------
+
+def test_signals_emoji_zwj_sequence_not_flagged():
+    """U+200D (ZWJ) between two emoji code points (judge emoji: person +
+    ZWJ + scales + VS-16) is a legitimate emoji ZWJ sequence, not
+    obfuscation — must NOT raise the zero-width signal."""
+    judge_emoji = chr(0x1F9D1) + chr(0x200D) + chr(0x2696) + chr(0xFE0F)
+    signals = obfuscation_signals(judge_emoji)
+    assert "zero-width / invisible characters found" not in signals
+
+
+def test_signals_skin_toned_emoji_zwj_sequence_not_flagged():
+    """Skin-toned variant (person + Fitzpatrick modifier + ZWJ + scales +
+    VS-16) must also be exempted — the modifier sits between the ZWJ and
+    the flanking emoji."""
+    skin_toned_judge = (
+        chr(0x1F9D1) + chr(0x1F3FD) + chr(0x200D) + chr(0x2696) + chr(0xFE0F)
+    )
+    signals = obfuscation_signals(skin_toned_judge)
+    assert "zero-width / invisible characters found" not in signals
+
+
+def test_signals_zwj_splicing_ascii_word_still_flagged():
+    """A ZWJ that splices two ASCII letters (hiding the word 'system') is
+    NOT flanked by emoji — must still WARN as suspicious zero-width."""
+    spliced = "sys" + chr(0x200D) + "tem"
+    signals = obfuscation_signals(spliced)
+    assert "zero-width / invisible characters found" in signals
+
+
+def test_signals_lone_zwj_at_start_still_flagged():
+    """A ZWJ with nothing before it (string start) is never exempt."""
+    text = chr(0x200D) + "hello"
+    signals = obfuscation_signals(text)
+    assert "zero-width / invisible characters found" in signals
+
+
+def test_signals_lone_zwj_at_end_still_flagged():
+    """A ZWJ with nothing after it (string end) is never exempt."""
+    text = "hello" + chr(0x200D)
+    signals = obfuscation_signals(text)
+    assert "zero-width / invisible characters found" in signals
+
+
+def test_signals_zero_width_space_still_flagged_near_emoji():
+    """U+200B (zero-width space, NOT ZWJ) must always flag — even if it
+    happens to sit next to emoji. Only U+200D gets the emoji exemption."""
+    text = chr(0x1F600) + chr(0x200B) + chr(0x1F600)
+    signals = obfuscation_signals(text)
+    assert "zero-width / invisible characters found" in signals
+
+
+def test_signals_bom_still_flagged():
+    text = chr(0xFEFF) + "start"
+    signals = obfuscation_signals(text)
+    assert "zero-width / invisible characters found" in signals
+
+
+def test_signals_word_joiner_still_flagged():
+    text = "ob" + chr(0x2060) + "ey"
+    signals = obfuscation_signals(text)
+    assert "zero-width / invisible characters found" in signals
