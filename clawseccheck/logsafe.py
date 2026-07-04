@@ -13,11 +13,12 @@ import os
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .checks import SECRET_KEY_RE, SECRET_PATTERNS
 from .safeio import secure_append_text
 
-__all__ = ["redact", "get_logger"]
+__all__ = ["redact", "get_logger", "sanitize_url_host_only", "redact_urls_in_text"]
 
 # Pattern for bare key=value or key = value pairs where the key looks secret-like.
 # Matches: key=value, key = value, key="value", key='value'
@@ -96,6 +97,48 @@ def redact(text: str | None) -> str:
     result = _KV_RE.sub(_replace_kv, result)
 
     return result
+
+
+# B-073: any URL-shaped substring (scheme://...) so embedded credentials
+# (userinfo, query tokens, path segments) can be found and stripped even when
+# they appear inside a larger command string rather than as a bare URL value.
+_URL_SHAPE_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"]+")
+
+
+def sanitize_url_host_only(url: str) -> str:
+    """Return *url* reduced to ``scheme://host`` only — no userinfo, port,
+    path, query, or fragment.
+
+    A remote MCP command/URL can embed a credential anywhere other than the
+    bare host (``https://user:token@host/...``, ``?api_key=...``,
+    ``/token/<value>``). Evidence strings must never round-trip that, so this
+    keeps only the parts that are never secret-bearing. Falls back to
+    ``"<redacted>"`` if the value cannot be parsed as a URL at all.
+    """
+    if not url:
+        return url or ""
+    try:
+        parsed = urlparse(url.strip())
+    except Exception:
+        return "<redacted>"
+    if not parsed.scheme or not parsed.hostname:
+        return "<redacted>"
+    host = parsed.hostname
+    # urlparse lower-cases hostname already; keep as-is for readability.
+    return f"{parsed.scheme}://{host}"
+
+
+def redact_urls_in_text(text: str) -> str:
+    """Replace every URL-shaped substring in *text* with its host-only form.
+
+    Use this before truncating/echoing a free-form string (e.g. an MCP stdio
+    command line with args) into Finding evidence, so an embedded credential
+    in a URL argument (``npx --registry https://TOKEN@reg.example.com/ pkg``)
+    never reaches the rendered output.
+    """
+    if not text:
+        return text or ""
+    return _URL_SHAPE_RE.sub(lambda m: sanitize_url_host_only(m.group(0)), text)
 
 
 def _replace_secret_pattern(m: re.Match) -> str:  # type: ignore[type-arg]

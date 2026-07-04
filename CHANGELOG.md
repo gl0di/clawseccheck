@@ -3,6 +3,25 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.8.1] — 2026-07-04
+
+Patch release: two robustness/safety fixes. No detection, scoring, or check-surface change —
+every check keeps its id, severity, and verdict; only crash-safety and evidence rendering improve.
+
+### Fixed
+- **A deeply-nested config no longer crashes the audit.** A pathologically deep (but validly
+  parsed) `openclaw.json` — ~1000+ levels of object nesting — used to raise an uncaught
+  `RecursionError` from the config walker instead of degrading gracefully. The recursive config
+  walkers now cap at a fixed depth (far above any real-world config shape) and return cleanly,
+  matching the graceful-degrade contract every other malformed input already followed.
+
+### Security
+- **MCP command/URL evidence is now credential-safe.** The MCP hardening (B24) and external-
+  endpoint (C047) checks echoed the raw server command / URL into finding evidence, which can
+  carry a token in a URL's userinfo, path, or query (`https://user:TOKEN@host/…`, `?api_key=…`).
+  Both now reduce any URL to `scheme://host` before it reaches the report (via a new host-only
+  sanitizer in `logsafe`), so the host signal survives but an embedded credential never does.
+
 ## [3.8.0] — 2026-07-03
 
 `--vet` is now a **risk dossier**. Instead of a single "is this malicious?" verdict line,
@@ -179,7 +198,7 @@ B84's "proven tool use" is now sourced from real OpenClaw logs, not just self-re
   sidecar is present, B84's "proven" column comes from the log at **HIGH** confidence
   (upgraded from `ATTESTED`); it falls back to the attested `proven_tools` self-report when
   no log exists, and stays UNKNOWN when neither is available. This closes the log-observed
-  leg of the declared-vs-effective-vs-proven diff (Pulse C-090) that earlier recon had
+  leg of the declared-vs-effective-vs-proven diff that earlier recon had
   marked blocked — the real surface is the trajectory sidecar, not `logging.file` /
   `cacheTrace` (which carry no discrete tool-call record).
 

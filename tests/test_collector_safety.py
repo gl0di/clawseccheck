@@ -252,6 +252,30 @@ def test_full_audit_on_non_dict_config_does_not_crash(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# B-072 — deeply-nested (but validly-parsed) config must not RecursionError
+# ---------------------------------------------------------------------------
+
+def test_deeply_nested_dict_config_audits_without_recursion_error(tmp_path):
+    """A ~1500-level-deep (but valid) JSON object must not crash _secret_paths.
+
+    Unlike the B-014 case (json.loads itself overflowing on parse), this config
+    parses fine — the crash was in a check's own recursive walker
+    (_secret_paths) with no depth cap. audit() must complete and return a
+    numeric score instead of propagating RecursionError.
+    """
+    from clawseccheck import audit
+
+    depth = 1500
+    deep = ('{"agent":' * depth) + '{"password": "x"}' + ("}" * depth)
+    (tmp_path / "openclaw.json").write_text(deep, encoding="utf-8")
+
+    ctx, findings, score = audit(tmp_path, include_native=False)  # must not raise
+
+    assert isinstance(score.score, (int, float))
+    assert findings  # the audit still produced findings, not an empty crash bail-out
+
+
+# ---------------------------------------------------------------------------
 # Content-Classified Collector & Archive Extraction Tests (CLAWSECCHECK-F-010/011)
 # ---------------------------------------------------------------------------
 

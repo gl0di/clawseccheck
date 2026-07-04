@@ -326,19 +326,27 @@ def _plugins(cfg: dict) -> dict:
     return {}
 
 
-def _secret_paths(obj, prefix="") -> list[str]:
+# B-072: cap recursion depth for config walkers so a pathologically deep (but
+# validly-parsed) structure degrades gracefully instead of raising an uncaught
+# RecursionError. High enough that it never affects any real-world config shape.
+_MAX_WALK_DEPTH = 100
+
+
+def _secret_paths(obj, prefix="", depth=0) -> list[str]:
     """Dotted paths of secret-bearing keys holding a non-trivial string (no values)."""
     found = []
+    if depth >= _MAX_WALK_DEPTH:
+        return found
     if isinstance(obj, dict):
         for k, v in obj.items():
             path = f"{prefix}.{k}" if prefix else k
             if isinstance(v, str) and len(v) >= 16 and SECRET_KEY_RE.search(k):
                 found.append(path)
             else:
-                found.extend(_secret_paths(v, path))
+                found.extend(_secret_paths(v, path, depth + 1))
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
-            found.extend(_secret_paths(v, f"{prefix}[{i}]"))
+            found.extend(_secret_paths(v, f"{prefix}[{i}]", depth + 1))
     return found
 
 
@@ -5014,10 +5022,15 @@ def _mcp_server_risks(name: str, spec: dict) -> tuple[list[str], list[str]]:
     else:
         full_cmd = str(cmd)
 
+    # B-073: detection runs on the raw command, but the string echoed into evidence
+    # is host-only-sanitized so a credential embedded in a URL arg
+    # (e.g. npx --registry https://TOKEN@reg/pkg) never reaches the report (§8).
+    from .logsafe import redact_urls_in_text  # noqa: PLC0415
+    safe_cmd = redact_urls_in_text(full_cmd)[:80]
     if _MCP_UNPINNED_RE.search(full_cmd):
-        warns.append(f"{name}: stdio command uses unpinned/URL spec ({full_cmd[:80]})")
+        warns.append(f"{name}: stdio command uses unpinned/URL spec ({safe_cmd})")
     if _MCP_CURL_RE.search(full_cmd):
-        warns.append(f"{name}: stdio command uses curl with URL ({full_cmd[:80]})")
+        warns.append(f"{name}: stdio command uses curl with URL ({safe_cmd})")
 
     # ---- env passthrough ----
     env = spec.get("env") or {}
@@ -5126,6 +5139,9 @@ def check_mcp_external_endpoint(ctx: Context) -> Finding:
     """
     servers = _mcp_servers(ctx.config)
     external = []
+    # B-073: keep only scheme://host of the endpoint in evidence — userinfo, path,
+    # and query can each carry a token (https://user:token@host/mcp/<token>?key=...) (§8).
+    from .logsafe import sanitize_url_host_only  # noqa: PLC0415
     for name, spec in servers.items():
         if not isinstance(spec, dict):
             continue
@@ -5134,7 +5150,7 @@ def check_mcp_external_endpoint(ctx: Context) -> Finding:
             continue
         if _mcp_url_is_local(url):
             continue
-        external.append(f"{name}: non-local MCP URL {_obf_clip(url.strip())}")
+        external.append(f"{name}: non-local MCP URL {_obf_clip(sanitize_url_host_only(url.strip()))}")
 
     if external:
         return _finding(
