@@ -34,6 +34,14 @@ from .catalog import (
     WARN,
     Finding,
 )
+from .scanbudget import (
+    DEFAULT_AUDIT_BUDGET_S,
+    DEFAULT_CHECK_BUDGET_S,
+    ScanBudgetExceeded,
+    audit_budget_exceeded,
+    audit_deadline,
+    check_deadline,
+)
 from .collector import (
     _MAX_BYTES_PER_SKILL,
     _OWN_SKILL_NAMES,
@@ -13446,14 +13454,53 @@ def _check_error_finding(chk, exc: BaseException) -> Finding:
     )
 
 
-def run_all(ctx: Context) -> list[Finding]:
-    # Per-check isolation (B-101): one crashing check degrades to a single UNKNOWN
-    # finding instead of aborting the audit. Catch Exception (not BaseException) so
-    # KeyboardInterrupt / SystemExit still propagate. Mirrors the --vet ring's guard.
+def _check_budget_finding(chk, kind: str, seconds: float | None = None) -> Finding:
+    """A check hit the wall-clock budget (C-159) — degrade it to one UNKNOWN finding.
+
+    kind="check": this check overran its own per-check budget (POSIX hard timeout).
+    kind="audit": the whole-audit budget was already spent before this check ran (the
+    cooperative fallback on platforms without a hard timeout — see scanbudget.py).
+    """
+    name = getattr(chk, "__name__", "unknown_check")
+    why = (
+        "the overall audit time budget was exhausted before this check ran"
+        if kind == "audit"
+        else f"it exceeded its {seconds:g}s wall-clock budget"
+    )
+    return Finding(
+        id=f"ERR:{name}",
+        title=f"Check '{name}' timed out",
+        severity=MEDIUM,
+        status=UNKNOWN,
+        detail=(
+            f"This check was skipped because {why}, so its result is UNKNOWN (it neither "
+            "passed nor failed). The rest of the audit ran normally. This only bounds a "
+            "pathological / hostile input; it is not itself a finding."
+        ),
+        fix="Re-run on a quieter machine; report the check name if it recurs on a normal config.",
+        framework="Engine robustness",
+        scored=False,
+        evidence=[f"scan budget: {kind}"],
+    )
+
+
+def run_all(ctx: Context, check_budget_s: float = DEFAULT_CHECK_BUDGET_S,
+            audit_budget_s: float = DEFAULT_AUDIT_BUDGET_S) -> list[Finding]:
+    # Per-check isolation (B-101) + wall-clock budget (C-159): a crashing OR hanging
+    # check degrades to one UNKNOWN finding instead of aborting the audit. Catch
+    # ScanBudgetExceeded before the generic Exception; catch Exception (not
+    # BaseException) so KeyboardInterrupt / SystemExit still propagate.
     findings: list[Finding] = []
+    deadline = audit_deadline(audit_budget_s)
     for chk in CHECKS:
+        if audit_budget_exceeded(deadline):
+            findings.append(_check_budget_finding(chk, "audit"))
+            continue
         try:
-            findings.append(chk(ctx))
+            with check_deadline(check_budget_s):
+                findings.append(chk(ctx))
+        except ScanBudgetExceeded:
+            findings.append(_check_budget_finding(chk, "check", check_budget_s))
         except Exception as exc:  # noqa: BLE001 — a bad check must not sink the audit
             findings.append(_check_error_finding(chk, exc))
     return findings
