@@ -3,6 +3,40 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.18.0] — 2026-07-05
+
+Local-store write-path hardening: the score history and event journals are now safe under
+concurrent runs, bounded in size, and self-describing — plus a documented uninstall path. All
+local-only and read-only-by-default; no check verdict or grade changes.
+
+### Added
+- **`--purge` (+ `--yes`).** An opt-in, confirmation-gated command to delete ClawSecCheck's own
+  local store (`~/.clawseccheck/`: history, events, monitor state, coverage) — the only
+  destructive command in the tool. It unlinks only a fixed whitelist of known files (plus their
+  lock sidecars); it never globs, never removes a directory tree, and never follows a symlink
+  out of the store. Without `--yes` it lists the files and asks first; on a non-interactive
+  stdin it aborts without deleting. README gains an "Uninstall / cleanup" section.
+- **Journal retention.** `history.jsonl` and `events.jsonl` are now capped: once a journal
+  passes 5000 lines it is pruned to the most recent 4000 in one amortized pass, re-sealing the
+  surviving hash-chain from a fresh genesis so `--verify-history` stays green afterwards.
+- **Schema stamping.** History and event entries now carry a `_schema` version *inside* the
+  hashed payload (so a forged value breaks the tamper-evident chain). Loaders skip an entry
+  written by a newer major without crashing; existing journals with no `_schema` still load and
+  verify unchanged.
+
+### Fixed
+- **False "chain broken" under concurrency.** Two audits running at once (e.g. an interactive
+  run while a scheduled `--monitor` fires) could each chain a new entry off the same previous
+  hash, tripping a spurious tamper alarm on honest history. Appends now take an advisory
+  file lock around the read-hash→append→rotate section (a no-op on platforms without `fcntl`,
+  where behavior is unchanged).
+
+### Changed
+- Journal reads stream line-by-line instead of loading the whole file into memory, so `--trend`
+  and `--monitor` stay flat on large histories.
+- Rotation is documented as a local trust boundary: the hash-chain proves no tampering *between*
+  rotations (re-sealing necessarily rewrites the surviving hashes).
+
 ## [3.17.0] — 2026-07-05
 
 Polish, API completeness & close-out. One new advisory check for a class of risk that only
