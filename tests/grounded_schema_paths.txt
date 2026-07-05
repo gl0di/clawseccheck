@@ -1,0 +1,82 @@
+# Grounded OpenClaw config paths — the vetted set of paths clawseccheck may query
+# via dig(). Every path here is documented in the internal schema recon
+# (docs/research/openclaw-schema-recon.md, workspace-root, never shipped).
+#
+# This file SHIPS so the §4 anti-hallucination guard (tests/test_schema_grounding.py)
+# runs in CI, where the recon doc is absent. Adding a new dig("some.path") requires
+# adding it here AND grounding it in the recon (the local recon-consistency test
+# enforces the latter). Keep sorted; one path per line. See CLAWSECCHECK B-106.
+agents.defaults.heartbeat
+agents.defaults.model
+agents.defaults.sandbox.docker.binds
+agents.defaults.sandbox.docker.network
+agents.defaults.sandbox.mode
+agents.defaults.sandbox.workspaceAccess
+agents.defaults.subagents
+agents.defaults.subagents.allowAgents
+agents.defaults.subagents.maxChildrenPerAgent
+agents.defaults.subagents.maxConcurrent
+agents.defaults.subagents.maxSpawnDepth
+agents.list
+agents.subagents
+auth.profiles
+browser.ssrfPolicy.dangerouslyAllowPrivateNetwork
+channels
+channels.defaults.contextVisibility
+config.allowPrivateNetwork
+config.permissionMode
+cron
+discovery.mdns.mode
+gateway.allowRealIpFallback
+gateway.auth.mode
+gateway.auth.password
+gateway.auth.rateLimit
+gateway.auth.token
+gateway.auth.trustedProxy.allowLoopback
+gateway.bind
+gateway.controlUi.allowInsecureAuth
+gateway.controlUi.allowedOrigins
+gateway.egress
+gateway.host
+gateway.nodes.allowCommands
+gateway.nodes.denyCommands
+gateway.tailscale.mode
+gateway.tls.enabled
+gateway.token
+gateway.tools.allow
+gateway.trustedProxies
+heartbeat
+hooks.mappings
+hooks.token
+lastTouchedVersion
+logging.cacheTrace.filePath
+logging.redactSensitive
+mcp.servers
+meta.lastTouchedVersion
+network.dangerouslyAllowPrivateNetwork
+network.egress
+openclaw.disable-model-invocation
+openclaw.install.npmSpec
+openclaw.user-invocable
+plugins.allow
+plugins.mcp
+session.dmScope
+subagents.allowAgents
+tools.allow
+tools.deny
+tools.elevated.allowFrom
+tools.exec.applyPatch.workspaceOnly
+tools.exec.ask
+tools.exec.host
+tools.exec.mode
+tools.exec.security
+tools.exec.strictInlineEval
+tools.http.allow
+tools.mcp
+tools.profile
+tools.sessions
+tools.web
+tools.web.fetch.enabled
+tools.web.fetch.maxRedirects
+update.auto
+update.auto.enabled
