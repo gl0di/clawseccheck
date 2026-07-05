@@ -18,6 +18,7 @@ symlink-attack surface this guards against.
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -50,13 +51,57 @@ def _open_owner_only(path: Path, extra_flags: int) -> int:
 
 
 def secure_write_text(path: Path, data: str) -> None:
-    """Overwrite *path* with *data*, refusing to follow a symlinked target."""
-    fd = _open_owner_only(path, os.O_TRUNC)
+    """Atomically overwrite *path* with *data* (temp-file + fsync + os.replace).
+
+    Writing straight onto the destination (O_TRUNC then os.write) left a truncated,
+    corrupt file if the process died mid-write — crash, power loss, or ENOSPC. For the
+    monitor's ``state.json`` a corrupt read is swallowed as "no state", which silently
+    reset the baseline to first-run and hid real config drift (B-107). We now write to a
+    sibling temp file, fsync it, then ``os.replace`` it onto the destination, so a reader
+    ever only sees the old complete file or the new complete file — never a partial write.
+
+    Symlink-safety is preserved and, if anything, stronger than the previous O_NOFOLLOW
+    open: ``os.replace`` renames onto the destination *name* — it never writes *through* a
+    symlink planted at that path (the symlink is replaced, its target left untouched). The
+    temp file is created fresh and unique by ``mkstemp`` (mode 0600, O_EXCL — there is
+    nothing to follow) inside the destination's own directory, so the replace is a
+    same-filesystem atomic rename.
+    """
+    path = Path(path)
+    # Preserve the B-007 refuse-on-symlink contract the old O_NOFOLLOW open enforced: a
+    # planted symlink at the destination is a tamper signal, and callers/tests expect an
+    # OSError rather than a silent write. (os.replace below is the hard backstop — it never
+    # writes *through* a symlink even if one is planted after this check, so the victim is
+    # safe regardless; this check just keeps the loud, tested refusal for the common case.)
+    if path.is_symlink():
+        raise OSError(f"refusing to write through symlinked target: {path}")
+    parent = path.parent
+    fd, tmp_name = tempfile.mkstemp(dir=parent, prefix="." + path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
     try:
-        os.write(fd, data.encode("utf-8"))
-    finally:
-        os.close(fd)
-    try:  # belt-and-suspenders; creation mode already 0600 (POSIX only)
+        try:
+            os.write(fd, data.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)  # atomic on the same filesystem
+    except BaseException:
+        # Any failure before the replace lands (write / fsync / replace, or an interrupt)
+        # must leave no partial temp behind — the destination keeps its previous content.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    try:  # best-effort: persist the rename itself across power loss (POSIX dirs only)
+        dir_fd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+    try:  # belt-and-suspenders; mkstemp already created the temp 0600 (POSIX only)
         path.chmod(0o600)
     except (OSError, NotImplementedError):
         pass
