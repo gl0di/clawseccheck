@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 # agent is the live part and is always confirm-gated — so "live" is disclosed here.
 READONLY = "readonly"
 LIVE = "live"
+DESTRUCTIVE = "destructive"
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,11 @@ _PALETTE: tuple[PaletteCategory, ...] = (
         PaletteEntry("Verify history", 'verify history', "--verify-history",
                      "check the score history's hash-chain hasn't been tampered with"),
     )),
+    PaletteCategory("Maintenance", DESTRUCTIVE, (
+        PaletteEntry("Purge local data", 'purge', "--purge",
+                     "delete ClawSecCheck's local store (history, events, state) — "
+                     "confirms first, or --yes to skip the prompt", ("--yes",)),
+    )),
 )
 
 # Modifiers you add to any command (not standalone modes, so not in _PRIMARY_MODES).
@@ -168,6 +174,7 @@ def _ascii(text: str) -> str:
     return (text
             .replace("🦞 ", "").replace("🦞", "")
             .replace("✅ ", "").replace("✅", "")
+            .replace("⚠ ", "").replace("⚠", "")
             .replace("⚡", "(live)")
             .replace("·", "-").replace("—", "-").replace("…", "..."))
 
@@ -183,6 +190,8 @@ def _flag_col(entry: PaletteEntry) -> str:
 def _header_tag(kind: str, ascii_only: bool) -> str:
     if kind == LIVE:
         tag = "⚡ exercises your running agent — I confirm first"
+    elif kind == DESTRUCTIVE:
+        tag = "⚠ deletes local files — I confirm first"
     else:
         tag = "✅ read-only"
     return _ascii(tag) if ascii_only else tag

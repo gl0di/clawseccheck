@@ -686,6 +686,27 @@ python3 audit.py --log audit.log            # also write log to a local file
 
 ---
 
+## 🗑️ Uninstall / cleanup
+
+Everything ClawSecCheck ever writes lives under `~/.clawseccheck/` (score history, monitor
+state/events, the coverage-freshness ledger) — nothing is scattered elsewhere and nothing is
+ever uploaded. To remove that local store:
+
+```bash
+clawseccheck --purge          # lists the files, asks for confirmation, then deletes them
+clawseccheck --purge --yes    # skip the prompt (for scripted uninstall)
+```
+
+`--purge` only ever touches its own known files (`history.jsonl`, `events.jsonl`, `state.json`,
+`coverage.json`, plus their lock sidecars) — never a directory glob or recursive delete, so
+anything else you keep under that path is untouched. It exits without deleting anything if you
+answer no (or there's nothing to purge), and reports the count of files removed on success.
+Removing the `clawseccheck` package/skill itself is a separate, normal uninstall step (e.g.
+`pip uninstall clawseccheck` or removing the skill directory) — `--purge` only clears the local
+data store.
+
+---
+
 ## ✅ Baseline (accepting findings)
 
 Reviewed a finding and decided it's acceptable? Add it to `~/.openclaw/.clawseccheckignore` —

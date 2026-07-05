@@ -215,6 +215,7 @@ _PRIMARY_MODES = [
     ("functions", "--functions", "bool"),
     ("verify_self", "--verify-self", "bool"),
     ("verify_history", "--verify-history", "bool"),
+    ("purge", "--purge", "bool"),
     ("vet", "--vet", "opt"),
     ("vet_skill", "--vet-skill", "opt"),
     ("vet_plugin", "--vet-plugin", "opt"),
@@ -344,6 +345,79 @@ def _onboarding_reason(home: Path) -> str | None:
     except OSError:
         return None
     return None
+
+
+# --- --purge: opt-in, confirmation-gated local-store cleanup (C-164) -----------
+
+# The ONLY files --purge will ever touch, plus their advisory-lock sidecars
+# (locking.journal_lock creates "<file>.lock" next to history.jsonl/events.jsonl).
+# Deliberately a fixed whitelist, never a glob/rmtree of the store directory —
+# an unrelated file a user happens to keep in ~/.clawseccheck/ must never be at risk.
+_PURGE_FILENAMES = ("history.jsonl", "events.jsonl", "state.json", "coverage.json")
+
+
+def _confirm_purge(paths: "list[Path]") -> "tuple[bool, bool]":
+    """Print the exact files to be deleted and ask for confirmation.
+
+    Returns (proceed, eof):
+      - (True, False)  — explicit y/yes answer: proceed.
+      - (False, False) — any other typed answer (including blank/"n"): declined,
+        a normal (non-error) abort.
+      - (False, True)  — EOFError (no stdin / non-interactive): abort loudly,
+        the caller reports this as an error (rc 1), never a silent proceed.
+    Kept as its own function so tests can monkeypatch it.
+    """
+    _emit("The following files will be permanently deleted:")
+    for p in paths:
+        _emit(f"  {p}")
+    try:
+        answer = input("Delete these files? [y/N]: ")
+    except EOFError:
+        return False, True
+    return answer.strip().lower() in ("y", "yes"), False
+
+
+def _run_purge(args) -> int:
+    """Delete ClawSecCheck's local store (opt-in, confirmation-gated).
+
+    Resolves the store directory from --history's parent (all four known files
+    live alongside each other under ~/.clawseccheck/ by default). Operates ONLY
+    on the fixed whitelist of known filenames plus their ".lock" sidecars —
+    never globs or rmtree's the directory, so an unrelated file the user happens
+    to keep there is never at risk. Read-only until the user (or --yes) confirms.
+    """
+    store_dir = Path(args.history).expanduser().parent
+    candidates = [store_dir / name for name in _PURGE_FILENAMES]
+    candidates += [store_dir / (name + ".lock") for name in _PURGE_FILENAMES]
+    existing = [p for p in candidates if p.exists()]
+
+    if not existing:
+        _emit("Nothing to purge — no ClawSecCheck local store files found.")
+        return 0
+
+    if not args.yes:
+        proceed, eof = _confirm_purge(existing)
+        if not proceed:
+            if eof:
+                _emit("Purge aborted — no confirmation input available (not a tty / EOF).")
+                return 1
+            _emit("Purge aborted — no files were deleted.")
+            return 0
+    else:
+        _emit("The following files will be permanently deleted:")
+        for p in existing:
+            _emit(f"  {p}")
+
+    deleted = 0
+    for p in existing:
+        try:
+            p.unlink()
+            deleted += 1
+        except OSError as exc:
+            _emit(f"(could not delete {p}: {exc})")
+
+    _emit(f"Purged {deleted} file(s) from {store_dir}.")
+    return 0
 
 
 def main(argv=None) -> int:
@@ -489,6 +563,13 @@ def _main(argv=None) -> int:
                    help="do not record this run to the local score history (default: record)")
     p.add_argument("--verify-history", action="store_true",
                    help="verify the score history file's tamper-evident hash-chain and exit")
+    p.add_argument("--purge", action="store_true",
+                   help="delete ClawSecCheck's local store (history/events/state/coverage "
+                        "files + their lock sidecars) and exit — confirmation-gated unless "
+                        "--yes is also given; nothing else is touched")
+    p.add_argument("--yes", action="store_true",
+                   help="skip the interactive confirmation prompt for --purge (for scripted "
+                        "uninstall); has no effect without --purge")
     p.add_argument("--no-update-notice", action="store_true",
                    help="suppress the offline 'your build may be stale' reminder "
                         "(also suppressible via CLAWSECCHECK_NO_UPDATE_NOTICE=1; offline, never a network call)")
@@ -536,6 +617,11 @@ def _main(argv=None) -> int:
     )
 
     # standalone modes that don't audit ~/.openclaw
+    if args.purge:
+        # Dispatched FIRST, before any audit()/history-record call-site below, so
+        # purge can never race its own uninstall by writing a fresh history point.
+        return _run_purge(args)
+
     if args.verify_self:
         combined, per_file = package_digest()
         lines = [f"ClawSecCheck {__version__} — engine source digest (SHA-256)",

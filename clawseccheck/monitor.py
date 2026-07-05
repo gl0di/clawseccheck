@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 
 from .catalog import BY_ID, FAIL
+from .locking import journal_lock
 from .logsafe import redact_urls_in_text, sanitize_url_host_only
 from .safeio import secure_append_text, secure_dir, secure_write_text
 
@@ -34,6 +35,22 @@ SNAPSHOT_VERSION = 2
 DEFAULT_STATE = "~/.clawseccheck/state.json"
 DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
 
+# C-162: schema stamp for hash-chained journal lines (history.jsonl / events.jsonl).
+# Stamped INSIDE the hashed payload (so verify_chain authenticates it too — a planted
+# _schema value breaks the chain like any other tampered field). Bumped only for a
+# genuine future format change to the chained entry shape; loaders skip a line whose
+# _schema is a newer major than this build understands (see _iter_jsonl consumers)
+# rather than risk misparsing it. Absent _schema (legacy pre-C-162 lines) still loads.
+SCHEMA_VERSION = 1
+
+# C-164: retention/rotation for the hash-chained journals (history.jsonl /
+# events.jsonl). Once a journal exceeds _JOURNAL_MAX_LINES, it is pruned down to
+# the last _JOURNAL_KEEP entries in one amortized batch (not every append) — see
+# _rotate_journal. The gap between the two keeps rotation infrequent relative to
+# append volume.
+_JOURNAL_MAX_LINES = 5000
+_JOURNAL_KEEP = 4000
+
 
 def _h(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
@@ -50,6 +67,27 @@ def _chain_hash(prev_hash: str, entry: dict) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _iter_jsonl(p: Path):
+    """Stream-parse a JSONL file, yielding one dict per well-formed non-blank line.
+
+    C-164: iterates the open file object line-by-line (never
+    ``read_text().splitlines()``), so memory stays flat even on a large journal.
+    Blank lines, JSON-decode errors, and non-dict top-level values are silently
+    skipped (same graceful contract the previous read_text()-based loops had).
+    """
+    with p.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(entry, dict):
+                yield entry
+
+
 def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
     """Verify the hash-chain integrity of an events.jsonl file.
 
@@ -60,22 +98,22 @@ def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
 
     Returns (False, "broken at entry N") on the first mismatch.
     Never raises — any IO/parse error causes (True, "OK") (graceful).
+
+    Authenticates every field of every entry (including '_schema', C-162, and any
+    entry whose '_schema' is a newer major than this build understands) — the
+    unknown-schema skip policy belongs to the *loaders* (load_events/history.load),
+    not to chain verification, which must authenticate the whole file regardless.
     """
     p = Path(events_path).expanduser()
     try:
         if not p.is_file():
             return True, "OK"
-        lines = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        entries = list(_iter_jsonl(p))
     except OSError:
         return True, "OK"
 
     prev_hash = ""
-    for idx, line in enumerate(lines):
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
+    for idx, entry in enumerate(entries):
         stored = entry.get("chain_hash")
         if stored is None:
             # Legacy entry — skip chain verification for this entry, carry prev_hash
@@ -89,6 +127,48 @@ def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
         prev_hash = stored
 
     return True, "OK"
+
+
+def _rotate_journal(p: Path, max_lines: int = _JOURNAL_MAX_LINES,
+                    keep: int = _JOURNAL_KEEP) -> None:
+    """C-164: prune *p* to its last *keep* entries once it exceeds *max_lines*.
+
+    No-op (file left byte-identical) when the line-count is at or below
+    *max_lines* — rotation is amortized, not per-append. When it does trigger, the
+    survivors' chain is RE-GENESISED: chain_hash is recomputed forward starting
+    from prev_hash="" over each entry's own non-hash fields (including '_schema'),
+    so ``verify_chain`` reports OK over the whole survivor file afterwards — this
+    is what prevents the spurious "chain BROKEN" that simply truncating the file
+    would cause (the survivors' original hashes point at now-deleted history).
+
+    This re-genesis is a deliberate, documented local trust boundary: rotation
+    itself is not tamper-evident across the rotation boundary (an attacker with
+    write access to the file could rotate-and-forge), only within a generation.
+
+    Must be called from inside the caller's ``journal_lock`` critical section
+    (immediately after an append) — it does not take the lock itself.
+    Never raises: any OSError during read/rewrite is swallowed, leaving the
+    file as last known good (an unrotated, still-valid, still-growing journal).
+    """
+    try:
+        if not p.is_file():
+            return
+        entries = list(_iter_jsonl(p))
+        if len(entries) <= max_lines:
+            return  # no-op — file untouched, byte-identical
+
+        survivors = entries[-keep:]
+        prev_hash = ""
+        rechained: list[str] = []
+        for entry in survivors:
+            base = {k: v for k, v in entry.items() if k != "chain_hash"}
+            ch = _chain_hash(prev_hash, base)
+            rechained.append(json.dumps({**base, "chain_hash": ch}))
+            prev_hash = ch
+
+        secure_write_text(p, "\n".join(rechained) + "\n")
+    except OSError:
+        pass
 
 
 _MEMORY_MAX_BYTES = 200_000
@@ -597,22 +677,23 @@ def save_state(path: str | Path, snap: dict) -> None:
 
 
 def _last_chain_hash(p: Path) -> str:
-    """Return the 'chain_hash' of the last entry in a JSONL file, or '' if none."""
+    """Return the 'chain_hash' of the last entry in a JSONL file, or '' if none.
+
+    C-164: streams via ``_iter_jsonl`` (line-by-line) rather than reading the
+    whole file into one big list-of-lines, so memory stays flat on a large file;
+    only the running "last chain_hash seen so far" is retained.
+    """
     if not p.is_file():
         return ""
+    last = ""
     try:
-        lines = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    except OSError:
-        return ""
-    for line in reversed(lines):
-        try:
-            entry = json.loads(line)
+        for entry in _iter_jsonl(p):
             val = entry.get("chain_hash")
             if val is not None:
-                return str(val)
-        except json.JSONDecodeError:
-            continue
-    return ""
+                last = str(val)
+    except OSError:
+        return ""
+    return last
 
 
 def record_events(alerts, path: str | Path = DEFAULT_EVENTS, when: str | None = None) -> None:
@@ -621,7 +702,16 @@ def record_events(alerts, path: str | Path = DEFAULT_EVENTS, when: str | None = 
 
     Each entry carries a 'chain_hash' field: sha256(prev_chain_hash + canonical_json)
     so the journal is tamper-evident. Existing entries without 'chain_hash' are treated
-    as the chain genesis (backward compatible).
+    as the chain genesis (backward compatible). Each entry also carries '_schema'
+    (C-162) INSIDE the hashed payload, so it is itself tamper-evident.
+
+    B-108: the read-last-hash→append critical section runs under an advisory
+    ``journal_lock`` so two concurrent monitor runs can't both read the same prev
+    chain_hash and each append, which would otherwise leave a spurious
+    "chain BROKEN" that neither writer actually caused.
+
+    C-164: after appending, the file is opportunistically rotated (pruned +
+    re-chained) once it exceeds the retention cap — see ``_rotate_journal``.
     """
     if not alerts:
         return
@@ -631,34 +721,57 @@ def record_events(alerts, path: str | Path = DEFAULT_EVENTS, when: str | None = 
     p = Path(path).expanduser()
     try:  # symlink-safe append; never raise from the event journal
         secure_dir(p.parent)
-        prev_hash = _last_chain_hash(p)
-        lines_out: list[str] = []
-        for lvl, msg in alerts:
-            base = {"ts": when, "level": lvl, "message": msg}
-            ch = _chain_hash(prev_hash, base)
-            entry = {**base, "chain_hash": ch}
-            lines_out.append(json.dumps(entry))
-            prev_hash = ch
-        secure_append_text(p, "\n".join(lines_out) + "\n")
+        with journal_lock(p):
+            prev_hash = _last_chain_hash(p)
+            lines_out: list[str] = []
+            for lvl, msg in alerts:
+                base = {"ts": when, "level": lvl, "message": msg, "_schema": SCHEMA_VERSION}
+                ch = _chain_hash(prev_hash, base)
+                entry = {**base, "chain_hash": ch}
+                lines_out.append(json.dumps(entry))
+                prev_hash = ch
+            secure_append_text(p, "\n".join(lines_out) + "\n")
+            _rotate_journal(p)
     except OSError:
         pass
 
 
+def _schema_ok(entry: dict) -> bool:
+    """C-162 loader policy: absent/legacy _schema loads; == current loads; a NEWER
+    major than this build understands is skipped (no crash, no misparse).
+
+    Skipping is a *loader* concern only: an unknown-future-schema line is
+    hidden-but-present, not deleted, and verify_chain() still authenticates and
+    counts it (a forged _schema on an honest line breaks the chain). So this skip
+    cannot silently erase evidence beyond the pre-existing "write access breaks
+    tamper-evidence" boundary."""
+    raw = entry.get("_schema")
+    if raw is None:
+        return True
+    try:
+        return int(raw) <= SCHEMA_VERSION
+    except (TypeError, ValueError):
+        # Non-numeric _schema is itself a malformed/tampered line — don't misparse it.
+        return False
+
+
 def load_events(path: str | Path = DEFAULT_EVENTS, limit: int | None = None) -> list[dict]:
-    """Read the event journal (chronological). Returns [] if absent/unreadable."""
+    """Read the event journal (chronological). Returns [] if absent/unreadable.
+
+    C-162: a line whose '_schema' is a newer major than this build understands is
+    skipped (siblings still load); absent/legacy or current '_schema' loads normally.
+    """
     p = Path(path).expanduser()
     if not p.is_file():
         return []
     out: list[dict] = []
     try:
-        for line in p.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
+        # C-164: stream line-by-line via _iter_jsonl (not read_text().splitlines())
+        # so memory stays flat on a large journal.
+        for entry in _iter_jsonl(p):
+            if not _schema_ok(entry):
                 continue
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+            out.append(entry)
     except OSError:
         return []
     return out[-limit:] if limit else out

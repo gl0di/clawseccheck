@@ -67,8 +67,12 @@ def load_ledger(home: str | None = None) -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    # Accept only string → string entries; discard anything malformed.
-    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+    # Accept only string → string entries; discard anything malformed. "_schema"
+    # (C-162) is a reserved bookkeeping key, not a capability — never surfaced to
+    # callers (freshness_notice iterates THRESHOLDS, so it would be ignored anyway,
+    # but filtering here keeps the returned map a clean capability→date view).
+    return {k: v for k, v in data.items()
+            if isinstance(k, str) and isinstance(v, str) and k != "_schema"}
 
 
 def record_run(capability: str, *, home: str | None = None,
@@ -92,11 +96,15 @@ def record_run(capability: str, *, home: str | None = None,
         Override the recorded date (for testing).
         ``None`` → ``date.today()``.
     """
+    from .monitor import SCHEMA_VERSION  # avoid top-level import cycle
     from .safeio import secure_dir, secure_write_text  # avoid top-level import cycle
 
     today = today or date.today()
     ledger = load_ledger(home)
     ledger[capability] = today.isoformat()
+    # C-162: reserved "_schema" bookkeeping key, written last so it always reflects
+    # this build regardless of write order above. load_ledger() filters it back out.
+    ledger["_schema"] = str(SCHEMA_VERSION)
     p = _ledger_path(home)
     try:
         secure_dir(p.parent)
