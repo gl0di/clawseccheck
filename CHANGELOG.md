@@ -3,6 +3,28 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.19.0] — 2026-07-05
+
+Assurance honesty: the report now says out loud when it could only evaluate a small slice of your
+setup, so a grade from thin coverage no longer looks as confident as a full one. Both signals are
+advisory text only — the score, grade, and all machine outputs (`--json`, `--sarif`, `--badge`) are
+unchanged.
+
+### Added
+- **Low-coverage caution.** When fewer than 35% of scored checks could actually be evaluated (the
+  rest UNKNOWN — thin config, byte caps, or a missing field), a prominent line under the grade says
+  so: "only X% of scored checks could be evaluated — treat this grade with caution." A grade over
+  40% assessable is unaffected; real configs (including a bare setup) stay quiet.
+- **Schema-staleness nudge.** When an overwhelming majority (≥85%) of scored checks on a populated
+  config come back UNKNOWN, a hedged, fully offline nudge notes it may mean OpenClaw moved a field
+  path and this build is stale for your version. It is worded as a possibility, never an assertion,
+  and is computed purely from the run's own findings — no network, no schema fetch.
+
+### Changed
+- Both signals read one new internal helper (`scoring.assessment_coverage`); thresholds are grounded
+  against real fixtures and the real agent home so normally- and even minimally-configured setups do
+  not trip them.
+
 ## [3.18.0] — 2026-07-05
 
 Local-store write-path hardening: the score history and event journals are now safe under
