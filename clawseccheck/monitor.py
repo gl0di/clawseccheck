@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 
 from .catalog import BY_ID, FAIL
+from .logsafe import redact_urls_in_text, sanitize_url_host_only
 from .safeio import secure_append_text, secure_dir, secure_write_text
 
 
@@ -116,8 +117,11 @@ def _extract_memory_signals(text: str) -> dict:
         if pattern.search(text):
             signals.append(pattern.pattern)
 
+    # B-105: memory-file URLs can carry credentials in userinfo/query (?api_key=…);
+    # reduce each to scheme://host before it enters the snapshot / any alert so the
+    # secret is never persisted at rest in state.json/events.jsonl.
     raw_urls = _MEMORY_URL_RE.findall(text)
-    urls = sorted({u.rstrip(")>\"") for u in raw_urls if u})
+    urls = sorted({sanitize_url_host_only(u.rstrip(")>\"")) for u in raw_urls if u})
     return {
         "signals": sorted(signals),
         "urls": urls,
@@ -269,11 +273,17 @@ def _mcp_detail_sig(ctx) -> dict:
                     tool_name = str(tool).strip()
                     if tool_name:
                         tool_sigs[tool_name] = ""
+        # B-105: at-rest redaction. command/args0 can embed a credential inside a URL
+        # arg (npx --registry https://TOKEN@reg/ …); url can be https://user:token@host or
+        # carry ?api_key=…. Sanitize BEFORE the value enters the snapshot, so state.json
+        # never holds the secret and every drift alert built from these fields (RP2/RP3)
+        # inherits the redaction. Host-level drift (the security signal) is preserved;
+        # only the secret-bearing parts collapse.
         out[name] = {
-            "command": str(spec.get("command") or ""),
-            "args0": args0,
+            "command": redact_urls_in_text(str(spec.get("command") or "")),
+            "args0": redact_urls_in_text(args0),
             "transport": str(spec.get("transport") or ""),
-            "url": str(spec.get("url") or ""),
+            "url": sanitize_url_host_only(str(spec.get("url") or "")),
             "env_keys": sorted(env_keys),
             "oauth_scope": oauth_scope,
             "tool_sigs": dict(sorted(tool_sigs.items())),
