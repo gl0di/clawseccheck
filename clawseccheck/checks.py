@@ -9589,6 +9589,34 @@ _B63_ACTION_RE = re.compile(
 
 _B63_WINDOW = 120  # proximity window in characters
 
+# B-091: SOFT disclosure-suppression framing — milder than _B63_SECRECY_RE's strong
+# secrecy verbs ("no need to mention", "skip it in your summary", "needn't be reported").
+# Used ONLY by the semantic pass below, which is gated on a credential-shaped read
+# (_CRED_RE), so a benign "no need to mention the version" can never fire on its own.
+# Kept to tight, contiguous phrases (no nested unbounded spans) to stay clear of the
+# ReDoS class fixed in B-100/B-102.
+_B63_SOFT_SUPPRESS_RE = re.compile(
+    normalize_for_scan(
+        r"(?:"
+        # English — "no need to <disclose-verb>" / "needn't be <disclosed>"
+        r"no\s+need\s+to\s+(?:mention|note|report|surface|flag|disclose|explain"
+        r"|call\s+(?:it|this|that)\s+out|bring\s+(?:it|this|that)\s+up)"
+        r"|need(?:s)?\s+not\s+be\s+(?:mentioned|noted|reported|surfaced|flagged|disclosed|explained)"
+        r"|(?:without|don'?t\s+bother)\s+(?:noting|mentioning|reporting|surfacing|flagging|disclosing)"
+        r"|(?:skip|omit|leave\s+out|exclude)\s+(?:it|this|that)\s+(?:in|from)\s+(?:your|the)\s+"
+        r"(?:summary|reply|response|answer|output)"
+        # Russian
+        r"|не\s+(?:нужно|надо|стоит)\s+(?:упоминать|сообщать|отмечать|указывать|говорить)"
+        r"|без\s+(?:упоминани[йя]|уведомлени[йя]|огласки)"
+        r")"
+    ),
+    re.IGNORECASE,
+)
+
+# The credential read and the framing can sit in separate sentences, so the semantic
+# pass uses a wider proximity window than the lexical Signal-A/B rule.
+_B63_SEMANTIC_WINDOW = 240
+
 
 def _b63_scan(text: str, fence_ranges: list[tuple[int, int]]) -> list[tuple[str, bool]]:
     """Scan *text* for silent-instruction patterns.
@@ -9610,6 +9638,29 @@ def _b63_scan(text: str, fence_ranges: list[tuple[int, int]]) -> list[tuple[str,
         if len(snippet) > 80:
             snippet = snippet[:77] + "..."
         hits.append((snippet, has_action))
+
+    # B-091: semantic pass — a paraphrased "act, then don't disclose" instruction can
+    # dodge the lexical Signal-A verbs (confirmed live-fire bypass: static-graded SAFE
+    # while the model silently exfiltrated a bait file). When soft-suppression framing
+    # sits next to a credential-shaped read, surface it as WARN for human review.
+    #
+    # Intentionally WARN-only (never FAIL). The C-135 adversarial pass showed a legitimate
+    # cloud/DevOps skill that reads a credential to authenticate and uses a transport for
+    # its announced purpose (curl to its own API, wget/scp/netcat) — plus benign "don't
+    # echo the secret value in your reply" hygiene — hits credential + transport +
+    # suppression together, so any FAIL here would be a §5 false positive. The blatant
+    # read-secret-then-ship-to-a-drop case is already FAILed by the cross-skill cred+exfil
+    # rules; B63's unique contribution is flagging the *suppression* intent for review.
+    # The credential-path anchor is mandatory, so a benign "no need to mention the
+    # version" never fires.
+    for m in _B63_SOFT_SUPPRESS_RE.finditer(text):
+        if _defensive_context(text, m.start(), fence_ranges):
+            continue
+        start = max(0, m.start() - _B63_SEMANTIC_WINDOW)
+        end = min(len(text), m.end() + _B63_SEMANTIC_WINDOW)
+        if not _CRED_RE.search(text[start:end]):
+            continue  # credential-path anchor is mandatory — no anchor, no finding
+        hits.append(("disclosure-suppression framing near a credential read", False))
     return hits
 
 
