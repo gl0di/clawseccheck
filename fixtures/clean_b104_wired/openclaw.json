@@ -1,0 +1,21 @@
+{
+  "tools": {
+    "profile": "minimal"
+  },
+  "models": {
+    "main": {
+      "provider": "ollama/llama3"
+    }
+  },
+  "mcp": {
+    "servers": {
+      "srv": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "x"
+        ]
+      }
+    }
+  }
+}

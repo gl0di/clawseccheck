@@ -1,0 +1,18 @@
+{
+  "tools": {
+    "profile": "minimal"
+  },
+  "models": {
+    "main": {
+      "provider": "ollama/llama3"
+    }
+  },
+  "mcp": {
+    "servers": {
+      "deadmcp": {
+        "command": "/opt/nonexistent/mcp-bin",
+        "args": []
+      }
+    }
+  }
+}

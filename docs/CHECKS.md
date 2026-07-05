@@ -1067,6 +1067,18 @@ Advisory checks are recorded for coverage but are not scored.
 
 ## Advisory checks
 
+### B104 - Offboarding hygiene (duplicate skill installs / dead MCP command paths)
+
+- Severity: LOW
+- Block: advisory
+- Framework: Decommissioning / NHI Offboarding
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Offboarding hygiene (duplicate skill installs / dead MCP command paths)
+- Remediation:
+  - none
+
 ### B91 - Dynamic-dispatch sink obfuscation (computed getattr/import_module name)
 
 - Severity: MEDIUM

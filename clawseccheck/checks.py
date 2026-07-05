@@ -13704,6 +13704,107 @@ def check_incident_readiness(ctx: Context) -> Finding:
     )
 
 
+def check_offboarding_hygiene(ctx: Context) -> Finding:
+    """B104 — decommissioning / offboarding hygiene (F-089, NHI1 improper offboarding).
+
+    Read-only filesystem/config reconciliation for leftover attack surface left by an
+    incomplete offboarding:
+      WARN — the same skill (by declared frontmatter `name:`) is installed in >1 location
+             (the stale copy is still auto-loadable surface), OR a configured stdio MCP
+             server's ABSOLUTE command path does not exist on disk (a dead entry).
+      PASS — no duplicate skill installs and no dead MCP command paths.
+      UNKNOWN — no OpenClaw home filesystem to inspect.
+
+    §5 note: OpenClaw AUTO-LOADS skills by directory presence (recon §13), not by an
+    explicit config reference, so "installed but not referenced in config" is NOT an orphan
+    signal here — that sub-check is UNKNOWN-by-design and intentionally omitted so it can
+    never produce a false "orphaned" finding on every legitimately auto-discovered skill.
+    Symlinked skill dirs are skipped (plugin-skills symlink into a plugin's own skills/ dir,
+    recon §13 — counting the link + its target would be a false duplicate). A bare MCP
+    command (npx/node/uvx) is never flagged — it is PATH/runtime-resolved and
+    container-safe; only an absolute path that is absent is a dead-entry signal.
+    """
+    from .collector import SKILL_DIRS  # local import: avoid a module-load cycle
+
+    home = getattr(ctx, "home", None)
+    if not isinstance(home, Path) or not home.exists():
+        return _custom(
+            "B104", LOW, UNKNOWN,
+            "No OpenClaw home filesystem to inspect for offboarding hygiene.",
+            "Run on a host with an OpenClaw home (~/.openclaw) to reconcile installed "
+            "skills and MCP entries.",
+        )
+
+    # Duplicate skill installs: same declared name in >1 (non-symlink) dir.
+    name_to_dirs: dict[str, list[str]] = {}
+    for rel in SKILL_DIRS:
+        base = home / rel
+        if not base.is_dir():
+            continue
+        try:
+            entries = sorted(base.iterdir())
+        except OSError:
+            continue
+        for sd in entries:
+            if sd.is_symlink() or not sd.is_dir():
+                continue
+            skill_md = sd / "SKILL.md"
+            if not skill_md.is_file():
+                continue
+            try:
+                blob = skill_md.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            # A raw on-disk SKILL.md starts with `---` (the collector injects the
+            # `# file: SKILL.md` header that _frontmatter_name needs, but we read raw), so
+            # pull the declared name from the frontmatter block directly; fall back to the
+            # dir name when there is no `name:`.
+            block = _skill_frontmatter_block(blob)
+            nm = re.search(r"^name:\s*([^\n#]+)", block, re.M) if block else None
+            name = (nm.group(1).strip() if nm else sd.name).strip().lower()
+            try:
+                rel_dir = str(sd.relative_to(home))  # home-relative: no absolute path leak
+            except ValueError:
+                rel_dir = sd.name
+            name_to_dirs.setdefault(name, []).append(rel_dir)
+
+    warns: list[str] = []
+    for name, dirs in sorted(name_to_dirs.items()):
+        uniq = sorted(set(dirs))
+        if len(uniq) > 1:
+            warns.append(f"skill '{name}' installed in {len(uniq)} locations: " + ", ".join(uniq))
+
+    # Dead MCP entries: a configured stdio server whose ABSOLUTE command path is missing.
+    for name, spec in _mcp_servers(ctx.config or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        cmd = spec.get("command")
+        if not isinstance(cmd, str) or not cmd.strip():
+            continue
+        expanded = os.path.expanduser(cmd.strip())
+        if os.path.isabs(expanded) and not Path(expanded).exists():
+            warns.append(f"MCP server '{name}' command path is missing: {cmd.strip()}")
+
+    if warns:
+        extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
+        return _custom(
+            "B104", LOW, WARN,
+            "Offboarding hygiene: " + "; ".join(warns[:6]) + extra,
+            "Retire stale duplicate skill copies and remove dead MCP entries — a leftover "
+            "install remains auto-loadable / spawnable attack surface after the skill or "
+            "server was meant to be decommissioned (NHI1 improper offboarding). If this "
+            "config is audited from a different host than it runs on, verify the missing "
+            "command path there before removing it.",
+            warns,
+        )
+    return _custom(
+        "B104", LOW, PASS,
+        "No duplicate skill installs or dead MCP command paths found.",
+        "Keep exactly one copy of each skill and remove MCP entries whose command no "
+        "longer exists — leftover installs are decommissioning debt.",
+    )
+
+
 CHECKS = [
     check_trifecta,
     check_secrets,
@@ -13784,6 +13885,7 @@ CHECKS = [
     check_cachetrace_redaction,
     check_webfetch_redirects,
     check_incident_readiness,
+    check_offboarding_hygiene,  # B104 — decommissioning/offboarding hygiene (F-089)
 ]
 
 

@@ -916,6 +916,20 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="skills",
     ),
+    # Decommissioning debt: the same skill installed in >1 location (stale auto-loadable
+    # copy) or a configured MCP server whose absolute command path is gone (dead entry).
+    # Advisory host-hygiene (NHI1 improper offboarding); orphaned-skill detection is
+    # UNKNOWN-by-design because OpenClaw auto-loads skills by directory presence (§5).
+    CheckMeta(
+        "B104",
+        "Offboarding hygiene (duplicate skill installs / dead MCP command paths)",
+        LOW,
+        "advisory",
+        "Decommissioning / NHI Offboarding",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # A sink reached via a COMPUTED name (getattr(os, 'sy'+'stem'), import_module(cfg['mod']))
     # rather than a literal token defeats a simple text/keyword scan. Reuses the existing
     # skillast.py AST rules (GETATTR_INDIRECTION, DYNAMIC_IMPORT_EXEC) — pure wiring, no new
