@@ -12175,6 +12175,47 @@ def _fm_metadata_obj(fm: str) -> dict:
     return obj if isinstance(obj, dict) else {}
 
 
+_FM_METADATA_KEY_RE = re.compile(r"(?m)^[ \t]*metadata:[ \t]*")
+
+
+def _fm_metadata_obj_multiline(fm: str) -> dict:
+    """Parse the `metadata:` JSON value from a frontmatter block, tolerating the multi-line,
+    pretty-printed, trailing-comma form the real OpenClaw fleet writes (B-099/B103).
+
+    The single-line `_fm_metadata_obj` returns {} on every real bundled skill (they use a
+    multi-line JSON object), so the install[] check would see nothing. This locates
+    `metadata:`, captures the brace-balanced object, strips trailing commas, and json.loads
+    it. Any parse failure returns {} — an unparseable metadata block is 'nothing to inspect',
+    never evidence of malice (§5, zero false-positive FAIL). Brace-scanning does not track
+    braces inside string values, so a hostile skill can only DODGE the check (→ {} → UNKNOWN),
+    never trip a false finding."""
+    m = _FM_METADATA_KEY_RE.search(fm)
+    if not m:
+        return {}
+    start = fm.find("{", m.end())
+    if start < 0:
+        return {}
+    depth = 0
+    end = -1
+    for j in range(start, len(fm)):
+        c = fm[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end = j + 1
+                break
+    if end < 0:
+        return {}
+    raw = re.sub(r",(\s*[}\]])", r"\1", fm[start:end])  # strip trailing commas
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
 def _skill_is_unreachable(fm: str) -> bool:
     """True when the skill is unreachable by BOTH the user and the model — reading both the
     top-level and the nested `metadata.openclaw` forms of each flag (universal shape §6.6)."""
@@ -13216,6 +13257,128 @@ def check_config_trust_widening(ctx: Context) -> Finding:
     )
 
 
+# ---------- B103: install-directive supply-chain (B-099) ----------
+# A skill's SKILL.md frontmatter can declare metadata.openclaw.install[] — the directives
+# OpenClaw runs to bootstrap the skill's runtime dependency (brew/apt/go/node/npm/uv/download).
+# The `download` kind fetches + extracts an arbitrary archive from a url. This had ZERO
+# dedicated vetting: an install directive that fetches over plaintext HTTP, or from a raw IP
+# or .onion host, read SAFE/A/100. B103 flags exactly those unambiguous provenance failures.
+#
+# ZERO-FP DISCIPLINE (§5), verified against the full 52-skill real fleet:
+#   • Only values that literally start with a URL scheme are treated as fetch targets — a go
+#     `module` (github.com/x/y@latest) or a brew `formula`/`tap` is a package coordinate, NOT
+#     a URL, and is never host/IP-parsed (the classic misparse).
+#   • FAIL only on: plaintext http://ftp:// scheme (Rule A), or a host that is a raw IP literal
+#     or a .onion address (Rule B). Every real entry is HTTPS-to-a-named-host → PASS.
+#   • No WARN tier: "unpinned" (go @latest, brew/apt/node by-name) is the fleet NORM; a
+#     typosquat heuristic on a skill's own first-party install target is not provably zero-FP.
+#     A missed detection (HTTPS from a typo-domain) is accepted; a false FAIL is not.
+_INSTALL_URL_FIELDS = ("url", "download", "src", "source", "href")
+_INSTALL_IPV4_HOST_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def _install_host_is_ip(host: str) -> bool:
+    """True when *host* (a urlparse hostname) is a raw IP literal, not a DNS name."""
+    if not host:
+        return False
+    if _INSTALL_IPV4_HOST_RE.match(host):
+        return all(0 <= int(o) <= 255 for o in host.split("."))
+    return ":" in host  # urlparse strips the [] of an IPv6 literal, leaving the colons
+
+
+def _install_url_target(val) -> tuple[str | None, str | None]:
+    """Return (scheme, host) ONLY for values that are literally URL-shaped (start with a
+    scheme); ('', None)/(None, None) otherwise. A bare package coordinate never reaches
+    urlparse, so it can never be misread as an IP/onion host."""
+    v = str(val).strip()
+    if not v.lower().startswith(("http://", "https://", "ftp://", "ftps://")):
+        return (None, None)
+    try:
+        p = urlparse(v)
+    except ValueError:
+        return (None, None)
+    return (p.scheme.lower(), (p.hostname or "").lower())
+
+
+def _install_entry_findings(skill_name: str, install) -> list[str]:
+    """Per-entry supply-chain evidence for an install[] array. Returns FAIL evidence strings."""
+    fails: list[str] = []
+    if not isinstance(install, list):
+        return fails
+    for entry in install:
+        if not isinstance(entry, dict):
+            continue
+        eid = str(entry.get("id") or entry.get("label") or entry.get("kind") or "?")[:60]
+        for field in _INSTALL_URL_FIELDS:
+            val = entry.get(field)
+            if not val:
+                continue
+            scheme, host = _install_url_target(val)
+            if scheme is None:
+                continue  # not a URL-shaped value (package coordinate, path, etc.)
+            if scheme in ("http", "ftp"):
+                fails.append(
+                    f"{skill_name}: install '{eid}' fetches over plaintext {scheme}:// "
+                    f"({host or 'unknown host'})"
+                )
+            elif host and _install_host_is_ip(host):
+                fails.append(f"{skill_name}: install '{eid}' fetches from a raw-IP host ({host})")
+            elif host and _IOC_ONION_RE.fullmatch(host):
+                fails.append(f"{skill_name}: install '{eid}' fetches from a .onion host ({host})")
+    return fails
+
+
+def check_install_directive_supply_chain(ctx: Context) -> Finding:
+    """B103 — supply-chain provenance of a skill's metadata.openclaw.install[] directives.
+
+    FAIL    — an install directive fetches an artifact over plaintext HTTP/FTP, or from a
+              raw IP literal or a .onion host (unverified/anonymous supply-chain source).
+    PASS    — every install fetch uses TLS to a named host.
+    UNKNOWN — no installed skills, or none declare metadata.openclaw.install[].
+    """
+    skills = getattr(ctx, "installed_skills", None)
+    if not skills:
+        return _custom(
+            "B103", HIGH, UNKNOWN,
+            "No installed skills to inspect for install-directive supply-chain risk.",
+            "Run --vet on a skill dir, or on a host with installed skills.",
+        )
+    fails: list[str] = []
+    inspected = 0
+    for name, blob in skills.items():
+        fm = _skill_frontmatter_block(blob)
+        if fm is None:
+            continue
+        install = dig(_fm_metadata_obj_multiline(fm), "openclaw.install")
+        if not install:
+            continue
+        inspected += 1
+        fails.extend(_install_entry_findings(name, install))
+    if inspected == 0:
+        return _custom(
+            "B103", HIGH, UNKNOWN,
+            "No SKILL.md metadata.openclaw.install[] directives found to inspect.",
+            "Run --vet on a skill whose SKILL.md frontmatter declares an install[] block.",
+        )
+    if fails:
+        extra = f" (+{len(fails) - 6} more)" if len(fails) > 6 else ""
+        return _custom(
+            "B103", HIGH, FAIL,
+            "Unsafe install-directive source(s): " + "; ".join(fails[:6]) + extra,
+            "An install directive that fetches over plaintext HTTP/FTP, or from a raw IP or "
+            ".onion host, is an unverified supply-chain source that can be silently swapped. "
+            "Pin the source to an HTTPS URL on a named host, or remove the directive.",
+            fails,
+        )
+    return _custom(
+        "B103", HIGH, PASS,
+        f"Inspected {inspected} skill(s) with install directives: all fetch sources use TLS "
+        "and named hosts.",
+        "Keep install fetch URLs on HTTPS + named hosts (no plaintext HTTP, raw IPs, or "
+        ".onion).",
+    )
+
+
 SKILL_CONTENT_RING = (
     check_unicode_obfuscation,  # B58 — unicode / hidden-text de-obfuscation
     check_markdown_image_exfil,  # B59 — MD-image data-exfil
@@ -13246,6 +13409,7 @@ SKILL_CONTENT_RING = (
     check_pth_persistence,  # B99 — .pth/sitecustomize auto-execution persistence (F-088)
     check_clickfix_setup_section,  # B100 — ClickFix paste-into-terminal + remote-fetch (F-090)
     check_config_trust_widening,  # B96 — config-driven trust widening, heuristic-only (F-100)
+    check_install_directive_supply_chain,  # B103 — install[] supply-chain provenance (B-099)
 )
 
 

@@ -1051,6 +1051,22 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
+### B103 - Install-directive supply-chain (plaintext/IP/onion fetch in metadata.openclaw.install[])
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain / ClawHavoc
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: Install-directive supply-chain (plaintext/IP/onion fetch in metadata.openclaw.install[])
+- Remediation:
+  - none
+
+## Advisory checks
+
 ### B91 - Dynamic-dispatch sink obfuscation (computed getattr/import_module name)
 
 - Severity: MEDIUM

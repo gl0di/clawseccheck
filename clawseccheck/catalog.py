@@ -902,6 +902,20 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # A skill's metadata.openclaw.install[] directive fetches an installer artifact over
+    # plaintext HTTP/FTP, or from a raw IP / .onion host — an unverified supply-chain source
+    # with no legitimate form in the real schema. Deterministic config-field facts (scored),
+    # zero-FP-verified against the full bundled fleet (B-099).
+    CheckMeta(
+        "B103",
+        "Install-directive supply-chain (plaintext/IP/onion fetch in metadata.openclaw.install[])",
+        HIGH,
+        "hardening",
+        "Supply Chain / ClawHavoc",
+        scored=True,
+        confidence="HIGH",
+        surface="skills",
+    ),
     # A sink reached via a COMPUTED name (getattr(os, 'sy'+'stem'), import_module(cfg['mod']))
     # rather than a literal token defeats a simple text/keyword scan. Reuses the existing
     # skillast.py AST rules (GETATTR_INDIRECTION, DYNAMIC_IMPORT_EXEC) — pure wiring, no new
@@ -1279,6 +1293,7 @@ AST_MAP = {
     "B89": ("AST01",),  # unreachable-yet-code-bearing skill = staged/dormant malicious shape (cf. B13)
     "B90": ("AST01",),  # cross-file split base64 payload = hidden malicious code / scanner evasion (cf. B13)
     "B102": ("AST01",),  # base64 split at a file-section boundary = hidden malicious code (cf. B90)
+    "B103": ("AST02",),  # install[] plaintext/IP/onion fetch = ML supply-chain compromise (cf. B13/B95)
     "B91": ("AST01",),  # dynamic-dispatch sink obfuscation = hidden malicious code / scanner evasion (cf. B89/B90)
     "B92": ("AST02",),  # unsafe deserialization sink = RCE-from-data supply-chain tamper (cf. B86)
     "B93": ("AST04",),  # confusable trigger description = insecure metadata / trigger-squat (cf. B88)
@@ -1310,6 +1325,7 @@ OWASP_MAP = {
     "B9": ("LLM07", "LLM02"),
     "B11": ("LLM02",),
     "B13": ("LLM03",),
+    "B103": ("LLM03",),  # install[] plaintext/IP/onion fetch = supply-chain (cf. B13/B95)
     "B14": ("LLM02",),
     "B15": ("LLM03",),
     "B17": ("LLM06", "LLM10"),

@@ -56,6 +56,7 @@ meta.lastTouchedVersion
 network.dangerouslyAllowPrivateNetwork
 network.egress
 openclaw.disable-model-invocation
+openclaw.install
 openclaw.install.npmSpec
 openclaw.user-invocable
 plugins.allow

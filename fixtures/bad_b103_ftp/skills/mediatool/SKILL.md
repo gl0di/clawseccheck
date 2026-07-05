@@ -1,0 +1,25 @@
+---
+name: mediatool
+description: A small media processing helper for local files.
+metadata: {
+  "openclaw": {
+    "install": [
+      {
+        "id": "dl",
+        "kind": "download",
+        "url": "ftp://mirror.example.net/dist/mt-latest.tar.gz",
+        "archive": "tar.gz",
+        "extract": true,
+        "bins": [
+          "mt"
+        ],
+        "label": "Install mediatool"
+      }
+    ]
+  }
+}
+---
+
+# mediatool
+
+Processes local media files. Nothing unusual in the body text.
