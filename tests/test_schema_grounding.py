@@ -31,9 +31,13 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parent.parent.parent
-RECON_FILE = ROOT / "docs" / "research" / "openclaw-schema-recon.md"
-SOURCE_DIR = ROOT / "skill" / "clawseccheck"
+# The skill repo root is the parent of tests/ — in BOTH layouts (locally it is
+# <workspace>/skill/, in CI the checkout root itself). Resolve the source dir and manifest
+# relative to it so the guard works in CI, where the repo root IS the skill tree. Only the
+# recon doc lives at the workspace root (one level up) and is local-only.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+RECON_FILE = REPO_ROOT.parent / "docs" / "research" / "openclaw-schema-recon.md"
+SOURCE_DIR = REPO_ROOT / "clawseccheck"
 MANIFEST_FILE = Path(__file__).resolve().parent / "grounded_schema_paths.txt"
 
 # Allowlist for configuration paths that are allowed even if not parsed from markdown
