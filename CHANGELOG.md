@@ -3,6 +3,30 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.19.1] — 2026-07-05
+
+Supply-chain hardening and a sweep of small correctness fixes. No user-facing behavior
+change — the score, grade, and machine outputs are untouched.
+
+### Security
+- CI: every GitHub Action is now pinned to a full commit SHA (with the version tag kept in a
+  trailing comment), in both the test and the publish workflows. A floating tag can be
+  re-pointed to run arbitrary code in the publish job, which holds the ClawHub token — pinning
+  removes that supply-chain exposure.
+
+### Fixed
+- Archive member names are length-capped before they reach report evidence text. Unlike a real
+  filesystem path, a zip/tar entry name is not OS-length-bounded, so a crafted multi-KB name
+  could bloat the report; the real name still drives the extraction and safety checks.
+- The offline build-age is clamped at 0, so a backward-skewed clock (or a future build date) can
+  no longer render a negative age.
+- The B79 session-posture check now samples the most recent sessions by modification time rather
+  than filename (session filenames are not guaranteed to sort in time order).
+
+### Changed
+- Added a coherence test pinning the tamper sub-grade's check-id list to the catalog, so a future
+  check-id rename fails CI instead of silently dropping an ingredient from the sub-grade.
+
 ## [3.19.0] — 2026-07-05
 
 Assurance honesty: the report now says out loud when it could only evaluate a small slice of your
