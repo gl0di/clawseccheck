@@ -280,6 +280,9 @@ def _flag_coherence_notes(args) -> list[str]:
         # If both format flags are set, --json wins and --card is silently dropped.
         if bool(getattr(args, "json", False)) and bool(getattr(args, "card", False)):
             notes.append("note: --card ignored (running --json)")
+        # --quiet only collapses --full's appended sections; alone it has nothing to do.
+        if bool(getattr(args, "quiet", False)) and not bool(getattr(args, "full", False)):
+            notes.append("note: --quiet has no effect without --full")
         return notes  # the default path honors every tracked global modifier
     win_attr, win_flag = active[0]
     ignored = [
@@ -309,6 +312,9 @@ def _flag_coherence_notes(args) -> list[str]:
     # early-returning modes (menu/vet/live-test family) truly ignore it.
     if bool(getattr(args, "full", False)) and "full" not in honored:
         no_effect.append("--full")
+    # --quiet is a --full modifier; a winning primary mode drops --full, so --quiet too.
+    if bool(getattr(args, "quiet", False)) and "full" not in honored:
+        no_effect.append("--quiet")
     if getattr(args, "attest", None) is not None and win_attr not in _ATTEST_CONSUMERS:
         no_effect.append("--attest")
     # --trend / --monitor record a score-history point as part of their job, so
@@ -451,6 +457,10 @@ def _main(argv=None) -> int:
                    help="run audit + self-test + vet-mcp in one command "
                         "(human output path; self-test emits deterministic test material only, "
                         "does not attack; extra sections skipped in --json / --card mode)")
+    p.add_argument("--quiet", action="store_true",
+                   help="only with --full: collapse the appended self-test and vet-mcp "
+                        "sections to one-line summaries (lighter for CI logs / scroll); the "
+                        "full detail stays available via --self-test / --vet-mcp")
     p.add_argument("--ask", action="store_true",
                    help="emit an attestation template (JSON) for the agent to self-report "
                         "facts the config can't show; fill it, then pass --attest")
@@ -925,42 +935,73 @@ def _main(argv=None) -> int:
 
     vm_has_fail = False
     if args.full and not args.json and not args.card:
-        # --- Self-test section (canary + red-team + dry-run) ---
         seed = args.seed if args.seed is not None else secrets.token_hex(8)
-        _emit("")
-        _emit("=" * 60)
-        _emit("CLAWSECCHECK SELF-TEST")
-        _emit("=" * 60)
-        _emit(render_canary(make_canary(), ascii_only))
-        _emit("")
-        _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
-        _emit("")
-        _emit(render_dryrun(make_scenarios(), ascii_only))
-        _emit("")
-        _emit(render_multiturn(make_multiturn(), ascii_only))
-        record_run("self_test")
-        # --- vet-mcp section ---
-        _emit("")
-        _emit("=" * 60)
-        _emit("CLAWSECCHECK VET-MCP")
-        _emit("=" * 60)
-        vm_findings = vet_mcp(target=None, home=args.home)
-        if len(vm_findings) == 1 and vm_findings[0].status == "UNKNOWN":
-            vmf = vm_findings[0]
-            vm_icon = "[?]" if ascii_only else "❔"
-            _emit(f"{vm_icon} {vmf.detail}")
-        else:
+        if args.quiet:
+            # C-110: --full --quiet — the appended self-test material + per-server
+            # vet-mcp detail are what push --full to ~490 lines; collapse each to a
+            # single honest summary line (the concise report above is unchanged).
+            # The self-test harnesses emit generated adversarial *scenarios* for the
+            # agent to run — there is no PASS/score the tool computes, so the summary
+            # states counts, not a verdict (Golden Rule #4: no fabricated result).
+            # record_run() / vm_has_fail still fire, so ledger freshness and
+            # --exit-code behave identically to the verbose path.
+            n_rt = len(make_suite(seed))
+            n_dr = len(make_scenarios())
+            n_mt = len(make_multiturn())
+            _emit("")
+            _emit(f"SELF-TEST: 1 canary + {n_rt} red-team + {n_dr} dry-run + {n_mt} multi-turn "
+                  "injection scenario(s) generated — run them against your agent "
+                  "(RESISTANT = good). Full harness: --self-test.")
+            record_run("self_test")
+            vm_findings = vet_mcp(target=None, home=args.home)
             vm_has_fail = any(vmf.status == "FAIL" for vmf in vm_findings)
-            for vmf in vm_findings:
-                vm_icon = _VET_ICON_ASCII[vmf.status] if ascii_only else _VET_ICON_UNI[vmf.status]
-                vm_verdict = _VET_VERDICT[vmf.status]
-                _emit(f"{vm_icon} {vm_verdict}: {_sanitize(vmf.title)}")
-                if vmf.evidence:
-                    for vm_ev in vmf.evidence[:4]:
-                        _emit(f"    - {_sanitize(vm_ev)}")
-                _emit(f"    fix: {_sanitize(vmf.fix)}")
-                _emit("")
-        record_run("vet_mcp")
+            if len(vm_findings) == 1 and vm_findings[0].status == "UNKNOWN":
+                _emit(f"VET-MCP: {_sanitize(vm_findings[0].detail)}")
+            else:
+                _vc = {st: sum(1 for v in vm_findings if v.status == st)
+                       for st in ("FAIL", "WARN", "PASS", "UNKNOWN")}
+                _summary = (f"VET-MCP: {len(vm_findings)} server-check(s) — "
+                            f"{_vc['FAIL']} FAIL, {_vc['WARN']} WARN, {_vc['PASS']} PASS")
+                if _vc["UNKNOWN"]:
+                    _summary += f", {_vc['UNKNOWN']} UNKNOWN"
+                _emit(_summary + ". Full detail: --vet-mcp.")
+            record_run("vet_mcp")
+        else:
+            # --- Self-test section (canary + red-team + dry-run) ---
+            _emit("")
+            _emit("=" * 60)
+            _emit("CLAWSECCHECK SELF-TEST")
+            _emit("=" * 60)
+            _emit(render_canary(make_canary(), ascii_only))
+            _emit("")
+            _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
+            _emit("")
+            _emit(render_dryrun(make_scenarios(), ascii_only))
+            _emit("")
+            _emit(render_multiturn(make_multiturn(), ascii_only))
+            record_run("self_test")
+            # --- vet-mcp section ---
+            _emit("")
+            _emit("=" * 60)
+            _emit("CLAWSECCHECK VET-MCP")
+            _emit("=" * 60)
+            vm_findings = vet_mcp(target=None, home=args.home)
+            if len(vm_findings) == 1 and vm_findings[0].status == "UNKNOWN":
+                vmf = vm_findings[0]
+                vm_icon = "[?]" if ascii_only else "❔"
+                _emit(f"{vm_icon} {vmf.detail}")
+            else:
+                vm_has_fail = any(vmf.status == "FAIL" for vmf in vm_findings)
+                for vmf in vm_findings:
+                    vm_icon = _VET_ICON_ASCII[vmf.status] if ascii_only else _VET_ICON_UNI[vmf.status]
+                    vm_verdict = _VET_VERDICT[vmf.status]
+                    _emit(f"{vm_icon} {vm_verdict}: {_sanitize(vmf.title)}")
+                    if vmf.evidence:
+                        for vm_ev in vmf.evidence[:4]:
+                            _emit(f"    - {_sanitize(vm_ev)}")
+                    _emit(f"    fix: {_sanitize(vmf.fix)}")
+                    _emit("")
+            record_run("vet_mcp")
 
     _save_failed = False
     if args.save:

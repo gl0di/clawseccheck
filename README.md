@@ -601,6 +601,7 @@ preserving backward compatibility.
 | Vet connected MCP servers | `clawseccheck --vet-mcp` |
 | Reputation gate before download | `clawseccheck --vet-source clawhub:some-skill` |
 | Active injection self-test | `clawseccheck --canary` · `clawseccheck --redteam` · `clawseccheck --dryrun` |
+| All-in-one (audit + self-test + vet-mcp) | `clawseccheck --full` · add `--quiet` to collapse the appended sections to one-line summaries (lighter for CI logs) |
 | Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
 | Attestation template / feed it back | `clawseccheck --ask` · `clawseccheck --attest attest.json` |
 | Shareable card / SVG badge | `clawseccheck --card` · `clawseccheck --badge badge.svg` |
