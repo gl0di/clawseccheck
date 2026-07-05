@@ -2960,6 +2960,10 @@ def _decoded_payloads(blob: str) -> list[str]:
     """
     hits = []
     seen: set[str] = set()
+    # B-093: a security/educational skill whose whole text is defensive documentation
+    # (## Known Risks + negation) may embed an encoded attack sample — do not let the B63
+    # silent-instruction arm FAIL it (matches B58's base_defensive dampening; C-135).
+    container_defensive = _whole_text_is_defensive(normalize_for_scan(blob))
 
     def _check(decoded: str) -> None:
         # NFKC-fold so a fullwidth / homoglyph variant inside the payload
@@ -2970,6 +2974,14 @@ def _decoded_payloads(blob: str) -> list[str]:
             return
         seen.add(key)
         if len(norm) >= 6 and _DECODED_BAD_RE.search(norm):
+            hits.append(norm.strip().replace("\n", " ")[:80])
+            return
+        # B-093: _DECODED_BAD_RE only catches shell/download payloads. A base64 blob can
+        # also decode to a silent-instruction directive (read-then-exfil + "don't include
+        # this in your summary") that no shell keyword covers. Route decoded text through
+        # B63's decode-aware actionable check so the encoded soft-exfil surfaces instead of
+        # passing as an inert blob — unless the container is defensive documentation.
+        if len(norm) >= 6 and not container_defensive and _b63_decoded_actionable(norm):
             hits.append(norm.strip().replace("\n", " ")[:80])
 
     def _scan(source: str) -> None:
@@ -9664,6 +9676,46 @@ def _b63_scan(text: str, fence_ranges: list[tuple[int, int]]) -> list[tuple[str,
     return hits
 
 
+# B-093: output-level action-hiding directives ("do not include/list/note this step in
+# your summary/reply"). Deliberately NOT part of the plaintext Signal-A list: in the
+# clear this phrasing is ambiguous with benign output-verbosity control ("read the
+# CHANGELOG, don't list it in your summary — it's too long"), which the C-135 pass showed
+# FAILs wrongly. It is trusted as FAIL ONLY through the base64/hidden decode paths
+# (_b63_decoded_actionable), where the encoding itself is the evasion signal — a benign
+# skill controls verbosity in plaintext, it does not base64-wrap the instruction.
+_B63_DECODED_SUPPRESS_RE = re.compile(
+    normalize_for_scan(
+        r"(?:do(?:n'?t|\s+not))\s+(?:include|list|note|surface|report|log|mention)\s+"
+        r"(?:th(?:is|at)|it)(?:\s+step|\s+action)?\s+in\s+(?:your|the)\s+"
+        r"(?:summary|reply|response|answer|output|report)"
+    ),
+    re.IGNORECASE,
+)
+
+
+def _b63_decoded_actionable(text: str) -> bool:
+    """True when DECODED (base64/hidden-segment) content carries an actionable
+    silent-instruction directive — used by B58/B13 to escalate an encoded payload.
+
+    Two sources: (a) the plaintext-grade lexical Signal-A + action hits from _b63_scan
+    (so a base64-hidden "silently exfiltrate … curl" still fires); (b) the decode-only
+    action-hiding family (_B63_DECODED_SUPPRESS_RE) co-located with an action verb, which
+    is trusted as FAIL only here because the encoding is the evasion signal. Semantic
+    WARN-tier hits (has_action=False) never escalate. Fence/negation dampening applies.
+    """
+    fr = _fence_ranges(text)
+    if any(has_action for _, has_action in _b63_scan(text, fr)):
+        return True
+    for m in _B63_DECODED_SUPPRESS_RE.finditer(text):
+        if _defensive_context(text, m.start(), fr):
+            continue
+        lo = max(0, m.start() - _B63_WINDOW)
+        hi = min(len(text), m.end() + _B63_WINDOW)
+        if _B63_ACTION_RE.search(text[lo:hi]):
+            return True
+    return False
+
+
 def check_silent_instruction(ctx: Context) -> Finding:
     """B63 — Silent-instruction detector (C-075).
 
@@ -10345,6 +10397,25 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                     )
                     hidden = True
                     break
+            # B-093: INJECTION_PATTERNS misses the exfil-staging + disclosure-suppression
+            # family that B63 catches. Route DECODED content (variant != norm; the
+            # plaintext is B63's own check's job) through _b63_scan and escalate only on an
+            # actionable (FAIL-tier) hit — a semantic WARN-tier hit must not become a FAIL
+            # just because it was base64-wrapped. Respect base_defensive the same way the
+            # INJECTION arm respects it for the norm variant: a security/educational skill
+            # whose whole text reads as defensive documentation (## Known Risks + negation)
+            # may legitimately embed an encoded attack sample, so it must not FAIL (C-135).
+            if (
+                not hidden
+                and variant != norm
+                and not base_defensive
+                and _b63_decoded_actionable(variant)
+            ):
+                fail_ev.append(
+                    f"{source_name}: obfuscation hides silent-instruction directive "
+                    f"({signals})"
+                )
+                hidden = True
             if hidden:
                 break
 
