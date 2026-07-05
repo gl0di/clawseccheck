@@ -993,6 +993,7 @@ def _finding_to_dict(f: Finding) -> dict:
             "fix": _sanitize(f.fix), "framework": f.framework,
             "confidence": getattr(f, "confidence", "HIGH"),
             "pass_confidence": getattr(f, "pass_confidence", None),
+            "scored": bool(getattr(f, "scored", True)),
             "suppressed": bool(getattr(f, "suppressed", False)),
             "owasp": list(owasp_for(f.id)),
             "ast": list(ast_for(f.id)),
@@ -1370,6 +1371,8 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         "grade": score.grade,
         "capped": score.capped,
         "raw_score": score.raw_score,
+        "cap_severity": score.cap_severity,
+        "assessable": bool(score.assessable),
         "trifecta": _trifecta_ratio(findings),
         "findings": [
             _finding_dict_json(f)

@@ -26,6 +26,8 @@ versioning §6 in `CLAUDE.md`).
 | `grade` | `str` | yes | Letter grade: `"A"`, `"B"`, `"C"`, `"D"`, `"E"`, or `"F"`. |
 | `capped` | `bool` | yes | `true` if the score was capped below `raw_score` (e.g. Lethal Trifecta triggered). |
 | `raw_score` | `int` | yes | Score before any cap is applied. Equals `score` when `capped` is `false`. |
+| `cap_severity` | `str \| null` | yes | Severity that drove the score cap (`"CRITICAL"`, `"HIGH"`, …), or `null` when nothing capped the score. When `capped` is `true` this names *why*; `null` is the norm when `capped` is `false`. |
+| `assessable` | `bool` | yes | `false` for the distinct "N/A / nothing scorable" state (empty / all-UNKNOWN / all-advisory config) — lets a consumer tell a real `F` apart from a not-assessable `"N/A"` config. `true` for every normal audit. |
 | `trifecta` | `str` | yes | Lethal Trifecta sub-score expressed as `"<n>/3"` (e.g. `"2/3"`). `"?/3"` means check A1 did not run. |
 | `findings` | `array[Finding]` | yes | All check results. See §2. |
 | `next_actions` | `array[NextAction]` | yes | Prioritised remediation suggestions. See §3. |
@@ -45,6 +47,8 @@ versioning §6 in `CLAUDE.md`).
   "grade": "C",
   "capped": false,
   "raw_score": 74,
+  "cap_severity": null,
+  "assessable": true,
   "trifecta": "1/3",
   "findings": [ ... ],
   "next_actions": [ ... ],
@@ -75,6 +79,7 @@ Shared by `--json`, `--json` with `--risk`, and `--vet` mode.
 | `framework` | `str` | Threat-framework reference, e.g. `"OWASP LLM01"`. |
 | `confidence` | `str` | `"HIGH"`, `"MEDIUM"`, or `"LOW"`. |
 | `pass_confidence` | `str \| null` | For PASS findings only: `"verified"` (evidence-based pass), `"no_signal"` (check found nothing but couldn't confirm safety), or `null` (FAIL/WARN/UNKNOWN — not applicable). |
+| `scored` | `bool` | `false` for advisory findings excluded from the weighted score (they still appear in the report but don't move the grade); `true` for findings that count toward the score. Lets a JSON consumer reproduce the human report's "N to fix vs M warn" arithmetic, which excludes advisory items. |
 | `suppressed` | `bool` | `true` if the finding was suppressed by the user's baseline. |
 | `owasp` | `array[str]` | OWASP LLM Top 10 codes that apply, e.g. `["LLM01", "LLM02"]`. May be empty. |
 | `ast` | `array[str]` | OWASP Agentic Skills Top 10 (2026) codes that apply, e.g. `["AST03", "AST05"]`. May be empty. Additive metadata only — no scoring or verdict impact. |
