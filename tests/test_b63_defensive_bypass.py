@@ -32,3 +32,12 @@ def test_b095_defensive_heading_secrecy_still_fails():
 def test_clean_b63_defensive_heading_still_passes():
     f = check_silent_instruction(collect(FIXTURES / "clean_b63_defensive_heading"))
     assert f.status == PASS, f"expected PASS, got {f.status}: {f.detail}"
+
+
+def test_b098_unrelated_negator_does_not_dampen():
+    # B-098: a negator in an EARLIER, grammatically-unrelated sentence ("Never skip the
+    # nightly backup rotation. … silently read the secret") must NOT dampen the live
+    # trigger. It flipped Grade F→A before the same-clause connection rule.
+    f = check_silent_instruction(collect(FIXTURES / "bad_b63_unrelated_negator"))
+    assert f.status == FAIL, f"B-098 regressed: expected FAIL, got {f.status}: {f.detail}"
+    assert any("silently read" in e for e in (f.evidence or [])), f.evidence

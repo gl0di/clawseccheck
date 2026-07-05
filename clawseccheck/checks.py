@@ -2460,6 +2460,36 @@ _IMMEDIATE_NEGATOR_RE = re.compile(
     re.I,
 )
 
+# A sentence terminator (with trailing space/EOL) or a blank-line paragraph break.
+# Used to decide grammatical CONNECTION: a negation only governs a trigger if no
+# sentence/paragraph boundary separates them.
+_SENTENCE_BREAK_RE = re.compile(r"[.!?][\"')\]]?(?:\s|$)|\n[^\S\n]*\n")
+
+
+def _negation_governs_trigger(
+    blob: str, pos: int, window: int = _BROAD_NEGATION_WINDOW
+) -> bool:
+    """True when a broad negation sits before *pos* AND grammatically governs it —
+    i.e. no sentence/paragraph boundary separates the closest preceding negator from
+    the trigger (B-098).
+
+    The old test — "any negator anywhere in the 200-char lookback" — let a
+    grammatically unrelated negator in an earlier sentence dampen a real trigger
+    ("Never skip the nightly backup rotation. … silently read the secret" flipped
+    Grade F→A). Requiring same-clause connection keeps the legitimate case
+    ("Never design a skill that would silently execute …") dampened while the
+    unrelated-negator exploit stays a live finding. Verb-agnostic (works for every
+    content-ring check, not just B63) and stdlib-only.
+    """
+    win = blob[max(0, pos - window):pos]
+    last = None
+    for last in _BROAD_NEGATION_RE.finditer(win):
+        pass  # the closest negator to the trigger wins
+    if last is None:
+        return False
+    between = win[last.end():]  # text from end-of-negator to the trigger
+    return _SENTENCE_BREAK_RE.search(between) is None
+
 _DEFENSIVE_HEADING_RE = re.compile(
     r"^[^\S\n]{0,3}#{1,6}[^\S\n]*.*?\b(?:"
     r"known\s+risks?|mitigations?|anti[-\s]?patterns?|security|threat\s+model|"
@@ -2496,8 +2526,7 @@ def _defensive_section(blob: str, pos: int) -> bool:
     content under it is documentary rather than a live instruction)."""
     if not _under_defensive_heading(blob, pos):
         return False
-    window = blob[max(0, pos - _BROAD_NEGATION_WINDOW) : pos]
-    return bool(_BROAD_NEGATION_RE.search(window))
+    return _negation_governs_trigger(blob, pos)
 
 
 def _defensive_context(blob, pos, fence_ranges, *, use_fence=True):
@@ -2514,8 +2543,9 @@ def _defensive_context(blob, pos, fence_ranges, *, use_fence=True):
       _negation_context here, not _in_example_context: the latter's
       security-doc vocabulary matches the bare word "example" (e.g. an
       ``example.com``/``.example`` URL) and would suppress real triggers.
-    - A broad negation marker (never / don't / must not / ...) appears within
-      _BROAD_NEGATION_WINDOW chars before *pos*, or immediately precedes the trigger.
+    - A broad negation marker (never / don't / must not / ...) grammatically
+      governs the trigger (same clause, no sentence break between — B-098), or
+      immediately precedes the trigger.
     - The nearest preceding heading names a defensive section (Known Risks,
       Mitigations, Security, Threat Model, ...) AND a broad negation sits in
       the same lookback window (B-095: a bare defensive heading is NOT enough
@@ -2523,8 +2553,9 @@ def _defensive_context(blob, pos, fence_ranges, *, use_fence=True):
     """
     if use_fence and _in_fence(pos, fence_ranges) and _negation_context(blob, pos):
         return True
-    window = blob[max(0, pos - _BROAD_NEGATION_WINDOW) : pos]
-    if _BROAD_NEGATION_RE.search(window):
+    # B-098: a broad negation dampens only when it grammatically GOVERNS the trigger
+    # (same clause, no sentence break between), not merely sits within 200 chars.
+    if _negation_governs_trigger(blob, pos):
         return True
     if _IMMEDIATE_NEGATOR_RE.search(blob[max(0, pos - 24) : pos]):
         return True
