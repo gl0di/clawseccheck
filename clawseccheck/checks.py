@@ -12831,6 +12831,84 @@ def check_dependency_confusion(ctx: Context) -> Finding:
     )
 
 
+def check_cross_skill_combined_effect(ctx: Context) -> Finding:
+    """B105 (B-096, L1-6) — cross-skill combined-effect correlation.
+
+    Per-skill vetting (--vet / --vet-all) assesses each skill in ISOLATION, so it
+    cannot see a silent-exfil pattern SPLIT across two co-installed skills: one skill
+    carries user-directed secrecy framing with no action of its own (a bare B63
+    Signal-B WARN), while a DIFFERENT co-installed skill independently reads a
+    credential-shaped value AND has a network/exfil sink (Signal A) but no secrecy
+    framing, so it vets clean on B63. Neither reaches FAIL alone, yet an agent with
+    BOTH loaded holds both halves of the pattern in one context window.
+
+    Runs ONLY at full-audit scope (all skills in ctx.installed_skills at once); it is
+    deliberately NOT in SKILL_CONTENT_RING, which runs per-skill with a single-entry
+    context where this correlation is structurally impossible.
+
+    Pure correlation over two existing per-skill detectors (_b63_scan for Signal B,
+    _has_cred_exfil_cross_skill for Signal A) — no new fuzzy logic. Advisory
+    (scored=False); WARN-only, never FAIL. The exfil class requires a NETWORK/remote
+    sink (via _EXFIL_RE, not a local log/report sink) — that discriminator keeps a
+    benign "read a cred to authenticate, write to a local report" DevOps skill out of
+    the correlation (C-135).
+    """
+    skills = getattr(ctx, "installed_skills", None)
+    if not skills:
+        return _custom(
+            "B105",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to correlate for cross-skill combined effects.",
+            "Run a full audit on a host with two or more installed skills.",
+        )
+
+    secrecy_only: list[str] = []      # bare Signal B: secrecy framing, no co-located action
+    cred_exfil_clean: list[str] = []  # Signal A: cred-read + network sink, and B63-clean
+    for name, blob in skills.items():
+        norm = normalize_for_scan(blob)
+        hits = _b63_scan(norm, _fence_ranges(norm))
+        if hits:
+            # Class (1): has secrecy framing but NO co-located action in ANY hit. A skill
+            # WITH a co-located action is B63's own FAIL/WARN — not our correlation target.
+            if not any(has_action for _snip, has_action in hits):
+                secrecy_only.append(name)
+        elif _has_cred_exfil_cross_skill(blob):
+            # Class (2): cred-read + remote/exfil sink, and B63 saw nothing (vets clean).
+            cred_exfil_clean.append(name)
+
+    pairs: list[str] = []
+    for s1 in secrecy_only:
+        for s2 in cred_exfil_clean:
+            if s1 == s2:  # mutually exclusive by construction, but never self-pair
+                continue
+            pairs.append(f"'{s1}' (secrecy-only) + '{s2}' (cred-read + exfil-sink)")
+
+    if not pairs:
+        return _custom(
+            "B105",
+            MEDIUM,
+            PASS,
+            "No co-installed skill pair splits a silent-exfil pattern (secrecy framing in "
+            "one skill, credential-read + network sink in another).",
+            "Keep disclosure-suppression language and credential-exfil capability out of "
+            "co-installed skills.",
+        )
+    extra = f" (+{len(pairs) - 6} more)" if len(pairs) > 6 else ""
+    return _custom(
+        "B105",
+        MEDIUM,
+        WARN,
+        "Cross-skill combined-effect risk (co-installed): " + "; ".join(pairs[:6]) + extra
+        + ". Neither skill is dangerous alone, but together they hold both halves of a "
+        "silent-exfil pattern that per-skill vetting cannot see. Review each pair together.",
+        "Confirm you intend both skills installed together. Remove the hide-from-user "
+        "language from the secrecy skill, or the network sink from the credential-reading "
+        "skill. Advisory correlation (not scored) — it flags a combination --vet cannot see.",
+        pairs,
+    )
+
+
 # B97 (F-104, L1-7): a per-turn event-hook file (hooks/openclaw/*.mjs) is a REAL, documented
 # OpenClaw tool-registration mechanism (confirmed against a real installed skill's own
 # hooks/openclaw/HOOK.md) — not a hidden backdoor convention. It fires on EVERY turn though,
@@ -13404,6 +13482,7 @@ SKILL_CONTENT_RING = (
     check_trigger_homoglyph,  # B93 — confusable characters in trigger description (F-103)
     check_lifecycle_hooks_extended,  # B94 — extended lifecycle hooks beyond postinstall (F-099)
     check_dependency_confusion,  # B95 — unpinned dep name resembling a well-known package (F-101)
+    check_cross_skill_combined_effect,  # B105 — cross-skill Signal-A/Signal-B combined effect (B-096)
     check_event_hook_interceptor,  # B97 — per-turn event-hook interceptor in a skill (F-104)
     check_manifest_absent,  # B98 — undeclared privilege: risky effects, no tools manifest
     check_pth_persistence,  # B99 — .pth/sitecustomize auto-execution persistence (F-088)

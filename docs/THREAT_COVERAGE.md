@@ -65,7 +65,7 @@ OWASP Agentic (ASI) classes below, not stretched into a category they don't fit.
 | LLM03 | Supply Chain | B5, B13, B15, B24, B25, B33, B42, B57, B103, C4, C5, C047 |
 | LLM04 | Data and Model Poisoning | B7, B20, B22, B55 |
 | LLM05 | Improper Output Handling | B21, B47 |
-| LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B62, B63, B65, B66, B68, B69, B71, B72, B76, B79 |
+| LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B62, B63, B65, B66, B68, B69, B71, B72, B76, B79, B105 |
 | LLM07 | System Prompt Leakage | B9 |
 | LLM08 | Vector and Embedding Weaknesses | — (no agent-config surface; RAG/embedding concern) |
 | LLM09 | Misinformation | — (model output / overreliance; out of scope) |
@@ -90,7 +90,7 @@ finding in `--json` (`"ast": [...]`).
 | AST02 | Supply Chain Compromise | B5, B13, B15, B24, B25, B42, B57, B103, C5, C047 |
 | AST03 | Over-Privileged Skills | B3, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B68, B69, B71, B72, B75, B76, B79 |
 | AST04 | Insecure Metadata | B6, B44, B62 |
-| AST05 | Untrusted External Instructions | B6, B7, B20, B21, B23, B26, B30, B58, B59, B60, B61, B63, B64, B65, B66, B67, B74, C074 |
+| AST05 | Untrusted External Instructions | B6, B7, B20, B21, B23, B26, B30, B58, B59, B60, B61, B63, B64, B65, B66, B67, B74, B105, C074 |
 | AST06 | Weak Isolation | B4, B22, B38, B39, B48, B70, B73, C032 |
 | AST07 | Update Drift | B25, B33, C4, C6 |
 | AST08 | Poor Scanning | B16 |

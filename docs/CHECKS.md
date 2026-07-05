@@ -1139,6 +1139,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B105 - Cross-skill combined effect (secrecy framing + credential exfil split across skills)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Human Oversight / Transparency
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: LLM06 Excessive Agency
+- What it checks: Cross-skill combined effect (secrecy framing + credential exfil split across skills)
+- Remediation:
+  - none
+
 ### B97 - Per-turn event-hook file shipped in a skill (hooks/openclaw/*)
 
 - Severity: HIGH

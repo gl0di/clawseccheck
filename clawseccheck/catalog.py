@@ -1003,6 +1003,21 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B105 (B-096): cross-skill combined effect — one co-installed skill supplies secrecy
+    # framing (bare B63 Signal-B), a DIFFERENT one supplies credential-read + network exfil
+    # (Signal A); neither reaches FAIL alone but together they form a silent-exfil pattern
+    # per-skill vetting cannot see. Full-audit scope only. Pure correlation, WARN-only,
+    # advisory (scored=False) — remote-sink discriminator keeps benign cred→local-log out.
+    CheckMeta(
+        "B105",
+        "Cross-skill combined effect (secrecy framing + credential exfil split across skills)",
+        MEDIUM,
+        "advisory",
+        "Human Oversight / Transparency",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # A skill that ships hooks/openclaw/*.mjs installs a PER-TURN event handler — a real,
     # documented OpenClaw tool-registration mechanism, not a hidden backdoor, but it fires on
     # EVERY turn (persistent point of review), distinct from B42's install-time hook scan
@@ -1313,6 +1328,7 @@ AST_MAP = {
     "B93": ("AST04",),  # confusable trigger description = insecure metadata / trigger-squat (cf. B88)
     "B94": ("AST02",),  # extended lifecycle hooks = supply-chain tamper on install/version/publish (cf. B42)
     "B95": ("AST02",),  # dependency confusion (unpinned + typosquat name) = supply-chain tamper (cf. B13)
+    "B105": ("AST05",),  # cross-skill combined effect = excessive agency across co-installed skills
     "B97": ("AST09",),  # per-turn event-hook file = persistent review/audit surface (cf. B77/B85)
     "B96": ("AST04",),  # config-driven trust widening (heuristic) = insecure metadata (cf. B62/B88)
     "B98": ("AST04",),  # missing capability declaration = insecure/absent least-privilege metadata (cf. B62/B88/B96)
@@ -1377,6 +1393,7 @@ OWASP_MAP = {
     # undermines human oversight. NOT LLM09 "Misinformation" (a model-output/RAG concern
     # the agent config can't see; LLM09 is out of scope per docs/THREAT_COVERAGE.md).
     "B63": ("LLM06",),
+    "B105": ("LLM06",),  # combined-effect disclosure suppression (cross-skill) — cf. B63
     # B65: conditional/sleeper trigger instructions — hidden conditional malware-like
     # behavior under a user-query gate (Excessive Agency, not Misinformation).
     "B65": ("LLM06",),
