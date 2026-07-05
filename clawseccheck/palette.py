@@ -61,6 +61,9 @@ _PALETTE: tuple[PaletteCategory, ...] = (
         PaletteEntry("Incident evidence pack", 'incident pack', "--incident",
                      "findings + hashes + rotation list — a preservation aid, "
                      "never rotates or deletes anything"),
+        PaletteEntry("Trajectory analysis", 'analyze trajectory', "--analyze-trajectory",
+                     "post-hoc: did a skill's instruction get acted on at runtime? "
+                     "correlates skill indicators against tool.call args"),
     )),
     PaletteCategory("Live tests", LIVE, (
         PaletteEntry("Canary", 'canary', "--canary",

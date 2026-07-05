@@ -58,6 +58,7 @@ from .percentile import render_percentile
 from .logsafe import get_logger
 from .safeio import secure_write_text
 from .incident import render_incident
+from .trajaudit import render_trajectory_analysis
 from .sbom import render_sbom
 
 
@@ -240,6 +241,7 @@ _PRIMARY_MODES = [
     ("dashboard", "--dashboard", "bool"),
     ("sbom", "--sbom", "bool"),
     ("incident", "--incident", "bool"),
+    ("analyze_trajectory", "--analyze-trajectory", "opt"),
     ("dashboard_findings", "--dashboard-findings", "bool"),
     ("monitor", "--monitor", "bool"),
 ]
@@ -420,6 +422,14 @@ def _main(argv=None) -> int:
                         "snapshot, skill/MCP hashes (--sbom), trajectory-sidecar hashes, the "
                         "credential rotation list, and monitor event history — never rotates "
                         "or deletes anything itself")
+    p.add_argument("--analyze-trajectory", nargs="?", const="", default=None, metavar="PATH",
+                   dest="analyze_trajectory",
+                   help="post-hoc incident analysis: correlate installed skills' credential / "
+                        "exfil / secret-path indicators against tool.call arguments in OpenClaw "
+                        "trajectory sidecars (agents/*/sessions/*.trajectory.jsonl) to see if a "
+                        "skill's instruction was actually acted on at runtime. Read-only; reads "
+                        "data.arguments only in memory to test known indicators, never echoes "
+                        "raw args. Optional PATH to one .trajectory.jsonl; default scans the home")
     p.add_argument("--emit-manifest", action="store_true", dest="emit_manifest",
                    help="print a proposed permission manifest (YAML-shaped) derived from "
                         "static effect analysis; use with --vet/--vet-skill on a single skill")
@@ -850,6 +860,11 @@ def _main(argv=None) -> int:
 
     if args.incident:
         _emit(render_incident(ctx, findings, score))
+        return 0
+
+    if args.analyze_trajectory is not None:
+        _emit(render_trajectory_analysis(
+            ctx, explicit_path=args.analyze_trajectory or None, ascii_only=ascii_only))
         return 0
 
     if args.monitor:

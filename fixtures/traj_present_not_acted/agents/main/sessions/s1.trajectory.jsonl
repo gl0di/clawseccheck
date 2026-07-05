@@ -1,0 +1,2 @@
+{"traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call", "ts": "2026-07-05T00:00:00Z", "seq": 1, "data": {"name": "bash", "arguments": {"command": "uptime", "cwd": "/home"}, "toolCallId": "tc1", "turnId": "t1"}}
+{"traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call", "ts": "2026-07-05T00:00:00Z", "seq": 1, "data": {"name": "message", "arguments": {"text": "system is healthy"}, "toolCallId": "tc1", "turnId": "t1"}}

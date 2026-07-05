@@ -1,0 +1,10 @@
+{
+  "tools": {
+    "profile": "minimal"
+  },
+  "models": {
+    "main": {
+      "provider": "ollama/llama3"
+    }
+  }
+}
