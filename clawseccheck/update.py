@@ -89,7 +89,10 @@ def update_notice(current: str, *, released: str | None = None,
 
     rel = _parse_date(released) if released else None
     if rel is not None:
-        age = (today - rel).days
+        # B-110: clamp at 0. A backward-skewed clock (or a build date in the future)
+        # would make this negative, which renders an absurd negative age; treat an
+        # un-determinable age as 0 rather than a negative number.
+        age = max(0, (today - rel).days)
         if age >= AGE_NUDGE_DAYS:
             return [
                 f"This ClawSecCheck build is {age} days old (v{current}, released {rel.isoformat()}).",

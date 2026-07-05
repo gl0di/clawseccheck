@@ -91,6 +91,32 @@ def test_b79_pass_non_main_agent_safe(tmp_path):
     assert f.status == PASS, f"expected PASS, got {f.status}: {f.detail}"
 
 
+def test_b79_samples_recent_sessions_by_mtime_not_filename(tmp_path):
+    """B-109: the 5 'recent' sessions must be the mtime-newest, not the lexicographically
+    last. Here the newest-by-mtime files ('aaa_*', all 'never') sort BEFORE the safe files
+    ('zzz_*') by name — a filename sort would sample the safe ones and wrongly PASS."""
+    import os
+
+    sessions = tmp_path / "agents" / "analyst" / "agent" / "codex-home" / "sessions"
+    # 6 safe sessions, lexicographically LAST, but OLDEST by mtime.
+    for i in range(6):
+        _write_session(sessions, f"zzz_{i}.jsonl", [_safe_turn(f"s{i}")])
+    # 5 dangerous ('never') sessions, lexicographically FIRST, but NEWEST by mtime.
+    for i in range(5):
+        _write_session(sessions, f"aaa_{i}.jsonl", [_never_turn(f"n{i}")])
+
+    base = 1_000_000_000.0
+    for i in range(6):
+        os.utime(sessions / f"zzz_{i}.jsonl", (base + i, base + i))          # older
+    for i in range(5):
+        os.utime(sessions / f"aaa_{i}.jsonl", (base + 100_000 + i, base + 100_000 + i))  # newer
+
+    f = check_session_approval_policy(_ctx(tmp_path))
+    # mtime sampling picks the 5 'never' files -> dangerous posture (WARN).
+    # A filename sort would have picked 'zzz_*' (safe) and PASSed — the regression guard.
+    assert f.status == WARN, f"expected WARN from mtime-newest 'never' sessions, got {f.status}: {f.detail}"
+
+
 def test_b79_unknown_empty_agents_dir(tmp_path):
     """B79 must stay UNKNOWN when the agents dir exists but contains no session files."""
     (tmp_path / "agents").mkdir()

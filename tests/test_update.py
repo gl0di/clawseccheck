@@ -192,3 +192,25 @@ def test_cli_json_is_exempt_from_notice(tmp_path, monkeypatch, capsys):
     main(["--home", str(FIXTURES / "home_safe"), "--no-native", "--no-host", "--no-history",
           "--json"])
     assert "newer ClawSecCheck" not in capsys.readouterr().out
+
+
+def test_b110_future_release_date_clamps_age_no_negative(tmp_path):
+    """B-110: a build 'released' date in the future (backward clock skew) must not produce
+    a negative age. The age is clamped at 0, so the nudge stays silent and no absurd
+    negative-age line is ever emitted."""
+    missing = str(tmp_path / "no-hint.json")  # hint branch must not fire
+    # today is BEFORE the release date -> raw (today - rel).days is negative.
+    lines = update_notice("3.19.0", released="2030-01-01",
+                          today=date(2026, 7, 5), latest_path=missing)
+    assert lines == [], f"expected no advisory for a future-dated build, got {lines}"
+    # Defensive: even if a line were emitted, it must never carry a negative day count.
+    assert not any("-" in ln and "days old" in ln for ln in lines)
+
+
+def test_b110_old_build_still_nudges(tmp_path):
+    """B-110 regression guard: clamping must not suppress a genuinely-old build's nudge."""
+    missing = str(tmp_path / "no-hint.json")
+    old = date(2026, 7, 5).replace(year=2025)  # ~1 year old > AGE_NUDGE_DAYS
+    lines = update_notice("3.19.0", released=old.isoformat(),
+                          today=date(2026, 7, 5), latest_path=missing)
+    assert lines and any("days old" in ln for ln in lines)

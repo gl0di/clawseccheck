@@ -11552,6 +11552,15 @@ def check_config_health_integrity(ctx: Context) -> Finding:
 # ---------------------------------------------------------------------------
 # B79 — Codex session approval-policy posture
 # ---------------------------------------------------------------------------
+def _safe_mtime(p: Path) -> float:
+    """B-109: modification time for recency sorting; 0.0 if the file is unreadable
+    (it may vanish between the directory walk and the stat)."""
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def check_session_approval_policy(ctx: Context) -> Finding:
     import json as _json
 
@@ -11591,7 +11600,9 @@ def check_session_approval_policy(ctx: Context) -> Finding:
         if not agent_files:
             continue
         any_sessions = True
-        recent = sorted(agent_files)[-5:]
+        # B-109: pick the genuinely most-recent sessions by mtime, not by filename
+        # (session filenames are not guaranteed lexicographically time-monotonic).
+        recent = sorted(agent_files, key=_safe_mtime)[-5:]
 
         a_total = 0
         a_never = 0

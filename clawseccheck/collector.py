@@ -44,6 +44,20 @@ _ARCHIVE_MAX_FILE_BYTES = _MAX_FILE_BYTES
 _ARCHIVE_MAX_TOTAL_BYTES = 20_000_000
 _ARCHIVE_MAX_EXPANSION_RATIO = 100
 
+# B-111: an archive member name is attacker-controlled and NOT OS-length-limited (unlike a
+# real filesystem path) — a crafted zip/tar entry can carry a multi-KB name. It flows
+# uncapped into ctx.limit_hits / ctx.path_traversal_violations / ctx.file_manifest keys,
+# which are joined straight into report evidence text (see B13 in checks.py). Cap it at the
+# point of entry so every downstream consumer inherits the bound.
+_UNTRUSTED_NAME_CAP = 120
+
+
+def _cap_name(name: str) -> str:
+    """Bound an attacker-controlled archive member name before it reaches evidence text."""
+    if len(name) <= _UNTRUSTED_NAME_CAP:
+        return name
+    return name[:_UNTRUSTED_NAME_CAP] + "...(truncated)"
+
 # F-087: padding-anomaly evasion signal. When a file is sliced by the text-scan cap,
 # the discarded tail is sampled (bounded — never re-reads gigabytes) and measured for
 # Shannon entropy. Low-entropy filler (a repeated byte, long whitespace/newline runs, a
@@ -335,10 +349,14 @@ def decompress_and_classify(
                     return [(file_relpath, file_bytes, classification, format_name)]
 
                 for member_name in namelist:
+                    # B-111: member_name is attacker-controlled and NOT length-limited like a
+                    # real filesystem path — use a capped display name for evidence/manifest
+                    # text; the real (uncapped) member_name still drives zf.getinfo/zf.open.
+                    member_disp = _cap_name(member_name)
                     if not is_safe_tar_member(skill_dir, member_name):
                         if ctx is not None:
-                            ctx.path_traversal_violations.append(f"{file_relpath}::{member_name}")
-                            ctx.file_manifest[f"{file_relpath}::{member_name}"] = "unsafe-path"
+                            ctx.path_traversal_violations.append(f"{file_relpath}::{member_disp}")
+                            ctx.file_manifest[f"{file_relpath}::{member_disp}"] = "unsafe-path"
                         return [(file_relpath, file_bytes, classification, format_name)]
 
                     if member_name.endswith("/"):
@@ -352,9 +370,9 @@ def decompress_and_classify(
                         if member_info.file_size > _ARCHIVE_MAX_FILE_BYTES:
                             if ctx is not None:
                                 ctx.limit_hits.append(
-                                    f"Max file decompressed size hit (>200,000) for {member_name} in {file_relpath}"
+                                    f"Max file decompressed size hit (>200,000) for {member_disp} in {file_relpath}"
                                 )
-                                ctx.file_manifest[f"{file_relpath}::{member_name}"] = "capped(size)"
+                                ctx.file_manifest[f"{file_relpath}::{member_disp}"] = "capped(size)"
                             continue
 
                         with zf.open(member_name, "r") as zfp:
@@ -364,8 +382,8 @@ def decompress_and_classify(
 
                     if truncated:
                         if ctx is not None:
-                            ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member_name} in {file_relpath}")
-                            ctx.file_manifest[f"{file_relpath}::{member_name}"] = "capped(size)"
+                            ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member_disp} in {file_relpath}")
+                            ctx.file_manifest[f"{file_relpath}::{member_disp}"] = "capped(size)"
                         continue
 
                     archive_stats["total_files_count"] += 1
@@ -385,7 +403,7 @@ def decompress_and_classify(
                                 ctx.file_manifest[file_relpath] = "capped(ratio)"
                             return [(file_relpath, file_bytes, classification, format_name)]
 
-                    sub_rel = f"{file_relpath}::{member_name}"
+                    sub_rel = f"{file_relpath}::{member_disp}"
                     sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
                     results.extend(sub_results)
 
@@ -409,20 +427,24 @@ def decompress_and_classify(
                     return [(file_relpath, file_bytes, classification, format_name)]
                     
                 for member in members:
+                    # B-111: member.name is attacker-controlled and NOT length-limited like a
+                    # real filesystem path — use a capped display name for evidence/manifest
+                    # text; the real (uncapped) member.name still drives tf.extractfile.
+                    member_disp = _cap_name(member.name)
                     if not is_safe_tar_member(skill_dir, member.name):
                         if ctx is not None:
-                            ctx.path_traversal_violations.append(f"{file_relpath}::{member.name}")
-                            ctx.file_manifest[f"{file_relpath}::{member.name}"] = "unsafe-path"
+                            ctx.path_traversal_violations.append(f"{file_relpath}::{member_disp}")
+                            ctx.file_manifest[f"{file_relpath}::{member_disp}"] = "unsafe-path"
                             return [(file_relpath, file_bytes, classification, format_name)]
-                        
+
                     if not member.isreg():
                         continue
-                        
+
                     try:
                         if member.size > _ARCHIVE_MAX_FILE_BYTES:
                             if ctx is not None:
-                                ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member.name} in {file_relpath}")
-                                ctx.file_manifest[f"{file_relpath}::{member.name}"] = "capped(size)"
+                                ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member_disp} in {file_relpath}")
+                                ctx.file_manifest[f"{file_relpath}::{member_disp}"] = "capped(size)"
                             continue
 
                         f_obj = tf.extractfile(member)
@@ -431,11 +453,11 @@ def decompress_and_classify(
                         member_bytes = f_obj.read(member.size)
                     except Exception:
                         continue
-                        
+
                     if len(member_bytes) > _ARCHIVE_MAX_FILE_BYTES:
                         if ctx is not None:
-                            ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member.name} in {file_relpath}")
-                            ctx.file_manifest[f"{file_relpath}::{member.name}"] = "capped(size)"
+                            ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member_disp} in {file_relpath}")
+                            ctx.file_manifest[f"{file_relpath}::{member_disp}"] = "capped(size)"
                         continue
                         
                     archive_stats["total_files_count"] += 1
@@ -455,7 +477,7 @@ def decompress_and_classify(
                                 ctx.file_manifest[file_relpath] = "capped(ratio)"
                             return [(file_relpath, file_bytes, classification, format_name)]
                             
-                    sub_rel = f"{file_relpath}::{member.name}"
+                    sub_rel = f"{file_relpath}::{member_disp}"
                     sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
                     results.extend(sub_results)
                 if ctx is not None:
