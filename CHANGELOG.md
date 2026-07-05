@@ -3,6 +3,51 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.16.0] — 2026-07-05
+
+Supply-chain, privacy & integrity. New coverage for a skill's install directives and for
+decommissioning debt, a post-hoc incident-analysis mode, at-rest redaction of the monitor
+store, an atomic state writer, and CI that actually proves the audit runs on macOS.
+
+### Added
+- **B103 — install-directive supply-chain.** Parses a skill's SKILL.md frontmatter
+  `metadata.openclaw.install[]` and FAILs an entry that fetches its artifact over plaintext
+  `http://`/`ftp://`, or from a raw IP literal or a `.onion` host. Deliberately narrow and
+  zero-FP-verified against the full bundled skill fleet: a go module / brew formula / node
+  package coordinate is never mis-parsed as a URL, and "unpinned" (the fleet norm) is not
+  treated as a signal. Scored.
+- **B104 — offboarding hygiene.** Advisory host-hygiene: the same skill installed in more
+  than one location (a stale, still-auto-loadable copy), or a configured MCP server whose
+  absolute command path is gone (a dead entry). Orphaned-skill detection is intentionally
+  UNKNOWN-by-design — OpenClaw auto-loads skills by directory presence, so "unreferenced"
+  is the normal load path, not an orphan.
+- **`--analyze-trajectory [PATH]`** — post-hoc incident analysis. Correlates the concrete
+  indicators a skill names (credential paths, exfil hosts, secret-named paths) against the
+  `tool.call` arguments in OpenClaw's trajectory sidecars, to answer whether a skill's
+  instruction was actually acted on at runtime vs merely present in a static file. Reads
+  arguments in memory only to test known indicators and never echoes them.
+- **macOS CI.** The advertised `darwin` platform is now proven to run and pass the full
+  suite in CI (was previously untested), alongside Linux (Python 3.9 + 3.12).
+
+### Fixed
+- **At-rest redaction in the monitor.** MCP url/command/args and memory-file URLs are now
+  sanitized before they enter the snapshot, so `state.json`/`events.jsonl` never persist an
+  embedded credential and every drift alert inherits the redaction. Host-level drift (the
+  security signal) is preserved.
+- **Atomic state writes.** `secure_write_text` now writes to a temp file, fsyncs, and
+  `os.replace`s onto the destination, so a crash mid-write can no longer leave a truncated
+  `state.json` that silently reset the monitor baseline to "no drift". The refuse-on-symlink
+  guard is preserved.
+- **The §4 schema-grounding guard now runs in CI.** It previously skipped when the internal
+  recon doc was absent (i.e. exactly where PRs merge); a vendored path manifest now enforces
+  that every config path the code queries is grounded, on every CI run.
+
+### Changed
+- **Windows disclosure.** The read-only audit still runs on Windows, but the "owner-only,
+  symlink-safe" guarantees for the local `~/.clawseccheck/` store are POSIX-only
+  (`O_NOFOLLOW`/`chmod`). This is now stated plainly in the README and the code rather than
+  silently assumed — on Windows, treat the store as an ordinary user file.
+
 ## [3.15.0] — 2026-07-05
 
 Safety-critical hardening. The audit can no longer hang, crash, or be starved by a
