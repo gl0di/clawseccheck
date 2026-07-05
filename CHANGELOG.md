@@ -3,6 +3,42 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.17.0] — 2026-07-05
+
+Polish, API completeness & close-out. One new advisory check for a class of risk that only
+emerges when two skills are installed together, a machine-API completeness pass on `--json`,
+a quieter `--full`, and a grounded fix to how the skill advertises when it should trigger.
+
+### Added
+- **B105 — cross-skill combined effect.** A new full-audit-only advisory check (WARN-only,
+  `scored=False`) for a silent-exfil pattern SPLIT across two co-installed skills: one skill
+  carries user-directed secrecy framing with no action of its own (a bare B63 Signal-B),
+  while a *different* co-installed skill independently reads a credential and has a network
+  exfil sink (Signal A) but no secrecy framing — so each vets clean-ish alone, yet an agent
+  with both loaded holds both halves of the pattern at once. Pure O(N) correlation over two
+  existing per-skill detectors; the exfil class requires a **remote** sink (not a local
+  log/report), which keeps a benign "read a cred to authenticate, write to a local report"
+  DevOps skill out of the correlation. Verified zero false correlation on the real
+  `~/.openclaw` home and across all 52 bundled OpenClaw skills.
+- **`--json` API completeness.** The machine payload now exposes top-level `cap_severity`
+  (which severity drove the score cap, or `null`) and `assessable` (the distinct N/A state),
+  plus per-finding `scored` — so a JSON consumer can reproduce the human report's
+  "to-fix vs warn" arithmetic. Purely additive; the frozen JSON contract stays additive.
+- **`docs/CHECK_AUTHORING.md`** — a lightweight, non-enforcing convention for writing a
+  Finding's `detail` (name the missing control and the consequence for FAIL/WARN; PASS and
+  UNKNOWN are exempt). Guidance for new checks, not a rewrite of existing ones.
+
+### Changed
+- **`--full --quiet`** collapses the appended self-test and vet-mcp sections to one summary
+  line each (much lighter for CI logs / scroll) while the concise report above is unchanged;
+  the full detail stays available via `--self-test` / `--vet-mcp`. The self-test summary
+  states scenario counts, not a verdict — the self-test emits adversarial material for the
+  agent to run, not a score the tool computes.
+- **SKILL.md `description`** now states when to trigger the skill, not only what it does —
+  grounded against OpenClaw's real skill-loading mechanism (the frontmatter `description` is
+  the always-on trigger surface; the body is lazy-loaded only after invocation), so trigger
+  intent must be readable from the description.
+
 ## [3.16.0] — 2026-07-05
 
 Supply-chain, privacy & integrity. New coverage for a skill's install directives and for
