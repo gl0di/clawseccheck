@@ -11,9 +11,17 @@ user.  These helpers close that hole:
     open fail (ELOOP) instead of being followed, and created with mode 0600 at
     creation time.
 
-Pure stdlib, no network, owner-only. ``O_NOFOLLOW`` is POSIX; on platforms that
-lack it the flag degrades to 0 (best effort) — the same platforms also lack the
-symlink-attack surface this guards against.
+Pure stdlib, no network. These hardening guarantees hold on **POSIX only**
+(Linux, macOS): ``O_NOFOLLOW`` and ``chmod`` are POSIX facilities.
+
+**Windows caveat (C-160):** on Windows both primitives degrade — ``O_NOFOLLOW``
+resolves to ``0`` (the symlink-clobber guard is a no-op; Windows *does* have
+symlinks/junctions, so this is a real gap, not an absent surface) and ``chmod``
+does not set NTFS ACLs (the ``0o600``/``0o700`` modes are best-effort and the
+store is **not** owner-restricted). The read-only audit itself still works on
+Windows; only this local-store hardening is unavailable there. This is disclosed
+in the README rather than silently assumed away — the tool must not claim a
+security property it cannot deliver on a platform it advertises.
 """
 from __future__ import annotations
 

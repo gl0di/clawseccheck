@@ -7,10 +7,19 @@ on:
 jobs:
   # -- L1: lint + test ----------------------------------------------------------
   test:
-    runs-on: ubuntu-latest
+    # C-160: SKILL.md advertises os:[darwin,linux,win32]. Add a macOS (darwin) axis so the
+    # advertised POSIX platform is actually proven to run + pass, not just assumed. Windows
+    # is still advertised for the read-only audit but its local-store hardening degrades
+    # (see safeio.py / README) — a green Windows CI would not make O_NOFOLLOW/chmod work, so
+    # the honest fix is disclosure, not a rubber-stamp OS axis.
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.9", "3.12"]
+        include:
+          - {os: ubuntu-latest, python-version: "3.9"}
+          - {os: ubuntu-latest, python-version: "3.12"}
+          - {os: macos-latest, python-version: "3.12"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

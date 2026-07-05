@@ -366,8 +366,14 @@ python audit.py
 py audit.py --card --ascii
 ```
 
-Cross-platform: pure Python stdlib, pathlib-based paths, POSIX file-permission checks are
-skipped on Windows (NTFS uses ACLs), and all output has an ASCII fallback.
+Cross-platform: pure Python stdlib, pathlib-based paths, and an ASCII fallback for every
+output. The read-only audit runs on Linux, macOS, and Windows (Linux + macOS are covered by
+CI). **Local-store hardening is POSIX-only, though:** the "owner-only, symlink-safe"
+guarantees for `~/.clawseccheck/` (history/state/reports) rely on POSIX `chmod` and
+`O_NOFOLLOW`. On **Windows** both degrade — file modes are not enforced as NTFS ACLs (the
+store is not owner-restricted) and the symlink-clobber guard is a no-op — so on Windows treat
+`~/.clawseccheck/` as an ordinary user file, not a hardened store. The audit results
+themselves are unaffected.
 
 ---
 
