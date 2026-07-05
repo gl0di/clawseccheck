@@ -3,6 +3,42 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.15.0] — 2026-07-05
+
+Safety-critical hardening. The audit can no longer hang, crash, or be starved by a
+pathological config, and the content-ring detectors (silent-instruction, injection,
+obfuscation) no longer miss paraphrased or base64-wrapped disclosure-suppression — while
+staying free of false-positive FAILs on real configs (Golden Rule #5).
+
+### Added
+- **Wall-clock scan budget for `run_all`** — per-check and per-audit deadlines (POSIX
+  `SIGALRM` where available, a graceful no-op elsewhere) so a single check can never wedge
+  the whole audit; a timed-out check reports UNKNOWN instead of hanging (C-159).
+
+### Fixed
+- **Per-check fault isolation in `run_all`** — one crashing check no longer aborts the
+  entire audit. Each check is wrapped so a failure surfaces as an UNKNOWN `ERR:<check>`
+  finding, and the CLI gained a clean top-level error guard (B-101).
+- **ReDoS hardening** — two quadratic content-ring regexes and a pathological-whitespace
+  regex are now bounded; `vet_skill` on a hostile input drops from ~66s to sub-second
+  (B-100, B-102).
+- **Uncapped reads** — bootstrap files and session/audit JSONL logs are read against a
+  byte/tail budget so an oversized file cannot exhaust memory (B-103, B-104).
+- **Content-ring negation must GOVERN its trigger** — a negator in an earlier, unrelated
+  sentence no longer dampens a live directive; dampening now requires same-clause
+  connection (B-098).
+- **A bare code fence no longer dampens** content-ring prose checks (B59/B64/B65/B74): an
+  unannotated triple-backtick block is treated as a documented example only when a
+  negation/example marker sits around it (B-097).
+- **B63 catches paraphrased disclosure-suppression** — soft "no need to mention" framing
+  next to a credential-shaped read is surfaced as WARN for human review. WARN-only by
+  design, so a legitimate cloud/DevOps skill that reads a credential to authenticate is
+  never wrongly FAILed (B-091).
+- **base64 / HTML-comment-decoded content is routed through B63** in B58 and B13 — an
+  encoded read-then-suppress payload now yields a specific silent-instruction finding
+  instead of a generic "base64 present" WARN. The encoding itself is the escalation
+  signal, and the finding is dampened under defensive documentation (B-093).
+
 ## [3.14.0] — 2026-07-04
 
 Zero-network vet pipeline (epic E-019 subset) — a full check-before-install flow that
