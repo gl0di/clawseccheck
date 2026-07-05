@@ -709,10 +709,14 @@ A **stale security scanner is itself a risk** — an old build misses the latest
 stays honest about this **without breaking its own promises**, by drawing a hard line:
 
 - ClawSecCheck itself **never touches the network** — not to check for updates, not for anything.
-  Its only staleness signal is an **offline** line in the report that reads the local clock and an
-  optional local hint file (`~/.clawseccheck/latest.json`); it never fetches that file and never
-  writes it as a side effect of an audit. Suppress the reminder with `--no-update-notice` (or
-  `CLAWSECCHECK_NO_UPDATE_NOTICE=1`).
+  Its staleness signals are all **offline**: (a) a report line that reads the local clock and an
+  optional local hint file (`~/.clawseccheck/latest.json`) — it never fetches that file and never
+  writes it as a side effect of an audit (suppress with `--no-update-notice` or
+  `CLAWSECCHECK_NO_UPDATE_NOTICE=1`); and (b) a hedged nudge that fires only when an overwhelming
+  majority of *scored* checks came back UNKNOWN on a populated config — a possible sign that
+  OpenClaw moved a field path and this build is stale for your version. It is deliberately worded
+  as a possibility ("either a minimal setup, or possibly stale"), never an assertion, and computes
+  purely from this run's own findings — no network, no schema fetch.
 - **Updating is the user's own action, never an automatic step.** Do not check for or install
   updates as a side effect of running an audit. If — and only if — the user explicitly asks to
   update, they run the same tool they installed it with themselves (e.g.

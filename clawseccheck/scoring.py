@@ -92,6 +92,47 @@ def compute(findings: list[Finding]) -> ScoreResult:
     )
 
 
+def assessment_coverage(findings: list[Finding]) -> dict:
+    """How much of the scoreable catalog this run could actually assess.
+
+    Mirrors ``compute``'s finding-selection exactly (``scored`` + not a
+    suppressed/non-scoreable status), except it does NOT drop UNKNOWN —
+    UNKNOWN is exactly what this measures. Pure, no I/O.
+
+    Returns a dict:
+        {"scored_total": int, "assessable": int, "unknown": int,
+         "assessable_frac": float, "unknown_frac": float}
+
+    ``assessable + unknown == scored_total`` always holds. When
+    ``scored_total == 0`` both fractions are ``0.0`` (nothing to divide by).
+    """
+    in_scope = [
+        f for f in findings
+        if f.scored and f.status != "SKILL_ARCHIVE_PATH_TRAVERSAL"
+        and not getattr(f, "suppressed", False)
+    ]
+    scored_total = len(in_scope)
+    unknown = sum(1 for f in in_scope if f.status == UNKNOWN)
+    assessable = scored_total - unknown
+
+    if scored_total == 0:
+        return {
+            "scored_total": 0,
+            "assessable": 0,
+            "unknown": 0,
+            "assessable_frac": 0.0,
+            "unknown_frac": 0.0,
+        }
+
+    return {
+        "scored_total": scored_total,
+        "assessable": assessable,
+        "unknown": unknown,
+        "assessable_frac": assessable / scored_total,
+        "unknown_frac": unknown / scored_total,
+    }
+
+
 def project(findings: list[Finding]) -> dict:
     """What-if projection: estimate the score impact of fixing FAIL findings.
 

@@ -25,7 +25,7 @@ from .ansi import paint
 from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
 from .guide import suggest_actions
-from .scoring import ScoreResult
+from .scoring import ScoreResult, assessment_coverage
 
 # Findings, skill names, decoded payload previews and native-audit fields are UNTRUSTED
 # data. Strip terminal-control sequences (ANSI/OSC incl. OSC-52 clipboard), bidi overrides
@@ -87,6 +87,15 @@ _STATUS_COLOR = {
     FAIL: "red", WARN: "yellow", PASS: "green", UNKNOWN: "grey",
     "SKILL_ARCHIVE_PATH_TRAVERSAL": "grey",
 }
+
+# ── Assurance honesty (R11) ───────────────────────────────────────────────────
+# Two human-report-only signals over assessment_coverage() (scoring.py). Neither
+# ever touches score/grade/findings or the machine outputs (JSON/card/SVG/SARIF) —
+# both are advisory text only. Thresholds grounded against the real-fixture band
+# (assessable 0.39-0.52; see fixtures/clean_b13_doc_example ~0.39, home_safe ~0.52).
+LOW_COVERAGE_FRAC = 0.35  # below this fraction assessable -> loud caution line (C-166)
+DRIFT_UNKNOWN_FRAC = 0.85  # at/above this fraction UNKNOWN -> hedged staleness nudge (C-165)
+DRIFT_MIN_SCORED = 20  # minimum scored_total before the staleness nudge is even considered
 
 
 def _grade_color(grade: str) -> str:
@@ -585,6 +594,10 @@ def render_report(findings: list[Finding], score: ScoreResult,
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
     grade_disp = paint(score.grade, _grade_color(score.grade), "bold", enabled=True) if color else score.grade
+    # Assurance honesty (R11): single source-of-truth coverage tally, computed once and
+    # reused by both the C-166 low-coverage line (below) and the C-165 staleness nudge
+    # (advisory band, further down) — never a second independent tally.
+    cov = assessment_coverage(findings)
     # 🦞 mascot: header line only, once (design-system Foundations); --ascii drops it.
     head = "ClawSecCheck - OpenClaw Security Audit" if ascii_only \
         else "🦞 ClawSecCheck - OpenClaw Security Audit"
@@ -593,6 +606,19 @@ def render_report(findings: list[Finding], score: ScoreResult,
              _score_bar(score.score, score.grade, ascii_only=ascii_only, color=color)]
     if score.capped:
         lines.append(f"(capped from {score.raw_score} - open {score.cap_severity or 'CRITICAL'} finding)")
+
+    # C-166: loud caution line when only a small slice of the catalog could be assessed —
+    # a high grade over a thin slice can otherwise read as a full clean bill of health.
+    # Human-report-only; never alters score/grade. Gated on score.assessable so the N/A
+    # path (nothing scorable at all) isn't double-warned.
+    if score.assessable and cov["scored_total"] > 0 and cov["assessable_frac"] < LOW_COVERAGE_FRAC:
+        warn_icon = "[!]" if ascii_only else "⚠️ "
+        pct = round(cov["assessable_frac"] * 100)
+        lines.append(
+            f"{warn_icon} Low coverage: only {pct}% of scored checks could be evaluated"
+            f" ({cov['assessable']}/{cov['scored_total']}). Treat this grade with caution —"
+            " it reflects a small slice of your setup."
+        )
 
     # Tamper Score sub-grade — human-report-only addition (like update_notice below).
     # Presentation-layer only: never alters score/grade above; None (default) renders
@@ -795,6 +821,22 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append("")
         for ln in freshness_notice:
             lines.append(f"{bullet} {_sanitize(ln)}")
+
+    # C-165: hedged staleness nudge — an overwhelming UNKNOWN share on a detected OpenClaw
+    # setup is ambiguous (could be a genuinely minimal install, or ClawSecCheck's checks may
+    # be stale against a newer OpenClaw schema) so the wording MUST keep both readings open;
+    # never assert drift as fact. Human-report-only, advisory only; makes no network call.
+    if (openclaw_detected and cov["scored_total"] >= DRIFT_MIN_SCORED
+            and cov["unknown_frac"] >= DRIFT_UNKNOWN_FRAC):
+        bullet = "*" if ascii_only else "⏳"
+        lines.append("")
+        lines.append(
+            f"{bullet} Most checks came back not-assessable"
+            f" ({cov['unknown']}/{cov['scored_total']}) on a detected OpenClaw setup."
+            " Either this is a minimal setup, or ClawSecCheck may be stale against a newer"
+            " OpenClaw config schema — worth a second look either way."
+            " (offline notice; no network call)"
+        )
 
     # Scan receipt: deterministic Merkle-style hash for audit traceability
     lines.append("")
