@@ -2798,16 +2798,62 @@ def _negation_context(blob: str, pos: int) -> bool:
     return bool(_NEGATION_RE.search(blob[window_start:pos]))
 
 
-def _is_code_example(blob: str, pos: int, fence_ranges: list[tuple[int, int]]) -> bool:
+# Words that annotate a fenced block as a documented example (B-097). Checked in the
+# lines immediately around the fence, in addition to _NEGATION_RE's markers.
+_FENCE_ANNOTATION_RE = re.compile(r"\bexamples?\b|\bfor\s+instance\b|\bsample\b", re.I)
+
+
+def _fence_is_annotated(
+    blob: str, pos: int, fence_ranges: list[tuple[int, int]], margin: int = 160
+) -> bool:
+    """True when the fence containing *pos* is annotated as a documented example — a
+    negation/example marker in the ~160 chars just before the fence opens or just after
+    it closes (e.g. 'Example prompt injection:', '# Bad:', "Don't do this."). A bare,
+    unannotated fence is NOT a documented example (B-097)."""
+    for start, end in fence_ranges:
+        if start <= pos < end:
+            surrounding = blob[max(0, start - margin):start] + "\n" + blob[end:end + margin]
+            return bool(
+                _NEGATION_RE.search(surrounding) or _FENCE_ANNOTATION_RE.search(surrounding)
+            )
+        if start > pos:
+            break
+    return False
+
+
+def _is_code_example(
+    blob: str,
+    pos: int,
+    fence_ranges: list[tuple[int, int]],
+    *,
+    fence_needs_negation: bool = False,
+) -> bool:
     """Return True when the match at *pos* is clearly a documented example, not a live
     instruction.  Returns False (keep the finding) when in doubt.
 
-    Criteria (either is sufficient):
-    - The position falls inside a precomputed Markdown fence range.
-    - The _NEGATION_WINDOW chars immediately before the position contain a negation /
-      example marker (e.g. "do not", "e.g.", "# warning:", "avoid running").
+    Criteria:
+    - The _NEGATION_WINDOW chars before the position contain a negation / example
+      marker (e.g. "do not", "e.g.", "# warning:", "avoid running").
+    - OR the position falls inside a precomputed Markdown fence range — UNLESS
+      *fence_needs_negation* is True.
+
+    B-097: content-ring prose checks (B59/B64/B65/B74) pass fence_needs_negation=True,
+    so a bare ```fence``` no longer dampens on its own — the fenced position must ALSO
+    carry a negation/example marker (mirrors _defensive_context's B-094 fence leg). A
+    live directive hidden in an unannotated fence stays a finding. The default (False)
+    preserves the legacy behaviour for callers whose bad fixtures hide the payload
+    inside a fence and rely on other signals to catch it.
     """
-    return _in_fence(pos, fence_ranges) or _negation_context(blob, pos)
+    if _negation_context(blob, pos):
+        return True
+    if not _in_fence(pos, fence_ranges):
+        return False
+    if fence_needs_negation:
+        # B-097: a bare fence no longer dampens — the fence must be ANNOTATED as an
+        # example (a marker in the lines just before/after it), else a live directive
+        # hidden in an unannotated ```fence``` stays a finding.
+        return _fence_is_annotated(blob, pos, fence_ranges)
+    return True
 
 
 def _blank_fences(blob: str, ranges: list[tuple[int, int]]) -> str:
@@ -9723,7 +9769,7 @@ def check_instruction_hierarchy_override(ctx: Context) -> Finding:
         fr = _fence_ranges(norm)
         high_spans = []
         for m in _B64_HIGH_CONFIDENCE_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr):
+            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             snippet = m.group().strip()
             if len(snippet) > 80:
@@ -9732,7 +9778,7 @@ def check_instruction_hierarchy_override(ctx: Context) -> Finding:
             high_spans.append((m.start(), m.end()))
 
         for m in _B64_WEAK_SIGNAL_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr):
+            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             if any(s <= m.start() < e for s, e in high_spans):
                 continue
@@ -9954,7 +10000,7 @@ def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
     """Scan *text* for persona-jailbreak snippets."""
     hits: list[str] = []
     for m in _B66_ROLE_START_RE.finditer(text):
-        if _is_code_example(text, m.start(), fr):
+        if _is_code_example(text, m.start(), fr, fence_needs_negation=True):
             continue
         start = max(0, m.start() - _B66_WINDOW)
         end = min(len(text), m.end() + _B66_WINDOW)
@@ -10407,21 +10453,21 @@ def _check_markdown_image_exfil(ctx: Context) -> Finding:
         fr = _fence_ranges(norm)
 
         for m in _B59_MD_IMG_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr):
+            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             url = _b59_markdown_url(m.group(1))
             if url and _b59_url_has_data_query(url):
                 evidence.append(f"{source}: markdown image URL with query params: {_obf_clip(url)}")
 
         for m in _B59_MD_LINK_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr):
+            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             url = _b59_markdown_url(m.group(1))
             if url and _b59_url_has_data_query(url):
                 evidence.append(f"{source}: markdown link URL with query params: {_obf_clip(url)}")
 
         for m in _B59_HTML_TAG_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr):
+            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             tag = m.group(0)
             tag_name_match = re.match(r"<\s*([A-Za-z0-9-]+)", tag)
@@ -10478,7 +10524,7 @@ def check_image_attr_injection(ctx: Context) -> Finding:
         norm = normalize_for_scan(blob)
         fr = _fence_ranges(norm)
         for m in _B59_HTML_TAG_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr):
+            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             tag = m.group(0)
             tag_name_match = re.match(r"<\s*([A-Za-z0-9-]+)", tag)
@@ -10989,14 +11035,14 @@ def check_forged_provenance(ctx: Context) -> Finding:
         norm = normalize_for_scan(text)
         fr = _fence_ranges(norm)
         for m in _B74_ROLE_BLOCK_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr):
+            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             snippet = m.group().strip()
             if len(snippet) > 80:
                 snippet = snippet[:77] + "..."
             fail_ev.append(f'{source_name}: "{snippet}"')
         for m in _B74_FALSE_PROVENANCE_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr):
+            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             snippet = m.group().strip()
             if len(snippet) > 80:
