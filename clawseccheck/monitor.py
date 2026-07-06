@@ -96,6 +96,15 @@ def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
     - all entries lack a 'chain_hash' field (legacy graceful mode), or
     - every 'chain_hash' field matches the recomputed value.
 
+    When the chain is intact but the file carries N entries whose '_schema' the
+    loaders skip (unknown future major, or a malformed but honestly-chained value),
+    returns (True, "OK (N unknown-schema entr{y,ies} present)") instead of a bare
+    "OK". Those lines are hidden-but-present: authenticated and physically on disk,
+    yet invisible to load_events()/history.load(). Surfacing the count lets an
+    operator who diffs on-disk line-count against loaded-row-count see the gap
+    rather than trust a silent "OK" (C-167). Still (True, …) — this is honesty about
+    a pre-existing "write access breaks tamper-evidence" boundary, not a new break.
+
     Returns (False, "broken at entry N") on the first mismatch.
     Never raises — any IO/parse error causes (True, "OK") (graceful).
 
@@ -113,7 +122,13 @@ def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
         return True, "OK"
 
     prev_hash = ""
+    unknown_schema = 0
     for idx, entry in enumerate(entries):
+        # Count lines the loaders would skip (C-167): present + authenticated here,
+        # but hidden from load_events()/history.load() by the unknown-schema policy.
+        if not _schema_ok(entry):
+            unknown_schema += 1
+
         stored = entry.get("chain_hash")
         if stored is None:
             # Legacy entry — skip chain verification for this entry, carry prev_hash
@@ -126,6 +141,9 @@ def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
             return False, f"broken at entry {idx}"
         prev_hash = stored
 
+    if unknown_schema:
+        noun = "entry" if unknown_schema == 1 else "entries"
+        return True, f"OK ({unknown_schema} unknown-schema {noun} present)"
     return True, "OK"
 
 
@@ -741,10 +759,10 @@ def _schema_ok(entry: dict) -> bool:
     major than this build understands is skipped (no crash, no misparse).
 
     Skipping is a *loader* concern only: an unknown-future-schema line is
-    hidden-but-present, not deleted, and verify_chain() still authenticates and
-    counts it (a forged _schema on an honest line breaks the chain). So this skip
-    cannot silently erase evidence beyond the pre-existing "write access breaks
-    tamper-evidence" boundary."""
+    hidden-but-present, not deleted, and verify_chain() authenticates it, counts it,
+    and surfaces the count in its OK message (C-167 — a forged _schema on an honest
+    line breaks the chain). So this skip cannot silently erase evidence beyond the
+    pre-existing "write access breaks tamper-evidence" boundary."""
     raw = entry.get("_schema")
     if raw is None:
         return True

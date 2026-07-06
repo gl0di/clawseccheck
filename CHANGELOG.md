@@ -3,6 +3,23 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.19.4] — 2026-07-06
+
+Tamper-evidence honesty: `--verify-history` now surfaces when the journal holds
+lines its loaders skip, closing a "silent OK" gap.
+
+### Changed
+
+- **`--verify-history` / `verify_chain`**: when the hash-chain is intact but the
+  journal contains N entries whose `_schema` the loaders skip (an unknown future
+  major, or a malformed-but-honestly-chained value), the result is now
+  `OK (N unknown-schema entr{y,ies} present)` instead of a bare `OK`. Such lines are
+  authenticated and physically on disk yet invisible to `load_events()` /
+  history load — surfacing the count lets an operator who diffs on-disk line-count
+  against loaded-row-count spot the gap instead of trusting a silent `OK`. Still a
+  passing result: this is honesty about the pre-existing "write access breaks
+  tamper-evidence" boundary, not a new break. Audit output is unaffected.
+
 ## [3.19.3] — 2026-07-06
 
 Maintainability groundwork, no engine change: the project's structure is now

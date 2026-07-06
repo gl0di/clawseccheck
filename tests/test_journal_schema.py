@@ -161,7 +161,8 @@ def test_events_load_legacy_line_without_schema_still_loads(tmp_path):
 
 def test_events_untampered_future_schema_still_verifies_ok(tmp_path):
     """verify_chain authenticates the whole file, including unknown-_schema lines;
-    only load_events applies the skip-unknown-schema policy on top."""
+    only load_events applies the skip-unknown-schema policy on top. C-167: the OK
+    message now surfaces the count of such hidden-but-present lines."""
     path = tmp_path / "events.jsonl"
     record_events([("HIGH", "a")], path=path, when="2026-07-01T00:00:00")
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -175,9 +176,33 @@ def test_events_untampered_future_schema_still_verifies_ok(tmp_path):
 
     ok, msg = verify_chain(path)
     assert ok is True
-    assert msg == "OK"
+    # C-167: still OK (the line is authenticated), but the count is surfaced so an
+    # operator diffing on-disk line-count vs loaded-row-count sees the hidden row.
+    assert msg == "OK (1 unknown-schema entry present)"
     # But load_events (the consumer) still refuses to misparse the unknown line.
     assert load_events(path) == []
+
+
+def test_events_verify_surfaces_plural_unknown_schema_count(tmp_path):
+    """C-167: with N>1 hidden-but-present lines the count pluralizes and equals the
+    on-disk-lines minus loaded-rows gap — the whole point of surfacing it."""
+    path = tmp_path / "events.jsonl"
+    # One loadable + two honestly-chained future-schema lines.
+    specs = [SCHEMA_VERSION, SCHEMA_VERSION + 5, SCHEMA_VERSION + 9]
+    prev, lines = "", []
+    for i, sch in enumerate(specs):
+        base = {"ts": f"2026-07-0{i + 1}T00:00:00", "level": "INFO",
+                "message": chr(97 + i), "_schema": sch}
+        ch = _chain_hash(prev, base)
+        lines.append(json.dumps({**base, "chain_hash": ch}))
+        prev = ch
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    ok, msg = verify_chain(path)
+    assert ok is True
+    assert msg == "OK (2 unknown-schema entries present)"
+    # The surfaced count == on-disk lines (3) − loaded rows (1).
+    assert len(load_events(path)) == 1
 
 
 # ---------------------------------------------------------------------------
