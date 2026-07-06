@@ -6,11 +6,9 @@ layer-1 modules (catalog/collector/...) and stdlib — never on a topic module.
 Moved verbatim from the former single-file checks.py; no logic changes.
 """
 from __future__ import annotations
-
 import os
 import re
 from pathlib import Path
-
 from ..catalog import (
     BY_ID,
     Finding,
@@ -502,3 +500,14 @@ def _safe_mtime(p: Path) -> float:
         return p.stat().st_mtime
     except OSError:
         return 0.0
+
+
+def _plugins(cfg: dict) -> dict:
+    """Installed plugins, supporting both `plugins.entries.<name>` and legacy shapes."""
+    p = cfg.get("plugins")
+    if isinstance(p, dict):
+        entries = p.get("entries")
+        if isinstance(entries, dict):
+            return entries
+        return p
+    return {}
