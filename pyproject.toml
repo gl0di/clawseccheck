@@ -36,4 +36,6 @@ version = { attr = "clawseccheck.__version__" }
 # The checks/ aggregator re-exports every topic module's symbols (incl. privates) so
 # they stay importable as `from clawseccheck.checks import X`. It deliberately has no
 # __all__ (CLAUDE.md §3.1-a), so those re-export imports read as "unused" to pyflakes.
-"clawseccheck/checks/__init__.py" = ["F401"]
+# F811: the aggregator also keeps in-function lazy re-imports (to avoid load cycles)
+# that shadow a top-level import once the top-level user moves to a topic module.
+"clawseccheck/checks/__init__.py" = ["F401", "F811"]
