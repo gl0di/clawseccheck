@@ -3,6 +3,44 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.19.2] — 2026-07-06
+
+Precision pass on the content-ring / provenance checks: several FAIL-capable
+checks hard-FAILed benign security-education and documentation skills — exactly
+the genre the audit should endorse. Each now distinguishes a live attack from a
+skill that merely *quotes or documents* one, with no loss of true-positive
+detection (a genuinely ambiguous case surfaces as WARN, never a silent pass).
+
+### Fixed
+
+- **B58** (Unicode-obfuscation): a defensive skill that quotes an injection
+  phrase inside an HTML comment is no longer flagged as hidden obfuscation. A
+  hidden segment carrying an actual actionable sink (URL / email / exfil) still
+  FAILs.
+- **B13** (installed-skill injection): the canonical "ignore previous
+  instructions" directive no longer FAILs when it is quoted as a documented
+  example; a live directive (or one chained to an exfil sink) still FAILs.
+- **B64** (instruction-hierarchy override): a security doc quoting an override
+  attack (e.g. "a common attacker payload reads: …") is no longer graded
+  DANGEROUS. A live directive dressed as documentation cannot be laundered — an
+  override chained to an actionable payload always FAILs, and an ambiguous quoted
+  phrase surfaces as WARN, never a clean pass.
+- **B74** (forged role/system block): a transcript- or prompt-format skill that
+  documents `[user]` / `[assistant]` / `[system]` role tags in prose is no longer
+  hard-FAILed. A fabricated `[SYSTEM: …]` turn that actually carries an override
+  directive still FAILs; a bare or documented marker is a WARN.
+- **B103** (install-directive supply chain): an install directive that fetches
+  from a loopback / private-LAN / IPv6-loopback mirror (`https://127.0.0.1`,
+  `https://192.168.x.x`, `https://[::1]`) — an air-gapped or homelab source — is
+  no longer flagged. Only a **public**, routable raw-IP host FAILs.
+
+### Changed
+
+- B64 and B74 now emit **WARN** (rather than FAIL or a silent pass) on genuinely
+  ambiguous input — an override phrase or role marker that could be either a
+  documented example or a live attack. This keeps the finding visible without
+  hard-capping the grade of a plausibly-benign skill.
+
 ## [3.19.1] — 2026-07-05
 
 Supply-chain hardening and a sweep of small correctness fixes. No user-facing behavior
