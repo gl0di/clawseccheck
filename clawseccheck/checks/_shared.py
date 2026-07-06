@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 from ..catalog import (
     BY_ID,
     Finding,
@@ -511,3 +512,101 @@ def _plugins(cfg: dict) -> dict:
             return entries
         return p
     return {}
+
+
+# ---------------------------------------------------------------------------
+# B77 — Config-write audit log review
+# ---------------------------------------------------------------------------
+_JSONL_SCAN_CAP = 1_000_000  # B-104: byte budget for tailing append-only JSONL logs
+
+
+_MCP_REMOTE_TRANSPORTS = ("sse", "http", "streamable-http", "streamablehttp", "websocket", "ws")
+
+
+def _custom(cid, severity, status, detail, fix, ev=None) -> Finding:
+    """Build a finding with an explicit severity (for dynamic-severity checks)."""
+    m = BY_ID[cid]
+    return Finding(
+        m.id,
+        m.title,
+        severity,
+        status,
+        detail,
+        fix,
+        m.framework,
+        m.scored,
+        ev or [],
+        confidence=m.confidence,
+    )
+
+
+def _mcp_has_remote(spec) -> bool:
+    """True when an MCP server spec is a remote endpoint (url / network transport),
+    vs a local stdio subprocess (a `command`)."""
+    if not isinstance(spec, dict):
+        return False
+    if spec.get("url"):
+        return True
+    return str(spec.get("transport", "")).lower() in _MCP_REMOTE_TRANSPORTS
+
+
+# ---------- B15: MCP server trust ----------
+def _mcp_servers(cfg: dict) -> dict:
+    out = {}
+    # Real OpenClaw schema nests servers: mcp.servers.<name> = spec.
+    mcp = cfg.get("mcp")
+    if isinstance(mcp, dict):
+        servers = mcp.get("servers")
+        if isinstance(servers, dict):
+            out.update(servers)
+        else:  # legacy/alt shape: top-level mcp is a direct {name: spec} map
+            out.update({k: v for k, v in mcp.items() if isinstance(v, dict)})
+    for key in ("mcpServers", "mcp_servers"):
+        v = cfg.get(key)
+        if isinstance(v, dict):
+            out.update(v)
+    v = dig(cfg, "tools.mcp") or dig(cfg, "plugins.mcp")
+    if isinstance(v, dict):
+        out.update(v)
+    for name in _plugins(cfg):
+        if "mcp" in str(name).lower():
+            out.setdefault(name, {})
+    return out
+
+
+def _mcp_url_is_local(url: str) -> bool:
+    if not isinstance(url, str) or not url.strip():
+        return False
+    raw = url.strip()
+    lower = raw.lower()
+    if lower.startswith(("unix://", "file://")):
+        return True
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    if host in LOOPBACK:
+        return True
+    return host.startswith("127.")
+
+
+def _read_jsonl_tail(path: Path, cap: int = _JSONL_SCAN_CAP) -> tuple[str, bool]:
+    """Read at most the last ``cap`` bytes of a (possibly huge) append-only JSONL log.
+
+    Session / config-audit logs can reach GB; a whole-file read + splitlines OOMs on
+    long-running agents (B-104). We tail the most-recent ``cap`` bytes — the entries a
+    posture check cares about — and drop a possibly-partial leading line (callers already
+    skip unparseable lines). Returns (text, truncated).
+    """
+    size = path.stat().st_size
+    if size <= cap:
+        return path.read_text(encoding="utf-8", errors="replace"), False
+    with open(path, "rb") as fp:
+        fp.seek(size - cap)
+        data = fp.read(cap)
+    text = data.decode("utf-8", errors="replace")
+    nl = text.find("\n")
+    if nl != -1:
+        text = text[nl + 1:]
+    return text, True
