@@ -3,6 +3,38 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.20.0] — 2026-07-06
+
+A detection-precision pass on the content-security ring — fewer false alarms on benign
+skills, plus one coverage add — alongside a large internal refactor: the 14k-line check
+engine is now a topic-organised `clawseccheck/checks/` package with byte-identical audit
+output.
+
+### Added
+- B13 decoded-base64 payload detection now catches runnable payloads that carry no
+  curl/wget/nc token: bash `/dev/tcp` reverse shells, `certutil -urlcache` LOLBin
+  downloads, and `python -c` one-liners that import socket/subprocess/os.
+
+### Fixed
+- B66 (persona/role jailbreak) no longer false-WARNs benign persona skills whose only
+  "weakening" phrase is ambiguous (`no restrictions`, `do anything`, `anything goes`) —
+  a jailbreak-core token or a persona-reset verb is now required. A role opener plus a
+  reset verb ("forget your instructions") on its own now WARNs, while benign
+  rule/guideline overrides ("override the default rules") stay clean.
+- B100 (ClickFix setup instruction) no longer false-WARNs the canonical first-party
+  installer one-liner (`curl https://sh.rustup.rs | sh`, uv, nvm, brew, docker, …) via a
+  curated vendor-host allowlist; a look-alike host, `http://`, a bare IP, or an attacker
+  path still WARNs. Its advisory severity is corrected HIGH → MEDIUM.
+- B13 no longer false-CRITICAL-FAILs (Grade F) on a base64 blob that decodes to benign
+  data merely naming a networking tool (a CSV column `nc`, a "use curl" README); the
+  decoded-shell arm now requires command context (a URL, a pipe-to-shell, or a flag).
+
+### Changed
+- Internal: `clawseccheck/checks.py` (14,384 lines) is split into a topic-organised
+  `clawseccheck/checks/` package (a `_shared` leaf plus `_config` / `_content` / `_mcp` /
+  `_capability` / `_lifecycle` / `_host` / `_egress` / `_agents` / `_vet` topic modules).
+  Every name stays importable from `clawseccheck.checks`; audit output is byte-identical.
+
 ## [3.19.4] — 2026-07-06
 
 Tamper-evidence honesty: `--verify-history` now surfaces when the journal holds
