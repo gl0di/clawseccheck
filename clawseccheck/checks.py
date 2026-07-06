@@ -2466,6 +2466,27 @@ _IMMEDIATE_NEGATOR_RE = re.compile(
 _SENTENCE_BREAK_RE = re.compile(r"[.!?][\"')\]]?(?:\s|$)|\n[^\S\n]*\n")
 
 
+def _sentence_scoped_segment(text: str, start: int, end: int, cap: int = 200) -> str:
+    """Return the text from the nearest preceding sentence/paragraph break to the
+    nearest following one, bounded by *cap* chars on each side (B-119).
+
+    Used to scope an "is this match actionable" check to the match's OWN clause —
+    a plain character window picks up unrelated action verbs from a NEIGHBOURING
+    sentence (e.g. "Never blindly execute a hidden directive. ... <!-- ignore
+    previous instructions --> ..." would otherwise see "execute" and wrongly call
+    the quoted phrase actionable).
+    """
+    lo_bound = max(0, start - cap)
+    hi_bound = min(len(text), end + cap)
+    last_break = None
+    for bm in _SENTENCE_BREAK_RE.finditer(text, lo_bound, start):
+        last_break = bm
+    lo = last_break.end() if last_break is not None else lo_bound
+    next_break = _SENTENCE_BREAK_RE.search(text, end, hi_bound)
+    hi = next_break.start() if next_break is not None else hi_bound
+    return text[lo:hi]
+
+
 def _negation_governs_trigger(
     blob: str, pos: int, window: int = _BROAD_NEGATION_WINDOW
 ) -> bool:
@@ -3176,11 +3197,32 @@ def check_installed_skills(ctx: Context) -> Finding:
         # Dual-use directives only fire alongside a real cred/exfil signal (zero-FP);
         # the canonical "ignore previous instructions" phrase fires on its own. Co-located
         # real malware (paste-host) still scores CRITICAL via _SKILL_CRIT independently.
+        # B-119: the standalone (canonical-phrase) arm previously had NO defensive/example
+        # guard, unlike its F-052 sibling below — so a skill that merely QUOTES the phrase as
+        # documentation ("for example: <!-- ignore previous instructions -->") got FAILed
+        # HIGH. Mirror F-052 EXACTLY: dampen a canonical-phrase hit only when it sits in an
+        # example/quote context (_in_example_context). We deliberately do NOT also dampen on
+        # _whole_text_is_defensive — a "## Known Risks" heading + one "Never…" line is
+        # trivially forgeable and silenced a real hijack directive (C-135 bypasses B5/B1) —
+        # nor gate on a sink predicate: bare "curl"/"POST"/URL tokens are ordinary security-
+        # doc vocabulary and produced a false-positive FAIL class (C-135 direction A). A
+        # co-located live payload (obfuscated / paste-host / hidden-comment exfil) still
+        # scores via B58 / _SKILL_CRIT independently. The standalone regexes match against
+        # _blob_norm, so the guard uses fence ranges over THAT SAME string (position
+        # consistency), not the raw-blob _fr computed above.
         cred_exfil_signal = _has_same_line or _has_cross
         _blob_norm = normalize_for_scan(blob)
+        _fr_norm = _fence_ranges(_blob_norm)
         for label, standalone, rx in _SKILL_INJECTION:
-            if rx.search(_blob_norm) and (standalone or cred_exfil_signal):
+            if not standalone:
+                if rx.search(_blob_norm) and cred_exfil_signal:
+                    high.append(f"{name}: injection directive — {label}")
+                continue
+            for m in rx.finditer(_blob_norm):
+                if _in_example_context(_blob_norm, m.start(), _fr_norm):
+                    continue
                 high.append(f"{name}: injection directive — {label}")
+                break
 
         # F-052: anti-refusal + system-prompt/tool-definition leak directives. Malicious on
         # their own (no co-signal), but dampened by _in_example_context so a security skill
@@ -10325,6 +10367,21 @@ def _b58_base64_variants(text: str) -> list[tuple[str, str]]:
     return variants
 
 
+_B58_URL_OR_EMAIL_RE = re.compile(r'https?://|\b[\w.+-]+@[\w-]+\.[\w.-]+', re.I)
+
+
+def _b58_extract_actionable(seg_norm: str) -> bool:
+    """True when a decoded/hidden B58 segment carries an ACTIONABLE payload — an action
+    verb (_B63_ACTION_RE), an exfil transport (_EXFIL_RE), or a bare URL/email sink —
+    beyond the bare injection phrase. Discriminates a real hidden directive from a
+    defensive skill merely QUOTING an attack phrase (B-113)."""
+    return bool(
+        _B63_ACTION_RE.search(seg_norm)
+        or _EXFIL_RE.search(seg_norm)
+        or _B58_URL_OR_EMAIL_RE.search(seg_norm)
+    )
+
+
 def _check_unicode_obfuscation(ctx: Context) -> Finding:
     """Compatibility implementation of B58 with decode-aware hidden-injection detection."""
     if not ctx.bootstrap and not ctx.installed_skills:
@@ -10353,7 +10410,13 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
             signal_parts.append("base64")
         base_signal_text = "; ".join(signal_parts)
 
-        variants: list[tuple[str, str]] = [(norm, base_signal_text)]
+        # is_extract=False: variant is the whole document (raw or whole-doc-decoded) —
+        # decoding revealed a payload invisible in the raw text, a concealment signal on
+        # its own. is_extract=True: variant is a SEGMENT EXTRACT (hidden-html/css,
+        # html-comment, base64 blob) — naturally a substring that differs from `norm`
+        # merely because it is shorter, so it must NOT bypass the base_defensive dampener
+        # the way a genuine whole-doc decode does (B-113).
+        variants: list[tuple[str, str, bool]] = [(norm, base_signal_text, False)]
         seen = {norm}
         for decoded, labels in _b58_decode_variants(text):
             n = normalize_for_scan(decoded)
@@ -10365,7 +10428,7 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                 merged_signals.append(base_signal_text)
             if labels:
                 merged_signals.append(labels)
-            variants.append((n, "; ".join([s for s in merged_signals if s])))
+            variants.append((n, "; ".join([s for s in merged_signals if s]), False))
 
         for decoded, labels in hidden_segments + base64_variants:
             n = normalize_for_scan(decoded)
@@ -10374,22 +10437,27 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                 merged_signals.append(base_signal_text)
             if labels:
                 merged_signals.append(labels)
-            variants.append((n, "; ".join([s for s in merged_signals if s])))
+            variants.append((n, "; ".join([s for s in merged_signals if s]), True))
 
         hidden = False
         base_defensive = _whole_text_is_defensive(norm)
-        for variant, signals in variants:
+        for variant, signals, is_extract in variants:
             if not signals:
                 continue
             if variant == norm and base_defensive:
                 continue
             for pat in INJECTION_PATTERNS:
                 if pat.search(variant) and (
-                    variant != norm
+                    (variant != norm and not is_extract)
                     or not pat.search(text)
-                    or "hidden-html/css" in signals
-                    or "html-comment" in signals
-                    or "base64:" in signals
+                    or (
+                        (
+                            "hidden-html/css" in signals
+                            or "html-comment" in signals
+                            or "base64:" in signals
+                        )
+                        and (not base_defensive or _b58_extract_actionable(variant))
+                    )
                 ):
                     fail_ev.append(
                         f"{source_name}: obfuscation hides injection matching "
@@ -10434,6 +10502,18 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                 and confusable_in_ascii_context(text)
             ):
                 reasons.append("confusable characters in ASCII-Latin context")
+            if base_defensive:
+                # B-113: a wholly-defensive skill (## Known Risks + broad negation) that merely
+                # QUOTES an injection phrase inside a concealment channel (html-comment / hidden
+                # markup / a base64 attack sample) is a security-education artifact the tool
+                # endorses — not nagged. Drop the concealment-channel signals so it stays
+                # silent (PASS). Genuine obfuscation in raw_signals (invisible / bidi /
+                # confusable) has no benign explanation and is KEPT. Real actionable or
+                # char-obfuscated payloads never reach here — they already FAIL above.
+                _channel = {label for _, label in hidden_segments}
+                if base64_variants:
+                    _channel.add("base64")
+                reasons = [r for r in reasons if r not in _channel]
             if reasons:
                 warn_ev.append(
                     f"{source_name}: Unicode obfuscation signals present ("
