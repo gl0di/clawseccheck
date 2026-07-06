@@ -843,7 +843,11 @@ _DECODED_STRONG_RE = re.compile(
     r"|\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b"                     # pipe to a shell: … | sh
     r"|\bnc\b[^\n]{0,40}\s-e\b"                                # nc -e : reverse shell
     r"|\bpowershell\b[^\n]{0,40}\s-(?:e|enc|nop|w|c)\b"        # powershell -enc / -e / -c
-    r"|https?://\d{1,3}(?:\.\d{1,3}){3}",                      # URL to a bare IPv4
+    r"|https?://\d{1,3}(?:\.\d{1,3}){3}"                       # URL to a bare IPv4
+    r"|/dev/(?:tcp|udp)/"                                      # B-121: bash /dev/tcp reverse shell
+    r"|\bcertutil\b[^\n]{0,60}-urlcache"                       # B-121: certutil -urlcache LOLBin
+    r"|\bpython[0-9.]*\s+-c\b[^\n]{0,160}"                     # B-121: python -c <dangerous>
+    r"(?:import\s+(?:socket|subprocess|pty|os)\b|os\.system|exec\(|__import__)",
     re.I,
 )
 # A networking tool actually INVOKING a target on the same line: the token FOLLOWED by a

