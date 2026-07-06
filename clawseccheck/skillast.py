@@ -84,7 +84,7 @@ _MAX_FINDINGS_PER_FILE = 25
 # legit "read OPENAI_API_KEY, send it as an auth header" pattern is never flagged.
 
 # Taint (ENV_EXFIL_FLOW): env-var reads and agent-config-file reads flowing into a
-# network sink.  Severity is "info" so the WARN path in checks.py controls escalation;
+# network sink.  Severity is "info" so the WARN path in the checks engine controls escalation;
 # FAIL is never automatic because legitimate skills routinely send API keys to trusted
 # endpoints (e.g. posting ANTHROPIC_API_KEY to api.anthropic.com).
 _AGENT_CONFIG_PATH_RE = re.compile(
@@ -722,7 +722,7 @@ def _conditional_sink_findings(tree: ast.AST) -> list:
     """A dangerous sink (exec/eval/os.system/subprocess or a network call) reachable only
     under a date/time or environment guard — the code-level time-bomb / sandbox-evasion
     pattern, distinct from B65's prose sleeper-trigger. WARN-grade (conditional execution
-    has legit uses): checks.py routes CONDITIONAL_SINK to a WARN, never an automatic FAIL."""
+    has legit uses): the checks engine routes CONDITIONAL_SINK to a WARN, never an automatic FAIL."""
     out = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.If):
@@ -998,7 +998,7 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                     )
 
     # F-049: env-var / agent-config secret reaching a network sink (SkillSpector E2 env
-    # harvesting + E1 external transmission).  Severity is "info" and checks.py routes it
+    # harvesting + E1 external transmission).  Severity is "info" and the checks engine routes it
     # to a WARN — never an automatic FAIL — because legit skills DO post an env secret to a
     # trusted endpoint (e.g. ANTHROPIC_API_KEY -> api.anthropic.com) and the scanner cannot
     # know the destination.  The taint must actually connect: a name assigned from an
@@ -1872,7 +1872,7 @@ _SH_CRED_FILE_RE = re.compile(
 # Outbound commands that can send data off the machine.
 _SH_OUTBOUND_RE = re.compile(r"\b(?:curl|wget|nc|ncat|netcat)\b|/dev/tcp/", re.I)
 # curl|wget URL piped into a NON-shell interpreter (download -> exec) — extends the
-# sh/bash-only _PIPE_SHELL_RE (checks.py) to python/node/perl/ruby/php/deno.
+# sh/bash-only _PIPE_SHELL_RE (the checks engine) to python/node/perl/ruby/php/deno.
 _SH_PIPE_INTERP_RE = re.compile(
     r"(?:curl|wget)\b[^\n|]{0,256}?https?://[^\n|]{0,256}\|\s*(?:sudo\s+)?"
     r"(?:python3?|node|perl|ruby|php|deno)\b",

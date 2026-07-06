@@ -29,7 +29,7 @@ _KV_RE = re.compile(
     re.I,
 )
 
-# Provider-specific secret formats that the generic SECRET_PATTERNS in checks.py
+# Provider-specific secret formats that the generic SECRET_PATTERNS in the checks engine
 # miss (B-009).  These are full-token shapes, so each match is replaced wholesale.
 # Kept here (not in checks.SECRET_PATTERNS) so they only widen *redaction* and do
 # not introduce new config-scan findings / false-positive FAILs.

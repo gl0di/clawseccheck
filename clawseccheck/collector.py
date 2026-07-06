@@ -47,7 +47,7 @@ _ARCHIVE_MAX_EXPANSION_RATIO = 100
 # B-111: an archive member name is attacker-controlled and NOT OS-length-limited (unlike a
 # real filesystem path) — a crafted zip/tar entry can carry a multi-KB name. It flows
 # uncapped into ctx.limit_hits / ctx.path_traversal_violations / ctx.file_manifest keys,
-# which are joined straight into report evidence text (see B13 in checks.py). Cap it at the
+# which are joined straight into report evidence text (see B13 in the checks engine). Cap it at the
 # point of entry so every downstream consumer inherits the bound.
 _UNTRUSTED_NAME_CAP = 120
 

@@ -13,10 +13,10 @@ Three guards:
   (c) placement lint: a checks/_shared.py leaf (created by the I-022 R2 split) may
       hold only shared helpers/constants — no check_*/vet_* entry point.
 
-The line budget deliberately records today's over-budget files (checks.py first of
-all) in _EXEMPT as *tracked debt*, not a free pass — each carries a reason and the
-companion test fails if an exemption goes stale, so the guard tightens on its own as
-the modularization lands.
+The line budget deliberately records the over-budget checks/ topic modules
+(_content / _vet / _mcp / _config / _lifecycle) in _EXEMPT as *tracked debt*, not a
+free pass — each carries a reason and the companion test fails if an exemption goes
+stale, so the guard tightens on its own as any finer split lands.
 """
 from __future__ import annotations
 

@@ -101,7 +101,7 @@ def build_sars(ctx: object) -> list[dict]:
     Reads ctx.installed_skills, ctx.installed_skill_py, and ctx.effect_profiles.
     Re-runs the lightweight B62 classification logic (same functions, same results)
     to enumerate mismatches; does NOT re-run the full check_capability_intent_mismatch
-    to avoid importing checks.py (circular) — this module duplicates only the
+    to avoid importing the checks engine (circular) — this module duplicates only the
     classification helpers it needs.
 
     Returns a list of SAR dicts (one per mismatch-flagged skill), sorted by skill name.
@@ -114,7 +114,7 @@ def build_sars(ctx: object) -> list[dict]:
         return []
 
     # Import the B62 helpers from checks here (lazy import avoids a top-level
-    # circular dependency; checks.py does not import sar.py).
+    # circular dependency; the checks engine does not import sar.py).
     from .checks import (  # noqa: PLC0415
         _b62_classify_category,
         _b62_extract_declaration,

@@ -10,7 +10,7 @@
     connections  — whom it connects with (outbound surface, exfil channels).
 
 This module is a pure *aggregation + grading* layer. It does NOT scan: the four vet
-engines (``vet_skill`` / ``vet_plugin`` / ``vet_mcp`` / ``vet_source`` in ``checks.py``)
+engines (``vet_skill`` / ``vet_plugin`` / ``vet_mcp`` / ``vet_source`` in ``the checks engine``)
 stay the signal producers. ``build_profile`` reads their existing ``Finding`` output plus
 the ``ctx`` they attach, buckets each finding to an axis using the catalog's own AST /
 surface metadata (no per-finding hand-wiring), and rolls the axes up to an A–F grade via
@@ -191,7 +191,7 @@ def _danger_coverage_gap(danger_bucket: list, ctx) -> bool:
 
     Primary signal: ``ctx.limit_hits`` (collector.py appends to it on every size/file/
     nesting cap hit). Falls back to matching the bucket's own UNKNOWN finding detail text
-    when no ctx is attached (e.g. a hand-built Finding in a unit test) — checks.py's B13
+    when no ctx is attached (e.g. a hand-built Finding in a unit test) — the checks engine's B13
     limit-hit branch always phrases it "coverage is incomplete".
     """
     if not danger_bucket:
