@@ -44,6 +44,10 @@ _EXEMPT = {
     "checks/_lifecycle.py": "~1,340 lines — the approval / update-pinning / self-modification "
                             "/ supply-chain topic (17 checks + helpers); topic-faithful and "
                             "over budget by design. A finer split is a later cycle.",
+    "checks/_content.py": "~4,800 lines — the content-security ring (30 skill-malware / "
+                          "prompt-injection checks + the fence/decode/typosquat machinery). "
+                          "Kept as ONE unit on purpose (SKILL_CONTENT_RING is the single "
+                          "source consumed by both the full audit and --vet); do not split.",
     "skillast.py": "2,139 lines — the python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target).",
     "report.py": "1,720 lines — the output renderers; its own split is deferred to a "
