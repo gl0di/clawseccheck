@@ -656,3 +656,52 @@ def _trifecta_legs(ctx: Context) -> dict:
             or bool(_active_channels(cfg))  # enabled channels are bidirectional
         ),
     }
+
+
+INJECTION_PATTERNS = [
+    re.compile(r"ignore (all|any|previous|prior) (instructions|messages)", re.I),
+    re.compile(r"obey (all|any|every|whatever)", re.I),
+    re.compile(r"follow (all|any|every|whatever) (instruction|command|request)", re.I),
+    re.compile(
+        r"do (whatever|anything) (the )?(user|sender|message|email) (says|asks|wants)", re.I
+    ),
+    # NOTE: a bare "without (asking|confirmation)" pattern was removed — it is approval-bypass
+    # phrasing (B23's domain, which is severity-gated) and conflated protective directives
+    # ("Don't run destructive commands without asking") with permissive ones, causing false
+    # CRITICAL FAILs on well-configured agents. B6 flags blanket-obedience / injection only.
+]
+
+
+_FM_BLOCK_BARE_RE = re.compile(
+    r"\A---\s*\n(?P<fm>(?:.*?\n)*?)^---\s*\n",
+    re.MULTILINE,
+)
+
+
+# The SKILL.md frontmatter block. _read_skill_text prefixes each file with `# file: <name>`
+# (dir vet + full audit); a lone-file vet (vet_skill on a SKILL.md path) has no such header,
+# so the block may also start the blob. Both forms are handled by _skill_frontmatter_block.
+_FM_BLOCK_HEADERED_RE = re.compile(
+    r"^# file:\s+SKILL\.md\s*\n---\s*\n(?P<fm>(?:.*?\n)*?)^---\s*\n",
+    re.MULTILINE,
+)
+
+
+_HOOK_EXEC_RE = re.compile(
+    r"\bcurl\b|\bwget\b|\|\s*(?:ba|z)?sh\b|\bbash\b|node\s+-e|python\d?\s+-c|"
+    r"base64|\biex\b|invoke-expression|powershell|https?://|eval\s*\(",
+    re.I,
+)
+
+
+def _skill_frontmatter_block(blob: str) -> str | None:
+    """Return the SKILL.md frontmatter text (between the first fenced `---` pair), or None
+    if the blob carries no frontmatter. Prefers the `# file: SKILL.md`-anchored form; falls
+    back to a blob that opens with frontmatter (lone-file vet)."""
+    m = _FM_BLOCK_HEADERED_RE.search(blob)
+    if m:
+        return m.group("fm")
+    m = _FM_BLOCK_BARE_RE.match(blob)
+    if m:
+        return m.group("fm")
+    return None
