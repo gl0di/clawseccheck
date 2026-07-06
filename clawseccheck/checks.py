@@ -9890,6 +9890,11 @@ _B64_REPORT_FRAME_RE = re.compile(
     r"looks?\s+like|wording\s+like|phrase[sd]?\s+like|words?\s+like|"
     r"such\s+as|for\s+example|for\s+instance|e\.?g\.?|i\.?e\.?|"
     r"payload|example|directive[sd]?\s+(?:like|such)|"
+    # security-doc vocabulary: a skill DESCRIBING the attack it defends against
+    # ("a common injection is: …"). A sink-bearing live directive still FAILs (the
+    # actionable-continuation veto runs before this frame check); only a bare quoted
+    # phrase is dampened to WARN (B-112 C-135 A-case).
+    r"injection|injections|attack|attacks|malicious|adversar\w*|"
     r"when\s+you\s+see|if\s+you\s+see|do\s+not\s+obey|never\s+obey|"
     r"do\s+not\s+follow|never\s+follow|do\s+not\s+comply|ignore\s+it)\b",
     re.I,
