@@ -187,8 +187,8 @@ def test_near_miss_of_ioc_still_routes_through_typosquat_only():
 def test_catalog_is_populated_and_source_cited():
     # The shipped catalog is no longer empty, and its source block cites the advisories.
     assert _SOURCE_KNOWN_BAD["clawhub"] and _SOURCE_KNOWN_BAD["url"]
-    src = Path(__file__).resolve().parent.parent / "clawseccheck" / "checks.py"
-    text = src.read_text(encoding="utf-8")
+    pkg = Path(__file__).resolve().parent.parent / "clawseccheck" / "checks"
+    text = "".join(f.read_text(encoding="utf-8") for f in sorted(pkg.glob("*.py")))
     block = text.split("_SOURCE_KNOWN_BAD: dict = {", 1)[1].split("_SOURCE_KNOWN_GOOD", 1)[0]
     assert "Unit 42" in block
     assert "ClawHavoc" in block or "Koi" in block

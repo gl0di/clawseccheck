@@ -27,7 +27,7 @@ Issues = "https://github.com/gl0di/clawseccheck/issues"
 clawseccheck = "clawseccheck.cli:main"
 
 [tool.setuptools]
-packages = ["clawseccheck"]
+packages = ["clawseccheck", "clawseccheck.checks"]
 
 [tool.setuptools.dynamic]
 version = { attr = "clawseccheck.__version__" }

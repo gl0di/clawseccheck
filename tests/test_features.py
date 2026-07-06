@@ -55,8 +55,8 @@ def test_vet_unknown_for_missing_path(tmp_path):
 def test_vet_own_source_not_flagged_as_malware():
     # A security auditor embeds attack signatures + red-team payloads as data;
     # vetting its OWN source must not self-flag as malware.
-    import clawseccheck.checks as _checks
-    pkg_dir = Path(_checks.__file__).resolve().parent          # the clawseccheck/ package
+    import clawseccheck
+    pkg_dir = Path(clawseccheck.__file__).resolve().parent     # the clawseccheck/ package
     repo_root = pkg_dir.parent                                 # repo root (has clawseccheck/)
     for target in (pkg_dir, repo_root):
         f = vet_skill(target)

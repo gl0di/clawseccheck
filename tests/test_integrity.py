@@ -24,7 +24,7 @@ def test_per_file_map_contains_py_files():
     # Must include this very module's package files (keyed by POSIX relpath).
     assert "integrity.py" in per_file
     assert "cli.py" in per_file
-    assert "checks.py" in per_file
+    assert "checks/__init__.py" in per_file
     # __pycache__ artifacts must never be hashed (they vary by interpreter).
     assert not any("__pycache__" in name for name in per_file)
     # Every per-file entry is a 64-char hex string.

@@ -20,9 +20,9 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from . import attest as _attest
-from . import trajectory as _trajectory
-from .catalog import (
+from .. import attest as _attest
+from .. import trajectory as _trajectory
+from ..catalog import (
     ATTESTED,
     BY_ID,
     CRITICAL,
@@ -35,7 +35,7 @@ from .catalog import (
     WARN,
     Finding,
 )
-from .scanbudget import (
+from ..scanbudget import (
     DEFAULT_AUDIT_BUDGET_S,
     DEFAULT_CHECK_BUDGET_S,
     ScanBudgetExceeded,
@@ -43,7 +43,7 @@ from .scanbudget import (
     audit_deadline,
     check_deadline,
 )
-from .collector import (
+from ..collector import (
     _MAX_BYTES_PER_SKILL,
     _OWN_SKILL_NAMES,
     BOOTSTRAP_FILES,
@@ -56,15 +56,15 @@ from .collector import (
     read_skill_shell,
     read_skill_js,
 )
-from .safeio import walk_dir_safely
-from .skillast import (
+from ..safeio import walk_dir_safely
+from ..skillast import (
     analyze_javascript,
     analyze_python,
     analyze_python_package,
     analyze_shell,
 )
-from .skillast import simulate_effects as _simulate_effects
-from .textnorm import (
+from ..skillast import simulate_effects as _simulate_effects
+from ..textnorm import (
     confusable_in_ascii_context,
     normalize_for_scan,
     obfuscation_signals,
@@ -3064,7 +3064,7 @@ def _powershell_encoded_payloads(blob: str) -> list[str]:
 def check_installed_skills(ctx: Context) -> Finding:
     # Lazy import to avoid circular dependency: logsafe imports SECRET_PATTERNS
     # from this module, so a top-level "from .logsafe import redact" would cycle.
-    from .logsafe import redact as _redact  # noqa: PLC0415
+    from ..logsafe import redact as _redact  # noqa: PLC0415
 
     skills = ctx.installed_skills
     if not skills:
@@ -3657,9 +3657,9 @@ def check_installed_skills(ctx: Context) -> Finding:
     )
 
 
-# Distinctive symbols that only ClawSecCheck's own signature module (checks.py)
-# contains. Used to recognise our own source so --vet doesn't flag the scanner's
-# embedded attack signatures + red-team payloads as malware.
+# Distinctive symbols that only ClawSecCheck's own signature engine (the checks/
+# package) contains. Used to recognise our own source so --vet doesn't flag the
+# scanner's embedded attack signatures + red-team payloads as malware.
 _OWN_ENGINE_MARKERS = ("def check_installed_skills", "def vet_skill", "_SKILL_CRIT")
 
 
@@ -3672,14 +3672,21 @@ def _is_own_source(p: Path) -> bool:
     by name alone — so a look-alike skill that merely calls itself "clawseccheck" is
     still scanned normally and cannot use the name to dodge detection.
     """
-    if (p / "clawseccheck" / "checks.py").is_file():  # repo root / install dir
-        engine = p / "clawseccheck" / "checks.py"
-    elif p.name.lower() in _OWN_SKILL_NAMES and (p / "checks.py").is_file():  # package dir
-        engine = p / "checks.py"
+    # The engine is the checks/ package (current) or a legacy single-file checks.py.
+    # Read every engine source so the markers are found regardless of which topic module
+    # the I-022 split scattered them into.
+    if (p / "clawseccheck" / "checks").is_dir():  # repo root / install dir (package)
+        sources = sorted((p / "clawseccheck" / "checks").glob("*.py"))
+    elif (p / "clawseccheck" / "checks.py").is_file():  # repo root / install dir (legacy)
+        sources = [p / "clawseccheck" / "checks.py"]
+    elif p.name.lower() in _OWN_SKILL_NAMES and (p / "checks").is_dir():  # package dir
+        sources = sorted((p / "checks").glob("*.py"))
+    elif p.name.lower() in _OWN_SKILL_NAMES and (p / "checks.py").is_file():  # package dir (legacy)
+        sources = [p / "checks.py"]
     else:
         return False
     try:
-        head = engine.read_text(encoding="utf-8", errors="replace")
+        head = "\n".join(s.read_text(encoding="utf-8", errors="replace") for s in sources)
     except OSError:
         return False
     return all(m in head for m in _OWN_ENGINE_MARKERS)
@@ -5418,7 +5425,7 @@ def _mcp_server_risks(name: str, spec: dict) -> tuple[list[str], list[str]]:
     # B-073: detection runs on the raw command, but the string echoed into evidence
     # is host-only-sanitized so a credential embedded in a URL arg
     # (e.g. npx --registry https://TOKEN@reg/pkg) never reaches the report (§8).
-    from .logsafe import redact_urls_in_text  # noqa: PLC0415
+    from ..logsafe import redact_urls_in_text  # noqa: PLC0415
     safe_cmd = redact_urls_in_text(full_cmd)[:80]
     if _MCP_UNPINNED_RE.search(full_cmd):
         warns.append(f"{name}: stdio command uses unpinned/URL spec ({safe_cmd})")
@@ -5534,7 +5541,7 @@ def check_mcp_external_endpoint(ctx: Context) -> Finding:
     external = []
     # B-073: keep only scheme://host of the endpoint in evidence — userinfo, path,
     # and query can each carry a token (https://user:token@host/mcp/<token>?key=...) (§8).
-    from .logsafe import sanitize_url_host_only  # noqa: PLC0415
+    from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
     for name, spec in servers.items():
         if not isinstance(spec, dict):
             continue
@@ -5861,7 +5868,7 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
     group_write: list[str] = []  # -> WARN (if no FAIL)
     found_any = False
 
-    from .collector import WORKSPACE_DIRS
+    from ..collector import WORKSPACE_DIRS
 
     seen: set = set()  # resolved paths already statted -> never double-report
 
@@ -5994,7 +6001,7 @@ def _writable_identity_files(ctx: Context) -> list[str]:
     Only called on POSIX. Returns paths relative to ctx.home.
     """
     writable: list[str] = []
-    from .collector import SKILL_DIRS, WORKSPACE_DIRS
+    from ..collector import SKILL_DIRS, WORKSPACE_DIRS
 
     # Check SOUL.md (and the workspace dir that contains it)
     for ws in WORKSPACE_DIRS:
@@ -7694,7 +7701,7 @@ def _writable_skill_dirs(ctx: Context):
     """
     if not _is_posix():
         return None
-    from .collector import SKILL_DIRS  # noqa: PLC0415
+    from ..collector import SKILL_DIRS  # noqa: PLC0415
 
     bad, seen = [], 0
     for rel in SKILL_DIRS:
@@ -7728,7 +7735,7 @@ def _writable_skill_dirs(ctx: Context):
 
 
 def check_install_policy(ctx: Context) -> Finding:
-    from .logsafe import redact as _redact  # noqa: PLC0415
+    from ..logsafe import redact as _redact  # noqa: PLC0415
 
     skills = ctx.installed_skills
     if not skills:
@@ -12149,7 +12156,7 @@ def _symlink_scan_roots(ctx: Context) -> list[Path]:
     vet (ctx.home IS the vetted skill dir, marked by a root SKILL.md) and full audit
     (ctx.home is the OpenClaw home -> each installed skill dir + each workspace dir).
     A real OpenClaw home never carries a root SKILL.md, so the two never collide."""
-    from .collector import SKILL_DIRS, WORKSPACE_DIRS  # noqa: PLC0415
+    from ..collector import SKILL_DIRS, WORKSPACE_DIRS  # noqa: PLC0415
 
     home = ctx.home
     roots: list[Path] = []
@@ -12666,7 +12673,7 @@ def _reassembles_to_payload(candidate: str) -> str | None:
 
 def check_cross_file_payload(ctx: Context) -> Finding:
     """B90 — a base64 payload reassembled from string literals split across a skill's files."""
-    from .logsafe import redact as _redact  # noqa: PLC0415 — decoded preview is attacker-controlled
+    from ..logsafe import redact as _redact  # noqa: PLC0415 — decoded preview is attacker-controlled
 
     skills = getattr(ctx, "installed_skills", None)
     if not skills:
@@ -13038,7 +13045,7 @@ def check_lifecycle_hooks_extended(ctx: Context) -> Finding:
     Python side, a setup.py that overrides `cmdclass` runs arbitrary code at `pip
     install` time. Advisory (scored=False); WARN-only, never alters the static grade.
     """
-    from .logsafe import redact as _redact  # noqa: PLC0415
+    from ..logsafe import redact as _redact  # noqa: PLC0415
 
     skills = getattr(ctx, "installed_skills", None)
     if not skills:
@@ -14137,7 +14144,7 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
     command (npx/node/uvx) is never flagged — it is PATH/runtime-resolved and
     container-safe; only an absolute path that is absent is a dead-entry signal.
     """
-    from .collector import SKILL_DIRS  # local import: avoid a module-load cycle
+    from ..collector import SKILL_DIRS  # local import: avoid a module-load cycle
 
     home = getattr(ctx, "home", None)
     if not isinstance(home, Path) or not home.exists():

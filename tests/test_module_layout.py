@@ -35,8 +35,9 @@ _MAX_LINES = 1200
 # tracked debt, not a free pass — trim it as the I-022 modularization lands (the
 # companion staleness test fails if an exemption no longer applies).
 _EXEMPT = {
-    "checks.py": "14,384 lines — the worst offender; split into a checks/ package is "
-                 "scheduled (I-022 R2). Drop this once the package lands.",
+    "checks/__init__.py": "~14k lines during the I-022 R2 migration — topic modules are "
+                          "being extracted from the aggregator __init__ phase by phase; it "
+                          "shrinks to aggregator glue by the final phase. Drop this then.",
     "skillast.py": "2,139 lines — the python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target).",
     "report.py": "1,720 lines — the output renderers; its own split is deferred to a "
