@@ -3,6 +3,30 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.19.3] — 2026-07-06
+
+Maintainability groundwork, no engine change: the project's structure is now
+documented as an enforced convention so contributors know where new code goes
+before writing it, and a mechanical guard keeps any single module from silently
+growing into a 14k-line monolith. Audit behaviour and output are byte-for-byte
+unchanged.
+
+### Added
+
+- **Module-layout guard** (`tests/test_module_layout.py`): a stdlib-only, offline
+  CI test enforcing a per-module line budget (with explicit, reasoned exemptions
+  for today's known-large files) and an **export-contract** manifest
+  (`tests/checks_public_api.txt`) — every name callers import from
+  `clawseccheck.checks` must stay importable, so an internal refactor can't quietly
+  break the public surface.
+
+### Changed
+
+- **Check-authoring docs** (`docs/CHECK_AUTHORING.md`): added a "Where a new check
+  lives" section — pick the topic, register once in `CHECKS` / `SKILL_CONTENT_RING`,
+  add its `catalog.py` metadata, reuse existing helpers, prove it with clean + bad
+  fixtures, and regenerate `docs/CHECKS.md`.
+
 ## [3.19.2] — 2026-07-06
 
 Precision pass on the content-ring / provenance checks: several FAIL-capable

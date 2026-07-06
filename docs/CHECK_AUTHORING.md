@@ -8,6 +8,35 @@ Inspired by cloudflare/security-audit-skill's `report-schema.json` `root_cause` 
 (a forced one-sentence causal template). ClawSecCheck adopts the *spirit* — a Finding
 should say what is wrong **and why it matters** — without the schema rigidity.
 
+## Where a new check lives (before you write the `detail`)
+
+The check engine is organized **by topic**, not one flat file. Put a new check next to
+its topic peers, and keep the two registries the single source of truth:
+
+- **Pick the topic.** Config-hardening, content-security ring (skill-malware / prompt
+  injection), MCP / plugin, capability / manifest, lifecycle, host, egress / data-at-rest,
+  multi-agent — add the check function alongside the checks that read the same part of the
+  config or skill.
+- **Register it once.** Append the function to the `CHECKS` list (the ordered registry the
+  audit iterates). A content-security check goes into the `SKILL_CONTENT_RING` tuple
+  instead — that tuple is the single source of truth consumed by **both** the full audit
+  **and** `--vet`, so the two paths can never drift.
+- **Add its metadata.** One `CheckMeta` entry in `catalog.py` (id, title, severity,
+  framework, surface). The audit asserts every check has a catalog entry.
+- **Reuse, don't re-implement.** Shared parsing/regex helpers (fence detection,
+  frontmatter parsing, channel/tool enumeration, secret patterns) already exist and are
+  reused across checks — call the existing helper rather than adding a near-duplicate.
+- **Prove it both ways.** Every new/changed check needs a **clean** fixture (no finding)
+  and a **bad** fixture (the finding fires), plus a test asserting both, and explicit
+  coverage of the `UNKNOWN` path. A new FAIL-capable check also needs an adversarial
+  "try to make it fire wrongly" pass against real configs (zero false-positive FAILs).
+- **Regenerate the catalog doc.** `docs/CHECKS.md` is generated from `catalog.py` — run
+  `python3 scripts/gen_checks_docs.py --write` after adding a check.
+
+Keep the public import surface stable: whatever tests or other modules import from the
+check engine must stay importable — the engine re-exports its names from one aggregation
+point, so a new module never breaks `from clawseccheck.checks import …`.
+
 ## The template (FAIL / WARN details)
 
 A FAIL or WARN `detail` should name the **missing control** and the **consequence**:
