@@ -340,6 +340,8 @@ from ._content import (
     _CLICKFIX_IMPERATIVE_RE,
     _CLICKFIX_PROXIMITY_WINDOW,
     _CLICKFIX_REMOTE_FETCH_RE,
+    _CLICKFIX_TRUSTED_INSTALLERS,
+    _clickfix_trusted_installer,
     _CRED_RE,
     _DECODED_BAD_RE,
     _DEFENSIVE_HEADING_RE,

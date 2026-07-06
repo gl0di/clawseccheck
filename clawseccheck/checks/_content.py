@@ -756,6 +756,61 @@ _CLICKFIX_REMOTE_FETCH_RE = re.compile(
 )
 
 
+_URL_IN_CMD_RE = re.compile(r"https?://[^\s'\"|)>]+", re.I)
+
+# B-118: curated first-party installer hosts whose documented `curl https://<host> | sh`
+# one-liner is the standard install idiom, not ClickFix social-engineering. Each entry is
+# (exact host, required path prefix). A path prefix is mandatory for MULTI-TENANT hosts
+# (raw.githubusercontent.com serves any repo) so an attacker payload on the same host is
+# NOT cleared. https-only; every non-listed host keeps the WARN, so B100 still catches
+# real ClickFix (incl. look-alike domains). Not fabricated — these are the vendors' actual
+# documented installer URLs.
+_CLICKFIX_TRUSTED_INSTALLERS = (
+    ("sh.rustup.rs", ""),
+    ("astral.sh", ""),
+    ("get.docker.com", ""),
+    ("deno.land", ""),
+    ("bun.sh", ""),
+    ("get.pnpm.io", ""),
+    ("install.python-poetry.org", ""),
+    ("starship.rs", ""),
+    ("ollama.com", ""),
+    ("raw.githubusercontent.com", "/nvm-sh/"),
+    ("raw.githubusercontent.com", "/Homebrew/"),
+    ("raw.githubusercontent.com", "/creationix/"),  # legacy nvm org
+)
+
+
+def _clickfix_trusted_installer(cmd: str) -> bool:
+    """B-118: True when a matched remote-fetch is a plain https fetch whose EVERY URL is on
+    the curated first-party installer allowlist (rustup/uv/nvm/brew/docker/...). Only those
+    down-rank; every other host — a look-alike, an attacker CDN, a plaintext http://, or an
+    inherently remote-exec fetcher (iwr|iex / npx / pip install http / process substitution)
+    — keeps the WARN, so B100 still catches real ClickFix."""
+    low = cmd.lower()
+    if any(t in low for t in (
+        "iex", "invoke-expression", "invoke-webrequest", "npx ", "pip install http",
+        "bash <(", "sh <(",
+    )):
+        return False
+    urls = _URL_IN_CMD_RE.findall(cmd)
+    if not urls:
+        return False
+    for u in urls:
+        p = urlparse(u)
+        if p.scheme != "https":
+            return False
+        if p.port is not None or p.query or p.fragment:
+            return False  # canonical installer URL only — no explicit port, query, or fragment
+        host = (p.hostname or "").lower()
+        path = p.path or ""
+        if ".." in path:
+            return False  # no traversal past a trusted org prefix on a multi-tenant host
+        if not any(host == h and path.startswith(pre) for h, pre in _CLICKFIX_TRUSTED_INSTALLERS):
+            return False
+    return True
+
+
 # Credential/secret access is only malicious when EXFILTRATED.
 # Same-line rule: a line that touches a secret path AND ships it out (avoids flagging a
 # skill that merely loads its own config).
@@ -3115,6 +3170,8 @@ def check_clickfix_setup_section(ctx: Context) -> Finding:
             window = blob[window_start : m.end() + _CLICKFIX_PROXIMITY_WINDOW]
             if not _CLICKFIX_IMPERATIVE_RE.search(window):
                 continue
+            if _clickfix_trusted_installer(m.group(0)):
+                continue  # curated first-party installer host (B-118) — not ClickFix
             heading = (_nearest_heading(blob, m.start()) or "").strip("# \n")
             warns.append(
                 f"{name}: '{heading}' section instructs pasting a remote-fetch command "
@@ -3126,7 +3183,7 @@ def check_clickfix_setup_section(ctx: Context) -> Finding:
         extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
         return _custom(
             "B100",
-            HIGH,
+            MEDIUM,  # advisory (scored=False) WARN — HIGH overstated the weight (B-118)
             WARN,
             "ClickFix-style setup instruction: " + "; ".join(warns[:4]) + extra,
             "Replace the paste-into-terminal instruction with a documented package-"
