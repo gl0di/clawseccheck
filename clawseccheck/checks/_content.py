@@ -834,6 +834,38 @@ _DECODED_BAD_RE = re.compile(
     re.I,
 )
 
+# B-116: the decoded-payload FAIL must not fire on text that merely NAMES a networking
+# tool (a CSV column `nc`, prose "use curl"). Two tiers: a self-sufficient signal fires
+# alone; a bare tool token needs command context (a URL, a pipe-to-shell, or a flag).
+_DECODED_STRONG_RE = re.compile(
+    r"/bin/(?:ba|z)?sh"                                      # a shell interpreter path
+    r"|\binvoke-expression\b"                                 # PowerShell exec primitive
+    r"|\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b"                     # pipe to a shell: … | sh
+    r"|\bnc\b[^\n]{0,40}\s-e\b"                                # nc -e : reverse shell
+    r"|\bpowershell\b[^\n]{0,40}\s-(?:e|enc|nop|w|c)\b"        # powershell -enc / -e / -c
+    r"|https?://\d{1,3}(?:\.\d{1,3}){3}",                      # URL to a bare IPv4
+    re.I,
+)
+# A networking tool actually INVOKING a target on the same line: the token FOLLOWED by a
+# URL (any scheme) or a flag — i.e. the tool's own argument. This distinguishes a real
+# command from text that merely NAMES the tool or links to its docs ("see https://curl.se/
+# for curl documentation" has the URL BEFORE the token, not as its argument — B-116 FP).
+_DECODED_TOOL_CMD_RE = re.compile(
+    r"\b(?:curl|wget|nc)\b[^\n]{0,80}?(?:[a-z][a-z0-9+.\-]*://|\s-[a-zA-Z])"
+    r"|\bpowershell\b[^\n]{0,120}?(?:[a-z][a-z0-9+.\-]*://|\s-[a-zA-Z]|\biex\b)",
+    re.I,
+)
+
+
+def _decoded_is_payload(norm: str) -> bool:
+    """B-116: True when decoded text is a runnable shell/download payload, not merely text
+    that NAMES a networking tool. A self-sufficient signal (`_DECODED_STRONG_RE`: a shell
+    path, `| sh`, `nc -e`, `powershell -enc`, a URL to a bare IP, invoke-expression) fires
+    alone; otherwise a tool must actually INVOKE a target (`_DECODED_TOOL_CMD_RE`: the token
+    followed by a URL or a flag). So a benign decoded CSV/README that just names `nc`/`curl`,
+    or links to a tool's docs, does not flip B13 to CRITICAL FAIL."""
+    return bool(_DECODED_STRONG_RE.search(norm) or _DECODED_TOOL_CMD_RE.search(norm))
+
 
 _DEFENSIVE_HEADING_RE = re.compile(
     r"^[^\S\n]{0,3}#{1,6}[^\S\n]*.*?\b(?:"
@@ -2638,7 +2670,7 @@ def _reassembles_to_payload(candidate: str) -> str | None:
         printable = sum(1 for c in head if c.isprintable() or c in "\t\n ")
         if printable / len(head) < 0.85:  # decoded binary asset, not a text payload
             return None
-        if len(norm) >= 6 and _DECODED_BAD_RE.search(norm):
+        if len(norm) >= 6 and _decoded_is_payload(norm):
             return norm.strip().replace("\n", " ")[:80]
         return None
 

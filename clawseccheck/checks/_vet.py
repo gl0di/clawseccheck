@@ -55,6 +55,7 @@ from ._content import (
     _B64_BLOB_RE,
     _CRED_RE,
     _DECODED_BAD_RE,
+    _decoded_is_payload,
     _EXFIL_RE,
     _IOC_ONION_RE,
     _KNOWN_NAMES,
@@ -782,7 +783,7 @@ def _decoded_payloads(blob: str) -> list[str]:
         if key in seen:
             return
         seen.add(key)
-        if len(norm) >= 6 and _DECODED_BAD_RE.search(norm):
+        if len(norm) >= 6 and _decoded_is_payload(norm):
             hits.append(norm.strip().replace("\n", " ")[:80])
             return
         # B-093: _DECODED_BAD_RE only catches shell/download payloads. A base64 blob can
