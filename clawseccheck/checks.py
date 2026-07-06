@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import binascii
 import html
+import ipaddress
 import json
 import os
 import re
@@ -13666,13 +13667,33 @@ _INSTALL_URL_FIELDS = ("url", "download", "src", "source", "href")
 _INSTALL_IPV4_HOST_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
-def _install_host_is_ip(host: str) -> bool:
-    """True when *host* (a urlparse hostname) is a raw IP literal, not a DNS name."""
+def _install_host_is_public_ip(host: str) -> bool:
+    """True when *host* is a raw PUBLIC (globally-routable) IP literal (B-115). A DNS name
+    returns False (handled elsewhere); so does a loopback / private / link-local / ULA /
+    TEST-NET literal — an install directive that fetches from `127.0.0.1`, `192.168.x.x` or
+    `[::1]` is an air-gapped / homelab / fleet-internal mirror on the operator's own network,
+    not an anonymous swappable supply-chain source, so it must NOT FAIL. IPv4 goes through
+    `_is_public_ip` (explicit TEST-NET/private handling, stable across Python versions); IPv6
+    is classified via stdlib `ipaddress`."""
     if not host:
         return False
-    if _INSTALL_IPV4_HOST_RE.match(host):
-        return all(0 <= int(o) <= 255 for o in host.split("."))
-    return ":" in host  # urlparse strips the [] of an IPv6 literal, leaving the colons
+    h = host.strip().strip("[]")
+    if _INSTALL_IPV4_HOST_RE.match(h):
+        return _is_public_ip(h)
+    if ":" in h:  # IPv6 literal (urlparse strips the [] but be defensive)
+        try:
+            ip = ipaddress.ip_address(h)
+        except ValueError:
+            return False
+        return not (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_unspecified
+            or ip.is_multicast
+        )
+    return False
 
 
 def _install_url_target(val) -> tuple[str | None, str | None]:
@@ -13710,8 +13731,10 @@ def _install_entry_findings(skill_name: str, install) -> list[str]:
                     f"{skill_name}: install '{eid}' fetches over plaintext {scheme}:// "
                     f"({host or 'unknown host'})"
                 )
-            elif host and _install_host_is_ip(host):
-                fails.append(f"{skill_name}: install '{eid}' fetches from a raw-IP host ({host})")
+            elif host and _install_host_is_public_ip(host):
+                fails.append(
+                    f"{skill_name}: install '{eid}' fetches from a raw public-IP host ({host})"
+                )
             elif host and _IOC_ONION_RE.fullmatch(host):
                 fails.append(f"{skill_name}: install '{eid}' fetches from a .onion host ({host})")
     return fails

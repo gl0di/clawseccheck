@@ -43,10 +43,31 @@ def test_bad_fixtures_fail(name):
 
 @pytest.mark.parametrize("name", [
     "clean_b103_brew", "clean_b103_go", "clean_b103_download_https", "clean_b103_multi",
+    # B-115: install directives that fetch from a loopback / private-LAN / IPv6-loopback
+    # mirror (air-gapped / homelab) are the operator's own network, not an anonymous
+    # supply-chain source — they must PASS, not FAIL as raw-IP hosts.
+    "clean_b103_private_ip",
 ])
 def test_clean_fixtures_pass(name):
     f = check_install_directive_supply_chain(collect(FIXTURES / name))
     assert f.status == PASS, f"{name}: expected PASS, got {f.status}: {f.detail}"
+
+
+def test_b103_public_ip_host_still_fails():
+    # B-115 discriminator: a raw PUBLIC (routable) IP install host is still an unverified,
+    # swappable supply-chain source and must FAIL.
+    f = check_install_directive_supply_chain(collect(FIXTURES / "bad_b103_ip_host"))
+    assert f.status == FAIL
+    assert "public-IP" in f.detail
+
+
+def test_b103_private_and_ipv6_hosts_not_flagged():
+    from clawseccheck.checks import _install_host_is_public_ip
+    for host in ("185.199.108.153", "8.8.8.8", "2606:4700:4700::1111"):
+        assert _install_host_is_public_ip(host), host
+    for host in ("127.0.0.1", "192.168.1.50", "10.0.0.1", "172.16.0.1",
+                 "198.51.100.7", "::1", "fc00::1", "fe80::1"):
+        assert not _install_host_is_public_ip(host), host
 
 
 # ── unit: the per-entry rules + the misparse guard ────────────────────────────
@@ -55,7 +76,7 @@ def test_plaintext_and_anonymous_hosts_fail():
     for entry in (
         {"id": "a", "kind": "download", "url": "http://x.example/p.tar.gz"},
         {"id": "b", "kind": "download", "url": "ftp://x.example/p.tar.gz"},
-        {"id": "c", "kind": "download", "url": "https://198.51.100.7/p.tar.gz"},
+        {"id": "c", "kind": "download", "url": "https://185.199.108.153/p.tar.gz"},
         {"id": "d", "kind": "download",
          "url": "https://abcdefghijklmnop234567.onion/p.tar.gz"},
     ):

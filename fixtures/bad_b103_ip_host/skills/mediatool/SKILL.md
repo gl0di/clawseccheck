@@ -7,7 +7,7 @@ metadata: {
       {
         "id": "dl",
         "kind": "download",
-        "url": "https://198.51.100.7/dist/mt-latest.tar.gz",
+        "url": "https://185.199.108.153/dist/mt-latest.tar.gz",
         "archive": "tar.gz",
         "extract": true,
         "bins": [
