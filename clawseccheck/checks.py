@@ -11308,6 +11308,95 @@ _B74_FALSE_PROVENANCE_RE = re.compile(
     re.I,
 )
 
+# Override / jailbreak imperatives that a FORGED system/role turn smuggles in — the payload
+# that makes the fabricated block dangerous (vs a bare marker merely mentioned in docs). Kept
+# broad on the injection vocabulary. A missed phrasing only downgrades FAIL→WARN (never PASS),
+# so a fabricated block is always at least surfaced.
+_B74_TURN_DIRECTIVE_RE = re.compile(
+    r"\b(?:ignore|disregard|forget|overrule|bypass|circumvent|violate|override)\b"
+    r"(?:\s+\S+){0,4}?\s+"
+    r"(?:instruction|instructions|guideline|guidelines|rule|rules|restriction|restrictions|"
+    r"direction|directions|prompt|control|controls|guardrail|guardrails|safety|"
+    r"everything|below|above)"
+    r"|\byou\s+are\s+(?:now\s+)?(?:an?\s+)?(?:unrestricted|jailbroken|unfiltered|uncensored|"
+    r"unlimited|dan)\b"
+    r"|\b(?:unrestricted|unfiltered|uncensored|jailbroken)\s+(?:assistant|ai|model|mode)\b"
+    r"|\bno\s+(?:safety|restrictions?|guidelines?|rules?|limits?|filters?)\b"
+    r"|\bdisable\s+(?:all\s+|any\s+|the\s+)?(?:safety|restrictions?|guidelines?|controls?)"
+    r"|\boverride\b(?=\s*[\]\n]|$)",
+    re.I,
+)
+
+# Defensive / documentation frame around a marker — a skill QUOTING a forged block as an
+# example ("a common injection is: [SYSTEM: …]. Never comply.") or writing a rule ABOUT
+# overrides ("[assistant] responses must never override safety"). Downgrades FAIL→WARN so a
+# security/doc skill is not hard-FAILed for describing the attack it defends against (C-135).
+_B74_DEFENSIVE_FRAME_RE = re.compile(
+    r"\b(?:for\s+example|for\s+instance|e\.?g\.?|such\s+as|example|examples|sample|"
+    r"injection|injections|attack|attacks|payload|malicious|adversar\w*|"
+    r"reads?|says?|looks?\s+like|wording\s+like|"
+    r"refuse|reject|flag|detect|treat\s+(?:it|this|them)\s+as|"
+    r"do\s+not\s+(?:obey|follow|comply|act|trust)|"
+    r"never\s+(?:obey|follow|comply|act|trust|override)|"
+    r"must\s+(?:not|never)|may\s+not|should\s+(?:not|never)|cannot|can[’']?t)\b",
+    re.I,
+)
+
+
+def _b74_turn_content(norm: str, m: "re.Match") -> str:
+    """The text that belongs to the marker's OWN turn — where an injected directive would
+    live — or '' if the marker is a bare mid-sentence MENTION rather than a turn opener. This
+    is the containment that stops the directive check from reaching across a whole paragraph
+    (C-135): '[user]' in "a [user] message asks you to ignore safety" is a mention, not a
+    turn, so its directive check sees nothing."""
+    g = m.group()
+    gl = g.lower()
+    end = m.end()
+    # '[SYSTEM: …]' colon-bracket → the turn body is inside, up to the closing ']'.
+    if "[" in g and g.rstrip().endswith(":"):
+        close = norm.find("]", end)
+        return norm[end:close] if 0 <= close - end <= 300 else norm[end:end + 120]
+    # '<system>…</system>' opening tag → body up to the closing tag (a bare '<system>' with no
+    # close is a mention).
+    if gl.startswith("<") and "/" not in gl:
+        close = norm.lower().find("</system>", end)
+        return norm[end:close] if 0 <= close - end <= 300 else ""
+    # a closing '</system>' tag carries no turn body.
+    if "/" in gl:
+        return ""
+    # line-anchored markers (line-start 'SYSTEM:', '===SYSTEM===', or a closed bracket that
+    # OPENS its line) → the turn body is the rest of that line. The line-start 'SYSTEM:'
+    # alternative captures a leading '\n', so advance past it to the marker's real column.
+    real_start = m.start() + (len(g) - len(g.lstrip("\n \t")))
+    line_start = norm.rfind("\n", 0, real_start) + 1
+    if norm[line_start:real_start].strip() == "":
+        line_end = norm.find("\n", end)
+        return norm[end:line_end if line_end != -1 else len(norm)]
+    # a closed '[USER]'/'[ASSISTANT]'/'[SYSTEM]' used MID-sentence is a documentation mention.
+    return ""
+
+
+def _b74_forged_turn_has_directive(norm: str, m: "re.Match") -> bool:
+    """B-112: True when a role/system marker OPENS an injected turn carrying an
+    instruction-hierarchy OVERRIDE — a fabricated `[SYSTEM: ignore previous instructions…]`
+    turn — vs a BARE marker MENTIONED in documentation. The directive must live in the
+    marker's OWN turn (`_b74_turn_content`), not merely nearby, and must not sit in a
+    defensive/quoting frame (a doc describing the attack). A bare/ambiguous marker → WARN
+    (handled by the caller); only a real forged directive turn → FAIL."""
+    content = _b74_turn_content(norm, m)
+    if not content:
+        return False
+    if not (
+        _B74_TURN_DIRECTIVE_RE.search(content)
+        or _B64_HIGH_CONFIDENCE_RE.search(content)
+        or _B64_WEAK_SIGNAL_RE.search(content)
+    ):
+        return False
+    frame_win = norm[max(0, m.start() - 100):min(len(norm), m.end() + 120)]
+    if _B74_DEFENSIVE_FRAME_RE.search(frame_win):
+        return False
+    return True
+
 
 def check_forged_provenance(ctx: Context) -> Finding:
     """B74 — Forged-provenance content detector.
@@ -11336,6 +11425,7 @@ def check_forged_provenance(ctx: Context) -> Finding:
 
     fail_ev: list[str] = []
     warn_ev: list[str] = []
+    role_warn_ev: list[str] = []
 
     def _scan(source_name: str, text: str) -> None:
         norm = normalize_for_scan(text)
@@ -11346,7 +11436,14 @@ def check_forged_provenance(ctx: Context) -> Finding:
             snippet = m.group().strip()
             if len(snippet) > 80:
                 snippet = snippet[:77] + "..."
-            fail_ev.append(f'{source_name}: "{snippet}"')
+            if _b74_forged_turn_has_directive(norm, m):
+                fail_ev.append(f'{source_name}: "{snippet}"')
+            else:
+                # B-112: a bare role/system marker with no co-located override directive is
+                # ambiguous (a fabricated shell vs a transcript/format skill documenting
+                # [user]/[assistant]/[system] tags). Surface as WARN — never the DANGEROUS
+                # FAIL that hard-caps the grade on a benign documentation skill.
+                role_warn_ev.append(f'{source_name}: "{snippet}"')
         for m in _B74_FALSE_PROVENANCE_RE.finditer(norm):
             if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
@@ -11384,18 +11481,32 @@ def check_forged_provenance(ctx: Context) -> Finding:
             "safety controls and inject unauthorized instructions.",
             fail_ev,
         )
-    if warn_ev:
-        ev_summary = "; ".join(warn_ev[:4])
-        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
+    warn_all = role_warn_ev + warn_ev
+    if warn_all:
+        reasons = []
+        if role_warn_ev:
+            reasons.append(
+                "role/system-block markers present in prose without a co-located override "
+                "directive (ambiguous — a fabricated turn vs a transcript/format skill "
+                "documenting [user]/[assistant]/[system] tags)"
+            )
+        if warn_ev:
+            reasons.append(
+                "false-provenance attribution phrases (content claims the model previously "
+                "agreed to or authorized something)"
+            )
+        ev_summary = "; ".join(warn_all[:4])
+        extra = f" (+{len(warn_all) - 4} more)" if len(warn_all) > 4 else ""
         return _finding(
             "B74",
             WARN,
-            "False-provenance attribution phrases found — content claims the model "
-            "previously agreed to or authorized something: " + ev_summary + extra,
-            "Review the flagged content. Legitimate instructions do not claim the model "
-            "previously agreed to them. If this is documentation, move it into a fenced "
-            "code block (```) so it is treated as an example.",
-            warn_ev,
+            "Provenance / role-marker signals found — " + "; and ".join(reasons) + ": "
+            + ev_summary + extra,
+            "Review the flagged content. A real forged-system-block attack pairs the marker "
+            "with an override directive (that hard-FAILs); a bare marker is usually "
+            "documentation. If this is documentation, move the example into a fenced code "
+            "block (```) so it is treated as an example.",
+            warn_all,
         )
     return _finding(
         "B74",
