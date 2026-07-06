@@ -164,7 +164,7 @@ def test_b22_no_workspace_is_unknown(tmp_path):
 def test_b22_windows_is_unknown(monkeypatch, tmp_path):
     _make_workspace(tmp_path, ws_mode=0o777)
     from clawseccheck import checks
-    monkeypatch.setattr(checks, "_is_posix", lambda: False)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: False)
     c = _ctx(_cfg_with_tools(), home=str(tmp_path))
     assert check_self_modification(c).status == "UNKNOWN"
 

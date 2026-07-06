@@ -79,7 +79,7 @@ def test_b85_absent_is_unknown(tmp_path):
 
 def test_b85_non_posix_is_unknown(monkeypatch, tmp_path):
     _traj(tmp_path)   # even with a record present, NTFS ACLs are unreadable -> UNKNOWN
-    monkeypatch.setattr(checks, "_is_posix", lambda: False)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: False)
     f = check_incident_readiness(_ctx(tmp_path))
     assert f.status == "UNKNOWN"
     assert "acl" in f.detail.lower()

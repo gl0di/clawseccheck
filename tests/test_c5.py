@@ -16,7 +16,7 @@ def _ctx():
 # ---- non-POSIX -> UNKNOWN ----
 def test_c5_non_posix_unknown(monkeypatch):
     from clawseccheck import checks
-    monkeypatch.setattr(checks, "_is_posix", lambda: False)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: False)
     result = check_path_safety(_ctx())
     assert result.status == "UNKNOWN"
     assert result.id == "C5"
@@ -26,7 +26,7 @@ def test_c5_non_posix_unknown(monkeypatch):
 def test_c5_not_on_path_unknown(monkeypatch):
     import shutil
     from clawseccheck import checks
-    monkeypatch.setattr(checks, "_is_posix", lambda: True)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
     monkeypatch.setattr(shutil, "which", lambda name: None)
     result = check_path_safety(_ctx())
     assert result.status == "UNKNOWN"
@@ -47,7 +47,7 @@ def test_c5_writable_binary_dir_warns(monkeypatch, tmp_path):
 
     bin_dir.chmod(0o777)   # world-writable — should trigger WARN
     try:
-        monkeypatch.setattr(checks, "_is_posix", lambda: True)
+        monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
         monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
         # PATH only contains the binary dir itself (no dirs before it).
         monkeypatch.setenv("PATH", str(bin_dir))
@@ -78,7 +78,7 @@ def test_c5_writable_earlier_path_dir_warns(monkeypatch, tmp_path):
     evil_dir.mkdir()
     evil_dir.chmod(0o777)
     try:
-        monkeypatch.setattr(checks, "_is_posix", lambda: True)
+        monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
         monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
         monkeypatch.setenv("PATH", f"{evil_dir}{os.pathsep}{bin_dir}")
 
@@ -107,7 +107,7 @@ def test_c5_writable_later_path_dir_passes(monkeypatch, tmp_path):
     later_dir.mkdir()
     later_dir.chmod(0o777)
     try:
-        monkeypatch.setattr(checks, "_is_posix", lambda: True)
+        monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
         monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
         monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{later_dir}")
 
@@ -134,7 +134,7 @@ def test_c5_tight_path_passes(monkeypatch, tmp_path):
     pre_dir.mkdir()
     pre_dir.chmod(0o755)
 
-    monkeypatch.setattr(checks, "_is_posix", lambda: True)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
     monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
     monkeypatch.setenv("PATH", f"{pre_dir}{os.pathsep}{bin_dir}")
 
@@ -155,7 +155,7 @@ def test_c5_group_only_dir_says_group_not_world(monkeypatch, tmp_path):
     fake_exe.chmod(0o755)
     bin_dir.chmod(0o775)   # group-writable ONLY (o=r-x, no world write)
     try:
-        monkeypatch.setattr(checks, "_is_posix", lambda: True)
+        monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
         monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
         monkeypatch.setenv("PATH", str(bin_dir))
 
@@ -182,7 +182,7 @@ def test_c5_world_writable_dir_says_world(monkeypatch, tmp_path):
     fake_exe.chmod(0o755)
     bin_dir.chmod(0o757)   # world-writable, group not
     try:
-        monkeypatch.setattr(checks, "_is_posix", lambda: True)
+        monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
         monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
         monkeypatch.setenv("PATH", str(bin_dir))
 
@@ -207,7 +207,7 @@ def test_c5_group_and_world_writable_dir_says_both(monkeypatch, tmp_path):
     fake_exe.chmod(0o755)
     bin_dir.chmod(0o777)
     try:
-        monkeypatch.setattr(checks, "_is_posix", lambda: True)
+        monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
         monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
         monkeypatch.setenv("PATH", str(bin_dir))
 
@@ -231,7 +231,7 @@ def test_c5_is_not_scored(monkeypatch, tmp_path):
     fake_exe.chmod(0o755)
     bin_dir.chmod(0o755)
 
-    monkeypatch.setattr(checks, "_is_posix", lambda: True)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
     monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
     monkeypatch.setenv("PATH", str(bin_dir))
 

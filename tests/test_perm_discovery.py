@@ -122,7 +122,7 @@ def test_c5_flags_group_writable_ancestor(monkeypatch, tmp_path):
     import shutil
     from clawseccheck import checks
     binfile = _fake_install(tmp_path, pkg_mode=0o775)   # bin tight, package root 775
-    monkeypatch.setattr(checks, "_is_posix", lambda: True)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
     monkeypatch.setattr(shutil, "which", lambda name: str(binfile))
     monkeypatch.setenv("PATH", str(binfile.parent))
     f = check_path_safety(_ctx(tmp_path))
@@ -134,7 +134,7 @@ def test_c5_clean_tree_passes(monkeypatch, tmp_path):
     import shutil
     from clawseccheck import checks
     binfile = _fake_install(tmp_path, pkg_mode=0o755)   # all tight
-    monkeypatch.setattr(checks, "_is_posix", lambda: True)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
     monkeypatch.setattr(shutil, "which", lambda name: str(binfile))
     monkeypatch.setenv("PATH", str(binfile.parent))
     assert check_path_safety(_ctx(tmp_path)).status == "PASS"
@@ -153,7 +153,7 @@ def test_c5_sticky_ancestor_not_flagged(monkeypatch, tmp_path):
     os.chmod(pkg, 0o755)
     os.chmod(binfile, 0o755)
     os.chmod(sticky, 0o1777)             # sticky + world-write
-    monkeypatch.setattr(checks, "_is_posix", lambda: True)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
     monkeypatch.setattr(shutil, "which", lambda name: str(binfile))
     monkeypatch.setenv("PATH", str(binfile.parent))
     f = check_path_safety(_ctx(tmp_path))
@@ -166,7 +166,7 @@ def test_c5_attested_install_dir_warns(monkeypatch, tmp_path):
     inst = tmp_path / "openclaw"
     inst.mkdir()
     os.chmod(inst, 0o775)
-    monkeypatch.setattr(checks, "_is_posix", lambda: True)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
     monkeypatch.setattr(shutil, "which", lambda name: None)   # not on PATH
     att = {"schema": attest.SCHEMA_ID, "paths": {"openclaw_install": str(inst)}}
     f = check_path_safety(_ctx(tmp_path, att))
@@ -181,7 +181,7 @@ def test_c5_attested_install_clean_passes(monkeypatch, tmp_path):
     inst.mkdir()
     os.chmod(tmp_path, 0o755)
     os.chmod(inst, 0o755)
-    monkeypatch.setattr(checks, "_is_posix", lambda: True)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
     monkeypatch.setattr(shutil, "which", lambda name: None)
     att = {"schema": attest.SCHEMA_ID, "paths": {"openclaw_install": str(inst)}}
     assert check_path_safety(_ctx(tmp_path, att)).status == "PASS"
@@ -190,7 +190,7 @@ def test_c5_attested_install_clean_passes(monkeypatch, tmp_path):
 def test_c5_no_path_no_attest_unknown(monkeypatch, tmp_path):
     import shutil
     from clawseccheck import checks
-    monkeypatch.setattr(checks, "_is_posix", lambda: True)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
     monkeypatch.setattr(shutil, "which", lambda name: None)
     assert check_path_safety(_ctx(tmp_path)).status == "UNKNOWN"
 

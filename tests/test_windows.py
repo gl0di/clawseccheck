@@ -15,7 +15,7 @@ def test_posix_perm_checks_are_skipped_on_windows(monkeypatch, tmp_path):
     # "world-readable" finding on Windows even if st_mode looks loose.
     from clawseccheck import checks
     # simulate Windows without touching the global os.name (which pathlib reads)
-    monkeypatch.setattr(checks, "_is_posix", lambda: False)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: False)
 
     cfg = tmp_path / "openclaw.json"
     cfg.write_text(

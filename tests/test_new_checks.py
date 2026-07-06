@@ -67,5 +67,5 @@ def test_b19_no_dirs_unknown(tmp_path):
 
 def test_b19_windows_is_unknown(monkeypatch, tmp_path):
     from clawseccheck import checks
-    monkeypatch.setattr(checks, "_is_posix", lambda: False)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: False)
     assert check_data_atrest(_ctx({}, home=str(tmp_path))).status == "UNKNOWN"

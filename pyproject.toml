@@ -31,3 +31,9 @@ packages = ["clawseccheck", "clawseccheck.checks"]
 
 [tool.setuptools.dynamic]
 version = { attr = "clawseccheck.__version__" }
+
+[tool.ruff.lint.per-file-ignores]
+# The checks/ aggregator re-exports every topic module's symbols (incl. privates) so
+# they stay importable as `from clawseccheck.checks import X`. It deliberately has no
+# __all__ (CLAUDE.md §3.1-a), so those re-export imports read as "unused" to pyflakes.
+"clawseccheck/checks/__init__.py" = ["F401"]

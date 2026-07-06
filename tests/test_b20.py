@@ -73,7 +73,7 @@ def test_b20_group_writable_memory_warns(tmp_path):
 # ---- Windows / non-POSIX -> UNKNOWN ----
 def test_b20_windows_is_unknown(monkeypatch, tmp_path):
     from clawseccheck import checks
-    monkeypatch.setattr(checks, "_is_posix", lambda: False)
+    monkeypatch.setattr(checks._shared, "_is_posix", lambda: False)
     ws = _ws(tmp_path)
     (ws / "SOUL.md").write_text("identity")
     result = check_bootstrap_write_protection(_ctx(tmp_path))

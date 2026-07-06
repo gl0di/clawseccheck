@@ -70,80 +70,50 @@ from ..textnorm import (
     obfuscation_signals,
 )
 
-
-def _is_posix() -> bool:
-    return os.name == "posix"
-
-
-def _perms_loose(ctx: Context) -> bool:
-    """True only on POSIX when the config file is group/world-readable.
-
-    Windows uses NTFS ACLs, not POSIX mode bits, so st_mode is not meaningful
-    there — we never raise a false 'world-readable' finding on Windows.
-    """
-    if not _is_posix() or ctx.config_mode is None:
-        return False
-    return (ctx.config_mode & 0o077) != 0
-
-
-LOOPBACK = {"127.0.0.1", "localhost", "::1", "", "loopback", "local"}
-EXPOSED_BINDS = {"0.0.0.0", "::", "all", "public", "*"}
-
-
-def parse_bind_host(value) -> str:
-    """Extract the host portion from a gateway.bind value, handling IPv6 correctly.
-
-    Zone IDs (e.g. ``%eth0``) are stripped from IPv6 addresses so that the
-    loopback/wildcard classification works regardless of whether the caller
-    appended a scope suffix.
-
-    Examples::
-        "127.0.0.1:8080"   -> "127.0.0.1"
-        "[::1]:8765"        -> "::1"
-        "[::1%eth0]:8765"   -> "::1"
-        "::1%eth0"          -> "::1"
-        "::"                -> "::"
-        "[::]"              -> "::"
-        "0.0.0.0"           -> "0.0.0.0"
-        ""                  -> ""
-    """
-    s = str(value or "").strip().lower()
-    if not s:
-        return ""
-    # Bracketed IPv6 with optional port: [::1]:port or [::]
-    # Zone ID may appear inside the brackets: [::1%eth0]:port
-    if s.startswith("["):
-        end = s.find("]")
-        if end != -1:
-            host = s[1:end]  # e.g. "::1" or "::" or "::1%eth0"
-            # Strip zone ID from bracketed form.
-            if "%" in host:
-                host = host.split("%", 1)[0]
-            return host
-    # Bare wildcard / known special values without colons
-    if s in {"::", "0.0.0.0", "*"}:
-        return s
-    # host:port (IPv4 or hostname) — exactly one colon
-    if s.count(":") == 1:
-        return s.split(":", 1)[0]
-    # Bare IPv6 address with multiple colons (no brackets, no port).
-    # May carry a zone ID suffix: ::1%eth0
-    if ":" in s:
-        host = s
-        if "%" in host:
-            host = host.split("%", 1)[0]
-        return host
-    return s
+# I-022 R2: shared leaf — helpers/constants reused across topic modules and by
+# sibling modules. Imported explicitly (not star) so every private stays importable
+# via the aggregator (CLAUDE.md §3.1-a: no __all__ here).
+from . import _shared
+from ._shared import (
+    _is_posix,
+    _perms_loose,
+    LOOPBACK,
+    EXPOSED_BINDS,
+    parse_bind_host,
+    SECRET_KEY_RE,
+    SECRET_PATTERNS,
+    INPUT_TOOL_HINTS,
+    SENSITIVE_TOOL_HINTS,
+    OUTBOUND_TOOL_HINTS,
+    _meta,
+    _finding,
+    _channels,
+    _UNTRUSTED_INPUT_POLICIES,
+    _open_channels,
+    _external_input_channels,
+    _MAX_WALK_DEPTH,
+    _secret_paths,
+    _enabled_tools,
+    _hint,
+    _POWERFUL_PROFILES,
+    _profile_is_powerful,
+    _real_exec_enabled,
+    _web_fetch_enabled,
+    _active_channels,
+    _untrusted_input_channels,
+    _agent_legs,
+    _LEG_KEYS,
+    _has_approval_gate,
+    _is_public_ip,
+    _OWN_ENGINE_MARKERS,
+    _is_own_source,
+    _DESTRUCTIVE_HINTS,
+    _agent_is_powerful,
+    _TIER_NAME,
+    _safe_mtime,
+)
 
 
-SECRET_KEY_RE = re.compile(r"(password|secret|token|api[_-]?key|apikey|bottoken)", re.I)
-SECRET_PATTERNS = [
-    re.compile(r"sk-ant-[a-z0-9-]{8,}", re.I),
-    re.compile(r"sk-[a-zA-Z0-9]{20,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"AIza[0-9A-Za-z_-]{30,}"),
-    re.compile(r"(?:password|secret|api[_-]?key|token)\s*[:=]\s*['\"]?[^\s'\"]{8,}", re.I),
-]
 INJECTION_PATTERNS = [
     re.compile(r"ignore (all|any|previous|prior) (instructions|messages)", re.I),
     re.compile(r"obey (all|any|every|whatever)", re.I),
@@ -156,40 +126,6 @@ INJECTION_PATTERNS = [
     # ("Don't run destructive commands without asking") with permissive ones, causing false
     # CRITICAL FAILs on well-configured agents. B6 flags blanket-obedience / injection only.
 ]
-INPUT_TOOL_HINTS = (
-    "email",
-    "imap",
-    "gmail",
-    "rss",
-    "feed",
-    "web",
-    "browse",
-    "fetch",
-    "file_read",
-    "inbox",
-)
-SENSITIVE_TOOL_HINTS = (
-    "db",
-    "sql",
-    "postgres",
-    "supabase",
-    "secret",
-    "credential",
-    "vault",
-    "fs_read",
-    "files",
-)
-OUTBOUND_TOOL_HINTS = (
-    "send",
-    "email_send",
-    "webhook",
-    "http_post",
-    "exec",
-    "shell",
-    "fs_write",
-    "deploy",
-    "publish",
-)
 # C015 mirrors logsafe's additional secret token shapes so the home-file scan catches
 # the same secret families the logger already redacts, without ever echoing values.
 _C015_EXTRA_SECRET_PATTERNS = [
@@ -242,89 +178,6 @@ _WEB_FETCH_SKILL_HINTS = (
 )
 
 
-def _meta(cid: str):
-    return BY_ID[cid]
-
-
-def _finding(
-    cid, status, detail, fix, evidence=None, confidence=None, pass_confidence=None
-) -> Finding:
-    m = _meta(cid)
-    return Finding(
-        m.id,
-        m.title,
-        m.severity,
-        status,
-        detail,
-        fix,
-        m.framework,
-        m.scored,
-        evidence or [],
-        confidence=confidence or m.confidence,
-        pass_confidence=pass_confidence,
-    )
-
-
-def _channels(cfg: dict) -> dict:
-    ch = cfg.get("channels")
-    return ch if isinstance(ch, dict) else {}
-
-
-# Policies that admit ANY non-owner external sender — authenticated source ≠ trusted content.
-# "owner" / "owner-only" / absent / "ask" (per-message approval) are intentionally excluded.
-# _open_channels() uses only "open" for B2 ("anyone can command"); _external_input_channels()
-# uses the full set for trifecta / blast-radius / ingress-path checks (B-032 fix).
-_UNTRUSTED_INPUT_POLICIES = frozenset({"open", "allowlist", "paired"})
-
-
-def _open_channels(cfg: dict) -> list[str]:
-    """Channels where dmPolicy/groupPolicy == 'open' (truly public — anyone can command).
-
-    Used by B2 (gateway auth check) and risk label rendering. For the broader
-    'any external input arrives here' question use _external_input_channels().
-    """
-    out = []
-    for name, c in _channels(cfg).items():
-        # B-041: a channel with enabled:false ingests nothing — skip it, matching the
-        # enabled-aware _active_channels/_untrusted_input_channels helpers. Without this a
-        # DISABLED open channel produced §5 hard-FAIL false positives (B2/B55).
-        if not isinstance(c, dict) or c.get("enabled") is False:
-            continue
-        nodes = [c] + list((c.get("accounts") or {}).values())
-        for node in nodes:
-            if isinstance(node, dict) and (
-                node.get("dmPolicy") == "open" or node.get("groupPolicy") == "open"
-            ):
-                out.append(name)
-                break
-    return out
-
-
-def _external_input_channels(cfg: dict) -> list[str]:
-    """Channels that admit external (non-owner) senders regardless of how restricted.
-
-    Includes open, allowlist, and paired modes — all of which carry untrusted content
-    that could be crafted by (or injected into) the sender. Used for the trifecta
-    'untrusted input' leg and credential / ingress-path checks (B-032).
-    """
-    out = []
-    for name, c in _channels(cfg).items():
-        # B-041: skip enabled:false channels (a disabled channel admits no external
-        # input), matching _untrusted_input_channels. A disabled allowlist/paired channel
-        # otherwise drove §5 hard-FAIL false positives (B39) and spurious WARNs (B41/B46).
-        if not isinstance(c, dict) or c.get("enabled") is False:
-            continue
-        nodes = [c] + list((c.get("accounts") or {}).values())
-        for node in nodes:
-            if isinstance(node, dict) and (
-                node.get("dmPolicy") in _UNTRUSTED_INPUT_POLICIES
-                or node.get("groupPolicy") in _UNTRUSTED_INPUT_POLICIES
-            ):
-                out.append(name)
-                break
-    return out
-
-
 def _plugins(cfg: dict) -> dict:
     """Installed plugins, supporting both `plugins.entries.<name>` and legacy shapes."""
     p = cfg.get("plugins")
@@ -334,56 +187,6 @@ def _plugins(cfg: dict) -> dict:
             return entries
         return p
     return {}
-
-
-# B-072: cap recursion depth for config walkers so a pathologically deep (but
-# validly-parsed) structure degrades gracefully instead of raising an uncaught
-# RecursionError. High enough that it never affects any real-world config shape.
-_MAX_WALK_DEPTH = 100
-
-
-def _secret_paths(obj, prefix="", depth=0) -> list[str]:
-    """Dotted paths of secret-bearing keys holding a non-trivial string (no values)."""
-    found = []
-    if depth >= _MAX_WALK_DEPTH:
-        return found
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            path = f"{prefix}.{k}" if prefix else k
-            if isinstance(v, str) and len(v) >= 16 and SECRET_KEY_RE.search(k):
-                found.append(path)
-            else:
-                found.extend(_secret_paths(v, path, depth + 1))
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            found.extend(_secret_paths(v, f"{prefix}[{i}]", depth + 1))
-    return found
-
-
-def _enabled_tools(cfg: dict) -> list[str]:
-    tools = []
-    allow = dig(cfg, "tools.elevated.allowFrom")
-    if allow:
-        tools.append("elevated")
-    # Real fields: tools.exec.security / tools.exec.host / tools.exec.mode
-    # (tools.exec.host_sandbox does NOT exist in the OpenClaw schema)
-    exec_security = dig(cfg, "tools.exec.security")
-    exec_host = dig(cfg, "tools.exec.host")
-    exec_mode = dig(cfg, "tools.exec.mode")
-    sandbox_mode = dig(cfg, "agents.defaults.sandbox.mode")
-    if (
-        exec_security is not None
-        or exec_host is not None
-        or exec_mode is not None
-        or "exec" in str(dig(cfg, "tools.profile", ""))
-        or (sandbox_mode is not None and sandbox_mode != "off")
-    ):
-        tools.append("exec")
-    # collect any explicitly listed tool names
-    listed = dig(cfg, "tools.allow") or dig(cfg, "gateway.tools.allow") or []
-    if isinstance(listed, list):
-        tools.extend(str(t) for t in listed)
-    return tools
 
 
 def _trusted_proxies_ok(value) -> bool:
@@ -401,110 +204,11 @@ def _trusted_proxies_ok(value) -> bool:
     return False
 
 
-def _hint(names, hints) -> bool:
-    blob = " ".join(names).lower()
-    return any(h in blob for h in hints)
-
-
 # -- A1-local capability detection ------------------------------------------------
 # These enrich the trifecta reading WITHOUT widening the shared _enabled_tools /
 # _external_input_channels / _channels helpers, which ~15 other checks rely on.
 # Keeping the broader, more aggressive reading local to A1 (and B46, which shares
 # _trifecta_legs) bounds the blast radius of the fix.
-
-# Tool profiles that grant exec / filesystem-write capability (outbound leg).
-# "minimal"/"readonly"/"chat" stay safe; an unknown-but-powerful profile name is
-# still caught by the "exec"/"code" substring fallback in _profile_is_powerful().
-_POWERFUL_PROFILES = frozenset(
-    {
-        "coding",
-        "code",
-        "full",
-        "dev",
-        "developer",
-        "admin",
-        "power",
-        "all",
-        "max",
-    }
-)
-
-
-def _profile_is_powerful(profile) -> bool:
-    p = str(profile or "").lower()
-    return p in _POWERFUL_PROFILES or "exec" in p or "code" in p
-
-
-def _real_exec_enabled(cfg: dict) -> bool:
-    """A genuinely-DECLARED exec/shell capability — not a mere containment control.
-
-    B-064: the shared _enabled_tools() infers a synthetic "exec" from
-    `agents.defaults.sandbox.mode != "off"` (correct for B4's "exec present but
-    sandbox unset" reasoning, wrong for the trifecta). A sandbox is a HARDENING
-    control, not evidence an exec tool is granted, so it must not raise A1's sensitive
-    leg (§4: don't assert a capability the config doesn't declare). Real signals only:
-    an explicit tools.exec.* field, a powerful tools.profile, or an "exec"/"shell"
-    name in tools.allow / gateway.tools.allow.
-    """
-    if (
-        dig(cfg, "tools.exec.security") is not None
-        or dig(cfg, "tools.exec.host") is not None
-        or dig(cfg, "tools.exec.mode") is not None
-    ):
-        return True
-    if _profile_is_powerful(dig(cfg, "tools.profile")):
-        return True
-    listed = dig(cfg, "tools.allow") or dig(cfg, "gateway.tools.allow") or []
-    return isinstance(listed, list) and _hint([str(t) for t in listed], ("exec", "shell"))
-
-
-def _web_fetch_enabled(cfg: dict) -> bool:
-    """An enabled web fetch/browse tool: pulls arbitrary remote content into the
-    agent (untrusted input) and can exfiltrate via request URLs (outbound)."""
-    web = dig(cfg, "tools.web")
-    if not isinstance(web, dict):
-        return False
-    if web.get("enabled"):
-        return True
-    return any(isinstance(sub, dict) and sub.get("enabled") for sub in web.values())
-
-
-def _active_channels(cfg: dict) -> dict:
-    """Channels that are not explicitly disabled (`enabled` is not False)."""
-    return {
-        n: c
-        for n, c in _channels(cfg).items()
-        if not (isinstance(c, dict) and c.get("enabled") is False)
-    }
-
-
-def _untrusted_input_channels(cfg: dict) -> list[str]:
-    """Enabled channels that can receive non-owner (untrusted) input.
-
-    Same untrusted-policy allowlist as _external_input_channels (dmPolicy/groupPolicy
-    in _UNTRUSTED_INPUT_POLICIES = open/allowlist/paired), but additionally excludes
-    channels explicitly disabled (`enabled: False`) — a disabled channel ingests
-    nothing. An absent or restrictive groupPolicy (e.g. "ask" per-message approval,
-    or "owner") is deliberately NOT treated as untrusted, consistent with the leg
-    doctrine at _UNTRUSTED_INPUT_POLICIES: a groups-present denylist would FAIL a safe
-    owner-approved group bot ("ask") — a §5 false positive — so we key off the
-    untrusted-policy allowlist only.
-    """
-    out = []
-    for name, c in _channels(cfg).items():
-        if not isinstance(c, dict) or c.get("enabled") is False:
-            continue
-        nodes = [c] + list((c.get("accounts") or {}).values())
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            if (
-                node.get("dmPolicy") in _UNTRUSTED_INPUT_POLICIES
-                or node.get("groupPolicy") in _UNTRUSTED_INPUT_POLICIES
-            ):
-                out.append(name)
-                break
-    return out
 
 
 def _meaningful_tool_surface(ctx: Context) -> bool:
@@ -583,25 +287,9 @@ def _trifecta_legs(ctx: Context) -> dict:
     }
 
 
-def _agent_legs(tools: list) -> dict:
-    """Classify ONE agent's declared tool list into the three trifecta legs.
-
-    Per-agent we only have that agent's own tool names (from the attestation roster),
-    so legs are derived purely from the same tool-name hints A1 uses. The config-level
-    signals A1 also consults (credentials dir, gateway password, elevated.allowFrom)
-    are GLOBAL, not attributable to one agent, so they are intentionally not applied here.
-    """
-    return {
-        "untrusted input": _hint(tools, INPUT_TOOL_HINTS),
-        "sensitive data": _hint(tools, SENSITIVE_TOOL_HINTS),
-        "outbound actions": _hint(tools, OUTBOUND_TOOL_HINTS),
-    }
-
-
 # Delegation return-handling tiers, safest→weakest. A schema (typed) return is a wall
 # that blocks the injected instruction/data channel; raw/unknown carry it through.
 _DELEGATION_TIER = {"schema": 3, "filtered": 2, "raw": 1, "unknown": 1}
-_LEG_KEYS = ("untrusted input", "sensitive data", "outbound actions")
 
 
 def _reassembly(ctx: Context):
@@ -1349,32 +1037,6 @@ def check_memory_poisoning(ctx: Context) -> Finding:
         "Agent has persistent memory; confirm it is not written from untrusted input.",
         "Restrict memory writes to the owner; sanitize anything derived from external content.",
     )
-
-
-def _has_approval_gate(cfg: dict) -> bool:
-    """Return True when the config has a meaningful exec approval gate.
-
-    Real fields (docs.openclaw.ai/tools/permission-modes):
-      tools.exec.mode     — deny/allowlist/ask/auto/full
-      tools.exec.security — deny/ask/full
-      tools.exec.ask      — off/on-miss/always
-    Non-existent: tools.confirm, tools.requireApproval, tools.elevated.requireApproval
-    """
-    mode = dig(cfg, "tools.exec.mode")
-    security = dig(cfg, "tools.exec.security")
-    ask = dig(cfg, "tools.exec.ask")
-    # "auto" IS a gate (grounded 2026-06-24, docs.openclaw.ai/tools/permission-modes):
-    # "Run allowlist matches, then use auto-review" — approval misses go through the
-    # native auto-reviewer first, then fall back to the human approval route. Only "full"
-    # ("Run host exec without prompts") is ungated, and it is intentionally excluded here.
-    # Do not re-flag "auto" as a false-PASS (previously reported and closed not-a-bug).
-    if mode in ("deny", "allowlist", "ask", "auto"):
-        return True
-    if security in ("deny", "ask"):
-        return True
-    if ask in ("on-miss", "always"):
-        return True
-    return False
 
 
 def check_human_approval(ctx: Context) -> Finding:
@@ -2671,25 +2333,6 @@ _IOC_ONION_RE = re.compile(r"\b[a-z2-7]{16,56}\.onion\b", re.I)
 _IOC_IPURL_RE = re.compile(r"\bhttps?://(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::\d{2,5})?\b")
 
 
-def _is_public_ip(ip: str) -> bool:
-    """True for a routable IPv4 — excludes private / loopback / link-local / TEST-NET doc
-    ranges so example addresses in documentation don't fire."""
-    try:
-        octs = [int(x) for x in ip.split(".")]
-    except ValueError:
-        return False
-    if len(octs) != 4 or any(o > 255 for o in octs):
-        return False
-    a, b = octs[0], octs[1]
-    if a in (0, 10, 127) or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31):
-        return False
-    if a == 169 and b == 254:  # link-local
-        return False
-    if (a, b) in ((192, 0), (198, 51), (203, 0)):  # TEST-NET-1/2/3 documentation ranges
-        return False
-    return True
-
-
 # `curl URL | sh` is how uv/rustup/brew/deno legitimately install — only suspicious when the
 # host is NOT a well-known installer domain.
 _REPUTABLE_INSTALL_HOSTS = (
@@ -3655,41 +3298,6 @@ def check_installed_skills(ctx: Context) -> Finding:
         "patterns found.",
         "Keep installing only skills whose source you've reviewed — trust no one.",
     )
-
-
-# Distinctive symbols that only ClawSecCheck's own signature engine (the checks/
-# package) contains. Used to recognise our own source so --vet doesn't flag the
-# scanner's embedded attack signatures + red-team payloads as malware.
-_OWN_ENGINE_MARKERS = ("def check_installed_skills", "def vet_skill", "_SKILL_CRIT")
-
-
-def _is_own_source(p: Path) -> bool:
-    """True if `p` is ClawSecCheck's own source tree (repo root, install dir, or the
-    package dir itself). A security auditor necessarily ships attack signatures and
-    red-team payloads as *data*, so a naive malware scan of its own source self-flags.
-
-    Recognition is by structure (package layout) AND distinctive engine symbols — not
-    by name alone — so a look-alike skill that merely calls itself "clawseccheck" is
-    still scanned normally and cannot use the name to dodge detection.
-    """
-    # The engine is the checks/ package (current) or a legacy single-file checks.py.
-    # Read every engine source so the markers are found regardless of which topic module
-    # the I-022 split scattered them into.
-    if (p / "clawseccheck" / "checks").is_dir():  # repo root / install dir (package)
-        sources = sorted((p / "clawseccheck" / "checks").glob("*.py"))
-    elif (p / "clawseccheck" / "checks.py").is_file():  # repo root / install dir (legacy)
-        sources = [p / "clawseccheck" / "checks.py"]
-    elif p.name.lower() in _OWN_SKILL_NAMES and (p / "checks").is_dir():  # package dir
-        sources = sorted((p / "checks").glob("*.py"))
-    elif p.name.lower() in _OWN_SKILL_NAMES and (p / "checks.py").is_file():  # package dir (legacy)
-        sources = [p / "checks.py"]
-    else:
-        return False
-    try:
-        head = "\n".join(s.read_text(encoding="utf-8", errors="replace") for s in sources)
-    except OSError:
-        return False
-    return all(m in head for m in _OWN_ENGINE_MARKERS)
 
 
 # F-048: the pre-install vet path runs the shared SKILL_CONTENT_RING (defined near the
@@ -5764,7 +5372,7 @@ def check_subagents(ctx: Context) -> Finding:
 # ---------- B19: data at-rest protection (POSIX only) ----------
 def check_data_atrest(ctx: Context) -> Finding:
     """Memory/log directories and log files are not group/world-readable."""
-    if not _is_posix():
+    if not _shared._is_posix():
         return _finding(
             "B19",
             UNKNOWN,
@@ -5853,7 +5461,7 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
 
     Only stat() is called — no file contents are read.
     """
-    if not _is_posix():
+    if not _shared._is_posix():
         return _finding(
             "B20",
             UNKNOWN,
@@ -6073,7 +5681,7 @@ def check_self_modification(ctx: Context) -> Finding:
             "—",
         )
 
-    if not _is_posix():
+    if not _shared._is_posix():
         return _finding(
             "B22",
             UNKNOWN,
@@ -6401,8 +6009,6 @@ _APPROVAL_BYPASS_RE = re.compile(
     r"|\bskip\s+confirmation\b",
     re.I,
 )
-# Destructive / outbound tool name hints (same set as OUTBOUND_TOOL_HINTS above).
-_DESTRUCTIVE_HINTS = OUTBOUND_TOOL_HINTS
 
 
 def check_approval_bypass(ctx: Context) -> Finding:
@@ -6676,7 +6282,7 @@ def check_path_safety(ctx: Context) -> Finding:
             "safety was not assessed.",
             "Re-run without --no-host to check PATH / install-tree permissions.",
         )
-    if not _is_posix():
+    if not _shared._is_posix():
         return _custom(
             "C5",
             BY_ID["C5"].severity,
@@ -7699,7 +7305,7 @@ def _writable_skill_dirs(ctx: Context):
     Returns a list of (path, who, mode) — possibly empty — or None when perms are
     not assessable (Windows / non-POSIX), so the caller reports honestly.
     """
-    if not _is_posix():
+    if not _shared._is_posix():
         return None
     from ..collector import SKILL_DIRS  # noqa: PLC0415
 
@@ -7792,19 +7398,6 @@ _HOST_CLASS_LABEL = {
     "edr_av": "endpoint protection / EDR (Wazuh, CrowdStrike, ClamAV, Defender)",
     "firewall": "host firewall (ufw, firewalld, nftables)",
 }
-
-
-def _agent_is_powerful(ctx: Context) -> bool:
-    """High blast-radius agent: it can execute/write/elevate on the host AND is
-    reachable by untrusted input. Used only to gate host-posture WARNs, so the
-    absence of host monitoring is flagged exactly when a compromise of *this*
-    agent would be consequential (and stays quiet for a sandboxed, low-reach one).
-    """
-    cfg = ctx.config
-    tools = _enabled_tools(cfg)
-    can_act = _hint(tools, ("exec", "shell", "fs_write", "deploy")) or "elevated" in tools
-    reachable = bool(_external_input_channels(cfg)) or _hint(tools, INPUT_TOOL_HINTS)
-    return can_act and reachable
 
 
 # Keywords that map a free-text self-reported host monitor to a host-watch class.
@@ -8462,9 +8055,6 @@ def check_multiagent_exposure(ctx: Context) -> Finding:
         "capabilities across agents so no single agent holds all three legs. Attest "
         "your agent roster ('--attest') to check per-agent separation (B45).",
     )
-
-
-_TIER_NAME = {3: "schema (wall)", 2: "filtered (sieve)", 1: "raw/unknown (passthrough)"}
 
 
 # ---------- B48: dangerous break-glass overrides (v1.8.0) ----------
@@ -11857,18 +11447,6 @@ def check_config_health_integrity(ctx: Context) -> Finding:
     )
 
 
-# ---------------------------------------------------------------------------
-# B79 — Codex session approval-policy posture
-# ---------------------------------------------------------------------------
-def _safe_mtime(p: Path) -> float:
-    """B-109: modification time for recency sorting; 0.0 if the file is unreadable
-    (it may vanish between the directory walk and the stat)."""
-    try:
-        return p.stat().st_mtime
-    except OSError:
-        return 0.0
-
-
 def check_session_approval_policy(ctx: Context) -> Finding:
     import json as _json
 
@@ -12195,7 +11773,7 @@ def check_symlink_escape(ctx: Context) -> Finding:
     path (the vetted dir) via SKILL_CONTENT_RING. Read-only: links are resolved with
     os.path.realpath but never opened. See the module comment above for the verdict rubric.
     """
-    if not _is_posix():
+    if not _shared._is_posix():
         return _custom(
             "B87",
             HIGH,
@@ -14045,7 +13623,7 @@ def check_incident_readiness(ctx: Context) -> Finding:
 
     Only ``stat()`` is called — no trajectory file contents are read.
     """
-    if not _is_posix():
+    if not _shared._is_posix():
         return _finding(
             "B85",
             UNKNOWN,
