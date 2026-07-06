@@ -558,8 +558,11 @@ _B66_WEAK_RE = re.compile(
 
 _B66_RESET_RE = re.compile(
     r"\b(?:forget|disregard|override|discard|drop|abandon)\s+"
-    r"(?:all\s+)?(?:your\s+|the\s+)?(?:previous\s+)?"
-    r"(?:instructions?|persona|role|rules?|guidelines?|programming|constraints?)\b",
+    r"(?:all\s+)?(?:your\s+|the\s+)?"
+    r"(?:(?:previous|original|initial|system|base|default)\s+)?"
+    # B-120: AI-identity nouns ONLY — dropping the ambiguous role/rules/guidelines that
+    # benign game/config/writing skills override constantly ("override the default rules").
+    r"(?:instructions?|persona|programming|prompt|constraints?)\b",
     re.IGNORECASE,
 )
 
@@ -1838,11 +1841,14 @@ def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         start = max(0, m.start() - _B66_WINDOW)
         end = min(len(text), m.end() + _B66_WINDOW)
         window = text[start:end]
-        # High-signal jailbreak core fires alone; an ambiguous weakening phrase needs a
-        # corroborating core token or a persona-reset verb (B-117).
-        if not _B66_CORE_RE.search(window):
-            if not (_B66_WEAK_RE.search(window) and _B66_RESET_RE.search(window)):
-                continue
+        # A high-signal jailbreak CORE token OR a persona-RESET verb fires on its own
+        # (B-120); an ambiguous weakening phrase alone (_B66_WEAK_RE) does not (B-117).
+        if not (_B66_CORE_RE.search(window) or _B66_RESET_RE.search(window)):
+            continue
+        # A skill DOCUMENTING / defending against the attack (under a Known-Risks / Security
+        # heading) must not WARN (B-120 guard for the reset-alone firing path).
+        if _under_defensive_heading(text, m.start()):
+            continue
         snippet = window.strip().replace("\n", " ")
         if len(snippet) > 120:
             snippet = snippet[:117] + "..."
