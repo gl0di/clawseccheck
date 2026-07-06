@@ -610,3 +610,49 @@ def _read_jsonl_tail(path: Path, cap: int = _JSONL_SCAN_CAP) -> tuple[str, bool]
     if nl != -1:
         text = text[nl + 1:]
     return text, True
+
+
+# ---------------------------------------------------------------- Block A
+def _trifecta_legs(ctx: Context) -> dict:
+    """The three lethal-trifecta legs computed from the GLOBAL config surface.
+
+    Shared by A1 (check_trifecta) and B46 (check_multiagent_exposure) so both read
+    one definition of the legs. Keys are the human-facing labels A1 emits; insertion
+    order is preserved (input → sensitive → outbound).
+    """
+    cfg = ctx.config
+    tools = _enabled_tools(cfg)
+    untrusted_ch = _untrusted_input_channels(cfg)
+    web_fetch = _web_fetch_enabled(cfg)
+    # B-061: ungated exec/shell can read any private file (sensitive) AND exfiltrate
+    # (outbound). Approval-gated exec — tools.exec.mode is deny/allowlist/ask/auto,
+    # security=deny/ask, ask=on-miss/always — see _has_approval_gate) is NOT autonomous:
+    # a human signs each call, so it must NOT raise the sensitive leg. Without this guard
+    # §5 breaks — home_safe + clean_b55/b68/b69/c014/c6 pair an untrusted channel with
+    # mode='ask' exec and would flip to a spurious 3/3. Only ungated exec at mode='full'
+    # reaches sensitive. Outbound already counts exec via OUTBOUND_TOOL_HINTS (gated or
+    # not), so the outbound leg below is intentionally left unchanged.
+    # B-064: use _real_exec_enabled (declared exec signals) NOT _hint(tools, ...) — the
+    # latter matches the synthetic "exec" _enabled_tools infers from a configured sandbox
+    # (a hardening control, not an exec grant), which produced a spurious 3/3 FAIL.
+    exec_enabled = _real_exec_enabled(cfg) and not _has_approval_gate(cfg)
+    return {
+        "untrusted input": (bool(untrusted_ch) or _hint(tools, INPUT_TOOL_HINTS) or web_fetch),
+        "sensitive data": (
+            # Agent-readable private data: a data tool (db/credential/vault/fs_read/...)
+            # or a credentials/ dir under the home. NOT gateway.auth.password — that is
+            # the gateway's own auth secret, not data the agent can read/exfiltrate
+            # (B1 flags it as a plaintext secret, which is its proper home). Counting it
+            # here let "web fetch + a gateway password" reach a spurious 3/3 (§5).
+            _hint(tools, SENSITIVE_TOOL_HINTS)
+            or (ctx.home / "credentials").is_dir()
+            or exec_enabled  # B-061: ungated arbitrary code can read private files
+        ),
+        "outbound actions": (
+            _hint(tools, OUTBOUND_TOOL_HINTS)
+            or bool(dig(cfg, "tools.elevated.allowFrom"))
+            or _profile_is_powerful(dig(cfg, "tools.profile"))
+            or web_fetch
+            or bool(_active_channels(cfg))  # enabled channels are bidirectional
+        ),
+    }
