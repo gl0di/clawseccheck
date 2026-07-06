@@ -536,12 +536,30 @@ _B66_ROLE_START_RE = re.compile(
 )
 
 
-_B66_WEAKEN_RE = re.compile(
-    r"\b(?:d\.?a\.?n|do\s+anything\s+now|do\s+anything|anything\s+goes|"
-    r"unrestricted|no\s+restrictions?|no\s+limits?|ignore\s+(?:all\s+)?"
+# B66 signal, tiered (B-117). A high-signal jailbreak CORE token fires on its own.
+# AMBIGUOUS "weakening" phrases ("no restrictions", "do anything", "anything goes") are
+# ordinary in benign persona/role skills, so they only count as evidence when a CORE
+# token OR a persona-RESET verb also appears in the window — otherwise a clean skill
+# like "act as a reviewer with no restrictions on honesty" false-WARNs.
+_B66_CORE_RE = re.compile(
+    r"\b(?:d\.?a\.?n|do\s+anything\s+now|ignore\s+(?:all\s+)?"
     r"(?:previous\s+)?(?:instructions?|safety|prompts?|policies?)|"
     r"without\s+constraints?|bypass\s+(?:safety|policy|rules)|"
-    r"free\s+bot|always\s+obey(?:s)?|always\s+obeys)\b",
+    r"free\s+bot|always\s+obey(?:s)?)\b",
+    re.IGNORECASE,
+)
+
+
+_B66_WEAK_RE = re.compile(
+    r"\b(?:do\s+anything|anything\s+goes|unrestricted|no\s+restrictions?|no\s+limits?)\b",
+    re.IGNORECASE,
+)
+
+
+_B66_RESET_RE = re.compile(
+    r"\b(?:forget|disregard|override|discard|drop|abandon)\s+"
+    r"(?:all\s+)?(?:your\s+|the\s+)?(?:previous\s+)?"
+    r"(?:instructions?|persona|role|rules?|guidelines?|programming|constraints?)\b",
     re.IGNORECASE,
 )
 
@@ -1729,8 +1747,11 @@ def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         start = max(0, m.start() - _B66_WINDOW)
         end = min(len(text), m.end() + _B66_WINDOW)
         window = text[start:end]
-        if not _B66_WEAKEN_RE.search(window):
-            continue
+        # High-signal jailbreak core fires alone; an ambiguous weakening phrase needs a
+        # corroborating core token or a persona-reset verb (B-117).
+        if not _B66_CORE_RE.search(window):
+            if not (_B66_WEAK_RE.search(window) and _B66_RESET_RE.search(window)):
+                continue
         snippet = window.strip().replace("\n", " ")
         if len(snippet) > 120:
             snippet = snippet[:117] + "..."
