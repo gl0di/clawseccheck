@@ -9884,6 +9884,102 @@ _B64_WEAK_SIGNAL_RE = re.compile(
 )
 
 
+_B64_QUOTE_OPEN_RE = re.compile(r"""['"‘’“”]\s*$""")  # NOT backtick: a ```fence``` is not a report-quote
+_B64_REPORT_FRAME_RE = re.compile(
+    r"\b(?:reads?|read|says?|state[sd]?|writes?|contains?|include[sd]?|"
+    r"looks?\s+like|wording\s+like|phrase[sd]?\s+like|words?\s+like|"
+    r"such\s+as|for\s+example|for\s+instance|e\.?g\.?|i\.?e\.?|"
+    r"payload|example|directive[sd]?\s+(?:like|such)|"
+    r"when\s+you\s+see|if\s+you\s+see|do\s+not\s+obey|never\s+obey|"
+    r"do\s+not\s+follow|never\s+follow|do\s+not\s+comply|ignore\s+it)\b",
+    re.I,
+)
+_B64_REPORT_WINDOW = 80
+
+
+_B64_ACTIONABLE_CONT_RE = re.compile(
+    r"\b(?:"
+    r"send|sends|sending|email|emails|emailing|post|posts|posting|"
+    r"upload|uploads|uploading|exfiltrate|exfiltrates|exfiltrating|"
+    r"leak|leaks|leaking|transmit|transmits|transmitting|"
+    r"fetch|fetches|fetching|curl|wget|push|pushes|pushing|forward|forwards|"
+    r"delete|deletes|deleting|run|runs|running|exec|execute|executes|executing|"
+    r"remove|removes|removing|"
+    r"disable|disables|disabling|bypass|bypasses|bypassing|"
+    r"turn\s+off|turns\s+off|turning\s+off|switch\s+off"
+    r")\b",
+    re.I,
+)
+
+
+def _b64_actionable_continuation(blob: str, pos: int, end: int) -> bool:
+    """B-121: True when a LIVE actionable payload (exfil/transmit/destructive verb, exfil
+    transport, or credential-path sink) chains after the override phrase within its OWN
+    sentence. A documented/quoted override in a real defense-doc does not chain to a live
+    sink; a live attack does. A leading quote or report-frame word is trivially mimicable
+    in-sentence, so this semantic signal is the only attacker-resistant discriminator — a
+    live continuation vetoes ALL example/quote dampeners below."""
+    seg = _sentence_scoped_segment(blob, pos, end, cap=200)
+    idx = seg.find(blob[pos:end])
+    after = seg[idx + (end - pos):] if idx != -1 else seg
+    return bool(
+        _B64_ACTIONABLE_CONT_RE.search(after)
+        or _EXFIL_RE.search(after)
+        or _CRED_RE.search(after)
+    )
+
+
+def _b64_reported_or_quoted(blob: str, pos: int, end: int) -> bool:
+    """B-114: True when the override phrase at `pos` is the OBJECT of a report/quote frame
+    within its OWN sentence — a defense-doc quoting the attack ("payload reads: '…'"), NOT a
+    bare imperative. Called only AFTER the live-continuation gate has cleared, so a frame
+    word / quote can no longer launder a directive that chains a real sink. (`end` accepted
+    for signature symmetry with the unified gate.)"""
+    if _B64_QUOTE_OPEN_RE.search(blob[max(0, pos - 3):pos]):
+        return True
+    lo = max(0, pos - _B64_REPORT_WINDOW)
+    seg = blob[lo:pos]
+    last_break = None
+    for last_break in _SENTENCE_BREAK_RE.finditer(seg):
+        pass
+    if last_break is not None:
+        seg = seg[last_break.end():]
+    return bool(_B64_REPORT_FRAME_RE.search(seg))
+
+
+def _b64_classify(blob: str, pos: int, end: int, fence_ranges, comment_ranges) -> str:
+    """Three-way disposition for a B64 override hit — "fail" | "skip" | "warn".
+
+    - "fail": a BARE imperative, OR a phrase chained to a LIVE actionable sink (exfil/harm
+      continuation). A live sink vetoes every documentation frame — an attacker cannot
+      launder a working directive by prefixing "Example:" or wrapping it in quotes.
+    - "skip": the phrase sits in a genuine annotated code fence → a documented example, PASS.
+    - "warn": the phrase is quoted / report-framed / prose-negated but NOT fenced and NOT
+      chained to a detectable live sink. This is genuinely AMBIGUOUS — a defense-doc quoting
+      the attack in prose and a live directive dressed as documentation are syntactically
+      identical (and no enumerable sink-verb list is attacker-proof: mail/ship/beacon/… all
+      evade). So neither FAIL (would false-positive the benign defense doc — B-114) nor PASS
+      (would let a frame word launder a live directive to a clean grade — the C-135 bypass).
+      Per the project's "ambiguous suppression → WARN, not FAIL" rule, it surfaces as WARN:
+      the finding is visible (no fake pass) but does not hard-FAIL a plausibly-benign doc.
+
+    A phrase hidden inside an HTML comment is a hidden-channel concern owned by B58
+    (obfuscation / hidden injection), not B64 — B64 covers overrides in the live instruction
+    text. Delegating comment bodies to B58 avoids double-flagging a defensive skill that
+    quotes the attack inside a comment, while B58 still catches a genuinely hidden one."""
+    if any(s <= pos < e for s, e in comment_ranges):
+        return "skip"
+    if _b64_actionable_continuation(blob, pos, end):
+        return "fail"
+    if _in_fence(pos, fence_ranges) and _is_code_example(
+        blob, pos, fence_ranges, fence_needs_negation=True
+    ):
+        return "skip"
+    if _negation_context(blob, pos) or _b64_reported_or_quoted(blob, pos, end):
+        return "warn"
+    return "fail"
+
+
 def check_instruction_hierarchy_override(ctx: Context) -> Finding:
     """B64 — Instruction-hierarchy override detector (C-076).
 
@@ -9912,18 +10008,26 @@ def check_instruction_hierarchy_override(ctx: Context) -> Finding:
     def add_hits(source_name: str, text: str):
         norm = normalize_for_scan(text)
         fr = _fence_ranges(norm)
+        cr = [(m.start(), m.end()) for m in _B58_HTML_COMMENT_RE.finditer(norm)]
         high_spans = []
         for m in _B64_HIGH_CONFIDENCE_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
+            disp = _b64_classify(norm, m.start(), m.end(), fr, cr)
+            if disp == "skip":
                 continue
             snippet = m.group().strip()
             if len(snippet) > 80:
                 snippet = snippet[:77] + "..."
+            if disp == "warn":
+                # Ambiguous framed override (B-114/B-121): surface as WARN, not a hard FAIL.
+                warn_ev.append(f'{source_name}: "{snippet}"')
+                continue
             fail_ev.append(f'{source_name}: "{snippet}"')
             high_spans.append((m.start(), m.end()))
 
         for m in _B64_WEAK_SIGNAL_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
+            # Weak signals never FAIL; a fenced or ambiguously-framed weak phrase stays silent
+            # (skip), a bare one is a WARN — preserving the pre-existing weak-arm behaviour.
+            if _b64_classify(norm, m.start(), m.end(), fr, cr) in ("skip", "warn"):
                 continue
             if any(s <= m.start() < e for s, e in high_spans):
                 continue
