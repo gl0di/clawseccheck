@@ -35,9 +35,6 @@ _MAX_LINES = 1200
 # tracked debt, not a free pass — trim it as the I-022 modularization lands (the
 # companion staleness test fails if an exemption no longer applies).
 _EXEMPT = {
-    "checks/__init__.py": "~14k lines during the I-022 R2 migration — topic modules are "
-                          "being extracted from the aggregator __init__ phase by phase; it "
-                          "shrinks to aggregator glue by the final phase. Drop this then.",
     "checks/_config.py": "~1,300 lines — the config-hardening topic (15 checks + helpers); "
                          "topic-faithful and over budget by design. A finer split is a "
                          "later cycle (I-022 secondary target).",
@@ -52,6 +49,9 @@ _EXEMPT = {
                       "detect_vet_type/check_installed_skills + SKILL_CONTENT_RING + the "
                       "shared effect/sink analysis); consumes the content ring. Over budget "
                       "by design; a finer split is a later cycle.",
+    "checks/_mcp.py": "~1,400 lines — the MCP / plugin checks + vet_mcp / vet_plugin (40 "
+                      "symbols); topic-faithful and over budget by design. A finer split is "
+                      "a later cycle.",
     "skillast.py": "2,139 lines — the python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target).",
     "report.py": "1,720 lines — the output renderers; its own split is deferred to a "
