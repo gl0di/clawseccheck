@@ -48,6 +48,10 @@ _EXEMPT = {
                           "prompt-injection checks + the fence/decode/typosquat machinery). "
                           "Kept as ONE unit on purpose (SKILL_CONTENT_RING is the single "
                           "source consumed by both the full audit and --vet); do not split.",
+    "checks/_vet.py": "~2,000 lines — the --vet entry engine (vet_skill/vet_source/"
+                      "detect_vet_type/check_installed_skills + SKILL_CONTENT_RING + the "
+                      "shared effect/sink analysis); consumes the content ring. Over budget "
+                      "by design; a finer split is a later cycle.",
     "skillast.py": "2,139 lines — the python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target).",
     "report.py": "1,720 lines — the output renderers; its own split is deferred to a "
