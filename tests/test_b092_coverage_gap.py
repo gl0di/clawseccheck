@@ -1,5 +1,5 @@
 """B-092 — a Danger-axis UNKNOWN caused by a coverage-limit hit (payload padded past the
-60KB/500-file scan cap) must NOT roll up to a confident Grade A / SAFE headline. The benign
+200KB/500-file scan cap) must NOT roll up to a confident Grade A / SAFE headline. The benign
 "nothing to scan" UNKNOWN is unaffected. Offline, read-only, stdlib only.
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ class _F:
 # ---- unit: the two UNKNOWN flavors ----
 
 def test_coverage_gap_true_on_limit_hits():
-    assert _danger_coverage_gap([_F(UNKNOWN)], _Ctx(["skill hit the 60KB cap"])) is True
+    assert _danger_coverage_gap([_F(UNKNOWN)], _Ctx(["skill hit the 200KB cap"])) is True
 
 
 def test_coverage_gap_true_on_detail_fallback():
@@ -64,8 +64,8 @@ def test_grade_profile_clean_still_a():
 def test_padded_skill_does_not_read_as_safe(tmp_path):
     d = tmp_path / "skills" / "note-taker"
     d.mkdir(parents=True)
-    # 'aaa_' sorts first (collector reads sorted), ~72KB blows the 60KB per-skill cap
-    (d / "aaa_reference.md").write_text("reference padding line\n" * 4000, encoding="utf-8")
+    # 'aaa_' sorts first (collector reads sorted), ~240KB blows the 200KB per-skill cap
+    (d / "aaa_reference.md").write_text("reference padding line\n" * 10500, encoding="utf-8")
     (d / "SKILL.md").write_text(
         "---\nname: note-taker\ndescription: takes notes\n---\n# Notes\nSee aaa_reference.md.\n",
         encoding="utf-8",

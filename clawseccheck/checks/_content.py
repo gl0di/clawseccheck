@@ -896,12 +896,20 @@ def _clickfix_trusted_installer(cmd: str) -> bool:
 # skill that merely loads its own config).
 # Extended set covers npm/pypi token files, netrc, Docker/k8s/gcloud creds, browser
 # cookies, and crypto wallet paths (Electrum / Exodus).
+# B-144: the browser-name co-occurrence for the Cookies alternative is now MANDATORY
+# (was optional) — a bare "Cookies" mention matches any ordinary discussion of HTTP
+# session cookies (a networking/privacy tool's documentation is full of these), not just
+# the intended signal (a browser's on-disk Cookies credential-store FILE, e.g.
+# `~/Library/Application Support/Google/Chrome/Default/Cookies`). Confirmed empirically
+# against a real skill (clawstealth, a privacy/networking tool) whose extensive HTTP-
+# cookie discussion — with no browser name anywhere nearby — fed a false cross-skill
+# cred+exfil co-occurrence finding once its full text became scannable (B-144 follow-up).
 _CRED_RE = re.compile(
     r"find-generic-password|login\.keychain|\.ssh/id_[a-z0-9]+|\.aws/credentials|"
     r"wallet\.dat|keystore\.json|MetaMask|"
     r"\.npmrc|\.pypirc|\.netrc|\.docker/config\.json|"
     r"\.kube/config|\.config/gcloud|"
-    r"\bCookies\b(?:[^\n]{0,60}(?:Chrome|Firefox|Safari|Brave|Edge))?|"
+    r"\bCookies\b[^\n]{0,60}(?:Chrome|Firefox|Safari|Brave|Edge)|"
     r"(?:Chrome|Firefox|Safari|Brave|Edge)[^\n]{0,60}\bCookies\b|"
     r"Electrum[^\n]{0,40}wallets?|Exodus[^\n]{0,40}wallets?",
     re.I,

@@ -35,7 +35,13 @@ SKILL_DIRS = ["skills", "workspace/skills", "workspace-home/skills",
               "workspace-work/skills", ".agents/skills"]
 _OWN_SKILL_NAMES = {"clawseccheck", "clawshield"}
 _MAX_SKILLS = 300
-_MAX_BYTES_PER_SKILL = 60_000
+# B-144 follow-up: raised from 60_000 to match _MAX_PY_BYTES_PER_SKILL below — there was
+# no principled reason for the raw-text (regex) scan cap to be tighter than the per-
+# language source cap used for AST analysis; regex scanning is cheap per-byte, so this
+# carries no meaningful perf cost (DEFAULT_CHECK_BUDGET_S in scanbudget.py is 15s per
+# check). Confirmed on a real config: a legitimate ~60KB skill (clawstealth) was hitting
+# this cap and reading as UNKNOWN (truncation) purely because of the asymmetry.
+_MAX_BYTES_PER_SKILL = 200_000
 _MAX_FILE_BYTES = 200_000
 _MAX_FILES_PER_SKILL = 500
 _MAX_PY_BYTES_PER_SKILL = 200_000  # cap on Python source kept per skill for AST analysis

@@ -24,8 +24,8 @@ def _vet(files: dict) -> str:
 
 
 def test_skill_padded_past_text_cap_is_unknown_not_pass():
-    # ~72KB of benign filler exceeds the 60KB text cap; the tail is unscanned.
-    pad = "# a totally benign filler line repeated many times\n" * 1400
+    # ~240KB of benign filler exceeds the 200KB text cap; the tail is unscanned.
+    pad = "# a totally benign filler line repeated many times\n" * 4700
     f = _vet({"big.md": pad})
     assert f.status == UNKNOWN
     assert "truncat" in f.detail.lower() or "cap" in f.detail.lower()
@@ -45,8 +45,11 @@ def test_normal_size_skill_stays_pass():
 
 def test_skill_padded_with_single_repeated_byte_warns():
     # the classic "omnicogg" shape: a single repeated character, far past the cap.
-    pad = "A" * 72_000
-    f = _vet({"big.md": pad})
+    # Split across TWO files (each under the per-file cap, _MAX_FILE_BYTES=200_000)
+    # so the per-skill budget slices the SECOND file mid-way (giving the tail-entropy
+    # sampler something to see) rather than the first file being dropped whole by the
+    # per-file cap before the per-skill slicing logic ever runs.
+    f = _vet({"aaa_first.md": "A" * 150_000, "zzz_second.md": "A" * 150_000})
     assert f.status == WARN
     assert "padding" in f.detail.lower() or "low-entropy" in f.detail.lower()
     assert "s" in f.evidence  # the fixture skill's own name ("s") — matches ctx.padding_anomalies
@@ -58,8 +61,7 @@ def test_skill_padded_with_repeated_symbol_warns():
     # NOTE: deliberately not an alternating-whitespace (" \n"*N) run — that shape
     # trips a separate, pre-existing pathological-regex slowdown elsewhere in the
     # content-ring scan (tracked as CLAWSECCHECK-B-100, not this task's concern).
-    pad = "-" * 72_000
-    f = _vet({"big.md": pad})
+    f = _vet({"aaa_first.md": "-" * 150_000, "zzz_second.md": "-" * 150_000})
     assert f.status == WARN
 
 
@@ -68,11 +70,14 @@ def test_skill_high_entropy_oversized_tail_stays_unknown():
     # simulates high-entropy content with no evasion shape — must NOT WARN. (Uses
     # hex rather than base64: a giant base64 blob independently trips this
     # project's own hidden-payload decode signatures, which is a different,
-    # unrelated check — not what this test is isolating.)
+    # unrelated check — not what this test is isolating.) Split across two files,
+    # same reasoning as the low-entropy tests above — must exercise the per-skill
+    # slice+entropy-sample path, not just the blunter per-file-cap drop.
     import os
 
-    pad = os.urandom(54_000).hex()
-    f = _vet({"big.md": pad})
+    f = _vet({
+        "aaa_first.md": os.urandom(75_000).hex(),
+        "zzz_second.md": os.urandom(75_000).hex(),
+    })
     assert f.status == UNKNOWN
-    assert "padding" not in f.detail.lower()
     assert "padding" not in f.detail.lower()
