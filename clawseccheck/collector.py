@@ -670,8 +670,8 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                 if ctx is not None:
                     ctx.limit_hits.append(f"File {f.name} size exceeds {_MAX_FILE_BYTES} bytes")
                     ctx.file_manifest[relpath] = "capped(size)"
-                    continue
-                
+                continue
+
         # Read the whole file bytes
         try:
             file_bytes = f.read_bytes()
