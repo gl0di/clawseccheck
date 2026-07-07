@@ -316,6 +316,58 @@ _B62_EXPECTED: dict[str, frozenset] = {
 _B62_HIGH_SURPRISE = frozenset({"network", "exec", "cred"})
 
 
+# B-145: per-family disclosure phrases. If a skill's OWN declaration text (SKILL.md
+# description + any companion .md file, e.g. skill-card.md — never its Python source)
+# affirmatively names a "surprising" family, that family is not hidden and should not be
+# flagged. Keyed by the same family vocabulary as _B62_EXPECTED/_b62_actual_families.
+# B-145 / C-135 adversarial pass: an EARLIER draft matched bare generic verbs
+# ("send", "email", "create", "edit", "delete") anywhere in the description — an
+# independent adversarial reviewer found this lets ordinary, unrelated phrasing
+# ("send you a short summary email", "you can edit the text") launder a genuinely
+# undisclosed capability (e.g. a real exfil `urlopen()` hidden behind a benign-sounding
+# summariser description). Fixed by requiring specificity:
+#   - network: either a strong standalone network-specific phrase (webhook, http
+#     request, api call, network/internet access, outbound), OR a generic action verb
+#     (send/create/write/upload/post) co-occurring within ~40 chars with a NAMED
+#     external product/service/API noun — so "sends a summary email" alone does not
+#     disclose, but "sends Gmail messages"/"creates Calendar events" does.
+#   - write: DROPPED entirely. `write` is not in _B62_HIGH_SURPRISE, so a lone `write`
+#     surprise never gates to WARN on its own (the gate requires a HIGH-SURPRISE family
+#     or >=2 surprising families) — the pattern only added laundering surface with no
+#     matching protection benefit.
+#   - exec: bare "execute"/"executing" removed — now requires an explicit object
+#     (commands/scripts/code) after execute, same as the existing "run ..." alternative.
+#   - cred: bare "authorize"/"authorization" removed — too generic (can describe
+#     unrelated permission-granting prose); the remaining terms (oauth, access token,
+#     api key, credentials, refresh token) are specific security/auth vocabulary.
+_B62_DISCLOSURE_NETWORK_NOUN = (
+    r"(?:gmail|calendar|drive|sheets?|slides?|contacts?|slack|discord|telegram|"
+    r"webhook|api|third[- ]party|external\s+service)"
+)
+_B62_DISCLOSURE_PATTERNS: dict[str, re.Pattern] = {
+    "network": re.compile(
+        r"\b(?:api\s+call|outbound|webhook|http\s+requests?|"
+        r"network\s+access|internet\s+access|"
+        r"(?:send|sends|sending|creat(?:e|es|ing)|writ(?:e|es|ing)|"
+        r"upload(?:s|ing)?|post(?:s|ing)?)\b[^.?!\n]{0,40}\b"
+        + _B62_DISCLOSURE_NETWORK_NOUN
+        + r")\b",
+        re.I,
+    ),
+    "exec": re.compile(
+        r"\b(?:run(?:s|ning)?\s+(?:commands?|scripts?|code)|"
+        r"execut(?:e|es|ing)\s+(?:commands?|scripts?|code)|"
+        r"shell\s+access|arbitrary\s+code)\b",
+        re.I,
+    ),
+    "cred": re.compile(
+        r"\b(?:oauth|o-?auth|access\s+token|api\s+key|credentials?|"
+        r"refresh\s+token)\b",
+        re.I,
+    ),
+}
+
+
 _B62_IMPORT_CRED_RE = re.compile(
     r"\b(?:import\s+(?:keyring|gnupg|cryptography|paramiko)|"
     r"from\s+(?:keyring|cryptography)\s+import|"
@@ -1799,6 +1851,64 @@ def _b62_surprising_families(
 ) -> frozenset:
     """Return capability families that are ACTUAL but NOT in EXPECTED."""
     return actual - expected
+
+
+# B-145: only .md-file sections of the blob count as "declaration text" — a skill's own
+# Python source (docstrings/comments) must never count as disclosure. Matches ANY
+# "# file: <name>" header (not just .md) so section boundaries are correct regardless of
+# extension — the .md filter is applied separately when picking which sections to keep.
+_B62_FILE_HEADER_RE = re.compile(r"^# file: (\S+)\n", re.MULTILINE)
+
+
+def _b62_declaration_text(blob: str) -> str:
+    """Concatenate the body text of every ``.md`` file section in *blob* (SKILL.md,
+    skill-card.md, README.md, ...) — the set of files a skill author would plausibly use
+    to disclose scope/risk. Non-Markdown sections (Python source, JSON manifests, ...)
+    are excluded, so a docstring or code comment can never count as disclosure.
+
+    Sections are joined with a blank line so a negation at the tail of one file's text
+    can never grammatically govern a trigger at the head of the next file's text (a
+    blank line is itself a sentence boundary per _SENTENCE_BREAK_RE).
+    """
+    headers = list(_B62_FILE_HEADER_RE.finditer(blob))
+    sections = []
+    for i, h in enumerate(headers):
+        if not h.group(1).lower().endswith(".md"):
+            continue
+        start = h.end()
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(blob)
+        sections.append(blob[start:end])
+    return "\n\n".join(sections)
+
+
+def _b62_disclosed_families(blob: str, families: frozenset) -> frozenset:
+    """Return the subset of *families* that the skill's own declaration text (.md
+    sections only) affirmatively discloses, per _B62_DISCLOSURE_PATTERNS.
+
+    A negated mention ("does not send data", "never deletes your files") does not
+    count as disclosure — each match is guarded by the same sentence-boundary-aware
+    _negation_governs_trigger used elsewhere in this file, so a skill can't accidentally
+    (or deliberately) launder disclosure credit through a denial.
+    """
+    if not families:
+        return frozenset()
+    text = _b62_declaration_text(blob)
+    if not text:
+        return frozenset()
+    disclosed: set = set()
+    for fam in families:
+        pattern = _B62_DISCLOSURE_PATTERNS.get(fam)
+        if not pattern:
+            continue
+        for m in pattern.finditer(text):
+            # Use the match's END (not start) as the anchor: a negator immediately
+            # preceding the trigger word ("never sends", "does not send") is only
+            # detected when the window includes the trigger word itself, so
+            # _negation_governs_trigger's \s+\w+ negator pattern has something to match.
+            if not _negation_governs_trigger(text, m.end()):
+                disclosed.add(fam)
+                break
+    return frozenset(disclosed)
 
 
 def _b63_decoded_actionable(text: str) -> bool:
@@ -3288,6 +3398,9 @@ def check_capability_intent_mismatch(ctx: Context) -> Finding:
     - A single low-surprise family (file read/write for a text-only tool) does NOT flag.
     - A "formatter" with network capability → WARN (high surprise).
     - A "downloader" with network → PASS (expected).
+    - A surprising family the skill's own SKILL.md/skill-card.md text affirmatively
+      discloses (e.g. "sends Gmail on your behalf") does NOT flag (B-145) — a skill
+      that names every capability it uses isn't "hiding" them.
     """
     if not ctx.installed_skills:
         return _finding(
@@ -3332,6 +3445,12 @@ def check_capability_intent_mismatch(ctx: Context) -> Finding:
             continue
 
         surprising = _b62_surprising_families(actual, expected)
+        if not surprising:
+            continue
+
+        # B-145: drop any family the skill's own SKILL.md/skill-card.md text already
+        # discloses — a skill that names every capability it uses isn't "hiding" them.
+        surprising = surprising - _b62_disclosed_families(blob, surprising)
         if not surprising:
             continue
 

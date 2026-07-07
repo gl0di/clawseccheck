@@ -421,6 +421,8 @@ from ._content import (
     _b60_has_propagation,
     _b62_actual_families,
     _b62_classify_category,
+    _b62_declaration_text,
+    _b62_disclosed_families,
     _b62_extract_declaration,
     _b62_surprising_families,
     _b63_decoded_actionable,
