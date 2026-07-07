@@ -42,6 +42,51 @@ def test_c015_passes_clean_fixture():
     assert f.status == PASS
 
 
+def test_c015_ignores_codex_plugin_doc_cache_placeholders(tmp_path):
+    """B-124: vendored plugin doc-cache markdown with placeholder secret-shaped
+    text must not trigger C015 — it is third-party documentation, not a real
+    secret created by the user or agent."""
+    (tmp_path / "openclaw.json").write_text("{}\n", encoding="utf-8")
+    doc_cache = (
+        tmp_path / "agents" / "main" / "agent" / "codex-home"
+        / ".tmp" / "plugins" / "plugins" / "base44"
+    )
+    doc_cache.mkdir(parents=True)
+    (doc_cache / "secrets-set.md").write_text(
+        "API_KEY=abc123 DB_PASSWORD=secret\n", encoding="utf-8"
+    )
+    other_plugin = (
+        tmp_path / "agents" / "main" / "agent" / "codex-home"
+        / ".tmp" / "plugins" / "plugins" / "boltz-api-cli"
+    )
+    other_plugin.mkdir(parents=True)
+    (other_plugin / "auth.md").write_text('password:"securePassword123"\n', encoding="utf-8")
+    f = check_secrets_at_rest_home(_ctx(tmp_path))
+    assert f.status == PASS
+
+
+def test_c015_still_flags_real_secret_outside_doc_cache(tmp_path):
+    """A real secret in a normal, user-authored config file must still trigger
+    C015 — the doc-cache exclusion must not weaken genuine detection."""
+    secret = _runtime_secret()
+    (tmp_path / "openclaw.json").write_text("{}\n", encoding="utf-8")
+    doc_cache = (
+        tmp_path / "agents" / "main" / "agent" / "codex-home"
+        / ".tmp" / "plugins" / "plugins" / "base44"
+    )
+    doc_cache.mkdir(parents=True)
+    (doc_cache / "secrets-set.md").write_text(
+        "API_KEY=abc123 DB_PASSWORD=secret\n", encoding="utf-8"
+    )
+    (tmp_path / "workspace-home").mkdir()
+    (tmp_path / "workspace-home" / ".env").write_text(
+        "TOKEN=" + secret + "\n", encoding="utf-8"
+    )
+    f = check_secrets_at_rest_home(_ctx(tmp_path))
+    assert f.status == WARN
+    assert any(".env: secret-like value detected" in item for item in f.evidence)
+
+
 def test_c015_bad_fixture_can_be_seeded_at_runtime(tmp_path):
     src = FIXTURES / "bad_c015_home_secrets"
     (tmp_path / "workspace-home").mkdir(parents=True)

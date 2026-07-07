@@ -194,6 +194,22 @@ _MISSING_LEG_ACTIVATORS = {
 }
 
 
+def _c015_is_codex_plugin_doc_cache(parts: tuple) -> bool:
+    """True if *parts* (a resolved path's ``.parts``) sit under a Codex CLI plugin
+    doc-cache directory: ``agents/<name>/agent/codex-home/.tmp/plugins/plugins/**``.
+
+    OpenClaw's Codex CLI integration vendors third-party plugins' reference
+    documentation into this cache (see ``codex-home/sessions`` in _lifecycle.py for
+    the sibling ``agent/codex-home`` shape). Those `.md` files routinely contain
+    placeholder examples like ``API_KEY=abc123`` or ``password:"..."`` that are not
+    secrets — they were shipped by the plugin author, not created by the user or
+    agent — so C015's generic keyword pattern false-positives on them (B-124).
+    """
+    marker = ("agent", "codex-home", ".tmp", "plugins", "plugins")
+    n = len(marker)
+    return any(parts[i : i + n] == marker for i in range(len(parts) - n + 1))
+
+
 # ---------------------------------------------------------------- Block B
 def _c015_candidate_files(ctx: Context) -> list[Path]:
     skip_roots = [(ctx.home / rel).resolve() for rel in SKILL_DIRS]
@@ -208,6 +224,8 @@ def _c015_candidate_files(ctx: Context) -> list[Path]:
         if any(
             resolved == root or root in resolved.parents for root in skip_roots if root.exists()
         ):
+            continue
+        if _c015_is_codex_plugin_doc_cache(resolved.parts):
             continue
         name = path.name.lower()
         if (
