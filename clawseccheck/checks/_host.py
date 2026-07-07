@@ -4,6 +4,7 @@ Carved verbatim out of the former single-file checks.py; no logic changes.
 Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 """
 from __future__ import annotations
+import re
 from pathlib import Path
 from .. import trajectory as _trajectory
 from ..catalog import (
@@ -477,4 +478,127 @@ def check_incident_readiness(ctx: Context) -> Finding:
         "trustworthy.",
         evidence=[f"trajectory files present: {len(files)}"],
         confidence="HIGH",
+    )
+
+
+# ---------- B150: systemd user-unit Restart=always persistence (informational) ----------
+# Real observed shape: ~/.config/systemd/user/openclaw-gateway.service carries
+# `Restart=always` + `WantedBy=default.target` — a durable autonomy substrate (the
+# gateway restarts itself indefinitely and starts automatically at login/boot). No
+# existing check reads systemd unit files; hostwatch.py only detects system-wide
+# *monitor* enable-symlinks (/etc/systemd/system/*.wants/), not user units or their
+# content. ~/.config/systemd/user/ is a sibling of ~/.openclaw under the same real
+# user home, so it is reached via ctx.home.parent (same idiom as check_backups' C3
+# ctx.home.parent / "backups" lookup) rather than hostwatch's fake-OS-root model.
+#
+# This is disclosure only, never proof of compromise: Restart=always is legitimate,
+# common infrastructure for a long-running gateway service. WARN (LOW/advisory) only
+# when an OpenClaw-related unit is found with a persistent-restart directive; PASS/
+# UNKNOWN otherwise. Never FAIL.
+_SYSTEMD_RESTART_RE = re.compile(r"^\s*Restart\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
+_SYSTEMD_EXECSTART_RE = re.compile(r"^\s*ExecStart\s*=\s*(.*\S)?\s*$", re.IGNORECASE | re.MULTILINE)
+_SYSTEMD_WANTEDBY_RE = re.compile(r"^\s*WantedBy\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
+
+# Persistent-restart directives worth disclosing (systemd.service(5)): "always" restarts
+# unconditionally; "on-failure"/"on-abnormal"/"on-watchdog"/"on-abort" are conditional and
+# far less interesting as a standalone autonomy signal, so only "always" is flagged here.
+_SYSTEMD_PERSISTENT_RESTART = frozenset({"always"})
+
+
+def _systemd_unit_is_openclaw_related(unit_name: str, exec_start: str) -> bool:
+    """True if the unit's file name or ExecStart= line mentions 'openclaw'."""
+    return "openclaw" in unit_name.lower() or "openclaw" in exec_start.lower()
+
+
+def check_systemd_persistence(ctx: Context) -> Finding:
+    """B150 — OpenClaw-related systemd user-unit Restart=always persistence.
+
+    Reads ~/.config/systemd/user/*.service (a sibling of ~/.openclaw, resolved via
+    ctx.home.parent) for units whose name or ExecStart= line mentions "openclaw". If
+    found with Restart=always, this is reported as an informational/LOW advisory —
+    legitimate infrastructure that also happens to be a durable autonomy/persistence
+    mechanism worth disclosing, never proof of compromise.
+
+    PASS    — OpenClaw-related unit(s) found, none set Restart=always (or an
+              equivalent persistent-restart directive).
+    WARN    — an OpenClaw-related unit sets Restart=always (advisory, LOW, never FAIL).
+    UNKNOWN — no ~/.config/systemd/user/ directory (systemd not in use, non-Linux, or
+              simply absent), or no OpenClaw-related unit file found there.
+    """
+    user_units_dir = ctx.home.parent / ".config" / "systemd" / "user"
+    if not user_units_dir.is_dir():
+        return _finding(
+            "B150",
+            UNKNOWN,
+            "No ~/.config/systemd/user/ directory found — systemd user units are not in "
+            "use on this host (or this is not Linux), so unit-based persistence could "
+            "not be assessed.",
+            "No action needed unless a systemd user unit is added later.",
+        )
+
+    try:
+        unit_files = sorted(p for p in user_units_dir.iterdir()
+                             if p.is_file() and not p.is_symlink() and p.suffix == ".service")
+    except OSError:
+        unit_files = []
+
+    any_openclaw_unit = False
+    persistent_ev: list[str] = []
+    other_ev: list[str] = []
+
+    for unit_path in unit_files:
+        try:
+            text = unit_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        exec_m = _SYSTEMD_EXECSTART_RE.search(text)
+        exec_start = (exec_m.group(1) or "") if exec_m else ""
+        if not _systemd_unit_is_openclaw_related(unit_path.name, exec_start):
+            continue
+        any_openclaw_unit = True
+
+        restart_m = _SYSTEMD_RESTART_RE.search(text)
+        restart_val = restart_m.group(1).lower() if restart_m else None
+        wanted_m = _SYSTEMD_WANTEDBY_RE.search(text)
+        wanted_by = wanted_m.group(1) if wanted_m else None
+
+        if restart_val in _SYSTEMD_PERSISTENT_RESTART:
+            detail = f"{unit_path.name}: Restart={restart_val}"
+            if wanted_by:
+                detail += f", WantedBy={wanted_by}"
+            persistent_ev.append(detail)
+        else:
+            other_ev.append(unit_path.name)
+
+    if not any_openclaw_unit:
+        return _finding(
+            "B150",
+            UNKNOWN,
+            "No OpenClaw-related systemd user unit found under "
+            f"{user_units_dir} — unit-based persistence not applicable.",
+            "No action needed unless an OpenClaw systemd user unit is added later.",
+        )
+
+    if persistent_ev:
+        detail = "; ".join(persistent_ev[:6])
+        return _finding(
+            "B150",
+            WARN,
+            "An OpenClaw-related systemd user unit restarts itself indefinitely "
+            f"(a durable autonomy substrate): {detail}. This is disclosure only — "
+            "Restart=always is common, legitimate infrastructure for a long-running "
+            "gateway service, not proof of compromise.",
+            "Confirm this restart policy is intentional. If the service should not "
+            "persist automatically, change Restart= to 'no' or 'on-failure', and "
+            "review any WantedBy= target that starts it automatically at login/boot.",
+            evidence=persistent_ev,
+        )
+
+    return _finding(
+        "B150",
+        PASS,
+        "OpenClaw-related systemd user unit(s) found "
+        f"({', '.join(other_ev[:6])}); none set Restart=always.",
+        "Keep restart policies intentional and documented.",
+        evidence=other_ev[:6],
     )

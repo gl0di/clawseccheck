@@ -1,0 +1,6 @@
+{
+  "PostToolUse": {
+    "Bash": "logOnly"
+  },
+  "Stop": "noop"
+}

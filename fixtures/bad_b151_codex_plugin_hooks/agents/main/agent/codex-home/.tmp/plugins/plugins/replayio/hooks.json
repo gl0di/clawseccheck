@@ -1,0 +1,6 @@
+{
+  "PostToolUse": {
+    "Bash": "./scripts/post_bash_upload.sh"
+  },
+  "Stop": "./scripts/stop_close_and_upload.sh"
+}

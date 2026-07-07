@@ -1408,3 +1408,306 @@ def check_mcp_bypass_highblast(ctx: Context) -> Finding:
         "Current MCP tool inventory contains only low-blast verbs (search/read/draft). "
         "Re-run after adding MCP servers or changing tool configurations.",
     )
+
+
+# ---------- B151: codex connector shell hooks in the plugin doc-cache ----------
+# Real path: agents/<agent>/agent/codex-home/.tmp/plugins/plugins/<connector>/hooks.json
+# (the Codex CLI's own third-party plugin cache — a DIFFERENT on-disk location from an
+# OpenClaw skill dir; existing skill-supply-chain checks scan SKILL_DIRS and never reach
+# here). Some connectors wire a shell script to a tool-use event, e.g.
+# {"PostToolUse": {"Bash": "./scripts/post_bash_upload.sh"}, "Stop": "./scripts/stop_close_and_upload.sh"}
+# — an upload-shaped surface. This is informational disclosure only (WARN, LOW/advisory,
+# never FAIL): a third-party connector legitimately reacting to tool-use/session-end
+# events is not proof of malice, but the shell wiring is worth surfacing.
+#
+# The exact hooks.json shape is not part of OpenClaw's own config schema (it belongs to
+# the Codex CLI's connector ecosystem, read generically here — never hardcoded to one
+# connector's exact keys), so detection is deliberately shape-tolerant: any string value
+# reachable from the JSON (at any nesting depth) that looks like a shell script path is
+# treated as a "shell hook", tagged with the event name under which it was found (the
+# top-level key it was nested under, when discoverable).
+_C015_CODEX_PLUGIN_MARKER = ("agent", "codex-home", ".tmp", "plugins", "plugins")
+
+# Tool-use / lifecycle event names worth calling out by name when found as a top-level
+# (or near-top-level) key — informational framing only, not an exhaustive enum: any
+# other event name is still reported, just without a "recognized" label.
+_HOOK_EVENT_HINTS = frozenset({
+    "posttooluse", "pretooluse", "stop", "subagentstop", "sessionstart", "sessionend",
+    "notification", "userpromptsubmit",
+})
+
+
+def _looks_like_shell_script(value: str) -> bool:
+    """True if *value* looks like a shell-script command/path (generic, not one shape)."""
+    v = value.strip()
+    if not v:
+        return False
+    if v.endswith((".sh", ".bash", ".zsh")):
+        return True
+    # A bare command line invoking a shell interpreter or a relative script path.
+    first_tok = v.split()[0] if v.split() else v
+    first_tok = first_tok.lstrip("./")
+    return first_tok in {"sh", "bash", "zsh"} or v.startswith(("./", "../"))
+
+
+def _walk_hook_shell_refs(node, event_name: str | None, out: list[tuple[str, str]]) -> None:
+    """Recursively collect (event_name, shell_ref) pairs from a hooks.json structure.
+
+    Shape-tolerant: descends dicts/lists at any depth, carrying the closest enclosing
+    top-level-ish key as the "event name" label (best-effort; never fabricated beyond
+    what the JSON itself names).
+    """
+    if isinstance(node, dict):
+        for key, val in node.items():
+            child_event = str(key) if event_name is None else event_name
+            _walk_hook_shell_refs(val, child_event, out)
+    elif isinstance(node, list):
+        for item in node:
+            _walk_hook_shell_refs(item, event_name, out)
+    elif isinstance(node, str):
+        if _looks_like_shell_script(node):
+            out.append((event_name or "<unknown event>", node))
+
+
+def _codex_plugin_doc_cache_dirs(ctx: Context) -> list[Path]:
+    """agents/<agent>/agent/codex-home/.tmp/plugins/plugins/ dirs under ctx.home, if any."""
+    agents_root = ctx.home / "agents"
+    out: list[Path] = []
+    if not agents_root.is_dir():
+        return out
+    try:
+        agent_dirs = sorted(p for p in agents_root.iterdir() if p.is_dir() and not p.is_symlink())
+    except OSError:
+        return out
+    for agent_dir in agent_dirs:
+        cache_dir = agent_dir
+        for part in _C015_CODEX_PLUGIN_MARKER:
+            cache_dir = cache_dir / part
+        if cache_dir.is_dir():
+            out.append(cache_dir)
+    return out
+
+
+def check_codex_plugin_hooks(ctx: Context) -> Finding:
+    """B151 — codex connector shell hooks in the plugin doc-cache (informational).
+
+    Walks agents/*/agent/codex-home/.tmp/plugins/plugins/*/hooks.json (the Codex CLI's
+    own third-party plugin cache, distinct from any OpenClaw skill directory) and, for
+    each hooks.json found, reports when a hook wires a shell script to a tool-use/
+    lifecycle event. Advisory only (WARN, LOW, never FAIL) — an upload-shaped surface in
+    a third-party connector cache, not proof of malice.
+
+    PASS    — doc-cache dir(s) found with hooks.json file(s), none wire a shell script.
+    WARN    — at least one hooks.json wires a shell script to an event.
+    UNKNOWN — no codex-home doc-cache directory found, or no hooks.json within it.
+    """
+    cache_dirs = _codex_plugin_doc_cache_dirs(ctx)
+    if not cache_dirs:
+        return _finding(
+            "B151",
+            UNKNOWN,
+            "No Codex CLI plugin doc-cache directory found under agents/*/agent/"
+            "codex-home/.tmp/plugins/plugins/ — not applicable (Codex CLI connectors "
+            "are not in use, or the cache has not been populated).",
+            "No action needed unless Codex CLI connectors are adopted later.",
+        )
+
+    import json as _json
+
+    any_hooks_file = False
+    shell_ev: list[str] = []
+    clean_connectors: list[str] = []
+
+    for cache_dir in cache_dirs:
+        try:
+            connector_dirs = sorted(p for p in cache_dir.iterdir() if p.is_dir() and not p.is_symlink())
+        except OSError:
+            continue
+        for connector_dir in connector_dirs:
+            hooks_path = connector_dir / "hooks.json"
+            if not hooks_path.is_file() or hooks_path.is_symlink():
+                continue
+            any_hooks_file = True
+            try:
+                data = _json.loads(hooks_path.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, ValueError):
+                continue
+            refs: list[tuple[str, str]] = []
+            _walk_hook_shell_refs(data, None, refs)
+            if refs:
+                for event_name, script in refs[:3]:
+                    shell_ev.append(
+                        f"{connector_dir.name}/hooks.json: {event_name} -> {script}"
+                    )
+            else:
+                clean_connectors.append(connector_dir.name)
+
+    if not any_hooks_file:
+        return _finding(
+            "B151",
+            UNKNOWN,
+            "Codex CLI plugin doc-cache directory found, but no hooks.json file exists "
+            "within it — no connector shell-hook wiring to assess.",
+            "No action needed unless a connector with hooks.json is installed later.",
+        )
+
+    if shell_ev:
+        detail = "; ".join(shell_ev[:6])
+        extra = f" (+{len(shell_ev) - 6} more)" if len(shell_ev) > 6 else ""
+        return _finding(
+            "B151",
+            WARN,
+            "Third-party Codex connector(s) wire a shell script to a tool-use/lifecycle "
+            f"event in the plugin doc-cache: {detail}{extra}. This is an upload-shaped "
+            "surface disclosed for awareness — not proof of malice; many legitimate "
+            "connectors do this.",
+            "Review the referenced script(s) before trusting the connector, and confirm "
+            "they only run with your consent (e.g. as part of an explicit workflow).",
+            evidence=shell_ev[:6],
+        )
+
+    return _finding(
+        "B151",
+        PASS,
+        f"Codex connector hooks.json file(s) found ({', '.join(clean_connectors[:6])}); "
+        "none wire a shell script to a tool-use/lifecycle event.",
+        "Keep reviewing new connectors' hooks.json before trusting them.",
+        evidence=clean_connectors[:6],
+    )
+
+
+# ---------- B152: orphaned plugin caches not declared in plugins.entries ----------
+# Real example: npm/projects/openclaw-brave-plugin-* and agents/main/agent/plugins/nvidia
+# exist on disk but are not declared in openclaw.json's plugins.entries. Two grounded
+# on-disk plugin-cache locations (recon §11.1): ~/.openclaw/npm/projects/<wrapper>/ (an
+# npm/ClawHub-installed plugin's host wrapper project — the real plugin + its manifest
+# live at <wrapper>/node_modules/<pkg-or-@scope/pkg>/) and agents/<agent>/agent/plugins/
+# (a per-agent plugin cache directory; no manifest guaranteed, so the directory name
+# itself is the best-effort candidate id). _plugins() already reads the declared
+# plugins.entries set (reused as-is, same access pattern other B5x/B57 checks use).
+#
+# WARN (LOW/advisory), never FAIL: an on-disk plugin cache with no matching
+# plugins.entries key may be stale (uninstalled but not cleaned up), mid-install, or a
+# plugin declared under a different config key shape — not proof of malice.
+_NPM_PROJECTS_REL = ("npm", "projects")
+_AGENT_PLUGINS_REL = ("agent", "plugins")
+
+
+def _npm_projects_plugin_ids(ctx: Context) -> dict[str, Path]:
+    """{plugin-id: wrapper-dir} for each ~/.openclaw/npm/projects/<wrapper>/ whose
+    manifest (found via the shared _locate_plugin_root helper) declares an id."""
+    out: dict[str, Path] = {}
+    npm_projects = ctx.home
+    for part in _NPM_PROJECTS_REL:
+        npm_projects = npm_projects / part
+    if not npm_projects.is_dir():
+        return out
+    try:
+        wrapper_dirs = sorted(p for p in npm_projects.iterdir() if p.is_dir() and not p.is_symlink())
+    except OSError:
+        return out
+    import json as _json
+
+    for wrapper_dir in wrapper_dirs:
+        root = _locate_plugin_root(wrapper_dir)
+        pid: str | None = None
+        if root is not None:
+            try:
+                manifest = _json.loads(
+                    (root / _PLUGIN_MANIFEST).read_text(encoding="utf-8", errors="replace")
+                )
+            except (OSError, ValueError):
+                manifest = None
+            if isinstance(manifest, dict) and isinstance(manifest.get("id"), str) and manifest["id"]:
+                pid = manifest["id"]
+        if pid is None:
+            # No manifest / unresolvable id — fall back to the wrapper dir name itself so
+            # the on-disk presence is still surfaced (never silently dropped, F-061 spirit).
+            pid = wrapper_dir.name
+        out[pid] = wrapper_dir
+    return out
+
+
+def _agent_plugins_ids(ctx: Context) -> dict[str, Path]:
+    """{plugin-id: plugin-dir} for each agents/<agent>/agent/plugins/<name>/ directory."""
+    out: dict[str, Path] = {}
+    agents_root = ctx.home / "agents"
+    if not agents_root.is_dir():
+        return out
+    try:
+        agent_dirs = sorted(p for p in agents_root.iterdir() if p.is_dir() and not p.is_symlink())
+    except OSError:
+        return out
+    for agent_dir in agent_dirs:
+        plugins_dir = agent_dir
+        for part in _AGENT_PLUGINS_REL:
+            plugins_dir = plugins_dir / part
+        if not plugins_dir.is_dir():
+            continue
+        try:
+            plugin_dirs = sorted(p for p in plugins_dir.iterdir() if p.is_dir() and not p.is_symlink())
+        except OSError:
+            continue
+        for plugin_dir in plugin_dirs:
+            out.setdefault(plugin_dir.name, plugin_dir)
+    return out
+
+
+def check_orphaned_plugin_caches(ctx: Context) -> Finding:
+    """B152 — on-disk plugin caches not declared in plugins.entries (informational).
+
+    Compares plugin cache directories under ~/.openclaw/npm/projects/ and
+    agents/*/agent/plugins/ against the declared plugins.entries set from config, and
+    WARNs (LOW/advisory) on any on-disk plugin directory not declared. Never FAIL — a
+    stale/uninstalled cache, an in-progress install, or a plugin declared elsewhere is
+    not proof of malice, just a hygiene signal worth surfacing.
+
+    PASS    — on-disk plugin cache directories found, all match a declared entry.
+    WARN    — at least one on-disk plugin cache directory has no matching
+              plugins.entries key.
+    UNKNOWN — no on-disk plugin cache directory found at either known location.
+    """
+    npm_ids = _npm_projects_plugin_ids(ctx)
+    agent_ids = _agent_plugins_ids(ctx)
+
+    if not npm_ids and not agent_ids:
+        return _finding(
+            "B152",
+            UNKNOWN,
+            "No on-disk plugin cache directory found under ~/.openclaw/npm/projects/ "
+            "or agents/*/agent/plugins/ — not applicable.",
+            "No action needed unless plugins are installed later.",
+        )
+
+    declared = set(_plugins(ctx.config))
+    on_disk: dict[str, Path] = {}
+    on_disk.update(npm_ids)
+    on_disk.update(agent_ids)
+
+    orphaned = sorted(pid for pid in on_disk if pid not in declared)
+
+    if orphaned:
+        ev = [f"{pid} ({on_disk[pid]})" for pid in orphaned[:6]]
+        extra = f" (+{len(orphaned) - 6} more)" if len(orphaned) > 6 else ""
+        return _finding(
+            "B152",
+            WARN,
+            "On-disk plugin cache director(y/ies) found with no matching "
+            f"plugins.entries declaration: {', '.join(orphaned[:6])}{extra}. This may "
+            "be a stale/uninstalled cache, a mid-install artifact, or a plugin declared "
+            "under a different key — not proof of malice.",
+            "Review each undeclared plugin cache: if it is stale, remove it; if it is "
+            "an intentional plugin, ensure it is declared under plugins.entries so it "
+            "is covered by plugin-permission and supply-chain checks.",
+            evidence=ev,
+        )
+
+    return _finding(
+        "B152",
+        PASS,
+        f"On-disk plugin cache director(y/ies) found ({', '.join(sorted(on_disk)[:6])}); "
+        "all match a declared plugins.entries entry.",
+        "Keep plugins.entries in sync with on-disk plugin caches as plugins are added "
+        "or removed.",
+        evidence=sorted(on_disk)[:6],
+    )

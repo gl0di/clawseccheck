@@ -1,0 +1,10 @@
+[Unit]
+Description=OpenClaw Gateway
+
+[Service]
+ExecStart=/usr/bin/openclaw gateway start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
