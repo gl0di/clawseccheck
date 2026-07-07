@@ -332,6 +332,18 @@ CATALOG: list[CheckMeta] = [
         "Injection Surface",
         surface="channels",
     ),
+    # B140 (B-139): a channel provider's groups["*"] wildcard entry with no allowFrom
+    # (channel-level or per-group) means the bot answers in any group anyone adds it
+    # to. Advisory only — a public/community bot may accept this deliberately.
+    CheckMeta(
+        "B140",
+        "Wildcard group ingress with no allowFrom restriction",
+        MEDIUM,
+        "hardening",
+        "Injection Surface",
+        confidence="MEDIUM",
+        surface="channels",
+    ),
     CheckMeta(
         "B33",
         "Known-vulnerable OpenClaw version gate",
@@ -1193,6 +1205,77 @@ CATALOG: list[CheckMeta] = [
         scored=False,
         surface="bootstrap",
     ),
+    # B136: Codex CLI project trust_level="trusted" (codex-home/config.toml) disables
+    # Codex's own approval/sandbox gating for everything run under that project path.
+    # Hardening advisory, never FAIL — a trusted project may be entirely legitimate;
+    # this is awareness of a broad, security-relevant setting, matching B79's precedent
+    # (Codex approval-policy posture) which is also scored=False / surface="tools".
+    CheckMeta(
+        "B136",
+        "Codex CLI project trust_level=\"trusted\" (codex-home/config.toml)",
+        MEDIUM,
+        "advisory",
+        "Human Approval",
+        scored=False,
+        confidence="MEDIUM",
+        surface="tools",
+    ),
+    # B138: dangling high-scope pending device pairing (devices/pending.json). A pending
+    # isRepair=true request with an operator.admin/operator.write scope is awaiting human
+    # approval — informational awareness, not proof of compromise. Hardening advisory,
+    # never FAIL; surface="agents" (control-plane device/identity onboarding).
+    CheckMeta(
+        "B138",
+        "Dangling high-scope pending device pairing (devices/pending.json)",
+        MEDIUM,
+        "advisory",
+        "Control Plane / Human Approval",
+        scored=False,
+        confidence="MEDIUM",
+        surface="agents",
+    ),
+    # B150: OpenClaw-related systemd user-unit Restart=always persistence
+    # (~/.config/systemd/user/*.service). Legitimate, common infrastructure for a
+    # long-running gateway service that also happens to be a durable autonomy/
+    # persistence substrate worth disclosing. Advisory, never FAIL — matches B136's
+    # precedent (a broad, security-relevant OS-level setting, informational only).
+    CheckMeta(
+        "B150",
+        "Systemd user-unit Restart=always persistence (OpenClaw-related)",
+        LOW,
+        "advisory",
+        "Persistence / Host Watch",
+        scored=False,
+        confidence="MEDIUM",
+        surface="host",
+    ),
+    # B151: third-party Codex CLI connector caches (agents/*/agent/codex-home/.tmp/
+    # plugins/plugins/*/hooks.json) that wire a shell script to a tool-use/lifecycle
+    # event. Informational disclosure of an upload-shaped surface in a third-party
+    # connector cache — not proof of malice. Advisory, never FAIL.
+    CheckMeta(
+        "B151",
+        "Codex connector shell hooks in the plugin doc-cache",
+        LOW,
+        "advisory",
+        "Supply Chain / Connector Hooks",
+        scored=False,
+        confidence="MEDIUM",
+        surface="mcp",
+    ),
+    # B152: on-disk plugin cache directories (npm/projects/, agents/*/agent/plugins/)
+    # not declared under plugins.entries — may be stale/uninstalled, mid-install, or
+    # declared under a different key. Hygiene/disclosure signal, never FAIL.
+    CheckMeta(
+        "B152",
+        "Orphaned plugin cache not declared in plugins.entries",
+        LOW,
+        "advisory",
+        "Supply Chain / Plugin Hygiene",
+        scored=False,
+        confidence="MEDIUM",
+        surface="mcp",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -1334,6 +1417,12 @@ AST_MAP = {
     "B98": ("AST04",),  # missing capability declaration = insecure/absent least-privilege metadata (cf. B62/B88/B96)
     "B99": ("AST02",),  # .pth/sitecustomize auto-execution persistence = supply-chain tamper (cf. B86/B94)
     "B100": ("AST01", "AST02"),  # ClickFix paste-into-terminal + remote-fetch = malicious skill / supply-chain (cf. B13)
+    "B136": ("AST06",),  # codex trust_level="trusted" disables approval/sandbox gating = weak isolation (cf. B4/B48/B70)
+    "B138": ("AST03",),  # dangling high-scope pending device pairing = over-privileged-skill risk awaiting approval (cf. B79)
+    "B140": ("AST05",),  # wildcard group ingress, no allowFrom = untrusted external instructions (cf. B26/B67)
+    "B150": ("AST03",),  # systemd Restart=always persistence = durable over-privileged autonomy substrate (cf. B17)
+    "B151": ("AST02",),  # codex connector shell hooks in the plugin doc-cache = supply-chain tamper (cf. B42/B94)
+    "B152": ("AST02",),  # orphaned plugin cache not declared in plugins.entries = supply-chain visibility gap (cf. C5/C047)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
@@ -1432,6 +1521,12 @@ OWASP_MAP = {
     "B84": (
         "LLM06",
     ),  # proven high-blast verb with an ungated posture = Excessive Agency (cf. B43/B44)
+    "B136": ("LLM06",),  # codex trust_level="trusted" disables approval/sandbox = Excessive Agency (cf. B4/B8)
+    "B138": ("LLM06",),  # dangling high-scope pending device pairing = Excessive Agency (cf. B79)
+    "B140": ("LLM01",),  # wildcard group ingress, no allowFrom = Prompt Injection surface (cf. B21/B67)
+    "B150": ("LLM06", "LLM10"),  # systemd Restart=always = durable autonomy substrate (cf. B17)
+    "B151": ("LLM03",),  # codex connector shell hooks in the plugin doc-cache = Supply Chain
+    "B152": ("LLM03",),  # orphaned plugin cache not declared in plugins.entries = Supply Chain
 }
 
 

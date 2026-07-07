@@ -129,6 +129,7 @@ from ._host import (
     check_host_firewall,
     check_host_egress_posture,
     check_incident_readiness,
+    check_systemd_persistence,
 )
 
 from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has_remote, _mcp_servers, _mcp_url_is_local, _read_jsonl_tail,)
@@ -170,6 +171,7 @@ from ._agents import (
     check_subagents_allow_agents,
     check_tool_output_trust,
     check_untrusted_context,
+    check_wildcard_group_ingress,
 )
 
 from ._capability import (
@@ -250,6 +252,7 @@ from ._lifecycle import (
     check_backups,
     check_bootstrap_injection,
     check_bootstrap_write_protection,
+    check_codex_project_trust,
     check_cron_scheduler,
     check_hook_policy_bypass,
     check_human_approval,
@@ -257,6 +260,7 @@ from ._lifecycle import (
     check_known_vulns,
     check_memory_poisoning,
     check_offboarding_hygiene,
+    check_pending_device_pairing_scope,
     check_self_modification,
     check_session_approval_policy,
     check_supply_chain,
@@ -605,6 +609,8 @@ from ._mcp import (
     check_mcp_hardening,
     check_mcp_tool_inheritance,
     check_plugin_permission_mode,
+    check_codex_plugin_hooks,
+    check_orphaned_plugin_caches,
     vet_mcp,
     vet_plugin,
 )
@@ -1043,6 +1049,7 @@ CHECKS = [
     check_browser_ssrf,
     check_session_visibility,
     check_untrusted_context,
+    check_wildcard_group_ingress,
     check_known_vulns,
     check_credential_blast_radius,
     check_effective_tools,
@@ -1090,6 +1097,11 @@ CHECKS = [
     check_webfetch_redirects,
     check_incident_readiness,
     check_offboarding_hygiene,  # B104 — decommissioning/offboarding hygiene (F-089)
+    check_codex_project_trust,  # B136 — Codex CLI project trust_level="trusted"
+    check_pending_device_pairing_scope,  # B138 — dangling high-scope pending device pairing
+    check_systemd_persistence,  # B150 — systemd user-unit Restart=always persistence
+    check_codex_plugin_hooks,  # B151 — codex connector shell hooks in the plugin doc-cache
+    check_orphaned_plugin_caches,  # B152 — on-disk plugin cache not in plugins.entries
 ]
 
 

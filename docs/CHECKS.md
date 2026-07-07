@@ -405,6 +405,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B140 - Wildcard group ingress with no allowFrom restriction
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Injection Surface
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: LLM01 Prompt Injection
+- What it checks: Wildcard group ingress with no allowFrom restriction
+- Remediation:
+  - none
+
 ### B33 - Known-vulnerable OpenClaw version gate
 
 - Severity: HIGH
@@ -1328,6 +1340,66 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: LLM01 Prompt Injection
 - What it checks: Injection-like text in HTML image attributes
+- Remediation:
+  - none
+
+### B136 - Codex CLI project trust_level="trusted" (codex-home/config.toml)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Human Approval
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: LLM06 Excessive Agency
+- What it checks: Codex CLI project trust_level="trusted" (codex-home/config.toml)
+- Remediation:
+  - none
+
+### B138 - Dangling high-scope pending device pairing (devices/pending.json)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Control Plane / Human Approval
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: LLM06 Excessive Agency
+- What it checks: Dangling high-scope pending device pairing (devices/pending.json)
+- Remediation:
+  - none
+
+### B150 - Systemd user-unit Restart=always persistence (OpenClaw-related)
+
+- Severity: LOW
+- Block: advisory
+- Framework: Persistence / Host Watch
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: LLM06 Excessive Agency, LLM10 Unbounded Consumption
+- What it checks: Systemd user-unit Restart=always persistence (OpenClaw-related)
+- Remediation:
+  - none
+
+### B151 - Codex connector shell hooks in the plugin doc-cache
+
+- Severity: LOW
+- Block: advisory
+- Framework: Supply Chain / Connector Hooks
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: LLM03 Supply Chain
+- What it checks: Codex connector shell hooks in the plugin doc-cache
+- Remediation:
+  - none
+
+### B152 - Orphaned plugin cache not declared in plugins.entries
+
+- Severity: LOW
+- Block: advisory
+- Framework: Supply Chain / Plugin Hygiene
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: LLM03 Supply Chain
+- What it checks: Orphaned plugin cache not declared in plugins.entries
 - Remediation:
   - none
 

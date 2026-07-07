@@ -103,6 +103,7 @@ check_cachetrace_redaction
 check_capability_blast_radius
 check_capability_intent_mismatch
 check_clickfix_setup_section
+check_codex_project_trust
 check_conditional_sleeper_trigger
 check_config_audit_log
 check_config_health_integrity
@@ -165,6 +166,7 @@ check_multiagent_exposure
 check_node_denycommands_ineffective
 check_offboarding_hygiene
 check_path_safety
+check_pending_device_pairing_scope
 check_per_source_trust_contracts
 check_persona_jailbreak
 check_plugin_permission_mode
@@ -194,6 +196,7 @@ check_untrusted_context
 check_update_pinning
 check_version
 check_webfetch_redirects
+check_wildcard_group_ingress
 detect_vet_type
 dig
 normalize_for_scan
