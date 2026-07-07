@@ -161,6 +161,33 @@ def test_b74_code_fence_not_flagged():
     assert f.status in (PASS, WARN)
 
 
+# --------------------------------------------------------------------------- VCS metadata (B-125)
+def test_b74_git_config_user_section_not_flagged():
+    """B-125: an installed skill that is a git checkout ships its own .git/config,
+
+    whose INI ``[user]`` section header must not be collected as skill content and
+    misread as a forged conversational role-marker.
+    """
+    from clawseccheck.collector import collect
+    f = check_forged_provenance(collect(FIXTURES / "clean_b74_vcs_metadata"))
+    assert f.id == "B74"
+    assert f.status == PASS
+
+
+def test_b74_git_dir_excluded_from_collected_skill_content():
+    """The .git/ directory of an installed skill must not appear in the collected
+
+    skill text at all (not just "doesn't happen to match B74's regex") — this is
+    the root collection-layer fix, checked directly against Context.installed_skills.
+    """
+    from clawseccheck.collector import collect
+    ctx = collect(FIXTURES / "clean_b74_vcs_metadata")
+    skill_text = ctx.installed_skills.get("git-checkout-skill", "")
+    assert "[user]" not in skill_text
+    assert "repositoryformatversion" not in skill_text
+    assert "Example Dev" not in skill_text
+
+
 # --------------------------------------------------------------------------- installed_skills
 def test_b74_detects_role_block_in_skill():
     c = _ctx_empty()

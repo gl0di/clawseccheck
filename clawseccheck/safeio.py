@@ -138,15 +138,21 @@ def is_safe_tar_member(base_dir: Path, member_name: str) -> bool:
         return False
 
 
+_VCS_DIR_NAMES = (".git", ".hg", ".svn")
+
+
 def walk_dir_safely(
     base_dir: Path,
     exclude_pycache: bool = False,
+    exclude_vcs: bool = False,
     max_files: int | None = None,
     skips: list | None = None,
 ) -> list[Path]:
     """Recursively walk base_dir, skipping symlinks and any file that escapes base_dir.
 
     If exclude_pycache is True, ignores directories or files containing "__pycache__".
+    If exclude_vcs is True, ignores directories or files under a ".git", ".hg", or ".svn"
+    directory (VCS metadata is not skill/config content — B-125).
     If max_files is provided, stop after that many regular files are collected.
     If `skips` (a list) is provided, each skipped symlink or path-escape is appended to it as
     a (path, reason) tuple so a caller can surface the drop instead of losing it silently
@@ -160,8 +166,16 @@ def walk_dir_safely(
     out = []
     for dirpath, dirnames, filenames in os.walk(base_dir, topdown=True, followlinks=False):
         # Deterministic traversal
-        if exclude_pycache:
-            dirnames[:] = [d for d in sorted(dirnames) if "__pycache__" not in (Path(dirpath) / d).parts]
+        if exclude_pycache or exclude_vcs:
+            def _keep(d: str, _dirpath: str = dirpath) -> bool:
+                parts = (Path(_dirpath) / d).parts
+                if exclude_pycache and "__pycache__" in parts:
+                    return False
+                if exclude_vcs and any(vcs in parts for vcs in _VCS_DIR_NAMES):
+                    return False
+                return True
+
+            dirnames[:] = [d for d in sorted(dirnames) if _keep(d)]
         else:
             dirnames.sort()
 
@@ -170,6 +184,8 @@ def walk_dir_safely(
             p = Path(dirpath) / filename
 
             if exclude_pycache and "__pycache__" in p.parts:
+                continue
+            if exclude_vcs and any(vcs in p.parts for vcs in _VCS_DIR_NAMES):
                 continue
             if p.is_symlink():
                 if skips is not None:

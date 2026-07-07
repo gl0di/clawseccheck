@@ -619,7 +619,9 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
             return cached
 
     _skips: list = []
-    files = walk_dir_safely(skill_dir, exclude_pycache=True, max_files=_MAX_FILES_PER_SKILL, skips=_skips)
+    files = walk_dir_safely(
+        skill_dir, exclude_pycache=True, exclude_vcs=True, max_files=_MAX_FILES_PER_SKILL, skips=_skips
+    )
     if ctx is not None and _skips:
         # F-061: a skill shipping `data -> ~/.ssh/id_rsa` or `-> ../../openclaw.json` used to
         # be skipped silently. Record the skip + its target so it surfaces as a WARN.
