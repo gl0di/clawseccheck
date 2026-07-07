@@ -3,6 +3,47 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.22.0] — 2026-07-07
+
+A recall pass: real-config false-negative hunt findings (E-030) plus a ClawBench
+precision/recall benchmark's coverage gaps (E-031) — six new checks, a feature-detection
+fix that unblocks several UNKNOWN-only checks on live configs, and a truncation-safety fix.
+
+### Added
+- B136/B138 — codex-home `config.toml` `trust_level="trusted"` over a broad workspace
+  path, and a dangling `devices/pending.json` `operator.admin` repair-pairing request
+  awaiting approval.
+- B140 — wildcard Telegram/Discord group ingress (`groups."*"`) with no `allowFrom` at
+  either the group or channel level — the bot answers in any group it's added to.
+- B150/B151/B152 — systemd user-unit persistence (`Restart=always` durable autonomy
+  substrate), codex connector shell hooks in the plugin doc-cache, and orphaned plugin
+  cache directories not declared under `plugins.entries`.
+- B153 — untrusted shell-variable interpolation into a `python -c`/`node -e`/`bun -e`
+  one-liner (quote-breakout injection risk, independent of whether the body also names a
+  dangerous import).
+- B154 — cross-file split PLAINTEXT payload reassembly, extending B90's base64-only
+  cross-file reassembly to payloads that are never base64-encoded.
+- Hardcoded provider-shaped secret detection (AST-level): an unconditional
+  `os.environ["KEY"] = "<literal>"` overwrite, or a provider-shaped literal as the
+  default arg of `os.getenv`/`os.environ.get` — folds into B13.
+
+### Fixed
+- B4/B8/B22/B69 (sandbox, approval, self-modification, strict-inline-eval) and
+  B21/B67 (retrieved-content trust boundary, per-source tool-output trust) no longer
+  return a false UNKNOWN "not applicable" when a `tools.profile` grants implicit exec or
+  `web.fetch` is enabled — these checks previously only recognized an explicit
+  `tools.exec` block, missing the coding-profile-implies-live-shell and
+  web-fetch-is-an-untrusted-source cases entirely.
+- C015 (secrets-at-rest) now scans `identity/` (device private key) and `devices/`
+  (operator control-plane tokens), and `openclaw.json.*` sibling backups
+  (`.bak`, `.bak.N`, `.last-good`, `.pre-update`) that were previously skipped.
+- An oversized single file is now skipped regardless of whether a `Context` is passed to
+  the collector — a caller that omitted it previously read the whole file into memory
+  instead of respecting the size cap.
+
+### Changed
+- `docs/CHECKS.md` is regenerated for the new checks above.
+
 ## [3.21.0] — 2026-07-07
 
 A precision pass driven by a live-config false-positive hunt and a 100-skill benchmark
