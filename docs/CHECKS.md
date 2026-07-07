@@ -1367,6 +1367,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B135 - Accepted-despite-failed-verification skill install (.clawhub/lock.json)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Supply Chain / Human Approval
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: Accepted-despite-failed-verification skill install (.clawhub/lock.json)
+- Remediation:
+  - none
+
 ### B150 - Systemd user-unit Restart=always persistence (OpenClaw-related)
 
 - Severity: LOW

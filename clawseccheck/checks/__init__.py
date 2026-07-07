@@ -252,6 +252,7 @@ from ._lifecycle import (
     check_backups,
     check_bootstrap_injection,
     check_bootstrap_write_protection,
+    check_clawhub_lock_verification,
     check_codex_project_trust,
     check_cron_scheduler,
     check_hook_policy_bypass,
@@ -1104,6 +1105,7 @@ CHECKS = [
     check_systemd_persistence,  # B150 — systemd user-unit Restart=always persistence
     check_codex_plugin_hooks,  # B151 — codex connector shell hooks in the plugin doc-cache
     check_orphaned_plugin_caches,  # B152 — on-disk plugin cache not in plugins.entries
+    check_clawhub_lock_verification,  # B135 — accepted-despite-failed-verification install
 ]
 
 

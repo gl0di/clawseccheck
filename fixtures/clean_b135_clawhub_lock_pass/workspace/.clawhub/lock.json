@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "skills": {
+    "well-behaved-skill": {
+      "version": "1.0.0",
+      "installedAt": 1751000000000,
+      "registry": "https://clawhub.ai",
+      "artifact": {
+        "kind": "archive",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111",
+        "integrity": "sha256-REDACTED"
+      },
+      "skillFile": {
+        "path": "SKILL.md",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111"
+      },
+      "verification": {
+        "schema": "clawhub.skill.verify.v1",
+        "ok": true,
+        "decision": "pass",
+        "reasons": [],
+        "card": {
+          "available": true,
+          "path": "skill-card.md",
+          "url": "https://example.invalid/skills/well-behaved-skill/card",
+          "sha256": "2222222222222222222222222222222222222222222222222222222222222"
+        },
+        "signature": {
+          "status": "unsigned"
+        }
+      }
+    }
+  }
+}

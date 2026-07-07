@@ -1477,6 +1477,132 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
     )
 
 
+# ---------- B135: accepted-despite-failed-verification skill install (.clawhub/lock.json) ----------
+# Real shape (docs/research/openclaw-schema-recon.md §14.5): {"version": ..., "skills":
+# {<slug>: {"version", "installedAt", "registry", "artifact", "skillFile", "verification":
+# {"schema", "ok": bool, "decision": "pass"|"fail", "reasons": [...], "card": {...},
+# "signature": {"status": ...}}}}}. verification.ok == False or decision == "fail" means
+# the registry's OWN check rejected the skill, yet it is installed and present in this lock
+# file — that explicit rejection is the trigger. Deliberately NOT triggered by signature
+# ("unsigned"), provenance ("unavailable"), or a suspicious staticScan/skillSpector
+# sub-signal alone: a live fleet install showed those exact sub-signals flagged while the
+# registry's own aggregate decision was "pass" (a disclosed security-audit tool tripping its
+# own detection regexes — see reference note on scanner FP against detection signatures) —
+# flagging on the sub-signals would reproduce that false positive.
+def check_clawhub_lock_verification(ctx: Context) -> Finding:
+    """B135 — accepted-despite-failed-verification skill install (.clawhub/lock.json).
+
+    PASS    — no .clawhub/lock.json found in any workspace, OR every locked skill's
+              verification.ok is true and decision is not "fail".
+    WARN    — at least one locked skill has verification.ok == False or
+              decision == "fail" — the registry's own check rejected it, yet it is
+              installed and present in the lock file.
+    UNKNOWN — a .clawhub/lock.json was found but is unreadable or not valid JSON.
+    """
+    import json as _json
+
+    from ..collector import WORKSPACE_DIRS
+
+    lock_paths: list[Path] = []
+    seen: set = set()
+    for rel in [""] + list(WORKSPACE_DIRS):
+        p = ctx.home / rel / ".clawhub" / "lock.json"
+        if not p.is_file():
+            continue
+        try:
+            real = p.resolve()
+        except OSError:
+            real = p
+        if real in seen:
+            continue
+        seen.add(real)
+        lock_paths.append(p)
+
+    if not lock_paths:
+        return _finding(
+            "B135",
+            PASS,
+            "no .clawhub/lock.json found in any workspace — no ClawHub-installed skills "
+            "to evaluate.",
+            "No action needed.",
+        )
+
+    rejected_ev: list[str] = []
+    any_parsed = False
+    any_unreadable = False
+
+    for lock_path in lock_paths:
+        try:
+            data = _json.loads(lock_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            any_unreadable = True
+            continue
+        if not isinstance(data, dict):
+            any_unreadable = True
+            continue
+        skills = data.get("skills")
+        if not isinstance(skills, dict):
+            continue
+        any_parsed = True
+        for slug, entry in skills.items():
+            if not isinstance(entry, dict):
+                continue
+            verification = entry.get("verification")
+            if not isinstance(verification, dict):
+                continue
+            ok = verification.get("ok")
+            decision = verification.get("decision")
+            if ok is False or decision == "fail":
+                reasons = verification.get("reasons")
+                reasons_str = (
+                    ", ".join(str(r) for r in reasons)
+                    if isinstance(reasons, list) and reasons
+                    else "none listed"
+                )
+                signature = verification.get("signature")
+                sig_status = (
+                    signature.get("status")
+                    if isinstance(signature, dict)
+                    else "unknown"
+                )
+                version = entry.get("version", "unknown")
+                rejected_ev.append(
+                    f"{slug}@{version}: decision={decision!r} ok={ok!r} "
+                    f"reasons=[{reasons_str}] signature={sig_status}"
+                )
+
+    if rejected_ev:
+        detail = "; ".join(rejected_ev[:6]) + (
+            f" (+{len(rejected_ev) - 6} more)" if len(rejected_ev) > 6 else ""
+        )
+        return _finding(
+            "B135",
+            WARN,
+            f"skill(s) installed despite failed ClawHub verification: {detail}.",
+            "Review the flagged skill(s) manually — ClawHub's own verification rejected "
+            "them but they are installed and running; uninstall or re-verify their "
+            "provenance before trusting them.",
+            evidence=rejected_ev[:6],
+        )
+
+    if not any_parsed and any_unreadable:
+        return _finding(
+            "B135",
+            UNKNOWN,
+            ".clawhub/lock.json found but unreadable or not valid JSON — cannot evaluate "
+            "ClawHub skill-verification state.",
+            "Review .clawhub/lock.json manually.",
+        )
+
+    return _finding(
+        "B135",
+        PASS,
+        "all ClawHub-installed skills passed registry verification (or no lock file "
+        "was found).",
+        "No action needed.",
+    )
+
+
 def check_supply_chain(ctx: Context) -> Finding:
     cfg = ctx.config
     # plugins.installs_unpinned_npm_specs / plugins.installs_missing_integrity do NOT exist

@@ -1234,6 +1234,23 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="agents",
     ),
+    # B135: a skill installed despite ClawHub's own verification rejecting it
+    # (.clawhub/lock.json verification.ok=false / decision="fail"). Deterministic
+    # config-field fact (the lock file explicitly records the registry's own
+    # decision), but advisory/scored=False: a legitimate reason to keep a
+    # rejected install can exist (e.g. a security researcher's own test skill),
+    # so this is awareness of an accepted-despite-rejection state, not proof of
+    # compromise — matches B136/B138's precedent in the same E-030 epic.
+    CheckMeta(
+        "B135",
+        "Accepted-despite-failed-verification skill install (.clawhub/lock.json)",
+        MEDIUM,
+        "advisory",
+        "Supply Chain / Human Approval",
+        scored=False,
+        confidence="HIGH",
+        surface="skills",
+    ),
     # B150: OpenClaw-related systemd user-unit Restart=always persistence
     # (~/.config/systemd/user/*.service). Legitimate, common infrastructure for a
     # long-running gateway service that also happens to be a durable autonomy/
@@ -1446,6 +1463,7 @@ AST_MAP = {
     "B98": ("AST04",),  # missing capability declaration = insecure/absent least-privilege metadata (cf. B62/B88/B96)
     "B99": ("AST02",),  # .pth/sitecustomize auto-execution persistence = supply-chain tamper (cf. B86/B94)
     "B100": ("AST01", "AST02"),  # ClickFix paste-into-terminal + remote-fetch = malicious skill / supply-chain (cf. B13)
+    "B135": ("AST02",),  # accepted-despite-failed-verification install = supply-chain trust bypass (cf. B103/B95)
     "B136": ("AST06",),  # codex trust_level="trusted" disables approval/sandbox gating = weak isolation (cf. B4/B48/B70)
     "B138": ("AST03",),  # dangling high-scope pending device pairing = over-privileged-skill risk awaiting approval (cf. B79)
     "B140": ("AST05",),  # wildcard group ingress, no allowFrom = untrusted external instructions (cf. B26/B67)
@@ -1550,6 +1568,7 @@ OWASP_MAP = {
     "B84": (
         "LLM06",
     ),  # proven high-blast verb with an ungated posture = Excessive Agency (cf. B43/B44)
+    "B135": ("LLM03",),  # accepted-despite-failed-verification install = Supply Chain (cf. B103)
     "B136": ("LLM06",),  # codex trust_level="trusted" disables approval/sandbox = Excessive Agency (cf. B4/B8)
     "B138": ("LLM06",),  # dangling high-scope pending device pairing = Excessive Agency (cf. B79)
     "B140": ("LLM01",),  # wildcard group ingress, no allowFrom = Prompt Injection surface (cf. B21/B67)

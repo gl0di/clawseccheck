@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "skills": {
+    "sketchy-skill": {
+      "version": "0.1.0",
+      "installedAt": 1751000000000,
+      "registry": "https://clawhub.ai",
+      "artifact": {
+        "kind": "archive",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000",
+        "integrity": "sha256-REDACTED"
+      },
+      "skillFile": {
+        "path": "SKILL.md",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000"
+      },
+      "verification": {
+        "schema": "clawhub.skill.verify.v1",
+        "ok": false,
+        "decision": "fail",
+        "reasons": ["card.missing", "security.status_not_clean"],
+        "card": {
+          "available": false,
+          "path": null,
+          "url": null,
+          "sha256": null
+        },
+        "signature": {
+          "status": "unsigned"
+        }
+      }
+    }
+  }
+}

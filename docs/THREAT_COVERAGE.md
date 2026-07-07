@@ -62,7 +62,7 @@ OWASP Agentic (ASI) classes below, not stretched into a category they don't fit.
 |---|---|---|
 | LLM01 | Prompt Injection | A1, B2, B6, B21, B23, B26, B30, B48, B56, B58, B59, B60, B61, B64, B67, B74, B140, C074 |
 | LLM02 | Sensitive Information Disclosure | B1, B9, B11, B12, B14, B19, B39, B41, B59, B61, B67, C014, C015 |
-| LLM03 | Supply Chain | B5, B13, B15, B24, B25, B33, B42, B57, B103, B151, B152, C4, C5, C047 |
+| LLM03 | Supply Chain | B5, B13, B15, B24, B25, B33, B42, B57, B103, B135, B151, B152, C4, C5, C047 |
 | LLM04 | Data and Model Poisoning | B7, B20, B22, B55 |
 | LLM05 | Improper Output Handling | B21, B47 |
 | LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B62, B63, B65, B66, B68, B69, B71, B72, B76, B79, B105, B136, B138, B150 |
@@ -87,7 +87,7 @@ finding in `--json` (`"ast": [...]`).
 | AST code | Category | ClawSecCheck checks |
 |---|---|---|
 | AST01 | Malicious Skills | B13, B60, B63, B65, C048 |
-| AST02 | Supply Chain Compromise | B5, B13, B15, B24, B25, B42, B57, B103, B151, B152, C5, C047 |
+| AST02 | Supply Chain Compromise | B5, B13, B15, B24, B25, B42, B57, B103, B135, B151, B152, C5, C047 |
 | AST03 | Over-Privileged Skills | B3, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B68, B69, B71, B72, B75, B76, B79, B138, B150 |
 | AST04 | Insecure Metadata | B6, B44, B62 |
 | AST05 | Untrusted External Instructions | B6, B7, B20, B21, B23, B26, B30, B58, B59, B60, B61, B63, B64, B65, B66, B67, B74, B105, B140, C074 |
