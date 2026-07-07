@@ -35,16 +35,20 @@ SKILL_DIRS = ["skills", "workspace/skills", "workspace-home/skills",
               "workspace-work/skills", ".agents/skills"]
 _OWN_SKILL_NAMES = {"clawseccheck", "clawshield"}
 _MAX_SKILLS = 300
-# B-144 follow-up: raised from 60_000 to match _MAX_PY_BYTES_PER_SKILL below — there was
-# no principled reason for the raw-text (regex) scan cap to be tighter than the per-
-# language source cap used for AST analysis; regex scanning is cheap per-byte, so this
-# carries no meaningful perf cost (DEFAULT_CHECK_BUDGET_S in scanbudget.py is 15s per
-# check). Confirmed on a real config: a legitimate ~60KB skill (clawstealth) was hitting
-# this cap and reading as UNKNOWN (truncation) purely because of the asymmetry.
-_MAX_BYTES_PER_SKILL = 200_000
-_MAX_FILE_BYTES = 200_000
+# B-144 follow-up: raised 60_000 -> 200_000 -> 1_000_000, all three caps kept in lock-
+# step. _MAX_FILE_BYTES must move WITH _MAX_BYTES_PER_SKILL, not independently — a
+# single file over _MAX_FILE_BYTES is dropped whole by collect_skill_files before the
+# per-skill budget logic ever sees it, so raising only the per-skill cap has no effect
+# on a skill with one large file. Regex/entropy scanning 1MB is still low-single-digit
+# milliseconds per check (DEFAULT_CHECK_BUDGET_S is 15s); the cross-file reassembly
+# checks (B90/B154) are independently bounded by their own fragment/window caps
+# regardless of blob size. Confirmed on a real config: a legitimate ~152KB skill
+# (clawstealth) was hitting the old 60KB cap and reading as UNKNOWN purely from asymmetry
+# with _MAX_PY_BYTES_PER_SKILL (already 200KB) before that first bump.
+_MAX_BYTES_PER_SKILL = 1_000_000
+_MAX_FILE_BYTES = 1_000_000
 _MAX_FILES_PER_SKILL = 500
-_MAX_PY_BYTES_PER_SKILL = 200_000  # cap on Python source kept per skill for AST analysis
+_MAX_PY_BYTES_PER_SKILL = 1_000_000  # cap on Python source kept per skill for AST analysis
 _ARCHIVE_FILE_LIMIT = _MAX_FILES_PER_SKILL
 _ARCHIVE_MAX_FILE_BYTES = _MAX_FILE_BYTES
 _ARCHIVE_MAX_TOTAL_BYTES = 20_000_000

@@ -3,6 +3,10 @@ past the per-skill byte/file cap used to have its tail (where a payload could hi
 with zero disclosure — --vet returned a clean PASS. Now the cap hit is recorded in
 ctx.limit_hits and check_installed_skills surfaces UNKNOWN (ranked above the WARN buckets),
 never a clean PASS. Normal-size skills are unaffected.
+
+Fixture sizes are computed from the real collector.py constants (not hardcoded) — this
+cap has moved twice already (60KB -> 200KB -> 1MB, B-144 follow-ups) and hardcoded sizes
+broke each time.
 """
 from __future__ import annotations
 
@@ -11,6 +15,12 @@ from pathlib import Path
 
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
 from clawseccheck.checks import vet_skill
+from clawseccheck.collector import _MAX_BYTES_PER_SKILL, _MAX_FILE_BYTES
+
+# Each fixture file must individually stay under _MAX_FILE_BYTES (else it's dropped
+# whole by collect_skill_files before the per-skill budget/entropy-sampling logic ever
+# sees it) while the SUM across files comfortably exceeds _MAX_BYTES_PER_SKILL.
+_PER_FILE = min(_MAX_FILE_BYTES - 1, int(_MAX_BYTES_PER_SKILL * 0.75))
 
 
 def _vet(files: dict) -> str:
@@ -24,8 +34,9 @@ def _vet(files: dict) -> str:
 
 
 def test_skill_padded_past_text_cap_is_unknown_not_pass():
-    # ~240KB of benign filler exceeds the 200KB text cap; the tail is unscanned.
-    pad = "# a totally benign filler line repeated many times\n" * 4700
+    # Benign filler exceeding the per-skill text cap; the tail is unscanned.
+    line = "# a totally benign filler line repeated many times\n"
+    pad = line * (int(_MAX_BYTES_PER_SKILL * 1.2 // len(line)) + 1)
     f = _vet({"big.md": pad})
     assert f.status == UNKNOWN
     assert "truncat" in f.detail.lower() or "cap" in f.detail.lower()
@@ -45,11 +56,11 @@ def test_normal_size_skill_stays_pass():
 
 def test_skill_padded_with_single_repeated_byte_warns():
     # the classic "omnicogg" shape: a single repeated character, far past the cap.
-    # Split across TWO files (each under the per-file cap, _MAX_FILE_BYTES=200_000)
-    # so the per-skill budget slices the SECOND file mid-way (giving the tail-entropy
-    # sampler something to see) rather than the first file being dropped whole by the
-    # per-file cap before the per-skill slicing logic ever runs.
-    f = _vet({"aaa_first.md": "A" * 150_000, "zzz_second.md": "A" * 150_000})
+    # Split across TWO files (each under the per-file cap, _MAX_FILE_BYTES) so the
+    # per-skill budget slices the SECOND file mid-way (giving the tail-entropy sampler
+    # something to see) rather than the first file being dropped whole by the per-file
+    # cap before the per-skill slicing logic ever runs.
+    f = _vet({"aaa_first.md": "A" * _PER_FILE, "zzz_second.md": "A" * _PER_FILE})
     assert f.status == WARN
     assert "padding" in f.detail.lower() or "low-entropy" in f.detail.lower()
     assert "s" in f.evidence  # the fixture skill's own name ("s") — matches ctx.padding_anomalies
@@ -61,7 +72,7 @@ def test_skill_padded_with_repeated_symbol_warns():
     # NOTE: deliberately not an alternating-whitespace (" \n"*N) run — that shape
     # trips a separate, pre-existing pathological-regex slowdown elsewhere in the
     # content-ring scan (tracked as CLAWSECCHECK-B-100, not this task's concern).
-    f = _vet({"aaa_first.md": "-" * 150_000, "zzz_second.md": "-" * 150_000})
+    f = _vet({"aaa_first.md": "-" * _PER_FILE, "zzz_second.md": "-" * _PER_FILE})
     assert f.status == WARN
 
 
@@ -75,9 +86,10 @@ def test_skill_high_entropy_oversized_tail_stays_unknown():
     # slice+entropy-sample path, not just the blunter per-file-cap drop.
     import os
 
+    n = _PER_FILE // 2  # hex() doubles byte count back to _PER_FILE chars
     f = _vet({
-        "aaa_first.md": os.urandom(75_000).hex(),
-        "zzz_second.md": os.urandom(75_000).hex(),
+        "aaa_first.md": os.urandom(n).hex(),
+        "zzz_second.md": os.urandom(n).hex(),
     })
     assert f.status == UNKNOWN
     assert "padding" not in f.detail.lower()

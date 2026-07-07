@@ -127,7 +127,7 @@ _STATUS_RANK: dict[str, int] = {FAIL: 3, WARN: 2, UNKNOWN: 1, PASS: 0}
 _WARN_CAP = 89
 _NON_DANGER_FAIL_CAP = 79
 # B-092: a Danger-axis UNKNOWN caused by a coverage-limit hit (a payload padded past the
-# 200KB/500-file scan cap could hide unscanned) must never read as "A / SAFE" — cap it at
+# per-skill/500-file scan cap could hide unscanned) must never read as "A / SAFE" — cap it at
 # the top of the C band, same ceiling scoring.py gives a real HIGH finding.
 _COVERAGE_GAP_DANGER_CAP = 79
 
@@ -181,7 +181,7 @@ def _worst(findings: list):
 
 def _danger_coverage_gap(danger_bucket: list, ctx) -> bool:
     """True iff the Danger axis is UNKNOWN *because scanning hit a coverage limit* —
-    e.g. a payload padded past the 200KB/500-file per-skill cap in collector.py — rather
+    e.g. a payload padded past the per-skill/500-file scan cap in collector.py — rather
     than the benign "nothing to scan" UNKNOWN (no code, no MCP servers, etc.).
 
     B-092: those two UNKNOWN flavors must not be conflated. "Nothing to scan" is a

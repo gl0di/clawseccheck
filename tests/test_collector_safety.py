@@ -504,8 +504,8 @@ def test_file_manifest_limits_and_safety(tmp_path):
     home = tmp_path / "home"
     sd = _make_skill(home, "limitsskill", "initial text")
     
-    # 1. Oversized normal file (>200,000 bytes)
-    (sd / "huge.txt").write_bytes(b"a" * 200001)
+    # 1. Oversized normal file (over _MAX_FILE_BYTES)
+    (sd / "huge.txt").write_bytes(b"a" * (_MAX_FILE_BYTES + 1))
     
     # 2. Oversized archive (>10MB)
     (sd / "huge.zip").write_bytes(b"PK\x03\x04" + b"a" * (10 * 1024 * 1024 + 1))
