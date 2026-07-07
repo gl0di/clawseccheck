@@ -1290,6 +1290,21 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B154: the split-across-files scanner-evasion vector for a payload that is never
+    # base64-encoded — B90 reassembles base64 fragments behind a decode sink; this
+    # reassembles PLAINTEXT fragments and tests the joined text directly against the same
+    # strong runnable-payload shape. WARN-only heuristic (reassembly at runtime is an
+    # inference, same as B90).
+    CheckMeta(
+        "B154",
+        "Cross-file split plaintext payload (reassembled from string literals)",
+        MEDIUM,
+        "advisory",
+        "Obfuscation / Malicious Skill",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

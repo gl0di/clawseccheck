@@ -1415,6 +1415,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B154 - Cross-file split plaintext payload (reassembled from string literals)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Obfuscation / Malicious Skill
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Cross-file split plaintext payload (reassembled from string literals)
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

@@ -81,6 +81,7 @@ from ._content import (
     check_config_trust_widening,
     check_cross_file_boundary_payload,
     check_cross_file_payload,
+    check_cross_file_plaintext_payload,
     check_dependency_confusion,
     check_dormant_capability,
     check_dynamic_dispatch_obfuscation,
@@ -2110,6 +2111,7 @@ SKILL_CONTENT_RING = (
     check_dormant_capability,  # B89 — unreachable-yet-code-bearing skill (dormant capability)
     check_cross_file_payload,  # B90 — cross-file split base64 payload reassembly (I-019)
     check_cross_file_boundary_payload,  # B102 — base64 split exactly at a file boundary (F-086)
+    check_cross_file_plaintext_payload,  # B154 — cross-file split PLAINTEXT payload reassembly
     check_dynamic_dispatch_obfuscation,  # B91 — dynamic-dispatch sink obfuscation (F-102)
     check_unsafe_deserialization,  # B92 — unsafe deserialization sink (F-098)
     check_trigger_homoglyph,  # B93 — confusable characters in trigger description (F-103)

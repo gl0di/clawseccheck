@@ -114,6 +114,7 @@ check_credential_blast_radius
 check_cron_scheduler
 check_cross_file_boundary_payload
 check_cross_file_payload
+check_cross_file_plaintext_payload
 check_cross_skill_combined_effect
 check_dangerous_overrides
 check_data_atrest

