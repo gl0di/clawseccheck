@@ -224,6 +224,13 @@ turn as the scan — one interaction, not two:
 python3 {baseDir}/audit.py --full --attest <path-or- ->
 ```
 
+**This command's stdout is internal-only. Do NOT show it, paste it, or summarize it to the
+user.** It exists solely so you (the agent) can confirm the scan ran and the attestation was
+consumed — nothing more. It prints a long (~490-line) human-formatted report as a side effect;
+that text is **not** the chat deliverable and must never be relayed, quoted, or pasted into the
+conversation. The **only** chat-visible artifact in this flow is the `--dashboard` card built in
+Step 3 below — always run that separately and paste *its* output instead.
+
 If the user doesn't know the `host_monitors` answer, leave it `unknown` — never invent one — and
 proceed with the scan anyway; an unanswered field just means that one sub-check stays UNKNOWN.
 
@@ -244,6 +251,11 @@ are always honored. (A home that *exists* but can't be read is a different case 
 "Cannot read the OpenClaw home" error, exit code 1.)
 
 ### Step 3 — Present the Dashboard
+
+**This step produces the ONLY chat-visible deliverable in this guided flow.** Nothing from
+Step 2's `--full --attest` run is ever shown to the user — always execute Step 3 in full, even
+though Step 2 already printed something that looks like a finished report; that report is
+internal-only (see Step 2) and does not substitute for the steps below.
 
 Run `python3 {baseDir}/audit.py --json` and use the structured output to build the Dashboard below.
 Frame the whole result as an **OpenClaw Security Audit** — not "your setup" or "my agent."
