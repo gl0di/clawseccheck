@@ -3,6 +3,39 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.23.0] — 2026-07-07
+
+A precision follow-up plus a new coverage check: B13 no longer FAILs on Dave's real
+`~/.openclaw` via a second, previously-untouched code path, a text-scan truncation cap
+that was hiding legitimate skill content is raised, and a new check closes the last
+E-030 gap — a skill installed despite the registry's own verification rejecting it.
+
+### Added
+- B135 — a skill installed despite ClawHub's own registry verification rejecting it
+  (`.clawhub/lock.json` `verification.ok=false` / `decision="fail"`), yet present and
+  running. WARN-only advisory — never triggered by an unsigned signature or a
+  suspicious static-scan sub-signal alone, since a live fleet install showed those
+  flagged while the registry's own aggregate decision was still `"pass"`. Closes the
+  last E-030 real-config coverage gap.
+
+### Fixed
+- B13 — the same-skill "credential path and exfil sink both present" co-occurrence
+  heuristic and the cron/startup-persistence bucket both still FAILed on Dave's real
+  config after R1, via code paths R1 never touched. `_CRED_RE` matches now run through
+  the sentence-boundary-aware negation check (not just a plain window), and
+  `systemctl enable`/`launchctl load` naming a well-known third-party daemon (tor,
+  nginx, docker, postgresql, ...) down-ranks to WARN instead of FAIL — ordinary service
+  management, not the agent scheduling its own persistence.
+- Per-skill/per-file text-scan caps raised 60KB → 1MB (`_MAX_BYTES_PER_SKILL`,
+  `_MAX_FILE_BYTES`, `_MAX_PY_BYTES_PER_SKILL` kept in lock-step) — the old 60KB cap was
+  truncating legitimate skills and reading as UNKNOWN purely from asymmetry with the
+  200KB Python-source cap. `_CRED_RE`'s bare `Cookies` alternative now requires a
+  co-located browser name, so a skill's own "no cookies stored" privacy prose no longer
+  reads as evidence of credential handling.
+
+### Changed
+- `docs/CHECKS.md` and `docs/THREAT_COVERAGE.md` regenerated for B135.
+
 ## [3.22.0] — 2026-07-07
 
 A recall pass: real-config false-negative hunt findings (E-030) plus a ClawBench
