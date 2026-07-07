@@ -1266,6 +1266,217 @@ def check_session_approval_policy(ctx: Context) -> Finding:
     )
 
 
+# ---------- B136: Codex CLI project trust_level="trusted" (codex-home/config.toml) ----------
+# Real shape (docs/research/openclaw-schema-recon.md §14.6, live install):
+#   [projects."<absolute-workspace-path>"]
+#   trust_level = "trusted"
+# trust_level="trusted" disables Codex's own approval/sandbox gating for everything run
+# under that project path. Same on-disk neighborhood as B79's codex-home/sessions read
+# (agents/<id>/agent/codex-home/), different sub-path (config.toml, not sessions/).
+#
+# No TOML library is used anywhere else in this codebase (stdlib-only, no third-party
+# TOML dep) and we only need to detect ONE specific shape, not parse general TOML — a
+# narrow line-scan is sufficient and deliberately conservative (no false PASS on a
+# section we can't confidently rule out).
+_TOML_PROJECT_SECTION_RE = re.compile(r'^\[projects\.(?P<path>"(?:[^"\\]|\\.)*")\]\s*$')
+_TOML_TRUST_LEVEL_TRUSTED_RE = re.compile(r'^trust_level\s*=\s*"trusted"\s*$')
+
+
+def _codex_trusted_projects(text: str) -> list[str]:
+    """Scan codex-home config.toml text for [projects."..."] sections with trust_level="trusted".
+
+    Returns the list of project paths (quotes stripped) found trusted. A narrow,
+    line-oriented scan — not a general TOML parser — since we only need to detect this
+    one specific key/section shape.
+    """
+    trusted: list[str] = []
+    current_project: str | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Any other top-level section (e.g. "[projects]" alone, or an unrelated table)
+        # ends the current [projects."..."] context.
+        m = _TOML_PROJECT_SECTION_RE.match(line)
+        if m:
+            current_project = m.group("path").strip('"')
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current_project = None
+            continue
+        if current_project is not None and _TOML_TRUST_LEVEL_TRUSTED_RE.match(line):
+            trusted.append(current_project)
+            current_project = None  # one trust_level line per section is all we track
+    return trusted
+
+
+def check_codex_project_trust(ctx: Context) -> Finding:
+    """B136 — Codex CLI project trust_level="trusted" (codex-home/config.toml).
+
+    PASS    — codex-home/config.toml exists but no [projects."..."] section sets
+              trust_level="trusted".
+    WARN    — at least one project path has trust_level="trusted", which disables
+              Codex's own approval/sandbox gating for everything run under that path.
+    UNKNOWN — no agents/<id>/agent/codex-home/config.toml found anywhere (Codex CLI
+              is not in use).
+    """
+    agents_root = ctx.home / "agents"
+    agent_dirs: list[Path] = []
+    if agents_root.is_dir():
+        agent_dirs = sorted(p for p in agents_root.iterdir() if p.is_dir() and not p.is_symlink())
+
+    any_config = False
+    trusted_ev: list[str] = []
+
+    for agent_dir in agent_dirs:
+        config_path = agent_dir / "agent" / "codex-home" / "config.toml"
+        if not config_path.is_file():
+            continue
+        any_config = True
+        try:
+            text = config_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for project_path in _codex_trusted_projects(text):
+            trusted_ev.append(f"agent {agent_dir.name}: project {project_path!r}")
+
+    if not any_config:
+        return _finding(
+            "B136",
+            UNKNOWN,
+            "no codex-home/config.toml found — Codex CLI does not appear to be in use.",
+            "No action needed unless Codex CLI is adopted later.",
+        )
+
+    if trusted_ev:
+        detail = "; ".join(trusted_ev[:6]) + (
+            f" (+{len(trusted_ev) - 6} more)" if len(trusted_ev) > 6 else ""
+        )
+        return _finding(
+            "B136",
+            WARN,
+            f"Codex CLI project trust is set to \"trusted\" for: {detail} — this disables "
+            "Codex's own approval/sandbox gating for everything run under that project path.",
+            "Only mark a project trusted if you fully trust everything that can run there; "
+            'prefer the default (non-"trusted") level so Codex keeps its own approval/'
+            "sandbox gate active.",
+            evidence=trusted_ev[:6],
+        )
+
+    return _finding(
+        "B136",
+        PASS,
+        "codex-home/config.toml found; no project has trust_level=\"trusted\".",
+        "Keep project trust unset/default so Codex's own approval/sandbox gating stays active.",
+    )
+
+
+# ---------- B138: dangling high-scope pending device pairing (devices/pending.json) ----------
+# Real shape (docs/research/openclaw-schema-recon.md §14.4): a dict keyed by request UUID;
+# each entry: requestId, deviceId, publicKey, platform, clientId, clientMode, role, roles,
+# scopes, silent, isRepair, ts. A request with isRepair=true and a high-privilege scope
+# (operator.admin / operator.write) is awaiting human approval — if approved, it grants
+# admin/write control-plane access.
+_HIGH_SCOPE_NAMES = frozenset({"operator.admin", "operator.write"})
+
+
+def check_pending_device_pairing_scope(ctx: Context) -> Finding:
+    """B138 — dangling high-scope pending device pairing (devices/pending.json).
+
+    PASS    — devices/pending.json is absent (no pending pairings at all — the common,
+              expected case), OR present with no high-scope pending entries.
+    WARN    — a pending entry requests a high-privilege scope (operator.admin /
+              operator.write), especially combined with isRepair=true — this is a
+              pending pairing awaiting human approval, not proof of compromise.
+    UNKNOWN — devices/pending.json exists but is unreadable or not valid JSON.
+    """
+    import json as _json
+
+    pending_path = ctx.home / "devices" / "pending.json"
+    if not pending_path.is_file():
+        return _finding(
+            "B138",
+            PASS,
+            "no devices/pending.json found — no pending device pairing requests.",
+            "No action needed.",
+        )
+
+    try:
+        data = _json.loads(pending_path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return _finding(
+            "B138",
+            UNKNOWN,
+            "devices/pending.json present but unreadable — cannot evaluate pending "
+            "device pairing requests.",
+            "Ensure devices/pending.json is owner-readable, or review it manually.",
+        )
+    except ValueError:
+        return _finding(
+            "B138",
+            UNKNOWN,
+            "devices/pending.json present but not valid JSON — cannot evaluate pending "
+            "device pairing requests.",
+            "Review devices/pending.json manually for pending pairing requests.",
+        )
+
+    if not isinstance(data, dict):
+        return _finding(
+            "B138",
+            UNKNOWN,
+            "devices/pending.json present but not in the expected format — cannot "
+            "evaluate pending device pairing requests.",
+            "Review devices/pending.json manually for pending pairing requests.",
+        )
+
+    high_scope_ev: list[str] = []
+    for entry in data.values():
+        if not isinstance(entry, dict):
+            continue
+        scopes = entry.get("scopes")
+        if not isinstance(scopes, (list, tuple)):
+            continue
+        if not any(s in _HIGH_SCOPE_NAMES for s in scopes if isinstance(s, str)):
+            continue
+        device_id = entry.get("deviceId", "unknown")
+        platform = entry.get("platform", "unknown")
+        is_repair = bool(entry.get("isRepair", False))
+        high_scope_ev.append(
+            f"deviceId={device_id} platform={platform} isRepair={is_repair}"
+        )
+
+    if not data:
+        return _finding(
+            "B138",
+            PASS,
+            "devices/pending.json found but empty — no pending device pairing requests.",
+            "No action needed.",
+        )
+
+    if high_scope_ev:
+        detail = "; ".join(high_scope_ev[:6]) + (
+            f" (+{len(high_scope_ev) - 6} more)" if len(high_scope_ev) > 6 else ""
+        )
+        return _finding(
+            "B138",
+            WARN,
+            f"pending device pairing request(s) awaiting your approval request a "
+            f"high-privilege scope (operator.admin/operator.write): {detail}.",
+            "Review each pending pairing request before approving it. Only approve "
+            "admin/write scope for a device you recognize and expect; reject/ignore "
+            "unrecognized requests.",
+            evidence=high_scope_ev[:6],
+        )
+
+    return _finding(
+        "B138",
+        PASS,
+        f"{len(data)} pending device pairing request(s) found; none request a "
+        "high-privilege scope (operator.admin/operator.write).",
+        "Continue reviewing pending pairing requests before approving them.",
+    )
+
+
 def check_supply_chain(ctx: Context) -> Finding:
     cfg = ctx.config
     # plugins.installs_unpinned_npm_specs / plugins.installs_missing_integrity do NOT exist

@@ -1,0 +1,16 @@
+{
+  "3f9c1e2a-4b6d-4a7f-9b1e-2a4b6d4a7f9b": {
+    "requestId": "3f9c1e2a-4b6d-4a7f-9b1e-2a4b6d4a7f9b",
+    "deviceId": "device-repair-01",
+    "publicKey": "REDACTED",
+    "platform": "ios",
+    "clientId": "clawmobile",
+    "clientMode": "repair",
+    "role": "operator",
+    "roles": ["operator"],
+    "scopes": ["operator.admin", "operator.read"],
+    "silent": false,
+    "isRepair": true,
+    "ts": 1751000000
+  }
+}
