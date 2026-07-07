@@ -77,6 +77,35 @@ _DANGEROUS_OBJ = {
     "commands",
 }
 
+# B-140: provider-shaped hardcoded credential detection. Prefixes assembled from parts
+# so this module's OWN detection-pattern data is never mistaken for a live secret by a
+# naive scanner (same style as _DECODE_FUNCS / _DANGEROUS_ATTRS above). This module only
+# DETECTS a string shape; it never contains, logs, or reproduces a real secret value.
+_PROVIDER_TOKEN_PREFIXES = (
+    "sk-ant-", "sk-proj-", "sk_live_", "sk_test_", "sk-", "sk_",
+    "AKIA", "AIza", "gh" + "p_", "gh" + "o_", "gh" + "s_", "gh" + "r_", "gh" + "u_",
+    "xox" + "b-", "xox" + "a-", "xox" + "p-", "xox" + "r-", "xox" + "s-",
+    "tvly-", "xai-", "gsk_",
+)
+_PROVIDER_TOKEN_RE = re.compile(
+    r"^(?:" + "|".join(re.escape(p) for p in _PROVIDER_TOKEN_PREFIXES) + r")[A-Za-z0-9_-]{12,}$"
+)
+_PLACEHOLDER_TOKEN_RE = re.compile(
+    r"(?i)(your[_-]?key|changeme|xxxx|example|placeholder|redacted|dummy|<[a-z_]+>|\.\.\.)"
+)
+
+
+def _is_hardcoded_provider_secret(node: ast.AST) -> bool:
+    """True if *node* is a string-literal constant shaped like a real provider API key
+    (a known prefix + a long high-entropy-looking tail) and NOT an obvious placeholder/
+    example value. Never inspects or logs the matched value itself — callers must only
+    report the env-var key name and pattern shape, never this string."""
+    if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+        return False
+    val = node.value
+    return bool(_PROVIDER_TOKEN_RE.match(val)) and not _PLACEHOLDER_TOKEN_RE.search(val)
+
+
 _MAX_FINDINGS_PER_FILE = 25
 
 # Taint (CRED_EXFIL_FLOW): a credential-FILE's contents flowing into a network sink.
@@ -887,6 +916,37 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         f = node.func
         ln = getattr(node, "lineno", 0)
 
+        # B-140(b): os.getenv("KEY", "<provider-shaped-literal>") / os.environ.get("KEY", "<...>")
+        # — a hardcoded provider-shaped secret used as the literal fallback/default arg.
+        if isinstance(f, ast.Attribute) and len(node.args) >= 2:
+            is_os_getenv = f.attr == "getenv" and _attr_base(f.value) == "os"
+            is_environ_get = f.attr == "get" and (
+                (
+                    isinstance(f.value, ast.Attribute)
+                    and f.value.attr == "environ"
+                    and _attr_base(f.value.value) == "os"
+                )
+                or (isinstance(f.value, ast.Name) and f.value.id == "environ")
+            )
+            if is_os_getenv or is_environ_get:
+                default_arg = node.args[1]
+                if _is_hardcoded_provider_secret(default_arg):
+                    key_node = node.args[0]
+                    key_repr = (
+                        key_node.value
+                        if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)
+                        else "<dynamic>"
+                    )
+                    call_name = "os.getenv" if is_os_getenv else f"{_attr_base(f.value)}.get"
+                    add(
+                        "HARDCODED_PROVIDER_SECRET",
+                        "crit",
+                        ln,
+                        f"hardcoded provider-shaped secret as the default arg of "
+                        f"{call_name}({key_repr!r}, ...)",
+                    )
+                continue
+
         # A call to a dynamic-evaluation builtin (the names in _EXEC_NAMES):
         # an obfuscated/decoded or tainted argument = crit; a plain one = info.
         if isinstance(f, ast.Name) and f.id in _EXEC_NAMES and node.args:
@@ -1171,6 +1231,45 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                         )
 
     out.extend(_conditional_sink_findings(tree))
+
+    # B-140(a): os.environ["KEY"] = "<provider-shaped-literal>" — an unconditional
+    # overwrite of an env var with a hardcoded provider-shaped token. A separate small
+    # loop (rather than folding into the ast.Call walk above) since Assign is a
+    # different node shape and the Call loop's control flow is continue-heavy.
+    for node in ast.walk(tree):
+        if len(out) >= _MAX_FINDINGS_PER_FILE:
+            break
+        if not isinstance(node, ast.Assign):
+            continue
+        if len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Subscript):
+            continue
+        tv = target.value
+        is_os_environ = (
+            isinstance(tv, ast.Attribute) and tv.attr == "environ" and _attr_base(tv.value) == "os"
+        ) or (isinstance(tv, ast.Name) and tv.id == "environ")
+        if not is_os_environ:
+            continue
+        if not _is_hardcoded_provider_secret(node.value):
+            continue
+        key_node = target.slice
+        # Python 3.9 compat: a subscript slice may be wrapped in ast.Index.
+        if key_node.__class__.__name__ == "Index":
+            key_node = key_node.value  # type: ignore[attr-defined]
+        key_repr = (
+            key_node.value
+            if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)
+            else "<dynamic>"
+        )
+        add(
+            "HARDCODED_PROVIDER_SECRET",
+            "crit",
+            getattr(node, "lineno", 0),
+            f"hardcoded provider-shaped secret written to os.environ[{key_repr!r}]",
+        )
+
     return out
 
 
