@@ -1,3 +1,4 @@
+<!-- markdownlint-disable -->
 # HEARTBEAT.md template
 
 # Add real task entries below to enable heartbeat scheduling.

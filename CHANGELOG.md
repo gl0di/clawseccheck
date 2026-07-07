@@ -3,6 +3,45 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.21.0] — 2026-07-07
+
+A precision pass driven by a live-config false-positive hunt and a 100-skill benchmark
+run — fewer false alarms across B13, the content-security ring, and several permission/
+rationale checks, plus a guided-flow documentation fix.
+
+### Fixed
+- B13 no longer FAILs a skill for a bare self-notification to its own Telegram/Discord
+  bot (`api.telegram.org/bot`, `discord.com/api/webhooks`) — these require an unrelated
+  credential or local file-read reaching the same request to still CRITICAL-FAIL. Also
+  adds discriminators for documented first-party API endpoints, fixed-argv subprocess
+  calls, `torch.load(weights_only=True)`/`.eval()`, and disclosed credential-to-disclosed-
+  sink flows (WeChat/PushPlus-style), and fixes an unrelated `.eval()`/`.exec()`
+  method-call false match in B98's dangerous-primitive scan.
+- B65 (conditional sleeper-trigger) no longer fires on the standard SKILL.md
+  invocation-phrase idiom or a documented memory-write rule.
+- B61 (agent snooping) no longer fires on a skill reading its own declared config or a
+  documented metadata-only auditor.
+- B58 (unicode obfuscation) no longer mislabels a pure-ASCII html-comment hidden-text
+  signal as "Unicode obfuscation" when there are zero non-ASCII bytes present.
+- C015 (secrets-at-rest) no longer flags vendored Codex CLI plugin doc-cache
+  placeholder text (`API_KEY=abc123`, `password:"securePassword123"`) as a real secret.
+- The installed-skill content collector no longer ingests a skill's `.git`/`.hg`/`.svn`
+  internals, which previously let B74 misread a git-config `[user]` section header as a
+  forged conversational role.
+- B20/B85/C5's group-writable WARN no longer asserts an active "a group member could
+  overwrite/tamper/replace" threat when the file's owning group has no other members;
+  world-writable and multi-member-group cases are unaffected.
+- B9's absent-`redactSensitive` rationale no longer claims the default "may expose
+  secrets" when the real default (`"tools"`) already redacts; severity corrected
+  MEDIUM → LOW.
+- B17 (autonomy/heartbeat) no longer asserts an active heartbeat schedule from a bare
+  `HEARTBEAT.md` filename match — it now reads the file's actual content and checks for
+  a real heartbeat/cron config key before reporting above UNKNOWN.
+- The guided-flow SKILL.md now explicitly states that Step 2's `--full --attest` stdout
+  is internal-only and must never be shown to the user — a live Telegram session had
+  relayed it instead of Step 3's dedicated `--dashboard` card (both renderers were
+  already correct; this was an instruction-following gap).
+
 ## [3.20.0] — 2026-07-06
 
 A detection-precision pass on the content-security ring — fewer false alarms on benign
