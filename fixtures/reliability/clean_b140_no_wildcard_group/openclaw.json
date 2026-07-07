@@ -1,0 +1,17 @@
+{
+  "meta": { "lastTouchedVersion": "2026.2.14" },
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": { "mode": "token", "token": "minimum-32-character-secure-token-here" }
+  },
+  "channels": {
+    "telegram": {
+      "groups": {
+        "engineering": { "requireMention": true }
+      }
+    }
+  },
+  "tools": { "profile": "minimal" },
+  "logging": { "redactSensitive": "tools" },
+  "models": { "main": { "provider": "ollama/llama3" } }
+}

@@ -34,6 +34,7 @@ from ._shared import (
     _has_approval_gate,
     _hint,
     _trifecta_legs,
+    _web_fetch_enabled,
 )
 
 
@@ -797,13 +798,16 @@ def check_tool_output_trust(ctx: Context) -> Finding:
     tools = _enabled_tools(cfg)
     has_outbound_tools = _hint(tools, OUTBOUND_TOOL_HINTS)
     has_web_fetch_tools = _hint(tools, INPUT_TOOL_HINTS)
+    has_web_fetch_cfg = _web_fetch_enabled(cfg)
     # Installed skills whose names clearly indicate web / remote-content retrieval.
     web_skills = [s for s in ctx.installed_skills if _hint([s], _WEB_FETCH_SKILL_HINTS)]
 
-    if has_outbound_tools or has_web_fetch_tools or web_skills:
+    if has_outbound_tools or has_web_fetch_tools or has_web_fetch_cfg or web_skills:
         ev = []
         if has_outbound_tools or has_web_fetch_tools:
             ev.append(f"tools: {', '.join(tools[:6])}")
+        if has_web_fetch_cfg:
+            ev.append("tools.web.fetch.enabled=true")
         if web_skills:
             ev.append(f"web/fetch skills: {', '.join(web_skills[:4])}")
         return _finding(
@@ -883,4 +887,67 @@ def check_untrusted_context(ctx: Context) -> Finding:
         "All configured channels restrict context to allowlisted senders "
         "(contextVisibility='allowlist' or 'allowlist_quote').",
         "Keep contextVisibility set to 'allowlist' or 'allowlist_quote' on all channels.",
+    )
+
+
+def check_wildcard_group_ingress(ctx: Context) -> Finding:
+    """B140 — Wildcard group ingress with no allowFrom restriction (B-139).
+
+    Some channel providers (e.g. Telegram) support a per-group config block keyed by
+    group ID, with a "*" key matching ANY group the bot is added to. If a provider
+    configures groups["*"] and no allowFrom restricts it — neither a per-group
+    allowFrom on the "*" entry itself, nor a channel-level allowFrom sibling of
+    groups — the bot will answer in any group anyone adds it to, from anyone who
+    triggers it (e.g. via requireMention). This is an open, unrestricted group-ingress
+    surface.
+
+    PASS    — channels are configured but none has an unrestricted wildcard group.
+    WARN    — at least one channel has a wildcard ("*") group entry with no effective
+              allowFrom restricting it. Advisory only — never FAIL, since a public/
+              community bot may intentionally accept any group.
+    UNKNOWN — no channels configured; cannot assess.
+    """
+    providers = {
+        k: v for k, v in _channels(ctx.config).items() if k != "defaults" and isinstance(v, dict)
+    }
+    if not providers:
+        return _finding(
+            "B140",
+            UNKNOWN,
+            "No channels configured — cannot assess wildcard group-ingress exposure.",
+            "If you enable a channel with group support, set allowFrom (channel-level "
+            "or per-group) before allowing a wildcard ('*') group entry.",
+        )
+
+    affected: list[str] = []
+    for provider, provider_cfg in providers.items():
+        groups = provider_cfg.get("groups")
+        if not isinstance(groups, dict) or "*" not in groups:
+            continue
+        wildcard_group = groups.get("*")
+        group_allow_from = (
+            wildcard_group.get("allowFrom") if isinstance(wildcard_group, dict) else None
+        )
+        channel_allow_from = provider_cfg.get("allowFrom")
+        if not group_allow_from and not channel_allow_from:
+            affected.append(provider)
+
+    if affected:
+        return _finding(
+            "B140",
+            WARN,
+            "Wildcard ('*') group entry with no allowFrom restriction — the bot will "
+            "respond in ANY group it is added to, from any sender who triggers it. "
+            f"Affected channel(s): {', '.join(affected)}.",
+            "Set allowFrom (channel-level, or on the '*' group entry itself) to "
+            "restrict who can trigger the bot in wildcard-matched groups, or replace "
+            "the wildcard with an explicit allowlist of group IDs.",
+            evidence=affected,
+        )
+
+    return _finding(
+        "B140",
+        PASS,
+        "No configured channel has an unrestricted wildcard ('*') group entry.",
+        "Keep any wildcard group entry paired with an allowFrom restriction.",
     )
