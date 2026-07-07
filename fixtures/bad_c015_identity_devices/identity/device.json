@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "deviceId": "fixture-device-0001",
+  "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nPLACEHOLDER_PUBLIC_KEY_MATERIAL\n-----END PUBLIC KEY-----",
+  "privateKeyPem": "__RUNTIME_SECRET__",
+  "createdAtMs": 1700000000000
+}

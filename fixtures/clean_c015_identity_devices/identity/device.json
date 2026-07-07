@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "deviceId": "fixture-device-clean-0001",
+  "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nPLACEHOLDER_PUBLIC_KEY_MATERIAL\n-----END PUBLIC KEY-----",
+  "createdAtMs": 1700000000000
+}

@@ -87,6 +87,19 @@ _C015_EXTRA_SECRET_PATTERNS = [
         r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
         re.DOTALL,
     ),
+    # B-133: pretty-printed JSON quotes the key ("token": "value"), so the shared
+    # SECRET_PATTERNS keyword pattern (which expects key[:=]value with no closing
+    # quote in between) never matches identity/device-auth.json or devices/paired.json
+    # style credential objects. This mirrors that same pattern for the quoted-JSON-key
+    # shape, scoped to key names that only carry live credential/grant material
+    # (password/secret/api[_-]key/*token/privateKey*) — not a general JSON-value scan.
+    # `\w*token` (not just `token`) also covers accessToken/refreshToken-style keys
+    # confirmed under identity/device-auth.json's and devices/paired.json's "tokens"
+    # object.
+    re.compile(
+        r'"(?:password|secret|api[_-]?key|\w*token|private[_-]?key\w*)"\s*:\s*"[^"\s]{8,}"',
+        re.I,
+    ),
 ]
 
 
@@ -231,6 +244,8 @@ def _c015_candidate_files(ctx: Context) -> list[Path]:
         if (
             path.suffix.lower() in _C015_TEXT_EXTS
             or name in {"openclaw.json", "openclaw.jsonc"}
+            or name.startswith("openclaw.json.")
+            or name.startswith("openclaw.jsonc.")
             or name.startswith(".env")
             or name in BOOTSTRAP_FILES
         ):

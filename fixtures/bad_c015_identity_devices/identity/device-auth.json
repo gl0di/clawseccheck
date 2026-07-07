@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "deviceId": "fixture-device-0001",
+  "tokens": {
+    "token": "__RUNTIME_SECRET__"
+  }
+}

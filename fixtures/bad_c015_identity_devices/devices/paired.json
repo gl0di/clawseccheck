@@ -1,0 +1,20 @@
+{
+  "fixture-hash-0001": {
+    "deviceId": "fixture-device-0002",
+    "publicKey": "PLACEHOLDER_PUBLIC_KEY_MATERIAL",
+    "platform": "linux",
+    "clientId": "fixture-client-0001",
+    "clientMode": "cli",
+    "role": "operator",
+    "roles": ["operator"],
+    "scopes": ["operator.admin", "operator.write"],
+    "approvedScopes": ["operator.admin"],
+    "tokens": {
+      "accessToken": "__RUNTIME_SECRET__"
+    },
+    "createdAtMs": 1700000000000,
+    "approvedAtMs": 1700000001000,
+    "lastSeenAtMs": 1700000002000,
+    "lastSeenReason": "heartbeat"
+  }
+}

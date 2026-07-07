@@ -1,0 +1,18 @@
+{
+  "fixture-hash-clean-0001": {
+    "deviceId": "fixture-device-clean-0002",
+    "publicKey": "PLACEHOLDER_PUBLIC_KEY_MATERIAL",
+    "platform": "linux",
+    "clientId": "fixture-client-clean-0001",
+    "clientMode": "cli",
+    "role": "operator",
+    "roles": ["operator"],
+    "scopes": ["operator.admin"],
+    "approvedScopes": ["operator.admin"],
+    "tokens": {},
+    "createdAtMs": 1700000000000,
+    "approvedAtMs": 1700000001000,
+    "lastSeenAtMs": 1700000002000,
+    "lastSeenReason": "heartbeat"
+  }
+}
