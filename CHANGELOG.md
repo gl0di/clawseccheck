@@ -10,11 +10,6 @@ precision/recall benchmark's coverage gaps (E-031) — six new checks, a feature
 fix that unblocks several UNKNOWN-only checks on live configs, and a truncation-safety fix.
 
 ### Added
-- B135 — a skill installed despite ClawHub's own registry verification rejecting it
-  (`.clawhub/lock.json` `verification.ok=false` / `decision="fail"`), yet present and
-  running. WARN-only advisory — never triggered by an unsigned signature or a
-  suspicious static-scan sub-signal alone, since a live fleet install showed those
-  flagged while the registry's own aggregate decision was still `"pass"`.
 - B136/B138 — codex-home `config.toml` `trust_level="trusted"` over a broad workspace
   path, and a dangling `devices/pending.json` `operator.admin` repair-pairing request
   awaiting approval.
