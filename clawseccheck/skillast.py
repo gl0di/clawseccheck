@@ -448,6 +448,29 @@ def _subprocess_taint_is_command_injection(
     return True  # string / name / concat first arg -> string command or program path
 
 
+def _subprocess_call_is_fixed_argv(
+    node: ast.Call, list_bindings: dict[str, ast.List | ast.Tuple] | None = None
+) -> bool:
+    """B-132: True when a subprocess.* call's command is a literal argv LIST (inline or a
+    var bound to exactly one list/tuple literal — see _single_list_bindings_local) and
+    shell is not True. This is a pure SHAPE check, independent of taint: a fixed argv list
+    passes its elements to execve as literal argv data, not through a shell, so it cannot
+    be split/re-interpreted the way a concatenated/interpolated command STRING can — much
+    lower risk regardless of whether any element happens to be attacker-influenced.
+    Mirrors _subprocess_taint_is_command_injection's list-resolution but without requiring
+    a taint set, so it can gate the untainted DANGEROUS_SINK info-sink classification too.
+    """
+    for kw in node.keywords:
+        if kw.arg == "shell":
+            v = kw.value
+            if not (isinstance(v, ast.Constant) and v.value is False):
+                return False  # shell=True, or a dynamic value we cannot prove is False
+    first = node.args[0] if node.args else None
+    if isinstance(first, ast.Name) and list_bindings:
+        first = list_bindings.get(first.id, first)  # resolve a var-bound command list
+    return isinstance(first, (ast.List, ast.Tuple))
+
+
 def _file_read_tainted_names(tree: ast.AST) -> set[str]:
     """Names whose value derives from a file-read operation (for TT4 source)."""
     tainted: set[str] = set()
@@ -829,6 +852,12 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     try:
         tree = ast.parse(source)
         tainted = _tainted_names(tree)
+        # B-132: precompute fixed-argv-list bindings once so the plain subprocess.*
+        # DANGEROUS_SINK check below can tell a safe `subprocess.run(['prog', arg])`
+        # (or `cmd = ['prog', arg]; subprocess.run(cmd)`) apart from a spliced/
+        # interpolated command string — independent of taint (this is a shape check,
+        # not a taint check; see _subprocess_call_is_fixed_argv).
+        list_bindings_by_call = _list_bindings_by_call(tree)
     except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError) as exc:
         err_type = type(exc).__name__
         return [
@@ -951,6 +980,19 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                         "arbitrary-code-execution risk if the data is untrusted",
                     )
                 continue
+            # B-132: torch.load(..., weights_only=True) is PyTorch's own safe-loading
+            # flag (analogous to yaml's SafeLoader) — it restricts unpickling to a fixed
+            # allowlist of tensor/primitive types, so it is not a code-exec-on-load risk
+            # the way a bare torch.load()/pickle.load() is. Skip flagging it entirely,
+            # mirroring the yaml.load(Loader=SafeLoader) special-case above.
+            if mod == "torch" and f.attr == "load":
+                wo_kw = next((kw for kw in node.keywords if kw.arg == "weights_only"), None)
+                if (
+                    wo_kw is not None
+                    and isinstance(wo_kw.value, ast.Constant)
+                    and wo_kw.value.value is True
+                ):
+                    continue
             if mod in _DESERIALIZE_MODS:
                 add(
                     "DESERIALIZE_CODE",
@@ -975,6 +1017,14 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 "check_call",
                 "Popen",
             )
+            # B-132: a subprocess.* call with a literal, fixed argv list (shell not True)
+            # passes its arguments straight to execve — not through a shell — so it is
+            # far lower risk than a spliced/interpolated command string and should not
+            # weigh the same as a genuine shell-exec sink. Skip flagging it entirely here
+            # (it still participates fully in the separate taint-aware TT5 pass below,
+            # which already distinguishes command- from argument-injection).
+            if is_subp and _subprocess_call_is_fixed_argv(node, list_bindings_by_call.get(node)):
+                continue
             if is_os or is_subp:
                 add("DANGEROUS_SINK", "info", ln, f"{base}.{f.attr}() shell/exec sink")
                 continue

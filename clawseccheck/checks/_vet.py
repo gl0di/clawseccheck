@@ -117,7 +117,7 @@ _SKILL_CRIT = [
         "paste / exfiltration host",
         re.compile(
             r"\b(glot\.io|pastebin\.com|hastebin|transfer\.sh|0x0\.st|webhook\.site|requestbin|"
-            r"discord\.com/api/webhooks|api\.telegram\.org/bot|rentry\.co|rentry\.org|"
+            r"rentry\.co|rentry\.org|"
             r"beeceptor\.com|interactsh\.com|oast\.(?:pro|fun|me|live|site|online)|"
             r"canarytokens\.(?:com|net|org)|file\.io|localtunnel\.me|trycloudflare\.com|"
             r"[a-z0-9-]+\.ngrok(?:-free)?\.(?:io|app)|ngrok\.io|ngrok-free\.app|"
@@ -146,6 +146,86 @@ _SKILL_CRIT = [
         ),
     ),
 ]
+
+
+# B-122: api.telegram.org/bot and discord.com/api/webhooks are DUAL-USE — a skill's own
+# self-notification bot (status pings, alerts to the user's own channel) is the single most
+# common legitimate use of these two hosts (e.g. telegram-send). Unlike the unambiguous
+# paste/exfil sinks above (pastebin, webhook.site, transfer.sh, ...) these two require a
+# taint/secret-anchor discriminator before they can be called CRITICAL. Note the bot/webhook
+# token that is PART OF THE URL PATH itself (.../bot${TELEGRAM_BOT_TOKEN}/... or
+# .../webhooks/<id>/<token>) is NOT the discriminator — that token is the channel's own
+# mandatory auth material, present in every legitimate call. The discriminator is a
+# DIFFERENT secret (AWS/OpenAI/SSH/etc., unrelated to the messaging channel itself) or a
+# local file-read result flowing into the message BODY/payload alongside the notify-host
+# URL — evidence the "self-notification" is actually shipping secret/file data out. Bare
+# mention of the host with only its own channel token — a static status string posted to
+# the skill's own configured bot/webhook — is WARN, mirroring the F-097 first-party-
+# allowlist idiom (down-rank instead of drop, so a genuinely tainted hit still surfaces).
+_SKILL_NOTIFY_HOST_RE = re.compile(
+    r"\b(discord\.com/api/webhooks|api\.telegram\.org/bot)\b",
+    re.I,
+)
+
+
+# Credential-shaped env-var names that are NOT the messaging channel's own auth token —
+# i.e. exclude BOT_TOKEN / WEBHOOK_* (the channel's own, expected, mandatory secret) so a
+# skill using its own Telegram/Discord token as designed never fires. Anything else
+# credential-shaped (AWS/OpenAI/SSH/generic API keys, passwords, private keys) reaching the
+# same request is a genuine taint signal — a different secret is being shipped through the
+# notify host. Mirrors skillast._SH_CRED_ENV_RE's shape.
+_NOTIFY_UNRELATED_CRED_VAR_RE = re.compile(
+    r"(?:\$\{?|%|process\.env\.|os\.(?:environ(?:\.get)?|getenv)\s*\(\s*['\"])"
+    r"(?!\s*[A-Za-z0-9_]*(?:BOT_?TOKEN|WEBHOOK_?(?:SECRET|TOKEN|URL|ID))\b)"
+    r"[A-Za-z0-9_]*"
+    r"(?:API_?KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|ACCESS_?KEY|AUTH_?KEY|TOKEN)"
+    r"[A-Za-z0-9_]*\}?",
+    re.I,
+)
+
+
+# Sensitive local-file read (mirrors _CRED_RE's credential-path shape plus general
+# read-a-local-file verbs) — the other half of the "taint reaches the same request" gate:
+# a skill that reads an arbitrary local file and forwards its contents to a notify host is
+# not "self-notification", it is exfiltration wearing a notification-host disguise.
+_NOTIFY_FILE_READ_RE = re.compile(
+    r"\bopen\s*\([^)\n]{0,80}['\"](?:/|~|\.\.)|"
+    r"\.read_(?:text|bytes)\s*\(|"
+    r"\bfs\.readFileSync\s*\(",
+    re.I,
+)
+
+
+def _notify_host_window(blob: str, pos: int, window: int = 200) -> str:
+    """Return the text around a notify-host match, bounded to the same line/statement —
+    wide enough to catch `... + AWS_SECRET_ACCESS_KEY + ...` string-building on the same
+    request, narrow enough that an unrelated credential mention elsewhere in the skill
+    does not fire the discriminator."""
+    start = max(0, pos - window)
+    end = min(len(blob), pos + window)
+    return blob[start:end]
+
+
+def _notify_host_hits(blob: str, fence_ranges: list[tuple[int, int]]) -> tuple[list[str], list[str]]:
+    """Split Telegram/Discord notify-host matches into (crit_hits, warn_hits).
+
+    A match escalates to CRITICAL only when a credential/secret UNRELATED to the
+    messaging channel's own token, or a local file-read, sits within the same request
+    window (B-122 taint discriminator) — evidence the "self-notification" is actually
+    shipping secret/file data to the host. A bare mention, or one that only carries the
+    channel's own bot/webhook token, is WARN.
+    """
+    crit_hits: list[str] = []
+    warn_hits: list[str] = []
+    for m in _SKILL_NOTIFY_HOST_RE.finditer(blob):
+        if _is_code_example(blob, m.start(), fence_ranges):
+            continue
+        window = _notify_host_window(blob, m.start())
+        if _NOTIFY_UNRELATED_CRED_VAR_RE.search(window) or _NOTIFY_FILE_READ_RE.search(window):
+            crit_hits.append(f"secret/file data reaches a Telegram/Discord notify host: {m.group(0)}")
+        else:
+            warn_hits.append(f"self-notification via Telegram/Discord ({m.group(0)}) — review the payload")
+    return crit_hits, warn_hits
 
 
 # F-023: local-sink credential exposure — same-line credential source + local data-bearing sink.
@@ -592,8 +672,13 @@ def _in_example_context(blob: str, pos: int, fence_ranges: list[tuple[int, int]]
     return bool(_SAFETY_EXAMPLE_RE.search(seg))
 
 
+# B-132: recognise a skill's own DECLARED API/endpoint key too, not just homepage/repo —
+# a skill's Prerequisites/frontmatter routinely names its own vendor API/SSE/base-URL
+# under one of these keys, and a fetch to that host is the skill's documented, first-party
+# endpoint, not an "external fetch to a non-reputable host".
 _FM_HOMEPAGE_RE = re.compile(
-    r"^\s*(?:homepage|repository|repo|url)\s*:\s*[\"']?(https?://[^\s\"'#]+)",
+    r"^\s*(?:homepage|repository|repo|url|api|api[-_]url|endpoint|base[-_]url)\s*:\s*"
+    r"[\"']?(https?://[^\s\"'#]+)",
     re.I | re.MULTILINE,
 )
 
@@ -602,9 +687,9 @@ _URL_HOST_RE = re.compile(r"https?://([^/:\s\"'<>)\]]+)", re.I)
 
 
 def _skill_own_host(blob: str):
-    """Host of the skill's declared homepage/repository frontmatter URL (lowercased), or
-    None when the frontmatter declares no such field. Conservative: only real homepage/
-    repo/url keys count — not an icon CDN or a demo link."""
+    """Host of the skill's declared homepage/repository/api/endpoint frontmatter URL
+    (lowercased), or None when the frontmatter declares no such field. Conservative: only
+    real homepage/repo/url/api/endpoint keys count — not an icon CDN or a demo link."""
     fm = _skill_frontmatter_block(blob)
     if fm is None:
         return None
@@ -876,6 +961,7 @@ def check_installed_skills(ctx: Context) -> Finding:
     warns_content: list[
         str
     ] = []  # F-051/F-060/F-062 soft content signals (broad trigger, local chain, IOCs)
+    warns_notify_host: list[str] = []  # B-122: bare Telegram/Discord self-notify (no taint)
     for name, blob in skills.items():
         # C-041: precompute fence ranges once per blob so every check below can
         # skip matches that are purely inside a documented code example.
@@ -888,6 +974,15 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if not _is_code_example(blob, m.start(), _fr):
                     crit.append(f"{name}: {label}")
                     break  # one finding per label per skill is enough
+
+        # B-122: Telegram/Discord are dual-use notification hosts, not unambiguous
+        # exfil sinks — CRITICAL only when a secret/file-read taint reaches the same
+        # request; a bare self-notification hit is WARN (down-rank, not drop).
+        _notify_crit, _notify_warn = _notify_host_hits(blob, _fr)
+        for h in _notify_crit:
+            crit.append(f"{name}: {h}")
+        for h in _notify_warn:
+            warns_notify_host.append(f"{name}: {h}")
 
         # Same-line cred+exfil: skip lines that fall entirely inside a fence.
         if _has_cred_exfil_outside_fence(blob, _fr):
@@ -1316,6 +1411,25 @@ def check_installed_skills(ctx: Context) -> Finding:
             "script, or a Tor/.onion or hardcoded-IP reference). Review the skill's prose "
             "and any referenced files before trusting it.",
             warns_content,
+        )
+
+    # B-122: bare Telegram/Discord self-notification (no secret/file taint reaching the
+    # request) — a capability, not malice; e.g. a skill posting a status summary to its
+    # own bot/webhook. WARN-first; ranked alongside the other soft content signals.
+    if warns_notify_host:
+        extra = f" (+{len(warns_notify_host) - 6} more)" if len(warns_notify_host) > 6 else ""
+        return _custom(
+            "B13",
+            HIGH,
+            WARN,
+            "Notification-host usage worth a review in installed skill(s): "
+            + "; ".join(warns_notify_host[:6])
+            + extra,
+            "The skill posts to a Telegram bot / Discord webhook with no secret or local "
+            "file-read value flowing into the request — this looks like the skill's own "
+            "self-notification, not exfiltration. Confirm the bot/webhook is one you "
+            "configured yourself.",
+            warns_notify_host,
         )
 
     # C-040: backgrounding/daemonize — lower confidence WARN (nohup/disown/setsid).

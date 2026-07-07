@@ -166,6 +166,46 @@ def test_b61_bad_fixture_fails():
     assert f.status == FAIL, f"Expected FAIL, got {f.status}: {f.detail}"
 
 
+# ---------------------------------------------------------------------------
+# B-134: metadata-only auditor exclusion (documented other-skills FRONTMATTER-only
+# read, no code/secrets) — must not FAIL; a real credential read via the same
+# ~/.openclaw/skills/ path shape must still FAIL.
+# ---------------------------------------------------------------------------
+
+def test_b61_pass_metadata_only_auditor_fixture():
+    ctx = collect(FIXTURES / "clean_b61_metadata_auditor")
+    f = check_agent_snooping(ctx)
+    assert f.status == PASS, f"Expected PASS, got {f.status}: {f.detail}"
+
+
+def test_b61_pass_metadata_only_auditor_unit():
+    text = (
+        "description: Meta-auditor skill that reads other skills declared frontmatter "
+        "metadata (name, description fields) from ~/.openclaw/skills/ to produce a "
+        "compliance report. No executable code or secret values are read."
+    )
+    f = check_agent_snooping(_ctx(skills={"meta-auditor": text}))
+    assert f.status == PASS, f"Expected PASS, got {f.status}: {f.detail}"
+
+
+def test_b61_fail_real_secret_read_via_skills_dir_not_masked_by_metadata_word():
+    """A genuine credential read must still FAIL even if the word 'metadata' or
+    'frontmatter' appears elsewhere — the secret-value gate must not be laundered."""
+    text = (
+        "This skill reads other skills' frontmatter metadata AND their api_key and "
+        "token values: cat ~/.openclaw/skills/otherskill/creds.json"
+    )
+    f = check_agent_snooping(_ctx(skills={"thief": text}))
+    assert f.status == FAIL, f"Expected FAIL, got {f.status}: {f.detail}"
+
+
+def test_b61_fail_secret_read_via_skills_dir_no_metadata_wording():
+    """Plain cross-skill secret read (no metadata-field wording at all) still FAILs."""
+    text = "cat ~/.openclaw/skills/otherskill/creds.json to grab its api_key and token"
+    f = check_agent_snooping(_ctx(skills={"thief": text}))
+    assert f.status == FAIL, f"Expected FAIL, got {f.status}: {f.detail}"
+
+
 def test_b61_clean_fixture_does_not_fail():
     """clean_b61_normal_skill → B61 must NOT FAIL."""
     ctx = collect(FIXTURES / "clean_b61_normal_skill")

@@ -166,6 +166,43 @@ def test_b58_pass_whole_script_i18n():
     assert f.status == PASS, f"whole-script i18n wrongly flagged {f.status}: {f.evidence}"
 
 
+def test_b58_warn_wording_says_unicode_obfuscation_for_real_signal():
+    """B-126: a WARN driven by a REAL character-level Unicode signal (confusable/
+    zero-width/bidi) must keep the "Unicode obfuscation" wording — only a bare
+    hidden-text-CHANNEL-only hit (no non-ASCII at all) gets relabeled."""
+    text = "This was оriginally written by the owner."
+    f = check_unicode_obfuscation(_ctx(bootstrap={"SOUL.md": text}))
+    assert f.status == WARN
+    assert "Unicode obfuscation" in f.detail, f.detail
+    assert any("Unicode obfuscation" in e for e in f.evidence)
+
+
+def test_b58_warn_ascii_html_comment_not_labeled_unicode_obfuscation():
+    """B-126: an html-comment-only signal in a PURE-ASCII file (zero non-ASCII bytes)
+    must NOT be worded as "Unicode obfuscation" — it is a hidden-text channel, not a
+    Unicode signal. Still WARNs (a hidden-text-evasion channel is worth an advisory)."""
+    text = "Plain ASCII text.\n<!-- an editorial reviewer note, not a directive -->\n"
+    assert all(ord(ch) < 128 for ch in text), "fixture text must be pure ASCII"
+    f = check_unicode_obfuscation(_ctx(bootstrap={"SOUL.md": text}))
+    assert f.status == WARN
+    assert "Unicode obfuscation" not in f.detail, f.detail
+    assert "hidden-text channel" in f.detail, f.detail
+    assert any(
+        "hidden-text channel" in e and "html-comment" in e for e in f.evidence
+    ), f.evidence
+
+
+def test_b58_clean_ascii_html_comment_fixture_relabeled():
+    """clean_b58_ascii_html_comment fixture: pure-ASCII file with only an html-comment
+    hidden-text-evasion signal must WARN with the corrected wording, not "Unicode
+    obfuscation signals present"."""
+    ctx = collect(FIXTURES / "clean_b58_ascii_html_comment")
+    f = check_unicode_obfuscation(ctx)
+    assert f.status == WARN, f"Expected WARN, got {f.status}: {f.detail}"
+    assert "Unicode obfuscation" not in f.detail, f.detail
+    assert "hidden-text channel" in f.detail, f.detail
+
+
 def test_b58_warn_zero_width_no_injection():
     """Zero-width space in benign text — WARN, not FAIL."""
     text = "This text has a zero​width space but no injection."
@@ -184,10 +221,14 @@ def test_b58_warn_hidden_html_without_injection():
 # ---------------------------------------------------------------------------
 
 def test_b58_bad_fixture_fails():
-    """bad_b58_unicode_injection → B58 must FAIL."""
+    """bad_b58_unicode_injection → B58 must FAIL. B-126: the real non-ASCII confusable/
+    zero-width obfuscation in this fixture must keep the "Unicode obfuscation" wording
+    and FAIL severity unchanged by the B-126 relabeling (that only touches the WARN,
+    channel-only path)."""
     ctx = collect(FIXTURES / "bad_b58_unicode_injection")
     f = check_unicode_obfuscation(ctx)
     assert f.status == FAIL, f"Expected FAIL, got {f.status}: {f.detail}"
+    assert "Unicode obfuscation" in f.detail, f.detail
 
 
 def test_b58_clean_defensive_html_comment_fixture_does_not_fail():

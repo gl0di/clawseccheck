@@ -73,12 +73,32 @@ def test_dynamic_import_exec():
 # info (escalate-only) detections — must NOT be 'crit'
 # ---------------------------------------------------------------------------
 
-def test_plain_subprocess_is_info_only():
+def test_plain_subprocess_fixed_argv_is_not_flagged():
+    # B-132: a subprocess.* call with a literal, fixed argv list (shell not True) passes
+    # its arguments straight to execve, not through a shell — far lower risk than a
+    # spliced/interpolated command string, so it is not flagged at all (not even 'info').
     src = 'import subprocess\nsubprocess.run(["ls"])\n'
+    assert "DANGEROUS_SINK" not in _rules(src)
+    assert all(f.severity != "crit" for f in analyze_python(src, "t.py"))
+
+
+def test_subprocess_spliced_string_is_info_only():
+    # A non-argv-list (string/concatenated) command is still the ordinary info-level sink.
+    src = 'import subprocess\ncmd = "ls " + user_input\nsubprocess.run(cmd, shell=True)\n'
     by = _by_rule(src)
     assert "DANGEROUS_SINK" in by
     assert by["DANGEROUS_SINK"].severity == "info"
     assert all(f.severity != "crit" for f in analyze_python(src, "t.py"))
+
+
+def test_subprocess_fixed_argv_via_local_variable_is_not_flagged():
+    # B-132: the argv list may be bound to a local before the call — still a fixed shape.
+    src = (
+        'import subprocess\n'
+        'cmd = ["python", "-m", "edge_tts", "--text", text]\n'
+        'subprocess.run(cmd)\n'
+    )
+    assert "DANGEROUS_SINK" not in _rules(src)
 
 
 def test_os_system_is_info_only():

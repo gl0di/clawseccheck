@@ -39,6 +39,8 @@ from ..textnorm import (
 from . import _shared
 from ._shared import (
     INJECTION_PATTERNS,
+    _FM_BLOCK_BARE_RE,
+    _FM_BLOCK_HEADERED_RE,
     _HOOK_EXEC_RE,
     _channels,
     _custom,
@@ -106,6 +108,13 @@ _B58_HIDDEN_TAG_RE = re.compile(
 
 
 _B58_HTML_COMMENT_RE = re.compile(r"<!--(.*?)-->", re.IGNORECASE | re.DOTALL)
+
+
+# B-126: structural hidden-text-evasion CHANNEL labels — distinct from a real Unicode
+# character-level signal (zero-width/bidi/confusable). A file can trip one of these
+# with zero non-ASCII bytes at all (e.g. a plain HTML comment), so evidence made up
+# entirely of these must not be worded as "Unicode obfuscation".
+_B58_HIDDEN_CHANNEL_LABELS = frozenset({"html-comment", "hidden-html/css", "base64"})
 
 
 _B58_JS_HEX_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
@@ -204,6 +213,52 @@ _B61_READ_VERB_RE = re.compile(
 
 # Window in characters around the config-path match to search for a verb.
 _B61_WINDOW = 120
+
+
+# B-134: vocabulary for a documented metadata-only auditor — reads DECLARED frontmatter/
+# manifest FIELDS (name, description, version, ...) of other skills, not their executable
+# code or secret values. Narrow and field-shaped on purpose: a bare mention of "metadata"
+# is not enough by itself (see _B61_SECRET_VALUE_RE gate below) to avoid laundering a real
+# credential-read behind the word "metadata".
+_B61_METADATA_FIELD_RE = re.compile(
+    r"\b(?:frontmatter|manifest)\b"
+    r"|\bmetadata\b.{0,40}\b(?:field|fields)\b"
+    r"|\b(?:declared|frontmatter)\s+(?:name|description|version)\b"
+    r"|\bno\s+(?:executable\s+)?code\s+(?:or|and)\s+no\s+secret",
+    re.I,
+)
+
+
+# B-134: secret/credential-shaped vocabulary — reused to gate the metadata-only-auditor
+# exclusion above: if a secret-shaped term co-occurs with the path+verb match, this is a
+# genuine credential read, not a metadata-only scan, and must still FAIL.
+_B61_SECRET_VALUE_RE = re.compile(
+    r"\b(?:password|secret|token|api[_-]?key|apikey|credential|bottoken)s?\b",
+    re.I,
+)
+
+
+# B-134: a narrow negator immediately before a secret-shaped term ("no secret values",
+# "not reading any tokens") means the text is DISCLAIMING secret access, not describing
+# it — mirrors _IMMEDIATE_NEGATOR_RE's discipline (lookback, no sentence break implied).
+_B61_SECRET_NEGATOR_RE = re.compile(
+    r"\b(?:no|not|never|without|zero)\s+(?:reading\s+|any\s+)?(?:executable\s+)?(?:code\s+"
+    r"(?:or|and)\s+)?$",
+    re.I,
+)
+
+
+def _b61_secret_value_present(window: str) -> bool:
+    """True when a secret/credential-shaped term appears in *window* and is NOT itself
+    the object of a narrow immediate negation (B-134) — e.g. "No ... secret values are
+    read" describes an ABSENCE of secret access, so it must not count as evidence of a
+    real credential read."""
+    for sm in _B61_SECRET_VALUE_RE.finditer(window):
+        lookback = window[max(0, sm.start() - 40) : sm.start()]
+        if _B61_SECRET_NEGATOR_RE.search(lookback):
+            continue
+        return True
+    return False
 
 
 # Regex to extract `description:` from the SKILL.md frontmatter in a blob.
@@ -497,7 +552,10 @@ _B65_ACTION_RE = re.compile(
     # removed: combined with the near-universal "when the user asks …" trigger they fired on
     # wholly benign skill descriptions (e.g. "use this when the user asks to write a git
     # commit message") — a broad false positive. Exec / exfil / leak / destroy verbs remain.
-    r"\b(?:send|forward|post|call|invoke|execute|run|open|download|upload|"
+    # B-123/B-134: "call" and "invoke" were removed too — they fire on the standard
+    # SKILL.md frontmatter invocation idiom ("Call when the user says: ...") and on
+    # ordinary "call the tool" phrasing, neither of which is a sink/destructive action.
+    r"\b(?:send|forward|post|execute|run|open|download|upload|"
     r"curl|wget|fetch|delete|exfiltrat|harvest|relay|reveal|steal|exfil)\b",
     re.IGNORECASE,
 )
@@ -522,6 +580,17 @@ _B65_QUERY_RE = re.compile(
 
 _B65_TRIGGER_RE = re.compile(
     r"\b(?:if|when|whenever|upon|as soon as|in case|once)\b",
+    re.IGNORECASE,
+)
+
+
+# B-123/B-134: the standard OpenClaw agent-memory documentation idiom — "When someone
+# says 'remember this' -> update memory/notes.md" — is a disclosed, benign memory-write
+# rule, not a covert sink. Matches only the narrow "update/write ... memory" shape so a
+# genuine exfil action chained after a trigger phrase (e.g. "send the report to ...")
+# is unaffected.
+_B65_MEMORY_WRITE_RE = re.compile(
+    r"\b(?:update|write|append|save|store)\b[^.\n]{0,40}\bmemory\b",
     re.IGNORECASE,
 )
 
@@ -692,8 +761,12 @@ _B95_UNPINNED_PKG_RE = re.compile(r"'([^']+)' unpinned")
 # rare and actionable instead of firing on almost every skill that does real work. Advisory
 # (scored=False), WARN-only (never FAIL) — a heuristic gap in declared metadata, not proof
 # of malice.
+# B-132: (?<!\.) before eval(/exec( excludes a METHOD call on an object (model.eval(),
+# self.exec(...)) — those are ML-framework / object methods (e.g. torch's nn.Module.eval()
+# switching to inference mode), not the dynamic-evaluation builtins. A bare eval(/exec( (no
+# preceding dot) still matches.
 _B98_DANGEROUS_PRIMITIVE_RE = re.compile(
-    r"\bos\.system\s*\(|\bos\.exec[lv]p?e?\s*\(|\beval\s*\(|\bexec\s*\("
+    r"\bos\.system\s*\(|\bos\.exec[lv]p?e?\s*\(|(?<!\.)\beval\s*\(|(?<!\.)\bexec\s*\("
     r"|subprocess\.(?:run|call|Popen|check_call|check_output)\s*\([^)]*shell\s*=\s*True",
     re.I,
 )
@@ -1811,11 +1884,31 @@ def _b64_reported_or_quoted(blob: str, pos: int, end: int) -> bool:
     return bool(_B64_REPORT_FRAME_RE.search(seg))
 
 
+def _in_skill_frontmatter_span(blob: str, pos: int) -> bool:
+    """True when *pos* falls inside the SKILL.md YAML frontmatter block (the standard
+    `description: "Call when the user says: ..."` invocation-phrase idiom lives here —
+    B-123). Reuses the same frontmatter-block regexes as _skill_frontmatter_block, but
+    position-aware so a mid-scan trigger match can be tested against the block's span."""
+    m = _FM_BLOCK_HEADERED_RE.search(blob)
+    if m and m.start("fm") <= pos < m.end("fm"):
+        return True
+    m = _FM_BLOCK_BARE_RE.match(blob)
+    if m and m.start("fm") <= pos < m.end("fm"):
+        return True
+    return False
+
+
 def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
     """Scan *text* for conditional sleeper-trigger snippets."""
     hits: list[str] = []
     for m in _B65_TRIGGER_RE.finditer(text):
         if _defensive_context(text, m.start(), fr):
+            continue
+        # B-123: the SKILL.md frontmatter `description:` field is the standard, disclosed
+        # skill-invocation-phrase idiom ("Call when the user says: ...") — not a covert
+        # trigger. Excluded here rather than by narrowing the trigger/query vocabulary so
+        # a genuine covert trigger placed OUTSIDE frontmatter is unaffected.
+        if _in_skill_frontmatter_span(text, m.start()):
             continue
         start = max(0, m.start() - _B65_WINDOW)
         end = min(len(text), m.end() + _B65_WINDOW)
@@ -1823,6 +1916,18 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         if not (
             (_B65_QUERY_RE.search(window) or _B65_DELAY_RE.search(window))
             and _B65_ACTION_RE.search(window)
+        ):
+            continue
+        # B-134: a documented memory-write rule ("When someone says 'remember this',
+        # update memory/notes.md ...") is the standard OpenClaw agent-memory idiom, not
+        # a covert sink. Only suppress when EVERY action match in the window is itself
+        # part of a memory-write phrase (i.e. the action gate fired solely because of the
+        # memory-write verb) — a genuine sink verb (send/curl/exfiltrate/...) chained
+        # alongside a memory-write phrase is a distinct match and still fires normally.
+        memory_spans = [mm.span() for mm in _B65_MEMORY_WRITE_RE.finditer(window)]
+        if memory_spans and all(
+            any(ms[0] <= am.start() and am.end() <= ms[1] for ms in memory_spans)
+            for am in _B65_ACTION_RE.finditer(window)
         ):
             continue
         snippet = window.strip().replace("\n", " ")
@@ -2017,8 +2122,11 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
 
     fail_ev: list[str] = []
     warn_ev: list[str] = []
+    warn_has_unicode_reason = False  # B-126: True once any WARN entry carries a real
+    # character-level signal (zero-width/bidi/confusable), not just a hidden-text channel.
 
     def _scan(source_name: str, text: str):
+        nonlocal warn_has_unicode_reason
         norm = normalize_for_scan(text)
         raw_signals = obfuscation_signals(text)
         hidden_segments = _b58_hidden_segments(text)
@@ -2136,10 +2244,27 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                     _channel.add("base64")
                 reasons = [r for r in reasons if r not in _channel]
             if reasons:
-                warn_ev.append(
-                    f"{source_name}: Unicode obfuscation signals present ("
-                    f"{'; '.join(reasons)}) but no hidden injection detected"
-                )
+                # B-126: "html-comment" / "hidden-html/css" / "base64" are STRUCTURAL
+                # hidden-text-evasion channels, not a Unicode signal — a file can trip
+                # one of these with zero non-ASCII bytes at all (a plain HTML comment).
+                # Calling that "Unicode obfuscation" mislabels the finding. Split the
+                # wording: reserve "Unicode obfuscation" for when a real character-level
+                # signal (zero-width/bidi/confusable) is present; an evidence set made up
+                # ENTIRELY of hidden-text channels gets its own, accurately-labeled detail
+                # string instead.
+                channel_reasons = [r for r in reasons if r in _B58_HIDDEN_CHANNEL_LABELS]
+                unicode_reasons = [r for r in reasons if r not in _B58_HIDDEN_CHANNEL_LABELS]
+                if unicode_reasons:
+                    warn_has_unicode_reason = True
+                    warn_ev.append(
+                        f"{source_name}: Unicode obfuscation signals present ("
+                        f"{'; '.join(reasons)}) but no hidden injection detected"
+                    )
+                else:
+                    warn_ev.append(
+                        f"{source_name}: hidden-text channel ({'; '.join(channel_reasons)}) "
+                        "found but no hidden injection detected"
+                    )
 
     for fname, text in ctx.bootstrap.items():
         _scan(fname, text)
@@ -2158,14 +2283,29 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
             fail_ev,
         )
     if warn_ev:
+        # B-126: if EVERY warning is a hidden-text CHANNEL (html-comment / hidden-html/css
+        # / base64) with no real character-level Unicode signal anywhere, the summary must
+        # not claim "Unicode obfuscation" either — a pure-ASCII file with only an HTML
+        # comment triggers this branch and must not be mislabeled.
+        if warn_has_unicode_reason:
+            return _finding(
+                "B58",
+                WARN,
+                "Unicode obfuscation signals found (no hidden injection confirmed): "
+                + "; ".join(warn_ev[:4]),
+                "Review the flagged files for intentional Unicode obfuscation. Legitimate "
+                "RTL / i18n content is expected; invisible zero-width or Cyrillic/Greek "
+                "lookalike characters in ASCII-context prose are suspicious.",
+                warn_ev,
+            )
         return _finding(
             "B58",
             WARN,
-            "Unicode obfuscation signals found (no hidden injection confirmed): "
+            "Hidden-text channel found (no hidden injection confirmed): "
             + "; ".join(warn_ev[:4]),
-            "Review the flagged files for intentional Unicode obfuscation. Legitimate "
-            "RTL / i18n content is expected; invisible zero-width or Cyrillic/Greek "
-            "lookalike characters in ASCII-context prose are suspicious.",
+            "Review the flagged files for an HTML comment or CSS/markup-hidden span used "
+            "as a hidden-text-evasion channel. Legitimate documentation comments are "
+            "common and not proof of malice on their own.",
             warn_ev,
         )
     return _finding(
@@ -3011,6 +3151,21 @@ def check_agent_snooping(ctx: Context) -> Finding:
             end = min(len(norm), m.end() + _B61_WINDOW)
             window = norm[start:end]
             if _B61_READ_VERB_RE.search(window) or _B61_EXFIL_SINK_RE.search(window):
+                # B-134: a documented metadata-only auditor — reads OTHER skills'
+                # declared frontmatter/manifest FIELDS (name, description, ...) as its
+                # stated purpose, not their executable code or secret values. Scoped
+                # narrowly: only `.openclaw/skills` (the skills tree itself, not
+                # `/memory` or a genuinely foreign `.claude`/`.codex`/`.gemini` path),
+                # only when metadata-field vocabulary is present in the window, AND
+                # only when NO secret/credential-shaped term co-occurs — a real
+                # credential read still FAILs even if the word "metadata" appears
+                # somewhere nearby.
+                if (
+                    pl.endswith("/skills")
+                    and _B61_METADATA_FIELD_RE.search(window)
+                    and not _b61_secret_value_present(window)
+                ):
+                    continue
                 fail_ev.append(
                     f"{skill_name}: reads foreign-agent config path "
                     f"'{path_match}' with a read/exfil verb"
