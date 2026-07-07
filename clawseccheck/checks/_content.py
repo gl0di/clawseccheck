@@ -780,7 +780,10 @@ _B98_DANGEROUS_PRIMITIVE_RE = re.compile(
 # bad fixture hides its payload inside a fence, so it must opt OUT via use_fence=False).
 _BROAD_NEGATION_RE = re.compile(
     r"\b(?:never|avoid|do\s?n['o]?t|don't|must\s+not|should\s+not|"
-    r"shouldn't|mustn't|cannot|can't|refuse\s+to)\s+\w+",
+    r"shouldn't|mustn't|cannot|can't|refuse\s+to)\s+\w+|"
+    r"\*\*no\b",  # B-144: "**No Cookies:**"-style bold-markdown denial heading —
+    # no trailing \w+: the denied noun IS the trigger match itself, positioned right
+    # after this marker, so it must not be required inside the backward-look window.
     re.I,
 )
 
@@ -992,10 +995,23 @@ _EVENT_HOOK_PATH_RE = re.compile(r"(?:^|/)hooks/openclaw/[^/]+\.(?:mjs|cjs|js|ts
 
 
 # Exfil transports — same set used for both same-line and cross-skill detection.
+# B-144: discord.com/api/webhooks and api.telegram.org/bot are DUAL-USE notification
+# hosts (see B-122's _SKILL_NOTIFY_HOST_RE in _vet.py) — a skill's own self-notification
+# bot is their single most common legitimate use. R1/B-122 already built a dedicated,
+# taint-aware discriminator for exactly these two hosts (CRITICAL only when an unrelated
+# secret or local file-read reaches the same request; a bare mention is WARN) and folded
+# it into check_installed_skills as its own finding. But _EXFIL_RE is a SHARED pattern
+# also consumed by the same-line rule (_has_cred_exfil_outside_fence) and the cross-skill
+# co-occurrence rule (_has_cross, below) — R1 never touched those two, so a skill that
+# merely mentions a credential-shaped path AND its own notify host ANYWHERE (zero taint/
+# proximity requirement for the cross-skill case) still FAILs via this second path. Since
+# the dedicated B-122 discriminator already covers the genuinely-tainted case, these two
+# ambiguous hosts are dropped from the shared unambiguous-exfil-sink list rather than
+# duplicating taint logic in every consumer.
 _EXFIL_RE = re.compile(
     r"\bcurl\b|\bwget\b|\bnc\b|netcat|requests?\.post|fetch\(|\bPOST\b|\bscp\b|base64|"
     r"glot\.io|webhook\.site|transfer\.sh|pastebin|"
-    r"discord\.com/api/webhooks|api\.telegram\.org/bot|rentry\.co|rentry\.org|"
+    r"rentry\.co|rentry\.org|"
     r"beeceptor\.com|interactsh\.com|oast\.|canarytokens\.|file\.io|"
     r"localtunnel\.me|trycloudflare\.com|"
     r"ngrok(?:-free)?\.(?:io|app)|pipedream\.net",

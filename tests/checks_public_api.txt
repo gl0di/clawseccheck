@@ -72,6 +72,7 @@ _local_sink_exfil_hits
 _mcp_has_remote
 _mcp_servers
 _negation_context
+_negation_governs_trigger
 _open_channels
 _parse_source_target
 _parse_version

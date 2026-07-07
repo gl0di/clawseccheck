@@ -67,6 +67,7 @@ from ._content import (
     _frontmatter_name,
     _in_fence,
     _is_code_example,
+    _negation_governs_trigger,
     _skill_declared_tools,
     _squat_hits,
     _try_b64_decode,
@@ -409,11 +410,83 @@ _PERSIST_WINDOW = 200  # chars around agent-context filename to look for a write
 _HTML_TAG_RE = re.compile(r"<[^>\n]{0,60}>")
 
 
+# B-144: a `systemctl enable <name>` / `launchctl load <name>` naming a well-known
+# THIRD-PARTY infrastructure daemon is ordinary service management, not the agent
+# arranging its own covert persistence — confirmed empirically against a real skill
+# (clawstealth, a Tor-anonymizer, whose sole cron/persistence hit was `systemctl
+# enable tor`, i.e. turning on Tor itself, core to the skill's stated purpose). The
+# threat this pattern targets is a skill scheduling ITS OWN script/agent logic to
+# survive restarts unsupervised — enabling a named, unrelated system service the user
+# already recognizes is a different, benign action. Mirrors _REPUTABLE_INSTALL_HOSTS'
+# down-rank-not-drop idiom for `curl|sh` installers.
+_REPUTABLE_DAEMON_NAMES = frozenset({
+    "tor", "nginx", "docker", "postgresql", "postgres", "mysql", "mariadb",
+    "redis", "redis-server", "sshd", "ssh", "cron", "cronie", "fail2ban", "ufw",
+    "chronyd", "ntpd", "ntp", "systemd-timesyncd", "apache2", "httpd",
+})
+
+
+_CRON_SERVICE_TARGET_RE = re.compile(
+    r"(?:systemctl\s+enable|launchctl\s+load)\s+(?:--now\s+)?(?:--\s+)?([A-Za-z0-9_.-]+)",
+    re.I,
+)
+
+
+# A skill's own disclosed, documented watchdog/self-monitoring job (a "Kill Switch cron
+# monitor", a daily self-audit) is a legitimate feature — kept as a secondary discriminator
+# for the non-systemctl cron mechanisms (crontab/@reboot/cron dirs/LaunchAgents), where a
+# named-daemon check does not apply.
+_CRON_DISCLOSURE_RE = re.compile(
+    r"\bwatch\s?dog\b|\bkill[\s-]?switch\b|\bself[\s-]?(?:monitor|check|audit)\b|"
+    r"\bhealth[\s-]?check\b|\bheartbeat\s+monitor\b|\b(?:daily|scheduled|periodic)\s+audit\b|"
+    r"\bmonitor(?:ing)?\s+(?:job|task|process)\b",
+    re.I,
+)
+
+
+_CRON_DISCLOSURE_WINDOW = 200  # chars around the cron/persistence match
+
+
+def _cron_persistence_hits(blob: str, fence_ranges: list[tuple[int, int]]) -> tuple[list[str], list[str]]:
+    """B-144: split cron/startup-persistence matches into (high_hits, warn_hits).
+
+    A `systemctl enable`/`launchctl load` naming a well-known third-party daemon
+    (_REPUTABLE_DAEMON_NAMES) down-ranks to WARN — ordinary service management, not
+    the agent scheduling its own persistence. Otherwise, a match stays HIGH unless
+    nearby text discloses it as an intentional, documented monitoring/watchdog job
+    (_CRON_DISCLOSURE_RE). Mirrors B-122's dual-use-host treatment for Telegram/
+    Discord notify hosts: down-rank, don't drop, so a genuinely covert job still
+    surfaces for review.
+    """
+    high_hits: list[str] = []
+    warn_hits: list[str] = []
+    label = "cron/startup persistence: installs a scheduled or boot-time job"
+    reputable_label = "cron/startup persistence (reputable service): enables a well-known system daemon"
+    disclosed_label = "cron/startup persistence (disclosed): a documented watchdog/monitoring job"
+    for m in _CRON_PERSIST_RE.finditer(blob):
+        if _is_code_example(blob, m.start(), fence_ranges):
+            continue
+        svc = _CRON_SERVICE_TARGET_RE.match(blob, m.start())
+        if svc and svc.group(1).lower() in _REPUTABLE_DAEMON_NAMES:
+            warn_hits.append(reputable_label)
+            break
+        start = max(0, m.start() - _CRON_DISCLOSURE_WINDOW)
+        end = min(len(blob), m.end() + _CRON_DISCLOSURE_WINDOW)
+        window = blob[start:end]
+        if _CRON_DISCLOSURE_RE.search(window):
+            warn_hits.append(disclosed_label)
+        else:
+            high_hits.append(label)
+        break  # one finding per skill is enough, same as the original loop
+    return high_hits, warn_hits
+
+
 # C-040: persistence/rogue-agent patterns
 # Each tuple: (label, regex)  — consumed in check_installed_skills HIGH loop.
+# B-144: cron/startup persistence moved to the dedicated _cron_persistence_hits
+# discriminator above (dual-use — a disclosed watchdog job down-ranks to WARN).
 _SKILL_PERSISTENCE_HIGH = [
     ("self-modification: skill writes to its own source file (__file__)", _SELF_MOD_RE),
-    ("cron/startup persistence: installs a scheduled or boot-time job", _CRON_PERSIST_RE),
 ]
 
 
@@ -807,6 +880,26 @@ def _blank_fences(blob: str, ranges: list[tuple[int, int]]) -> str:
     return "".join(chars)
 
 
+def _has_non_negated_cred_match(blob: str) -> bool:
+    """B-144: True when _CRED_RE matches somewhere in *blob* outside a negation context.
+
+    _CRED_RE's bare `Cookies` alternative (browser-Cookies-file theft) also matches a
+    completely unrelated, benign usage: a privacy tool's own "**No Cookies:** do not
+    store session cookies" documentation. Confirmed empirically against a real skill
+    (clawstealth) where this was the sole _CRED_RE hit feeding a false cross-skill
+    cred+exfil co-occurrence finding (B-144). A credential-shaped word that only
+    appears inside a denial/feature-absence framing is not evidence the skill actually
+    handles that credential.
+
+    Uses _negation_governs_trigger (sentence-boundary-aware), NOT the plain
+    _negation_context window check — an unrelated negation in an EARLIER sentence
+    (e.g. a "**No Cookies:**" disclaimer at the top of a long skill) must not
+    dampen a genuine, unrelated credential-path match much further down the blob;
+    only a negator that grammatically governs the SAME clause counts.
+    """
+    return any(not _negation_governs_trigger(blob, m.start()) for m in _CRED_RE.finditer(blob))
+
+
 def _has_cred_exfil_outside_fence(blob: str, fence_ranges: list[tuple[int, int]]) -> bool:
     """Same-line cred+exfil rule, fence-aware (C-041).
 
@@ -1053,7 +1146,9 @@ def check_installed_skills(ctx: Context) -> Finding:
         # combine with an exfil host reference to produce a cross-skill finding.
         _blob_nofence = _blank_fences(blob, _fr)
         _has_same_line = _has_cred_exfil_outside_fence(blob, _fr)
-        _has_cross = bool(_CRED_RE.search(_blob_nofence) and _EXFIL_RE.search(_blob_nofence))
+        _has_cross = bool(
+            _has_non_negated_cred_match(_blob_nofence) and _EXFIL_RE.search(_blob_nofence)
+        )
         if not _has_same_line and _has_cross:
             high.append(
                 f"{name}: credential path and exfil sink both present in skill (split-stage risk)"
@@ -1149,13 +1244,22 @@ def check_installed_skills(ctx: Context) -> Finding:
         if _overgrant:
             warns_content.append(_overgrant)
 
-        # C-040: persistence / rogue-agent patterns — HIGH (self-mod, cron/startup)
+        # C-040: persistence / rogue-agent patterns — HIGH (self-mod)
         # and WARN (backgrounding/daemonize). Fence-aware via _is_code_example.
         for p_label, p_rx in _SKILL_PERSISTENCE_HIGH:
             for pm in p_rx.finditer(blob):
                 if not _is_code_example(blob, pm.start(), _fr):
                     high.append(f"{name}: {p_label}")
                     break  # one finding per label per skill
+
+        # B-144: cron/startup persistence — dual-use, disclosure-aware (see
+        # _cron_persistence_hits docstring). A disclosed watchdog/monitoring job
+        # down-ranks to WARN instead of HIGH.
+        _cron_high, _cron_warn = _cron_persistence_hits(blob, _fr)
+        for h in _cron_high:
+            high.append(f"{name}: {h}")
+        for h in _cron_warn:
+            _persist_warn.append(f"{name}: {h}")
 
         # C-040: agent-config injection (two-step: filename + write-verb in window).
         for hit in _agent_config_write_hits(name, blob, _fr):
