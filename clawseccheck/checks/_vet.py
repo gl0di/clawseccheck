@@ -91,6 +91,7 @@ from ._content import (
     check_import_from_writable,
     check_install_directive_supply_chain,
     check_instruction_hierarchy_override,
+    check_interpreter_interpolation_injection,
     check_lifecycle_hooks_extended,
     check_manifest_absent,
     check_markdown_image_exfil,
@@ -2120,4 +2121,5 @@ SKILL_CONTENT_RING = (
     check_clickfix_setup_section,  # B100 — ClickFix paste-into-terminal + remote-fetch (F-090)
     check_config_trust_widening,  # B96 — config-driven trust widening, heuristic-only (F-100)
     check_install_directive_supply_chain,  # B103 — install[] supply-chain provenance (B-099)
+    check_interpreter_interpolation_injection,  # B153 — interpreter one-liner interpolation
 )

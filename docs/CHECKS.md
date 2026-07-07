@@ -1403,6 +1403,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B153 - Untrusted interpolation into an interpreter one-liner (python -c / node -e / bun -e)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Command Injection
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Untrusted interpolation into an interpreter one-liner (python -c / node -e / bun -e)
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

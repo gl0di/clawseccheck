@@ -938,6 +938,21 @@ _DECODED_TOOL_CMD_RE = re.compile(
 )
 
 
+# B153: an untrusted shell variable spliced UNESCAPED into a
+# double-quoted `python -c` / `node -e` / `bun -e` one-liner. Bash expands `$VAR`/`${VAR}`
+# inside a double-quoted argument BEFORE the interpreter ever sees it, so an attacker- or
+# caller-controlled value can break out of the interpreter's own string literal (quote-
+# breakout RCE) even when the -c/-e body has no obvious dangerous-import shape on its own
+# (the gap _DECODED_STRONG_RE's `python -c ... import socket/os.system` doesn't cover).
+# Single-quoted `-c '...'` is NOT flagged: single quotes suppress shell expansion, so a
+# `$VAR` there is inert (reaches the interpreter as a literal dollar sign, not a splice).
+_INTERP_ONELINER_RE = re.compile(
+    r'\b(?:python[0-9.]*\s+-c|node\s+-e|bun\s+-e)\s+"([^"\n]{0,400})"',
+    re.I,
+)
+_SHELL_VAR_INTERP_RE = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|`[^`\n]{1,80}`")
+
+
 def _decoded_is_payload(norm: str) -> bool:
     """B-116: True when decoded text is a runnable shell/download payload, not merely text
     that NAMES a networking tool. A self-sufficient signal (`_DECODED_STRONG_RE`: a shell
@@ -4297,6 +4312,58 @@ def check_install_directive_supply_chain(ctx: Context) -> Finding:
         "and named hosts.",
         "Keep install fetch URLs on HTTPS + named hosts (no plaintext HTTP, raw IPs, or "
         ".onion).",
+    )
+
+
+def check_interpreter_interpolation_injection(ctx: Context) -> Finding:
+    """B153 — untrusted variable interpolation into an interpreter
+    one-liner sink (`python -c`, `node -e`, `bun -e`).
+
+    A shell script that builds a `-c`/`-e` argument as a DOUBLE-quoted string containing
+    `$VAR`/`${VAR}` (or a backtick command substitution) lets bash expand that value
+    before the interpreter ever parses it — an untrusted CLI arg or JSON-derived shell
+    variable can break out of the interpreter's own string literal (quote-breakout RCE).
+    This is a narrower gap than B13's existing `python -c ... import socket/os.system`
+    match: the interpolation itself is the risk, independent of whether the -c/-e body
+    also names a dangerous import.
+
+    WARN-only (never FAIL on its own) — the spliced variable's actual origin/trust is not
+    provable from static text alone, and this deliberately covers the cross-file case (a
+    .sh referenced by SKILL.md) for free, since ctx.installed_skills already concatenates
+    every file in a skill into one blob.
+    """
+    skills = getattr(ctx, "installed_skills", None)
+    if not skills:
+        return _custom(
+            "B153", MEDIUM, UNKNOWN,
+            "No installed skills to inspect for interpreter-interpolation injection.",
+            "Run --vet on a skill dir, or on a host with installed skills.",
+        )
+    warns: list[str] = []
+    for name, blob in skills.items():
+        for m in _INTERP_ONELINER_RE.finditer(blob):
+            body = m.group(1)
+            if not _SHELL_VAR_INTERP_RE.search(body):
+                continue
+            sink = m.group(0).split('"', 1)[0].strip()
+            warns.append(f"{name}: untrusted variable interpolated into `{sink}` one-liner")
+            break  # one finding per skill is enough
+    if warns:
+        extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
+        return _custom(
+            "B153", MEDIUM, WARN,
+            "Untrusted interpolation into an interpreter one-liner: "
+            + "; ".join(warns[:6]) + extra,
+            "Pass untrusted values as a separate argv element (sys.argv / process.argv), "
+            "not spliced into the -c/-e string — a double-quoted shell variable inside an "
+            "interpreter one-liner lets the caller break out of the code literal.",
+            warns,
+        )
+    return _custom(
+        "B153", MEDIUM, PASS,
+        "No untrusted variable interpolation found in interpreter one-liners "
+        "(python -c / node -e / bun -e).",
+        "Keep interpreter one-liners free of double-quoted shell-variable splicing.",
     )
 
 

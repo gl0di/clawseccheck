@@ -148,6 +148,7 @@ check_install_directive_supply_chain
 check_install_policy
 check_installed_skills
 check_instruction_hierarchy_override
+check_interpreter_interpolation_injection
 check_known_vulns
 check_leak
 check_least_privilege

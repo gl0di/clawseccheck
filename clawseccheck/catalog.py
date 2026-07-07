@@ -1276,6 +1276,20 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="mcp",
     ),
+    # B153: an untrusted shell variable spliced unescaped into a
+    # double-quoted python -c / node -e / bun -e one-liner — quote-breakout injection risk
+    # independent of whether the body also names a dangerous import. WARN-only heuristic
+    # (the variable's real trust/origin isn't provable from static text alone).
+    CheckMeta(
+        "B153",
+        "Untrusted interpolation into an interpreter one-liner (python -c / node -e / bun -e)",
+        MEDIUM,
+        "advisory",
+        "Command Injection",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

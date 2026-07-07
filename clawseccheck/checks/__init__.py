@@ -490,6 +490,7 @@ from ._content import (
     check_import_from_writable,
     check_install_directive_supply_chain,
     check_instruction_hierarchy_override,
+    check_interpreter_interpolation_injection,
     check_lifecycle_hooks_extended,
     check_manifest_absent,
     check_markdown_image_exfil,
