@@ -2,7 +2,9 @@
 from pathlib import Path
 
 from clawseccheck.checks import check_tool_output_trust
-from clawseccheck.collector import Context
+from clawseccheck.collector import Context, collect
+
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
 def _ctx(cfg=None, bootstrap=None, skills=None, home="/x"):
@@ -175,3 +177,37 @@ def test_b21_warn_evidence_populated():
     result = check_tool_output_trust(ctx)
     assert result.status == "WARN"
     assert len(result.evidence) >= 1
+
+
+# ---- B-130: tools.web.fetch.enabled=true is an external-content-ingestion ----
+# ---- signal on its own, even when _enabled_tools()/skill-name hints see nothing ----
+
+def test_b21_web_fetch_enabled_config_no_rule_warns():
+    ctx = _ctx(
+        cfg={"tools": {"web": {"fetch": {"enabled": True}}}},
+        bootstrap={"workspace/SOUL.md": "You are a helpful assistant."},
+    )
+    result = check_tool_output_trust(ctx)
+    assert result.status == "WARN"
+    assert any("tools.web.fetch.enabled" in e for e in result.evidence)
+
+
+def test_b21_web_fetch_disabled_no_other_signal_is_unknown():
+    # Regression: tools.web present but fetch disabled -> not a signal -> UNKNOWN.
+    ctx = _ctx(
+        cfg={"tools": {"web": {"fetch": {"enabled": False}}}},
+        bootstrap={"workspace/SOUL.md": "You are a helpful assistant."},
+    )
+    assert check_tool_output_trust(ctx).status == "UNKNOWN"
+
+
+def test_b21_fixture_web_fetch_enabled_warns():
+    ctx = collect(FIXTURES / "bad_b130_web_fetch_enabled")
+    result = check_tool_output_trust(ctx)
+    assert result.status == "WARN", f"Expected WARN, got {result.status}: {result.detail}"
+
+
+def test_b21_fixture_minimal_no_capability_is_unknown():
+    ctx = collect(FIXTURES / "clean_b130_minimal_no_capability")
+    result = check_tool_output_trust(ctx)
+    assert result.status == "UNKNOWN", f"Expected UNKNOWN, got {result.status}: {result.detail}"

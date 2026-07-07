@@ -265,3 +265,30 @@ def test_fixture_bad_b4_peragent_sandbox_fails():
 def test_fixture_clean_b4_peragent_sandbox_passes():
     f = check_sandbox(_load_fixture("clean_b4_peragent_sandbox"))
     assert f.status == PASS, f"Expected PASS from clean fixture, got {f.status}: {f.detail}"
+
+
+# ---------------------------------------------------------------------------
+# B-130: powerful tools.profile (e.g. "coding") is exec-capable even with no
+# explicit tools.exec.* fields set and no agents.defaults.sandbox configured —
+# must no longer silently return the "no exec tools" UNKNOWN.
+# ---------------------------------------------------------------------------
+
+def test_b130_coding_profile_no_sandbox_no_exec_fields_warns():
+    f = check_sandbox(_ctx({"tools": {"profile": "coding"}}))
+    assert f.status == "WARN", f"Expected WARN, got {f.status}: {f.detail}"
+
+
+def test_b130_minimal_profile_no_sandbox_stays_unknown():
+    # Regression: a genuinely minimal profile with no sandbox config must stay UNKNOWN.
+    f = check_sandbox(_ctx({"tools": {"profile": "minimal"}}))
+    assert f.status == "UNKNOWN", f"Expected UNKNOWN, got {f.status}: {f.detail}"
+
+
+def test_fixture_bad_b130_coding_profile_warns():
+    f = check_sandbox(_load_fixture("bad_b130_coding_profile_no_exec_fields"))
+    assert f.status == "WARN", f"Expected WARN, got {f.status}: {f.detail}"
+
+
+def test_fixture_clean_b130_minimal_stays_unknown():
+    f = check_sandbox(_load_fixture("clean_b130_minimal_no_capability"))
+    assert f.status == "UNKNOWN", f"Expected UNKNOWN, got {f.status}: {f.detail}"

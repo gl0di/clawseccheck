@@ -10,7 +10,9 @@ from pathlib import Path
 
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_human_approval
-from clawseccheck.collector import Context
+from clawseccheck.collector import Context, collect
+
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
 def _ctx(cfg: dict) -> Context:
@@ -94,6 +96,32 @@ def test_b08_exec_ask_field_on_miss_passes():
 def test_b08_exec_ask_field_always_passes():
     assert check_human_approval(
         _ctx({"tools": {"exec": {"mode": "full", "ask": "always"}}})).status == PASS
+
+
+# ---- B-130: powerful tools.profile (e.g. "coding") is detected as exec even ----
+# ---- with no explicit tools.exec.* fields set (feature-detection blind spot: ----
+# ---- _enabled_tools() used to only match a literal "exec" substring in ----
+# ---- tools.profile, missing "coding"). ----
+
+def test_b08_coding_profile_no_exec_fields_warns():
+    f = check_human_approval(_ctx({"tools": {"profile": "coding"}}))
+    assert f.status == WARN
+
+
+def test_b08_minimal_profile_stays_unknown():
+    # Regression: a genuinely minimal profile must NOT be treated as exec-capable.
+    f = check_human_approval(_ctx({"tools": {"profile": "minimal"}}))
+    assert f.status == UNKNOWN
+
+
+def test_b08_bad_fixture_coding_profile_warns():
+    f = check_human_approval(collect(FIXTURES / "bad_b130_coding_profile_no_exec_fields"))
+    assert f.status == WARN, f"Expected WARN, got {f.status}: {f.detail}"
+
+
+def test_b08_clean_fixture_minimal_unknown():
+    f = check_human_approval(collect(FIXTURES / "clean_b130_minimal_no_capability"))
+    assert f.status == UNKNOWN, f"Expected UNKNOWN, got {f.status}: {f.detail}"
 
 
 # ---- never FAIL ----

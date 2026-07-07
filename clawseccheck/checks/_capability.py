@@ -30,6 +30,7 @@ from ._shared import (
     _has_approval_gate,
     _hint,
     _open_channels,
+    _profile_is_powerful,
 )
 
 
@@ -520,7 +521,10 @@ def check_exec_strict_inline_eval(ctx: Context) -> Finding:
             "tools.exec.strictInlineEval to true.",
         )
     exec_mode = dig(cfg, "tools.exec.mode")
-    if val is False and exec_mode is not None and exec_mode != "deny":
+    exec_active = (
+        exec_mode is not None and exec_mode != "deny"
+    ) or _profile_is_powerful(dig(cfg, "tools.profile"))
+    if val is False and exec_active:
         return _finding(
             "B69",
             WARN,

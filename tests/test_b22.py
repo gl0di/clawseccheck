@@ -5,10 +5,13 @@ ask/auto/full) via `_has_approval_gate`. The phantom fields tools.confirm /
 tools.requireApproval / tools.elevated.requireApproval do NOT exist and must not
 influence the result (regression for BLK-01).
 """
+import json
 from pathlib import Path
 
 from clawseccheck.checks import check_self_modification
 from clawseccheck.collector import Context
+
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
 def _ctx(cfg=None, home="/x"):
@@ -16,6 +19,10 @@ def _ctx(cfg=None, home="/x"):
     c.config = cfg or {}
     c.bootstrap = {}
     return c
+
+
+def json_load_fixture(name: str) -> dict:
+    return json.loads((FIXTURES / name / "openclaw.json").read_text())
 
 
 def _make_workspace(tmp_path, soul_mode=0o644, ws_mode=0o755, skills_mode=None):
@@ -152,6 +159,40 @@ def test_b22_elevated_tools_count(tmp_path):
     cfg = {"tools": {"elevated": {"allowFrom": ["owner@example.com"]}}}
     c = _ctx(cfg, home=str(tmp_path))
     assert check_self_modification(c).status == "FAIL"
+
+
+# ---- B-130: powerful tools.profile (e.g. "coding") counts as condition (a), ----
+# ---- even with no explicit tools.exec.*/elevated fields set ----
+def test_b22_coding_profile_no_exec_fields_counts_as_dangerous_tools(tmp_path):
+    _make_workspace(tmp_path, ws_mode=0o777)
+    cfg = {"tools": {"profile": "coding"}}
+    c = _ctx(cfg, home=str(tmp_path))
+    # No approval gate configured -> FAIL (condition (a) now true via profile).
+    assert check_self_modification(c).status == "FAIL"
+
+
+def test_b22_minimal_profile_stays_unknown(tmp_path):
+    # Regression: a genuinely minimal profile must NOT be treated as dangerous tools.
+    _make_workspace(tmp_path, ws_mode=0o777)
+    cfg = {"tools": {"profile": "minimal"}}
+    c = _ctx(cfg, home=str(tmp_path))
+    assert check_self_modification(c).status == "UNKNOWN"
+
+
+def test_b22_bad_fixture_coding_profile_fails(tmp_path):
+    _make_workspace(tmp_path, ws_mode=0o777)
+    cfg = json_load_fixture("bad_b130_coding_profile_no_exec_fields")
+    c = _ctx(cfg, home=str(tmp_path))
+    result = check_self_modification(c)
+    assert result.status == "FAIL", f"Expected FAIL, got {result.status}: {result.detail}"
+
+
+def test_b22_clean_fixture_minimal_unknown(tmp_path):
+    _make_workspace(tmp_path, ws_mode=0o777)
+    cfg = json_load_fixture("clean_b130_minimal_no_capability")
+    c = _ctx(cfg, home=str(tmp_path))
+    result = check_self_modification(c)
+    assert result.status == "UNKNOWN", f"Expected UNKNOWN, got {result.status}: {result.detail}"
 
 
 # ---- no workspace at all -> UNKNOWN (no writable targets found) ----

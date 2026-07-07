@@ -50,6 +50,7 @@ from ._shared import (
     _is_public_ip,
     _mcp_servers,
     _skill_frontmatter_block,
+    _web_fetch_enabled,
 )
 
 
@@ -4557,11 +4558,14 @@ def check_per_source_trust_contracts(ctx: Context) -> Finding:
     cfg = ctx.config
     active: list[str] = []
 
-    # browser: browser.* config key or tools include browse/web hints
+    # browser: browser.* config key, tools include browse/web hints, or an
+    # enabled tools.web.fetch (or any tools.web.<subkey>.enabled) config.
     browser_cfg = cfg.get("browser", {})
     if isinstance(browser_cfg, dict) and browser_cfg:
         active.append("browser")
     elif _hint(_enabled_tools(cfg), ("browse", "web")):
+        active.append("browser")
+    elif _web_fetch_enabled(cfg):
         active.append("browser")
 
     # email: channels has gmail/email key, or hooks.gmail exists

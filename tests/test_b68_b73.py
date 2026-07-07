@@ -128,6 +128,47 @@ def test_b69_clean_fixture_passes():
     ).status == PASS
 
 
+# ---- B-130: powerful tools.profile (e.g. "coding") counts as "exec active" ----
+# ---- alongside tools.exec.mode, so strictInlineEval=false + profile="coding" ----
+# ---- must WARN, not be treated as exec-inactive. ----
+
+def test_b69_false_with_coding_profile_no_exec_mode_warns():
+    f = check_exec_strict_inline_eval(
+        _ctx({"tools": {"profile": "coding", "exec": {"strictInlineEval": False}}})
+    )
+    assert f.status == WARN
+
+
+def test_b69_unset_with_coding_profile_no_exec_fields_is_unknown():
+    # strictInlineEval itself is still unset -> UNKNOWN regardless of profile
+    # (only the "is exec active" gate changed, not the field-presence check).
+    f = check_exec_strict_inline_eval(_ctx({"tools": {"profile": "coding"}}))
+    assert f.status == UNKNOWN
+
+
+def test_b69_minimal_profile_false_no_exec_mode_passes():
+    # Regression: minimal profile + no exec.mode -> exec not active -> PASS.
+    f = check_exec_strict_inline_eval(
+        _ctx({"tools": {"profile": "minimal", "exec": {"strictInlineEval": False}}})
+    )
+    assert f.status == PASS
+
+
+def test_b69_coding_profile_fixture_field_still_unset_is_unknown():
+    # bad_b130_coding_profile_no_exec_fields has no tools.exec.strictInlineEval at
+    # all (that fixture targets B4/B8/B22, not B69) -> the field-presence check
+    # (untouched by this fix) still returns UNKNOWN.
+    assert check_exec_strict_inline_eval(
+        collect(FIXTURES / "bad_b130_coding_profile_no_exec_fields")
+    ).status == UNKNOWN
+
+
+def test_b69_fixture_coding_profile_strict_inline_eval_false_warns():
+    assert check_exec_strict_inline_eval(
+        collect(FIXTURES / "bad_b130_coding_profile_strict_inline_eval")
+    ).status == WARN
+
+
 # ---------------------------------------------------------------------------
 # B70 — trustedProxy allowLoopback on non-loopback bind
 # ---------------------------------------------------------------------------

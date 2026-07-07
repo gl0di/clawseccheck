@@ -306,7 +306,7 @@ def _enabled_tools(cfg: dict) -> list[str]:
         exec_security is not None
         or exec_host is not None
         or exec_mode is not None
-        or "exec" in str(dig(cfg, "tools.profile", ""))
+        or _profile_is_powerful(dig(cfg, "tools.profile"))
         or (sandbox_mode is not None and sandbox_mode != "off")
     ):
         tools.append("exec")
