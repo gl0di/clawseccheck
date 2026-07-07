@@ -1068,6 +1068,11 @@ CHECKS = [
     # SKILL_CONTENT_RING is defined just above; changing it updates both the full audit
     # and the --vet path so they can never drift apart.
     *SKILL_CONTENT_RING,
+    # B105 — cross-skill Signal-A/Signal-B combined effect (B-096). Deliberately OUTSIDE
+    # SKILL_CONTENT_RING: it correlates across ctx.installed_skills, which only ever has
+    # multiple entries at full-audit scope — the --vet path builds a single-entry context
+    # where the correlation is structurally impossible, so it's registered here directly.
+    check_cross_skill_combined_effect,
     check_exec_applypatch_workspace,
     check_exec_strict_inline_eval,
     check_trustedproxy_loopback,

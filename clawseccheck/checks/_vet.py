@@ -81,7 +81,6 @@ from ._content import (
     check_config_trust_widening,
     check_cross_file_boundary_payload,
     check_cross_file_payload,
-    check_cross_skill_combined_effect,
     check_dependency_confusion,
     check_dormant_capability,
     check_dynamic_dispatch_obfuscation,
@@ -2001,7 +2000,6 @@ SKILL_CONTENT_RING = (
     check_trigger_homoglyph,  # B93 — confusable characters in trigger description (F-103)
     check_lifecycle_hooks_extended,  # B94 — extended lifecycle hooks beyond postinstall (F-099)
     check_dependency_confusion,  # B95 — unpinned dep name resembling a well-known package (F-101)
-    check_cross_skill_combined_effect,  # B105 — cross-skill Signal-A/Signal-B combined effect (B-096)
     check_event_hook_interceptor,  # B97 — per-turn event-hook interceptor in a skill (F-104)
     check_manifest_absent,  # B98 — undeclared privilege: risky effects, no tools manifest
     check_pth_persistence,  # B99 — .pth/sitecustomize auto-execution persistence (F-088)

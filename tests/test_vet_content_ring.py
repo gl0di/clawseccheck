@@ -64,6 +64,9 @@ _RING_EXEMPT = {
     "check_egress_inventory",   # outbound-capable inventory (audit posture)
     "check_monitoring",         # threat-monitoring presence (audit posture)
     "check_tool_output_trust",  # B21 — bootstrap trust-boundary posture (audit-level)
+    "check_cross_skill_combined_effect",  # B105 (B-096) — correlates ACROSS installed
+    # skills; ctx.installed_skills only ever has 2+ entries at full-audit scope, so the
+    # single-entry --vet context makes the correlation structurally impossible there.
 }
 
 
