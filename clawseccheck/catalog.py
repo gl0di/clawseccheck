@@ -171,7 +171,7 @@ CATALOG: list[CheckMeta] = [
     CheckMeta(
         "B9",
         "System-prompt / secret leak in tool output",
-        MEDIUM,
+        LOW,
         "hardening",
         "Egress / Leak",
         surface="secrets",

@@ -8,6 +8,7 @@ from pathlib import Path
 from .. import trajectory as _trajectory
 from ..catalog import (
     ATTESTED,
+    LOW,
     PASS,
     UNKNOWN,
     WARN,
@@ -21,6 +22,7 @@ from ..collector import (
 from . import _shared
 from ._shared import (
     _agent_is_powerful,
+    _custom,
     _finding,
     _plugins,
 )
@@ -394,14 +396,32 @@ def check_incident_readiness(ctx: Context) -> Finding:
         )
 
     tamper: list[str] = []
+    # B-127: group-writable (not also world-writable) AND the owning group has no
+    # other members currently -> no live "other group member" threat subject exists.
+    # Bucketed separately so it can be reported as a lower-severity hygiene note
+    # instead of the active-tamper WARN, while world-write (any local user) and
+    # "membership unknown/has other members" keep the existing WARN behavior.
+    tamper_singleton: list[str] = []
     seen_dirs: set = set()
+
+    def _record(entry: str, mode: int, st) -> None:
+        if mode & 0o002:  # world-writable -> always an active threat, never downgrade
+            tamper.append(entry)
+            return
+        other_members = _shared._group_has_other_members(st.st_gid, st.st_uid)
+        if other_members is False:
+            tamper_singleton.append(entry)
+        else:
+            tamper.append(entry)
+
     for path in files:
         try:
-            fmode = path.stat().st_mode & 0o777
+            fst = path.stat()
         except OSError:
             continue
+        fmode = fst.st_mode & 0o777
         if fmode & 0o022:
-            tamper.append(f"{path.name} (mode {oct(fmode)[-3:]})")
+            _record(f"{path.name} (mode {oct(fmode)[-3:]})", fmode, fst)
         parent = path.parent
         try:
             real = parent.resolve()
@@ -411,11 +431,12 @@ def check_incident_readiness(ctx: Context) -> Finding:
             continue
         seen_dirs.add(real)
         try:
-            dmode = parent.stat().st_mode & 0o777
+            dst = parent.stat()
         except OSError:
             continue
+        dmode = dst.st_mode & 0o777
         if dmode & 0o022:
-            tamper.append(f"{parent.name}/ (dir, mode {oct(dmode)[-3:]})")
+            _record(f"{parent.name}/ (dir, mode {oct(dmode)[-3:]})", dmode, dst)
 
     if tamper:
         joined = "; ".join(tamper[:8])
@@ -430,6 +451,19 @@ def check_incident_readiness(ctx: Context) -> Finding:
             "*.trajectory.jsonl files and `chmod 700` their sessions/ directory.",
             evidence=tamper,
             confidence="HIGH",
+        )
+
+    if tamper_singleton:
+        joined = "; ".join(tamper_singleton[:8])
+        extra = f" (+{len(tamper_singleton) - 8} more)" if len(tamper_singleton) > 8 else ""
+        return _custom(
+            "B85", LOW, WARN,
+            "The agent's trajectory record exists but is group-writable — tighten to "
+            f"0600/0700; no other group members currently: {joined}{extra}",
+            "Tighten permissions so only the owner can write the record: `chmod 600` the "
+            "*.trajectory.jsonl files and `chmod 700` their sessions/ directory (defense "
+            "in depth — group membership can change later).",
+            tamper_singleton,
         )
 
     return _finding(

@@ -661,10 +661,16 @@ def check_leak(ctx: Context) -> Finding:
             'Set logging.redactSensitive to "tools" to redact secrets from tool output and logs.',
         )
     if redact is None:
+        # B-128: the OpenClaw default when the field is unset is already "tools"
+        # (redaction ON) — an absent field is secure-by-default, not an exposure.
+        # The real (smaller) gap is that the default isn't pinned, so a future
+        # OpenClaw default change could silently alter this without the operator
+        # noticing. Wording/severity only — the trigger condition is unchanged.
         return _finding(
             "B9",
             WARN,
-            "logging.redactSensitive not set — default may expose secrets in output.",
+            'logging.redactSensitive not pinned — default "tools" already redacts '
+            "secrets; pin it explicitly for stability against a future default change.",
             'Explicitly set logging.redactSensitive to "tools".',
         )
     if redact == "tools":

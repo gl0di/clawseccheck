@@ -2,7 +2,10 @@
 from pathlib import Path
 
 from clawseccheck.checks import check_bootstrap_write_protection
-from clawseccheck.collector import Context
+from clawseccheck.collector import Context, collect
+from clawseccheck.catalog import LOW, MEDIUM
+
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
 def _ctx(home):
@@ -95,6 +98,73 @@ def test_b20_unknown_message_is_actionable(tmp_path):
     assert "--attest" in text
     # must not be the old dead-end placeholder
     assert result.fix.strip() != "—"
+
+
+# ---- B-127: group-writable, but group has NO other members -> WARN downgraded to LOW ----
+def test_b20_group_writable_singleton_group_is_low_severity(monkeypatch, tmp_path):
+    from clawseccheck import checks
+    monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: False)
+    ws = _ws(tmp_path)
+    mem = ws / "MEMORY.md"
+    mem.write_text("memories")
+    mem.chmod(0o664)           # group-write
+    result = check_bootstrap_write_protection(_ctx(tmp_path))
+    assert result.status == "WARN"
+    assert result.id == "B20"
+    assert result.severity == LOW
+    assert "no other group members" in result.detail.lower()
+    # must not assert an active exploit threat when there is no other member
+    assert "members of the" not in result.detail.lower()
+
+
+# ---- B-127: group-writable, group HAS other members -> unchanged WARN/MEDIUM behavior ----
+def test_b20_group_writable_multi_member_group_stays_medium_warn(monkeypatch, tmp_path):
+    from clawseccheck import checks
+    monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: True)
+    ws = _ws(tmp_path)
+    mem = ws / "MEMORY.md"
+    mem.write_text("memories")
+    mem.chmod(0o664)           # group-write
+    result = check_bootstrap_write_protection(_ctx(tmp_path))
+    assert result.status == "WARN"
+    assert result.id == "B20"
+    assert result.severity == MEDIUM
+    assert "can overwrite agent identity/memory" in result.detail.lower()
+
+
+# ---- B-127: group membership UNKNOWN (grp/pwd unavailable) -> unchanged WARN/MEDIUM ----
+def test_b20_group_writable_membership_unknown_stays_medium_warn(monkeypatch, tmp_path):
+    from clawseccheck import checks
+    monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: None)
+    ws = _ws(tmp_path)
+    mem = ws / "MEMORY.md"
+    mem.write_text("memories")
+    mem.chmod(0o664)           # group-write
+    result = check_bootstrap_write_protection(_ctx(tmp_path))
+    assert result.status == "WARN"
+    assert result.severity == MEDIUM
+
+
+# ---- B-127: end-to-end clean fixture via the real collector/audit path ----
+def test_b20_clean_fixture_singleton_group_write_end_to_end(monkeypatch):
+    """clean_b127_singleton_group_write: a real on-disk MEMORY.md, chmod'd group-writable
+    at runtime (perms are not portable through git) with the group-membership lookup
+    mocked to a deterministic singleton, through the real collect() -> check ->
+    LOW-severity, reworded-hygiene path (rather than an unmockable dependency on this
+    box's actual /etc/group contents)."""
+    from clawseccheck import checks
+    monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: False)
+    fixture_dir = FIXTURES / "clean_b127_singleton_group_write"
+    mem = fixture_dir / "workspace" / "MEMORY.md"
+    mem.chmod(0o664)  # group-write
+    try:
+        ctx = collect(fixture_dir)
+        result = check_bootstrap_write_protection(ctx)
+        assert result.status == "WARN"
+        assert result.severity == LOW
+        assert "no other group members" in result.detail.lower()
+    finally:
+        mem.chmod(0o644)  # restore to a fixed, non-group-writable mode for git cleanliness
 
 
 # ---- tight perms on all bootstrap files -> PASS ----

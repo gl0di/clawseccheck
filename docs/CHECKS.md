@@ -129,7 +129,7 @@ Advisory checks are recorded for coverage but are not scored.
 
 ### B9 - System-prompt / secret leak in tool output
 
-- Severity: MEDIUM
+- Severity: LOW
 - Block: hardening
 - Framework: Egress / Leak
 - Scored: yes

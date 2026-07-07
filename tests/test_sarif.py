@@ -141,10 +141,12 @@ def test_high_rule_level_is_error():
 
 
 def test_medium_rule_level_is_warning():
-    doc, _ = _parse([_finding("B9", PASS)])  # B9 is MEDIUM
+    # B9 was MEDIUM but is now LOW (B-128: absent redactSensitive is secure-by-default,
+    # not an active exposure) — B10 is a stable MEDIUM example for this assertion.
+    doc, _ = _parse([_finding("B10", PASS)])  # B10 is MEDIUM
     rules = doc["runs"][0]["tool"]["driver"]["rules"]
-    b9 = next(r for r in rules if r["id"] == "B9")
-    assert b9["defaultConfiguration"]["level"] == "warning"
+    b10 = next(r for r in rules if r["id"] == "B10")
+    assert b10["defaultConfiguration"]["level"] == "warning"
 
 
 def test_low_rule_level_is_note():

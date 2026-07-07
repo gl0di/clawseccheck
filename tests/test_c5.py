@@ -156,6 +156,9 @@ def test_c5_group_only_dir_says_group_not_world(monkeypatch, tmp_path):
     bin_dir.chmod(0o775)   # group-writable ONLY (o=r-x, no world write)
     try:
         monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
+        # Other group members exist -> keep asserting the original active-threat
+        # wording (unaffected by the B-127 singleton-group downgrade).
+        monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: True)
         monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
         monkeypatch.setenv("PATH", str(bin_dir))
 
@@ -166,6 +169,60 @@ def test_c5_group_only_dir_says_group_not_world(monkeypatch, tmp_path):
         # the overstatement the field round flagged: never claim world-write on a 775 dir
         assert "world-writable" not in joined
         assert "group/world-writable" not in joined
+    finally:
+        bin_dir.chmod(0o755)
+
+
+# ---- B-127: group-writable dir, group has NO other members -> reworded hygiene note ----
+def test_c5_group_only_dir_singleton_group_rewords_no_active_threat(monkeypatch, tmp_path):
+    import shutil
+    from clawseccheck import checks
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_exe = bin_dir / "openclaw"
+    fake_exe.write_text("#!/bin/sh")
+    fake_exe.chmod(0o755)
+    bin_dir.chmod(0o775)   # group-writable ONLY
+    try:
+        monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
+        monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: False)
+        monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
+        monkeypatch.setenv("PATH", str(bin_dir))
+
+        result = check_path_safety(_ctx())
+        assert result.status == "WARN"
+        joined = " ".join(result.evidence)
+        assert "no other group members" in joined.lower()
+        # must not assert the active "a group member could replace" exploit claim
+        assert "a group member could replace" not in joined.lower()
+    finally:
+        bin_dir.chmod(0o755)
+
+
+# ---- B-127: world-writable dir stays the active-threat wording even if group is a
+#      singleton (world bit alone is exploitable by any local user) ----
+def test_c5_world_writable_dir_not_reworded_even_if_group_singleton(monkeypatch, tmp_path):
+    import shutil
+    from clawseccheck import checks
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_exe = bin_dir / "openclaw"
+    fake_exe.write_text("#!/bin/sh")
+    fake_exe.chmod(0o755)
+    bin_dir.chmod(0o757)   # world-writable
+    try:
+        monkeypatch.setattr(checks._shared, "_is_posix", lambda: True)
+        monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: False)
+        monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
+        monkeypatch.setenv("PATH", str(bin_dir))
+
+        result = check_path_safety(_ctx())
+        assert result.status == "WARN"
+        joined = " ".join(result.evidence)
+        assert "world-writable" in joined
+        assert "no other group members" not in joined.lower()
     finally:
         bin_dir.chmod(0o755)
 

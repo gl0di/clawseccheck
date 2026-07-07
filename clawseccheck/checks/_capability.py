@@ -762,29 +762,31 @@ def check_path_safety(ctx: Context) -> Finding:
     writable: list[str] = []
     checked: set = set()
 
-    def _writable_kind(d: Path) -> str | None:
+    def _writable_kind(d: Path) -> "tuple[str, object] | None":
         """The precise non-owner write exposure of *d*, or None if tight/sticky-exempt.
-        Returns 'group-writable', 'world-writable', or 'group- and world-writable' so the
-        evidence reflects the bits actually set — a 0o775 dir is group-writable only and
-        must never be reported as 'world-writable'. A sticky dir (e.g. /tmp, mode 1777) is
-        exempt regardless of group/world bits: the sticky bit blocks cross-owner
-        rename/delete, so it is not a replace vector (and the ancestor walk passes /tmp)."""
+        Returns (kind, stat_result) where kind is 'group-writable', 'world-writable', or
+        'group- and world-writable' so the evidence reflects the bits actually set — a
+        0o775 dir is group-writable only and must never be reported as 'world-writable'.
+        A sticky dir (e.g. /tmp, mode 1777) is exempt regardless of group/world bits: the
+        sticky bit blocks cross-owner rename/delete, so it is not a replace vector (and
+        the ancestor walk passes /tmp)."""
         try:
-            m = d.stat().st_mode
+            st = d.stat()
         except OSError:
             return None
+        m = st.st_mode
         if m & 0o1000:  # sticky -> cross-owner replace blocked
             return None
         g, w = bool(m & 0o020), bool(m & 0o002)
         if g and w:
-            return "group- and world-writable"
+            return "group- and world-writable", st
         if w:
-            return "world-writable"
+            return "world-writable", st
         if g:
-            return "group-writable"
+            return "group-writable", st
         return None
 
-    def _flag(d: Path, prefix: str, suffix: str = "") -> None:
+    def _flag(d: Path, prefix: str, suffix: str = "", *, replace_verb: str = "replace") -> None:
         try:
             rd = d.resolve()
         except OSError:
@@ -792,9 +794,23 @@ def check_path_safety(ctx: Context) -> Finding:
         if rd in checked:
             return
         checked.add(rd)
-        kind = _writable_kind(rd)
-        if kind:
-            writable.append(f"{prefix} is {kind}{suffix}")
+        result = _writable_kind(rd)
+        if not result:
+            return
+        kind, st = result
+        # B-127: a purely group-writable dir whose group currently has no members
+        # besides the file's owner has no live "other member" to exploit it — note
+        # the hygiene gap without asserting an active exploit. World-write (any
+        # local user) and group-write with real/unknown other members are unchanged.
+        if kind == "group-writable":
+            other_members = _shared._group_has_other_members(st.st_gid, st.st_uid)
+            if other_members is False:
+                writable.append(
+                    f"{prefix} is group-writable — tighten to 0755/0700; "
+                    "no other group members currently"
+                )
+                return
+        writable.append(f"{prefix} is {kind}{suffix}")
 
     def _walk_ancestors(start: Path, label: str, levels: int = 5) -> None:
         # Flag group/world-writable ancestor install dirs ABOVE the binary. A writable

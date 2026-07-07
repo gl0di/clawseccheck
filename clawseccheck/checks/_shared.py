@@ -36,6 +36,50 @@ def _perms_loose(ctx: Context) -> bool:
     return (ctx.config_mode & 0o077) != 0
 
 
+def _group_has_other_members(gid: int, owner_uid: int) -> "bool | None":
+    """Does *gid* currently have any member other than the uid that owns the file?
+
+    Read-only, stdlib-only (``grp``/``pwd``), never shells out, never touches the
+    network. A file's owning group can gain a member two ways: an explicit
+    ``gr_mem`` entry in ``/etc/group``, or another user whose PRIMARY group
+    (``pw_gid`` in ``/etc/passwd``) is *gid* — both are checked.
+
+    Returns:
+        True  — at least one other user is a member (explicit or primary-group).
+        False — the group has no members besides the file's owner (a "singleton"
+                group) — group-write is not actually exploitable by anyone else.
+        None  — membership could not be determined (non-POSIX, ``grp``/``pwd``
+                unavailable, or the gid/uid is unresolvable). Callers must treat
+                this as "unknown" and NOT downgrade a finding on this basis.
+    """
+    if not _is_posix():
+        return None
+    try:
+        import grp
+        import pwd
+    except ImportError:
+        return None
+    try:
+        group = grp.getgrgid(gid)
+    except (KeyError, OverflowError, ValueError):
+        return None
+    owner_name = None
+    try:
+        owner_name = pwd.getpwuid(owner_uid).pw_name
+    except (KeyError, OverflowError, ValueError):
+        pass
+    for member in group.gr_mem:
+        if member != owner_name:
+            return True
+    try:
+        for entry in pwd.getpwall():
+            if entry.pw_gid == gid and entry.pw_uid != owner_uid:
+                return True
+    except OSError:
+        return None
+    return False
+
+
 LOOPBACK = {"127.0.0.1", "localhost", "::1", "", "loopback", "local"}
 
 

@@ -353,12 +353,54 @@ def check_approval_bypass(ctx: Context) -> Finding:
 
 
 # ---------- B17: autonomy / heartbeat actions ----------
+def _heartbeat_file_has_real_content(text: str) -> bool:
+    """B-129: does a HEARTBEAT.md body contain an actual task entry?
+
+    True only when at least one line is non-blank AND not a comment. A comment
+    line either starts with ``#`` (markdown heading/comment convention used
+    elsewhere in bootstrap files) or falls inside/adjacent to an HTML
+    ``<!-- -->`` comment block. A file that is empty, whitespace-only, or
+    contains nothing but comments is treated as a disabled template, not an
+    active schedule.
+    """
+    in_html_comment = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Track (possibly multi-line) HTML comment blocks; a line that is
+        # entirely inside one, or is itself a one-line <!-- ... --> comment,
+        # never counts as real content.
+        if in_html_comment:
+            if "-->" in line:
+                in_html_comment = False
+                remainder = line.split("-->", 1)[1].strip()
+                if remainder and not remainder.startswith("#"):
+                    return True
+            continue
+        if line.startswith("<!--"):
+            if "-->" in line:
+                remainder = line.split("-->", 1)[1].strip()
+                if remainder and not remainder.startswith("#"):
+                    return True
+            else:
+                in_html_comment = True
+            continue
+        if line.startswith("#"):
+            continue
+        return True
+    return False
+
+
 def check_autonomy(ctx: Context) -> Finding:
     """Does the agent act autonomously (heartbeat) and can it take outbound actions?"""
     cfg = ctx.config
 
-    # Signal 1: a HEARTBEAT.md bootstrap file is present
-    has_heartbeat_file = any(k.endswith("HEARTBEAT.md") for k in ctx.bootstrap)
+    # Signal 1: a HEARTBEAT.md bootstrap file with actual (non-blank, non-comment)
+    # task content — B-129: a filename match alone proves nothing; a disabled,
+    # comments-only template must not be reported as an active schedule.
+    heartbeat_texts = [v for k, v in ctx.bootstrap.items() if k.endswith("HEARTBEAT.md")]
+    has_heartbeat_file = any(_heartbeat_file_has_real_content(t) for t in heartbeat_texts)
     # Signal 2: real heartbeat / cron keys in config
     # Real paths: agents.defaults.heartbeat or agents.list[].heartbeat; top-level cron
     # heartbeat (top-level) and schedule do NOT exist in OpenClaw schema — removed
@@ -374,6 +416,19 @@ def check_autonomy(ctx: Context) -> Finding:
     autonomous = has_heartbeat_file or has_heartbeat_cfg
 
     if not autonomous:
+        # Either no HEARTBEAT.md/config signal at all, OR a HEARTBEAT.md exists but
+        # is empty/comments-only with no heartbeat/cron config key — both are
+        # "nothing to reason about", not an active schedule.
+        if heartbeat_texts:
+            return _finding(
+                "B17",
+                UNKNOWN,
+                "A HEARTBEAT.md file is present but contains no task content (empty or "
+                "comments-only) and no heartbeat/cron config key was found — cannot "
+                "confirm the agent actually runs on an active schedule.",
+                "If heartbeat scheduling is intended, add real task entries to "
+                "HEARTBEAT.md or set agents.defaults.heartbeat / a per-agent heartbeat.",
+            )
         return _finding("B17", UNKNOWN, "No autonomy/heartbeat signal detected.", "—")
 
     tools = _enabled_tools(cfg)
@@ -504,12 +559,27 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
         )
 
     world_write: list[str] = []  # -> FAIL
-    group_write: list[str] = []  # -> WARN (if no FAIL)
+    group_write: list[str] = []  # -> WARN (if no FAIL); other group members exist/unknown
+    group_write_singleton: list[str] = []  # -> LOW hygiene note: no other group members
     found_any = False
 
     from ..collector import WORKSPACE_DIRS
 
     seen: set = set()  # resolved paths already statted -> never double-report
+
+    def _record_group_write(entry: str, st) -> None:
+        """File/dir is group-writable: bucket by whether the group has other members.
+
+        B-127: group-write alone does not mean an exploitable "other member" exists.
+        Only downgrade when membership is POSITIVELY known to be singleton — an
+        UNKNOWN membership result keeps the existing WARN behavior unchanged.
+        *entry* is the already-formatted evidence string (e.g. "path (mode 664)").
+        """
+        other_members = _shared._group_has_other_members(st.st_gid, st.st_uid)
+        if other_members is False:
+            group_write_singleton.append(entry)
+        else:
+            group_write.append(entry)
 
     def _classify_file(path: Path, rel: str, *, soft: bool) -> bool:
         """stat one file; record world/group write. Returns True if the file existed.
@@ -527,16 +597,17 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
             return True
         seen.add(real)
         try:
-            mode = path.stat().st_mode & 0o777
+            st = path.stat()
         except OSError:
             return True
+        mode = st.st_mode & 0o777
         if soft:
             if mode & 0o022:
-                group_write.append(f"{rel} (mode {oct(mode)[-3:]})")
+                _record_group_write(f"{rel} (mode {oct(mode)[-3:]})", st)
         elif mode & 0o002:
             world_write.append(f"{rel} (mode {oct(mode)[-3:]})")
         elif mode & 0o020:
-            group_write.append(f"{rel} (mode {oct(mode)[-3:]})")
+            _record_group_write(f"{rel} (mode {oct(mode)[-3:]})", st)
         return True
 
     # Scan the OpenClaw home ROOT ("") as well as each workspace dir. The root is
@@ -557,12 +628,13 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
         # Parent dir perms (only relevant when critical bootstrap files live here)
         if has_critical_here:
             try:
-                dir_mode = ws_dir.stat().st_mode & 0o777
+                dir_st = ws_dir.stat()
+                dir_mode = dir_st.st_mode & 0o777
                 rel = prefix.rstrip("/") or "."
                 if dir_mode & 0o002:
                     world_write.append(f"{rel}/ (dir, mode {oct(dir_mode)[-3:]})")
                 elif dir_mode & 0o020:
-                    group_write.append(f"{rel}/ (dir, mode {oct(dir_mode)[-3:]})")
+                    _record_group_write(f"{rel}/ (dir, mode {oct(dir_mode)[-3:]})", dir_st)
             except OSError:
                 pass
 
@@ -617,6 +689,22 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
             f"file's group can overwrite agent identity/memory: {joined}{extra}",
             "Run `chmod g-w` on the listed files/dirs, or tighten to `chmod 700`/`600`.",
             evidence=group_write,
+        )
+
+    if group_write_singleton:
+        # B-127: group-write bit is set, but the owning group currently has no other
+        # members — there is no "other group member" who could exploit it. Still a
+        # least-privilege hygiene deviation, so keep a low-severity note rather than
+        # asserting an active, exploitable threat.
+        joined = "; ".join(group_write_singleton[:8])
+        extra = f" (+{len(group_write_singleton) - 8} more)" if len(group_write_singleton) > 8 else ""
+        return _custom(
+            "B20", LOW, WARN,
+            f"Bootstrap or memory file(s) are group-writable — tighten to 0600/0700; "
+            f"no other group members currently: {joined}{extra}",
+            "Run `chmod g-w` on the listed files/dirs, or tighten to `chmod 700`/`600` "
+            "for defense in depth (group membership can change later).",
+            group_write_singleton,
         )
 
     return _finding(

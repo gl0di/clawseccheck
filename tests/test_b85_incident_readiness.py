@@ -69,6 +69,40 @@ def test_b85_world_writable_dir_warns(tmp_path):
     assert any("dir" in e for e in f.evidence)
 
 
+# ---- B-127: group-writable, but group has NO other members -> WARN downgraded to LOW -----
+def test_b85_group_writable_singleton_group_is_low_severity(monkeypatch, tmp_path):
+    from clawseccheck.catalog import LOW
+    monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: False)
+    _traj(tmp_path, file_mode=0o660, dir_mode=0o700)   # group-write on the file
+    f = check_incident_readiness(_ctx(tmp_path))
+    assert f.status == "WARN"
+    assert f.severity == LOW
+    assert "no other group members" in f.detail.lower()
+    assert "destroying the evidence" not in f.detail.lower()
+
+
+# ---- B-127: group-writable, group HAS other members -> unchanged MEDIUM WARN -------------
+def test_b85_group_writable_multi_member_group_stays_medium_warn(monkeypatch, tmp_path):
+    from clawseccheck.catalog import MEDIUM
+    monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: True)
+    _traj(tmp_path, file_mode=0o660, dir_mode=0o700)
+    f = check_incident_readiness(_ctx(tmp_path))
+    assert f.status == "WARN"
+    assert f.severity == MEDIUM
+    assert "destroying the evidence" in f.detail.lower()
+
+
+# ---- B-127: world-writable file always stays the active-threat WARN, even if group is
+#      also a singleton (world bit alone is an active threat regardless of group membership)
+def test_b85_world_writable_file_not_downgraded_even_if_group_singleton(monkeypatch, tmp_path):
+    from clawseccheck.catalog import MEDIUM
+    monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: False)
+    _traj(tmp_path, file_mode=0o606, dir_mode=0o700)   # world-write only on the file
+    f = check_incident_readiness(_ctx(tmp_path))
+    assert f.status == "WARN"
+    assert f.severity == MEDIUM
+
+
 # ---- UNKNOWN: nothing to reason about ----------------------------------------------------
 def test_b85_absent_is_unknown(tmp_path):
     # No trajectory sidecar anywhere -> UNKNOWN, never a false FAIL/PASS.
