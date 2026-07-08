@@ -1,0 +1,2 @@
+{"traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call", "ts": "2026-07-08T00:00:01Z", "seq": 1, "data": {"name": "web_fetch", "arguments": {}, "toolCallId": "c1", "turnId": "t1", "threadId": "th1"}}
+{"traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call", "ts": "2026-07-08T00:00:02Z", "seq": 2, "data": {"name": "send_message", "arguments": {}, "toolCallId": "c2", "turnId": "t1", "threadId": "th1"}}

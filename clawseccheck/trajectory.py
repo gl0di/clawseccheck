@@ -107,3 +107,106 @@ def read_proven_tools(
         meta["files_scanned"] += 1
 
     return verbs, meta
+
+
+# Event types read_events() understands. Every other `type` value is skipped —
+# never guessed at (§4: no fabricated facts about an ungrounded event shape).
+_EVENT_TYPES = ("tool.call", "tool.result", "prompt.submitted")
+
+
+def _event_outcome(rec_type: str, data: dict) -> str | None:
+    """Classify a tool.result's outcome from status/isError/success (§9.1 grounded).
+
+    Returns "success", "failed", or None (ambiguous/not a tool.result — never guessed).
+    Never reads output/result/contentItems — those are the sensitive payload (§8).
+    """
+    if rec_type != "tool.result":
+        return None
+    status = data.get("status")
+    is_error = data.get("isError")
+    success = data.get("success")
+    if status == "failed" or is_error is True or success is False:
+        return "failed"
+    if status == "completed" or success is True:
+        return "success"
+    return None
+
+
+def read_events(
+    home: Path,
+    *,
+    max_files: int = _MAX_FILES,
+    max_bytes_per_file: int = _MAX_BYTES_PER_FILE,
+    explicit_path: str | None = None,
+) -> tuple[list[dict], dict]:
+    """Return (events, meta) — §8-safe event metadata for the behavioral engine.
+
+    Each event is ``{type, name, ts, seq, turnId, threadId, outcome}`` for
+    ``tool.call``/``tool.result``/``prompt.submitted`` records (§9.1 grounded envelope).
+    ``name`` and ``outcome`` are ``None`` where the event type doesn't carry them
+    (e.g. ``prompt.submitted`` has no tool name; only ``tool.result`` has an outcome).
+
+    NEVER reads ``data.arguments``/``data.output``/``data.result``/``data.contentItems``
+    — the sensitive call/return payloads (§8). Only tool/event identity and sequencing
+    metadata. Same version gate and DoS bounds as ``read_proven_tools``.
+
+    ``explicit_path`` scans a single given ``.trajectory.jsonl`` file instead of
+    globbing *home* (mirrors ``trajaudit.analyze``'s CLI PATH argument).
+    """
+    events: list[dict] = []
+    meta = {"present": False, "files_scanned": 0, "unknown_version": False}
+
+    if explicit_path:
+        p = Path(explicit_path).expanduser()
+        files = [p] if p.is_file() else []
+    else:
+        files = find_trajectory_files(home, max_files=max_files)
+    if not files:
+        return events, meta
+    meta["present"] = True
+
+    for path in files:
+        try:
+            read = 0
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    read += len(line)
+                    if read > max_bytes_per_file:
+                        break
+                    # Cheap pre-filter: skip lines that can't be one of our event
+                    # types without JSON-parsing every line (most lines are other
+                    # event types we don't read, e.g. model.completed).
+                    if not any(f'"{t}"' in line for t in _EVENT_TYPES):
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get("traceSchema") != _TRACE_SCHEMA:
+                        continue
+                    if rec.get("schemaVersion") != _SCHEMA_VERSION:
+                        meta["unknown_version"] = True
+                        continue
+                    rec_type = rec.get("type")
+                    if rec_type not in _EVENT_TYPES:
+                        continue
+                    data = rec.get("data")
+                    if not isinstance(data, dict):
+                        data = {}
+                    name = data.get("name")
+                    events.append({
+                        "type": rec_type,
+                        "name": name.strip() if isinstance(name, str) and name.strip() else None,
+                        "ts": rec.get("ts"),
+                        "seq": rec.get("seq"),
+                        "turnId": data.get("turnId"),
+                        "threadId": data.get("threadId"),
+                        "outcome": _event_outcome(rec_type, data),
+                    })
+        except OSError:
+            continue
+        meta["files_scanned"] += 1
+
+    return events, meta

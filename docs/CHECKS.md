@@ -1439,6 +1439,30 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### T1 - Behavioral trifecta (observed ingress -> sensitive -> egress verb sequence)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Lethal Trifecta (behavioral)
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: LLM06 Excessive Agency
+- What it checks: Behavioral trifecta (observed ingress -> sensitive -> egress verb sequence)
+- Remediation:
+  - none
+
+### T2 - Outcome anomaly (fail→fail→success series on a sensitive verb)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Anomalous Behavior
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Outcome anomaly (fail→fail→success series on a sensitive verb)
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

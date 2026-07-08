@@ -65,6 +65,10 @@ _PALETTE: tuple[PaletteCategory, ...] = (
         PaletteEntry("Trajectory analysis", 'analyze trajectory', "--analyze-trajectory",
                      "post-hoc: did a skill's instruction get acted on at runtime? "
                      "correlates skill indicators against tool.call args"),
+        PaletteEntry("Behavioral audit", 'behavioral', "--behavioral",
+                     "post-hoc: reconstructs observed tool-call sequences and flags a "
+                     "proven-by-log ingress->sensitive->egress trifecta or fail-then-"
+                     "succeed outcome anomaly"),
     )),
     PaletteCategory("Live tests", LIVE, (
         PaletteEntry("Canary", 'canary', "--canary",

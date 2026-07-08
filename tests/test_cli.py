@@ -15,6 +15,27 @@ def test_cli_card_returns_zero(capsys):
     assert "OpenClaw Security" in capsys.readouterr().out
 
 
+def test_cli_behavioral_routes_and_warns(capsys):
+    rc = main(["--home", str(FIXTURES / "traj_behavioral_trifecta"), "--behavioral", "--ascii"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Behavioral trajectory audit" in out
+    assert "T1" in out
+
+
+def test_cli_behavioral_no_sidecar(capsys):
+    rc = main(["--home", str(FIXTURES / "traj_no_sidecar"), "--behavioral", "--ascii"])
+    assert rc == 0
+    assert "No trajectory sidecars found" in capsys.readouterr().out
+
+
+def test_cli_behavioral_explicit_path(capsys):
+    path = FIXTURES / "traj_outcome_anomaly" / "agents" / "main" / "sessions" / "s1.trajectory.jsonl"
+    rc = main(["--home", str(FIXTURES / "traj_no_sidecar"), "--behavioral", str(path), "--ascii"])
+    assert rc == 0
+    assert "T2" in capsys.readouterr().out
+
+
 def test_cli_dashboard_findings_frames_and_slices(capsys):
     """--dashboard-findings prints only the framed Section-3 block, not the whole report."""
     rc = main(["--home", str(FIXTURES / "home_vuln"), "--no-native", "--no-history",

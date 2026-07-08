@@ -1322,6 +1322,45 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # E-032 v1 — behavioral trajectory audit (--behavioral mode only, never part of the
+    # main audit()/CHECKS list or the A-F score). Reads OpenClaw's trajectory sidecar
+    # (agents/*/sessions/*.trajectory.jsonl, §9.1 grounded) and finds sequences PROVEN by
+    # the log, complementing the static config/skill-content checks (what the agent could
+    # do vs what it actually did). Metadata-only (§8): never reads
+    # arguments/output/result/contentItems. WARN-only, scored=False (Golden Rule #5) —
+    # ingress/sensitive/egress role is classified by VERB NAME (a heuristic, MEDIUM
+    # confidence), not by the untouched payload content.
+    #
+    # T1: behavioral trifecta — an ingress-verb, then a sensitive-verb, then an
+    # egress-verb, in that order, within one thread. Mirrors A1's static
+    # ingress/sensitive/egress leg model (INPUT_TOOL_HINTS/SENSITIVE_TOOL_HINTS/
+    # OUTBOUND_TOOL_HINTS, checks/_shared.py) applied to observed runtime order instead
+    # of declared config — proof-by-log of the same pattern A1 flags by capability.
+    CheckMeta(
+        "T1",
+        "Behavioral trifecta (observed ingress -> sensitive -> egress verb sequence)",
+        MEDIUM,
+        "advisory",
+        "Lethal Trifecta (behavioral)",
+        scored=False,
+        confidence="MEDIUM",
+        surface="monitoring",
+    ),
+    # T2: outcome anomaly — a fail -> fail -> success series on a sensitive verb within
+    # one thread (from tool.result status/isError/success). Conservative on purpose: only
+    # a repeated-failure-then-success shape on a sensitive-classified verb counts, never
+    # a bare isolated failure (isolated failures are the overwhelming common case and
+    # would blow the zero-false-positive bar on any real fleet).
+    CheckMeta(
+        "T2",
+        "Outcome anomaly (fail→fail→success series on a sensitive verb)",
+        MEDIUM,
+        "advisory",
+        "Anomalous Behavior",
+        scored=False,
+        confidence="MEDIUM",
+        surface="monitoring",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -1458,6 +1497,7 @@ AST_MAP = {
     "B94": ("AST02",),  # extended lifecycle hooks = supply-chain tamper on install/version/publish (cf. B42)
     "B95": ("AST02",),  # dependency confusion (unpinned + typosquat name) = supply-chain tamper (cf. B13)
     "B105": ("AST05",),  # cross-skill combined effect = excessive agency across co-installed skills
+    "T1": ("AST05",),  # behavioral trifecta = untrusted external instructions, proven by log (cf. B105)
     "B97": ("AST09",),  # per-turn event-hook file = persistent review/audit surface (cf. B77/B85)
     "B96": ("AST04",),  # config-driven trust widening (heuristic) = insecure metadata (cf. B62/B88)
     "B98": ("AST04",),  # missing capability declaration = insecure/absent least-privilege metadata (cf. B62/B88/B96)
@@ -1530,6 +1570,7 @@ OWASP_MAP = {
     # the agent config can't see; LLM09 is out of scope per docs/THREAT_COVERAGE.md).
     "B63": ("LLM06",),
     "B105": ("LLM06",),  # combined-effect disclosure suppression (cross-skill) — cf. B63
+    "T1": ("LLM06",),  # behavioral trifecta = Excessive Agency, proven by log — cf. B105
     # B65: conditional/sleeper trigger instructions — hidden conditional malware-like
     # behavior under a user-query gate (Excessive Agency, not Misinformation).
     "B65": ("LLM06",),

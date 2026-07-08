@@ -59,6 +59,7 @@ from .logsafe import get_logger
 from .safeio import secure_write_text
 from .incident import render_incident
 from .trajaudit import render_trajectory_analysis
+from .behavioral import render_behavioral_analysis
 from .sbom import render_sbom
 
 
@@ -243,6 +244,7 @@ _PRIMARY_MODES = [
     ("sbom", "--sbom", "bool"),
     ("incident", "--incident", "bool"),
     ("analyze_trajectory", "--analyze-trajectory", "opt"),
+    ("behavioral", "--behavioral", "opt"),
     ("dashboard_findings", "--dashboard-findings", "bool"),
     ("monitor", "--monitor", "bool"),
 ]
@@ -510,6 +512,16 @@ def _main(argv=None) -> int:
                         "skill's instruction was actually acted on at runtime. Read-only; reads "
                         "data.arguments only in memory to test known indicators, never echoes "
                         "raw args. Optional PATH to one .trajectory.jsonl; default scans the home")
+    p.add_argument("--behavioral", nargs="?", const="", default=None, metavar="PATH",
+                   dest="behavioral",
+                   help="behavioral trajectory audit: reconstruct observed tool-call SEQUENCES "
+                        "from OpenClaw trajectory sidecars (agents/*/sessions/*.trajectory.jsonl) "
+                        "and flag a proven-by-log behavioral trifecta (T1: ingress -> sensitive "
+                        "-> egress verb order) or an outcome anomaly (T2: repeated failure then "
+                        "success on a sensitive verb). Read-only, metadata-only — never reads "
+                        "call/return payloads, only verb identity and sequencing. WARN-only, "
+                        "never scored. Optional PATH to one .trajectory.jsonl; default scans "
+                        "the home")
     p.add_argument("--emit-manifest", action="store_true", dest="emit_manifest",
                    help="print a proposed permission manifest (YAML-shaped) derived from "
                         "static effect analysis; use with --vet/--vet-skill on a single skill")
@@ -961,6 +973,12 @@ def _main(argv=None) -> int:
     if args.analyze_trajectory is not None:
         _emit(render_trajectory_analysis(
             ctx, explicit_path=args.analyze_trajectory or None, ascii_only=ascii_only))
+        return 0
+
+    if args.behavioral is not None:
+        record_run("behavioral")
+        _emit(render_behavioral_analysis(
+            ctx, explicit_path=args.behavioral or None, ascii_only=ascii_only))
         return 0
 
     if args.monitor:
