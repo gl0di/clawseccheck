@@ -34,20 +34,30 @@ _MAX_TRAJECTORY_BYTES = 8_000_000  # mirrors trajectory.py's own per-file scan c
 def _trajectory_hash_entries(home) -> list[dict]:
     """Hash each trajectory sidecar file's raw bytes — never parses/reads call
     content. A hash lets an investigator later prove a file wasn't altered
-    without this pack itself having read anything sensitive out of it."""
+    without this pack itself having read anything sensitive out of it.
+
+    Files at or under ``_MAX_TRAJECTORY_BYTES`` get an honest full-file
+    ``sha256``. Files over the cap are NOT silently hashed as if complete —
+    the digest only covers the first ``_MAX_TRAJECTORY_BYTES`` bytes, and
+    ``truncated: True`` is always surfaced so a consumer can never mistake a
+    partial digest for a whole-file one (mirrors collector.py's
+    ``_read_with_limit`` (bytes, truncated) contract)."""
     if not isinstance(home, Path):
         return []
     entries: list[dict] = []
     for path in _trajectory.find_trajectory_files(home):
         try:
-            data = path.read_bytes()[:_MAX_TRAJECTORY_BYTES]
+            raw = path.read_bytes()
             rel = path.relative_to(home)
         except (OSError, ValueError):
             continue
+        truncated = len(raw) > _MAX_TRAJECTORY_BYTES
+        data = raw[:_MAX_TRAJECTORY_BYTES] if truncated else raw
         entries.append({
             "path": str(rel),
             "sha256": hashlib.sha256(data).hexdigest(),
             "bytes": len(data),
+            "truncated": truncated,
         })
     return entries
 

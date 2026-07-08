@@ -122,6 +122,37 @@ def test_trajectory_hashes_present_when_sidecar_files_exist(tmp_path):
     assert entry["bytes"] == len(content.encode("utf-8"))
     import hashlib
     assert entry["sha256"] == hashlib.sha256(content.encode("utf-8")).hexdigest()
+    # C-172 regression: a small file's digest is a plain, full-file sha256 — not
+    # flagged as truncated.
+    assert entry["truncated"] is False
+
+
+def test_trajectory_hash_labeled_truncated_when_file_exceeds_cap(tmp_path, monkeypatch):
+    """C-172: a sidecar bigger than the per-file cap must never be silently reported
+    as if its sha256 authenticated the whole file. Patch the cap down (rather than
+    writing a real 8MB fixture) to keep the test fast."""
+    import hashlib
+
+    import clawseccheck.incident as incident
+
+    monkeypatch.setattr(incident, "_MAX_TRAJECTORY_BYTES", 16)
+
+    sessions = tmp_path / "agents" / "main" / "sessions"
+    sessions.mkdir(parents=True)
+    traj = sessions / "big.trajectory.jsonl"
+    content = "x" * 100
+    traj.write_text(content, encoding="utf-8")
+
+    ctx = _ctx(tmp_path)
+    payload = build_incident(ctx, [], _score(), when="2026-07-04T00:00:00")
+    assert len(payload["trajectory_hashes"]) == 1
+    entry = payload["trajectory_hashes"][0]
+
+    assert entry["truncated"] is True
+    assert entry["bytes"] == 16
+    # The digest only covers the first 16 bytes — never the whole 100-byte file.
+    assert entry["sha256"] == hashlib.sha256(content[:16].encode("utf-8")).hexdigest()
+    assert entry["sha256"] != hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def test_trajectory_hashes_empty_when_no_sidecar_files(tmp_path):

@@ -854,7 +854,7 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
     Emits ONLY what Section 3 must contain, so the host agent PASTES this verbatim instead
     of re-composing it (models drop the open 3-sided frame otherwise):
       - non-suppressed FAIL/WARN findings only (PASS/UNKNOWN live in Sections 4 & 6);
-      - MEDIUM/ATTESTED-confidence findings excluded (they surface in Section 5);
+      - MEDIUM/ATTESTED-confidence findings excluded (they surface in Section 4);
       - families with no qualifying finding are omitted (no empty "— clear" headers);
       - each family under the same open 3-sided frame render_report uses.
     """

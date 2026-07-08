@@ -66,6 +66,51 @@ def test_skill_indicators_extraction():
     assert any("fake_secrets/api_token.txt" in t for t in ind)
 
 
+def test_prose_only_keywords_do_not_trigger_incident_signal():
+    # B-157: "secret"/"password"/"token" appearing only as ordinary English prose (no
+    # real path anywhere) must never be treated as a "secret path" indicator, and must
+    # never produce a false INCIDENT SIGNAL just because the same words show up in an
+    # unrelated tool-call message.
+    r = analyze(collect(FIXTURES / "traj_prose_only_no_incident"))
+    assert r["present"] is True
+    assert r["indicator_count"] == 0, r
+    assert r["hits"] == [], r
+    report = render_trajectory_analysis(collect(FIXTURES / "traj_prose_only_no_incident"))
+    assert "INCIDENT SIGNAL" not in report
+
+
+def test_real_credential_path_still_triggers_incident_signal():
+    # Regression guard (B-157 must not neuter the detector): a genuine credential path
+    # (~/.aws/credentials) that a skill NAMES and that then appears in a tool-call's
+    # arguments must still fire as an acted-on incident signal.
+    r = analyze(collect(FIXTURES / "traj_real_cred_path_acted"))
+    assert r["present"] and r["hits"], r
+    hit = r["hits"][0]
+    assert "aws/credentials" in hit["indicator"] or "credentials" in hit["indicator"]
+    assert hit["verb"] == "bash" and hit["skill"] == "backup-helper"
+    report = render_trajectory_analysis(collect(FIXTURES / "traj_real_cred_path_acted"))
+    assert "INCIDENT SIGNAL" in report
+
+
+def test_bare_keyword_variants_do_not_pollute_skill_indicators():
+    # B-157: bare English words ("secret", "password", "token", "tokens", "api_key")
+    # with no path separator must never surface as indicators at all.
+    for word in ("secret", "password", "token", "tokens", "api_key", "credential"):
+        skills = {"s": f"This paragraph just talks about a {word} in general terms."}
+        ind = skill_indicators(skills)
+        assert ind == {}, (word, ind)
+
+
+def test_secret_path_dedupes_bare_keyword_variant_of_same_path():
+    # B-157: for one underlying path, a bare-keyword variant that used to fire alongside
+    # the real path (e.g. "credential" + "~/.aws/credentials" from the same sentence)
+    # must be de-duped away, leaving only the genuine path-shaped indicator.
+    skills = {"s": "Read the credential store at ~/.aws/credentials for auth."}
+    ind = skill_indicators(skills)
+    assert "credential" not in ind
+    assert any("aws/credentials" in tok for tok in ind), ind
+
+
 def test_unknown_schema_version_marks_incomplete(tmp_path):
     home = tmp_path
     sess = home / "agents" / "main" / "sessions"

@@ -34,6 +34,22 @@ from .trajectory import (
 # (fake_secrets/db_token.txt, ~/.config/app/api_key). High-signal + low-FP: a path with
 # 'secret'/'token'/'credential'/'password'/'api[_-]key' in it, that a skill NAMES and the
 # agent then touches, is a strong "acted on" signal for incident response.
+#
+# B-157: the surrounding `[\w./~+-]*` is zero-or-more on both sides, so it also matches
+# the bare keyword alone with NO path separator at all (`_SECRET_PATH_RE.fullmatch("secret")`
+# / `.fullmatch("password")` / `.fullmatch("tokens")` all matched True) — any ordinary
+# English sentence containing one of these words then counted as a "secret path"
+# indicator, and `analyze()`'s raw substring test flagged plain conversation as an
+# INCIDENT SIGNAL. The regex itself is left as-is (it still needs to capture the FULL
+# path around the keyword, greedily, for real hits); instead `skill_indicators()` below
+# requires the matched token to actually contain a path separator (`/`) before it is
+# accepted as an indicator — a bare dictionary word never does, a real path
+# (`~/.aws/credentials`, `fake_secrets/db_token.txt`, `/home/user/.ssh/id_rsa`-style)
+# always does. This also fixes the near-duplicate-variant symptom for free: for input
+# like "the credential store at ~/.aws/credentials", finditer used to yield BOTH the bare
+# `credential` (no `/`, prose) and the real `~/.aws/credentials` path as two indicators
+# for what a human reads as one underlying path; the bare variant is now dropped by the
+# same `/`-required filter, leaving only the genuine path.
 _SECRET_PATH_RE = re.compile(
     r"[\w./~+-]*(?:secret|token|credential|password|api[_-]?key)[\w./~+-]*", re.I
 )
@@ -55,8 +71,16 @@ def skill_indicators(installed_skills: dict | None) -> dict[str, str]:
         for rx in (_CRED_RE, _EXFIL_RE, _SECRET_PATH_RE):
             for m in rx.finditer(text):
                 tok = m.group(0).strip().strip(".,;:\"'`)(")
-                if len(tok) >= _MIN_INDICATOR_LEN and tok not in out:
-                    out[tok] = str(name)
+                if len(tok) < _MIN_INDICATOR_LEN or tok in out:
+                    continue
+                # B-157: a _SECRET_PATH_RE hit with no path separator at all is a bare
+                # English word ("secret", "password", "tokens" as prose), not a path a
+                # skill named — drop it. _CRED_RE / _EXFIL_RE tokens are always
+                # path/host-shaped by construction, so this only constrains
+                # _SECRET_PATH_RE.
+                if rx is _SECRET_PATH_RE and "/" not in tok and not tok.startswith("~"):
+                    continue
+                out[tok] = str(name)
     return out
 
 

@@ -1,0 +1,2 @@
+{"traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call", "ts": "2026-07-05T00:00:00Z", "seq": 1, "data": {"name": "message", "arguments": {"text": "Reminder: never reuse the same password, rotate your token regularly, and never share a secret over chat."}, "toolCallId": "tc1", "turnId": "t1"}}
+{"traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call", "ts": "2026-07-05T00:00:00Z", "seq": 1, "data": {"name": "bash", "arguments": {"command": "echo 'security tips discussed'", "cwd": "/home"}, "toolCallId": "tc2", "turnId": "t1"}}

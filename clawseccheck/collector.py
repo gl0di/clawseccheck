@@ -457,6 +457,15 @@ def decompress_and_classify(
                             return [(file_relpath, file_bytes, classification, format_name)]
 
                     if not member.isreg():
+                        if ctx is not None and (member.issym() or member.islnk()):
+                            # F-061-style disclosure: a symlink/hardlink member inside an
+                            # archive is dropped just like a symlink hit by walk_dir_safely
+                            # on a real directory — record it the same way so --vet on an
+                            # archive surfaces "N symlink member(s) not followed" too.
+                            tgt = member.linkname or "?"
+                            reason = f"symlink -> {tgt}"
+                            ctx.symlink_skips.append(f"{file_relpath}::{member_disp}: {reason}")
+                            ctx.file_manifest[f"{file_relpath}::{member_disp}"] = "skipped:" + reason.split(" ", 1)[0]
                         continue
 
                     try:
@@ -527,15 +536,15 @@ def decompress_and_classify(
                     ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
                     ctx.file_manifest[file_relpath] = "capped(size)"
                 return [(file_relpath, file_bytes, classification, format_name)]
-                
-                if compressed_size > 10240:
-                    ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
-                    if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
-                        if ctx is not None:
-                            ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
-                            ctx.file_manifest[file_relpath] = "capped(ratio)"
+
+            if compressed_size > 10240:
+                ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
+                if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
+                    if ctx is not None:
+                        ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                        ctx.file_manifest[file_relpath] = "capped(ratio)"
                     return [(file_relpath, file_bytes, classification, format_name)]
-                    
+
             sub_rel = file_relpath[:-3] if file_relpath.lower().endswith(".gz") else f"{file_relpath}::extracted"
             sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
             results.extend(sub_results)
@@ -567,15 +576,15 @@ def decompress_and_classify(
                     ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
                     ctx.file_manifest[file_relpath] = "capped(size)"
                 return [(file_relpath, file_bytes, classification, format_name)]
-                
-                if compressed_size > 10240:
-                    ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
-                    if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
-                        if ctx is not None:
-                            ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
-                            ctx.file_manifest[file_relpath] = "capped(ratio)"
+
+            if compressed_size > 10240:
+                ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
+                if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
+                    if ctx is not None:
+                        ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                        ctx.file_manifest[file_relpath] = "capped(ratio)"
                     return [(file_relpath, file_bytes, classification, format_name)]
-                    
+
             sub_rel = file_relpath[:-4] if file_relpath.lower().endswith(".bz2") else f"{file_relpath}::extracted"
             sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
             results.extend(sub_results)
@@ -607,15 +616,15 @@ def decompress_and_classify(
                     ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
                     ctx.file_manifest[file_relpath] = "capped(size)"
                 return [(file_relpath, file_bytes, classification, format_name)]
-                
-                if compressed_size > 10240:
-                    ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
-                    if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
-                        if ctx is not None:
-                            ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
-                            ctx.file_manifest[file_relpath] = "capped(ratio)"
+
+            if compressed_size > 10240:
+                ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
+                if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
+                    if ctx is not None:
+                        ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                        ctx.file_manifest[file_relpath] = "capped(ratio)"
                     return [(file_relpath, file_bytes, classification, format_name)]
-                    
+
             sub_rel = file_relpath[:-3] if file_relpath.lower().endswith(".xz") else f"{file_relpath}::extracted"
             sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
             results.extend(sub_results)

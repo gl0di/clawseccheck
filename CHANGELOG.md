@@ -3,6 +3,37 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.28.0] — 2026-07-08
+
+R16 — trajectory/incident polish: the last of the round-2 test-campaign findings
+(2026-07-08), all low/medium severity.
+
+### Fixed
+- **`--analyze-trajectory` no longer floods false "INCIDENT SIGNAL" hits on
+  ordinary English words.** `_SECRET_PATH_RE`'s indicator extraction now requires
+  a real path shape (a `/` or a `~` prefix) before counting a match as a "secret
+  path" — a chat message merely containing the word "secret"/"password"/"token"
+  no longer counts as an incident hit. A genuine credential path
+  (`~/.aws/credentials`, etc.) still fires, and no longer produces redundant
+  near-duplicate indicator variants for the same path.
+- **`--incident`'s trajectory hash now honestly discloses truncation.**
+  Previously a ≥8MB trajectory sidecar's reported "sha256" silently covered only
+  the first 8MB with no indication — now every hash entry carries an explicit
+  `truncated` flag.
+- **Archive-safety bookkeeping fixes** (non-exploitable — the actual byte-cap
+  guards were never bypassable): the expansion-ratio check in the gzip/bz2/xz
+  decompression branches was nested inside a prior unconditional `return`,
+  making it dead code; it's now a reachable sibling check, matching the existing
+  ZIP/TAR branches. Symlink members inside a tar archive are now recorded into
+  the same disclosure trail (`symlink_skips`) as a symlink found by the
+  directory-walk path, so `--vet` on an archive now discloses skipped symlink
+  members instead of silently dropping them with no trace.
+- Doc-drift: a `report.py` docstring referencing the wrong SKILL.md section
+  number for confidence-filtered findings (Section 5 → Section 4).
+
+### Changed
+- _TODO_
+
 ## [3.27.0] — 2026-07-08
 
 R15 — suppression and local-state contract integrity: three cases where the tool
