@@ -100,3 +100,65 @@ def test_run_all_normal_run_has_no_budget_findings():
     # a fast run under a generous budget must never synthesize a timeout finding
     findings = checks.run_all(_ctx())
     assert not [f for f in findings if f.id.startswith("ERR:")]
+
+
+# ── C-175: ScanBudgetExceeded must propagate through simulate_effects, not be
+# swallowed into a false PASS ──────────────────────────────────────────────
+
+def test_simulate_effects_propagates_scan_budget_exceeded(monkeypatch):
+    """skillast.simulate_effects() is documented 'never raises' for ordinary
+    failures, but a ScanBudgetExceeded hit mid-simulation must be the one
+    exception that escapes — swallowing it made a truncated, incomplete scan
+    indistinguishable from 'found nothing'."""
+    from clawseccheck import skillast
+
+    class _Boom:
+        def __init__(self, *a, **kw):
+            pass
+
+        def simulate(self):
+            raise ScanBudgetExceeded
+
+    monkeypatch.setattr(skillast, "EffectSimulator", _Boom)
+    with pytest.raises(ScanBudgetExceeded):
+        skillast.simulate_effects("x = 1\n", "f.py")
+
+
+def test_simulate_effects_still_swallows_ordinary_exceptions(monkeypatch):
+    """Regression guard: only ScanBudgetExceeded escapes — any other exception
+    (e.g. a bug in the simulator itself) must still degrade to an empty list,
+    per simulate_effects's 'never raises' contract for non-budget failures."""
+    from clawseccheck import skillast
+
+    class _Boom:
+        def __init__(self, *a, **kw):
+            pass
+
+        def simulate(self):
+            raise ValueError("simulator bug")
+
+    monkeypatch.setattr(skillast, "EffectSimulator", _Boom)
+    assert skillast.simulate_effects("x = 1\n", "f.py") == []
+
+
+def test_check_installed_skills_degrades_to_unknown_not_false_pass_on_budget_hit(monkeypatch):
+    """Integration: when the per-check deadline fires mid-simulate_effects for
+    check_installed_skills (B13), run_all must convert it to the synthetic
+    ERR:check_installed_skills UNKNOWN finding — not let the check fall
+    through to a confident PASS with an incomplete scan."""
+    import clawseccheck.checks._vet as vet_mod
+
+    def _raise(*a, **kw):
+        raise ScanBudgetExceeded
+
+    monkeypatch.setattr(vet_mod, "_simulate_effects", _raise)
+    ctx = _ctx()
+    ctx.installed_skills = {"someskill": "notes"}
+    ctx.installed_skill_py = {"someskill": [("run.py", "import os\nos.system('x')\n")]}
+
+    findings = checks.run_all(ctx, check_budget_s=120.0)
+    budget_hits = [f for f in findings if f.id == "ERR:check_installed_skills"]
+    assert len(budget_hits) == 1, "expected check_installed_skills to hit the budget path"
+    assert budget_hits[0].status == UNKNOWN
+    # And critically: no B13 PASS/FAIL finding was fabricated from the truncated scan.
+    assert not [f for f in findings if f.id == "B13"]

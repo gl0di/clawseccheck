@@ -37,6 +37,7 @@ from ..skillast import (
     analyze_shell,
 )
 from ..skillast import simulate_effects as _simulate_effects
+from ..scanbudget import ScanBudgetExceeded
 from ..textnorm import (
     normalize_for_scan,
 )
@@ -1309,8 +1310,18 @@ def check_installed_skills(ctx: Context) -> Finding:
                     high.append(f"{name}: {af.reason} ({loc})")
             # simulate_effects never raises; guard here too in case of future
             # refactors or mocking in tests.
+            #
+            # C-175: ScanBudgetExceeded must NOT be swallowed here — it is a plain
+            # Exception subclass, so a bare `except Exception` catches the per-check
+            # wall-clock deadline firing mid-simulation and silently treats a
+            # truncated analysis as "nothing found", letting this check fall through
+            # to a false PASS instead of the UNKNOWN run_all's own ScanBudgetExceeded
+            # handler is meant to produce. Re-raise it before the catch-all so the
+            # budget signal reaches run_all regardless of which check triggered it.
             try:
                 _ep = _simulate_effects(src, relpath)
+            except ScanBudgetExceeded:
+                raise
             except Exception:  # noqa: BLE001
                 _ep = []
             for entry in _ep:

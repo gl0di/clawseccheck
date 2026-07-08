@@ -23,6 +23,8 @@ import ast
 import re
 from collections import namedtuple
 
+from .scanbudget import ScanBudgetExceeded
+
 # A finding: rule id, severity ("crit" = malware-grade / FAIL-eligible on its own;
 # "info" = common sink, escalates only alongside a cred/exfil signal), source line, reason.
 ASTFinding = namedtuple("ASTFinding", "rule severity lineno reason")
@@ -2289,9 +2291,16 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
 def simulate_effects(source: str, filename: str = "<skill>") -> list[dict]:
     """Analyze Python source to simulate reachable effects and guarding conditions under seeds.
 
-    Never raises, returns an empty list on failure.
+    Never raises, returns an empty list on failure — EXCEPT ScanBudgetExceeded
+    (C-175), which must propagate: the caller (checks/_vet.py's
+    check_installed_skills) relies on it reaching run_all's dedicated handler,
+    which converts a budget hit into an honest UNKNOWN finding. Swallowing it
+    here made a truncated, incomplete simulation indistinguishable from "found
+    nothing" — a scan cut short mid-analysis silently reported PASS.
     """
     try:
         return EffectSimulator(source, filename).simulate()
+    except ScanBudgetExceeded:
+        raise
     except Exception:
         return []
