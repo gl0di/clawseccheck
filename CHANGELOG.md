@@ -3,6 +3,28 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.28.2] — 2026-07-08
+
+Two false-positive/false-negative detection fixes (B24, B65) and a doc improvement
+to how the `host_monitors` attestation field gets answered.
+
+### Fixed
+- B24 (`_MCP_UNPINNED_RE`) no longer flags a URL passed to a legitimate registry/
+  index flag (`--registry`, `--index-url`, `-i`, `--extra-index-url`, `--find-links`,
+  `-f`, `--proxy`, `--trusted-host`) as an unpinned package spec — a fully-pinned
+  `npx --registry https://... some-pkg@1.2.3` no longer WARNs; a URL that *is* the
+  package spec still does.
+- B65's action regex now matches "exfiltrate"/"exfiltration"/"exfiltrated", not just
+  the bare "exfiltrat" token — the previous `\b` boundary never matched inside the
+  real word.
+
+### Changed
+- SKILL.md: the agent now self-probes `host_monitors` (systemctl/ps/lsmod/launchctl
+  grepped against common EDR/IDS names) with its own shell access before asking the
+  user, since the human usually can't answer and the field then defaults to
+  `unknown` unnecessarily. Falls back to asking only if the probe can't run or is
+  inconclusive. No engine change.
+
 ## [3.28.1] — 2026-07-08
 
 Fixes a `--vet` false-negative: a skill archive containing a zip-slip
