@@ -89,3 +89,64 @@ def test_events_jsonl_on_disk_holds_no_secret(tmp_path):
     for secret in (_URL_TOK, _QRY_KEY, _ARG_TOK):
         assert secret not in raw, f"{secret!r} persisted at rest in events.jsonl"
     assert "old.example.com" in raw and "new.example.com" in raw  # host drift preserved
+
+
+# ---------------------------------------------------------------------------
+# C-178 — RP2/RP3 must not false-positive across the redaction-format boundary
+# ---------------------------------------------------------------------------
+
+def test_rp3_no_false_positive_when_prev_snapshot_predates_redaction():
+    """A prev state.json written by a pre-cde6798 build still holds the RAW url
+    (this commit's own fix landed AFTER some users' state.json was written).
+    The very next --monitor run after upgrading must not treat "raw url" vs.
+    "same endpoint, now sanitized" as a rug-pull — same host, no real change."""
+    curr_sig = _mcp_detail_sig(_ctx(url_host="api.example.com"))
+    # Simulate a pre-redaction snapshot: same server, RAW (unsanitized) url.
+    prev_sig = json.loads(json.dumps(curr_sig))
+    prev_sig["srv"]["url"] = f"https://user:{_URL_TOK}@api.example.com/mcp?api_key={_QRY_KEY}"
+
+    prev = {"mcp_detail": prev_sig}
+    curr = {"mcp_detail": curr_sig}
+    for s in (prev, curr):
+        s.update({"score": 90, "grade": "A", "skills": {}, "bootstrap": {}, "checks": {}})
+
+    alerts = diff(prev, curr)
+    rp3 = [a for a in alerts if "RP3" in a[1]]
+    assert not rp3, f"unexpected RP3 false-positive across a migration boundary: {rp3}"
+
+
+def test_rp3_still_fires_and_never_echoes_stale_credential_on_a_real_repoint():
+    """A REAL endpoint change (old.example.com -> new.example.com) must still
+    fire RP3 even when the prev snapshot predates redaction — and the alert
+    text must never contain the stale raw credential from the old snapshot."""
+    curr_sig = _mcp_detail_sig(_ctx(url_host="new.example.com"))
+    prev_sig = json.loads(json.dumps(curr_sig))
+    prev_sig["srv"]["url"] = f"https://user:{_URL_TOK}@old.example.com/mcp?api_key={_QRY_KEY}"
+
+    prev = {"mcp_detail": prev_sig}
+    curr = {"mcp_detail": curr_sig}
+    for s in (prev, curr):
+        s.update({"score": 90, "grade": "A", "skills": {}, "bootstrap": {}, "checks": {}})
+
+    alerts = diff(prev, curr)
+    rp3 = [a for a in alerts if "RP3" in a[1]]
+    assert rp3, "expected RP3 to fire on a genuine endpoint repoint"
+    blob = " ".join(a[1] for a in rp3)
+    assert _URL_TOK not in blob and _QRY_KEY not in blob, blob
+    assert "old.example.com" in blob and "new.example.com" in blob
+
+
+def test_rp2_no_false_positive_when_prev_command_predates_redaction():
+    """Same migration-boundary issue for RP2's command/args0 comparison."""
+    curr_sig = _mcp_detail_sig(_ctx())
+    prev_sig = json.loads(json.dumps(curr_sig))
+    prev_sig["srv"]["args0"] = f"--registry=https://{_ARG_TOK}@reg.example.com/"
+
+    prev = {"mcp_detail": prev_sig}
+    curr = {"mcp_detail": curr_sig}
+    for s in (prev, curr):
+        s.update({"score": 90, "grade": "A", "skills": {}, "bootstrap": {}, "checks": {}})
+
+    alerts = diff(prev, curr)
+    rp2 = [a for a in alerts if "RP2" in a[1]]
+    assert not rp2, f"unexpected RP2 false-positive across a migration boundary: {rp2}"
