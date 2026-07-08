@@ -65,6 +65,34 @@ def test_chain_multi(tmp_path: Path) -> None:
         prev = entry["chain_hash"]
 
 
+def test_chain_survives_non_utf8_byte_instead_of_wedging(tmp_path: Path) -> None:
+    """C-177: a single non-UTF-8 byte in the journal (a plausible crash-mid-write
+    artifact) used to raise UnicodeDecodeError from _iter_jsonl and permanently
+    wedge verify_chain()/record_events() on every future call. It must now
+    degrade that one garbled line gracefully, same as any other malformed line,
+    and let the next record_events() append cleanly."""
+    journal = tmp_path / "events.jsonl"
+    record_events([("HIGH", "alert-1")], path=journal, when="2026-01-01T00:00:00")
+    with open(journal, "ab") as fh:
+        fh.write(b"\x00\x01\xff\xfe garbage not json \x00\n")
+
+    ok, msg = verify_chain(journal)
+    assert ok, msg
+
+    # A subsequent write must not raise and must produce a well-formed new line.
+    record_events([("MEDIUM", "alert-2")], path=journal, when="2026-01-01T00:01:00")
+    lines = journal.read_bytes().split(b"\n")
+    text_lines = [ln.decode("utf-8", errors="replace") for ln in lines if ln.strip()]
+    parsed = 0
+    for ln in text_lines:
+        try:
+            json.loads(ln)
+            parsed += 1
+        except json.JSONDecodeError:
+            pass
+    assert parsed == 2, f"expected 2 well-formed JSON lines, parsed {parsed} of {text_lines}"
+
+
 def test_chain_broken(tmp_path: Path) -> None:
     """Tampering with the middle entry breaks the chain."""
     journal = tmp_path / "events.jsonl"

@@ -74,8 +74,14 @@ def _iter_jsonl(p: Path):
     ``read_text().splitlines()``), so memory stays flat even on a large journal.
     Blank lines, JSON-decode errors, and non-dict top-level values are silently
     skipped (same graceful contract the previous read_text()-based loops had).
+
+    C-177: opened with ``errors="replace"`` (same pattern as baseline.py's
+    ``load_ignore``) so a non-UTF-8 byte anywhere in the file — a plausible
+    crash-mid-write artifact — degrades that one line to unparseable-JSON
+    (skipped, same as any other malformed line) instead of raising
+    ``UnicodeDecodeError`` and permanently wedging every future invocation.
     """
-    with p.open("r", encoding="utf-8") as fh:
+    with p.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -598,11 +604,14 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
 
             # RP2 — command/transport change (HIGH): the executable, first arg, or
             # transport changed — a different thing now runs under the same trusted name.
+            # C-178: command/args0 may hold a pre-cde6798 build's raw (unredacted)
+            # value in ps; re-apply redact_urls_in_text (idempotent on an already-
+            # redacted value) before comparing, same normalization as RP3's url.
             p_transport = ps.get("transport", "")
             c_transport = cs.get("transport", "")
-            p_cmd = ps.get("command", "")
+            p_cmd = redact_urls_in_text(ps.get("command", ""))
             c_cmd = cs.get("command", "")
-            p_args0 = ps.get("args0", "")
+            p_args0 = redact_urls_in_text(ps.get("args0", ""))
             c_args0 = cs.get("args0", "")
             transport_changed = p_transport != c_transport
             cmd_changed = p_cmd != c_cmd
@@ -624,7 +633,16 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
             # RP3 — endpoint/default repoint (HIGH): url or env values that look like
             # endpoints changed.  We snapshot env KEY names only, so this detects an env
             # var disappearing or appearing; the url field is snapshotted directly.
-            p_url = ps.get("url", "")
+            #
+            # C-178: cs["url"] is always host-only sanitized at snapshot time
+            # (_mcp_detail_sig), but ps["url"] may have been written by a build
+            # predating the cde6798 redaction fix, in which case it is still the
+            # RAW url (possibly carrying a credential). Re-sanitizing p_url here
+            # (idempotent on an already-sanitized value) normalizes both sides to
+            # the same form before comparing, so a version upgrade alone never
+            # false-positives a rug-pull, and the stale raw credential is never
+            # echoed into the alert text either.
+            p_url = sanitize_url_host_only(ps.get("url", ""))
             c_url = cs.get("url", "")
             if p_url != c_url:
                 # Determine severity: host change is always HIGH; adding/clearing url is HIGH.

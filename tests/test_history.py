@@ -97,6 +97,26 @@ def test_load_skips_corrupt_json_line(tmp_path):
     assert rows[1]["date"] == "2026-06-19"
 
 
+def test_load_skips_non_utf8_byte_instead_of_wedging(tmp_path):
+    """C-177: a single non-UTF-8 byte anywhere in the journal used to raise
+    UnicodeDecodeError (uncaught by the JSONDecodeError guard) and permanently
+    wedge every future load()/verify() call. It must now degrade that one
+    (garbled) line gracefully, same as any other malformed line."""
+    path = tmp_path / "history.jsonl"
+    path.write_bytes(
+        b'{"date":"2026-06-15","score":72,"grade":"C"}\n'
+        b'\x00\x01\xff\xfe garbage not json \x00\n'
+        b'{"date":"2026-06-19","score":90,"grade":"A"}\n'
+    )
+    rows = load(str(path))
+    assert len(rows) == 2
+    assert rows[0]["date"] == "2026-06-15"
+    assert rows[1]["date"] == "2026-06-19"
+
+    ok, msg = verify(str(path))
+    assert ok, msg
+
+
 def test_load_skips_line_missing_required_key(tmp_path):
     path = tmp_path / "history.jsonl"
     path.write_text(

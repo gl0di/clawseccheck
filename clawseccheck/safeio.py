@@ -116,9 +116,28 @@ def secure_write_text(path: Path, data: str) -> None:
 
 
 def secure_append_text(path: Path, data: str) -> None:
-    """Append *data* to *path*, refusing to follow a symlinked target."""
+    """Append *data* to *path*, refusing to follow a symlinked target.
+
+    C-177: if the file already has content that does NOT end in a newline —
+    e.g. a crash truncated the previous write mid-line — a leading ``\\n`` is
+    written first. Without this, the new line gets silently concatenated onto
+    the dangling truncated line with no separator, turning one recoverable
+    truncated record into a permanent unparseable merged line.
+    """
+    needs_leading_newline = False
+    try:
+        with path.open("rb") as rf:
+            rf.seek(0, os.SEEK_END)
+            if rf.tell() > 0:
+                rf.seek(-1, os.SEEK_END)
+                needs_leading_newline = rf.read(1) != b"\n"
+    except OSError:
+        pass  # file doesn't exist yet (or unreadable) — nothing to guard
+
     fd = _open_owner_only(path, os.O_APPEND)
     try:
+        if needs_leading_newline:
+            os.write(fd, b"\n")
         os.write(fd, data.encode("utf-8"))
     finally:
         os.close(fd)
