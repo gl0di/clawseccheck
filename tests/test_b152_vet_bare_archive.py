@@ -143,7 +143,10 @@ def test_vet_bare_zip_path_traversal_member_detected(tmp_path):
     assert any("outside.py" in v for v in ctx.path_traversal_violations)
 
     f = vet_skill(archive_path)
-    assert f.status != PASS, "path traversal in a bare-archive vet target must not read as a clean PASS"
+    # Check-layer status stays the dedicated "SKILL_ARCHIVE_PATH_TRAVERSAL" literal
+    # (see test_collector_safety.py / test_assurance_coverage.py); B-160 fixed the
+    # --vet dossier's *grading* of it, not this status — see test_b160_*.py.
+    assert f.status == "SKILL_ARCHIVE_PATH_TRAVERSAL", f"got {f.status}: {f.detail}"
 
 
 def test_vet_bare_archive_oversized_member_capped(tmp_path):

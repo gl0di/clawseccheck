@@ -120,7 +120,15 @@ _AXIS_APPLICABILITY: dict[str, dict[str, bool]] = {
                "persistence": False, "connections": False},
 }
 
-_STATUS_RANK: dict[str, int] = {FAIL: 3, WARN: 2, UNKNOWN: 1, PASS: 0}
+# B-160: "SKILL_ARCHIVE_PATH_TRAVERSAL" is a real third status the checks engine emits
+# for B13 (report.py / scoring.py deliberately exclude it from the *scored* audit, same
+# as UNKNOWN — see scoring.compute). But it is a confirmed known-bad signal (zip-slip),
+# not an honesty exclusion, so the --vet danger axis must rank/grade it like FAIL —
+# otherwise _worst() picks it as low as PASS and _grade_profile drops it from `scorable`
+# entirely, letting a detected archive path-traversal attack render as A/SAFE.
+_STATUS_RANK: dict[str, int] = {
+    FAIL: 3, "SKILL_ARCHIVE_PATH_TRAVERSAL": 3, WARN: 2, UNKNOWN: 1, PASS: 0,
+}
 # Overall-grade caps so the letter never contradicts the verdict word: any WARN keeps it
 # below A (an artifact with a real caveat is not "A / SAFE"); a non-danger FAIL costs a
 # further grade (mirrors scoring.FAIL_CAPS[HIGH] — "one real failure always costs a grade").
@@ -288,6 +296,10 @@ def _axis_status(bucket: list, applicable: bool, *, no_signal_status: str) -> st
     worst = _worst(bucket)
     if worst is None:
         return no_signal_status
+    if worst.status == "SKILL_ARCHIVE_PATH_TRAVERSAL":
+        # B-160: a real known-bad signal, not an honesty exclusion — grade it as FAIL
+        # even though scoring.py's separately-scored audit deliberately excludes it.
+        return FAIL
     return worst.status
 
 
