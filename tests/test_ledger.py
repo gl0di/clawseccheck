@@ -367,3 +367,74 @@ def test_cli_dryrun_records_self_test(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     ledger = load_ledger(str(tmp_path))
     assert "self_test" in ledger
+
+
+# ---------------------------------------------------------------------------
+# B-156: --no-history must gate the coverage ledger too, not just the
+# audit-trend history writer. Every opt-in capability path (self-test family,
+# vet/vet-mcp/vet-plugin/vet-source) is expected to skip record_run() entirely
+# under --no-history — never touching ~/.clawseccheck/coverage.json.
+# ---------------------------------------------------------------------------
+
+def _skill_dir(tmp_path: Path) -> str:
+    d = tmp_path / "some-skill"
+    d.mkdir()
+    (d / "SKILL.md").write_text(
+        "---\nname: x\ndescription: y\n---\nHello.\n", encoding="utf-8",
+    )
+    return str(d)
+
+
+def test_cli_no_history_suppresses_redteam_ledger_write(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    main(["--redteam", "--seed", "x", "--no-history", "--ascii"])
+    capsys.readouterr()
+    assert not _ledger_file(tmp_path).exists()
+
+
+def test_cli_no_history_suppresses_self_test_ledger_write(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    main(["--self-test", "--no-history", "--ascii"])
+    capsys.readouterr()
+    assert not _ledger_file(tmp_path).exists()
+
+
+def test_cli_no_history_suppresses_vet_ledger_write(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sk = _skill_dir(tmp_path)
+    main(["--vet", sk, "--no-history", "--ascii"])
+    capsys.readouterr()
+    assert not _ledger_file(tmp_path).exists()
+
+
+def test_cli_no_history_does_not_disturb_existing_ledger(tmp_path, monkeypatch, capsys):
+    # Pre-seed a ledger entry, then run an opt-in capability with --no-history and
+    # confirm the file's mtime/content is untouched (not just "still exists").
+    monkeypatch.setenv("HOME", str(tmp_path))
+    record_run("self_test", home=str(tmp_path), today=date(2026, 6, 1))
+    ledger_path = _ledger_file(tmp_path)
+    before_mtime = ledger_path.stat().st_mtime_ns
+    before_content = ledger_path.read_text(encoding="utf-8")
+    main(["--redteam", "--seed", "x", "--no-history", "--ascii"])
+    capsys.readouterr()
+    assert ledger_path.stat().st_mtime_ns == before_mtime
+    assert ledger_path.read_text(encoding="utf-8") == before_content
+
+
+# --- Regression: WITHOUT --no-history, these same capabilities still record ---
+
+def test_cli_vet_without_no_history_still_records(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sk = _skill_dir(tmp_path)
+    main(["--vet", sk, "--ascii"])
+    capsys.readouterr()
+    ledger = load_ledger(str(tmp_path))
+    assert "vet" in ledger
+
+
+def test_cli_self_test_without_no_history_still_records(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    main(["--self-test", "--ascii"])
+    capsys.readouterr()
+    ledger = load_ledger(str(tmp_path))
+    assert "self_test" in ledger

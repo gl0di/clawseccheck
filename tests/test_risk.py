@@ -994,3 +994,112 @@ def test_risk18_clean_restricted_context():
 
 def test_risk18_empty_config_no_fire():
     assert not any(p.id == "RISK-18" for p in _paths({}))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# B-154: RISK-* suppression via .clawseccheckignore
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _vuln_cfg_for_b154():
+    """Fires B4 (sandbox off + exec) AND RISK-01/RISK-03 (open channel + exec + no sandbox)."""
+    return {
+        "channels": {"discord": {"dmPolicy": "open"}},
+        "agents": {"defaults": {"sandbox": {"mode": "off"}}},
+        "tools": {"exec": {"security": "full"}},
+    }
+
+
+def test_risk03_suppressed_by_explicit_id_excluded_from_report_and_json(capsys, tmp_path):
+    """Exact repro: .clawseccheckignore has B4 + RISK-03 -> RISK-03 gone from the
+    active report, gone from --json risk_paths, and --show-suppressed lists it."""
+    cfg = tmp_path / "openclaw.json"
+    cfg.write_text(json.dumps(_vuln_cfg_for_b154()))
+
+    from clawseccheck import audit
+    ctx, findings, _ = audit(tmp_path)
+    b4 = next((f for f in findings if f.id == "B4"), None)
+    assert b4 is not None and b4.status == FAIL, "fixture must actually FAIL B4"
+    paths_before = risk_paths(ctx, findings)
+    assert any(p.id == "RISK-03" for p in paths_before), "fixture must fire RISK-03 pre-suppression"
+
+    (tmp_path / ".clawseccheckignore").write_text("B4\nRISK-03\n")
+
+    # --risk-paths: RISK-03 must be gone from the rendered chains.
+    rc = main(["--home", str(tmp_path), "--no-native", "--risk-paths", "--ascii"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "RISK-03" not in out
+    assert "No sandbox + untrusted ingress" not in out  # RISK-03's title
+
+    # --json risk_paths: RISK-03 must not appear.
+    rc = main(["--home", str(tmp_path), "--no-native", "--json"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert all(rp["id"] != "RISK-03" for rp in data["risk_paths"])
+    # B4 itself stays correctly suppressed too (existing contract, sanity check).
+    assert all(f["id"] != "B4" or f.get("suppressed") for f in data["findings"])
+
+    # --show-suppressed: must now recognize RISK-03 as a suppressed id (not just B4).
+    rc = main(["--home", str(tmp_path), "--no-native", "--show-suppressed"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "B4" in out
+    assert "RISK-03" in out
+
+
+def test_risk_paths_ignore_param_marks_suppressed_but_still_returns_object():
+    """risk_paths(..., ignore=...) mirrors baseline.apply(): the RiskPath stays in the
+    returned list with .suppressed=True (so --show-suppressed can find it) rather than
+    being silently dropped by the engine itself — filtering is the caller's job."""
+    ctx = _ctx(_vuln_cfg_for_b154())
+    f = _findings(ctx)
+    paths = risk_paths(ctx, f, ignore={"RISK-03"})
+    r03 = next(p for p in paths if p.id == "RISK-03")
+    assert r03.suppressed is True
+    # every other fired path stays unsuppressed
+    others = [p for p in paths if p.id != "RISK-03"]
+    assert others and all(not p.suppressed for p in others)
+
+
+def test_risk_chain_from_suppressed_underlying_finding_without_explicit_risk_id_still_fires():
+    """Decision (B-154): suppressing the underlying check ALONE (B4 here) does NOT
+    implicitly suppress a RISK chain derived from the same condition — the RISK-id
+    must be listed explicitly in .clawseccheckignore. This matches baseline.py's
+    existing semantics (bare id / fingerprint matching only, no derived/transitive
+    suppression) and avoids fragile 1:1 dependency mapping, since most RISK rules read
+    raw config directly rather than a single finding's status (e.g. RISK-03's sandbox
+    leg is evaluated independently of the B4 finding object)."""
+    cfg = _vuln_cfg_for_b154()
+    ctx = _ctx(cfg)
+    f = _findings(ctx)
+    b4 = next(x for x in f if x.id == "B4")
+    assert b4.status == FAIL
+    from clawseccheck.baseline import apply as apply_baseline
+    apply_baseline(f, {"B4"})  # suppress ONLY the underlying finding, not the RISK-id
+    assert b4.suppressed is True
+
+    paths = risk_paths(ctx, f, ignore={"B4"})
+    r03 = next((p for p in paths if p.id == "RISK-03"), None)
+    assert r03 is not None, "RISK-03 must still be returned/fired"
+    assert r03.suppressed is False, (
+        "suppressing only the underlying check must NOT auto-suppress the derived chain"
+    )
+
+
+def test_unsuppressed_risk_chain_still_fires_normally_regression(capsys, tmp_path):
+    """Regression: with no ignore file at all, RISK-* chains fire and render/JSON as before —
+    the suppression plumbing must not silently swallow RISK-* findings in general."""
+    cfg = tmp_path / "openclaw.json"
+    cfg.write_text(json.dumps(_vuln_cfg_for_b154()))
+
+    rc = main(["--home", str(tmp_path), "--no-native", "--risk-paths", "--ascii"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "RISK-01" in out or "Untrusted sender can reach host execution" in out
+    assert "No sandbox + untrusted ingress" in out  # RISK-03's title still present
+
+    rc = main(["--home", str(tmp_path), "--no-native", "--json"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    ids = {rp["id"] for rp in data["risk_paths"]}
+    assert "RISK-03" in ids

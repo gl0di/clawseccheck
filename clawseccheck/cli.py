@@ -84,6 +84,20 @@ def _emit(text: str) -> None:
         print(text.encode("ascii", "replace").decode("ascii"))
 
 
+def _record_run(capability: str, args) -> None:
+    """Coverage-ledger write, gated by --no-history (B-156).
+
+    Every opt-in capability path (vet/vet-mcp/vet-plugin/vet-source/self-test
+    family/behavioral) funnels through here instead of calling
+    ``ledger.record_run`` directly, so ``--no-history`` reliably suppresses
+    the ``~/.clawseccheck/coverage.json`` write everywhere, not just on the
+    audit-trend path (Golden Rule #2: local-only / no surprise writes).
+    """
+    if getattr(args, "no_history", False):
+        return
+    record_run(capability)
+
+
 # Vet-MCP icon / verdict constants — shared by the standalone --vet-mcp path
 # and the embedded vet-mcp section inside --full.
 _VET_ICON_ASCII: dict[str, str] = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}
@@ -215,7 +229,7 @@ def _run_vet_mcp(target, args, ascii_only: bool) -> int:
             _emit(f"(SARIF written to {args.sarif})")
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
-    record_run("vet_mcp")
+    _record_run("vet_mcp", args)
     _vet_rc = 1 if profile.overall_status in ("FAIL", "WARN") else 0
     if args.json:
         _emit(render_vet_json(profile, mode="vet-mcp", version=__version__))
@@ -745,7 +759,7 @@ def _main(argv=None) -> int:
         # Record the run in the coverage ledger, symmetric with --vet-mcp (C-128).
         # freshness_notice has no "vet" threshold, so this updates the ledger without
         # adding a staleness nudge — it just keeps the vet modes consistent.
-        record_run("vet" if vet_kind == "skill" else "vet_plugin")
+        _record_run("vet" if vet_kind == "skill" else "vet_plugin", args)
         # Side output: SARIF file (mirrors the full-audit --sarif behavior, incl.
         # the same graceful handling of an unwritable path — B-014).
         if args.sarif:
@@ -785,7 +799,7 @@ def _main(argv=None) -> int:
         f = vet_source(args.vet_source)
         profile = build_profile(f, args.vet_source, "source")
         _src_rc = 1 if profile.overall_status in ("FAIL", "WARN") else 0
-        record_run("vet_source")
+        _record_run("vet_source", args)
         if args.json:
             _emit(render_vet_json(profile, mode="vet-source", version=__version__))
             return _src_rc
@@ -801,7 +815,7 @@ def _main(argv=None) -> int:
         f = vet_skill(advise_target) if advise_kind == "skill" else vet_plugin(advise_target)
         profile = build_profile(f, advise_target, advise_kind)
         _advise_rc = 1 if profile.overall_status in ("FAIL", "WARN") else 0
-        record_run("vet" if advise_kind == "skill" else "vet_plugin")
+        _record_run("vet" if advise_kind == "skill" else "vet_plugin", args)
         if args.json:
             _emit(render_advise_json(profile, version=__version__))
             return _advise_rc
@@ -810,23 +824,23 @@ def _main(argv=None) -> int:
 
     if args.canary:
         _emit(render_canary(make_canary(), ascii_only))
-        record_run("self_test")
+        _record_run("self_test", args)
         return 0
 
     if args.redteam:
         seed = args.seed if args.seed is not None else secrets.token_hex(8)
         _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
-        record_run("self_test")
+        _record_run("self_test", args)
         return 0
 
     if args.dryrun:
         _emit(render_dryrun(make_scenarios(), ascii_only))
-        record_run("self_test")
+        _record_run("self_test", args)
         return 0
 
     if args.multiturn:
         _emit(render_multiturn(make_multiturn(), ascii_only))
-        record_run("self_test")
+        _record_run("self_test", args)
         return 0
 
     if args.self_test:
@@ -838,7 +852,7 @@ def _main(argv=None) -> int:
         _emit(render_dryrun(make_scenarios(), ascii_only))
         _emit("")
         _emit(render_multiturn(make_multiturn(), ascii_only))
-        record_run("self_test")
+        _record_run("self_test", args)
         return 0
 
     if args.ask:
@@ -855,9 +869,15 @@ def _main(argv=None) -> int:
             _emit(f"{len(ignore)} suppressed entry/entries in .clawseccheckignore:")
             ctx, findings, _ = audit(args.home, include_native=False)
             suppressed = [f for f in findings if getattr(f, "suppressed", False)]
-            if suppressed:
+            # B-154: a bare "RISK-NN" entry matches a RiskPath.id, not any Finding —
+            # surface those explicitly too, or --show-suppressed silently missed them.
+            suppressed_risk = [p for p in _risk.risk_paths(ctx, findings, ignore=ignore)
+                                if p.suppressed]
+            if suppressed or suppressed_risk:
                 for f in suppressed:
                     _emit(f"  {f.id}  {fingerprint(f)}  ({f.title})")
+                for p in suppressed_risk:
+                    _emit(f"  {p.id}  ({p.title})")
             else:
                 for entry in sorted(ignore):
                     _emit(f"  {entry}")
@@ -918,7 +938,12 @@ def _main(argv=None) -> int:
     logger.debug("ran %d checks", len(findings))
     logger.info("score=%s grade=%s", score.score, score.grade)
 
-    paths = _risk.risk_paths(ctx, findings)
+    # B-154: RISK-* chains must honor .clawseccheckignore too — pass the same
+    # ignore set findings were suppressed with, then drop suppressed chains
+    # before they reach any render/JSON path.
+    _risk_ignore = load_ignore(Path(args.home).expanduser())
+    paths = [p for p in _risk.risk_paths(ctx, findings, ignore=_risk_ignore)
+             if not p.suppressed]
 
     if args.risk_paths:
         _emit(_risk.render_risk_paths(paths, ascii_only=ascii_only))
@@ -997,7 +1022,7 @@ def _main(argv=None) -> int:
         return 0
 
     if args.behavioral is not None:
-        record_run("behavioral")
+        _record_run("behavioral", args)
         _emit(render_behavioral_analysis(
             ctx, explicit_path=args.behavioral or None, ascii_only=ascii_only))
         return 0
@@ -1077,7 +1102,7 @@ def _main(argv=None) -> int:
             _emit(f"SELF-TEST: 1 canary + {n_rt} red-team + {n_dr} dry-run + {n_mt} multi-turn "
                   "injection scenario(s) generated — run them against your agent "
                   "(RESISTANT = good). Full harness: --self-test.")
-            record_run("self_test")
+            _record_run("self_test", args)
             vm_findings = vet_mcp(target=None, home=args.home)
             vm_has_fail = any(vmf.status == "FAIL" for vmf in vm_findings)
             if len(vm_findings) == 1 and vm_findings[0].status == "UNKNOWN":
@@ -1090,7 +1115,7 @@ def _main(argv=None) -> int:
                 if _vc["UNKNOWN"]:
                     _summary += f", {_vc['UNKNOWN']} UNKNOWN"
                 _emit(_summary + ". Full detail: --vet-mcp.")
-            record_run("vet_mcp")
+            _record_run("vet_mcp", args)
         else:
             # --- Self-test section (canary + red-team + dry-run) ---
             _emit("")
@@ -1104,7 +1129,7 @@ def _main(argv=None) -> int:
             _emit(render_dryrun(make_scenarios(), ascii_only))
             _emit("")
             _emit(render_multiturn(make_multiturn(), ascii_only))
-            record_run("self_test")
+            _record_run("self_test", args)
             # --- vet-mcp section ---
             _emit("")
             _emit("=" * 60)
@@ -1126,7 +1151,7 @@ def _main(argv=None) -> int:
                             _emit(f"    - {_sanitize(vm_ev)}")
                     _emit(f"    fix: {_sanitize(vmf.fix)}")
                     _emit("")
-            record_run("vet_mcp")
+            _record_run("vet_mcp", args)
 
     _save_failed = False
     if args.save:

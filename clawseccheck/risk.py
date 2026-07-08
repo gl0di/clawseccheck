@@ -35,6 +35,10 @@ class RiskPath:
     chain: list[str]  # ordered steps, rendered as A -> B -> C
     why: str          # plain-language explanation
     fix: str          # remediation guidance
+    # B-154: mirrors Finding.suppressed — set when this RISK-id is listed in
+    # .clawseccheckignore. Kept in the returned list (same pattern as findings)
+    # so --show-suppressed can surface it; report/json renderers must filter it out.
+    suppressed: bool = False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -933,12 +937,23 @@ def _rule_persistent_foothold(ctx: Context, findings: list[Finding],
     )
 
 
-def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
+def risk_paths(ctx: Context, findings: list[Finding],
+                ignore: set[str] | None = None) -> list[RiskPath]:
     """Compute dangerous capability chains from config + existing findings.
 
     Returns [] when no chains are detected. Each rule fires only on POSITIVE
     evidence for every link — no chain is invented from absent data.
     Deduplicated by id; sorted by severity (CRITICAL first).
+
+    `ignore` is the parsed `.clawseccheckignore` entry set (see baseline.py). A
+    RiskPath whose id (e.g. "RISK-03") appears in `ignore` is marked
+    `suppressed = True` but still RETURNED — same pattern as
+    `baseline.apply()` on regular findings, so `--show-suppressed` can list it.
+    Callers that render the report/JSON must filter `not p.suppressed`
+    themselves (B-154: suppression here requires the RISK-id to be listed
+    explicitly; suppressing an underlying check alone does not silently
+    suppress the derived chain, since most chains read raw config directly
+    rather than a single finding's status).
     """
     cfg = ctx.config
     tools = _enabled_tools(cfg)
@@ -1027,6 +1042,13 @@ def risk_paths(ctx: Context, findings: list[Finding]) -> list[RiskPath]:
 
     # Sort by severity
     unique.sort(key=lambda p: _SEV_ORDER.get(p.severity, 9))
+
+    # B-154: mark (don't drop) RISK-ids explicitly listed in .clawseccheckignore.
+    if ignore:
+        for p in unique:
+            if p.id in ignore:
+                p.suppressed = True
+
     return unique
 
 

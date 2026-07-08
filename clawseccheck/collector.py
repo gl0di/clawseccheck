@@ -54,6 +54,15 @@ _ARCHIVE_MAX_FILE_BYTES = _MAX_FILE_BYTES
 _ARCHIVE_MAX_TOTAL_BYTES = 20_000_000
 _ARCHIVE_MAX_EXPANSION_RATIO = 100
 
+# B-153: openclaw.json is user/agent-authored structured config (MCP server lists,
+# capability grants, agent definitions, …) rather than a skill payload, so it gets its
+# OWN — slightly larger — cap instead of reusing _MAX_FILE_BYTES verbatim: a real config
+# with many servers/agents can legitimately run a few hundred KB larger than a single
+# skill file, and the read happens exactly ONCE per audit (unlike per-skill-file reads),
+# so a larger single cap doesn't reopen the memory-scaling hole B-153 closes. Still
+# bounded — a 500MB config caps at 5MB read, not unbounded RSS growth.
+_MAX_CONFIG_BYTES = 5_000_000
+
 # B-111: an archive member name is attacker-controlled and NOT OS-length-limited (unlike a
 # real filesystem path) — a crafted zip/tar entry can carry a multi-KB name. It flows
 # uncapped into ctx.limit_hits / ctx.path_traversal_violations / ctx.file_manifest keys,
@@ -973,20 +982,43 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     ctx.config_found = cfg_path.is_file()
     if cfg_path.is_file():
         try:
-            parsed = _loads_tolerant(cfg_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            ctx.errors.append(f"could not parse {cfg_path}: {exc}")
-        except RecursionError:
-            ctx.errors.append(f"could not parse {cfg_path}: nesting too deep")
+            # B-153: stream-read with the same over-allocation-free cap used for
+            # bootstrap/skill files — a huge/padded openclaw.json must not load whole
+            # into memory (memory DoS). A truncated read is NOT fed to the JSON parser
+            # (partial JSON would either raise a confusing parse error or, worse, parse
+            # into a truncated-but-valid-looking dict); instead it surfaces a limit_hit
+            # + error so downstream checks see ctx.config as unset (UNKNOWN), same as
+            # any other unparsable config.
+            with open(cfg_path, "rb") as fp:
+                raw, truncated = _read_with_limit(fp, _MAX_CONFIG_BYTES)
+        except OSError as exc:
+            ctx.errors.append(f"could not read {cfg_path}: {exc}")
         else:
-            if isinstance(parsed, dict):
-                ctx.config = parsed
-                ctx.config_mode = cfg_path.stat().st_mode & 0o777
-            else:
+            if truncated:
+                ctx.limit_hits.append(
+                    f"config file '{cfg_path.name}' exceeded the "
+                    f"{_MAX_CONFIG_BYTES // 1_000_000}MB cap — content beyond the cap "
+                    "was NOT read or parsed")
                 ctx.errors.append(
-                    f"malformed {cfg_path}: expected a JSON object, "
-                    f"got {type(parsed).__name__}"
+                    f"could not parse {cfg_path}: exceeds "
+                    f"{_MAX_CONFIG_BYTES // 1_000_000}MB cap"
                 )
+            else:
+                try:
+                    parsed = _loads_tolerant(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    ctx.errors.append(f"could not parse {cfg_path}: {exc}")
+                except RecursionError:
+                    ctx.errors.append(f"could not parse {cfg_path}: nesting too deep")
+                else:
+                    if isinstance(parsed, dict):
+                        ctx.config = parsed
+                        ctx.config_mode = cfg_path.stat().st_mode & 0o777
+                    else:
+                        ctx.errors.append(
+                            f"malformed {cfg_path}: expected a JSON object, "
+                            f"got {type(parsed).__name__}"
+                        )
     else:
         ctx.errors.append(f"config not found: {cfg_path}")
 

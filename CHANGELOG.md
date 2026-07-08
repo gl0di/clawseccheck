@@ -3,6 +3,34 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.27.0] — 2026-07-08
+
+R15 — suppression and local-state contract integrity: three cases where the tool
+didn't honor its own documented guarantees around `.clawseccheckignore`,
+`--no-history`, and bounded reads.
+
+### Fixed
+- **RISK-* combinational findings are now suppressible.** `.clawseccheckignore`
+  can now list a RISK-id directly (e.g. `RISK-03`) to remove it from the active
+  report, `--json`'s `risk_paths`, and have it listed under `--show-suppressed` —
+  previously RISK-* chains ignored suppression entirely and always printed in
+  full, even when their underlying finding was correctly suppressed. Suppressing
+  the underlying check alone does NOT implicitly suppress the derived chain —
+  the RISK-id must be listed explicitly (documented in `baseline.py`).
+- **`--no-history` now actually stops all local-state writes.** Previously it
+  only gated the audit-trend history file — the separate coverage ledger
+  (`~/.clawseccheck/coverage.json`) was written unconditionally by every
+  capability (`--vet*`, `--self-test`, `--redteam`, `--behavioral`, etc.),
+  breaking the one flag meant to guarantee a read-only, isolated run.
+- **Config reads are now bounded.** `collect()` previously read `openclaw.json`
+  with no size cap while every other input surface in the collector already
+  was — an oversized/corrupted config could scale memory use unboundedly
+  (500MB config → ~1GB peak RSS, measured). Now capped at 5MB with graceful
+  degradation to UNKNOWN (a `limit_hits` note), never a partial/garbled parse.
+
+### Changed
+- _TODO_
+
 ## [3.26.0] — 2026-07-08
 
 R14 — detection engine precision: four cases where the taint simulator, RISK

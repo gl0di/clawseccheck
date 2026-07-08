@@ -19,6 +19,7 @@ from clawseccheck.collector import (
     Context,
     _MAX_FILES_PER_SKILL,
     _MAX_FILE_BYTES,
+    _MAX_CONFIG_BYTES,
     _read_installed_skills,
     _read_skill_text,
     collect,
@@ -233,6 +234,51 @@ def test_dict_config_still_parses(tmp_path):
 
     assert ctx.config == {"gateway": {}}
     assert not any("expected a JSON object" in e for e in ctx.errors)
+
+
+# ---------------------------------------------------------------------------
+# B-153 — openclaw.json read must be capped like every other input surface
+# ---------------------------------------------------------------------------
+
+def test_oversized_config_degrades_gracefully_not_unbounded(tmp_path):
+    """A config padded past _MAX_CONFIG_BYTES must be capped, not loaded whole.
+
+    Pre-fix, collect() did an unconditional cfg_path.read_text() with no cap,
+    scaling memory with the file size. Post-fix it must record a limit_hit +
+    error and leave ctx.config == {} (UNKNOWN to downstream checks) instead of
+    attempting to parse truncated JSON.
+    """
+    padding = "x" * (_MAX_CONFIG_BYTES + 1000)
+    body = '{"gateway": {}, "padding": "' + padding + '"}'
+    (tmp_path / "openclaw.json").write_text(body, encoding="utf-8")
+
+    ctx = collect(tmp_path)  # must not raise, must not read the whole file
+
+    assert ctx.config == {}, "an oversized config must not be parsed at all"
+    assert ctx.config_mode is None
+    assert any(
+        "exceeded the" in h and "MB cap" in h for h in ctx.limit_hits
+    ), f"expected a limit_hits note about the config cap, got {ctx.limit_hits}"
+    assert any(
+        "could not parse" in e and "cap" in e for e in ctx.errors
+    ), f"expected a could-not-parse cap note, got {ctx.errors}"
+
+
+def test_ordinary_config_well_under_cap_parses_normally(tmp_path):
+    """Regression: a normal-sized real-shaped config still parses fine."""
+    (tmp_path / "openclaw.json").write_text(
+        '{"gateway": {}, "mcp": {"servers": {"example": {"command": "foo"}}}}',
+        encoding="utf-8",
+    )
+
+    ctx = collect(tmp_path)
+
+    assert ctx.config == {
+        "gateway": {},
+        "mcp": {"servers": {"example": {"command": "foo"}}},
+    }
+    assert not ctx.limit_hits
+    assert not any("could not parse" in e for e in ctx.errors)
 
 
 def test_full_audit_on_non_dict_config_does_not_crash(tmp_path):

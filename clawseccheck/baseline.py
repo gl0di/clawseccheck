@@ -3,6 +3,13 @@
 Entries are either a bare check id (e.g. ``B14``) or a full fingerprint
 (e.g. ``B14:ab12cd34``).  Suppressed findings are excluded from the score,
 the report, and the monitor snapshot.
+
+A bare entry may also be a RISK-* id (e.g. ``RISK-03``): those are matched
+directly against ``risk.RiskPath.id`` by ``risk.risk_paths(..., ignore=...)``,
+not by this module — RiskPath objects are not part of the ``findings`` list
+``apply()`` filters. Suppressing a RISK-id requires listing that RISK-id
+explicitly; suppressing only the underlying check(s) does not implicitly
+suppress a chain derived from it (see B-154).
 """
 from __future__ import annotations
 

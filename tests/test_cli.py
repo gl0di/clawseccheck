@@ -124,7 +124,7 @@ def test_cli_ctx_errors_are_sanitized(monkeypatch, tmp_path, capsys):
     fake_score = ScoreResult(0, "F", False, 0, 0, 0, assessable=False)
 
     monkeypatch.setattr("clawseccheck.cli.audit", lambda *_args, **_kwargs: (fake_ctx, [], fake_score))
-    monkeypatch.setattr("clawseccheck.cli._risk.risk_paths", lambda _ctx, _findings: [])
+    monkeypatch.setattr("clawseccheck.cli._risk.risk_paths", lambda _ctx, _findings, **_kw: [])
     monkeypatch.setattr("clawseccheck.cli.render_next_actions", lambda *_args, **_kwargs: "")
     monkeypatch.setattr("clawseccheck.cli.render_card", lambda *_args, **_kwargs: "")
 
