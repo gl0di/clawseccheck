@@ -216,9 +216,10 @@ After the user chooses (or says "check" / "go"), proceed to Step 2.
 come back assessed instead of UNKNOWN — this used to be a separate post-scan "deeper" pick; now it's
 folded into the single scan itself (F-043). Run the interrogation protocol documented in full under
 Step 5 "Choice: deeper / capability check": answer your own tool/verb inventory, `approval_gates`,
-and `untrusted_to_action` from your own runtime (you already know these), ask the user only the one
-`host_monitors` question you can't see yourself, then assemble and feed the attestation in the SAME
-turn as the scan — one interaction, not two:
+and `untrusted_to_action` from your own runtime (you already know these), self-probe
+`host_monitors` with your own shell access and fall back to asking the user only if the probe is
+inconclusive, then assemble and feed the attestation in the SAME turn as the scan — one
+interaction, not two:
 
 ```
 python3 {baseDir}/audit.py --full --attest <path-or- ->
@@ -231,8 +232,9 @@ that text is **not** the chat deliverable and must never be relayed, quoted, or 
 conversation. The **only** chat-visible artifact in this flow is the `--dashboard` card built in
 Step 3 below — always run that separately and paste *its* output instead.
 
-If the user doesn't know the `host_monitors` answer, leave it `unknown` — never invent one — and
-proceed with the scan anyway; an unanswered field just means that one sub-check stays UNKNOWN.
+If the self-probe is inconclusive and the user doesn't know the `host_monitors` answer either,
+leave it `unknown` — never invent one — and proceed with the scan anyway; an unanswered field just
+means that one sub-check stays UNKNOWN.
 
 **For any other item**, run the flag for that mode directly — no self-report needed. Pick the right
 interpreter for the OS:
@@ -560,10 +562,22 @@ For **approval_gates** — answer this yourself:
 For **untrusted_to_action** — answer this yourself:
 > Combine: do you have any channel with open/allowlist/paired dmPolicy or groupPolicy (external ingress exists)? AND do you have outbound tools (email, webhook, exec, deploy, etc.) without an approval gate? If both → `ungated`. If approval gate present → `gated`.
 
-For **host_monitors** — ask the user (they know, you can't see):
-> "Is there any security monitoring on this machine that a file scan wouldn't see — a work EDR agent, a network IDS on the gateway?" → `host_monitors`
+For **host_monitors** — try to answer it yourself first with a bounded, read-only probe using
+your own shell access (ClawSecCheck itself stays subprocess-free — this probe is *your* action,
+fed back through `--attest`, not the engine's). Look for common EDR/IDS/telemetry process,
+service, or module names:
+> - `systemctl list-units --type=service --state=running 2>/dev/null | grep -iE 'falcon|crowdstrike|sentinel|carbonblack|cbagent|cortex|defender|mdatp|auditd|ossec|wazuh|suricata|snort|zeek|clamav|osquery|tetragon|falco'`
+> - `ps -eo comm 2>/dev/null | grep -iE '<same list>'`
+> - `lsmod 2>/dev/null | grep -iE 'falcon|tetragon|<same list>'` (loaded EDR/telemetry kernel modules)
+> - (macOS) `launchctl list | grep -iE '<same list>'`
 
-If the user doesn't know, leave the field `unknown` — never invent an answer.
+If the probe runs and finds one or more matches, set `host_monitors` to the matched name(s). If it
+runs clean (no matches), set `host_monitors` to `[]` — a probed "none found" is a real, agent-
+verified answer, not a guess. Only fall back to asking the user — "Is there any security
+monitoring on this machine that a file scan wouldn't see — a work EDR agent, a network IDS on the
+gateway?" → `host_monitors` — when you have no shell access or the probe errors out.
+
+If neither the probe nor the user can answer, leave the field `unknown` — never invent an answer.
 
 **Step 3b — tell the audit WHERE your files are (you can see the filesystem; the static scan
 can't guess).** Fill `paths` so the permission checks (B20 / C5) cover your real layout:
