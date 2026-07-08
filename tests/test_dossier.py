@@ -15,8 +15,10 @@ from pathlib import Path
 
 import pytest
 
+import json
+
 from clawseccheck.catalog import FAIL, MEDIUM, PASS, UNKNOWN, WARN, Finding
-from clawseccheck.checks import SKILL_CONTENT_RING, vet_mcp, vet_skill
+from clawseccheck.checks import SKILL_CONTENT_RING, vet_mcp, vet_plugin, vet_skill
 from clawseccheck.collector import Context
 from clawseccheck.dossier import AXES, NA, axis_for, build_profile
 
@@ -199,4 +201,54 @@ def test_na_axes_excluded_from_grade_denominator():
     mcp_f = Finding("MCP-VET", "mcp", MEDIUM, PASS, "clean", "-", "MCP")
     p = build_profile([mcp_f], "srv", "mcp")
     assert any(a.axis == "persistence" and a.status == NA for a in p.axes)
+    assert p.overall_grade == "A"
+
+
+# ---------------------------------------------------------------------------
+# B-149: PLUGIN-VET's own container-native signal (manifest sanity / npm
+# lifecycle scripts / floating deps / skills-entry escape) must reach an axis
+# via .axis_reasons, not be silently dropped as "decomposed into sub-findings"
+# when there ARE no dispatched sub-findings carrying it.
+# ---------------------------------------------------------------------------
+
+def _plugin(tmp_path, manifest=None, pkg=None):
+    root = tmp_path / "plug"
+    root.mkdir()
+    (root / "openclaw.plugin.json").write_text(
+        json.dumps(manifest or {"id": "demo",
+                                 "configSchema": {"type": "object",
+                                                   "additionalProperties": False}}),
+        encoding="utf-8",
+    )
+    if pkg is not None:
+        (root / "package.json").write_text(json.dumps(pkg), encoding="utf-8")
+    return root
+
+
+def test_plugin_lifecycle_script_routes_to_build_not_dropped(tmp_path):
+    """B-149 regression: a bundled npm postinstall script (no bundled skills, no
+    embedded MCP spec — so PLUGIN-VET carries the ONLY signal, nothing rides on
+    .ring_findings) must still land on the Build axis and floor the grade below A,
+    not vanish into 'container aggregate, drop it'."""
+    root = _plugin(tmp_path, pkg={"name": "x", "scripts": {"postinstall": "node steal.js"}})
+    f = vet_plugin(root)
+    assert f.status == WARN and not f.ring_findings  # precondition: no dispatched subs
+    p = build_profile(f, str(root), "plugin")
+    build = next(a for a in p.axes if a.axis == "build")
+    assert build.status == WARN
+    assert "postinstall" in build.reason
+    assert p.overall_status == WARN
+    assert p.overall_grade != "A"
+    assert not p.unmapped  # not silently swallowed as a coverage gap either
+
+
+def test_plugin_clean_manifest_still_grades_a(tmp_path):
+    """Regression guard: a clean plugin (no container-native signal at all) must still
+    grade A / SAFE after the B-149 routing fix — no spurious Build WARN introduced."""
+    root = _plugin(tmp_path)
+    f = vet_plugin(root)
+    assert f.status == PASS
+    p = build_profile(f, str(root), "plugin")
+    build = next(a for a in p.axes if a.axis == "build")
+    assert build.status == PASS
     assert p.overall_grade == "A"

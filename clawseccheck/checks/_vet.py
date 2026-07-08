@@ -1721,16 +1721,30 @@ def vet_skill(path: str | Path) -> Finding:
         shell_sources = read_skill_shell(p, ctx)
         js_sources = read_skill_js(p, ctx)
     elif p.is_file():
+        # B-152: route a bare file target through the SAME archive-aware collection
+        # the directory branch above uses (collect_skill_files -> decompress_and_
+        # classify), instead of raw-reading its bytes as text. Previously a bare
+        # .tar.gz/.zip skill archive passed straight to --vet/--vet-skill never got
+        # decompressed here — its compressed bytes were garbled through
+        # errors="replace" and classified purely by (non-matching) suffix, so
+        # malware inside was never seen. collect_skill_files (and therefore
+        # _read_skill_text/read_skill_python/read_skill_shell/read_skill_js, which
+        # all call it) now handles a file input by decompressing it exactly like an
+        # archive found while walking a skill dir, with the same traversal/ratio/
+        # file-count/size caps — degrading to UNKNOWN via ctx.limit_hits, never a
+        # guessed PASS, when a cap is hit.
         try:
-            text = p.read_text(encoding="utf-8", errors="replace")
+            with open(p, "rb"):
+                pass
         except OSError as exc:
             finding = _custom("B13", HIGH, UNKNOWN, f"could not read {p}: {exc}", "—")
             finding.ctx = ctx
             return finding
         name = p.parent.name or p.stem
-        py_sources = [(p.name, text)] if p.suffix == ".py" else []
-        shell_sources = [(p.name, text)] if p.suffix in (".sh", ".bash", ".zsh") else []
-        js_sources = [(p.name, text)] if p.suffix in (".js", ".ts", ".mjs", ".cjs") else []
+        text = _read_skill_text(p, ctx)
+        py_sources = read_skill_python(p, ctx)
+        shell_sources = read_skill_shell(p, ctx)
+        js_sources = read_skill_js(p, ctx)
     else:
         finding = _custom(
             "B13",

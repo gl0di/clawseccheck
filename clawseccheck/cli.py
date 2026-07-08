@@ -23,6 +23,7 @@ from . import (
     detect_vet_type, vet_mcp, vet_plugin, vet_skill, vet_source,
 )
 from . import __released__, __version__
+from .collector import SKILL_DIRS
 from .update import update_notice
 from .ledger import freshness_notice as _compute_freshness, load_ledger, record_run
 from . import risk as _risk
@@ -91,28 +92,48 @@ _VET_VERDICT: dict[str, str] = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS
 
 
 def vet_all(home_dir: Path, ascii_only: bool = False) -> int:
-    """Vet every installed skill under home_dir/skills/.
+    """Vet every installed skill discovered under any of collector.SKILL_DIRS.
 
-    Finds all subdirectories of home_dir/skills/ that contain a SKILL.md file,
-    runs vet_skill on each, prints per-skill verdicts and an aggregate summary
-    table, then returns 0 if all findings are PASS/UNKNOWN, or 1 if any WARN/FAIL.
+    Mirrors the real OpenClaw skill-discovery locations the full audit engine
+    already uses (skills/, workspace/skills/, workspace-home/skills/,
+    workspace-work/skills/, .agents/skills/ — see collector.SKILL_DIRS), not
+    just the single legacy home_dir/skills/ path (B-147). Finds all
+    subdirectories across those roots that contain a SKILL.md file, dedups by
+    resolved path, runs vet_skill on each, prints per-skill verdicts and an
+    aggregate summary table, then returns 0 if all findings are PASS/UNKNOWN,
+    or 1 if any WARN/FAIL.
     """
-    skills_dir = home_dir / "skills"
-    if not skills_dir.exists():
-        _emit(f"No skills directory found at {skills_dir}")
-        return 0
-
     skill_paths: list[Path] = []
-    try:
-        for entry in sorted(skills_dir.iterdir()):
-            if entry.is_dir() and (entry / "SKILL.md").exists():
+    seen: set[Path] = set()
+    checked_dirs: list[Path] = []
+    for rel in SKILL_DIRS:
+        skills_dir = home_dir / rel
+        try:
+            if not skills_dir.is_dir():
+                continue
+            checked_dirs.append(skills_dir)
+            for entry in sorted(skills_dir.iterdir()):
+                if not (entry.is_dir() and (entry / "SKILL.md").exists()):
+                    continue
+                try:
+                    resolved = entry.resolve()
+                except OSError:
+                    resolved = entry
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
                 skill_paths.append(entry)
-    except PermissionError as exc:
-        _emit(f"(could not read skills directory: {exc})")
+        except PermissionError as exc:
+            _emit(f"(could not read skills directory {skills_dir}: {exc})")
+            continue
+
+    if not checked_dirs:
+        _emit(f"No skills directory found under {home_dir}")
         return 0
 
     if not skill_paths:
-        _emit(f"No skills found under {skills_dir}")
+        dirs_str = ", ".join(str(d) for d in checked_dirs)
+        _emit(f"No skills found under {dirs_str}")
         return 0
 
     _ASCII = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}

@@ -147,3 +147,73 @@ def test_cli_vet_all_skips_dir_without_skillmd(tmp_path, capsys):
 
     assert "has_md" in out
     assert "no_md" not in out
+
+
+# ---------------------------------------------------------------------------
+# B-147: discovery across all of collector.SKILL_DIRS, not just home/skills/
+# ---------------------------------------------------------------------------
+
+def _make_skill_under(base: Path, rel_dir: str, name: str, content: str = _CLEAN_MD) -> Path:
+    """Create a skill directory with a SKILL.md under base/<rel_dir>/<name>."""
+    skill_dir = base / rel_dir / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+    return skill_dir
+
+
+def test_vet_all_finds_skills_under_workspace_skills_only(tmp_path, capsys):
+    """B-147: a skill installed only under workspace/skills/ (the real common
+    OpenClaw location — no legacy home/skills/ dir at all) must still be found
+    and vetted; previously vet_all() hardcoded home/skills/ and would report
+    'no skills directory found', vetting zero skills."""
+    _make_skill_under(tmp_path, "workspace/skills", "ws_only_skill")
+    assert not (tmp_path / "skills").exists()
+
+    rc = vet_all(tmp_path, ascii_only=True)
+    out = capsys.readouterr().out
+
+    assert "ws_only_skill" in out
+    assert "Aggregate summary" in out
+    assert rc == 0
+
+
+def test_vet_all_still_finds_legacy_home_skills(tmp_path, capsys):
+    """Regression: the original home/skills/ path must still be discovered
+    alongside the newer SKILL_DIRS locations."""
+    _make_skill(tmp_path, "legacy_skill")
+
+    vet_all(tmp_path, ascii_only=True)
+    out = capsys.readouterr().out
+
+    assert "legacy_skill" in out
+
+
+def test_vet_all_finds_skills_across_multiple_skill_dirs(tmp_path, capsys):
+    """Skills spread across two different SKILL_DIRS entries are all found and
+    vetted in a single --vet-all run."""
+    _make_skill(tmp_path, "legacy_skill")
+    _make_skill_under(tmp_path, "workspace/skills", "ws_skill")
+    _make_skill_under(tmp_path, ".agents/skills", "agents_skill")
+
+    vet_all(tmp_path, ascii_only=True)
+    out = capsys.readouterr().out
+
+    assert "legacy_skill" in out
+    assert "ws_skill" in out
+    assert "agents_skill" in out
+    assert "3 skill(s) checked" in out
+
+
+def test_vet_all_dedups_same_skill_reachable_via_two_skill_dirs(tmp_path, capsys):
+    """If two SKILL_DIRS entries resolve to the same on-disk skill (e.g. one is
+    a symlinked alias of the other), it must be vetted once, not twice."""
+    _make_skill_under(tmp_path, "workspace/skills", "shared_skill")
+    # home/skills is a symlink alias of home/workspace/skills, so the same
+    # skill directory is reachable via two different SKILL_DIRS entries.
+    (tmp_path / "skills").symlink_to(tmp_path / "workspace" / "skills")
+
+    vet_all(tmp_path, ascii_only=True)
+    out = capsys.readouterr().out
+
+    assert out.count("=== shared_skill ===") == 1
+    assert "1 skill(s) checked" in out

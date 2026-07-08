@@ -3,6 +3,33 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.25.0] — 2026-07-08
+
+R13 — vet-surface false negatives: three cases where `--vet*` either missed real
+malware or silently dropped a real signal from the human-facing verdict.
+
+### Fixed
+- **`--vet`/`--vet-skill` on a bare skill archive** (`.tar.gz`/`.zip`) now decompresses
+  and classifies its contents instead of scanning garbled raw bytes — a malicious
+  archive downloaded before install now correctly fails instead of reporting a false
+  SAFE/SUSPICIOUS. `collector.collect_skill_files()` now accepts a single file (not
+  only a directory), so the single-file vet path reuses the same archive-aware,
+  cap-enforced collection the directory-walk path already had.
+- **`--vet-all` now discovers skills under every real OpenClaw skill location**
+  (`workspace/skills`, `workspace-home/skills`, `workspace-work/skills`,
+  `.agents/skills`), not just a hardcoded `~/.openclaw/skills`. Previously it silently
+  vetted zero skills (exit 0) on a stock install where skills live under
+  `workspace/skills` — the tool's own coverage blind spot. Dedupes by resolved path.
+- **`--vet-plugin`'s container-native findings** (npm postinstall/lifecycle scripts,
+  floating dependency versions, manifest-path escape, native-executable stowaways) no
+  longer get silently dropped from the grade/verdict rollup — they now route to the
+  Build axis, matching the existing MCP container/sub-finding split. Previously a
+  plugin declaring a postinstall script showed a clean Grade A/SAFE in the CLI text
+  dossier despite the raw `--json` finding correctly flagging it.
+
+### Changed
+- _TODO_
+
 ## [3.24.0] — 2026-07-08
 
 A new capability, not a check-count bump: the behavioral trajectory audit (E-032 v1,

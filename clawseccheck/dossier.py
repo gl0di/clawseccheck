@@ -218,15 +218,21 @@ def _normalize_pool(engine_output) -> list:
     return [primary, *getattr(primary, "ring_findings", [])]
 
 
-def _route_mcp_finding(f, buckets: dict) -> None:
-    """Route an MCP-VET verdict into axes.
+def _route_axis_reasons(f, buckets: dict, *, fallback_axis: str | None) -> bool:
+    """Route a multi-reason verdict into axes via its own `.axis_reasons`.
 
-    The MCP engine tags `.axis_reasons` as ``{axis: [[status, reason], ...]}``; each axis
-    gets a view of the finding with only its reasons and its own worst severity — so an
-    unpinned spec lands under Build (WARN) while a wildcard-env passthrough lands under
-    Connections, instead of everything reading as Danger. With no reasons (a clean or
-    unparseable verdict) the whole finding stays on danger — conservative, never falsely
-    clean.
+    Shared by MCP-VET (vet_mcp) and PLUGIN-VET (vet_plugin): both tag `.axis_reasons` as
+    ``{axis: [[status, reason], ...]}``; each axis gets a view of the finding with only
+    its reasons and its own worst severity — so e.g. an unpinned MCP spec lands under
+    Build (WARN) while a wildcard-env passthrough lands under Connections, instead of
+    everything reading as Danger. Returns whether anything was routed.
+
+    `fallback_axis`: when no reasons were routed, bucket the whole finding there instead
+    (conservative, never falsely clean) — MCP-VET falls back to "danger" (a clean or
+    unparseable verdict still carries real signal). PLUGIN-VET passes ``None``: an empty
+    `.axis_reasons` there means the container carried no signal of its own beyond its
+    already-flattened, already-bucketed dispatched sub-findings (B-149), so it is simply
+    dropped, same as before this routing existed.
     """
     reasons = getattr(f, "axis_reasons", None) or {}
     routed = False
@@ -237,8 +243,9 @@ def _route_mcp_finding(f, buckets: dict) -> None:
         detail = "; ".join(str(e[1]) for e in entries)
         buckets[axis].append(dc_replace(f, status=worst, detail=detail))
         routed = True
-    if not routed:
-        buckets["danger"].append(f)
+    if not routed and fallback_axis is not None:
+        buckets[fallback_axis].append(f)
+    return routed
 
 
 def _skill_capabilities(ctx) -> tuple[bool, set]:
@@ -312,13 +319,18 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
             buckets[ax].append(f)
         elif f.id == "PLUGIN-VET":
             # Container aggregate: its dispatched sub-findings ride on .ring_findings and
-            # are already flattened into the pool, so they bucket on their own.
-            continue
+            # are already flattened into the pool, so they bucket on their own. The
+            # container's OWN signal (manifest sanity / npm lifecycle scripts / floating
+            # deps / skills-entry escape / native stowaways — B-149) is never carried by a
+            # sub-finding, so it rides on .axis_reasons instead and is routed here; no
+            # fallback bucket when empty, since an empty .axis_reasons means the container
+            # itself found nothing beyond what its sub-findings already bucketed.
+            _route_axis_reasons(f, buckets, fallback_axis=None)
         elif f.id == "MCP-VET":
             # Per-reason routing (danger/build/behavior/connections) is populated on
             # .axis_reasons by the MCP engine; until then, keep the whole verdict on the
             # danger axis so a dangerous server can never read as falsely clean.
-            _route_mcp_finding(f, buckets)
+            _route_axis_reasons(f, buckets, fallback_axis="danger")
         else:
             # A real finding that maps nowhere is a coverage gap we surface, never swallow.
             unmapped.append(f.id)

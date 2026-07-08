@@ -356,6 +356,16 @@ def vet_plugin(path: str | Path) -> Finding:
             evidence,
         )
     finding.ring_findings = actionable
+    if warns:
+        # Container-native signals (manifest sanity, npm lifecycle scripts, floating
+        # dependency versions, skills-entry path escape, native-executable stowaways)
+        # are folded straight into this PLUGIN-VET finding's own status/detail — they
+        # never ride on a dispatched sub-finding, so ring_findings alone would silently
+        # drop them from the risk dossier (B-149). Tag them for the Build axis the same
+        # way vet_mcp() tags MCP-VET via axis_reasons; each item is always WARN-severity
+        # (rank 2) regardless of whether a dispatched sub-finding pushed the overall
+        # status further to FAIL.
+        finding.axis_reasons = {"build": [[WARN, w] for w in warns]}
     return finding
 
 

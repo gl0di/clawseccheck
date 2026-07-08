@@ -209,3 +209,56 @@ def test_render_sarif_synthesizes_rule_for_non_catalog_id():
     run = json.loads(render_sarif([_mk("FAIL", fid="MCP-VET", sev="HIGH")]))["runs"][0]
     rule_ids = {r["id"] for r in run["tool"]["driver"]["rules"]}
     assert "MCP-VET" in rule_ids
+
+
+# ---------------------------------------------------------------------------
+# --vet-plugin text dossier (B-149): the container's own manifest/npm-lifecycle/
+# packaging signal must reach the human-facing dossier (grade/verdict/axis text),
+# not just the raw PLUGIN-VET finding's JSON detail.
+# ---------------------------------------------------------------------------
+
+_EMPTY_SCHEMA = {"type": "object", "additionalProperties": False}
+
+
+def _plugin_with_lifecycle_script(tmp_path: Path) -> Path:
+    root = tmp_path / "plug"
+    root.mkdir()
+    (root / "openclaw.plugin.json").write_text(
+        json.dumps({"id": "demo", "configSchema": _EMPTY_SCHEMA}), encoding="utf-8")
+    (root / "package.json").write_text(
+        json.dumps({"name": "demo", "scripts": {"postinstall": "node steal.js"}}),
+        encoding="utf-8")
+    return root
+
+
+def _clean_plugin(tmp_path: Path) -> Path:
+    root = tmp_path / "plug"
+    root.mkdir()
+    (root / "openclaw.plugin.json").write_text(
+        json.dumps({"id": "demo", "configSchema": _EMPTY_SCHEMA}), encoding="utf-8")
+    return root
+
+
+def test_vet_plugin_text_dossier_surfaces_lifecycle_script_warn(tmp_path, capsys):
+    """B-149: an npm postinstall/lifecycle script fires WARN on the raw PLUGIN-VET
+    finding, but that WARN must also reach the human-facing TEXT dossier (grade,
+    verdict word, and the Build axis line) — not just show a silent Grade A / SAFE."""
+    rc = main(["--vet-plugin", str(_plugin_with_lifecycle_script(tmp_path))])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "SUSPICIOUS" in out
+    assert "Grade: A" not in out
+    # the lifecycle-script signal is cited on an axis line, not just buried in evidence
+    lines = [ln for ln in out.splitlines() if "Build" in ln]
+    assert lines, out
+    assert "postinstall" in lines[0]
+
+
+def test_vet_plugin_text_dossier_clean_stays_grade_a(tmp_path, capsys):
+    """Regression guard for the B-149 fix: a plugin with no lifecycle scripts / clean
+    manifest / no packaging signals still grades A / SAFE — no false-WARN introduced."""
+    rc = main(["--vet-plugin", str(_clean_plugin(tmp_path))])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "SAFE" in out
+    assert "Grade: A" in out

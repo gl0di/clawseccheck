@@ -622,41 +622,57 @@ def decompress_and_classify(
 
 
 def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dict]:
+    """Collect (and archive-decompress/classify) the files that make up one skill.
+
+    B-152: *skill_dir* may also be a single **file** — e.g. a bare skill archive
+    (.zip/.tar.gz/.tgz/.tar.bz2/.tar.xz) passed directly to --vet/--vet-skill instead
+    of an installed skill directory. In that case the file itself is the sole entry
+    walked below, so it goes through the exact same archive-decompression / size-cap /
+    mismatch-polyglot bookkeeping as an archive found while walking a directory
+    (previously only reachable when the archive was *inside* a scanned skill dir).
+    """
     if ctx is not None:
         cache_key = str(skill_dir)
         cached = ctx._collected_skill_files.get(cache_key)
         if cached is not None:
             return cached
 
-    _skips: list = []
-    files = walk_dir_safely(
-        skill_dir, exclude_pycache=True, exclude_vcs=True, max_files=_MAX_FILES_PER_SKILL, skips=_skips
-    )
-    if ctx is not None and _skips:
-        # F-061: a skill shipping `data -> ~/.ssh/id_rsa` or `-> ../../openclaw.json` used to
-        # be skipped silently. Record the skip + its target so it surfaces as a WARN.
-        for spath, reason in _skips:
-            try:
-                rel = str(Path(spath).relative_to(skill_dir))
-            except (ValueError, OSError):
-                rel = spath
-            ctx.symlink_skips.append(f"{rel}: {reason}")
-            ctx.file_manifest.setdefault(rel, "skipped:" + reason.split(" ", 1)[0])
+    if skill_dir.is_file():
+        # Anchor relative paths / traversal checks on the parent dir, same as
+        # is_safe_tar_member expects a directory, never the archive file itself.
+        base_dir = skill_dir.parent
+        files = [skill_dir]
+    else:
+        base_dir = skill_dir
+        _skips: list = []
+        files = walk_dir_safely(
+            base_dir, exclude_pycache=True, exclude_vcs=True, max_files=_MAX_FILES_PER_SKILL, skips=_skips
+        )
+        if ctx is not None and _skips:
+            # F-061: a skill shipping `data -> ~/.ssh/id_rsa` or `-> ../../openclaw.json` used to
+            # be skipped silently. Record the skip + its target so it surfaces as a WARN.
+            for spath, reason in _skips:
+                try:
+                    rel = str(Path(spath).relative_to(base_dir))
+                except (ValueError, OSError):
+                    rel = spath
+                ctx.symlink_skips.append(f"{rel}: {reason}")
+                ctx.file_manifest.setdefault(rel, "skipped:" + reason.split(" ", 1)[0])
     collected = []
-    
+
     for f in files:
         if not f.is_file():
             continue
-            
+
         if ctx is not None:
             ctx.total_files_inspected += 1
-            
+
         try:
             st_size = f.stat().st_size
         except OSError:
             continue
-            
-        relpath = str(f.relative_to(skill_dir))
+
+        relpath = str(f.relative_to(base_dir))
         
         # Read the first 4096 bytes to classify
         try:
@@ -696,7 +712,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
         
         # Recursively decompress and classify
         extracted = decompress_and_classify(
-            ctx, skill_dir, file_bytes, relpath, depth=1, archive_stats=archive_stats
+            ctx, base_dir, file_bytes, relpath, depth=1, archive_stats=archive_stats
         )
         
         for sub_relpath, sub_bytes, sub_class, sub_fmt in extracted:
