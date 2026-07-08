@@ -110,6 +110,17 @@ finding in `--json` (`"ast": [...]`).
   intentionally from a naive surface mapping: B7 maps to AST05 (external instructions
   reaching memory), not AST04; B57 maps to AST02/AST03 (supply-chain + privilege),
   reflecting its dual exposure.
+- **AST01/B13's Python AST analysis is bounded by the interpreter running the audit.**
+  `ast.parse()` (`skillast.py`) uses the running interpreter's own grammar, with no
+  `feature_version` pin. A skill wrapping an obfuscated call in syntax newer than the
+  running Python (e.g. `match`/`case`, Python 3.10+) fails to parse on an older audit
+  interpreter and degrades to UNKNOWN there, though it is correctly caught as FAIL on
+  3.10+. This is a deliberate trade-off, not an oversight: pinning to the package's
+  minimum (Python 3.9+, per `pyproject.toml`) would make detection uniformly worse —
+  every interpreter, including 3.10+, would then reject that syntax too, since
+  `feature_version` can only *restrict* a parser to an older grammar, never grant an
+  older interpreter the ability to parse newer syntax it structurally lacks. Run the
+  audit on the newest available Python for maximum AST-based detection coverage.
 
 ### OWASP Agentic Security Initiative (ASI) — by threat name
 
