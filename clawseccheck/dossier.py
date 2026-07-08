@@ -279,7 +279,10 @@ def _skill_capabilities(ctx) -> tuple[bool, set]:
 
 def _reason_and_fix(bucket: list, axis: str, *, empty_reason: str) -> tuple[str, str]:
     worst = _worst(bucket)
-    if worst is not None and worst.status in (FAIL, WARN, UNKNOWN):
+    # B-160: "SKILL_ARCHIVE_PATH_TRAVERSAL" carries a real detail/fix like FAIL does —
+    # without it here the axis grades F but the rendered reason falls back to the
+    # generic "no malware signature" text instead of the actual traversal detail.
+    if worst is not None and worst.status in (FAIL, WARN, UNKNOWN, "SKILL_ARCHIVE_PATH_TRAVERSAL"):
         return (worst.detail, worst.fix)
     return (empty_reason, "")
 

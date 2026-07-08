@@ -52,6 +52,11 @@ def test_bare_archive_traversal_dossier_grade_is_f(tmp_path):
     p = build_profile(vet_skill(archive), str(archive), "skill")
     assert p.overall_status == FAIL
     assert p.overall_grade == "F"
+    danger = next(a for a in p.axes if a.axis == "danger")
+    assert danger.status == FAIL
+    # The real detail must reach the render, not the generic "no malware signature"
+    # placeholder _reason_and_fix falls back to for an unrecognized status.
+    assert "Archive path traversal detected" in danger.reason
 
 
 def test_nested_skill_with_traversal_archive_dossier_grade_is_f(tmp_path):
