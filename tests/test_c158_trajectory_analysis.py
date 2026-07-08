@@ -124,3 +124,61 @@ def test_unknown_schema_version_marks_incomplete(tmp_path):
     c.installed_skills = {"s": "read fake_secrets/db_token.txt"}
     r = analyze(c)
     assert r["present"] and r["unknown_version"] is True, r
+
+
+def test_truncation_marks_incomplete_and_a_hit_past_the_cap_is_missed(tmp_path):
+    """C-180: same truncation blind spot as behavioral.py's T1/T2 — a real
+    indicator hit placed entirely past the 8MB per-file scan cap is silently
+    missed unless the truncation itself is surfaced."""
+    from clawseccheck.trajectory import _MAX_BYTES_PER_FILE
+
+    home = tmp_path
+    sess = home / "agents" / "main" / "sessions"
+    sess.mkdir(parents=True)
+
+    def row(seq, name, args=None):
+        rec = {
+            "traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call",
+            "ts": str(seq), "seq": seq,
+            "data": {"name": name, "arguments": args or {}},
+        }
+        return json.dumps(rec) + "\n"
+
+    path = sess / "s.trajectory.jsonl"
+    with path.open("w", encoding="utf-8") as fh:
+        seq = 1
+        written = 0
+        while written < _MAX_BYTES_PER_FILE + 100_000:
+            r = row(seq, "list_files")
+            fh.write(r)
+            written += len(r)
+            seq += 1
+        # real indicator hit, placed entirely past the byte cap
+        fh.write(row(seq, "bash", {"cmd": "cat fake_secrets/db_token.txt"}))
+
+    c = Context(home=home)
+    c.config = {}
+    c.bootstrap = {}
+    c.installed_skills = {"s": "read fake_secrets/db_token.txt"}
+    r = analyze(c)
+    assert r["truncated"] is True
+    # confirms the signal really was missed — the bug this caveat discloses.
+    assert r["hits"] == []
+
+    out = render_trajectory_analysis(c)
+    assert "INCOMPLETE" in out and "scan cap" in out
+
+
+def test_no_truncation_on_small_file(tmp_path):
+    home = tmp_path
+    sess = home / "agents" / "main" / "sessions"
+    sess.mkdir(parents=True)
+    line = json.dumps({"traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                       "type": "tool.call", "data": {"name": "bash", "arguments": {}}})
+    (sess / "s.trajectory.jsonl").write_text(line + "\n", encoding="utf-8")
+    c = Context(home=home)
+    c.config = {}
+    c.bootstrap = {}
+    c.installed_skills = {}
+    r = analyze(c)
+    assert r["truncated"] is False

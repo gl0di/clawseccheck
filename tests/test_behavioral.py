@@ -120,6 +120,44 @@ def test_group_scoped_by_session_never_merges_unrelated_sessions():
     assert f.status == PASS
 
 
+def test_t1_disambiguates_label_when_two_sessions_share_a_thread_id():
+    """C-180: two different sessions both using OpenClaw's own default threadId
+    ("th1") and both independently firing a real trifecta must not render as
+    two identical, indistinguishable "th1" labels — the reviewer needs to know
+    which session's sidecar to actually go inspect."""
+    events = []
+    for session in ("sessA", "sessB"):
+        for seq, name in enumerate(
+            ("web_fetch", "read_credential_file", "send_message"), start=1
+        ):
+            events.append({
+                "sessionId": session, "threadId": "th1", "seq": seq, "ts": str(seq),
+                "type": "tool.call", "name": name,
+            })
+    groups = group_events_by_thread(events)
+    f = check_behavioral_trifecta(groups)
+    assert f.status == WARN
+    assert "th1 (session sessA)" in f.detail
+    assert "th1 (session sessB)" in f.detail
+    # the two labels must be distinct, not both just "th1"
+    assert len(set(f.evidence)) == 2
+
+
+def test_t1_label_stays_plain_when_no_collision():
+    """Regression guard: the disambiguation must not fire (and pollute the
+    label) for the overwhelming common case of a single firing thread."""
+    groups = {
+        "th1": [
+            {"type": "tool.call", "name": "web_fetch", "seq": 1},
+            {"type": "tool.call", "name": "read_credential_file", "seq": 2},
+            {"type": "tool.call", "name": "send_message", "seq": 3},
+        ]
+    }
+    f = check_behavioral_trifecta(groups)
+    assert f.status == WARN
+    assert f.evidence == ["th1"]
+
+
 # ---------------------------------------------------------------------------
 # T1 — behavioral trifecta
 # ---------------------------------------------------------------------------
@@ -334,3 +372,59 @@ def test_analyze_unknown_schema_version_marked(tmp_path):
     r = analyze(_ctx(tmp_path))
     assert r["unknown_version"] is True
     assert r["event_count"] == 0
+
+
+def test_analyze_truncation_marked_and_a_signal_past_the_cap_is_missed(tmp_path):
+    """C-180: a real trifecta placed entirely past the 8MB per-file scan cap must
+    not silently produce a clean PASS with no indication anything was cut off."""
+    import json
+
+    from clawseccheck.trajectory import _MAX_BYTES_PER_FILE
+
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True)
+
+    def line(seq, name):
+        rec = {
+            "traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call",
+            "ts": str(seq), "seq": seq, "sessionId": "s1",
+            "data": {"name": name, "threadId": "th1"},
+        }
+        return json.dumps(rec) + "\n"
+
+    path = d / "s.trajectory.jsonl"
+    with path.open("w", encoding="utf-8") as fh:
+        seq = 1
+        written = 0
+        while written < _MAX_BYTES_PER_FILE + 100_000:
+            row = line(seq, "list_files")
+            fh.write(row)
+            written += len(row)
+            seq += 1
+        # the real signal, placed entirely past the byte cap
+        for name in ("web_fetch", "read_credential_file", "send_message"):
+            fh.write(line(seq, name))
+            seq += 1
+
+    r = analyze(_ctx(tmp_path))
+    assert r["truncated"] is True
+    # confirms the signal really was missed (the bug this caveat discloses) —
+    # not a claim this is desirable, just the honest current behavior.
+    assert all(f.status == PASS for f in r["findings"])
+
+    out = render_behavioral_analysis(_ctx(tmp_path))
+    assert "INCOMPLETE" in out and "scan cap" in out
+
+
+def test_analyze_no_truncation_on_small_file(tmp_path):
+    """Regression guard: the cap-hit caveat must not fire on ordinary small files."""
+    import json
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True)
+    rec = {
+        "traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call",
+        "ts": "1", "seq": 1, "sessionId": "s1", "data": {"name": "bash", "threadId": "t1"},
+    }
+    (d / "s.trajectory.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    r = analyze(_ctx(tmp_path))
+    assert r["truncated"] is False

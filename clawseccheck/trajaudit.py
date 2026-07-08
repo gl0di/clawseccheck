@@ -97,6 +97,10 @@ def _iter_tool_calls(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
             for line in fh:
                 read += len(line)
                 if read > max_bytes:
+                    # C-180: surface the cap hit the same way an unrecognised
+                    # schema version already is — an unscanned remainder past
+                    # this offset must not let a clean result read as complete.
+                    yield ("__truncated__", "")
                     break
                 if '"tool.call"' not in line:
                     continue
@@ -136,6 +140,7 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         "present": False,
         "files_scanned": 0,
         "unknown_version": False,
+        "truncated": False,
         "tool_calls": 0,
         "indicator_count": len(indicators),
         "verbs": set(),
@@ -159,6 +164,9 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         for name, blob in _iter_tool_calls(path):
             if name == "__unknown__":
                 result["unknown_version"] = True
+                continue
+            if name == "__truncated__":
+                result["truncated"] = True
                 continue
             result["tool_calls"] += 1
             result["verbs"].add(name)
@@ -199,6 +207,10 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
     if r["unknown_version"]:
         lines.append(f"  {q} Some records used an unrecognised trajectory schema version — "
                      "results are INCOMPLETE (treat as UNKNOWN, not authoritative).")
+    if r["truncated"]:
+        lines.append(f"  {q} A trajectory file exceeded the per-file scan cap — the "
+                     "unscanned remainder was never analyzed. Results are INCOMPLETE "
+                     "(treat as UNKNOWN, not authoritative).")
 
     if r["hits"]:
         lines.append(f"  {warn} INCIDENT SIGNAL — an installed skill's indicator appeared in "

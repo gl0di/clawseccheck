@@ -157,7 +157,7 @@ def read_events(
     globbing *home* (mirrors ``trajaudit.analyze``'s CLI PATH argument).
     """
     events: list[dict] = []
-    meta = {"present": False, "files_scanned": 0, "unknown_version": False}
+    meta = {"present": False, "files_scanned": 0, "unknown_version": False, "truncated": False}
 
     if explicit_path:
         p = Path(explicit_path).expanduser()
@@ -175,6 +175,10 @@ def read_events(
                 for line in fh:
                     read += len(line)
                     if read > max_bytes_per_file:
+                        # C-180: surface the cap hit — a signal past this byte
+                        # offset is silently unscanned, so a clean T1/T2 verdict
+                        # on a capped file must not read as confidently complete.
+                        meta["truncated"] = True
                         break
                     # Cheap pre-filter: skip lines that can't be one of our event
                     # types without JSON-parsing every line (most lines are other

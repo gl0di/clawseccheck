@@ -110,6 +110,29 @@ def _group_label(group_key: str) -> str:
     return thread_or_turn or "(no thread/turn id)"
 
 
+def _disambiguated_labels(firing_keys: list[str]) -> list[str]:
+    """Label each firing group_key, appending its session id ONLY where two
+    different sessions collide on the same bare thread/turn label.
+
+    C-180: OpenClaw's own default threadId ("th1") makes this collision
+    realistic — two unrelated sessions both flagged the same "th1" rendered
+    as two identical, indistinguishable labels with no way to tell which
+    session's sidecar to actually go inspect. The common single-session case
+    (the overwhelming majority) keeps the plain thread/turn-id-only label
+    _group_label's own docstring says a reviewer greps for.
+    """
+    labels = [_group_label(k) for k in firing_keys]
+    dupes = {lbl for lbl in labels if labels.count(lbl) > 1}
+    out = []
+    for key, lbl in zip(firing_keys, labels):
+        if lbl in dupes:
+            session_id = key.split("\x1f", 1)[0]
+            out.append(f"{lbl} (session {session_id})")
+        else:
+            out.append(lbl)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # T1 — behavioral trifecta: ingress-verb -> sensitive-verb -> egress-verb, in that
 # order (by seq/ts), within one thread.
@@ -137,10 +160,11 @@ def check_behavioral_trifecta(groups: dict[str, list[dict]]) -> object:
            egress-verb, in that order.
     PASS — threads present, no thread shows the ordered sequence.
     """
-    firing: list[str] = []
+    firing_keys: list[str] = []
     for group_key, thread_events in groups.items():
         if _t1_thread_trifecta(thread_events):
-            firing.append(_group_label(group_key))
+            firing_keys.append(group_key)
+    firing = _disambiguated_labels(firing_keys)
 
     if firing:
         detail = "; ".join(firing[:6]) + (f" (+{len(firing) - 6} more)" if len(firing) > 6 else "")
@@ -206,10 +230,11 @@ def check_outcome_anomaly(groups: dict[str, list[dict]]) -> object:
            than asserting the more alarming reading (C-170 adversarial finding).
     PASS — threads present, no such series found.
     """
-    firing: list[str] = []
+    firing_keys: list[str] = []
     for group_key, thread_events in groups.items():
         if _t2_thread_anomaly(thread_events):
-            firing.append(_group_label(group_key))
+            firing_keys.append(group_key)
+    firing = _disambiguated_labels(firing_keys)
 
     if firing:
         detail = "; ".join(firing[:6]) + (f" (+{len(firing) - 6} more)" if len(firing) > 6 else "")
@@ -241,6 +266,7 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         "present": meta["present"],
         "files_scanned": meta["files_scanned"],
         "unknown_version": meta["unknown_version"],
+        "truncated": meta["truncated"],
         "event_count": len(events),
         "thread_count": 0,
         "findings": [],
@@ -278,6 +304,10 @@ def render_behavioral_analysis(ctx, *, explicit_path: str | None = None, ascii_o
     if r["unknown_version"]:
         lines.append(f"  {q} Some records used an unrecognised trajectory schema version — "
                      "results are INCOMPLETE (treat as UNKNOWN, not authoritative).")
+    if r["truncated"]:
+        lines.append(f"  {q} A trajectory file exceeded the per-file scan cap — the "
+                     "unscanned remainder was never analyzed. Results are INCOMPLETE "
+                     "(treat as UNKNOWN, not authoritative).")
 
     any_warn = False
     for f in r["findings"]:
