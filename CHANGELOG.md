@@ -3,6 +3,33 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.28.3] — 2026-07-08
+
+Four HIGH-severity robustness/security fixes found by an E-035 test sweep
+(concurrency, state-recovery, cross-version migration, scanbudget, malformed
+config — all test-only, no code changes during the sweep itself).
+
+### Fixed
+- `history.jsonl`/`events.jsonl` no longer permanently wedge on a single
+  non-UTF-8 byte (a plausible crash-mid-write artifact) — every future
+  `--trend`/`--verify-history`/`--watch-log`/`--monitor`/audit invocation used
+  to fail with `UnicodeDecodeError` until a `--purge` that destroys all local
+  state; now degrades that one line gracefully like any other malformed line.
+  A related append-path bug (a truncated-without-trailing-newline journal
+  getting the next record silently merged onto the dangling line) is fixed
+  alongside it.
+- `--monitor`'s RP2/RP3 rug-pull checks no longer false-positive on the very
+  next run after a version upgrade that crosses the MCP url/command/args
+  at-rest redaction fix (v3.16-era) — and no longer re-echo a stale raw
+  credential-bearing URL from an old, pre-redaction snapshot into the alert.
+- `check_gateway` (B2) no longer false-PASSes on a present-but-malformed
+  `gateway` config value (e.g. `"gateway": null`) — now reads UNKNOWN, since
+  the field genuinely couldn't be assessed.
+- A per-check wall-clock budget hit mid-simulation on `check_installed_skills`
+  (B13) no longer silently degrades to a confident PASS on a truncated,
+  incomplete scan — it now correctly surfaces as an honest UNKNOWN
+  (`skillast.simulate_effects` no longer swallows the budget-exceeded signal).
+
 ## [3.28.2] — 2026-07-08
 
 Two false-positive/false-negative detection fixes (B24, B65) and a doc improvement
