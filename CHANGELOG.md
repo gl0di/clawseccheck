@@ -3,6 +3,40 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.28.4] — 2026-07-08
+
+The remaining MEDIUM/LOW fixes from the E-035 test sweep (concurrency,
+env/locale, trajectory depth), plus a documented (not code-fixed) known
+limitation.
+
+### Fixed
+- `ledger.py`'s coverage tracker (`--self-test`/`--vet-mcp`/etc.) no longer
+  silently loses a capability's last-run date under real concurrent
+  processes — its read-modify-write cycle is now serialized the same way
+  `history.py`/`monitor.py` already are.
+- `--ascii` no longer leaks a non-ASCII em-dash in the `--vet` risk dossier
+  header.
+- `--behavioral`/`--analyze-trajectory` now surface an honest "results are
+  INCOMPLETE" caveat when a trajectory sidecar exceeds the 8MB per-file scan
+  cap, instead of a silent, confident PASS that could miss a real signal
+  placed past that offset.
+- Two different sessions independently flagging a behavioral trifecta while
+  sharing OpenClaw's default `threadId` ("th1") no longer render as two
+  identical, indistinguishable labels — the session is now included when a
+  genuine collision occurs.
+
+### Documented
+- AST01/B13's Python AST analysis is bounded by the interpreter running the
+  audit — a skill using 3.10+-only syntax (e.g. `match`/`case`) as an
+  obfuscation wrapper can evade detection when the audit runs on Python 3.9.
+  Investigated pinning `ast.parse()` to the package's Python 3.9+ minimum as
+  a fix and rejected it: `feature_version` can only restrict a parser to an
+  *older* grammar, never grant an older interpreter the ability to parse
+  newer syntax — pinning would make detection uniformly worse on 3.10+
+  (the majority of installs), not better. Documented as a known trade-off in
+  `docs/THREAT_COVERAGE.md`; run the audit on the newest available Python
+  for maximum AST-based detection coverage.
+
 ## [3.28.3] — 2026-07-08
 
 Four HIGH-severity robustness/security fixes found by an E-035 test sweep
