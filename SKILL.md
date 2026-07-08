@@ -697,6 +697,7 @@ Use this to map what the user says to the right command:
 | "badge", "share my grade", "shareable", "certificate" | `--badge` or `--card` |
 | "HTML report", "full report" | `--html report.html` |
 | "JSON", "machine readable", "raw data" | `--json` |
+| "what did my agent actually do", "behavioral", "runtime audit", "did it really do that", "prove it happened" | `--behavioral` — post-hoc, proof-by-log tool-call sequences from the trajectory sidecar; metadata-only, WARN-only, never scored |
 
 ---
 

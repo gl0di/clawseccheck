@@ -141,10 +141,13 @@ def read_events(
 ) -> tuple[list[dict], dict]:
     """Return (events, meta) — §8-safe event metadata for the behavioral engine.
 
-    Each event is ``{type, name, ts, seq, turnId, threadId, outcome}`` for
+    Each event is ``{type, name, ts, seq, sessionId, turnId, threadId, outcome}`` for
     ``tool.call``/``tool.result``/``prompt.submitted`` records (§9.1 grounded envelope).
     ``name`` and ``outcome`` are ``None`` where the event type doesn't carry them
     (e.g. ``prompt.submitted`` has no tool name; only ``tool.result`` has an outcome).
+    ``sessionId`` (top-level, not sensitive — a session identifier) lets a caller scope
+    grouping to one session, since ``seq`` is a per-session counter (§9.1), not globally
+    unique across trajectory files (C-170 adversarial finding).
 
     NEVER reads ``data.arguments``/``data.output``/``data.result``/``data.contentItems``
     — the sensitive call/return payloads (§8). Only tool/event identity and sequencing
@@ -201,6 +204,7 @@ def read_events(
                         "name": name.strip() if isinstance(name, str) and name.strip() else None,
                         "ts": rec.get("ts"),
                         "seq": rec.get("seq"),
+                        "sessionId": rec.get("sessionId"),
                         "turnId": data.get("turnId"),
                         "threadId": data.get("threadId"),
                         "outcome": _event_outcome(rec_type, data),

@@ -10,8 +10,8 @@ agent actually DO" — reconstructed from OpenClaw's trajectory sidecar
 from declared capability.
 
 §8 privacy boundary: reads ONLY `trajectory.read_events()`'s metadata — `type`, `name`,
-`ts`, `seq`, `turnId`, `threadId`, `outcome`. NEVER reads `arguments`/`output`/`result`/
-`contentItems` (the sensitive call/return payloads).
+`ts`, `seq`, `sessionId`, `turnId`, `threadId`, `outcome`. NEVER reads
+`arguments`/`output`/`result`/`contentItems` (the sensitive call/return payloads).
 
 Findings are WARN-only, `scored=False` (Golden Rule #5) — a heuristic on observed VERB
 NAMES classified by role (ingress/sensitive/egress), not on the untouched payload
@@ -22,34 +22,53 @@ A-F score — only through `--behavioral`, mirroring `--analyze-trajectory`'s ow
 """
 from __future__ import annotations
 
+from . import attest
 from .catalog import PASS, WARN
-from .checks import (
-    INPUT_TOOL_HINTS,
-    OUTBOUND_TOOL_HINTS,
-    SENSITIVE_TOOL_HINTS,
-    _finding,
-)
+from .checks import INPUT_TOOL_HINTS, _finding
 from .trajectory import read_events
+
+# C-170 adversarial pass found the naive "reuse A1's three hint tuples verbatim"
+# design (still used for `INPUT_TOOL_HINTS` below) has two real bugs when applied
+# per-VERB instead of per-CONFIG (A1's coarse "is any such tool present anywhere"
+# check tolerates broad hints; a per-call sequence claim does not):
+#
+# 1. FALSE NEGATIVE (the canonical exfil path, invisible): `INPUT_TOOL_HINTS`
+#    contains "email"/"gmail" for the ingress leg, and was checked FIRST — so an
+#    EGRESS verb like "gmail_send"/"send_email" matched "gmail"/"email" and got
+#    swallowed into "ingress", never reaching the egress check at all. Fixed by
+#    classifying egress via `attest.classify_verb()` (B43's own action-verb-
+#    anchored blast-radius taxonomy — "send"/"forward"/"post"/"webhook"/... —
+#    already grounded and battle-tested) FIRST, before the ingress hints get a
+#    chance to shadow it.
+# 2. FALSE POSITIVE (routine workflows): the shared `SENSITIVE_TOOL_HINTS`
+#    includes bare "files"/"fs_read", broad enough to match ANY filesystem verb
+#    ("list_files", "read_files") — so "web_search -> list_files -> slack_send"
+#    (an entirely mundane combo) read as a proven lethal-trifecta WARN. Fixed with
+#    `_T_SENSITIVE_HINTS` below: a stricter LOCAL subset for T1/T2's per-verb
+#    precision need — genuinely sensitive stores/credentials only, dropping the
+#    bare filesystem terms. Deliberately NOT edited in `checks/_shared.py` itself
+#    (that tuple's broader recall is correct at A1's coarse, whole-config grain;
+#    narrowing it there would weaken A1, a change out of this check's scope).
+_T_SENSITIVE_HINTS = ("db", "sql", "postgres", "supabase", "secret", "credential", "vault")
 
 
 def _classify_verb_role(name: str | None) -> str | None:
     """Classify one tool verb as "ingress" / "sensitive" / "egress" / None.
 
-    Reuses the SAME hint tuples A1 (the static Lethal Trifecta check) already uses for
-    its config-side ingress/sensitive/outbound legs (`checks/_shared.py`) — a single
-    source of truth for what counts as each role, never a forked taxonomy. Substring
-    match on the lowered verb name, first matching role wins (ingress checked first: a
-    verb like "web_fetch" is unambiguously an input source, not sensitive-data access).
+    Order matters (see the C-170 note above): egress is checked FIRST via
+    `attest.classify_verb()` so an egress action verb is never shadowed by an
+    ingress product-name hint; only then ingress (`INPUT_TOOL_HINTS`, shared with
+    A1); only then the tightened local sensitive-data hint set.
     """
     if not name:
         return None
     n = name.lower()
+    if attest.classify_verb(n) in ("EGRESS", "EXEC"):
+        return "egress"
     if any(h in n for h in INPUT_TOOL_HINTS):
         return "ingress"
-    if any(h in n for h in SENSITIVE_TOOL_HINTS):
+    if any(h in n for h in _T_SENSITIVE_HINTS):
         return "sensitive"
-    if any(h in n for h in OUTBOUND_TOOL_HINTS):
-        return "egress"
     return None
 
 
@@ -62,19 +81,33 @@ def _sort_key(event: dict):
 
 
 def group_events_by_thread(events: list[dict]) -> dict[str, list[dict]]:
-    """Group events by `threadId` (fallback `turnId`), each group sorted by (seq, ts).
+    """Group events by `(sessionId, threadId-or-turnId)`, each group sorted by (seq, ts).
 
-    Events with neither threadId nor turnId fall into one shared "" bucket — a known,
-    documented limitation (rare in grounded real data; every observed tool.call/
-    tool.result carries at least a turnId), not silently dropped.
+    C-170 adversarial finding: `seq` is a per-SESSION counter (§9.1 recon), not
+    globally unique — pooling events across multiple trajectory files/sessions
+    keyed by bare `threadId`/`turnId` risked merging unrelated sessions that
+    happen to share a thread/turn id (or both lack one) into a manufactured
+    sequence. Scoping the key by `sessionId` first closes that: two events only
+    group together if they're both the same session AND the same thread/turn.
+    (If OpenClaw ever legitimately reuses one threadId across session restarts,
+    this fails toward a missed detection, never a false one — the safe direction
+    per Golden Rule #5.) The label shown in a finding uses the thread/turn id
+    alone (`_group_label`) since that's what a reviewer greps the sidecar for.
     """
     groups: dict[str, list[dict]] = {}
     for ev in events:
-        key = ev.get("threadId") or ev.get("turnId") or ""
-        groups.setdefault(str(key), []).append(ev)
+        thread_or_turn = str(ev.get("threadId") or ev.get("turnId") or "")
+        key = f"{ev.get('sessionId')}\x1f{thread_or_turn}"
+        groups.setdefault(key, []).append(ev)
     for key in groups:
         groups[key].sort(key=_sort_key)
     return groups
+
+
+def _group_label(group_key: str) -> str:
+    """Human-facing label for a group key — the thread/turn id half only."""
+    thread_or_turn = group_key.split("\x1f", 1)[-1]
+    return thread_or_turn or "(no thread/turn id)"
 
 
 # ---------------------------------------------------------------------------
@@ -105,9 +138,9 @@ def check_behavioral_trifecta(groups: dict[str, list[dict]]) -> object:
     PASS — threads present, no thread shows the ordered sequence.
     """
     firing: list[str] = []
-    for thread_id, thread_events in groups.items():
+    for group_key, thread_events in groups.items():
         if _t1_thread_trifecta(thread_events):
-            firing.append(thread_id or "(no thread/turn id)")
+            firing.append(_group_label(group_key))
 
     if firing:
         detail = "; ".join(firing[:6]) + (f" (+{len(firing) - 6} more)" if len(firing) > 6 else "")
@@ -166,13 +199,17 @@ def check_outcome_anomaly(groups: dict[str, list[dict]]) -> object:
     """T2 — outcome anomaly: repeated failure then success on a sensitive verb.
 
     WARN — a sensitive verb failed at least twice in a row, then succeeded, within one
-           thread (persistence past initial denial — e.g. permission probing).
+           thread. Ambiguous by design (§8 — no error-class/message is read, only
+           status/isError/success): this can mean persistence past an initial denial
+           (e.g. permission/path probing), OR ordinary retry/backoff on a transient
+           failure (rate limit, timeout) — the finding text says so explicitly rather
+           than asserting the more alarming reading (C-170 adversarial finding).
     PASS — threads present, no such series found.
     """
     firing: list[str] = []
-    for thread_id, thread_events in groups.items():
+    for group_key, thread_events in groups.items():
         if _t2_thread_anomaly(thread_events):
-            firing.append(thread_id or "(no thread/turn id)")
+            firing.append(_group_label(group_key))
 
     if firing:
         detail = "; ".join(firing[:6]) + (f" (+{len(firing) - 6} more)" if len(firing) > 6 else "")
@@ -182,9 +219,10 @@ def check_outcome_anomaly(groups: dict[str, list[dict]]) -> object:
             "Outcome anomaly observed — a sensitive-data tool call failed at least "
             f"{_T2_MIN_FAILURES} times in a row and then succeeded, within a thread: "
             f"{detail}.",
-            "Review the trajectory sidecar for the named thread(s) manually — repeated "
-            "failure followed by success on sensitive-data access can indicate "
-            "persistence past an initial denial (e.g. permission/path probing).",
+            "Review the trajectory sidecar for the named thread(s) manually. This can "
+            "mean persistence past an initial denial (e.g. permission/path probing) — "
+            "or an ordinary retry/backoff on a transient failure (rate limit, timeout); "
+            "the log's status/isError/success alone can't distinguish the two.",
             firing[:6],
         )
     return _finding(

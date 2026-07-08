@@ -12,6 +12,7 @@ from pathlib import Path
 
 from clawseccheck.behavioral import (
     _classify_verb_role,
+    _group_label,
     analyze,
     check_behavioral_trifecta,
     check_outcome_anomaly,
@@ -52,31 +53,71 @@ def test_classify_none_name_is_none():
     assert _classify_verb_role(None) is None
 
 
+def test_classify_egress_verb_not_shadowed_by_ingress_product_name():
+    """C-170 adversarial finding: 'gmail_send'/'send_email' contain 'gmail'/'email'
+    (INPUT_TOOL_HINTS, meant for the ingress leg) but are egress ACTIONS — they must
+    classify as egress, not ingress, or the canonical email-exfil trifecta becomes
+    invisible to T1."""
+    assert _classify_verb_role("gmail_send") == "egress"
+    assert _classify_verb_role("send_email") == "egress"
+    assert _classify_verb_role("email_send") == "egress"
+    assert _classify_verb_role("webhook") == "egress"
+
+
+def test_classify_routine_filesystem_verb_is_not_sensitive():
+    """C-170 adversarial finding: a bare filesystem-listing verb ('list_files') must
+    NOT classify as 'sensitive' — that reading was broad enough to turn an ordinary
+    web-search-then-list-files-then-slack-post workflow into a false trifecta."""
+    assert _classify_verb_role("list_files") is None
+    assert _classify_verb_role("read_files") is None
+
+
 # ---------------------------------------------------------------------------
 # Unit: group_events_by_thread
 # ---------------------------------------------------------------------------
 
 def test_group_by_thread_id():
     events = [
-        {"threadId": "a", "turnId": "t1", "seq": 2, "ts": "2"},
-        {"threadId": "a", "turnId": "t1", "seq": 1, "ts": "1"},
-        {"threadId": "b", "turnId": "t2", "seq": 1, "ts": "1"},
+        {"sessionId": "s1", "threadId": "a", "turnId": "t1", "seq": 2, "ts": "2"},
+        {"sessionId": "s1", "threadId": "a", "turnId": "t1", "seq": 1, "ts": "1"},
+        {"sessionId": "s1", "threadId": "b", "turnId": "t2", "seq": 1, "ts": "1"},
     ]
     groups = group_events_by_thread(events)
-    assert set(groups) == {"a", "b"}
-    assert [e["seq"] for e in groups["a"]] == [1, 2]  # sorted
+    assert {_group_label(k) for k in groups} == {"a", "b"}
+    a_key = next(k for k in groups if _group_label(k) == "a")
+    assert [e["seq"] for e in groups[a_key]] == [1, 2]  # sorted
 
 
 def test_group_falls_back_to_turn_id_when_no_thread_id():
-    events = [{"threadId": None, "turnId": "t1", "seq": 1, "ts": "1"}]
+    events = [{"sessionId": "s1", "threadId": None, "turnId": "t1", "seq": 1, "ts": "1"}]
     groups = group_events_by_thread(events)
-    assert set(groups) == {"t1"}
+    assert {_group_label(k) for k in groups} == {"t1"}
 
 
 def test_group_no_ids_falls_into_shared_bucket():
-    events = [{"threadId": None, "turnId": None, "seq": 1, "ts": "1"}]
+    events = [{"sessionId": "s1", "threadId": None, "turnId": None, "seq": 1, "ts": "1"}]
     groups = group_events_by_thread(events)
-    assert set(groups) == {""}
+    assert len(groups) == 1
+    assert {_group_label(k) for k in groups} == {"(no thread/turn id)"}
+
+
+def test_group_scoped_by_session_never_merges_unrelated_sessions():
+    """C-170 adversarial finding: seq is a per-SESSION counter — two different
+    sessions that happen to share a threadId (or both lack one, landing in the
+    shared "" bucket) must NOT be pooled into one group; that could manufacture a
+    trifecta out of three unrelated single-verb sessions."""
+    events = [
+        {"sessionId": "session-A", "threadId": "shared", "turnId": None, "seq": 1, "ts": "1",
+         "type": "tool.call", "name": "web_fetch"},
+        {"sessionId": "session-B", "threadId": "shared", "turnId": None, "seq": 1, "ts": "1",
+         "type": "tool.call", "name": "read_credential_file"},
+        {"sessionId": "session-C", "threadId": "shared", "turnId": None, "seq": 1, "ts": "1",
+         "type": "tool.call", "name": "send_message"},
+    ]
+    groups = group_events_by_thread(events)
+    assert len(groups) == 3  # NOT pooled into one "shared" group
+    f = check_behavioral_trifecta(groups)
+    assert f.status == PASS
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +175,37 @@ def test_t1_does_not_fire_across_separate_threads():
             {"type": "tool.call", "name": "read_credential_file", "seq": 1},
             {"type": "tool.call", "name": "send_message", "seq": 2},
         ],
+    }
+    f = check_behavioral_trifecta(groups)
+    assert f.status == PASS
+
+
+def test_t1_warns_on_canonical_email_exfil_pattern():
+    """C-170 regression: fetch inbox -> read a credential -> send it out over email
+    must WARN — this is the textbook exfil path the check exists to catch, and an
+    earlier draft missed it entirely (the egress-verb 'gmail_send' was shadowed by
+    the ingress hint 'gmail' since ingress was checked first)."""
+    groups = {
+        "th1": [
+            {"type": "tool.call", "name": "gmail_fetch_inbox", "seq": 1},
+            {"type": "tool.call", "name": "read_credential_file", "seq": 2},
+            {"type": "tool.call", "name": "gmail_send", "seq": 3},
+        ]
+    }
+    f = check_behavioral_trifecta(groups)
+    assert f.status == WARN
+
+
+def test_t1_pass_on_ordinary_web_files_chat_workflow():
+    """C-170 regression: 'search the web, look at repo files, post a summary to
+    Slack' is an entirely mundane combo, not a lethal-trifecta pattern — an earlier
+    draft's overly-broad 'files' sensitive-hint made this a false WARN."""
+    groups = {
+        "th1": [
+            {"type": "tool.call", "name": "web_search", "seq": 1},
+            {"type": "tool.call", "name": "list_files", "seq": 2},
+            {"type": "tool.call", "name": "slack_send_message", "seq": 3},
+        ]
     }
     f = check_behavioral_trifecta(groups)
     assert f.status == PASS
