@@ -1015,13 +1015,26 @@ def check_mcp(ctx: Context) -> Finding:
     )
 
 
+# B-159: flags that legitimately take a URL as a registry/index config value,
+# not a package spec — a URL immediately after one of these is not unpinned-
+# package evidence. `pip install --registry https://... some-pkg==1.2.3` (or
+# `npx --registry=... pkg@1.2.3`) commonly points at a private mirror while
+# still pinning the package itself.
+_MCP_SAFE_URL_FLAGS = (
+    "--registry", "--index-url", "-i", "--extra-index-url",
+    "--find-links", "-f", "--proxy", "--trusted-host",
+)
+_MCP_SAFE_URL_LOOKBEHIND = "".join(
+    rf"(?<!{re.escape(flag)} )(?<!{re.escape(flag)}=)" for flag in _MCP_SAFE_URL_FLAGS
+)
+
 # ---------- B24: MCP server hardening ----------
 # Unpinned / dangerous install specs for stdio commands.
 _MCP_UNPINNED_RE = re.compile(
     r"(?:npx|pip(?:x)?|uvx)\b[^\n]*?"  # npx / pip / pipx / uvx prefix
     r"(?:"
     r"@latest"  # explicit @latest tag
-    r"|https?://"  # URL argument
+    rf"|{_MCP_SAFE_URL_LOOKBEHIND}https?://"  # URL argument (not a known safe registry/index flag value)
     r"|(?<![a-zA-Z0-9._-])(?!@[0-9])@(?![0-9])[a-zA-Z]"  # @scope but not pinned @1.2.3
     r")",
     re.I,

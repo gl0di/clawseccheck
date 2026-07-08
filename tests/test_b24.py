@@ -132,6 +132,43 @@ def test_b24_pinned_npx_fetch_still_passes():
     assert check_mcp_hardening(ctx).status == "PASS"
 
 
+# ---- B-159: a URL passed to a known safe registry/index flag is not
+# unpinned-package evidence — the package spec itself is still pinned. ----
+
+def test_b24_pinned_npx_with_registry_flag_space_passes():
+    ctx = _mcp({"tool": {
+        "command": "npx",
+        "args": ["-y", "--registry", "https://registry.npmjs.org/", "some-pkg@1.2.3"],
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b24_pinned_npx_with_registry_flag_equals_passes():
+    ctx = _mcp({"tool": {
+        "command": "npx",
+        "args": ["-y", "--registry=https://registry.npmjs.org/", "some-pkg@1.2.3"],
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b24_pinned_pip_with_index_url_flag_passes():
+    ctx = _mcp({"tool": {
+        "command": "pip",
+        "args": ["install", "--index-url", "https://pypi.example.com/simple", "some-pkg==1.2.3"],
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b24_npx_bare_url_package_still_warns():
+    """Regression guard: a URL that IS the package spec (not a flag value)
+    must still warn — only known safe-flag values are exempted."""
+    ctx = _mcp({"tool": {
+        "command": "npx",
+        "args": ["-y", "--registry", "https://registry.npmjs.org/", "https://evil.example/pkg.tgz"],
+    }})
+    assert check_mcp_hardening(ctx).status == "WARN"
+
+
 def test_b24_bad_pipe_to_run_fixture_fails():
     from clawseccheck.collector import collect
 
