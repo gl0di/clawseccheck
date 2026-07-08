@@ -774,6 +774,21 @@ def check_gateway(ctx: Context) -> Finding:
             "No config loaded — cannot assess gateway.",
             "Run on the host with ~/.openclaw present.",
         )
+    # C-182: `if not cfg:` above only catches a WHOLE-CONFIG-empty state. A
+    # present-but-malformed `gateway` value (e.g. `"gateway": null`, a list, a
+    # number) makes every dig(cfg, "gateway...") lookup degrade to its default
+    # ("absent") without raising — indistinguishable from "gateway key simply
+    # not present" — and falls through to a confident PASS below. A field that
+    # genuinely can't be assessed must read UNKNOWN, not a fabricated PASS.
+    gw_present = isinstance(cfg, dict) and "gateway" in cfg
+    gw = cfg.get("gateway") if gw_present else None
+    if gw_present and not isinstance(gw, dict):
+        return _finding(
+            "B2",
+            UNKNOWN,
+            "gateway config value is present but malformed (not an object) — cannot assess.",
+            "Fix `gateway` to be a config object, or remove the key.",
+        )
     return _finding(
         "B2",
         PASS,
