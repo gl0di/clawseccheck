@@ -180,10 +180,16 @@ def _reassembly(ctx: Context):
                     visited.add(to)
                     order.append(to)
                     stack.append(to)
+        if not tiers_seen:
+            # entry traversed no outgoing edge at all (monolithic / no delegation from
+            # this agent) — there is no cross-agent reassembly to report here; a
+            # single agent holding all three legs by itself is B45's territory, never
+            # a fabricated B47/RISK-11 chain with an untraversed "weakest" tier.
+            continue
         union = {k: any(legs_of(v)[k] for v in order) for k in _LEG_KEYS}
         if not all(union.values()):
             continue
-        weakest = min(tiers_seen) if tiers_seen else 1
+        weakest = min(tiers_seen)
         sens = next((v for v in order if legs_of(v)["sensitive data"]), entry)
         outb = next((v for v in order if legs_of(v)["outbound actions"]), entry)
         cand = {

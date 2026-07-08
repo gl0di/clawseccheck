@@ -346,3 +346,104 @@ def my_tool(user_arg):
     res = results[0]
     assert "network" in res["reachable_effects"]
 
+
+# ---------------------------------------------------------------------------
+# B-155: `with ... as VAR:` must propagate taint / register sink effects
+# (previously dropped into the generic ast.walk fallback in simulate_statement,
+# which never called taint_target() for the binding nor recursed into the body)
+# ---------------------------------------------------------------------------
+
+def test_simulator_with_statement_network_and_file_write():
+    # Idiomatic context-manager form: urlopen(...) as resp, then open(...) as f.
+    src = """
+def fetch(url):
+    import urllib.request
+    with urllib.request.urlopen(url) as resp:
+        data = resp.read()
+    with open("/tmp/out.txt", "wb") as f:
+        f.write(data)
+"""
+    results = simulate_effects(src)
+    assert len(results) == 1
+    res = results[0]
+    assert "network" in res["reachable_effects"]
+    assert "read" in res["reachable_effects"]
+    assert "write" in res["reachable_effects"]
+
+
+def test_simulator_with_statement_agrees_with_non_with_equivalent():
+    # Skill A: idiomatic `with` form. Skill B: same logic without `with`.
+    # Both must report identical reachable effects (B-155 regression).
+    src_with = """
+def fetch(url):
+    import urllib.request
+    with urllib.request.urlopen(url) as resp:
+        data = resp.read()
+    with open("/tmp/out.txt", "wb") as f:
+        f.write(data)
+"""
+    src_plain = """
+def fetch(url):
+    import urllib.request
+    resp = urllib.request.urlopen(url)
+    data = resp.read()
+    f = open("/tmp/out.txt", "wb")
+    f.write(data)
+    f.close()
+"""
+    res_with = simulate_effects(src_with)[0]
+    res_plain = simulate_effects(src_plain)[0]
+    assert set(res_with["reachable_effects"]) == set(res_plain["reachable_effects"])
+    assert {"network", "read", "write"} <= set(res_with["reachable_effects"])
+
+
+def test_simulator_with_statement_asyncwith_taint_propagation():
+    # ast.AsyncWith must be handled the same way as ast.With.
+    src = """
+async def fetch(user_arg):
+    async with make_client() as client:
+        pass
+    open("/tmp/out", "w").write(user_arg)
+"""
+    results = simulate_effects(src)
+    assert len(results) == 1
+    res = results[0]
+    assert "write" in res["reachable_effects"]
+
+
+def test_simulator_with_statement_benign_lock_no_spurious_effect():
+    # A `with` block that is genuinely inert (no sink call in the manager or
+    # body) must not report any capability — no spurious FAIL/WARN surface.
+    src = """
+import threading
+
+_lock = threading.Lock()
+
+def my_tool(user_arg):
+    with _lock:
+        total = 1 + 1
+    return total
+"""
+    results = simulate_effects(src)
+    assert len(results) == 1
+    res = results[0]
+    assert res["reachable_effects"] == []
+
+
+def test_simulator_with_statement_tempdir_and_suppress_no_spurious_effect():
+    # Common benign idioms: tempfile.TemporaryDirectory() and contextlib.suppress()
+    # must not be misclassified as read/write/network sinks.
+    src = """
+import contextlib
+import tempfile
+
+def my_tool(user_arg):
+    with contextlib.suppress(ValueError):
+        with tempfile.TemporaryDirectory() as d:
+            name = d
+    return name
+"""
+    results = simulate_effects(src)
+    assert len(results) == 1
+    res = results[0]
+    assert res["reachable_effects"] == []

@@ -6,7 +6,7 @@ Tool names classify unambiguously (same as test_b45):
 from pathlib import Path
 
 
-from clawseccheck.checks import check_delegation_reassembly
+from clawseccheck.checks import check_agent_separation, check_delegation_reassembly
 from clawseccheck.collector import Context
 from clawseccheck.risk import risk_paths
 
@@ -122,6 +122,63 @@ def test_b47_is_advisory():
 # ---- RISK-11 needs attestation: absent on a bare config ----
 def test_risk11_absent_without_attestation():
     assert "RISK-11" not in _risk_ids({})
+
+
+# ---- B-151 regression: a monolithic agent (holds all 3 legs itself, zero outgoing
+# delegation edges) must NOT be reported as a cross-agent B47/RISK-11 reassembly just
+# because an UNRELATED delegation edge exists elsewhere in the roster — even a fully
+# walled (schema-return) edge between two other agents. That is B45's territory
+# exclusively (one agent = the whole trifecta, no privilege separation).
+def test_b47_monolithic_agent_with_unrelated_edge_is_unknown_not_warn():
+    att = {
+        "agents": [
+            {"name": "solo", "tools": ["web_fetch", "postgres_query", "shell_exec"]},
+        ],
+        "delegation": [{"from": "ghost1", "to": "ghost2", "returns": "schema"}],
+    }
+    r = check_delegation_reassembly(_ctx(att))
+    # "solo" has no outgoing edge at all, so no chain was ever traversed for it, and
+    # ghost1/ghost2 are not in the attested agent roster (not untrusted-input agents
+    # with legs known) — nothing reachable → PASS (edges exist, but not reachable),
+    # never WARN, and never RISK-11.
+    assert r.status != "WARN"
+    assert "RISK-11" not in _risk_ids(att)
+
+
+def test_b47_monolithic_agent_with_unrelated_edge_any_tier_never_warns():
+    for tier in ("schema", "filtered", "raw", "unknown"):
+        att = {
+            "agents": [
+                {"name": "solo", "tools": ["web_fetch", "postgres_query", "shell_exec"]},
+            ],
+            "delegation": [{"from": "ghost1", "to": "ghost2", "returns": tier}],
+        }
+        r = check_delegation_reassembly(_ctx(att))
+        assert r.status != "WARN", f"tier={tier} produced a false WARN"
+        assert "RISK-11" not in _risk_ids(att), f"tier={tier} produced a false RISK-11"
+
+
+def test_b47_monolithic_agent_no_edges_still_unknown():
+    # Control: no delegation edges at all -> UNKNOWN (unchanged behavior).
+    att = {"agents": [
+        {"name": "solo", "tools": ["web_fetch", "postgres_query", "shell_exec"]},
+    ]}
+    r = check_delegation_reassembly(_ctx(att))
+    assert r.status == "UNKNOWN"
+
+
+def test_b45_still_warns_on_monolithic_agent_regardless_of_b47_fix():
+    # B45 must still correctly WARN on the monolithic case — this bug's fix lives
+    # entirely inside _reassembly() (B47/RISK-11's engine); B45 never calls it.
+    att = {
+        "agents": [
+            {"name": "solo", "tools": ["web_fetch", "postgres_query", "shell_exec"]},
+        ],
+        "delegation": [{"from": "ghost1", "to": "ghost2", "returns": "schema"}],
+    }
+    r = check_agent_separation(_ctx(att))
+    assert r.status == "WARN"
+    assert any("solo" in e for e in r.evidence)
 
 
 # ---- he report: B47 WARN evidence prose is translated, the chain (data) is preserved ----

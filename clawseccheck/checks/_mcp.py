@@ -1031,6 +1031,25 @@ _MCP_UNPINNED_RE = re.compile(
 _MCP_CURL_RE = re.compile(r"\bcurl\b[^\n]*?https?://", re.I)
 
 
+# B-150: downloader piped straight into a shell interpreter — e.g.
+# `curl http://x | bash`, `wget -qO- http://x | sh`, `curl ... | sudo bash`.
+# This is the unambiguous "pipe-to-run" shape (distinct from a bare curl/wget
+# fetch with no pipe, which stays a WARN via _MCP_CURL_RE above).
+_MCP_PIPE_TO_SHELL_RE = re.compile(
+    r"\b(?:curl|wget|invoke-webrequest|iwr)\b[^|\n]*\|\s*(?:sudo\s+)?"
+    r"(?:bash|sh|zsh|dash|ksh|powershell|pwsh)\b",
+    re.I,
+)
+
+# B-150: PowerShell IEX/Invoke-Expression executing content pulled from the
+# network in the same expression (the Windows equivalent of pipe-to-run).
+_MCP_IEX_DOWNLOAD_RE = re.compile(
+    r"(?:iex|invoke-expression)\s*\(?[^\n]*?"
+    r"(?:net\.webclient|downloadstring|invoke-webrequest|iwr\b)",
+    re.I,
+)
+
+
 # Broad secret env vars.
 _MCP_SECRET_ENV_RE = re.compile(
     r"^(OPENAI_API_KEY|ANTHROPIC_API_KEY|AWS_[A-Z_]+|AZURE_[A-Z_]+|GCP_[A-Z_]+|"
@@ -1083,6 +1102,21 @@ def _mcp_server_risks(name: str, spec: dict) -> tuple[list[str], list[str]]:
         warns.append(f"{name}: stdio command uses unpinned/URL spec ({safe_cmd})")
     if _MCP_CURL_RE.search(full_cmd):
         warns.append(f"{name}: stdio command uses curl with URL ({safe_cmd})")
+
+    # B-150: unambiguous pipe-to-run install vector — a downloader (curl/wget/
+    # Invoke-WebRequest) piped straight into a shell interpreter, or a
+    # PowerShell IEX/Invoke-Expression executing downloaded content. This is
+    # deliberately narrower than raw command-base membership in
+    # _VET_MCP_DANGEROUS_CMDS (which --vet-mcp uses for its own, intentionally
+    # stricter, "is the binary itself risky" signal): B24 stays conservative
+    # (per its docstring, FAIL only on unambiguous positive evidence), so a
+    # bare `curl <url>` with no pipe into a shell stays a WARN above, not a
+    # FAIL — only the actual pipe-to-shell/IEX shape escalates.
+    if _MCP_PIPE_TO_SHELL_RE.search(full_cmd) or _MCP_IEX_DOWNLOAD_RE.search(full_cmd):
+        fails.append(
+            f"{name}: command pipes a remote download directly into a shell "
+            f"interpreter (pipe-to-run install vector) ({safe_cmd})"
+        )
 
     # ---- env passthrough ----
     env = spec.get("env") or {}

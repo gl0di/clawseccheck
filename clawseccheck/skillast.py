@@ -1788,6 +1788,15 @@ class EffectSimulator:
             for sub in ast.walk(stmt):
                 self.check_dynamic_import_overapprox(sub, state, seed)
                 self.check_sink_effects(sub, state, seed)
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            for item in stmt.items:
+                is_tainted = self.check_expr_taint_sources(item.context_expr, state, seed)
+                if item.optional_vars is not None:
+                    self.taint_target(item.optional_vars, is_tainted, state)
+                for sub in ast.walk(item.context_expr):
+                    self.check_dynamic_import_overapprox(sub, state, seed)
+                    self.check_sink_effects(sub, state, seed)
+            self.simulate_statements(stmt.body, state, seed)
         else:
             for sub in ast.walk(stmt):
                 self.check_dynamic_import_overapprox(sub, state, seed)

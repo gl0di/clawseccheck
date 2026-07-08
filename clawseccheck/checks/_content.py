@@ -615,7 +615,15 @@ _B65_ACTION_RE = re.compile(
 
 
 _B65_DELAY_RE = re.compile(
-    r"\b(?:later|next time|from now on|in the future|ever)\b",
+    # B-148: "later" alone is the standard API-sequencing idiom ("pass it in later
+    # calls/requests") — a persistence/sleeper-trigger delay phrase, not an ordinary
+    # follow-up call reference. The negative lookahead keeps "later" as a delay signal
+    # everywhere EXCEPT immediately before an API-call-shaped noun; "next time" / "from
+    # now on" / "in the future" / "ever" are unambiguous persistence framing and are
+    # left unrestricted.
+    r"\b(?:next time|from now on|in the future|ever)\b"
+    r"|\blater\b(?!\s+(?:call|calls|request|requests|invocation|invocations|"
+    r"step|steps|message|messages|response|responses|use|uses|usage))",
     re.IGNORECASE,
 )
 
@@ -649,6 +657,12 @@ _B65_MEMORY_WRITE_RE = re.compile(
 
 
 _B65_WINDOW = 160  # chars around the conditional marker
+
+
+# B-148: a backtick-quoted API parameter value, e.g. `` `action="open"` ``, is a code
+# literal being documented, not the English verb "open [a connection/file]". Single
+# backticks only — a ```fenced``` block is handled separately by `_fence_ranges`.
+_B65_INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 
 
 _B66_ROLE_START_RE = re.compile(
@@ -2062,9 +2076,23 @@ def _in_skill_frontmatter_span(blob: str, pos: int) -> bool:
     return False
 
 
+def _b65_live_action_match(window: str, window_start: int, inline_ranges) -> bool:
+    """B-148: True when *window* contains an `_B65_ACTION_RE` hit that is NOT wholly
+    inside a backtick-quoted inline code span (e.g. `` `action="open"` ``) — an API
+    parameter value being documented, not the English sink verb it happens to spell."""
+    for m in _B65_ACTION_RE.finditer(window):
+        abs_start = window_start + m.start()
+        abs_end = window_start + m.end()
+        if any(s <= abs_start and abs_end <= e for s, e in inline_ranges):
+            continue  # wholly inside a backtick-quoted code span — not a live verb
+        return True
+    return False
+
+
 def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
     """Scan *text* for conditional sleeper-trigger snippets."""
     hits: list[str] = []
+    inline_ranges = _inline_code_ranges(text)
     for m in _B65_TRIGGER_RE.finditer(text):
         if _defensive_context(text, m.start(), fr):
             continue
@@ -2079,7 +2107,7 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         window = text[start:end]
         if not (
             (_B65_QUERY_RE.search(window) or _B65_DELAY_RE.search(window))
-            and _B65_ACTION_RE.search(window)
+            and _b65_live_action_match(window, start, inline_ranges)
         ):
             continue
         # B-134: a documented memory-write rule ("When someone says 'remember this',
@@ -2780,6 +2808,13 @@ def _in_fence(pos: int, ranges: list[tuple[int, int]]) -> bool:
         if start > pos:
             break  # ranges are ordered by start position
     return False
+
+
+def _inline_code_ranges(text: str) -> list[tuple[int, int]]:
+    """B-148: return (start, end) spans of single-backtick inline code — `` `like this` ``
+    — in *text*. Ordered by start position, so callers can reuse `_in_fence`'s scan-and-
+    break logic. Distinct from `_fence_ranges` (triple-backtick/tilde fenced blocks)."""
+    return [(m.start(), m.end()) for m in _B65_INLINE_CODE_RE.finditer(text)]
 
 
 def _install_entry_findings(skill_name: str, install) -> list[str]:

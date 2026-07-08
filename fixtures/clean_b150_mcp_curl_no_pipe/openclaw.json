@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "servers": {
+      "fetcher": {
+        "command": "curl",
+        "args": ["-fsSL", "https://api.example.com/data.json", "-o", "/tmp/data.json"]
+      }
+    }
+  }
+}
