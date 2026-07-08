@@ -262,3 +262,15 @@ def test_vet_plugin_text_dossier_clean_stays_grade_a(tmp_path, capsys):
     assert rc == 0
     assert "SAFE" in out
     assert "Grade: A" in out
+
+
+def test_vet_dossier_ascii_flag_leaks_no_non_ascii_chars(tmp_path, capsys):
+    """C-179: render_vet_dossier's header used a hardcoded em-dash with no final
+    ASCII safety net (every other renderer has one), so --ascii still leaked it."""
+    sk = tmp_path / "clean"
+    sk.mkdir()
+    (sk / "SKILL.md").write_text("---\nname: clean\ndescription: hi\n---\nHello.\n")
+    rc = main(["--vet", str(sk), "--ascii"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert all(ord(c) < 128 for c in out), f"non-ASCII char leaked: {out!r}"

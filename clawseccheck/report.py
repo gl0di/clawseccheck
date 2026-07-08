@@ -1119,7 +1119,11 @@ def render_vet_dossier(profile, ascii_only: bool = False) -> str:
               f"{sep} run --json for full detail"]
     if profile.unmapped:
         lines.append(f"  (unmapped: {', '.join(profile.unmapped)})")
-    return "\n".join(lines)
+    out = "\n".join(lines)
+    # C-179: unlike every other renderer here, this one had no final ASCII safety
+    # net — the hardcoded em-dash in the header (line above) leaked through even
+    # with --ascii set.
+    return _asciify(out) if ascii_only else out
 
 
 # ---- F-067: --advise — the same VetProfile the risk dossier already computes, reframed
