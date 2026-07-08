@@ -96,19 +96,27 @@ def record_run(capability: str, *, home: str | None = None,
         Override the recorded date (for testing).
         ``None`` → ``date.today()``.
     """
+    from .locking import journal_lock  # avoid top-level import cycle
     from .monitor import SCHEMA_VERSION  # avoid top-level import cycle
     from .safeio import secure_dir, secure_write_text  # avoid top-level import cycle
 
     today = today or date.today()
-    ledger = load_ledger(home)
-    ledger[capability] = today.isoformat()
-    # C-162: reserved "_schema" bookkeeping key, written last so it always reflects
-    # this build regardless of write order above. load_ledger() filters it back out.
-    ledger["_schema"] = str(SCHEMA_VERSION)
     p = _ledger_path(home)
     try:
         secure_dir(p.parent)
-        secure_write_text(p, json.dumps(ledger, indent=2, ensure_ascii=False) + "\n")
+        # C-174: the read-modify-write cycle below was unlocked, so two real
+        # concurrent processes (e.g. --self-test and --vet-mcp run back to
+        # back) could each read the same stale ledger and overwrite each
+        # other's key on write — a silent lost update. journal_lock (same
+        # primitive history.py/monitor.py already use) serializes it.
+        with journal_lock(p):
+            ledger = load_ledger(home)
+            ledger[capability] = today.isoformat()
+            # C-162: reserved "_schema" bookkeeping key, written last so it always
+            # reflects this build regardless of write order above. load_ledger()
+            # filters it back out.
+            ledger["_schema"] = str(SCHEMA_VERSION)
+            secure_write_text(p, json.dumps(ledger, indent=2, ensure_ascii=False) + "\n")
     except OSError:
         pass
 

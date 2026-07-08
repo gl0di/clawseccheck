@@ -438,3 +438,39 @@ def test_cli_self_test_without_no_history_still_records(tmp_path, monkeypatch, c
     capsys.readouterr()
     ledger = load_ledger(str(tmp_path))
     assert "self_test" in ledger
+
+
+# ---------------------------------------------------------------------------
+# C-174: record_run's read-modify-write must be serialized against real
+# concurrent processes, not just concurrent threads in one interpreter.
+# ---------------------------------------------------------------------------
+
+def test_record_run_survives_real_concurrent_processes(tmp_path):
+    """20 real OS processes each recording a distinct capability key into the
+    SAME ledger file must all survive — before the journal_lock fix, an
+    unlocked read-modify-write cycle silently lost 2-7 of 20 keys per round."""
+    import subprocess
+    import sys
+
+    home = tmp_path
+    (home / ".clawseccheck").mkdir(parents=True, exist_ok=True)
+    runner = home / "runner.py"
+    runner.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r})\n"
+        "from clawseccheck.ledger import record_run\n"
+        "record_run(sys.argv[1], home=sys.argv[2])\n"
+    )
+
+    n = 20
+    procs = [
+        subprocess.Popen([sys.executable, str(runner), f"cap{i}", str(home)])
+        for i in range(n)
+    ]
+    for p in procs:
+        assert p.wait() == 0
+
+    ledger = load_ledger(str(home))
+    keys = {k for k in ledger if k != "_schema"}
+    expected = {f"cap{i}" for i in range(n)}
+    assert keys == expected, f"lost keys: {expected - keys}"
