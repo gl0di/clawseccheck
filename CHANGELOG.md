@@ -3,6 +3,49 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.24.0] — 2026-07-08
+
+A new capability, not a check-count bump: the behavioral trajectory audit (E-032 v1,
+`--behavioral`) — proof-by-log of what an agent actually DID, complementing every
+existing check's "what it could do". Plus a B62 precision fix carried over from the
+previous cycle.
+
+### Added
+- **Behavioral trajectory audit (`--behavioral`)** — reads OpenClaw's trajectory
+  sidecar (`agents/*/sessions/*.trajectory.jsonl`) and reconstructs observed tool-call
+  sequences. Metadata-only (§8): never reads `arguments`/`output`/`result`/
+  `contentItems`, only verb identity and sequencing. WARN-only, `scored=False` — a new
+  mode, never part of `audit()`/the A-F score.
+  - **T1** — behavioral trifecta: an ingress verb, then a sensitive-data verb, then an
+    egress verb, observed in that order within one thread/session. Mirrors A1's static
+    Lethal Trifecta model applied to proven runtime order instead of declared config.
+  - **T2** — outcome anomaly: a sensitive verb failing at least twice in a row and then
+    succeeding, within one thread — persistence past an initial denial, or ordinary
+    retry/backoff (the finding text says so explicitly; the metadata-only design can't
+    distinguish the two).
+  - An independent adversarial pass (C-135 discipline) caught two real bugs before
+    ship: the canonical email-exfil pattern was invisible to T1 (an egress verb's own
+    name shadowed by an ingress product-name hint), and an entirely mundane
+    web-search/list-files/chat-post workflow false-fired T1 (an overly broad
+    "sensitive" hint). Both fixed; re-verified zero-FP against a real fleet.
+- B135 completion note: the E-030 real-config coverage epic (9/9 children) and R4's
+  precision follow-up are now fully closed out — see prior 3.23.0 entry.
+
+### Fixed
+- B62 (`capability-intent-mismatch`) false-fired on a fully-disclosed skill: a skill's
+  own `SKILL.md`/`skill-card.md` text can now clear a "surprising capability" WARN when
+  it affirmatively discloses that capability (e.g. "sends Gmail messages on your
+  behalf"). Only `.md`-file declaration text counts — never a skill's Python source —
+  and a negated mention ("never sends data") doesn't count as disclosure. An
+  adversarial pass caught an early, looser draft that let ordinary phrasing ("send you
+  a summary email") launder a genuinely undisclosed capability; tightened before
+  landing.
+
+### Changed
+- `docs/CHECKS.md` regenerated for the new T1/T2 entries.
+- `docs/THREAT_COVERAGE.md` refreshed (stale check count, new behavioral-audit
+  section, AST05/LLM06 mapping for T1).
+
 ## [3.23.0] — 2026-07-07
 
 A precision follow-up plus a new coverage check: B13 no longer FAILs on Dave's real
