@@ -3,6 +3,18 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.28.1] — 2026-07-08
+
+Fixes a `--vet` false-negative: a skill archive containing a zip-slip
+(path-traversal) member graded A/SAFE instead of DANGEROUS/F.
+
+### Fixed
+- `--vet` risk dossier now grades a detected archive path-traversal member
+  (zip-slip) as `FAIL`/`F` (danger floor) instead of A/SAFE, and surfaces the
+  real "Archive path traversal detected: ..." detail instead of a generic
+  placeholder. The underlying detection was already correct; only the
+  dossier's aggregation/grading layer was missing a case for this status.
+
 ## [3.28.0] — 2026-07-08
 
 R16 — trajectory/incident polish: the last of the round-2 test-campaign findings
