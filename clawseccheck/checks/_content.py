@@ -608,8 +608,12 @@ _B65_ACTION_RE = re.compile(
     # B-123/B-134: "call" and "invoke" were removed too — they fire on the standard
     # SKILL.md frontmatter invocation idiom ("Call when the user says: ...") and on
     # ordinary "call the tool" phrasing, neither of which is a sink/destructive action.
+    # B-158: "exfiltrat" had a trailing \b, which requires a word-boundary right after
+    # the "t" — but "exfiltrate"/"exfiltration"/"exfiltrated" continue with a word char,
+    # so \bexfiltrat\b never matched inside the actual word, only a bare "exfiltrat"
+    # token. \w* lets it match any suffix while \b still guards the left edge.
     r"\b(?:send|forward|post|execute|run|open|download|upload|"
-    r"curl|wget|fetch|delete|exfiltrat|harvest|relay|reveal|steal|exfil)\b",
+    r"curl|wget|fetch|delete|exfiltrat\w*|harvest|relay|reveal|steal|exfil)\b",
     re.IGNORECASE,
 )
 
