@@ -3,6 +3,45 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.30.0] — 2026-07-10
+
+A new outbound-proxy check, real JSON5/`$include` config parsing (OpenClaw configs are
+JSON5, not strict JSON), configured/grouped skill discovery, and systematic output
+redaction.
+
+### Added
+- **New check B155 — outbound proxy hardening.** Audits OpenClaw's outbound proxy surface:
+  a credential embedded in `proxy.proxyUrl` or a provider's `request.proxy.url` FAILs (a
+  plaintext secret in the config, echoed host-only); a provider disabling proxy/endpoint TLS
+  verification (`request.proxy.tls.insecureSkipVerify` / `request.tls.insecureSkipVerify`),
+  `request.allowPrivateNetwork`, or `tools.web.fetch.useTrustedEnvProxy` WARNs. A configured
+  managed proxy with a clean URL PASSes; no proxy is a non-scoring advisory, never a FAIL.
+- Configured and grouped skill discovery: `skills.load.extraDirs` and nested/grouped skill
+  layouts are now discovered (with per-name de-duplication that no longer lets a shadowed
+  skill hide), bounded by depth and directory-count caps.
+
+### Fixed
+- OpenClaw config files are now parsed as JSON5/JSONC with `$include` resolution, replacing
+  a JSON5-*subset* parser. A valid JSON5 `openclaw.json` (single-quoted strings, unquoted
+  keys, comments, special number forms) is no longer mis-reported as an unparseable config
+  (a false `config_parse_error` / `--exit-code` trip). The loader is read-only and never
+  executes input (`ast.literal_eval`); `$include` is confined to the config's own roots
+  (resolve-then-check, no symlink escape), depth- and cycle-bounded, and — hardened after an
+  adversarial pass — capped against a sibling fan-out that could otherwise expand a <1 KB
+  config into an unbounded read storm and hang the audit.
+- A deeply-nested or oversized plugin manifest now degrades to `UNKNOWN` in `--vet-plugin`
+  instead of aborting the vet with an internal error.
+
+### Changed
+- Output redaction is now systematic: the human, JSON and SARIF renderers route untrusted
+  strings through the secret-redactor, the full SARIF tree is sanitized, and risk-path
+  labels and content-ring URLs are redacted — broader coverage than the previous per-field
+  fixes.
+- **Behaviour change:** a finding suppressed via `.clawseccheckignore` no longer improves the
+  security score — a suppressed FAIL still caps the grade and trips `--exit-code`. Combined
+  with the badge/SARIF suppression markers from 3.29.0, an ignore entry can surface a finding
+  but can never inflate the reported posture.
+
 ## [3.29.0] — 2026-07-10
 
 Coverage and machine-output fixes from the audit-triage sweep: the audit now sees
