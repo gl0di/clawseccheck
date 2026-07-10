@@ -958,28 +958,94 @@ def read_skill_js(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str
     return out
 
 
+def _config_workspace_dirs(home: Path, cfg: dict) -> list[Path]:
+    """Absolute workspace dir(s) declared in openclaw.json (B-161).
+
+    OpenClaw's ``agents.defaults.workspace`` — and any per-agent
+    ``agents.list[].workspace`` override — can point the agent's workspace outside the
+    hardcoded WORKSPACE_DIRS names. Bootstrap files and a ``skills/`` dir living there
+    would otherwise be invisible, so a malicious SOUL.md / skill in a custom workspace
+    scored clean. Returns de-duplicated absolute dirs (relative paths resolved against
+    *home*). Never raises; blank / non-string values are skipped. When the value points at
+    the default location it resolves to a path SKILL_DIRS already covers, so nothing is
+    scanned twice (see the resolved-path de-dup in the callers).
+    """
+    if not isinstance(cfg, dict):
+        return []
+    raw: list[str] = []
+    dv = dig(cfg, "agents.defaults.workspace")
+    if isinstance(dv, str) and dv.strip():
+        raw.append(dv)
+    agents_list = dig(cfg, "agents.list")
+    if isinstance(agents_list, list):
+        for a in agents_list:
+            if isinstance(a, dict):
+                w = a.get("workspace")
+                if isinstance(w, str) and w.strip():
+                    raw.append(w)
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for r in raw:
+        p = Path(r).expanduser()
+        if not p.is_absolute():
+            p = home / p
+        try:
+            resolved = p.resolve()
+        except OSError:
+            resolved = p
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        out.append(p)
+    return out
+
+
 def _read_installed_skills(home: Path, ctx: Context) -> None:
-    seen = set()
-    for rel in SKILL_DIRS:
-        base = home / rel
+    seen: set[str] = set()
+    # (base_dir, allow_symlink_entries). The hardcoded roots refuse symlinked skill dirs —
+    # a planted symlink is a tamper signal — but plugin-skills entries are *deliberately*
+    # symlinks into a plugin's bundled skills/ dir, so those get dereferenced (B-161).
+    roots: list[tuple[Path, bool]] = [(home / rel, False) for rel in SKILL_DIRS]
+    for cw in _config_workspace_dirs(home, ctx.config):
+        roots.append((cw / "skills", False))
+    plugin_skills = home / "plugin-skills"
+    if plugin_skills.is_dir():
+        roots.append((plugin_skills, True))
+    seen_roots: set[Path] = set()
+    for base, allow_symlink in roots:
         if not base.is_dir():
             continue
+        try:
+            base_key = base.resolve()
+        except OSError:
+            base_key = base
+        if base_key in seen_roots:
+            continue
+        seen_roots.add(base_key)
         for sd in sorted(base.iterdir()):
             if len(ctx.installed_skills) >= _MAX_SKILLS:
                 return
-            if sd.is_symlink() or not sd.is_dir() or sd.name.lower() in _OWN_SKILL_NAMES:
+            if sd.name.lower() in _OWN_SKILL_NAMES:
                 continue
-            if not (sd / "SKILL.md").is_file():
+            if sd.is_symlink() and not allow_symlink:
+                continue
+            try:
+                target = sd.resolve() if sd.is_symlink() else sd
+            except OSError:
+                continue
+            if not target.is_dir():
+                continue
+            if not (target / "SKILL.md").is_file():
                 continue
             key = sd.name
             if key in seen:
                 continue
             seen.add(key)
             try:
-                ctx.installed_skills[key] = _read_skill_text(sd, ctx)
-                ctx.installed_skill_py[key] = read_skill_python(sd, ctx)
-                ctx.installed_skill_shell[key] = read_skill_shell(sd, ctx)
-                ctx.installed_skill_js[key] = read_skill_js(sd, ctx)
+                ctx.installed_skills[key] = _read_skill_text(target, ctx)
+                ctx.installed_skill_py[key] = read_skill_python(target, ctx)
+                ctx.installed_skill_shell[key] = read_skill_shell(target, ctx)
+                ctx.installed_skill_js[key] = read_skill_js(target, ctx)
             except OSError as exc:
                 ctx.errors.append(f"could not read skill {key}: {exc}")
 
@@ -1047,8 +1113,15 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     # Resolved paths are tracked so a symlink from a workspace dir back to a
     # root file is not read twice.
     _seen_bootstrap: set[Path] = set()
-    for _ws in [""] + list(WORKSPACE_DIRS):
-        wdir = home if _ws == "" else home / _ws
+    _ws_dirs: list[tuple[str, Path]] = [("", home)]
+    _ws_dirs += [(ws, home / ws) for ws in WORKSPACE_DIRS]
+    # B-161: also scan any config-declared custom workspace(s) for bootstrap files, so a
+    # SOUL.md/AGENTS.md living outside the hardcoded names is not invisible. The
+    # resolved-path de-dup below keeps a file that also lives under a hardcoded dir from
+    # being read (or counted) twice.
+    for _cw in _config_workspace_dirs(home, ctx.config):
+        _ws_dirs.append((_cw.name or "workspace", _cw))
+    for _ws, wdir in _ws_dirs:
         if not wdir.is_dir():
             continue
         for name in BOOTSTRAP_FILES:
