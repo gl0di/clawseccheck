@@ -317,6 +317,14 @@ CATALOG: list[CheckMeta] = [
         surface="sessions",
     ),
     CheckMeta(
+        "B155",
+        "Outbound proxy hardening (credential leak / TLS-verify / SSRF-guard bypass)",
+        HIGH,
+        "hardening",
+        "Proxy / Egress Hardening",
+        surface="tools",
+    ),
+    CheckMeta(
         "B39",
         "Session visibility / cross-user transcript leak",
         MEDIUM,

@@ -54,6 +54,7 @@ logging.cacheTrace.filePath
 logging.redactSensitive
 mcp.servers
 meta.lastTouchedVersion
+models.providers
 network.dangerouslyAllowPrivateNetwork
 network.egress
 openclaw.disable-model-invocation
@@ -62,6 +63,9 @@ openclaw.install.npmSpec
 openclaw.user-invocable
 plugins.allow
 plugins.mcp
+proxy
+proxy.enabled
+proxy.proxyUrl
 session.dmScope
 subagents.allowAgents
 tools.allow
@@ -80,5 +84,6 @@ tools.sessions
 tools.web
 tools.web.fetch.enabled
 tools.web.fetch.maxRedirects
+tools.web.fetch.useTrustedEnvProxy
 update.auto
 update.auto.enabled

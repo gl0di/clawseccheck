@@ -6,6 +6,8 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 from __future__ import annotations
 import os
 from pathlib import Path
+from urllib.parse import urlparse
+
 from ..catalog import (
     FAIL,
     MEDIUM,
@@ -197,6 +199,143 @@ def check_browser_ssrf(ctx: Context) -> Finding:
         "and hostnameAllowlist is present.",
         "Keep browser.noSandbox unset/false, "
         "dangerouslyAllowPrivateNetwork=false, and maintain a tight hostnameAllowlist.",
+    )
+
+
+def check_outbound_proxy(ctx: Context) -> Finding:
+    """B155 — Outbound proxy hardening (credential leak / TLS-verify / SSRF-guard bypass).
+
+    Audits OpenClaw's OUTBOUND proxy surface — the top-level managed forward proxy
+    (`proxy.*`) plus per-provider request proxy/TLS options and web_fetch's env-proxy
+    trust. Distinct from the INBOUND reverse-proxy trust in C032 / gateway.trustedProxies
+    (do not conflate). Absence of a proxy is the default and is NEVER a FAIL (§5).
+
+    FAIL    — proxy.proxyUrl embeds credentials (http://user:pass@host): a secret sits in
+              plaintext in openclaw.json (only runtime logs are redacted).
+    WARN    — a provider disables proxy/endpoint TLS verification
+              (models.providers.*.request.proxy.tls.insecureSkipVerify or
+              request.tls.insecureSkipVerify) → MITM; request.allowPrivateNetwork → SSRF;
+              tools.web.fetch.useTrustedEnvProxy → bypasses the local SSRF/DNS-rebind guard;
+              or proxy.enabled with no proxyUrl (a config the host refuses to start).
+    PASS    — a managed proxy is configured with a clean (credential-free) URL.
+    UNKNOWN — no outbound proxy configured (the default): advisory nudge, never a FAIL.
+    """
+    from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
+    cfg = ctx.config
+
+    proxy = dig(cfg, "proxy")
+    proxy_url = dig(cfg, "proxy.proxyUrl")
+    proxy_enabled = dig(cfg, "proxy.enabled")
+    has_proxy_url = isinstance(proxy_url, str) and bool(proxy_url.strip())
+
+    parsed = None
+    if has_proxy_url:
+        try:
+            parsed = urlparse(proxy_url.strip())
+        except (ValueError, AttributeError):
+            parsed = None
+
+    fails: list[str] = []
+    warns: list[str] = []
+    notes: list[str] = []
+
+    # FAIL: a credential embedded in the managed-proxy URL is a plaintext secret in config.
+    if parsed is not None and (parsed.username or parsed.password):
+        fails.append(
+            f"proxy.proxyUrl embeds credentials ({sanitize_url_host_only(proxy_url)}) — "
+            "a secret sits in plaintext in openclaw.json (only runtime logs are redacted)"
+        )
+
+    # WARN: proxy enabled with no URL — the host refuses to start (broken config).
+    if proxy_enabled is True and not has_proxy_url:
+        warns.append(
+            "proxy.enabled=true but proxy.proxyUrl is unset — OpenClaw refuses to start "
+            "a managed proxy with no URL"
+        )
+
+    # WARN: per-provider TLS-verify-disable / private-network egress.
+    providers = dig(cfg, "models.providers")
+    if isinstance(providers, dict):
+        for pid, pspec in providers.items():
+            if not isinstance(pspec, dict):
+                continue
+            req = pspec.get("request")
+            if not isinstance(req, dict):
+                continue
+            pxy = req.get("proxy")
+            ptls = pxy.get("tls") if isinstance(pxy, dict) else None
+            if isinstance(ptls, dict) and ptls.get("insecureSkipVerify") is True:
+                warns.append(
+                    f"models.providers.{pid}.request.proxy.tls.insecureSkipVerify=true — "
+                    "proxy TLS certificate not verified (MITM surface)"
+                )
+            utls = req.get("tls")
+            if isinstance(utls, dict) and utls.get("insecureSkipVerify") is True:
+                warns.append(
+                    f"models.providers.{pid}.request.tls.insecureSkipVerify=true — "
+                    "model-endpoint TLS certificate not verified (MITM surface)"
+                )
+            if req.get("allowPrivateNetwork") is True:
+                warns.append(
+                    f"models.providers.{pid}.request.allowPrivateNetwork=true — "
+                    "provider requests may reach private/metadata IPs (SSRF surface)"
+                )
+
+    # WARN: web_fetch trusts the env proxy → bypasses the local SSRF / DNS-rebind guard.
+    if dig(cfg, "tools.web.fetch.useTrustedEnvProxy") is True:
+        warns.append(
+            "tools.web.fetch.useTrustedEnvProxy=true — web_fetch trusts the environment "
+            "HTTP(S)_PROXY and lets it resolve DNS, bypassing the local SSRF/DNS-rebind "
+            "guard (safe only if that proxy is operator-controlled)"
+        )
+
+    # note (NOT a WARN — §5: a plain http:// CONNECT proxy is documented-normal, TLS stays
+    # end-to-end after CONNECT): only flag cleartext-to-proxy for a real non-loopback host.
+    if parsed is not None and (parsed.scheme or "").lower() == "http":
+        host = (parsed.hostname or "").lower()
+        if host and host not in LOOPBACK and not host.startswith("127."):
+            notes.append(
+                "proxy.proxyUrl uses plain http:// to a non-loopback host "
+                f"({sanitize_url_host_only(proxy_url)}) — the CONNECT handshake and any proxy "
+                "auth travel in cleartext to the proxy; prefer https:// to the proxy endpoint"
+            )
+
+    if fails:
+        return _finding(
+            "B155", FAIL, "; ".join(fails),
+            "Keep the proxy credential out of openclaw.json: use a credential-free proxy URL "
+            "and supply auth via OPENCLAW_PROXY_URL / a secret store instead of userinfo in "
+            "the config; prefer an https:// proxy endpoint.",
+            evidence=fails + warns + notes,
+        )
+    if warns:
+        shown = warns[:4]
+        if len(warns) > 4:
+            shown = shown + [f"(+{len(warns) - 4} more)"]
+        return _finding(
+            "B155", WARN,
+            f"Outbound-proxy weakening ({len(warns)} signal(s)) — see evidence.",
+            "Re-enable TLS verification (remove insecureSkipVerify), avoid "
+            "request.allowPrivateNetwork, and only set tools.web.fetch.useTrustedEnvProxy "
+            "when the env proxy is operator-controlled and enforces egress policy.",
+            evidence=shown + notes,
+        )
+    if isinstance(proxy, dict) and (proxy_enabled is True or has_proxy_url):
+        return _finding(
+            "B155", PASS,
+            "Managed outbound proxy is configured with no credential-in-URL, "
+            "TLS-verify-disable, or SSRF-guard-bypass signals."
+            + (f" Note: {notes[0]}" if notes else ""),
+            "Keep the proxy URL credential-free (env / secret store), TLS verification on, "
+            "and egress policy enforced at the proxy.",
+            evidence=notes,
+        )
+    return _finding(
+        "B155", UNKNOWN,
+        "No outbound proxy configured — the agent's egress goes direct (the default). "
+        "A managed proxy (proxy.*) would centralize and log egress; informational, not required.",
+        "Optional: set proxy.enabled + a credential-free https:// proxy.proxyUrl to route and "
+        "audit the agent's outbound traffic through a controlled egress point.",
     )
 
 

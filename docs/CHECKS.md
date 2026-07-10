@@ -381,6 +381,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - config: `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork` = `false` - block private-network requests from the browser tool
 
+### B155 - Outbound proxy hardening (credential leak / TLS-verify / SSRF-guard bypass)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Proxy / Egress Hardening
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Outbound proxy hardening (credential leak / TLS-verify / SSRF-guard bypass)
+- Remediation:
+  - none
+
 ### B39 - Session visibility / cross-user transcript leak
 
 - Severity: MEDIUM
