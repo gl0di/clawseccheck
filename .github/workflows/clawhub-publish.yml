@@ -67,7 +67,12 @@ jobs:
 
       - name: Smoke gate — lint, tests, compile
         run: |
-          python -m pip install -U pytest ruff
+          # Pinned to exact versions (not `-U`): this job later authenticates with the
+          # CLAWHUB_TOKEN release secret and holds contents/id-token:write, so a
+          # compromised or typosquatted pytest/ruff release must not be able to execute
+          # here (C-183 — same supply-chain discipline as the pinned clawhub@0.22.0
+          # install above). Bump these deliberately, like clawhub@ / markdownlint-cli@.
+          python -m pip install pytest==7.4.4 ruff==0.15.20
           python -m pytest -q
           ruff check .
           python -m compileall clawseccheck
