@@ -3,6 +3,30 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.28.5] — 2026-07-10
+
+Security hotfix from the audit-triage sweep: two paths where attacker-controlled
+MCP config could reach the report output unsanitized.
+
+### Security
+- MCP hardening (B24) no longer echoes a remote server's raw `url`/`endpoint`
+  into finding evidence. A credential embedded in userinfo, path, or query
+  (`https://user:TOKEN@host/…?api_key=…`) is now reduced to `scheme://host`
+  first — the same treatment the sibling C047 check already applied — so the
+  token no longer round-trips into the human, JSON, or SARIF report.
+- The capability-graph and credential-surface sections of the human report now
+  strip terminal-control sequences from MCP server / tool names before printing.
+  These two renderers previously bypassed the `_sanitize` guard used everywhere
+  else, letting a hostile MCP name inject ANSI/OSC escapes (window-title
+  spoofing, prior-output erasure, OSC-52 clipboard) on a default run and in a
+  `--save`d report.
+
+### Changed
+- CI and the ClawHub publish job now pin `pytest`/`ruff` to exact versions
+  instead of installing the latest. This matches the already-pinned `clawhub@`
+  and `markdownlint-cli@` installs, so a compromised or typosquatted release
+  cannot execute inside the token-bearing publish job.
+
 ## [3.28.4] — 2026-07-08
 
 The remaining MEDIUM/LOW fixes from the E-035 test sweep (concurrency,

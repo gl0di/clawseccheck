@@ -1166,7 +1166,14 @@ def _mcp_server_risks(name: str, spec: dict) -> tuple[list[str], list[str]]:
     if isinstance(url, str) and url.startswith("https://"):
         # Only flag when there is no allowedHosts restriction configured at all
         if not allowed_hosts:
-            warns.append(f"{name}: remote MCP endpoint {url[:60]} with no allowedHosts restriction")
+            # B-162: reduce to scheme://host — a url/endpoint can carry a token in
+            # userinfo/path/query (https://user:TOKEN@host/...?api_key=...); the raw
+            # value must never round-trip into evidence (§8, mirrors C047 below).
+            from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
+            warns.append(
+                f"{name}: remote MCP endpoint {sanitize_url_host_only(url)} "
+                "with no allowedHosts restriction"
+            )
 
     return fails, warns
 

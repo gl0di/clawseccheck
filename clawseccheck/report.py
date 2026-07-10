@@ -340,9 +340,12 @@ def _capability_graph_lines(ctx) -> list[str]:
         return []
     lines = ["Capability graph", "Static config + attestation summary:"]
     for node in graph["nodes"]:
-        tools = ", ".join(node["tools"]) if node["tools"] else "none"
+        # label (MCP server / subagent name) and tool names are untrusted config data —
+        # strip terminal-control sequences so they can't spoof/erase the terminal (B-164).
+        label = _sanitize(str(node["label"]))
+        tools = _sanitize(", ".join(node["tools"])) if node["tools"] else "none"
         lines.append(
-            f"- {node['label']} ({node['kind']}): tools={tools}; "
+            f"- {label} ({node['kind']}): tools={tools}; "
             f"secrets_visible={_bool_word(node['secrets_visible'])}; "
             f"can_write_memory={_bool_word(node['can_write_memory'])}; "
             f"can_egress={_bool_word(node['can_egress'])}"
@@ -485,7 +488,9 @@ def _credential_surface_lines(ctx) -> list[str]:
     map_ = _credential_surface_map(ctx)
     lines = ["Credential surface map (path-existence inventory)", "Static config + file-system inventory:"]
     for item in map_:
-        evidence = "; ".join(item["evidence"]) if item["evidence"] else "none"
+        # evidence carries untrusted MCP server names / config-derived strings — strip
+        # terminal-control sequences before they reach the terminal (B-164).
+        evidence = _sanitize("; ".join(item["evidence"])) if item["evidence"] else "none"
         lines.append(f"- {item['class']}: reachable={_bool_word(item['reachable'])}; {evidence}")
     return lines
 

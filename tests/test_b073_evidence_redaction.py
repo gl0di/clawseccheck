@@ -49,3 +49,15 @@ def test_b24_stdio_url_credential_not_in_evidence():
     blob = _rendered(f)
     assert _TOKEN not in blob, "credential leaked into B24 finding"
     assert "reg.example.com" in blob, "host signal must survive sanitization"
+
+
+def test_b24_remote_url_credential_not_in_evidence():
+    # B24's OWN remote-https branch (a url/endpoint with no allowedHosts) must also
+    # reduce the URL to scheme://host — userinfo and query tokens must never round-trip
+    # into evidence/detail/fix (B-162). Regression companion to the stdio path above.
+    url = f"https://admin:{_TOKEN}@mcp.internal.example.com/rpc/{_TOKEN}?api_key={_TOKEN}"
+    f = check_mcp_hardening(_ctx({"mcp": {"servers": {"leaky": {"url": url}}}}))
+    assert f.status == "WARN"
+    blob = _rendered(f)
+    assert _TOKEN not in blob, "credential leaked into B24 remote-URL finding"
+    assert "mcp.internal.example.com" in blob, "host signal must survive sanitization"
