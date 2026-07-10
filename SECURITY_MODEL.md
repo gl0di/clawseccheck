@@ -183,6 +183,16 @@ An absent, empty, or legacy pre-chain file (entries with no `chain_hash` field a
 verifies as `OK` for backward compatibility; the first entry whose recomputed hash does
 not match its stored `chain_hash` reports exactly where the chain broke.
 
+**What the chain does and does not defend.** It is a plain SHA-256 chain, not a keyed
+(HMAC) or externally-anchored one, so it detects *accidental corruption* and *naive edits*
+(editing/reordering/deleting an entry breaks it) — not a knowledgeable attacker who already
+has write access to the file, who can simply recompute the whole chain forward after
+tampering. The chain is therefore a drift/tamper-*evidence* aid, **not** a substitute for
+filesystem permissions on `~/.clawseccheck/`: anyone who can write that file already runs as
+your user and could edit history, patch the engine, or read anything you can. This is the
+same honest boundary as `--verify-self` (it does not defend against an adversary who also
+patches the verifier).
+
 ## A note for other security scanners auditing ClawSecCheck's own source
 
 If you are running a static scanner (including ClawHub's own publish-time audit, or a

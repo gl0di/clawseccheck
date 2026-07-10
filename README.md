@@ -773,6 +773,14 @@ positives on real configs.
   behaviours or formally verify your agent's security properties.
 - **Does not replace runtime red-teaming.** Static configuration analysis is a starting
   point, not a substitute for adversarial testing against a running agent.
+- **The active self-tests and attestation are a self-report protocol, not an
+  independently-verified check.** `--canary` / `--redteam` / `--dryrun` / `--self-test`
+  emit deterministic test material for your agent to run and grade, and `--ask` / `--attest`
+  ask your agent to declare its own capabilities — because the tool stays local and makes no
+  network calls (it cannot spin up and observe an independent agent process). An
+  already-compromised or jailbroken agent could therefore report `RESISTANT` or a benign
+  capability set dishonestly. Treat these results as the subject grading its own homework,
+  corroborated against the observable config/logs — not as proof.
 - **May produce false positives and false negatives.** Evidence-gating keeps noise low,
   but heuristics can miss novel attack patterns and can misread edge-case configurations.
 - **Read scope is bounded:** config, bootstrap markdown, installed-skill text, OpenClaw log
