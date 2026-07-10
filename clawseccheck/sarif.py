@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from .catalog import CATALOG, CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding, remediation_for
 from .dossier import VERDICT_WORD, axis_for
-from .report import _sanitize
+from .report import _sanitize, surfaced_despite_suppression
 from .scoring import ScoreResult
 
 if TYPE_CHECKING:
@@ -74,7 +74,10 @@ def render_sarif(
     """Return a SARIF 2.1.0 JSON string representing *findings*.
 
     Only FAIL and WARN findings that are not suppressed produce ``results``
-    entries. PASS, UNKNOWN, and suppressed findings are silently omitted.
+    entries. PASS and UNKNOWN are omitted, as are ordinary suppressed findings —
+    except a score-capping suppressed CRITICAL/HIGH FAIL (or sensitive check id),
+    which is emitted WITH a SARIF ``suppressions`` array so it stays visible to a
+    consumer (e.g. GitHub code scanning) rather than being silently hidden (B-163).
     The output is deterministic: rules follow CATALOG order; results follow the
     order of *findings* (caller is responsible for ordering if needed).
 
@@ -107,11 +110,14 @@ def render_sarif(
         for meta in CATALOG
     ]
 
-    # Build results: only FAIL / WARN, not suppressed.
+    # Build results: FAIL / WARN. Ordinary suppressed findings are skipped, but a
+    # score-capping suppressed CRITICAL/HIGH FAIL (or sensitive id) is kept and flagged
+    # with a SARIF `suppressions` array so it stays visible, not silently dropped (B-163).
     _catalog_ids = {meta.id for meta in CATALOG}
     results = []
     for f in findings:
-        if f.suppressed:
+        surfaced_suppressed = surfaced_despite_suppression(f)
+        if f.suppressed and not surfaced_suppressed:
             continue
         if f.status not in (FAIL, WARN):
             continue
@@ -139,6 +145,14 @@ def render_sarif(
                 fix_texts.append(f"set {c['path']} = {json.dumps(c['set'])} ({c.get('note', '')})")
         if fix_texts:
             result["fixes"] = [{"description": {"text": _sanitize(tx)}} for tx in fix_texts]
+        if surfaced_suppressed:
+            # SARIF-native suppression: the result stays in `results` (visible in the UI)
+            # but is marked suppressed, so a gate that respects suppressions won't fail on
+            # it while a reviewer still sees the hidden CRITICAL/HIGH (B-163).
+            result["suppressions"] = [{
+                "kind": "external",
+                "justification": "suppressed via .clawseccheckignore; still counts against real security",
+            }]
         results.append(result)
         # Vetting findings (e.g. MCP-VET) carry ids outside the scored CATALOG.
         # Keep the SARIF self-consistent: every referenced ruleId must have a rule.

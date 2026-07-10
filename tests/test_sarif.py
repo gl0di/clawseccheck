@@ -195,11 +195,22 @@ def test_unknown_finding_produces_no_result():
     assert results == []
 
 
-def test_suppressed_fail_produces_no_result():
-    f = _finding("B2", FAIL, suppressed=True)
+def test_suppressed_noncapping_fail_produces_no_result():
+    # An ordinary suppressed FAIL (not score-capping, not a sensitive id) stays omitted.
+    f = _finding("B7", FAIL, severity="MEDIUM", suppressed=True)
     doc, _ = _parse([f])
     results = doc["runs"][0]["results"]
     assert results == []
+
+
+def test_suppressed_capping_fail_surfaced_with_suppressions():
+    # B-163: a score-capping suppressed CRITICAL/HIGH FAIL stays visible in `results`
+    # but carries a SARIF `suppressions` array, so it can't be hidden from a reviewer.
+    f = _finding("B2", FAIL, severity=CRITICAL, suppressed=True)
+    doc, _ = _parse([f])
+    results = doc["runs"][0]["results"]
+    assert [r["ruleId"] for r in results] == ["B2"]
+    assert results[0]["suppressions"][0]["kind"] == "external"
 
 
 def test_suppressed_warn_produces_no_result():
@@ -215,7 +226,8 @@ def test_mixed_findings_only_actionable_in_results():
         _finding("B2", WARN, severity=HIGH),
         _finding("B3", PASS),
         _finding("B4", UNKNOWN),
-        _finding("B5", FAIL, suppressed=True),
+        # An ordinary (non-capping) suppressed FAIL stays omitted from results.
+        _finding("B5", FAIL, severity="MEDIUM", suppressed=True),
     ]
     doc, _ = _parse(findings)
     results = doc["runs"][0]["results"]

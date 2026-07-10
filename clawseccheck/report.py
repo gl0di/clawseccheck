@@ -45,6 +45,22 @@ def _sanitize(s: str) -> str:
         s = s.replace(c, " ")
     return s
 
+
+# A finding suppressed via .clawseccheckignore is normally dropped from the score, the
+# badge and SARIF. But a suppressed CRITICAL/HIGH FAIL (which caps the score) or a
+# sensitive check id must stay VISIBLE on every surface — one ignore line could otherwise
+# flip an F into an A silently. This predicate is the single source of that rule, shared by
+# the human report, the SVG badge and the SARIF renderer (B-163).
+SENSITIVE_SUPPRESSED_IDS = frozenset({"B1", "B2", "B13", "B20"})
+
+
+def surfaced_despite_suppression(f: Finding) -> bool:
+    """True when a suppressed finding must still be surfaced (score-capping or sensitive)."""
+    return bool(getattr(f, "suppressed", False)) and (
+        (f.status == FAIL and f.severity in (CRITICAL, HIGH))
+        or f.id in SENSITIVE_SUPPRESSED_IDS
+    )
+
 _SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}
 # Within a family: FAIL/WARN (the actionable items) before PASS/UNKNOWN (context).
 _STATUS_ORDER = {FAIL: 0, WARN: 1, UNKNOWN: 2, PASS: 3}
@@ -776,11 +792,9 @@ def render_report(findings: list[Finding], score: ScoreResult,
         # Surface suppressed findings that either cap the score (a FAILed CRITICAL→49 / HIGH→79)
         # or hit a sensitive check (B1/B2/B13/B20). Hiding these silently could turn an F into an
         # A via one .clawseccheckignore line, so they stay visible no matter what the ignore says.
-        _SENSITIVE_IDS = {"B1", "B2", "B13", "B20"}
+        # Same rule the badge and SARIF now use (surfaced_despite_suppression) — one source (B-163).
         for f in findings:
-            if not getattr(f, "suppressed", False):
-                continue
-            if (f.status == FAIL and f.severity in (CRITICAL, HIGH)) or f.id in _SENSITIVE_IDS:
+            if surfaced_despite_suppression(f):
                 lines.append(
                     f"WARNING: a {f.severity} finding ({f.id}) is suppressed via"
                     " .clawseccheckignore — it still counts against your real security;"
@@ -1002,9 +1016,16 @@ _GRADE_COLOR = {"A": "#4c1", "B": "#97ca00", "C": "#dfb317", "D": "#fe7d37", "F"
 
 
 def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
-    """A shields.io-style SVG badge (grade + score only — never findings)."""
+    """A shields.io-style SVG badge (grade + score, plus a suppressed-critical marker —
+    never finding details)."""
     label = "OpenClaw Security"
     value = f"{score.grade} {score.score}/100"
+    # B-163: if a score-capping CRITICAL/HIGH FAIL (or sensitive id) was hidden via
+    # .clawseccheckignore, the badge must not read as a clean grade — mark it so a shared
+    # badge can't misrepresent the real posture. Count only (never finding details).
+    n_hidden = sum(1 for f in findings if surfaced_despite_suppression(f))
+    if n_hidden:
+        value += f" *{n_hidden} suppressed"
     color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
     lw = 8 + len(label) * 6          # rough text widths
     vw = 8 + len(value) * 7

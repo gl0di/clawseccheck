@@ -110,3 +110,52 @@ def test_suppressed_critical_warns_once_per_finding():
     out = render_report([s1, s2], compute([s1, s2]))
     assert out.count("WARNING: a CRITICAL finding (B1)") == 1
     assert out.count("WARNING: a CRITICAL finding (B2)") == 1
+
+
+# ---- B-163: suppression must also reach the badge and SARIF, not just the text report ----
+
+def test_suppressed_critical_marked_on_badge():
+    """The shareable SVG badge must not read as a clean grade when a score-capping
+    CRITICAL FAIL was hidden via .clawseccheckignore — surface a suppression marker."""
+    from clawseccheck.report import render_svg
+    supp = _f("B2", CRITICAL, FAIL, "gateway exposed")
+    supp.suppressed = True
+    svg = render_svg(compute([supp]), [supp])
+    assert "suppressed" in svg.lower()
+
+
+def test_suppressed_non_critical_not_marked_on_badge():
+    """A merely-MEDIUM suppressed finding does not cap the score, so it must NOT clutter
+    the badge (only score-capping / sensitive suppressions are surfaced)."""
+    from clawseccheck.report import render_svg
+    supp = _f("B14", "MEDIUM", WARN, "egress surface")
+    supp.suppressed = True
+    svg = render_svg(compute([supp]), [supp])
+    assert "suppressed" not in svg.lower()
+
+
+def test_suppressed_critical_surfaced_in_sarif():
+    """A suppressed CRITICAL FAIL must appear in SARIF results with a `suppressions`
+    array (visible in code-scanning UI) instead of being silently omitted."""
+    import json as _json
+
+    from clawseccheck.sarif import render_sarif
+    supp = _f("B2", CRITICAL, FAIL, "gateway exposed")
+    supp.suppressed = True
+    doc = _json.loads(render_sarif([supp], compute([supp]), tool_version="0.0.0"))
+    results = doc["runs"][0]["results"]
+    b2 = [r for r in results if r["ruleId"] == "B2"]
+    assert b2, "suppressed CRITICAL must still be a visible SARIF result"
+    assert b2[0].get("suppressions"), "must be marked as a SARIF suppression, not a live alert"
+    assert b2[0]["suppressions"][0]["kind"] == "external"
+
+
+def test_suppressed_non_critical_still_omitted_from_sarif():
+    """A non-score-capping suppressed finding stays omitted from SARIF results."""
+    import json as _json
+
+    from clawseccheck.sarif import render_sarif
+    supp = _f("B14", "MEDIUM", WARN, "egress surface")
+    supp.suppressed = True
+    doc = _json.loads(render_sarif([supp], compute([supp]), tool_version="0.0.0"))
+    assert doc["runs"][0]["results"] == []
