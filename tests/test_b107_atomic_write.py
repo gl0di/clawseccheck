@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from clawseccheck.safeio import secure_write_text
+from clawseccheck.safeio import secure_append_text, secure_write_text
 
 
 def _siblings(p: Path) -> list[str]:
@@ -99,6 +99,51 @@ def test_partial_write_never_visible_at_dest(tmp_path, monkeypatch):
     # The old baseline is still the only complete file readers can see.
     assert dest.read_text() == "good-baseline"
     assert _siblings(dest) == ["state.json"], f"stray files: {_siblings(dest)}"
+
+
+def test_short_write_without_raise_writes_all_bytes(tmp_path, monkeypatch):
+    # B-167: a short os.write returning fewer bytes WITHOUT raising (ENOSPC/EDQUOT can
+    # do this) must not leave a truncated file — secure_write_text loops until every
+    # byte is flushed. The single unchecked os.write would otherwise fsync+replace a
+    # half-written temp, silently reproducing the B-107 corruption.
+    dest = tmp_path / "state.json"
+    real_write = os.write
+    calls = {"n": 0}
+
+    def _short(fd, data):
+        calls["n"] += 1
+        if calls["n"] == 1 and len(data) > 1:
+            return real_write(fd, data[:1])  # short write: one byte, no exception
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", _short)
+    payload = "the-full-payload-must-land-intact"
+    secure_write_text(dest, payload)
+    monkeypatch.undo()
+
+    assert dest.read_text() == payload
+    assert _siblings(dest) == ["state.json"], f"stray files: {_siblings(dest)}"
+
+
+def test_append_short_write_writes_all_bytes(tmp_path, monkeypatch):
+    # B-167: secure_append_text must likewise drain a short write rather than lose the
+    # tail of a journal line (which would corrupt the hash chain / trajectory record).
+    dest = tmp_path / "events.jsonl"
+    secure_append_text(dest, "first-line\n")
+    real_write = os.write
+    calls = {"n": 0}
+
+    def _short(fd, data):
+        calls["n"] += 1
+        if calls["n"] == 1 and len(data) > 1:
+            return real_write(fd, data[:2])  # short write of the payload's head
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", _short)
+    secure_append_text(dest, "second-line-must-be-whole\n")
+    monkeypatch.undo()
+
+    assert dest.read_text() == "first-line\nsecond-line-must-be-whole\n"
 
 
 def test_monitor_state_roundtrip(tmp_path):

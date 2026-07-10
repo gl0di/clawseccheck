@@ -58,6 +58,25 @@ def _open_owner_only(path: Path, extra_flags: int) -> int:
     return os.open(path, flags, 0o600)
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    """Write *every* byte of *data* to *fd*, looping over short writes.
+
+    A single ``os.write`` may write fewer bytes than requested WITHOUT raising —
+    e.g. when the filesystem fills mid-write (ENOSPC/EDQUOT can return a short
+    count). An unchecked single write would then fsync+replace a truncated file
+    onto the destination, silently reproducing the B-107 corruption the atomic
+    write exists to prevent (B-167). Loop until the buffer is fully drained.
+    """
+    mv = memoryview(data)
+    written = 0
+    total = len(mv)
+    while written < total:
+        n = os.write(fd, mv[written:])
+        if n <= 0:  # pragma: no cover - defensive; POSIX os.write won't return 0 for a non-empty buffer
+            raise OSError("os.write made no progress")
+        written += n
+
+
 def secure_write_text(path: Path, data: str) -> None:
     """Atomically overwrite *path* with *data* (temp-file + fsync + os.replace).
 
@@ -88,7 +107,7 @@ def secure_write_text(path: Path, data: str) -> None:
     tmp = Path(tmp_name)
     try:
         try:
-            os.write(fd, data.encode("utf-8"))
+            _write_all(fd, data.encode("utf-8"))
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -137,8 +156,8 @@ def secure_append_text(path: Path, data: str) -> None:
     fd = _open_owner_only(path, os.O_APPEND)
     try:
         if needs_leading_newline:
-            os.write(fd, b"\n")
-        os.write(fd, data.encode("utf-8"))
+            _write_all(fd, b"\n")
+        _write_all(fd, data.encode("utf-8"))
     finally:
         os.close(fd)
     try:  # belt-and-suspenders; creation mode already 0600 (POSIX only)
