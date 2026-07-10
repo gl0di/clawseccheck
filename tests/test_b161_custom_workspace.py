@@ -88,3 +88,41 @@ def test_blank_workspace_value_is_ignored(tmp_path):
     _write(home / "skills" / "ok" / "SKILL.md", "body")
     ctx = collect(home)  # must not raise
     assert "ok" in ctx.installed_skills
+
+
+# ---- C-135 adversarial regressions: a hostile path must degrade, never crash ----
+
+def test_symlink_loop_in_plugin_skills_does_not_crash(tmp_path):
+    # A self-referential plugin-skills symlink makes Path.resolve() raise RuntimeError
+    # ("Symlink loop"); it must be skipped, not abort the whole audit.
+    home = tmp_path
+    _write(home / "openclaw.json", "{}")
+    ps = home / "plugin-skills"
+    ps.mkdir(parents=True, exist_ok=True)
+    (ps / "loop").symlink_to(ps / "loop")  # self-loop
+    _write(home / "skills" / "ok" / "SKILL.md", "body")
+    ctx = collect(home)  # must not raise
+    assert "ok" in ctx.installed_skills  # the real skill still gets discovered
+    assert "loop" not in ctx.installed_skills
+
+
+def test_null_byte_workspace_does_not_crash(tmp_path):
+    # A null byte in agents.defaults.workspace makes Path.resolve() raise ValueError
+    # ("embedded null byte"); the path must be dropped, not crash collect().
+    import json
+    home = tmp_path
+    bad = "ws" + chr(0) + "x"  # assembled at runtime, no literal control char in source
+    _write(home / "openclaw.json", json.dumps({"agents": {"defaults": {"workspace": bad}}}))
+    _write(home / "skills" / "ok" / "SKILL.md", "body")
+    ctx = collect(home)  # must not raise
+    assert "ok" in ctx.installed_skills
+
+
+def test_null_byte_per_agent_workspace_does_not_crash(tmp_path):
+    import json
+    home = tmp_path
+    bad = "ws" + chr(0)
+    _write(home / "openclaw.json", json.dumps({"agents": {"list": [{"workspace": bad}]}}))
+    _write(home / "skills" / "ok" / "SKILL.md", "body")
+    ctx = collect(home)  # must not raise
+    assert "ok" in ctx.installed_skills

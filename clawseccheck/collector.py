@@ -991,8 +991,11 @@ def _config_workspace_dirs(home: Path, cfg: dict) -> list[Path]:
             p = home / p
         try:
             resolved = p.resolve()
-        except OSError:
-            resolved = p
+        except (OSError, ValueError, RuntimeError):
+            # An unusable workspace path — embedded null byte (ValueError), symlink loop /
+            # over-deep (RuntimeError), or an OS error — must be skipped, never crash the
+            # audit. Dropping it here also stops a later is_dir() from raising on it (C-135).
+            continue
         if resolved in seen:
             continue
         seen.add(resolved)
@@ -1017,7 +1020,7 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
             continue
         try:
             base_key = base.resolve()
-        except OSError:
+        except (OSError, ValueError, RuntimeError):
             base_key = base
         if base_key in seen_roots:
             continue
@@ -1031,7 +1034,9 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                 continue
             try:
                 target = sd.resolve() if sd.is_symlink() else sd
-            except OSError:
+            except (OSError, ValueError, RuntimeError):
+                # A looping / over-deep / null-byte plugin-skills symlink raises
+                # RuntimeError/ValueError (not just OSError) — skip it, never crash (C-135).
                 continue
             if not target.is_dir():
                 continue
