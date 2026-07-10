@@ -210,13 +210,13 @@ def check_outbound_proxy(ctx: Context) -> Finding:
     trust. Distinct from the INBOUND reverse-proxy trust in C032 / gateway.trustedProxies
     (do not conflate). Absence of a proxy is the default and is NEVER a FAIL (§5).
 
-    FAIL    — proxy.proxyUrl embeds credentials (http://user:pass@host): a secret sits in
-              plaintext in openclaw.json (only runtime logs are redacted).
+    FAIL    — proxy.proxyUrl (or a provider's request.proxy.url) embeds credentials
+              (http://user:pass@host): a secret sits in plaintext in openclaw.json
+              (only runtime logs are redacted).
     WARN    — a provider disables proxy/endpoint TLS verification
               (models.providers.*.request.proxy.tls.insecureSkipVerify or
               request.tls.insecureSkipVerify) → MITM; request.allowPrivateNetwork → SSRF;
-              tools.web.fetch.useTrustedEnvProxy → bypasses the local SSRF/DNS-rebind guard;
-              or proxy.enabled with no proxyUrl (a config the host refuses to start).
+              tools.web.fetch.useTrustedEnvProxy → bypasses the local SSRF/DNS-rebind guard.
     PASS    — a managed proxy is configured with a clean (credential-free) URL.
     UNKNOWN — no outbound proxy configured (the default): advisory nudge, never a FAIL.
     """
@@ -246,14 +246,12 @@ def check_outbound_proxy(ctx: Context) -> Finding:
             "a secret sits in plaintext in openclaw.json (only runtime logs are redacted)"
         )
 
-    # WARN: proxy enabled with no URL — the host refuses to start (broken config).
-    if proxy_enabled is True and not has_proxy_url:
-        warns.append(
-            "proxy.enabled=true but proxy.proxyUrl is unset — OpenClaw refuses to start "
-            "a managed proxy with no URL"
-        )
+    # NOTE: proxy.enabled with no proxyUrl is NOT flagged — OpenClaw's resolveProxyUrl
+    # falls back to the OPENCLAW_PROXY_URL env var, which this static check cannot see, so
+    # "enabled without a config URL" is a legitimate (env-supplied) running config (§5, §4).
 
-    # WARN: per-provider TLS-verify-disable / private-network egress.
+    # WARN: per-provider TLS-verify-disable / private-network egress. FAIL: an explicit-proxy
+    # url can embed credentials — same secret-leak class as the top-level proxy.proxyUrl.
     providers = dig(cfg, "models.providers")
     if isinstance(providers, dict):
         for pid, pspec in providers.items():
@@ -263,6 +261,19 @@ def check_outbound_proxy(ctx: Context) -> Finding:
             if not isinstance(req, dict):
                 continue
             pxy = req.get("proxy")
+            if isinstance(pxy, dict):
+                purl = pxy.get("url")
+                if isinstance(purl, str) and purl.strip():
+                    try:
+                        pp = urlparse(purl.strip())
+                    except (ValueError, AttributeError):
+                        pp = None
+                    if pp is not None and (pp.username or pp.password):
+                        fails.append(
+                            f"models.providers.{pid}.request.proxy.url embeds credentials "
+                            f"({sanitize_url_host_only(purl)}) — a secret sits in plaintext in "
+                            "openclaw.json (only runtime logs are redacted)"
+                        )
             ptls = pxy.get("tls") if isinstance(pxy, dict) else None
             if isinstance(ptls, dict) and ptls.get("insecureSkipVerify") is True:
                 warns.append(

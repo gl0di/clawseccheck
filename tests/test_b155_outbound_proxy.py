@@ -76,10 +76,25 @@ def test_webfetch_trusted_env_proxy_warns():
     assert "useTrustedEnvProxy" in _blob(f)
 
 
-def test_proxy_enabled_without_url_warns():
+def test_proxy_enabled_without_config_url_is_not_flagged():
+    # OpenClaw's resolveProxyUrl falls back to the OPENCLAW_PROXY_URL env var, which this
+    # static check cannot see — so proxy.enabled with no config URL is a valid running
+    # config, not a WARN (§4/§5; C-135 defect 1 — the check must not assert "refuses to start").
     f = check_outbound_proxy(_ctx({"proxy": {"enabled": True}}))
-    assert f.status == WARN
-    assert "no URL" in _blob(f) or "unset" in _blob(f)
+    assert f.status == PASS
+    assert "refuses to start" not in _blob(f)
+
+
+def test_provider_explicit_proxy_url_credential_fails_and_is_redacted():
+    # C-135 defect 2: a credential in an explicit-proxy url is the same secret-leak class as
+    # the top-level proxy.proxyUrl and must FAIL, echoing host-only.
+    url = f"http://{_SECRET}@corp-proxy.example.com:3128"
+    cfg = {"models": {"providers": {"openai": {"request": {"proxy": {"mode": "explicit-proxy", "url": url}}}}}}
+    f = check_outbound_proxy(_ctx(cfg))
+    assert f.status == FAIL
+    blob = _blob(f)
+    assert _SECRET not in blob, "explicit-proxy credential leaked"
+    assert "corp-proxy.example.com" in blob
 
 
 def test_plain_http_proxy_to_remote_is_note_not_fail():
