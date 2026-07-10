@@ -3,6 +3,51 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.29.0] — 2026-07-10
+
+Coverage and machine-output fixes from the audit-triage sweep: the audit now sees
+config-declared custom workspaces and plugin-skills, lexically scans plugin runtime
+JS/TS, and can no longer be quietly misread by a broken config or a shared badge.
+
+### Added
+- The audit now discovers a workspace declared via `agents.defaults.workspace` (or a
+  per-agent `agents.list[].workspace`) — previously, a workspace pointing outside the
+  hardcoded names hid its bootstrap files and skills entirely, so a malicious `SOUL.md`
+  or skill in a custom workspace scored clean. OpenClaw's `plugin-skills/` symlink roots
+  are now scanned too (dereferencing the symlink target). Real configs are unchanged: the
+  default workspace location de-duplicates to the paths already scanned.
+- `vet_plugin` (`--vet-plugin`) now runs the same conservative lexical JS/TS pass the skill
+  vet uses over a plugin's runtime entry files. A plugin whose JS contained obfuscated-RCE
+  (`eval(atob(...))`) or remote-fetch-then-eval previously returned a silent `PASS`; it now
+  reports `WARN`. The pass never forces a `FAIL` (a lexical false-positive on a minified
+  bundle must not).
+
+### Changed
+- A `.clawseccheckignore` that suppresses a score-capping CRITICAL/HIGH finding is now
+  reflected on every surface, not just the text report: the shareable SVG badge shows a
+  `*N suppressed` marker and SARIF emits the finding with a native `suppressions` array
+  (visible in code-scanning) instead of dropping it silently.
+- **Behaviour change:** a present-but-unparseable `openclaw.json` is now a distinct,
+  machine-visible state. `--json` and `--sarif` carry `config_parse_error` (and `--json`
+  also `config_found` + `errors`), and `--exit-code` trips on it — a broken config can no
+  longer pass a CI gate as a green UNKNOWN-only run. A valid empty `{}` config is not an
+  error. See `OUTPUT_SCHEMA.md` §1 for the three new `--json` keys.
+
+### Fixed
+- `safeio`'s atomic writer/appender looped its `os.write` so a short write that returns
+  fewer bytes without raising (disk-full / quota) can no longer leave a truncated file at
+  the destination — closing the last gap in the B-107 atomic-write guarantee.
+- Hardened the new workspace/plugin-skills discovery against hostile paths found in
+  adversarial review: a self-referential/over-deep `plugin-skills` symlink or a null byte
+  in a workspace value no longer aborts the whole audit — such paths are skipped, the tool
+  degrades rather than crashing.
+
+### Documentation
+- Clarified that the active self-tests (`--canary`/`--redteam`/`--dryrun`/`--self-test`)
+  and attestation are a self-report protocol — an already-compromised agent could report
+  dishonestly — and that the local history hash chain is tamper-*evidence* against
+  accidental corruption / naive edits, not a substitute for filesystem permissions.
+
 ## [3.28.5] — 2026-07-10
 
 Security hotfix from the audit-triage sweep: two paths where attacker-controlled
