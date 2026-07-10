@@ -31,12 +31,14 @@ def test_apply_by_id_and_by_fingerprint():
     assert c.suppressed
 
 
-def test_suppressed_critical_does_not_cap_score():
+def test_suppressed_critical_still_caps_score():
     keep = _f("B3", HIGH, PASS)
     supp = _f("B2", CRITICAL, FAIL, "x")
     supp.suppressed = True
     r = compute([keep, supp])
-    assert r.score == 100 and r.capped is False
+    assert r.score <= 49
+    assert r.grade == "F"
+    assert r.failed_critical == 1
 
 
 

@@ -47,8 +47,16 @@ class ScoreResult:
 
 
 def compute(findings: list[Finding]) -> ScoreResult:
-    scored = [f for f in findings if f.scored and f.status not in (UNKNOWN, "SKILL_ARCHIVE_PATH_TRAVERSAL")
-              and not getattr(f, "suppressed", False)]
+    # Suppression is a reporting/triage decision, not proof that a real FAIL stopped
+    # existing. Keep suppressed FAILs in the score so an ignore entry cannot turn a
+    # vulnerable system into an A/100. Suppressed PASS/WARN/UNKNOWN findings retain the
+    # historical baseline behaviour and stay outside the raw denominator.
+    scored = [
+        f for f in findings
+        if f.scored
+        and f.status not in (UNKNOWN, "SKILL_ARCHIVE_PATH_TRAVERSAL")
+        and (not getattr(f, "suppressed", False) or f.status == FAIL)
+    ]
     total = sum(WEIGHT[f.severity] for f in scored)
     if total == 0:
         # Nothing measurable — distinct "not assessable" result, not a real F.

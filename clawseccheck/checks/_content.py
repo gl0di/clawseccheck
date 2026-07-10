@@ -2248,6 +2248,12 @@ def _check_markdown_image_exfil(ctx: Context) -> Finding:
 
     evidence: list[str] = []
 
+    def _safe_url(url: str) -> str:
+        # Keep the query shape useful for the finding while ensuring the public Finding
+        # object itself cannot carry a credential into a custom renderer/API consumer.
+        from ..logsafe import redact  # noqa: PLC0415
+        return _obf_clip(redact(url))
+
     def _scan(blob: str, source: str) -> None:
         norm = normalize_for_scan(blob)
         fr = _fence_ranges(norm)
@@ -2257,14 +2263,14 @@ def _check_markdown_image_exfil(ctx: Context) -> Finding:
                 continue
             url = _b59_markdown_url(m.group(1))
             if url and _b59_url_has_data_query(url):
-                evidence.append(f"{source}: markdown image URL with query params: {_obf_clip(url)}")
+                evidence.append(f"{source}: markdown image URL with query params: {_safe_url(url)}")
 
         for m in _B59_MD_LINK_RE.finditer(norm):
             if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             url = _b59_markdown_url(m.group(1))
             if url and _b59_url_has_data_query(url):
-                evidence.append(f"{source}: markdown link URL with query params: {_obf_clip(url)}")
+                evidence.append(f"{source}: markdown link URL with query params: {_safe_url(url)}")
 
         for m in _B59_HTML_TAG_RE.finditer(norm):
             if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
@@ -3065,7 +3071,8 @@ def _scan_b59_html_attr(evidence: list[str], source: str, tag: str, name: str, v
             "poster": "HTML media poster URL with query params",
             "href": "HTML anchor href URL with query params",
         }.get(attr, "HTML URL with query params")
-        evidence.append(f"{source}: {label}: {_obf_clip(item)}")
+        from ..logsafe import redact  # noqa: PLC0415
+        evidence.append(f"{source}: {label}: {_obf_clip(redact(item))}")
 
 
 def _sentence_scoped_segment(text: str, start: int, end: int, cap: int = 200) -> str:

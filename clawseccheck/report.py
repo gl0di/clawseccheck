@@ -43,7 +43,27 @@ def _sanitize(s: str) -> str:
     s = _BAD_CHARS_RE.sub("", _ANSI_OSC_RE.sub("", s))
     for c in "\r\n\t":
         s = s.replace(c, " ")
-    return s
+    # Lazy import avoids the report -> logsafe -> checks import cycle during package
+    # initialisation. Every renderer shares this boundary, so secret redaction cannot be
+    # accidentally implemented for JSON while remaining absent from text/SARIF/HTML.
+    from .logsafe import redact  # noqa: PLC0415
+    return redact(s)
+
+
+def _sanitize_tree(value):
+    """Recursively sanitize untrusted strings in machine-readable output trees."""
+    if isinstance(value, str):
+        return _sanitize(value)
+    if isinstance(value, list):
+        return [_sanitize_tree(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_tree(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            _sanitize(str(key)): _sanitize_tree(item)
+            for key, item in value.items()
+        }
+    return value
 
 
 # A finding suppressed via .clawseccheckignore is normally dropped from the score, the
@@ -1105,7 +1125,7 @@ def render_vet_json(profile, *, mode: str, version: str) -> str:
         "findings": [_finding_to_dict(f) for f in profile.findings],
         "unmapped": list(profile.unmapped),
     }
-    return json.dumps(payload, ensure_ascii=True, indent=2)
+    return json.dumps(_sanitize_tree(payload), ensure_ascii=True, indent=2)
 
 
 def _dossier_top_fix(profile) -> str:
@@ -1242,7 +1262,7 @@ def render_advise_json(profile, *, version: str) -> str:
         "copy, not your real installed skill"
     )
     payload["coverage"] = _coverage(profile.findings)
-    return json.dumps(payload, ensure_ascii=True, indent=2)
+    return json.dumps(_sanitize_tree(payload), ensure_ascii=True, indent=2)
 
 
 # ---- F-065: --vet-plan — the zero-network default path. This tool never fetches
@@ -1490,7 +1510,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     payload["config_parse_error"] = bool(getattr(ctx, "config_parse_error", False)) if ctx is not None else False
     payload["errors"] = [_sanitize(e) for e in getattr(ctx, "errors", [])] if ctx is not None else []
     payload["scan_receipt"] = f"sha256:{compute_scan_receipt(findings)}"
-    return json.dumps(payload, ensure_ascii=True, indent=2)
+    return json.dumps(_sanitize_tree(payload), ensure_ascii=True, indent=2)
 
 
 def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str:

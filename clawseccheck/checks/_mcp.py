@@ -24,6 +24,7 @@ from ..collector import (
     classify_bytes,
     dig,
 )
+from ..configloader import loads_json5
 from ..textnorm import (
     normalize_for_scan,
     obfuscation_signals,
@@ -131,14 +132,17 @@ def vet_plugin(path: str | Path) -> Finding:
             "A plugin root carries openclaw.plugin.json; for a skill directory use --vet.",
         )
     try:
-        manifest = _json.loads(
+        manifest = loads_json5(
             (root / _PLUGIN_MANIFEST).read_text(encoding="utf-8", errors="replace")
         )
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
+        # RecursionError (deeply-nested manifest) and MemoryError (huge manifest) are not
+        # ValueError — without them a hostile manifest would abort the whole vet instead of
+        # degrading to UNKNOWN, the graceful path every other bad manifest takes (C-135).
         return _plugin_finding(
             HIGH,
             UNKNOWN,
-            f"could not parse {_PLUGIN_MANIFEST}: {exc}",
+            f"could not parse {_PLUGIN_MANIFEST}: {type(exc).__name__}",
             "Inspect the manifest manually — the host would refuse this plugin too.",
         )
     if not isinstance(manifest, dict):

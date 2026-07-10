@@ -37,6 +37,7 @@ from .report import (
     render_permission_manifest,
     render_vet_dossier,
     render_vet_plan,
+    surfaced_despite_suppression,
 )
 from .dossier import build_profile
 from .ansi import should_color, strip_ansi
@@ -1175,7 +1176,11 @@ def _main(argv=None) -> int:
 
     if args.exit_code:
         has_fail = any(
-            not getattr(f, "suppressed", False) and f.status == "FAIL"
+            f.status == "FAIL"
+            and (
+                not getattr(f, "suppressed", False)
+                or surfaced_despite_suppression(f)
+            )
             for f in findings
         )
         # B-166: a present-but-unparseable openclaw.json produces only UNKNOWN/WARN, so a

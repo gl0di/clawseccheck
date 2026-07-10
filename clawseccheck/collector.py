@@ -5,9 +5,7 @@ No network. No writes. Pure stdlib.
 """
 from __future__ import annotations
 
-import json
 import math
-import re
 import io
 import zipfile
 import tarfile
@@ -17,7 +15,15 @@ import lzma
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from .configloader import (
+    ConfigLoadError as _ConfigLoadError,
+    load_openclaw_config as _load_openclaw_config,
+)
 from .safeio import walk_dir_safely, is_safe_tar_member
+from .skilldiscovery import (
+    config_extra_skill_dirs as _config_extra_skill_dirs,
+    iter_discovered_skill_dirs as _iter_discovered_skill_dirs,
+)
 from .textnorm import obfuscation_signals
 
 # Bootstrap / prompt files injected into the system prompt as "trusted context".
@@ -92,10 +98,6 @@ _ENTROPY_MIN_SAMPLE = 2_048         # below this, entropy is too noisy to judge
 # honest-UNKNOWN on the boundary rather than widen and risk a false WARN.
 _PADDING_ENTROPY_THRESHOLD = 3.0
 
-_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
-_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
-
-
 def _shannon_entropy_bits(s: str) -> float:
     """Shannon entropy (bits per byte) over the UTF-8 byte histogram of *s*.
 
@@ -115,16 +117,6 @@ def _shannon_entropy_bits(s: str) -> float:
             p = c / n
             ent -= p * math.log2(p)
     return ent
-
-
-def _loads_tolerant(text: str) -> dict:
-    """Parse JSON, tolerating JSON5-isms (comments, trailing commas)."""
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        stripped = _COMMENT_RE.sub("", text)
-        stripped = _TRAILING_COMMA_RE.sub(r"\1", stripped)
-        return json.loads(stripped)
 
 
 @dataclass
@@ -1009,8 +1001,25 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     # a planted symlink is a tamper signal — but plugin-skills entries are *deliberately*
     # symlinks into a plugin's bundled skills/ dir, so those get dereferenced (B-161).
     roots: list[tuple[Path, bool]] = [(home / rel, False) for rel in SKILL_DIRS]
+    # OpenClaw also loads personal cross-agent skills from ~/.agents/skills. Only add
+    # this global root when auditing an actual profile directory under the user's home;
+    # fixture/custom --home scans must remain hermetic and never absorb unrelated skills.
+    try:
+        user_home = Path.home().resolve()
+        audited_home = home.resolve()
+    except (OSError, ValueError, RuntimeError):
+        user_home = None
+        audited_home = None
+    if (
+        user_home is not None
+        and audited_home is not None
+        and audited_home.parent == user_home
+        and audited_home.name.startswith(".openclaw")
+    ):
+        roots.append((user_home / ".agents" / "skills", False))
     for cw in _config_workspace_dirs(home, ctx.config):
         roots.append((cw / "skills", False))
+    roots.extend((path, False) for path in _config_extra_skill_dirs(home, ctx.config))
     plugin_skills = home / "plugin-skills"
     if plugin_skills.is_dir():
         roots.append((plugin_skills, True))
@@ -1025,26 +1034,25 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         if base_key in seen_roots:
             continue
         seen_roots.add(base_key)
-        for sd in sorted(base.iterdir()):
+        for sd, target in _iter_discovered_skill_dirs(
+            base, allow_symlink_entries=allow_symlink, limit_hits=ctx.limit_hits
+        ):
             if len(ctx.installed_skills) >= _MAX_SKILLS:
                 return
             if sd.name.lower() in _OWN_SKILL_NAMES:
                 continue
-            if sd.is_symlink() and not allow_symlink:
-                continue
-            try:
-                target = sd.resolve() if sd.is_symlink() else sd
-            except (OSError, ValueError, RuntimeError):
-                # A looping / over-deep / null-byte plugin-skills symlink raises
-                # RuntimeError/ValueError (not just OSError) — skip it, never crash (C-135).
-                continue
-            if not target.is_dir():
-                continue
-            if not (target / "SKILL.md").is_file():
-                continue
             key = sd.name
             if key in seen:
-                continue
+                try:
+                    rel = sd.relative_to(base).as_posix()
+                except ValueError:
+                    rel = sd.name
+                key = f"{base.name}/{rel}"
+                suffix = 2
+                original = key
+                while key in seen:
+                    key = f"{original}#{suffix}"
+                    suffix += 1
             seen.add(key)
             try:
                 ctx.installed_skills[key] = _read_skill_text(target, ctx)
@@ -1064,44 +1072,19 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     parsed_ok = False
     if cfg_path.is_file():
         try:
-            # B-153: stream-read with the same over-allocation-free cap used for
-            # bootstrap/skill files — a huge/padded openclaw.json must not load whole
-            # into memory (memory DoS). A truncated read is NOT fed to the JSON parser
-            # (partial JSON would either raise a confusing parse error or, worse, parse
-            # into a truncated-but-valid-looking dict); instead it surfaces a limit_hit
-            # + error so downstream checks see ctx.config as unset (UNKNOWN), same as
-            # any other unparsable config.
-            with open(cfg_path, "rb") as fp:
-                raw, truncated = _read_with_limit(fp, _MAX_CONFIG_BYTES)
-        except OSError as exc:
-            ctx.errors.append(f"could not read {cfg_path}: {exc}")
+            parsed = _load_openclaw_config(cfg_path, root_byte_limit=_MAX_CONFIG_BYTES)
+        except (OSError, _ConfigLoadError, RecursionError) as exc:
+            message = str(exc)
+            ctx.errors.append(f"could not parse {cfg_path}: {message}")
+            if "cap" in message or "exceeds" in message:
+                ctx.limit_hits.append(message)
         else:
-            if truncated:
-                ctx.limit_hits.append(
-                    f"config file '{cfg_path.name}' exceeded the "
-                    f"{_MAX_CONFIG_BYTES // 1_000_000}MB cap — content beyond the cap "
-                    "was NOT read or parsed")
-                ctx.errors.append(
-                    f"could not parse {cfg_path}: exceeds "
-                    f"{_MAX_CONFIG_BYTES // 1_000_000}MB cap"
-                )
-            else:
-                try:
-                    parsed = _loads_tolerant(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    ctx.errors.append(f"could not parse {cfg_path}: {exc}")
-                except RecursionError:
-                    ctx.errors.append(f"could not parse {cfg_path}: nesting too deep")
-                else:
-                    if isinstance(parsed, dict):
-                        ctx.config = parsed
-                        ctx.config_mode = cfg_path.stat().st_mode & 0o777
-                        parsed_ok = True
-                    else:
-                        ctx.errors.append(
-                            f"malformed {cfg_path}: expected a JSON object, "
-                            f"got {type(parsed).__name__}"
-                        )
+            ctx.config = parsed
+            try:
+                ctx.config_mode = cfg_path.stat().st_mode & 0o777
+            except OSError as exc:
+                ctx.errors.append(f"could not stat {cfg_path}: {exc}")
+            parsed_ok = True
     else:
         ctx.errors.append(f"config not found: {cfg_path}")
 

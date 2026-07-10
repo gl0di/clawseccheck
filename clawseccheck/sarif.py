@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from .catalog import CATALOG, CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding, remediation_for
 from .dossier import VERDICT_WORD, axis_for
-from .report import _sanitize, surfaced_despite_suppression
+from .report import _sanitize, _sanitize_tree, surfaced_despite_suppression
 from .scoring import ScoreResult
 
 if TYPE_CHECKING:
@@ -277,4 +277,4 @@ def render_sarif(
             ],
         }
 
-    return json.dumps(sarif_log, ensure_ascii=True, indent=2)
+    return json.dumps(_sanitize_tree(sarif_log), ensure_ascii=True, indent=2)

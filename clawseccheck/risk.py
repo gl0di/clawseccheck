@@ -1083,16 +1083,20 @@ def render_risk_paths(paths: list[RiskPath], ascii_only: bool = False) -> str:
         return _asciify(msg) if ascii_only else msg
 
     arrow = " -> " if ascii_only else " → "  # ->  or  →
+    # Imported lazily because report imports this renderer lazily too. Risk labels are
+    # derived from untrusted channel/provider names and need the same output boundary as
+    # ordinary findings.
+    from .report import _sanitize  # noqa: PLC0415
 
     lines: list[str] = ["Highest-risk paths", "=" * 44, ""]
 
     for p in paths:
-        sev_tag = f"[{p.severity}]"
+        sev_tag = f"[{_sanitize(p.severity)}]"
         # Include the id (RISK-NN) in the human output too — it was only in --json before,
         # so a finding referenced by id could not be cross-referenced in the text report.
-        lines.append(f"{sev_tag} {p.id}: {p.title}")
-        lines.append(f"  Chain : {arrow.join(p.chain)}")
-        lines.append(f"  Why   : {p.why}")
+        lines.append(f"{sev_tag} {_sanitize(p.id)}: {_sanitize(p.title)}")
+        lines.append(f"  Chain : {arrow.join(_sanitize(step) for step in p.chain)}")
+        lines.append(f"  Why   : {_sanitize(p.why)}")
         # Reports-only (F-074): the chain and why ARE the report; the structured
         # remediation stays available as --json data (risk_paths[].fix) only.
         lines.append("")
