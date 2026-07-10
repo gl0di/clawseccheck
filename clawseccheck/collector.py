@@ -135,6 +135,7 @@ class Context:
     errors: list[str] = field(default_factory=list)
     config_mode: int | None = None                  # octal perms of openclaw.json, or None
     config_found: bool = False                       # openclaw.json present (vs non-OpenClaw setup)
+    config_parse_error: bool = False                 # openclaw.json present but unparseable (B-166)
     native: object = None                           # NativeResult from openclaw security audit
     host: object = None                             # hostwatch.detect() result; set by audit(include_host=True)
     include_host: bool = False                      # host-filesystem scanning enabled (audit(include_host=True) / not --no-host)
@@ -989,6 +990,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
 
     cfg_path = home / "openclaw.json"
     ctx.config_found = cfg_path.is_file()
+    parsed_ok = False
     if cfg_path.is_file():
         try:
             # B-153: stream-read with the same over-allocation-free cap used for
@@ -1023,6 +1025,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
                     if isinstance(parsed, dict):
                         ctx.config = parsed
                         ctx.config_mode = cfg_path.stat().st_mode & 0o777
+                        parsed_ok = True
                     else:
                         ctx.errors.append(
                             f"malformed {cfg_path}: expected a JSON object, "
@@ -1030,6 +1033,13 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
                         )
     else:
         ctx.errors.append(f"config not found: {cfg_path}")
+
+    # B-166: "config present but unparseable" (read error, size-cap truncation, decode/
+    # JSON/recursion error, or a non-object top level) is a distinct, machine-visible state
+    # from "no config file". Surfaced in --json/--sarif and trips --exit-code so a broken
+    # config can't silently pass a CI gate as an UNKNOWN-only run. A valid empty "{}" is
+    # NOT an error (parsed_ok stays True).
+    ctx.config_parse_error = ctx.config_found and not parsed_ok
 
     # Scan the home root first, then workspace sub-directories.  The root is
     # included so bootstrap files that live outside the three named workspace

@@ -37,6 +37,9 @@ versioning §6 in `CLAUDE.md`).
 | `intentAttestationRequests` | `array[SAR]` | yes | Structured Attestation Requests for B62 capability-intent mismatches. See §7. |
 | `coverage` | `object` | yes | Surface/family coverage map for the Dashboard. See §8. |
 | `projection` | `object` | yes | What-if score projections for the Dashboard. See §9. |
+| `config_found` | `bool` | yes | `true` when an `openclaw.json` was present at the scanned home (vs a non-OpenClaw setup). |
+| `config_parse_error` | `bool` | yes | `true` when `openclaw.json` was present but could not be parsed into a config object (syntax error, size-cap truncation, or a non-object top level). A gating consumer should treat `true` as "scan incomplete", not a clean result — the run is UNKNOWN-heavy. A valid empty `{}` config is `false`. |
+| `errors` | `array[str]` | yes | Human-readable collection/parse messages (e.g. the `openclaw.json` parse error). Empty array on a clean run. |
 | `scan_receipt` | `str` | yes | Deterministic content-integrity hash over all findings, formatted `"sha256:<64-hex-chars>"`. Same findings set (any order) always yields the same receipt; a changed finding set changes it. Not a security signature — a drift/tamper-evidence checksum for the scan output itself. |
 
 ### Skeleton
@@ -58,6 +61,9 @@ versioning §6 in `CLAUDE.md`).
   "intentAttestationRequests": [],
   "coverage": { "surfaces": {}, "families": {}, "gaps": {}, "summary": {} },
   "projection": { "current": {}, "top1": null, "cumulative": {} },
+  "config_found": true,
+  "config_parse_error": false,
+  "errors": [],
   "scan_receipt": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 }
 ```

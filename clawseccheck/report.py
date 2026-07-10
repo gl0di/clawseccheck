@@ -1483,6 +1483,12 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     from .scoring import project as _project  # noqa: PLC0415
     payload["coverage"] = _coverage(findings)
     payload["projection"] = _project(findings)
+    # B-166: config read/parse state is machine-visible. A broken openclaw.json must not
+    # read as a silent all-clear — config_parse_error is a clean gating boolean and errors
+    # carries the human-readable parse message(s) that were previously only in the text run.
+    payload["config_found"] = bool(getattr(ctx, "config_found", False)) if ctx is not None else False
+    payload["config_parse_error"] = bool(getattr(ctx, "config_parse_error", False)) if ctx is not None else False
+    payload["errors"] = [_sanitize(e) for e in getattr(ctx, "errors", [])] if ctx is not None else []
     payload["scan_receipt"] = f"sha256:{compute_scan_receipt(findings)}"
     return json.dumps(payload, ensure_ascii=True, indent=2)
 

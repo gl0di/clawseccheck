@@ -1178,7 +1178,9 @@ def _main(argv=None) -> int:
             not getattr(f, "suppressed", False) and f.status == "FAIL"
             for f in findings
         )
-        if has_fail or vm_has_fail:
+        # B-166: a present-but-unparseable openclaw.json produces only UNKNOWN/WARN, so a
+        # FAIL-only gate would stay green on a broken config. Trip on it explicitly.
+        if has_fail or vm_has_fail or getattr(ctx, "config_parse_error", False):
             return 1
 
     return 0

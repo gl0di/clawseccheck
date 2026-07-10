@@ -235,6 +235,9 @@ def render_sarif(
             "path_traversal_violations": path_traversal_violations,
             "file_manifest": file_manifest,
             "simulated_effects": simulated_effects,
+            # B-166: surface a present-but-unparseable openclaw.json so a SARIF consumer
+            # doesn't read an UNKNOWN-only run over a broken config as a clean scan.
+            "config_parse_error": bool(getattr(ctx, "config_parse_error", False)),
         }
         run = sarif_log["runs"][0]
         if "properties" not in run:
