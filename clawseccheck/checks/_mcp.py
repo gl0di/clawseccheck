@@ -72,6 +72,13 @@ _PLUGIN_FILE_CAP = 400  # B-074: a cap hit is disclosed and downgrades to UNKNOW
 
 _PLUGIN_SNIFF_BYTES = 512
 
+# B-165: plugin runtime JS/TS entry files get the same conservative lexical pass the
+# skill vet already runs (analyze_javascript). Bounded per-file read so a minified bundle
+# can't blow memory; a JS signal raises the plugin verdict to WARN (never FAIL — a
+# minified-bundle false-positive must not force a FAIL), fixing the old false-clean PASS.
+_PLUGIN_JS_EXT = (".js", ".mjs", ".cjs", ".ts")
+_PLUGIN_JS_MAX_BYTES = 2_000_000
+
 
 _VET_RANK_STATUS = {3: FAIL, 2: WARN, 1: UNKNOWN, 0: PASS}
 
@@ -97,10 +104,15 @@ def vet_plugin(path: str | Path) -> Finding:
     pinning, native-executable stowaways) run here; bundled skills are dispatched to
     vet_skill() — they land on the skill auto-load surface via the
     ~/.openclaw/plugin-skills symlink farm — and embedded MCP server specs to
-    vet_mcp(). Plugin runtime code is JS/TS and is NOT deeply analyzed (design
-    decision D2); that limit is disclosed in the evidence, never hidden by a PASS.
+    vet_mcp(). Plugin runtime JS/TS gets the same conservative *lexical* pass the skill
+    vet runs (analyze_javascript: obfuscated-RCE / remote-fetch-then-eval and a couple of
+    warn-level signals) — a JS signal raises the verdict to WARN so it is never a silent
+    PASS (B-165). That pass is lexical, not a full runtime analysis (the residual D2 limit);
+    the coverage note still says so, and it never forces a FAIL on its own.
     """
     import json as _json
+
+    from ..skillast import analyze_javascript  # noqa: PLC0415
 
     p = Path(str(path)).expanduser()
     if not p.exists():
@@ -140,6 +152,7 @@ def vet_plugin(path: str | Path) -> Finding:
     warns: list[str] = []
     notes: list[str] = []  # coverage / informational evidence — never verdict-moving
     subs: list[Finding] = []  # dispatched engine findings (vet_skill / vet_mcp)
+    js_signals: list[str] = []  # B-165: lexical JS/TS findings — raise the verdict to WARN
 
     # -- manifest sanity (required fields per recon §11.2; host blocks activation on error)
     pid = manifest.get("id")
@@ -203,9 +216,10 @@ def vet_plugin(path: str | Path) -> Finding:
             entries.extend(str(x) for x in val)
     if entries:
         notes.append(
-            "coverage: plugin runtime code is JS/TS ("
+            "coverage: plugin runtime JS/TS ("
             + ", ".join(entries[:3])
-            + ") — not deeply analyzed by this vet; review the entry files before trusting"
+            + ") is lexically scanned for obfuscated-RCE / remote-eval signals only — not a "
+            "full runtime analysis; still review the entry files before trusting"
         )
     notes.append("coverage: node_modules/ (third-party npm deps) excluded from the content scan")
     npm_spec = dig(pkg, "openclaw.install.npmSpec")
@@ -307,16 +321,36 @@ def vet_plugin(path: str | Path) -> Finding:
                 "native executable bundled in the plugin (stowaway): "
                 f"{fp.relative_to(root)} ({fmt})"
             )
+        elif fp.suffix.lower() in _PLUGIN_JS_EXT:
+            # B-165: same conservative lexical JS/TS pass as the skill vet. Bounded read so
+            # a minified bundle can't blow memory; a signal raises the verdict to WARN (below),
+            # never FAIL, so a false-positive can't force a FAIL.
+            if size <= _PLUGIN_JS_MAX_BYTES:
+                try:
+                    src = fp.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    src = None
+                if src is not None:
+                    rel = fp.relative_to(root)
+                    for af in analyze_javascript(src, str(rel)):
+                        js_signals.append(f"runtime JS/TS: {af.reason} ({rel}:{af.lineno})")
+            else:
+                notes.append(
+                    f"coverage: runtime JS/TS '{fp.relative_to(root)}' exceeds the "
+                    f"{_PLUGIN_JS_MAX_BYTES // 1_000_000}MB scan cap — not lexically scanned"
+                )
 
     # -- verdict: same merge rank as the skill vet; UNKNOWN floor on a capped sweep
     sub_rank = max((_VET_MERGE_RANK.get(f.status, 0) for f in subs), default=0)
-    rank = max(sub_rank, 2 if warns else 0, 1 if truncated else 0)
+    # B-165: js_signals raise the floor to WARN (2), never FAIL — a lexical false-positive
+    # on a minified bundle must not force a FAIL.
+    rank = max(sub_rank, 2 if (warns or js_signals) else 0, 1 if truncated else 0)
     status = _VET_RANK_STATUS[rank]
 
     n_mcp = sum(1 for f in subs if f.id == "MCP-VET")
     summary = f"plugin '{pid}' ({len(skill_dirs)} bundled skill(s), {n_mcp} embedded MCP spec(s))"
     actionable = [f for f in subs if f.status in (FAIL, WARN, UNKNOWN)]
-    evidence = warns + [f"{f.status}: {f.detail}" for f in actionable] + notes
+    evidence = warns + js_signals + [f"{f.status}: {f.detail}" for f in actionable] + notes
 
     if status == FAIL:
         worst = max(subs, key=lambda f: _VET_MERGE_RANK.get(f.status, 0))
@@ -329,8 +363,12 @@ def vet_plugin(path: str | Path) -> Finding:
             evidence,
         )
     elif status == WARN:
-        head_sig = warns[0] if warns else actionable[0].detail
-        label = "supply-chain / packaging signals" if warns else "bundled-content signals"
+        if warns:
+            head_sig, label = warns[0], "supply-chain / packaging signals"
+        elif js_signals:
+            head_sig, label = js_signals[0], "runtime JS/TS signals"
+        else:
+            head_sig, label = actionable[0].detail, "bundled-content signals"
         finding = _plugin_finding(
             MEDIUM,
             WARN,
@@ -352,7 +390,7 @@ def vet_plugin(path: str | Path) -> Finding:
             LOW,
             PASS,
             f"{summary}: no manifest, packaging, or bundled-content signals",
-            "Still skim the JS/TS entry files — plugin runtime code is outside this vet's depth.",
+            "Skim the JS/TS entry files anyway — this vet's JS pass is lexical, not a full runtime analysis.",
             evidence,
         )
     finding.ring_findings = actionable
