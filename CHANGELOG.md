@@ -3,6 +3,21 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.32.0] — 2026-07-11
+
+Adds a native-addon-load signal to the plugin/skill JS scan and a maintainer-contact section.
+
+### Added
+- **`JS_NATIVE_DLOPEN`** — the lexical plugin/skill JS pass now flags a direct `process.dlopen(`
+  call (a native-addon `.node` load that bypasses JS-level analysis — Node's own docs say
+  `require()` should be preferred). It surfaces as a WARN and never forces a FAIL, in either the
+  plugin (`--vet-plugin`) or installed-skill (`--vet`) path. Grounded zero false-positive: no
+  legitimate direct callers were found across the installed OpenClaw distribution or a full
+  `node_modules` tree.
+- A **"Feedback & issues"** section in the README and `SKILL.md`, pointing to GitHub Issues with a
+  maintainer contact (`gllodi@gmail.com`). Documentation only — no network, no telemetry; the
+  tool's local-only / read-only / no-network guarantees are unchanged.
+
 ## [3.31.0] — 2026-07-11
 
 Custom agent workspaces are now resolved and their scan scope disclosed, and the pre-scan
