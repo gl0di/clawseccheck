@@ -3,6 +3,36 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.32.1] — 2026-07-11
+
+Fixes from a live v3.32.0 run: host-monitor detection, silent-instruction severity, a
+grounding error in the multi-agent findings, and maintainer-contact / menu-label corrections.
+
+### Fixed
+- **Host-monitor detection no longer claims a monitor is absent when it merely could not find
+  one.** A read-only, often non-root scan cannot prove auditd / IDS / file-integrity / EDR are
+  absent — they may live in paths it did not read (sbin binaries off a non-root `PATH`, a
+  running pidfile, `rules.d`) — so a miss now resolves to UNKNOWN rather than a confident
+  "not detected", and detection is broadened (absolute sbin paths, `/run/auditd.pid`, a
+  populated `rules.d`). A high-privilege agent on a host with no *confirmed* monitoring is still
+  warned (and the RISK-10 chain still fires): the exposure is surfaced honestly, never silenced.
+- **Silent-instruction directive (B63)** no longer shows a plausibly-benign "don't tell"-style
+  phrase at HIGH severity when no action is co-located with it. HIGH is now reserved for a real
+  hide-then-act directive; the ambiguous, may-be-documentation case is MEDIUM.
+- **Multi-agent findings** corrected a false claim that OpenClaw exposes no per-agent tool
+  allowlist and no way to resolve a default agent — it does (`agents.list[].tools.*`, a
+  resolvable default) — while keeping the honest caveat that a static per-agent split is still
+  bounded because session-granted runtime tools are not written to config.
+- **Vulnerability-reporting contact** — `SECURITY.md` pointed reporters at a "GitHub profile"
+  email that was not published; it now names the maintainer address directly, and a dangling
+  `references/maintainers.md` link was removed from the skill.
+
+### Changed
+- The "Check everything" menu item no longer implies it runs a live behavioral injection test —
+  a full audit only *generates* injection scenarios; the real, opt-in behavioral test is called
+  out separately. The guided flow also now suggests a compact (`--card`) or file
+  (`--save`/`--html`) report when the channel truncates long messages (e.g. Telegram).
+
 ## [3.32.0] — 2026-07-11
 
 Adds a native-addon-load signal to the plugin/skill JS scan and a maintainer-contact section.
