@@ -327,14 +327,16 @@ def _model_names(cfg: dict) -> list[str]:
     return names
 
 
-# F-040: OpenClaw exposes agents.list[] (multiple named agents) but no field to
-# resolve which one is "default" (no agents.defaultId / agents.active — grounded
-# absence, see openclaw-schema-recon.md). A1's legs are computed from the GLOBAL
-# config surface, so a multi-agent install's trifecta view is an aggregate, not any
-# single agent's real exposure. Reframed from an interactive guide.py question (F-039)
-# to this static note: no id/name field exists to let a static check or a headless
-# CLI invocation (the tool's primary usage — see SKILL.md) resolve or ask about a
-# specific agent, and a blocking input() prompt would hang under that invocation mode.
+# F-040: OpenClaw DOES resolve a default agent at runtime (defaultId ??
+# sessionDefaults.defaultAgentId ?? "main") and DOES expose per-agent tool config
+# (agents.list[].tools.{alsoAllow, profile, byProvider, toolsBySender}) — this check
+# consults neither. A1's legs are computed from the GLOBAL config surface, so a
+# multi-agent install's trifecta view stays an aggregate, not any single agent's real
+# exposure; reading a specific agent's effective grants here is a deferred enhancement
+# (check_agent_separation already offers an attested per-agent alternative today).
+# Reframed from an interactive guide.py question (F-039) to this static note: a
+# blocking input() prompt would hang under headless CLI invocation (the tool's primary
+# usage — see SKILL.md), so this stays a caveat, not an attempt to resolve one agent.
 def _multi_agent_note(ctx: Context) -> str:
     agent_list = dig(ctx.config, "agents.list")
     n = len(agent_list) if isinstance(agent_list, list) else 0
@@ -342,9 +344,9 @@ def _multi_agent_note(ctx: Context) -> str:
         return ""
     return (
         f" Note: config declares {n} agents under agents.list — this trifecta view is"
-        f" the aggregated global surface. OpenClaw exposes no field to resolve which"
-        f" one you run as default, so if you run a specific named agent, its own"
-        f" effective grants may differ from this global reading."
+        f" the aggregated global surface, not any single agent's effective grants. This"
+        f" check does not resolve or read a specific agent's own tool config, so if you"
+        f" run one named agent, its real exposure may differ from this global reading."
     )
 
 

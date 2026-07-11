@@ -210,10 +210,14 @@ def check_agent_separation(ctx: Context) -> Finding:
 
     A1 flattens the whole setup into one capability surface, so it cannot tell a
     monolithic agent (one agent holds all three legs) from a properly separated fleet
-    where no single agent does. OpenClaw config has no per-agent tool allowlist (only
-    per-agent deny lists), so the per-agent capability split is NOT in config — this
-    reads the attested agent roster (--attest 'agents') and classifies each agent's
-    legs itself (it never trusts a self-graded "this agent is safe").
+    where no single agent does. OpenClaw DOES expose per-agent tool config
+    (agents.list[].tools.{alsoAllow, profile, byProvider, toolsBySender} — both allow
+    and deny), but a config-only split still can't be fully sound: tools granted at
+    session start (message/exec_command/web_* — never written to openclaw.json, the
+    B-033 thin-surface problem) sit outside those fields, so a static read could
+    understate an agent's real legs. This reads the attested agent roster
+    (--attest 'agents') instead and classifies each agent's legs from what it actually
+    reports (it never trusts a self-graded "this agent is safe").
 
     WARN    — some single agent holds all three legs (input + sensitive + outbound):
               separation is absent; that agent alone is the lethal trifecta.
@@ -231,7 +235,9 @@ def check_agent_separation(ctx: Context) -> Finding:
             "B45",
             UNKNOWN,
             "No agent roster attested — per-agent privilege separation cannot be "
-            "assessed from config (OpenClaw config has no per-agent tool allowlist).",
+            "assessed from config alone (per-agent tool config exists, but it can't "
+            "show session-granted runtime tools, so it can't fully stand in for each "
+            "agent's real legs).",
             "If you run more than one agent, run 'clawseccheck --ask', have each agent "
             "list its real tools under 'agents', then re-run with '--attest <file>'.",
         )

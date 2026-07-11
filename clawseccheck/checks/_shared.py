@@ -428,9 +428,13 @@ def _agent_legs(tools: list) -> dict:
     """Classify ONE agent's declared tool list into the three trifecta legs.
 
     Per-agent we only have that agent's own tool names (from the attestation roster),
-    so legs are derived purely from the same tool-name hints A1 uses. The config-level
-    signals A1 also consults (credentials dir, gateway password, elevated.allowFrom)
-    are GLOBAL, not attributable to one agent, so they are intentionally not applied here.
+    so legs are derived purely from the same tool-name hints A1 uses. OpenClaw does
+    expose per-agent tool config (agents.list[].tools.*), but this classifies the
+    ATTESTED roster on purpose — attestation can reflect session-granted runtime tools
+    that static per-agent config fields can't (see check_agent_separation for why). The
+    config-level signals A1 also consults (credentials dir, gateway password,
+    elevated.allowFrom) are GLOBAL, not attributable to one agent, so they are
+    intentionally not applied here.
     """
     return {
         "untrusted input": _hint(tools, INPUT_TOOL_HINTS),
