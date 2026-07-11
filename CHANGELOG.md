@@ -3,6 +3,26 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.31.0] — 2026-07-11
+
+Custom agent workspaces are now resolved and their scan scope disclosed, and the pre-scan
+menu can remember the last mode you chose. Both are local-only and read-only.
+
+### Added
+- The last pre-scan mode is now remembered between runs. It is stored locally at
+  `~/.clawseccheck/prescan.json` (0600, the mode name only) so a later run can offer it as
+  the default instead of always starting at Quick; any absent, unreadable, or unknown state
+  falls back to Quick. Local-only and read-only like the rest of the tool — no network, and
+  no findings ever leave your machine.
+
+### Fixed
+- A custom agent workspace declared in `openclaw.json` (`agents.defaults.workspace` or a
+  per-agent `workspace`) that uses `..`, `~`, or an absolute path is now recorded by its
+  resolved path, and when it resolves outside the audited `--home` the report discloses that
+  once rather than silently folding outside-home bootstrap/skill files into the scan.
+  OpenClaw legitimately permits out-of-home workspaces, so they are still scanned — never
+  rejected — introducing no false-positive.
+
 ## [3.30.0] — 2026-07-10
 
 A new outbound-proxy check, real JSON5/`$include` config parsing (OpenClaw configs are
