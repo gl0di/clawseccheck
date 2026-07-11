@@ -19,6 +19,7 @@ from .monitor import (
     DEFAULT_EVENTS, diff, load_events, load_state, record_events, save_state, snapshot,
 )
 from .native import run_native_audit
+from .prescan import read_last_mode, record_mode
 from .report import (
     render_card, render_dashboard, render_dashboard_findings, render_events, render_json,
     render_monitor, render_report, render_svg, render_vet_json,
@@ -81,4 +82,5 @@ __all__ = [
     "history_load", "history_record", "render_trend", "DEFAULT_HISTORY",
     "suggest_actions", "render_next_actions",
     "risk_paths", "render_risk_paths",
+    "read_last_mode", "record_mode",
 ]
