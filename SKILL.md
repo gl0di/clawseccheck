@@ -762,3 +762,11 @@ network is an **explicit, user-initiated** action — never something the skill 
 To keep this playbook lean, two supplementary references live outside it and are read
 only when needed: the full CLI flag reference in [`references/cli-flags.md`](references/cli-flags.md)
 and the maintainer release protocol in [`references/maintainers.md`](references/maintainers.md).
+
+---
+
+## Feedback & issues
+
+Found a bug, a false positive, or have a question? Open an issue:
+<https://github.com/gl0di/clawseccheck/issues> — maintained by
+gl0di <gl0di@users.noreply.github.com>.

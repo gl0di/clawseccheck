@@ -804,6 +804,15 @@ The test suite and fixtures live in the [GitHub repo](https://github.com/gl0di/c
 
 ---
 
+## 🐛 Feedback & issues
+
+Found a bug, a false positive, or have a question? Please open an issue:
+<https://github.com/gl0di/clawseccheck/issues>
+
+Maintained by gl0di <gl0di@users.noreply.github.com>.
+
+---
+
 ## 📄 License
 
 MIT — see [LICENSE](LICENSE).
