@@ -184,7 +184,7 @@ monospace fence:
 
 > 🦞 ClawSecCheck · v{version}
 >
->   1  🔍 Check everything        config + live agent test ⚡
+>   1  🔍 Check everything        config + capability audit
 >   2  📦 Check before install    skill · plugin · MCP
 >   3  📄 Report & history        show · save · trend · badge
 >   4  📋 Menu                    everything else: verify · version · HTML · SARIF…
@@ -201,7 +201,7 @@ rest on demand. The number, the phrase, or a tap all select an item; free phrasi
 
 | Choice | Flag(s) | Notes |
 |--------|---------|-------|
-| 1 Check everything ("check" / "go") | `--full` (+ auto capability self-report, see Step 2) | Read-only audit **+** capability self-report (resolves B43/B44 inline instead of leaving them UNKNOWN for a separate "deeper" step — F-043) **+** live self-test (canary/dryrun/redteam) **+** MCP vet, in one go. The ⚡ live test is disclosed in the label, so picking item 1 **is** the consent — run the read-only audit first, present the dashboard, *then* the live test. |
+| 1 Check everything ("check" / "go") | `--full` (+ auto capability self-report, see Step 2) | Read-only audit **+** capability self-report (resolves B43/B44 inline instead of leaving them UNKNOWN for a separate "deeper" step — F-043) **+** self-test scenario generation (canary/dryrun/redteam — generates injection scenarios; it does not itself run a behavioral verdict) **+** MCP vet, in one go. The actual ⚡ live behavioral test (VULNERABLE vs RESISTANT) is a separate, opt-in step offered after the dashboard (Section 6, item a) — not part of item 1. |
 | 2 Check before install | `--vet <path>` (autodetects skill · plugin · MCP spec; `--vet-skill` / `--vet-plugin` force an engine) · `--vet-mcp [name]` (configured MCP) · `--vet-source <slug|url>` (before anything is even downloaded) | Supply-chain check on something you're about to trust. See vet flow in Step 5. |
 | 3 Report & history | default report · `--save <path>` · `--trend` · `--badge <path>` | Show or save the last result, the score trend, or a shareable badge. |
 | 4 Menu | `--functions` (Screen 12 — the full palette) | Saying "menu" / "functions" / "more" expands the complete capability list — run `python3 {baseDir}/audit.py --functions` (or present its output). Every capability appears as a speakable prompt grounded to its real flag (verify, what-changed, html, sarif, percentile, risk-paths, the vet family, the ⚡ live tests, …), so there's no wall of raw flags. (`--menu` itself renders *this* Welcome screen; the palette is one level deeper.) |
@@ -275,6 +275,12 @@ Present all six sections below **in one message**, in order. Render menus and pr
 sections (5-6) as ordinary text — do NOT wrap them in a code block or monospace fence;
 that rule does not apply to the Section 1-2 Dashboard card, which must be pasted exactly
 as the tool prints it (see below) because its frame relies on monospace alignment.
+
+**Channel-aware delivery:** the full Dashboard card can exceed a chat channel's message
+limit (e.g. Telegram's ~4096-character cap — Sections 1-2 alone can already run to
+≈6,482 characters). If the destination channel truncates long messages, deliver a
+compact summary instead with `--card` (grade + score + trifecta) and offer to save the
+full report as a file via `--save <path>` or `--html <path>`.
 
 **Sections 1-2 — the Dashboard card: do not compose it, paste it.**
 
@@ -417,6 +423,10 @@ in a code block or monospace fence:
 > Next — ✅ read-only · ⚡ touches live agent (asks)
 >   a ⚡ Live injection test   b ✅ Turn on monitoring
 >   c ✅ Save full report      d ✅ Menu   Start with a?
+
+Item a is not a duplicate of Step 2's audit: the full audit only *generated* injection
+scenarios (and never showed them to the user — Step 2 is internal-only), it never ran one
+against you, so this is the first real behavioral test (VULNERABLE vs RESISTANT) in the flow.
 
 ### Step 4 — Next menu routing
 
@@ -759,9 +769,8 @@ network is an **explicit, user-initiated** action — never something the skill 
 
 ## Reference docs (loaded on demand, not at audit time)
 
-To keep this playbook lean, two supplementary references live outside it and are read
-only when needed: the full CLI flag reference in [`references/cli-flags.md`](references/cli-flags.md)
-and the maintainer release protocol in [`references/maintainers.md`](references/maintainers.md).
+To keep this playbook lean, a supplementary reference lives outside it and is read
+only when needed: the full CLI flag reference in [`references/cli-flags.md`](references/cli-flags.md).
 
 ---
 

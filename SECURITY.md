@@ -16,7 +16,7 @@ disclosure.
 **Preferred:** [GitHub Security Advisories](https://github.com/gl0di/clawseccheck/security/advisories/new)
 (private, coordinated disclosure).
 
-**Alternative:** email the maintainer via the address listed on the GitHub profile.
+**Alternative:** email the maintainer at `gllodi@gmail.com`.
 
 ### What to include
 
