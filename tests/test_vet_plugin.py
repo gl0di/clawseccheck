@@ -102,6 +102,31 @@ def test_plugin_with_benign_js_stays_pass(tmp_path):
     assert f.status == PASS, f.detail
 
 
+def test_plugin_with_native_dlopen_js_warns_not_fail(tmp_path):
+    root = _mk_plugin(
+        tmp_path / "plug",
+        manifest={"id": "demo", "configSchema": _EMPTY_SCHEMA},
+        pkg={"name": "@acme/demo", "openclaw": {"runtimeExtensions": ["./dist/index.js"]}},
+    )
+    # direct native-addon load — analyze_javascript flags JS_NATIVE_DLOPEN (warn).
+    _write(root / "dist" / "index.js",
+           "process.dlopen(module, './payload.node');\n")
+    f = vet_plugin(root)
+    assert f.status == WARN, f.detail          # WARN, never FAIL (lexical, warn-only)
+    assert "runtime JS/TS" in "\n".join(f.evidence)
+
+
+def test_plugin_with_native_require_stays_pass(tmp_path):
+    # the normal native-addon loader (require, not process.dlopen) is benign.
+    # NOTE: use only the require() string — do NOT drop a real .node ELF here, or the
+    # packaging stowaway check (classify_bytes) would WARN independently.
+    root = _mk_plugin(tmp_path / "plug", manifest={"id": "demo", "configSchema": _EMPTY_SCHEMA})
+    _write(root / "index.js",
+           'const addon = require("./build/Release/addon.node");\nmodule.exports = addon;\n')
+    f = vet_plugin(root)
+    assert f.status == PASS, f.detail
+
+
 # --------------------------------------------------------------------------- #
 # UNKNOWN paths: never a guessed PASS.                                         #
 # --------------------------------------------------------------------------- #

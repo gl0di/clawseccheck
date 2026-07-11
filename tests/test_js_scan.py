@@ -99,6 +99,22 @@ def test_dynamic_require_variable_flags_warn():
     assert _sev('const m = require(modName);\n', "JS_DYNAMIC_REQUIRE") == "warn"
 
 
+def test_process_dlopen_flags_warn():
+    assert _sev('process.dlopen(module, "./build/x.node");\n', "JS_NATIVE_DLOPEN") == "warn"
+
+
+def test_benign_native_require_is_silent():
+    # requiring a native addon (the normal loader) is not a direct dlopen escape.
+    assert _rules('const addon = require("./build/Release/addon.node");\n') == []
+    assert _rules('const bindings = require("bindings")("addon");\n') == []
+
+
+def test_benign_commented_dlopen_is_silent():
+    # comment-masking: a documented mention must not fire (line + block).
+    assert _rules('// process.dlopen(module, path) — internal only\nx();\n') == []
+    assert _rules('/* uses process.dlopen() under the hood */\nx();\n') == []
+
+
 def test_benign_static_exec_is_silent():
     src = 'const {exec} = require("child_process");\nexec("ls -la");\n'
     assert "JS_CHILD_PROCESS_DYNAMIC" not in _rules(src)
@@ -124,3 +140,11 @@ def test_vet_skill_with_js_eval_decoded_fails(tmp_path):
 def test_vet_skill_with_benign_js_is_safe(tmp_path):
     d = _mk_skill(tmp_path / "ok", {"index.js": 'const fs = require("fs");\nconsole.log("hi");\n'})
     assert vet_skill(str(d)).status == PASS
+
+
+def test_vet_skill_with_dlopen_js_is_warn_not_fail(tmp_path):
+    # process.dlopen() is warn-only: it must surface, but must NEVER be a FAIL — even in
+    # the installed-skill path, where a *crit* JS signal (e.g. JS_EVAL_DECODED) maps to a
+    # B13 FAIL. This locks the "warn severity" choice that keeps it non-FAIL here.
+    d = _mk_skill(tmp_path / "native", {"index.js": "process.dlopen(module, './x.node');\n"})
+    assert vet_skill(str(d)).status != FAIL

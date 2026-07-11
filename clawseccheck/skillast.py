@@ -2206,6 +2206,12 @@ _JS_CP_TEMPLATE_RE = re.compile(
 _JS_DYN_REQUIRE_RE = re.compile(
     r"\brequire\s*\(\s*(?:`[^`]*\$\{|[A-Za-z_$][\w$.]*\s*[)+])",
 )
+# process.dlopen() — a direct native-addon (.node) load: the native-boundary escape.
+# Node's own docs (process.dlopen) say require() should be preferred and it "should not
+# be used directly"; direct use in plugin runtime JS is a red flag. warn-only.
+_JS_NATIVE_DLOPEN_RE = re.compile(
+    r"\bprocess\.dlopen\s*\(",
+)
 
 
 def _js_mask_comments(source: str) -> str:
@@ -2231,6 +2237,9 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
         emitted when the file references child_process (kills the RegExp.exec FP).
       JS_DYNAMIC_REQUIRE (warn) — require() of a non-literal (variable / template):
         an attacker-influenced module path.
+      JS_NATIVE_DLOPEN (warn) — process.dlopen(): a direct native-addon (.node) load,
+        the native-boundary escape that bypasses JS-level analysis. Node's docs say
+        require() should be preferred over calling dlopen directly.
 
     Benign JS — static eval, JSON.parse(atob(token)), local require, base64 decode
     without eval — stays silent. Comments are masked so documented examples don't fire."""
@@ -2283,6 +2292,17 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
             ln,
             "require() of a non-literal (variable/template) — a dynamic, "
             "possibly attacker-influenced module path",
+        )
+
+    for m in _JS_NATIVE_DLOPEN_RE.finditer(masked):
+        ln = masked.count("\n", 0, m.start()) + 1
+        add(
+            "JS_NATIVE_DLOPEN",
+            "warn",
+            ln,
+            "process.dlopen() loads a native addon (.node) directly — a "
+            "native-boundary escape that bypasses JS-level analysis; require() "
+            "is the normal loader",
         )
 
     return out
