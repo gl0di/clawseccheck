@@ -1623,14 +1623,14 @@ These paths are computed from multiple checks. They fire only when every leg is 
 ### RISK-10 - Powerful agent on an unmonitored host — a breach would be invisible
 
 - Severity: MEDIUM
-- Pattern: MEDIUM: a high-privilege agent on a host with NO detection monitoring.
+- Pattern: MEDIUM: a high-privilege agent on a host with no CONFIRMED detection monitoring.
 - Chain: untrusted input reaches the agent -> agent can execute / write on the host -> no host detection (IDS / audit / file-integrity / EDR) -> a compromise would leave no trace
 - Why:
   This agent can act on the host (exec / write / elevated tools) and is reachable by
-  untrusted input, yet ClawSecCheck found NO host detection monitoring — no network IDS,
-  no audit logging, no file-integrity monitor, and no endpoint/EDR sensor. If the agent
-  were compromised via a prompt injection, the resulting activity would very likely go
-  completely unseen.
+  untrusted input, yet ClawSecCheck found no evidence of any host detection monitoring —
+  no confirmed network IDS, audit logging, file-integrity monitor, or endpoint/EDR sensor
+  (some of these may simply be unreadable by a non-root scan). If the agent were
+  compromised via a prompt injection, the resulting activity would very likely go unseen.
 - Fix:
   Add at least one host detection layer so a compromise is observable: enable auditd with
   watches on the agent's files, install a file-integrity monitor (AIDE), and/or deploy an

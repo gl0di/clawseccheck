@@ -239,12 +239,17 @@ def _session_cross_user(findings: list[Finding], cfg: dict) -> bool:
 
 
 def _host_blind(ctx: Context) -> bool:
-    """True only when host detection RAN, the platform is supported, and EVERY
-    visibility class (network IDS / audit / FIM / EDR) is definitively ABSENT.
+    """True only when host detection RAN, the platform is supported, and
+    no visibility monitor is PRESENT across all four families (network IDS /
+    audit / FIM / EDR) — every one is either definitively ABSENT or an honest
+    UNKNOWN (B-172: a read-only, often non-root scan cannot PROVE one of these
+    is absent, so a miss is UNKNOWN rather than a confident 'absent' — but it
+    still means no monitor was CONFIRMED present).
 
-    Per the zero-false-positive doctrine we require POSITIVE evidence of absence —
-    an 'unknown' (couldn't read) or any 'present' monitor yields no chain. Firewall
-    is excluded: it's prevention, not detection of a compromise.
+    Any 'present' monitor yields no chain. A class status of ``None`` (the class
+    key itself missing from the result) still yields no chain — that is a shape
+    the real detector never produces, so it is treated as inconclusive, not
+    blind. Firewall is excluded: it's prevention, not detection of a compromise.
     """
     host = getattr(ctx, "host", None)
     if not host or not host.get("supported"):
@@ -254,7 +259,7 @@ def _host_blind(ctx: Context) -> bool:
     statuses = [(classes.get(c) or {}).get("status") for c in vis]
     if any(s is None for s in statuses):
         return False
-    return all(s == "absent" for s in statuses)
+    return all(s in ("absent", "unknown") for s in statuses)
 
 
 def _has_multi_user_channel(cfg: dict) -> bool:
@@ -567,11 +572,13 @@ def _rule_malicious_skill_exfil(ctx: Context, findings: list[Finding],
 
 
 def _rule_host_blind(ctx: Context, tools: list[str], cfg: dict) -> RiskPath | None:
-    """MEDIUM: a high-privilege agent on a host with NO detection monitoring.
+    """MEDIUM: a high-privilege agent on a host with no CONFIRMED detection monitoring.
 
     Not an exploit chain like the others — a visibility gap: if this agent is
     compromised, nothing on the host (IDS / audit / FIM / EDR) would notice.
-    Fires only on positive evidence that all four visibility classes are absent.
+    Fires when no visibility class is confirmed present — each is either
+    definitively absent or an honest unknown (B-172: a read-only miss is not
+    proof of absence, but it is also not evidence of presence).
     """
     if not _host_blind(ctx):
         return None
@@ -589,10 +596,11 @@ def _rule_host_blind(ctx: Context, tools: list[str], cfg: dict) -> RiskPath | No
         ],
         why=(
             "This agent can act on the host (exec / write / elevated tools) and is "
-            "reachable by untrusted input, yet ClawSecCheck found NO host detection "
-            "monitoring — no network IDS, no audit logging, no file-integrity monitor, "
-            "and no endpoint/EDR sensor. If the agent were compromised via a prompt "
-            "injection, the resulting activity would very likely go completely unseen."
+            "reachable by untrusted input, yet ClawSecCheck found no evidence of any "
+            "host detection monitoring — no confirmed network IDS, audit logging, "
+            "file-integrity monitor, or endpoint/EDR sensor (some of these may simply "
+            "be unreadable by a non-root scan). If the agent were compromised via a "
+            "prompt injection, the resulting activity would very likely go unseen."
         ),
         fix=(
             "Add at least one host detection layer so a compromise is observable: "

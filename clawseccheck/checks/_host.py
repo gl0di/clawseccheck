@@ -87,6 +87,14 @@ _HOST_CLASS_LABEL = {
     "firewall": "host firewall (ufw, firewalld, nftables)",
 }
 
+# The four *detection/visibility* classes (mirrors hostwatch.VISIBILITY_CLASSES).
+# A read-only, often non-root scan cannot PROVE one of these is absent — a miss
+# is honest UNKNOWN (hostwatch._detection_cls, B-172) — but an UNKNOWN on one of
+# these still means "presence not confirmed," so a high-privilege agent still
+# deserves a (lower-confidence) heads-up rather than a silent plain UNKNOWN.
+# FIREWALL is prevention, not detection, and keeps the plain UNKNOWN branch.
+_VISIBILITY_CLASSES = frozenset({"network_ids", "host_audit", "file_integrity", "edr_av"})
+
 
 # ---------- B16: is threat monitoring / detection set up? ----------
 _MONITORING_HINTS = (
@@ -169,6 +177,20 @@ def _host_finding(cid: str, cls: str, ctx: Context) -> Finding:
         )
 
     if status == "unknown":
+        if cls in _VISIBILITY_CLASSES and _agent_is_powerful(ctx):
+            return _custom(
+                cid,
+                LOW,
+                WARN,
+                f"Could not confirm read-only whether {label} is present on this "
+                "host, and this agent is high-privilege (it can act on the host "
+                "and is reachable by untrusted input). A read-only scan cannot "
+                "prove a monitor's absence — but if there genuinely is none, a "
+                "compromise here could go unseen.",
+                f"Confirm manually whether {label} is active on the agent's "
+                "machine, or self-report it via `--attest` (host_monitors) so "
+                "this check can credit it.",
+            )
         return _finding(
             cid,
             UNKNOWN,

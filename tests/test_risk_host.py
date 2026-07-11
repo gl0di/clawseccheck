@@ -1,10 +1,13 @@
-"""RISK-10 — powerful agent on a host with no detection monitoring.
+"""RISK-10 — powerful agent on a host with no CONFIRMED detection monitoring.
 
-Fires only on POSITIVE evidence that all four visibility classes (network IDS /
-audit / FIM / EDR) are ABSENT, AND the agent is high-privilege (exec/write +
-reachable by untrusted input). An 'unknown' probe or any present monitor yields
-no chain (zero-false-positive doctrine). Firewall is irrelevant (prevention,
-not detection).
+Fires when none of the four visibility classes (network IDS / audit / FIM /
+EDR) is CONFIRMED present — each is either definitively ABSENT or an honest
+UNKNOWN (B-172: a read-only, often non-root scan cannot PROVE one of these is
+absent, so a miss is UNKNOWN rather than a false 'absent' — but it still means
+no monitor was confirmed present) — AND the agent is high-privilege (exec/write
++ reachable by untrusted input). Any CONFIRMED-present monitor yields no chain
+(zero-false-positive doctrine). Firewall is irrelevant (prevention, not
+detection).
 """
 from __future__ import annotations
 
@@ -51,10 +54,14 @@ def test_risk10_silent_when_one_visibility_monitor_present():
     assert "RISK-10" not in _ids(_ctx(_POWERFUL, host))
 
 
-def test_risk10_silent_when_a_visibility_class_is_unknown():
-    # an inconclusive probe is NOT positive evidence of absence -> no chain
-    host = _host(host_audit={"status": "unknown", "found": [], "active": None})
-    assert "RISK-10" not in _ids(_ctx(_POWERFUL, host))
+def test_risk10_fires_when_all_visibility_classes_unknown():
+    # B-172: a read-only miss is honest UNKNOWN, not a confident "absent" — but
+    # UNKNOWN still means "no visibility monitor confirmed present," so RISK-10
+    # must still fire when every visibility class is unknown, or a genuinely-bare
+    # host (whose monitors just live somewhere this scan can't read) would be
+    # silently unflagged.
+    host = _host(**{c: {"status": "unknown", "found": [], "active": None} for c in _VIS})
+    assert "RISK-10" in _ids(_ctx(_POWERFUL, host))
 
 
 def test_risk10_silent_when_host_not_scanned():

@@ -1,8 +1,13 @@
 """B50–B54 host-posture checks + their wiring through audit(include_host=True).
 
-The checks read ctx.host (the hostwatch.detect result). They never FAIL: a missing
-monitor is a WARN only when the agent is high-privilege, otherwise a PASS, and an
-inconclusive/unsupported probe is UNKNOWN (excluded from the score).
+The checks read ctx.host (the hostwatch.detect result). They never FAIL: a
+confirmed-absent monitor is a WARN only when the agent is high-privilege,
+otherwise a PASS. An inconclusive/unsupported probe is normally UNKNOWN
+(excluded from the score) — EXCEPT (B-172) for the four *visibility* classes
+(network_ids/host_audit/file_integrity/edr_av): a read-only miss there is
+still UNKNOWN at the detector level, but a powerful agent gets a LOW-confidence
+WARN instead of a silent plain UNKNOWN, since presence was never confirmed
+either. Firewall (prevention, not detection) keeps the plain-UNKNOWN behavior.
 """
 from __future__ import annotations
 
@@ -81,6 +86,26 @@ def test_absent_monitor_weak_agent_passes():
 def test_unknown_class_is_unknown():
     host = _host(firewall={"status": "unknown", "found": [], "active": None})
     f = check_host_firewall(_ctx(_POWERFUL, host))
+    assert f.status == UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# B-172: a miss on a *visibility* class (network_ids/host_audit/file_integrity/
+# edr_av) is honest UNKNOWN, never a confident "absent" — but that UNKNOWN
+# still means "presence not confirmed," so a high-privilege agent still gets a
+# (lower-confidence) heads-up rather than a silent plain UNKNOWN. Firewall is
+# prevention, not detection, and keeps the plain-UNKNOWN behavior above.
+# ---------------------------------------------------------------------------
+
+def test_unknown_visibility_class_powerful_agent_warns():
+    host = _host(network_ids={"status": "unknown", "found": [], "active": None})
+    f = check_host_network_ids(_ctx(_POWERFUL, host))
+    assert f.status == WARN
+
+
+def test_unknown_visibility_class_weak_agent_is_unknown():
+    host = _host(network_ids={"status": "unknown", "found": [], "active": None})
+    f = check_host_network_ids(_ctx(_WEAK, host))
     assert f.status == UNKNOWN
 
 

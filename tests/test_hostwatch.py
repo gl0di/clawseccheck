@@ -39,7 +39,14 @@ def test_linux_blind_host_all_absent(tmp_path):
             # of a security TOOL is itself informative), a missing declarative config
             # says nothing about the live kernel default, so UNKNOWN is the honest call.
             assert res["classes"][cls]["status"] == "unknown"
+        elif cls in hostwatch.VISIBILITY_CLASSES:
+            # B-172: a read-only miss on a visibility class (network IDS / audit /
+            # file-integrity / EDR) is honest UNKNOWN, never a confident "absent" —
+            # the monitor's config/agent may live in a path a non-root scan can't read.
+            assert res["classes"][cls]["status"] == "unknown"
         else:
+            # firewall is prevention, not detection — its "absent" semantics are
+            # unaffected by B-172.
             assert res["classes"][cls]["status"] == "absent"
 
 
@@ -65,11 +72,72 @@ def test_linux_zeek_detected_by_binary_on_path(tmp_path):
     assert "Zeek" in res["classes"]["network_ids"]["found"]
 
 
+def test_linux_suricata_via_sbin_and_pidfile_is_present_active(tmp_path):
+    # B-172: broaden Suricata detection beyond PATH/config-file — a binary under
+    # usr/sbin plus a running pidfile is a legitimate signal too.
+    _touch(tmp_path, "usr/sbin/suricata")
+    _touch(tmp_path, "run/suricata/suricata.pid", "5678\n")
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    net = res["classes"]["network_ids"]
+    assert net["status"] == "present"
+    assert "Suricata" in net["found"]
+    assert net["active"] is True
+
+
+def test_linux_suricata_does_not_mark_edr_present(tmp_path):
+    # C-135 taxonomy guard: an IDS (Suricata) must never bleed into the edr_av
+    # class — IDS != EDR. edr_av stays an honest UNKNOWN (B-172 miss semantics).
+    _touch(tmp_path, "usr/sbin/suricata")
+    _touch(tmp_path, "run/suricata/suricata.pid", "5678\n")
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    edr = res["classes"]["edr_av"]
+    assert edr["status"] == "unknown"
+    assert edr["found"] == []
+
+
 def test_linux_auditd_present(tmp_path):
     _touch(tmp_path, "etc/audit/auditd.conf")
     res = detect(root=tmp_path, system="Linux", which=_none)
     assert res["classes"]["host_audit"]["status"] == "present"
     assert "auditd" in res["classes"]["host_audit"]["found"]
+
+
+def test_linux_auditd_via_sbin_and_pidfile_is_present_active(tmp_path):
+    # B-172: broaden detection beyond PATH-only auditctl/config-file — a binary
+    # under sbin plus a running pidfile is a legitimate signal too.
+    _touch(tmp_path, "sbin/auditctl")
+    _touch(tmp_path, "run/auditd.pid", "1234\n")
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    audit = res["classes"]["host_audit"]
+    assert audit["status"] == "present"
+    assert "auditd" in audit["found"]
+    assert audit["active"] is True
+
+
+def test_linux_auditd_rules_d_present(tmp_path):
+    # etc/audit/rules.d/ with a real .rules file is a valid auditd config signal.
+    _touch(tmp_path, "etc/audit/rules.d/10-base.rules")
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    assert res["classes"]["host_audit"]["status"] == "present"
+
+
+def test_linux_auditd_empty_rules_d_is_unknown(tmp_path):
+    # C-135: an EMPTY etc/audit/rules.d (a purged-package leftover dir with no
+    # .rules files) must NOT read as a present monitor — that would mask a
+    # genuinely-unmonitored host. It stays an honest 'unknown'.
+    (tmp_path / "etc/audit/rules.d").mkdir(parents=True)
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    assert res["classes"]["host_audit"]["status"] == "unknown"
+
+
+def test_linux_bare_host_audit_miss_is_unknown(tmp_path):
+    # B-172 regression pin: a read-only miss on host_audit must be honest
+    # UNKNOWN, never a confident "absent" — auditd may be installed and active
+    # in a path a non-root scan can't read.
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    audit = res["classes"]["host_audit"]
+    assert audit["status"] == "unknown"
+    assert audit["found"] == []
 
 
 def test_linux_aide_with_db_is_active(tmp_path):
@@ -272,4 +340,5 @@ def test_detect_never_raises_on_missing_root():
     # a nonexistent root must degrade gracefully, not crash
     res = detect(root="/nonexistent-clawseccheck-root-xyz", system="Linux", which=_none)
     assert res["supported"] is True
-    assert res["classes"]["network_ids"]["status"] == "absent"
+    # B-172: a miss on a visibility class is honest UNKNOWN, not "absent".
+    assert res["classes"]["network_ids"]["status"] == "unknown"

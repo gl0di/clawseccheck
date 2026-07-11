@@ -13,6 +13,11 @@ Doctrine (matches the rest of ClawSecCheck):
 - **No fabricated positives.** Every signal here is grounded against authoritative
   upstream docs for each monitor. Low-confidence signals are
   deliberately omitted — an honest ``unknown`` beats a wrong ``present``/``absent``.
+- **A miss on a visibility class is UNKNOWN, never a confident "absent"
+  (B-172).** A read-only, often non-root scan cannot PROVE ``network_ids`` /
+  ``host_audit`` / ``file_integrity`` / ``edr_av`` are absent — the monitor's
+  config or agent may live in a path this scan can't read. ``FIREWALL`` and
+  ``EGRESS_POSTURE`` are unaffected (see their own comments above/below).
 - **Injectable for tests.** ``detect(root=..., system=..., which=...)`` lets tests
   point at a fake filesystem root and a fake PATH resolver, so the suite stays
   offline, deterministic, and writes nothing outside ``tmp_path``.
@@ -181,6 +186,25 @@ def _unknown_cls() -> dict:
     return {"status": "unknown", "found": [], "active": None, "evidence": []}
 
 
+def _detection_cls(found: list[str], active: bool | None = None) -> dict:
+    """Detection/visibility class: present if found, else UNKNOWN (never a
+    confident 'absent'). A read-only, often non-root scan cannot PROVE a host
+    monitor is absent — its rules/agent may live in paths we can't read — so a
+    miss is honest UNKNOWN (mirrors macOS host_audit, hostwatch.py:362)."""
+    return _cls(found, active) if found else _unknown_cls()
+
+
+def _has_files(root: Path, rel: str, pattern: str) -> bool:
+    """True if directory *rel* under *root* holds at least one file matching
+    *pattern*. Distinguishes a configured dir from an empty leftover — C-135:
+    an empty ``etc/audit/rules.d`` from a purged package must NOT read as a
+    present monitor. Read-only; never raises."""
+    try:
+        return any((root / rel).glob(pattern))
+    except OSError:
+        return False
+
+
 def _egress_cls(found: list[str], deny: bool | None, weak: list[str]) -> dict:
     """Build the egress-posture class result.
 
@@ -221,36 +245,48 @@ def _detect_linux(root: Path, which) -> dict:
 
     # Network IDS / monitor ----------------------------------------------------
     found, active = [], None
-    if which("suricata") or _exists(root, "etc/suricata/suricata.yaml"):
+    if (which("suricata")
+            or _exists(root, "etc/suricata/suricata.yaml")
+            or _exists(root, "usr/sbin/suricata", "sbin/suricata")):
         found.append("Suricata")
-        if _systemd_enabled(root, "suricata.service"):
+        if (_exists(root, "run/suricata/suricata.pid", "var/run/suricata/suricata.pid",
+                    "run/suricata.pid", "var/run/suricata.pid")
+                or _systemd_enabled(root, "suricata.service")):
             active = True
     if (which("zeek") or which("zeekctl")
             or _exists(root, "opt/zeek/bin/zeek", "usr/local/zeek/bin/zeek")):
         found.append("Zeek")
     if which("snort") or _exists(root, "etc/snort/snort.lua", "usr/local/etc/snort/snort.lua"):
         found.append("Snort")
-    classes[NETWORK_IDS] = _cls(found, active)
+    classes[NETWORK_IDS] = _detection_cls(found, active)
 
     # Host audit / syscall logging --------------------------------------------
     found, active = [], None
-    if which("auditctl") or _exists(root, "etc/audit/auditd.conf", "etc/audit/audit.rules"):
+    if (which("auditctl")
+            or _exists(root, "sbin/auditctl", "usr/sbin/auditctl")
+            or _exists(root, "etc/audit/auditd.conf", "etc/audit/audit.rules")
+            or _has_files(root, "etc/audit/rules.d", "*.rules")):
         found.append("auditd")
-        if _systemd_enabled(root, "auditd.service"):
+        if _exists(root, "run/auditd.pid", "var/run/auditd.pid"):
             active = True
-    classes[HOST_AUDIT] = _cls(found, active)
+        elif _systemd_enabled(root, "auditd.service"):
+            active = True
+    classes[HOST_AUDIT] = _detection_cls(found, active)
 
     # File-integrity monitoring ------------------------------------------------
     found, active = [], None
-    if which("aide") or _exists(root, "etc/aide/aide.conf", "etc/aide.conf"):
+    if (which("aide") or _exists(root, "etc/aide/aide.conf", "etc/aide.conf")
+            or _exists(root, "usr/bin/aide", "usr/sbin/aide")):
         found.append("AIDE")
         if _exists(root, "var/lib/aide/aide.db", "var/lib/aide/aide.db.gz"):
             active = True  # baseline DB initialised
-    if which("tripwire") or _exists(root, "etc/tripwire/tw.cfg", "etc/tripwire/twcfg.txt"):
+    if (which("tripwire") or _exists(root, "etc/tripwire/tw.cfg", "etc/tripwire/twcfg.txt")
+            or _exists(root, "usr/sbin/tripwire", "usr/bin/tripwire")):
         found.append("Tripwire")
-    if which("osqueryd") or _exists(root, "etc/osquery/osquery.conf"):
+    if (which("osqueryd") or _exists(root, "etc/osquery/osquery.conf")
+            or _exists(root, "usr/bin/osqueryd")):
         found.append("osquery")
-    classes[FILE_INTEGRITY] = _cls(found, active)
+    classes[FILE_INTEGRITY] = _detection_cls(found, active)
 
     # EDR / endpoint protection / AV ------------------------------------------
     found = []
@@ -258,15 +294,16 @@ def _detect_linux(root: Path, which) -> dict:
         found.append("Wazuh")
     elif _exists(root, "var/ossec/bin/ossec-control", "var/ossec/etc/ossec.conf"):
         found.append("OSSEC")
-    if which("falconctl") or _exists(root, "opt/CrowdStrike/falconctl"):
+    if which("falconctl") or _exists(root, "opt/CrowdStrike/falconctl", "sbin/falconctl"):
         found.append("CrowdStrike Falcon")
     if _exists(root, "opt/sentinelone/bin/sentinelctl"):
         found.append("SentinelOne")
     if which("mdatp") or _exists(root, "opt/microsoft/mdatp"):
         found.append("Microsoft Defender")
-    if which("clamscan") or which("clamd") or _exists(root, "etc/clamav/clamd.conf"):
+    if (which("clamscan") or which("clamd")
+            or _exists(root, "etc/clamav/clamd.conf", "usr/sbin/clamd", "usr/bin/clamscan")):
         found.append("ClamAV")
-    classes[EDR_AV] = _cls(found)
+    classes[EDR_AV] = _detection_cls(found)
 
     # Host firewall ------------------------------------------------------------
     found, active = [], None
