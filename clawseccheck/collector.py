@@ -950,17 +950,26 @@ def read_skill_js(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str
     return out
 
 
-def _config_workspace_dirs(home: Path, cfg: dict) -> list[Path]:
+def _config_workspace_dirs(
+    home: Path, cfg: dict, limit_hits: list[str] | None = None
+) -> list[Path]:
     """Absolute workspace dir(s) declared in openclaw.json (B-161).
 
     OpenClaw's ``agents.defaults.workspace`` — and any per-agent
     ``agents.list[].workspace`` override — can point the agent's workspace outside the
     hardcoded WORKSPACE_DIRS names. Bootstrap files and a ``skills/`` dir living there
     would otherwise be invisible, so a malicious SOUL.md / skill in a custom workspace
-    scored clean. Returns de-duplicated absolute dirs (relative paths resolved against
-    *home*). Never raises; blank / non-string values are skipped. When the value points at
-    the default location it resolves to a path SKILL_DIRS already covers, so nothing is
-    scanned twice (see the resolved-path de-dup in the callers).
+    scored clean. Returns de-duplicated absolute, RESOLVED dirs (relative paths resolved
+    against *home*). Never raises; blank / non-string values are skipped. When the value
+    points at the default location it resolves to a path SKILL_DIRS already covers, so
+    nothing is scanned twice (see the resolved-path de-dup in the callers).
+
+    B-169: real OpenClaw does not confine ``workspace`` under the user's home
+    (``resolveUserPath`` has no home-check), so a workspace that resolves OUTSIDE *home*
+    is legitimate and MUST still be scanned — rejecting it would be a false-positive
+    FAIL/skip (Golden Rule #5). Instead, when *limit_hits* is given and a workspace
+    resolves outside *home*, one de-duplicated disclosure line is appended so the report
+    stays transparent about the scan's actual scope.
     """
     if not isinstance(cfg, dict):
         return []
@@ -975,6 +984,10 @@ def _config_workspace_dirs(home: Path, cfg: dict) -> list[Path]:
                 w = a.get("workspace")
                 if isinstance(w, str) and w.strip():
                     raw.append(w)
+    try:
+        resolved_home = home.resolve()
+    except (OSError, ValueError, RuntimeError):
+        resolved_home = home
     out: list[Path] = []
     seen: set[Path] = set()
     for r in raw:
@@ -991,7 +1004,20 @@ def _config_workspace_dirs(home: Path, cfg: dict) -> list[Path]:
         if resolved in seen:
             continue
         seen.add(resolved)
-        out.append(p)
+        if limit_hits is not None:
+            try:
+                in_home = resolved.is_relative_to(resolved_home)
+            except (OSError, ValueError):
+                in_home = False
+            if not in_home:
+                msg = (
+                    f"custom workspace '{resolved.name}' resolves outside the audited "
+                    f"--home ({resolved}) — bootstrap/skills read from there are outside "
+                    "the scoped audit"
+                )
+                if msg not in limit_hits:
+                    limit_hits.append(msg)
+        out.append(resolved)
     return out
 
 
@@ -1017,7 +1043,7 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         and audited_home.name.startswith(".openclaw")
     ):
         roots.append((user_home / ".agents" / "skills", False))
-    for cw in _config_workspace_dirs(home, ctx.config):
+    for cw in _config_workspace_dirs(home, ctx.config, limit_hits=ctx.limit_hits):
         roots.append((cw / "skills", False))
     roots.extend((path, False) for path in _config_extra_skill_dirs(home, ctx.config))
     plugin_skills = home / "plugin-skills"
@@ -1107,7 +1133,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     # SOUL.md/AGENTS.md living outside the hardcoded names is not invisible. The
     # resolved-path de-dup below keeps a file that also lives under a hardcoded dir from
     # being read (or counted) twice.
-    for _cw in _config_workspace_dirs(home, ctx.config):
+    for _cw in _config_workspace_dirs(home, ctx.config, limit_hits=ctx.limit_hits):
         _ws_dirs.append((_cw.name or "workspace", _cw))
     for _ws, wdir in _ws_dirs:
         if not wdir.is_dir():
