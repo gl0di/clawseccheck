@@ -5250,6 +5250,7 @@ def check_silent_instruction(ctx: Context) -> Finding:
             "patterns, move it into a fenced code block (```) so it is treated as an "
             "example. If it is a live directive, remove it.",
             warn_ev,
+            severity=MEDIUM,
         )
 
     return _finding(

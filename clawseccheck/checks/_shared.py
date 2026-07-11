@@ -189,13 +189,20 @@ def _meta(cid: str):
 
 
 def _finding(
-    cid, status, detail, fix, evidence=None, confidence=None, pass_confidence=None
+    cid,
+    status,
+    detail,
+    fix,
+    evidence=None,
+    confidence=None,
+    pass_confidence=None,
+    severity=None,
 ) -> Finding:
     m = _meta(cid)
     return Finding(
         m.id,
         m.title,
-        m.severity,
+        severity if severity is not None else m.severity,
         status,
         detail,
         fix,
