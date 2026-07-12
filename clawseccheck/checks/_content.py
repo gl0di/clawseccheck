@@ -6200,16 +6200,18 @@ def check_symlink_escape(ctx: Context) -> Finding:
 
 
 def check_trigger_homoglyph(ctx: Context) -> Finding:
-    """B93 (F-103, L1-6) — confusable/mixed-script characters in a skill's trigger utterances.
+    """B93 (F-103, L1-6) — confusable/mixed-script characters in a skill's frontmatter NAME
+    and trigger DESCRIPTION.
 
-    F-022 already covers homoglyphs in the skill NAME (typosquatting); this covers the
-    frontmatter DESCRIPTION text — the actual trigger-phrase surface OpenClaw's model
-    invocation reads. A Cyrillic-а substituted into an otherwise-ASCII trigger phrase can
-    register as a distinct near-duplicate for preferential routing while looking identical
-    to a human reader. Gated on confusable_in_ascii_context (the same B58 anti-FP discipline)
-    so a whole-script non-Latin description (legitimate i18n, e.g. pure Russian/Greek prose)
-    is never flagged — only a confusable swapped INTO an otherwise-Latin word. Advisory
-    (scored=False); WARN-only.
+    F-118: the NAME leg is a skill-IMPERSONATION surface — a Cyrillic-а in "clаwstealth" reads
+    identical to a trusted skill but is a distinct identity in the loader. (F-022 covers NAME
+    typosquats by EDIT DISTANCE — a different mechanism that does not catch a homoglyph.) The
+    DESCRIPTION leg is the trigger-phrase surface OpenClaw's model invocation reads — a
+    confusable there can register as a distinct near-duplicate for preferential routing while
+    looking identical to a human. Both legs are gated on confusable_in_ascii_context (the same
+    B58 anti-FP discipline) so a whole-script non-Latin name/description (legitimate i18n, e.g.
+    pure Russian/Greek) is never flagged — only a confusable swapped INTO an otherwise-Latin
+    word. Advisory (scored=False); WARN-only.
     """
     if not getattr(ctx, "installed_skills", None):
         return _custom(
@@ -6221,10 +6223,19 @@ def check_trigger_homoglyph(ctx: Context) -> Finding:
         )
     warns: list[str] = []
     for skill_name, blob in ctx.installed_skills.items():
-        _, description = _b62_extract_declaration(blob, skill_name)
-        if not description:
-            continue
-        if obfuscation_signals(description) and confusable_in_ascii_context(description):
+        name, description = _b62_extract_declaration(blob, skill_name)
+        # F-118: the frontmatter NAME is a skill-impersonation surface — a Cyrillic-in-ASCII
+        # homoglyph (e.g. "clаwstealth", Cyrillic а) reads identical to a human but is a
+        # distinct identity. F-022 (edit-distance typosquat) is a different mechanism and does
+        # NOT catch this. Same double-gate as the description leg (obfuscation_signals +
+        # confusable_in_ascii_context): only fires when a confusable sits INSIDE an otherwise-
+        # Latin token, sparing honest whole-script i18n.
+        if name and obfuscation_signals(name) and confusable_in_ascii_context(name):
+            warns.append(
+                f"{skill_name}: skill NAME contains a confusable character mixed into an "
+                "otherwise-Latin word — homoglyph impersonation surface"
+            )
+        if description and obfuscation_signals(description) and confusable_in_ascii_context(description):
             warns.append(
                 f"{skill_name}: trigger description contains a confusable character mixed "
                 "into an otherwise-Latin word — may create a near-duplicate trigger"
@@ -6234,16 +6245,17 @@ def check_trigger_homoglyph(ctx: Context) -> Finding:
             "B93",
             MEDIUM,
             PASS,
-            "No confusable/mixed-script characters found in any skill's trigger description.",
-            "Keep trigger phrasing in a single, plain script (no invisible or lookalike "
-            "characters).",
+            "No confusable/mixed-script characters found in any skill's name or trigger "
+            "description.",
+            "Keep skill names and trigger phrasing in a single, plain script (no invisible "
+            "or lookalike characters).",
         )
     extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
     return _custom(
         "B93",
         MEDIUM,
         WARN,
-        "Confusable characters in trigger description: " + "; ".join(warns[:6]) + extra,
+        "Confusable characters in skill name / trigger description: " + "; ".join(warns[:6]) + extra,
         "A lookalike character in a trigger phrase (e.g. Cyrillic а for Latin a) is "
         "indistinguishable to a human but can register as a different phrase for routing "
         "purposes. Verify the description is plain ASCII/expected-script text, not a "
