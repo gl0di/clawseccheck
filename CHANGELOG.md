@@ -3,6 +3,43 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.36.0] — 2026-07-12
+
+Skill-surface coverage expansion (E-039 wave 1): the audit now inspects notebook code, a
+skill's dependency sources, declared-but-uninstalled skill sources, and a writable config —
+plus a false-FAIL fix that clears a spurious finding on standard umask-002 machines.
+
+### Added
+- **B157 — non-registry / remote-code dependency source.** A skill's `package.json` declaring
+  a dependency from a git URL, a remote tarball, a github `user/repo` shorthand, or a
+  `file:`/`link:`/`npm:` alias is flagged (in the full audit and `--vet`). FAIL only when the
+  remote source has unverifiable provenance (plaintext http/ftp, a raw public IP, or a
+  `.onion` host); otherwise WARN. Advisory / unscored. The ubiquitous caret/tilde version
+  float is intentionally not flagged.
+- **B158 — declared skill-load source not present on disk.** Reconciles a config's declared
+  skill-load sources (`skills.load.extraDirs`, `plugins.load.paths`, and `.clawhub/lock.json`
+  skill entries) against what is installed, and warns on any that resolve to nothing — an
+  unaudited surface that would enter auto-load unscanned if it later materialized. Advisory /
+  unscored.
+
+### Changed
+- **Notebooks are now analyzed.** Jupyter `.ipynb` code cells are routed to the same AST/taint
+  engine as `.py` files (a malformed notebook degrades to a clear UNKNOWN, never a crash).
+  Loose CPython bytecode (`.pyc`) and WebAssembly (`.wasm`) files bundled in a skill are now
+  surfaced as stowaways.
+- **Plugin-bundled skills are discovered.** Skills bundled under a `plugins.load.paths` entry
+  (`<plugin>/skills/`) are now collected and scanned like any other installed skill.
+- **B22 now covers a writable `openclaw.json`.** A group/world-writable config is a
+  self-escalation target (a skill could rewrite tool grants or disable the approval gate), so
+  it joins B22's writable self-modification targets.
+
+### Fixed
+- **B22 no longer false-FAILs on a standard umask-002 / user-private-group machine.** A
+  group-writable SOUL.md / skills dir / config owned by the user's own private group (Fedora /
+  RHEL defaults: 0o664 files, 0o775 dirs) is not exploitable by anyone else, so it is now
+  down-ranked; a genuinely shared group still fails. Clears a spurious FAIL on real single-user
+  setups.
+
 ## [3.35.0] — 2026-07-12
 
 Detection-gap closes surfaced by the v3.34.0 adversarial sweep — three real threats that
