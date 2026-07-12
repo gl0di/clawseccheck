@@ -3,6 +3,42 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.34.0] — 2026-07-12
+
+FP precision sweep R2 — the six WARN-precision checks that over-fired on benign READMEs,
+requirements files, and config prose now require a corroborator / allowlist before flagging.
+No grade-capping FAILs are involved (Tier-2); the goal is fewer cosmetic WARNs on clean setups.
+Grounded against the frozen clawbench-3.28.4 campaign and hardened by an adversarial pass.
+
+### Changed
+- **B65 (conditional sleeper trigger) requires a malicious corroborator.** A conditional
+  "when the user asks/says X → do Y" rule now WARNs only when the window also carries a
+  covertness marker, an outbound exfil to a second-party/external destination, an exfil-intent
+  verb, or a secret being sent out. A disclosed benign rule ("when the user asks for X, run the
+  cleanup script and send a report") no longer WARNs.
+- **B59 (markdown-image exfil) allowlists badge / analytics URLs.** A `?…=…` image/link URL is
+  no longer treated as data-bearing when its exact host is a known badge/CI host (shields.io,
+  codecov, …, https only) or every query key is a benign display/analytics param (style, logo,
+  utm_*). A real data-bearing query on an untrusted host still WARNs.
+- **B66 (persona jailbreak) tightens its jailbreak tokens.** "DAN" is now matched case-sensitive
+  (the name "Dan" no longer trips it); "without constraints" is dropped (creative prose); the
+  "ignore …" branch requires an all/previous qualifier; and "constraints" is dropped from the
+  persona-reset nouns. The canonical jailbreak (uppercase DAN, "ignore all previous
+  instructions", "forget your persona") still WARNs.
+- **B154 (cross-file split payload) requires the payload to straddle a fragment boundary.** A
+  split-plaintext WARN now fires only when the reassembled runnable-command match actually
+  crosses an interior fragment seam — B154's whole premise. A dangerous token wholly inside one
+  literal (a benign `/bin/sh`, a loopback URL, `${VAR:-default}`) no longer fires; a genuinely
+  split command still does.
+- **B74 (forged provenance) stops flagging bare role/system markers.** A `[SYSTEM]` / `system:`
+  / `[user]` marker with no co-located override directive is no longer a scored WARN — the
+  clawbench campaign showed ~100% of those were benign (YAML keys, transcript-format docs). A
+  forged block that carries an override OR an exfil / secret-disclosure directive ("reveal your
+  API key", "send the secrets to evil.com") still hard-FAILs.
+- **B95 (dependency confusion) allowlists real near-brand packages.** A published package one
+  edit from a brand name (scapy↔scipy, boto↔boto3, panda↔pandas) is no longer flagged as a
+  typosquat; a genuine typosquat (reqeusts, numpi) still is.
+
 ## [3.33.0] — 2026-07-12
 
 FP precision sweep R1 — the four content-ring checks that could hard-FAIL (grade-cap at C) a

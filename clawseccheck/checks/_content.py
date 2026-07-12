@@ -13,7 +13,7 @@ import os
 import re
 import unicodedata
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse, urlsplit
 from ..catalog import (
     FAIL,
     HIGH,
@@ -851,6 +851,29 @@ _B65_WINDOW = 160  # chars around the conditional marker
 _B65_INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 
 
+# B-180: covertness markers — the malicious corroborator (alongside an external exfil dest)
+# that separates a real sleeper ("when the user says X, quietly send …") from a benign
+# DISCLOSED skill rule ("when the user asks for X, run the Y script"), which is byte-identical
+# without one.
+_B65_COVERT_RE = re.compile(
+    r"\b(?:quietly|secretly|silently|covertly|stealthily|discreetly)\b"
+    r"|without\s+(?:telling|informing|the\s+user)|don'?t\s+(?:tell|mention|inform|log|notify)"
+    r"|\bhidden(?:ly)?\b",
+    re.I,
+)
+
+
+# B-180: the other malicious corroborators for a conditional-action rule — an exfil-intent verb
+# (inherently hostile regardless of destination) OR a bare external destination (a raw domain /
+# IPv4 that _B63_DEST_RE's "to me / my bot / http(s)://" set does not cover).
+_B65_EXFIL_HINT_RE = re.compile(
+    r"\bexfiltrat\w*|\bexfil\b|\bleak\b|\bsmuggle\b"
+    r"|\bto\s+\d{1,3}(?:\.\d{1,3}){3}\b"
+    r"|\bto\s+[a-z0-9][\w-]*\.(?:com|net|org|io|dev|xyz|co|me|app|ru|cn|info|biz|example)\b",
+    re.I,
+)
+
+
 _B66_ROLE_START_RE = re.compile(
     r"\b(?:you\s+are\s+now|you\s+are|pretend\s+you\s+are|"
     r"pretend\s+to\s+be|act\s+as|role-?play(?:ing)?\s+as|assume\s+the\s+role\s+of)\b",
@@ -864,9 +887,16 @@ _B66_ROLE_START_RE = re.compile(
 # token OR a persona-RESET verb also appears in the window — otherwise a clean skill
 # like "act as a reviewer with no restrictions on honesty" false-WARNs.
 _B66_CORE_RE = re.compile(
-    r"\b(?:d\.?a\.?n|do\s+anything\s+now|ignore\s+(?:all\s+)?"
-    r"(?:previous\s+)?(?:instructions?|safety|prompts?|policies?)|"
-    r"without\s+constraints?|bypass\s+(?:safety|policy|rules)|"
+    # B-182: "d.a.n" under re.I also matched the ordinary name "Dan"/"Dan's" — scoped
+    # case-sensitive (?-i:...) so only the ALL-CAPS jailbreak persona "DAN" fires.
+    # The bare "without constraints?" alternative is dropped: it fired on benign
+    # creative/optimization prose ("moves without constraints"). The "ignore
+    # instructions" alternative now requires an all/previous qualifier: bare "ignore
+    # instructions" no longer fires (B64/B58 already cover the generic override), only
+    # "ignore all/previous instructions".
+    r"\b(?:(?-i:D\.?A\.?N)|do\s+anything\s+now|ignore\s+(?:all\s+|previous\s+)+"
+    r"(?:instructions?|safety|prompts?|policies?)|"
+    r"bypass\s+(?:safety|policy|rules)|"
     r"free\s+bot|always\s+obey(?:s)?)\b",
     re.IGNORECASE,
 )
@@ -884,7 +914,9 @@ _B66_RESET_RE = re.compile(
     r"(?:(?:previous|original|initial|system|base|default)\s+)?"
     # B-120: AI-identity nouns ONLY — dropping the ambiguous role/rules/guidelines that
     # benign game/config/writing skills override constantly ("override the default rules").
-    r"(?:instructions?|persona|programming|prompt|constraints?)\b",
+    # B-182: "constraints?" dropped too — benign persona prose ("override the default
+    # constraints", "drop constraints") is not AI-identity, it's ordinary rule-tuning.
+    r"(?:instructions?|persona|programming|prompt)\b",
     re.IGNORECASE,
 )
 
@@ -993,6 +1025,29 @@ _B74_TURN_DIRECTIVE_RE = re.compile(
     r"|\bno\s+(?:safety|restrictions?|guidelines?|rules?|limits?|filters?)\b"
     r"|\bdisable\s+(?:all\s+|any\s+|the\s+)?(?:safety|restrictions?|guidelines?|controls?)"
     r"|\boverride\b(?=\s*[\]\n]|$)",
+    re.I,
+)
+
+
+# B-184 (C-135 r2): a forged turn also carries a directive when it SMUGGLES an exfil / secret-
+# disclosure command — "reveal your API key", "exfiltrate the credentials", "send the secrets to
+# evil.com". These are not instruction-hierarchy OVERRIDES (so _B74_TURN_DIRECTIVE_RE misses
+# them), but a fabricated [SYSTEM]/<system> block issuing them is exactly the forged-block attack
+# — dropping the bare-marker WARN leg must NOT let them read PASS. A truly bare marker (no such
+# directive in its own turn) still passes.
+_B74_EXFIL_DIRECTIVE_RE = re.compile(
+    r"\b(?:reveal|expose|disclose|leak|exfiltrat\w*|dump|steal|send|email|upload|transmit"
+    r"|forward|post|share|hand\s+over|print|output)\b"
+    r"(?:\s+\S+){0,5}?\s+"
+    r"(?:secret|secrets|credential|credentials|password|passwords|api[_\- ]?keys?"
+    r"|tokens?|private[_\- ]?keys?|ssh\s+keys?|access[_\- ]?keys?|passphrase|seed\s+phrase"
+    r"|env(?:ironment)?\s+(?:var|variable)s?|\.env|wallet|keychain|session\s+(?:data|token)"
+    r"|cookies?)"
+    r"|\b(?:send|email|upload|transmit|forward|post|exfiltrat\w*|leak|beam)\b(?:\s+\S+){0,6}?\s+"
+    r"to\s+(?:https?://|[\w.+-]+@[\w-]+\.[\w.-]+"
+    r"|(?:my|the|an?)\s+(?:server|endpoint|bot|inbox|webhook|attacker|address|drop|c2|handle)"
+    r"|[\w-]+\.(?:com|net|org|io|dev|xyz|ru|cn|co|me|example)\b"
+    r"|\d{1,3}(?:\.\d{1,3}){3})",
     re.I,
 )
 
@@ -1224,6 +1279,21 @@ def _decoded_is_payload(norm: str) -> bool:
     followed by a URL or a flag). So a benign decoded CSV/README that just names `nc`/`curl`,
     or links to a tool's docs, does not flip B13 to CRITICAL FAIL."""
     return bool(_DECODED_STRONG_RE.search(norm) or _DECODED_TOOL_CMD_RE.search(norm))
+
+
+def _b154_payload_straddles(cand: str, boundaries: list[int]) -> bool:
+    """B-183: True when SOME payload match (`_DECODED_STRONG_RE` / `_DECODED_TOOL_CMD_RE`)
+    in *cand* spans an interior fragment *boundary* — i.e. the runnable command is actually
+    SPLIT across literals and glued, B154's whole premise. A payload wholly inside one literal
+    (a benign `/bin/sh`, a loopback URL, `${VAR:-default}`) straddles nothing and is ignored.
+    ALL matches are checked, not just the leftmost: a benign token early in the join (`curl -s`)
+    must not mask a genuinely-split payload later in it (`http://1.2.3.4`)."""
+    for rx in (_DECODED_STRONG_RE, _DECODED_TOOL_CMD_RE):
+        for m in rx.finditer(cand):
+            s, e = m.span()
+            if any(s < b < e for b in boundaries):
+                return True
+    return False
 
 
 _DEFENSIVE_HEADING_RE = re.compile(
@@ -1458,6 +1528,31 @@ _KNOWN_NAMES: frozenset[str] = frozenset(
         "elasticsearch",
         # Misc well-known
         "slack",
+        "boto3",
+    }
+)
+
+
+# B-185: legitimate published packages that sit exactly one edit away from a brand in
+# `_KNOWN_NAMES` (scapy↔scipy, panda↔pandas, boto↔boto3, motion↔notion, preact↔react, …).
+# `_squat_hits` otherwise WARNs on any 1-edit neighbor regardless of whether that neighbor
+# is itself a real, widely-published name — a genuine typosquat (reqeusts, numpi, panda5)
+# is by definition NOT a published package, so it can never appear on this list.
+_KNOWN_LEGIT_NEIGHBORS: frozenset[str] = frozenset(
+    {
+        "scapy",
+        "panda",
+        "boto",
+        "motion",
+        "preact",
+        "hiredis",
+        "flasgger",
+        "slick",
+        "vite",
+        "swr",
+        "yup",
+        "chalk",
+        "execa",
         "boto3",
     }
 )
@@ -1990,13 +2085,50 @@ def _b59_split_srcset(urls: str) -> list[str]:
     return out
 
 
+# B-181: known badge / CI-status / coverage hosts whose query-string is a rendering
+# hint (style/label/color/...), not exfiltrated data. HTTPS only, exact-host match — so
+# a lookalike like img.shields.io.evil.com still fires.
+_B59_BADGE_HOSTS = frozenset({
+    "img.shields.io", "shields.io", "badgen.net", "img.badgen.net", "codecov.io",
+    "app.codecov.io", "coveralls.io", "badge.fury.io", "camo.githubusercontent.com",
+    "circleci.com", "api.codeclimate.com", "snyk.io",
+})
+# Benign display/analytics query keys. Require ALL keys to be benign — a mixed URL like
+# ?utm_source=x&data=SECRET still fires. utm_* is matched by prefix.
+_B59_BENIGN_PARAMS = frozenset({
+    "style", "label", "labelcolor", "logo", "logocolor", "logowidth", "color",
+    "cacheseconds", "link", "message", "logobase64",
+})
+
+
 def _b59_url_has_data_query(url: str) -> bool:
     if not (url.startswith("http://") or url.startswith("https://")):
         return False
     q = url.find("?")
-    if q == -1:
+    if q == -1 or "=" not in url[q + 1:]:
         return False
-    return "=" in url[q + 1 :]
+    # B-181: a badge / analytics URL is not exfil. Not data-bearing when the exact host
+    # (https only, so img.shields.io.evil.com still fires) is a known badge/CI host, OR every
+    # query key is a benign display/analytics param (require ALL benign so ?utm_source=x&data=
+    # SECRET still fires). utm_* is matched by prefix.
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return True
+    if parts.scheme == "https" and (parts.hostname or "").lower() in _B59_BADGE_HOSTS:
+        return False
+    # The host-agnostic benign-param branch must ALSO check VALUES: a benign param NAME
+    # carrying a token-shaped VALUE ("?utm_source=<SESSION_TOKEN>", "?style=<base64>") is exfil
+    # to an attacker host, not a campaign label (C-135 r2). A value is token-shaped when it has
+    # a 20+-char opaque run containing a digit — real campaign labels are short lowercase words.
+    kvs = parse_qsl(parts.query, keep_blank_values=True)
+    if kvs and all(
+        (k.lower().startswith("utm_") or k.lower() in _B59_BENIGN_PARAMS)
+        and not (re.search(r"[A-Za-z0-9+/=_-]{20,}", v) and re.search(r"\d", v))
+        for k, v in kvs
+    ):
+        return False
+    return True
 
 
 def _b60_has_propagation(text: str) -> bool:
@@ -2434,6 +2566,19 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
             and _b65_live_action_match(window, start, inline_ranges)
         ):
             continue
+        # B-180: a DISCLOSED "when the user asks, run X" rule is byte-identical to a benign
+        # skill instruction — require a malicious corroborator before flagging: an outbound
+        # exfil (send→2nd-party/external dest / sink / cred path), a covertness marker, an
+        # exfil-intent verb or bare external destination, or a secret being sent out. A benign
+        # conditional-action rule ("run the cleanup script and send a report") has none and
+        # surfaces nothing (was a false WARN).
+        if not (
+            _has_outbound_exfil(window)
+            or _B65_COVERT_RE.search(window)
+            or _B65_EXFIL_HINT_RE.search(window)
+            or (_B63_SECRET_TERM_RE.search(window) and _B63_SEND_VERB_RE.search(window))
+        ):
+            continue
         # B-134: a documented memory-write rule ("When someone says 'remember this',
         # update memory/notes.md ...") is the standard OpenClaw agent-memory idiom, not
         # a covert sink. Only suppress when EVERY action match in the window is itself
@@ -2499,6 +2644,7 @@ def _b74_forged_turn_has_directive(norm: str, m: "re.Match") -> bool:
         return False
     if not (
         _B74_TURN_DIRECTIVE_RE.search(content)
+        or _B74_EXFIL_DIRECTIVE_RE.search(content)
         or _B64_HIGH_CONFIDENCE_RE.search(content)
         or _B64_WEAK_SIGNAL_RE.search(content)
     ):
@@ -3498,6 +3644,9 @@ def _squat_hits(
             # If this form is itself a known name → legitimate use, skip.
             if form in known:
                 continue
+            # B-185: a real published package one edit away from a brand is not a squat.
+            if form in _KNOWN_LEGIT_NEIGHBORS:
+                continue
             for kn in known:
                 if len(kn) < _TYPOSQUAT_MIN_KNOWN_LEN:
                     continue
@@ -4301,15 +4450,26 @@ def check_cross_file_plaintext_payload(ctx: Context) -> Finding:
         # payload evasion glues a SMALL number of ADJACENT fragments, so only bounded windows
         # over a capped fragment slice are tried — never the whole-skill join.
         window_frags = frags[:_XFILE_WINDOW_MAX_FRAGS]
-        candidates = [
-            "".join(window_frags[i : i + w])
-            for w in (2, 3, 4)
-            for i in range(len(window_frags) - w + 1)
-        ]
         hit = None
-        for cand in candidates:
-            if _decoded_is_payload(cand):
-                hit = cand.strip().replace("\n", " ")[:80]
+        # B-183: the payload match must STRADDLE an interior fragment boundary — B154's whole
+        # premise is a command SPLIT across literals and glued at runtime. A dangerous token
+        # wholly inside ONE literal (a benign `/bin/sh`, a loopback URL, `${VAR:-default}`) is
+        # not a split-payload evasion and no longer fires; a genuine split (`ht`+`tp://1.2.3.4`)
+        # crosses the seam and still does.
+        for w in (2, 3, 4):
+            for i in range(len(window_frags) - w + 1):
+                parts = window_frags[i : i + w]
+                cand = "".join(parts)
+                # interior seam offsets (cumulative fragment lengths, excluding the final total)
+                boundaries: list[int] = []
+                _off = 0
+                for p in parts[:-1]:
+                    _off += len(p)
+                    boundaries.append(_off)
+                if _b154_payload_straddles(cand, boundaries):
+                    hit = cand.strip().replace("\n", " ")[:80]
+                    break
+            if hit:
                 break
         if hit:
             warns.append(
@@ -4682,7 +4842,6 @@ def check_forged_provenance(ctx: Context) -> Finding:
 
     fail_ev: list[str] = []
     warn_ev: list[str] = []
-    role_warn_ev: list[str] = []
 
     def _scan(source_name: str, text: str) -> None:
         norm = normalize_for_scan(text)
@@ -4695,12 +4854,12 @@ def check_forged_provenance(ctx: Context) -> Finding:
                 snippet = snippet[:77] + "..."
             if _b74_forged_turn_has_directive(norm, m):
                 fail_ev.append(f'{source_name}: "{snippet}"')
-            else:
-                # B-112: a bare role/system marker with no co-located override directive is
-                # ambiguous (a fabricated shell vs a transcript/format skill documenting
-                # [user]/[assistant]/[system] tags). Surface as WARN — never the DANGEROUS
-                # FAIL that hard-caps the grade on a benign documentation skill.
-                role_warn_ev.append(f'{source_name}: "{snippet}"')
+            # B-184: a bare role/system marker with NO co-located override directive is no
+            # longer flagged (was a scored WARN that shaved the grade). The clawbench campaign
+            # showed ~100% of these were benign — a YAML `system:` key, documented
+            # [user]/[assistant]/[system] transcript tags, an `<system>` prose label — and a
+            # genuine forged block always carries a directive, which the FAIL branch above
+            # catches. So a bare marker is now silent (no grade-affecting over-fire).
         for m in _B74_FALSE_PROVENANCE_RE.finditer(norm):
             if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
@@ -4738,32 +4897,18 @@ def check_forged_provenance(ctx: Context) -> Finding:
             "safety controls and inject unauthorized instructions.",
             fail_ev,
         )
-    warn_all = role_warn_ev + warn_ev
-    if warn_all:
-        reasons = []
-        if role_warn_ev:
-            reasons.append(
-                "role/system-block markers present in prose without a co-located override "
-                "directive (ambiguous — a fabricated turn vs a transcript/format skill "
-                "documenting [user]/[assistant]/[system] tags)"
-            )
-        if warn_ev:
-            reasons.append(
-                "false-provenance attribution phrases (content claims the model previously "
-                "agreed to or authorized something)"
-            )
-        ev_summary = "; ".join(warn_all[:4])
-        extra = f" (+{len(warn_all) - 4} more)" if len(warn_all) > 4 else ""
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
         return _finding(
             "B74",
             WARN,
-            "Provenance / role-marker signals found — " + "; and ".join(reasons) + ": "
-            + ev_summary + extra,
-            "Review the flagged content. A real forged-system-block attack pairs the marker "
-            "with an override directive (that hard-FAILs); a bare marker is usually "
-            "documentation. If this is documentation, move the example into a fenced code "
-            "block (```) so it is treated as an example.",
-            warn_all,
+            "False-provenance attribution phrases found — content claims the model "
+            "previously agreed to or authorized something: " + ev_summary + extra,
+            "Review the flagged content. A real forged-system-block attack pairs a role "
+            "marker with an override directive (that hard-FAILs). If this is documentation, "
+            "move the example into a fenced code block (```) so it is treated as an example.",
+            warn_ev,
         )
     return _finding(
         "B74",

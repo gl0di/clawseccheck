@@ -43,6 +43,17 @@ def test_unpinned_but_not_typosquat_does_not_warn():
     assert f.status != WARN
 
 
+def test_legit_near_brand_package_does_not_warn():
+    # B-185: real published packages one edit from a brand (scapy↔scipy, boto↔boto3,
+    # panda↔pandas) are on the legit-neighbor allowlist and must NOT WARN as typosquats;
+    # a genuine typosquat (reqeusts) still does.
+    for dep in ("scapy", "boto", "panda"):
+        ctx = Context(home=Path("/nonexistent"))
+        ctx.installed_skills = {"x": f"# file: requirements.txt\n{dep}\n"}
+        f = check_dependency_confusion(ctx)
+        assert f.status != WARN, f"legit near-brand package '{dep}' wrongly flagged: {f.detail}"
+
+
 # --- vet-level: B95 surfaces as WARN on the bad fixture, PASS on the clean one ---
 
 def test_vet_bad_dependency_confusion_is_warn():
