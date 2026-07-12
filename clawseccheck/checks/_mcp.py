@@ -320,7 +320,7 @@ def vet_plugin(path: str | Path) -> Finding:
         except OSError:
             continue
         _cls, fmt = classify_bytes(head, size)
-        if fmt in ("ELF", "PE", "class") or (fmt or "").startswith("Mach-O"):
+        if fmt in ("ELF", "PE", "class", "pyc", "wasm") or (fmt or "").startswith("Mach-O"):
             warns.append(
                 "native executable bundled in the plugin (stowaway): "
                 f"{fp.relative_to(root)} ({fmt})"

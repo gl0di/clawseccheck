@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import io
+import json
 import zipfile
 import tarfile
 import gzip
@@ -182,6 +183,15 @@ def _read_with_limit(file_obj: io.BufferedIOBase, byte_limit: int) -> tuple[byte
             return bytes(out[:byte_limit]), True
 
 
+def _pyc_fmt(data: bytes) -> str | None:
+    r"""Name a would-be-binary file 'pyc' when it carries the CPython bytecode magic
+    (``<version-low-byte>\r\r\n`` — bytes 1..3 are ``\x0d\x0d\x0a`` for every 3.x release,
+    since the 16-bit magic's high byte is 0x0d). F-116: consulted ONLY on the binary return
+    paths, so a benign text file that merely starts with ``#\r\r\n`` (which stays high-
+    printable-ratio TEXT) is never misnamed pyc."""
+    return "pyc" if len(data) >= 4 and data[1:4] == b"\x0d\x0d\x0a" else None
+
+
 def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
     """Classify data as "TEXT" or "BINARY" and return (classification, format_name)."""
     fmt = None
@@ -207,6 +217,8 @@ def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
                 fmt = "class"
         if not fmt:
             fmt = "Mach-O (FAT MSB)"
+    elif data.startswith(b"\x00asm"):
+        fmt = "wasm"  # F-116: WebAssembly module — unambiguous magic, a loose .wasm is a stowaway
     elif data.startswith(b"PK\x03\x04"):
         fmt = "ZIP"
     elif data.startswith(b"PK\x05\x06"):
@@ -244,7 +256,7 @@ def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
             continue
 
     if decoded is None:
-        return "BINARY", None
+        return "BINARY", _pyc_fmt(data)
 
     if not decoded:
         return "TEXT", None
@@ -264,7 +276,7 @@ def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
     if ratio >= 0.85:
         return "TEXT", None
     else:
-        return "BINARY", None
+        return "BINARY", _pyc_fmt(data)
 
 
 def check_mismatch(filename: str, classification: str, format_name: str | None, data: bytes) -> str | None:
@@ -743,7 +755,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     # F-054: a native executable (ELF/PE/Mach-O/JVM class) bundled inside a
                     # skill is a stowaway — skills are text/config; a compiled binary the
                     # prose doesn't need has no business here. Recorded for a WARN.
-                    if sub_fmt in ("ELF", "PE", "class") or (sub_fmt or "").startswith("Mach-O"):
+                    if sub_fmt in ("ELF", "PE", "class", "pyc", "wasm") or (sub_fmt or "").startswith("Mach-O"):
                         ctx.stowaway_files.append(f"{sub_relpath} ({sub_fmt})")
             
             # Map statuses here!
@@ -849,10 +861,40 @@ def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
     return "\n".join(parts)
 
 
+def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str | None:
+    """F-116: concatenate the source of a Jupyter notebook's `code` cells so the AST/taint
+    engine (which otherwise sees only .py/.sh/.js) can analyze them. Returns joined Python
+    source, or None when the notebook JSON can't be parsed — in which case a limit_hit is
+    recorded so the AST layer degrades to UNKNOWN (AST_UNANALYZABLE), never a false PASS."""
+    try:
+        nb = json.loads(text)
+        cells = nb["cells"]
+        if not isinstance(cells, list):
+            raise ValueError("cells is not a list")
+    except (ValueError, KeyError, TypeError):
+        if ctx is not None:
+            ctx.limit_hits.append(
+                f"notebook in skill '{skill_name}' could not be parsed — its code cells "
+                "were NOT analyzed (AST_UNANALYZABLE)"
+            )
+        return None
+    parts: list[str] = []
+    for cell in cells:
+        if not isinstance(cell, dict) or cell.get("cell_type") != "code":
+            continue
+        src = cell.get("source")
+        if isinstance(src, list):
+            parts.append("".join(s for s in src if isinstance(s, str)))
+        elif isinstance(src, str):
+            parts.append(src)
+    return "\n".join(parts)
+
+
 def read_skill_python(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str, str]]:
     """Collect the Python source files of one skill for read-only AST analysis.
 
-    Returns a list of (relative-path, source) pairs.
+    Returns a list of (relative-path, source) pairs. F-116: Jupyter `.ipynb` notebooks are
+    included — their code cells are routed to the SAME engine as `.py`.
     """
     collected = collect_skill_files(skill_dir, ctx)
     out: list[tuple[str, str]] = []
@@ -866,10 +908,17 @@ def read_skill_python(skill_dir: Path, ctx: Context | None = None) -> list[tuple
             break
         if item["classification"] != "TEXT":
             continue
-        if not item["relpath"].lower().endswith(".py"):
+        rel = item["relpath"].lower()
+        if not rel.endswith((".py", ".ipynb")):
             continue
 
         text = item["content"].decode(encoding="utf-8", errors="replace")
+        if rel.endswith(".ipynb"):
+            # F-116: route the notebook's code cells through the same AST/taint engine as .py.
+            src = _ipynb_code_source(text, skill_dir.name, ctx)
+            if src is None:
+                continue  # malformed notebook -> limit_hit recorded; degrade to UNKNOWN
+            text = src
         out.append((item["relpath"], text))
         total += len(text)
         file_count += 1

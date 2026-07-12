@@ -58,6 +58,11 @@ _EXEMPT = {
                  "later cycle (I-022 secondary target).",
     "catalog.py": "1,585 lines — the CheckMeta CATALOG (one entry per check) + BY_ID; "
                   "reference data / a manifest, not branching logic.",
+    "collector.py": "~1,240 lines — the read-only collection layer (config / bootstrap / skill "
+                    "collection + the Context dataclass + byte-format classify_bytes); a "
+                    "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
+                    "+ .pyc/.wasm sniffing); a finer split (byte-format sniffing -> a leaf "
+                    "module) is a later cycle.",
 }
 
 
