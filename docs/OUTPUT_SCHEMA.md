@@ -577,7 +577,68 @@ SARIF: the vetting modes additionally carry the dossier roll-up on
 
 ---
 
-## 12. Stability Policy
+## 12. `--judge-packet` Output (F-113)
+
+Produced by the standalone `--judge-packet` flag. A separate JSON artifact — not part
+of the `--json` envelope — that assembles the audit's borderline-band results (findings
+whose status the engine could not determine, or that are deliberately WARN-only /
+dual-use by design) into a machine-readable list of questions for the user's OWN host
+agent to review and answer. **Read-only and purely additive**: it never re-runs a check,
+never changes any Finding's status/severity/score, and never contacts an LLM or the
+network itself.
+
+Sources folded into the packet:
+
+- every unsuppressed `UNKNOWN` finding from the audit;
+- unsuppressed `WARN` findings whose id has a documented false-negative-prone history
+  (dual-use signals deliberately down-ranked from FAIL so a legitimate skill is never
+  hard-failed): `B13`, `B65`, `B66`, `B90`, `B99`, `B100`, `B102`, `B154`, `B156`;
+- one item per B62 capability-intent mismatch (see §7);
+- taint signals (`TT4_FILE_NET`, `TT_SSRF`, `TT5_ARG_INJECTION`, `DANGEROUS_SINK`) the
+  skill AST/taint layer computes but the installed-skill check does not surface on its
+  own when no independent credential/exfil signal is present elsewhere in the skill.
+
+### Envelope fields
+
+| Field | Type | Description |
+|---|---|---|
+| `tool` | `str` | Always `"clawseccheck"`. |
+| `version` | `str` | Tool version string. |
+| `judgePacket` | `array[JudgePacketItem]` | The packet items. May be an empty array. |
+
+### JudgePacketItem fields
+
+| Field | Type | Description |
+|---|---|---|
+| `finding_id` | `str` | Check id (e.g. `"B13"`, `"B62"`) or recovered AST rule name (e.g. `"TT4_FILE_NET"`). |
+| `target` | `str` | Skill/file name the item concerns (redacted if secret-shaped), or the `finding_id` when no target could be derived. |
+| `redacted_evidence` | `str` | Human-readable evidence summary (fully redacted — no raw secrets or skill source). |
+| `engine_disposition` | `str` | The underlying status: `"WARN"` or `"UNKNOWN"` (this artifact never carries `PASS`/`FAIL` items). |
+| `question` | `str` | Plain-language yes/no attestation question for the host agent. |
+| `verdict_schema` | `object` | Fixed answer contract: `{"answer": ["yes", "no"], "reason": "free text"}`. |
+
+### Skeleton
+
+```json
+{
+  "tool": "clawseccheck",
+  "version": "3.37.0",
+  "judgePacket": [
+    {
+      "finding_id": "TT4_FILE_NET",
+      "target": "report_uploader",
+      "redacted_evidence": "report_uploader: file-read contents flow into requests.post (indirect flow) — data exfiltration risk (uploader.py:8)",
+      "engine_disposition": "UNKNOWN",
+      "question": "This skill reads a file and the contents appear to flow into a network call, with no independent credential signal nearby (so the engine did not escalate it). Is this an intended upload/sync to a trusted destination? [yes/no + reason]",
+      "verdict_schema": {"answer": ["yes", "no"], "reason": "free text"}
+    }
+  ]
+}
+```
+
+---
+
+## 13. Stability Policy
 
 ### Frozen (breaking change requires major version bump)
 

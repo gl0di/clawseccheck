@@ -62,6 +62,9 @@ _PALETTE: tuple[PaletteCategory, ...] = (
         PaletteEntry("Incident evidence pack", 'incident pack', "--incident",
                      "findings + hashes + rotation list — a preservation aid, "
                      "never rotates or deletes anything"),
+        PaletteEntry("Judge packet", 'judge packet', "--judge-packet",
+                     "borderline findings (unknowns, FN-prone warns, dropped taint) as "
+                     "JSON for a host-agent second opinion — never changes the grade"),
         PaletteEntry("Trajectory analysis", 'analyze trajectory', "--analyze-trajectory",
                      "post-hoc: did a skill's instruction get acted on at runtime? "
                      "correlates skill indicators against tool.call args"),

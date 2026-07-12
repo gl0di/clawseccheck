@@ -39,6 +39,7 @@ from .report import (
     render_vet_plan,
     surfaced_despite_suppression,
 )
+from .adjudication import render_judge_packet_json
 from .dossier import build_profile
 from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE
@@ -283,6 +284,7 @@ _PRIMARY_MODES = [
     ("behavioral", "--behavioral", "opt"),
     ("dashboard_findings", "--dashboard-findings", "bool"),
     ("monitor", "--monitor", "bool"),
+    ("judge_packet", "--judge-packet", "bool"),
 ]
 
 # Which tracked global modifiers each primary mode actually honors. The default
@@ -637,6 +639,10 @@ def _main(argv=None) -> int:
     p.add_argument("--sbom", action="store_true",
                    help="export a local bill-of-materials (skills, MCP servers, hashes, "
                         "declared/unpinned deps) as deterministic JSON to stdout and exit")
+    p.add_argument("--judge-packet", action="store_true", dest="judge_packet",
+                   help="export the borderline finding band (UNKNOWN, FN-prone WARN, "
+                        "B62, dropped taint) as JSON for a host-agent judge to review "
+                        "— never changes the grade")
     p.add_argument("--verbose", action="store_true",
                    help="emit INFO-level log breadcrumbs to stderr")
     p.add_argument("--debug", action="store_true",
@@ -1015,6 +1021,10 @@ def _main(argv=None) -> int:
 
     if args.incident:
         _emit(render_incident(ctx, findings, score))
+        return 0
+
+    if args.judge_packet:
+        _emit(render_judge_packet_json(ctx, findings, version=__version__))
         return 0
 
     if args.analyze_trajectory is not None:

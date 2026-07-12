@@ -63,6 +63,10 @@ _EXEMPT = {
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
                     "+ .pyc/.wasm sniffing); a finer split (byte-format sniffing -> a leaf "
                     "module) is a later cycle.",
+    "cli.py": "~1,200 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
+              "primary mode adds a few lines here by design. Crossed the budget with F-113 "
+              "(--judge-packet); a finer split (e.g. flag registration -> its own module) is "
+              "a later cycle.",
 }
 
 
