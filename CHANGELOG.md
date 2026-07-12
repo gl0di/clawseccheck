@@ -3,6 +3,46 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.33.0] — 2026-07-12
+
+FP precision sweep R1 — the four content-ring checks that could hard-FAIL (grade-cap at C) a
+legitimate config now require a malicious **corroborator** before FAILing; a benign shape
+surfaces as WARN or PASS. The corroborator keys on VERB CLASS (a secret being read/exfil'd, or
+data shipped to a second-party/external destination), not a fixed keyword/sink list, so a
+transport not in any enumeration ("DM it to my telegram bot") is still caught. Grounded against
+the frozen clawbench-3.28.4 campaign and hardened through multiple adversarial review rounds and
+real-fleet verification; zero false-positive FAILs on real fleet configs (Golden Rule #5).
+
+### Changed
+- **B64 (instruction-hierarchy override) no longer hard-FAILs a guardian skill's own signature
+  list.** An override phrase whose nearest heading is a detection/signatures catalogue
+  ("## Signatures to detect", "## Known injection patterns"), or that is framed in-sentence by
+  detection vocabulary, is dampened FAIL→WARN. A phrase that chains an actionable / exfil /
+  credential sink still hard-FAILs — the sink veto runs over the whole paragraph (not just the
+  phrase's own sentence) and keys on send-verb + destination, so a payload split into the next
+  sentence or shipped via a non-enumerated transport cannot launder it. A quoted full-attack
+  example under a detection heading is treated as documentation (WARN), not a directive.
+- **B63 (silent-instruction) requires a concealment anchor before FAILing.** A secrecy phrase
+  plus a co-located action now grade-caps only when the window also carries a human overseer
+  kept in the dark ("don't tell the user", "without telling"), a covertness marker
+  (invisible/covert/stealth), a secret that is actually being read/exfil'd, or an outbound send
+  to a second-party/external destination. Bare verbosity idioms ("suppress the output",
+  "silently install the deps", "suppress the output during the token refresh") surface as WARN,
+  not FAIL. The WARN remediation text was corrected (a bare fence no longer dampens — the fence
+  must be annotated, B-097).
+- **B61 (cross-agent snooping) treats reading the host's own ~/.openclaw config as
+  self-configuration.** A bare `.openclaw` root, a glob (`skills/*/SKILL.md`), or `openclaw.json`
+  read with only a read verb — no exfil sink, no outbound send to a destination, no secret term,
+  no resolvable foreign owner slug — is now silent (PASS), consistent with the existing self-slug
+  exemption. A foreign-agent path (~/.claude, ~/.codex, ~/.gemini), an identifiable sibling-skill
+  slug, a glob over non-metadata files (`skills/*/config.json`), an off-host send, or a secret
+  term still FAILs.
+- **B58 (hidden-injection) stops nagging on every HTML comment / base64 blob.** A hidden-text
+  channel now surfaces only when its body carries a partial injection signal — an actionable
+  payload (verb-class, so a non-enumerated exfil counts), an injection-pattern match, or a
+  concealed directive-at-the-user (phishing) shape. A plain comment or benign base64 now PASSes;
+  a genuinely hidden actionable or phishing directive still FAILs / WARNs.
+
 ## [3.32.1] — 2026-07-11
 
 Fixes from a live v3.32.0 run: host-monitor detection, silent-instruction severity, a

@@ -262,6 +262,37 @@ def _b61_secret_value_present(window: str) -> bool:
     return False
 
 
+def _b61_openclaw_names_foreign_slug(norm: str, m: re.Match[str], skill_name: str) -> bool:
+    """B-178: True when a ``~/.openclaw/skills|memory/<seg>`` match names an identifiable
+    OTHER skill's slug — a resolvable next segment that is neither the current skill nor a
+    glob. False for a bare ``.openclaw`` root, a glob wildcard (``skills/*/SKILL.md``), or a
+    config file like ``openclaw.json``: those resolve to no foreign owner and are the host's
+    own tree, so a bare read of them is self-configuration (down-ranked FAIL->WARN by the
+    caller). Mirrors the B-087 self-slug parse so a genuine sibling-slug read still FAILs."""
+    pl = m.group(0).lower()
+    if not (pl.endswith("/skills") or pl.endswith("/memory")):
+        return False  # openclaw.json / mcp_config.json — no owner slug segment follows
+    rest = norm[m.end():].lstrip("/")
+    seg = re.match(r"[\w.-]+", rest)
+    if not seg:
+        # C-135 round 2: a glob metachar (`*`, `?`, `[`) enumerates OTHER slugs — a fleet-wide
+        # read, strictly broader than one named sibling — so treat it as foreign, EXCEPT when
+        # it targets a metadata file (`*/SKILL.md`, `*/skill.json`, a manifest): that is the
+        # benign skill-lister the B-178 self-config skip is meant to allow. A glob over
+        # arbitrary/secret files (`*/config.json`, `*/.env`) is a harvest → foreign → FAIL.
+        if rest[:1] in "*?[":
+            # the metadata filename must END here — anchor it so `*/SKILL.md.bak`,
+            # `*/skill.jsonx`, `*/manifest.backup`, `*/SKILL.md/../session.json` (a metadata
+            # PREFIX with a live suffix / traversal) are NOT laundered as benign (C-135 r2 HOLE 5).
+            return not re.match(
+                r"[*?\[][^/\s]*/(?:SKILL\.md|skill\.json|manifest(?:\.json)?)(?=$|[\s'\"),])",
+                rest,
+                re.I,
+            )
+        return False  # bare `.openclaw` root (end-of-path) — the host's own tree
+    return seg.group(0).split(".")[0].lower() != skill_name.lower()
+
+
 # Regex to extract `description:` from the SKILL.md frontmatter in a blob.
 _B62_DESCRIPTION_RE = re.compile(
     r"^# file:\s+SKILL\.md\s*\n---\s*\n(?:.*?\n)*?description:\s*([^\n#]+)",
@@ -474,7 +505,8 @@ _B63_SECRECY_RE = re.compile(
         # English
         r"do(?:n'?t|[ ]not)\s+(?:tell|inform|notify|alert|show|reveal|disclose|mention)(?:\s+(?:the\s+)?user)?"
         r"|(?:without|never)\s+(?:telling|informing|notifying|alerting|showing|revealing|mentioning)"
-        r"|silently\s+(?:execute|run|perform|send|delete|install|download|modify|write|read)"
+        r"|silently\s+(?:execute|run|perform|send|delete|install|download|modify|write|read"
+        r"|forward|transmit|exfiltrate|collect|upload|leak|copy|beacon|relay|deliver|grab|extract)"
         r"|suppress\s+(?:the\s+)?(?:output|response|notification|warning|error|log|message)"
         r"|hide\s+(?:this|the\s+(?:action|output|result|command|response))\s+(?:from\s+(?:the\s+)?user)"
         r"|keep\s+(?:this|it)\s+(?:secret|hidden|quiet|private)\s+(?:from\s+(?:the\s+)?user)"
@@ -527,6 +559,130 @@ _B63_SOFT_SUPPRESS_RE = re.compile(
 _B63_WINDOW = 120  # proximity window in characters
 
 
+# B-177: FAIL-tier anchor for Signal-A. A secrecy phrase + a co-located action grade-caps
+# (FAIL/HIGH) ONLY when the window also carries one of: a human overseer being kept in the
+# dark ("without telling …", "hide … from the user"), a covertness marker (invisible/
+# covert/stealth), or a secret/credential. Without an anchor the directive is ambiguous
+# with benign verbosity control ("suppress the output", "silently install the deps",
+# "don't show it in your summary"), which the clawbench FP campaign showed FAILs wrongly.
+# Anchorless matches surface as WARN, not FAIL (project laws §5 — ambiguous suppression is
+# WARN-only). A real concealment/exfil directive always keeps its anchor, so every existing
+# FAIL fixture (without-telling / скрой-от-пользователя / read-a-secret) stays FAIL.
+_B63_FAIL_ANCHOR_RE = re.compile(
+    normalize_for_scan(
+        r"(?:"
+        # (1) concealment framed around a human overseer
+        r"without\s+(?:telling|informing|notifying|alerting|warning|"
+        r"(?:the\s+)?(?:user|human|operator|owner|admin))"
+        r"|(?:hide|hidden|conceal(?:ed|ing)?|withhold|keep\s+(?:this|it|them)\s+"
+        r"(?:secret|hidden|quiet|private))\s+from\s+(?:the\s+)?"
+        r"(?:user|human|operator|owner|admin|them|him|her)"
+        r"|behind\s+(?:the\s+)?(?:user|human|operator|owner)(?:'?s)?\s+back"
+        # negated disclosure aimed at a person ("don't tell the user", "never inform the
+        # operator") — the person must be the object of a NEGATED disclosure verb, so
+        # affirmative transparency ("always tell the user what you changed") never anchors.
+        r"|(?:don'?t|do\s+not|never|no\s+need\s+to|avoid|refrain\s+from)\s+"
+        r"(?:\w+\s+){0,2}?"
+        r"(?:tell|inform|notif|alert|warn|reveal|disclos|mention|show|surfac|let|allow)"
+        r"\w*\s+(?:the\s+)?(?:user|human|operator|owner|admin|them|him|her)"
+        # (2) covertness markers — secrecy is the point, not verbosity. Word-boundary anchored
+        # so "stealth" does not match a substring of a skill name ($CLAWSTEALTH…) — a real
+        # false-FAIL on the benign clawstealth Tor skill (C-135 r2 real-fleet).
+        r"|\b(?:invisible|covert|stealth|clandestine|surreptitious)"
+        # (3) exfiltration to an EXTERNAL destination expressed as prose. (A secret/credential
+        # term and an outbound send-verb+destination are handled SEPARATELY, by verb class, in
+        # _b63_scan — a bare secret noun no longer anchors on its own, so a benign "token
+        # refresh" near a verbosity idiom stays WARN.)
+        r"|(?:remote|external|third[- ]?party|off[- ]?(?:host|site))\s+"
+        r"(?:endpoint|server|host|url|api|service|address|machine|drop|bucket|site|webhook)"
+        r"|(?:attacker|adversar\w*)(?:'?s)?\s+(?:server|endpoint|host|inbox|site|drop|machine)"
+        r"|exfiltrat\w*|\bexfil\b"
+        # Russian: overseer-concealment / covert / exfil
+        r"|(?:от\s+)?(?:пользовател|юзер)|тайно|скрытно|незаметно"
+        r"|(?:внешн|удалённ|удаленн)\w*\s+(?:сервер|адрес|хост|эндпоинт)|эксфильтр\w*"
+        r")"
+    ),
+    re.IGNORECASE,
+)
+
+
+# B-177/178/179 (C-135 round 2) — shared VERB-CLASS discriminators. The prior fixes keyed
+# FAIL on fixed keyword/sink enumerations, which an attacker enumerates around (a transport
+# not in the list, a credential named descriptively). These key on the SHAPE — a secret being
+# accessed, or data being shipped to a second-party/external destination — reused by B63
+# (anchor), B61 (self-config skip), B64 (paragraph veto) and B58 (actionable body).
+_B63_SECRET_TERM_RE = re.compile(
+    normalize_for_scan(
+        # Bare secret nouns bounded by a NON-LETTER on each side (with an optional plural -s),
+        # so an incidental substring inside a word does not anchor ("secretary", "tokenizer",
+        # $CLAWSTEALTH) while a compound file/var name still matches ("fake_secrets",
+        # "db_token") — `_` and `.` and `/` are separators, not letters (C-135 r2 real-fleet).
+        r"(?<![a-z])(?:secret|token|credential|password|passwd|api[_\- ]?key|private[_\- ]?key"
+        r"|access[_\- ]?key|keychain|keystore|wallet|mnemonic|passphrase)s?(?![a-z])"
+        r"|auth\s+(?:token|string|value|key)"
+        r"|gateway\s+(?:token|value|secret|key|auth)|recovery\s+(?:phrase|seed)|seed\s+phrase"
+        r"|\.env\b|\.ssh|\.aws|\.npmrc"
+        r"|(?<![а-я])(?:секрет|парол|токен|ключ)"
+    ),
+    re.IGNORECASE,
+)
+
+# A read / exfil verb operating on a value — so a secret term anchors a FAIL only when it is
+# actually being accessed ("read the api_key") and NOT when it is an incidental noun near a
+# benign idiom ("suppress the output during the token refresh" — no access verb → WARN).
+_B63_SECRET_ACCESS_RE = re.compile(
+    normalize_for_scan(
+        r"\b(?:read|cat|less|head|tail|grep|jq|dump|grab|extract|steal|harvest|collect"
+        r"|fetch|download|load|pull|open|copy|exfiltrat\w*|send|forward|transmit|upload|leak)\w*"
+        r"|прочит\w*|чита\w*|скача\w*|загруз\w*|извлек\w*|собер\w*|укра\w*"
+    ),
+    re.IGNORECASE,
+)
+
+# An outbound-send verb (by class, not a fixed sink list) …
+_B63_SEND_VERB_RE = re.compile(
+    normalize_for_scan(
+        r"\b(?:send|forward|transmit|upload|post|email|deliver|relay|ship|leak"
+        r"|exfiltrat\w*|push|beam|smuggle|beacon|copy|drop)\w*"
+        r"|\bdm\b"
+        r"|отправ\w*|переда\w*|выгруж\w*|слить|перешл\w*|слив\w*"
+    ),
+    re.IGNORECASE,
+)
+
+# … directed at a SECOND-PARTY / external destination. Send-verb + destination must co-occur
+# in the window to signal exfiltration; either alone is benign ("send the summary to the
+# user", "my server" with no verb).
+_B63_DEST_RE = re.compile(
+    r"\bto\s+(?:me\b|us\b|my\s|our\s|a\s+(?:remote|external|second|third|another)"
+    r"|the\s+(?:remote|external|attacker|adversary|shared))"
+    r"|\b(?:my|the|a|his|her|their)\s+(?:bot|chat|inbox|server|endpoint|webhook|channel"
+    r"|telegram|discord|slack|gist|paste(?:bin)?|bucket|shared\s+folder|drop\s?box|dropbox"
+    r"|address|c2|handle|account)"
+    # a bare dotted-quad IP as the send target ("beam it to 1.2.3.4"); gated by a preceding
+    # "to/at" so a version string / CIDR mention in prose does not match (C-135 r2 HOLE 2)
+    r"|\b(?:to|at)\s+\d{1,3}(?:\.\d{1,3}){3}\b"
+    # an @-handle, but only when it is the OBJECT of a destination cue — a bare @word matches
+    # Python decorators (@app.route) / CSS at-rules (@media), a false positive (C-135 r2 HOLE 3)
+    r"|\b(?:to|via|dm)\s+@\w{2,}"
+    r"|https?://|[\w.+-]+@[\w-]+\.[\w.-]+"
+    r"|к\s+себе|\bмне\b|в\s+(?:мой|наш|чат|бот|облак)",
+    re.IGNORECASE,
+)
+
+
+def _has_outbound_exfil(window: str) -> bool:
+    """True when *window* ships data to a second-party/external destination — a send verb
+    (`_B63_SEND_VERB_RE`) co-located with a destination (`_B63_DEST_RE`), a known sink
+    (`_EXFIL_RE`), or a credential path (`_CRED_RE`). Verb-class based, so a transport not in
+    any fixed list ("DM it to my telegram bot") is still caught."""
+    return bool(
+        _EXFIL_RE.search(window)
+        or _CRED_RE.search(window)
+        or (_B63_SEND_VERB_RE.search(window) and _B63_DEST_RE.search(window))
+    )
+
+
 _B64URL_BLOB_RE = re.compile(r"[A-Za-z0-9_-]{40,}")
 
 
@@ -576,9 +732,35 @@ _B64_REPORT_FRAME_RE = re.compile(
     # ("a common injection is: …"). A sink-bearing live directive still FAILs (the
     # actionable-continuation veto runs before this frame check); only a bare quoted
     # phrase is dampened to WARN (B-112 C-135 A-case).
-    r"injection|injections|attack|attacks|malicious|adversar\w*|"
+    r"injection\w*|attack\w*|malicious\w*|adversar\w*|"
+    # B-176: detection-skill vocabulary — a guardian enumerating the phrases it
+    # recognizes in-sentence ("signature: …", "detect the wording …", "indicator: …").
+    # A live sink still vetoes to FAIL upstream; only a bare quoted phrase is dampened.
+    r"detect(?:s|ed|ion|ing)?|signatures?|indicators?|recogni[sz]e[sd]?|"
+    r"watch\s+for|look\s+for|scan\s+for|red\s+flags?|warning\s+signs?|"
     r"when\s+you\s+see|if\s+you\s+see|do\s+not\s+obey|never\s+obey|"
     r"do\s+not\s+follow|never\s+follow|do\s+not\s+comply|ignore\s+it)\b",
+    re.I,
+)
+
+
+_B64_DETECTION_HEADING_RE = re.compile(
+    # B-176: a Markdown heading that frames the section below as a detection / signature
+    # catalogue — a guardian skill enumerating the attacks it recognizes, not issuing them.
+    # Consumed by _b64_reported_or_quoted: a bare override phrase whose CLOSEST heading
+    # matches this is dampened FAIL->WARN (out of the same-sentence report window). A live
+    # sink still FAILs upstream (the continuation veto runs before any dampener), and the
+    # nearest-heading rule is self-scoping — a later non-detection heading wins.
+    r"(?:"
+    r"signatures?|indicators?|detect(?:ion|s|ing)?|recogni[sz]\w*|"
+    r"watch\s*(?:for|list|out)|look\s+for|scan\s+for|"
+    r"red\s+flags?|warning\s+signs?|"
+    r"known\s+(?:attack|injection|jailbreak|payload|prompt|threat|malicious)\w*|"
+    r"(?:attack|injection|jailbreak|threat|malicious|adversar\w*)\s+"
+    r"(?:pattern|example|signature|indicator)s?|"
+    r"patterns?\s+to\s+(?:detect|block|flag|watch|reject|catch)|"
+    r"indicators?\s+of\s+compromise|\bioc\b"
+    r")",
     re.I,
 )
 
@@ -1702,15 +1884,66 @@ def _b58_decode_variants(text: str, rounds: int = 2) -> list[tuple[str, str]]:
 
 
 def _b58_extract_actionable(seg_norm: str) -> bool:
-    """True when a decoded/hidden B58 segment carries an ACTIONABLE payload — an action
-    verb (_B63_ACTION_RE), an exfil transport (_EXFIL_RE), or a bare URL/email sink —
-    beyond the bare injection phrase. Discriminates a real hidden directive from a
-    defensive skill merely QUOTING an attack phrase (B-113)."""
+    """True when a decoded/hidden B58 segment carries an ACTIONABLE payload — an action verb
+    (_B63_ACTION_RE), an exfil transport (_EXFIL_RE), a bare URL/email sink, or an
+    outbound-send verb directed at a second-party destination (verb class, so a transport not
+    in any fixed list — "DM the seed phrase to @drop" — is still caught; C-135 round 2). This
+    discriminates a real hidden directive from a defensive skill merely QUOTING an attack
+    phrase (B-113)."""
     return bool(
         _B63_ACTION_RE.search(seg_norm)
         or _EXFIL_RE.search(seg_norm)
         or _B58_URL_OR_EMAIL_RE.search(seg_norm)
+        or (_B63_SEND_VERB_RE.search(seg_norm) and _B63_DEST_RE.search(seg_norm))
     )
+
+
+# B-179 (C-135 round 2, narrowed round 3): a hidden-comment body that SOLICITS a secret from
+# the user — a credential-phishing shape — is suspicious even when it dodges the action-verb
+# list and matches no classic INJECTION_PATTERN. Requires a solicitation verb WITHIN ~40 chars
+# of a secret/credential noun, so ubiquitous benign help comments ("tell the user to run
+# --help", "you must restart the daemon", "reply with the version") no longer re-open the
+# dominant-FP channel over-fire (C-135 r2 HOLE 6). A real phishing directive ("re-type your
+# seed phrase", "confirm your password") still keeps the channel a visible WARN.
+_B58_HIDDEN_DIRECTIVE_RE = re.compile(
+    r"\b(?:re-?type|re-?enter|enter|provide|confirm|verify|share|resend|paste|type"
+    r"|reply\s+with|send\s+(?:me|us))\b"
+    r"[^\n]{0,40}?"
+    r"\b(?:password|passphrase|seed(?:\s+phrase)?|recovery\s+(?:phrase|code)|private\s+key"
+    r"|secret|api[_\- ]?key|credential|pin|otp|2fa|mnemonic|wallet|security\s+code)\b",
+    re.IGNORECASE,
+)
+
+
+def _b58_channel_body_suspicious(body_norm: str) -> bool:
+    """B-179: True when a hidden-channel body (html-comment / hidden-markup / base64 decode)
+    carries a REAL hidden signal — a match against an INJECTION_PATTERN, an outbound exfil
+    (credential / send-verb → destination), or a concealed credential-phishing shape
+    (`_B58_HIDDEN_DIRECTIVE_RE`). A BARE action verb is deliberately NOT enough: benign doc
+    comments mention run/read/open constantly ("tell the user to run --help"), so the
+    channel-only WARN is suppressed (no nag) for them — the dominant B58 false-positive was
+    this over-fire (round-2 HOLE 6). A genuinely hidden actionable directive still FAILs via
+    the FAIL arm's `_b58_extract_actionable`, a separate gate."""
+    if any(pat.search(body_norm) for pat in INJECTION_PATTERNS):
+        return True
+    if _has_outbound_exfil(body_norm):
+        return True
+    return bool(_B58_HIDDEN_DIRECTIVE_RE.search(body_norm))
+
+
+def _b58_text_is_detection_catalogue(norm: str) -> bool:
+    """B-179: True when the document has a detection / signatures heading — a security skill
+    cataloguing the injection phrases it RECOGNIZES ("## Signatures to detect", "## Known
+    injection patterns", "## Indicators"). Such a doc legitimately quotes attack phrases
+    (sometimes inside a comment or hidden block, to show the raw evasion) without issuing
+    them, so a NON-actionable channel-hidden quote is dampened FAIL->WARN — mirroring the
+    whole-text defensive dampener and the B-176 detection-heading rule. An actionable payload
+    (exfil / action verb / sink) still FAILs; a bare hidden override with no such heading and
+    no defensive chrome still FAILs."""
+    for m in _ANY_HEADING_RE.finditer(norm):
+        if _B64_DETECTION_HEADING_RE.search(m.group(0)):
+            return True
+    return False
 
 
 def _b58_hidden_segments(text: str) -> list[tuple[str, str]]:
@@ -1966,12 +2199,27 @@ def _b63_scan(text: str, fence_ranges: list[tuple[int, int]]) -> list[tuple[str,
         start = max(0, m.start() - _B63_WINDOW)
         end = min(len(text), m.end() + _B63_WINDOW)
         window = text[start:end]
-        has_action = bool(_B63_ACTION_RE.search(window))
+        # Signal B: an action verb, OR an outbound-send verb (beam/route/relay/… are exfil
+        # actions not in the general action list; C-135 r2 HOLE 2).
+        has_action = bool(
+            _B63_ACTION_RE.search(window) or _B63_SEND_VERB_RE.search(window)
+        )
+        # B-177: FAIL (grade-cap) only when an anchor confirms concealment intent — a human
+        # overseer kept in the dark, a covertness marker, or a secret/credential in the
+        # window. A bare verbosity idiom ("suppress the output", "silently install") carries
+        # none and is ambiguous, so it surfaces as WARN, not FAIL (§5). The live sink / cred
+        # read still anchors a real attack.
+        anchored = bool(
+            _B63_FAIL_ANCHOR_RE.search(window)             # person-conceal / covert / exfil-prose
+            or _has_outbound_exfil(window)                  # send-verb→2nd-party dest / sink / cred path
+            or (_B63_SECRET_TERM_RE.search(window)          # a secret that is actually being
+                and _B63_SECRET_ACCESS_RE.search(window))   #   read / exfil'd (not "token refresh")
+        )
         # Keep a readable snippet for evidence (truncate long matches).
         snippet = m.group().strip()
         if len(snippet) > 80:
             snippet = snippet[:77] + "..."
-        hits.append((snippet, has_action))
+        hits.append((snippet, has_action and anchored))
 
     # B-091: semantic pass — a paraphrased "act, then don't disclose" instruction can
     # dodge the lexical Signal-A verbs (confirmed live-fire bypass: static-graded SAFE
@@ -2015,6 +2263,59 @@ def _b64_actionable_continuation(blob: str, pos: int, end: int) -> bool:
     )
 
 
+def _b64_next_sentence_has_exfil(blob: str, pos: int, end: int) -> bool:
+    """B-176 (C-135 round 3): a STRICT exfil sink — a credential (`_CRED_RE`) or a send verb
+    directed at a destination (`_B63_SEND_VERB_RE` + `_B63_DEST_RE`) — in the override phrase's
+    sentence or the ONE following it. Deliberately NOT a bare `_EXFIL_RE` (`curl`), which
+    over-reached to an unrelated benign install/telemetry sink elsewhere in the same paragraph
+    (round-2 HOLE 1). Gated behind a heading-ONLY dampener in _b64_classify, so it only
+    escalates a bare override a mere detection heading would otherwise launder (B64-1); a
+    report-framed override never reaches here."""
+    m1 = _SENTENCE_BREAK_RE.search(blob, end)
+    start2 = m1.end() if m1 else end
+    m2 = _SENTENCE_BREAK_RE.search(blob, start2)
+    hi = m2.end() if m2 else min(len(blob), start2 + 220)
+    hi = min(hi, end + 320)
+    seg = blob[pos:hi]
+    return bool(
+        _CRED_RE.search(seg)
+        or (_B63_SEND_VERB_RE.search(seg) and _B63_DEST_RE.search(seg))
+    )
+
+
+def _b64_detection_heading_dampens(blob: str, pos: int) -> bool:
+    """B-176: True when the override phrase's CLOSEST markdown heading is a detection /
+    signatures catalogue ("## Signatures to detect", "## Known injection patterns") — a
+    guardian skill enumerating the attacks it recognizes, not issuing them. A later
+    non-detection heading between the catalogue and the phrase (e.g. "## Setup") wins and stops
+    the dampening. This is a WEAK, attacker-authorable frame (unlike an in-sentence report
+    quote), so _b64_classify still vetoes it to FAIL when a live exfil sits in the next
+    sentence (`_b64_next_sentence_has_exfil`)."""
+    heading = _nearest_heading(blob, pos)
+    return heading is not None and bool(_B64_DETECTION_HEADING_RE.search(heading))
+
+
+def _b64_is_quoted_example(blob: str, pos: int, end: int) -> bool:
+    """B-176 (C-135 round 2/3): True when the override phrase is a QUOTED attack string (a
+    quote char immediately before it) under a detection heading — the "Watch for payloads
+    like: '…'" documentation shape — AND no live exfil sink sits OUTSIDE the quotation (after
+    the closing quote, same sentence). A quoted full-attack example is documentation, so the
+    live-sink veto yields to the dampener (B64-4). But if only the override phrase is quoted
+    while the exfil runs live after the closing quote (round-2 HOLE 4-1c), it is NOT an example
+    and the veto must fire. A bare (unquoted) directive under the heading also does not
+    qualify."""
+    if not _B64_QUOTE_OPEN_RE.search(blob[max(0, pos - 3):pos]):
+        return False
+    heading = _nearest_heading(blob, pos)
+    if heading is None or not _B64_DETECTION_HEADING_RE.search(heading):
+        return False
+    close = re.search("['\"‘’“”]", blob[end:end + 400])
+    tail_start = end + close.end() if close else end
+    sent = _SENTENCE_BREAK_RE.search(blob, tail_start)
+    tail = blob[tail_start: sent.end() if sent else min(len(blob), tail_start + 200)]
+    return not _has_outbound_exfil(tail)
+
+
 def _b64_classify(blob: str, pos: int, end: int, fence_ranges, comment_ranges) -> str:
     """Three-way disposition for a B64 override hit — "fail" | "skip" | "warn".
 
@@ -2037,14 +2338,29 @@ def _b64_classify(blob: str, pos: int, end: int, fence_ranges, comment_ranges) -
     quotes the attack inside a comment, while B58 still catches a genuinely hidden one."""
     if any(s <= pos < e for s, e in comment_ranges):
         return "skip"
-    if _b64_actionable_continuation(blob, pos, end):
+    # A live actionable/exfil sink in the phrase's OWN sentence makes it a real directive →
+    # FAIL, and it vetoes every documentation frame. EXCEPTION: a QUOTED attack string under a
+    # detection heading with no live sink outside the quotes is documentation, so the veto
+    # yields to the dampener for it (B64-4 / HOLE 4-1c).
+    if not _b64_is_quoted_example(blob, pos, end) and _b64_actionable_continuation(
+        blob, pos, end
+    ):
         return "fail"
     if _in_fence(pos, fence_ranges) and _is_code_example(
         blob, pos, fence_ranges, fence_needs_negation=True
     ):
         return "skip"
+    # An in-sentence report/quote frame ("a jailbreak might say …", "payload reads: '…'") or a
+    # prose negation is GENUINE documentation → WARN (the dampener wins outright).
     if _negation_context(blob, pos) or _b64_reported_or_quoted(blob, pos, end):
         return "warn"
+    # A bare override under ONLY a detection heading is weak, attacker-authorable framing: WARN
+    # for a lone catalogued phrase (a guardian's signature list), but FAIL when a live exfil
+    # sits in the next sentence — a real directive the heading alone would otherwise launder
+    # (B64-1/2/3). The next-sentence veto keys on credential / send-verb+destination (verb
+    # class), NOT a bare `curl`, so an unrelated benign install command does not trip it (HOLE 1).
+    if _b64_detection_heading_dampens(blob, pos):
+        return "fail" if _b64_next_sentence_has_exfil(blob, pos, end) else "warn"
     return "fail"
 
 
@@ -2063,6 +2379,10 @@ def _b64_reported_or_quoted(blob: str, pos: int, end: int) -> bool:
         pass
     if last_break is not None:
         seg = seg[last_break.end():]
+    # In-sentence report/quote frame only. The detection-HEADING dampener moved to
+    # _b64_detection_heading_dampens (C-135 round 3): a heading is weaker framing than an
+    # in-sentence quote, so it is vetoed by a next-sentence exfil, whereas an in-sentence
+    # frame here is genuine documentation and wins outright.
     return bool(_B64_REPORT_FRAME_RE.search(seg))
 
 
@@ -2372,6 +2692,12 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
 
         hidden = False
         base_defensive = _whole_text_is_defensive(norm)
+        # B-179: a detection/signatures catalogue (a security skill listing the injection
+        # phrases it recognizes) is treated like a whole-text-defensive doc for the channel
+        # FAIL — a non-actionable quote inside a comment/hidden block is dampened to WARN,
+        # not FAILed. An actionable payload still FAILs; a bare hidden override with no such
+        # heading and no defensive chrome still FAILs (the catalogue flag is False there).
+        catalogue_defensive = _b58_text_is_detection_catalogue(norm)
         for variant, signals, is_extract in variants:
             if not signals:
                 continue
@@ -2387,7 +2713,10 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                             or "html-comment" in signals
                             or "base64:" in signals
                         )
-                        and (not base_defensive or _b58_extract_actionable(variant))
+                        and (
+                            (not base_defensive and not catalogue_defensive)
+                            or _b58_extract_actionable(variant)
+                        )
                     )
                 ):
                     fail_ev.append(
@@ -2445,6 +2774,21 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                 if base64_variants:
                     _channel.add("base64")
                 reasons = [r for r in reasons if r not in _channel]
+            # B-179: a hidden-text CHANNEL is only WARN-worthy when its body carries a
+            # partial injection signal (an actionable payload or an INJECTION_PATTERN match).
+            # A plain `<!-- TODO -->` comment or a benign base64 blob is neither hiding nor
+            # obfuscating a directive, so drop the channel labels — the tool no longer nags on
+            # every comment (the dominant B58 false-positive). Char-level Unicode signals
+            # (invisible / bidi / confusable) are untouched; an actionable hidden directive
+            # already FAILed above.
+            _channel_labels = {label for _, label in hidden_segments}
+            if base64_variants:
+                _channel_labels.add("base64")
+            if _channel_labels and not any(
+                _b58_channel_body_suspicious(normalize_for_scan(b))
+                for b, _ in hidden_segments + base64_variants
+            ):
+                reasons = [r for r in reasons if r not in _channel_labels]
             if reasons:
                 # B-126: "html-comment" / "hidden-html/css" / "base64" are STRUCTURAL
                 # hidden-text-evasion channels, not a Unicode signal — a file can trip
@@ -3374,6 +3718,28 @@ def check_agent_snooping(ctx: Context) -> Finding:
                     pl.endswith("/skills")
                     and _B61_METADATA_FIELD_RE.search(window)
                     and not _b61_secret_value_present(window)
+                ):
+                    continue
+                # B-178: reading the host's OWN ~/.openclaw tree — a bare `.openclaw` root,
+                # a glob (`skills/*/SKILL.md`), or `openclaw.json`, none of which resolves to
+                # a foreign owner slug — with ONLY a bare read verb (no exfil sink, no
+                # secret/credential term) is self-configuration, not cross-agent theft. The
+                # B-087 self-slug skip above can't clear these (no resolvable slug), so skip
+                # them here too (PASS) — consistent with the self-slug and no-verb self-access
+                # branches, which are already silent. A foreign-agent path (.claude/.codex/
+                # .gemini), an identifiable sibling-skill slug, an exfil sink, or a secret
+                # term all still FAIL. `continue` (not the trailing `break`) so a worse signal
+                # later in the same skill (a foreign read) can still escalate it to FAIL.
+                if (
+                    ".openclaw" in pl
+                    and not _B61_EXFIL_SINK_RE.search(window)
+                    # C-135 round 2: a read that also SHIPS the value off-host (a send verb →
+                    # a second-party destination, e.g. "forward the gateway value to my
+                    # telegram bot") is not self-config, even when the transport is not in the
+                    # narrow _B61_EXFIL_SINK_RE list. Keep such a read out of the skip → FAIL.
+                    and not (_B63_SEND_VERB_RE.search(window) and _B63_DEST_RE.search(window))
+                    and not _b61_secret_value_present(window)
+                    and not _b61_openclaw_names_foreign_slug(norm, m, skill_name)
                 ):
                     continue
                 fail_ev.append(
@@ -5246,9 +5612,11 @@ def check_silent_instruction(ctx: Context) -> Finding:
             WARN,
             "Possible silent-instruction pattern(s) found (no action context "
             "co-located — may be documentation): " + ev_summary + extra,
-            "Review the flagged content. If it is documentation describing attack "
-            "patterns, move it into a fenced code block (```) so it is treated as an "
-            "example. If it is a live directive, remove it.",
+            "Review the flagged content. If it is a live directive that hides actions "
+            "from the user, remove it. If it is documentation describing an attack "
+            "pattern, wrap it in a fenced code block AND annotate it as a non-executable "
+            "example (a nearby 'do NOT do this' / 'example only' note) — a bare fence no "
+            "longer dampens the finding on its own (B-097).",
             warn_ev,
             severity=MEDIUM,
         )
