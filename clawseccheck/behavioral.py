@@ -22,10 +22,13 @@ A-F score — only through `--behavioral`, mirroring `--analyze-trajectory`'s ow
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from . import attest
-from .catalog import PASS, WARN
+from .catalog import PASS, UNKNOWN, WARN
 from .checks import INPUT_TOOL_HINTS, _finding
-from .trajectory import read_events
+from .collector import dig
+from .trajectory import read_events, read_proven_tools
 
 # C-170 adversarial pass found the naive "reuse A1's three hint tuples verbatim"
 # design (still used for `INPUT_TOOL_HINTS` below) has two real bugs when applied
@@ -258,6 +261,200 @@ def check_outcome_anomaly(groups: dict[str, list[dict]]) -> object:
     )
 
 
+# ---------------------------------------------------------------------------
+# T3 — runtime capability drift (F-123): a HIGH-BLAST verb PROVEN in the trajectory
+# log that is NOT in the declared (tools.allow / tools.alsoAllow / gateway.tools.allow)
+# ∪ attested set. Class-grant tokens (globs / group: / bundle-) make it UNKNOWN, not WARN.
+# Complements B84: B84 fires on proven-high-blast + UNGATED posture (declared or not);
+# T3 fires on proven-high-blast + UNDECLARED (gated or not). WARN-only, scored=False,
+# --behavioral only — never audit()/CHECKS/A-F. The HIGH-BLAST gate is load-bearing:
+# built-ins and MCP tools are auto-available beyond tools.allow (B44), so reversible /
+# unknown verbs (message/web_*/list_*) never reach the alert — only EXEC / EGRESS /
+# DESTRUCTIVE / MAILBOX_CONFIG drift does.
+# ---------------------------------------------------------------------------
+
+
+def _t3_is_class_grant(token: str) -> bool:
+    """True when an allow-list entry grants a whole CLASS of tools rather than one literal
+    verb — so the granted surface can't be enumerated. Grounded against the dist tool-policy
+    matcher (tool-policy-Cm3NCEHp.js / tool-policy-match): every core group is "group:<id>",
+    plugins arrive as "group:plugins" / "bundle-mcp" / "<server>__*" globs, and the sentinel
+    "__openclaw_default_plugin_tools__" is expanded to "*" (allow-all default plugin tools).
+    Any of these means T3 must NOT assert drift (it would false-WARN a legitimately-bundled
+    verb)."""
+    low = token.strip().lower()
+    return (
+        "*" in token
+        or ":" in token
+        or low.startswith(("group", "bundle"))
+        or low == "__openclaw_default_plugin_tools__"
+    )
+
+
+# OpenClaw folds a few tool names to a canonical id BEFORE allow/deny matching (grounded:
+# dist tool-policy-Cm3NCEHp.js TOOL_NAME_ALIASES, thread-lifecycle DYNAMIC_TOOL_NAME_ALIASES,
+# native-hook-relay NATIVE_HOOK_TOOL_NAME_ALIASES). We apply the SAME fold on both the
+# declared and the proven side, so an allow-list entry "exec" matches a proven "bash" (and
+# vice-versa) — else T3 would false-WARN the bash↔exec alias.
+_T3_VERB_ALIASES = {
+    "bash": "exec",
+    "apply-patch": "apply_patch",
+    "exec_command": "exec",
+}
+
+
+def _t3_canon(name) -> str:
+    """Namespace-stripped, lowercased, alias-folded verb (see _T3_VERB_ALIASES)."""
+    v = attest.normalize_verb(name)
+    return _T3_VERB_ALIASES.get(v, v)
+
+
+def _t3_declared(ctx) -> tuple[set, bool, bool]:
+    """Return ``(literal_verbs, unbounded, has_allow_bound)`` for the declared tool grant.
+
+    ``literal_verbs`` — normalized + alias-folded EXACT verb names from tools.allow +
+    tools.alsoAllow + gateway.tools.allow UNION the attested inventory.
+    ``unbounded`` — True when any class-grant token (glob / group / bundle / sentinel) is
+    present, so the surface can't be enumerated.
+    ``has_allow_bound`` — True when the TOP-LEVEL ``tools.allow`` is a present, non-empty
+    list. That is the ONLY channel establishing an ENUMERABLE RESTRICTIVE upper bound: a
+    non-empty allow-list denies anything it doesn't match, so a proven verb is necessarily
+    within it. When it is ABSENT the base grant is ``tools.profile`` (explicit or the default),
+    an unenumerable set that legitimately grants high-blast core tools (exec / code_execution /
+    sessions_send) — so drift can't be asserted (C-135: OpenClaw's schema forbids allow+alsoAllow
+    and RECOMMENDS profile+alsoAllow, where there is no allow layer at all). alsoAllow /
+    gateway.tools.allow / attestation only ADD to the declared set — they never bound it, so
+    they don't gate. The profile can only NARROW (AND-intersection) a present allow-list, so it
+    can't add false drift when a bound exists. Mirrors B84's construction (_capability.py:347-361)."""
+    cfg = getattr(ctx, "config", None) or {}
+    allow = dig(cfg, "tools.allow")
+    has_allow_bound = isinstance(allow, list) and len(allow) > 0
+    raw: list = []
+    # Explicit dig() literals (not a loop var) so the schema-grounding AST scanner sees
+    # each grounded path (§4). additive channels: alsoAllow + gateway.tools.allow.
+    for v in (
+        allow,
+        dig(cfg, "tools.alsoAllow"),
+        dig(cfg, "gateway.tools.allow"),
+    ):
+        if isinstance(v, list):
+            raw += v
+    reported = (getattr(ctx, "attestation", None) or {}).get("tools")
+    if isinstance(reported, list):
+        raw += reported
+    literals: set = set()
+    unbounded = False
+    for t in raw:
+        if not isinstance(t, (str, bytes)):
+            continue
+        s = (t.decode("utf-8", "replace") if isinstance(t, bytes) else t).strip()
+        if not s:
+            continue
+        if _t3_is_class_grant(s):
+            unbounded = True
+            continue
+        literals.add(_t3_canon(s))
+    return literals, unbounded, has_allow_bound
+
+
+def check_capability_drift(ctx) -> object:
+    """T3 — a proven high-blast verb never declared in config / attestation."""
+    home = getattr(ctx, "home", None)
+    if not isinstance(home, Path):
+        return _finding(
+            "T3",
+            UNKNOWN,
+            "No OpenClaw home to read a trajectory log from — capability drift can't be assessed.",
+            "Run --behavioral on a host with an OpenClaw agent's session trajectories.",
+        )
+    observed, meta = read_proven_tools(home)
+    if not meta.get("present"):
+        return _finding(
+            "T3",
+            UNKNOWN,
+            "No trajectory sidecars found (agents/*/sessions/*.trajectory.jsonl) — no proven "
+            "tool use to compare against the declared grant.",
+            "Run on a host where an OpenClaw agent has produced session trajectories.",
+        )
+    if meta.get("unknown_version"):
+        return _finding(
+            "T3",
+            UNKNOWN,
+            "A trajectory record used an unrecognised schema version — the proven tool set is "
+            "incomplete, so drift can't be assessed authoritatively.",
+            "Re-run against trajectories written by a supported OpenClaw version.",
+        )
+    declared, unbounded, has_allow_bound = _t3_declared(ctx)
+    if not has_allow_bound:
+        # No explicit top-level `tools.allow` to bound the grant. Then the base grant is the
+        # tools.profile (explicit or the DEFAULT profile) — an unenumerable set that
+        # legitimately grants high-blast core tools (exec / code_execution / sessions_send).
+        # OpenClaw's schema even FORBIDS allow+alsoAllow and recommends `profile + alsoAllow`,
+        # where there is no allow layer at all, so a proven profile-granted verb would
+        # spuriously "drift". §4: report UNKNOWN when state genuinely can't be determined.
+        return _finding(
+            "T3",
+            UNKNOWN,
+            "No explicit 'tools.allow' upper bound — the tool grant is governed by "
+            "'tools.profile' (or the default profile), whose tool set can't be enumerated from "
+            "config, so a proven verb can't be shown UNDECLARED (an absent allow-list is not a "
+            "restriction a proven verb could exceed).",
+            "For drift detection, pin the high-blast tools you intend to grant as explicit "
+            "verb names in 'tools.allow' (or attest the exact tool inventory with --attest).",
+        )
+    if unbounded:
+        # tools.allow is present but grants a whole class (a glob '<server>__*', a 'group:...'
+        # or 'bundle-...' bundle, the default-plugin-tools sentinel). OpenClaw allows MCP/plugin
+        # tools this way, so the granted surface can't be enumerated — a proven verb can't be
+        # shown UNDECLARED without false-WARNing every legitimately-bundled verb.
+        return _finding(
+            "T3",
+            UNKNOWN,
+            "The 'tools.allow' list uses class-grant tokens (a glob like '<server>__*', a "
+            "'group:...' or 'bundle-...' bundle) — the granted surface can't be enumerated, "
+            "so a proven verb can't be shown UNDECLARED without false positives.",
+            "For drift detection, pin the high-blast tools you intend to grant as explicit "
+            "verb names in 'tools.allow' (or attest the exact tool inventory with --attest).",
+        )
+    if not declared:
+        # tools.allow was a non-empty list but carried no interpretable string verb (e.g. all
+        # non-string junk) — can't build a grant to compare against. UNKNOWN, never a guess.
+        return _finding(
+            "T3",
+            UNKNOWN,
+            "The 'tools.allow' list carried no interpretable tool name — runtime capability "
+            "drift can't be assessed against it.",
+            "Define 'tools.allow' with explicit verb-name strings (or attest the tool "
+            "inventory with --attest).",
+        )
+    drift = sorted(
+        v
+        for v in {_t3_canon(o) for o in observed}
+        if attest.classify_verb(v) in attest.HIGH_BLAST_CLASSES and v not in declared
+    )
+    if drift:
+        detail = ", ".join(drift[:6]) + (f" (+{len(drift) - 6} more)" if len(drift) > 6 else "")
+        return _finding(
+            "T3",
+            WARN,
+            "Runtime capability drift — high-blast verb(s) PROVEN in the trajectory log are not "
+            f"in the declared (tools.allow) or attested grant: {detail}. A verb beyond the "
+            "allow-list is often legitimate (built-ins and MCP tools are auto-available), so "
+            "this is advisory, not proof of abuse.",
+            "Verify each verb should be reachable. If expected, add it to 'tools.allow' (or "
+            "attest the tool inventory) so declared capability matches actual use; if not, "
+            "remove the tool / MCP server that exposes it.",
+            [f"proven, undeclared, high-blast: {v}" for v in drift],
+        )
+    return _finding(
+        "T3",
+        PASS,
+        "Every proven high-blast verb is within the declared / attested grant — no runtime "
+        "capability drift observed.",
+        "Keep the trajectory sidecar and tools.allow / attestation in sync.",
+    )
+
+
 def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     """Run the v1 behavioral detectors (T1, T2) and return a result dict."""
     home = getattr(ctx, "home", None)
@@ -279,6 +476,7 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     result["findings"] = [
         check_behavioral_trifecta(groups),
         check_outcome_anomaly(groups),
+        check_capability_drift(ctx),
     ]
     return result
 
@@ -315,6 +513,10 @@ def render_behavioral_analysis(ctx, *, explicit_path: str | None = None, ascii_o
             any_warn = True
             lines.append(f"  {warn} {f.id} — {f.detail}")
             lines.append(f"      fix: {f.fix}")
+        elif f.status == UNKNOWN:
+            # An advisory non-state (e.g. T3 with no explicit allow-list) — mark it as
+            # UNKNOWN, never a ✓, so it doesn't read as a clean pass.
+            lines.append(f"  {q} {f.id} — {f.detail}")
         else:
             lines.append(f"  {ok} {f.id} — {f.detail}")
 

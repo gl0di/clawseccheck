@@ -69,6 +69,7 @@ proxy.proxyUrl
 session.dmScope
 subagents.allowAgents
 tools.allow
+tools.alsoAllow
 tools.deny
 tools.elevated.allowFrom
 tools.exec.applyPatch.workspaceOnly

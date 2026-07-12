@@ -68,12 +68,12 @@ def test_report_sanitizes_untrusted_finding_text():
     assert "\x1b" not in out and "‮" not in out
 
 
-# T1/T2 (E-032, behavioral trajectory audit) are deliberately mode-scoped: they run
-# ONLY through `--behavioral` (clawseccheck.behavioral.analyze), never as part of
-# run_all()/audit()/the A-F score — there is no config-driven "declared" state for a
-# runtime tool-call sequence to assess. Still cataloged (CheckMeta + docs/CHECKS.md)
-# for consistent finding metadata/reporting, same as any other check ID.
-_MODE_SCOPED_EXEMPT = {"T1", "T2"}
+# T1/T2/T3 (E-032/E-039, behavioral trajectory audit) are deliberately mode-scoped: they
+# run ONLY through `--behavioral` (clawseccheck.behavioral.analyze), never as part of
+# run_all()/audit()/the A-F score — they assess a runtime tool-call sequence, not
+# config-driven "declared" state. Still cataloged (CheckMeta + docs/CHECKS.md) for
+# consistent finding metadata/reporting, same as any other check ID.
+_MODE_SCOPED_EXEMPT = {"T1", "T2", "T3"}
 
 
 # ---- C3 registered + no dangling catalog entries ----

@@ -11,7 +11,7 @@ the content-security ring — B59–B67 / B74 / B42 — on an uninstalled skill;
 and capability-intent-aware) / `--vet-mcp`, the **attestation
 layer** (`--ask` / `--attest`, with a guided interrogation protocol so the agent self-builds
 the report; `--attest -` reads stdin) that feeds the agent's self-report into B43/B44, and
-the **behavioral trajectory audit** (`--behavioral`, E-032 v1) — T1/T2, proof-by-log
+the **behavioral trajectory audit** (`--behavioral`, E-032/E-039) — T1/T2/T3, proof-by-log
 sequence detectors over OpenClaw's trajectory sidecar, complementing every check above
 (which all answer "what the agent *could* do") with "what the agent *actually did*".
 
@@ -50,7 +50,7 @@ sequence detectors over OpenClaw's trajectory sidecar, complementing every check
 | Native binary PATH safety | C5 | |
 | **Host defensive posture** | B50–B54 | Is the agent's *host* watched: network IDS, host audit, file-integrity, EDR/AV, firewall — read-only, WARN only for a high-privilege agent, never FAIL (v0.20). A self-reported `host_monitors` entry (attestation) upgrades a gap to an `ATTESTED` PASS for a monitor the scan can't see; static detection still wins (v0.28) |
 | **Combinational attack chains** | RISK-01..18 | Lethal trifecta, untrusted→exec, control-plane takeover, malicious-skill→exfil, markdown-image→persistence, sleeper→delayed-RCE, powerful-agent-on-unmonitored-host (RISK-10/11), etc. |
-| **Behavioral trajectory (proof-by-log)** | T1, T2 (`--behavioral`) | Every check above answers "what the agent *could* do" from config/skill-source; T1/T2 read OpenClaw's trajectory sidecar and answer "what it *actually did*" — an observed ingress→sensitive→egress verb sequence (T1) or a fail→fail→success series on a sensitive verb (T2). Metadata-only (§8): never reads call/return payloads. WARN-only, never scored — a separate mode, not part of the A-F grade. |
+| **Behavioral trajectory (proof-by-log)** | T1, T2, T3 (`--behavioral`) | Every check above answers "what the agent *could* do" from config/skill-source; the T-series reads OpenClaw's trajectory sidecar and answers "what it *actually did*" — an observed ingress→sensitive→egress verb sequence (T1), a fail→fail→success series on a sensitive verb (T2), or a high-blast verb PROVEN in the log that the explicit `tools.allow` grant never declared (T3, capability drift). Metadata-only (§8): never reads call/return payloads. WARN-only, never scored — a separate mode, not part of the A-F grade. |
 
 ## Framework mapping (OWASP)
 
@@ -69,7 +69,7 @@ OWASP Agentic (ASI) classes below, not stretched into a category they don't fit.
 | LLM03 | Supply Chain | B5, B13, B15, B24, B25, B33, B42, B57, B103, B135, B151, B152, C4, C5, C047 |
 | LLM04 | Data and Model Poisoning | B7, B20, B22, B55 |
 | LLM05 | Improper Output Handling | B21, B47 |
-| LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B62, B63, B65, B66, B68, B69, B71, B72, B76, B79, B105, B136, B138, B150, T1 |
+| LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B62, B63, B65, B66, B68, B69, B71, B72, B76, B79, B105, B136, B138, B150, T1, T3 |
 | LLM07 | System Prompt Leakage | B9 |
 | LLM08 | Vector and Embedding Weaknesses | — (no agent-config surface; RAG/embedding concern) |
 | LLM09 | Misinformation | — (model output / overreliance; out of scope) |
@@ -93,7 +93,7 @@ finding in `--json` (`"ast": [...]`).
 | AST01 | Malicious Skills | B13, B60, B63, B65, C048 |
 | AST02 | Supply Chain Compromise | B5, B13, B15, B24, B25, B42, B57, B103, B135, B151, B152, C5, C047 |
 | AST03 | Over-Privileged Skills | B3, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B68, B69, B71, B72, B75, B76, B79, B138, B150 |
-| AST04 | Insecure Metadata | B6, B44, B62 |
+| AST04 | Insecure Metadata | B6, B44, B62, T3 |
 | AST05 | Untrusted External Instructions | B6, B7, B20, B21, B23, B26, B30, B58, B59, B60, B61, B63, B64, B65, B66, B67, B74, B105, B140, C074, T1 |
 | AST06 | Weak Isolation | B4, B22, B38, B39, B48, B70, B73, B136, C032 |
 | AST07 | Update Drift | B25, B33, C4, C6 |

@@ -327,8 +327,11 @@ def test_traj_behavioral_trifecta_fixture_warns():
 
 
 def test_traj_behavioral_clean_fixture_silent():
+    # "Silent" = no WARN fires. T1/T2 PASS on the clean fixture; T3 (F-123) reports
+    # UNKNOWN here because the bare Context has no declared tools.allow to measure drift
+    # against — an advisory non-state, not an alert.
     r = analyze(_ctx(FIXTURES / "traj_behavioral_clean"))
-    assert all(f.status == PASS for f in r["findings"])
+    assert all(f.status != WARN for f in r["findings"])
 
 
 def test_traj_outcome_anomaly_fixture_warns():
@@ -409,8 +412,9 @@ def test_analyze_truncation_marked_and_a_signal_past_the_cap_is_missed(tmp_path)
     r = analyze(_ctx(tmp_path))
     assert r["truncated"] is True
     # confirms the signal really was missed (the bug this caveat discloses) —
-    # not a claim this is desirable, just the honest current behavior.
-    assert all(f.status == PASS for f in r["findings"])
+    # not a claim this is desirable, just the honest current behavior. No WARN fires
+    # (T1/T2 PASS; T3 is UNKNOWN on this config-less Context — an advisory non-state).
+    assert all(f.status != WARN for f in r["findings"])
 
     out = render_behavioral_analysis(_ctx(tmp_path))
     assert "INCOMPLETE" in out and "scan cap" in out

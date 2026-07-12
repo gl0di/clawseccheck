@@ -1410,6 +1410,23 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="monitoring",
     ),
+    # T3: runtime capability drift — a HIGH-BLAST verb PROVEN in the trajectory log that is
+    # NOT in the declared (tools.allow / gateway.tools.allow) ∪ attested grant. Complements
+    # B84 (proven-high-blast + UNGATED posture); T3 is proven-high-blast + UNDECLARED,
+    # regardless of gating. The high-blast gate is load-bearing: built-ins and MCP tools are
+    # auto-available beyond tools.allow (B44), so reversible/unknown verbs never reach the
+    # alert — only EXEC/EGRESS/DESTRUCTIVE/MAILBOX_CONFIG drift does. WARN-only, unscored,
+    # --behavioral only (never audit()/CHECKS/A-F).
+    CheckMeta(
+        "T3",
+        "Runtime capability drift (proven high-blast verb never declared)",
+        MEDIUM,
+        "advisory",
+        "Excessive Agency (behavioral)",
+        scored=False,
+        confidence="MEDIUM",
+        surface="monitoring",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -1547,6 +1564,7 @@ AST_MAP = {
     "B95": ("AST02",),  # dependency confusion (unpinned + typosquat name) = supply-chain tamper (cf. B13)
     "B105": ("AST05",),  # cross-skill combined effect = excessive agency across co-installed skills
     "T1": ("AST05",),  # behavioral trifecta = untrusted external instructions, proven by log (cf. B105)
+    "T3": ("AST04",),  # runtime capability drift = over-privileged + insecure self-report (cf. B84)
     "B97": ("AST09",),  # per-turn event-hook file = persistent review/audit surface (cf. B77/B85)
     "B96": ("AST04",),  # config-driven trust widening (heuristic) = insecure metadata (cf. B62/B88)
     "B98": ("AST04",),  # missing capability declaration = insecure/absent least-privilege metadata (cf. B62/B88/B96)
@@ -1620,6 +1638,7 @@ OWASP_MAP = {
     "B63": ("LLM06",),
     "B105": ("LLM06",),  # combined-effect disclosure suppression (cross-skill) — cf. B63
     "T1": ("LLM06",),  # behavioral trifecta = Excessive Agency, proven by log — cf. B105
+    "T3": ("LLM06",),  # runtime capability drift = Excessive Agency, proven by log — cf. B84
     # B65: conditional/sleeper trigger instructions — hidden conditional malware-like
     # behavior under a user-query gate (Excessive Agency, not Misinformation).
     "B65": ("LLM06",),

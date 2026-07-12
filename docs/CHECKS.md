@@ -1515,6 +1515,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### T3 - Runtime capability drift (proven high-blast verb never declared)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Excessive Agency (behavioral)
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: LLM06 Excessive Agency
+- What it checks: Runtime capability drift (proven high-blast verb never declared)
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.
