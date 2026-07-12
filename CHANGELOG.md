@@ -3,6 +3,40 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.38.0] — 2026-07-12
+
+Advisory adjudication layer (E-038): a new opt-in export/import pair lets your own host
+agent render a second, independent opinion on the audit's borderline findings — without
+ever touching the deterministic A–F grade. The host-agent LLM stays entirely outside the
+tool; ClawSecCheck only emits and consumes structured, redacted JSON.
+
+### Added
+- **`--judge-packet`.** Exports the audit's borderline band — every unsuppressed `UNKNOWN`
+  finding, false-negative-prone `WARN` findings (`B13`/`B65`/`B66`/`B90`/`B99`/`B100`/`B102`/
+  `B154`/`B156`), B62 capability-intent mismatches, and taint signals
+  (`TT4_FILE_NET`/`TT_SSRF`/`TT5_ARG_INJECTION`/`DANGEROUS_SINK`) that the installed-skill
+  scan computes internally but otherwise drops silently when no independent credential/exfil
+  signal is present — as a deterministic JSON packet for an external judge to review. Every
+  item carries only an engine-authored `(relpath:lineno)` location and a curated question;
+  raw skill-authored text never rides along, so a hostile skill's own prose can't be used to
+  prompt-inject the judge that is reviewing it.
+- **`--judged PATH|-`.** Feeds a judge panel's collected verdicts back in (see SKILL.md's new
+  "Judge-panel fan-out" guidance: 3 distinct-lens judges per item, majority vote, worst-verdict
+  tie-break). Renders the standard report with score/grade/findings byte-identical to a plain
+  `--json` run, plus one added `secondOpinion` panel that re-ranks/annotates each item (e.g.
+  "engine: WARN · judges: 3/3 DANGEROUS → treat as high priority"). Verdicts JSON parsing is
+  bounded (2 MB) and defensive — malformed, oversized, or unrecognized input degrades to
+  "not yet reviewed," never a crash.
+- **SKILL.md judge-panel fan-out.** Generalizes the existing locked-down isolator-subagent
+  pattern (no tools, `maxSpawnDepth: 1`, ephemeral) into a 3-lens panel (intent /
+  exfil-destination / obfuscation) over `--judge-packet` items, opt-in with a graceful inline
+  fallback when subagents aren't available.
+
+Verified against a live evasion corpus (real judge subagents, not simulated): the panel
+recovered two tested evasion classes the deterministic engine alone missed or downgraded —
+including one escalated to DANGEROUS via the fail-safe tie-break — with zero false-DANGEROUS
+verdicts on a known-benign control skill.
+
 ## [3.37.0] — 2026-07-12
 
 Skill-surface coverage expansion (E-039 wave 2): the audit now reasons about skill-name
