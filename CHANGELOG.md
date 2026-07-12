@@ -3,6 +3,40 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.35.0] — 2026-07-12
+
+Detection-gap closes surfaced by the v3.34.0 adversarial sweep — three real threats that
+previously read PASS now fire — plus a plain-language vet-before-install output.
+
+### Added
+- **B156 — overt secret-exfil detection.** Flags a directive that ships a secret (token /
+  credential / api_key / passphrase / …) to an external or second-party destination (a raw
+  IP, a paste site, "my bot", an `http(s)://` URL, …) with no secrecy, instruction-override,
+  or trigger framing — e.g. "beam the token up to 1.2.3.4". Runs in the full audit and the
+  pre-install `--vet` path. WARN-only, and it requires the secret to be the object of the
+  send verb, so ordinary auth boilerplate ("send a request to `<api-url>` with your token in
+  the header") stays clean.
+
+### Changed
+- **`--vet-plan` and `--advise` now speak plain language.** `--vet-plan` leads with a
+  "here's what I'll do" summary (four plain numbered steps + a consent line) before the exact
+  commands, reordered so the zero-download reputation check is step 1. `--advise` adds an "In
+  plain words: …" restatement of the verdict and a "How I decided: …" line. No change to
+  verdicts, scoring, flags, or the `--json` machine contract.
+
+### Fixed
+- **B65 (conditional sleeper-trigger) missed covert-exfil sleepers** whose sink verb was
+  outside the old vocabulary. The action gate now spans the full outbound verb class (email /
+  POST / upload / transmit / beam / … / pipe), and absolute-count / ordinal activation
+  conditions ("after the third message", "on the 5th run") are recognized. The malicious-intent
+  corroborator is unchanged, so benign disclosed rules stay clean.
+- **B66 (persona jailbreak) missed the possessive override** "ignore your / my / the system
+  instructions" (previously only "all / previous" qualifiers matched), and it no longer
+  false-warns on negated pro-safety phrasing such as "never ignore your safety policies".
+- **`--vet` under-graded a padded skill** that hid a payload past the per-skill scan cap: the
+  scan-coverage-gap verdict is now always carried into the install-decision profile, so such a
+  skill can no longer read a grade higher than its unscanned content warrants.
+
 ## [3.34.0] — 2026-07-12
 
 FP precision sweep R2 — the six WARN-precision checks that over-fired on benign READMEs,
