@@ -77,6 +77,23 @@ def test_b156_pass_secret_to_first_party_sink():
         assert f.status == PASS, f"first-party sink wrongly flagged: {soul!r} -> {f.status}"
 
 
+def test_b156_pass_auth_boilerplate_object_of_send():
+    """B-188 C-135: the secret must be the OBJECT of the send verb (between verb and dest).
+    Auth boilerplate where the credential is trailing metadata AFTER the destination, and
+    cross-sentence co-location, must NOT fire (the two dominant benign-WARN classes)."""
+    for soul in (
+        "Send a GET request to https://api.weather.example.com/v1/forecast with your "
+        "API key in the Authorization header.",
+        "To charge a customer, send a POST request to https://api.stripe.com/v1/charges "
+        "with your secret key in the Authorization header.",
+        "Post your notification to the webhook with the token included.",
+        "Send the daily summary to the Slack channel. Store your api_key in the local "
+        ".env file so the CLI can read it.",
+    ):
+        f = check_overt_secret_exfil(_ctx(bootstrap={"SOUL.md": soul}))
+        assert f.status == PASS, f"auth boilerplate wrongly flagged: {soul!r} -> {f.status}: {f.detail}"
+
+
 def test_b156_complements_b63_no_double_report_on_secrecy():
     """When a secrecy marker B63 recognises is present, B63 owns the finding and B156
     stays silent — strictly complementary, no double report."""

@@ -644,7 +644,11 @@ _B63_SEND_VERB_RE = re.compile(
     normalize_for_scan(
         r"\b(?:send|forward|transmit|upload|post|email|deliver|relay|ship|leak"
         r"|exfiltrat\w*|push|beam|smuggle|beacon|copy|drop)\w*"
-        r"|\bdm\b"
+        # B-186: "pipe" is an outbound transport verb ("pipe the vault to my C2"). Kept as
+        # an EXACT \bpipe\b alternative (not `pipe\w*`) so the benign noun "pipeline" /
+        # "piping" never matches — and, like every send verb, it only signals exfil when
+        # _B63_DEST_RE (a 2nd-party/external destination) co-occurs.
+        r"|\bdm\b|\bpipe\b"
         r"|отправ\w*|переда\w*|выгруж\w*|слить|перешл\w*|слив\w*"
     ),
     re.IGNORECASE,
@@ -827,6 +831,23 @@ _B65_QUERY_RE = re.compile(
 
 _B65_TRIGGER_RE = re.compile(
     r"\b(?:if|when|whenever|upon|as soon as|in case|once)\b",
+    re.IGNORECASE,
+)
+
+
+# B-186: absolute-count / ordinal persistence triggers — "after the third message",
+# "on the 5th run", "after 3 messages", "once 3 days pass". The relative if/when/once
+# vocabulary above misses these sleeper-activation conditions (the delay is a COUNT, not a
+# phrase). Used BOTH as a window anchor (positions the scan window when there is no
+# if/when/once) AND as a delay-gate signal (an absolute-count trigger IS persistence
+# framing, so it satisfies query-or-delay without a "user says" query phrase).
+_B65_COUNT_TRIGGER_RE = re.compile(
+    r"\b(?:after|on|at|by|once|upon|when|whenever)\s+(?:the\s+)?"
+    r"(?:\d+(?:st|nd|rd|th)?|first|second|third|fourth|fifth|sixth|seventh|"
+    r"eighth|ninth|tenth)\s+"
+    r"(?:messages?|msgs?|repl(?:y|ies)|responses?|turns?|runs?|"
+    r"invocations?|calls?|prompts?|requests?|sessions?|interactions?|"
+    r"days?|hours?|weeks?|times?)\b",
     re.IGNORECASE,
 )
 
@@ -2537,24 +2558,46 @@ def _in_skill_frontmatter_span(blob: str, pos: int) -> bool:
     return False
 
 
+def _b65_live_action_spans(
+    window: str, window_start: int, inline_ranges
+) -> list[tuple[int, int]]:
+    """Window-relative spans of live (non-inline-code) action verbs in *window*, from BOTH
+    the sensitive-action list (_B65_ACTION_RE) AND the canonical outbound verb class
+    (_B63_SEND_VERB_RE). B-186 widened the B65 action gate to the outbound/exfil verb class
+    (email / POST / upload / transmit / beam / deliver / ship / leak / … plus the B65-local
+    `pipe`) so a covert-exfil sleeper whose sink verb was outside the old list no longer
+    slips the gate before the corroborator runs. A hit wholly inside a backtick-quoted
+    inline code span (`` `action="open"` ``) is an API parameter value being documented,
+    not a live sink verb (B-148), and is excluded."""
+    spans: list[tuple[int, int]] = []
+    for rx in (_B65_ACTION_RE, _B63_SEND_VERB_RE):
+        for m in rx.finditer(window):
+            abs_start = window_start + m.start()
+            abs_end = window_start + m.end()
+            if any(s <= abs_start and abs_end <= e for s, e in inline_ranges):
+                continue  # wholly inside a backtick-quoted code span — not a live verb
+            spans.append((m.start(), m.end()))
+    return spans
+
+
 def _b65_live_action_match(window: str, window_start: int, inline_ranges) -> bool:
-    """B-148: True when *window* contains an `_B65_ACTION_RE` hit that is NOT wholly
-    inside a backtick-quoted inline code span (e.g. `` `action="open"` ``) — an API
-    parameter value being documented, not the English sink verb it happens to spell."""
-    for m in _B65_ACTION_RE.finditer(window):
-        abs_start = window_start + m.start()
-        abs_end = window_start + m.end()
-        if any(s <= abs_start and abs_end <= e for s, e in inline_ranges):
-            continue  # wholly inside a backtick-quoted code span — not a live verb
-        return True
-    return False
+    """B-148/B-186: True when *window* has at least one live (non-inline-code) action verb
+    from the union sink/outbound class (see _b65_live_action_spans)."""
+    return bool(_b65_live_action_spans(window, window_start, inline_ranges))
 
 
 def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
     """Scan *text* for conditional sleeper-trigger snippets."""
     hits: list[str] = []
     inline_ranges = _inline_code_ranges(text)
-    for m in _B65_TRIGGER_RE.finditer(text):
+    # B-186: anchor over the relative if/when/once triggers AND the absolute-count / ordinal
+    # triggers ("after the third message"), position-sorted so windows emit earliest-first;
+    # the snippet dedup below absorbs the overlap when one phrase ("once 3 days") matches both.
+    anchors = sorted(
+        list(_B65_TRIGGER_RE.finditer(text)) + list(_B65_COUNT_TRIGGER_RE.finditer(text)),
+        key=lambda mm: mm.start(),
+    )
+    for m in anchors:
         if _defensive_context(text, m.start(), fr):
             continue
         # B-123: the SKILL.md frontmatter `description:` field is the standard, disclosed
@@ -2566,8 +2609,14 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         start = max(0, m.start() - _B65_WINDOW)
         end = min(len(text), m.end() + _B65_WINDOW)
         window = text[start:end]
+        # B-186: an absolute-count trigger in the window IS persistence framing, so it
+        # satisfies the query-or-delay gate on its own (no "user says" query phrase needed).
         if not (
-            (_B65_QUERY_RE.search(window) or _B65_DELAY_RE.search(window))
+            (
+                _B65_QUERY_RE.search(window)
+                or _B65_DELAY_RE.search(window)
+                or _B65_COUNT_TRIGGER_RE.search(window)
+            )
             and _b65_live_action_match(window, start, inline_ranges)
         ):
             continue
@@ -2590,16 +2639,23 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         # part of a memory-write phrase (i.e. the action gate fired solely because of the
         # memory-write verb) — a genuine sink verb (send/curl/exfiltrate/...) chained
         # alongside a memory-write phrase is a distinct match and still fires normally.
+        # B-134 / B-186: suppress a documented memory-write rule only when EVERY live action
+        # span in the window is itself inside a memory-write phrase. Uses the UNION action
+        # spans (_b65_live_action_spans) so a genuine send/exfil verb outside the old
+        # _B65_ACTION_RE list is no longer wrongly swept into the suppression — previously an
+        # empty _B65_ACTION_RE match set made all([]) == True and could suppress a real sink.
+        action_spans = _b65_live_action_spans(window, start, inline_ranges)
         memory_spans = [mm.span() for mm in _B65_MEMORY_WRITE_RE.finditer(window)]
-        if memory_spans and all(
-            any(ms[0] <= am.start() and am.end() <= ms[1] for ms in memory_spans)
-            for am in _B65_ACTION_RE.finditer(window)
+        if memory_spans and action_spans and all(
+            any(ms[0] <= a0 and a1 <= ms[1] for ms in memory_spans)
+            for a0, a1 in action_spans
         ):
             continue
         snippet = window.strip().replace("\n", " ")
         if len(snippet) > 120:
             snippet = snippet[:117] + "..."
-        hits.append(snippet)
+        if snippet not in hits:
+            hits.append(snippet)
     return hits
 
 
@@ -2624,24 +2680,31 @@ def _b156_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
     if _whole_text_is_defensive(text):
         return hits
     for m in _B63_SEND_VERB_RE.finditer(text):
-        # B156 scope is PROSE directives ("beam the token to 1.2.3.4"). A send verb
-        # inside a ```fence``` is a shell-command example — documentation (a security
-        # guide showing an attacker's `curl ... $(cat ~/.aws/credentials)`) or ClickFix
-        # territory owned by B13/B100 — so skip fenced matches to protect Golden Rule #5.
-        # _defensive_context additionally dampens prose defensive framing ("never send
-        # the token to an attacker's server").
+        # B156 scope is PROSE directives ("beam the token to 1.2.3.4"). A send verb inside
+        # a ```fence``` is a shell-command example — documentation (a security guide showing
+        # an attacker's `curl ... $(cat ~/.aws/credentials)`) or ClickFix territory owned by
+        # B13/B100 — so skip fenced matches. _defensive_context dampens prose defensive
+        # framing ("never send the token to an attacker's server").
         if _in_fence(m.start(), fr) or _defensive_context(text, m.start(), fr):
             continue
-        start = max(0, m.start() - _B156_WINDOW)
-        end = min(len(text), m.end() + _B156_WINDOW)
-        window = text[start:end]
-        if not (
-            _B63_SECRET_TERM_RE.search(window)
-            and _B63_DEST_RE.search(window)
-            and not _B63_SECRECY_RE.search(window)
+        # Object-of-send (B-188 C-135 FP fix): the destination must FOLLOW the send verb and
+        # the secret must sit BETWEEN the verb and that destination — the secret is the thing
+        # being sent, not merely co-located in a wide window. Drops the two dominant benign
+        # WARNs: auth boilerplate where the credential is trailing metadata AFTER the dest
+        # ("send a request to <api-url> with your token in the header"), and cross-sentence
+        # co-location ("send the summary to <channel>. store your api_key locally.").
+        seg = text[m.end() : m.end() + _B156_WINDOW]
+        dest_m = _B63_DEST_RE.search(seg)
+        if not dest_m or not _B63_SECRET_TERM_RE.search(seg[: dest_m.start()]):
+            continue
+        # Absence of a secrecy marker keeps B156 strictly complementary to B63 (which owns
+        # the secrecy-framed exfil). Span the verb so a marker BEFORE it ("silently send …")
+        # is still seen.
+        if _B63_SECRECY_RE.search(
+            text[max(0, m.start() - _B156_WINDOW) : m.end() + dest_m.end()]
         ):
             continue
-        snippet = window.strip().replace("\n", " ")
+        snippet = text[max(0, m.start() - 10) : m.end() + dest_m.end()].strip().replace("\n", " ")
         if len(snippet) > 120:
             snippet = snippet[:117] + "..."
         if snippet not in hits:
@@ -2660,7 +2723,15 @@ def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         window = text[start:end]
         # A high-signal jailbreak CORE token OR a persona-RESET verb fires on its own
         # (B-120); an ambiguous weakening phrase alone (_B66_WEAK_RE) does not (B-117).
-        if not (_B66_CORE_RE.search(window) or _B66_RESET_RE.search(window)):
+        trigger = _B66_CORE_RE.search(window) or _B66_RESET_RE.search(window)
+        if not trigger:
+            continue
+        # B-187 FP guard: a negated / pro-safety phrase near a persona role-start ("never
+        # ignore your safety policies", "you must not ignore your instructions") is the
+        # OPPOSITE of a jailbreak. Suppress when a negation governs the trigger — the same
+        # guard B63/B156 apply via _defensive_context. _b66_scan previously had none, so the
+        # B-187 possessive widening ("ignore your …") surfaced this pro-safety false-WARN.
+        if _defensive_context(text, start + trigger.start(), fr):
             continue
         # A skill DOCUMENTING / defending against the attack (under a Known-Risks / Security
         # heading) must not WARN (B-120 guard for the reset-alone firing path).
