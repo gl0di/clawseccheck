@@ -276,3 +276,109 @@ def render_judge_packet_json(ctx, findings, *, version: str) -> str:
         "judgePacket": build_judge_packet(ctx, findings),
     }
     return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+
+
+# --------------------------------------------------------------------------- --judged consumer (F-115)
+
+# A --judged payload larger than this is refused outright (bounded/defensive
+# parsing of untrusted input -- see CLAUDE.md 2). Well past any real judge
+# panel's output for one audit's borderline band.
+_MAX_VERDICTS_BYTES = 2_000_000
+
+_VALID_VERDICTS = frozenset({"SAFE", "SUSPICIOUS", "DANGEROUS"})
+
+_PRIORITY_BY_VERDICT = {
+    "DANGEROUS": "treat as high priority",
+    "SUSPICIOUS": "worth a closer look",
+    "SAFE": "likely benign",
+}
+
+
+def _parse_verdicts(raw: str) -> dict:
+    """Defensively parse ``--judged``'s untrusted input JSON into a
+    ``{(finding_id, target): {"verdict": ..., "votes": ...}}`` map.
+
+    Bounded and never raises: an oversized payload, malformed JSON, the wrong
+    shape, or an unrecognized verdict value each just drop that entry (or the
+    whole parse) rather than error -- this data is advisory-only and must
+    never be able to crash or otherwise perturb the audit itself.
+    """
+    if not isinstance(raw, str) or len(raw.encode("utf-8", "surrogatepass")) > _MAX_VERDICTS_BYTES:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    entries = data.get("verdicts")
+    if not isinstance(entries, list):
+        return {}
+    out: dict = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        fid, target = entry.get("finding_id"), entry.get("target")
+        verdict = entry.get("verdict")
+        if not (isinstance(fid, str) and isinstance(target, str) and verdict in _VALID_VERDICTS):
+            continue
+        votes = entry.get("votes")
+        out[(fid, target)] = {"verdict": verdict, "votes": votes if isinstance(votes, dict) else None}
+    return out
+
+
+def _annotate(engine_disposition: str, entry: dict | None) -> str:
+    """Plain-language re-rank line for one packet item, e.g. "engine: WARN
+    ... judges: 3/3 DANGEROUS -> treat as high priority". ``entry`` is None
+    when no verdict was submitted for this item.
+    """
+    if entry is None:
+        return "not yet reviewed by a judge"
+    verdict = entry["verdict"]
+    votes = entry.get("votes")
+    judges_desc = f"judge: {verdict}"
+    if isinstance(votes, dict):
+        try:
+            total = sum(int(v) for v in votes.values())
+            hit = int(votes.get(verdict, 0))
+        except (TypeError, ValueError):
+            total = 0
+        if total > 0:
+            judges_desc = f"judges: {hit}/{total} {verdict}"
+    priority = _PRIORITY_BY_VERDICT.get(verdict, "worth a closer look")
+    return f"engine: {engine_disposition} · {judges_desc} → {priority}"
+
+
+def _second_opinion(ctx, findings, verdicts_map: dict) -> list[dict]:
+    """One row per current judge-packet item, annotated with any submitted
+    verdict. Items nobody judged yet still appear, marked unreviewed -- the
+    panel shows the whole borderline band, not just what came back judged.
+    """
+    items = []
+    for item in build_judge_packet(ctx, findings):
+        entry = verdicts_map.get((item["finding_id"], item["target"]))
+        items.append({
+            "finding_id": item["finding_id"],
+            "target": item["target"],
+            "engine_disposition": item["engine_disposition"],
+            "judge_verdict": entry["verdict"] if entry else None,
+            "annotation": _annotate(item["engine_disposition"], entry),
+        })
+    return items
+
+
+def render_judged_json(ctx, findings, score, *, verdicts_raw: str, risk=None) -> str:
+    """``--judged``: render the standard ``--json`` payload UNCHANGED (its
+    score/grade/findings are byte-identical to a plain --json run on the same
+    inputs -- tests/test_adjudication.py enforces this against an adversarial
+    all-DANGEROUS verdict set) plus one added key, ``secondOpinion``: an
+    advisory panel built from the host's already-majority-voted judge-panel
+    verdicts (SKILL.md's "Judge-panel fan-out" section). A verdict can only
+    annotate an existing finding; it can never alter score, grade, or the
+    findings list itself.
+    """
+    from .report import render_json  # noqa: PLC0415 -- lazy import mirrors sar.py's precedent
+
+    base = json.loads(render_json(findings, score, risk=risk, ctx=ctx))
+    base["secondOpinion"] = _second_opinion(ctx, findings, _parse_verdicts(verdicts_raw))
+    return json.dumps(base, ensure_ascii=True, indent=2)

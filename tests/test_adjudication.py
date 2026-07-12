@@ -1,4 +1,5 @@
-"""Tests for F-113: the judge-packet builder (clawseccheck/adjudication.py).
+"""Tests for F-113/F-114/F-115: the judge-packet builder + --judged consumer
+(clawseccheck/adjudication.py).
 
 Covers:
 - build_judge_packet() includes unsuppressed UNKNOWN findings, and unsuppressed
@@ -18,6 +19,11 @@ Covers:
   contiguous secret-shaped literal exists in this file (mirrors test_logsafe.py).
 - build_judge_packet() is deterministic across repeated calls on the same input.
 - render_judge_packet_json() envelope shape, and the --judge-packet CLI flag.
+- F-115: render_judged_json()'s hard invariant (adversarial all-DANGEROUS
+  verdicts never change score/grade/findings), the secondOpinion annotation
+  panel, defensive/bounded parsing of the untrusted verdicts JSON (oversized,
+  malformed, wrong-shaped, unknown-verdict input all degrade to "no verdicts
+  matched" rather than raising), and the --judged CLI flag (path + stdin).
 
 All tests are offline, read-only, stdlib-only.
 """
@@ -28,10 +34,15 @@ from pathlib import Path
 
 import pytest
 
-from clawseccheck.adjudication import build_judge_packet, render_judge_packet_json
+from clawseccheck.adjudication import (
+    build_judge_packet,
+    render_judge_packet_json,
+    render_judged_json,
+)
 from clawseccheck.catalog import FAIL, HIGH, MEDIUM, PASS, UNKNOWN, WARN, Finding
 from clawseccheck.checks._vet import check_installed_skills
 from clawseccheck.collector import Context, collect
+from clawseccheck.scoring import compute
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 _HOME_FAKE = Path("/nonexistent/home")
@@ -368,6 +379,181 @@ def test_cli_judge_packet_flag_runs_and_emits_json(tmp_path, capsys):
     assert data["tool"] == "clawseccheck"
     assert "version" in data
     assert isinstance(data["judgePacket"], list)
+
+
+# ---------------------------------------------------------------------------
+# F-115: render_judged_json — the hard invariant
+# ---------------------------------------------------------------------------
+
+def _sample_findings_and_score():
+    findings = [
+        Finding("B1", "t", HIGH, PASS, "pass detail", "fix", "fw"),
+        Finding("B13", "t", HIGH, WARN, "warn detail", "fix", "fw",
+                evidence=["skillx: notify pattern"]),
+        Finding("C99", "t", MEDIUM, UNKNOWN, "unknown detail", "fix it", "fw"),
+    ]
+    return findings, compute(findings)
+
+
+def test_judged_never_changes_score_grade_or_findings():
+    """The hard invariant (mirrors SKILL.md's advisory-narration rule, now
+    enforced in code): feeding adversarial all-DANGEROUS verdicts back through
+    --judged must leave score/grade/findings byte-identical to a plain --json
+    run on the same inputs. A judge panel can only annotate, never alter.
+    """
+    from clawseccheck.report import render_json
+
+    findings, score = _sample_findings_and_score()
+    ctx = Context(home=_HOME_FAKE)
+    base = json.loads(render_json(findings, score, ctx=ctx))
+
+    adversarial = json.dumps({"verdicts": [
+        {"finding_id": f.id, "target": "anything", "verdict": "DANGEROUS",
+         "votes": {"SAFE": 0, "SUSPICIOUS": 0, "DANGEROUS": 3}}
+        for f in findings
+    ]})
+    judged = json.loads(render_judged_json(ctx, findings, score, verdicts_raw=adversarial))
+
+    for key in ("score", "grade", "capped", "raw_score", "cap_severity",
+                "assessable", "trifecta", "findings"):
+        assert judged[key] == base[key], f"--judged altered {key!r}"
+
+
+def test_judged_adds_second_opinion_key_only():
+    findings, score = _sample_findings_and_score()
+    ctx = Context(home=_HOME_FAKE)
+    judged = json.loads(render_judged_json(ctx, findings, score, verdicts_raw="{}"))
+    assert "secondOpinion" in judged
+    assert isinstance(judged["secondOpinion"], list)
+
+
+# ---------------------------------------------------------------------------
+# F-115: secondOpinion annotation content
+# ---------------------------------------------------------------------------
+
+def test_second_opinion_annotates_matched_item_with_vote_breakdown():
+    findings, score = _sample_findings_and_score()
+    ctx = Context(home=_HOME_FAKE)
+    verdicts = json.dumps({"verdicts": [
+        {"finding_id": "B13", "target": "skillx", "verdict": "DANGEROUS",
+         "votes": {"SAFE": 0, "SUSPICIOUS": 0, "DANGEROUS": 3}},
+    ]})
+    judged = json.loads(render_judged_json(ctx, findings, score, verdicts_raw=verdicts))
+    row = next(i for i in judged["secondOpinion"] if i["finding_id"] == "B13")
+    assert row["target"] == "skillx"
+    assert row["engine_disposition"] == "WARN"
+    assert row["judge_verdict"] == "DANGEROUS"
+    assert "3/3 DANGEROUS" in row["annotation"]
+    assert "treat as high priority" in row["annotation"]
+
+
+def test_second_opinion_marks_unmatched_items_unreviewed():
+    findings, score = _sample_findings_and_score()
+    ctx = Context(home=_HOME_FAKE)
+    judged = json.loads(render_judged_json(ctx, findings, score, verdicts_raw="{}"))
+    row = next(i for i in judged["secondOpinion"] if i["finding_id"] == "C99")
+    assert row["judge_verdict"] is None
+    assert row["annotation"] == "not yet reviewed by a judge"
+
+
+def test_second_opinion_safe_verdict_reads_likely_benign():
+    findings, score = _sample_findings_and_score()
+    ctx = Context(home=_HOME_FAKE)
+    verdicts = json.dumps({"verdicts": [
+        {"finding_id": "C99", "target": "C99", "verdict": "SAFE"},
+    ]})
+    judged = json.loads(render_judged_json(ctx, findings, score, verdicts_raw=verdicts))
+    row = next(i for i in judged["secondOpinion"] if i["finding_id"] == "C99")
+    assert "likely benign" in row["annotation"]
+
+
+# ---------------------------------------------------------------------------
+# F-115: defensive/bounded parsing of the untrusted verdicts JSON
+# ---------------------------------------------------------------------------
+
+def test_judged_malformed_json_degrades_to_no_verdicts_matched():
+    findings, score = _sample_findings_and_score()
+    ctx = Context(home=_HOME_FAKE)
+    judged = json.loads(render_judged_json(ctx, findings, score, verdicts_raw="not json at all {{{"))
+    assert all(i["judge_verdict"] is None for i in judged["secondOpinion"])
+
+
+def test_judged_wrong_shape_degrades_to_no_verdicts_matched():
+    findings, score = _sample_findings_and_score()
+    ctx = Context(home=_HOME_FAKE)
+    for bad in ('[]', '{"verdicts": "not a list"}', '{"no_verdicts_key": []}', "null", "42"):
+        judged = json.loads(render_judged_json(ctx, findings, score, verdicts_raw=bad))
+        assert all(i["judge_verdict"] is None for i in judged["secondOpinion"]), bad
+
+
+def test_judged_unknown_verdict_value_is_ignored():
+    findings, score = _sample_findings_and_score()
+    ctx = Context(home=_HOME_FAKE)
+    verdicts = json.dumps({"verdicts": [
+        {"finding_id": "C99", "target": "C99", "verdict": "MAYBE_EVIL_IDK"},
+    ]})
+    judged = json.loads(render_judged_json(ctx, findings, score, verdicts_raw=verdicts))
+    row = next(i for i in judged["secondOpinion"] if i["finding_id"] == "C99")
+    assert row["judge_verdict"] is None
+
+
+def test_judged_oversized_payload_is_refused_not_parsed():
+    findings, score = _sample_findings_and_score()
+    ctx = Context(home=_HOME_FAKE)
+    huge = json.dumps({"verdicts": [
+        {"finding_id": "C99", "target": "C99", "verdict": "DANGEROUS", "padding": "x" * 3_000_000},
+    ]})
+    assert len(huge) > 2_000_000
+    judged = json.loads(render_judged_json(ctx, findings, score, verdicts_raw=huge))
+    assert all(i["judge_verdict"] is None for i in judged["secondOpinion"])
+
+
+def test_judged_never_raises_on_arbitrary_garbage_input():
+    findings, score = _sample_findings_and_score()
+    ctx = Context(home=_HOME_FAKE)
+    for garbage in (None, 12345, [], {}, b"\x00\x01\xff", ""):
+        # render_judged_json must never raise regardless of what a hostile or
+        # buggy host agent feeds it as verdicts_raw.
+        render_judged_json(ctx, findings, score, verdicts_raw=garbage)
+
+
+# ---------------------------------------------------------------------------
+# CLI: --judged flag (path + stdin)
+# ---------------------------------------------------------------------------
+
+def test_cli_judged_flag_reads_from_path(tmp_path, capsys):
+    from clawseccheck.cli import main
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    verdicts_path = tmp_path / "verdicts.json"
+    verdicts_path.write_text(json.dumps({"verdicts": []}), encoding="utf-8")
+    rc = main(["--home", str(tmp_path), "--judged", str(verdicts_path), "--no-native", "--no-host"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert "secondOpinion" in data
+    assert "grade" in data
+
+
+def test_cli_judged_flag_reads_from_stdin(tmp_path, capsys, monkeypatch):
+    import io
+
+    from clawseccheck.cli import main
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"verdicts": []})))
+    rc = main(["--home", str(tmp_path), "--judged", "-", "--no-native", "--no-host"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert "secondOpinion" in data
+
+
+def test_cli_judged_flag_missing_file_still_renders_report(tmp_path, capsys):
+    from clawseccheck.cli import main
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    rc = main(["--home", str(tmp_path), "--judged", str(tmp_path / "does-not-exist.json"),
+               "--no-native", "--no-host"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert "secondOpinion" in data
+    assert all(i["judge_verdict"] is None for i in data["secondOpinion"])
 
 
 # ---------------------------------------------------------------------------

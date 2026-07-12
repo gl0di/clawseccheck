@@ -39,7 +39,7 @@ from .report import (
     render_vet_plan,
     surfaced_despite_suppression,
 )
-from .adjudication import render_judge_packet_json
+from .adjudication import render_judge_packet_json, render_judged_json
 from .dossier import build_profile
 from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE
@@ -285,6 +285,7 @@ _PRIMARY_MODES = [
     ("dashboard_findings", "--dashboard-findings", "bool"),
     ("monitor", "--monitor", "bool"),
     ("judge_packet", "--judge-packet", "bool"),
+    ("judged", "--judged", "opt"),
 ]
 
 # Which tracked global modifiers each primary mode actually honors. The default
@@ -643,6 +644,10 @@ def _main(argv=None) -> int:
                    help="export the borderline finding band (UNKNOWN, FN-prone WARN, "
                         "B62, dropped taint) as JSON for a host-agent judge to review "
                         "— never changes the grade")
+    p.add_argument("--judged", metavar="PATH", dest="judged",
+                   help="feed back a host-agent judge panel's verdicts JSON for a prior "
+                        "--judge-packet; renders the audit's UNCHANGED grade/findings plus "
+                        "an advisory secondOpinion panel — use '-' to read from stdin")
     p.add_argument("--verbose", action="store_true",
                    help="emit INFO-level log breadcrumbs to stderr")
     p.add_argument("--debug", action="store_true",
@@ -1025,6 +1030,17 @@ def _main(argv=None) -> int:
 
     if args.judge_packet:
         _emit(render_judge_packet_json(ctx, findings, version=__version__))
+        return 0
+
+    if args.judged:
+        if args.judged == "-":
+            verdicts_raw = sys.stdin.read()
+        else:
+            try:
+                verdicts_raw = Path(args.judged).expanduser().read_text(encoding="utf-8")
+            except OSError:
+                verdicts_raw = ""
+        _emit(render_judged_json(ctx, findings, score, verdicts_raw=verdicts_raw))
         return 0
 
     if args.analyze_trajectory is not None:

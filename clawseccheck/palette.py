@@ -153,8 +153,11 @@ _POWER_FLAGS = "--json, --fail-under, --exit-code, --home, --seed, --no-host"
 #   --menu / --functions  → the container screens themselves (Welcome / this palette)
 #   --dashboard / --dashboard-findings → internal agent-only render hooks (SKILL.md
 #                            Step 3), not user-speakable capabilities.
+#   --judged → an internal continuation flag: it consumes a judge panel's verdicts
+#              JSON (produced by the SKILL.md "Judge-panel fan-out" flow, itself
+#              triggered from --judge-packet), not something a user says on its own.
 EXEMPT_FROM_PALETTE: frozenset[str] = frozenset(
-    {"--menu", "--functions", "--dashboard", "--dashboard-findings"})
+    {"--menu", "--functions", "--dashboard", "--dashboard-findings", "--judged"})
 
 
 def grounded_flags() -> set[str]:

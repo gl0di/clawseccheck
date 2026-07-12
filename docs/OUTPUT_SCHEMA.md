@@ -638,7 +638,66 @@ Sources folded into the packet:
 
 ---
 
-## 13. Stability Policy
+## 13. `--judged` Output (F-115)
+
+Consumes a host-agent judge panel's verdicts JSON for a prior `--judge-packet` run (see
+§12) and renders the combined report. Takes the verdicts JSON via `--judged PATH`, or
+`--judged -` to read it from stdin.
+
+**Hard invariant:** the `score`, `grade`, `capped`, `raw_score`, `cap_severity`,
+`assessable`, `trifecta`, and `findings` fields are **byte-identical** to a plain
+`--json` run on the same inputs. A judge panel can only annotate an existing finding —
+it can never raise, lower, or otherwise touch the deterministic grade. This is
+mechanically enforced by `tests/test_adjudication.py`'s adversarial all-`DANGEROUS`
+verdict test.
+
+The only addition on top of the standard `--json` payload (§4) is one new key:
+
+| Field | Type | Description |
+|---|---|---|
+| `secondOpinion` | `array[SecondOpinionItem]` | One row per current `--judge-packet` item — including ones nobody has judged yet. |
+
+### SecondOpinionItem fields
+
+| Field | Type | Description |
+|---|---|---|
+| `finding_id` | `str` | Same as the originating `judgePacket` item's `finding_id`. |
+| `target` | `str` | Same as the originating item's `target`. |
+| `engine_disposition` | `str` | The underlying status (`"WARN"` or `"UNKNOWN"`). |
+| `judge_verdict` | `str \| null` | `"SAFE"` / `"SUSPICIOUS"` / `"DANGEROUS"` if a verdict was submitted for this item, else `null`. |
+| `annotation` | `str` | Plain-language re-rank line, e.g. `"engine: WARN · judges: 3/3 DANGEROUS → treat as high priority"`, or `"not yet reviewed by a judge"`. |
+
+### Input contract (the verdicts JSON `--judged` consumes)
+
+Matched against `judgePacket` items by the `(finding_id, target)` pair. Parsing is
+bounded and defensive (untrusted input from a host agent, possibly reflecting
+attacker-influenced skill content): a payload over 2 MB, malformed JSON, a
+non-object root, a non-array `verdicts` field, a non-object entry, or an entry whose
+`finding_id`/`target` isn't a string or whose `verdict` isn't one of `SAFE` /
+`SUSPICIOUS` / `DANGEROUS` is each simply dropped (that entry, or the whole parse) —
+`--judged` never raises or crashes on bad input; the affected item(s) just render as
+not-yet-reviewed.
+
+```json
+{
+  "verdicts": [
+    {
+      "finding_id": "B13",
+      "target": "skillx",
+      "verdict": "DANGEROUS",
+      "votes": {"SAFE": 0, "SUSPICIOUS": 0, "DANGEROUS": 3}
+    }
+  ]
+}
+```
+
+`votes` is optional — when present and its values sum to something greater than
+zero, the annotation renders a vote breakdown (`"judges: 3/3 DANGEROUS"`); when
+absent, it renders `"judge: DANGEROUS"`.
+
+---
+
+## 14. Stability Policy
 
 ### Frozen (breaking change requires major version bump)
 
