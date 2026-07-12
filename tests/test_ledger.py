@@ -107,7 +107,11 @@ def test_ledger_written_to_tmp_only(tmp_path):
 # freshness_notice — threshold logic
 # ---------------------------------------------------------------------------
 
-TODAY = date(2026, 6, 27)
+# Relative to the real current date: the CLI's freshness check calls date.today()
+# internally (main() exposes no today-override), so "ran today" ledger writes must use the
+# actual today or they drift stale as wall-clock advances (a hardcoded date time-bombed the
+# vet_mcp 14-day threshold). Offset-based tests below stay deterministic (age = the offset).
+TODAY = date.today()
 
 _SELF_TEST_THRESHOLD = THRESHOLDS["self_test"]   # 30 days
 _VET_MCP_THRESHOLD = THRESHOLDS["vet_mcp"]       # 14 days
