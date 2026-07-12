@@ -1182,6 +1182,14 @@ def render_vet_dossier(profile, ascii_only: bool = False) -> str:
 _ADVISE_VERDICT = {FAIL: "DO-NOT-INSTALL", WARN: "CAUTION", PASS: "INSTALL", UNKNOWN: "CAUTION"}
 _ADVISE_ICON_UNI = {"DO-NOT-INSTALL": "⛔", "CAUTION": "⚠️", "INSTALL": "✅"}
 _ADVISE_ICON_ASCII = {"DO-NOT-INSTALL": "[X]", "CAUTION": "[!]", "INSTALL": "[OK]"}
+# F-112: a plain-language restatement of the same verdict for readers who don't parse
+# DO-NOT-INSTALL/CAUTION/INSTALL as jargon. "{d}" is the em-dash/hyphen, chosen per
+# ascii_only so this line honors the same terminal-safety contract as the rest of the file.
+_ADVISE_PLAIN_WORDS = {
+    "DO-NOT-INSTALL": "I found something dangerous {d} I don't recommend installing this.",
+    "CAUTION": "I couldn't fully clear this {d} read the reasons before trusting it.",
+    "INSTALL": "Nothing dangerous found {d} this looks safe to install.",
+}
 
 
 def _advise_reasons(profile, limit: int = 5) -> list[str]:
@@ -1216,6 +1224,13 @@ def render_advise(profile, ascii_only: bool = False) -> str:
     verdict = _ADVISE_VERDICT.get(profile.overall_status, "CAUTION")
     name = _sanitize(Path(profile.target).name or profile.target)
     lines = [f"{icons[verdict]}  {verdict} — {profile.target_type} '{name}'", ""]
+
+    dash = "-" if ascii_only else "—"
+    plain = _ADVISE_PLAIN_WORDS.get(verdict, _ADVISE_PLAIN_WORDS["CAUTION"]).format(d=dash)
+    lines.append(f"In plain words: {plain}")
+    lines.append("How I decided: the verdict is the worst signal found across all checks. "
+                  "What drove it:")
+    lines.append("")
 
     reasons = _advise_reasons(profile)
     if reasons:
@@ -1273,6 +1288,11 @@ def render_advise_json(profile, *, version: str) -> str:
 # identified. Only real, standard package-manager verbs are suggested (git/npm/pip);
 # for "clawhub" and unresolved bare names there is no single verified CLI flag to name,
 # so the plan gives generic guidance rather than fabricating one.
+#
+# F-112: pure output-readability change — same commands, same ecosystem detection, no
+# new verdict/scoring logic. The plain-language preamble (4 numbered steps + a consent
+# line) comes first for a reader who doesn't parse shell; the exact commands follow
+# underneath, reordered so --vet-source (the pre-download reputation gate) is step 1.
 def render_vet_plan(target: str) -> str:
     from .checks import _parse_source_target  # noqa: PLC0415
 
@@ -1301,18 +1321,30 @@ def render_vet_plan(target: str) -> str:
         fetch = (f"curl -fsSL {target} -o \"$QUARANTINE/download\"" if eco == "url" else
                   f"# '{name}' has no resolvable ecosystem — fetch via your package manager's "
                   "normal lookup, into \"$QUARANTINE\"")
+    # the concrete-command ecosystems get a shared "this line varies" annotation; the
+    # clawhub/unresolved branches above are already a full "#"-commented explanation, so
+    # they are left as-is rather than doubly annotated.
+    fetch_note = "   # (git clone / pip download / curl per ecosystem)" if eco in (
+        "npm", "pypi", "git", "url") else ""
 
     return "\n".join([
-        "Zero-network plan — clawseccheck never touches the network. Run these yourself",
-        "(or have your agent run them), then feed the result back in:",
+        f"Before you install \"{name}\", here's what I'll do — nothing lands on your setup",
+        "until it passes:",
         "",
-        "  QUARANTINE=$(mktemp -d)   # outside every OpenClaw auto-load path",
-        f"  {fetch}",
-        "  clawseccheck --advise \"$QUARANTINE\"",
-        "  rm -rf \"$QUARANTINE\"    # cleanup — run this regardless of the verdict",
+        "  1. Check the source's reputation first — no download at all.",
+        "  2. Fetch it into a throwaway folder your agent can't auto-load.",
+        "  3. Scan that copy and give you a plain verdict: install / be careful / don't install.",
+        "  4. Delete the throwaway copy no matter what.",
         "",
-        "Before fetching anything, also run: "
-        f"clawseccheck --vet-source {target}   # identity check, zero network, no fetch",
+        "Say \"yes\" and I'll run all of this for you.",
+        "",
+        "Commands (for the agent — clawseccheck never touches the network itself):",
+        "",
+        f"  clawseccheck --vet-source {target}   # 1: reputation, zero network",
+        "  QUARANTINE=$(mktemp -d)   # 2: throwaway, outside auto-load",
+        f"  {fetch}{fetch_note}",
+        "  clawseccheck --advise \"$QUARANTINE\"   # 3: verdict",
+        "  rm -rf \"$QUARANTINE\"   # 4: cleanup (always)",
     ])
 
 

@@ -179,3 +179,69 @@ def test_cli_advise_json_is_valid_json(capsys):
     payload = json.loads(out)
     assert payload["mode"] == "advise"
     assert payload["advise_verdict"] == "DO-NOT-INSTALL"
+
+
+# --------------------------------------------------------------------------- #
+# F-112: plain-language vet-before-install output (readability only, no verdict change)
+# --------------------------------------------------------------------------- #
+
+def test_vet_plan_plain_language_preamble_and_step_order():
+    """F-112 Part 1: the 'What I'll do' plain-language block (4 numbered steps + a consent
+    line) precedes the commands, and the commands run in order 1->4 with --vet-source
+    (the pre-download reputation gate) as step 1 and cleanup last."""
+    out = render_vet_plan("npm:some-skill")
+    assert "here's what I'll do" in out
+    for step in (
+        "1. Check the source's reputation",
+        "2. Fetch it into a throwaway",
+        "3. Scan that copy",
+        "4. Delete the throwaway",
+    ):
+        assert step in out, f"missing plain step: {step!r}"
+    assert 'Say "yes"' in out  # consent line
+    assert (
+        out.index("--vet-source")
+        < out.index("mktemp -d")
+        < out.index("--advise")
+        < out.rindex("rm -rf")
+    )
+
+
+def test_vet_plan_plain_block_is_ascii_safe():
+    """F-112: the plain-language block introduces no box-art / bullet glyphs."""
+    out = render_vet_plan("npm:some-skill")
+    for banned in ("│", "─", "•", "┌", "└", "►"):
+        assert banned not in out
+
+
+def test_advise_plain_words_and_how_decided_all_verdicts():
+    """F-112 Part 2: every verdict renders a plain-words sentence + the 'How I decided'
+    line, preserving the existing header / Reasons / Next-steps structure."""
+    for fixture, verdict, plain in (
+        ("bad_b13_runtime_fetch/skills/evil-fetch-skill", "DO-NOT-INSTALL", "something dangerous"),
+        ("clean_b13_doc_example/skills/security-guide", "INSTALL", "looks safe to install"),
+    ):
+        out = render_advise(_profile(fixture))
+        assert verdict in out
+        assert "In plain words:" in out
+        assert plain in out
+        assert "How I decided: the verdict is the worst signal" in out
+        assert "Next steps:" in out
+
+
+def test_advise_plain_words_ascii_uses_hyphen():
+    """F-112: the ascii_only path renders the plain-words dash as '-', not the em-dash."""
+    out = render_advise(_profile("bad_b13_runtime_fetch/skills/evil-fetch-skill"), ascii_only=True)
+    plain_line = out.split("In plain words:")[1].split("\n")[0]
+    assert "I found something dangerous - I don't recommend" in out
+    assert "—" not in plain_line
+
+
+def test_advise_json_contract_unchanged_by_f112():
+    """F-112 is a human-text-only change: the JSON machine contract must NOT gain a
+    plain-words / how-decided field."""
+    profile = _profile("bad_b13_runtime_fetch/skills/evil-fetch-skill")
+    dumped = json.dumps(json.loads(render_advise_json(profile, version="0.0.0")))
+    for leaked in ("In plain words", "How I decided", "how_decided", "plain_words"):
+        assert leaked not in dumped
+    assert json.loads(dumped)["advise_verdict"] == "DO-NOT-INSTALL"

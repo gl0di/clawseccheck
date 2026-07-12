@@ -510,12 +510,14 @@ refs. Relay the band honestly:
 
 **Full guided pipeline (zero network in the tool, every step).** For "check before I install
 X" end to end: (1) `--vet-source <target>` — the identity gate above; stop here on KNOWN-BAD.
-(2) `--vet-plan <target>` prints the exact fetch+isolate+cleanup commands for *you* (the agent)
-to run — a temp quarantine dir outside every OpenClaw auto-load path, the right fetch verb for
-the target's ecosystem (npm/pypi/git/url), never executed by the tool itself. (3) Run those
+(2) `--vet-plan <target>` leads with a plain-language "here's what I'll do" summary (4 numbered
+steps + a consent line), then prints the exact fetch+isolate+cleanup commands for *you* (the
+agent) to run — a temp quarantine dir outside every OpenClaw auto-load path, the right fetch verb
+for the target's ecosystem (npm/pypi/git/url), never executed by the tool itself. (3) Run those
 commands yourself. (4) `--advise <quarantine-path>` — reframes the same risk dossier as an
-install decision: **INSTALL** / **CAUTION** / **DO-NOT-INSTALL**, with reasons and a cleanup
-command. Relay it directly:
+install decision: **INSTALL** / **CAUTION** / **DO-NOT-INSTALL**, each with a plain-words
+restatement ("In plain words: …"), a "how I decided" line, the reasons, and a cleanup command.
+Relay it directly:
 - INSTALL -> "No FAIL/WARN findings across every assessable axis — looks clean."
 - CAUTION -> "Some findings worth reviewing before trusting this (I'll name them)."
 - DO-NOT-INSTALL -> "This has patterns used by malware — do not install it."
