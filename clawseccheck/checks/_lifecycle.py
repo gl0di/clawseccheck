@@ -1622,6 +1622,93 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
     )
 
 
+def check_declared_skill_reconciliation(ctx: Context) -> Finding:
+    """B158 (F-119) — a config declares a skill/plugin LOAD SOURCE that resolves to nothing on
+    disk right now. The audit can only scan what is present, so a declared-but-absent source is
+    an unaudited gap: if it later materializes (auto-update, install) it enters the auto-load
+    surface the audit reported clean on. Advisory, WARN-only — declared-but-absent is legitimate
+    on a fresh host, never a FAIL. Grounded declared sources (verified against the installed
+    dist): skills.load.extraDirs, plugins.load.paths, and .clawhub/lock.json -> skills.<slug>.
+    skillFile. (skills.entries/plugins.entries are apiKey/config OVERLAYS keyed by an already-
+    installed id — they carry no source/url and are deliberately NOT reconciled here.)
+    """
+    import json as _json
+
+    from ..collector import WORKSPACE_DIRS
+    from ..skilldiscovery import config_extra_skill_dirs, config_plugin_load_paths
+
+    if not ctx.config_found:
+        return _finding(
+            "B158",
+            UNKNOWN,
+            "No openclaw.json found — declared skill-load sources can't be reconciled "
+            "against disk.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+
+    missing: list[str] = []
+    for label, dirs in (
+        ("skills.load.extraDirs", config_extra_skill_dirs(ctx.home, ctx.config)),
+        ("plugins.load.paths", config_plugin_load_paths(ctx.home, ctx.config)),
+    ):
+        for d in dirs:
+            try:
+                present = d.is_dir()
+            except OSError:
+                present = False
+            if not present:
+                missing.append(f"{label}: '{d}' declared but not present on disk")
+
+    seen: set = set()
+    for rel in [""] + list(WORKSPACE_DIRS):
+        lock = ctx.home / rel / ".clawhub" / "lock.json"
+        if not lock.is_file():
+            continue
+        try:
+            data = _json.loads(lock.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        skills = data.get("skills") if isinstance(data, dict) else None
+        if not isinstance(skills, dict):
+            continue
+        for slug, rec in skills.items():
+            if not isinstance(rec, dict):
+                continue
+            sf = rec.get("skillFile")
+            if not isinstance(sf, str) or not sf.strip() or "\x00" in sf:
+                continue
+            p = Path(sf) if Path(sf).is_absolute() else (ctx.home / sf)
+            try:
+                gone = not p.parent.is_dir()
+            except OSError:
+                gone = True
+            if gone and str(p) not in seen:
+                seen.add(str(p))
+                missing.append(
+                    f".clawhub/lock.json: skill '{slug}' skillFile dir gone ({p.parent})"
+                )
+
+    if not missing:
+        return _finding(
+            "B158",
+            PASS,
+            "Every declared skill/plugin load source resolves to a present directory on disk.",
+            "Keep declared load sources (skills.load.extraDirs, plugins.load.paths, ClawHub "
+            "lock entries) in sync with what is actually installed.",
+        )
+
+    extra = f" (+{len(missing) - 6} more)" if len(missing) > 6 else ""
+    return _finding(
+        "B158",
+        WARN,
+        "Declared skill-load source(s) not present on disk — unaudited; if one materializes it "
+        "enters the auto-load surface unscanned: " + "; ".join(missing[:6]) + extra,
+        "Remove the stale declaration, or install the skill/plugin so ClawSecCheck can scan it "
+        "before it auto-loads.",
+        evidence=missing,
+    )
+
+
 def check_supply_chain(ctx: Context) -> Finding:
     cfg = ctx.config
     # plugins.installs_unpinned_npm_specs / plugins.installs_missing_integrity do NOT exist

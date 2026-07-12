@@ -653,6 +653,20 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="bootstrap",
     ),
+    # B158 (F-119): a declared skill/plugin load source (skills.load.extraDirs,
+    # plugins.load.paths, or a .clawhub/lock.json skillFile) resolves to nothing on disk —
+    # an unaudited auto-load gap. Advisory, WARN-only, unscored (declared-but-absent is
+    # legitimate on a fresh host).
+    CheckMeta(
+        "B158",
+        "Declared skill-load source not present on disk (unaudited auto-load surface)",
+        MEDIUM,
+        "advisory",
+        "Supply Chain",
+        scored=False,
+        confidence="HIGH",
+        surface="skills",
+    ),
     # B67 (C-092): per-source tool-output trust contracts.
     # Complements B21 (generic trust boundary): checks that bootstrap has
     # channel-specific DATA/instruction declarations for each active high-risk

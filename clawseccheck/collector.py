@@ -22,6 +22,7 @@ from .configloader import (
 from .safeio import walk_dir_safely, is_safe_tar_member
 from .skilldiscovery import (
     config_extra_skill_dirs as _config_extra_skill_dirs,
+    config_plugin_load_paths as _config_plugin_load_paths,
     iter_discovered_skill_dirs as _iter_discovered_skill_dirs,
 )
 from .textnorm import obfuscation_signals
@@ -1046,6 +1047,10 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     for cw in _config_workspace_dirs(home, ctx.config, limit_hits=ctx.limit_hits):
         roots.append((cw / "skills", False))
     roots.extend((path, False) for path in _config_extra_skill_dirs(home, ctx.config))
+    # F-119: plugins.load.paths (a real dist key) — a path-loaded plugin bundles skills under
+    # <plugin>/skills/ that enter the auto-load surface; discover them so they're scanned like
+    # any other installed skill instead of being silently invisible.
+    roots.extend((pp / "skills", False) for pp in _config_plugin_load_paths(home, ctx.config))
     plugin_skills = home / "plugin-skills"
     if plugin_skills.is_dir():
         roots.append((plugin_skills, True))

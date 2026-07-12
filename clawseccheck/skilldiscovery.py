@@ -31,6 +31,33 @@ def config_extra_skill_dirs(home: Path, cfg: dict) -> list[Path]:
     return out
 
 
+def config_plugin_load_paths(home: Path, cfg: dict) -> list[Path]:
+    """Resolve ``plugins.load.paths`` (a real dist key) — extra plugin roots whose bundled
+    skills live under ``<plugin>/skills/`` and enter the auto-load surface. Mirrors
+    ``config_extra_skill_dirs``: no guessing outside the audited config; ``\\x00`` / OSError /
+    dedup guards; relative paths resolve against *home*."""
+    plugins = cfg.get("plugins") if isinstance(cfg, dict) else None
+    load = plugins.get("load") if isinstance(plugins, dict) else None
+    raw = load.get("paths") if isinstance(load, dict) else None
+    values = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip() or "\x00" in value:
+            continue
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = home / path
+        try:
+            resolved = path.resolve()
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(path)
+    return out
+
+
 def iter_discovered_skill_dirs(
     base: Path,
     *,

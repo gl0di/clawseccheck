@@ -256,6 +256,7 @@ from ._lifecycle import (
     check_clawhub_lock_verification,
     check_codex_project_trust,
     check_cron_scheduler,
+    check_declared_skill_reconciliation,
     check_hook_policy_bypass,
     check_human_approval,
     check_install_policy,
@@ -1111,6 +1112,7 @@ CHECKS = [
     check_codex_plugin_hooks,  # B151 — codex connector shell hooks in the plugin doc-cache
     check_orphaned_plugin_caches,  # B152 — on-disk plugin cache not in plugins.entries
     check_clawhub_lock_verification,  # B135 — accepted-despite-failed-verification install
+    check_declared_skill_reconciliation,  # B158 — declared-but-unresolved skill-load source (F-119)
 ]
 
 

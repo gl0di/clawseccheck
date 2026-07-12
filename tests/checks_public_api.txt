@@ -122,6 +122,7 @@ check_cross_skill_combined_effect
 check_dangerous_overrides
 check_data_atrest
 check_declared_effective_proven
+check_declared_skill_reconciliation
 check_delegation_reassembly
 check_dependency_confusion
 check_discovery_mdns_mode

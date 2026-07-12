@@ -781,6 +781,22 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B158 - Declared skill-load source not present on disk (unaudited auto-load surface)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Supply Chain
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Declared skill-load source not present on disk (unaudited auto-load surface)
+- Remediation:
+  - none
+
+## Hardening checks
+
 ### B67 - Per-source tool-output trust contracts
 
 - Severity: MEDIUM

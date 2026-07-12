@@ -1,0 +1,4 @@
+{
+  "skills": { "load": { "extraDirs": ["present-skills"] } },
+  "tools": { "profile": "minimal" }
+}

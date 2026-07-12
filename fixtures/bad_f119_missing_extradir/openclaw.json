@@ -1,0 +1,4 @@
+{
+  "skills": { "load": { "extraDirs": ["ghost-skills"] } },
+  "tools": { "profile": "minimal" }
+}
