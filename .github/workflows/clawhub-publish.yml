@@ -106,22 +106,27 @@ jobs:
           PYEOF
           echo "Wrote SHA256SUMS.txt:" && cat SHA256SUMS.txt
 
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # v3
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
 
       - name: Sign SHA256SUMS.txt (cosign keyless/OIDC)
         # Keyless signing: cosign exchanges this job's GitHub Actions OIDC token
         # (id-token: write, above) for a short-lived cert from Fulcio, signs the
-        # blob, and uploads the signature to the public Rekor transparency log —
+        # blob, and uploads the entry to the public Rekor transparency log —
         # no signing key or secret to generate, store, or rotate. Anyone can later
         # verify SHA256SUMS.txt was produced by *this* repo's release workflow with
-        # `cosign verify-blob` (exact command published in README/FAQ), without ever
-        # trusting a key we'd have to keep secret.
+        # `cosign verify-blob --bundle` (exact command published in README/FAQ),
+        # without ever trusting a key we'd have to keep secret.
+        #
+        # Output is a single Sigstore bundle (signature + cert + Rekor proof) rather
+        # than the old detached .sig/.pem pair: cosign v3 (installer v4) flips
+        # --new-bundle-format's default to true, which silently ignores the
+        # --output-signature/--output-certificate flags (C-189). --bundle is the
+        # supported single-file path and round-trips on both cosign v2 and v3.
         run: |
           cosign sign-blob --yes \
-            --output-signature SHA256SUMS.txt.sig \
-            --output-certificate SHA256SUMS.txt.pem \
+            --bundle SHA256SUMS.txt.bundle \
             SHA256SUMS.txt
-          echo "Signed SHA256SUMS.txt -> SHA256SUMS.txt.sig / SHA256SUMS.txt.pem"
+          echo "Signed SHA256SUMS.txt -> SHA256SUMS.txt.bundle"
 
       - name: Log in to ClawHub
         # Token is passed only via env — never echoed or printed.
@@ -167,7 +172,7 @@ jobs:
       # Create a matching GitHub Release so the "Latest release" badge tracks the tag.
       # Uses the runner's built-in gh CLI (no third-party action → respects the
       # github-owned+verified Actions policy). Notes are pulled from CHANGELOG.md.
-      # Also attaches the signed digest (SHA256SUMS.txt + cosign .sig/.pem) generated
+      # Also attaches the signed digest (SHA256SUMS.txt + cosign .bundle) generated
       # above, via the same `gh` CLI (`release upload`) rather than a second
       # release-management action, so there is one mechanism for release assets.
       - name: Create GitHub Release
@@ -182,5 +187,5 @@ jobs:
             --title "ClawSecCheck ${GITHUB_REF_NAME}" --notes "$NOTES" \
             || echo "GitHub Release already exists for ${GITHUB_REF_NAME}"
           gh release upload "${GITHUB_REF_NAME}" \
-            SHA256SUMS.txt SHA256SUMS.txt.sig SHA256SUMS.txt.pem \
+            SHA256SUMS.txt SHA256SUMS.txt.bundle \
             --clobber

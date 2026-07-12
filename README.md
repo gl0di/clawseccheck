@@ -91,12 +91,10 @@ trusting the comparison:
 ```bash
 # Get the release assets (adjust the version):
 curl -LO https://github.com/gl0di/clawseccheck/releases/download/vX.Y.Z/SHA256SUMS.txt
-curl -LO https://github.com/gl0di/clawseccheck/releases/download/vX.Y.Z/SHA256SUMS.txt.sig
-curl -LO https://github.com/gl0di/clawseccheck/releases/download/vX.Y.Z/SHA256SUMS.txt.pem
+curl -LO https://github.com/gl0di/clawseccheck/releases/download/vX.Y.Z/SHA256SUMS.txt.bundle
 
 cosign verify-blob \
-  --certificate SHA256SUMS.txt.pem \
-  --signature SHA256SUMS.txt.sig \
+  --bundle SHA256SUMS.txt.bundle \
   --certificate-identity-regexp "^https://github.com/gl0di/clawseccheck/" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS.txt
