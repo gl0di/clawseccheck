@@ -181,6 +181,7 @@ check_plugin_permission_mode
 check_prompt_self_replication
 check_proxy_header_forging
 check_pth_persistence
+check_remote_code_dependency
 check_sandbox
 check_secrets
 check_secrets_at_rest_home

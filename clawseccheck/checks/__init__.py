@@ -505,6 +505,7 @@ from ._content import (
     check_persona_jailbreak,
     check_prompt_self_replication,
     check_pth_persistence,
+    check_remote_code_dependency,
     check_silent_instruction,
     check_symlink_escape,
     check_trigger_homoglyph,

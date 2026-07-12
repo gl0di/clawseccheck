@@ -1,0 +1,4 @@
+{
+  "name": "deppy",
+  "dependencies": { "helper": "git+http://1.2.3.4/repo.git" }
+}

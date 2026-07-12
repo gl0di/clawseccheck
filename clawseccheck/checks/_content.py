@@ -1639,6 +1639,24 @@ _PKG_JSON_UNPINNED_RE = re.compile(
 _PKG_JSON_UNPINNED_VER_RE = re.compile(r"^(?:\*|latest|>=\S+|>\S+)$", re.IGNORECASE)
 
 
+# F-117: classify a dependency VALUE (not the package name) as a non-registry / remote-code
+# source. A registry version ("1.2.3", "^1.0", ">=2", "workspace:*") never matches these; only
+# a git/tarball/http(s) URL, a github "user/repo" shorthand, or a file:/link:/npm: alias does.
+# (The ubiquitous caret/tilde "^1.2.3"/"~1.2.3" float is deliberately NOT flagged — it is in
+# nearly every real package.json and the lockfile pins the actual version, so flagging it would
+# only cry wolf.)
+_DEP_REMOTE_CODE_RE = re.compile(
+    r"^(?:git\+|git://|git@)"
+    r"|^[a-z][a-z0-9+.\-]*://\S+\.(?:tgz|tar\.gz|tar)(?:[#?].*)?$"
+    r"|^https?://",
+    re.IGNORECASE,
+)
+_DEP_GITHUB_SHORTHAND_RE = re.compile(
+    r"^(?!https?://)(?:github:)?[\w.\-]+/[\w.\-]+(?:#\S+)?$", re.IGNORECASE
+)
+_DEP_LOCAL_ALIAS_RE = re.compile(r"^(?:file:|link:|npm:)", re.IGNORECASE)
+
+
 # B99 (F-088, L1): .pth / sitecustomize auto-execution persistence. A `.pth` file whose
 # lines start with `import ` executes on every Python interpreter start via `site`
 # module processing — even without anyone ever importing the package (the TeamPCP/
@@ -3919,6 +3937,107 @@ def _unpinned_deps_in_skill(name: str, blob: str) -> list[str]:
                     hits.append(f"{name}: pyproject.toml: '{pkg}' unpinned (supply-chain SC3)")
 
     return hits
+
+
+def _bad_provenance_url(val: str) -> bool:
+    """True for a remote-code dependency source with UNVERIFIABLE provenance — plaintext
+    http/ftp transport, a raw public-IP host, or a .onion address. Reuses B103's vetted host
+    predicates. A git+https:// / https:// to a named host is NOT bad-provenance (WARN, not
+    FAIL)."""
+    v = val.strip()
+    if v.lower().startswith("git+"):
+        v = v[4:]
+    scheme, host = _install_url_target(v)
+    if scheme in ("http", "ftp", "ftps"):
+        return True
+    if host and _install_host_is_public_ip(host):
+        return True
+    return bool(host and _IOC_ONION_RE.fullmatch(host))
+
+
+def _remote_code_deps_in_skill(name: str, blob: str) -> list[tuple[str, str]]:
+    """(severity, evidence) for package.json deps whose VALUE is a non-registry source.
+    severity 'fail' only for a remote-code source with bad provenance (plaintext http, raw
+    public IP, .onion); every other non-registry source is 'warn'."""
+    hits: list[tuple[str, str]] = []
+    for m in _MANIFEST_HEADER_RE.finditer(blob):
+        if m.group("name").strip().lower() != "package.json":
+            continue
+        body = m.group("body")
+        for block_m in _PKG_JSON_UNPINNED_RE.finditer(body):
+            block_end = body.find("}", block_m.end())
+            block_text = body[block_m.start() : (block_end + 1 if block_end != -1 else len(body))]
+            for dep_m in _PKG_JSON_DEP_RE.finditer(block_text):
+                pkg, ver = dep_m.group("pkg"), dep_m.group("ver").strip()
+                if _DEP_REMOTE_CODE_RE.search(ver):
+                    sev = "fail" if _bad_provenance_url(ver) else "warn"
+                    hits.append(
+                        (sev, f"{name}: package.json: '{pkg}' -> remote-code source ({_obf_clip(ver)})")
+                    )
+                elif _DEP_LOCAL_ALIAS_RE.search(ver):
+                    hits.append(
+                        ("warn", f"{name}: package.json: '{pkg}' -> local/alias source ({_obf_clip(ver)})")
+                    )
+                elif _DEP_GITHUB_SHORTHAND_RE.match(ver):
+                    hits.append(
+                        ("warn", f"{name}: package.json: '{pkg}' -> github shorthand source ({_obf_clip(ver)})")
+                    )
+    return hits
+
+
+def check_remote_code_dependency(ctx: Context) -> Finding:
+    """B157 (F-117) — a skill's package.json declares a dependency VALUE that is a non-registry
+    / remote-code source (a git URL, a remote tarball, a github "user/repo" shorthand, or a
+    file:/link:/npm: alias) instead of a registry version. Such a source installs code that
+    bypasses the registry's integrity/immutability guarantees. FAIL only when the remote source
+    has unverifiable provenance (plaintext http, raw public IP, .onion — mirrors B103);
+    otherwise WARN (a git or file: source is legitimate for forks & monorepos)."""
+    skills = getattr(ctx, "installed_skills", None)
+    if not skills:
+        return _custom(
+            "B157",
+            HIGH,
+            UNKNOWN,
+            "No installed skills to inspect for remote-code dependency sources.",
+            "Run on a skill dir (--vet) or a host with installed skills present.",
+        )
+    fails: list[str] = []
+    warns: list[str] = []
+    for name, blob in skills.items():
+        for sev, ev in _remote_code_deps_in_skill(name, blob):
+            (fails if sev == "fail" else warns).append(ev)
+    if fails:
+        extra = f" (+{len(fails) - 6} more)" if len(fails) > 6 else ""
+        return _custom(
+            "B157",
+            HIGH,
+            FAIL,
+            "Dependency pulls remote code from an unverifiable source: "
+            + "; ".join(fails[:6]) + extra,
+            "Replace the git/tarball/plaintext source with a registry package pinned to an "
+            "exact version + integrity hash, or vendor and review the code.",
+            fails + warns,
+        )
+    if warns:
+        extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
+        return _custom(
+            "B157",
+            HIGH,
+            WARN,
+            "Dependency uses a non-registry source (review provenance): "
+            + "; ".join(warns[:6]) + extra,
+            "Prefer registry packages pinned to exact versions with integrity hashes. git / "
+            "tarball / file: / link: sources are legitimate for forks & monorepos but bypass "
+            "registry integrity — confirm each is intended.",
+            warns,
+        )
+    return _custom(
+        "B157",
+        HIGH,
+        PASS,
+        "No dependency declares a non-registry / remote-code source.",
+        "Keep dependencies pinned to registry versions with integrity hashes.",
+    )
 
 
 def _whole_text_is_defensive(blob: str) -> bool:

@@ -103,6 +103,7 @@ from ._content import (
     check_persona_jailbreak,
     check_prompt_self_replication,
     check_pth_persistence,
+    check_remote_code_dependency,
     check_silent_instruction,
     check_symlink_escape,
     check_trigger_homoglyph,
@@ -2246,6 +2247,7 @@ SKILL_CONTENT_RING = (
     check_conditional_sleeper_trigger,  # B65 — conditional sleeper-trigger
     check_persona_jailbreak,  # B66 — persona / DAN jailbreak
     check_overt_secret_exfil,  # B156 — overt unconditional secret-exfil (B-188)
+    check_remote_code_dependency,  # B157 — non-registry / remote-code dependency source (F-117)
     check_per_source_trust_contracts,  # B67 — per-source trust contracts
     check_forged_provenance,  # B74 — forged role / false-provenance
     check_install_policy,  # B42 — install-time policy (hooks + dir perms)

@@ -667,6 +667,20 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="skills",
     ),
+    # B157 (F-117): a skill's package.json declares a dependency VALUE that is a non-registry /
+    # remote-code source (git URL, remote tarball, github shorthand, file:/link:/npm: alias).
+    # FAIL only for unverifiable provenance (plaintext http / raw public IP / .onion); else
+    # WARN. Advisory / unscored on first landing (promote after a real-fleet C-135 pass).
+    CheckMeta(
+        "B157",
+        "Non-registry / remote-code dependency source in a skill package.json",
+        HIGH,
+        "advisory",
+        "Supply Chain",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # B67 (C-092): per-source tool-output trust contracts.
     # Complements B21 (generic trust boundary): checks that bootstrap has
     # channel-specific DATA/instruction declarations for each active high-risk

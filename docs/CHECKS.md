@@ -795,6 +795,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B157 - Non-registry / remote-code dependency source in a skill package.json
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Supply Chain
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Non-registry / remote-code dependency source in a skill package.json
+- Remediation:
+  - none
+
 ## Hardening checks
 
 ### B67 - Per-source tool-output trust contracts
