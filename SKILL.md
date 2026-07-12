@@ -160,6 +160,57 @@ By spawning only in the locked-down form above — no tools, `maxSpawnDepth: 1`,
 structured typed output only — the skill acts as a reference example of the delegation pattern its
 own audit rewards, rather than a contradiction of it. Any other spawn form is off the table.
 
+### Judge-panel fan-out for `--judge-packet` items (advisory second opinion)
+
+`--judge-packet` (see `docs/OUTPUT_SCHEMA.md` §12) emits a JSON array of borderline
+findings the deterministic engine could not resolve on its own — every item is already
+stripped of raw skill source (only a redacted evidence location and a fixed
+plain-language question survive). This section generalizes the isolator pattern above
+from "one verdict per target" to "one **panel** of distinct-lens verdicts per packet
+item," so the second opinion draws on more than one way of reading the same evidence.
+
+**When to run it:** only as an extra, opt-in step after Step 3's Dashboard, when the
+user asks for a judge review / second opinion on the scan's borderline results — not
+automatically on every audit (same spirit as the ⚡ live tests in Section 6).
+
+1. Run `python3 {baseDir}/audit.py --judge-packet` and parse its `judgePacket` array.
+2. For each item, spawn **3 judge subagents**, each given a distinct lens on the **same**
+   packet item (input is only the item's own `redacted_evidence`/`question` fields —
+   never raw skill source, so the context-firewall holds for the whole panel, not just
+   one judge):
+   - **Intent** — "does the skill's declared purpose justify this finding?"
+   - **Exfil-destination** — "is the network/data sink first-party/trusted, or
+     attacker-controlled?"
+   - **Obfuscation** — "does the evidence suggest deliberate encoding/indirection to
+     hide behavior, or an ordinary implementation detail?"
+
+   Each judge returns **only** a typed verdict — no other output form is permitted:
+
+   ```json
+   {
+     "verdict": "SAFE" | "SUSPICIOUS" | "DANGEROUS",
+     "confidence": 0.0,
+     "reason": "<one sentence>",
+     "risk_ids": ["B65"]
+   }
+   ```
+3. **Majority vote** per item across its 3 lens verdicts. A tie (no single verdict has
+   at least 2 of the 3 votes — e.g. one SAFE, one SUSPICIOUS, one DANGEROUS) escalates
+   to the **worst** of the three rather than picking arbitrarily — the same fail-safe
+   principle as the rest of this skill.
+4. Spawn in the same locked-down form as the isolator subagent above — **no tools**,
+   `maxSpawnDepth: 1`, **ephemeral** — and bound concurrency the same way
+   (`maxChildrenPerAgent` / `agents.subagents.maxConcurrent`); fan out across packet
+   items, not unboundedly across items × 3 lenses at once.
+5. **Opt-in + graceful fallback**, same rule as above: if subagents are unavailable,
+   fall back to reasoning through all 3 lenses yourself in one inline turn per item,
+   with the SECURITY rule as the active guard — never claim a panel ran when it did not.
+6. Present the collected per-item majority verdicts as a **"Second opinion (advisory)"**
+   panel, explicitly labeled and **separate from the scored Dashboard** — feed them back
+   with `--judged` to render the combined report. This extends the "Verdicts are
+   advisory narration only" rule above: a judge panel can re-rank or annotate a finding
+   the engine already reported, but it can never raise or lower the A–F grade.
+
 ---
 
 ## Guided conversational flow
