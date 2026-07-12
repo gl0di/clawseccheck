@@ -894,7 +894,12 @@ _B66_CORE_RE = re.compile(
     # instructions" alternative now requires an all/previous qualifier: bare "ignore
     # instructions" no longer fires (B64/B58 already cover the generic override), only
     # "ignore all/previous instructions".
-    r"\b(?:(?-i:D\.?A\.?N)|do\s+anything\s+now|ignore\s+(?:all\s+|previous\s+)+"
+    # B-187: the qualifier set also accepts the identity-possessive "your"/"my"/"the
+    # system" ("ignore your instructions") — B64 (_B64_HIGH_CONFIDENCE_RE requires the
+    # literal "previous") and B58 both miss the possessive form. The `+` still requires
+    # at least one qualifier, so bare "ignore instructions" stays PASS.
+    r"\b(?:(?-i:D\.?A\.?N)|do\s+anything\s+now|"
+    r"ignore\s+(?:all\s+|previous\s+|your\s+|my\s+|the\s+system\s+)+"
     r"(?:instructions?|safety|prompts?|policies?)|"
     r"bypass\s+(?:safety|policy|rules)|"
     r"free\s+bot|always\s+obey(?:s)?)\b",
@@ -2598,6 +2603,52 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
     return hits
 
 
+_B156_WINDOW = 120  # chars around the send verb for the overt-exfil co-location window
+
+
+def _b156_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
+    """B-188/B156: overt secret-exfil snippets — a send verb whose window carries a
+    secret term AND a second-party/external destination, but NO secrecy marker.
+
+    B63 owns the secrecy-framed case; B64 owns the instruction-override case; B65 owns
+    the trigger-gated case. This closes the gap none of them cover: an UNCONDITIONAL,
+    overt "send <secret> to <external dest>" (e.g. "beam the token up to 1.2.3.4").
+    Gating on the ABSENCE of a secrecy marker (_B63_SECRECY_RE) keeps it strictly
+    complementary to B63 — a secrecy-framed exfil is owned by B63, so B156 never
+    double-reports it. Reuses the E-037 verb-class discriminators."""
+    hits: list[str] = []
+    # A whole-text-defensive document (a security guide with a defensive heading AND a
+    # broad negation — "never do:", "Do not write code that … sends …") is documentation,
+    # not a live directive. Mirrors B58's base-variant gate (_content.py:2885/2895) so a
+    # documented exfil EXAMPLE does not false-WARN (Golden Rule #5, clean_b13_doc_example).
+    if _whole_text_is_defensive(text):
+        return hits
+    for m in _B63_SEND_VERB_RE.finditer(text):
+        # B156 scope is PROSE directives ("beam the token to 1.2.3.4"). A send verb
+        # inside a ```fence``` is a shell-command example — documentation (a security
+        # guide showing an attacker's `curl ... $(cat ~/.aws/credentials)`) or ClickFix
+        # territory owned by B13/B100 — so skip fenced matches to protect Golden Rule #5.
+        # _defensive_context additionally dampens prose defensive framing ("never send
+        # the token to an attacker's server").
+        if _in_fence(m.start(), fr) or _defensive_context(text, m.start(), fr):
+            continue
+        start = max(0, m.start() - _B156_WINDOW)
+        end = min(len(text), m.end() + _B156_WINDOW)
+        window = text[start:end]
+        if not (
+            _B63_SECRET_TERM_RE.search(window)
+            and _B63_DEST_RE.search(window)
+            and not _B63_SECRECY_RE.search(window)
+        ):
+            continue
+        snippet = window.strip().replace("\n", " ")
+        if len(snippet) > 120:
+            snippet = snippet[:117] + "..."
+        if snippet not in hits:
+            hits.append(snippet)
+    return hits
+
+
 def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
     """Scan *text* for persona-jailbreak snippets."""
     hits: list[str] = []
@@ -4184,6 +4235,69 @@ def check_conditional_sleeper_trigger(ctx: Context) -> Finding:
         "installed skills.",
         "Avoid hidden action triggers that depend on secret words or phrases. "
         "Make behavior explicit and policy-gated.",
+    )
+
+
+def check_overt_secret_exfil(ctx: Context) -> Finding:
+    """B156 — overt (unconditional) secret-exfil to a second-party/external destination.
+
+    A directive that ships a secret (token / credential / api_key / …) to an external
+    or second-party destination (raw IP, paste site, "my bot", http(s)://, …) with NO
+    secrecy marker (so B63 stays silent), NO instruction-hierarchy override phrase (so
+    B64 stays silent) and NO trigger (so B65 stays silent). Closes the coverage gap none
+    of B63/B64/B65 own (B-188).
+
+    WARN  — a secret is sent to an external / second-party destination in the clear.
+    PASS  — no such directive.
+    UNKNOWN — nothing to inspect.
+
+    WARN-only: a legitimate cloud / DevOps skill may transmit its OWN credential to its
+    OWN backend ("send the api_key to the server"), so this is advisory, not a hard FAIL.
+    """
+    if not ctx.bootstrap and not ctx.installed_skills:
+        return _finding(
+            "B156",
+            UNKNOWN,
+            "No bootstrap files or installed skills found — nothing to inspect for "
+            "overt secret-exfil directives.",
+            "Run on the host with workspace bootstrap files and installed skills present.",
+        )
+
+    evidence: list[str] = []
+
+    for fname, text in ctx.bootstrap.items():
+        norm = normalize_for_scan(text)
+        fr = _fence_ranges(norm)
+        for hit in _b156_scan(norm, fr):
+            evidence.append(f"{fname}: secret sent to external/2nd-party destination: {hit}")
+
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        fr = _fence_ranges(norm)
+        for hit in _b156_scan(norm, fr):
+            evidence.append(
+                f"{skill_name}: secret sent to external/2nd-party destination: {hit}"
+            )
+
+    if evidence:
+        return _finding(
+            "B156",
+            WARN,
+            "Overt secret-exfil directive(s) detected — a secret is shipped to an "
+            "external / second-party destination with no secrecy, override, or trigger "
+            "framing: " + "; ".join(evidence[:4]),
+            "Never transmit secrets, tokens, or credentials to external or operator-"
+            "controlled destinations. If a skill must authenticate, send only to a "
+            "documented first-party endpoint and never route the raw secret value out.",
+            evidence,
+        )
+
+    return _finding(
+        "B156",
+        PASS,
+        "No overt secret-exfil directives (a secret sent to an external / second-party "
+        "destination) detected in bootstrap files or installed skills.",
+        "Keep secrets local; never route credentials to external or second-party sinks.",
     )
 
 

@@ -640,6 +640,19 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="bootstrap",
     ),
+    # B156 (B-188): overt unconditional secret-exfil — a secret shipped to an external /
+    # second-party destination with no secrecy (B63), override (B64) or trigger (B65)
+    # framing. WARN-only runtime (auth skills legitimately POST their own token to their
+    # own backend), HIGH metadata like its B63/B65 content-ring siblings.
+    CheckMeta(
+        "B156",
+        "Overt secret-exfil to external/second-party destination",
+        HIGH,
+        "hardening",
+        "Data Exfiltration / Credential Leak",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
     # B67 (C-092): per-source tool-output trust contracts.
     # Complements B21 (generic trust boundary): checks that bootstrap has
     # channel-specific DATA/instruction declarations for each active high-risk

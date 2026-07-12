@@ -769,6 +769,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B156 - Overt secret-exfil to external/second-party destination
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Data Exfiltration / Credential Leak
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Overt secret-exfil to external/second-party destination
+- Remediation:
+  - none
+
 ### B67 - Per-source tool-output trust contracts
 
 - Severity: MEDIUM

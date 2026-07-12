@@ -98,6 +98,7 @@ from ._content import (
     check_lifecycle_hooks_extended,
     check_manifest_absent,
     check_markdown_image_exfil,
+    check_overt_secret_exfil,
     check_per_source_trust_contracts,
     check_persona_jailbreak,
     check_prompt_self_replication,
@@ -1781,7 +1782,20 @@ def vet_skill(path: str | Path) -> Finding:
         pool = [finding, *ring]
         primary = max(pool, key=lambda fx: _VET_MERGE_RANK.get(fx.status, 0))
         primary.ring_findings = [
-            fx for fx in pool if fx is not primary and fx.status in (FAIL, WARN)
+            fx
+            for fx in pool
+            if fx is not primary
+            and (
+                fx.status in (FAIL, WARN)
+                # Always carry the B13 base verdict when it is a coverage-gap UNKNOWN (the
+                # scan hit a size/file cap), even when a ring WARN/FAIL outranks it as the
+                # primary. Otherwise build_profile loses the danger-axis coverage-gap signal
+                # and a padded skill hiding a payload past the scan cap reads a grade too
+                # high — the B-092 invariant. (_run_content_ring only ever returns FAIL/WARN,
+                # so `finding` is the sole possible UNKNOWN in the pool.)
+                or (fx is finding and fx.status == UNKNOWN
+                    and "coverage is incomplete" in (fx.detail or ""))
+            )
         ]
         primary.ctx = ctx
         return primary
@@ -2231,6 +2245,7 @@ SKILL_CONTENT_RING = (
     check_instruction_hierarchy_override,  # B64 — instruction-hierarchy override
     check_conditional_sleeper_trigger,  # B65 — conditional sleeper-trigger
     check_persona_jailbreak,  # B66 — persona / DAN jailbreak
+    check_overt_secret_exfil,  # B156 — overt unconditional secret-exfil (B-188)
     check_per_source_trust_contracts,  # B67 — per-source trust contracts
     check_forged_provenance,  # B74 — forged role / false-provenance
     check_install_policy,  # B42 — install-time policy (hooks + dir perms)

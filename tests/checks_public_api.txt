@@ -171,6 +171,7 @@ check_multiagent_exposure
 check_node_denycommands_ineffective
 check_offboarding_hygiene
 check_outbound_proxy
+check_overt_secret_exfil
 check_path_safety
 check_pending_device_pairing_scope
 check_per_source_trust_contracts
