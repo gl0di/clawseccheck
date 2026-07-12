@@ -3,6 +3,37 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.37.0] — 2026-07-12
+
+Skill-surface coverage expansion (E-039 wave 2): the audit now reasons about skill-name
+impersonation in frontmatter, cross-tier skill shadowing, runtime capability drift, and the
+read exposure of session transcripts and install backups. Every new signal is advisory /
+path-aware and was verified to produce zero spurious findings on a real fleet.
+
+### Added
+- **T3 — runtime capability drift (`--behavioral`).** A high-blast verb (exec / egress /
+  destructive / mailbox-config) PROVEN in the trajectory log that the explicit `tools.allow`
+  grant never declared. WARN-only, unscored, `--behavioral` mode only — never part of the A–F
+  grade. Sound by construction: it asserts drift only against a present, non-empty, all-literal
+  `tools.allow` upper bound; an absent allow-list, a `tools.profile`-based grant, a class-grant
+  token (`bundle-mcp`, `group:*`, `<server>__*`), or an unreadable trajectory all report
+  UNKNOWN rather than guess. Tool-name aliases (`bash`↔`exec`) are folded on both sides.
+
+### Changed
+- **B93 (homoglyph) now covers the skill NAME.** A confusable / mixed-script character mixed
+  into an otherwise-Latin skill `name:` in SKILL.md frontmatter is flagged as a
+  skill-impersonation surface, alongside the existing trigger-description leg. A whole-script
+  non-Latin name (legitimate i18n) is still spared.
+- **B104 (offboarding) now flags cross-tier skill shadowing.** The same declared skill `name:`
+  installed across different precedence tiers (workspace / agent / managed / plugin) is surfaced
+  as a shadowing risk — OpenClaw silently lets the higher-precedence copy win, so a planted copy
+  can override a trusted skill — distinct from the existing same-tier stale-copy hygiene warning.
+- **B19 (data-at-rest) now covers session transcripts and install backups.** Session
+  transcripts (`agents/*/sessions/*.jsonl`, codex-home rollouts) and `.openclaw-install-backups/`
+  (backed-up config = secrets) are checked for read exposure. Path-aware: a file is flagged only
+  when a non-owner can both traverse the whole directory chain to it and read it, so the
+  umask-default files OpenClaw seals inside its 0o700 home never produce a spurious grade change.
+
 ## [3.36.0] — 2026-07-12
 
 Skill-surface coverage expansion (E-039 wave 1): the audit now inspects notebook code, a
