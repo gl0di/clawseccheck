@@ -37,7 +37,7 @@ def test_b157_unknown_no_skills():
 def test_b157_pass_pinned_and_caret():
     """Registry versions — exact pins AND the ubiquitous caret/tilde float — are clean."""
     for pj in (
-        '{"dependencies":{"react":"18.2.0","lodash":"4.17.21"}}',
+        '{"dependencies":{"dayjs":"1.11.10","zod":"3.22.4"}}',
         '{"dependencies":{"react":"^18.2.0","x":"~1.0.0"}}',
         '{"dependencies":{"a":">=1.0.0","b":"workspace:*"}}',
     ):

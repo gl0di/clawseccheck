@@ -1,4 +1,4 @@
 {
   "name": "deppy",
-  "dependencies": { "react": "18.2.0", "lodash": "4.17.21" }
+  "dependencies": { "dayjs": "1.11.10", "zod": "3.22.4" }
 }
