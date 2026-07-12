@@ -242,6 +242,25 @@ def _writable_identity_files(ctx: Context) -> list[str]:
         except OSError:
             pass
 
+    # F-121: openclaw.json group/world-WRITABLE is a self-escalation target — a skill with
+    # fs_write (running as the agent) could rewrite tool grants, widen tools.exec.mode, or
+    # delete the approval gate: strictly worse than the read exposure B1/B11 already flag.
+    # Test the WRITE bit only (a merely group-READABLE config is B1/B11's concern). World-
+    # writable is unambiguous; a group-writable config is down-ranked away when its owning
+    # group has no OTHER members (user-private-group / umask-002 box) so it never false-FAILs
+    # a single-user machine.
+    cfg_path = ctx.home / "openclaw.json"
+    try:
+        cst = cfg_path.stat()
+    except OSError:
+        cst = None
+    if cst is not None:
+        cmode = cst.st_mode & 0o777
+        if cmode & 0o002:  # world-writable — unambiguous
+            writable.append(f"openclaw.json (mode {oct(cmode)[-3:]})")
+        elif cmode & 0o020 and _shared._group_has_other_members(cst.st_gid, cst.st_uid) is not False:
+            writable.append(f"openclaw.json (mode {oct(cmode)[-3:]})")
+
     return writable
 
 

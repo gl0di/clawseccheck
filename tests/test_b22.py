@@ -53,6 +53,15 @@ def _cfg_with_tools(exec_mode=None, exec_security=None):
     return cfg
 
 
+def _write_config(tmp_path, mode, cfg=None):
+    """Write openclaw.json on disk at *mode* (tmp_path files are NOT normalized by
+    conftest, unlike fixtures/) so the F-121 config-writable leg can be exercised."""
+    p = tmp_path / "openclaw.json"
+    p.write_text(json.dumps(cfg or {"tools": {"allow": ["fs_write", "shell"]}}))
+    p.chmod(mode)
+    return p
+
+
 # ---- condition (a): no tools -> UNKNOWN ----
 def test_b22_no_tools_is_unknown(tmp_path):
     _make_workspace(tmp_path, ws_mode=0o777)
@@ -208,6 +217,45 @@ def test_b22_windows_is_unknown(monkeypatch, tmp_path):
     monkeypatch.setattr(checks._shared, "_is_posix", lambda: False)
     c = _ctx(_cfg_with_tools(), home=str(tmp_path))
     assert check_self_modification(c).status == "UNKNOWN"
+
+
+# ---- F-121: a writable openclaw.json is a self-escalation target ----
+def test_b22_world_writable_config_fails(tmp_path):
+    """F-121: a WORLD-writable openclaw.json (a skill running as the agent could rewrite tool
+    grants / disable the approval gate) with fs_write tools and no approval is a FAIL."""
+    _make_workspace(tmp_path, soul_mode=0o600, ws_mode=0o700)  # tight workspace isolates the config leg
+    _write_config(tmp_path, 0o666)
+    result = check_self_modification(_ctx(_cfg_with_tools(), home=str(tmp_path)))
+    assert result.status == "FAIL"
+    assert any("openclaw.json" in e for e in result.evidence)
+
+
+def test_b22_tight_config_not_flagged(tmp_path):
+    """F-121: a 0o600 openclaw.json is not a writable target — a tight workspace then has no
+    writable identity/skill target at all (UNKNOWN)."""
+    _make_workspace(tmp_path, soul_mode=0o600, ws_mode=0o700)
+    _write_config(tmp_path, 0o600)
+    assert check_self_modification(_ctx(_cfg_with_tools(), home=str(tmp_path))).status == "UNKNOWN"
+
+
+def test_b22_group_writable_config_singleton_downranked(tmp_path, monkeypatch):
+    """F-121: a GROUP-writable openclaw.json whose owning group has no OTHER members
+    (user-private-group / umask-002 box) is down-ranked — no false FAIL (Golden Rule #5)."""
+    from clawseccheck import checks
+    monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: False)
+    _make_workspace(tmp_path, soul_mode=0o600, ws_mode=0o700)
+    _write_config(tmp_path, 0o660)
+    assert check_self_modification(_ctx(_cfg_with_tools(), home=str(tmp_path))).status == "UNKNOWN"
+
+
+def test_b22_group_writable_config_shared_group_fails(tmp_path, monkeypatch):
+    """F-121: a GROUP-writable openclaw.json whose group has OTHER members is exploitable by
+    them — FAIL."""
+    from clawseccheck import checks
+    monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: True)
+    _make_workspace(tmp_path, soul_mode=0o600, ws_mode=0o700)
+    _write_config(tmp_path, 0o660)
+    assert check_self_modification(_ctx(_cfg_with_tools(), home=str(tmp_path))).status == "FAIL"
 
 
 # ---- finding metadata ----
