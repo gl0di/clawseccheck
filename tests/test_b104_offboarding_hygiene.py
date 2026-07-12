@@ -62,3 +62,58 @@ def test_single_unreferenced_skill_is_not_orphaned(tmp_path):
     c.bootstrap = {}
     c.installed_skills = {}
     assert check_offboarding_hygiene(c).status == PASS
+
+
+# --- F-122: cross-tier NAME shadowing across the precedence-ordered load roots ---
+
+def _mk_skill(root: Path, name: str) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "SKILL.md").write_text(f"---\nname: {name}\n---\n\nbody\n", encoding="utf-8")
+
+
+def _ctx(home: Path, config=None) -> Context:
+    c = Context(home=home)
+    c.config = config or {}
+    c.bootstrap = {}
+    c.installed_skills = {}
+    return c
+
+
+def test_cross_tier_shadowing_warns(tmp_path):
+    """F-122: the same declared name in a HIGHER-precedence tier (workspace) and a lower one
+    (managed ~/.openclaw/skills) silently shadows — WARN naming the shadowing (winning) tier."""
+    _mk_skill(tmp_path / "skills" / "helper", "helper")                # managed
+    _mk_skill(tmp_path / "workspace" / "skills" / "helper", "helper")  # workspace (wins)
+    f = check_offboarding_hygiene(_ctx(tmp_path))
+    assert f.status == WARN, f.detail
+    ev = " ".join(f.evidence or [])
+    assert "shadows" in ev and "workspace" in ev and "helper" in ev
+
+
+def test_same_tier_duplicate_is_hygiene_not_shadowing(tmp_path):
+    """Two copies in the SAME tier are stale-copy hygiene, not cross-tier shadowing."""
+    _mk_skill(tmp_path / "skills" / "a", "dup")
+    _mk_skill(tmp_path / "skills" / "b", "dup")
+    f = check_offboarding_hygiene(_ctx(tmp_path))
+    assert f.status == WARN, f.detail
+    ev = " ".join(f.evidence or [])
+    assert "installed in 2 locations" in ev and "shadows" not in ev
+
+
+def test_extra_dir_shadowing_via_config(tmp_path):
+    """F-122: a skills.load.extraDirs copy (lowest tier) sharing a name with a managed skill is
+    cross-tier shadowing surface — the managed copy wins over the extra/plugin tier."""
+    _mk_skill(tmp_path / "skills" / "helper", "helper")   # managed
+    extra = tmp_path / "ext"
+    _mk_skill(extra / "helper", "helper")                 # extra/plugin tier
+    f = check_offboarding_hygiene(_ctx(tmp_path, {"skills": {"load": {"extraDirs": [str(extra)]}}}))
+    assert f.status == WARN, f.detail
+    ev = " ".join(f.evidence or [])
+    assert "shadows" in ev and "managed" in ev
+
+
+def test_distinct_names_across_tiers_pass(tmp_path):
+    """Different names in different tiers is the normal case — no collision, PASS."""
+    _mk_skill(tmp_path / "skills" / "alpha", "alpha")
+    _mk_skill(tmp_path / "workspace" / "skills" / "beta", "beta")
+    assert check_offboarding_hygiene(_ctx(tmp_path)).status == PASS

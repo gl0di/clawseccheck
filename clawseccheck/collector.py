@@ -1143,6 +1143,60 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                 ctx.errors.append(f"could not read skill {key}: {exc}")
 
 
+# Skill-load tiers in PRECEDENCE order, HIGHEST-WINS first. Grounded against the dist loader
+# (openclaw dist workspace-*.js — every discovered skill is merged into one global Map keyed by
+# declared `name:`, so the LAST-merged root silently overwrites — "shadows" — any same-named
+# skill from an earlier root, with NO warning). Precedence highest→lowest: workspace >
+# project-agent > personal-agent > managed (~/.openclaw/skills) > bundled(dist) > extraDirs /
+# plugins.load.paths. The audit sees the home-rooted tiers below; the bundled-dist tier lives
+# outside the home and is not scanned.
+SKILL_TIER_ORDER = ("workspace", "project-agent", "personal-agent", "managed", "extra/plugin")
+
+
+def skill_load_roots(
+    home: Path, cfg: dict | None = None, *, user_home: Path | None = None
+) -> list[tuple[Path, str]]:
+    """Return ``(root_dir, tier)`` for every skill-load root the audit can see, in PRECEDENCE
+    order — highest-precedence (the tier that WINS a name collision) FIRST. Resolved-path
+    de-duped so one physical dir is never listed twice (the highest-precedence alias wins).
+    Read-only; never raises. Used by B104 to flag cross-tier NAME shadowing (a planted
+    higher-precedence copy silently overriding a trusted skill). ``user_home`` adds the
+    personal ``~/.agents/skills`` tier — pass it only when auditing a real ``~/.openclaw``
+    profile, so fixture/custom --home scans stay hermetic (mirrors ``_read_installed_skills``)."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    ordered: list[tuple[Path, str]] = []
+    # workspace tier (highest): default workspace names under home + any custom workspace.
+    for rel in ("workspace/skills", "workspace-home/skills", "workspace-work/skills"):
+        ordered.append((home / rel, "workspace"))
+    for cw in _config_workspace_dirs(home, cfg):
+        ordered.append((cw / "skills", "workspace"))
+    # agent tiers.
+    ordered.append((home / ".agents" / "skills", "project-agent"))
+    if user_home is not None:
+        ordered.append((user_home / ".agents" / "skills", "personal-agent"))
+    # managed tier (~/.openclaw/skills).
+    ordered.append((home / "skills", "managed"))
+    # extra/plugin tier (lowest): skills.load.extraDirs + plugins.load.paths + plugin-skills.
+    for d in _config_extra_skill_dirs(home, cfg):
+        ordered.append((d, "extra/plugin"))
+    for pp in _config_plugin_load_paths(home, cfg):
+        ordered.append((pp / "skills", "extra/plugin"))
+    ordered.append((home / "plugin-skills", "extra/plugin"))
+    # Resolved-path de-dup — keep the first (highest-precedence) occurrence of each dir.
+    out: list[tuple[Path, str]] = []
+    seen: set[Path] = set()
+    for path, tier in ordered:
+        try:
+            key = path.resolve()
+        except (OSError, ValueError, RuntimeError):
+            key = path
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((path, tier))
+    return out
+
+
 def collect(home: Path | str = "~/.openclaw") -> Context:
     home = Path(home).expanduser()
     ctx = Context(home=home)

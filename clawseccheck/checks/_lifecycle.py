@@ -993,15 +993,32 @@ def check_memory_poisoning(ctx: Context) -> Finding:
     )
 
 
+def _b104_user_home(home: Path) -> "Path | None":
+    """The user's home ONLY when *home* is a real ``~/.openclaw`` profile directly under it, so
+    B104 adds the personal ``~/.agents/skills`` tier for a live audit but stays hermetic on
+    fixture / custom --home scans (mirrors collector._read_installed_skills' gate)."""
+    try:
+        user_home = Path.home().resolve()
+        audited = home.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if audited.parent == user_home and audited.name.startswith(".openclaw"):
+        return user_home
+    return None
+
+
 def check_offboarding_hygiene(ctx: Context) -> Finding:
     """B104 — decommissioning / offboarding hygiene (F-089, NHI1 improper offboarding).
 
     Read-only filesystem/config reconciliation for leftover attack surface left by an
     incomplete offboarding:
-      WARN — the same skill (by declared frontmatter `name:`) is installed in >1 location
-             (the stale copy is still auto-loadable surface), OR a configured stdio MCP
+      WARN — the same skill (by declared frontmatter `name:`) is installed in >1 load root.
+             When the copies span DIFFERENT precedence tiers (F-122) the higher-precedence one
+             silently SHADOWS the others (OpenClaw merges every root into one name-keyed map,
+             last-merged wins, no warning — a planted higher-tier copy can override a trusted
+             skill); same-tier copies are stale-copy hygiene. OR a configured stdio MCP
              server's ABSOLUTE command path does not exist on disk (a dead entry).
-      PASS — no duplicate skill installs and no dead MCP command paths.
+      PASS — no duplicate/shadowing skill installs and no dead MCP command paths.
       UNKNOWN — no OpenClaw home filesystem to inspect.
 
     §5 note: OpenClaw AUTO-LOADS skills by directory presence (recon §13), not by an
@@ -1013,7 +1030,8 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
     command (npx/node/uvx) is never flagged — it is PATH/runtime-resolved and
     container-safe; only an absolute path that is absent is a dead-entry signal.
     """
-    from ..collector import SKILL_DIRS  # local import: avoid a module-load cycle
+    # local import: avoid a module-load cycle
+    from ..collector import SKILL_TIER_ORDER, skill_load_roots
 
     home = getattr(ctx, "home", None)
     if not isinstance(home, Path) or not home.exists():
@@ -1024,10 +1042,13 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
             "skills and MCP entries.",
         )
 
-    # Duplicate skill installs: same declared name in >1 (non-symlink) dir.
-    name_to_dirs: dict[str, list[str]] = {}
-    for rel in SKILL_DIRS:
-        base = home / rel
+    # Duplicate skill installs: same declared name in >1 (non-symlink) dir. Scanned across the
+    # FULL precedence-ordered load-root set (F-122) so a same-name copy planted in a
+    # HIGHER-precedence tier — which silently SHADOWS a trusted skill (dist merges all roots
+    # into one name-keyed map, last-merged wins, no warning) — is surfaced, not just same-tier
+    # stale copies. name -> [(tier, rel_dir), ...].
+    name_hits: dict[str, list[tuple[str, str]]] = {}
+    for base, tier in skill_load_roots(home, ctx.config, user_home=_b104_user_home(home)):
         if not base.is_dir():
             continue
         try:
@@ -1054,14 +1075,29 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
             try:
                 rel_dir = str(sd.relative_to(home))  # home-relative: no absolute path leak
             except ValueError:
-                rel_dir = sd.name
-            name_to_dirs.setdefault(name, []).append(rel_dir)
+                rel_dir = sd.name  # out-of-home root: bare dir name, never an absolute path
+            name_hits.setdefault(name, []).append((tier, rel_dir))
 
     warns: list[str] = []
-    for name, dirs in sorted(name_to_dirs.items()):
-        uniq = sorted(set(dirs))
-        if len(uniq) > 1:
-            warns.append(f"skill '{name}' installed in {len(uniq)} locations: " + ", ".join(uniq))
+    for name, hits in sorted(name_hits.items()):
+        uniq = sorted(set(hits))
+        if len(uniq) < 2:
+            continue
+        tiers = {t for t, _ in uniq}
+        dirs = [d for _, d in uniq]
+        if len(tiers) > 1:
+            # Cross-tier: the highest-precedence tier silently shadows the lower ones.
+            winner = min(
+                tiers,
+                key=lambda t: SKILL_TIER_ORDER.index(t) if t in SKILL_TIER_ORDER else 99,
+            )
+            warns.append(
+                f"skill '{name}' is installed in {len(uniq)} load roots spanning different "
+                f"precedence tiers ({', '.join(sorted(tiers))}) — the '{winner}' copy silently "
+                f"shadows the others: {', '.join(dirs)}"
+            )
+        else:
+            warns.append(f"skill '{name}' installed in {len(uniq)} locations: " + ", ".join(dirs))
 
     # Dead MCP entries: a configured stdio server whose ABSOLUTE command path is missing.
     for name, spec in _mcp_servers(ctx.config or {}).items():
@@ -1079,11 +1115,13 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
         return _custom(
             "B104", LOW, WARN,
             "Offboarding hygiene: " + "; ".join(warns[:6]) + extra,
-            "Retire stale duplicate skill copies and remove dead MCP entries — a leftover "
+            "Keep exactly one copy of each skill and remove dead MCP entries — a leftover "
             "install remains auto-loadable / spawnable attack surface after the skill or "
-            "server was meant to be decommissioned (NHI1 improper offboarding). If this "
-            "config is audited from a different host than it runs on, verify the missing "
-            "command path there before removing it.",
+            "server was meant to be decommissioned (NHI1 improper offboarding). For a "
+            "cross-tier collision, confirm the higher-precedence copy is the intended one: it "
+            "silently shadows the rest, so a planted copy there overrides the trusted skill. "
+            "If this config is audited from a different host than it runs on, verify the "
+            "missing command path there before removing it.",
             warns,
         )
     return _custom(
