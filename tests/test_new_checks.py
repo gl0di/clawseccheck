@@ -140,3 +140,65 @@ def test_b19_windows_is_unknown(monkeypatch, tmp_path):
     from clawseccheck import checks
     monkeypatch.setattr(checks._shared, "_is_posix", lambda: False)
     assert check_data_atrest(_ctx({}, home=str(tmp_path))).status == "UNKNOWN"
+
+
+# ---- F-120: session transcripts + install-backups (path-aware at-rest exposure) ----
+def _touch(p: Path, mode: int) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{}")  # stat-only check never reads content — keep it benign
+    p.chmod(mode)
+
+
+def test_b19_loose_transcript_in_traversable_home_warns(tmp_path):
+    home = tmp_path / "openclaw"
+    t = home / "agents" / "main" / "sessions" / "s1.jsonl"
+    _touch(t, 0o644)  # world-readable transcript
+    for d in (home, home / "agents", home / "agents" / "main", t.parent):
+        d.chmod(0o755)  # whole chain world-traversable -> genuinely reachable
+    f = check_data_atrest(_ctx({}, home=str(home)))
+    assert f.status == "WARN", f.detail
+    assert "s1.jsonl" in " ".join(f.evidence or [])
+
+
+def test_b19_loose_transcript_sealed_in_tight_home_passes(tmp_path):
+    # FP-safety / reference-fleet case: a 0o644 transcript sealed inside a 0o700 home is
+    # UNREACHABLE by other users -> no spurious WARN (the umask-default flood this guards).
+    home = tmp_path / "openclaw"
+    t = home / "agents" / "main" / "sessions" / "s1.jsonl"
+    _touch(t, 0o644)
+    for d in (home / "agents" / "main", home / "agents"):
+        d.chmod(0o755)
+    home.chmod(0o700)  # home sealed -> nothing inside is reachable
+    assert check_data_atrest(_ctx({}, home=str(home))).status == "PASS"
+
+
+def test_b19_codex_home_loose_transcript_reachable_warns(tmp_path):
+    # the codex-home rollout transcripts that are 0o664 by default — flagged only when the
+    # path to them is actually traversable by others.
+    home = tmp_path / "openclaw"
+    t = home / "agents" / "main" / "agent" / "codex-home" / "sessions" / "2026" / "r.jsonl"
+    _touch(t, 0o644)
+    for d in (home, home / "agents", home / "agents" / "main", home / "agents" / "main" / "agent",
+              t.parent.parent, t.parent):
+        d.chmod(0o755)
+    assert check_data_atrest(_ctx({}, home=str(home))).status == "WARN"
+
+
+def test_b19_world_readable_install_backup_warns(tmp_path):
+    home = tmp_path / "openclaw"
+    b = home / ".openclaw-install-backups" / "openclaw.json.bak"
+    _touch(b, 0o644)
+    for d in (home, b.parent):
+        d.chmod(0o755)
+    f = check_data_atrest(_ctx({}, home=str(home)))
+    assert f.status == "WARN", f.detail
+    assert ".openclaw-install-backups" in " ".join(f.evidence or [])
+
+
+def test_b19_transcript_collection_is_capped(tmp_path):
+    from clawseccheck.checks._egress import _collect_atrest_transcripts
+    sess = tmp_path / "agents" / "main" / "sessions"
+    sess.mkdir(parents=True)
+    for i in range(210):
+        (sess / f"s{i}.jsonl").write_text("{}")
+    assert len(_collect_atrest_transcripts(tmp_path)) <= 200

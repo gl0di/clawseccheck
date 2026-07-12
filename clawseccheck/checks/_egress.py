@@ -535,6 +535,92 @@ def check_config_health_integrity(ctx: Context) -> Finding:
     )
 
 
+def _other_can_reach_read(home: Path, target: Path) -> bool:
+    """True when a NON-owner — world, or a group with members beyond the owner (UPG-safe, cf.
+    B22/B-189 `_group_has_other_members`) — can BOTH traverse every directory from *home* down
+    to *target* AND read *target*.
+
+    Path-aware on purpose: a loose (umask-default 0o644/0o664) transcript sealed inside a 0o700
+    home is UNREACHABLE, so it is never a false at-rest exposure — verified on the reference
+    fleet, where ~/.openclaw and the whole agents/ chain are 0o700 even though the nested
+    codex-home transcripts are 0o664. POSIX stat-only; never reads content; never raises."""
+    try:
+        rel = target.relative_to(home)
+    except ValueError:
+        return False
+    chain: list[Path] = [home]
+    cur = home
+    for part in rel.parts[:-1]:
+        cur = cur / part
+        chain.append(cur)
+    world_ok = True
+    group_ok = True
+    for d in chain:
+        try:
+            st = d.stat()
+        except OSError:
+            return False
+        m = st.st_mode
+        world_ok = world_ok and bool(m & 0o001)  # o+x to traverse
+        # Group leg requires a group KNOWN to have members beyond the owner (`is True`, not
+        # `is not False`). B19 is scored, so a false WARN moves the grade — on a umask-002 UPG
+        # box the owning group is a private singleton and membership may be undeterminable
+        # (None); treating None as "shared" (as the WRITE check B22 does) would false-WARN
+        # every such install. Erring toward NOT flagging on None keeps Golden Rule #5. The
+        # world leg still catches genuine world-readable exposure unambiguously.
+        grp_other = _shared._group_has_other_members(st.st_gid, st.st_uid)
+        group_ok = group_ok and bool(m & 0o010) and (grp_other is True)  # g+x, known-shared group
+        if not world_ok and not group_ok:
+            return False
+    try:
+        tst = target.stat()
+    except OSError:
+        return False
+    tm = tst.st_mode
+    if world_ok and (tm & 0o004):  # reachable + world-readable
+        return True
+    grp_other_t = _shared._group_has_other_members(tst.st_gid, tst.st_uid)
+    return bool(group_ok and (tm & 0o040) and (grp_other_t is True))  # reachable + group-read
+
+
+def _collect_atrest_transcripts(home: Path, cap: int = 200) -> list[Path]:
+    """Bounded, symlink-safe list of secret/PII-bearing at-rest transcript / backup FILES
+    (F-120): agents/*/sessions/*.jsonl, agents/*/agent/codex-home/sessions/**/*.jsonl, and
+    <home>/.openclaw-install-backups/** (backed-up openclaw.json = secrets). Read-only; the
+    ``cap`` bounds a pathological agents/ tree (mirrors _lifecycle.py's 200-file cap)."""
+    out: list[Path] = []
+
+    def _grab(root: Path, pattern: str) -> None:
+        if len(out) >= cap or not root.is_dir():
+            return
+        try:
+            for f in root.rglob(pattern):  # generator — early break bounds the walk
+                if len(out) >= cap:
+                    break
+                try:
+                    if f.is_file() and not f.is_symlink():
+                        out.append(f)
+                except OSError:
+                    continue
+        except OSError:
+            return
+
+    try:
+        agents = home / "agents"
+        if agents.is_dir():
+            for agent_dir in sorted(agents.iterdir()):
+                if len(out) >= cap:
+                    break
+                if not agent_dir.is_dir() or agent_dir.is_symlink():
+                    continue
+                _grab(agent_dir / "sessions", "*.jsonl")
+                _grab(agent_dir / "agent" / "codex-home" / "sessions", "*.jsonl")
+    except OSError:
+        pass
+    _grab(home / ".openclaw-install-backups", "*")
+    return sorted(out)
+
+
 # ---------- B19: data at-rest protection (POSIX only) ----------
 def check_data_atrest(ctx: Context) -> Finding:
     """Memory/log directories and log files are not group/world-readable."""
@@ -587,25 +673,42 @@ def check_data_atrest(ctx: Context) -> Finding:
     except OSError:
         pass
 
-    if not loose and not candidates_dirs:
-        return _finding("B19", UNKNOWN, "No memory/log directories found to inspect.", "—")
+    # F-120: session transcripts + install-backups (secret/PII at rest). Path-aware — only a
+    # file a NON-owner can actually reach AND read counts, so umask-default 0o644/0o664 files
+    # sealed inside a 0o700 home never produce a spurious WARN (Golden Rule #5).
+    transcripts = _collect_atrest_transcripts(ctx.home)
+    for t in transcripts:
+        if _other_can_reach_read(ctx.home, t):
+            try:
+                rel = t.relative_to(ctx.home)
+            except ValueError:
+                rel = Path(t.name)
+            try:
+                mode = t.stat().st_mode & 0o777
+            except OSError:
+                continue
+            loose.append(f"{rel} (mode {oct(mode)[-3:]})")
+
+    if not loose and not candidates_dirs and not transcripts:
+        return _finding("B19", UNKNOWN, "No memory/log/transcript stores found to inspect.", "—")
     if loose:
         joined = "; ".join(loose[:8])
         extra = f" (+{len(loose) - 8} more)" if len(loose) > 8 else ""
         return _finding(
             "B19",
             WARN,
-            f"Memory/logs are group/world-readable — conversation data/PII at rest "
-            f"is exposed: {joined}{extra}",
-            "Run `chmod 700` on memory/log directories and `chmod 600` on log files "
-            "to restrict access to the owner only.",
+            f"Conversation data/PII at rest is group/world-readable (memory/logs, session "
+            f"transcripts, or install backups): {joined}{extra}",
+            "Run `chmod 700` on the memory/log/session directories and `chmod 600` on the "
+            "files (or `chmod 700 ~/.openclaw`) to restrict access to the owner only.",
             evidence=loose,
         )
     return _finding(
         "B19",
         PASS,
-        "Memory/log directories have tight permissions (owner-only).",
-        "Keep memory and log directories at chmod 700/600.",
+        "Memory/log directories, session transcripts, and install backups are not reachable "
+        "and readable by other users (owner-only, or sealed inside a tight home).",
+        "Keep memory/log/session directories at chmod 700 and their files at 600.",
     )
 
 
