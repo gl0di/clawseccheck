@@ -2,11 +2,11 @@
 
 Honest map of what ClawSecCheck checks today, what it does **not** yet check, and where
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
-all (so they can't even surface as a finding). Updated 2026-07-08 for v3.24.0.
+all (so they can't even surface as a finding). Updated 2026-07-12 for v3.33.0.
 
-Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 118 checks
+Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 119 checks
 total; see `docs/CHECKS.md` for the full generated list, plus the
-combinational risk engine `RISK-01..RISK-17`, the install-time vetters `--vet` (B13 plus
+combinational risk engine `RISK-01..RISK-18`, the install-time vetters `--vet` (B13 plus
 the content-security ring — B59–B67 / B74 / B42 — on an uninstalled skill; AST-, injection-,
 and capability-intent-aware) / `--vet-mcp`, the **attestation
 layer** (`--ask` / `--attest`, with a guided interrogation protocol so the agent self-builds
@@ -49,7 +49,7 @@ sequence detectors over OpenClaw's trajectory sidecar, complementing every check
 | Backups of identity/memory | C3 | |
 | Native binary PATH safety | C5 | |
 | **Host defensive posture** | B50–B54 | Is the agent's *host* watched: network IDS, host audit, file-integrity, EDR/AV, firewall — read-only, WARN only for a high-privilege agent, never FAIL (v0.20). A self-reported `host_monitors` entry (attestation) upgrades a gap to an `ATTESTED` PASS for a monitor the scan can't see; static detection still wins (v0.28) |
-| **Combinational attack chains** | RISK-01..17 | Lethal trifecta, untrusted→exec, control-plane takeover, malicious-skill→exfil, markdown-image→persistence, sleeper→delayed-RCE, powerful-agent-on-unmonitored-host (RISK-10/11), etc. |
+| **Combinational attack chains** | RISK-01..18 | Lethal trifecta, untrusted→exec, control-plane takeover, malicious-skill→exfil, markdown-image→persistence, sleeper→delayed-RCE, powerful-agent-on-unmonitored-host (RISK-10/11), etc. |
 | **Behavioral trajectory (proof-by-log)** | T1, T2 (`--behavioral`) | Every check above answers "what the agent *could* do" from config/skill-source; T1/T2 read OpenClaw's trajectory sidecar and answer "what it *actually did*" — an observed ingress→sensitive→egress verb sequence (T1) or a fail→fail→success series on a sensitive verb (T2). Metadata-only (§8): never reads call/return payloads. WARN-only, never scored — a separate mode, not part of the A-F grade. |
 
 ## Framework mapping (OWASP)

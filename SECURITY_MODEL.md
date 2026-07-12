@@ -25,9 +25,10 @@ ClawSecCheck is a **local, read-only** audit tool. Its permitted operations are:
 - **Build findings** from parsed config values and file metadata using deterministic,
   evidence-gated logic.
 - **Print** a structured report to stdout (text, JSON, SARIF, HTML, SVG badge).
-- **Write to disk** only when the user explicitly requests it via a CLI flag:
-  `--save`, `--badge`, `--html`, `--sarif`, `--monitor` (state snapshot),
-  `--trend` / `--history` (score history), `--log` (log file).
+- **Write to disk** its own state under `~/.clawseccheck/`: a one-line score-history
+  entry **by default** (opt out `--no-history`), and — only when you ask —
+  `--save`, `--badge`, `--html`, `--sarif`, `--monitor` state, `--sbom`, `--log`.
+  `--purge` deletes that store. It never writes your OpenClaw config.
 - **Run one fixed, read-only subprocess** — `openclaw security audit --json` — with
   a timeout, `capture_output=True`, and no `shell=True`, only when `--no-native` is
   not set.
@@ -226,6 +227,9 @@ reviewer can check every clause below directly against the cited module:
 
 - It does **not** write outside `~/.clawseccheck/` or a path the user names on the
   command line (`safeio.py`, `collector.py`).
+- `--purge` deletes ClawSecCheck's own store files (a fixed filename list —
+  history.jsonl, events.jsonl, state.json, coverage.json + lock sidecars), never
+  recursive/glob, never outside `~/.clawseccheck/`.
 - It does **not** make a network connection of any kind, for any reason, ever (grep the
   import graph: there is no `socket`, `http.client`, `urllib.request` call site that
   reaches the network at runtime — `urllib.parse` is used only for local string
@@ -267,20 +271,6 @@ OpenClaw's skill schema ships such a field, at which point `SKILL.md` should gai
 ## Release validation protocol
 
 A release must pass local validation before merge/tag:
-## Post-release operational backlog (v1.20.6)
-
-- [impact:quality][owner:maintainer][difficulty:1-2h] Confirm B43/B44 confidence wording matches implementation after post-release changes.
-  [что проверить] Compare behavior in `tests/test_attest.py` and `clawseccheck/checks.py` for `approval_gates_auto` and `approval bypass` evidence.
-  [критерий Done] Behavior remains consistent with runtime docs and user-facing findings.
-
-- [impact:release][owner:release-eng][difficulty:1-2h] Keep operational docs synchronized after each tag.
-  [что проверить] README/CHANGELOG/SECURITY/SECURITY_MODEL/SKILL entries mention the same release steps and smoke commands.
-  [критерий Done] No stale check IDs or argument contracts between docs and parser behavior.
-
-- [impact:ops][owner:release-eng][difficulty:1 day] Run explicit post-release smoke for installability/repeatability.
-  [что проверить] `clawseccheck --self-test --ascii`; `python3 -m pytest tests/test_cli.py tests/test_cli_flags.py tests/test_attest.py`; `python3 -m pytest tests/test_features.py::test_canary_token_and_payload tests/test_features.py::test_canary_evaluate tests/test_features.py::test_canary_deterministic_per_seed`; and `--attest` flow for `B43/B44`.
-  [критерий Done] Same commands succeed on a clean environment or the limitation is recorded in release notes.
-
 
 - `python3 -m ruff check .`
 - `python3 -m pytest`

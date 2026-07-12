@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>🦞 A free, local, read-only security self-audit for your own OpenClaw agent.</b><br>
-  <sub><i>The claw that checks your claws — scores you A–F and reports the holes. Reports only, never touches anything.</i></sub>
+  <sub><i>The claw that checks your claws — scores you A–F and reports the holes. Reports only — it never changes your OpenClaw setup.</i></sub>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 ---
 
 A one-command security self-audit for *your own* OpenClaw agent. It scores your setup
-**A–F** and surfaces the most urgent holes in plain language — reports only, it never fixes or changes anything —
+**A–F** and surfaces the most urgent holes in plain language — reports only; it never fixes or changes your OpenClaw setup —
 plus a **shareable grade badge**.
 
 Because you run it on your own agent, there's no "scanning someone else" problem: no
@@ -45,9 +45,10 @@ doesn't check:
 - **`UNKNOWN` ≠ `PASS`.** If a file can't be read, the config can't be parsed, or a state
   can't be determined, it's reported as `UNKNOWN` and excluded from the score — never
   silently marked safe.
-- **Some deep checks are planned, not shipped yet:** a dirty-input action-gate and taint-tracking
-  layer (B27–B28) is on the roadmap, and the shipped B33 version gate is seeded with a small set of
-  grounded advisories — its table grows as new ones are verified, not an exhaustive CVE database yet.
+- **A broader config-level dirty-input action-gate is still on the roadmap;** the B13 taint trace
+  (credential-file read → network sink) already ships. The shipped B33 version gate is seeded with
+  a small set of grounded advisories — its table grows as new ones are verified, not an exhaustive
+  CVE database yet.
 - **Vetting the scanner itself** (`--vet` pointed at ClawSecCheck's own source) reports
   *safe with a note* — a security tool necessarily ships attack signatures as data.
 
@@ -302,7 +303,9 @@ ClawSecCheck is **open source and zero-dependency (Python stdlib only)**. Its ow
 - `~/.openclaw/agents/.../sessions/*.jsonl` (B79 approval-policy posture)
 - host OS path-existence checks for IDS/FIM/EDR/firewall config (B50–B54)
 - credential-store path-existence inventory: whether `.env`, SSH key dirs, keychain/keyring
-  directories, and browser cookie stores **exist** near the agent home — contents never read The only thing it writes by default is a one-line
+  directories, and browser cookie stores **exist** near the agent home — contents never read.
+
+The only thing it writes by default is a one-line
 entry to a **private, owner-only** local score history (`~/.clawseccheck/history.jsonl`) so you can
 track your grade over time — opt out with `--no-history`. Everything else is written only when you
 ask: a report file (`--save`), the `--monitor` snapshot and change journal
@@ -539,7 +542,7 @@ Beyond individual checks, ClawSecCheck runs a **risk engine** that looks for dan
 *combinations* — capability chains where two or more co-occurring properties make a
 compromise catastrophic or trivial to execute.
 
-The highest-risk chains it detects now span **RISK-01 through RISK-16**:
+The highest-risk chains it detects now span **RISK-01 through RISK-18**:
 
 | ID | Severity | Chain |
 |----|----------|-------|
@@ -555,9 +558,12 @@ The highest-risk chains it detects now span **RISK-01 through RISK-16**:
 | RISK-10 | MEDIUM | Untrusted input → agent can exec/write on host → no host detection (IDS/audit/FIM/EDR) → a breach would be invisible |
 | RISK-11 | HIGH | Cross-agent trifecta reassembly (confused deputy): untrusted-input agent → drives a sensitive-data agent → drives an outbound agent across non-wall delegation edges |
 | RISK-12 | HIGH | Untrusted input + broad/unscoped write capability (B55) → filesystem tamper/persistence |
+| RISK-13 | HIGH | Markdown-image exfil + writable memory/bootstrap = persistence / exfil |
 | RISK-14 | HIGH | Wildcard-elevated sender + heartbeat → self-escalating autonomy loop |
 | RISK-15 | HIGH | Untrusted context + browser SSRF to private network → metadata/credential exfiltration |
 | RISK-16 | HIGH | RW workspace + host bind + plaintext gateway credential path → control-plane takeover |
+| RISK-17 | HIGH | Conditional sleeper trigger + scheduled execution = delayed RCE |
+| RISK-18 | HIGH | Untrusted context + cron + heartbeat = persistent autonomous foothold |
 
 Each chain fires **only when every link has positive evidence** — no chain is invented from
 absent or UNKNOWN data, so findings are evidence-gated, which keeps false positives low —
@@ -672,8 +678,9 @@ python3 audit.py --log audit.log            # also write log to a local file
   *before* you trust it. Flags unpinned installs (`npx @latest`, unversioned packages), `curl|sh`
   bootstrap, plaintext-HTTP remote transports, env-variable secret passthrough, and overly broad
   OAuth scopes. Verdict per server: SAFE / SUSPICIOUS / DANGEROUS. Local and read-only — no
-  network calls, no writes. Targets the #1 agent supply-chain gap: most tools audit your skills
-  but not the MCP servers wired into your agent.
+  network calls; it writes only a one-line coverage-freshness entry under `~/.clawseccheck/`
+  (suppressed by `--no-history`). Targets the #1 agent supply-chain gap: most tools audit your
+  skills but not the MCP servers wired into your agent.
 - **`--canary`** emits a benign injection hidden in untrusted-looking content; feed it to your
   agent — if the agent echoes the token, it obeyed an injection (**VULNERABLE**), otherwise
   **RESISTANT**. This is the live "battle-tested" complement to the passive checks.
@@ -734,12 +741,11 @@ grade + score + trifecta ratio — never the findings** (sharing must not hand a
 
 ## 📐 Public API & stability
 
-As of **1.0.0**, the following is a **frozen contract**: breaking it requires a **major** version
-bump (SemVer). The freeze was cut after the attestation layer settled, an adversarial review, and
-four field runs whose every finding was fixed or deliberately documented — with zero hard false
-positives on real configs.
-
-> A planned **2.0.0** will deliberately exercise this rule — batching the accumulated breaking changes (e.g. English-only output, finalized grade semantics, schema tidy) into one major bump. Until then, 1.x stays additive.
+The public contract below has been frozen since **1.0.0**. The breaking changes it anticipated
+shipped in **2.0.0** (English-only output) and **3.0.0**; breaking any item below still requires
+a major bump (SemVer). The freeze was cut after the attestation layer settled, an adversarial
+review, and four field runs whose every finding was fixed or deliberately documented — with zero
+hard false positives on real configs.
 
 **Frozen contract (breaking these → major bump):**
 
@@ -756,7 +762,7 @@ positives on real configs.
 - **Scoring bands:** A 90+ · B 80–89 · C 70–79 · D 50–69 · F <50; `UNKNOWN` never scores; advisory
   checks (`scored=False`) never move the grade.
 
-**Explicitly experimental within 1.x (may change without a major bump, by design):**
+**Explicitly experimental (may change without a major bump, by design):**
 
 - The **attestation layer**: the `clawseccheck-attest/1` self-report schema (note the `/1` — it is
   explicitly versioned to evolve), the `--ask`/`--attest` flow, the B43 **verb→blast-radius
@@ -793,7 +799,7 @@ positives on real configs.
 
 ## 🧪 Tests
 
-A security tool should be heavily tested — so it is. The suite is **140+ test files / 2,400+ tests**, run on **Python 3.9 and 3.12** in CI alongside `ruff`. Tests are **offline and read-only** (no network, nothing written outside the test's temp dir); every check ships a **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit `UNKNOWN`-path coverage; and the release bar is **zero false-positive FAILs on real configs**.
+A security tool should be heavily tested — so it is. The suite is **270+ test files / 3,900+ tests**, run on **Python 3.9 and 3.12** in CI alongside `ruff`. Tests are **offline and read-only** (no network, nothing written outside the test's temp dir); every check ships a **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit `UNKNOWN`-path coverage; and the release bar is **zero false-positive FAILs on real configs**.
 
 ```bash
 python3 -m pytest -q       # full suite

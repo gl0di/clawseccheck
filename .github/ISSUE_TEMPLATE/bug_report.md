@@ -34,7 +34,7 @@ paste the relevant output here
 | OpenClaw version | e.g. 1.2.3 |
 | Python version | e.g. 3.11.4 |
 | OS | e.g. macOS 14.5, Ubuntu 22.04 |
-| ClawSecCheck version | e.g. 0.19.0 |
+| ClawSecCheck version | e.g. 3.33.0 |
 
 ## Additional context
 

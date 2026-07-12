@@ -33,7 +33,7 @@ calls this out explicitly: *"`UNKNOWN` ≠ `PASS`"*.
   reports `UNKNOWN` when no plugins are declared. This is correct and honest — not a
   problem.
 
-- **Attestation-only checks.** Checks B43, B44, B45, B46, B47 require an agent
+- **Attestation-only checks.** Checks B43, B44, B45, B47 require an agent
   self-report that the static config cannot provide. Without `--attest`, they report
   `UNKNOWN`. Use `clawseccheck --ask` to generate the attestation template, fill it with
   your running agent, and then pass `--attest attest.json` to unlock these checks.
@@ -56,7 +56,7 @@ failure from being diluted by many passes:
 | Severity of any FAIL | Score capped at | Grade ceiling |
 |---|---|---|
 | CRITICAL | 49 | F |
-| HIGH | 75 | C |
+| HIGH | 79 | C |
 | MEDIUM | 89 | B |
 | LOW | 94 | A- |
 
@@ -139,8 +139,9 @@ score. To confirm what is suppressed, use `--show-suppressed` again.
 
 ## I get permission errors — what do I do?
 
-ClawSecCheck is **read-only** — it never changes your config or files. Permission errors
-mean the *audit* cannot read a file it needs to inspect.
+ClawSecCheck never changes your OpenClaw config or the files it audits — it only writes
+its own score history under `~/.clawseccheck/`. Permission errors mean the *audit* cannot
+read a file it needs to inspect.
 
 **Most common causes and fixes:**
 
@@ -254,7 +255,8 @@ clawseccheck --home /path/to/custom/openclaw/home
   ```
 
 - **Auditing a backup or exported config.** Copy the config directory somewhere and point
-  `--home` at it. The audit is read-only and will not modify anything.
+  `--home` at it. The audit will not modify the config directory you point it at (it
+  keeps its own score history under `~/.clawseccheck/`).
 
 - **Docker / CI.** Mount the config directory into the container and pass `--home`:
 
@@ -329,9 +331,8 @@ Attestation findings are marked `ATTESTED` confidence — a self-report is weake
 than a config file, so these checks are advisory and never override a config-fact finding.
 Without `--attest`, all four checks report `UNKNOWN`.
 
-**Attestation is read-only.** The agent fills the template from its own knowledge; the
-audit only reads the resulting file and runs `stat()` on any paths it mentions. Nothing is
-written or changed.
+**The attestation step writes nothing** — it only reads the file you name and `stat()`s
+the paths inside it.
 
 ---
 

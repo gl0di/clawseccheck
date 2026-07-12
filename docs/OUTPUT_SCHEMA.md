@@ -23,7 +23,7 @@ versioning §6 in `CLAUDE.md`).
 | Field | Type | Always present | Description |
 |---|---|---|---|
 | `score` | `int` | yes | Overall security score, 0–100. |
-| `grade` | `str` | yes | Letter grade: `"A"`, `"B"`, `"C"`, `"D"`, `"E"`, or `"F"`. |
+| `grade` | `str` | yes | Letter grade: `"A"`, `"B"`, `"C"`, `"D"`, or `"F"`. |
 | `capped` | `bool` | yes | `true` if the score was capped below `raw_score` (e.g. Lethal Trifecta triggered). |
 | `raw_score` | `int` | yes | Score before any cap is applied. Equals `score` when `capped` is `false`. |
 | `cap_severity` | `str \| null` | yes | Severity that drove the score cap (`"CRITICAL"`, `"HIGH"`, …), or `null` when nothing capped the score. When `capped` is `true` this names *why*; `null` is the norm when `capped` is `false`. |
@@ -440,7 +440,7 @@ corresponding checks always appear in `rules`.
 | Field | Type | Description |
 |---|---|---|
 | `name` | `str` | Always `"ClawSecCheck"`. |
-| `version` | `str` | Tool version string, e.g. `"1.2.0"`. |
+| `version` | `str` | Tool version string, e.g. `"3.33.0"`. |
 | `informationUri` | `str` | Always `"https://github.com/gl0di/clawseccheck"`. |
 | `rules` | `array[Rule]` | One entry per check in the CATALOG, in catalog order. |
 
@@ -472,7 +472,7 @@ corresponding checks always appear in `rules`.
 
 `fixes` is omitted (not `null`, not `[]`) when the check has no paste-ready remediation.
 Each entry carries only `description.text`; ClawSecCheck never emits `artifactChanges`
-because it is read-only by design.
+because ClawSecCheck never rewrites the artifacts it audits.
 
 ### `runs[0].properties.analysis_completeness` (when context is available)
 
@@ -555,7 +555,7 @@ itself an axis. `--vet-source` returns a single `SOURCE-VET` finding on the `dan
 ```json
 {
   "tool": "clawseccheck",
-  "version": "3.8.0",
+  "version": "3.33.0",
   "mode": "vet",
   "target": "/path/to/skill",
   "target_type": "skill",

@@ -2,7 +2,7 @@
 
 > **Status: convention, not enforced.** This is guidance for *new and edited* checks. It
 > deliberately does **not** trigger a build failure and does **not** call for a one-pass
-> rewrite of the ~239 existing `_finding()` call-sites. Apply it as you touch a check.
+> rewrite of the ~340 existing `_finding()` call-sites. Apply it as you touch a check.
 
 Inspired by cloudflare/security-audit-skill's `report-schema.json` `root_cause` field
 (a forced one-sentence causal template). ClawSecCheck adopts the *spirit* — a Finding

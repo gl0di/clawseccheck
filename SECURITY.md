@@ -35,8 +35,11 @@ as `<REDACTED>` or `sk-XXXX`.
 ## Scope
 
 ClawSecCheck is a **local, read-only** audit tool. It reads only the files it is
-pointed at (OpenClaw config, bootstrap markdown, installed-skill text) and writes
-nothing by default. It makes no network calls. Findings stay on your machine.
+pointed at (OpenClaw config, bootstrap markdown, installed-skill text) and writes only
+its own state under `~/.clawseccheck/` — by default a one-line score-history entry
+(opt out with `--no-history`), and other files only when you ask (`--save`, `--badge`,
+`--sarif`, `--monitor`, `--log`). It never writes to your OpenClaw config, and it makes
+no network calls. Findings stay on your machine.
 
 For the full breakdown of the tool's own capability surface, least-privilege posture,
 data-handling/redaction discipline, tamper-evident audit trail, and the forward-looking
