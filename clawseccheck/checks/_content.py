@@ -3948,7 +3948,7 @@ def _bad_provenance_url(val: str) -> bool:
     if v.lower().startswith("git+"):
         v = v[4:]
     scheme, host = _install_url_target(v)
-    if scheme in ("http", "ftp", "ftps"):
+    if scheme in ("http", "ftp"):  # plaintext transport only — ftps is FTP-over-TLS (encrypted)
         return True
     if host and _install_host_is_public_ip(host):
         return True
