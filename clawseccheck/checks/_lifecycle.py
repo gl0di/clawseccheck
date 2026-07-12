@@ -195,11 +195,27 @@ def _parse_version(ver: str) -> tuple[int, ...] | None:
     return parts
 
 
-def _writable_identity_files(ctx: Context) -> list[str]:
-    """Return relative paths of identity/skill targets that are group/world-writable
-    OR whose parent dir is group/world-writable (giving write access via directory).
+def _writable_by_others(st) -> bool:
+    """True when a file/dir is writable by someone OTHER than its owner: world-writable is
+    unambiguous; group-writable counts ONLY when the owning group has other members. A
+    user-private-group / umask-002 singleton (e.g. Fedora/RHEL defaults: 0o664 files, 0o775
+    dirs owned by the user's own private group) is not actually exploitable by anyone else,
+    so it must not FAIL (B-189)."""
+    mode = st.st_mode & 0o777
+    if mode & 0o002:
+        return True
+    if mode & 0o020:
+        return _shared._group_has_other_members(st.st_gid, st.st_uid) is not False
+    return False
 
-    Only called on POSIX. Returns paths relative to ctx.home.
+
+def _writable_identity_files(ctx: Context) -> list[str]:
+    """Return relative paths of identity/skill targets writable by someone other than the
+    owner (world-writable, or group-writable with a non-singleton owning group), OR whose
+    parent dir is. Only called on POSIX. Returns paths relative to ctx.home.
+
+    B-189: the singleton down-rank applies to EVERY leg — SOUL.md, the workspace/skills dirs,
+    and openclaw.json — so a user-private-group / umask-002 box never false-FAILs.
     """
     writable: list[str] = []
     from ..collector import SKILL_DIRS, WORKSPACE_DIRS
@@ -209,13 +225,13 @@ def _writable_identity_files(ctx: Context) -> list[str]:
         ws_dir = ctx.home / ws
         if not ws_dir.is_dir():
             continue
-        # Workspace dir itself group/world-writable gives write to all files inside
+        # Workspace dir itself writable-by-others gives write to all files inside
         try:
-            dmode = ws_dir.stat().st_mode & 0o777
-            if dmode & 0o022:
-                # At least one identity file exists here
-                if any((ws_dir / f).is_file() for f in _IDENTITY_TARGETS):
-                    writable.append(f"{ws}/ (dir mode {oct(dmode)[-3:]})")
+            st = ws_dir.stat()
+            if _writable_by_others(st) and any(
+                (ws_dir / f).is_file() for f in _IDENTITY_TARGETS
+            ):
+                writable.append(f"{ws}/ (dir mode {oct(st.st_mode & 0o777)[-3:]})")
         except OSError:
             pass
         # Individual identity files
@@ -224,9 +240,9 @@ def _writable_identity_files(ctx: Context) -> list[str]:
             if not f.is_file():
                 continue
             try:
-                fmode = f.stat().st_mode & 0o777
-                if fmode & 0o022:
-                    writable.append(f"{ws}/{fname} (mode {oct(fmode)[-3:]})")
+                st = f.stat()
+                if _writable_by_others(st):
+                    writable.append(f"{ws}/{fname} (mode {oct(st.st_mode & 0o777)[-3:]})")
             except OSError:
                 pass
 
@@ -236,30 +252,23 @@ def _writable_identity_files(ctx: Context) -> list[str]:
         if not d.is_dir():
             continue
         try:
-            dmode = d.stat().st_mode & 0o777
-            if dmode & 0o022:
-                writable.append(f"{rel}/ (dir mode {oct(dmode)[-3:]})")
+            st = d.stat()
+            if _writable_by_others(st):
+                writable.append(f"{rel}/ (dir mode {oct(st.st_mode & 0o777)[-3:]})")
         except OSError:
             pass
 
-    # F-121: openclaw.json group/world-WRITABLE is a self-escalation target — a skill with
-    # fs_write (running as the agent) could rewrite tool grants, widen tools.exec.mode, or
-    # delete the approval gate: strictly worse than the read exposure B1/B11 already flag.
-    # Test the WRITE bit only (a merely group-READABLE config is B1/B11's concern). World-
-    # writable is unambiguous; a group-writable config is down-ranked away when its owning
-    # group has no OTHER members (user-private-group / umask-002 box) so it never false-FAILs
-    # a single-user machine.
+    # openclaw.json writable-by-others is a self-escalation target — a skill with fs_write
+    # (running as the agent) could rewrite tool grants, widen tools.exec.mode, or delete the
+    # approval gate: strictly worse than the read exposure B1/B11 already flag. Write bit only
+    # (a merely group-READABLE config is B1/B11's concern). (F-121)
     cfg_path = ctx.home / "openclaw.json"
     try:
         cst = cfg_path.stat()
     except OSError:
         cst = None
-    if cst is not None:
-        cmode = cst.st_mode & 0o777
-        if cmode & 0o002:  # world-writable — unambiguous
-            writable.append(f"openclaw.json (mode {oct(cmode)[-3:]})")
-        elif cmode & 0o020 and _shared._group_has_other_members(cst.st_gid, cst.st_uid) is not False:
-            writable.append(f"openclaw.json (mode {oct(cmode)[-3:]})")
+    if cst is not None and _writable_by_others(cst):
+        writable.append(f"openclaw.json (mode {oct(cst.st_mode & 0o777)[-3:]})")
 
     return writable
 

@@ -86,10 +86,25 @@ def test_b22_world_writable_ws_dir_no_approval_fails(tmp_path):
 
 
 # ---- FAIL: tools + group-writable SOUL.md + no approval ----
-def test_b22_group_writable_soul_no_approval_fails(tmp_path):
+def test_b22_group_writable_soul_shared_group_fails(tmp_path, monkeypatch):
+    """A group-writable SOUL.md whose owning group has OTHER members is genuinely exploitable
+    by them -> FAIL."""
+    from clawseccheck import checks
+    monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: True)
     _make_workspace(tmp_path, soul_mode=0o664, ws_mode=0o700)
     c = _ctx(_cfg_with_tools(), home=str(tmp_path))
     assert check_self_modification(c).status == "FAIL"
+
+
+def test_b22_group_writable_soul_private_group_downranked(tmp_path, monkeypatch):
+    """B-189: a group-writable SOUL.md under a user-private-group / umask-002 box (owning group
+    has no other members) is not exploitable by anyone else -> down-ranked, no false FAIL.
+    This is exactly the live false-FAIL that was on the owner's own ~/.openclaw."""
+    from clawseccheck import checks
+    monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: False)
+    _make_workspace(tmp_path, soul_mode=0o664, ws_mode=0o700)
+    c = _ctx(_cfg_with_tools(), home=str(tmp_path))
+    assert check_self_modification(c).status == "UNKNOWN"  # no writable target
 
 
 # ---- FAIL: tools + world-writable skills dir + no approval ----
