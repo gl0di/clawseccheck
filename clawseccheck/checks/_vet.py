@@ -359,19 +359,55 @@ _SELF_MOD_RE = re.compile(
 # Write-mode open / write_text in proximity to an agent-context filename.
 # Two-step: first find the agent-context filename; then check within ±_PERSIST_WINDOW
 # chars for a write verb.  The write verb is NOT "open" alone (read-opens are fine);
-# it must be open(..., 'w'/'a'), .write_text(, .write(, >> (shell redirect), or
-# pathlib write_bytes/write_text.
+# it must be open(..., 'w'/'a'), .write_text(, .write(, or pathlib write_bytes/write_text.
+#
+# B-198 (real-fleet finding): a bare shell-redirect ANYWHERE in the proximity window
+# (`>>\s*\S` / `>\s*\S`) used to also count — but a redirect glyph is common outside
+# real writes: a markdown arrow ("ops.sh -> restore"), a blockquote ("> Note"), an fd
+# dup ("2>&1"), or a redirect to a DIFFERENT target ("> /dev/null"). A real skill's
+# dev-progress notes ("outer CLAUDE.md rule ... ops.sh -> restore") false-FAILed
+# because the "->" arrow sat within the window of an unrelated "CLAUDE.md" mention.
+# Redirects are checked separately now (_REDIR_TO_FILE_PREFIX_RE), bound to the
+# filename as their actual target, not merely co-located nearby.
 _PERSIST_WRITE_VERB_RE = re.compile(
     r"""(?:
         open\s*\([^)]{0,120}[,\s]['"][wa]['"] |   # open(..., 'w') or open(..., 'a')
         \.write_text\s*\(                        |  # pathlib .write_text(
         \.write_bytes\s*\(                       |  # pathlib .write_bytes(
-        \.write\s*\(                             |  # fileobj.write(
-        >>\s*\S                                  |  # shell append >>
-        >\s*\S                                      # shell overwrite >
+        \.write\s*\(                                 # fileobj.write(
     )""",
     re.I | re.VERBOSE,
 )
+
+
+# B-198: a shell redirect (`>`/`>>`) whose TARGET is the agent-context filename just
+# matched — bound immediately before it (with an optional path prefix, e.g.
+# "> ~/.claude/CLAUDE.md"), not merely present somewhere in the proximity window.
+# The negative lookbehind excludes redirect-shaped glyphs that are not real shell
+# redirects: a markdown arrow ("->"/"=>"/"|>"), an angle-bracket pair ("<>"), or an
+# fd dup ("2>&1", excluded via the trailing "&"). Checked against the ~48-char prefix
+# immediately before the filename match, anchored at its end.
+_REDIR_TO_FILE_PREFIX_RE = re.compile(r"""(?<![-=|<>&])>>?\s*["']?(?:[~$]?[\w.${}@%+-]*/)*$""")
+
+
+_REDIR_PREFIX_WINDOW = 48  # chars to look back from the filename match for a redirect
+
+
+def _redirect_targets_file(blob: str, fname_start: int) -> bool:
+    """B-198: True when a genuine shell redirect immediately precedes the filename
+    match at *fname_start*. Beyond the shape check in _REDIR_TO_FILE_PREFIX_RE, this
+    also requires the '>' NOT be the first non-whitespace token on its line — a real
+    shell redirect always follows a command ("cat foo > CLAUDE.md"), whereas a bare
+    markdown blockquote ("> CLAUDE.md contains project rules") is syntactically
+    identical to a redirect but has nothing before the '>' on its own line."""
+    prefix_start = max(0, fname_start - _REDIR_PREFIX_WINDOW)
+    prefix = _HTML_TAG_RE.sub(" ", blob[prefix_start:fname_start])
+    m = _REDIR_TO_FILE_PREFIX_RE.search(prefix)
+    if not m:
+        return False
+    redir_pos = prefix_start + m.start()
+    line_start = blob.rfind("\n", 0, redir_pos) + 1
+    return blob[line_start:redir_pos].strip() != ""
 
 
 # Cron/startup persistence: scheduling a command that runs at login or reboot.
@@ -469,8 +505,18 @@ def _cron_persistence_hits(blob: str, fence_ranges: list[tuple[int, int]]) -> tu
     label = "cron/startup persistence: installs a scheduled or boot-time job"
     reputable_label = "cron/startup persistence (reputable service): enables a well-known system daemon"
     disclosed_label = "cron/startup persistence (disclosed): a documented watchdog/monitoring job"
+    fixture_label = "cron/startup persistence (test fixture): inside the skill's own test file"
+    saw_test_fixture = False
     for m in _CRON_PERSIST_RE.finditer(blob):
         if _is_code_example(blob, m.start(), fence_ranges):
+            continue
+        # B-199: attack-shaped cron content inside the skill's OWN test fixture
+        # (e.g. clawstealth's tests/*_test.sh asserting its cron_ensure idempotency
+        # against a MOCKED crontab binary) is not a live directive — same class as
+        # B-193's pipe-to-shell/base64 test-fixture down-rank, extended to cron.
+        # Keep scanning past it: a genuine match elsewhere must still be caught.
+        if _pos_in_test_fixture_file(blob, m.start()):
+            saw_test_fixture = True
             continue
         svc = _CRON_SERVICE_TARGET_RE.match(blob, m.start())
         if svc and svc.group(1).lower() in _REPUTABLE_DAEMON_NAMES:
@@ -484,6 +530,9 @@ def _cron_persistence_hits(blob: str, fence_ranges: list[tuple[int, int]]) -> tu
         else:
             high_hits.append(label)
         break  # one finding per skill is enough, same as the original loop
+    else:
+        if saw_test_fixture:
+            warn_hits.append(fixture_label)
     return high_hits, warn_hits
 
 
@@ -617,7 +666,11 @@ def _agent_config_write_hits(
         win_start = max(0, m.start() - _PERSIST_WINDOW)
         win_end = min(len(blob), m.end() + _PERSIST_WINDOW)
         window = _HTML_TAG_RE.sub(" ", blob[win_start:win_end])  # B-085: drop inline tag '>'
-        if _PERSIST_WRITE_VERB_RE.search(window):
+        # B-198: a real shell redirect targeting THIS filename — checked separately
+        # from the general write-verb window since it must be bound immediately
+        # before the filename (not merely co-located), else a markdown arrow/
+        # blockquote/fd-dup/redirect-to-another-path anywhere nearby would count.
+        if _PERSIST_WRITE_VERB_RE.search(window) or _redirect_targets_file(blob, m.start()):
             key = name
             if key not in seen_skills:
                 seen_skills.add(key)
@@ -761,6 +814,56 @@ _CRED_ACQUISITION_RE = re.compile(
     r"\b(?:api[\s_-]?key|token|account|credentials?)\b",
     re.I,
 )
+
+
+# B-197: the same prohibition-vs-directive confusion B-194 found in F-021 also affects
+# C-044's "execute arbitrary code" alternation — "You must never: Execute arbitrary
+# code" is a safety CONSTRAINT, not a directive to perform it. C-044-scoped rather
+# than reusing _FETCH_PROHIBITION_RE verbatim: a bare sentence-initial "Never run any
+# scripts" (no "must"/"shall") is common safety-prompt phrasing that _FETCH_PROHIBITION_RE
+# does not cover, so this adds bare never/do not/don't alongside the shared vocabulary.
+_AGENCY_EXEC_VERB_RE = re.compile(
+    r"\b(?:execute|run)\s+(?:arbitrary|any)\s+(?:commands?|code|scripts?)\b", re.I
+)
+
+
+_AGENCY_PROHIBITION_RE = re.compile(
+    r"\bnever\b|\bmust\s+not\b|\bshall\s+not\b|\bdo\s+not\b|\bdon.?t\b|"
+    r"\b(?:strictly\s+)?(?:forbidden|prohibited)\b|\bnot\s+allowed\b",
+    re.I,
+)
+
+
+# C-135 (adversarial review, 2nd finding): the shared _FETCH_PROHIBITION_DOUBLE_NEG_RE
+# (skip/omit/avoid/fail to/without) is far narrower than the real double-negation
+# class — "never REFUSE to execute arbitrary code" / "must not HESITATE to execute
+# arbitrary code" / "never FORGET to execute arbitrary code" are unambiguous COMMANDS,
+# not prohibitions, yet none of those verbs were covered. C-044-scoped (not widening
+# the shared F-021 regex, to avoid perturbing B-194's already-shipped, already-
+# reviewed behavior) — the same widening may be worth applying to F-021 separately.
+_AGENCY_DOUBLE_NEG_RE = re.compile(
+    r"\b(?:skip|omit|avoid|fail\s+to|without|refuse|hesitate|declin(?:e|ing)|"
+    r"neglect|forget|delay|wait|hold\s+back)\b",
+    re.I,
+)
+
+
+def _agency_prohibition_governs(blob: str, m: re.Match) -> bool:
+    """B-197: True when a prohibition phrase GOVERNS the matched exec-directive text
+    (same sentence, positioned before it, no double-negation) — mirrors B-194's
+    _fetch_prohibition_governs, but scoped to C-044's exec-verb alternation only (the
+    auto-approve/tools-wildcard/permissions-all alternations in the same _SKILL_HIGH
+    label stay ungoverned; those are config-shaped grants, not phrasing an ordinary
+    safety constraint would use)."""
+    if not _AGENCY_EXEC_VERB_RE.match(m.group(0)):
+        return False
+    prefix = blob[max(0, m.start() - _RUNTIME_FETCH_WINDOW) : m.start()]
+    breaks = list(_SENTENCE_BREAK_RE.finditer(prefix))
+    sentence_start = breaks[-1].end() if breaks else 0
+    clause = prefix[sentence_start:]
+    if not _AGENCY_PROHIBITION_RE.search(clause):
+        return False
+    return not _AGENCY_DOUBLE_NEG_RE.search(clause)
 
 
 # F-021: runtime-external-fetch instruction detector (OWASP AST05 "Untrusted External
@@ -1419,6 +1522,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         # HIGH patterns: same fence-aware approach.
         for label, rx in _SKILL_HIGH:
             _test_fixture_only = False  # B-193: saw ONLY test-fixture-scoped live matches
+            _agency_prohibited_only = False  # B-197: saw ONLY prohibition-governed matches
             for m in rx.finditer(blob):
                 if not _is_code_example(blob, m.start(), _fr):
                     # B-193: attack-shaped strings inside the skill's OWN test fixtures
@@ -1431,6 +1535,15 @@ def check_installed_skills(ctx: Context) -> Finding:
                         _test_fixture_only = True
                         continue
                     _test_fixture_only = False
+                    # B-197: a safety-constraint prohibition ("You must never: execute
+                    # arbitrary code") FORBIDS the action, not directs it — keep scanning
+                    # for a genuine, non-prohibited match instead.
+                    if label == "excessive agency: auto-approve/execute directive (skill content)" and (
+                        _agency_prohibition_governs(blob, m)
+                    ):
+                        _agency_prohibited_only = True
+                        continue
+                    _agency_prohibited_only = False
                     # F-097: an http download-and-run under an install/setup heading is a
                     # documented installer (capability, not malice) -> WARN. The obfuscation/
                     # powershell/git entries are NOT gated and stay FAIL.
@@ -1445,6 +1558,8 @@ def check_installed_skills(ctx: Context) -> Finding:
             else:
                 if _test_fixture_only:
                     warns_content.append(f"{name}: {label} (inside the skill's own test fixture)")
+                elif _agency_prohibited_only:
+                    warns_content.append(f"{name}: {label} (prohibition/safety-constraint phrasing)")
 
         # F-021: runtime-external-fetch instruction (OWASP AST05).
         # Fires when a skill's text contains fetch/load verb + external http(s) URL +

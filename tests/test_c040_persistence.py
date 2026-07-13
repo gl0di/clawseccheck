@@ -197,6 +197,44 @@ def test_c040_cron_at_reboot_unit():
     )
     f = check_installed_skills(_ctx({"installer": blob}))
     assert f.status == FAIL, f"@reboot not detected: {f.detail!r}"
+
+
+# ===========================================================================
+# B-199 (real-fleet finding): cron content inside the skill's OWN test fixture
+# (clawstealth's tests/*_test.sh asserting its cron_ensure idempotency against a
+# MOCKED crontab binary) is not a live directive — same class as B-193's
+# pipe-to-shell/base64 test-fixture down-rank, extended to cron.
+# ===========================================================================
+
+def test_c040_cron_inside_shell_test_fixture_does_not_fail():
+    blob = (
+        "# file: SKILL.md\n---\nname: vpn-tool\n---\n"
+        "# file: engine_core_test.sh\n"
+        "#!/usr/bin/env bash\n"
+        "PASS=0\n"
+        "FAIL=0\n"
+        'check() { if eval "$2"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi; }\n'
+        'echo "[test] cron_ensure"\n'
+        'export CRON_STATE="${SANDBOX}/crontab.state"\n'
+        'cat > "${BIN}/crontab" <<EOMOCK\n'
+        "#!/bin/sh\n"
+        "# mock crontab reading/writing $CRON_STATE\n"
+        "EOMOCK\n"
+        'chmod +x "${BIN}/crontab"\n'
+        'cron_ensure "clawstealth-ks" "*/2 * * * * root /opt/clawstealth/killswitch_check.sh"\n'
+        'cron_ensure "clawstealth-ks" "*/2 * * * * root /opt/clawstealth/killswitch_check.sh"\n'
+        "_cron_count=\"$(grep -c '# clawstealth-ks' \"$CRON_STATE\" 2>/dev/null || printf '0')\"\n"
+        'check "cron_ensure: exactly one tagged line after two calls" "[ \'$_cron_count\' -eq 1 ]"\n'
+    )
+    f = check_installed_skills(_ctx({"vpn-tool": blob}))
+    assert f.status != FAIL, f"cron test-fixture content wrongly failed: {f.detail!r}"
+
+
+def test_c040_bad_cron_fixture_still_fails_after_test_fixture_wiring():
+    """Regression guard: the real bad_c040_cron fixture (a live, non-test crontab
+    directive) must still FAIL after wiring in the test-fixture down-rank."""
+    f = _b13(FIXTURES / "bad_c040_cron")
+    assert f.status == FAIL, f"bad_c040_cron regressed: {f.status!r}: {f.detail!r}"
     assert any("cron" in (e or "").lower() or "persistence" in (e or "").lower()
                for e in (f.evidence or [])), (
         f"No cron/persistence evidence: {f.evidence!r}"
