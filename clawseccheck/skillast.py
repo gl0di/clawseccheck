@@ -763,6 +763,221 @@ def _subtree_has_decode(node: ast.AST) -> bool:
     return any(_is_decode_call(n) for n in ast.walk(node)) or _has_xor_decode(node)
 
 
+def _is_decode_primitive_call(node: ast.AST) -> bool:
+    """A real decode/decompress primitive call (the base64/zlib/hex family in
+    _DECODE_FUNCS) -- excludes the generic 'decode'/'fromhex'/'join' attribute names
+    that `_is_decode_call` also matches for the tighter single-expression check. Those
+    bare names are too common on ordinary code (`os.path.join`, `str.join`,
+    `thread.join`, `bytes.decode('utf-8')`) to safely use as the signal that names a
+    WHOLE function as decode-composing (see C-135 finding on C-202: this exact
+    collision false-FAILed a benign template-engine skill at crit severity)."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    if isinstance(f, ast.Name) and f.id in _DECODE_FUNCS:
+        return True
+    return isinstance(f, ast.Attribute) and f.attr in _DECODE_FUNCS
+
+
+def _assign_target_names(target: ast.AST) -> set[str]:
+    """Bare names bound by an assignment target, unpacking tuples/lists/starred
+    targets (`a, *b = ...` -> {'a', 'b'})."""
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: set[str] = set()
+        for elt in target.elts:
+            names |= _assign_target_names(elt)
+        return names
+    if isinstance(target, ast.Starred):
+        return _assign_target_names(target.value)
+    return set()
+
+
+def _shadowed_names_in_subtree(fn: ast.AST) -> set[str]:
+    """C-202 / C-135 round 3: names that get locally rebound SOMEWHERE within `fn`'s
+    own subtree -- `fn`'s own parameters, nested def/class names at any depth, or
+    assignment/for/with/walrus targets at any depth. Over-inclusive on purpose: any
+    name that COULD be locally rebound must be treated as "maybe not the module-level
+    name of the same identifier", because Python's scoping rules make a rebinding
+    anywhere in a function shadow that name for the function's ENTIRE body, not just
+    after the rebinding line. This closes a real false positive: a function parameter,
+    nested helper, or local variable named the same as a genuine module-level
+    decode-composing function (e.g. `_decode`, or an ordinary name like `process`)
+    was being treated as though it WERE that function, purely by string match."""
+    shadowed: set[str] = set()
+    if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        args = fn.args
+        for a in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+            shadowed.add(a.arg)
+        if args.vararg:
+            shadowed.add(args.vararg.arg)
+        if args.kwarg:
+            shadowed.add(args.kwarg.arg)
+    for n in ast.walk(fn):
+        if n is fn:
+            continue
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            shadowed.add(n.name)
+            args = n.args
+            for a in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+                shadowed.add(a.arg)
+            if args.vararg:
+                shadowed.add(args.vararg.arg)
+            if args.kwarg:
+                shadowed.add(args.kwarg.arg)
+        elif isinstance(n, ast.ClassDef):
+            shadowed.add(n.name)
+        elif isinstance(n, ast.Assign):
+            for t in n.targets:
+                shadowed |= _assign_target_names(t)
+        elif isinstance(n, (ast.AugAssign, ast.AnnAssign)) and isinstance(n.target, ast.Name):
+            shadowed.add(n.target.id)
+        elif isinstance(n, (ast.For, ast.AsyncFor)):
+            shadowed |= _assign_target_names(n.target)
+        elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+            shadowed |= _assign_target_names(n.optional_vars)
+        elif isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name):
+            shadowed.add(n.target.id)
+    return shadowed
+
+
+def _build_toplevel_owner_map(funcs: list) -> dict:
+    """Map every descendant node of each top-level function to that function (the
+    "owning scope" for shadow-resolution purposes). A node not in this map is
+    module-level code."""
+    owner: dict = {}
+    for fn in funcs:
+        for n in ast.walk(fn):
+            owner.setdefault(n, fn)
+    return owner
+
+
+def _decode_composing_visible(
+    node: ast.AST, composing: set[str], owner_map: dict, shadow_cache: dict
+) -> set[str]:
+    """The subset of `composing` actually visible (not locally shadowed) at `node`'s
+    position -- see `_shadowed_names_in_subtree`. Module-level nodes (not owned by any
+    top-level function) see the full `composing` set unmodified."""
+    if not composing:
+        return composing
+    fn = owner_map.get(node)
+    if fn is None:
+        return composing
+    if fn not in shadow_cache:
+        shadow_cache[fn] = _shadowed_names_in_subtree(fn)
+    shadowed = shadow_cache[fn]
+    return (composing - shadowed) if shadowed else composing
+
+
+def _function_composes_decode(fn: ast.AST, composing: set[str]) -> bool:
+    """C-202 (+ C-135 round-2 fix): True only when a decode primitive/xor-shape, or a
+    call to an already-known decode-composing function, is reachable through the
+    function's OWN return value(s) -- never merely present anywhere in its body. A
+    decode call in a dead/debug branch (or a nested closure) whose result is discarded
+    must not taint the whole function name: `if debug: base64.b64decode(b'x')`
+    followed by `return 'literal'` must stay silent, since the decoded bytes never
+    reach what the function actually returns."""
+
+    def subtree_is_decode_ish(node: ast.AST) -> bool:
+        for n in ast.walk(node):
+            if _is_decode_primitive_call(n):
+                return True
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in composing:
+                return True
+        return _has_xor_decode(node)
+
+    own_nodes = list(_scope_own_nodes(fn))
+    tainted: set[str] = set()
+    for _ in range(4):
+        changed = False
+        for node in own_nodes:
+            if isinstance(node, ast.Assign):
+                rhs = node.value
+                if subtree_is_decode_ish(rhs) or (isinstance(rhs, ast.Name) and rhs.id in tainted):
+                    for t in node.targets:
+                        if isinstance(t, ast.Name) and t.id not in tainted:
+                            tainted.add(t.id)
+                            changed = True
+        if not changed:
+            break
+
+    for node in own_nodes:
+        if isinstance(node, ast.Return) and node.value is not None:
+            rv = node.value
+            if subtree_is_decode_ish(rv) or (isinstance(rv, ast.Name) and rv.id in tainted):
+                return True
+    return False
+
+
+def _decode_composing_funcnames(tree: ast.AST) -> set[str]:
+    """C-202: MODULE-LEVEL function names that COMPOSE decode work into their return
+    value (a base64/zlib/hex primitive, an xor-decode shape, or a call to another
+    decode-composing function) -- the `_decode()`-style top-level wrapper helper that a
+    naive decode->exec check misses when the payload is routed through it before
+    reaching exec/eval. Resolved to a small fixpoint so a wrapper that only calls
+    ANOTHER decode-composing function (chained/multi-stage wrappers, e.g. a `_decode()`
+    that just calls `_step2()`, which does the actual base64 call) is recognised too.
+
+    C-135 (adversarial review, round 1) found that matching class METHOD names by bare
+    string, with no receiver/scope resolution, let an unrelated same-named method
+    elsewhere in the file (e.g. two different classes each defining
+    `resolve`/`load`/`compose`) cross-contaminate a legitimate exec()/eval() call -- a
+    real crit false-FAIL. A module-level `def` name is unique within a file (Python
+    does not allow two top-level defs of the same name to coexist), so restricting to
+    top-level functions only closes that collision without giving up the
+    wrapper-indirection case this task targets (which is itself always a top-level
+    helper in the real-world samples).
+
+    C-135 round 2 found that even restricted to module level, treating a decode call
+    ANYWHERE in the function body (not just on its return path) as the composing
+    signal let a decode call in an unreachable/discarded branch taint a function whose
+    actual return value never touched it. `_function_composes_decode` requires the
+    decode signal to flow into the function's own `return`.
+
+    C-135 round 3 found that even return-path-scoped, a bare-name match against
+    `composing` could fire inside a function whose OWN body locally rebinds that same
+    name (a parameter, a nested helper, or a local reassignment) -- an ordinary name
+    reused elsewhere in the file (e.g. `_decode`, `process`, `parse`) is not the same
+    function just because it shares a string. Each candidate function only sees the
+    composing names not shadowed somewhere within its own subtree
+    (`_shadowed_names_in_subtree`)."""
+    funcs = [
+        n
+        for n in getattr(tree, "body", [])
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    shadowed_by_fn = {fn: _shadowed_names_in_subtree(fn) for fn in funcs}
+    composing: set[str] = set()
+    for _ in range(4):
+        changed = False
+        for fn in funcs:
+            if fn.name in composing:
+                continue
+            shadowed = shadowed_by_fn[fn]
+            visible = (composing - shadowed) if shadowed else composing
+            if _function_composes_decode(fn, visible):
+                composing.add(fn.name)
+                changed = True
+        if not changed:
+            break
+    return composing
+
+
+def _subtree_calls_decode_composing(node: ast.AST, composing: set[str]) -> bool:
+    """C-202: True when `node`'s subtree calls a decode-composing MODULE-LEVEL function
+    by bare name (`_decode(...)`) -- the wrapper-indirection form of decode->exec that
+    plain `_subtree_has_decode` (inline decode primitives only) misses. Bare-name-only
+    (no `obj.attr(...)` match) by design -- see `_decode_composing_funcnames` docstring
+    for the C-135 collision this avoids."""
+    if not composing:
+        return False
+    return any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in composing
+        for n in ast.walk(node)
+    )
+
+
 # F-058: code-level time-bomb / sandbox-evasion. Narrow on purpose — wall-clock date
 # (datetime.now()/date.today()/utcnow) and environment presence (os.environ / os.getenv)
 # only; NOT time.time() elapsed-timeouts or sys.platform checks, which are ordinary flow.
@@ -821,16 +1036,33 @@ def _names_in(node: ast.AST) -> set[str]:
     return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
 
 
-def _tainted_names(tree: ast.AST) -> set[str]:
+def _tainted_names(
+    tree: ast.AST,
+    composing: set[str] | None = None,
+    owner_map: dict | None = None,
+    shadow_cache: dict | None = None,
+) -> set[str]:
     """Names assigned from a decode/decompress expression — so a dynamic-eval call on
     `payload`, where `payload` was assigned `base64.b64decode(...)` earlier, is still
-    recognised."""
+    recognised. `composing` (from _decode_composing_funcnames) extends this to an
+    assignment from a call to a decode-composing wrapper, e.g. `payload = _decode(blob)`
+    -- `owner_map`/`shadow_cache` (from _build_toplevel_owner_map) restrict that match
+    to the composing names actually visible at each assignment's position, so a local
+    parameter/nested-def/rebind that merely shares the wrapper's name is not conflated
+    with it (C-135 round 3)."""
     tainted: set[str] = set()
+    composing = composing or set()
+    owner_map = owner_map or {}
+    shadow_cache = shadow_cache if shadow_cache is not None else {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and _subtree_has_decode(node.value):
-            for t in node.targets:
-                if isinstance(t, ast.Name):
-                    tainted.add(t.id)
+        if isinstance(node, ast.Assign):
+            visible = _decode_composing_visible(node, composing, owner_map, shadow_cache)
+            if _subtree_has_decode(node.value) or _subtree_calls_decode_composing(
+                node.value, visible
+            ):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        tainted.add(t.id)
     return tainted
 
 
@@ -892,7 +1124,15 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     """
     try:
         tree = ast.parse(source)
-        tainted = _tainted_names(tree)
+        composing = _decode_composing_funcnames(tree)
+        _toplevel_funcs = [
+            n
+            for n in getattr(tree, "body", [])
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        owner_map = _build_toplevel_owner_map(_toplevel_funcs)
+        shadow_cache: dict = {}
+        tainted = _tainted_names(tree, composing, owner_map, shadow_cache)
         # B-132: precompute fixed-argv-list bindings once so the plain subprocess.*
         # DANGEROUS_SINK check below can tell a safe `subprocess.run(['prog', arg])`
         # (or `cmd = ['prog', arg]; subprocess.run(cmd)`) apart from a spliced/
@@ -963,7 +1203,12 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         # an obfuscated/decoded or tainted argument = crit; a plain one = info.
         if isinstance(f, ast.Name) and f.id in _EXEC_NAMES and node.args:
             arg = node.args[0]
-            if _subtree_has_decode(arg) or (_names_in(arg) & tainted):
+            visible_composing = _decode_composing_visible(node, composing, owner_map, shadow_cache)
+            if (
+                _subtree_has_decode(arg)
+                or (_names_in(arg) & tainted)
+                or _subtree_calls_decode_composing(arg, visible_composing)
+            ):
                 add(
                     "OBFUSCATED_EXEC",
                     "crit",

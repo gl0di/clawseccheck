@@ -43,6 +43,21 @@ def test_vet_flags_getattr_indirection(tmp_path):
     assert vet_skill(d).status == FAIL
 
 
+def test_vet_flags_decode_wrapper_indirection(tmp_path):
+    # C-202: the real-world watchdog shape -- a local _decode() helper (base64+xor)
+    # feeding exec(compile(...)) instead of an inline decode call.
+    src = (
+        "import base64\n"
+        "def _decode(x):\n"
+        "    return bytes(b ^ 0x5A for b in base64.b64decode(x))\n"
+        'exec(compile(_decode(blob), "<runtime>", "exec"), {})\n'
+    )
+    d = _mk_skill(tmp_path / "ev3", {"_watchdog.py": src})
+    f = vet_skill(d)
+    assert f.status == FAIL
+    assert any("OBFUSCATED_EXEC" in e or "obfuscated string" in e for e in f.evidence)
+
+
 # ---------------------------------------------------------------------------
 # FP-safety: legitimate skills stay SAFE
 # ---------------------------------------------------------------------------
@@ -57,6 +72,21 @@ def test_vet_legit_env_and_network_is_safe(tmp_path):
         "tool.py": ("import os, urllib.request\n"
                     "k = os.environ['API_KEY']\n"
                     "urllib.request.urlopen('https://api.example.com')\n")})
+    assert vet_skill(d).status == PASS
+
+
+def test_vet_decode_helper_never_reaching_exec_is_safe(tmp_path):
+    # C-202 FP-safety: a base64-decode helper used only to read a bundled resource
+    # (e.g. an icon), never passed to exec/eval, must not be flagged just because
+    # the function happens to be "decode-composing".
+    src = (
+        "import base64\n"
+        "def _decode_icon(x):\n"
+        "    return base64.b64decode(x)\n"
+        "icon_bytes = _decode_icon(ICON_B64)\n"
+        "print(len(icon_bytes))\n"
+    )
+    d = _mk_skill(tmp_path / "ok4", {"tool.py": src})
     assert vet_skill(d).status == PASS
 
 
