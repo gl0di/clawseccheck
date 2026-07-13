@@ -3,6 +3,51 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.40.0] — 2026-07-13
+
+Real-fleet-driven B13 (installed-skill vetting) precision pass, a memory-safety fix
+in the skill-content taint simulator, and a cron-persistence security-hole close —
+each new discriminator went through independent adversarial review before shipping,
+and two mechanisms that review found unsound were retracted rather than shipped.
+
+### Added
+- **Ethereum/Solana wallet-path credential-exfil detection.** `.ethereum/keystore`
+  and `.config/solana` now recognized as credential-exfil sources.
+
+### Fixed
+- **EffectSimulator unbounded memory growth on nested/sequential if/else branches**
+  (B-192) — a skill with deeply nested conditionals could grow `reached_sinks`
+  exponentially, exhausting memory during `--vet`/full-audit scans. Bounded via a
+  dedup'd sink-key set with a hard cap, verified lossless against the original
+  accuracy and bounded to sub-second time even at depth 24 (previously hung past
+  15s at depth 20).
+- **Reduced B13 false-FAIL rate on 4 confirmed benign patterns** (B-193): forged
+  test-fixture headers, self-declared config-writer false-FAILs, and a shell-test-
+  file extension for the existing test-fixture down-rank (with 2-signal hardening
+  against a single-generic-shell-idiom bypass).
+- **5 more F-021 runtime-fetch false-FAIL patterns** (B-194): local/loopback hosts,
+  safety-prohibition sentences (with sentence-boundary governance so a distant,
+  unrelated disclaimer can't immunize a live directive), and credential-acquisition
+  doc-URL phrasing.
+- **B13 cron-persistence break-on-first bug** (B-203): `_cron_persistence_hits`
+  stopped scanning at the first cron/startup-persistence match in a skill's text,
+  so an early reputable or disclosed match could mask a later, genuinely covert
+  one. It now evaluates every distinct match — closing a real detection gap, not
+  just a false-positive.
+
+### Investigated, not shipped
+- Two down-rank mechanisms designed against real-fleet findings were retracted
+  after independent adversarial review proved each trivially gameable rather than
+  patched further: a "conditionally-gated systemd unit" cron down-rank (accepted
+  any syntactically-valid Condition directive as proof of a meaningful gate,
+  including trivially-true ones) and a discriminator meant to down-rank C-044's
+  exec-verb pattern on descriptive security-documentation comments (three
+  successive designs, each defeated — comment-shape alone, an address-keyword
+  blocklist, and a vocabulary-anchored version were all bypassed in turn). Both
+  residuals are known, documented, narrow false-positives on one real config —
+  accepted over shipping a HIGH-severity check a single attacker-chosen word
+  could bypass.
+
 ## [3.39.0] — 2026-07-13
 
 Closes epic E-040 (threat-map closure guarantee): a machine-enforced closure invariant
