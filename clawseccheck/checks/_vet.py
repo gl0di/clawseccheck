@@ -43,6 +43,7 @@ from ..textnorm import (
 )
 
 from ._shared import (
+    _MANIFEST_HEADER_RE,
     _custom,
     _is_own_source,
     _is_public_ip,
@@ -503,17 +504,64 @@ _SKILL_PERSISTENCE_WARN = [
 ]
 
 
+# B-193: a skill's OWN test suite legitimately contains attack-shaped strings as
+# fixtures asserting its defenses against them (case_01472, SkillTrustBench's own
+# FP_TEST_FIXTURE label) — not a live directive. Basename-only (the "# file: <name>"
+# marker _read_skill_text injects strips the directory), so this is a naming-
+# convention signal, not a path-based one.
+_TEST_FIXTURE_BASENAME_RE = re.compile(
+    r"^(?:test_.*|.*_test|conftest)\.py$|^.*\.(?:spec|test)\.(?:js|ts|tsx|jsx)$",
+    re.I,
+)
+
+
+# C-135 (adversarial review) found the basename check alone is forgeable: the
+# "# file: <name>" marker is plain text _read_skill_text injects, not an authenticated
+# boundary — _MANIFEST_HEADER_RE matches ANY line shaped like it, including one an
+# attacker embeds inside an unrelated file's own body (e.g. a fabricated
+# "# file: test_x.py" heading inside README.md, wrapping a live payload). A one-line
+# forged header with a bare shell command has none of the shape a genuine pytest/
+# unittest fixture has; requiring it closes the zero-effort forgery while accepting
+# that a sophisticated attacker crafting fully plausible test-function boilerplate
+# around a live payload is a harder, residual case the tool still surfaces as WARN
+# (not silently drops) rather than FAIL.
+_TEST_SHAPE_RE = re.compile(
+    r"\bdef\s+test_\w*\s*\(|\bimport\s+pytest\b|\bimport\s+unittest\b|"
+    r"\bclass\s+Test\w*\b|@pytest\.mark\b|\bself\.assert\w*\(",
+    re.I,
+)
+
+
+def _pos_in_test_fixture_file(blob: str, pos: int) -> bool:
+    """True when *pos* falls inside a "# file: <name>" section whose basename matches
+    a test-file naming convention AND whose body has genuine test-code shape — both
+    are required (C-135: a forged header alone is not enough). Scopes a down-rank to
+    exactly that file, not the whole skill (a live attack elsewhere is unaffected)."""
+    for m in _MANIFEST_HEADER_RE.finditer(blob):
+        if m.start("body") <= pos < m.end("body"):
+            return bool(
+                _TEST_FIXTURE_BASENAME_RE.match(m.group("name").strip())
+                and _TEST_SHAPE_RE.search(m.group("body"))
+            )
+    return False
+
+
 def _agent_config_write_hits(
     name: str, blob: str, fence_ranges: list[tuple[int, int]]
-) -> list[str]:
-    """Return evidence strings for agent-config-file write patterns in *blob*.
+) -> list[tuple[str, str]]:
+    """Return (evidence string, matched agent-context filename) pairs for agent-config-file
+    write patterns in *blob*.
 
     Two-step detection: (1) find each agent-context filename match outside a
     code-example fence; (2) confirm a write-mode verb exists within
     ±_PERSIST_WINDOW chars of the filename match.  This keeps a skill that merely
     READS (or documents) an agent-context file from tripping the detector.
+
+    B-193: now returns the filename alongside the evidence string so the caller can
+    check whether the skill's OWN declared purpose targets that exact file
+    (_skill_declares_config_target) before deciding severity.
     """
-    hits: list[str] = []
+    hits: list[tuple[str, str]] = []
     seen_skills: set[str] = set()
     for m in _AGENT_CONTEXT_FILES_RE.finditer(blob):
         if _is_code_example(blob, m.start(), fence_ranges):
@@ -527,9 +575,69 @@ def _agent_config_write_hits(
             if key not in seen_skills:
                 seen_skills.add(key)
                 hits.append(
-                    f"{name}: agent-config persistence: writes to agent-context file '{fname}'"
+                    (
+                        f"{name}: agent-config persistence: writes to agent-context file "
+                        f"'{fname}'",
+                        fname,
+                    )
                 )
     return hits
+
+
+# B-193: verbs a skill's own SKILL.md frontmatter would plausibly use to describe
+# ITSELF as a tool that manages a specific config file — a self-declaration check, not
+# a bare allowlist: it still requires the exact target filename to appear near the verb.
+_CONFIG_DECLARE_VERB_RE = re.compile(
+    r"\b(?:configur\w*|customi[sz]\w*|set\s*-?\s*up\w*|manag\w*|edit\w*|updat\w*|"
+    r"writ\w*|generat\w*)\b",
+    re.I,
+)
+
+
+def _skill_declares_config_target(blob: str, target_fname: str) -> bool:
+    """B-193: True when the skill's OWN SKILL.md frontmatter (name/description) names
+    the exact write-target file near a configuration verb — the skill's stated purpose,
+    not a bare self-declared allowlist (case_01826, a legitimate statusline configurator
+    whose entire job is writing .claude/settings.json). Requires the CONCRETE target
+    filename, not just any configuration-sounding language, so a skill that declares
+    itself a generic "config manager" without naming this specific file does not
+    qualify — narrows the self-declaration to something an attacker can't get for free
+    just by claiming to be helpful."""
+    fm = _skill_frontmatter_block(blob)
+    if not fm:
+        return False
+    target_stem = target_fname.rsplit("/", 1)[-1]
+    fm_lower = fm.lower()
+    idx = fm_lower.find(target_stem.lower())
+    if idx == -1:
+        return False
+    window = fm[max(0, idx - 80) : idx + len(target_stem) + 80]
+    return bool(_CONFIG_DECLARE_VERB_RE.search(window))
+
+
+# C-135 (adversarial review): a self-declared config-writer's "no other signal" gate is
+# trivially satisfied by a payload with no OTHER B13 pattern of its own — a written
+# config value that grants blanket tool approval or plants a hook is exactly that: the
+# declaration excuses WRITING the file, never installing a permission bypass or hook
+# inside it. Reuses the B96 auto-approve/permission-widening shape (_content.py) plus
+# the hook/dangerously-skip vocabulary an approval-bypass payload would carry.
+_CONFIG_WRITE_DANGEROUS_RE = re.compile(
+    r'"?auto[_-]?approve\w*"?\s*[:=]\s*(?:"?(?:true|all|approve[_-]?all)"?)|'
+    r'"?permission[_-]?mode"?\s*[:=]\s*"?(?:approve[_-]?all|bypass|dangerously\w*)"?|'
+    r"\ballow\w*\s*[:=]\s*\[?\s*[\"'*]|"
+    r"\b(?:Pre|Post)ToolUse\b|dangerously[_-]?skip\w*|dangerously[_-]?allow\w*",
+    re.I,
+)
+
+
+def _config_write_carries_dangerous_payload(blob: str) -> bool:
+    """True when the skill's text ANYWHERE carries permission-bypass/hook-shaped
+    wording — gates _skill_declares_config_target's down-rank so a declared purpose
+    never excuses smuggling an auto-approve or hook payload into the declared target
+    (C-135 finding: the written VALUE, not just the write call, is where the malice
+    would live, and B13's other checks don't independently see a config file's
+    literal string contents)."""
+    return bool(_CONFIG_WRITE_DANGEROUS_RE.search(blob))
 
 
 # F-021: runtime-external-fetch instruction detector (OWASP AST05 "Untrusted External
@@ -553,8 +661,15 @@ _RUNTIME_FETCH_VERB_RE = re.compile(r"\b(?:fetch|download|load|read|retrieve|pul
 
 
 _RUNTIME_FETCH_NOUN_RE = re.compile(
-    r"\b(?:instructions?|context|system\s+prompt|config(?:uration)?|rules?|"
-    r"prompt|directives?)\b",
+    # B-193: bare "config(uration)" is not instruction-specific — a data-tool skill
+    # documenting "download the dataset and load it into your config" satisfies verb+noun
+    # on ordinary data-fetch prose with no agent-instruction meaning at all (case_01090,
+    # a data_tool skill fetching a public dataset). Qualify "config" to the agent/model
+    # class of config an instruction-hijack attack actually targets; the other nouns
+    # (instructions/context/system prompt/rules/prompt/directives) are already specific.
+    r"\b(?:instructions?|context|system\s+prompt|"
+    r"(?:agent|system|assistant|model|prompt|skill|tool)[\s-]*config(?:uration)?|"
+    r"rules?|prompt|directives?)\b",
     re.I,
 )
 
@@ -612,6 +727,38 @@ _AUTONOMY_RE = re.compile(
     r"no\s+prompt",
     re.I,
 )
+
+
+_DESTRUCTIVE_AUTONOMY_WINDOW = 200  # chars between a destructive cmd and an autonomy marker
+
+
+def _destructive_autonomy_hit(blob: str, fence_ranges: list[tuple[int, int]]) -> bool:
+    """B-193: the destructive command and the autonomy marker must co-occur within
+    _DESTRUCTIVE_AUTONOMY_WINDOW chars of each other — the prior whole-blob co-occurrence
+    check (merely both existing SOMEWHERE) false-fired on a devtool git migration helper
+    (case_00751): `git push --force` in one part of the workflow, an unrelated `--yes`/
+    non-interactive flag mentioned elsewhere for automation, zero connection between them.
+    A genuine no-confirmation destructive directive keeps the two phrases close by nature —
+    mirrors the project's established proximity-window idiom (_PERSIST_WINDOW etc.)."""
+    destructive_spans = [
+        m.start()
+        for m in _DESTRUCTIVE_CMD_RE.finditer(blob)
+        if not _is_code_example(blob, m.start(), fence_ranges)
+    ]
+    if not destructive_spans:
+        return False
+    autonomy_spans = [
+        m.start()
+        for m in _AUTONOMY_RE.finditer(blob)
+        if not _is_code_example(blob, m.start(), fence_ranges)
+    ]
+    if not autonomy_spans:
+        return False
+    return any(
+        abs(d - a) <= _DESTRUCTIVE_AUTONOMY_WINDOW
+        for d in destructive_spans
+        for a in autonomy_spans
+    )
 
 
 # Prompt-injection / approval-bypass directives embedded in a THIRD-PARTY skill's prose
@@ -1096,8 +1243,19 @@ def check_installed_skills(ctx: Context) -> Finding:
 
         # HIGH patterns: same fence-aware approach.
         for label, rx in _SKILL_HIGH:
+            _test_fixture_only = False  # B-193: saw ONLY test-fixture-scoped live matches
             for m in rx.finditer(blob):
                 if not _is_code_example(blob, m.start(), _fr):
+                    # B-193: attack-shaped strings inside the skill's OWN test fixtures
+                    # (tests/test_*.py legitimately asserting defenses against them,
+                    # case_01472) are the named FP driver for exactly this label — keep
+                    # scanning for a genuine, non-test-fixture match instead.
+                    if label == "base64-decode piped to exec / obfuscation" and (
+                        _pos_in_test_fixture_file(blob, m.start())
+                    ):
+                        _test_fixture_only = True
+                        continue
+                    _test_fixture_only = False
                     # F-097: an http download-and-run under an install/setup heading is a
                     # documented installer (capability, not malice) -> WARN. The obfuscation/
                     # powershell/git entries are NOT gated and stay FAIL.
@@ -1109,6 +1267,9 @@ def check_installed_skills(ctx: Context) -> Finding:
                     else:
                         high.append(f"{name}: {label}")
                     break
+            else:
+                if _test_fixture_only:
+                    warns_content.append(f"{name}: {label} (inside the skill's own test fixture)")
 
         # F-021: runtime-external-fetch instruction (OWASP AST05).
         # Fires when a skill's text contains fetch/load verb + external http(s) URL +
@@ -1139,8 +1300,13 @@ def check_installed_skills(ctx: Context) -> Finding:
                 # F-097: pipe-to-shell to the skill's own host or under an install/setup
                 # heading is a documented installer -> WARN; else it stays FAIL.
                 _own = _own_host is not None and (h == _own_host or h.endswith("." + _own_host))
+                # B-193: same test-fixture FP driver as the base64/exec label above
+                # (case_01472) — a live pipe-to-shell string inside the skill's own
+                # tests/test_*.py is a fixture, not a directive.
                 if _own or _under_install_heading(blob, pm.start()):
                     warns_install_curl.append(msg)
+                elif _pos_in_test_fixture_file(blob, pm.start()):
+                    warns_content.append(msg + " (inside the skill's own test fixture)")
                 else:
                     high.append(msg)
 
@@ -1157,25 +1323,16 @@ def check_installed_skills(ctx: Context) -> Finding:
                 f"{name}: credential path and exfil sink both present in skill (split-stage risk)"
             )
 
-        # C-039: destructive + autonomy pattern — HIGH when a destructive shell command
-        # (git reset --hard, git push --force, rm -rf ~, shred, mkfs, dd to /dev/) appears
-        # alongside an autonomy marker in the skill text. Bare rm -rf / is already CRITICAL
-        # via _SKILL_CRIT; this catches the broader class that only becomes dangerous when
-        # the agent is instructed to act without asking.  Fence-aware: skip matches that
-        # are inside documented code-example blocks.
-        if _DESTRUCTIVE_CMD_RE.search(blob) and _AUTONOMY_RE.search(blob):
-            # Confirm neither signal is exclusively inside a fenced documentation block.
-            _has_destructive_live = any(
-                not _is_code_example(blob, m.start(), _fr)
-                for m in _DESTRUCTIVE_CMD_RE.finditer(blob)
+        # C-039/B-193: destructive + autonomy pattern — HIGH when a destructive shell command
+        # (git reset --hard, git push --force, rm -rf ~, shred, mkfs, dd to /dev/) co-occurs
+        # WITHIN A BOUNDED WINDOW of an autonomy marker in the skill text. Bare rm -rf / is
+        # already CRITICAL via _SKILL_CRIT; this catches the broader class that only becomes
+        # dangerous when the agent is instructed to act on it without asking. Fence-aware:
+        # skip matches inside documented code-example blocks.
+        if _destructive_autonomy_hit(blob, _fr):
+            high.append(
+                f"{name}: destructive command with autonomy marker (no-confirmation destructive action)"
             )
-            _has_autonomy_live = any(
-                not _is_code_example(blob, m.start(), _fr) for m in _AUTONOMY_RE.finditer(blob)
-            )
-            if _has_destructive_live and _has_autonomy_live:
-                high.append(
-                    f"{name}: destructive command with autonomy marker (no-confirmation destructive action)"
-                )
 
         # Dual-use directives only fire alongside a real cred/exfil signal (zero-FP);
         # the canonical "ignore previous instructions" phrase fires on its own. Co-located
@@ -1264,9 +1421,24 @@ def check_installed_skills(ctx: Context) -> Finding:
         for h in _cron_warn:
             _persist_warn.append(f"{name}: {h}")
 
-        # C-040: agent-config injection (two-step: filename + write-verb in window).
-        for hit in _agent_config_write_hits(name, blob, _fr):
-            high.append(hit)
+        # C-040/B-193: agent-config injection (two-step: filename + write-verb in window).
+        # Down-rank to WARN only when BOTH hold: the skill's own SKILL.md declares this
+        # exact target as its purpose (_skill_declares_config_target), AND nothing else
+        # has already flagged this skill crit/high — a declared config-writer that also
+        # trips any other signal still FAILs (case_01826 mitigation, architect design).
+        for evidence, fname in _agent_config_write_hits(name, blob, _fr):
+            _prefix = f"{name}:"
+            _has_other_signal = any(e.startswith(_prefix) for e in crit) or any(
+                e.startswith(_prefix) for e in high
+            )
+            if (
+                not _has_other_signal
+                and _skill_declares_config_target(blob, fname)
+                and not _config_write_carries_dangerous_payload(blob)
+            ):
+                _persist_warn.append(f"{evidence} (skill's own declared purpose)")
+            else:
+                high.append(evidence)
 
         # C-040: backgrounding/daemonize — lower confidence → WARN bucket.
         # We collect into a separate list so they don't escalate to HIGH FAIL.

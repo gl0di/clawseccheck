@@ -742,6 +742,16 @@ _FM_BLOCK_HEADERED_RE = re.compile(
 )
 
 
+# General per-file section splitter for the "# file: <name>\n" header _read_skill_text
+# injects ahead of every concatenated file's content (moved here from _content.py, B-193 —
+# reused by _vet.py too). `name` keeps only the basename (directory stripped by
+# _read_skill_text), so this identifies WHICH FILE a blob position came from, not its path.
+_MANIFEST_HEADER_RE = re.compile(
+    r"^# file:\s+(?P<name>[^\n]+)\n(?P<body>.*?)(?=^# file:|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
 _HOOK_EXEC_RE = re.compile(
     r"\bcurl\b|\bwget\b|\|\s*(?:ba|z)?sh\b|\bbash\b|node\s+-e|python\d?\s+-c|"
     r"base64|\biex\b|invoke-expression|powershell|https?://|eval\s*\(",

@@ -42,6 +42,7 @@ from ._shared import (
     _FM_BLOCK_BARE_RE,
     _FM_BLOCK_HEADERED_RE,
     _HOOK_EXEC_RE,
+    _MANIFEST_HEADER_RE,
     _channels,
     _custom,
     _enabled_tools,
@@ -1604,11 +1605,8 @@ _LIFECYCLE_HOOK_RE = re.compile(
 # package update silently delivers malware into the skill bundle on next install.
 # Tomllib (3.11+) is not available on 3.9/3.10; use regex-only approach for 3.9 compat.
 #
-# Recognise the section header injected by _read_skill_text: "# file: <name>\n".
-_MANIFEST_HEADER_RE = re.compile(
-    r"^# file:\s+(?P<name>[^\n]+)\n(?P<body>.*?)(?=^# file:|\Z)",
-    re.MULTILINE | re.DOTALL,
-)
+# _MANIFEST_HEADER_RE (recognises the "# file: <name>\n" section header injected by
+# _read_skill_text) moved to _shared.py (B-193) — it's now reused by _vet.py too.
 
 
 # Words/phrases that mark a negation / example context in the PROSE immediately
