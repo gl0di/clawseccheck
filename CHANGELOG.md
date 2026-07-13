@@ -3,6 +3,37 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.38.1] — 2026-07-13
+
+Closes two silent misses found by the C-191 evasion-corpus eval, and tightens the
+capability-disclosure wording flagged by a ClawHub automated audit — no detection logic
+made stricter, no new false-FAIL surface.
+
+### Fixed
+- **B58 obfuscation scan now recurses into nested base64.** A payload encoded as
+  base64(base64(injection)) decoded once to an inner base64 string, not readable prose,
+  so the injection-pattern match never fired and the finding was a total, silent miss.
+  `_b58_base64_variants` now unwraps up to 3 layers, bounded by a per-token size cap and
+  a total-attempts budget so a crafted decode-bomb input can't blow up runtime.
+- **`--judge-packet` now recovers env-secret auth-header exfil.** An env/agent-config
+  secret placed in an auth-shaped keyword (`headers=`/`auth=`/`cert=`) of a network call
+  is deliberately excluded from the `ENV_EXFIL_FLOW` taint rule — the normal way a skill
+  authenticates to its own API — but that meant it was never even computed, so it could
+  never reach the advisory judge packet either. A new sibling AST walk
+  (`analyze_env_auth_kwarg_exfil`) surfaces exactly that excluded case as an `UNKNOWN`
+  judge-packet item; advisory only, never wired into any check's own verdict.
+- Swapped CVE-bearing package names out of the B157 registry-deps fixture (the check only
+  inspects a dependency's version-string shape, not the package name — the real advisories
+  against those names were an unrelated distraction for anyone reading the fixture).
+
+### Changed
+- **Capability disclosure tightened in SKILL.md/README.md.** "Read-only" is now stated as
+  scoped to your OpenClaw setup rather than absolute; host-security recon (filesystem/env-
+  name checks, no subprocess, no network) is disclosed explicitly instead of implied;
+  `--no-history`/`--no-host`/`--no-native`/`--purge` are listed together; and `--vet`/
+  `--vet-source` are stated up front as asking *your own host agent* to fetch, never
+  ClawSecCheck itself. No functionality or check-logic changed.
+
 ## [3.38.0] — 2026-07-12
 
 Advisory adjudication layer (E-038): a new opt-in export/import pair lets your own host
