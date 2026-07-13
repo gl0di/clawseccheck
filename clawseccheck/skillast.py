@@ -110,6 +110,16 @@ def _is_hardcoded_provider_secret(node: ast.AST) -> bool:
 
 _MAX_FINDINGS_PER_FILE = 25
 
+# B-192: EffectSimulator.State.reached_sinks grows without bound across nested
+# branches/loops (each simulate_if/simulate_loop merge duplicates the same sink
+# reached via different paths). A deeply-nested-but-tiny skill can drive this past
+# 2^depth entries, exhausting memory well before any wall-clock budget fires. This
+# caps the DISTINCT (effect, sink, guards) combinations a single simulation may
+# track — far beyond any real skill (<100) — and is generous enough to only trip on
+# adversarial guard-combination explosion, degrading to an honest UNKNOWN (never a
+# silent PASS) via the existing ScanBudgetExceeded -> run_all handler.
+_MAX_REACHED_SINKS = 10_000
+
 # Taint (CRED_EXFIL_FLOW): a credential-FILE's contents flowing into a network sink.
 # Sources are credential FILE paths ONLY — NOT environment variables — so the common
 # legit "read OPENAI_API_KEY, send it as an auth header" pattern is never flagged.
@@ -1340,11 +1350,25 @@ def analyze_env_auth_kwarg_exfil(source: str, filename: str = "<skill>") -> list
 # --- Abstract Effect Simulator ---
 
 
+def _sink_key(effect_type, sink_name, guards):
+    """Hashable identity for a reached-sink entry (B-192). `simulate()` already
+    collapses `reached_sinks` downstream to the distinct (effect, sink) set plus the
+    distinct guard-description set per sink — so merging exact-duplicate entries
+    (same effect + sink + guard combination) here changes no downstream finding; it
+    only stops the same duplicate from being re-copied at every nesting level."""
+    return (
+        effect_type,
+        sink_name,
+        tuple((g["condition_type"], g["description"]) for g in guards),
+    )
+
+
 class State:
     def __init__(self):
         self.tainted_vars = set()
         self.active_guards = []
         self.reached_sinks = []
+        self._sink_keys = set()
         self.terminated = False
         self.loop_broken = False
         self.loop_continued = False
@@ -1355,6 +1379,7 @@ class State:
         new_state.tainted_vars = set(self.tainted_vars)
         new_state.active_guards = [dict(g) for g in self.active_guards]
         new_state.reached_sinks = list(self.reached_sinks)
+        new_state._sink_keys = set(self._sink_keys)
         new_state.terminated = self.terminated
         new_state.loop_broken = self.loop_broken
         new_state.loop_continued = self.loop_continued
@@ -1363,13 +1388,28 @@ class State:
 
     def register_effect(self, effect_type, sink_name):
         self.reachable_effects.add(effect_type)
+        guards = [dict(g) for g in self.active_guards]
+        key = _sink_key(effect_type, sink_name, guards)
+        if key in self._sink_keys:
+            return
+        self._sink_keys.add(key)
         self.reached_sinks.append(
-            {
-                "effect": effect_type,
-                "sink": sink_name,
-                "guards": [dict(g) for g in self.active_guards],
-            }
+            {"effect": effect_type, "sink": sink_name, "guards": guards}
         )
+        if len(self.reached_sinks) > _MAX_REACHED_SINKS:
+            raise ScanBudgetExceeded
+
+    def merge_reached(self, other):
+        """Fold `other`'s reached_sinks into self, deduped (B-192) — used wherever
+        simulate_if/simulate_loop used to `.extend()` two ever-growing lists."""
+        for item in other.reached_sinks:
+            key = _sink_key(item["effect"], item["sink"], item["guards"])
+            if key in self._sink_keys:
+                continue
+            self._sink_keys.add(key)
+            self.reached_sinks.append(item)
+            if len(self.reached_sinks) > _MAX_REACHED_SINKS:
+                raise ScanBudgetExceeded
 
 
 class EffectSimulator:
@@ -1761,22 +1801,22 @@ class EffectSimulator:
 
         if state_then.terminated and state_else.terminated:
             state.terminated = True
-            state.reached_sinks.extend(state_then.reached_sinks)
-            state.reached_sinks.extend(state_else.reached_sinks)
+            state.merge_reached(state_then)
+            state.merge_reached(state_else)
         elif state_then.terminated:
             state.tainted_vars = state_else.tainted_vars
             state.active_guards = state_else.active_guards
-            state.reached_sinks.extend(state_then.reached_sinks)
-            state.reached_sinks.extend(state_else.reached_sinks)
+            state.merge_reached(state_then)
+            state.merge_reached(state_else)
         elif state_else.terminated:
             state.tainted_vars = state_then.tainted_vars
             state.active_guards = state_then.active_guards
-            state.reached_sinks.extend(state_then.reached_sinks)
-            state.reached_sinks.extend(state_else.reached_sinks)
+            state.merge_reached(state_then)
+            state.merge_reached(state_else)
         else:
             state.tainted_vars = state_then.tainted_vars.union(state_else.tainted_vars)
-            state.reached_sinks.extend(state_then.reached_sinks)
-            state.reached_sinks.extend(state_else.reached_sinks)
+            state.merge_reached(state_then)
+            state.merge_reached(state_else)
             common_guards = []
             for g in state_then.active_guards:
                 if g in state_else.active_guards:
@@ -1792,7 +1832,7 @@ class EffectSimulator:
             self.simulate_statements(node.body, state_copy, seed)
 
             state.tainted_vars.update(state_copy.tainted_vars)
-            state.reached_sinks.extend(state_copy.reached_sinks)
+            state.merge_reached(state_copy)
 
             if state_copy.terminated:
                 state.terminated = True
