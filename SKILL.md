@@ -1,9 +1,9 @@
 ---
 name: clawseccheck
 version: 3.38.0
-description: Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — all read-only, all on your machine. Scores your setup (A–F) and reports the most urgent holes — reports only, it never changes your OpenClaw setup. No API key, no data leaves your machine. Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, or see your A–F security score.
+description: Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Scores your setup (A–F) and reports the most urgent holes — it never changes your OpenClaw setup. No API key, no data leaves your machine. Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, or see your A–F security score.
 license: MIT
-metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — all read-only, all on your machine. Scores your setup (A–F) and reports the most urgent holes — reports only, it never changes your OpenClaw setup. No API key, no data leaves your machine. Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, or see your A–F security score."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
+metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Scores your setup (A–F) and reports the most urgent holes — it never changes your OpenClaw setup. No API key, no data leaves your machine. Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, or see your A–F security score."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
 ---
 
 # ClawSecCheck — OpenClaw Security Self-Audit
@@ -15,14 +15,17 @@ Activate when the user says anything like:
 "security check", "what's my security score", "am I vulnerable", "scan my OpenClaw agent",
 "how secure is my setup", "test my agent for attacks", "audit me".
 
-It is **read-only and local** — it inspects, it never changes your setup or reaches the network — so
-it is safe to run on request. Before the first run, tell the user in one line what it will read (their
-OpenClaw config, bootstrap files, log files, agent session logs, the text of installed skills, and
-credential-store path existence — all read-only, nothing leaves the machine) so there are no surprises.
-"Read-only" means it never modifies your OpenClaw setup and sends nothing off the machine; the only
-files it writes are your **own** local report and audit history under `~/.clawseccheck/`. The default
-audit is inspection-only — the optional active tests (`--canary`/`--redteam`/`--dryrun`) simulate an
-attack against your *own* agent locally and are **opt-in**, never run unless you ask for them.
+It is **read-only with respect to your OpenClaw setup** — it never touches `openclaw.json`, your
+skills, or your bootstrap files, and it reaches the network only through your own host agent (see
+`--vet` below) — so it is safe to run on request. That promise is scoped, not absolute: it also runs
+a bounded, filesystem-only scan of the **host** the agent runs on (beyond OpenClaw's own scope — see
+"host recon" below), and it writes its **own** local report/history state under `~/.clawseccheck/`
+(nothing about your agent — see "what it writes" below). Before the first run, tell the user in one
+line what it will read (their OpenClaw config, bootstrap files, log files, agent session logs, the
+text of installed skills, and credential-store path existence — all read-only, nothing leaves the
+machine) so there are no surprises. The default audit is inspection-only — the optional active tests
+(`--canary`/`--redteam`/`--dryrun`) simulate an attack against your *own* agent locally and are
+**opt-in**, never run unless you ask for them.
 
 ## What ClawSecCheck does (be transparent)
 
@@ -33,22 +36,32 @@ It runs a **read-only** local script that inspects the user's own agent. **Full 
 - text of **installed skills/plugins** (including Python AST-scan, parse-only — never executed)
 - `~/.openclaw/logs/config-audit.jsonl` and `config-health.json` — config-write provenance & integrity
 - `~/.openclaw/agents/.../sessions/*.jsonl` — Codex session logs for approval-policy posture
-- host OS defensive posture: path-existence checks for IDS, FIM, EDR, firewall config files
+- **host recon (beyond OpenClaw's own scope, skip with `--no-host`):** path-existence checks for
+  IDS, FIM, EDR, firewall config files and systemd enable-symlinks, plus the *presence* (never the
+  value) of a handful of proxy-shaped env vars (`http_proxy`/`https_proxy`/...) — filesystem/env-name
+  reads only, no subprocess, no network
 - credential-store path-existence inventory: checks whether `.env`, SSH key dirs, keychain/keyring
   directories, and browser cookie stores **exist** near the agent home (never reads their contents)
 - permissions of memory/log paths
 
-It makes **no network calls**
+It makes **no network calls of its own**
 and **never modifies your OpenClaw setup** — *read-only* means it never touches `openclaw.json`, your
-skills, or your bootstrap files. The only things it writes stay **on your own machine and are never
-uploaded**: a private local audit history under `~/.clawseccheck/` (owner-only — opt out with
-`--no-history`), any report files you explicitly request via a flag (`--save`, `--badge`, `--html`,
-`--sarif`, `--monitor`, `--trend`, `--log`), and a small freshness ledger
-(`~/.clawseccheck/coverage.json`) recording when you last ran an opt-in active self-test
-(`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`). Pure Python standard library, no dependencies.
+skills, or your bootstrap files. What it *does* write stays **on your own machine and is never
+uploaded** — none of it touches your OpenClaw setup, only ClawSecCheck's own state: a private local
+audit history under `~/.clawseccheck/` (owner-only — opt out with `--no-history`), any report files
+you explicitly request via a flag (`--save`, `--badge`, `--html`, `--sarif`, `--monitor`, `--trend`,
+`--log`), and a small freshness ledger (`~/.clawseccheck/coverage.json`) recording when you last ran
+an opt-in active self-test (`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`). Every file
+it writes is deletable in one step with `--purge`. Scoping flags at a glance: `--no-history` (skip
+local history), `--no-host` (skip the host-recon bullet above), `--no-native` (skip the one external
+command below). Pure Python standard library, no dependencies.
 
 It also runs OpenClaw's **built-in** audit — the one fixed, read-only external command
-`openclaw security audit --json` (its read-only mode, never a fixing one) — and folds those findings into the same report.
+`openclaw security audit --json` (its read-only mode, never a fixing one; the only subprocess call
+this tool makes anywhere — skip it with `--no-native`) — and folds those findings into the same
+report. Separately, `--vet`/`--vet-source` guide *your own host agent* to fetch a package into an
+isolated quarantine folder before vetting it — ClawSecCheck itself never fetches anything; it prints
+the exact fetch/isolate commands for you to review before they run (see the vetting workflow below).
 
 It checks, among other things:
 - the **Lethal Trifecta** (untrusted input x sensitive data x outbound actions — keep at most 2 of 3 active together),

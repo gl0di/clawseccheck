@@ -34,9 +34,27 @@ proof-of-ownership, no legal grey area.
 
 ## 🔒 Local, read-only, and honest about its limits
 
-ClawSecCheck runs **locally and read-only** — no network calls, no telemetry, nothing
-leaves your machine. It's a heuristic audit, so it's upfront about what it does and
-doesn't check:
+ClawSecCheck itself never calls the network — no telemetry, nothing leaves your machine
+on its own. It's a heuristic audit, so it's upfront about what it does and doesn't check,
+and about what "read-only" actually covers:
+
+**What "read-only" actually covers:**
+
+- **Read-only with respect to your OpenClaw setup.** It never touches `openclaw.json`,
+  your skills, or your bootstrap files — the promise is a *check*, not a change.
+- **It writes its own state, nowhere near your agent.** A local audit history and any
+  report files you request live under `~/.clawseccheck/` (opt out with `--no-history`,
+  remove everything in one step with `--purge`).
+- **Host-security recon, disclosed as such.** Beyond OpenClaw's own scope, it runs a
+  bounded filesystem scan of the host it's running on (IDS/EDR/firewall config paths,
+  systemd enable-symlinks) plus the *presence* — never the value — of a few
+  proxy-shaped env vars. No subprocess, no network. Skip it with `--no-host`.
+- **The one subprocess call it ever makes** is OpenClaw's own fixed, read-only
+  `openclaw security audit --json` — skip it with `--no-native`.
+- **`--vet`/`--vet-source` ask *your* agent to fetch, not ClawSecCheck.** Vetting a
+  package before install prints the exact fetch/isolate commands for your agent to run
+  in a quarantine folder — review them before they run; ClawSecCheck never fetches
+  anything itself.
 
 **Honest limits (we never hide these behind a green score):**
 
