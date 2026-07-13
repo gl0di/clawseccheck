@@ -6455,6 +6455,166 @@ def check_self_privesc_directive(ctx: Context) -> Finding:
     )
 
 
+# C-210: prose-intent bulk-data exfiltration -- natural-language description of
+# collecting bulk/PII data and sending it to an external (non-first-party) endpoint.
+# Distinct from C-203 (code-shaped host-info telemetry): this is prose/workflow-step
+# description, not code.
+_EXFIL_INTENT_VERB_RE = re.compile(r"\b(?:send|export|forward|upload|transmit)\b", re.I)
+_BULK_DATA_OBJECT_RE = re.compile(
+    r"\ball\s+(?:the\s+)?(?:user\s+)?records?\b|\bcomplete\s+dataset\b|"
+    r"\bentire\s+database\b|\ball\s+(?:the\s+)?data\b|\bSELECT\s+\*|"
+    r"\bpersonal(?:ly)?\s+identifiable\b|\bPII\b|\ball\s+customer\s+(?:data|records)\b",
+    re.I,
+)
+_EXFIL_URL_RE = re.compile(r"https?://[^\s\"'<>)\]]+", re.I)
+_EXFIL_VERB_URL_WINDOW = 100  # destination must be close to the verb -- "Send X to <URL>"
+_EXFIL_OBJECT_WINDOW = 300  # the object may be described a workflow step earlier
+
+
+def _prose_exfil_scan(blob: str, own_host, fence_ranges: list[tuple[int, int]]) -> list[tuple[str, bool]]:
+    """Scan *blob* for prose-intent bulk-data exfiltration. Returns (snippet, is_cred)
+    tuples for each verb+external-URL match that also has a bulk-data or credential
+    object described nearby."""
+    hits: list[tuple[str, bool]] = []
+    last_end = -1
+    for vm in _EXFIL_INTENT_VERB_RE.finditer(blob):
+        if vm.start() < last_end:
+            continue
+        if _defensive_context(blob, vm.start(), fence_ranges):
+            continue
+        url_window = blob[vm.end() : min(len(blob), vm.end() + _EXFIL_VERB_URL_WINDOW)]
+        um = _EXFIL_URL_RE.search(url_window)
+        if not um:
+            continue
+        url_abs_start = vm.end() + um.start()
+        # C-135 round 2: a markdown HEADING ("## Export") matches the bare verb regex
+        # too, and being leftmost, "claims" the hit ahead of the real body-text verb --
+        # its own window then spans from the section label straight into unrelated
+        # body prose (an earlier auth-token mention), producing a false correlation.
+        # C-135 round 3: skipping every heading-line verb match UNCONDITIONALLY was
+        # itself a bypass -- a directive fully self-contained on one heading line
+        # ("## Send all customer records to <url>") was silently never evaluated. Only
+        # skip when the matched URL falls OUTSIDE this line (a bare section label with
+        # no directive of its own); a heading whose own line contains the URL too is a
+        # genuine, self-contained directive and must still be evaluated.
+        line_start = blob.rfind("\n", 0, vm.start()) + 1
+        line_end = blob.find("\n", vm.start())
+        line_end = line_end if line_end != -1 else len(blob)
+        line = blob[line_start:line_end]
+        if _ANY_HEADING_RE.match(line) and url_abs_start >= line_end:
+            continue
+        url = um.group(0).rstrip(").,;:'\"")
+        if _url_matches_own_host(url, own_host):
+            continue  # first-party endpoint -- not exfiltration
+        # C-135-shape self-check: the object is commonly BETWEEN the verb and the URL
+        # ("Send all customer records to <URL>"), not only before the verb (a workflow
+        # step earlier: "Compile all records ... Send complete dataset to <URL>") --
+        # search both directions, not backward-only, for the WIDER bulk-data signal.
+        obj_start = max(0, vm.start() - _EXFIL_OBJECT_WINDOW)
+        obj_end = vm.end() + um.end()  # um is relative to url_window, which starts at vm.end()
+        obj_window = blob[obj_start:obj_end]
+        # C-135 round 2: is_cred must NOT use the same wide window. A credential/secret
+        # TERM (token/password/credential/...) is common in ordinary auth-setup prose
+        # ("authenticate using your API token") that has nothing to do with what's
+        # being sent -- co-occurring within 300 chars of an unrelated send/export
+        # sentence elsewhere in the doc false-escalated a routine auth mention straight
+        # to FAIL. A credential must be the actual OBJECT of THIS verb -- restrict to
+        # the narrow between-verb-and-URL span, mirroring how the bulk-data window
+        # already handles the "object right after the verb" shape.
+        cred_window = blob[vm.end():obj_end]
+        is_cred = bool(_B63_SECRET_TERM_RE.search(cred_window))
+        is_bulk = bool(_BULK_DATA_OBJECT_RE.search(obj_window))
+        if not (is_cred or is_bulk):
+            continue
+        last_end = obj_end
+        snippet_raw = blob[obj_start:obj_end]
+        snippet = " ".join(snippet_raw.split())
+        if len(snippet) > 140:
+            snippet = snippet[:137] + "..."
+        hits.append((snippet, is_cred))
+    return hits
+
+
+def check_prose_bulk_exfil(ctx: Context) -> Finding:
+    """B160 (C-210) — a skill's prose/workflow steps describe collecting bulk or PII
+    data (all records, a complete dataset, `SELECT *`, PII) and sending it to an
+    external endpoint that is not the skill's own declared host. Distinct from C-203,
+    which targets CODE-shaped host-info telemetry, not natural-language descriptions.
+
+    FAIL — the described object is credential/secret-shaped (a much stronger, less
+           ambiguous signal than bulk PII data).
+    WARN — the described object is bulk/PII data without a credential signal.
+    PASS — no prose-intent bulk-exfil pattern found, or the destination is the
+           skill's own declared homepage/repo/api/endpoint (first-party allowlist,
+           reused from B-132 — a legitimate report generator or configured sync/
+           backup target stays clean).
+    UNKNOWN — no installed skills to inspect.
+    """
+    if not ctx.installed_skills:
+        return _finding(
+            "B160",
+            UNKNOWN,
+            "No installed skills found — nothing to inspect for prose-intent "
+            "bulk-data exfiltration.",
+            "Run on a host where installed skills exist (~/.openclaw/skills, "
+            "workspace/skills).",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        fr = _fence_ranges(norm)
+        own_host = _skill_own_host(norm, fr)
+        for snippet, is_cred in _prose_exfil_scan(norm, own_host, fr):
+            tag = f'{skill_name}: "{snippet}"'
+            if is_cred:
+                fail_ev.append(tag)
+            else:
+                warn_ev.append(tag)
+
+    if fail_ev:
+        ev_summary = "; ".join(fail_ev[:4])
+        extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
+        return _finding(
+            "B160",
+            FAIL,
+            "Prose-intent credential/secret exfiltration detected — a skill "
+            "describes collecting credential/secret data and sending it to a "
+            "non-first-party endpoint: " + ev_summary + extra,
+            "Remove the directive, or route the transfer through the skill's own "
+            "declared homepage/API endpoint if it is genuinely first-party. Bulk "
+            "credential/secret data sent to an undeclared external host is a "
+            "classic exfiltration pattern regardless of the stated justification "
+            "(migration, backup, sync, etc.).",
+            fail_ev,
+        )
+
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
+        return _finding(
+            "B160",
+            WARN,
+            "Possible prose-intent bulk-data exfiltration found (no credential "
+            "signal — may be a legitimate migration/backup/report workflow): "
+            + ev_summary + extra,
+            "Review the flagged content. Confirm the destination is a trusted, "
+            "declared endpoint (or the skill's own homepage/API/base-url) and that "
+            "the bulk-data transfer is a genuine, documented feature of the skill.",
+            warn_ev,
+            severity=MEDIUM,
+        )
+
+    return _finding(
+        "B160",
+        PASS,
+        "No prose-intent bulk-data exfiltration directives found in installed skills.",
+        "Ensure no skill describes collecting bulk/PII data and sending it to an "
+        "undeclared external endpoint.",
+    )
+
+
 def check_symlink_escape(ctx: Context) -> Finding:
     """B87 (TAM-07) — a skill/workspace symlink resolving into a sensitive host path.
 

@@ -821,6 +821,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B160 - Prose-intent bulk-data exfiltration directive
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Data Exfiltration / Prompt Injection
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Prose-intent bulk-data exfiltration directive
+- Remediation:
+  - none
+
 ### B67 - Per-source tool-output trust contracts
 
 - Severity: MEDIUM

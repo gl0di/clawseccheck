@@ -108,6 +108,7 @@ from ._content import (
     check_persona_jailbreak,
     check_prompt_self_replication,
     check_pth_persistence,
+    check_prose_bulk_exfil,
     check_remote_code_dependency,
     check_self_privesc_directive,
     check_silent_instruction,
@@ -2766,6 +2767,7 @@ SKILL_CONTENT_RING = (
     check_silent_instruction,  # B63 — "don't tell the user"
     check_instruction_hierarchy_override,  # B64 — instruction-hierarchy override
     check_self_privesc_directive,  # B159 — self-privilege-escalation directive (C-207)
+    check_prose_bulk_exfil,  # B160 — prose-intent bulk-data exfiltration (C-210)
     check_conditional_sleeper_trigger,  # B65 — conditional sleeper-trigger
     check_persona_jailbreak,  # B66 — persona / DAN jailbreak
     check_overt_secret_exfil,  # B156 — overt unconditional secret-exfil (B-188)

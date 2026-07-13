@@ -701,6 +701,23 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B160 (C-210): natural-language description of collecting BULK/PII data and
+    # sending it to an external (non-first-party) endpoint -- a prose-intent exfil
+    # directive, distinct from C-203's code-shaped host-info telemetry. WARN for a
+    # bulk-data object (all records / complete dataset / SELECT * / PII); FAIL only
+    # when the object is credential/secret-shaped (a much stronger, less ambiguous
+    # signal). Reuses the B-132 first-party-host allowlist so "send to the skill's
+    # own configured endpoint" (report generators, legitimate sync/backup targets)
+    # stays clean.
+    CheckMeta(
+        "B160",
+        "Prose-intent bulk-data exfiltration directive",
+        HIGH,
+        "hardening",
+        "Data Exfiltration / Prompt Injection",
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # B67 (C-092): per-source tool-output trust contracts.
     # Complements B21 (generic trust boundary): checks that bootstrap has
     # channel-specific DATA/instruction declarations for each active high-risk
