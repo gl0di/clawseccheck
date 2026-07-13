@@ -718,6 +718,22 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B161 (C-217): identity-file injection -- an override/jailbreak directive planted
+    # in the agent's OWN identity/bootstrap files (SOUL.md, AGENTS.md, system-prompt
+    # equivalents), distinct from B64 (generic override phrases across bootstrap +
+    # skills + MCP) and B66 (persona/DAN jailbreak): this targets the specific
+    # staleness-framing ("the above instructions are outdated") + fake-authorization-
+    # code combo neither existing check covers. WARN on staleness/safety-disable
+    # framing alone; FAIL only when corroborated by a fabricated admin/auth code.
+    CheckMeta(
+        "B161",
+        "Identity-file injection (override/jailbreak directive in bootstrap files)",
+        CRITICAL,
+        "hardening",
+        "Prompt Injection / Identity Rewrite",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
     # B67 (C-092): per-source tool-output trust contracts.
     # Complements B21 (generic trust boundary): checks that bootstrap has
     # channel-specific DATA/instruction declarations for each active high-risk

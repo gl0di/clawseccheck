@@ -147,6 +147,7 @@ check_host_file_integrity
 check_host_firewall
 check_host_network_ids
 check_human_approval
+check_identity_file_injection
 check_image_attr_injection
 check_incident_readiness
 check_install_directive_supply_chain

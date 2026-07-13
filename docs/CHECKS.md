@@ -833,6 +833,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B161 - Identity-file injection (override/jailbreak directive in bootstrap files)
+
+- Severity: CRITICAL
+- Block: hardening
+- Framework: Prompt Injection / Identity Rewrite
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Identity-file injection (override/jailbreak directive in bootstrap files)
+- Remediation:
+  - none
+
 ### B67 - Per-source tool-output trust contracts
 
 - Severity: MEDIUM

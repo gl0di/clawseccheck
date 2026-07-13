@@ -5769,6 +5769,200 @@ def check_instruction_hierarchy_override(ctx: Context) -> Finding:
     )
 
 
+# C-217: identity-file injection -- an override/jailbreak directive planted in the
+# agent's OWN identity/bootstrap files (SOUL.md, AGENTS.md, system-prompt
+# equivalents). Distinct from B64 (generic override phrases, broader but shallower)
+# and B66 (persona/DAN jailbreak): targets the staleness-framing + fake-authorization-
+# code combo neither covers -- a directive that claims the CURRENT identity file is
+# outdated/superseded and backs the claim with a fabricated admin/auth code.
+_IDENTITY_STALENESS_RE = re.compile(
+    r"\b(?:the\s+)?above\s+instructions?\s+(?:are|is)\s+outdated\b|"
+    # C-135: "this update supersedes"/"ignore the previous version" bare (with no
+    # identity/instruction-specific object) are ordinary changelog/doc-versioning
+    # language ("this update supersedes the June draft") -- require the superseded/
+    # ignored thing to actually BE instructions/guidance/rules/policy/a prompt, not
+    # just any document.
+    r"\bthis\s+update\s+supersedes\s+(?:all\s+)?(?:prior|previous|earlier)\s+"
+    r"(?:instructions?|guidance|rules?|policy|directives?|prompts?)\b|"
+    r"\boverride\s+the\s+system\s+prompt\b|"
+    r"\bignore\s+the\s+previous\s+version\s+of\s+(?:this\s+|these\s+|the\s+)?"
+    r"(?:instructions?|guidance|rules?|policy|prompts?)\b|"
+    r"\bthese\s+instructions?\s+(?:replace|supersede)\s+(?:all\s+)?(?:prior|previous|"
+    r"earlier)\b",
+    re.I,
+)
+_IDENTITY_SAFETY_DISABLE_RE = re.compile(
+    r"\bbypass\s+safety\s+filters?\b|\bdisable\s+safety\b|"
+    r"\bsuspend\s+(?:content\s+)?safety\b|"
+    r"\bsafety\s+(?:filters?|checks?)\s+(?:no\s+longer\s+apply|are\s+disabled|(?:is|"
+    r"are)\s+off)\b",
+    re.I,
+)
+# A fabricated authorization/admin code -- the false-legitimacy prop, not a genuine
+# OpenClaw config field (Golden Rule #4: no such field is grounded anywhere).
+_IDENTITY_FAKE_AUTH_CODE_RE = re.compile(
+    r"\b(?:admin|authoriz(?:ation|ed)|access|override)[\s-]*(?:auth[\s-]*)?code\s*:\s*\S+",
+    re.I,
+)
+# C-135 round 3: a run-on paragraph with no blank line or heading (a plausible, common
+# style for a short AGENTS.md) still let an unrelated admin/access-code mention that
+# is merely PASSIVE DOCUMENTATION of where a real credential is stored/rotated
+# ("the admin access code: X is rotated quarterly ... stored in the vault") corroborate
+# an unrelated staleness sentence into FAIL. A live injection PRESENTS the code as
+# justification (a bare declarative "Admin auth code: X." with no passive-custody
+# framing); it never explains where the code is kept, who rotates it, or who to
+# contact. If passive-custody language sits immediately around the matched code, it
+# is documentation, not a payload -- don't count it as corroborating.
+_IDENTITY_PASSIVE_CODE_CONTEXT_RE = re.compile(
+    r"\bis\s+(?:stored|rotated|documented|kept|managed)\b|"
+    r"\b(?:stored|kept)\s+in\s+(?:the\s+)?vault\b|"
+    r"\bcontact\s+\S+\s+if\s+you\s+need\b|"
+    r"\brotated\s+(?:quarterly|monthly|annually|weekly|regularly)\b",
+    re.I,
+)
+_IDENTITY_CODE_CONTEXT_WINDOW = 80
+# C-135: a flat 200-char window let an UNRELATED benign "admin access code: X"
+# appendix entry (documenting where a break-glass credential is stored, not a live
+# directive) in a DIFFERENT section corroborate an unrelated staleness sentence
+# elsewhere into a false FAIL. Scope the auth-code correlation to the same PARAGRAPH
+# as the staleness/safety-disable signal instead -- wide enough to still catch the
+# real citation's shape (the fake auth-code sits in the sentence immediately after,
+# same paragraph, no blank line or heading between them), but a blank line or a new
+# markdown heading (an appendix, a different section) ends the correlation.
+_IDENTITY_PARAGRAPH_BOUNDARY_RE = re.compile(r"\n\s*\n|\n[^\S\n]{0,3}#{1,6}[^\S\n]")
+
+
+def _identity_paragraph_span(text: str, pos: int) -> tuple[int, int]:
+    start = 0
+    for bm in _IDENTITY_PARAGRAPH_BOUNDARY_RE.finditer(text, 0, pos):
+        start = bm.end()
+    end = len(text)
+    fm = _IDENTITY_PARAGRAPH_BOUNDARY_RE.search(text, pos)
+    if fm:
+        end = fm.start()
+    return start, end
+
+
+def _identity_has_live_auth_code(text: str, para_start: int, para_end: int) -> bool:
+    """True if a fake-auth-code match within [para_start, para_end) is NOT
+    surrounded by passive-custody documentation language (round 3: distinguishes a
+    live injection payload -- a bare declarative "Admin auth code: X." with no
+    passive-custody framing -- from benign documentation of where a real credential
+    is stored/rotated)."""
+    for cm in _IDENTITY_FAKE_AUTH_CODE_RE.finditer(text, para_start, para_end):
+        ctx_start = max(para_start, cm.start() - _IDENTITY_CODE_CONTEXT_WINDOW)
+        ctx_end = min(para_end, cm.end() + _IDENTITY_CODE_CONTEXT_WINDOW)
+        if not _IDENTITY_PASSIVE_CODE_CONTEXT_RE.search(text[ctx_start:ctx_end]):
+            return True
+    return False
+
+
+def _identity_injection_scan(text: str, fence_ranges: list[tuple[int, int]]) -> list[tuple[str, bool]]:
+    """Scan *text* for identity-file injection directives. Returns (snippet,
+    has_fake_auth_code) tuples for each staleness/safety-disable signal found outside
+    a defensive/documentation context."""
+    hits: list[tuple[str, bool]] = []
+    last_end = -1
+    signal_matches = sorted(
+        [*_IDENTITY_STALENESS_RE.finditer(text), *_IDENTITY_SAFETY_DISABLE_RE.finditer(text)],
+        key=lambda m: m.start(),
+    )
+    for m in signal_matches:
+        if m.start() < last_end:
+            continue
+        if _defensive_context(text, m.start(), fence_ranges):
+            continue
+        para_start, para_end = _identity_paragraph_span(text, m.start())
+        has_fake_auth_code = _identity_has_live_auth_code(text, para_start, para_end)
+        snippet_end = min(len(text), m.end() + 140)
+        last_end = max(para_end, snippet_end)
+        snippet = " ".join(text[m.start():snippet_end].split())
+        if len(snippet) > 140:
+            snippet = snippet[:137] + "..."
+        hits.append((snippet, has_fake_auth_code))
+    return hits
+
+
+def check_identity_file_injection(ctx: Context) -> Finding:
+    """B161 (C-217) — an override/jailbreak/identity-rewrite directive planted in the
+    agent's own identity/bootstrap files (SOUL.md, AGENTS.md, system-prompt
+    equivalents). Scoped to ctx.bootstrap ONLY -- a user's own bootstrap files are
+    exactly the surface this check protects, so a match here is a strong signal the
+    file was tampered with or that an untrusted process wrote to it.
+
+    FAIL — a staleness-framing ("the above instructions are outdated") or
+           safety-disable directive corroborated by a fabricated admin/authorization
+           code nearby — the false-legitimacy prop that makes this an unambiguous
+           injection rather than ambiguous prose.
+    WARN — the staleness/safety-disable signal alone, no corroborating fake code.
+    PASS — no identity-file injection pattern found.
+    UNKNOWN — no bootstrap files to inspect.
+    """
+    if not ctx.bootstrap:
+        return _finding(
+            "B161",
+            UNKNOWN,
+            "No bootstrap files found — nothing to inspect for identity-file "
+            "injection.",
+            "Run on the host where workspace SOUL.md/AGENTS.md/TOOLS.md or "
+            "system-prompt files exist.",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+    for fname, text in ctx.bootstrap.items():
+        norm = normalize_for_scan(text)
+        fr = _fence_ranges(norm)
+        for snippet, has_fake_auth_code in _identity_injection_scan(norm, fr):
+            tag = f'{fname}: "{snippet}"'
+            if has_fake_auth_code:
+                fail_ev.append(tag)
+            else:
+                warn_ev.append(tag)
+
+    if fail_ev:
+        ev_summary = "; ".join(fail_ev[:4])
+        extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
+        return _finding(
+            "B161",
+            FAIL,
+            "Identity-file injection detected — a bootstrap file claims prior "
+            "instructions are outdated/overridden or disables safety, backed by a "
+            "fabricated authorization code: " + ev_summary + extra,
+            "Remove the directive and restore the bootstrap file from a trusted "
+            "backup. A legitimate SOUL.md/AGENTS.md update never needs to claim "
+            "'the above instructions are outdated' or present a fake authorization "
+            "code — that is the identity-rewrite injection pattern.",
+            fail_ev,
+        )
+
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
+        return _finding(
+            "B161",
+            WARN,
+            "Possible identity-file injection pattern found (no fabricated "
+            "authorization code co-located — may be documentation): "
+            + ev_summary + extra,
+            "Review the flagged content. If it is a live directive claiming to "
+            "override or supersede the agent's identity/system instructions, remove "
+            "it. If it is documentation describing an attack pattern, fence it and "
+            "annotate it as a non-executable example.",
+            warn_ev,
+            severity=MEDIUM,
+        )
+
+    return _finding(
+        "B161",
+        PASS,
+        "No identity-file injection directives found in bootstrap files.",
+        "Ensure no bootstrap file (SOUL.md/AGENTS.md/system-prompt) contains a "
+        "directive claiming prior instructions are outdated or superseded, or that "
+        "disables safety controls.",
+    )
+
+
 def check_lifecycle_hooks_extended(ctx: Context) -> Finding:
     """B94 (F-099, L1-2) — lifecycle hooks beyond pre/postinstall (B42's existing scope).
 
