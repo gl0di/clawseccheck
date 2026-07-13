@@ -1937,26 +1937,62 @@ def _b102_trailing_run(text: str) -> str:
     return m.group(0)
 
 
+# C-191/B-191: a single decode pass misses base64(base64(payload)) evasion — the inner
+# layer decodes to more base64, not readable prose, so INJECTION_PATTERNS never match.
+# Recurse into a decoded result that itself still looks base64-shaped, bounded on three
+# independent axes so a crafted input can't turn this into a decode-bomb DoS: a fixed
+# layer depth, a per-token size cap, and a total-attempts budget (mirrors the
+# state["count"]/cap idiom used by the symlink walk above).
+_B58_BASE64_MAX_DEPTH = 3
+_B58_BASE64_MAX_LAYER_LEN = 200_000
+_B58_BASE64_MAX_ATTEMPTS = 200
+
+
 def _b58_base64_variants(text: str) -> list[tuple[str, str]]:
     variants: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    state = {"count": 0}
     for m in _B58_BASE64_RE.finditer(text):
-        token = m.group(0)
-        if len(token) % 4 != 0:
-            continue
-        try:
-            raw = base64.b64decode(token, validate=True)
-        except (binascii.Error, ValueError):
-            continue
-        if not raw:
-            continue
-        try:
-            decoded = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
-        decoded = normalize_for_scan(decoded)
-        if decoded.strip():
-            variants.append((decoded, f"base64:{_obf_clip(token, 32)}"))
+        _b58_decode_base64_layer(m.group(0), variants, seen, state, depth=1, label_prefix="base64")
     return variants
+
+
+def _b58_decode_base64_layer(
+    token: str,
+    variants: list[tuple[str, str]],
+    seen: set[str],
+    state: dict,
+    depth: int,
+    label_prefix: str,
+) -> None:
+    if token in seen or len(token) > _B58_BASE64_MAX_LAYER_LEN:
+        return
+    seen.add(token)
+    if len(token) % 4 != 0 or state["count"] >= _B58_BASE64_MAX_ATTEMPTS:
+        return
+    state["count"] += 1
+    try:
+        raw = base64.b64decode(token, validate=True)
+    except (binascii.Error, ValueError):
+        return
+    if not raw:
+        return
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return
+    decoded = normalize_for_scan(decoded)
+    if not decoded.strip():
+        return
+    variants.append((decoded, f"{label_prefix}:{_obf_clip(token, 32)}"))
+    if depth >= _B58_BASE64_MAX_DEPTH:
+        return
+    for inner_m in _B58_BASE64_RE.finditer(decoded):
+        inner = inner_m.group(0)
+        if inner not in seen:
+            _b58_decode_base64_layer(
+                inner, variants, seen, state, depth + 1, f"{label_prefix}→base64"
+            )
 
 
 def _b58_decode_html_entities(text: str) -> str:
