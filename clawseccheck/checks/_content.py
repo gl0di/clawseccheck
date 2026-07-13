@@ -3486,6 +3486,91 @@ def _frontmatter_name(blob: str) -> str | None:
     return None
 
 
+# B-132: recognise a skill's own DECLARED API/endpoint key too, not just homepage/repo —
+# a skill's Prerequisites/frontmatter routinely names its own vendor API/SSE/base-URL
+# under one of these keys, and a fetch to that host is the skill's documented, first-party
+# endpoint, not an "external fetch to a non-reputable host". Moved here from _vet.py
+# (C-210): a second topic (prose-intent bulk-exfil) now needs the same allowlist, and
+# _content.py already has every dependency these need (_frontmatter_name, _in_fence,
+# _skill_frontmatter_block, _MANIFEST_HEADER_RE) -- moving avoided a circular import.
+_FM_HOMEPAGE_RE = re.compile(
+    r"^\s*(?:homepage|repository|repo|url|api|api[-_]url|endpoint|base[-_]url)\s*:\s*"
+    r"[\"']?(https?://[^\s\"'#]+)",
+    re.I | re.MULTILINE,
+)
+
+
+_URL_HOST_RE = re.compile(r"https?://([^/:\s\"'<>)\]]+)", re.I)
+
+
+# B-194: the same self-declared-homepage signal, but for a JSON manifest (skill.json/
+# package.json) instead of SKILL.md's YAML frontmatter — case_01669, a skill's own
+# github.com repo URL living in skill.json, which _skill_frontmatter_block never reads
+# (it only looks at the "# file: SKILL.md" YAML block). JSON keys are quoted, so this
+# needs its own pattern rather than reusing _FM_HOMEPAGE_RE (which requires a bare,
+# unquoted key at line-start).
+_JSON_MANIFEST_BASENAME_RE = re.compile(r"^(?:skill|package|manifest)\.json$", re.I)
+
+
+_JSON_MANIFEST_HOST_RE = re.compile(
+    r'"(?:homepage|repository|repo|url)"\s*:\s*(?:\{\s*"url"\s*:\s*)?"(https?://[^\s"]+)"',
+    re.I,
+)
+
+
+def _skill_own_host(blob: str, fence_ranges: list[tuple[int, int]] | None = None):
+    """Host of the skill's declared homepage/repository/api/endpoint (lowercased), or
+    None when neither SKILL.md frontmatter nor a JSON manifest declares one.
+    Conservative: only real homepage/repo/url/api/endpoint keys count — not an icon
+    CDN or a demo link."""
+    fm = _skill_frontmatter_block(blob)
+    fm_name = _frontmatter_name(blob) if fm is not None else None
+    if fm is not None:
+        m = _FM_HOMEPAGE_RE.search(fm)
+        if m is not None:
+            hm = _URL_HOST_RE.match(m.group(1))
+            if hm:
+                return hm.group(1).lower()
+    for sm in _MANIFEST_HEADER_RE.finditer(blob):
+        if not _JSON_MANIFEST_BASENAME_RE.match(sm.group("name").strip()):
+            continue
+        # C-135: a bare "# file: skill.json" line is plain text an attacker can forge
+        # ANYWHERE in the blob (the same forgery class B-193 found and closed for the
+        # test-fixture down-rank) — including inside a fence. Require: (a) the section
+        # header is not fenced, (b) the body actually PARSES as JSON with a "name" key
+        # (not just a regex match on a bare fragment), and (c) when the skill's own
+        # SKILL.md declares a name, the manifest's name must match it. A one-line forged
+        # {"repository": "..."} fragment satisfies none of these.
+        if fence_ranges is not None and _in_fence(sm.start(), fence_ranges):
+            continue
+        try:
+            manifest = json.loads(sm.group("body"))
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(manifest, dict) or "name" not in manifest:
+            continue
+        if fm_name and str(manifest.get("name", "")).strip().lower() != fm_name.strip().lower():
+            continue
+        jm = _JSON_MANIFEST_HOST_RE.search(sm.group("body"))
+        if jm is None:
+            continue
+        hm = _URL_HOST_RE.match(jm.group(1))
+        if hm:
+            return hm.group(1).lower()
+    return None
+
+
+def _url_matches_own_host(url: str, own_host) -> bool:
+    """True when *url*'s host equals the skill's own declared host (exact or subdomain)."""
+    if not own_host:
+        return False
+    hm = _URL_HOST_RE.match(url)
+    if hm is None:
+        return False
+    h = hm.group(1).lower()
+    return h == own_host or h.endswith("." + own_host)
+
+
 def _has_cred_exfil_cross_skill(blob: str) -> bool:
     """True when both a credential path AND an exfil sink appear anywhere in the skill,
     even on different lines. This catches split-stage attacks where the credential read
