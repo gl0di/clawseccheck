@@ -597,10 +597,14 @@ CATALOG: list[CheckMeta] = [
     # B63 (C-075): Silent-instruction detector — directives that hide agent actions
     # from the user.  Always malicious (no legit skill says "don't tell the user").
     # FAIL on secrecy + action co-occurrence; WARN on bare secrecy phrase.
+    # C-192 (Option C targeted promote, clean C-135 pass): FAIL severity CRITICAL — a
+    # co-located secrecy+action directive is near-zero-FP and structurally always
+    # malicious. The WARN branch (bare secrecy phrase) stays pinned at its own explicit
+    # severity=MEDIUM in check_silent_instruction, unaffected by this bump.
     CheckMeta(
         "B63",
         "Silent-instruction directive (hidden actions from user)",
-        HIGH,
+        CRITICAL,
         "hardening",
         "Human Oversight / Transparency",
         confidence="HIGH",
@@ -751,10 +755,15 @@ CATALOG: list[CheckMeta] = [
         scored=False,
         surface="gateway",
     ),
+    # C-192 (Option C targeted promote, clean C-135 pass): FAIL severity CRITICAL — a
+    # forged role/system block requires a co-located override directive to FAIL at all
+    # (B-184 removed the bare-marker FP surface entirely), so the remaining FAIL case is
+    # near-zero-FP and structural. The WARN branch (bare false-provenance phrase) stays
+    # pinned at its own explicit severity=HIGH in check_forged_provenance, unaffected.
     CheckMeta(
         "B74",
         "Forged role/system block or false-provenance attribution in content",
-        HIGH,
+        CRITICAL,
         "hardening",
         "Prompt Injection / Provenance Forgery",
         surface="bootstrap",

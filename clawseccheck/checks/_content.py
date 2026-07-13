@@ -5249,6 +5249,13 @@ def check_forged_provenance(ctx: Context) -> Finding:
             "marker with an override directive (that hard-FAILs). If this is documentation, "
             "move the example into a fenced code block (```) so it is treated as an example.",
             warn_ev,
+            # C-192: pinned at the pre-promotion severity — only the FAIL path (forged
+            # role/system block + override directive, "always malicious" per this check's
+            # own docstring) is the near-zero-FP case promoted to CRITICAL. This WARN path
+            # (a bare false-provenance phrase, no forged block) is explicitly the
+            # lower-confidence branch that must NOT inherit the catalog bump, or its score
+            # weight would silently jump from 6 to 10 (WEIGHT[HIGH] -> WEIGHT[CRITICAL]).
+            severity=HIGH,
         )
     return _finding(
         "B74",

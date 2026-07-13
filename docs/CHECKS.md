@@ -723,7 +723,7 @@ Advisory checks are recorded for coverage but are not scored.
 
 ### B63 - Silent-instruction directive (hidden actions from user)
 
-- Severity: HIGH
+- Severity: CRITICAL
 - Block: hardening
 - Framework: Human Oversight / Transparency
 - Scored: yes
@@ -895,7 +895,7 @@ Advisory checks are recorded for coverage but are not scored.
 
 ### B74 - Forged role/system block or false-provenance attribution in content
 
-- Severity: HIGH
+- Severity: CRITICAL
 - Block: hardening
 - Framework: Prompt Injection / Provenance Forgery
 - Scored: yes
