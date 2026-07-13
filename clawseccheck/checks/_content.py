@@ -1244,7 +1244,11 @@ _CRED_RE = re.compile(
     r"\.kube/config|\.config/gcloud|"
     r"\bCookies\b[^\n]{0,60}(?:Chrome|Firefox|Safari|Brave|Edge)|"
     r"(?:Chrome|Firefox|Safari|Brave|Edge)[^\n]{0,60}\bCookies\b|"
-    r"Electrum[^\n]{0,40}wallets?|Exodus[^\n]{0,40}wallets?",
+    r"Electrum[^\n]{0,40}wallets?|Exodus[^\n]{0,40}wallets?|"
+    # C-198: real default on-disk crypto-wallet stores — Geth/go-ethereum's keystore dir
+    # and the Solana CLI's default keypair path (both well-known, documented paths, not
+    # fabricated — grounded the same way as the .aws/.kube/.config/gcloud entries above).
+    r"\.ethereum/keystore|\.config/solana(?:/id\.json)?",
     re.I,
 )
 
@@ -1758,6 +1762,12 @@ _SENSITIVE_PATH_SEGMENTS = frozenset(
         ".password-store",
     }
 )
+# C-198 (adversarial C-135 finding): a bare "solana"/".ethereum" segment here would match
+# ANY path with that literal component — including the official Solana toolchain install
+# dir (~/.local/share/solana/install/...) or an ordinary dev checkout named "solana" (the
+# blockchain's own monorepo is a common clone name). The specific real wallet paths
+# (.ethereum/keystore, .config/solana/id.json) are already covered precisely via the
+# _CRED_RE fallback in _symlink_target_sensitive below — no segment entry needed.
 
 
 # A sentence terminator (with trailing space/EOL) or a blank-line paragraph break.

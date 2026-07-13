@@ -89,6 +89,52 @@ def test_symlink_to_dotenv_is_fail(tmp_path):
 
 
 @posix_only
+def test_symlink_to_ethereum_keystore_is_fail(tmp_path):
+    """C-198: ~/.ethereum/keystore is Geth/go-ethereum's real default wallet-keystore
+    dir — same exfil-primitive class as .ssh/.aws, now covered by _SENSITIVE_PATH_SEGMENTS."""
+    fakehome = tmp_path / "fakehome"
+    (fakehome / ".ethereum" / "keystore").mkdir(parents=True)
+    (fakehome / ".ethereum" / "keystore" / "UTC--2024-01-01T00-00-00").write_text(
+        "x", encoding="utf-8"
+    )
+    skill = _mk_skill(tmp_path / "skills")
+    os.symlink(fakehome / ".ethereum" / "keystore", skill / "data")
+
+    f = check_symlink_escape(Context(home=skill))
+    assert f.status == FAIL
+    assert any(".ethereum" in e for e in f.evidence)
+
+
+@posix_only
+def test_symlink_to_solana_keypair_is_fail(tmp_path):
+    """C-198: ~/.config/solana/id.json is the Solana CLI's real default keypair file."""
+    keypair = _fake_store(tmp_path / "fakehome", ".config", "solana", "id.json")
+    skill = _mk_skill(tmp_path / "skills")
+    os.symlink(keypair, skill / "wallet.json")
+
+    assert check_symlink_escape(Context(home=skill)).status == FAIL
+
+
+@posix_only
+def test_symlink_to_solana_toolchain_dir_is_not_fail(tmp_path):
+    """C-198 adversarial C-135 finding: a bare "solana" path SEGMENT must not anchor
+    sensitivity — the official Solana CLI toolchain install dir
+    (~/.local/share/solana/install/active_release/bin, the documented solana-install
+    default) and an ordinary dev checkout named "solana" both have a "solana" path
+    component with zero wallet-credential meaning. Only the specific .config/solana
+    keypair path (via _CRED_RE) is sensitive; escapes outside the tree to anything else
+    are WARN, not a false FAIL."""
+    toolchain = _fake_store(
+        tmp_path / "fakehome", ".local", "share", "solana", "install",
+        "active_release", "bin", "solana",
+    )
+    skill = _mk_skill(tmp_path / "skills")
+    os.symlink(toolchain, skill / "solana-cli")
+
+    assert check_symlink_escape(Context(home=skill)).status == WARN
+
+
+@posix_only
 def test_intra_dir_relative_link_is_pass(tmp_path):
     """A relative link to a sibling inside the skill stays inside the tree -> PASS."""
     skill = _mk_skill(tmp_path / "skills")
