@@ -137,6 +137,30 @@ _AGENT_CONFIG_PATH_RE = re.compile(
 # NOT exfiltration; only a secret in the URL, body, params, or a positional arg is.
 _ENV_AUTH_KWARGS = frozenset({"headers", "auth", "cert"})
 
+# C-203: HOST_INFO_EXFIL_FLOW -- host/machine-identity info (hostname, platform/uname,
+# the repo's own git remote) flowing to an outbound sink: covert telemetry / phone-home.
+# Severity "info", same WARN-first rationale as ENV_EXFIL_FLOW -- crash-reporters and
+# legitimate telemetry exist, so this is never an automatic FAIL; only escalated by the
+# checks engine alongside other signals.
+_HOST_INFO_ATTRS = {"gethostname", "node", "uname"}
+_HOST_INFO_BASES = {"socket", "platform", "os"}
+_GIT_REMOTE_RE = re.compile(r"\bgit\s+remote\b", re.I)
+# Cheap prefilter so files with no telemetry-shaped signal at all skip the AST walk below.
+# Broader than _GIT_REMOTE_RE on purpose: an argv-list git-remote call
+# (subprocess.check_output(['git', 'remote', '-v'])) has no contiguous "git remote"
+# substring in source text (comma/quotes sit between the tokens) -- precision is
+# enforced later by _is_git_remote_read's AST-level check, this is only a fast skip.
+_HOST_INFO_SIGNAL_RE = re.compile(
+    r"gethostname|platform\.(?:node|uname)|os\.uname|git|remote|hostname|whoami", re.I
+)
+# A shell command string containing a live host-identity substitution -- the concat-built
+# `'curl -s ' + URL + '/eval_chain -d h=$(hostname)'` shape that evades literal-curl
+# matching (no single contiguous "curl ... | sh"-style literal to match against).
+_SHELL_HOST_SUBST_RE = re.compile(
+    r"\$\(\s*(?:hostname|whoami|uname)\b|`\s*(?:hostname|whoami|uname)\b", re.I
+)
+_CURL_LIKE_RE = re.compile(r"\b(?:curl|wget)\b", re.I)
+
 _CRED_PATH_RE = re.compile(
     r"\.ssh/id_|\bid_rsa\b|\bid_ed25519\b|\.aws/credentials|login\.keychain|wallet\.dat|"
     r"keystore\.json|\.npmrc|\.pypirc|\.netrc|\.docker/config|\.kube/config|"
@@ -611,6 +635,60 @@ def _env_tainted_names(tree: ast.AST) -> set[str]:
                             if isinstance(elt, ast.Name) and elt.id not in tainted:
                                 tainted.add(elt.id)
                                 changed = True
+        if not changed:
+            break
+    return tainted
+
+
+def _is_host_info_call(node: ast.AST) -> bool:
+    """socket.gethostname() / platform.node() / platform.uname() / os.uname() -- a
+    call that returns the host's own machine/OS identity."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    return (
+        isinstance(f, ast.Attribute)
+        and f.attr in _HOST_INFO_ATTRS
+        and _attr_base(f.value) in _HOST_INFO_BASES
+    )
+
+
+def _is_git_remote_read(node: ast.AST) -> bool:
+    """os.popen('git remote -v').read() / subprocess.check_output(['git','remote','-v'])
+    -- reading the repo's own git remote as a host/repo-identity source (C-203's
+    case_01942 shape)."""
+    if not isinstance(node, ast.Call):
+        return False
+    for n in ast.walk(node):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and _GIT_REMOTE_RE.search(n.value):
+            return True
+        if isinstance(n, (ast.List, ast.Tuple)):
+            parts = [
+                e.value for e in n.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)
+            ]
+            if "git" in parts and "remote" in parts:
+                return True
+    return False
+
+
+def _host_info_tainted_names(tree: ast.AST) -> set[str]:
+    """Names whose value derives from a host-identity read (transitively) -- same
+    assignment-fixpoint shape as _env_tainted_names, sourced from host-info calls and
+    git-remote reads instead of env vars."""
+    tainted: set[str] = set()
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    for _ in range(4):
+        changed = False
+        for a in assigns:
+            rhs = a.value
+            sourced = bool(_names_in(rhs) & tainted) or any(
+                _is_host_info_call(n) or _is_git_remote_read(n) for n in ast.walk(rhs)
+            )
+            if sourced:
+                for t in a.targets:
+                    if isinstance(t, ast.Name) and t.id not in tainted:
+                        tainted.add(t.id)
+                        changed = True
         if not changed:
             break
     return tainted
@@ -1404,6 +1482,75 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                     "an environment-variable or agent-config secret flows into a network "
                     "sink's URL or body — verify the destination is trusted (possible exfiltration)",
                 )
+
+    # C-203: HOST_INFO_EXFIL_FLOW — host/machine-identity info (hostname, platform/uname,
+    # git remote) reaching an outbound sink: covert telemetry / phone-home. Two shapes:
+    # (a) a Python network-library call (_is_net_sink) whose URL/body/params carries a
+    #     host-info-tainted value or an inline host-info call; (b) a shell-exec sink
+    #     (os.system/os.popen/subprocess) whose command string contains BOTH a curl/wget
+    #     fetch AND a host-identity signal — covers the concat-built
+    #     `'curl -s ' + URL + '/eval_chain -d h=$(hostname)'` shape that has no single
+    #     contiguous literal for a plain curl|sh regex to match. Severity "info" — WARN-first,
+    #     same rationale as ENV_EXFIL_FLOW (crash-reporters/telemetry are dual-use).
+    if _HOST_INFO_SIGNAL_RE.search(source):
+        host_src_tainted = _host_info_tainted_names(tree)
+        for node in ast.walk(tree):
+            if len(out) >= _MAX_FINDINGS_PER_FILE:
+                break
+            if not isinstance(node, ast.Call):
+                continue
+            ln = getattr(node, "lineno", 0)
+            if _is_net_sink(node.func):
+                arg_subtrees = [
+                    *node.args,
+                    *(kw.value for kw in node.keywords if kw.arg not in _ENV_AUTH_KWARGS),
+                ]
+                hit = False
+                for arg in arg_subtrees:
+                    if host_src_tainted and (_names_in(arg) & host_src_tainted):
+                        hit = True
+                        break
+                    if any(
+                        _is_host_info_call(s) or _is_git_remote_read(s) for s in ast.walk(arg)
+                    ):
+                        hit = True
+                        break
+                if hit:
+                    add(
+                        "HOST_INFO_EXFIL_FLOW",
+                        "info",
+                        ln,
+                        "host/machine-identity info (hostname/platform/git-remote) flows into "
+                        "a network sink — verify the destination is trusted (possible covert "
+                        "telemetry / phone-home)",
+                    )
+                continue
+            is_shell_exec, shell_sink_desc = _is_exec_sink_call(node.func)
+            if not is_shell_exec:
+                continue
+            for arg in (*node.args, *(kw.value for kw in node.keywords)):
+                literal_pieces = [
+                    n.value
+                    for n in ast.walk(arg)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                ]
+                has_curl = any(_CURL_LIKE_RE.search(p) for p in literal_pieces)
+                if not has_curl:
+                    continue
+                has_shell_subst = any(_SHELL_HOST_SUBST_RE.search(p) for p in literal_pieces)
+                has_host_signal = has_shell_subst or any(
+                    _is_host_info_call(s) or _is_git_remote_read(s) for s in ast.walk(arg)
+                ) or bool(host_src_tainted and (_names_in(arg) & host_src_tainted))
+                if has_host_signal:
+                    add(
+                        "HOST_INFO_EXFIL_FLOW",
+                        "info",
+                        ln,
+                        f"a {shell_sink_desc} shell command built with a curl/wget fetch AND a "
+                        "host-identity value (hostname/whoami/git-remote) — possible covert "
+                        "telemetry beacon",
+                    )
+                    break
 
     # Extended taint rules: TT5 (external-input -> exec), TT4 (file-read -> network),
     # SSRF (tainted URL -> network-fetch).  Compute external taint once and reuse.

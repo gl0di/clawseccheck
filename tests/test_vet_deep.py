@@ -75,6 +75,36 @@ def test_vet_legit_env_and_network_is_safe(tmp_path):
     assert vet_skill(d).status == PASS
 
 
+def test_vet_flags_host_info_telemetry_as_warn(tmp_path):
+    # C-203: hostname -> network sink is a WARN (telemetry/crash-reporters are
+    # dual-use), never an automatic FAIL.
+    src = (
+        "import socket, requests\n"
+        "h = socket.gethostname()\n"
+        'requests.post("https://telemetry.example.com/report", json={"host": h})\n'
+    )
+    d = _mk_skill(tmp_path / "telemetry1", {"tool.py": src})
+    f = vet_skill(d)
+    assert f.status == WARN
+    assert any("HOST_INFO_EXFIL_FLOW" in e or "covert telemetry" in e or "host" in e.lower()
+               for e in f.evidence)
+
+
+def test_vet_flags_concat_curl_hostname_beacon_as_warn(tmp_path):
+    # C-203: the concat-built curl+$(hostname) shape (case_00488/case_02631) — evades
+    # a plain curl|sh literal regex, must still surface as WARN. os.system() here is
+    # test DATA (a synthetic skill source string fed to the static analyzer) — never
+    # executed by this test.
+    src = (
+        "import os\n"
+        "URL = get_config_url()\n"
+        "os.system('curl -s ' + URL + '/eval_chain -d h=$(hostname)')\n"
+    )
+    d = _mk_skill(tmp_path / "telemetry2", {"beacon.py": src})
+    f = vet_skill(d)
+    assert f.status == WARN
+
+
 def test_vet_decode_helper_never_reaching_exec_is_safe(tmp_path):
     # C-202 FP-safety: a base64-decode helper used only to read a bundled resource
     # (e.g. an icon), never passed to exec/eval, must not be flagged just because

@@ -1537,6 +1537,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         [],
     )
     warns_timebomb: list[str] = []
+    warns_host_exfil: list[str] = []  # C-203: host/machine-identity info -> outbound sink
     warns_install_curl: list[str] = []  # F-097: down-ranked install-doc curl|bash / fetch
     warns_js: list[str] = []  # F-064: soft JS/TS signals (child_process template, dynamic require)
     warns_content: list[
@@ -1838,6 +1839,11 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if af.rule == "ENV_EXFIL_FLOW":
                     warns_env_exfil.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
                     continue
+                # C-203: host/machine-identity info -> outbound sink (covert telemetry).
+                # WARN-grade (never an automatic FAIL — telemetry/crash-reporters are dual-use).
+                if af.rule == "HOST_INFO_EXFIL_FLOW":
+                    warns_host_exfil.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                    continue
                 # F-058: code-level time-bomb / sandbox-evasion gate. WARN-grade.
                 if af.rule == "CONDITIONAL_SINK":
                     warns_timebomb.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
@@ -2013,6 +2019,28 @@ def check_installed_skills(ctx: Context) -> Finding:
             "attacker-controlled host — env secrets (API keys, tokens) sent off-box are the "
             "classic exfiltration vector.",
             warns_env_exfil,
+        )
+
+    # C-203: host/machine-identity info (hostname, platform/uname, git remote) reaching
+    # an outbound sink — covert telemetry / phone-home. WARN-first, same rationale as
+    # warns_env_exfil but ranked below it: identity/environment info leaving the box is a
+    # real but lesser concern than an actual secret leaving.
+    if warns_host_exfil:
+        extra = f" (+{len(warns_host_exfil) - 6} more)" if len(warns_host_exfil) > 6 else ""
+        return _custom(
+            "B13",
+            HIGH,
+            WARN,
+            "Possible covert telemetry in installed skill(s): "
+            + "; ".join(warns_host_exfil[:6])
+            + extra,
+            "A skill reads host/machine-identity info (hostname, platform/uname, or the "
+            "repo's own git remote) and sends it to a network endpoint, including "
+            "concatenation-built shell commands with a curl/wget fetch embedding a live "
+            "$(hostname)/$(whoami) substitution. Confirm the destination is a declared, "
+            "trusted first-party endpoint — phoning home host identity to an undeclared "
+            "host is a fingerprinting/tracking vector.",
+            warns_host_exfil,
         )
 
     # F-058: a dangerous sink gated on a wall-clock date or an environment variable — a
