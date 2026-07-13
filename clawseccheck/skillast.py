@@ -161,6 +161,60 @@ _SHELL_HOST_SUBST_RE = re.compile(
 )
 _CURL_LIKE_RE = re.compile(r"\b(?:curl|wget)\b", re.I)
 
+# C-205: DROPPER_DOWNLOAD_TO_TMP -- an argv-list curl/wget call (subprocess.run(["curl",
+# ..., "-o", "/tmp/x.sh"])), not the literal-`| sh` pipe shape B100 already catches --
+# staging a script into a writable/tmp-like path with an explicit output flag, the
+# classic "download now, exec later" dropper split (case_03526's shape: URL in a
+# variable, no pipe at all, so a plain curl|sh regex has nothing to match). Severity
+# "info" -- staging a download isn't itself proof of malice; the checks engine WARNs.
+_CURL_WGET_PROGRAMS = {"curl", "wget"}
+_CURL_OUTPUT_FLAGS = {"-o", "--output"}
+_SCRIPT_LIKE_EXTS = (".sh", ".bash", ".py", ".ps1", ".rb", ".pl")
+
+
+def _is_curl_wget_argv_call(node: ast.AST) -> bool:
+    """subprocess.run/call/check_call/check_output/Popen(['curl', ...] | ['wget', ...])
+    -- the argv-list form (not a shell string, which _CLICKFIX_REMOTE_FETCH_RE-style
+    text scanning already covers elsewhere)."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    if not (
+        isinstance(f, ast.Attribute)
+        and f.attr in _EXEC_SINK_SUBP_ATTRS
+        and _attr_base(f.value) in _EXEC_SINK_BASES_SUBP
+    ):
+        return False
+    if not node.args or not isinstance(node.args[0], (ast.List, ast.Tuple)):
+        return False
+    elts = node.args[0].elts
+    if not elts:
+        return False
+    prog = elts[0]
+    return (
+        isinstance(prog, ast.Constant)
+        and isinstance(prog.value, str)
+        and prog.value.lower() in _CURL_WGET_PROGRAMS
+    )
+
+
+def _curl_dropper_output_path(node: ast.Call) -> str | None:
+    """If `node` (already confirmed by _is_curl_wget_argv_call) has a literal
+    -o/--output flag followed by a literal path, return that path; else None."""
+    elts = node.args[0].elts
+    for i, e in enumerate(elts):
+        if (
+            isinstance(e, ast.Constant)
+            and isinstance(e.value, str)
+            and e.value in _CURL_OUTPUT_FLAGS
+            and i + 1 < len(elts)
+        ):
+            nxt = elts[i + 1]
+            if isinstance(nxt, ast.Constant) and isinstance(nxt.value, str):
+                return nxt.value
+    return None
+
+
 _CRED_PATH_RE = re.compile(
     r"\.ssh/id_|\bid_rsa\b|\bid_ed25519\b|\.aws/credentials|login\.keychain|wallet\.dat|"
     r"keystore\.json|\.npmrc|\.pypirc|\.netrc|\.docker/config|\.kube/config|"
@@ -1551,6 +1605,30 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                         "telemetry beacon",
                     )
                     break
+
+    # C-205: DROPPER_DOWNLOAD_TO_TMP — an argv-list curl/wget subprocess call staging a
+    # script into a writable/tmp-like path, with no literal pipe for B100's regex to
+    # match (the URL is typically a variable too). Checked independently of the loops
+    # above — this is a shape check on the argv list, not a taint flow.
+    for node in ast.walk(tree):
+        if len(out) >= _MAX_FINDINGS_PER_FILE:
+            break
+        if not _is_curl_wget_argv_call(node):
+            continue
+        out_path = _curl_dropper_output_path(node)
+        if (
+            out_path
+            and out_path.startswith(_WRITABLE_PATH_PREFIXES)
+            and out_path.lower().endswith(_SCRIPT_LIKE_EXTS)
+        ):
+            add(
+                "DROPPER_DOWNLOAD_TO_TMP",
+                "info",
+                getattr(node, "lineno", 0),
+                f"curl/wget argv-list call downloads a script to a writable path "
+                f"({out_path}) — staged dropper shape (no literal pipe, evades a plain "
+                "curl|sh match)",
+            )
 
     # Extended taint rules: TT5 (external-input -> exec), TT4 (file-read -> network),
     # SSRF (tainted URL -> network-fetch).  Compute external taint once and reuse.

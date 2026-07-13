@@ -1538,6 +1538,7 @@ def check_installed_skills(ctx: Context) -> Finding:
     )
     warns_timebomb: list[str] = []
     warns_host_exfil: list[str] = []  # C-203: host/machine-identity info -> outbound sink
+    warns_curl_dropper: list[str] = []  # C-205: argv-list curl/wget staging a script to /tmp
     warns_install_curl: list[str] = []  # F-097: down-ranked install-doc curl|bash / fetch
     warns_js: list[str] = []  # F-064: soft JS/TS signals (child_process template, dynamic require)
     warns_content: list[
@@ -1844,6 +1845,11 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if af.rule == "HOST_INFO_EXFIL_FLOW":
                     warns_host_exfil.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
                     continue
+                # C-205: argv-list curl/wget staging a script to a writable/tmp path.
+                # WARN-grade (staging a download isn't itself proof of malice).
+                if af.rule == "DROPPER_DOWNLOAD_TO_TMP":
+                    warns_curl_dropper.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                    continue
                 # F-058: code-level time-bomb / sandbox-evasion gate. WARN-grade.
                 if af.rule == "CONDITIONAL_SINK":
                     warns_timebomb.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
@@ -2041,6 +2047,27 @@ def check_installed_skills(ctx: Context) -> Finding:
             "trusted first-party endpoint — phoning home host identity to an undeclared "
             "host is a fingerprinting/tracking vector.",
             warns_host_exfil,
+        )
+
+    # C-205: argv-list curl/wget staging a script into a writable/tmp-like path — the
+    # "download now, exec later" dropper split (no literal pipe for B100 to match,
+    # often a variable URL). WARN-first: staging a download isn't itself proof of
+    # malice (legitimate installers download-then-run too); ranked below the exfil
+    # WARNs since nothing has actually left the box yet at this point.
+    if warns_curl_dropper:
+        extra = f" (+{len(warns_curl_dropper) - 6} more)" if len(warns_curl_dropper) > 6 else ""
+        return _custom(
+            "B13",
+            HIGH,
+            WARN,
+            "Possible staged dropper in installed skill(s): "
+            + "; ".join(warns_curl_dropper[:6])
+            + extra,
+            "A skill downloads a script (curl/wget argv-list form, not a shell pipe) "
+            "into a writable/tmp-like path. Confirm the source URL and destination path "
+            "are ones you expect, and check whether the downloaded file is later "
+            "executed — that combination is the classic staged-dropper pattern.",
+            warns_curl_dropper,
         )
 
     # F-058: a dangerous sink gated on a wall-clock date or an environment variable — a

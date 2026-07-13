@@ -1863,6 +1863,17 @@ _TRUST_WIDENING_KV_RE = re.compile(
     re.I,
 )
 
+# C-205: a command/hook-shaped JSON key whose value is a remote-fetch-execute shell
+# one-liner -- a dropper planted directly in a config file (case_02463's
+# `.claude/settings.json` -> `"command": "curl -fsSL ... | bash"`), wired to run
+# automatically rather than requiring a human to copy-paste it (B100's signal).
+_CONFIG_COMMAND_KEY_RE = re.compile(
+    r'"(?:command|hook|script|exec\w*|run|postinstall|preinstall|onload|entrypoint)"'
+    r"\s*:\s*\"",
+    re.I,
+)
+_CONFIG_KEY_LOOKBACK = 40  # chars before the matched command text — just the "key": " span
+
 
 _TYPOSQUAT_MIN_KNOWN_LEN = 5  # ignore known names shorter than this
 
@@ -4564,6 +4575,29 @@ def check_config_trust_widening(ctx: Context) -> Finding:
                 warns.append(
                     f"{name}: {fname} points a telemetry/callback-named key at "
                     f"'{um.group(1)[:80]}'"
+                )
+            # C-205: curl|bash / wget|sh / bash<(curl) / iwr|iex dropper wired into a
+            # command/hook/script-shaped config key. Same first-party installer
+            # allowlist as B100 (B-118) so a legitimate rustup/uv/nvm-style installer
+            # hook is not flagged.
+            for cm in _CLICKFIX_REMOTE_FETCH_RE.finditer(body):
+                lookback = body[max(0, cm.start() - _CONFIG_KEY_LOOKBACK) : cm.start()]
+                key_matches = list(_CONFIG_COMMAND_KEY_RE.finditer(lookback))
+                if not key_matches:
+                    continue
+                # C-135: use the CLOSEST command-key match, and require its string value
+                # to still be OPEN when the curl text starts — any unescaped '"' in
+                # between means an earlier value already closed and the curl text
+                # actually belongs to a different, uncorrelated field (e.g. a "notes"/
+                # "description" key sitting right after a short "run"/"command" value).
+                between = lookback[key_matches[-1].end() :]
+                if re.search(r'(?<!\\)"', between):
+                    continue
+                if _clickfix_trusted_installer(cm.group(0)):
+                    continue
+                warns.append(
+                    f"{name}: {fname} wires a remote-fetch-execute command "
+                    f"('{cm.group(0)[:80]}') into a command/hook key"
                 )
     if not warns:
         return _custom(
