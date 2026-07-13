@@ -43,6 +43,7 @@ from ._shared import (
     _FM_BLOCK_HEADERED_RE,
     _HOOK_EXEC_RE,
     _MANIFEST_HEADER_RE,
+    _SENTENCE_BREAK_RE,
     _channels,
     _custom,
     _enabled_tools,
@@ -1768,10 +1769,7 @@ _SENSITIVE_PATH_SEGMENTS = frozenset(
 # _CRED_RE fallback in _symlink_target_sensitive below — no segment entry needed.
 
 
-# A sentence terminator (with trailing space/EOL) or a blank-line paragraph break.
-# Used to decide grammatical CONNECTION: a negation only governs a trigger if no
-# sentence/paragraph boundary separates them.
-_SENTENCE_BREAK_RE = re.compile(r"[.!?][\"')\]]?(?:\s|$)|\n[^\S\n]*\n")
+# _SENTENCE_BREAK_RE moved to _shared.py (B-194) — now reused by _vet.py too.
 
 
 # A setup.py that overrides the install/build_ext command class can run arbitrary code at

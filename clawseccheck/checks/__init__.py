@@ -562,6 +562,7 @@ from ._vet import (
     _agent_config_write_hits,
     _blank_fences,
     _decoded_payloads,
+    _fetch_prohibition_governs,
     _has_cred_exfil_outside_fence,
     _in_example_context,
     _local_sink_exfil_hits,

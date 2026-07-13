@@ -752,6 +752,13 @@ _MANIFEST_HEADER_RE = re.compile(
 )
 
 
+# A sentence terminator (with trailing space/EOL) or a blank-line paragraph break.
+# Used to decide grammatical CONNECTION: a negation/prohibition only governs a trigger
+# if no sentence/paragraph boundary separates them (moved here from _content.py,
+# B-194 — reused by _vet.py too).
+_SENTENCE_BREAK_RE = re.compile(r"[.!?][\"')\]]?(?:\s|$)|\n[^\S\n]*\n")
+
+
 _HOOK_EXEC_RE = re.compile(
     r"\bcurl\b|\bwget\b|\|\s*(?:ba|z)?sh\b|\bbash\b|node\s+-e|python\d?\s+-c|"
     r"base64|\biex\b|invoke-expression|powershell|https?://|eval\s*\(",
