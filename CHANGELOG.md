@@ -3,6 +3,39 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.39.0] — 2026-07-13
+
+Closes epic E-040 (threat-map closure guarantee): a machine-enforced closure invariant
+for the threat-coverage doc, plus a targeted severity fix so detected skill-malware can
+land grade F instead of capping at D.
+
+### Added
+- **Threat-coverage closure ledger + CI guard.** `docs/THREAT_COVERAGE.md` was last
+  refreshed for v3.33.0 (119 checks) — 28 of the current 123 `CheckMeta` ids had never
+  been documented, and nothing enforced that a newly-added check or threat category ever
+  gets classified. Restructured the doc around a 4-bucket closure invariant: every threat
+  category now carries exactly one `[CHECK: <ids>]` / `[ATTEST]` / `[JUDGE: <rule>]` /
+  `[CEILING]` tag — the 28 missing ids, the 5 judge-packet-only AST rules, the
+  attestation-only taint/provenance case, and the 4 genuine declared ceilings (Windows
+  ACL, credential lifetime, deep content normalization, cross-platform reuse) are now all
+  explicitly classified. `tests/test_threat_coverage_ledger.py` reddens CI if a catalog id
+  or a category row is ever left untagged.
+
+### Changed
+- **B63/B74 FAIL severity promoted HIGH → CRITICAL.** Skill-malware detections at HIGH
+  severity capped the overall grade at D even when live malware was detected — only 3
+  CRITICAL checks existed (A1, B1, B2). Investigated the full promote list before
+  changing anything: 3 of 5 originally-considered signals (`CRED_EXFIL_FLOW`,
+  `OBFUSCATED_EXEC`, true command-injection) turned out to already be CRITICAL via B13's
+  own `crit`-tier bucket, shipped 2026-07-06 — no change needed there. The two
+  still-HIGH, near-zero-FP structural signals — B63 (silent-instruction, secrecy+action
+  co-occurrence) and B74 (forged role/system block + override directive) — are now
+  CRITICAL. Their lower-confidence WARN branches (bare secrecy phrase; bare
+  false-provenance phrase) stay pinned at their original severity and are unaffected.
+  B60 (self-replication) and B65 (sleeper prose) stay HIGH — their false-positive
+  frontier is real, not near-zero. Verified with a full adversarial pass: zero new
+  false-FAILs across every fixture and the real fleet.
+
 ## [3.38.1] — 2026-07-13
 
 Closes two silent misses found by the C-191 evasion-corpus eval, and tightens the
