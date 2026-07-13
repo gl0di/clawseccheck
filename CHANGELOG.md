@@ -3,6 +3,50 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.41.0] — 2026-07-13
+
+Six new false-negative-closing detectors from the SkillTrustBench/OASB benchmark
+gap-closure effort, each shipped only after an independent adversarial (C-135) pass —
+three of the six needed two or three rounds before the reviewer stopped finding real
+bypasses, most from the same underlying failure mode: a signal detected by mere
+proximity/window co-occurrence rather than genuine sentence- or paragraph-scoped
+correlation.
+
+### Added
+- **HOST_INFO_EXFIL_FLOW (C-203):** host/machine-identity info (hostname,
+  platform/uname, a git-remote read) reaching a network sink, or a concat-built
+  shell curl/wget command embedding a live `$(hostname)`/`$(whoami)` substitution —
+  covert telemetry / phone-home. WARN-first, mirrors the existing ENV_EXFIL_FLOW
+  rationale.
+- **Config-file curl\|bash dropper detection (C-205):** B96 now also flags a
+  curl\|bash/wget\|sh/`bash<(curl)`/iwr\|iex one-liner wired into a command/hook-shaped
+  config key (e.g. `.claude/settings.json` `postInstall`) — an auto-run hook, not
+  human-facing prose. New `DROPPER_DOWNLOAD_TO_TMP` rule: an argv-list curl/wget
+  subprocess call staging a script into a writable/tmp-like path, no literal pipe,
+  often a variable URL.
+- **B159 — self-privilege-escalation directive (C-207):** a skill instructs the
+  agent to write an allow-all/wildcard tool grant (`allowedTools`, `Bash(*)`,
+  `permissionMode: approve-all`) into its own settings, paired with a fabricated-
+  consent claim ("the user has already approved this"). FAIL on the pairing, WARN on
+  the bare directive.
+- **B160 — prose-intent bulk-data exfiltration (C-210):** a skill's prose/workflow
+  steps describe collecting bulk/PII data and sending it to a non-first-party
+  endpoint. WARN for a bulk-data object; FAIL only for a credential/secret-shaped
+  object. Reuses the first-party-host allowlist so a report generator sending to its
+  own declared endpoint stays clean.
+- **B161 — identity-file injection (C-217):** an override/jailbreak directive
+  planted in the agent's own SOUL.md/AGENTS.md/system-prompt files — a staleness
+  claim ("the above instructions are outdated") or safety-disable directive,
+  corroborated by a fabricated admin/authorization code in the same paragraph.
+
+### Fixed
+- **Decode→exec generalization past inline base64 (C-202):** OBFUSCATED_EXEC now
+  sees through a module-level `_decode()`-style wrapper (xor/zlib layering, chained
+  multi-stage helpers), not just a decode primitive written directly in the
+  exec/eval argument. Scope intentionally restricted to module-level functions and
+  return-path dataflow after adversarial review found — and closed — three
+  cross-scope name-collision and shadowing bypasses.
+
 ## [3.40.0] — 2026-07-13
 
 Real-fleet-driven B13 (installed-skill vetting) precision pass, a memory-safety fix
