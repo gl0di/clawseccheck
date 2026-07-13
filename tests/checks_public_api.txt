@@ -186,6 +186,7 @@ check_sandbox
 check_secrets
 check_secrets_at_rest_home
 check_self_modification
+check_self_privesc_directive
 check_sender_identity
 check_session_approval_policy
 check_session_visibility

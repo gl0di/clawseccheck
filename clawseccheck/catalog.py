@@ -685,6 +685,22 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B159 (C-207): skill prose instructs the AGENT to widen its own permissions —
+    # write an allow-all/wildcard tool grant (allowedTools, Bash(*), permissionMode:
+    # approve-all) into settings.json/openclaw.json — corroborated with a fabricated-
+    # consent claim ("the user has already approved this"). Distinct from B96 (which
+    # looks at VALUES already present in a bundled config file): this looks at PROSE
+    # directing the agent to WRITE such a value itself. Strong signal (overt
+    # capability-widening + a false justification to skip asking) -> FAIL-capable.
+    CheckMeta(
+        "B159",
+        "Self-privilege-escalation directive in skill prose",
+        CRITICAL,
+        "hardening",
+        "Prompt Injection / Privilege Escalation",
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # B67 (C-092): per-source tool-output trust contracts.
     # Complements B21 (generic trust boundary): checks that bootstrap has
     # channel-specific DATA/instruction declarations for each active high-risk

@@ -52,6 +52,14 @@ _EXEMPT = {
     "checks/_mcp.py": "~1,400 lines — the MCP / plugin checks + vet_mcp / vet_plugin (40 "
                       "symbols); topic-faithful and over budget by design. A finer split is "
                       "a later cycle.",
+    "checks/__init__.py": "~1,200 lines — the aggregator (every check import + the CHECKS "
+                          "list + run_all). Its length is driven directly by the NUMBER OF "
+                          "CHECKS (one import line per check, by design — see §3.1-a: no "
+                          "narrow __all__, every name must stay importable), so it grows by "
+                          "~1-2 lines with every new check the catalog gains. Crossed the "
+                          "budget with C-207's check_self_privesc_directive (B159); there is "
+                          "no topic to split imports/registration into without breaking the "
+                          "aggregator pattern itself. A finer split is a later cycle.",
     "skillast.py": "2,139 lines — the python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target).",
     "report.py": "1,720 lines — the output renderers; its own split is deferred to a "

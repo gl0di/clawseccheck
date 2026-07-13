@@ -6162,6 +6162,214 @@ def check_silent_instruction(ctx: Context) -> Finding:
     )
 
 
+# C-207: self-privilege-escalation directive -- a skill instructs the AGENT (not the
+# human reader) to write an allow-all/wildcard tool grant into its own config.
+_PRIVESC_TARGET_RE = re.compile(
+    r"allowedTools|allowed_tools|permissionMode|permission_mode|approval_policy|"
+    r"approve[_-]?all|Bash\(\*\)|Read\(\*\)|Write\(\*\)"
+)
+_PRIVESC_DIRECTIVE_VERB_RE = re.compile(
+    # "grant"/"enable" deliberately excluded -- both are common NOUNS/gerunds in
+    # ordinary descriptive prose about permissions ("a wildcard permission grant",
+    # "this enables automation"), which made them too noise-prone as bare-word
+    # verb signals. write/add/set/update/insert/append are unambiguously actions
+    # taken ON a config value in this context.
+    r"\b(?:write|add|set|update|insert|append)\b",
+    re.I,
+)
+# A false justification to skip asking the user -- the co-occurring signal that turns
+# a bare (and ambiguous, could be human setup docs) verb+target into an unambiguous
+# injection: overt capability-widening PLUS a fabricated consent claim.
+_PRIVESC_FABRICATED_CONSENT_RE = re.compile(
+    r"already\s+approved|has\s+approved\s+this|approved\s+(?:this\s+)?(?:during|at)\s+"
+    r"(?:skill\s+)?install\w*|pre[_-]?approved|no\s+need\s+to\s+ask|without\s+"
+    r"(?:asking|prompting)|don'?t\s+(?:need\s+to\s+)?ask",
+    re.I,
+)
+# C-135 round 1: three real false positives found, sharing one root cause -- the check
+# had no way to tell a LIVE directive apart from prose ABOUT one. Split into two
+# discriminators below: reported-speech (third-person subject describing the attack)
+# and historical framing (a past, already-completed change). Both dampen the same way
+# _defensive_context treats "example only" framing -- not a live directive.
+#
+# C-135 round 2 found the FIRST version of this fix over-corrected into two silent
+# bypasses: (1) "we set/added/..." was a SUPERSET of the directive-verb list itself,
+# so it unconditionally dampened every "we"-phrased directive, live or not -- removed
+# entirely. (2) generic section-label words ("changelog", "release notes", "previous
+# version", "used to", "historically") are free for an attacker to write anywhere near
+# a live directive with zero real narrative content behind them.
+#
+# C-135 round 3 found the round-2 fix STILL bypassable two ways, both from the same
+# root cause -- a flat, symmetric character window treats mere PROXIMITY as
+# correlation, with no requirement that the dampening phrase actually govern the same
+# clause as the directive: (a) a bare version token ("as of v1", "in v1") costs an
+# attacker only ~5-10 characters glued onto the FRONT of an otherwise fully-imperative
+# sentence -- unlike a reported-speech SUBJECT, a prepositional/temporal adjunct like
+# "as of v1" doesn't change the sentence's grammatical mood, so it can be prepended to
+# any live directive for free. The historical/version-token dampener is DROPPED
+# entirely rather than patched again: a rare, contrived over-strict FAIL on synthetic
+# changelog prose combining live-directive vocabulary with historical framing AND a
+# fabricated-consent claim is a far safer failure mode than a universal, near-free
+# bypass on a CRITICAL auto-scored check. (b) the reported-speech dampener itself was
+# ALSO proximity-only, so an unrelated boilerplate sentence ("Some malicious skills
+# try to trick you... Stay vigilant.") sitting in a DIFFERENT sentence, purely within
+# 250 chars, suppressed a real directive elsewhere in the document. Fixed by scoping
+# the reported-speech search to the SAME SENTENCE as the verb match (_sentence_span)
+# instead of a flat window -- a reported-speech subject must actually be part of the
+# sentence containing the directive, not merely nearby.
+_PRIVESC_REPORTED_SPEECH_RE = re.compile(
+    r"\b(?:some|many|other|malicious|compromised)\s+skills?\b|"
+    r"\ban?\s+attacker\b|\bmalicious\s+actors?\b|"
+    r"\battackers?\s+(?:commonly|often|typically|sometimes)\b|"
+    r"\ba\s+bad\s+actor\s+(?:might|could|can)\b|"
+    r"\bmalicious\s+code\s+(?:might|could|can)\b",
+    re.I,
+)
+_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?](?:\s+|$)|\n\s*\n")
+
+
+def _sentence_span(text: str, pos: int) -> tuple[int, int]:
+    """The [start, end) character span of the sentence/paragraph containing `pos`,
+    bounded by '.'/'!'/'?' followed by whitespace (or end of string), or a blank-line
+    paragraph break -- so a dampening phrase in an unrelated, earlier/later sentence
+    is never treated as governing this one."""
+    start = 0
+    for bm in _SENTENCE_BOUNDARY_RE.finditer(text, 0, pos):
+        start = bm.end()
+    end = len(text)
+    fm = _SENTENCE_BOUNDARY_RE.search(text, pos)
+    if fm:
+        end = fm.end()
+    return start, end
+
+
+_PRIVESC_VERB_WINDOW = 150  # verb must be near the target -- a directive, not a mention
+# C-135: shrunk from 400 -- wide enough to catch the real citation's consent claim
+# (~90 chars from the target in the actual case_03635 evidence) without also catching
+# an unrelated "already approved" phrase (e.g. a billing/subscription approval) that
+# merely happens to sit in a nearby, unconnected sentence.
+_PRIVESC_CONSENT_WINDOW = 150
+
+
+def _privesc_scan(text: str, fence_ranges: list[tuple[int, int]]) -> list[tuple[str, bool]]:
+    """Scan *text* for self-privilege-escalation directives. Returns (snippet,
+    has_fabricated_consent) tuples for each verb+target co-occurrence found outside a
+    defensive/documentation context. A single directive sentence commonly names
+    several targets at once (allowedTools + Bash(*) + Read(*) + Write(*)) -- matches
+    whose window overlaps an already-recorded hit are skipped so one sentence yields
+    one finding, not four near-duplicates."""
+    hits: list[tuple[str, bool]] = []
+    last_end = -1
+    for m in _PRIVESC_TARGET_RE.finditer(text):
+        if m.start() < last_end:
+            continue
+        if _defensive_context(text, m.start(), fence_ranges):
+            continue
+        start = max(0, m.start() - _PRIVESC_VERB_WINDOW)
+        end = min(len(text), m.end() + _PRIVESC_VERB_WINDOW)
+        window = text[start:end]
+        if not _PRIVESC_DIRECTIVE_VERB_RE.search(window):
+            continue
+        # Sentence-scoped, deliberately -- NOT a flat char window (round 3: an
+        # unrelated dampening phrase in a DIFFERENT sentence, merely within a wide
+        # window, suppressed a real directive elsewhere in the document). A
+        # reported-speech subject must be part of the SAME sentence as the directive.
+        sent_start, sent_end = _sentence_span(text, m.start())
+        if _PRIVESC_REPORTED_SPEECH_RE.search(text[sent_start:sent_end]):
+            continue
+        last_end = end
+        c_start = max(0, m.start() - _PRIVESC_CONSENT_WINDOW)
+        c_end = min(len(text), m.end() + _PRIVESC_CONSENT_WINDOW)
+        has_consent_claim = bool(_PRIVESC_FABRICATED_CONSENT_RE.search(text[c_start:c_end]))
+        snippet_raw = text[max(0, m.start() - 40) : min(len(text), m.end() + 40)]
+        snippet = " ".join(snippet_raw.split())  # collapse whitespace/newlines to one line
+        if len(snippet) > 100:
+            snippet = snippet[:97] + "..."
+        hits.append((snippet, has_consent_claim))
+    return hits
+
+
+def check_self_privesc_directive(ctx: Context) -> Finding:
+    """B159 (C-207) — a skill's prose instructs the AGENT to widen its own permissions:
+    write an allow-all/wildcard tool grant (allowedTools, Bash(*), permissionMode:
+    approve-all) into settings.json/openclaw.json. Scoped to installed SKILLS only, not
+    bootstrap -- a user's own SOUL.md/AGENTS.md instructing self-configuration of their
+    OWN agent is ordinary setup, not privilege escalation; the attack is a THIRD-PARTY
+    skill trying to widen its own grant.
+
+    FAIL    — verb+target directive co-located with a fabricated-consent claim ("the
+              user has already approved this") — overt capability-widening plus a
+              false justification to skip asking, an unambiguous injection shape.
+    WARN    — bare verb+target directive without a consent claim — could be legitimate
+              human-facing setup documentation ("add Bash(*) to your settings.json to
+              enable this skill"); flagged for human review, not auto-FAILed.
+    PASS    — no self-privilege-escalation directive found.
+    UNKNOWN — no installed skills to inspect.
+    """
+    if not ctx.installed_skills:
+        return _finding(
+            "B159",
+            UNKNOWN,
+            "No installed skills found — nothing to inspect for self-privilege-"
+            "escalation directives.",
+            "Run on a host where installed skills exist (~/.openclaw/skills, "
+            "workspace/skills).",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        fr = _fence_ranges(norm)
+        for snippet, has_consent in _privesc_scan(norm, fr):
+            tag = f'{skill_name}: "{snippet}"'
+            if has_consent:
+                fail_ev.append(tag)
+            else:
+                warn_ev.append(tag)
+
+    if fail_ev:
+        ev_summary = "; ".join(fail_ev[:4])
+        extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
+        return _finding(
+            "B159",
+            FAIL,
+            "Self-privilege-escalation directive detected — a skill instructs the "
+            "agent to grant itself an allow-all/wildcard tool permission, paired with "
+            "a fabricated-consent claim: " + ev_summary + extra,
+            "Remove the directive. A skill never legitimately instructs the agent to "
+            "silently widen its own tool permissions, and never legitimately claims "
+            "the user 'already approved' a grant the user was never shown — this is "
+            "the self-privilege-escalation injection pattern.",
+            fail_ev,
+        )
+
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
+        return _finding(
+            "B159",
+            WARN,
+            "Possible self-privilege-escalation directive found (no fabricated-consent "
+            "claim co-located — may be human-facing setup documentation): "
+            + ev_summary + extra,
+            "Review the flagged content. If it instructs the AGENT (not the human "
+            "reader) to write a permission-widening value into settings.json/"
+            "openclaw.json, remove it. Legitimate setup docs ask the human to edit "
+            "their own config themselves, not the agent to do it automatically.",
+            warn_ev,
+            severity=MEDIUM,
+        )
+
+    return _finding(
+        "B159",
+        PASS,
+        "No self-privilege-escalation directives found in installed skills.",
+        "Ensure no skill instructs the agent to write an allow-all/wildcard tool "
+        "grant into its own settings.",
+    )
+
+
 def check_symlink_escape(ctx: Context) -> Finding:
     """B87 (TAM-07) — a skill/workspace symlink resolving into a sensitive host path.
 

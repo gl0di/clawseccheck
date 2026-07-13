@@ -809,6 +809,18 @@ Advisory checks are recorded for coverage but are not scored.
 
 ## Hardening checks
 
+### B159 - Self-privilege-escalation directive in skill prose
+
+- Severity: CRITICAL
+- Block: hardening
+- Framework: Prompt Injection / Privilege Escalation
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Self-privilege-escalation directive in skill prose
+- Remediation:
+  - none
+
 ### B67 - Per-source tool-output trust contracts
 
 - Severity: MEDIUM
