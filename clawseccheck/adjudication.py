@@ -4,7 +4,7 @@ borderline-band packet for an external host-agent adjudicator.
 ClawSecCheck never calls an LLM or the network. This module only assembles a
 machine-readable list of borderline findings for the user's OWN host agent to
 review and answer — it does NOT change any check's verdict or score, and it
-does NOT re-run the audit. It covers three sources, read-only, over data an
+does NOT re-run the audit. It covers five sources, read-only, over data an
 audit() pass already collected:
 
   (a) every unsuppressed UNKNOWN finding — "could not determine from config",
@@ -21,7 +21,14 @@ audit() pass already collected:
       independent credential/exfil signal exists elsewhere in the skill. This
       module re-runs analyze_python (read-only, the same call checks/_vet.py
       already makes) and surfaces exactly those otherwise-invisible findings as
-      UNKNOWN, so a host agent can decide instead of never seeing them.
+      UNKNOWN, so a host agent can decide instead of never seeing them;
+  (e) env/agent-config secrets placed in an auth-shaped kwarg (headers=/auth=/
+      cert=) of a network call (B-190). This case is excluded from
+      ENV_EXFIL_FLOW inside analyze_python itself (skillast._ENV_AUTH_KWARGS,
+      the normal way a skill authenticates to its own API), so unlike (d) it is
+      never computed at all — re-running analyze_python can't find it either.
+      A second, independent AST walk (skillast.analyze_env_auth_kwarg_exfil)
+      scoped to exactly that excluded case surfaces it as UNKNOWN.
 
 Every string field is routed through logsafe.redact() before it reaches the
 packet — no raw skill source or secret value ever appears in the output.
@@ -36,7 +43,7 @@ import re
 from .catalog import UNKNOWN, WARN
 from .logsafe import redact
 from .sar import build_sars
-from .skillast import analyze_python
+from .skillast import analyze_env_auth_kwarg_exfil, analyze_python
 
 # --------------------------------------------------------------------------- constants
 
@@ -118,6 +125,11 @@ _RULE_QUESTIONS = {
                       "with no independent credential/exfil signal nearby. Is "
                       "this expected of the skill's declared purpose? "
                       "[yes/no + reason]",
+    "ENV_AUTH_KWARG_EXFIL": "An environment-variable or agent-config secret is placed "
+                            "in an auth-shaped keyword (headers/auth/cert) of a network "
+                            "call — the normal way a skill authenticates to its own API, "
+                            "but this destination was never independently reviewed. Do "
+                            "you recognize and trust this destination? [yes/no + reason]",
 }
 
 
@@ -223,6 +235,32 @@ def _recover_dropped_taint(ctx) -> list[dict]:
     return items
 
 
+def _env_auth_kwarg_items(ctx) -> list[dict]:
+    """B-190: surface env/agent-config secrets placed in an auth-shaped kwarg
+    (headers=/auth=/cert=) of a network call. Excluded from ENV_EXFIL_FLOW by design
+    (skillast._ENV_AUTH_KWARGS) because that's the normal way a skill authenticates to
+    its own API — so analyze_python never computes it, and _recover_dropped_taint's
+    re-run of analyze_python can never find it either. This is a second, independent
+    AST walk (analyze_env_auth_kwarg_exfil) scoped to exactly that excluded case.
+    Read-only, additive: never touches ctx or any check's own verdict.
+    """
+    installed_py = getattr(ctx, "installed_skill_py", None) or {}
+    items: list[dict] = []
+    for skill_name, sources in installed_py.items():
+        for relpath, src in sources:
+            for af in analyze_env_auth_kwarg_exfil(src, relpath):
+                loc = f"{relpath}:{af.lineno}"
+                items.append({
+                    "finding_id": af.rule,
+                    "target": redact(skill_name),
+                    "redacted_evidence": redact(f"{skill_name}: {af.reason} ({loc})"),
+                    "engine_disposition": UNKNOWN,
+                    "question": _question_for(af.rule),
+                    "verdict_schema": _VERDICT_SCHEMA,
+                })
+    return items
+
+
 def _b62_items(ctx) -> list[dict]:
     """Thin adapter over sar.build_sars(ctx): one packet item per B62
     capability-intent mismatch. build_sars already redacts every string field.
@@ -246,8 +284,8 @@ def _b62_items(ctx) -> list[dict]:
 def build_judge_packet(ctx, findings) -> list[dict]:
     """Assemble the judge packet from a completed audit() pass.
 
-    Reads ctx.installed_skill_py (for the recovered-taint pass), re-derives B62
-    mismatches via sar.build_sars(ctx), and scans the already-computed
+    Reads ctx.installed_skill_py (for the recovered-taint and env-auth-kwarg passes),
+    re-derives B62 mismatches via sar.build_sars(ctx), and scans the already-computed
     ``findings`` list for unsuppressed UNKNOWN results and unsuppressed WARN
     results in _FN_PRONE_WARN_IDS. Does not re-run any check and never alters a
     Finding's status/severity/score. Deterministic: same inputs always sort to
@@ -263,6 +301,7 @@ def build_judge_packet(ctx, findings) -> list[dict]:
 
     items.extend(_b62_items(ctx))
     items.extend(_recover_dropped_taint(ctx))
+    items.extend(_env_auth_kwarg_items(ctx))
 
     items.sort(key=lambda d: (d["finding_id"], d["target"], d["redacted_evidence"]))
     return items

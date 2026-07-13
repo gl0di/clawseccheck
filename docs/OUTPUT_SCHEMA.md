@@ -596,7 +596,12 @@ Sources folded into the packet:
 - one item per B62 capability-intent mismatch (see §7);
 - taint signals (`TT4_FILE_NET`, `TT_SSRF`, `TT5_ARG_INJECTION`, `DANGEROUS_SINK`) the
   skill AST/taint layer computes but the installed-skill check does not surface on its
-  own when no independent credential/exfil signal is present elsewhere in the skill.
+  own when no independent credential/exfil signal is present elsewhere in the skill;
+- `ENV_AUTH_KWARG_EXFIL`: an environment-variable or agent-config secret placed in an
+  auth-shaped keyword (`headers=`/`auth=`/`cert=`) of a network call — the normal way a
+  skill authenticates to its own API, so it is deliberately excluded from the engine's
+  own `ENV_EXFIL_FLOW` taint rule and never independently reviewed. A separate AST walk
+  scoped to exactly that excluded case surfaces it here.
 
 ### Envelope fields
 

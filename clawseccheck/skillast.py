@@ -1275,6 +1275,68 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     return out
 
 
+# B-190: a secret placed in headers=/auth=/cert= is deliberately excluded from
+# ENV_EXFIL_FLOW above (_ENV_AUTH_KWARGS) because that's the normal way a skill
+# authenticates to its own API. But the exclusion happens INSIDE analyze_python's own
+# loop, before any ASTFinding is ever created — so unlike other "info"-severity findings
+# that get silently dropped by check_installed_skills' cascade (still visible to
+# adjudication.py's _recover_dropped_taint, which re-runs analyze_python), this case is
+# never computed at all and so can never reach even the advisory judge-packet. This
+# sibling walk computes exactly the excluded case, always "info" severity, for
+# adjudication.py to surface as an UNKNOWN judge-packet item. Never called from
+# analyze_python or CHECKS — check_installed_skills' PASS/WARN/FAIL cascade never sees
+# these findings, so this cannot introduce a new false-FAIL (Golden Rule #5).
+def analyze_env_auth_kwarg_exfil(source: str, filename: str = "<skill>") -> list[ASTFinding]:
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+        return []
+    if (
+        "environ" not in source
+        and "getenv" not in source
+        and not _AGENT_CONFIG_PATH_RE.search(source)
+    ):
+        return []
+
+    env_src_tainted = _env_tainted_names(tree) | _agent_config_file_tainted_names(source, tree)
+    out: list[ASTFinding] = []
+    seen: set[int] = set()
+    for node in ast.walk(tree):
+        if len(out) >= _MAX_FINDINGS_PER_FILE:
+            break
+        if not (isinstance(node, ast.Call) and _is_net_sink(node.func)):
+            continue
+        auth_kwarg_subtrees = [kw.value for kw in node.keywords if kw.arg in _ENV_AUTH_KWARGS]
+        hit = False
+        for arg in auth_kwarg_subtrees:
+            if env_src_tainted and (_names_in(arg) & env_src_tainted):
+                hit = True
+                break
+            if any(
+                _is_env_read_value(s) or _rhs_has_subscript_environ(s) for s in ast.walk(arg)
+            ):
+                hit = True
+                break
+        if not hit:
+            continue
+        lineno = getattr(node, "lineno", 0)
+        if lineno in seen:
+            continue
+        seen.add(lineno)
+        out.append(
+            ASTFinding(
+                "ENV_AUTH_KWARG_EXFIL",
+                "info",
+                lineno,
+                "an environment-variable or agent-config secret is placed in an "
+                "auth-shaped keyword (headers/auth/cert) of a network call — the normal "
+                "way a skill authenticates to its own API, but never independently "
+                "reviewed; verify the destination is trusted",
+            )
+        )
+    return out
+
+
 # --- Abstract Effect Simulator ---
 
 
