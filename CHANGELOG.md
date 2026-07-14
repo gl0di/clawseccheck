@@ -3,6 +3,44 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.42.1] — 2026-07-14
+
+A precision-hardening pass on the AST taint-tracking engine and B160's bulk-
+credential-exfil detector, closing gaps found during v3.42.0's own adversarial
+(C-135) reviews. The B160 fix went through four independent C-135 rounds, each
+closing one false-positive class while confirming the fix didn't reopen a
+false-negative in the process — the residual narrow, safe-direction edge cases
+found along the way are documented in-line and tracked as backlog debt rather
+than block-fixed with a riskier change.
+
+### Fixed
+- **skillast taint tracking: real lexical scope chain.** `owner_map` only ever
+  distinguished "top-level function" and "class method" as scope units, with
+  no genuine parent-scope chain. This let a `global` declared in a nested
+  function wrongly promote an unrelated local in its enclosing function to
+  module-wide taint, let two sibling nested closures under a shared parent
+  collide, and let a module-level tainted name evade the shadow-subtraction
+  its sibling composing-function check already had. Fixed via a real lexical
+  scope chain: every function gets its own scope bucket regardless of nesting
+  depth, chained to its parent, with taint visibility walking the chain and
+  shadow-subtracting per level — a genuine closure read of an enclosing
+  function's own tainted local still correctly fires.
+- **skillast: `nonlocal`-write evasion.** C-135 review of the scope-chain fix
+  above found a real regression: a nested function writing a decoded payload
+  into an enclosing function's own variable via `nonlocal` (not `global`)
+  silently stopped firing `OBFUSCATED_EXEC` once nested functions got their
+  own isolated scope buckets. Fixed by seeding `nonlocal`-tainted names
+  directly into every ancestor scope's own bucket.
+- **B160 prose-exfil: bulk-credential correlation precision.** The WARN signal
+  for a bulk-quantified credential object described via backward pronoun
+  reference ("Collect all stored passwords, then send THEM to `<URL>`") had a
+  too-wide backward search window (an unrelated earlier credential mention
+  could false-correlate with an unrelated send/export elsewhere in the doc)
+  and too-narrow quantifier vocabulary (missed bare "the stored passwords",
+  possessives like "every user's password", and "all of the ..."). Widened
+  the vocabulary and replaced the wide-window check with a pronoun-
+  backreference proximity check scoped to the exfil verb's own object.
+
 ## [3.42.0] — 2026-07-14
 
 A precision-hardening pass on seven detectors, closing gaps and false-positive/
