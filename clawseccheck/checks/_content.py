@@ -6701,12 +6701,107 @@ _BULK_DATA_OBJECT_RE = re.compile(
 # routed to WARN (not FAIL) -- a bulk quantifier is required so an ordinary singular
 # auth mention ("authenticate using your API token") doesn't reintroduce the R1 FP
 # the tight is_cred window was built to close.
+#
+# B-212 (C-135 follow-up on B-207): widened past bare "all|every" -- "the stored
+# passwords" (definite article, no quantifier word, but PLURAL so still bulk-shaped),
+# a possessive ("every user's password" / "all users' passwords" / "all their
+# passwords"), and "all OF THE ..." were all confirmed-silent variants of the exact
+# same shape.
+_BULK_CRED_NOUN_RE = (
+    r"(?:secret|token|credential|password|passwd|api[_\- ]?key|private[_\- ]?key|"
+    r"access[_\- ]?key|keychain|keystore|wallet|mnemonic|passphrase)"
+)
+_BULK_CRED_INFIX_RE = r"(?:stored\s+|saved\s+|cached\s+|local\s+|browser\s+)*"
 _BULK_CRED_OBJECT_RE = re.compile(
-    r"\b(?:all|every)\s+(?:the\s+|your\s+|stored\s+|saved\s+)*(?:secret|token|credential|"
-    r"password|passwd|api[_\- ]?key|private[_\- ]?key|access[_\- ]?key|keychain|keystore|"
-    r"wallet|mnemonic|passphrase)s?\b",
+    r"\b(?:"
+    r"(?:all(?:\s+of)?|every)\s+(?:the\s+|your\s+|our\s+|my\s+|their\s+)?"
+    rf"{_BULK_CRED_INFIX_RE}{_BULK_CRED_NOUN_RE}s?"
+    r"|"
+    r"(?:every|all)\s+(?:user's|users'|users?)\s+"
+    rf"{_BULK_CRED_INFIX_RE}{_BULK_CRED_NOUN_RE}s?"
+    r"|"
+    rf"the\s+{_BULK_CRED_INFIX_RE}{_BULK_CRED_NOUN_RE}s\b"
+    r")",
     re.I,
 )
+# B-212 FP side: unlike is_cred (tight verb->URL window) or is_bulk (accepted as a
+# wider-tolerance tradeoff), is_bulk_cred's bulk-credential PHRASE was checked against
+# the raw 300-char backward obj_window with no requirement it actually describe what's
+# being sent -- "This tool manages all stored passwords securely. Later in the
+# workflow, export the daily activity log to <URL>" false-WARNed even though the
+# export target has nothing to do with the passwords mention.
+#
+# C-135 (round 2, on this exact fix): a first attempt gated cross-sentence matches on
+# whether the CREDENTIAL phrase's own sentence contained a collection-shaped verb
+# (collect/gather/.../read) -- "read" alone reopened the false-WARN this fix exists to
+# close ("This skill can read all stored passwords ... Later, export anonymous usage
+# metrics to <URL>"), while ordinary non-listed phrasing ("We need the passwords ...
+# send them to <URL>") stayed silently unmatched. The real, attacker-agnostic signal
+# every genuine case (including every shipped B-207 example) actually shares is
+# PRONOUN BACKREFERENCE: the exfil verb's own object is a bare pronoun ("send THEM",
+# "transmit IT", "forward THESE") standing in for a credential object described
+# earlier, rather than an explicit, self-contained object of its own ("export the
+# daily activity log"). A cross-sentence match now only counts when the verb's OWN
+# object (the span from the verb to the end of ITS sentence) is such a pronoun --
+# checking the credential phrase's sentence is dropped entirely, since it only ever
+# produced either an over-broad or under-broad verb vocabulary, never the real signal.
+#
+# C-135 (round 3, on this exact fix): scanning the pronoun anywhere in the verb's
+# WHOLE sentence (not just its own direct object) reopened the FP class yet again --
+# "Later, send the daily activity report to <URL>, since it's due today" false-WARNed
+# on an unrelated PASSWORDS mention two sentences earlier, because "it" merely
+# appeared somewhere later in the same sentence (in an unrelated trailing "since/
+# because/so" clause), not as what the verb actually sent. A first attempt scoped the
+# search to end at the first clause boundary (comma or a fixed subordinating-
+# conjunction list) -- C-135 round 4 found "and" (a COORDINATING conjunction, not
+# subordinating, so absent from that list) let the identical bug back in ("...send
+# the compliance report to <URL> and archive IT locally for audits"), and any finite
+# conjunction enumeration will keep missing one. Replaced with a PROXIMITY window
+# instead of a boundary-word list: English verb-object order puts a pronoun object
+# immediately after its verb ("send THEM to <URL>", "transmit IT all to <URL>") --
+# never 5+ words downstream in a trailing clause -- so the search is bounded to a
+# short, fixed character span right after the verb, with no enumeration to keep
+# extending.
+#
+# C-135 (round 4, on this exact fix): confirmed clean against every direction that
+# would MISS a real backreference (adverbial phrases between verb and pronoun --
+# "send them right away, without any delay, to <URL>" -- correctly still WARN, since
+# English syntax doesn't allow a long adverbial to sit between a verb and its own
+# pronoun direct object). One genuine remaining FP class was found and DELIBERATELY
+# left open rather than tightened further: a ditransitive "verb + pronoun(recipient)
+# + unrelated explicit direct object" shape ("send THEM the monthly invoice to
+# <URL>" -- "them" = recipients, not a backreference to an earlier credential
+# mention) also falls inside the proximity window. A follow-up fix was drafted
+# (require the pronoun be immediately followed by nothing but punctuation/"to"/end,
+# not another noun phrase) but REJECTED: it reintroduces a real false NEGATIVE --
+# tightening to "pronoun immediately precedes to/punctuation/end" fails on the very
+# adverbial-phrase cases this round just confirmed clean ("send them right away,
+# without any delay, to <URL>" -- "right away" sits between "them" and the comma/
+# "to", so the tightened check would wrongly silence it). Per this project's
+# consistent safe-direction bias (a WARN-grade false positive is tolerable; missing
+# a real exfil directive is not), the looser proximity-only design is kept -- the
+# ditransitive gap is tracked as non-blocking debt in the project's issue tracker.
+_BULK_CRED_PRONOUN_BACKREF_RE = re.compile(r"\b(?:them|it|these|those)\b", re.I)
+_BULK_CRED_PRONOUN_OBJECT_WINDOW = 20  # chars right after the verb: "  them to ", "  it all to "
+
+
+def _bulk_cred_object_correlated(
+    blob: str, obj_window: str, obj_start: int, verb_start: int, verb_end: int
+) -> bool:
+    """True when a `_BULK_CRED_OBJECT_RE` match in `obj_window` is actually
+    correlated with the exfil verb spanning [verb_start, verb_end) (absolute
+    positions in `blob`) -- see the B-212 comment above
+    `_BULK_CRED_PRONOUN_BACKREF_RE`."""
+    verb_object_span = blob[verb_end : verb_end + _BULK_CRED_PRONOUN_OBJECT_WINDOW]
+    verb_has_pronoun_object = bool(_BULK_CRED_PRONOUN_BACKREF_RE.search(verb_object_span))
+    for m in _BULK_CRED_OBJECT_RE.finditer(obj_window):
+        abs_start = obj_start + m.start()
+        lo, hi = sorted((abs_start, verb_start))
+        if _SENTENCE_BREAK_RE.search(blob, lo, hi) is None:
+            return True  # shares the exfil verb's own sentence
+        if verb_has_pronoun_object:
+            return True  # cross-sentence, but the verb's own object backreferences it
+    return False
 _EXFIL_URL_RE = re.compile(r"https?://[^\s\"'<>)\]]+", re.I)
 _EXFIL_VERB_URL_WINDOW = 100  # destination must be close to the verb -- "Send X to <URL>"
 _EXFIL_OBJECT_WINDOW = 300  # the object may be described a workflow step earlier
@@ -6770,8 +6865,9 @@ def _prose_exfil_scan(blob: str, own_host, fence_ranges: list[tuple[int, int]]) 
         # tight cred_window never reaches "passwords" (it's before the verb), so this
         # is checked against the wide obj_window like is_bulk and routed to WARN
         # (is_cred stays False here on purpose -- only the tight-window direct-object
-        # case is FAIL-grade).
-        is_bulk_cred = bool(_BULK_CRED_OBJECT_RE.search(obj_window))
+        # case is FAIL-grade). B-212: a bare wide-window search wasn't enough -- see
+        # _bulk_cred_object_correlated.
+        is_bulk_cred = _bulk_cred_object_correlated(blob, obj_window, obj_start, vm.start(), vm.end())
         if not (is_cred or is_bulk or is_bulk_cred):
             continue
         last_end = obj_end

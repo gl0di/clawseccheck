@@ -459,3 +459,190 @@ def test_b205_c135_nested_class_method_same_scope_taint_still_flags():
         "            exec(payload)\n"
     )
     assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+# ---------------------------------------------------------------------------
+# B-209 / B-210 / B-211: follow-ups discovered during B-205's own C-135 rounds
+# (all safe-direction FPs, non-blocking -- B-205 shipped as-is). All three share the
+# same root cause: owner_map only distinguished "top-level function" as a scope unit,
+# with no real parent-scope-chain. Fixed together via a genuine lexical scope chain
+# (each nested function gets its own bucket, chained to its immediate enclosing
+# function) plus shadow-subtraction for ancestor buckets.
+# ---------------------------------------------------------------------------
+
+def test_b209_global_in_nested_function_does_not_promote_enclosing_functions_own_local():
+    # A `global x` declared inside a NESTED function must not sweep the ENCLOSING
+    # function's own separate, non-global local `x` into the module-wide bucket too.
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    x = base64.b64decode(b'eA==')\n"
+        "    def inner():\n"
+        "        global x\n"
+        "        x = 'unrelated module global'\n"
+        "    inner()\n"
+        "    return x\n"
+        "def user():\n"
+        "    x = 'safe literal, unrelated name collision'\n"
+        "    exec(x)\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b210_sibling_nested_functions_under_same_parent_do_not_collide():
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    def inner1():\n"
+        "        payload = base64.b64decode(b'eA==')\n"
+        "        return payload\n"
+        "    def inner2():\n"
+        "        payload = 'safe literal, unrelated closure var'\n"
+        "        exec(payload)\n"
+        "    inner1()\n"
+        "    inner2()\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b210_genuine_closure_read_of_enclosing_functions_taint_still_flags():
+    # Positive control for B-210's fix: giving nested functions their own scope
+    # bucket must not blind detection when a nested function reads a REAL tainted
+    # local from its enclosing function via ordinary Python closure semantics.
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    key = base64.b64decode(b'eA==')\n"
+        "    def inner():\n"
+        "        exec(key)\n"
+        "    inner()\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b210_three_level_nesting_intermediate_shadow_blocks_outer_taint():
+    # Deeper correctness check beyond B-210's own repro: a THIRD level (innermost)
+    # closure-reading a name must resolve to the NEAREST enclosing binding (`mid`'s
+    # own unrelated local), not skip past it to the grandparent's tainted one.
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    key = base64.b64decode(b'eA==')\n"
+        "    def mid():\n"
+        "        key = 'mid own different unrelated key, not tainted'\n"
+        "        def inner():\n"
+        "            exec(key)\n"
+        "        inner()\n"
+        "    mid()\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b211_module_level_taint_shadowed_by_same_named_parameter_not_flagged():
+    src = (
+        "import base64\n"
+        "payload = base64.b64decode(b'eA==')\n"
+        "def render(payload):\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b211_module_level_taint_shadowed_by_local_reassignment_not_flagged():
+    src = (
+        "import base64\n"
+        "payload = base64.b64decode(b'eA==')\n"
+        "def render():\n"
+        "    payload = 'a totally different, safe, local string'\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b211_positive_control_real_module_level_taint_still_flags():
+    # Positive control for B-211's fix: an unrelated function with NO local/parameter
+    # shadowing of the same name must still see genuine module-level taint.
+    src = (
+        "import base64\n"
+        "payload = base64.b64decode(b'eA==')\n"
+        "def render():\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+# ---------------------------------------------------------------------------
+# C-135 (on B-210): a nested function that writes a decoded payload into an
+# ENCLOSING function's own variable via `nonlocal` (not `global`), read back and
+# exec'd there right after -- genuine runtime taint flow that silently stopped
+# firing once nested functions got their own scope bucket. Real regression found
+# during C-135's own review of the B-210 fix, fixed in the same change.
+# ---------------------------------------------------------------------------
+
+def test_c135_nonlocal_write_from_nested_function_still_flags():
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    payload = 'safe default'\n"
+        "    def inner():\n"
+        "        nonlocal payload\n"
+        "        payload = base64.b64decode(b'eA==')\n"
+        "    inner()\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_c135_nonlocal_write_across_two_nesting_levels_still_flags():
+    # `nonlocal` in `inner` skips its immediate parent `mid` (which never touches
+    # `payload` at all) and binds to `outer`'s own `payload` two levels up -- the
+    # fix must not assume "immediate parent only".
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    payload = 'safe'\n"
+        "    def mid():\n"
+        "        def inner():\n"
+        "            nonlocal payload\n"
+        "            payload = base64.b64decode(b'eA==')\n"
+        "        inner()\n"
+        "    mid()\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_c135_nonlocal_taint_visible_at_intermediate_ancestor_too():
+    # `mid` itself (between `inner` and `outer`) must also see the taint if it
+    # reads the same variable after `inner()` runs -- not just the outermost scope.
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    payload = 'safe'\n"
+        "    def mid():\n"
+        "        def inner():\n"
+        "            nonlocal payload\n"
+        "            payload = base64.b64decode(b'eA==')\n"
+        "        inner()\n"
+        "        exec(payload)\n"
+        "    mid()\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_c135_nonlocal_write_does_not_leak_to_unrelated_same_named_function():
+    # Safety control: an unrelated function elsewhere with no `nonlocal` relationship
+    # to the tainted one must not be swept in just by sharing a bare variable name.
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    payload = 'safe'\n"
+        "    def inner():\n"
+        "        nonlocal payload\n"
+        "        payload = base64.b64decode(b'eA==')\n"
+        "    inner()\n"
+        "def unrelated():\n"
+        "    payload = 'totally unrelated safe literal'\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
