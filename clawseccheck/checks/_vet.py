@@ -605,7 +605,7 @@ _TEST_FIXTURE_BASENAME_RE = re.compile(
 # around a live payload is a harder, residual case the tool still surfaces as WARN
 # (not silently drops) rather than FAIL.
 #
-# Python/JS test idioms are specific enough that ONE match suffices (a bare
+# Python test idioms are specific enough that ONE match suffices (a bare
 # `def test_...(` or `import pytest` is not something an unrelated script would
 # plausibly carry by accident).
 _TEST_SHAPE_RE = re.compile(
@@ -615,13 +615,54 @@ _TEST_SHAPE_RE = re.compile(
 )
 
 
+# B-204: JS/TS test shape. _TEST_FIXTURE_BASENAME_RE already admits .spec.js/
+# .test.ts/etc, but a genuine Jest/Mocha/Vitest test whose basename matched still
+# false-FAILed on an attack string in its body, because no JS test-shape idiom
+# existed to satisfy the second (body-shape) half of the check.
+#
+# C-135 found the first version of this fix (a single alternation, "one match
+# suffices" like the Python leg above) is a REAL FAIL-evasion bypass, not just a
+# theoretical one -- verified two independent live-payload repros through
+# check_installed_skills(): (a) an attacker shadowing `test`/`it` with their OWN
+# synchronously-executing function (`function test(name, fn) { fn(); }` then
+# `test('x', () => { <live unsandboxed payload> })`) satisfies the bare-test(
+# alternative with zero real framework involved; (b) a single gratuitous
+# `import { expect } from '@jest/globals';` line dropped into an otherwise fully
+# malicious file with NO test/it/describe call at all still satisfies the
+# import/require alternative, since _TEST_SHAPE_RE.search() scans the WHOLE file
+# body with no proximity requirement to the actual attack string. Each JS idiom
+# alone is therefore exactly as forgeable-by-deliberate-construction as the shell
+# idioms already are (the reason _SHELL_TEST_SHAPE_SIGNALS below requires >= 2) --
+# unlike the Python leg's `def test_...(`/`import pytest`, which at least requires
+# authoring a real function definition, not just a one-line import. Fixed by
+# applying the SAME multi-signal-count discipline used for the shell leg: each JS
+# idiom is a separate compiled regex, and _pos_in_test_fixture_file requires
+# _JS_TEST_SHAPE_MIN_SIGNALS distinct ones, not any single one alone. `(?<!\.)` on
+# the bare test(/it( alternative still matters (it excludes the extremely common
+# unrelated JS idiom `someRegex.test(str)` -- RegExp.prototype.test, a method
+# call), but is no longer, by itself, sufficient to pass -- a genuine Jest/Mocha
+# suite naturally carries 2+ of these (a framework import/require alongside its
+# own describe/test/it/expect calls); the two verified bypasses above only ever
+# carried exactly one.
+_JS_TEST_SHAPE_SIGNALS = [
+    re.compile(r"\bdescribe\s*\(\s*[`'\"]", re.I),
+    re.compile(r"(?<!\.)\b(?:test|it)\s*\(\s*[`'\"]", re.I),
+    re.compile(r"\bfrom\s+[`'\"](?:jest|vitest|mocha|@jest/globals|chai)[`'\"]", re.I),
+    re.compile(r"\brequire\s*\(\s*[`'\"](?:jest|vitest|mocha|chai)[`'\"]\s*\)", re.I),
+    re.compile(r"\bexpect\s*\(", re.I),
+]
+
+
+_JS_TEST_SHAPE_MIN_SIGNALS = 2
+
+
 # Shell-test shape (real-fleet verification): bash test harnesses have no single
 # universal idiom like pytest's `def test_`, so this covers the common conventions —
 # bats (`@test`), shunit2/generic (`assert_*`), and hand-rolled counters (`check()`/
 # `PASS=0`/`FAIL=0`) or sandbox-isolation setup (`mktemp -d`), all found verbatim in
 # real clawstealth test files.
 #
-# C-135 (2nd adversarial pass): UNLIKE the Python/JS list above, each shell
+# C-135 (2nd adversarial pass): UNLIKE the Python list above, each shell
 # alternative alone is a common, generic idiom a genuinely malicious *_test.sh
 # (named that way specifically to exploit the basename match) could plausibly
 # carry for unrelated reasons — `mktemp -d` to stage a payload, a `check "msg" ...`
@@ -630,7 +671,10 @@ _TEST_SHAPE_RE = re.compile(
 # shape combination was built to close. Each alternative is a SEPARATE compiled
 # regex (not one alternation) so _pos_in_test_fixture_file can count how many
 # DISTINCT idioms are present and require at least two — the real clawstealth
-# fixtures hit 4-5 of these; the minimal bypass repro hit exactly 1.
+# fixtures hit 4-5 of these; the minimal bypass repro hit exactly 1. (The JS leg
+# above hit the identical forgeability problem via live C-135 repros and now
+# follows the same >= 2 discipline, via _JS_TEST_SHAPE_SIGNALS/_JS_TEST_SHAPE_MIN_
+# SIGNALS.)
 _SHELL_TEST_SHAPE_SIGNALS = [
     re.compile(r"@test\b", re.I),
     re.compile(r"\bassert_\w+\b", re.I),
@@ -648,17 +692,21 @@ _SHELL_TEST_SHAPE_MIN_SIGNALS = 2
 def _pos_in_test_fixture_file(blob: str, pos: int) -> bool:
     """True when *pos* falls inside a "# file: <name>" section whose basename matches
     a test-file naming convention AND whose body has genuine test-code shape — both
-    are required (C-135: a forged header alone is not enough). A Python/JS test idiom
-    (_TEST_SHAPE_RE) is specific enough to count alone; a shell-test idiom is generic
-    enough (C-135 2nd pass) that at least _SHELL_TEST_SHAPE_MIN_SIGNALS distinct ones
-    must be present. Scopes a down-rank to exactly that file, not the whole skill (a
-    live attack elsewhere is unaffected)."""
+    are required (C-135: a forged header alone is not enough). A Python test idiom
+    (_TEST_SHAPE_RE) is specific enough to count alone (it requires authoring a real
+    function definition, not just a one-line import); JS and shell idioms are each
+    generic/forgeable enough alone (C-135) that at least their respective MIN_SIGNALS
+    distinct ones must be present. Scopes a down-rank to exactly that file, not the
+    whole skill (a live attack elsewhere is unaffected)."""
     for m in _MANIFEST_HEADER_RE.finditer(blob):
         if m.start("body") <= pos < m.end("body"):
             if not _TEST_FIXTURE_BASENAME_RE.match(m.group("name").strip()):
                 return False
             body = m.group("body")
             if _TEST_SHAPE_RE.search(body):
+                return True
+            js_signal_count = sum(1 for rx in _JS_TEST_SHAPE_SIGNALS if rx.search(body))
+            if js_signal_count >= _JS_TEST_SHAPE_MIN_SIGNALS:
                 return True
             shell_signal_count = sum(1 for rx in _SHELL_TEST_SHAPE_SIGNALS if rx.search(body))
             return shell_signal_count >= _SHELL_TEST_SHAPE_MIN_SIGNALS
