@@ -419,15 +419,34 @@ def _redirect_targets_file(blob: str, fname_start: int) -> bool:
 # launchctl load, writes to /etc/cron.* paths or ~/Library/LaunchAgents.
 # Conservative: "crontab -l" (read-only listing) is excluded; bare "cron" in prose
 # (e.g., "runs daily via cron") does NOT fire — must be an action verb context.
+#
+# C-204 (SkillTrustBench PE2, largest external FN bucket): the original alternation
+# only matched `crontab -e/-u/-r` or `crontab <file>` — it missed the equally common
+# STDIN-install form `crontab -` (piped from `(crontab -l; echo '...') | crontab -`,
+# already visible in the shipped bad_c040_cron fixture but riding on its OWN @reboot
+# line, not on the `crontab -` form itself) and the Python-argv shape
+# `subprocess.run(["crontab", "-"])`, where "crontab" and "-" are separate string
+# tokens, not a contiguous "crontab -" substring. Also widened `systemctl enable` to
+# tolerate one or more `--flag` tokens before it (`systemctl --user enable foo`,
+# `systemctl --user --now enable foo`) — real user-scoped agent persistence uses
+# `--user`, which the old regex silently missed entirely (zero match, not even WARN).
+# _CRON_SERVICE_TARGET_RE below was widened in lockstep so the reputable-daemon
+# down-rank still applies to the `--user`-flagged form. Added a systemd per-user unit
+# FILE path (`~/.config/systemd/user/*.service`/`.timer`) alongside the existing
+# `/etc/cron.*` and `Library/LaunchAgents` path alternatives — same bare-path-mention
+# precision level as those two, not a new stricter or looser standard.
 _CRON_PERSIST_RE = re.compile(
     r"""(?:
         crontab\s+-[eur]\b                          |  # crontab -e/-u/-r (not -l)
+        crontab\s+-(?!\w)                           |  # crontab - (stdin install, no flag)
+        ["']crontab["']\s*,\s*["']-["']             |  # subprocess argv: ["crontab","-"]
         crontab\s+[^-\s]                            |  # crontab <file>
         @reboot\b                                   |  # cron @reboot directive
-        systemctl\s+enable\b                        |  # systemd persistent enable
+        systemctl\s+(?:--\w[\w-]*\s+)*enable\b      |  # systemd enable (incl. --user/--now)
         launchctl\s+load\b                          |  # macOS launchd load
         /etc/cron\.(?:d|daily|weekly|monthly|hourly)|  # drop into cron dirs
-        Library/LaunchAgents                           # macOS per-user launch agent
+        Library/LaunchAgents                        |  # macOS per-user launch agent
+        \.config/systemd/user/\S+\.(?:service|timer)\b # per-user systemd unit file
     )""",
     re.I | re.VERBOSE,
 )
@@ -472,8 +491,12 @@ _REPUTABLE_DAEMON_NAMES = frozenset({
 })
 
 
+# C-204: widened in lockstep with _CRON_PERSIST_RE's systemctl alternative — both must
+# accept the same `--flag` tokens (e.g. --user) so a match at _cron_persist's start
+# position still resolves a service name here, letting the reputable-daemon down-rank
+# apply to `systemctl --user enable tor` exactly as it already does for `systemctl enable tor`.
 _CRON_SERVICE_TARGET_RE = re.compile(
-    r"(?:systemctl\s+enable|launchctl\s+load)\s+(?:--now\s+)?(?:--\s+)?([A-Za-z0-9_.-]+)",
+    r"(?:systemctl\s+(?:--\w[\w-]*\s+)*enable|launchctl\s+load)\s+(?:--now\s+)?(?:--\s+)?([A-Za-z0-9_.-]+)",
     re.I,
 )
 
@@ -482,10 +505,24 @@ _CRON_SERVICE_TARGET_RE = re.compile(
 # monitor", a daily self-audit) is a legitimate feature — kept as a secondary discriminator
 # for the non-systemctl cron mechanisms (crontab/@reboot/cron dirs/LaunchAgents), where a
 # named-daemon check does not apply.
+#
+# C-135 (adversarial review of C-204): confirmed empirically that plain, everyday
+# scheduling language a legitimate backup/sync/devops skill would use in its OWN
+# description — "periodic backup job", "background sync worker", "nightly backup cron
+# entry" — was NOT recognized (the vocabulary above is watchdog/health-check-specific)
+# and false-FAILed HIGH. Widened with a small, BOUNDED set of ordinary scheduling-task
+# nouns, each still paired with a job/task/entry/worker noun (same "verb/noun co-signal"
+# shape as the existing entries, not a bare "backup"/"sync" — those words alone are too
+# common in unrelated prose). This still only down-ranks HIGH->WARN (never a silent
+# PASS), so it does not weaken the check's ability to still surface a genuinely covert
+# job under an innocuous label — same trust model the watchdog vocabulary already uses.
 _CRON_DISCLOSURE_RE = re.compile(
     r"\bwatch\s?dog\b|\bkill[\s-]?switch\b|\bself[\s-]?(?:monitor|check|audit)\b|"
     r"\bhealth[\s-]?check\b|\bheartbeat\s+monitor\b|\b(?:daily|scheduled|periodic)\s+audit\b|"
-    r"\bmonitor(?:ing)?\s+(?:job|task|process)\b",
+    r"\bmonitor(?:ing)?\s+(?:job|task|process)\b|"
+    r"\bbackup\s+(?:job|task|worker|cron|entry)\b|\bsync\s+(?:job|task|worker)\b|"
+    r"\b(?:scheduled|periodic|nightly|recurring)\s+(?:task|job|backup|sync)\b|"
+    r"\bcron\s+(?:job|entry|task)\b",
     re.I,
 )
 
@@ -528,12 +565,15 @@ def _cron_persistence_hits(blob: str, fence_ranges: list[tuple[int, int]]) -> tu
     disclosed_label = "cron/startup persistence (disclosed): a documented watchdog/monitoring job"
     fixture_label = "cron/startup persistence (test fixture): inside the skill's own test file"
     saw_test_fixture = False
+    # C-204/C-135 (performance): compute ONCE per blob, not once per match — see
+    # _manifest_header_matches' docstring.
+    _header_matches = _manifest_header_matches(blob)
     for m in _CRON_PERSIST_RE.finditer(blob):
         if _is_code_example(blob, m.start(), fence_ranges):
             continue
         # B-199: attack-shaped cron content inside the skill's OWN test fixture is not
         # a live directive. Keep scanning past it — a genuine match elsewhere must still fire.
-        if _pos_in_test_fixture_file(blob, m.start()):
+        if _pos_in_test_fixture_file(blob, m.start(), _header_matches):
             saw_test_fixture = True
             continue
         svc = _CRON_SERVICE_TARGET_RE.match(blob, m.start())
@@ -689,7 +729,26 @@ _SHELL_TEST_SHAPE_SIGNALS = [
 _SHELL_TEST_SHAPE_MIN_SIGNALS = 2
 
 
-def _pos_in_test_fixture_file(blob: str, pos: int) -> bool:
+def _manifest_header_matches(blob: str) -> list[re.Match[str]]:
+    """C-204/C-135 (performance): _pos_in_test_fixture_file used to re-run
+    _MANIFEST_HEADER_RE.finditer(blob) — an O(len(blob)) scan of the WHOLE blob — on
+    EVERY call. That's cheap when its caller's own trigger pattern rarely matches more
+    than a handful of times per skill (agent-config filenames, cron keywords), but
+    _authkey_persistence_hits' trigger (a short, easily-repeated ~20-char literal,
+    ".ssh/authorized_keys") can realistically appear thousands of times in a single
+    skill file, and _MAX_BYTES_PER_SKILL (collector.py) permits up to 1MB per skill —
+    empirically measured at 107s for one check on one skill with ~18k matches (vs.
+    <3s for the pre-existing per-match-scanning callers on an analogous input, because
+    their own trigger patterns don't realistically repeat that densely). Callers that
+    iterate many matches over the SAME blob should compute this list ONCE and pass it
+    to _pos_in_test_fixture_file's header_matches parameter instead of re-scanning per
+    match."""
+    return list(_MANIFEST_HEADER_RE.finditer(blob))
+
+
+def _pos_in_test_fixture_file(
+    blob: str, pos: int, header_matches: list[re.Match[str]] | None = None
+) -> bool:
     """True when *pos* falls inside a "# file: <name>" section whose basename matches
     a test-file naming convention AND whose body has genuine test-code shape — both
     are required (C-135: a forged header alone is not enough). A Python test idiom
@@ -697,8 +756,15 @@ def _pos_in_test_fixture_file(blob: str, pos: int) -> bool:
     function definition, not just a one-line import); JS and shell idioms are each
     generic/forgeable enough alone (C-135) that at least their respective MIN_SIGNALS
     distinct ones must be present. Scopes a down-rank to exactly that file, not the
-    whole skill (a live attack elsewhere is unaffected)."""
-    for m in _MANIFEST_HEADER_RE.finditer(blob):
+    whole skill (a live attack elsewhere is unaffected).
+
+    *header_matches*: pass a precomputed _manifest_header_matches(blob) result when
+    calling this in a loop over many matches of the SAME blob (see
+    _manifest_header_matches' docstring — avoids an O(len(blob)) rescan per call).
+    Defaults to scanning fresh, matching the original single-call behavior.
+    """
+    matches = header_matches if header_matches is not None else _MANIFEST_HEADER_RE.finditer(blob)
+    for m in matches:
         if m.start("body") <= pos < m.end("body"):
             if not _TEST_FIXTURE_BASENAME_RE.match(m.group("name").strip()):
                 return False
@@ -753,6 +819,143 @@ def _agent_config_write_hits(
                     )
                 )
     return hits
+
+
+# C-204 (SkillTrustBench PE2 — T1098.004): a skill installs cross-session SSH access
+# by appending a public key to ~/.ssh/authorized_keys. This is the single biggest
+# externally-quantified false-negative bucket (85/345 malicious skills) and, prior to
+# this fix, was NOT detected at all — no authorized_keys-shaped pattern existed
+# anywhere in the codebase.
+_AUTHKEY_PATH_RE = re.compile(r"\.ssh/authorized_keys\b", re.I)
+
+# Public-key line prefixes per the OpenSSH format (RFC 4716 / OpenSSH authorized_keys(5));
+# a literal one of these in the same window as a write is essentially never something a
+# legitimate skill embeds — a benign skill that reads/audits authorized_keys does not
+# need to carry a full key literal to do so.
+_SSH_PUBKEY_RE = re.compile(
+    r"\bssh-(?:rsa|ed25519|dss|dsa)\b|\becdsa-sha2-nistp\d+\b|"
+    r"\bsk-ssh-ed25519@openssh\.com\b|\bsk-ecdsa-sha2-nistp\d+@openssh\.com\b",
+    re.I,
+)
+
+
+# C-135 (adversarial review) found the original ±_PERSIST_WINDOW proximity-window
+# write-verb search (the same idiom _agent_config_write_hits uses) is unsound here
+# specifically: a genuine empirically-verified repro — a read-only key-hygiene AUDIT
+# skill (`open(...authorized_keys...).readlines()`, then an UNRELATED `open("report.txt",
+# "w")`/`f.write(...)` a few lines later, plus an `ALLOWED_TYPES = ("ssh-rsa",
+# "ssh-ed25519", ...)` allowlist for classifying key types) — false-FAILed HIGH: the
+# unrelated write call and the unrelated key-TYPE-name literals independently satisfied
+# the window search and combined into a false "writes a literal SSH key" finding, even
+# though the skill never writes to authorized_keys at all. _agent_config_write_hits
+# tolerates this shape of imprecision because its filenames (SOUL.md, etc.) are rarely
+# also read for legitimate audit purposes; authorized_keys is routinely read by
+# legitimate security-hygiene tooling, so the proximity window is unsound for it.
+#
+# Fixed by requiring the write to be ARGUMENT-BOUND to the authorized_keys path itself,
+# not merely nearby: either (a) the SAME `open(...)` call carries both the path and a
+# 'w'/'a' mode flag, (b) a `.write_text(`/`.write_bytes(`/`.write(` call is chained
+# directly onto a path expression that itself contains the path literal (e.g.
+# `Path(os.path.expanduser("~/.ssh/authorized_keys")).write_text(new_key)`), or (c) a
+# shell redirect immediately precedes the path (_redirect_targets_file, already
+# argument-bound). A skill that assigns the path to a variable and writes through that
+# variable much later (no direct textual binding) is a residual miss — accepted
+# down-rank-not-drop precedent (matches _agent_config_write_hits' own filename-literal
+# limitation) rather than reintroducing the proximity-window false positive.
+#
+# Self-caught follow-up (found while replaying the C-135 repros above, not by the
+# reviewer): a first cut used two char-by-char lookaheads (`(?=[^)]{0,240}X)`) to check
+# for the path and the mode flag ahead of the open() call. That broke on the single
+# most idiomatic real-world shape, `open(os.path.expanduser("~/.ssh/authorized_keys"),
+# "a")`: `.ssh/authorized_keys` sits INSIDE the nested `expanduser(...)` call's own
+# parens, and a lookahead can only "hop over" a whole balanced `(...)` group as one
+# atomic unit — it can never stop partway through one to land its endpoint in the
+# middle of the group's own content. So the path substring, sitting mid-group, was
+# never reachable by either lookahead — the fix isn't a lookahead but a real "capture
+# the whole call as balanced text, then substring-check it" step: _AUTHKEY_OPEN_CALL_RE
+# matches one full `open(...)` call (tolerating exactly one level of nested parens,
+# e.g. an expanduser(...)/str(...) wrapper), and _authkey_open_calls_bind_write() then
+# just checks both facts (path present, mode-flag present) as plain substring/regex
+# tests against that captured span — no lookahead gymnastics. A SECOND level of nesting
+# is a further residual, same down-rank-not-drop tradeoff as the rest of this function:
+# falls back to the redirect/chained-write checks, or — if genuinely nothing binds —
+# WARN never fires either, same as any other unmatched shape, never a promoted FAIL.
+_AUTHKEY_ARG_FRAGMENT = r"(?:[^()]|\([^()]*\))"
+_AUTHKEY_OPEN_CALL_RE = re.compile(
+    rf"open\s*\({_AUTHKEY_ARG_FRAGMENT}{{0,240}}\)",
+    re.I,
+)
+_AUTHKEY_MODE_FLAG_RE = re.compile(r"['\"][wa]['\"]")
+_AUTHKEY_CHAINED_WRITE_RE = re.compile(
+    r"\.ssh/authorized_keys[^\n;]{0,60}\.\s*write(?:_text|_bytes)?\s*\(",
+    re.I,
+)
+_AUTHKEY_BOUND_WRITE_WINDOW = 240  # chars around the path to look for a bound open()/chain
+
+
+def _authkey_open_calls_bind_write(bound_region: str) -> bool:
+    """True when *bound_region* contains a single `open(...)` call whose own argument
+    list carries both the authorized_keys path and a 'w'/'a' mode flag — see the
+    _AUTHKEY_OPEN_CALL_RE comment above for why this is a captured-span substring check
+    rather than a lookahead."""
+    for m in _AUTHKEY_OPEN_CALL_RE.finditer(bound_region):
+        call = m.group(0)
+        if _AUTHKEY_PATH_RE.search(call) and _AUTHKEY_MODE_FLAG_RE.search(call):
+            return True
+    return False
+
+
+def _authkey_persistence_hits(
+    blob: str, fence_ranges: list[tuple[int, int]]
+) -> tuple[list[str], list[str]]:
+    """C-204/T1098.004: split ~/.ssh/authorized_keys write matches into (high, warn).
+
+    Two-step, mirroring _agent_config_write_hits: (1) find the authorized_keys path
+    outside a code-example fence or the skill's own test fixture; (2) require a write
+    ARGUMENT-BOUND to that exact path (see the C-135 comment above _AUTHKEY_OPEN_CALL_RE
+    for why proximity alone is unsound here) — a skill that only READS/audits
+    authorized_keys never fires, even when an unrelated write call or key-type-name
+    literal sits nearby. A literal ssh-* public-key token in the same bound-write region
+    escalates to HIGH (near-unforgeable: essentially no legitimate skill injects a
+    brand-new key); a bound write whose key content is a variable/computed value (not a
+    literal) down-ranks to WARN rather than a silent PASS.
+    """
+    high_hits: list[str] = []
+    warn_hits: list[str] = []
+    high_label = (
+        "authorized_keys persistence: skill writes an SSH public key to "
+        "~/.ssh/authorized_keys (T1098.004)"
+    )
+    warn_label = (
+        "authorized_keys persistence: skill writes to ~/.ssh/authorized_keys "
+        "(key content not a literal — review)"
+    )
+    # C-135 (performance): compute ONCE per blob, not once per match — a full-blob
+    # rescan per match is what turned a 1MB pathologically-repetitive skill (a
+    # realistic size under _MAX_BYTES_PER_SKILL) into a measured 107s single-check
+    # runtime; see _manifest_header_matches' docstring for the empirical numbers.
+    _header_matches = _manifest_header_matches(blob)
+    for m in _AUTHKEY_PATH_RE.finditer(blob):
+        if _is_code_example(blob, m.start(), fence_ranges):
+            continue
+        if _pos_in_test_fixture_file(blob, m.start(), _header_matches):
+            continue
+        bound_start = max(0, m.start() - _AUTHKEY_BOUND_WRITE_WINDOW)
+        bound_end = min(len(blob), m.end() + _AUTHKEY_BOUND_WRITE_WINDOW)
+        bound_region = _HTML_TAG_RE.sub(" ", blob[bound_start:bound_end])
+        is_bound_write = (
+            _authkey_open_calls_bind_write(bound_region)
+            or bool(_AUTHKEY_CHAINED_WRITE_RE.search(bound_region))
+            or _redirect_targets_file(blob, m.start())
+        )
+        if not is_bound_write:
+            continue
+        if _SSH_PUBKEY_RE.search(bound_region):
+            if high_label not in high_hits:
+                high_hits.append(high_label)
+        elif warn_label not in warn_hits:
+            warn_hits.append(warn_label)
+    return high_hits, warn_hits
 
 
 # B-193: verbs a skill's own SKILL.md frontmatter would plausibly use to describe
@@ -1764,6 +1967,14 @@ def check_installed_skills(ctx: Context) -> Finding:
         for h in _cron_high:
             high.append(f"{name}: {h}")
         for h in _cron_warn:
+            _persist_warn.append(f"{name}: {h}")
+
+        # C-204: authorized_keys persistence — write-verb + key-literal HIGH/WARN split
+        # (see _authkey_persistence_hits docstring). Same shape as the cron block above.
+        _authkey_high, _authkey_warn = _authkey_persistence_hits(blob, _fr)
+        for h in _authkey_high:
+            high.append(f"{name}: {h}")
+        for h in _authkey_warn:
             _persist_warn.append(f"{name}: {h}")
 
         # C-040/B-193: agent-config injection (two-step: filename + write-verb in window).
