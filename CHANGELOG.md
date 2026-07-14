@@ -3,6 +3,30 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.43.0] — 2026-07-14
+
+`vet_source`'s pre-download reputation gate now also catches a source that
+impersonates a trusted org/owner, not just a squatted repo/slug name — closing
+a real supply-chain gap where a repo could be named anything as long as its
+git/URL owner segment near-missed a known brand.
+
+### Added
+- **`vet_source`: typosquat detection on the source's owner/org segment.**
+  `git:host/OWNER/repo` and `https://host/OWNER/repo` sources previously parsed
+  the owner segment and silently discarded it, only squat-checking the repo/
+  slug basename. The owner is now squat-checked independently via the same
+  curated brand pool and `_squat_hits()` machinery already used for the repo
+  name — an exact match on one no longer suppresses a genuine squat on the
+  other. Grounded first against the real OpenClaw dist: the originally-proposed
+  "trusted-org allowlist" wasn't backed by anything in OpenClaw's actual
+  schema, so the check was narrowed to reuse existing, already-hardened
+  machinery on data already being parsed, rather than inventing a new one.
+  C-135 adversarial review caught and fixed two real issues before shipping
+  — several verified real-world orgs (`anthropics`, `expressjs`, `discordjs`,
+  `huggingfaceh4`, `postgresml`) initially false-fired as squats of their own
+  brand names, and a doubled slash in a git spec could silently zero the owner
+  and evade the check entirely.
+
 ## [3.42.1] — 2026-07-14
 
 A precision-hardening pass on the AST taint-tracking engine and B160's bulk-
