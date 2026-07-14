@@ -161,6 +161,36 @@ _SHELL_HOST_SUBST_RE = re.compile(
 )
 _CURL_LIKE_RE = re.compile(r"\b(?:curl|wget)\b", re.I)
 
+# C-223: first-party-host REWORDING for HOST_INFO_EXFIL_FLOW's network-sink shape. A
+# minimal, self-contained host matcher -- skillast.py is a Layer-1 leaf module and
+# cannot import checks/_content.py's own _skill_own_host/_url_matches_own_host (that
+# would invert the project's layering); the caller (checks/_vet.py, which already
+# computes the skill's own declared host via _skill_own_host) passes the plain host
+# STRING in as analyze_python()'s `own_host` parameter instead. C-135: a match REWORDS
+# the finding (disclosed vs. covert) rather than silencing it outright -- the declared
+# host is self-reported by the same skill being scanned, so a full drop would let an
+# attacker erase the only signal for free just by echoing their own exfil host into
+# their own SKILL.md.
+_URL_HOST_RE = re.compile(r"https?://([^/:\s\"'<>)\]]+)", re.I)
+
+
+def _url_literal_host(node: ast.AST) -> str | None:
+    """The lowercased host of *node* when it's a plain http(s) string constant; else
+    None (a variable, f-string, or non-URL literal can't be resolved statically)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        m = _URL_HOST_RE.match(node.value)
+        if m:
+            return m.group(1).lower()
+    return None
+
+
+def _host_matches_own(host: str | None, own_host: str | None) -> bool:
+    """True when *host* equals *own_host* (exact or subdomain) -- mirrors
+    checks/_content.py's _url_matches_own_host without importing across layers."""
+    if not host or not own_host:
+        return False
+    return host == own_host or host.endswith("." + own_host)
+
 # C-205: DROPPER_DOWNLOAD_TO_TMP -- an argv-list curl/wget call (subprocess.run(["curl",
 # ..., "-o", "/tmp/x.sh"])), not the literal-`| sh` pipe shape B100 already catches --
 # staging a script into a writable/tmp-like path with an explicit output flag, the
@@ -1315,12 +1345,20 @@ def _is_writable_import_path(node: ast.AST) -> bool:
     return False
 
 
-def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
+def analyze_python(
+    source: str, filename: str = "<skill>", own_host: str | None = None
+) -> list[ASTFinding]:
     """Return AST findings for one Python source string. Never raises, never executes.
 
     On a parse failure (SyntaxError, Python 2 syntax, pathological nesting, etc.)
     emits a single AST_UNANALYZABLE finding instead of returning an empty list, so
     callers can distinguish "clean file" from "file the AST/taint layer could not scan".
+
+    `own_host` (C-223): the skill's own declared endpoint host (from its
+    SKILL.md/manifest, computed by the caller — skillast.py has no access to that
+    text itself), used to REWORD (not silence — self-declaration proves disclosed,
+    not trustworthy) HOST_INFO_EXFIL_FLOW when a host-info value flows to the
+    skill's OWN disclosed endpoint rather than an undeclared third party.
     """
     try:
         tree = ast.parse(source)
@@ -1642,14 +1680,35 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                         hit = True
                         break
                 if hit:
-                    add(
-                        "HOST_INFO_EXFIL_FLOW",
-                        "info",
-                        ln,
-                        "host/machine-identity info (hostname/platform/git-remote) flows into "
-                        "a network sink — verify the destination is trusted (possible covert "
-                        "telemetry / phone-home)",
-                    )
+                    # C-223: a literal destination matching the skill's OWN declared
+                    # endpoint host is DISCLOSED, not covert -- reword rather than
+                    # silence entirely (C-135: the declared host is self-reported by
+                    # the same skill being scanned, so it proves the destination
+                    # isn't HIDDEN, not that it's trustworthy; a full drop would let
+                    # an attacker erase the only signal for free just by echoing
+                    # their own exfil host into SKILL.md). A non-literal/dynamic URL
+                    # can't be resolved statically, so it keeps the plain wording
+                    # (safe default).
+                    dest_host = _url_literal_host(node.args[0]) if node.args else None
+                    if _host_matches_own(dest_host, own_host):
+                        add(
+                            "HOST_INFO_EXFIL_FLOW",
+                            "info",
+                            ln,
+                            "verify independently — self-declaration alone doesn't prove the "
+                            "destination is trustworthy — host/machine-identity info "
+                            "(hostname/platform/git-remote) flows into a network sink matching "
+                            "the skill's OWN declared endpoint (disclosed, not covert)",
+                        )
+                    else:
+                        add(
+                            "HOST_INFO_EXFIL_FLOW",
+                            "info",
+                            ln,
+                            "host/machine-identity info (hostname/platform/git-remote) flows "
+                            "into a network sink — verify the destination is trusted (possible "
+                            "covert telemetry / phone-home)",
+                        )
                 continue
             is_shell_exec, shell_sink_desc = _is_exec_sink_call(node.func)
             if not is_shell_exec:

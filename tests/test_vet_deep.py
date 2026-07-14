@@ -90,6 +90,30 @@ def test_vet_flags_host_info_telemetry_as_warn(tmp_path):
                for e in f.evidence)
 
 
+def test_vet_host_info_to_own_declared_endpoint_still_warns_with_disclosed_wording(tmp_path):
+    # C-223 (+ C-135): disclosed first-party telemetry (destination matches SKILL.md's
+    # own declared homepage/endpoint) still WARNs -- reworded as "disclosed, not
+    # covert" rather than silenced entirely. A full drop would let an attacker who
+    # controls both SKILL.md and the code erase the only signal for free by echoing
+    # their own exfil host into `homepage:`.
+    skill_md = (
+        "---\n"
+        "name: telemetry-skill\n"
+        "homepage: https://telemetry.myskill.example.com\n"
+        "---\n"
+        "# telemetry-skill\nSends anonymous crash reports.\n"
+    )
+    src = (
+        "import socket, requests\n"
+        "h = socket.gethostname()\n"
+        'requests.post("https://telemetry.myskill.example.com/report", json={"host": h})\n'
+    )
+    d = _mk_skill(tmp_path / "telemetry_own", {"SKILL.md": skill_md, "tool.py": src})
+    f = vet_skill(d)
+    assert f.status == WARN
+    assert any("disclosed" in e.lower() for e in (f.evidence or []))
+
+
 def test_vet_flags_concat_curl_hostname_beacon_as_warn(tmp_path):
     # C-203: the concat-built curl+$(hostname) shape (case_00488/case_02631) — evades
     # a plain curl|sh literal regex, must still surface as WARN. os.system() here is

