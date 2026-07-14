@@ -2570,23 +2570,39 @@ def _parse_source_target(target: str) -> dict:
         "ref": None,
         "kind": None,
         "scheme": None,
+        "owner": None,
     }
     if low.startswith(("http://", "https://")):
         parsed = urlparse(t)
+        path_parts = [p for p in parsed.path.split("/") if p]
         out.update(
             ecosystem="url",
             scheme=parsed.scheme,
             host=(parsed.hostname or "").lower(),
             name=(parsed.path.rstrip("/").rsplit("/", 1)[-1] or (parsed.hostname or t)),
+            # B-200: the org/user segment of a host/owner/repo-shaped URL path
+            # (e.g. github.com/OWNER/repo/...) -- squat-checked below alongside the
+            # repo/slug name, which the code previously only kept the LAST segment
+            # of and silently discarded everything before it.
+            owner=(path_parts[0].lower() if len(path_parts) >= 2 else None),
         )
     else:
         m = _SOURCE_GIT_RE.match(t)
         if m:
+            path = m.group("path")
+            path_parts = path.split("/")
+            # B-200 (C-135): owner extraction uses a SEPARATE, empty-segment-filtered
+            # list -- a leading/doubled slash (`git:host//owner/repo`) must not
+            # silently zero the owner and evade the squat check below, the way an
+            # unfiltered split would. `name` intentionally keeps the raw split
+            # (path_parts[-1]), unchanged pre-existing behavior.
+            owner_parts = [p for p in path_parts if p]
             out.update(
                 ecosystem="git",
                 host=m.group("host").lower(),
-                name=m.group("path").rsplit("/", 1)[-1],
+                name=path_parts[-1],
                 ref=m.group("ref"),
+                owner=(owner_parts[0].lower() if len(owner_parts) >= 2 else None),
             )
         elif low.startswith("npm:"):
             spec = t[4:]
@@ -2692,8 +2708,21 @@ def vet_source(
     if eco == "registry":
         for v in good.values():
             pool |= set(v)
+    # B-200: also squat-check the SOURCE's owner/org segment (git:host/OWNER/repo,
+    # or a URL host/OWNER/repo path), not just the repo/slug basename -- a source
+    # that impersonates a trusted org while naming the repo itself anything
+    # (e.g. github.com/openclawy/anything) previously parsed the owner segment in
+    # _parse_source_target and then silently discarded it. Checked independently
+    # of the `plain` gate below: an exact-match repo name must not suppress a
+    # genuine owner squat, and vice versa.
+    owner = (info.get("owner") or "").lower()
+    squat_candidates = []
     if plain not in pool:  # an exact known-good name is the real thing, not a squat
-        for cand, kn, d in _squat_hits([plain], known=frozenset(pool))[:3]:
+        squat_candidates.append(plain)
+    if owner and owner != plain and owner not in pool:
+        squat_candidates.append(owner)
+    if squat_candidates:
+        for cand, kn, d in _squat_hits(squat_candidates, known=frozenset(pool))[:3]:
             reasons_susp.append(
                 f"'{cand}' resembles well-known '{kn}' (edit distance {d}) — possible typosquat"
             )

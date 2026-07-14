@@ -34,8 +34,10 @@ def test_parse_shapes():
     assert claw["ecosystem"] == "clawhub" and claw["kind"] == "skill"
     git = _parse_source_target("git:github.com/owner/repo@v1.2")
     assert git["ecosystem"] == "git" and git["host"] == "github.com" and git["ref"] == "v1.2"
+    assert git["owner"] == "owner"
     url = _parse_source_target("https://github.com/owner/repo")
     assert url["ecosystem"] == "url" and url["host"] == "github.com" and url["name"] == "repo"
+    assert url["owner"] == "owner"
     bare = _parse_source_target("someskill")
     assert bare["ecosystem"] == "registry"
 
@@ -77,6 +79,96 @@ def test_typosquat_of_real_plugin_id_warns():
 def test_exact_known_good_name_is_not_a_squat():
     f = vet_source("clawhub:telegram")                 # the real thing, not a squat
     assert f.status == UNKNOWN
+
+
+# --------------------------------------------------------------------------- #
+# B-200: typosquat on the SOURCE's owner/org segment (git:host/OWNER/repo, or a
+# URL host/OWNER/repo path) -- previously parsed and silently discarded, so a
+# source impersonating a trusted org while naming the repo itself anything went
+# undetected. Reuses the same _squat_hits machinery/pool as the slug check above.
+# --------------------------------------------------------------------------- #
+def test_git_owner_typosquat_of_brand_warns():
+    f = vet_source("git:github.com/githubb/some-tool")  # owner squats 'github'
+    assert f.status == WARN
+    assert "githubb" in "\n".join(f.evidence)
+    assert "github" in "\n".join(f.evidence)
+
+
+def test_url_owner_typosquat_of_brand_warns():
+    f = vet_source("https://github.com/anthropicc/repo/archive/main.zip")
+    assert f.status == WARN
+    assert "anthropicc" in "\n".join(f.evidence)
+
+
+def test_exact_known_owner_is_not_a_squat():
+    # 'gitlab' is itself a known brand -- the real org, not a squat of itself.
+    f = vet_source("git:github.com/gitlab/some-tool")
+    assert "typosquat" not in f.detail
+    assert not any("resembles" in e for e in f.evidence)
+
+
+def test_owner_squat_fires_even_when_repo_name_is_an_exact_known_good_match():
+    # The repo/slug basename ('clawseccheck') is an exact known-good match, which
+    # previously suppressed the ENTIRE squat check (including the owner) -- the
+    # owner squat must still fire independently.
+    f = vet_source("git:github.com/githubb/clawseccheck")
+    assert f.status == WARN
+    assert "githubb" in "\n".join(f.evidence)
+
+
+def test_unrelated_legit_owner_and_repo_stays_clean():
+    f = vet_source("git:github.com/gl0di/clawseccheck")
+    assert not any("resembles" in e for e in f.evidence)
+
+
+def test_single_segment_git_path_has_no_owner():
+    # No "owner/repo" split possible -- owner extraction must not crash or
+    # fabricate a false candidate.
+    info = _parse_source_target("git:github.com/justarepo")
+    assert info["owner"] is None
+
+
+# ---------------------------------------------------------------------------
+# C-135 (on B-200): real GitHub orgs one un-separated short suffix away from a
+# brand (framework/language-suffix or pluralization naming, not a squat) false-
+# fired -- e.g. github.com/anthropics is Anthropic's own real org.
+# ---------------------------------------------------------------------------
+
+def test_real_org_brand_suffix_variants_are_not_squats():
+    for owner in ("anthropics", "expressjs", "discordjs", "huggingfaceh4", "postgresml"):
+        f = vet_source(f"git:github.com/{owner}/mytool")
+        assert not any("resembles" in e for e in f.evidence), owner
+
+
+def test_real_squat_owners_still_fire_after_legit_neighbor_exemption():
+    # Positive control: the exemption above must be specific to the verified real
+    # orgs, not a blanket "brand + short suffix" rule -- an actual squat (extra
+    # doubled letter, not a real naming convention) must still WARN.
+    for owner in ("githubb", "anthropicc"):
+        f = vet_source(f"git:github.com/{owner}/mytool")
+        assert any("resembles" in e for e in f.evidence), owner
+
+
+def test_official_anthropics_claude_code_source_does_not_double_warn_on_owner():
+    f = vet_source("git:github.com/anthropics/claude-code")
+    owner_hits = [e for e in f.evidence if "anthropic" in e and "resembles" in e]
+    assert owner_hits == []
+
+
+# ---------------------------------------------------------------------------
+# C-135 (on B-200): a leading/doubled slash in a git: source zeroed the owner
+# segment (an unfiltered split kept the empty string as path_parts[0]), silently
+# skipping the owner-squat check entirely -- a real, zero-cost evasion.
+# ---------------------------------------------------------------------------
+
+def test_doubled_slash_does_not_silently_drop_owner_extraction():
+    info = _parse_source_target("git:github.com//githubb/mytool")
+    assert info["owner"] == "githubb"
+
+
+def test_doubled_slash_owner_squat_still_warns():
+    f = vet_source("git:github.com//githubb/mytool@main")
+    assert any("resembles" in e for e in f.evidence)
 
 
 def test_clean_unknown_name_is_unknown_never_pass():

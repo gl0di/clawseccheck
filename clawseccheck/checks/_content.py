@@ -1592,6 +1592,17 @@ _KNOWN_LEGIT_NEIGHBORS: frozenset[str] = frozenset(
         "chalk",
         "execa",
         "boto3",
+        # B-200 (C-135): real GitHub orgs one un-separated short suffix away from a
+        # brand in _KNOWN_NAMES -- a common, legitimate real-world naming convention
+        # (framework/language suffix, pluralization), not a typosquat. Verified real
+        # orgs, not hypothetical: github.com/anthropics (Anthropic's own org),
+        # github.com/expressjs (Express.js), github.com/discordjs, github.com/
+        # huggingfaceh4, github.com/postgresml.
+        "anthropics",
+        "expressjs",
+        "discordjs",
+        "huggingfaceh4",
+        "postgresml",
     }
 )
 
