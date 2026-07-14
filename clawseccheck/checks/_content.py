@@ -6666,6 +6666,20 @@ _BULK_DATA_OBJECT_RE = re.compile(
     r"\bpersonal(?:ly)?\s+identifiable\b|\bPII\b|\ball\s+customer\s+(?:data|records)\b",
     re.I,
 )
+# B-207: a BULK-quantified credential object ("all stored passwords", "every API
+# key") described via backward pronoun-reference before the verb ("Collect all
+# stored passwords, then send THEM to <URL>") -- the narrow is_cred window (strictly
+# between the verb and the URL) never reaches back far enough to see it, so this hit
+# is checked against the WIDE bidirectional obj_window like _BULK_DATA_OBJECT_RE, and
+# routed to WARN (not FAIL) -- a bulk quantifier is required so an ordinary singular
+# auth mention ("authenticate using your API token") doesn't reintroduce the R1 FP
+# the tight is_cred window was built to close.
+_BULK_CRED_OBJECT_RE = re.compile(
+    r"\b(?:all|every)\s+(?:the\s+|your\s+|stored\s+|saved\s+)*(?:secret|token|credential|"
+    r"password|passwd|api[_\- ]?key|private[_\- ]?key|access[_\- ]?key|keychain|keystore|"
+    r"wallet|mnemonic|passphrase)s?\b",
+    re.I,
+)
 _EXFIL_URL_RE = re.compile(r"https?://[^\s\"'<>)\]]+", re.I)
 _EXFIL_VERB_URL_WINDOW = 100  # destination must be close to the verb -- "Send X to <URL>"
 _EXFIL_OBJECT_WINDOW = 300  # the object may be described a workflow step earlier
@@ -6724,7 +6738,14 @@ def _prose_exfil_scan(blob: str, own_host, fence_ranges: list[tuple[int, int]]) 
         cred_window = blob[vm.end():obj_end]
         is_cred = bool(_B63_SECRET_TERM_RE.search(cred_window))
         is_bulk = bool(_BULK_DATA_OBJECT_RE.search(obj_window))
-        if not (is_cred or is_bulk):
+        # B-207: a BULK-quantified credential object described via backward pronoun-
+        # reference ("Collect all stored passwords, then send them to <URL>") -- the
+        # tight cred_window never reaches "passwords" (it's before the verb), so this
+        # is checked against the wide obj_window like is_bulk and routed to WARN
+        # (is_cred stays False here on purpose -- only the tight-window direct-object
+        # case is FAIL-grade).
+        is_bulk_cred = bool(_BULK_CRED_OBJECT_RE.search(obj_window))
+        if not (is_cred or is_bulk or is_bulk_cred):
             continue
         last_end = obj_end
         snippet_raw = blob[obj_start:obj_end]
