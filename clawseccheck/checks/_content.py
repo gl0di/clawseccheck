@@ -1212,7 +1212,13 @@ def _clickfix_trusted_installer(cmd: str) -> bool:
     if not urls:
         return False
     for u in urls:
-        p = urlparse(u)
+        try:
+            p = urlparse(u)
+        except ValueError:
+            # C-135 (C-224): a malformed-IPv6-bracket-shaped URL ("https://[::1/x")
+            # makes urlparse() raise instead of returning a parsed result. Fail
+            # closed — not trusted, keeps the WARN — never let a parse error escape.
+            return False
         if p.scheme != "https":
             return False
         if p.port is not None or p.query or p.fragment:
