@@ -307,3 +307,155 @@ def test_unrelated_function_named_like_decode_but_no_decode_body_not_composing()
         "exec(build_message(name))\n"
     )
     assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+# ---------------------------------------------------------------------------
+# B-205: _tainted_names cross-function variable-name collision (found during
+# C-202's own C-135 review, filed separately as a pre-existing bug -- reproduces
+# against the pre-C-202 baseline too). The same class of collision rounds 1/3 fixed
+# for decode-COMPOSING FUNCTION names, but left open for a variable assigned
+# directly from an inline decode primitive.
+# ---------------------------------------------------------------------------
+
+def test_b205_unrelated_same_named_local_in_different_function_not_flagged():
+    # `payload` is genuinely decode-tainted in setup(), but unrelated()'s own
+    # `payload` is a plain string literal local to unrelated() -- must not collide.
+    src = (
+        "import base64\n"
+        "def setup():\n"
+        "    payload = base64.b64decode(x)\n"
+        "    return payload\n"
+        "def unrelated():\n"
+        "    payload = 'safe literal'\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b205_same_scope_taint_still_flags():
+    # Positive control: the genuinely tainted case (assignment and exec in the SAME
+    # scope) must still fire -- the fix must not over-correct into a false negative.
+    src = (
+        "import base64\n"
+        "def run():\n"
+        "    payload = base64.b64decode(x)\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b205_module_level_taint_still_reaches_function_scope_exec():
+    # A module-level tainted assignment is genuinely visible inside every function
+    # (real Python global-scope lookup) -- must stay flagged, distinct from the
+    # cross-FUNCTION collision this fix closes.
+    src = (
+        "import base64\n"
+        "payload = base64.b64decode(x)\n"
+        "def run():\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b205_wrapper_taint_still_scoped_correctly_per_function():
+    # The composing-wrapper path (_tainted_names' `composing` extension) must remain
+    # scope-correct alongside the base-case fix: a wrapper-derived taint in one
+    # function must not leak into an unrelated same-named local elsewhere.
+    src = (
+        "import base64\n"
+        "def _decode(x):\n"
+        "    return base64.b64decode(x)\n"
+        "def setup():\n"
+        "    payload = _decode(blob)\n"
+        "    return payload\n"
+        "def unrelated():\n"
+        "    payload = 'safe literal'\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+# ---------------------------------------------------------------------------
+# B-205 / C-135 round 1: real bugs found in the FIRST version of the per-function
+# scoping fix. Both confirmed via a disposable git-worktree diff against the pre-fix
+# baseline before being fixed here.
+# ---------------------------------------------------------------------------
+
+def test_b205_c135_global_declared_taint_still_crosses_functions():
+    # Finding 1 (HIGH, real regression): `global`-declared taint genuinely IS
+    # module-scope in real Python, regardless of which function syntactically
+    # contains the assignment -- per-function scoping must not blind itself to a
+    # `global` declaration and silently stop catching this real obfuscation shape.
+    src = (
+        "import base64\n"
+        "def loader():\n"
+        "    global secret\n"
+        "    secret = base64.b64decode(b'eA==')\n"
+        "def runner():\n"
+        "    exec(secret)\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b205_c135_class_method_taint_not_leaked_to_unrelated_function():
+    # Finding 2 (MEDIUM-HIGH FP, common OOP-skill shape): a class method's own
+    # decode-tainted local must not fall through to the "not in owner_map" bucket
+    # (treated as module-level / visible everywhere) and collide with an unrelated
+    # same-named local in a totally different top-level function.
+    src = (
+        "import base64\n"
+        "class Loader:\n"
+        "    def load(self, blob):\n"
+        "        payload = base64.b64decode(blob)\n"
+        "        return payload\n"
+        "def run_report(title):\n"
+        "    payload = 'just a benign report title'\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b205_c135_class_method_same_scope_taint_still_flags():
+    # Positive control for Finding 2's fix: a class method's OWN exec() call on its
+    # OWN decode-tainted local must still fire -- the fix must isolate a method's
+    # scope from OTHER scopes, not blind detection within the method itself.
+    src = (
+        "import base64\n"
+        "class Loader:\n"
+        "    def load(self, blob):\n"
+        "        payload = base64.b64decode(blob)\n"
+        "        exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+# ---------------------------------------------------------------------------
+# B-205 / C-135 round 2: a nested class-within-a-class reopened Finding 2's
+# collision (owner_map's class handling only recursed one level into cls.body).
+# ---------------------------------------------------------------------------
+
+def test_b205_c135_nested_class_within_class_taint_not_leaked():
+    src = (
+        "import base64\n"
+        "class Outer:\n"
+        "    class Inner:\n"
+        "        def load(self):\n"
+        "            payload = base64.b64decode(b'eA==')\n"
+        "            return payload\n"
+        "def unrelated():\n"
+        "    payload = 'safe literal, totally unrelated'\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b205_c135_nested_class_method_same_scope_taint_still_flags():
+    src = (
+        "import base64\n"
+        "class Outer:\n"
+        "    class Inner:\n"
+        "        def load(self):\n"
+        "            payload = base64.b64decode(b'eA==')\n"
+        "            exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)

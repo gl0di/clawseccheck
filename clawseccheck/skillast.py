@@ -974,14 +974,37 @@ def _shadowed_names_in_subtree(fn: ast.AST) -> set[str]:
     return shadowed
 
 
-def _build_toplevel_owner_map(funcs: list) -> dict:
-    """Map every descendant node of each top-level function to that function (the
-    "owning scope" for shadow-resolution purposes). A node not in this map is
-    module-level code."""
+def _build_toplevel_owner_map(funcs: list, classes: list | None = None) -> dict:
+    """Map every descendant node of each top-level function to that function, AND
+    every descendant of each top-level class's own METHOD to that method (a method
+    gets its own scope, isolated from sibling methods, the class body itself, and
+    module level) -- the "owning scope" for shadow/taint-resolution purposes. A node
+    not in this map is module-level code.
+
+    B-205 (C-135 finding 2): without per-method scoping, a class method's own
+    decode-tainted local fell through to the "not in this map" module-level bucket
+    -- treated as visible EVERYWHERE -- and collided with an unrelated same-named
+    local in a totally different top-level function. Extremely common for OOP-style
+    skill code, so class methods need the same per-scope isolation top-level
+    functions already get. Recurses into a nested class-within-a-class (`class
+    Outer: class Inner: def load(self): ...`) so `Inner`'s methods get scoped too
+    (C-135 round 2 found the one-level-only version reopened the same collision for
+    that shape)."""
     owner: dict = {}
     for fn in funcs:
         for n in ast.walk(fn):
             owner.setdefault(n, fn)
+
+    def _map_class_methods(cls: ast.AST) -> None:
+        for member in cls.body:
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for n in ast.walk(member):
+                    owner.setdefault(n, member)
+            elif isinstance(member, ast.ClassDef):
+                _map_class_methods(member)
+
+    for cls in classes or ():
+        _map_class_methods(cls)
     return owner
 
 
@@ -1168,12 +1191,24 @@ def _names_in(node: ast.AST) -> set[str]:
     return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
 
 
+def _global_declared_names(fn: ast.AST) -> set[str]:
+    """B-205 (C-135 finding 1): names declared `global` anywhere within `fn`'s own
+    subtree. An assignment to one of these names writes to MODULE scope regardless
+    of which function syntactically contains it — Python's actual `global` semantics
+    — so it must be bucketed as module-level taint (visible everywhere), not scoped
+    to the syntactically-nearest owning function. Without this, `global secret;
+    secret = base64.b64decode(...)` in one function followed by `exec(secret)` in a
+    DIFFERENT function silently stopped firing once per-function scoping landed — a
+    real detection-bypass regression, not just a missed edge case."""
+    return {n2 for n in ast.walk(fn) if isinstance(n, ast.Global) for n2 in n.names}
+
+
 def _tainted_names(
     tree: ast.AST,
     composing: set[str] | None = None,
     owner_map: dict | None = None,
     shadow_cache: dict | None = None,
-) -> set[str]:
+) -> dict:
     """Names assigned from a decode/decompress expression — so a dynamic-eval call on
     `payload`, where `payload` was assigned `base64.b64decode(...)` earlier, is still
     recognised. `composing` (from _decode_composing_funcnames) extends this to an
@@ -1181,21 +1216,54 @@ def _tainted_names(
     -- `owner_map`/`shadow_cache` (from _build_toplevel_owner_map) restrict that match
     to the composing names actually visible at each assignment's position, so a local
     parameter/nested-def/rebind that merely shares the wrapper's name is not conflated
-    with it (C-135 round 3)."""
-    tainted: set[str] = set()
+    with it (C-135 round 3).
+
+    B-205: returns a dict keyed by the owning scope node (a top-level function, a
+    top-level class's own method, or None for module-level/`global`-declared
+    assignments), NOT a flat set — a previous flat-set version let an unrelated
+    same-named local in a DIFFERENT function collide (the same class of bug
+    C-202/C-135 rounds 1+3 found and fixed for decode-composing FUNCTION names, left
+    open here for this function's own inline-decode base case). A `global`-declared
+    target always buckets to None regardless of its syntactic scope (C-135 finding 1
+    — real `global` semantics, not the syntactic nesting owner_map otherwise uses).
+    Use `_tainted_names_visible()` to resolve the subset actually visible at a call
+    site's own scope."""
+    tainted: dict = {}
     composing = composing or set()
     owner_map = owner_map or {}
     shadow_cache = shadow_cache if shadow_cache is not None else {}
+    global_cache: dict = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             visible = _decode_composing_visible(node, composing, owner_map, shadow_cache)
             if _subtree_has_decode(node.value) or _subtree_calls_decode_composing(
                 node.value, visible
             ):
+                scope = owner_map.get(node)
+                if scope is not None:
+                    if scope not in global_cache:
+                        global_cache[scope] = _global_declared_names(scope)
+                    global_names = global_cache[scope]
+                else:
+                    global_names = set()
                 for t in node.targets:
                     if isinstance(t, ast.Name):
-                        tainted.add(t.id)
+                        bucket = None if t.id in global_names else scope
+                        tainted.setdefault(bucket, set()).add(t.id)
     return tainted
+
+
+def _tainted_names_visible(node: ast.AST, tainted: dict, owner_map: dict) -> set[str]:
+    """B-205: the tainted-name set visible at `node`'s position — names tainted by a
+    module-level decode assignment (visible everywhere) plus names tainted within
+    node's own top-level function scope. Mirrors _decode_composing_visible's scoping
+    model so a variable named e.g. `payload` decoded in one function cannot taint an
+    unrelated same-named `payload` in a different function."""
+    visible = set(tainted.get(None, ()))
+    scope = owner_map.get(node)
+    if scope is not None:
+        visible |= tainted.get(scope, set())
+    return visible
 
 
 def _attr_base(value: ast.AST) -> str:
@@ -1262,7 +1330,10 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             for n in getattr(tree, "body", [])
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
-        owner_map = _build_toplevel_owner_map(_toplevel_funcs)
+        _toplevel_classes = [
+            n for n in getattr(tree, "body", []) if isinstance(n, ast.ClassDef)
+        ]
+        owner_map = _build_toplevel_owner_map(_toplevel_funcs, _toplevel_classes)
         shadow_cache: dict = {}
         tainted = _tainted_names(tree, composing, owner_map, shadow_cache)
         # B-132: precompute fixed-argv-list bindings once so the plain subprocess.*
@@ -1336,9 +1407,10 @@ def analyze_python(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         if isinstance(f, ast.Name) and f.id in _EXEC_NAMES and node.args:
             arg = node.args[0]
             visible_composing = _decode_composing_visible(node, composing, owner_map, shadow_cache)
+            visible_tainted = _tainted_names_visible(node, tainted, owner_map)
             if (
                 _subtree_has_decode(arg)
-                or (_names_in(arg) & tainted)
+                or (_names_in(arg) & visible_tainted)
                 or _subtree_calls_decode_composing(arg, visible_composing)
             ):
                 add(
