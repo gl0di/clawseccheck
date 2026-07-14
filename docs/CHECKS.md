@@ -845,6 +845,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B163 - Social-engineering / credential-phishing prose directive
+
+- Severity: CRITICAL
+- Block: hardening
+- Framework: Prompt Injection / Social Engineering
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Social-engineering / credential-phishing prose directive
+- Remediation:
+  - none
+
 ### B67 - Per-source tool-output trust contracts
 
 - Severity: MEDIUM

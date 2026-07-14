@@ -734,6 +734,26 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="bootstrap",
     ),
+    # B163 (C-209): skill prose instructs the HUMAN READER to act on a fabricated
+    # urgent/authoritative pretext and hand over a credential or take an out-of-band
+    # action -- corroborated triad (urgency + authority-claim + credential-solicitation
+    # OR OOB-action), per the ratified prose-intent design (C-208). Distinct from B159
+    # (targets the AGENT's own permission config) and B160 (bulk-data exfil to a URL):
+    # this is the classic phishing/social-engineering pattern aimed at the human. C-135
+    # found a bare credential ask (e.g. "confirm your password") is common in ordinary
+    # account-recovery/2FA/support prose -- FAIL requires the ask ALSO be paired with a
+    # concrete external (non-first-party) URL destination nearby (a "credential-exfil
+    # sink," mirrors B160's is_cred); a bare ask or an out-of-band-action alone -> WARN.
+    # (B162 intentionally skipped -- reserved for the log-threat-hunting epic's F-127.)
+    CheckMeta(
+        "B163",
+        "Social-engineering / credential-phishing prose directive",
+        CRITICAL,
+        "hardening",
+        "Prompt Injection / Social Engineering",
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # B67 (C-092): per-source tool-output trust contracts.
     # Complements B21 (generic trust boundary): checks that bootstrap has
     # channel-specific DATA/instruction declarations for each active high-risk

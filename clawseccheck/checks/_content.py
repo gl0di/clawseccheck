@@ -6970,6 +6970,289 @@ def check_prose_bulk_exfil(ctx: Context) -> Finding:
     )
 
 
+# C-209: social-engineering / credential-phishing prose -- a skill's OWN prose instructs
+# the HUMAN READER (not the agent) to act on a fabricated urgent/authoritative pretext
+# and hand over a credential or take an out-of-band action. Distinct from B159 (targets
+# the AGENT's own permission config) and B160 (bulk-data exfil, action verb + external
+# URL): this targets the classic phishing shape, aimed at the human.
+#
+# C-135 (round 1) found the FIRST version of this check -- FAIL whenever the triad's
+# third leg was an explicit credential-noun solicitation (urgency + authority +
+# solicit-verb+noun, no destination required) -- produced real, realistic false
+# positives: ordinary account-recovery ("confirm your password to restore access"),
+# 2FA-setup ("confirm your verification code to finish enabling two-factor auth"),
+# password-rotation-assistant, and session-re-auth copy all legitimately combine an
+# urgency word, a role name (IT/support/security team), AND a credential-solicitation
+# verb+noun pair -- unlike B160, where "send ALL records/credentials to <URL>" is a
+# rare, near-unforgeable signal in benign prose, "confirm/provide/verify your
+# password/code" turns out to be routine, common language in ordinary auth UX copy.
+# The credential-ask leg alone, even triad-corroborated, is NOT the strong,
+# low-ambiguity signal B160's is_cred leg is.
+#
+# Fixed by reinstating the task's own original design intent (re-read after the C-135
+# finding): "escalate to FAIL only with a concrete credential-exfil sink" -- FAIL now
+# additionally requires an explicit, non-first-party URL destination near the
+# credential ask (mirrors B160's is_cred EXACTLY: _EXFIL_URL_RE + the B-132
+# first-party-host allowlist via _skill_own_host/_url_matches_own_host, so a
+# legitimate skill's own verification/reset page is not itself treated as a sink).
+# Bare credential-solicitation with no stated destination, and any out-of-band-action
+# anchor, both stay WARN -- corroborated-but-unconfirmed, surfaced for human review,
+# never silently dropped. Per the ratified prose-intent corroborated-triad design
+# (C-208): urgency-marker + authority-claim + (credential-solicitation OR
+# out-of-band action). Each leg alone is extremely common in ordinary prose (a support
+# skill legitimately says "urgent issues," "your IT department," "confirm your
+# email") -- only the three-way co-occurrence is the WARN signal, mirroring this
+# project's existing corroborator-gating pattern (B58/B61/B63/B64/B159/B160).
+_SOCIAL_URGENCY_RE = re.compile(
+    r"\bURGENT\b|\bimmediate(?:ly)?\s+action\s+required\b|\bact\s+(?:now|immediately)\b|"
+    r"\ban?\s+emergency\b|\bemergency\s+(?:protocol|verification|action)\b|"
+    r"\bwithout\s+delay\b|\btime[- ]sensitive\b",
+    re.I,
+)
+_SOCIAL_AUTHORITY_RE = re.compile(
+    r"\bauthorized\s+by\b|\bon\s+behalf\s+of\b|\bofficial\s+(?:notice|request|protocol|"
+    r"communication)\b|\bper\s+(?:company\s+)?policy\b|\brequired\s+by\s+(?:law|policy|"
+    r"regulation)\b|\b(?:the\s+)?(?:CISO|CTO|CEO|IT\s+department|security\s+team|"
+    r"support\s+team|help\s?desk|compliance\s+(?:team|department)|billing\s+department)\b",
+    re.I,
+)
+# The solicit-verb + credential-noun pair must sit close together (a genuine ask, not
+# an unrelated verb and an unrelated noun both merely present somewhere in the prose) --
+# mirrors B160's tight cred_window discipline (a credential must be the actual OBJECT
+# of the verb, not merely co-occurring within a wide window).
+_SOCIAL_SOLICIT_VERB_RE = re.compile(
+    r"\b(?:provide|enter|confirm|verify|share|submit|re[- ]?enter|re[- ]?confirm|send\s+us)\b",
+    re.I,
+)
+_SOCIAL_CRED_NOUN_RE = re.compile(
+    r"\b(?:password|credentials?|pin|otp|one[- ]time\s+(?:code|password)|"
+    r"verification\s+code|security\s+code|social\s+security\s+number|ssn|"
+    r"api\s*key|access\s+token|account\s+number|card\s+number|cvv)\b",
+    re.I,
+)
+_SOCIAL_OOB_ACTION_RE = re.compile(
+    r"\bcall\s+(?:this|the\s+following)\s+number\b|\bclick\s+(?:this|the)\s+link\b|"
+    r"\breply\s+with\s+your\b|\btext\s+your\b|\bvisit\s+(?:this|the\s+following)\s+"
+    r"(?:site|link|url|page)\b|\bscan\s+(?:this|the)\s+QR\s*code\b",
+    re.I,
+)
+_SOCIAL_SOLICIT_WINDOW = 40  # verb<->noun proximity for a genuine credential ask
+_SOCIAL_CORROBORATOR_WINDOW = 200  # urgency/authority proximity to the ask/OOB-action
+# C-135 round 2: the FIRST cut of the sink check searched a symmetric ±150-char window
+# for ANY external URL, with no requirement it be structurally the ask's destination --
+# confirmed to false-FAIL on an unrelated nearby link ("confirm your password to
+# continue. For more help see our docs at <URL>") and a link that merely PRECEDED the
+# ask in an unrelated sentence. The comment claiming this "mirrors B160's is_cred
+# exactly" was wrong: B160's URL search is FORWARD-ONLY from the exfil verb
+# (_EXFIL_VERB_URL_WINDOW = 100, `blob[vm.end():vm.end()+100]`), tying the URL
+# structurally to the verb, not a free-floating bidirectional scan. Fixed to match
+# that same forward-only discipline exactly: the URL must appear shortly AFTER the
+# credential ask (a natural "confirm your password AT <URL>" ordering), not merely
+# anywhere within a wide window in either direction.
+_SOCIAL_SINK_WINDOW = 80  # URL must follow the credential ask closely (forward-only)
+
+
+# C-135 round 2: a credential ask legitimately redirecting to a well-known third-party
+# OAuth/SSO provider (standard delegated-login integration) is common and NOT phishing,
+# unlike B160's bulk-exfil case where a third-party auth-provider destination would be
+# unusual. Small, curated, VERIFIED allowlist -- mirrors this project's existing
+# curated-allowlist-over-generic-rule precedent (_REPUTABLE_DAEMON_NAMES in _vet.py,
+# B-185's _KNOWN_LEGIT_NEIGHBORS) rather than a generic pattern that could also exempt
+# a genuine attacker-controlled lookalike host.
+_REPUTABLE_AUTH_PROVIDER_HOSTS = frozenset({
+    "accounts.google.com",
+    "login.microsoftonline.com",
+    "login.live.com",
+    "github.com",
+    "gitlab.com",
+    "appleid.apple.com",
+    "www.facebook.com",
+    "auth0.com",
+    "okta.com",
+    "login.okta.com",
+})
+
+
+def _social_engineering_corroborated(blob: str, anchor_start: int, anchor_end: int) -> bool:
+    """True when BOTH an urgency marker and an authority claim are present in the
+    window around [anchor_start, anchor_end) -- the two weaker triad legs that
+    corroborate a credential-solicitation or out-of-band-action anchor."""
+    c_start = max(0, anchor_start - _SOCIAL_CORROBORATOR_WINDOW)
+    c_end = min(len(blob), anchor_end + _SOCIAL_CORROBORATOR_WINDOW)
+    window = blob[c_start:c_end]
+    return bool(_SOCIAL_URGENCY_RE.search(window)) and bool(_SOCIAL_AUTHORITY_RE.search(window))
+
+
+def _social_engineering_has_external_sink(blob: str, anchor_end: int, own_host) -> bool:
+    """True when a non-first-party, non-reputable-auth-provider URL immediately
+    FOLLOWS the credential-ask anchor (within _SOCIAL_SINK_WINDOW chars, forward-only,
+    SAME SENTENCE) -- the "concrete credential-exfil sink" the FAIL tier requires.
+    Mirrors B160's is_cred URL-search directionality (see the C-135 round 2 comment
+    above _SOCIAL_SINK_WINDOW) and reuses the B-132 first-party-host allowlist plus the
+    _REPUTABLE_AUTH_PROVIDER_HOSTS allowlist, so neither a legitimate skill's own
+    verification page nor a standard OAuth/SSO redirect is treated as a sink.
+
+    C-135 round 2 follow-up: the forward window alone still let an UNRELATED URL in
+    the NEXT sentence count as a "sink" ("confirm your password to continue. For more
+    help see our docs at <URL>." -- the doc link has nothing to do with the ask).
+    Fixed by additionally requiring no sentence break between the ask and the URL --
+    a genuine "confirm your password AT <URL>" directive is one sentence; an unrelated
+    link in the following sentence is not.
+    """
+    window = blob[anchor_end : min(len(blob), anchor_end + _SOCIAL_SINK_WINDOW)]
+    um = _EXFIL_URL_RE.search(window)
+    if not um:
+        return False
+    if _SENTENCE_BREAK_RE.search(blob, anchor_end, anchor_end + um.start()) is not None:
+        return False
+    url = um.group(0).rstrip(").,;:'\"")
+    if _url_matches_own_host(url, own_host):
+        return False
+    hm = _URL_HOST_RE.match(url)
+    host = hm.group(1).lower() if hm else ""
+    if host in _REPUTABLE_AUTH_PROVIDER_HOSTS or any(
+        host.endswith("." + h) for h in _REPUTABLE_AUTH_PROVIDER_HOSTS
+    ):
+        return False
+    return True
+
+
+def _social_engineering_scan(
+    blob: str, own_host, fence_ranges: list[tuple[int, int]]
+) -> list[tuple[str, bool]]:
+    """Scan *blob* for social-engineering / credential-phishing prose. Returns (snippet,
+    is_credential_exfil_sink) tuples: True only when the anchor is a credential-noun
+    solicitation ALSO paired with a concrete external-URL destination (FAIL-grade,
+    mirrors B160's is_cred); False for a bare credential ask (no stated destination) or
+    an out-of-band-action instruction (WARN-grade either way -- corroborated but not
+    confirmed, per the C-135 finding above)."""
+    hits: list[tuple[str, bool]] = []
+    last_end = -1
+
+    def snippet(start: int, end: int) -> str:
+        raw = blob[max(0, start - 40) : min(len(blob), end + 60)]
+        s = " ".join(raw.split())
+        return s[:137] + "..." if len(s) > 140 else s
+
+    for vm in _SOCIAL_SOLICIT_VERB_RE.finditer(blob):
+        if vm.start() < last_end:
+            continue
+        if _defensive_context(blob, vm.start(), fence_ranges):
+            continue
+        noun_window = blob[vm.end() : min(len(blob), vm.end() + _SOCIAL_SOLICIT_WINDOW)]
+        nm = _SOCIAL_CRED_NOUN_RE.search(noun_window)
+        if not nm:
+            continue
+        anchor_end = vm.end() + nm.end()
+        if not _social_engineering_corroborated(blob, vm.start(), anchor_end):
+            continue
+        last_end = anchor_end
+        has_sink = _social_engineering_has_external_sink(blob, anchor_end, own_host)
+        hits.append((snippet(vm.start(), anchor_end), has_sink))
+
+    for om in _SOCIAL_OOB_ACTION_RE.finditer(blob):
+        if om.start() < last_end:
+            continue
+        if _defensive_context(blob, om.start(), fence_ranges):
+            continue
+        if not _social_engineering_corroborated(blob, om.start(), om.end()):
+            continue
+        last_end = om.end()
+        hits.append((snippet(om.start(), om.end()), False))
+
+    return hits
+
+
+def check_social_engineering_phishing(ctx: Context) -> Finding:
+    """B163 (C-209) — a skill's OWN prose instructs the HUMAN READER to act on a
+    fabricated urgent/authoritative pretext (the classic phishing shape): a corroborated
+    triad of urgency-marker + authority-claim + (credential-solicitation OR
+    out-of-band action), per the ratified prose-intent design (C-208). Distinct from
+    B159 (targets the AGENT's own config) and B160 (bulk-data exfil to a URL): this
+    check targets social engineering aimed at the human.
+
+    FAIL — the triad's third leg is a credential-noun solicitation ALSO paired with a
+           concrete external (non-first-party) URL destination nearby — a "credential-
+           exfil sink," much stronger and less ambiguous than a bare ask (C-135: an
+           unqualified credential ask alone is common in ordinary account-recovery/2FA/
+           support prose and is NOT FAIL-grade on its own).
+    WARN — a corroborated credential-noun solicitation with no stated destination, or
+           an out-of-band-action instruction (call this number / click this link /
+           reply with your ... / text your ...) — flagged for human review, not
+           auto-FAILed.
+    PASS — no social-engineering pattern found, or the trigger sits in a documented,
+           negated/defensive context (e.g. a phishing-awareness skill instructing users
+           NOT to comply with such a message).
+    UNKNOWN — no installed skills to inspect.
+    """
+    if not ctx.installed_skills:
+        return _finding(
+            "B163",
+            UNKNOWN,
+            "No installed skills found — nothing to inspect for social-engineering "
+            "/ credential-phishing prose.",
+            "Run on a host where installed skills exist (~/.openclaw/skills, "
+            "workspace/skills).",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        fr = _fence_ranges(norm)
+        own_host = _skill_own_host(norm, fr)
+        for snip, is_credential_exfil_sink in _social_engineering_scan(norm, own_host, fr):
+            tag = f'{skill_name}: "{snip}"'
+            if is_credential_exfil_sink:
+                fail_ev.append(tag)
+            else:
+                warn_ev.append(tag)
+
+    if fail_ev:
+        ev_summary = "; ".join(fail_ev[:4])
+        extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
+        return _finding(
+            "B163",
+            FAIL,
+            "Social-engineering / credential-phishing prose detected — a skill "
+            "instructs the user to act on an urgent, authority-claimed pretext, hand "
+            "over a password or other credential, and send it to an external "
+            "destination: " + ev_summary + extra,
+            "Remove the directive. A legitimate skill never manufactures urgency "
+            "combined with a fabricated authority claim to route a password or "
+            "credential to an undeclared external endpoint — this is the classic "
+            "phishing pattern regardless of the stated justification (verification, "
+            "account recovery, security alert, etc.).",
+            fail_ev,
+        )
+
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
+        return _finding(
+            "B163",
+            WARN,
+            "Possible social-engineering prose found (urgency + authority claim + "
+            "a credential ask or out-of-band action, no confirmed external "
+            "destination): " + ev_summary + extra,
+            "Review the flagged content. Confirm the urgency/authority framing is "
+            "genuine skill behavior, not a phishing-shaped pretext directing the "
+            "user to hand over a credential, call a number, click a link, or reply "
+            "out-of-band.",
+            warn_ev,
+            severity=MEDIUM,
+        )
+
+    return _finding(
+        "B163",
+        PASS,
+        "No social-engineering / credential-phishing prose patterns found in "
+        "installed skills.",
+        "Ensure no skill manufactures urgency combined with a fabricated authority "
+        "claim to solicit credentials or direct an out-of-band action.",
+    )
+
+
 def check_symlink_escape(ctx: Context) -> Finding:
     """B87 (TAM-07) — a skill/workspace symlink resolving into a sensitive host path.
 

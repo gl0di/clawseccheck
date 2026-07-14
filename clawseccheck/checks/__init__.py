@@ -511,6 +511,7 @@ from ._content import (
     check_remote_code_dependency,
     check_self_privesc_directive,
     check_silent_instruction,
+    check_social_engineering_phishing,
     check_symlink_escape,
     check_trigger_homoglyph,
     check_unicode_obfuscation,
