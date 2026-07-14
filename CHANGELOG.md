@@ -3,6 +3,63 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.42.0] — 2026-07-14
+
+A precision-hardening pass on seven detectors, closing gaps and false-positive/
+false-negative edge cases found during v3.41.0's own adversarial (C-135) reviews.
+One planned fix (B161's blank-line/heading-split evasion) was investigated,
+found to introduce a real false-FAIL on plausible incident-response-runbook
+content, and reverted rather than shipped — documented in-line so a future
+attempt doesn't retry the same approach.
+
+### Added
+- **First-party installer allowlist for `DROPPER_DOWNLOAD_TO_TMP`:** an argv-list
+  curl/wget call whose literal URL is on the curated first-party installer list
+  (rustup, uv/astral, docker, deno, bun, pnpm, poetry, starship, ollama, nvm/
+  homebrew GitHub-raw paths) no longer WARNs, matching B100's existing behavior
+  for the same hosts fetched via a piped `curl | sh`. Two rounds of adversarial
+  review found and closed a real bypass (a trusted URL cited as a decoy alongside
+  a second, genuinely malicious URL+output pair in the same call — verified
+  exploitable against real curl's multi-URL argv pairing) and a pre-existing
+  unguarded `urlparse()` crash on a malformed-IPv6-bracket URL, fixed in both this
+  new check and the sibling B100 allowlist it mirrors.
+- **JS/Jest/Mocha/Vitest test-shape recognition** for B13's attack-strings-in-
+  tests down-rank: a genuine Jest/Mocha/Vitest test file whose body legitimately
+  contains an attack-shaped string (asserting a scanner correctly rejects it) no
+  longer false-FAILs. The first version of this fix mirrored the Python leg's
+  "one match suffices" design and was found to be a real FAIL-evasion bypass — an
+  attacker shadowing `test`/`it` with their own function, or adding one gratuitous
+  test-framework import line, was enough to down-rank a live payload with no real
+  test framework involved. Fixed by requiring at least two distinct JS signals,
+  the same multi-signal discipline already proven for the shell-test leg.
+
+### Fixed
+- **`skillast._tainted_names` cross-scope variable collision:** a decode-tainted
+  local variable in one function could collide with an unrelated same-named local
+  in a different function, or fall through to a "visible everywhere" bucket for
+  class methods — both false-FAILed `OBFUSCATED_EXEC`. Scoped per top-level
+  function/class-method (including nested classes) instead of one flat set.
+  Two rounds of review found and fixed a genuine detection-bypass regression in
+  the fix itself (`global`-declared taint no longer crossing function boundaries).
+- **`HOST_INFO_EXFIL_FLOW` reworded, not silenced, on a first-party-host match:**
+  the initial fix fully silenced the WARN when a host-info-tainted value's
+  destination matched the skill's own SKILL.md-declared endpoint — but that
+  declaration is self-reported by the same untrusted skill, so an attacker could
+  erase the only signal for free by echoing their own exfil host into their own
+  manifest. Now reworded ("disclosed, not covert") instead of dropped, so the
+  finding stays visible either way.
+- **B160 prose-intent bulk exfiltration:** a bulk-quantified credential object
+  described via backward pronoun reference before the verb ("Collect all stored
+  passwords, then send them to `<URL>`") produced no signal at all; now WARNs.
+
+### Investigated, not shipped
+- **B161 identity-file injection** — two fix directions for known residual gaps
+  (WARN-noise on generic engineering-standards prose; a blank-line/heading-split
+  evasion) were prototyped and rejected: the noise fix silenced genuine attacks
+  phrased with the same excluded syntax, and the evasion fix produced a real
+  false-FAIL on a plausible changelog/incident-response-runbook shape. Reverted;
+  both gaps remain open as documented, safe-error-direction tradeoffs.
+
 ## [3.41.0] — 2026-07-13
 
 Six new false-negative-closing detectors from the SkillTrustBench/OASB benchmark
