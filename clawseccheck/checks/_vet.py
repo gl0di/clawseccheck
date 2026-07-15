@@ -278,6 +278,45 @@ _LOCAL_SINK_CHANNELS = [
 ]
 
 
+# C-199 (SkillTrustBench T09): a HARDCODED, predictable filename opened for write
+# directly under /tmp (or /var/tmp) — the classic CWE-377 insecure-temporary-file
+# pattern, distinct from _SINK_TEMPFILE_RE above (that one only cares whether a
+# CREDENTIAL reaches a temp-file sink; this one flags the temp-file WRITE PATTERN
+# itself as insecure, regardless of content). Any other local process/user can
+# pre-create that exact path — as a real file or a symlink to something sensitive —
+# before the skill writes to it, since the name is fixed and guessable, unlike the
+# safe tempfile module APIs (mkstemp/NamedTemporaryFile), which generate a random,
+# collision-resistant name and are therefore never flagged by this regex at all.
+_INSECURE_TEMPFILE_WRITE_RE = re.compile(
+    r"""
+    \bopen\s*\(\s*f?["'][^"'\n]{0,80}(?:/tmp/|/var/tmp/|/private/tmp/)[^"'\n]{0,80}["']
+        \s*,\s*["'][wa]
+    |
+    \bPath\s*\(\s*f?["'][^"'\n]{0,80}(?:/tmp/|/var/tmp/)[^"'\n]{0,80}["']\s*\)
+        \s*\.\s*write(?:_text|_bytes)?\s*\(
+    """,
+    re.I | re.VERBOSE,
+)
+
+
+def _insecure_tempfile_write_hits(
+    name: str, blob: str, fence_ranges: list[tuple[int, int]]
+) -> list[str]:
+    """C-199: one evidence string when *blob* opens a hardcoded, predictable /tmp
+    path for write. WARN-only — actual attacker access to a shared /tmp isn't
+    provable from static text alone, matching this project's standard local-sink
+    heuristic bar (never escalated to FAIL by this rule)."""
+    header_matches = _manifest_header_matches(blob)
+    for m in _INSECURE_TEMPFILE_WRITE_RE.finditer(blob):
+        if _is_code_example(blob, m.start(), fence_ranges):
+            continue
+        if _pos_in_test_fixture_file(blob, m.start(), header_matches):
+            continue
+        snippet = " ".join(m.group(0).split())[:70]
+        return [f"{name}: hardcoded predictable temp-file path opened for write ({snippet})"]
+    return []
+
+
 # HIGH: suspicious but sometimes legitimate — flag for human review, don't hard-fail.
 _SKILL_HIGH = [
     (
@@ -1794,6 +1833,8 @@ def check_installed_skills(ctx: Context) -> Finding:
     warns_timebomb: list[str] = []
     warns_host_exfil: list[str] = []  # C-203: host/machine-identity info -> outbound sink
     warns_curl_dropper: list[str] = []  # C-205: argv-list curl/wget staging a script to /tmp
+    warns_shell_injection: list[str] = []  # C-199: subprocess/os.system shell-injection-prone shape
+    warns_insecure_tempfile: list[str] = []  # C-199: hardcoded predictable /tmp write (CWE-377)
     warns_install_curl: list[str] = []  # F-097: down-ranked install-doc curl|bash / fetch
     warns_js: list[str] = []  # F-064: soft JS/TS signals (child_process template, dynamic require)
     warns_content: list[
@@ -2070,6 +2111,11 @@ def check_installed_skills(ctx: Context) -> Finding:
             else:
                 high.append(evidence)
 
+        # C-199 (SkillTrustBench T09): insecure temp-file handling — hardcoded/
+        # predictable /tmp path opened for write. WARN regardless of exfil/other
+        # signals (CWE-377 is a coding-quality issue, not itself a malice indicator).
+        warns_insecure_tempfile.extend(_insecure_tempfile_write_hits(name, blob, _fr))
+
         # C-040: backgrounding/daemonize — lower confidence → WARN bucket.
         # We collect into a separate list so they don't escalate to HIGH FAIL.
         # Stored per-skill in a shared list; returned as WARN after the HIGH check.
@@ -2116,6 +2162,11 @@ def check_installed_skills(ctx: Context) -> Finding:
                 # F-058: code-level time-bomb / sandbox-evasion gate. WARN-grade.
                 if af.rule == "CONDITIONAL_SINK":
                     warns_timebomb.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                    continue
+                # C-199: subprocess/os.system shell-injection-prone shape, regardless of
+                # exfil — WARN-grade on its own (never escalated to FAIL by this rule).
+                if af.rule == "SHELL_INJECTION_RISK":
+                    warns_shell_injection.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
                     continue
                 loc = f"{relpath}:{af.lineno}"
                 if af.severity == "crit":
@@ -2349,6 +2400,49 @@ def check_installed_skills(ctx: Context) -> Finding:
             "or environment condition is met — the classic way a payload stays dormant in "
             "review/CI and detonates later. Read the guarded branch and confirm it is benign.",
             warns_timebomb,
+        )
+
+    # C-199 (SkillTrustBench T09): subprocess.*(shell=True, ...) or a bare os.system()/
+    # os.popen() call whose command isn't a fixed literal — shell-injection-prone SHAPE
+    # regardless of proven exfil/taint (mirrors Bandit B602/B605). WARN-first: a skill
+    # that merely uses subprocess unsafely, with no other signal, is never FAILed on it.
+    if warns_shell_injection:
+        extra = (
+            f" (+{len(warns_shell_injection) - 6} more)" if len(warns_shell_injection) > 6 else ""
+        )
+        return _custom(
+            "B13",
+            HIGH,
+            WARN,
+            "Shell-injection-prone subprocess/os.system usage in installed skill(s): "
+            + "; ".join(warns_shell_injection[:6])
+            + extra,
+            "Avoid shell=True and string-form commands with subprocess; use a fixed argv "
+            "list (shell=False, the default) instead of interpolating a command string, so "
+            "shell metacharacters in any dynamic value cannot be reinterpreted.",
+            warns_shell_injection,
+        )
+
+    # C-199 (SkillTrustBench T09): hardcoded/predictable /tmp path opened for write —
+    # CWE-377 insecure-temporary-file. WARN-only, a coding-quality issue independent
+    # of exfil/malice signals.
+    if warns_insecure_tempfile:
+        extra = (
+            f" (+{len(warns_insecure_tempfile) - 6} more)"
+            if len(warns_insecure_tempfile) > 6
+            else ""
+        )
+        return _custom(
+            "B13",
+            MEDIUM,
+            WARN,
+            "Insecure temp-file handling in installed skill(s): "
+            + "; ".join(warns_insecure_tempfile[:6])
+            + extra,
+            "Use tempfile.mkstemp()/tempfile.NamedTemporaryFile() instead of a hardcoded "
+            "/tmp path — a fixed, predictable name lets another local process or user "
+            "pre-create it (as a file or a symlink) before the skill writes to it.",
+            warns_insecure_tempfile,
         )
 
     # F-064: soft JS/TS signals — child_process exec with an interpolated command, or a

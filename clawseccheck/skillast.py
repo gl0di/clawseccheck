@@ -1295,6 +1295,124 @@ def _suspicious_guard_kind(test: ast.AST) -> str:
     return ""
 
 
+def _resolve_name_binding(name: str, tree: ast.AST) -> ast.AST | None:
+    """A single assignment to `name` ANYWHERE in the file, mirroring
+    _single_list_bindings_local's discipline but for any RHS shape (not just
+    list/tuple) and whole-file rather than scope-aware -- a smaller apparatus,
+    acceptable here since ambiguity from a same-named local in a different scope
+    only ever makes this MORE conservative: 2+ assignments return None (treated as
+    "not provably constant"), never a false resolution to "safe"."""
+    candidates = [
+        n.value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        for t in n.targets
+        if isinstance(t, ast.Name) and t.id == name
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _is_pure_constant_expr(node, tree: ast.AST, _depth: int = 0) -> bool:
+    """C-199: True when `node` is provably a compile-time-constant expression -- a
+    literal, a list/tuple of literals, string concatenation of literals, an
+    f-string with no interpolation, or a bare Name resolved to exactly one such
+    binding elsewhere in the file (bounded recursion via `_depth`). Used to gate
+    _shell_injection_risk_findings: a subprocess/os.system call whose command is
+    fully literal has nothing an attacker could inject through, regardless of
+    shell=True."""
+    if node is None:
+        return True
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return all(_is_pure_constant_expr(e, tree, _depth + 1) for e in node.elts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _is_pure_constant_expr(
+            node.left, tree, _depth + 1
+        ) and _is_pure_constant_expr(node.right, tree, _depth + 1)
+    if isinstance(node, ast.JoinedStr):
+        return all(isinstance(v, ast.Constant) for v in node.values)
+    if isinstance(node, ast.Name) and _depth < 4:
+        binding = _resolve_name_binding(node.id, tree)
+        # An unresolvable Name (a function parameter, an import, or 0/2+ candidate
+        # assignments) is NOT the same as "no argument at all" -- must NOT recurse
+        # into the `node is None` branch above (which would wrongly read "can't
+        # resolve" as "provably constant"). The single most common source of real
+        # dynamic input, a function parameter, is exactly this unresolvable case.
+        if binding is None:
+            return False
+        return _is_pure_constant_expr(binding, tree, _depth + 1)
+    return False
+
+
+def _shell_injection_risk_findings(tree: ast.AST) -> list:
+    """C-199 (SkillTrustBench T09 "insecure coding, no clear attack intent"): a
+    subprocess.*(shell=True, ...) call, or a bare os.system()/os.popen() call, whose
+    command is NOT a provable compile-time constant -- classic shell-injection-prone
+    SHAPE (mirrors Bandit B602/B605), regardless of whether the dynamic part is
+    PROVEN externally-tainted (that stronger case is TT5_CMD_INJECTION, crit ->
+    FAIL). A skill that merely uses subprocess/os.system with an entirely literal
+    command never fires -- there is nothing for an attacker to inject through.
+    WARN-grade only; the checks engine never escalates this rule to FAIL on its own.
+    """
+    out = []
+    bindings_by_call = _list_bindings_by_call(tree)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        is_exec, exec_name = _is_exec_sink_call(node.func)
+        if not is_exec or "." not in exec_name:  # bare exec()/eval() -- not this rule's scope
+            continue
+        if exec_name.startswith("os."):
+            cmd = node.args[0] if node.args else None
+            if _is_pure_constant_expr(cmd, tree):
+                continue
+            out.append(
+                ASTFinding(
+                    "SHELL_INJECTION_RISK",
+                    "info",
+                    getattr(node, "lineno", 0),
+                    f"{exec_name}() runs a non-literal command through a shell — "
+                    "shell-injection-prone shape",
+                )
+            )
+            continue
+        # subprocess.*: only unsafe-shaped calls -- shell=True (or an unprovable
+        # dynamic shell= value), or a command that isn't a fixed argv list.
+        shell_true = False
+        for kw in node.keywords:
+            if kw.arg == "shell":
+                v = kw.value
+                if not (isinstance(v, ast.Constant) and v.value is False):
+                    shell_true = True
+                break
+        first = node.args[0] if node.args else None
+        if isinstance(first, ast.Name):
+            first = bindings_by_call.get(node, {}).get(first.id, first)
+        if not shell_true:
+            if isinstance(first, (ast.List, ast.Tuple)):
+                continue  # safe argv-list form, shell not True -- out of scope here
+            if not isinstance(first, (ast.Constant, ast.JoinedStr, ast.BinOp, ast.Name)):
+                # Some other dynamically-computed command (e.g. shlex.split(x),
+                # x.split()) -- without shell=True, can't safely assume a STRING-
+                # command shape without deeper type inference; skip rather than risk
+                # a false WARN on a common, actually-safe argv-producing idiom.
+                continue
+        if _is_pure_constant_expr(first, tree):
+            continue
+        shape = "shell=True" if shell_true else "string/name command form"
+        out.append(
+            ASTFinding(
+                "SHELL_INJECTION_RISK",
+                "info",
+                getattr(node, "lineno", 0),
+                f"{exec_name}() runs a non-literal command ({shape}) — "
+                "shell-injection-prone shape",
+            )
+        )
+    return out
+
+
 def _conditional_sink_findings(tree: ast.AST) -> list:
     """A dangerous sink (exec/eval/os.system/subprocess or a network call) reachable only
     under a date/time or environment guard — the code-level time-bomb / sandbox-evasion
@@ -2078,6 +2196,7 @@ def analyze_python(
                         )
 
     out.extend(_conditional_sink_findings(tree))
+    out.extend(_shell_injection_risk_findings(tree))
 
     # B-140(a): os.environ["KEY"] = "<provider-shaped-literal>" — an unconditional
     # overwrite of an env var with a hardcoded provider-shaped token. A separate small
