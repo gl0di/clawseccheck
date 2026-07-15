@@ -1116,11 +1116,18 @@ def _build_toplevel_owner_map(funcs: list, classes: list | None = None) -> tuple
         _map_function_scope(fn, None)
 
     def _map_class_methods(cls: ast.AST) -> None:
+        # B-213: a method's OWN nested closures now get their own isolated
+        # scope buckets too (mirroring _map_function_scope/_map_scope_subtree, already
+        # used for plain top-level functions since B-210) instead of a flat ast.walk
+        # folding the method's entire subtree -- including any nested `def` inside it
+        # -- into one bucket. Without this, a `global X` declared inside a helper
+        # closure NESTED within a method got attributed to the whole method, wrongly
+        # promoting the method's own unrelated same-named local to the module-wide taint
+        # bucket (the same collision B-210 fixed for plain nested functions).
         for member in cls.body:
             if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for n in ast.walk(member):
-                    owner.setdefault(n, member)
                 parent_scope.setdefault(member, None)
+                _map_scope_subtree(member, member)
             elif isinstance(member, ast.ClassDef):
                 _map_class_methods(member)
 

@@ -462,6 +462,63 @@ def test_b205_c135_nested_class_method_same_scope_taint_still_flags():
 
 
 # ---------------------------------------------------------------------------
+# B-213: same collision as B-209, but for a class METHOD's own nested closure.
+# _map_class_methods previously folded a method's entire subtree into ONE flat
+# bucket (ast.walk), unlike plain top-level functions which already got a real
+# per-nested-scope chain via B-210 -- so a `global x` inside a helper closure
+# NESTED WITHIN a method still wrongly promoted the method's own unrelated
+# same-named local to the module-wide taint bucket.
+# ---------------------------------------------------------------------------
+
+def test_b213_global_in_methods_nested_closure_does_not_promote_methods_own_local():
+    src = (
+        "import base64\n"
+        "class Foo:\n"
+        "    def method(self):\n"
+        "        def inner():\n"
+        "            global x\n"
+        "            x = 1\n"
+        "        x = base64.b64decode(b'eA==')\n"
+        "        inner()\n"
+        "        return x\n"
+        "exec(x)\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b213_methods_nested_closure_genuine_module_global_still_flags():
+    # Positive control: a method's nested closure genuinely writing a
+    # decode-tainted value to a REAL module global must still fire.
+    src = (
+        "import base64\n"
+        "class Foo:\n"
+        "    def method(self):\n"
+        "        def inner():\n"
+        "            global x\n"
+        "            x = base64.b64decode(b'eA==')\n"
+        "        inner()\n"
+        "exec(x)\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b213_methods_own_nested_closure_reading_own_local_still_flags():
+    # A method's nested closure reading the METHOD's own tainted local via
+    # ordinary closure semantics (no global involved) must still fire -- the
+    # per-nested-scope chain must not blind detection within the method itself.
+    src = (
+        "import base64\n"
+        "class Foo:\n"
+        "    def method(self):\n"
+        "        key = base64.b64decode(b'eA==')\n"
+        "        def inner():\n"
+        "            exec(key)\n"
+        "        inner()\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+# ---------------------------------------------------------------------------
 # B-209 / B-210 / B-211: follow-ups discovered during B-205's own C-135 rounds
 # (all safe-direction FPs, non-blocking -- B-205 shipped as-is). All three share the
 # same root cause: owner_map only distinguished "top-level function" as a scope unit,
