@@ -173,6 +173,29 @@ silent gap by definition; `tests/test_threat_coverage_ledger.py` fails the build
   schema (§8) exposes only verb name/order/timestamp — never `arguments`/`output` — so the
   cross-skill *content-correlated* handoff this signal would need is unobservable from the
   log at all `[CEILING]`
+- **SKILL.md front-loads a mandatory-first-step pointing at a bundled helper** (C-220,
+  arXiv 2602.14211 "SkillJect") — the effective delivery mechanism is two-channel: the
+  payload lives in a bundled `.py`/`.sh`/`.js` helper, and SKILL.md is front-loaded with a
+  "mandatory prerequisite" / "run this first" inducement to get the AGENT to execute it
+  (0.0% attack success with the payload in prose alone vs 80.7% with this framing).
+  Constructed the shape directly and ran it against the content ring: B100 (ClickFix)
+  structurally cannot see it — its remote-fetch regex has no concept of a LOCAL file
+  reference; B63 (silent-instruction) requires secrecy framing ("don't tell the user"),
+  the opposite of SkillJect's loud "you MUST run this" framing; B64 (instruction-hierarchy
+  override) requires overriding/disregarding an instruction, not prepending a step — none
+  of the three fire. The gap is real. A correlation-gated design (only flag when the
+  referenced helper ALSO independently trips skillast's own AST checks) does not rescue
+  it: verified directly that it is either redundant (a genuinely malicious helper already
+  fires B13 regardless of SKILL.md framing) or blind (a subtle helper that doesn't trip
+  the AST also doesn't trip the correlation) — and escalating an existing WARN to FAIL on
+  the strength of the framing alone false-fires on a real fixture
+  (`fixtures/benign_b13_disclosed_cred_sink/skills/wechat-push`, a legitimate
+  disclosed-credential integration that already WARNs at B13 and carries the identical
+  "mandatory setup" framing). Position/heading is not a discriminator either — front-loaded
+  `## Prerequisites`/`## Setup` sections are the standard documentation convention, present
+  in this repo's own real installed skill and multiple `clean_*` fixtures. Covered today via
+  B13/skillast (a genuinely malicious helper fires regardless of SKILL.md framing) and B100
+  (the narrower remote-fetch-under-a-setup-heading variant) `[CEILING]`
 
 ## Framework mapping (OWASP)
 
