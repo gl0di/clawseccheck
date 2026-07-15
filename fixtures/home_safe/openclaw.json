@@ -10,7 +10,7 @@
     "exec": { "mode": "ask" },
     "elevated": { "allowFrom": ["owner-123"] }
   },
-  "sandbox": { "mode": "enabled", "network_mode": "bridge", "seccomp_profile": "default" },
+  "agents": { "defaults": { "sandbox": { "mode": "non-main", "docker": { "network": "bridge" } } } },
   "plugins": {
     "allow": ["trentclaw"],
     "installs_unpinned_npm_specs": false,
