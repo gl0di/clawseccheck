@@ -857,6 +857,22 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B164 - Threats surfaced in agent logs (content scan)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Log Threat Intel
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Threats surfaced in agent logs (content scan)
+- Remediation:
+  - none
+
+## Hardening checks
+
 ### B67 - Per-source tool-output trust contracts
 
 - Severity: MEDIUM

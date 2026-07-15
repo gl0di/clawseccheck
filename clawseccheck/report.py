@@ -520,6 +520,24 @@ def _credential_surface_map(ctx) -> list[dict]:
     return entries
 
 
+def _log_threat_report_lines(findings: list[Finding]) -> list[str]:
+    """B164 (F-124/E-044) quiet-hint surfacing.
+
+    A WARN B164 finding already gets its full detail + up to 12 redacted-evidence
+    bullets via the generic FAIL/WARN render path above — nothing extra needed there.
+    But a PASS finding renders through ``_render_finding_compact`` (title only, no
+    detail), so the base-rate-discipline "N low-confidence signal(s) suppressed" hint
+    baked into B164's PASS detail text would otherwise never reach the human report.
+    This adds it back, and only when there is something to say.
+    """
+    b164 = next((f for f in findings if f.id == "B164"), None)
+    if b164 is None or b164.status != PASS or not b164.detail:
+        return []
+    if "low-confidence signal" not in b164.detail:
+        return []
+    return ["Log Threat Report", _sanitize(b164.detail)]
+
+
 def _credential_surface_lines(ctx) -> list[str]:
     map_ = _credential_surface_map(ctx)
     lines = ["Credential surface map (path-existence inventory)", "Static config + file-system inventory:"]
@@ -824,6 +842,11 @@ def render_report(findings: list[Finding], score: ScoreResult,
     if secret_lines:
         lines.append("")
         lines.extend(secret_lines)
+        lines.append("")
+    log_threat_lines = _log_threat_report_lines(findings)
+    if log_threat_lines:
+        lines.append("")
+        lines.extend(log_threat_lines)
         lines.append("")
 
     if suppressed_count:

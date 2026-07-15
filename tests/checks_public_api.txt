@@ -34,6 +34,7 @@ _INSTALL_HEADING_RE
 _JSONL_SCAN_CAP
 _KNOWN_ADVISORIES
 _KNOWN_NAMES
+_SECRET_PATH_RE
 _SKILL_CRIT
 _SKILL_HIGH
 _SKILL_TOOLS_LINE_RE
@@ -76,6 +77,7 @@ _mcp_servers
 _negation_context
 _negation_governs_trigger
 _open_channels
+_other_can_reach_read
 _parse_source_target
 _parse_version
 _peragent_sandbox_evidence
@@ -160,6 +162,7 @@ check_leak
 check_least_privilege
 check_lifecycle_hooks_extended
 check_local_first
+check_log_threat_hunt
 check_manifest_absent
 check_markdown_image_exfil
 check_mcp

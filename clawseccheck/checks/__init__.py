@@ -82,6 +82,9 @@ from ._shared import (
     parse_bind_host,
     SECRET_KEY_RE,
     SECRET_PATTERNS,
+    _CRED_RE,
+    _EXFIL_RE,
+    _SECRET_PATH_RE,
     INPUT_TOOL_HINTS,
     SENSITIVE_TOOL_HINTS,
     OUTBOUND_TOOL_HINTS,
@@ -136,6 +139,7 @@ from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has
 from ._egress import (
     _EXT_SKILL_HINTS,
     _USER_CONTENT_HOSTS,
+    _other_can_reach_read,
     _weak_allowlist_entries,
     check_browser_ssrf,
     check_outbound_proxy,
@@ -147,6 +151,7 @@ from ._egress import (
     check_egress,
     check_egress_inventory,
     check_leak,
+    check_log_threat_hunt,
     check_webfetch_redirects,
 )
 
@@ -349,7 +354,6 @@ from ._content import (
     _CLICKFIX_REMOTE_FETCH_RE,
     _CLICKFIX_TRUSTED_INSTALLERS,
     _clickfix_trusted_installer,
-    _CRED_RE,
     _DECODED_BAD_RE,
     _DECODED_STRONG_RE,
     _DECODED_TOOL_CMD_RE,
@@ -357,7 +361,6 @@ from ._content import (
     _DEFENSIVE_HEADING_RE,
     _DEP_PKG_NAME_RE,
     _EVENT_HOOK_PATH_RE,
-    _EXFIL_RE,
     _FENCE_ANNOTATION_RE,
     _FENCE_OPEN_RE,
     _FM_CROSS_SKILL_SQUAT_RE,
@@ -1112,6 +1115,7 @@ CHECKS = [
     check_cachetrace_redaction,
     check_webfetch_redirects,
     check_incident_readiness,
+    check_log_threat_hunt,  # B164 — content-scan the agent's own log corpus (F-124/E-044)
     check_offboarding_hygiene,  # B104 — decommissioning/offboarding hygiene (F-089)
     check_codex_project_trust,  # B136 — Codex CLI project trust_level="trusted"
     check_pending_device_pairing_scope,  # B138 — dangling high-scope pending device pairing

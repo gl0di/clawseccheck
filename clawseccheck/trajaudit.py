@@ -18,10 +18,9 @@ Stdlib-only, read-only, no network.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
-from .checks import _CRED_RE, _EXFIL_RE
+from .checks import _CRED_RE, _EXFIL_RE, _SECRET_PATH_RE
 from .logsafe import redact
 from .trajectory import (
     _MAX_BYTES_PER_FILE,
@@ -30,29 +29,10 @@ from .trajectory import (
     find_trajectory_files,
 )
 
-# A file path a skill names that carries a secret-ish token in the path itself
-# (fake_secrets/db_token.txt, ~/.config/app/api_key). High-signal + low-FP: a path with
-# 'secret'/'token'/'credential'/'password'/'api[_-]key' in it, that a skill NAMES and the
-# agent then touches, is a strong "acted on" signal for incident response.
-#
-# B-157: the surrounding `[\w./~+-]*` is zero-or-more on both sides, so it also matches
-# the bare keyword alone with NO path separator at all (`_SECRET_PATH_RE.fullmatch("secret")`
-# / `.fullmatch("password")` / `.fullmatch("tokens")` all matched True) — any ordinary
-# English sentence containing one of these words then counted as a "secret path"
-# indicator, and `analyze()`'s raw substring test flagged plain conversation as an
-# INCIDENT SIGNAL. The regex itself is left as-is (it still needs to capture the FULL
-# path around the keyword, greedily, for real hits); instead `skill_indicators()` below
-# requires the matched token to actually contain a path separator (`/`) before it is
-# accepted as an indicator — a bare dictionary word never does, a real path
-# (`~/.aws/credentials`, `fake_secrets/db_token.txt`, `/home/user/.ssh/id_rsa`-style)
-# always does. This also fixes the near-duplicate-variant symptom for free: for input
-# like "the credential store at ~/.aws/credentials", finditer used to yield BOTH the bare
-# `credential` (no `/`, prose) and the real `~/.aws/credentials` path as two indicators
-# for what a human reads as one underlying path; the bare variant is now dropped by the
-# same `/`-required filter, leaving only the genuine path.
-_SECRET_PATH_RE = re.compile(
-    r"[\w./~+-]*(?:secret|token|credential|password|api[_-]?key)[\w./~+-]*", re.I
-)
+# _SECRET_PATH_RE moved to checks/_shared.py (F-124/E-044 layer-fix): logscan.py (a
+# Layer-1 leaf, same shelf as this module's dependencies) needs it too and must not
+# import a Layer-2 topic module, so it now lives in the shared leaf and is imported
+# above via the checks aggregator, same as _CRED_RE/_EXFIL_RE already were.
 _MIN_INDICATOR_LEN = 6  # ignore trivially-short tokens that would match anything
 
 

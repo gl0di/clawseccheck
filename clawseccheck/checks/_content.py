@@ -39,6 +39,8 @@ from ..textnorm import (
 from . import _shared
 from ._shared import (
     INJECTION_PATTERNS,
+    _CRED_RE,
+    _EXFIL_RE,
     _FM_BLOCK_BARE_RE,
     _FM_BLOCK_HEADERED_RE,
     _HOOK_EXEC_RE,
@@ -1232,33 +1234,9 @@ def _clickfix_trusted_installer(cmd: str) -> bool:
     return True
 
 
-# Credential/secret access is only malicious when EXFILTRATED.
-# Same-line rule: a line that touches a secret path AND ships it out (avoids flagging a
-# skill that merely loads its own config).
-# Extended set covers npm/pypi token files, netrc, Docker/k8s/gcloud creds, browser
-# cookies, and crypto wallet paths (Electrum / Exodus).
-# B-144: the browser-name co-occurrence for the Cookies alternative is now MANDATORY
-# (was optional) — a bare "Cookies" mention matches any ordinary discussion of HTTP
-# session cookies (a networking/privacy tool's documentation is full of these), not just
-# the intended signal (a browser's on-disk Cookies credential-store FILE, e.g.
-# `~/Library/Application Support/Google/Chrome/Default/Cookies`). Confirmed empirically
-# against a real skill (clawstealth, a privacy/networking tool) whose extensive HTTP-
-# cookie discussion — with no browser name anywhere nearby — fed a false cross-skill
-# cred+exfil co-occurrence finding once its full text became scannable (B-144 follow-up).
-_CRED_RE = re.compile(
-    r"find-generic-password|login\.keychain|\.ssh/id_[a-z0-9]+|\.aws/credentials|"
-    r"wallet\.dat|keystore\.json|MetaMask|"
-    r"\.npmrc|\.pypirc|\.netrc|\.docker/config\.json|"
-    r"\.kube/config|\.config/gcloud|"
-    r"\bCookies\b[^\n]{0,60}(?:Chrome|Firefox|Safari|Brave|Edge)|"
-    r"(?:Chrome|Firefox|Safari|Brave|Edge)[^\n]{0,60}\bCookies\b|"
-    r"Electrum[^\n]{0,40}wallets?|Exodus[^\n]{0,40}wallets?|"
-    # C-198: real default on-disk crypto-wallet stores — Geth/go-ethereum's keystore dir
-    # and the Solana CLI's default keypair path (both well-known, documented paths, not
-    # fabricated — grounded the same way as the .aws/.kube/.config/gcloud entries above).
-    r"\.ethereum/keystore|\.config/solana(?:/id\.json)?",
-    re.I,
-)
+# _CRED_RE moved to checks/_shared.py (F-124/E-044 layer-fix): logscan.py (Layer 1) needs
+# these SHARED indicator regexes too and must not import a Layer-2 topic module, so they
+# now live in the shared leaf and are imported above like every other cross-topic name.
 
 
 _DECODED_BAD_RE = re.compile(
@@ -1362,29 +1340,9 @@ _DEP_PKG_NAME_RE = re.compile(
 _EVENT_HOOK_PATH_RE = re.compile(r"(?:^|/)hooks/openclaw/[^/]+\.(?:mjs|cjs|js|ts)$", re.I)
 
 
-# Exfil transports — same set used for both same-line and cross-skill detection.
-# B-144: discord.com/api/webhooks and api.telegram.org/bot are DUAL-USE notification
-# hosts (see B-122's _SKILL_NOTIFY_HOST_RE in _vet.py) — a skill's own self-notification
-# bot is their single most common legitimate use. R1/B-122 already built a dedicated,
-# taint-aware discriminator for exactly these two hosts (CRITICAL only when an unrelated
-# secret or local file-read reaches the same request; a bare mention is WARN) and folded
-# it into check_installed_skills as its own finding. But _EXFIL_RE is a SHARED pattern
-# also consumed by the same-line rule (_has_cred_exfil_outside_fence) and the cross-skill
-# co-occurrence rule (_has_cross, below) — R1 never touched those two, so a skill that
-# merely mentions a credential-shaped path AND its own notify host ANYWHERE (zero taint/
-# proximity requirement for the cross-skill case) still FAILs via this second path. Since
-# the dedicated B-122 discriminator already covers the genuinely-tainted case, these two
-# ambiguous hosts are dropped from the shared unambiguous-exfil-sink list rather than
-# duplicating taint logic in every consumer.
-_EXFIL_RE = re.compile(
-    r"\bcurl\b|\bwget\b|\bnc\b|netcat|requests?\.post|fetch\(|\bPOST\b|\bscp\b|base64|"
-    r"glot\.io|webhook\.site|transfer\.sh|pastebin|"
-    r"rentry\.co|rentry\.org|"
-    r"beeceptor\.com|interactsh\.com|oast\.|canarytokens\.|file\.io|"
-    r"localtunnel\.me|trycloudflare\.com|"
-    r"ngrok(?:-free)?\.(?:io|app)|pipedream\.net",
-    re.I,
-)
+# _EXFIL_RE moved to checks/_shared.py (F-124/E-044 layer-fix) — see the _CRED_RE note
+# above; same reason (logscan.py, a Layer-1 leaf, needs it and can't import a Layer-2
+# topic module). Still consumed here exactly as before, just imported instead of defined.
 
 
 # Words that annotate a fenced block as a documented example (B-097). Checked in the

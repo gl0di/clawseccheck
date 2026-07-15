@@ -977,3 +977,149 @@ def check_webfetch_redirects(ctx: Context) -> Finding:
         "Lower tools.web.fetch.maxRedirects to <= 5, or disable the web-fetch tool.",
         evidence=[f"tools.web.fetch.maxRedirects={redirects}"],
     )
+
+
+# ---------------------------------------------------------------------------
+# B164 (F-124/E-044 Phase 1): log threat-hunt — content-scan the agent's OWN log corpus.
+# ---------------------------------------------------------------------------
+# Distinct from what's already here: B82 (check_cachetrace_redaction) is config-only (is
+# redaction ON?), never reads cacheTrace CONTENT; B19 (check_data_atrest) is stat-only
+# (file permissions), never reads file content; B77 (check_config_audit_log) reads ONLY
+# logs/config-audit.jsonl, not the wider log corpus. B164 is the only one of the four that
+# actually content-scans the log corpus for threat signals.
+#
+# Quiet-by-default (design doc §5.1 — base-rate discipline): a real log corpus is
+# dominated by benign lines, so an isolated single-class hit is noise, not a finding. WARN
+# fires only when >=2 distinct signal classes co-occur in the SAME sink, or a single class
+# that already carries its own strong internal corroboration fires (exfil_evidence is
+# already secret+exfil-host paired inside logscan.py; secrets_at_rest additionally needs
+# the sink to be world-readable, checked here via the same B19 perm-check helper above).
+_LOG_HUNT_PER_FILE_BUDGET_S = 3.0
+
+
+def _log_hunt_corroborated(nonzero_classes: set, world_readable: bool) -> bool:
+    """True when a sink's nonzero signal classes clear the quiet-by-default WARN bar."""
+    strong_single = "exfil_evidence" in nonzero_classes or (
+        "secrets_at_rest" in nonzero_classes and world_readable
+    )
+    return strong_single or len(nonzero_classes) >= 2
+
+
+def check_log_threat_hunt(ctx: Context) -> Finding:
+    """B164 — threats surfaced in the agent's own log corpus (content scan, advisory).
+
+    Discovers every log/transcript sink the agent produces (trajectory sidecars,
+    logging.file, cacheTrace transcripts, session transcripts, the config-audit log,
+    memory files, install backups — see logdiscovery.py) and content-scans each one
+    (logscan.py) for six signal classes: injection markers against the agent, exfil
+    evidence, dangerous-capability use, environment-compromise IOCs, log
+    tamper/anomaly, and secrets at rest.
+
+    WARN  — at least one sink corroborates (see ``_log_hunt_corroborated``): >=2 distinct
+            signal classes co-occur in that sink, or a single inherently-strong class
+            fires (exfil_evidence, or secrets_at_rest on a world-readable sink).
+    PASS  — sinks were found and scanned but no sink corroborated. Isolated/low-
+            confidence hits are counted and reported, never WARNed on individually.
+    UNKNOWN — no log/transcript sinks found, or none were readable/non-empty.
+    Never FAIL — a content heuristic over an attacker-influenced corpus must never hard-
+    fail the audit (Golden Rule #5); this check is advisory (scored=False) precisely so a
+    false hit can never move the A-F grade.
+    """
+    # Lazy import: logscan.py (a Layer-1 leaf) itself imports from the checks aggregator
+    # (`from .checks import ...`) to reuse the engine's vetted indicator regexes — the
+    # SAME reason several checks/*.py functions already import `..logsafe` lazily inside
+    # the function body instead of at module top (see checks/_vet.py's comment on it).
+    # logdiscovery.py has no such dependency, but is imported the same way for symmetry.
+    from ..logdiscovery import discover_log_sinks  # noqa: PLC0415
+    from ..logscan import scan_log_file  # noqa: PLC0415
+    from ..scanbudget import audit_deadline  # noqa: PLC0415
+
+    sinks = discover_log_sinks(ctx)
+    if not sinks:
+        return _finding(
+            "B164",
+            UNKNOWN,
+            "No agent log/transcript sinks found (no logging.file, cacheTrace, trajectory "
+            "sidecar, session transcript, config-audit log, memory file, or install backup) "
+            "— nothing to content-scan.",
+            "Enable OpenClaw's default trajectory sidecar (on by default) and/or "
+            "logging.file so a future run has a log corpus to threat-hunt.",
+        )
+
+    corroborated: dict[str, set] = {}
+    all_samples: list[str] = []
+    any_scanned = False
+    any_truncated = False
+    any_timed_out = False
+    isolated_hits = 0
+
+    for sink in sinks:
+        deadline = audit_deadline(_LOG_HUNT_PER_FILE_BUDGET_S)
+        result = scan_log_file(sink, deadline)
+        any_truncated = any_truncated or result.truncated
+        any_timed_out = any_timed_out or result.timed_out
+        if result.bytes_scanned == 0:
+            continue
+        any_scanned = True
+
+        nonzero = {cls for cls, n in result.counts.items() if n > 0}
+        if not nonzero:
+            continue
+
+        world_readable = _other_can_reach_read(ctx.home, sink.path)
+        try:
+            rel = str(sink.path.relative_to(ctx.home))
+        except ValueError:
+            rel = sink.path.name
+
+        if _log_hunt_corroborated(nonzero, world_readable):
+            corroborated[rel] = nonzero
+            all_samples.extend(result.samples[:5])
+        else:
+            isolated_hits += len(nonzero)
+
+    if not any_scanned:
+        return _finding(
+            "B164",
+            UNKNOWN,
+            f"{len(sinks)} log/transcript sink(s) found but none were readable/non-empty "
+            "— nothing to content-scan.",
+            "Ensure the agent's log/transcript files are readable by the auditing user.",
+        )
+
+    note = ""
+    if any_truncated:
+        note += " Some file(s) hit the scan's byte/line cap — results may be incomplete."
+    if any_timed_out:
+        note += " Some file(s) hit the per-file scan timeout — results may be incomplete."
+
+    if corroborated:
+        n_sinks = len(corroborated)
+        shown = list(corroborated.items())[:5]
+        detail = "; ".join(f"{sink}: {', '.join(sorted(classes))}" for sink, classes in shown)
+        if n_sinks > 5:
+            detail += f" (+{n_sinks - 5} more sink(s))"
+        return _finding(
+            "B164",
+            WARN,
+            f"Corroborated threat signal(s) in {n_sinks} log sink(s): {detail}.{note}",
+            "Review the named log/transcript file(s) manually (see the Log Threat Report "
+            "section for redacted-evidence samples). Rotate any credential the matched "
+            "indicator could expose, and investigate how it reached the log.",
+            evidence=all_samples[:20],
+        )
+
+    detail = f"{len(sinks)} log/transcript sink(s) scanned; no corroborated threat signal."
+    if isolated_hits:
+        detail += (
+            f" {isolated_hits} low-confidence signal(s) suppressed (isolated, not corroborated)."
+        )
+    detail += note
+    return _finding(
+        "B164",
+        PASS,
+        detail,
+        "No action needed. Isolated/low-confidence signals are intentionally not WARNed "
+        "on individually (base-rate discipline) — see the Log Threat Report section for "
+        "the suppressed count.",
+    )

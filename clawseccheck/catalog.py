@@ -754,6 +754,28 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B164 (F-124/E-044 Phase 1): content-scan the agent's OWN log/transcript corpus
+    # (trajectory sidecars, logging.file, cacheTrace, session transcripts, config-audit
+    # log, memory files, install backups) for threat signals against the agent
+    # (injected instructions) and against its environment (exfil evidence, dangerous
+    # capability use, compromise IOCs, tamper/anomaly, at-rest secrets) — see
+    # clawseccheck/logdiscovery.py + logscan.py. Quiet-by-default (base-rate discipline,
+    # §5.1 of the design doc): WARN only when >=2 signal classes co-occur in one sink, or
+    # a single class with inherent same-line/perm corroboration fires (exfil_evidence is
+    # already secret+exfil-host paired; secrets_at_rest also needs a world-readable sink).
+    # Isolated single-class hits are suppressed to a quiet report hint, never a WARN.
+    # Advisory (scored=False) — a content heuristic over an attacker-influenced corpus
+    # must never move the A-F grade (Golden Rule #5). Never FAILs.
+    CheckMeta(
+        "B164",
+        "Threats surfaced in agent logs (content scan)",
+        MEDIUM,
+        "advisory",
+        "Log Threat Intel",
+        scored=False,
+        confidence="MEDIUM",
+        surface="monitoring",
+    ),
     # B67 (C-092): per-source tool-output trust contracts.
     # Complements B21 (generic trust boundary): checks that bootstrap has
     # channel-specific DATA/instruction declarations for each active high-risk
