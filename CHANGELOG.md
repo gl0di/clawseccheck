@@ -3,6 +3,49 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.44.0] — 2026-07-15
+
+Two new B13 sub-signals close real external-benchmark false-negative gaps
+(persistence via SSH keys/cron/systemd, and social-engineering/phishing
+prose), plus a doctrine pass making clean-verdict copy honest about
+ClawSecCheck's measured precision/recall trade-off.
+
+### Added
+- **B13: `~/.ssh/authorized_keys` persistence detection (T1098.004).** Was the
+  single biggest external false-negative bucket (85/345 malicious skills in
+  SkillTrustBench's PE2 pattern) — previously not detected at all. Flags a
+  skill writing an SSH public key to authorized_keys, argument-bound to the
+  exact `open(...)`/redirect call touching that path (not a proximity guess),
+  so a read-only key-hygiene audit skill never fires. FAIL requires a literal
+  key token in the write; a variable/computed key content down-ranks to WARN.
+- **B13: cron/systemd persistence gap closure.** The existing detector missed
+  `crontab -` (bare stdin install), the `["crontab", "-"]` argv form,
+  `systemctl --user enable`, and per-user `~/.config/systemd/user/*.service`/
+  `.timer` unit files — all now covered, with the reputable-daemon and
+  disclosure down-ranks extended to match.
+- **B163: social-engineering / credential-phishing prose detector.** New
+  content-ring check for a corroborated triad (urgency-marker + authority-
+  claim + credential-solicitation or an out-of-band action) in a skill's own
+  SKILL.md prose — the classic phishing pattern aimed at the human reader, a
+  previously zero-coverage attack class (OASB `social_engineering` recall
+  0.20). FAIL requires the credential ask ALSO be paired with a concrete
+  external-URL "sink" (a forward, same-sentence search with a first-party and
+  reputable-OAuth-provider allowlist); a bare ask or an out-of-band action
+  alone stays WARN — ordinary account-recovery/2FA/support copy legitimately
+  combines urgency, an authority reference, and "confirm your password"
+  without being phishing.
+
+### Changed
+- **Clean-verdict copy reframed as "no known attack pattern matched," not
+  "safe."** External benchmarks (SkillTrustBench, OASB) found ClawSecCheck's
+  detection precision very high (few false alarms) but malicious-sample
+  recall measured between 0.09 and 0.41 depending on benchmark/artifact type
+  — a gap the terminal report, HTML report, and `--next` guide previously
+  didn't disclose ("no issues found", "you're in good shape... stay safe").
+  The report now states the measured recall numbers directly where a user
+  reads a clean result; README's "Honest limits" section carries the same
+  grounding.
+
 ## [3.43.0] — 2026-07-14
 
 `vet_source`'s pre-download reputation gate now also catches a source that
