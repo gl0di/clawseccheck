@@ -881,14 +881,28 @@ _SSH_PUBKEY_RE = re.compile(
 # is a further residual, same down-rank-not-drop tradeoff as the rest of this function:
 # falls back to the redirect/chained-write checks, or — if genuinely nothing binds —
 # WARN never fires either, same as any other unmatched shape, never a promoted FAIL.
-_AUTHKEY_ARG_FRAGMENT = r"(?:[^()]|\([^()]*\))"
+#
+# CLAWSECCHECK-B-220: widened to tolerate a SECOND level of nesting (e.g.
+# `open(Path(os.path.expanduser("~/.ssh/authorized_keys")), "a")` -- Path(...) wrapping
+# expanduser(...)) -- the previously-accepted residual above. Each alternative is still
+# disjoint on its first char (paren vs non-paren), so this stays linear, not ambiguous.
+_AUTHKEY_ARG_FRAGMENT_L1 = r"(?:[^()]|\([^()]*\))"  # tolerates 1 level nested
+_AUTHKEY_ARG_FRAGMENT = rf"(?:[^()]|\((?:{_AUTHKEY_ARG_FRAGMENT_L1})*\))"  # tolerates 2
 _AUTHKEY_OPEN_CALL_RE = re.compile(
     rf"open\s*\({_AUTHKEY_ARG_FRAGMENT}{{0,240}}\)",
     re.I,
 )
 _AUTHKEY_MODE_FLAG_RE = re.compile(r"['\"][wa]['\"]")
+# CLAWSECCHECK-B-219: the intervening chars between the path and the `.write*(` call
+# are restricted to closing parens/quotes/whitespace -- i.e. a chain that literally
+# closes out the SAME expression the path lives in (`Path(...).write_text(`,
+# `Path(os.path.expanduser(...)).write_text(`). Previously `[^\n;]{0,60}` also matched
+# a walrus/conditional idiom on one logical line
+# (`if (p := Path(...authorized_keys...)).exists(): backup.write_text(...)`), where
+# `backup` is a completely unrelated variable -- a colon or a bare identifier before the
+# dot now breaks the match instead of being silently tolerated.
 _AUTHKEY_CHAINED_WRITE_RE = re.compile(
-    r"\.ssh/authorized_keys[^\n;]{0,60}\.\s*write(?:_text|_bytes)?\s*\(",
+    r"\.ssh/authorized_keys[)\"'\s]{0,60}\.\s*write(?:_text|_bytes)?\s*\(",
     re.I,
 )
 _AUTHKEY_BOUND_WRITE_WINDOW = 240  # chars around the path to look for a bound open()/chain
