@@ -3,6 +3,46 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.45.0] — 2026-07-15
+
+New advisory check content-scans the agent's own log/transcript corpus for threat
+signals, plus an assurance pass validating the shipped grade/RISK output and
+hardening the scanner's own regex surface against ReDoS.
+
+### Added
+- **B164: log-corpus threat-hunting (advisory, `scored=False`).** New
+  `logdiscovery.py`/`logscan.py` (Layer 1) discover every log/transcript sink the
+  agent produces — trajectory sidecars, `logging.file`, `cacheTrace`, session
+  transcripts, the config-audit log, memory files, install backups — and content-
+  scan each for six signal classes: injected instructions, exfil evidence,
+  dangerous-capability use, environment-compromise IOCs, log tamper/anomaly, and
+  secrets at rest. Quiet-by-default: WARNs only when a sink's signals corroborate
+  each other (base-rate discipline), never on an isolated hit; never FAILs. A
+  live pass against a real fleet found and fixed 4 calibration bugs before this
+  shipped — most notably a PII leak where evidence samples stored whole raw
+  trajectory lines instead of a bounded window around the actual match.
+- ReDoS audit script (`scripts/redos_audit.py`) and a unified cross-surface
+  DoS/fuzz harness (`tests/test_scanner_dos_harness.py`) — dev tooling, not part
+  of the shipped `clawseccheck` package. Audited all 272 compiled regexes in
+  `checks/`; 0 confirmed hangs.
+
+### Fixed
+- `fixtures/home_safe` (the canonical "clean whole config" reference fixture used
+  across 28 test files) set a phantom top-level `sandbox` key instead of the real
+  `agents.defaults.sandbox.mode` path, so it silently WARNed B4 and false-fired a
+  RISK-03 combinational chain. Found via a new grade/RISK calibration pass; fixed
+  the fixture, not the detector — both were already correctly flagging what the
+  fixture actually contained.
+
+### Changed
+- Two new dev-only eval harnesses outside the shipped package
+  (`eval/clawseccheck-calibration`, `eval/multi-file-attack-corpus`) validate the
+  A–F grade and RISK-\* chains against real whole-config fixtures, and measure how
+  much `--vet`/full-audit recall drops when an attack is composed across multiple
+  files instead of one — both surfaced concrete, scoped gaps for follow-up work
+  (13/18 RISK chains untested against any real-shaped fixture; cross-file
+  credential-exfil taint has no detector at all).
+
 ## [3.44.0] — 2026-07-15
 
 Two new B13 sub-signals close real external-benchmark false-negative gaps
