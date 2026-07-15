@@ -715,6 +715,25 @@ def render_report(findings: list[Finding], score: ScoreResult,
         " grade means \"not statically lethal-capable\", not \"runtime-proof\". Use the live"
         " tests above to probe actual resistance."
     )
+    # C-216 (PASS-semantics doctrine): a clean/high-grade result confirms detection didn't
+    # recognize anything, not that nothing is wrong -- distinct from the static-vs-runtime
+    # line above (which is about WHAT is checked); this is about what a clean VERDICT
+    # means. Numbers per Dave's ratification of C-216 (2026-07-13 backlog-sweep comment):
+    # cite the measured recall directly, not just a qualitative caveat. Grounded in
+    # eval/oasb/RESULTS.md (2026-07-13, v3.39.0, OASB per-skill FAIL-only recall 0.09) and
+    # eval/skilltrustbench/RESULTS.md (SkillTrustBench malicious-class recall 0.412) --
+    # both external, dev-only benchmarks (not shipped with this package). The lowest-recall
+    # categories that eval identified (privilege-escalation, data-exfiltration, social-
+    # engineering prose) have since had dedicated detectors added (B159/B160/B163) but the
+    # fix has not yet been re-measured against the same benchmark.
+    lines.append(
+        "A clean/high-grade result means \"no known attack pattern matched\" — not \"this"
+        " setup is safe.\" External benchmarks (SkillTrustBench, OASB) found detection"
+        " precision very high (few false alarms) but malicious-sample recall measured"
+        " between 0.09 and 0.41 depending on benchmark/artifact type — most misses were"
+        " attacks described in prose rather than shipped as code. A clean result means the"
+        " scanner didn't recognize a pattern it already knows, not that nothing is wrong."
+    )
     # Honest framing for non-OpenClaw / custom setups (B-017): when there is no
     # openclaw.json the config-driven checks come back UNKNOWN. UNKNOWN is neutral
     # (never counted against the score), but without context a hardened custom setup
@@ -739,12 +758,12 @@ def render_report(findings: list[Finding], score: ScoreResult,
     lines.append("")
     unsuppressed_all = [f for f in findings if not getattr(f, "suppressed", False)]
     if not unsuppressed_all:
-        lines.append(f"No issues found by ClawSecCheck. Keep it that way. {ok}")
+        lines.append(f"No known attack pattern matched. Keep it that way. {ok}")
     else:
         if issues:
             lines.append(f"{len(issues)} issue(s), grouped by area — most urgent first within each:")
         else:
-            lines.append(f"No issues found by ClawSecCheck. Keep it that way. {ok}")
+            lines.append(f"No known attack pattern matched. Keep it that way. {ok}")
         lines.append("")
         # Group EVERY finding (not just FAIL/WARN) by its OpenClaw surface family so the
         # Dashboard reads as coverage-by-category rather than a flat severity dump, and so
@@ -1601,7 +1620,9 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
     # Build the findings body: grouped by the 7 OpenClaw surface families so a long
     # list (dozens of findings) reads as coverage-by-area, matching the Dashboard.
     if not issues:
-        no_issues_text = esc("No issues found across the audited surfaces. Keep it that way.")
+        no_issues_text = esc(
+            "No known attack pattern matched across the audited surfaces. Keep it that way."
+        )
         findings_html = f'<div class="all-clear">✓ {no_issues_text}</div>'
         nav_html = ""
     else:

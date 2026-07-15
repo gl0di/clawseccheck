@@ -53,7 +53,7 @@ def test_suppressed_excluded_from_report():
     supp = _f("B2", CRITICAL, FAIL, "x")
     supp.suppressed = True
     out = render_report([supp], compute([supp]))
-    assert "No issues found" in out
+    assert "No known attack pattern matched" in out
     assert "1 finding(s) suppressed via .clawseccheckignore" in out
 
 

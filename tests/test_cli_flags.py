@@ -192,7 +192,7 @@ def test_default_run_safe_contains_guide_header_or_all_clear(capsys):
     rc = main(["--home", SAFE] + BASE)
     assert rc == 0
     out = capsys.readouterr().out
-    assert "What you can do next:" in out or "good shape" in out
+    assert "What you can do next:" in out or "No further action suggested" in out
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ def test_next_flag_safe_fixture(capsys):
     rc = main(["--home", SAFE] + BASE + ["--next"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "What you can do next:" in out or "good shape" in out
+    assert "What you can do next:" in out or "No further action suggested" in out
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +241,7 @@ def test_card_does_not_contain_guide_header(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "What you can do next:" not in out
-    assert "good shape" not in out
+    assert "No further action suggested" not in out
     assert "OpenClaw Security" in out
 
 

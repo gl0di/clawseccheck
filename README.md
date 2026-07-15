@@ -60,6 +60,14 @@ and about what "read-only" actually covers:
 
 - **Static analysis, not runtime-verified.** Findings describe your *configuration*, not a
   live exploit. Results are labelled accordingly.
+- **A clean report / grade-A means "no known attack pattern matched" — not "safe."**
+  External benchmarks (SkillTrustBench, OASB) found detection precision very high (few
+  false alarms — 1 false-positive in 3880 benign OASB samples) but malicious-sample
+  *recall* is the measured weak point: between 0.09 (OASB, per-skill FAIL-only, v3.39.0)
+  and 0.41 (SkillTrustBench, malicious-class recall). Most misses were attacks *described
+  in prose* rather than shipped as code — a blind spot dedicated detectors (B159/B160/B163)
+  have since started closing, though the fix hasn't been re-measured against the same
+  benchmark yet. A PASS tells you what the scanner recognized, not that nothing is wrong.
 - **`UNKNOWN` ≠ `PASS`.** If a file can't be read, the config can't be parsed, or a state
   can't be determined, it's reported as `UNKNOWN` and excluded from the score — never
   silently marked safe.

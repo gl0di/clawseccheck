@@ -259,7 +259,7 @@ class TestRenderNextActions:
 
     def test_empty_actions_returns_all_clear(self):
         out = render_next_actions([])
-        assert "good shape" in out or "re-run" in out
+        assert "No further action suggested" in out
 
     def test_empty_does_not_contain_header(self):
         out = render_next_actions([])
@@ -302,4 +302,4 @@ class TestRenderNextActions:
         actions = suggest_actions(findings, score)
         out = render_next_actions(actions)
         # safe fixture may still have warn findings -> header present; or all clear
-        assert "What you can do next:" in out or "good shape" in out
+        assert "What you can do next:" in out or "No further action suggested" in out

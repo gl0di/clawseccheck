@@ -130,7 +130,12 @@ def render_next_actions(
     *ascii_only* avoids unicode.
     """
     if not actions:
-        return "You're in good shape — re-run anytime to stay safe.\n"
+        # C-216 (PASS-semantics doctrine): "good shape"/"stay safe" overstates what a clean
+        # result means — reframed to what's actually true (no known pattern matched).
+        return (
+            "No further action suggested — nothing here matched a known attack"
+            " pattern. Re-run after any change to your setup.\n"
+        )
 
     header = "What you can do next:"
     run_label = "run:"

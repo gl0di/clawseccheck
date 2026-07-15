@@ -83,7 +83,7 @@ def test_fail_warn_findings_keep_why_but_no_fix():
 def test_all_suppressed_still_shows_clean_message():
     supp = _f("B1", FAIL, CRITICAL, suppressed=True)
     out = render_report([supp], compute([supp]))
-    assert "No issues found by ClawSecCheck. Keep it that way." in out
+    assert "No known attack pattern matched. Keep it that way." in out
     assert "[Secrets & Data]" not in out
 
 
