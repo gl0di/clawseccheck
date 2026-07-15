@@ -4910,6 +4910,55 @@ def check_cross_file_boundary_payload(ctx: Context) -> Finding:
     )
 
 
+# C-206: non-code DATA extensions collector.py already ingests into a skill's blob
+# (`collector.text_extensions`) but that B90's own literal-extraction loop never reads,
+# because that loop only walks `installed_skill_py/shell/js` (the CODE-extension subset:
+# .py/.ipynb, .sh/.bash/.zsh, .js/.ts/.mjs/.cjs). A first version of this fix gated on the
+# filename ENDING in ".txt" only — C-135 found that gate just as trivially rename-evadable
+# as the filename-contains-"part" gate this function's own reasoning already rejected
+# (renaming a part file to `.md` or `.json` sailed straight through). Gate on the full set
+# of non-code data extensions instead, so a rename within collector.py's own already-
+# ingested extension list can't dodge it.
+_XFILE_DATA_EXTS = (".txt", ".json", ".md")
+
+
+def _xfile_data_file_fragments(blob: str) -> list[str]:
+    """C-206: sibling DATA-file (`.txt`/`.json`/`.md`) section bodies from a skill's
+    concatenated blob, mined for candidate base64 fragments the same two ways B90's
+    existing loop already mines `.py`/`.sh`/`.js` CODE source:
+
+    (1) the WHOLE stripped body as one fragment, when it's itself a bare (unquoted)
+        base64 blob — the documented real-world evasion (SkillTrustBench case_01643/
+        case_03133, tracked as C-201/C-206): `_post_install.part1.txt` … `part5.txt`,
+        read via `open()` at runtime and concatenated, completely outside B90's
+        source-file allowlist and literal-quoting assumption.
+    (2) any individually QUOTED base64-shaped literal inside the body (reusing the same
+        `_XFILE_STRING_LITERAL_RE` extraction the code-source loop uses) — a data file
+        can just as easily carry the fragment as a quoted JSON/markdown value instead of
+        bare content.
+
+    Both legs reuse the SAME pure-base64-alphabet shape test B90 already applies to code
+    literals (`_XFILE_B64_FRAGMENT_RE`, anchored start-to-end — an internal newline breaks
+    it). A legitimate `.txt`/`.json`/`.md` file (README, license, changelog, wordlist, a
+    real manifest) essentially never collapses to a single unbroken base64-alphabet run,
+    nor typically carries an incidental long pure-base64 quoted value, so this reuses B90's
+    existing zero-FP bar rather than adding a new one.
+    """
+    frags: list[str] = []
+    for m in _MANIFEST_HEADER_RE.finditer(blob):
+        if not m.group("name").strip().lower().endswith(_XFILE_DATA_EXTS):
+            continue
+        body = m.group("body").strip()
+        if body and _XFILE_B64_FRAGMENT_RE.match(body):
+            frags.append(body)
+            continue
+        for lm in _XFILE_STRING_LITERAL_RE.finditer(body):
+            content = lm.group(1) if lm.group(1) is not None else lm.group(2)
+            if content and _XFILE_B64_FRAGMENT_RE.match(content):
+                frags.append(content)
+    return frags
+
+
 def check_cross_file_payload(ctx: Context) -> Finding:
     """B90 — a base64 payload reassembled from string literals split across a skill's files."""
     from ..logsafe import redact as _redact  # noqa: PLC0415 — decoded preview is attacker-controlled
@@ -4929,9 +4978,12 @@ def check_cross_file_payload(ctx: Context) -> Finding:
         sources: list = []
         for attr in ("installed_skill_py", "installed_skill_shell", "installed_skill_js"):
             sources.extend(getattr(ctx, attr, {}).get(name, []))
-        if not sources:
+        # C-206: sibling data-file (.txt/.json/.md) content is an additional fragment
+        # source, independent of whether the skill has any py/sh/js source at all.
+        data_frags = _xfile_data_file_fragments(skills.get(name, "") if isinstance(skills, dict) else "")
+        if not sources and not data_frags:
             continue
-        frags: list[str] = []
+        frags: list[str] = list(data_frags)
         joined_src: list[str] = []
         for _rel, src in sources:
             joined_src.append(src)
@@ -4945,6 +4997,10 @@ def check_cross_file_payload(ctx: Context) -> Finding:
             if cap_hit:
                 break
         # A "split" needs >=2 fragments AND a decode sink (the base64 must be decoded to run).
+        # The decode sink lives in the skill's CODE (py/sh/js), never in a .txt data file, so
+        # joined_src (unchanged) is still the right thing to search — a skill made ENTIRELY of
+        # .txt fragments with no code at all has nothing to decode+exec them, so `joined_src`
+        # being empty correctly means no decode sink is found and this loop iteration is skipped.
         if len(frags) < 2 or not _XFILE_DECODE_SINK_RE.search("\n".join(joined_src)):
             continue
         candidates = ["".join(frags)]
@@ -4960,8 +5016,9 @@ def check_cross_file_payload(ctx: Context) -> Finding:
                 break
         if hit:
             warns.append(
-                f"{name}: a base64 payload reassembles from {len(frags)} split string "
-                f"literal(s) and the skill has a base64-decode sink -> '{_redact(hit)}'"
+                f"{name}: a base64 payload reassembles from {len(frags)} split fragment(s) "
+                f"(string literal(s) and/or sibling .txt/.json/.md data-file content) and "
+                f"the skill has a base64-decode sink -> '{_redact(hit)}'"
             )
     if warns:
         extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
