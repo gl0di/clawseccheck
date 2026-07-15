@@ -3769,8 +3769,18 @@ def _negation_governs_trigger(
 
 
 def _normalize_for_squat(name: str) -> str:
-    """Lowercase, strip one known suffix or prefix, return result."""
-    n = name.lower().strip()
+    """Lowercase, confusable-fold, strip one known suffix or prefix, return result.
+
+    B-217: `.lower()` first so an uppercase Cyrillic/Greek confusable (e.g. Cyrillic
+    А U+0410) case-folds to its lowercase form (а U+0430) BEFORE `normalize_for_scan`'s
+    confusable table runs — the table only covers lowercase code points (see
+    textnorm.py). Without this, a Cyrillic-lookalike spelling of a brand name (e.g.
+    "dіѕсоrd" with Cyrillic і/ѕ/о) folds to plain ASCII "discord" and correctly
+    collapses to edit-distance 0 against the real name, instead of silently evading
+    the Levenshtein comparison at distance 3 (untouched Cyrillic glyphs each counting
+    as a full substitution).
+    """
+    n = normalize_for_scan(name.lower().strip())
     for suf in _SQUAT_STRIP_SUFFIXES:
         if n.endswith(suf) and len(n) > len(suf):
             n = n[: -len(suf)]
@@ -3910,26 +3920,54 @@ def _squat_hits(
       candidate_form not itself a known name.
     - Returns deduplicated hits, one per unique (candidate, known) pair.
     `known` defaults to the curated brand list; vet_source passes ecosystem pools.
+
+    B-217: both sides of the comparison are confusable-folded (via
+    `_normalize_for_squat` / `normalize_for_scan`) before the Levenshtein distance
+    is computed, so a Cyrillic/Greek-lookalike spelling of a known name (e.g.
+    Cyrillic і/ѕ/о swapped into "discord") collapses to its plain-ASCII form first
+    instead of racking up a full substitution per swapped glyph and evading the
+    edit-distance threshold entirely. `known` is folded once per call, not per
+    candidate -- it doesn't change across the candidate loop.
+
+    Folding alone isn't sufficient, though: a FULL homoglyph clone folds to
+    distance 0 against the real name, which is exactly what the "already a known
+    name -- legitimate use" exemptions below are designed to skip. `is_homoglyph`
+    (gated the same way B93 gates it, via `confusable_in_ascii_context`, so a
+    whole-script non-Latin name is never swept in) distinguishes "genuinely
+    already the real ASCII name" from "only equals it after confusable-folding" --
+    the latter is the impersonation this bug exists to catch, not a legitimate
+    exact match, so those exemptions must NOT apply to it.
     """
     seen: set[tuple[str, str]] = set()
     hits: list[tuple[str, str, int]] = []
+    known_norm = {kn: normalize_for_scan(kn) for kn in known}
 
     for cand in candidates:
         norm = _normalize_for_squat(cand)
+        is_homoglyph = confusable_in_ascii_context(cand)
         # Forms to check: normalized full name + each token
         forms_to_check = [norm] + _candidate_tokens(norm)
         for form in forms_to_check:
             if not form:
                 continue
-            # If this form is itself a known name → legitimate use, skip.
+            # If this form is itself a known name → legitimate use, skip --
+            # UNLESS it only got there via confusable-folding (a homoglyph clone,
+            # not a genuine match): flag that as an exact (distance-0) resemblance.
             if form in known:
+                if not is_homoglyph:
+                    continue
+                key = (cand, form)
+                if key not in seen:
+                    seen.add(key)
+                    hits.append((cand, form, 0))
                 continue
             # B-185: a real published package one edit away from a brand is not a squat.
-            if form in _KNOWN_LEGIT_NEIGHBORS:
+            if form in _KNOWN_LEGIT_NEIGHBORS and not is_homoglyph:
                 continue
             for kn in known:
                 if len(kn) < _TYPOSQUAT_MIN_KNOWN_LEN:
                     continue
+                kn_norm = known_norm[kn]
                 # B-218: the candidate side is tokenized on -/_ above, but
                 # `kn` itself is never normalized, so a hyphenated known entry (e.g.
                 # "github-copilot") compared unsplit against a hyphen-omitted spelling
@@ -3939,9 +3977,12 @@ def _squat_hits(
                 # stripped known name before running the fuzzy distance check (a real
                 # typosquat still has to clear the distance test below against every
                 # OTHER known name -- this only exempts the identical-modulo-hyphen case).
-                if form == kn.replace("-", "").replace("_", ""):
+                # Same B-217 carve-out: a homoglyph clone of the hyphen-omitted
+                # spelling must still fall through to the distance check (it'll
+                # land at distance 1 -- the hyphen -- and get flagged there).
+                if form == kn_norm.replace("-", "").replace("_", "") and not is_homoglyph:
                     continue
-                d = _levenshtein(form, kn)
+                d = _levenshtein(form, kn_norm)
                 # B-079: two independent edits on a short name is weak evidence —
                 # 'canvas' is not a squat of 'pandas'. Short names must be within
                 # ONE edit (transpositions already count as one, OSA above).

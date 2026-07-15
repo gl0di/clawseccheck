@@ -171,6 +171,70 @@ def test_squat_hits_nummpy_near_numpy():
 
 
 # ---------------------------------------------------------------------------
+# B-217: Cyrillic/Greek homoglyph clones of a known name evaded _squat_hits
+# entirely — the raw edit distance (one full substitution per swapped glyph)
+# sits above the allowed threshold, so it fired ZERO suspicion instead of
+# "resembles <brand>". Both sides of the comparison are now confusable-folded
+# before the Levenshtein distance is computed (see _normalize_for_squat /
+# normalize_for_scan), and a full clone (folds to distance 0) is flagged as an
+# exact resemblance rather than silently exempted like a genuine legit match.
+# ---------------------------------------------------------------------------
+
+def test_squat_hits_cyrillic_homoglyph_clone_fires():
+    # d + Cyrillic і (U+0456) + Cyrillic ѕ (U+0455) + c + Cyrillic о (U+043E) + r + d —
+    # visually "discord", raw edit distance 3 (each Cyrillic glyph counts as a full
+    # substitution), which sits ABOVE the allowed=2 threshold pre-fix.
+    homoglyph = "dіѕcоrd"
+    assert _levenshtein(homoglyph, "discord") == 3  # confirms the raw-distance premise
+    hits = _squat_hits([homoglyph])
+    assert hits, f"Cyrillic homoglyph clone of 'discord' must fire: {hits}"
+    assert (homoglyph, "discord", 0) in hits
+
+
+def test_squat_hits_cyrillic_homoglyph_near_miss_fires_at_low_distance():
+    # A homoglyph clone that ALSO has a genuine extra letter (not just confusable
+    # substitution) must still fire, now at the correct (small) folded distance
+    # rather than the inflated raw distance.
+    homoglyph_extra = "dіѕcоrdd"  # one trailing extra "d"
+    hits = _squat_hits([homoglyph_extra])
+    assert hits, f"Near-miss homoglyph clone must fire: {hits}"
+    knowns = [h[1] for h in hits]
+    assert "discord" in knowns
+
+
+def test_squat_hits_genuine_exact_match_still_silent_regression_guard():
+    # Regression guard: a real, plain-ASCII exact match must stay silent —
+    # the homoglyph carve-out must not affect the ordinary legitimate-use path.
+    hits = _squat_hits(["discord"])
+    assert not hits, f"Plain ASCII 'discord' must not fire: {hits}"
+
+
+def test_squat_hits_whole_script_non_latin_name_stays_silent():
+    # A legitimate whole-script (non-Latin) name — ordinary i18n, not a homoglyph
+    # mixed into a Latin word — must not be treated as a homoglyph clone, mirroring
+    # B93's own confusable_in_ascii_context anti-FP discipline.
+    hits = _squat_hits(["привет"])  # "привет" (hello)
+    assert not hits, f"Whole-script non-Latin name must not fire: {hits}"
+
+
+def test_squat_hits_hyphenless_homoglyph_of_hyphenated_known_name_fires_at_distance_one():
+    # A homoglyph clone that also omits a known name's hyphen must fall through to
+    # the fuzzy distance check (landing at distance 1, the hyphen) rather than being
+    # silently swallowed by the B-218 hyphen-omitted exact-match exemption.
+    homoglyph_concat = "gіthubcоpilot"  # Cyrillic і, о; no hyphen at all
+    hits = _squat_hits([homoglyph_concat], known=frozenset({"github-copilot"}))
+    assert hits == [(homoglyph_concat, "github-copilot", 1)], hits
+
+
+def test_vet_source_flags_cyrillic_homoglyph_owner():
+    from clawseccheck.checks import vet_source
+    homoglyph = "dіѕcоrd"
+    f = vet_source(f"git:github.com/{homoglyph}/mytool@main")
+    assert f.status == WARN
+    assert any("resembles well-known 'discord'" in e for e in f.evidence)
+
+
+# ---------------------------------------------------------------------------
 # 3. _dep_names_in_skill unit tests
 # ---------------------------------------------------------------------------
 
