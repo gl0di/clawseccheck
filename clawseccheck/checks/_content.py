@@ -3903,6 +3903,17 @@ def _squat_hits(
             for kn in known:
                 if len(kn) < _TYPOSQUAT_MIN_KNOWN_LEN:
                     continue
+                # CLAWSECCHECK-B-218: the candidate side is tokenized on -/_ above, but
+                # `kn` itself is never normalized, so a hyphenated known entry (e.g.
+                # "github-copilot") compared unsplit against a hyphen-omitted spelling
+                # ("githubcopilot") is always exactly edit-distance 1 (one hyphen
+                # insertion) -- a guaranteed false squat-fire on a plausible, common
+                # spelling. Exempt an EXACT match against the hyphen/underscore-
+                # stripped known name before running the fuzzy distance check (a real
+                # typosquat still has to clear the distance test below against every
+                # OTHER known name -- this only exempts the identical-modulo-hyphen case).
+                if form == kn.replace("-", "").replace("_", ""):
+                    continue
                 d = _levenshtein(form, kn)
                 # B-079: two independent edits on a short name is weak evidence —
                 # 'canvas' is not a squat of 'pandas'. Short names must be within

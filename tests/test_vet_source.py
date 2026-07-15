@@ -149,6 +149,22 @@ def test_real_squat_owners_still_fire_after_legit_neighbor_exemption():
         assert any("resembles" in e for e in f.evidence), owner
 
 
+def test_b218_hyphen_omitted_known_plugin_id_is_not_a_squat():
+    """CLAWSECCHECK-B-218: writing a hyphenated known plugin-id without its hyphen
+    (a common, arguably more natural spelling) must not false-fire as a typosquat --
+    the known side is now normalized the same way the candidate side already is."""
+    for slug in ("githubcopilot", "copilotproxy", "documentextract", "filetransfer", "azurespeech"):
+        f = vet_source(f"git:github.com/{slug}/mytool")
+        assert not any("resembles" in e for e in f.evidence), slug
+
+
+def test_b218_genuine_near_miss_of_hyphenated_known_still_warns():
+    # Positive control: the hyphen-stripped exemption above must be an EXACT match
+    # only -- a genuine near-miss (hyphen omitted AND a real typo) must still WARN.
+    f = vet_source("git:github.com/githubcopilott/mytool")
+    assert any("resembles" in e for e in f.evidence)
+
+
 def test_official_anthropics_claude_code_source_does_not_double_warn_on_owner():
     f = vet_source("git:github.com/anthropics/claude-code")
     owner_hits = [e for e in f.evidence if "anthropic" in e and "resembles" in e]
