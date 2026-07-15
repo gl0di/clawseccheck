@@ -398,13 +398,37 @@ _REDIR_TO_FILE_PREFIX_RE = re.compile(r"""(?<![-=|<>&])>>?\s*["']?(?:[~$]?[\w.${
 _REDIR_PREFIX_WINDOW = 48  # chars to look back from the filename match for a redirect
 
 
+# C-218: $VAR/${VAR} indirection — a redirect targeting a shell variable rather than
+# the agent-context filename literal directly (`F=CLAUDE.md; echo x >> "$F"`) is a
+# total miss for the direct scan above, which requires the redirect bound immediately
+# before the FILENAME match itself. `_VAR_ASSIGN_AGENT_FILE_RE` finds a `VAR=<agent-
+# context-filename>` assignment; `_VAR_REF_RE` finds a `$VAR`/`${VAR}` reference
+# elsewhere that a real shell redirect (_redirect_targets_file, reused unmodified —
+# it only looks at what precedes the given position, never what's at/after it) binds
+# to. Deliberately simple/literal (a single assignment, no export/quoting/expansion
+# edge cases) — a more sophisticated indirection is an accepted residual, same
+# down-rank-not-drop precedent as the rest of this detector.
+_VAR_ASSIGN_AGENT_FILE_RE = re.compile(
+    rf"""\b(?P<var>[A-Za-z_][A-Za-z0-9_]*)=["']?(?P<fname>{_AGENT_CONTEXT_FILES_RE.pattern})""",
+    re.I | re.VERBOSE,
+)
+_VAR_REF_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+
+
 def _redirect_targets_file(blob: str, fname_start: int) -> bool:
     """B-198: True when a genuine shell redirect immediately precedes the filename
     match at *fname_start*. Beyond the shape check in _REDIR_TO_FILE_PREFIX_RE, this
     also requires the '>' NOT be the first non-whitespace token on its line — a real
     shell redirect always follows a command ("cat foo > CLAUDE.md"), whereas a bare
     markdown blockquote ("> CLAUDE.md contains project rules") is syntactically
-    identical to a redirect but has nothing before the '>' on its own line."""
+    identical to a redirect but has nothing before the '>' on its own line.
+
+    C-218: a genuine command can still legitimately have nothing before the redirect
+    on ITS OWN line when the command token lives on the PRECEDING physical line via a
+    shell `\\` line-continuation (`echo payload \\` / `  >> CLAUDE.md`) — the simple
+    same-line check above used to see that line as blank and false-treat it as a bare
+    blockquote. Checked as a fallback only when the same-line check already failed.
+    """
     prefix_start = max(0, fname_start - _REDIR_PREFIX_WINDOW)
     prefix = _HTML_TAG_RE.sub(" ", blob[prefix_start:fname_start])
     m = _REDIR_TO_FILE_PREFIX_RE.search(prefix)
@@ -412,7 +436,14 @@ def _redirect_targets_file(blob: str, fname_start: int) -> bool:
         return False
     redir_pos = prefix_start + m.start()
     line_start = blob.rfind("\n", 0, redir_pos) + 1
-    return blob[line_start:redir_pos].strip() != ""
+    if blob[line_start:redir_pos].strip() != "":
+        return True
+    if line_start == 0:
+        return False
+    prev_line_end = line_start - 1  # index of the '\n' terminating the preceding line
+    prev_line_start = blob.rfind("\n", 0, prev_line_end) + 1
+    prev_line = blob[prev_line_start:prev_line_end]
+    return prev_line.rstrip(" \t").endswith("\\")
 
 
 # Cron/startup persistence: scheduling a command that runs at login or reboot.
@@ -819,7 +850,35 @@ def _agent_config_write_hits(
                         fname,
                     )
                 )
+    if not hits:
+        indirect = _var_indirected_agent_file_hit(name, blob, fence_ranges)
+        if indirect:
+            hits.append(indirect)
     return hits
+
+
+def _var_indirected_agent_file_hit(
+    name: str, blob: str, fence_ranges: list[tuple[int, int]]
+) -> tuple[str, str] | None:
+    """C-218: catches `VAR=CLAUDE.md; echo x >> "$VAR"` — a redirect bound to a shell
+    variable that was assigned an agent-context filename literal, rather than to the
+    filename directly (see the C-218 comment above _VAR_ASSIGN_AGENT_FILE_RE). Only
+    consulted when the direct scan in _agent_config_write_hits found nothing, mirroring
+    that function's own one-hit-per-skill discipline."""
+    for vm in _VAR_ASSIGN_AGENT_FILE_RE.finditer(blob):
+        if _is_code_example(blob, vm.start(), fence_ranges):
+            continue
+        var, fname = vm.group("var"), vm.group("fname")
+        for rm in _VAR_REF_RE.finditer(blob):
+            if rm.group(1) != var or _is_code_example(blob, rm.start(), fence_ranges):
+                continue
+            if _redirect_targets_file(blob, rm.start()):
+                return (
+                    f"{name}: agent-config persistence: writes to agent-context file "
+                    f"'{fname}' via ${{{var}}} indirection",
+                    fname,
+                )
+    return None
 
 
 # C-204 (SkillTrustBench PE2 — T1098.004): a skill installs cross-session SSH access

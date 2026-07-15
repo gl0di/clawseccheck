@@ -4,6 +4,11 @@ proximity window of an unrelated "CLAUDE.md" mention was read as a shell redirec
 Root cause: _PERSIST_WRITE_VERB_RE's `>`/`>>` alternatives fired on ANY redirect-
 shaped glyph anywhere in the window, not bound to the filename as an actual target.
 Found via real-fleet verification (Golden Rule #5) against clawstealth.
+
+C-218: two accepted FN gaps found during B-198's own adversarial review — a genuine
+redirect whose command token lives on the PRECEDING physical line via a `\\`
+continuation, and a redirect bound to a shell VARIABLE (`$F`/`${F}`) that was
+assigned an agent-context filename rather than to the filename literal directly.
 """
 from __future__ import annotations
 
@@ -70,3 +75,58 @@ def test_python_write_text_still_fires():
     blob = 'Path("SOUL.md").write_text(payload)\n'
     f = check_installed_skills(_ctx({"py-writer": blob}))
     assert f.status == FAIL, f"Python write_text should still FAIL: {f.detail}"
+
+
+# ---------------------------------------------------------------------------
+# C-218: two accepted FN gaps found during this file's own adversarial review —
+# a line-continuation before the redirect, and a redirect bound to a shell
+# variable rather than the agent-context filename literal directly.
+# ---------------------------------------------------------------------------
+
+
+def test_line_continuation_redirect_still_fails():
+    """The command token lives on the PRECEDING physical line via a `\\`
+    continuation — the redirect's own line is blank up to that point, which used
+    to read identically to a bare blockquote and false-PASS."""
+    blob = 'echo "$DATA" \\\n  >> AGENTS.md\n'
+    f = check_installed_skills(_ctx({"continuation-writer": blob}))
+    assert f.status == FAIL, f"line-continuation redirect should FAIL: {f.detail}"
+
+
+def test_blank_line_without_continuation_still_does_not_fail():
+    """Regression guard: a blank line before the redirect WITHOUT a preceding `\\`
+    continuation must stay a non-FAIL blockquote-shaped read, not a new false
+    positive introduced by the continuation check itself."""
+    blob = "See the note:\n\n> AGENTS.md contains project rules.\n"
+    f = check_installed_skills(_ctx({"blockquote-after-blank": blob}))
+    assert f.status != FAIL, f"blank-line-no-continuation wrongly failed: {f.detail}"
+
+
+def test_var_indirected_redirect_still_fails():
+    """A redirect targeting `$VAR`/`${VAR}` where VAR was assigned an agent-context
+    filename literal elsewhere is the same persistence write, just indirected."""
+    blob = 'F=CLAUDE.md; echo "$DATA" >> "$F"\n'
+    f = check_installed_skills(_ctx({"indirect-writer": blob}))
+    assert f.status == FAIL, f"$VAR-indirected redirect should FAIL: {f.detail}"
+
+
+def test_var_indirected_redirect_braced_form_still_fails():
+    blob = 'F=AGENTS.md\necho "$DATA" >> "${F}"\n'
+    f = check_installed_skills(_ctx({"indirect-writer2": blob}))
+    assert f.status == FAIL, f"${{VAR}}-indirected redirect should FAIL: {f.detail}"
+
+
+def test_var_assigned_agent_file_but_read_only_does_not_fail():
+    """The variable IS assigned an agent-context filename, but it's only ever
+    READ (cat), never redirected to — must not false-FAIL."""
+    blob = 'F=CLAUDE.md\ncat "$F"\n'
+    f = check_installed_skills(_ctx({"reader": blob}))
+    assert f.status != FAIL, f"read-only $VAR use wrongly failed: {f.detail}"
+
+
+def test_redirect_to_unrelated_var_does_not_fail():
+    """The redirect targets a DIFFERENT variable than the one assigned an
+    agent-context filename — must not correlate the two."""
+    blob = 'F=CLAUDE.md\nG=report.txt\necho "$DATA" >> "$G"\n'
+    f = check_installed_skills(_ctx({"unrelated-var": blob}))
+    assert f.status != FAIL, f"unrelated-variable redirect wrongly failed: {f.detail}"
