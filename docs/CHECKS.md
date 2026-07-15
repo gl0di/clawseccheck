@@ -1901,3 +1901,21 @@ These paths are computed from multiple checks. They fire only when every leg is 
   Disable the cron scheduler (remove the top-level 'cron' key) if scheduled tasks are not
   required. Set agents.defaults.heartbeat to a falsy value or add a human-approval gate
   for autonomous re-execution. Breaking any one leg breaks the chain.
+
+### RISK-19 - Audit/security-themed skill co-installed with a high-capability skill
+
+- Severity: MEDIUM
+- Pattern: MEDIUM (RISK-19, C-197): Skill Composition Risk — Trust Transfer.
+- Chain: {audit_name} (audit/security/verification-themed output) -> agent reads its output as an implicit approval signal -> {blast_name} (exec / network / write capability)
+- Why:
+  '{audit_name}' presents itself as an audit/security/verification tool, and
+  '{blast_name}' is a separate installed skill with exec, network, or write capability.
+  Per the Skill Composition Risk literature (arXiv 2606.15242), a prompt injection can
+  borrow the audit-themed skill's implied authority — its benign-sounding summary ('looks
+  clean', 'verified') — to green-light '{blast_name}'s risky action, even though neither
+  skill is individually malicious and no single skill holds both roles.
+- Fix:
+  Never let '{audit_name}'s output serve as an approval gate for '{blast_name}' or any
+  other high-capability skill's action — route genuinely risky actions
+  (exec/network/write) through a human-approval step that reads the actual action, not a
+  different skill's summary of it.

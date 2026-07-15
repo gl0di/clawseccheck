@@ -8,10 +8,13 @@ English-only. Read-only. Pure stdlib.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .catalog import CRITICAL, FAIL, HIGH, MEDIUM, WARN, Finding
 from .checks import (
+    _b62_actual_families,
+    _b62_extract_declaration,
     _enabled_tools,
     _external_input_channels,
     _has_approval_gate,
@@ -945,6 +948,78 @@ def _rule_persistent_foothold(ctx: Context, findings: list[Finding],
     )
 
 
+# C-197: Skill Composition Risk (SCR) — "Benign in Isolation, Harmful in Composition"
+# (arXiv 2606.15242) names three mechanisms; Capability Flow is already covered at the
+# agent/cred level by RISK-11's cross-agent reassembly. Architect-ratified design
+# (2026-07-13): pursue Trust Transfer as a static RISK-* chain, the same way RISK-11
+# reassembles trust across agents. Authorization Confusion (advisory context
+# reinterpreted as formal approval) stays a documented, unimplemented residual — it is
+# a RUNTIME reading of prose, not a structural property two co-installed skills expose
+# statically (the same "thin static surface" honestly flagged when this task was filed).
+_AUDIT_THEMED_RE = re.compile(
+    r"\b(?:audit(?:s|ing|or)?|security[- ]?(?:scan(?:ner)?|check|review)|compliance|"
+    r"vet(?:ting)?|verif(?:y|ies|ied|ication)|trust(?:ed)?[- ]?(?:score|report)|scanner)\b",
+    re.I,
+)
+_SCR_HIGH_BLAST_FAMILIES = frozenset({"exec", "network", "write"})
+
+
+def _rule_skill_composition_trust_transfer(ctx: Context) -> RiskPath | None:
+    """MEDIUM (RISK-19, C-197): Skill Composition Risk — Trust Transfer.
+
+    An audit/security/verification-themed installed skill is co-present with a
+    SEPARATE installed skill that has exec, network, or write capability (per
+    ctx.effect_profiles / _b62_actual_families, the same substrate B62 already
+    uses). Neither skill is individually malicious — the risk is compositional: an
+    agent can misread the audit-themed skill's benign-sounding output ("looks
+    clean", "verified", "no issues found") as authorization to proceed with the
+    OTHER skill's risky action. Fires only when BOTH a themed skill and a
+    DIFFERENT high-capability skill are positively identified — zero-FP by design
+    (a single skill matching both conditions is not a composition).
+    """
+    skills = getattr(ctx, "installed_skills", None)
+    if not skills or len(skills) < 2:
+        return None
+    themed: list[str] = []
+    high_blast: list[str] = []
+    for name, blob in skills.items():
+        decl_name, decl_desc = _b62_extract_declaration(blob, name)
+        if _AUDIT_THEMED_RE.search(f"{decl_name} {decl_desc}"):
+            themed.append(name)
+        py_sources = ctx.installed_skill_py.get(name, [])
+        if _b62_actual_families(name, ctx, py_sources) & _SCR_HIGH_BLAST_FAMILIES:
+            high_blast.append(name)
+    pair = next(((a, b) for a in themed for b in high_blast if a != b), None)
+    if pair is None:
+        return None
+    audit_name, blast_name = pair
+    return RiskPath(
+        id="RISK-19",
+        severity=MEDIUM,
+        title="Audit/security-themed skill co-installed with a high-capability skill",
+        chain=[
+            f"{audit_name} (audit/security/verification-themed output)",
+            "agent reads its output as an implicit approval signal",
+            f"{blast_name} (exec / network / write capability)",
+        ],
+        why=(
+            f"'{audit_name}' presents itself as an audit/security/verification tool, and "
+            f"'{blast_name}' is a separate installed skill with exec, network, or write "
+            "capability. Per the Skill Composition Risk literature (arXiv 2606.15242), a "
+            "prompt injection can borrow the audit-themed skill's implied authority — its "
+            f"benign-sounding summary ('looks clean', 'verified') — to green-light "
+            f"'{blast_name}'s risky action, even though neither skill is individually "
+            "malicious and no single skill holds both roles."
+        ),
+        fix=(
+            f"Never let '{audit_name}'s output serve as an approval gate for "
+            f"'{blast_name}' or any other high-capability skill's action — route genuinely "
+            "risky actions (exec/network/write) through a human-approval step that reads "
+            "the actual action, not a different skill's summary of it."
+        ),
+    )
+
+
 def risk_paths(ctx: Context, findings: list[Finding],
                 ignore: set[str] | None = None) -> list[RiskPath]:
     """Compute dangerous capability chains from config + existing findings.
@@ -1037,6 +1112,10 @@ def risk_paths(ctx: Context, findings: list[Finding],
         candidates.append(path)
 
     path = _rule_persistent_foothold(ctx, findings, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_skill_composition_trust_transfer(ctx)
     if path:
         candidates.append(path)
 
