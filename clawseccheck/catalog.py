@@ -657,6 +657,21 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="bootstrap",
     ),
+    # B165 (C-200, hex-key leg of the crypto-wallet VALUE detection split off C-198):
+    # a bare 0x + 64 hex-char value is shape-identical between an Ethereum private key
+    # and a transaction/block hash — co-occurrence gated (wallet/key wording nearby,
+    # tx/block-hash wording absent) rather than a bare shape-only regex. Advisory:
+    # acknowledged residual risk on both sides, never scored, never escalated to FAIL.
+    CheckMeta(
+        "B165",
+        "Possible exposed crypto private-key value (hex-shaped, wallet-context gated)",
+        HIGH,
+        "advisory",
+        "Data Exfiltration / Credential Leak",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # B158 (F-119): a declared skill/plugin load source (skills.load.extraDirs,
     # plugins.load.paths, or a .clawhub/lock.json skillFile) resolves to nothing on disk —
     # an unaudited auto-load gap. Advisory, WARN-only, unscored (declared-but-absent is

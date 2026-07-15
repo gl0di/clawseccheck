@@ -95,6 +95,7 @@ from ._content import (
     check_event_hook_interceptor,
     check_forged_provenance,
     check_frontmatter_hygiene,
+    check_hex_private_key_exposure,
     check_image_attr_injection,
     check_import_from_writable,
     check_install_directive_supply_chain,
@@ -3237,6 +3238,7 @@ SKILL_CONTENT_RING = (
     check_conditional_sleeper_trigger,  # B65 — conditional sleeper-trigger
     check_persona_jailbreak,  # B66 — persona / DAN jailbreak
     check_overt_secret_exfil,  # B156 — overt unconditional secret-exfil (B-188)
+    check_hex_private_key_exposure,  # B165 — hex-shaped crypto private-key value (C-200)
     check_remote_code_dependency,  # B157 — non-registry / remote-code dependency source (F-117)
     check_per_source_trust_contracts,  # B67 — per-source trust contracts
     check_forged_provenance,  # B74 — forged role / false-provenance

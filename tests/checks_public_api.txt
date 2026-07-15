@@ -141,6 +141,7 @@ check_frontmatter_hygiene
 check_fs_write_exposure
 check_gateway
 check_gateway_rate_limit
+check_hex_private_key_exposure
 check_hook_policy_bypass
 check_host_audit
 check_host_edr

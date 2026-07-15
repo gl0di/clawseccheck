@@ -4642,6 +4642,86 @@ def check_overt_secret_exfil(ctx: Context) -> Finding:
     )
 
 
+_HEX64_VALUE_RE = re.compile(r"(?<![0-9a-fA-F])0x[0-9a-fA-F]{64}(?![0-9a-fA-F])")
+
+# C-200 (hex-key leg of the crypto-wallet VALUE detection split off C-198): a bare
+# 0x + 64 hex-char value is SHAPE-IDENTICAL between an Ethereum private key and a
+# transaction/block hash — shape alone can't discriminate (grounded during C-198:
+# routine tx-hash discussion is extremely common in any blockchain-dev skill, not an
+# edge case). Architect-ratified design (2026-07-13): co-occurrence gating, not a
+# bare shape-only regex — mirrors _B63_SECRET_TERM_RE's own discipline of requiring
+# a corroborating signal rather than trusting shape alone.
+_WALLET_KEY_POSITIVE_RE = re.compile(
+    r"\b(?:priv(?:ate)?[_\- ]?key|wallet|keystore|mnemonic|seed[_\- ]?phrase|"
+    r"eth[_\- ]?account|web3|signing[_\- ]?key)\b",
+    re.I,
+)
+_TXHASH_NEGATIVE_RE = re.compile(
+    r"\b(?:tx|transaction)[_\- ]?(?:hash|id)\b|\bblock[_\- ]?hash\b|\breceipt\b|"
+    r"etherscan\.io|polygonscan\.com|bscscan\.com",
+    re.I,
+)
+_HEX64_CONTEXT_WINDOW = 80
+
+
+def check_hex_private_key_exposure(ctx: Context) -> Finding:
+    """B165 (C-200): a 64-char hex value (0x + 64 hex chars) near wallet/private-key
+    wording, with no nearby transaction/block-hash wording — a possible exposed
+    crypto private key.
+
+    Advisory, WARN-only: this heuristic has acknowledged residual risk on BOTH
+    sides — a real private key with NO nearby wallet-domain wording is a
+    documented miss (the hardest, lowest-signal case; not attempted here), and the
+    positive/negative corroborator lists are not exhaustive. Never escalated to
+    FAIL. The evidence never echoes the raw hex value (ZKDS) — only the fact that
+    one was found.
+    """
+    if not ctx.installed_skills:
+        return _finding(
+            "B165",
+            UNKNOWN,
+            "No installed skills found to inspect for exposed crypto private-key values.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    hits: list[str] = []
+    for name, blob in ctx.installed_skills.items():
+        fence_ranges = _fence_ranges(blob)
+        for m in _HEX64_VALUE_RE.finditer(blob):
+            if _is_code_example(blob, m.start(), fence_ranges):
+                continue
+            c_start = max(0, m.start() - _HEX64_CONTEXT_WINDOW)
+            c_end = min(len(blob), m.end() + _HEX64_CONTEXT_WINDOW)
+            window = blob[c_start:c_end]
+            if _TXHASH_NEGATIVE_RE.search(window):
+                continue  # tx/block-hash-shaped context -- explicitly excluded
+            if not _WALLET_KEY_POSITIVE_RE.search(window):
+                continue  # no corroborating wallet/key context -- shape alone isn't enough
+            hits.append(
+                f"{name}: 64-char hex value near wallet/private-key wording — "
+                "possible exposed crypto private key"
+            )
+            break  # one hit per skill is enough
+    if hits:
+        extra = f" (+{len(hits) - 6} more)" if len(hits) > 6 else ""
+        return _finding(
+            "B165",
+            WARN,
+            "Possible exposed crypto private key in installed skill(s): "
+            + "; ".join(hits[:6])
+            + extra,
+            "Remove the literal key value from the skill and rotate it immediately — never "
+            "ship a real private key in skill source, even as an 'example' or 'test' value.",
+            hits,
+        )
+    return _finding(
+        "B165",
+        PASS,
+        "No hex-shaped value near wallet/private-key wording found in installed skill(s).",
+        "Keep private keys out of skill source entirely; use environment variables or a "
+        "secrets manager, never a literal value.",
+    )
+
+
 def check_config_trust_widening(ctx: Context) -> Finding:
     """B96 (F-100, L1-3) — a skill-bundled config value that LOOKS like it widens agent
     trust (an approve-all/auto-approve-shaped key) or stages telemetry exfiltration (a

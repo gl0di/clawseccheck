@@ -783,6 +783,18 @@ Advisory checks are recorded for coverage but are not scored.
 
 ## Advisory checks
 
+### B165 - Possible exposed crypto private-key value (hex-shaped, wallet-context gated)
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Data Exfiltration / Credential Leak
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Possible exposed crypto private-key value (hex-shaped, wallet-context gated)
+- Remediation:
+  - none
+
 ### B158 - Declared skill-load source not present on disk (unaudited auto-load surface)
 
 - Severity: MEDIUM

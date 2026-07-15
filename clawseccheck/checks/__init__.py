@@ -496,6 +496,7 @@ from ._content import (
     check_event_hook_interceptor,
     check_forged_provenance,
     check_frontmatter_hygiene,
+    check_hex_private_key_exposure,
     check_identity_file_injection,
     check_image_attr_injection,
     check_import_from_writable,
