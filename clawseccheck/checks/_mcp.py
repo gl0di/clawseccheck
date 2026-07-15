@@ -32,6 +32,7 @@ from ..textnorm import (
 
 from ._shared import (
     SECRET_KEY_RE,
+    _KNOWN_EXFIL_HOST_RE,
     _finding,
     _mcp_has_remote,
     _mcp_servers,
@@ -39,6 +40,7 @@ from ._shared import (
     _plugins,
 )
 from ._content import (
+    _IOC_ONION_RE,
     _obf_clip,
 )
 from ._vet import (
@@ -1314,6 +1316,61 @@ def check_mcp_external_endpoint(ctx: Context) -> Finding:
         PASS,
         "No non-local MCP server URLs detected.",
         "Keep MCP endpoints local where possible and review any future remote URLs before enabling them.",
+    )
+
+
+def check_mcp_server_exfil_host_in_args(ctx: Context) -> Finding:
+    """B166 (C-211) — a known paste/exfiltration host (webhook.site, ngrok, pastebin,
+    *.onion, ...) referenced in an MCP server's own `command`/`args` — the server's
+    identity-level startup config itself names an untrusted drop point, before the
+    server is ever run. Distinct from C047 (a non-local `url`/`endpoint` MCP transport,
+    which is dual-use and only UNKNOWN) — this is a stronger, unambiguous host list
+    matched against the server's own launch arguments, so it's WARN.
+
+    Grounded against the real OASB registry corpus (v2.0, 2988 benign / 166 malicious
+    `mcp_tool` samples): 0 benign false positives, narrow recall (catches 1/166) — a
+    precision-first, low-yield signal. Advisory (never scored, never escalates to FAIL):
+    a config-level string match in a server's own args cannot prove malicious intent on
+    its own, only that it names a known drop point.
+    """
+    servers = _mcp_servers(ctx.config)
+    if not servers:
+        return _finding(
+            "B166",
+            UNKNOWN,
+            "No MCP servers configured.",
+            "Configure MCP servers to evaluate their command/args for known exfiltration hosts.",
+        )
+    hits: list[str] = []
+    for name, spec in servers.items():
+        if not isinstance(spec, dict):
+            continue
+        cmd = str(spec.get("command") or "")
+        raw_args = spec.get("args")
+        args = raw_args if isinstance(raw_args, list) else []
+        joined = " ".join([cmd, *(str(a) for a in args)])
+        m = _KNOWN_EXFIL_HOST_RE.search(joined)
+        onion = _IOC_ONION_RE.search(joined) if not m else None
+        hit = m or onion
+        if hit:
+            hits.append(f"{name}: command/args reference known exfiltration host '{hit.group(0)}'")
+
+    if hits:
+        return _finding(
+            "B166",
+            WARN,
+            "MCP server command/args reference a known paste/exfiltration host: "
+            + "; ".join(hits[:4]),
+            "Review the flagged MCP server's own startup command/args before enabling it — "
+            "a known paste/exfil host named in its OWN launch arguments (not just runtime "
+            "traffic) is a strong signal the server is designed to exfiltrate data.",
+            hits,
+        )
+    return _finding(
+        "B166",
+        PASS,
+        "No MCP server command/args reference a known paste/exfiltration host.",
+        "Keep MCP server startup command/args free of paste/exfiltration-host references.",
     )
 
 

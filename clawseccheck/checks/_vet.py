@@ -43,6 +43,7 @@ from ..textnorm import (
 )
 
 from ._shared import (
+    _KNOWN_EXFIL_HOST_RE,
     _MANIFEST_HEADER_RE,
     _SENTENCE_BREAK_RE,
     _custom,
@@ -129,16 +130,10 @@ from ._lifecycle import (
 # and the ClawHavoc password-dialog social-engineering trick).
 _SKILL_CRIT = [
     (
+        # C-211: moved to checks/_shared.py as _KNOWN_EXFIL_HOST_RE (verbatim) so B166
+        # (checks/_mcp.py) can reuse the exact same host set against MCP server args.
         "paste / exfiltration host",
-        re.compile(
-            r"\b(glot\.io|pastebin\.com|hastebin|transfer\.sh|0x0\.st|webhook\.site|requestbin|"
-            r"rentry\.co|rentry\.org|"
-            r"beeceptor\.com|interactsh\.com|oast\.(?:pro|fun|me|live|site|online)|"
-            r"canarytokens\.(?:com|net|org)|file\.io|localtunnel\.me|trycloudflare\.com|"
-            r"[a-z0-9-]+\.ngrok(?:-free)?\.(?:io|app)|ngrok\.io|ngrok-free\.app|"
-            r"[a-z0-9-]+\.pipedream\.net|pipedream\.net)\b",
-            re.I,
-        ),
+        _KNOWN_EXFIL_HOST_RE,
     ),
     (
         "known stealer malware name",

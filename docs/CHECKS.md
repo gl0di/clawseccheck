@@ -795,6 +795,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B166 - MCP server command/args references a known paste/exfiltration host
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Data Exfiltration / Credential Leak
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: MCP server command/args references a known paste/exfiltration host
+- Remediation:
+  - none
+
 ### B158 - Declared skill-load source not present on disk (unaudited auto-load surface)
 
 - Severity: MEDIUM

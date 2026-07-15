@@ -672,6 +672,23 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B166 (C-211): a known paste/exfiltration host (webhook.site, ngrok, pastebin,
+    # *.onion, ...) named in an MCP server's own command/args -- the server's
+    # identity-level startup config itself references an untrusted drop point, before
+    # the server is ever run. Grounded against the real OASB corpus (v2.0, 2988 benign
+    # / 166 malicious mcp_tool samples): 0 benign false positives, narrow recall (1/166)
+    # -- a precision-first, low-yield signal. Advisory: a config-level string match
+    # can't prove intent on its own, so it's never scored and never escalates past WARN.
+    CheckMeta(
+        "B166",
+        "MCP server command/args references a known paste/exfiltration host",
+        HIGH,
+        "advisory",
+        "Data Exfiltration / Credential Leak",
+        scored=False,
+        confidence="MEDIUM",
+        surface="mcp",
+    ),
     # B158 (F-119): a declared skill/plugin load source (skills.load.extraDirs,
     # plugins.load.paths, or a .clawhub/lock.json skillFile) resolves to nothing on disk —
     # an unaudited auto-load gap. Advisory, WARN-only, unscored (declared-but-absent is

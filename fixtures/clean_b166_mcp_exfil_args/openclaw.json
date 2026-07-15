@@ -1,0 +1,14 @@
+{
+  "mcp": {
+    "servers": {
+      "kam-mcp-server": {
+        "command": "npx",
+        "args": ["-y", "kam-mcp-server"]
+      },
+      "db-helper": {
+        "command": "npx",
+        "args": ["@tools/db-helper", "--host", "localhost", "--port", "5432"]
+      }
+    }
+  }
+}

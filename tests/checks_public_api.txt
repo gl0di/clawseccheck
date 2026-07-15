@@ -33,6 +33,7 @@ _EXFIL_RE
 _INSTALL_HEADING_RE
 _JSONL_SCAN_CAP
 _KNOWN_ADVISORIES
+_KNOWN_EXFIL_HOST_RE
 _KNOWN_NAMES
 _SECRET_PATH_RE
 _SKILL_CRIT
@@ -170,6 +171,7 @@ check_mcp
 check_mcp_bypass_highblast
 check_mcp_external_endpoint
 check_mcp_hardening
+check_mcp_server_exfil_host_in_args
 check_mcp_tool_inheritance
 check_memory_poisoning
 check_monitoring

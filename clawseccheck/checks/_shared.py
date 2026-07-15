@@ -205,6 +205,23 @@ _EXFIL_RE = re.compile(
 )
 
 
+# C-211: the HOST-only leg of the B13 "paste / exfiltration host" crit signal, moved here
+# (verbatim) so it can be reused outside skill-content scanning too — B166 (checks/_mcp.py)
+# matches it against an MCP server's own command/args, a different data source than B13's
+# skill-content blob. Deliberately narrower than _EXFIL_RE above: no generic curl/wget/
+# base64 keywords, only known drop-point HOSTNAMES, since an MCP server's argv commonly
+# contains a real `curl`/generic verb without that being any kind of signal.
+_KNOWN_EXFIL_HOST_RE = re.compile(
+    r"\b(glot\.io|pastebin\.com|hastebin|transfer\.sh|0x0\.st|webhook\.site|requestbin|"
+    r"rentry\.co|rentry\.org|"
+    r"beeceptor\.com|interactsh\.com|oast\.(?:pro|fun|me|live|site|online)|"
+    r"canarytokens\.(?:com|net|org)|file\.io|localtunnel\.me|trycloudflare\.com|"
+    r"[a-z0-9-]+\.ngrok(?:-free)?\.(?:io|app)|ngrok\.io|ngrok-free\.app|"
+    r"[a-z0-9-]+\.pipedream\.net|pipedream\.net)\b",
+    re.I,
+)
+
+
 # F-124/E-044 layer-fix: moved here VERBATIM from trajaudit.py (see _CRED_RE note above
 # for why) so logscan.py (a Layer-1 leaf) can reuse it without importing trajaudit.py.
 #
