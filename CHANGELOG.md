@@ -3,6 +3,65 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.46.0] — 2026-07-15
+
+Six precision fixes to existing checks plus three new detectors: a crypto private-key
+exposure check, a shell-injection/insecure-temp-file WARN pair closing part of the
+SkillTrustBench T09 gap, and a new RISK-* chain for cross-skill Trust Transfer.
+
+### Added
+- **B165: hex-shaped crypto private-key value (advisory, `scored=False`).** A bare
+  `0x` + 64 hex-char value is shape-identical between an Ethereum private key and a
+  transaction/block hash, so this is co-occurrence gated — WARN only when
+  wallet/key-domain wording (private key, wallet, keystore, mnemonic, seed phrase, …)
+  is nearby AND tx/transaction/block-hash wording is absent nearby — rather than a
+  bare shape-only regex that would collide with routine tx-hash discussion in any
+  blockchain-dev skill.
+- **SHELL_INJECTION_RISK + insecure temp-file handling (B13 sub-signals, WARN).**
+  Closes part of the SkillTrustBench T09 "insecure coding, no clear attack intent"
+  gap: a `subprocess.*(shell=True, …)` or bare `os.system()`/`os.popen()` call whose
+  command isn't a provable compile-time literal now WARNs on the unsafe shape alone
+  (distinct from the existing crit `TT5_CMD_INJECTION`, which requires proven
+  external taint), and a hardcoded/predictable `/tmp` path opened for write (CWE-377)
+  now WARNs too — `tempfile.mkstemp()`/`NamedTemporaryFile()` are never flagged.
+- **RISK-19: Skill Composition Risk — Trust Transfer.** A new static RISK-* chain:
+  an audit/security/verification-themed installed skill co-present with a *separate*
+  installed skill that has exec/network/write capability. Neither skill is
+  individually malicious; a prompt injection can borrow the audit-themed skill's
+  implied authority to green-light the other skill's risky action. Fires only when
+  both roles are held by different skills.
+
+### Fixed
+- B163 (social-engineering prose) sink-window widened 80→120 chars — an unusually
+  wordy but genuine phishing directive could place its sink URL just past the old
+  window and degrade to WARN instead of FAIL.
+- Authorized_keys persistence detector: now tolerates 2 levels of nested parens in
+  `open(...)` calls, and tightened the chained-write regex so a walrus/conditional
+  idiom writing an unrelated file no longer false-WARNs as an authorized_keys write.
+- `_squat_hits` typosquat detector now normalizes the *known*-name side for hyphens
+  too, not just the candidate — a hyphen-omitted spelling of a hyphenated known-good
+  name (e.g. `githubcopilot` for `github-copilot`) no longer always false-fires.
+- `skillast.py` class methods now get real per-nested-scope taint isolation
+  (mirroring the existing top-level-function fix) — a `global` declared inside a
+  helper closure nested *within* a method no longer wrongly promotes the method's
+  own unrelated local to module-wide taint.
+- B88 (frontmatter hygiene) now flags a skill that's present on disk but invisible
+  to the agent — grounded against the real OpenClaw dist's loader, which silently
+  drops a skill whose SKILL.md has no frontmatter, or no non-empty `description:`
+  field, with no log line anywhere in that call chain. This also surfaced and fixed
+  two unrelated latent bugs: `_skill_frontmatter_block` never recognized an
+  archive-sourced skill's real header (`name.zip::SKILL.md`), and `--vet`'s internal
+  merge-rank table was missing an entry for the archive-path-traversal status,
+  letting an ordinary WARN silently outrank and hide a detected zip-slip archive.
+- B13 agent-config-write detector: closed two accepted false-negative gaps — a
+  genuine redirect whose command lives on the *preceding* physical line via a
+  shell `\` continuation, and a redirect bound to a `$VAR`/`${VAR}` that was
+  assigned an agent-context filename rather than the filename literal directly.
+
+### Changed
+- `docs/CHECKS.md` regenerated; `docs/THREAT_COVERAGE.md` updated for B165, the new
+  T09 sub-signals, and the RISK range (now `RISK-01..RISK-19`).
+
 ## [3.45.0] — 2026-07-15
 
 New advisory check content-scans the agent's own log/transcript corpus for threat
