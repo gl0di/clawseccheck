@@ -7007,7 +7007,11 @@ _SOCIAL_CORROBORATOR_WINDOW = 200  # urgency/authority proximity to the ask/OOB-
 # that same forward-only discipline exactly: the URL must appear shortly AFTER the
 # credential ask (a natural "confirm your password AT <URL>" ordering), not merely
 # anywhere within a wide window in either direction.
-_SOCIAL_SINK_WINDOW = 80  # URL must follow the credential ask closely (forward-only)
+_SOCIAL_SINK_WINDOW = 120  # URL must follow the credential ask closely (forward-only)
+# CLAWSECCHECK-B-221: widened from 80 -- an unusually wordy but genuine single-sentence
+# phishing directive can place the sink URL past 80 chars (verified repro ~107 chars);
+# 120 gives headroom while staying same-sentence-scoped via _SENTENCE_BREAK_RE below,
+# matching B160's own forward window (_EXFIL_VERB_URL_WINDOW = 100).
 
 
 # C-135 round 2: a credential ask legitimately redirecting to a well-known third-party
