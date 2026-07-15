@@ -145,6 +145,34 @@ silent gap by definition; `tests/test_threat_coverage_ledger.py` fails the build
   Covered today only indirectly via B95/B157 (dependency-confusion / non-registry-source
   heuristics — a different surface, skill deps rather than MCP server packages); a real
   fix needs a live package-registry reputation lookup, out of scope by design `[CEILING]`
+- **Cross-skill capability-union without an untrusted-input leg** (C-219, arXiv 2606.00448
+  "When Safe Skills Collide") — two individually-safe installed skills whose capabilities
+  union into a dangerous combination (e.g. skill A can read credentials, skill B has
+  network egress; neither alone is flagged). The paper's own measurement on 1,520 real
+  ClawHub skills: 47,075 individually-safe PAIRS satisfy a forbidden composition pattern,
+  but only ~18.2% of those survive human adjudication as genuinely risky — bare
+  capability-*presence*-union is ~80% false-positive against human judgment. The
+  discriminating factor the paper's own numbers point to is exactly RISK-02's third leg
+  (untrusted ingress) — cred-read + network-egress with NO ingress vector is the normal
+  shape of an authenticated integration (a skill reading its own API token and calling that
+  API), not an attack. Dropping the ingress requirement to catch the paper's broader 2-leg
+  pattern would flood real fleets (verified against this repo's own capability-family
+  substrate: `_b62_actual_families`'s `cred` family matches `os.environ[`/`os.getenv(`/
+  token-literal patterns present in nearly every API-calling skill). Covered today via
+  B105 (same cred+network legs co-located in ONE skill, not unioned across a pair, plus a
+  secrecy-framing corroborator), RISK-19 (audit-themed skill + a separate high-blast skill,
+  a different discriminator), and B62 (per-skill capability/intent mismatch). A narrower
+  variant — cred+network legs supplied by CODE in two DIFFERENT skills, gated on a shared
+  file-path handoff between them (the only static proxy for "these two skills' capabilities
+  are plausibly composable," analogous to RISK-11's delegation "wall") — was designed but
+  not built: its precision depends entirely on that gate, whose recall against real skills
+  is unproven, so it is tracked as a separate gated spike rather than shipped speculatively.
+  `--behavioral` is not a better home either: T1 already is the trifecta-by-trajectory-log
+  (`check_behavioral_trifecta`), a C-170 finding already had to NARROW its sensitive-verb
+  hints because the naive 2-of-3 form false-fired on mundane sequences, and the trajectory
+  schema (§8) exposes only verb name/order/timestamp — never `arguments`/`output` — so the
+  cross-skill *content-correlated* handoff this signal would need is unobservable from the
+  log at all `[CEILING]`
 
 ## Framework mapping (OWASP)
 
