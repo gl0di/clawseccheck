@@ -112,7 +112,8 @@ def test_vet_valid_skill_md_pass_returns_zero(tmp_path, capsys):
     skill_parent.mkdir()
     skill = skill_parent / "SKILL.md"
     skill.write_text(
-        "---\nname: clawsc-demo\nversion: 0.1.0\n---\nThis is a safe skill.\n",
+        "---\nname: clawsc-demo\nversion: 0.1.0\ndescription: A safe test skill.\n"
+        "---\nThis is a safe skill.\n",
         encoding="utf-8",
     )
     rc = main(["--vet", str(skill)])
@@ -124,7 +125,8 @@ def test_vet_valid_skill_dir_pass_returns_zero(tmp_path, capsys):
     skill_dir = tmp_path / "safe_skill"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: safe-skill\nversion: 0.1.0\n---\nThis is a safe skill.\n",
+        "---\nname: safe-skill\nversion: 0.1.0\ndescription: A safe test skill.\n"
+        "---\nThis is a safe skill.\n",
         encoding="utf-8",
     )
     rc = main(["--vet", str(skill_dir)])

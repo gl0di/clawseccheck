@@ -32,7 +32,8 @@ def _clean_skill(tmp_path: Path) -> Path:
     sk = tmp_path / "clean"
     sk.mkdir()
     (sk / "SKILL.md").write_text(
-        "# Word Counter\nCount the words in a file the user names. Ask before reading other files.",
+        "---\nname: word-counter\ndescription: Count the words in a file the user names.\n"
+        "---\n# Word Counter\nCount the words in a file the user names. Ask before reading other files.",
         encoding="utf-8")
     (sk / "c.py").write_text(
         "import argparse\n\ndef n(p):\n    return len(open(p).read().split())\n", encoding="utf-8")

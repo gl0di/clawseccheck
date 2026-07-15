@@ -79,7 +79,8 @@ def test_no_cred_path_short_circuits():
 
 def _mk_skill(root: Path, files: dict) -> Path:
     root.mkdir(parents=True, exist_ok=True)
-    (root / "SKILL.md").write_text(files.get("SKILL.md", "# s\n"), encoding="utf-8")
+    default_md = "---\nname: test-skill\ndescription: A test skill.\n---\n# s\n"
+    (root / "SKILL.md").write_text(files.get("SKILL.md", default_md), encoding="utf-8")
     for n, c in files.items():
         if n != "SKILL.md":
             (root / n).write_text(c, encoding="utf-8")

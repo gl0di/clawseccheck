@@ -18,6 +18,10 @@ from clawseccheck.cli import main, vet_all
 # ---------------------------------------------------------------------------
 
 _CLEAN_MD = """\
+---
+name: word-counter
+description: Count the words in a file the user names.
+---
 # Word Counter
 Count the words in a file the user names. Ask before reading other files.
 """

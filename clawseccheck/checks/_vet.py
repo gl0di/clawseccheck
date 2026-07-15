@@ -882,7 +882,7 @@ _SSH_PUBKEY_RE = re.compile(
 # falls back to the redirect/chained-write checks, or — if genuinely nothing binds —
 # WARN never fires either, same as any other unmatched shape, never a promoted FAIL.
 #
-# CLAWSECCHECK-B-220: widened to tolerate a SECOND level of nesting (e.g.
+# B-220: widened to tolerate a SECOND level of nesting (e.g.
 # `open(Path(os.path.expanduser("~/.ssh/authorized_keys")), "a")` -- Path(...) wrapping
 # expanduser(...)) -- the previously-accepted residual above. Each alternative is still
 # disjoint on its first char (paren vs non-paren), so this stays linear, not ambiguous.
@@ -893,7 +893,7 @@ _AUTHKEY_OPEN_CALL_RE = re.compile(
     re.I,
 )
 _AUTHKEY_MODE_FLAG_RE = re.compile(r"['\"][wa]['\"]")
-# CLAWSECCHECK-B-219: the intervening chars between the path and the `.write*(` call
+# B-219: the intervening chars between the path and the `.write*(` call
 # are restricted to closing parens/quotes/whitespace -- i.e. a chain that literally
 # closes out the SAME expression the path lives in (`Path(...).write_text(`,
 # `Path(os.path.expanduser(...)).write_text(`). Previously `[^\n;]{0,60}` also matched
@@ -2476,7 +2476,16 @@ def check_installed_skills(ctx: Context) -> Finding:
 # F-048: the pre-install vet path runs the shared SKILL_CONTENT_RING (defined near the
 # CHECKS list) in addition to check_installed_skills, so --vet reaches the same
 # skill-intelligence checks the full audit applies to already-installed skills.
-_VET_MERGE_RANK = {FAIL: 3, WARN: 2, UNKNOWN: 1, PASS: 0}
+#
+# B-201 (found via its own test suite, not a separate report): "SKILL_ARCHIVE_PATH_
+# TRAVERSAL" is a real third status check_installed_skills emits (a confirmed
+# known-bad zip-slip signal, ranked with FAIL everywhere else it's merged --
+# dossier.py's _STATUS_RANK and report.py's _VET_STATUS_RANK both already treat it
+# this way). This table alone was missing it, so `.get(fx.status, 0)` silently fell
+# back to rank 0 -- the SAME rank as PASS -- letting any ordinary content-ring WARN
+# (e.g. B88, once B-201 made it fire more often) outrank and hide a detected path-
+# traversal archive behind an unrelated hygiene WARN.
+_VET_MERGE_RANK = {FAIL: 3, "SKILL_ARCHIVE_PATH_TRAVERSAL": 3, WARN: 2, UNKNOWN: 1, PASS: 0}
 
 
 def _run_content_ring(ctx: Context) -> list[Finding]:

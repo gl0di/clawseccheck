@@ -421,7 +421,7 @@ def test_vet_legit_skill_stays_safe(tmp_path):
     d = tmp_path / "ok-skill"
     d.mkdir()
     (d / "SKILL.md").write_text(
-        "# A skill\nThis skill reads local files and writes a summary report.\n",
+        "---\nname: ok-skill\ndescription: Reads local files and writes a summary report.\n---\n# A skill\nThis skill reads local files and writes a summary report.\n",
         encoding="utf-8",
     )
     f = vet_skill(d)

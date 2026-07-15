@@ -3453,6 +3453,33 @@ def _fm_yaml_bool(fm: str, key: str) -> bool | None:
     return m.group(1).lower() in ("true", "yes")
 
 
+def _fm_has_nonempty_description(fm: str) -> bool:
+    """True when the frontmatter block carries a `description:` field with SOME value
+    -- either inline on the same line, or as an indented multi-line continuation (the
+    same shape OpenClaw's own line-oriented frontmatter parser accepts).
+
+    B-201: grounded against the real dist (src/skills/loading/local-loader.ts,
+    loadSingleSkillDirectory): `const description = frontmatter.description?.trim();
+    if (!name || !description) return null;` -- `name` always falls back to the
+    directory basename, so a missing/empty `description:` is the SOLE reason
+    OpenClaw's own loader silently drops a skill, with no log line anywhere in that
+    call chain. This is what check_frontmatter_hygiene uses to flag that."""
+    for i, line in enumerate(fm.split("\n")):
+        m = re.match(r"^description:\s*(.*)$", line)
+        if not m:
+            continue
+        inline = m.group(1).strip().strip("'\"")
+        if inline:
+            return True
+        rest = fm.split("\n")[i + 1 :]
+        for cont in rest:
+            if cont.strip() == "":
+                continue
+            return cont.startswith((" ", "\t"))
+        return False
+    return False
+
+
 def _frontmatter_name(blob: str) -> str | None:
     """Extract the `name:` field from the SKILL.md frontmatter section of a blob, or None."""
     m = _SKILL_FRONTMATTER_NAME_RE.search(blob)
@@ -3903,7 +3930,7 @@ def _squat_hits(
             for kn in known:
                 if len(kn) < _TYPOSQUAT_MIN_KNOWN_LEN:
                     continue
-                # CLAWSECCHECK-B-218: the candidate side is tokenized on -/_ above, but
+                # B-218: the candidate side is tokenized on -/_ above, but
                 # `kn` itself is never normalized, so a hyphenated known entry (e.g.
                 # "github-copilot") compared unsplit against a hyphen-omitted spelling
                 # ("githubcopilot") is always exactly edit-distance 1 (one hyphen
@@ -5379,7 +5406,16 @@ def check_forged_provenance(ctx: Context) -> Finding:
 
 
 def check_frontmatter_hygiene(ctx: Context) -> Finding:
-    """B88 — SKILL.md frontmatter authoring hygiene (see the module comment above)."""
+    """B88 — SKILL.md frontmatter authoring hygiene (see the module comment above).
+
+    B-201: also flags a skill that is present on disk but INVISIBLE to the agent --
+    grounded against the real dist's loader (src/skills/loading/local-loader.ts,
+    loadSingleSkillDirectory), which silently returns null (no frontmatter block at
+    all, or a frontmatter block with no non-empty `description:`), with no log line
+    anywhere in that call chain. clawseccheck's own skill collection has no such
+    requirement, so a skill this check inspects can be one OpenClaw's own loader
+    already dropped -- the user believes the skill is active; it isn't.
+    """
     skills = getattr(ctx, "installed_skills", None)
     if not skills:
         return _custom(
@@ -5394,8 +5430,19 @@ def check_frontmatter_hygiene(ctx: Context) -> Finding:
     for name, blob in skills.items():
         fm = _skill_frontmatter_block(blob)
         if fm is None:
-            continue  # no frontmatter for this skill — nothing to lint
+            warns.append(
+                f"{name}: no SKILL.md frontmatter block found — OpenClaw's loader "
+                "requires a `description:` field to load a skill at all; this skill "
+                "will not appear to the agent"
+            )
+            continue
         inspected += 1
+        if not _fm_has_nonempty_description(fm):
+            warns.append(
+                f"{name}: SKILL.md frontmatter has no `description:` field — "
+                "OpenClaw's loader requires one to load the skill; this skill "
+                "will not appear to the agent"
+            )
         if any(_fm_tag_is_suspicious(fm, m) for m in _FM_TAG_RE.finditer(fm)):
             warns.append(
                 f"{name}: HTML/XML-tag-shaped value in SKILL.md frontmatter "
@@ -5406,14 +5453,6 @@ def check_frontmatter_hygiene(ctx: Context) -> Finding:
                 f"{name}: frontmatter wording displaces other skills "
                 "(cross-skill trigger squatting)"
             )
-    if inspected == 0:
-        return _custom(
-            "B88",
-            MEDIUM,
-            UNKNOWN,
-            "No SKILL.md frontmatter found to inspect.",
-            "Run --vet on a skill whose SKILL.md carries a `---` frontmatter block.",
-        )
     if warns:
         extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
         return _custom(
@@ -5422,16 +5461,21 @@ def check_frontmatter_hygiene(ctx: Context) -> Finding:
             WARN,
             "SKILL.md frontmatter authoring hygiene: " + "; ".join(warns[:6]) + extra,
             "Keep frontmatter values plain: no HTML/XML tags (use plain text — a tag is a "
-            "metadata-injection surface and can break the manifest validator), and describe "
-            "what the skill does without claiming to displace or override other skills.",
+            "metadata-injection surface and can break the manifest validator), describe "
+            "what the skill does without claiming to displace or override other skills, "
+            "and make sure every SKILL.md has a non-empty `description:` field in its "
+            "frontmatter — without one, OpenClaw's loader silently ignores the skill.",
             warns,
         )
+    # B-201: every skill that reached here had a parseable frontmatter block AND a
+    # non-empty description (either would have appended to `warns` above and returned
+    # already), so `inspected` is always > 0 at this point — no UNKNOWN path needed.
     return _custom(
         "B88",
         MEDIUM,
         PASS,
-        f"Frontmatter of {inspected} skill(s) is clean: no tag-shaped values and no "
-        "cross-skill trigger squatting.",
+        f"Frontmatter of {inspected} skill(s) is clean: no tag-shaped values, no "
+        "cross-skill trigger squatting, and every skill has a `description:` field.",
         "Keep frontmatter values plain text and scoped to what the skill actually does.",
     )
 
@@ -7019,7 +7063,7 @@ _SOCIAL_CORROBORATOR_WINDOW = 200  # urgency/authority proximity to the ask/OOB-
 # credential ask (a natural "confirm your password AT <URL>" ordering), not merely
 # anywhere within a wide window in either direction.
 _SOCIAL_SINK_WINDOW = 120  # URL must follow the credential ask closely (forward-only)
-# CLAWSECCHECK-B-221: widened from 80 -- an unusually wordy but genuine single-sentence
+# B-221: widened from 80 -- an unusually wordy but genuine single-sentence
 # phishing directive can place the sink URL past 80 chars (verified repro ~107 chars);
 # 120 gives headroom while staying same-sentence-scoped via _SENTENCE_BREAK_RE below,
 # matching B160's own forward window (_EXFIL_VERB_URL_WINDOW = 100).

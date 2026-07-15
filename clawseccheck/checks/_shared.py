@@ -818,8 +818,17 @@ _FM_BLOCK_BARE_RE = re.compile(
 # The SKILL.md frontmatter block. _read_skill_text prefixes each file with `# file: <name>`
 # (dir vet + full audit); a lone-file vet (vet_skill on a SKILL.md path) has no such header,
 # so the block may also start the blob. Both forms are handled by _skill_frontmatter_block.
+#
+# B-201 (found via its own test suite, not a separate report): an archive-sourced skill's
+# header is qualified with the archive path, e.g. "# file: clean_zip.zip::SKILL.md"
+# (collector.py's decompress_and_classify uses "outer::inner" chaining for nested
+# archives too) -- the bare "SKILL.md" equality this regex used to require never matched
+# that, so _skill_frontmatter_block silently returned None for every archive-sourced
+# skill's real, well-formed frontmatter. `\S*?` tolerates any such prefix; the trailing
+# `\s*\n` anchor still requires the header to END in "SKILL.md", so an unrelated file
+# merely containing that substring (e.g. "SKILL.md.bak") cannot match.
 _FM_BLOCK_HEADERED_RE = re.compile(
-    r"^# file:\s+SKILL\.md\s*\n---\s*\n(?P<fm>(?:.*?\n)*?)^---\s*\n",
+    r"^# file:\s+\S*?SKILL\.md\s*\n---\s*\n(?P<fm>(?:.*?\n)*?)^---\s*\n",
     re.MULTILINE,
 )
 

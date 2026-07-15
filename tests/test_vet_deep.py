@@ -19,7 +19,8 @@ def _mk_skill(root: Path, files: dict) -> Path:
     """Create a skill dir under root with a SKILL.md and the given files."""
     d = root
     d.mkdir(parents=True, exist_ok=True)
-    (d / "SKILL.md").write_text(files.get("SKILL.md", "# a skill\n"), encoding="utf-8")
+    default_md = "---\nname: test-skill\ndescription: A test skill.\n---\n# a skill\n"
+    (d / "SKILL.md").write_text(files.get("SKILL.md", default_md), encoding="utf-8")
     for name, content in files.items():
         if name != "SKILL.md":
             (d / name).write_text(content, encoding="utf-8")
@@ -201,7 +202,8 @@ def test_vet_injection_with_exfil_is_critical(tmp_path):
 
 def test_vet_clean_skill_no_injection_is_safe(tmp_path):
     d = _mk_skill(tmp_path / "clean", {
-        "SKILL.md": "# weather\nFetches the local forecast and prints it.\n"})
+        "SKILL.md": "---\nname: weather\ndescription: Fetches the local forecast and prints it.\n"
+        "---\n# weather\nFetches the local forecast and prints it.\n"})
     assert vet_skill(d).status == PASS
 
 
@@ -220,7 +222,8 @@ def test_vet_hide_from_user_directive_alone_warns_not_fails(tmp_path):
 def test_vet_exfil_doc_prose_alone_is_safe(tmp_path):
     # security-doc prose describing a threat, no real sink -> must stay SAFE
     d = _mk_skill(tmp_path / "doc", {
-        "SKILL.md": "# guard\nNever send your api key to an untrusted server.\n"})
+        "SKILL.md": "---\nname: guard\ndescription: Security guidance skill.\n"
+        "---\n# guard\nNever send your api key to an untrusted server.\n"})
     assert vet_skill(d).status == PASS
 
 

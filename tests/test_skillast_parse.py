@@ -80,7 +80,8 @@ def test_analyze_python_valid_source_no_unanalyzable():
 
 def _mk_skill(root: Path, files: dict) -> Path:
     root.mkdir(parents=True, exist_ok=True)
-    (root / "SKILL.md").write_text(files.get("SKILL.md", "# a skill\n"), encoding="utf-8")
+    default_md = "---\nname: test-skill\ndescription: A test skill.\n---\n# a skill\n"
+    (root / "SKILL.md").write_text(files.get("SKILL.md", default_md), encoding="utf-8")
     for name, content in files.items():
         if name != "SKILL.md":
             (root / name).write_text(content, encoding="utf-8")
@@ -111,7 +112,8 @@ def test_vet_skill_clean_py_is_still_pass(tmp_path):
 
 def test_vet_skill_no_py_files_is_pass(tmp_path):
     """A skill with no Python files at all must still PASS (not UNKNOWN)."""
-    d = _mk_skill(tmp_path / "nocode", {"SKILL.md": "# a skill\nDoes some task.\n"})
+    d = _mk_skill(tmp_path / "nocode", {
+        "SKILL.md": "---\nname: nocode\ndescription: Does some task.\n---\n# a skill\nDoes some task.\n"})
     result = vet_skill(d)
     assert result.status == PASS
 

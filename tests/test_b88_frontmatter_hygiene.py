@@ -97,9 +97,50 @@ def test_no_installed_skills_is_unknown():
     assert check_frontmatter_hygiene(Context(home=Path("/x"))).status == UNKNOWN
 
 
-def test_blob_without_frontmatter_is_unknown():
+def test_blob_without_frontmatter_warns_skill_wont_load():
+    """CLAWSECCHECK-B-201: grounded against the real dist's loader (loadSingleSkillDirectory
+    silently returns null when `description` is missing/empty, with no log line anywhere
+    in that call chain) — a skill with no frontmatter block at all is invisible to the
+    agent, not merely "nothing to inspect". Must WARN, not silently PASS/UNKNOWN."""
     ctx = _ctx("# file: SKILL.md\njust a body, no fenced frontmatter\n")
-    assert check_frontmatter_hygiene(ctx).status == UNKNOWN
+    f = check_frontmatter_hygiene(ctx)
+    assert f.status == WARN
+    assert any("will not appear to the agent" in e for e in f.evidence)
+
+
+# ---- B-201: missing `description:` field (OpenClaw's loader silently drops the skill) ----
+
+
+def test_frontmatter_with_no_description_field_warns():
+    blob = _blob("name: demo")
+    f = check_frontmatter_hygiene(_ctx(blob))
+    assert f.status == WARN
+    assert any("no `description:` field" in e for e in f.evidence)
+
+
+def test_frontmatter_with_empty_description_value_warns():
+    blob = _blob("name: demo\ndescription:")
+    f = check_frontmatter_hygiene(_ctx(blob))
+    assert f.status == WARN
+    assert any("no `description:` field" in e for e in f.evidence)
+
+
+def test_frontmatter_with_multiline_description_does_not_warn():
+    """OpenClaw's own line-frontmatter parser accepts an indented multi-line
+    continuation as the description value — must not false-WARN on that shape."""
+    blob = _blob(
+        "name: demo\n"
+        "description:\n"
+        "  A longer description that wraps onto\n"
+        "  a continuation line.\n"
+    )
+    f = check_frontmatter_hygiene(_ctx(blob))
+    assert f.status == PASS
+
+
+def test_frontmatter_with_inline_description_does_not_warn():
+    blob = _blob("name: demo\ndescription: does a thing")
+    assert check_frontmatter_hygiene(_ctx(blob)).status == PASS
 
 
 # ---- lone-file vet form (raw frontmatter, no `# file:` header) ----
@@ -124,6 +165,42 @@ def test_vet_skill_surfaces_b88(tmp_path):
     assert b88 is not None and b88.status == WARN
 
 
+# ---- B-201: archive-qualified "# file:" header (found via test_b152/test_b160's
+# own archive-integration tests, not a separate report) ----
+
+
+def test_archive_qualified_header_frontmatter_is_recognized():
+    """collector.py's decompress_and_classify chains an archive-relative name onto
+    the "# file:" header ("clean_zip.zip::SKILL.md", or "outer::inner::SKILL.md" for
+    nested archives) -- the bare "SKILL.md"-only header match used to miss this
+    entirely, so a real, well-formed frontmatter inside an archive-sourced skill
+    silently read as "no frontmatter at all" and false-WARNed via B-201's new check."""
+    blob = (
+        "# file: clean_zip.zip::SKILL.md\n"
+        "---\nname: demo\ndescription: does a thing\n---\nbody\n"
+    )
+    assert check_frontmatter_hygiene(_ctx(blob)).status == PASS
+
+
+def test_nested_archive_qualified_header_frontmatter_is_recognized():
+    blob = (
+        "# file: outer.zip::inner.zip::SKILL.md\n"
+        "---\nname: demo\ndescription: does a thing\n---\nbody\n"
+    )
+    assert check_frontmatter_hygiene(_ctx(blob)).status == PASS
+
+
+def test_similarly_named_non_skill_file_header_does_not_match():
+    """The widened header match still requires the header to literally END in
+    "SKILL.md" -- an unrelated file whose header merely CONTAINS that substring
+    mid-name (not as a trailing path component) must not be treated as frontmatter."""
+    blob = "# file: SKILL.md.bak\n---\nname: demo\ndescription: does a thing\n---\nbody\n"
+    ctx = _ctx(blob)
+    f = check_frontmatter_hygiene(ctx)
+    assert f.status == WARN  # no recognized frontmatter -> the B-201 "won't load" path
+    assert any("no SKILL.md frontmatter block found" in e for e in f.evidence)
+
+
 # ---- zero-FP on the shipped SKILL.md ----
 
 
@@ -131,3 +208,22 @@ def test_own_skill_md_is_clean():
     skill_md = Path(__file__).resolve().parent.parent / "SKILL.md"
     blob = "# file: SKILL.md\n" + skill_md.read_text(encoding="utf-8")
     assert check_frontmatter_hygiene(_ctx(blob, name="clawseccheck")).status == PASS
+
+
+# ---- zero-FP on the real bundled/installed OpenClaw fleet (Golden Rule #5) ----
+
+
+def test_fleet_wide_zero_fp():
+    import glob
+    import os
+
+    fleet = glob.glob(os.path.expanduser("~/.npm-global/lib/node_modules/openclaw/skills/*/SKILL.md"))
+    if not fleet:
+        return  # no real fleet installed in this environment -- nothing to check
+    warns = []
+    for sk in sorted(fleet):
+        blob = "# file: SKILL.md\n" + Path(sk).read_text(encoding="utf-8")
+        f = check_frontmatter_hygiene(_ctx(blob, name=os.path.basename(os.path.dirname(sk))))
+        if f.status == WARN:
+            warns.append((sk, f.detail))
+    assert not warns, f"B88/B-201 false-positive WARN on real bundled skills: {warns}"
