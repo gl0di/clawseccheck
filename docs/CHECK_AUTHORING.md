@@ -96,7 +96,7 @@ renderers show them in distinct slots, and `--json` exposes them as separate fie
 
 ## Notes
 
-- Output is **English-only** since v2.0.0 (`i18n.py`/`--lang` removed) — this convention
+- Output is **English-only** (`i18n.py`/`--lang` were removed) — this convention
   is a single-language guideline; there is no `he` string to keep in parallel.
 - Route anything derived from user config through `logsafe.redact()` before it lands in a
   `detail`/`evidence` string (Golden Rule #3 / §8 — no secret values in reports).

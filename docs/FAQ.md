@@ -187,7 +187,7 @@ you may see `UNKNOWN` for any check that depends on a file that does not exist.
 After the main report, you may see a notice like:
 
 ```text
-This ClawSecCheck build is 63 days old (v0.19.0, released 2026-04-25).
+This ClawSecCheck build is 63 days old (vX.Y.Z, released YYYY-MM-DD).
 Security tooling should be kept current -- check your ClawHub client for a newer version.
 (offline notice: based only on the build date; ClawSecCheck made no network call)
 ```
@@ -372,7 +372,7 @@ whenever you have real reason to suspect the host, not just a routine run.
 - **Use a fresh install of ClawSecCheck itself for the clean-host scan.** Don't reuse a
   copy of the tool that could have been sitting on the compromised host — install it
   fresh on the clean machine (`pipx install git+https://github.com/gl0di/clawseccheck` or
-  a fresh `openclaw skills install clawseccheck`) so the scanner's own binary is one the
+  a fresh `openclaw skills install @gl0di/clawseccheck`) so the scanner's own binary is one the
   malware never had a chance to touch either.
 - **Verify the engine digest out-of-band.** Compare `clawseccheck --verify-self`'s output
   against `SHA256SUMS.txt` published on the corresponding GitHub Release, signed with
