@@ -3,6 +3,36 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.47.0] — 2026-07-16
+
+One new MCP-surface detector plus two cross-file/typosquat evasion fixes, grounded
+against the real OASB benchmark corpus and a live-fleet false-positive sweep.
+
+### Added
+- **B166: MCP server command/args references a known paste/exfiltration host
+  (advisory, `scored=False`).** A known paste/exfil host (webhook.site, ngrok,
+  pastebin, `*.onion`, …) named in an MCP server's own launch `command`/`args` — the
+  server's identity-level startup config itself pointing at an untrusted drop point,
+  before the server ever runs. Grounded against the real OASB corpus (2988 benign /
+  166 malicious `mcp_tool` samples): 0 benign false positives, narrow recall (1/166).
+
+### Fixed
+- **B90 now catches split-base64 payloads hidden in sibling `.txt`/`.json`/`.md` data
+  files**, not just code string literals — closes a rename-based evasion of the
+  cross-file reassembly check.
+- **Typosquat detection (`_squat_hits`) now confusable-folds candidate skill names
+  before comparing against known names**, closing a homoglyph-clone evasion (a
+  Cyrillic/Greek lookalike name no longer silently passes as "already known").
+
+### Changed
+- Documented two catalog-wide design ceilings in `docs/THREAT_COVERAGE.md`: cross-skill
+  capability-union without an untrusted-input leg, and a SKILL.md front-loaded
+  mandatory-first-step pointing at a bundled helper. Both were investigated and found
+  to have no sound static-analysis discriminator (see the doc for the full rationale)
+  — no new check added for either.
+- Re-grounded T07 (tool-registry name-collision / skill tool-shadowing) against the
+  real OpenClaw dist and closed it as no-surface (no such registry mechanism exists).
+
 ## [3.46.0] — 2026-07-15
 
 Six precision fixes to existing checks plus three new detectors: a crypto private-key
