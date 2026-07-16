@@ -18,8 +18,9 @@
 Your OpenClaw agent can read your files, hold your credentials, and act on your
 behalf. **ClawSecCheck tells you whether that power is locked down.** It reads
 your configuration and your installed skills, scores the setup **A–F**, and
-explains the most urgent holes in plain language — each finding says what is
-wrong, why it matters, and what a fix looks like.
+explains the most urgent problems and risks in plain language — each finding
+says what is wrong and why it matters. It only reports: acting on a finding
+stays entirely in your hands.
 
 It is **free, local, and read-only**: no API key, no network calls, no
 telemetry. It never changes your OpenClaw setup, and your data never leaves
@@ -72,7 +73,8 @@ Score: 49/100   Grade: F
 - **A score and grade (A–F)** with honest caps: an open CRITICAL finding can
   never hide behind a good grade.
 - **Findings grouped by area, most urgent first** — every finding explains
-  itself in plain language and carries structured fix data in `--json`/SARIF.
+  itself in plain language; `--json`/SARIF add structured remediation data for
+  your own tooling (ClawSecCheck itself never applies changes).
 - **A shareable badge** (`--card` / `--badge`) that shows only the grade and
   score — never your findings.
 
