@@ -57,7 +57,7 @@ introduced:
 
 ## Trust boundaries
 
-```
+```text
 [ User's filesystem ]
         |  read-only
         v
@@ -277,6 +277,7 @@ A release must pass local validation before merge/tag:
 - targeted checks for the changed modules.
 
 Also verify that release documentation is synchronized:
+
 - `README.md`
 - `CHANGELOG.md`
 - `SECURITY.md`
