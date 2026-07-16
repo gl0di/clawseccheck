@@ -212,3 +212,69 @@ def test_c015_still_scans_normal_locations_after_widening(tmp_path):
     f = check_secrets_at_rest_home(_ctx(tmp_path))
     assert f.status == WARN
     assert any(".env: secret-like value detected" in item for item in f.evidence)
+
+
+# ---------------------------------------------------------------------------
+# C-226: SecretRef indirection (${NAME} / $NAME / secretref-env: / __env__: /
+# structured {source, provider, id}) is a SAFER OpenClaw 2026.7.1 config-value
+# shape and must not be misread as an exposed plaintext secret by C015 either.
+# ---------------------------------------------------------------------------
+
+def test_c015_passes_config_with_every_secretref_indirection_shape(tmp_path):
+    """Clean: an openclaw.json whose secret-shaped fields are ALL SecretRef
+    indirection (env shorthand, both legacy markers, and the structured object
+    form) must stay PASS — none of these is a plaintext secret."""
+    cfg_text = (
+        "{\n"
+        '  "gateway": {"auth": {"token": "${OPENAI_KEY}"}},\n'
+        '  "providers": {"openai": {"apiKey": "$OPENAI_KEY"}},\n'
+        '  "hooks": {"secretToken": "secretref-env:HOOKS_TOKEN"},\n'
+        '  "legacy": {"apiKey": "__env__:LEGACY_TOKEN"},\n'
+        '  "someService": {\n'
+        '    "apiKey": {"source": "env", "provider": "default", "id": "OPENAI_KEY"}\n'
+        "  }\n"
+        "}\n"
+    )
+    (tmp_path / "openclaw.json").write_text(cfg_text, encoding="utf-8")
+    f = check_secrets_at_rest_home(_ctx(tmp_path))
+    assert f.status == PASS
+
+
+def test_c015_adversarial_decoy_reference_does_not_mask_real_secret_elsewhere(tmp_path):
+    """Case 1: a decoy ${NAME} reference in one field and a real contiguous secret
+    in ANOTHER field of the SAME file — the real secret must still WARN (the
+    decoy match must not be the only one .search()/.finditer() ever inspects)."""
+    secret = _runtime_secret()
+    cfg_text = (
+        "{\n"
+        '  "gateway": {"auth": {"token": "${OPENAI_KEY}"}},\n'
+        '  "hooks": {"token": "' + secret + '"}\n'
+        "}\n"
+    )
+    (tmp_path / "openclaw.json").write_text(cfg_text, encoding="utf-8")
+    f = check_secrets_at_rest_home(_ctx(tmp_path))
+    assert f.status == WARN
+    assert any("openclaw.json" in item for item in f.evidence)
+
+
+def test_c015_adversarial_appended_secret_after_reference_still_warns(tmp_path):
+    """Case 2: ${NAME} immediately followed by appended real secret material in the
+    SAME value is NOT a pure reference — must still WARN."""
+    secret = _runtime_secret()
+    cfg_text = '{"gateway": {"auth": {"token": "${OPENAI_KEY}' + secret + '"}}}\n'
+    (tmp_path / "openclaw.json").write_text(cfg_text, encoding="utf-8")
+    f = check_secrets_at_rest_home(_ctx(tmp_path))
+    assert f.status == WARN
+
+
+def test_c015_adversarial_secretref_env_prefix_with_inline_blob_still_warns(tmp_path):
+    """Case 3: 'secretref-env:' prefix followed by an inline plaintext blob (not a
+    bare uppercase env-var-name token — the only shape OpenClaw itself treats as a
+    real reference) must still WARN."""
+    cfg_text = (
+        '{"gateway": {"auth": '
+        '{"token": "secretref-env:actually-a-plaintext-blob-appended-here"}}}\n'
+    )
+    (tmp_path / "openclaw.json").write_text(cfg_text, encoding="utf-8")
+    f = check_secrets_at_rest_home(_ctx(tmp_path))
+    assert f.status == WARN

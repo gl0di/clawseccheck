@@ -35,6 +35,7 @@ from ._shared import (
     _external_input_channels,
     _finding,
     _hint,
+    _is_secret_reference,
     _open_channels,
     _perms_loose,
     _plugins,
@@ -96,8 +97,11 @@ _C015_EXTRA_SECRET_PATTERNS = [
     # `\w*token` (not just `token`) also covers accessToken/refreshToken-style keys
     # confirmed under identity/device-auth.json's and devices/paired.json's "tokens"
     # object.
+    # C-226: value captured in group(1) so _pattern_hits_real_secret can tell a pure
+    # SecretRef indirection (e.g. "secretref-env:NAME") apart from a real inline
+    # secret sharing the same quoted-JSON-key shape.
     re.compile(
-        r'"(?:password|secret|api[_-]?key|\w*token|private[_-]?key\w*)"\s*:\s*"[^"\s]{8,}"',
+        r'"(?:password|secret|api[_-]?key|\w*token|private[_-]?key\w*)"\s*:\s*"([^"\s]{8,})"',
         re.I,
     ),
 ]
@@ -253,14 +257,32 @@ def _c015_candidate_files(ctx: Context) -> list[Path]:
     return out
 
 
-def _c015_has_secret(text: str) -> bool:
-    for pat in SECRET_PATTERNS:
-        if pat.search(text):
-            return True
-    for pat in _C015_EXTRA_SECRET_PATTERNS:
-        if pat.search(text):
+def _pattern_hits_real_secret(patterns, text: str) -> bool:
+    """True if any *patterns* match in *text* with a value that is not a pure
+    SecretRef indirection (C-226; see ``_is_secret_reference`` in checks/_shared.py).
+
+    Patterns with no capturing group are concrete API-key literal formats
+    (sk-ant-.../AKIA.../AIza...) that can never collide with `$NAME`/`${NAME}`/
+    legacy-marker syntax, so any match on those fires immediately. Patterns WITH a
+    capturing group (the generic ``keyword[:=]value`` shapes) have that captured
+    value checked against ``_is_secret_reference`` before counting as a hit — via
+    ``finditer`` over every match, not just the first, so a real secret elsewhere in
+    the same text still fires even when an earlier match of the SAME pattern is a
+    pure reference (a decoy reference in one field must never mask a real secret in
+    another field scanned by the same pattern).
+    """
+    for pat in patterns:
+        for m in pat.finditer(text):
+            if pat.groups >= 1 and _is_secret_reference(m.group(1)):
+                continue
             return True
     return False
+
+
+def _c015_has_secret(text: str) -> bool:
+    return _pattern_hits_real_secret(SECRET_PATTERNS, text) or _pattern_hits_real_secret(
+        _C015_EXTRA_SECRET_PATTERNS, text
+    )
 
 
 def _capabilities_attested(ctx: Context) -> bool:
@@ -1138,10 +1160,8 @@ def check_secrets(ctx: Context) -> Finding:
         )
     # secrets hardcoded into bootstrap files (always wrong — injected into the prompt)
     for fname, text in ctx.bootstrap.items():
-        for pat in SECRET_PATTERNS:
-            if pat.search(text):
-                ev.append(f"secret-like string in {fname}")
-                break
+        if _pattern_hits_real_secret(SECRET_PATTERNS, text):
+            ev.append(f"secret-like string in {fname}")
     if ev:
         return _finding(
             "B1",

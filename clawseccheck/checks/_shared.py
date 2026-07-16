@@ -140,8 +140,45 @@ SECRET_PATTERNS = [
     re.compile(r"sk-[a-zA-Z0-9]{20,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"AIza[0-9A-Za-z_-]{30,}"),
-    re.compile(r"(?:password|secret|api[_-]?key|token)\s*[:=]\s*['\"]?[^\s'\"]{8,}", re.I),
+    # C-226: the value is captured in group(1) so callers that need to distinguish a
+    # pure SecretRef indirection (e.g. "${NAME}") from a real plaintext secret can
+    # inspect just the value — see _is_secret_reference below. Adding the group does
+    # not change what this pattern matches (group(0)/start()/end() are unaffected),
+    # so existing .sub()/.search() callers (logsafe.redact, logscan.py) are unaffected.
+    re.compile(r"(?:password|secret|api[_-]?key|token)\s*[:=]\s*['\"]?([^\s'\"]{8,})", re.I),
 ]
+
+
+# C-226: OpenClaw 2026.7.1 added secret-by-reference config values
+# (SecretInput = string | SecretRef{source, provider, id}) so a value need not be a
+# plaintext secret at all — our detectors must not FAIL/WARN on the indirection
+# itself. Grounded against the installed OpenClaw 2026.7.1 dist
+# (dist/types.secrets-*.d.ts + types.secrets-OocW4TQ1.js):
+#   ENV_SECRET_REF_ID_RE       = /^[A-Z][A-Z0-9_]{0,127}$/
+#   ENV_SECRET_TEMPLATE_RE     = /^\$\{(ID)\}$/   -> "${NAME}"
+#   ENV_SECRET_SHORTHAND_RE    = /^\$(ID)$/       -> "$NAME"
+#   LEGACY_SECRETREF_ENV_MARKER_PREFIX          = "secretref-env:" (+ ID, case-sensitive)
+#   LEGACY_DOUBLE_UNDERSCORE_ENV_MARKER_PREFIX  = "__env__:" (+ ID, case-sensitive)
+# The structured `{source, provider, id}` SecretRef object form is a dict, never a
+# string, so _secret_paths (below) already skips it — it only ever flags STRING
+# values under a secret-shaped key. No handling needed here for that shape.
+_SECRET_REF_ENV_ID = r"[A-Z][A-Z0-9_]{0,127}"
+
+_SECRET_REFERENCE_RE = re.compile(
+    r"(?:\$\{%(id)s\}|\$%(id)s|secretref-env:%(id)s|__env__:%(id)s)"
+    % {"id": _SECRET_REF_ENV_ID}
+)
+
+
+def _is_secret_reference(value: str) -> bool:
+    """True only when *value*, after ``.strip()``, is EXACTLY one OpenClaw SecretRef
+    indirection shorthand — never a substring or a prefix of something longer, so any
+    real secret material appended (or prepended) to a reference shape still counts as
+    a plaintext secret (C-226 adversarial requirement: the exclusion must stay narrow).
+    """
+    if not isinstance(value, str):
+        return False
+    return bool(_SECRET_REFERENCE_RE.fullmatch(value.strip()))
 
 
 # Credential/secret access is only malicious when EXFILTRATED.
@@ -387,7 +424,12 @@ def _secret_paths(obj, prefix="", depth=0) -> list[str]:
     if isinstance(obj, dict):
         for k, v in obj.items():
             path = f"{prefix}.{k}" if prefix else k
-            if isinstance(v, str) and len(v) >= 16 and SECRET_KEY_RE.search(k):
+            if (
+                isinstance(v, str)
+                and len(v) >= 16
+                and SECRET_KEY_RE.search(k)
+                and not _is_secret_reference(v)
+            ):
                 found.append(path)
             else:
                 found.extend(_secret_paths(v, path, depth + 1))
