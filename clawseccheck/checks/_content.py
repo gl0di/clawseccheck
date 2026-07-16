@@ -45,6 +45,7 @@ from ._shared import (
     _FM_BLOCK_BARE_RE,
     _FM_BLOCK_HEADERED_RE,
     _HOOK_EXEC_RE,
+    _KNOWN_EXFIL_HOST_RE,
     _MANIFEST_HEADER_RE,
     _SENTENCE_BREAK_RE,
     _channels,
@@ -2719,8 +2720,19 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
 
 _B156_WINDOW = 120  # chars around the send verb for the overt-exfil co-location window
 
+# C-093: how far past the DESTINATION match itself (not the whole 120-char send-verb
+# window) the known-bad-host search looks -- just enough to catch the hostname that
+# follows a bare "https://" match (_B63_DEST_RE's URL alternative captures only the
+# scheme). Deliberately much narrower than _B156_WINDOW: searching the FULL post-verb
+# window let an unrelated known-host MENTION elsewhere in the same window (e.g. "send
+# the token to my telegram bot (docs are on pastebin.com)") wrongly escalate to FAIL --
+# the host must actually sit at/right after the destination cue to count.
+_B156_DEST_HOST_WINDOW = 40
 
-def _b156_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
+
+def _b156_scan(
+    text: str, fr: list[tuple[int, int]], own_host=None
+) -> list[tuple[str, bool]]:
     """B-188/B156: overt secret-exfil snippets — a send verb whose window carries a
     secret term AND a second-party/external destination, but NO secrecy marker.
 
@@ -2729,8 +2741,19 @@ def _b156_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
     overt "send <secret> to <external dest>" (e.g. "beam the token up to 1.2.3.4").
     Gating on the ABSENCE of a secrecy marker (_B63_SECRECY_RE) keeps it strictly
     complementary to B63 — a secrecy-framed exfil is owned by B63, so B156 never
-    double-reports it. Reuses the E-037 verb-class discriminators."""
-    hits: list[str] = []
+    double-reports it. Reuses the E-037 verb-class discriminators.
+
+    Returns (snippet, is_known_bad_host) pairs. is_known_bad_host is True only when the
+    destination window itself names a KNOWN paste/exfil/tunneling host
+    (_KNOWN_EXFIL_HOST_RE, reused from B166's MCP-args check) — a concrete, curated,
+    low-FP sink list, unambiguous malice, and the discriminator the caller escalates to
+    FAIL on. *own_host* (the skill's own declared homepage/repo/api host, from
+    _skill_own_host — B160/B-132 precedent) is a safety valve: when the flagged host IS
+    the skill's own declared backend, it stays the ambiguous WARN case instead — a
+    legitimate skill authenticating to its own backend must never escalate merely
+    because that backend happens to sit on one of these domains."""
+    hits: list[tuple[str, bool]] = []
+    seen: set[str] = set()
     # A whole-text-defensive document (a security guide with a defensive heading AND a
     # broad negation — "never do:", "Do not write code that … sends …") is documentation,
     # not a live directive. Mirrors B58's base-variant gate (_content.py:2885/2895) so a
@@ -2765,8 +2788,27 @@ def _b156_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         snippet = text[max(0, m.start() - 10) : m.end() + dest_m.end()].strip().replace("\n", " ")
         if len(snippet) > 120:
             snippet = snippet[:117] + "..."
-        if snippet not in hits:
-            hits.append(snippet)
+        if snippet in seen:
+            continue
+        seen.add(snippet)
+        # C-093/B-188 FAIL escalation: _B63_DEST_RE's URL alternative matches only the
+        # bare scheme ("https://"), not the host that follows, so the host check looks a
+        # short distance PAST the destination match itself (_B156_DEST_HOST_WINDOW) —
+        # otherwise a real "https://pastebin.com/..." destination would never see its
+        # own hostname text. Deliberately NOT the whole `seg` (120 chars): an unrelated
+        # known-host mention elsewhere in that wider window must not count as the
+        # destination (see _B156_DEST_HOST_WINDOW's comment).
+        dest_host_window = seg[dest_m.start() : dest_m.start() + _B156_DEST_HOST_WINDOW]
+        host_hit = _KNOWN_EXFIL_HOST_RE.search(dest_host_window)
+        is_known_bad_host = False
+        if host_hit is not None:
+            host = host_hit.group(0).lower()
+            is_own_backend = bool(own_host) and (
+                _url_matches_own_host(f"https://{host}", own_host)
+                or _url_matches_own_host(f"https://{own_host}", host)
+            )
+            is_known_bad_host = not is_own_backend
+        hits.append((snippet, is_known_bad_host))
     return hits
 
 
@@ -4642,7 +4684,8 @@ def check_conditional_sleeper_trigger(ctx: Context) -> Finding:
 
 
 def check_overt_secret_exfil(ctx: Context) -> Finding:
-    """B156 — overt (unconditional) secret-exfil to a second-party/external destination.
+    """B156 (C-093) — overt (unconditional) secret-exfil to a second-party/external
+    destination.
 
     A directive that ships a secret (token / credential / api_key / …) to an external
     or second-party destination (raw IP, paste site, "my bot", http(s)://, …) with NO
@@ -4650,12 +4693,23 @@ def check_overt_secret_exfil(ctx: Context) -> Finding:
     B64 stays silent) and NO trigger (so B65 stays silent). Closes the coverage gap none
     of B63/B64/B65 own (B-188).
 
-    WARN  — a secret is sent to an external / second-party destination in the clear.
-    PASS  — no such directive.
+    FAIL — the destination itself names a KNOWN paste/exfil/tunneling host
+           (_KNOWN_EXFIL_HOST_RE, reused from B166's MCP-args check — pastebin.com,
+           webhook.site, ngrok, transfer.sh, …). A concrete, curated, low-FP drop-point
+           list is unambiguous malice, corroborated enough to escalate.
+    WARN — a secret is sent to an external / second-party destination in the clear, but
+           the destination is a VAGUE / generic one ("my bot", "a remote server", a bare
+           unknown IP) with no known-bad-host corroboration — could still be a
+           legitimate skill authenticating to its own backend.
+    PASS — no such directive, or the flagged known-bad host IS the skill's own declared
+           homepage/repo/api host (first-party allowlist, B160/B-132 precedent) — never
+           escalated, stays WARN in that case (see below).
     UNKNOWN — nothing to inspect.
 
-    WARN-only: a legitimate cloud / DevOps skill may transmit its OWN credential to its
-    OWN backend ("send the api_key to the server"), so this is advisory, not a hard FAIL.
+    Escalation is corroborator-gated, not host-list-alone: a legitimate cloud / DevOps
+    skill may transmit its OWN credential to its OWN backend ("send the api_key to the
+    server") — that stays WARN (never FAIL) even when the flagged host happens to be one
+    of the known drop-point domains, via the same own-host safety valve B160 uses.
     """
     if not ctx.bootstrap and not ctx.installed_skills:
         return _finding(
@@ -4666,33 +4720,54 @@ def check_overt_secret_exfil(ctx: Context) -> Finding:
             "Run on the host with workspace bootstrap files and installed skills present.",
         )
 
-    evidence: list[str] = []
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
 
     for fname, text in ctx.bootstrap.items():
         norm = normalize_for_scan(text)
         fr = _fence_ranges(norm)
-        for hit in _b156_scan(norm, fr):
-            evidence.append(f"{fname}: secret sent to external/2nd-party destination: {hit}")
+        own_host = _skill_own_host(norm, fr)
+        for snippet, is_known_bad_host in _b156_scan(norm, fr, own_host):
+            tag = f"{fname}: secret sent to external/2nd-party destination: {snippet}"
+            (fail_ev if is_known_bad_host else warn_ev).append(tag)
 
     for skill_name, blob in ctx.installed_skills.items():
         norm = normalize_for_scan(blob)
         fr = _fence_ranges(norm)
-        for hit in _b156_scan(norm, fr):
-            evidence.append(
-                f"{skill_name}: secret sent to external/2nd-party destination: {hit}"
-            )
+        own_host = _skill_own_host(norm, fr)
+        for snippet, is_known_bad_host in _b156_scan(norm, fr, own_host):
+            tag = f"{skill_name}: secret sent to external/2nd-party destination: {snippet}"
+            (fail_ev if is_known_bad_host else warn_ev).append(tag)
 
-    if evidence:
+    if fail_ev:
+        ev_summary = "; ".join(fail_ev[:4])
+        extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
+        return _finding(
+            "B156",
+            FAIL,
+            "Overt secret-exfil to a KNOWN paste/exfiltration/tunneling host detected — "
+            "a secret is shipped to an unambiguous drop point with no secrecy, override, "
+            "or trigger framing: " + ev_summary + extra,
+            "Remove the directive immediately. Never transmit secrets, tokens, or "
+            "credentials to a paste site, webhook relay, or tunneling service. If a "
+            "skill must authenticate, send only to its own documented first-party "
+            "endpoint and never route the raw secret value out.",
+            fail_ev,
+        )
+
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
         return _finding(
             "B156",
             WARN,
             "Overt secret-exfil directive(s) detected — a secret is shipped to an "
             "external / second-party destination with no secrecy, override, or trigger "
-            "framing: " + "; ".join(evidence[:4]),
+            "framing: " + ev_summary + extra,
             "Never transmit secrets, tokens, or credentials to external or operator-"
             "controlled destinations. If a skill must authenticate, send only to a "
             "documented first-party endpoint and never route the raw secret value out.",
-            evidence,
+            warn_ev,
         )
 
     return _finding(

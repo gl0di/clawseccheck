@@ -644,10 +644,16 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="bootstrap",
     ),
-    # B156 (B-188): overt unconditional secret-exfil — a secret shipped to an external /
-    # second-party destination with no secrecy (B63), override (B64) or trigger (B65)
-    # framing. WARN-only runtime (auth skills legitimately POST their own token to their
-    # own backend), HIGH metadata like its B63/B65 content-ring siblings.
+    # B156 (B-188, corroborated FAIL added C-093): overt unconditional secret-exfil — a
+    # secret shipped to an external/second-party destination with no secrecy (B63),
+    # override (B64) or trigger (B65) framing. FAILs when the destination itself names a
+    # KNOWN paste/exfil/tunneling host (_KNOWN_EXFIL_HOST_RE — pastebin.com, webhook.site,
+    # ngrok, transfer.sh, …), a concrete low-FP drop-point list reused from B166;
+    # otherwise stays the original WARN (a vague destination, or a legitimate auth skill
+    # POSTing its own token to its own declared backend, per the own-host safety valve —
+    # see check_overt_secret_exfil / _b156_scan). No longer WARN-only: the metadata HIGH
+    # ceiling now matches the runtime's full range, same as its B63/B65 content-ring
+    # siblings.
     CheckMeta(
         "B156",
         "Overt secret-exfil to external/second-party destination",
