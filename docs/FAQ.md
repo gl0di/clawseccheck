@@ -187,7 +187,7 @@ you may see `UNKNOWN` for any check that depends on a file that does not exist.
 After the main report, you may see a notice like:
 
 ```text
-This ClawSecCheck build is 63 days old (v0.19.0, released 2026-04-25).
+This ClawSecCheck build is 63 days old (vX.Y.Z, released YYYY-MM-DD).
 Security tooling should be kept current -- check your ClawHub client for a newer version.
 (offline notice: based only on the build date; ClawSecCheck made no network call)
 ```

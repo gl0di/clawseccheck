@@ -44,8 +44,8 @@ classified at all.
 | System-prompt / secret leak in tool output | B9 | `[CHECK: B9]` |
 | Audit log & sensitive redaction | B10 | `[CHECK: B10]` |
 | Local-first & model hygiene | B12 | `[CHECK: B12]` |
-| Gateway exposure & channel auth | B2, B11, B80 | IPv6-aware bind parsing (v0.17.0); B80 flags auth without rate limiting on a non-loopback bind `[CHECK: B2, B11, B80]` |
-| Least privilege / dangerous tools | B3, B7, B8 | Approval gate via real `tools.exec.mode` (v0.17.0) `[CHECK: B3, B7, B8]` |
+| Gateway exposure & channel auth | B2, B11, B80 | IPv6-aware bind parsing; B80 flags auth without rate limiting on a non-loopback bind `[CHECK: B2, B11, B80]` |
+| Least privilege / dangerous tools | B3, B7, B8 | Approval gate via real `tools.exec.mode` `[CHECK: B3, B7, B8]` |
 | Execution sandbox present | B4 | Depth is partial — see gaps (B35) `[CHECK: B4]` |
 | Bootstrap-file injection surface | B6, B161 | Prompt-injection-prone directives in SOUL/AGENTS/TOOLS (B6); identity-file injection — staleness-framing/safety-disable directive corroborated by a fabricated admin/auth code (B161) `[CHECK: B6, B161]` |
 | Trusted-output boundary policy | B21 | Is external content treated as data, not instructions; combined with RISK-01/02/03 this is also the strongest automated leg of the dirty-input→action-gate concern (B27 was never implemented as its own id — no config surface exists for a generic gate — but this row plus the attestation layer below covers the same ground) `[CHECK: B21]` |
@@ -54,7 +54,7 @@ classified at all.
 | MCP server trust | B15, B24, B47, `--vet-mcp` | Unpinned installs, plaintext transport, env/secret passthrough, broad scopes `[CHECK: B15, B24, B47]` |
 | Threat monitoring present | B16, `--monitor` | Detects absence; **Agent Watch** (`--monitor`) gives severity-tagged drift on skills/bootstrap/score **and connections** (new MCP server / channel / gateway-exposed / host-monitor lost) + a local event journal (`--watch-log`) `[CHECK: B16]` |
 | Autonomy / heartbeat | B17 | Self-acting agent steerable by untrusted input `[CHECK: B17]` |
-| Subagent delegation | B18, B72, B81 | Elevated/exec inheritance w/o approval (real gate, v0.17.0); B72 flags `allowAgents` wildcard; B81 flags spawn limits raised beyond recommended defaults `[CHECK: B18, B72, B81]` |
+| Subagent delegation | B18, B72, B81 | Elevated/exec inheritance w/o approval (real approval gate); B72 flags `allowAgents` wildcard; B81 flags spawn limits raised beyond recommended defaults `[CHECK: B18, B72, B81]` |
 | Data at-rest perms | B19, B82 | Group/world-readable memory/log dirs; B82 covers `cacheTrace` transcripts persisted without tool-output redaction `[CHECK: B19, B82]` |
 | Bootstrap/memory write protection | B20 | Identity-file writability `[CHECK: B20]` |
 | Self-modification risk | B22 | Writable identity + tools + no approval `[CHECK: B22]` |
