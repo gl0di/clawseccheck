@@ -1319,19 +1319,30 @@ def check_mcp_external_endpoint(ctx: Context) -> Finding:
     )
 
 
+# C-230: the FAIL-tier subset of _KNOWN_EXFIL_HOST_RE — hosts with essentially no
+# legitimate reason to be hardcoded in an MCP server's OWN launch command/args. Kept
+# deliberately narrow after a C-135 pass: webhook.site is a single-purpose ephemeral
+# request-capture inbox (naming it in argv is an unambiguous data-drop), and .onion is an
+# anonymized hidden service. Everything else in _KNOWN_EXFIL_HOST_RE stays WARN — ngrok /
+# localtunnel / trycloudflare (dev tunnels for a local server), *.pipedream.net (a hosted
+# MCP offering), interactsh/oast (OOB detection for a pentest MCP), paste/file hosts (dual-
+# use fetch sources) all have real launch-argv uses.
+_B166_FAIL_HOST_RE = re.compile(r"\bwebhook\.site\b", re.I)
+
+
 def check_mcp_server_exfil_host_in_args(ctx: Context) -> Finding:
     """B166 (C-211) — a known paste/exfiltration host (webhook.site, ngrok, pastebin,
     *.onion, ...) referenced in an MCP server's own `command`/`args` — the server's
     identity-level startup config itself names an untrusted drop point, before the
     server is ever run. Distinct from C047 (a non-local `url`/`endpoint` MCP transport,
     which is dual-use and only UNKNOWN) — this is a stronger, unambiguous host list
-    matched against the server's own launch arguments, so it's WARN.
+    matched against the server's own launch arguments.
 
     Grounded against the real OASB registry corpus (v2.0, 2988 benign / 166 malicious
-    `mcp_tool` samples): 0 benign false positives, narrow recall (catches 1/166) — a
-    precision-first, low-yield signal. Advisory (never scored, never escalates to FAIL):
-    a config-level string match in a server's own args cannot prove malicious intent on
-    its own, only that it names a known drop point.
+    `mcp_tool` samples): 0 benign false positives. Two tiers (C-230): a very-high-confidence
+    subset (`webhook.site`, `.onion` — see `_B166_FAIL_HOST_RE`) FAILs and is scored, since
+    hardcoding one in a server's own launch argv has no legitimate form; every other known
+    host stays WARN (dev tunnels, hosted-MCP endpoints, dual-use paste/fetch hosts).
     """
     servers = _mcp_servers(ctx.config)
     if not servers:
@@ -1341,7 +1352,8 @@ def check_mcp_server_exfil_host_in_args(ctx: Context) -> Finding:
             "No MCP servers configured.",
             "Configure MCP servers to evaluate their command/args for known exfiltration hosts.",
         )
-    hits: list[str] = []
+    fail_hits: list[str] = []
+    warn_hits: list[str] = []
     for name, spec in servers.items():
         if not isinstance(spec, dict):
             continue
@@ -1352,19 +1364,36 @@ def check_mcp_server_exfil_host_in_args(ctx: Context) -> Finding:
         m = _KNOWN_EXFIL_HOST_RE.search(joined)
         onion = _IOC_ONION_RE.search(joined) if not m else None
         hit = m or onion
-        if hit:
-            hits.append(f"{name}: command/args reference known exfiltration host '{hit.group(0)}'")
+        if not hit:
+            continue
+        host = hit.group(0)
+        evidence = f"{name}: command/args reference known exfiltration host '{host}'"
+        if onion or _B166_FAIL_HOST_RE.search(joined):
+            fail_hits.append(evidence)
+        else:
+            warn_hits.append(evidence)
 
-    if hits:
+    if fail_hits:
+        return _finding(
+            "B166",
+            FAIL,
+            "MCP server command/args hardcode a single-purpose exfiltration host: "
+            + "; ".join(fail_hits[:4]),
+            "Remove the flagged MCP server or its exfil-host reference — a request-capture "
+            "inbox (webhook.site) or a .onion hidden service named in the server's OWN launch "
+            "command/args has no legitimate startup use and is a data-drop by design.",
+            fail_hits + warn_hits,
+        )
+    if warn_hits:
         return _finding(
             "B166",
             WARN,
             "MCP server command/args reference a known paste/exfiltration host: "
-            + "; ".join(hits[:4]),
+            + "; ".join(warn_hits[:4]),
             "Review the flagged MCP server's own startup command/args before enabling it — "
             "a known paste/exfil host named in its OWN launch arguments (not just runtime "
             "traffic) is a strong signal the server is designed to exfiltrate data.",
-            hits,
+            warn_hits,
         )
     return _finding(
         "B166",

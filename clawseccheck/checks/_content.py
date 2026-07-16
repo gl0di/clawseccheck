@@ -510,7 +510,11 @@ _B63_SECRECY_RE = re.compile(
         r"do(?:n'?t|[ ]not)\s+(?:tell|inform|notify|alert|show|reveal|disclose|mention)(?:\s+(?:the\s+)?user)?"
         r"|(?:without|never)\s+(?:telling|informing|notifying|alerting|showing|revealing|mentioning)"
         r"|silently\s+(?:execute|run|perform|send|delete|install|download|modify|write|read"
-        r"|forward|transmit|exfiltrate|collect|upload|leak|copy|beacon|relay|deliver|grab|extract)"
+        r"|forward|transmit|exfiltrate|collect|upload|leak|copy|beacon|relay|deliver|grab|extract"
+        # B-224: HTTP-method exfil verbs ("silently POST the file contents to <url>") — the
+        # same silent-instruction shape, still gated on Signal-B + an outbound-exfil anchor
+        # (send verb → external destination), so "silently POST to the user" never anchors.
+        r"|post|put)"
         r"|suppress\s+(?:the\s+)?(?:output|response|notification|warning|error|log|message)"
         r"|hide\s+(?:this|the\s+(?:action|output|result|command|response))\s+(?:from\s+(?:the\s+)?user)"
         r"|keep\s+(?:this|it)\s+(?:secret|hidden|quiet|private)\s+(?:from\s+(?:the\s+)?user)"
@@ -2965,6 +2969,18 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
         nonlocal warn_has_unicode_reason
         norm = normalize_for_scan(text)
         raw_signals = obfuscation_signals(text)
+        # B-224: character-INSERTION stego (soft-hyphen / zero-width / bidi) is stripped by
+        # normalize_for_scan, so the de-obfuscated payload lands in `norm` itself, not in a
+        # separate decode variant. When such a reveal happened, `norm` is a genuine
+        # de-obfuscation reveal and must go through the silent-instruction check below — the
+        # hidden-character signal is the evasion corroborator, exactly as a decode is.
+        norm_is_destego = any(
+            s in (
+                "zero-width / invisible characters found",
+                "bidi-override / embedding controls found",
+            )
+            for s in raw_signals
+        )
         hidden_segments = _b58_hidden_segments(text)
         base64_variants = _b58_base64_variants(text)
 
@@ -3049,7 +3065,7 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
             # may legitimately embed an encoded attack sample, so it must not FAIL (C-135).
             if (
                 not hidden
-                and variant != norm
+                and (variant != norm or norm_is_destego)
                 and not base_defensive
                 and _b63_decoded_actionable(variant)
             ):
@@ -3656,6 +3672,26 @@ def _install_host_is_public_ip(host: str) -> bool:
     return False
 
 
+def _install_host_is_local(host: str) -> bool:
+    """True when *host* is loopback / private / LAN-internal — an operator's own homelab or
+    fleet-internal mirror, not an anonymous swappable supply-chain source. Covers private/
+    loopback IP literals (via `_install_host_is_public_ip` inverted) plus the `localhost`
+    name and the reserved LAN suffixes (`.local`, `.localhost`, `.internal`, `.lan`,
+    `.home.arpa`). C-229 / C-135: keeps `http://localhost:4873` / `http://192.168.x.x` (a
+    self-hosted verdaccio) at WARN instead of a spurious plaintext-transport FAIL."""
+    if not host:
+        return False
+    h = host.strip().strip("[]").lower()
+    if h == "localhost" or h.endswith(
+        (".local", ".localhost", ".internal", ".lan", ".home.arpa")
+    ):
+        return True
+    # An IP literal that is NOT a public IP is loopback/private/link-local/ULA/TEST-NET.
+    if (_INSTALL_IPV4_HOST_RE.match(h) or ":" in h):
+        return not _install_host_is_public_ip(h)
+    return False
+
+
 def _install_url_target(val) -> tuple[str | None, str | None]:
     """Return (scheme, host) ONLY for values that are literally URL-shaped (start with a
     scheme); ('', None)/(None, None) otherwise. A bare package coordinate never reaches
@@ -4140,7 +4176,10 @@ def _bad_provenance_url(val: str) -> bool:
     if v.lower().startswith("git+"):
         v = v[4:]
     scheme, host = _install_url_target(v)
-    if scheme in ("http", "ftp"):  # plaintext transport only — ftps is FTP-over-TLS (encrypted)
+    # Plaintext transport (http/ftp) FAILs — EXCEPT to a loopback/LAN-internal host, which is
+    # an operator's own mirror (a self-hosted verdaccio), not an anonymous swappable source
+    # (C-229 / C-135). ftps is FTP-over-TLS (encrypted), so it never reaches this leg.
+    if scheme in ("http", "ftp") and not _install_host_is_local(host):
         return True
     if host and _install_host_is_public_ip(host):
         return True
@@ -7503,11 +7542,21 @@ def check_symlink_escape(ctx: Context) -> Finding:
             # not this host happens to have ~/.ssh. So classify sensitivity FIRST; only a
             # non-sensitive dangling link is a genuine "can't assess" -> UNKNOWN.
             sclass = _symlink_target_sensitive(real)
-            if sclass:
+            in_tree = real == contain_root or contain_root in real.parents
+            if sclass and not in_tree:
+                # A symlink that ESCAPES the workspace/home tree into a sensitive store is the
+                # exfil primitive — reading through it hands the skill a secret it could not
+                # otherwise reach.
                 fails.append(f"{rel} -> {real} [{sclass}]")
+            elif sclass and in_tree:
+                # C-228 / C-135: a sensitive-named target that stays INSIDE the tree the agent
+                # was already handed (a monorepo `apps/api/.env -> ../../.env`, a direnv
+                # `sub/.envrc -> ../.envrc`) adds no new reach — the file is already readable
+                # without the link. Not an escape; surface as WARN for a human look, never FAIL.
+                warns.append(f"{rel} -> {real} [{sclass}, stays in-tree]")
             elif not real.exists():  # follows the link: False == dangling
                 unknowns.append(f"{rel} -> {raw} (broken / dangling)")
-            elif real == contain_root or contain_root in real.parents:
+            elif in_tree:
                 pass  # PASS: stays inside the skill/workspace tree
             else:
                 warns.append(f"{rel} -> {real} (escapes the skill/workspace tree)")
