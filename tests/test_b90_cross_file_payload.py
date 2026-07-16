@@ -403,6 +403,50 @@ def test_punctuation_free_prose_body_is_not_collected_as_a_fragment():
     assert check_cross_file_payload(ctx).status == PASS
 
 
+# ---------------------------------------------------------------------------
+# B-225: cap_hit must not leak across skills -- an earlier skill tripping its
+# own literal cap must not truncate a LATER skill's scan too.
+# ---------------------------------------------------------------------------
+
+
+def _cap_tripping_py_source() -> str:
+    from clawseccheck.checks._content import _XFILE_LITERAL_CAP
+
+    # cap+50 quoted, pure-base64-alphabet literals (>=8 chars each) so this single
+    # skill's OWN literal-collection loop hits _XFILE_LITERAL_CAP on its own.
+    literals = ", ".join(f'"s{i:07d}"' for i in range(_XFILE_LITERAL_CAP + 50))
+    return f"x = [{literals}]\n"
+
+
+def test_cap_hit_in_one_skill_does_not_truncate_a_later_skills_scan():
+    ctx = Context(home=Path("/nonexistent"))
+    # "aaa_first" iterates before "zzz_second" (dict insertion order).
+    ctx.installed_skills = {"aaa_first": "# skill", "zzz_second": "# skill"}
+    ctx.installed_skill_py = {
+        "aaa_first": [("big.py", _cap_tripping_py_source())],
+        "zzz_second": [
+            ("a.py", f'part1 = "{_FRAG1}"\n'),
+            ("b.py", f'part2 = "{_FRAG2}"\n'),
+            ("c.py", _SINK),
+        ],
+    }
+    f = check_cross_file_payload(ctx)
+    # zzz_second's genuine split payload must still be found -- before the fix,
+    # aaa_first's cap_hit staying True broke out of zzz_second's own source loop
+    # after its first file, silently truncating (and missing) the split.
+    assert f.status == WARN
+    assert "zzz_second" in f.detail
+
+
+def test_cap_disclosure_still_fires_when_a_skill_trips_its_own_cap():
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.installed_skills = {"aaa_first": "# skill"}
+    ctx.installed_skill_py = {"aaa_first": [("big.py", _cap_tripping_py_source())]}
+    f = check_cross_file_payload(ctx)
+    assert f.status == UNKNOWN
+    assert "cap" in f.detail.lower()
+
+
 def test_uniform_width_wordlist_residual_case_still_gated_by_decode_shape():
     # The residual edge case identified for the line-wrap-uniformity signal: a
     # punctuation-free word list whose lines happen to be EXACTLY the same width

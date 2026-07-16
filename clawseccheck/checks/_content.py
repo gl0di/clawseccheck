@@ -5167,8 +5167,11 @@ def check_cross_file_payload(ctx: Context) -> Finding:
             "Run on a skill dir (--vet) or a host with installed skills.",
         )
     warns: list[str] = []
-    cap_hit = False
+    any_cap_hit = False
     for name in skills:
+        # B-225: each skill gets its OWN cap budget -- reset per-iteration so an earlier
+        # skill hitting the cap doesn't truncate every later skill's scan too.
+        cap_hit = False
         sources: list = []
         for attr in ("installed_skill_py", "installed_skill_shell", "installed_skill_js"):
             sources.extend(getattr(ctx, attr, {}).get(name, []))
@@ -5187,6 +5190,7 @@ def check_cross_file_payload(ctx: Context) -> Finding:
                     frags.append(content)
                     if len(frags) >= _XFILE_LITERAL_CAP:
                         cap_hit = True
+                        any_cap_hit = True
                         break
             if cap_hit:
                 break
@@ -5226,7 +5230,7 @@ def check_cross_file_payload(ctx: Context) -> Finding:
             "is not something you deliberately embedded, treat the skill as malicious.",
             warns,
         )
-    if cap_hit:
+    if any_cap_hit:
         return _custom(
             "B90",
             MEDIUM,
@@ -5326,8 +5330,11 @@ def check_cross_file_plaintext_payload(ctx: Context) -> Finding:
             "Run on a skill dir (--vet) or a host with installed skills.",
         )
     warns: list[str] = []
-    cap_hit = False
+    any_cap_hit = False
     for name in skills:
+        # B-225: each skill gets its OWN cap budget -- reset per-iteration so an earlier
+        # skill hitting the cap doesn't truncate every later skill's scan too.
+        cap_hit = False
         sources: list = []
         for attr in ("installed_skill_py", "installed_skill_shell", "installed_skill_js"):
             sources.extend(getattr(ctx, attr, {}).get(name, []))
@@ -5344,6 +5351,7 @@ def check_cross_file_plaintext_payload(ctx: Context) -> Finding:
             frags.append(content)
             if len(frags) >= _XFILE_LITERAL_CAP:
                 cap_hit = True
+                any_cap_hit = True
                 break
         if not cap_hit:
             for _rel, src in sources:
@@ -5353,6 +5361,7 @@ def check_cross_file_plaintext_payload(ctx: Context) -> Finding:
                         frags.append(content)
                         if len(frags) >= _XFILE_LITERAL_CAP:
                             cap_hit = True
+                            any_cap_hit = True
                             break
                 if cap_hit:
                     break
@@ -5404,7 +5413,7 @@ def check_cross_file_plaintext_payload(ctx: Context) -> Finding:
             "something you deliberately embedded, treat the skill as malicious.",
             warns,
         )
-    if cap_hit:
+    if any_cap_hit:
         return _custom(
             "B154",
             MEDIUM,
