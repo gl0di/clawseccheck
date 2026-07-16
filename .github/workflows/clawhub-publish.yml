@@ -32,9 +32,9 @@ jobs:
     # repo Settings → Environments → "release" for this gate to actually block.
     environment: release
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: "20"
 
@@ -153,6 +153,9 @@ jobs:
                 SECURITY.md SECURITY_MODEL.md CHANGELOG.md pyproject.toml docs audit.py \
                 dist/clawseccheck/
           find dist/clawseccheck -name '__pycache__' -type d -prune -exec rm -rf {} + || true
+          # Repo-page images (README banner/screenshot + their sources) are for GitHub only —
+          # they'd add ~650KB of dead weight to every skill install.
+          rm -rf dist/clawseccheck/docs/assets
           echo "Staged for publish:" && ls -1 dist/clawseccheck
 
       - name: Publish skill

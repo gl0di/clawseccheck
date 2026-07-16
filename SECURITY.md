@@ -4,8 +4,9 @@
 
 | Version | Supported |
 |---------|-----------|
-| latest  | yes       |
-| older   | best-effort patch on request |
+| Latest release | Fully supported |
+| Previous minor release | Critical security fixes only |
+| Older releases | Unsupported — please update (`openclaw skills update clawseccheck`) |
 
 ## Reporting a vulnerability
 
@@ -46,12 +47,14 @@ data-handling/redaction discipline, tamper-evident audit trail, and the forward-
 policy for any future fix/apply mode, see [`SECURITY_MODEL.md`](SECURITY_MODEL.md).
 
 In-scope issues include:
+
 - Logic bugs that produce false PASS results for genuinely unsafe configs.
 - Output channels that could be exploited for prompt injection (e.g. `--prompts`).
 - Any code path that reads, writes, or executes more than the documented scope.
 - Dependency or supply-chain issues in the publish workflow.
 
 Out of scope:
+
 - Vulnerabilities in OpenClaw itself (report those to the OpenClaw project).
 - Issues only reproducible by a malicious local user who already has filesystem access.
 
@@ -60,18 +63,9 @@ Out of scope:
 We aim to acknowledge reports within 5 business days and to release a patch within 30
 days for confirmed issues. Complex issues may take longer; we will communicate delays.
 
-## Pre-release hygiene and release checklist
+## Pre-release hygiene
 
-Before publishing a new release, run local checks first:
-- `python3 -m ruff check .`
-- `python3 -m pytest`
-- targeted tests for files changed in the release scope.
-
-Then update and verify release-facing documentation files:
-- `CHANGELOG.md`
-- `README.md`
-- `SECURITY.md`
-- `SECURITY_MODEL.md`
-- `SKILL.md`
-
-This prevents release drift (code/review/protocol mismatch) and keeps the operational security guidance aligned with shipped behavior.
+The full maintainer release checklist (tests, doc alignment, dependency review,
+signed release assets) lives in [`docs/RELEASING.md`](docs/RELEASING.md). It
+exists to prevent release drift — code, docs, and operational security guidance
+must always describe the same shipped behavior.

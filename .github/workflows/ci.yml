@@ -21,8 +21,8 @@ jobs:
           - {os: ubuntu-latest, python-version: "3.12"}
           - {os: macos-latest, python-version: "3.12"}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install test tools (the package itself has zero runtime deps)
@@ -46,17 +46,18 @@ jobs:
   markdownlint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - name: Install markdownlint-cli
         run: npm install -g markdownlint-cli@0.44.0
       - name: Lint Markdown
+        # CHANGELOG.md stays ignored (high-churn release log, repeated structures).
+        # SKILL.md/SECURITY.md/SECURITY_MODEL.md are linted like everything else —
+        # SKILL.md relaxes two formatting-only rules via an inline
+        # markdownlint-disable comment instead of a whole-file ignore.
         run: |
           markdownlint '**/*.md' \
             --ignore node_modules \
             --ignore CHANGELOG.md \
-            --ignore SKILL.md \
-            --ignore SECURITY.md \
-            --ignore SECURITY_MODEL.md \
             --config .markdownlint.jsonc
 
   # -- L3: dependency review (PRs only) ----------------------------------------
@@ -64,8 +65,8 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'pull_request' }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48  # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
         with:
           fail-on-severity: high
 
@@ -73,14 +74,23 @@ jobs:
   secret-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0
       - name: Install gitleaks
+        # Pinned version AND pinned SHA-256: the tarball is fetched from a GitHub
+        # release at runtime, so verify its digest before anything from it can run
+        # (same supply-chain discipline as the SHA-pinned actions). Bump SHA256
+        # together with VERSION — it's the linux_x64 line of the release's
+        # gitleaks_<VERSION>_checksums.txt.
         run: |
           VERSION="8.27.2"
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
-            | tar -xz -C /usr/local/bin gitleaks
+          SHA256="141c3b2dede46d8b3a53b47116da756bd223decc0374797559a6b50ecba5590c"
+          curl -sSfL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
+          echo "${SHA256}  gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf gitleaks.tar.gz -C /usr/local/bin gitleaks
+          rm gitleaks.tar.gz
       - name: Scan for secrets (gitleaks)
         run: gitleaks detect --source=. --config=.gitleaks.toml --redact --no-banner
 
@@ -88,7 +98,7 @@ jobs:
   commit-integrity:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0
 

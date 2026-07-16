@@ -12,3 +12,10 @@ updates:
       - "ci"
     commit-message:
       prefix: "ci"
+    # Bundle all GitHub Actions bumps into a single weekly PR instead of one
+    # PR per action, so they no longer pile up and conflict against each other
+    # in the shared workflow files. Grouped bumps still keep the SHA-pin (E-028).
+    groups:
+      github-actions:
+        patterns:
+          - "*"

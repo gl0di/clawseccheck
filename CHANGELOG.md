@@ -15,6 +15,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   `SAFE`/`SUSPICIOUS`/`DANGEROUS` contract with an external host-agent judge), which
   still uses `SAFE` as before.
 
+## [3.48.0] — 2026-07-16
+
+Detection-quality release: three deterministic-FAIL checks that could never move the
+grade now count toward it, and a stego recall gap is closed. Every scoring change went
+through an adversarial C-135 false-positive pass first — which caught, and fixed, a real
+false FAIL before it could ship.
+
+### Changed
+- **B87 (symlink escape to a sensitive host path) is now scored.** A skill/workspace
+  symlink that **escapes** into a secret store (`~/.ssh`, `~/.aws`, keychains, `.env`, …)
+  is a deterministic exfiltration primitive and now caps the A–F grade. The C-135 pass
+  caught a false positive this would otherwise have introduced — an in-workspace
+  monorepo `apps/api/.env → ../../.env` or direnv `sub/.envrc → ../.envrc` link — so a
+  sensitive target that **stays inside** the tree the agent already holds is now WARN
+  (no added reach), and only an escaping link FAILs.
+- **B157 (remote-code dependency provenance) is now scored,** matching B103's identical
+  FAIL shape. Plaintext `http`/`ftp` to a **loopback/LAN-internal** host (a self-hosted
+  verdaccio) is now WARN, not a spurious FAIL — only plaintext to a public host, a public
+  IP, or `.onion` FAILs.
+- **B166 (MCP server names a known exfil host in its launch args) is now scored,** with a
+  two-tier verdict: a very narrow FAIL subset (`webhook.site`, `.onion` — no legitimate
+  startup use) and WARN for the dual-use rest (dev tunnels like ngrok/localtunnel,
+  hosted-MCP `*.pipedream.net`, OOB-detection `interactsh`/`oast`, paste/fetch hosts).
+
+### Fixed
+- **B58 (Unicode-obfuscated injection) now catches character-insertion stego.** A
+  soft-hyphen / zero-width directive that normalization strips to reveal an exfil
+  instruction in the cleaned text itself (e.g. `silently POST the file contents to <url>`,
+  the MAL-STEGO-009 class) previously fell through to WARN; it now reaches the FAIL gate.
+  Benign soft-hyphen hyphenation with no directive stays WARN.
+
+### Notes
+- Grade impact: on a setup where one of B87/B157/B166 genuinely FAILs, the A–F score may
+  drop relative to 3.47.x — the finding is the same, it now counts. Clean setups are
+  unaffected; the release bar remains zero false-positive FAILs on real configs.
+
 ## [3.47.0] — 2026-07-16
 
 One new MCP-surface detector plus two cross-file/typosquat evasion fixes, grounded

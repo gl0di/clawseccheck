@@ -682,16 +682,16 @@ CATALOG: list[CheckMeta] = [
     # *.onion, ...) named in an MCP server's own command/args -- the server's
     # identity-level startup config itself references an untrusted drop point, before
     # the server is ever run. Grounded against the real OASB corpus (v2.0, 2988 benign
-    # / 166 malicious mcp_tool samples): 0 benign false positives, narrow recall (1/166)
-    # -- a precision-first, low-yield signal. Advisory: a config-level string match
-    # can't prove intent on its own, so it's never scored and never escalates past WARN.
+    # / 166 malicious mcp_tool samples): 0 benign false positives. C-230: scored, because
+    # a very-narrow FAIL tier (webhook.site / .onion, `_B166_FAIL_HOST_RE`) has no
+    # legitimate startup use; the broader dual-use hosts stay WARN inside the same check.
     CheckMeta(
         "B166",
         "MCP server command/args references a known paste/exfiltration host",
         HIGH,
-        "advisory",
+        "hardening",
         "Data Exfiltration / Credential Leak",
-        scored=False,
+        scored=True,
         confidence="MEDIUM",
         surface="mcp",
     ),
@@ -712,14 +712,15 @@ CATALOG: list[CheckMeta] = [
     # B157 (F-117): a skill's package.json declares a dependency VALUE that is a non-registry /
     # remote-code source (git URL, remote tarball, github shorthand, file:/link:/npm: alias).
     # FAIL only for unverifiable provenance (plaintext http / raw public IP / .onion); else
-    # WARN. Advisory / unscored on first landing (promote after a real-fleet C-135 pass).
+    # WARN. Scored since C-229: the FAIL shape is identical to B103's (already scored), and
+    # the promised real-fleet C-135 pass confirmed zero false-positive FAILs.
     CheckMeta(
         "B157",
         "Non-registry / remote-code dependency source in a skill package.json",
         HIGH,
-        "advisory",
+        "hardening",
         "Supply Chain",
-        scored=False,
+        scored=True,
         confidence="MEDIUM",
         surface="skills",
     ),
@@ -1030,15 +1031,17 @@ CATALOG: list[CheckMeta] = [
     # (~/.ssh, ~/.aws, keychains, browser profiles, .env, credential files) is a
     # data-exfiltration primitive (TAM-07 symlink escape). F-061 already traverses
     # such links *safely* (never followed); B87 turns the link itself into a verdict.
-    # Advisory (scored=False) so it never perturbs the static grade; the verdict is
-    # dynamic (FAIL sensitive / WARN escape / PASS intra-tree / UNKNOWN dangling).
+    # Scored since C-228: the FAIL condition is a deterministic realpath-into-secret-store
+    # fact with no dual-use ambiguity once it fires (reading through the link hands the
+    # target's contents to the skill), so it belongs in the grade denominator. The verdict
+    # stays dynamic (FAIL sensitive / WARN escape / PASS intra-tree / UNKNOWN dangling).
     CheckMeta(
         "B87",
         "Symlink escape to sensitive host path (skill / workspace)",
         HIGH,
-        "advisory",
+        "hardening",
         "Weak Isolation / Path Escape",
-        scored=False,
+        scored=True,
         confidence="HIGH",
         surface="skills",
     ),

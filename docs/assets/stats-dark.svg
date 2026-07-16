@@ -1,0 +1,67 @@
+<svg width="1240" height="128" viewBox="0 0 1240 128" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="130+ security checks - 18 attack-chain detectors - 4,900+ automated tests - 0 dependencies - 0 network calls">
+  <title>130+ security checks - 18 attack-chain detectors - 4,900+ automated tests - 0 dependencies - 0 network calls</title>
+  <style>
+    text { font-family: -apple-system, "Segoe UI", Roboto, "DejaVu Sans", Helvetica, Arial, sans-serif; }
+    .card { opacity: 0; animation: rise .65s cubic-bezier(.2,.7,.3,1) forwards; }
+    .c0 { animation-delay: 0.00s; }
+    .c1 { animation-delay: 0.08s; }
+    .c2 { animation-delay: 0.16s; }
+    .c3 { animation-delay: 0.24s; }
+    .c4 { animation-delay: 0.32s; }
+    .num { font-weight: 800; font-size: 36px; animation: glow 2.8s ease-in-out infinite; }
+    .c0 .num { animation-delay: 0.00s; }
+    .c1 .num { animation-delay: 0.35s; }
+    .c2 .num { animation-delay: 0.70s; }
+    .c3 .num { animation-delay: 1.05s; }
+    .c4 .num { animation-delay: 1.40s; }
+    .icon { font-size: 24px; }
+    .label { font-size: 15px; fill: #8b949e; letter-spacing: .3px; }
+    @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+    @keyframes glow { 0%, 100% { filter: drop-shadow(0 0 0px transparent); } 50% { filter: drop-shadow(0 0 7px); } }
+    @media (prefers-reduced-motion: reduce) {
+      .card { animation: none; opacity: 1; }
+      .num { animation: none; }
+      .scan { display: none; }
+    }
+  </style>
+  <g class="card c0">
+    <text class="icon" x="124.0" y="34" text-anchor="middle">🔍</text>
+    <text class="num" x="124.0" y="78" text-anchor="middle" fill="#ff6b5e" style="color:#ff6b5e">130+</text>
+    <text class="label" x="124.0" y="103" text-anchor="middle">security checks</text>
+  </g>
+  <line x1="248.0" y1="26" x2="248.0" y2="96" stroke="#30363d" stroke-width="1"/>
+  <g class="card c1">
+    <text class="icon" x="372.0" y="34" text-anchor="middle">⛓️</text>
+    <text class="num" x="372.0" y="78" text-anchor="middle" fill="#e8a33d" style="color:#e8a33d">18</text>
+    <text class="label" x="372.0" y="103" text-anchor="middle">attack-chain detectors</text>
+  </g>
+  <line x1="496.0" y1="26" x2="496.0" y2="96" stroke="#30363d" stroke-width="1"/>
+  <g class="card c2">
+    <text class="icon" x="620.0" y="34" text-anchor="middle">🧪</text>
+    <text class="num" x="620.0" y="78" text-anchor="middle" fill="#4ec96e" style="color:#4ec96e">4,900+</text>
+    <text class="label" x="620.0" y="103" text-anchor="middle">automated tests</text>
+  </g>
+  <line x1="744.0" y1="26" x2="744.0" y2="96" stroke="#30363d" stroke-width="1"/>
+  <g class="card c3">
+    <text class="icon" x="868.0" y="34" text-anchor="middle">📦</text>
+    <text class="num" x="868.0" y="78" text-anchor="middle" fill="#6ca9f0" style="color:#6ca9f0">0</text>
+    <text class="label" x="868.0" y="103" text-anchor="middle">dependencies</text>
+  </g>
+  <line x1="992.0" y1="26" x2="992.0" y2="96" stroke="#30363d" stroke-width="1"/>
+  <g class="card c4">
+    <text class="icon" x="1116.0" y="34" text-anchor="middle">🔌</text>
+    <text class="num" x="1116.0" y="78" text-anchor="middle" fill="#ff6b5e" style="color:#ff6b5e">0</text>
+    <text class="label" x="1116.0" y="103" text-anchor="middle">network calls</text>
+  </g>
+  <rect x="60" y="118" width="1120" height="2" rx="1" fill="#30363d" opacity=".55"/>
+  <g class="scan">
+    <linearGradient id="sweep" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e34234" stop-opacity="0"/>
+      <stop offset=".5" stop-color="#e34234" stop-opacity=".9"/>
+      <stop offset="1" stop-color="#e34234" stop-opacity="0"/>
+    </linearGradient>
+    <rect y="117" width="220" height="4" rx="2" fill="url(#sweep)">
+      <animate attributeName="x" values="-160;1180" dur="3.6s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+</svg>

@@ -795,17 +795,21 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
 ### B166 - MCP server command/args references a known paste/exfiltration host
 
 - Severity: HIGH
-- Block: advisory
+- Block: hardening
 - Framework: Data Exfiltration / Credential Leak
-- Scored: no
+- Scored: yes
 - Confidence: MEDIUM
 - OWASP: none
 - What it checks: MCP server command/args references a known paste/exfiltration host
 - Remediation:
   - none
+
+## Advisory checks
 
 ### B158 - Declared skill-load source not present on disk (unaudited auto-load surface)
 
@@ -819,19 +823,19 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
 ### B157 - Non-registry / remote-code dependency source in a skill package.json
 
 - Severity: HIGH
-- Block: advisory
+- Block: hardening
 - Framework: Supply Chain
-- Scored: no
+- Scored: yes
 - Confidence: MEDIUM
 - OWASP: none
 - What it checks: Non-registry / remote-code dependency source in a skill package.json
 - Remediation:
   - none
-
-## Hardening checks
 
 ### B159 - Self-privilege-escalation directive in skill prose
 
@@ -1143,17 +1147,21 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
 ### B87 - Symlink escape to sensitive host path (skill / workspace)
 
 - Severity: HIGH
-- Block: advisory
+- Block: hardening
 - Framework: Weak Isolation / Path Escape
-- Scored: no
+- Scored: yes
 - Confidence: HIGH
 - OWASP: none
 - What it checks: Symlink escape to sensitive host path (skill / workspace)
 - Remediation:
   - none
+
+## Advisory checks
 
 ### B88 - SKILL.md frontmatter authoring hygiene (tag-shaped values / cross-skill squatting)
 
