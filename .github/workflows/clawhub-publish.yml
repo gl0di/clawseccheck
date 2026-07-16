@@ -153,6 +153,9 @@ jobs:
                 SECURITY.md SECURITY_MODEL.md CHANGELOG.md pyproject.toml docs audit.py \
                 dist/clawseccheck/
           find dist/clawseccheck -name '__pycache__' -type d -prune -exec rm -rf {} + || true
+          # Repo-page images (README banner/screenshot + their sources) are for GitHub only —
+          # they'd add ~650KB of dead weight to every skill install.
+          rm -rf dist/clawseccheck/docs/assets
           echo "Staged for publish:" && ls -1 dist/clawseccheck
 
       - name: Publish skill

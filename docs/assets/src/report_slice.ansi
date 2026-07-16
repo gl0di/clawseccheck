@@ -1,0 +1,26 @@
+🦞 ClawSecCheck - OpenClaw Security Audit
+============================================
+Score: 49/100   Grade: [1mF[0m
+████████[90m░░░░░░░░[0m
+(capped from 61 - open CRITICAL finding)
+Tamper posture: F (2/100 — tamper-defense sub-grade over B20/B22/B42/B78/B85/B86/C5 + monitor state)
+Why 61/100: weighted pass-rate over 31 scored checks — 14 pass, 10 warn (half weight), 7 fail. UNKNOWN/advisory checks are excluded.
+(7 FAIL, 10 WARN — incl. 3 CRITICAL, 6 HIGH, 5 MEDIUM, 3 LOW)
+[2m        ⋯[0m
+20 issue(s), grouped by area — most urgent first within each:
+
+┌──────────────────────────────
+│ [1mExposure & Network[0m — 4 issue(s)
+└──────────────────────────────
+🔴 [31;1mCRITICAL[0m  Gateway exposure & channel authentication
+    why: gateway.bind=0.0.0.0 exposed with auth.mode=none; gateway.tailscale.mode=funnel exposes the gateway publicly; channel 'telegram' has an open dm/group policy (anyone can command it)
+
+🟠 [31;1mHIGH[0m  Control-plane mutation reachability via gateway
+    why: Gateway is network-exposed (bind=0.0.0.0, auth.mode='none') and control-plane tools are not explicitly in gateway.tools.deny — an authenticated caller could reach mutation endpoints
+[2m        ⋯[0m
+
+┌──────────────────────────────
+│ [1mPrivilege & Execution[0m — 5 issue(s)
+└──────────────────────────────
+🔴 [31;1mCRITICAL[0m  Lethal Trifecta (untrusted input × sensitive data × outbound)
+    why: Active legs 3/3: untrusted input, sensitive data, outbound actions. Rule: keep ≤2 of 3. All three legs are active — your agent takes outside input, can reach sensitive data, and can act outbound; one injected prompt is enough to exfiltrate everything.
