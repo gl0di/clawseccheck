@@ -67,6 +67,11 @@ _RING_EXEMPT = {
     "check_cross_skill_combined_effect",  # B105 (B-096) — correlates ACROSS installed
     # skills; ctx.installed_skills only ever has 2+ entries at full-audit scope, so the
     # single-entry --vet context makes the correlation structurally impossible there.
+    "check_log_threat_hunt",    # B164 (F-124/E-044) — content-scans the agent's own LOG
+    # CORPUS (audit posture), not per-skill content. C-221's cross-artifact axis reads
+    # installed_skills ONLY to build IOC tokens correlated against that corpus; under --vet
+    # there is a single skill and no log corpus, so the axis is structurally inert — same
+    # full-audit-scope reason as check_cross_skill_combined_effect above.
 }
 
 

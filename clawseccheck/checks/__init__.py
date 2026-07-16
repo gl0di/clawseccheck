@@ -138,7 +138,7 @@ from ._host import (
     check_systemd_persistence,
 )
 
-from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has_remote, _mcp_servers, _mcp_url_is_local, _read_jsonl_tail,)
+from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has_remote, _mcp_servers, _mcp_url_is_local, _read_jsonl_tail, correlation_indicators, _CORR_INDICATOR_CAP,)
 from ._egress import (
     _EXT_SKILL_HINTS,
     _USER_CONTENT_HOSTS,

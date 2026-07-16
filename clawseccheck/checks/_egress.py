@@ -31,10 +31,12 @@ from ._shared import (
     _finding,
     _has_approval_gate,
     _hint,
+    _KNOWN_EXFIL_HOST_RE,
     _mcp_has_remote,
     _mcp_servers,
     _mcp_url_is_local,
     _read_jsonl_tail,
+    correlation_indicators,
     parse_bind_host,
 )
 
@@ -1031,6 +1033,7 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     # the function body instead of at module top (see checks/_vet.py's comment on it).
     # logdiscovery.py has no such dependency, but is imported the same way for symmetry.
     from ..logdiscovery import discover_log_sinks  # noqa: PLC0415
+    from ..logsafe import redact  # noqa: PLC0415
     from ..logscan import scan_log_file  # noqa: PLC0415
     from ..scanbudget import audit_deadline  # noqa: PLC0415
 
@@ -1046,6 +1049,13 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
             "logging.file so a future run has a log corpus to threat-hunt.",
         )
 
+    # C-221: cross-artifact correlation — a skill NAMING a high-specificity IOC (a known
+    # drop-host or a credential/secret path in its own text) AND that same IOC APPEARING
+    # in the agent's own log corpus is strong "declared a target and it was actually used"
+    # evidence, folded into B164 as an additional corroboration axis (never its own check;
+    # never FAIL; scored=False throughout, same as every other B164 signal).
+    skill_iocs = correlation_indicators(ctx.installed_skills)
+
     corroborated: dict[str, set] = {}
     all_samples: list[str] = []
     any_scanned = False
@@ -1055,7 +1065,7 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
 
     for sink in sinks:
         deadline = audit_deadline(_LOG_HUNT_PER_FILE_BUDGET_S)
-        result = scan_log_file(sink, deadline)
+        result = scan_log_file(sink, deadline, skill_iocs)
         any_truncated = any_truncated or result.truncated
         any_timed_out = any_timed_out or result.timed_out
         if result.bytes_scanned == 0:
@@ -1063,7 +1073,8 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         any_scanned = True
 
         nonzero = {cls for cls, n in result.counts.items() if n > 0}
-        if not nonzero:
+        cross = result.skill_ioc_hits
+        if not nonzero and not cross:
             continue
 
         world_readable = _other_can_reach_read(ctx.home, sink.path)
@@ -1072,11 +1083,34 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         except ValueError:
             rel = sink.path.name
 
-        if _log_hunt_corroborated(nonzero, world_readable):
-            corroborated[rel] = nonzero
+        # C-221 / C-135 refinement: a cross-artifact hit on a KNOWN DROP-HOST a skill
+        # named (webhook.site / ngrok / pastebin …) is genuinely low-base-rate and
+        # qualifies the sink on its own. A hit on a credential/secret PATH is NOT — helper
+        # skills legitimately name and read ~/.aws/credentials, ~/.npmrc, … and those paths
+        # legitimately appear in the log, so a path cross-hit is only a CORROBORATOR: it
+        # counts as one extra signal class (needs a co-occurring class to clear the WARN
+        # bar) and can never sole-trigger a WARN on a benign dual-use path (the C-135 false
+        # positive: an aws-cost-helper skill naming ~/.aws/credentials + a benign log line).
+        strong_cross = {t: n for t, n in cross.items() if _KNOWN_EXFIL_HOST_RE.search(t)}
+        weak_cross = {t: n for t, n in cross.items() if t not in strong_cross}
+        effective = set(nonzero)
+        if weak_cross:
+            effective.add("cross-artifact-ioc")
+
+        if strong_cross or _log_hunt_corroborated(effective, world_readable):
+            display = set(nonzero)
+            if cross:
+                display.add("cross-artifact-ioc")
+                for tok, count in list(cross.items())[:5]:
+                    skill = skill_iocs.get(tok, "?")
+                    all_samples.append(
+                        f"cross-artifact-ioc: skill '{skill}' names {redact(tok)} "
+                        f"— seen {count}x in {sink.kind}"
+                    )
+            corroborated[rel] = display
             all_samples.extend(result.samples[:5])
         else:
-            isolated_hits += len(nonzero)
+            isolated_hits += len(nonzero) + len(weak_cross)
 
     if not any_scanned:
         return _finding(

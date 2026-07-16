@@ -280,6 +280,51 @@ _SECRET_PATH_RE = re.compile(
 )
 
 
+_CORR_INDICATOR_CAP = 256
+_MIN_CORR_INDICATOR_LEN = 4
+
+
+def _normalize_corr_token(tok: str) -> str:
+    """Lowercase + strip a leading $HOME/ / ~/ / ~ so a skill-declared path/host matches
+    the same IOC as it appears in a log line (membership test only)."""
+    t = tok.strip().strip(".,;:\"'`)(")
+    for prefix in ("$HOME/", "~/", "~"):
+        if t.startswith(prefix):
+            t = t[len(prefix):]
+            break
+    return t.lower()
+
+
+def correlation_indicators(installed_skills):
+    """Map each HIGH-SPECIFICITY IOC an installed skill NAMES -> the skill naming it (C-221).
+
+    Deliberately narrower than trajaudit.skill_indicators: only tokens whose appearance in
+    the agent's OWN log corpus is strong cross-artifact evidence — credential-shaped paths
+    (_CRED_RE), secret-named paths WITH a '/' separator (_SECRET_PATH_RE + the B-157 filter),
+    and KNOWN drop-point hosts (_KNOWN_EXFIL_HOST_RE). The bare _EXFIL_RE verbs
+    (curl/wget/fetch/base64/POST) are EXCLUDED — base-rate noise in any web/exec-capable
+    agent's logs. Keys are normalized (tilde-stripped, lowercased) for a case-insensitive
+    substring membership test; values are the declaring skill name. Capped at
+    _CORR_INDICATOR_CAP entries.
+    """
+    out = {}
+    for name, text in (installed_skills or {}).items():
+        if not isinstance(text, str):
+            continue
+        for rx in (_CRED_RE, _SECRET_PATH_RE, _KNOWN_EXFIL_HOST_RE):
+            for m in rx.finditer(text):
+                raw = m.group(0).strip().strip(".,;:\"'`)(")
+                if rx is _SECRET_PATH_RE and "/" not in raw:
+                    continue
+                key = _normalize_corr_token(raw)
+                if len(key) < _MIN_CORR_INDICATOR_LEN or key in out:
+                    continue
+                out[key] = str(name)
+                if len(out) >= _CORR_INDICATOR_CAP:
+                    return out
+    return out
+
+
 INPUT_TOOL_HINTS = (
     "email",
     "imap",

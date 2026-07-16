@@ -74,6 +74,7 @@ class LogScanResult:
     truncated: bool = False
     bytes_scanned: int = 0
     timed_out: bool = False
+    skill_ioc_hits: dict = field(default_factory=dict)  # normalized-tok -> count (C-221)
 
 
 # C-135 (2026-07-15, real-fleet sanity pass against ~/.openclaw): a trajectory JSONL
@@ -249,11 +250,15 @@ def _scan_trajectory_record(result: LogScanResult, line: str, last_seq, last_ts)
     return last_seq, last_ts
 
 
-def scan_log_file(sink: LogSink, deadline) -> LogScanResult:
+def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None) -> LogScanResult:
     """Bounded, redacted content scan of one log sink. Read-only; never raises.
 
     ``deadline`` is a ``time.monotonic()``-relative deadline (e.g. from
     ``scanbudget.audit_deadline()``), or ``None`` to disable the per-file soft cap.
+    ``skill_iocs`` (optional) is a normalized-token -> declaring-skill-name map (see
+    ``checks.correlation_indicators``, C-221); when given, each line is also tested for
+    substring membership of those tokens — a cross-artifact correlation signal — without
+    ever storing the raw line, only the already-vetted token + a hit count.
     """
     result = LogScanResult(sink=sink)
     path = sink.path
@@ -295,6 +300,11 @@ def scan_log_file(sink: LogSink, deadline) -> LogScanResult:
                     continue
 
                 _scan_line_content(result, line, is_trajectory=is_trajectory)
+                if skill_iocs:
+                    low = line.lower()
+                    for tok in skill_iocs:
+                        if tok in low:
+                            result.skill_ioc_hits[tok] = result.skill_ioc_hits.get(tok, 0) + 1
                 if is_trajectory:
                     last_seq, last_ts = _scan_trajectory_record(result, line, last_seq, last_ts)
     except OSError:
