@@ -47,12 +47,14 @@ data-handling/redaction discipline, tamper-evident audit trail, and the forward-
 policy for any future fix/apply mode, see [`SECURITY_MODEL.md`](SECURITY_MODEL.md).
 
 In-scope issues include:
+
 - Logic bugs that produce false PASS results for genuinely unsafe configs.
 - Output channels that could be exploited for prompt injection (e.g. `--prompts`).
 - Any code path that reads, writes, or executes more than the documented scope.
 - Dependency or supply-chain issues in the publish workflow.
 
 Out of scope:
+
 - Vulnerabilities in OpenClaw itself (report those to the OpenClaw project).
 - Issues only reproducible by a malicious local user who already has filesystem access.
 
