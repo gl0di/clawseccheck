@@ -3,7 +3,22 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [3.49.0] — 2026-07-16
+
+Detection precision + recall release: a new cross-artifact log-correlation axis, a
+credential-read recall fix, and a cross-file scan-budget fix — each detection change
+vetted by an adversarial false-positive pass first — plus a clearer vet verdict word.
+
+### Added
+- **B164 (log threat-hunt) now correlates skill-declared IOCs against the log corpus.**
+  When an installed skill's own text names a high-specificity indicator (a known
+  drop-host, or a credential/secret-shaped path) and that same indicator turns up in the
+  agent's own log corpus, B164 flags it as cross-artifact corroboration. A known drop-host
+  match alone WARNs (genuinely low base rate); a credential/secret-path match is only a
+  corroborator that needs a co-occurring signal, so a helper skill legitimately naming and
+  reading `~/.aws/credentials` can't sole-trigger an alert. Advisory (`scored=False`, never
+  FAILs); evidence is the redacted indicator + declaring skill + count only — raw log
+  content is never emitted.
 
 ### Changed
 - **Breaking (output text): the vet dossier's own "SAFE" verdict word is now "NO KNOWN
@@ -27,6 +42,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   after upgrading may show a self-healing capability-drift entry for a skill that
   legitimately reads a secret env var (the `cred` capability was never recorded before);
   it reconciles on the next scan.
+- **B90 / B154 (cross-file split-payload scan) now give each skill its own scan budget.**
+  An early skill hitting the per-skill string-literal cap no longer truncates later skills'
+  scans in the same run — previously a silent false negative and a mis-attributed
+  cap-hit disclosure. Each skill now scans to its own cap, and the "scan truncated"
+  disclosure still fires if any skill trips it.
 
 ## [3.48.0] — 2026-07-16
 

@@ -2,9 +2,9 @@
 
 Honest map of what ClawSecCheck checks today, what it does **not** yet check, and where
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
-all (so they can't even surface as a finding). Updated 2026-07-13 for v3.38.1.
+all (so they can't even surface as a finding). Updated 2026-07-16 for v3.49.0.
 
-Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 123 checks
+Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 130 checks
 total; see `docs/CHECKS.md` for the full generated list, plus the
 combinational risk engine `RISK-01..RISK-19`, the install-time vetters `--vet` (B13 plus
 the content-security ring — B59–B105 / B135–B158 on an uninstalled skill; AST-, injection-,
