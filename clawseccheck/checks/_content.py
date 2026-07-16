@@ -1905,6 +1905,17 @@ _XFILE_WINDOW_MAX_FRAGS = 300  # above this, only the full in-order join is trie
 _XFILE_PLAINTEXT_LITERAL_RE = re.compile(r'"([^"\n]{2,60})"|\'([^\'\n]{2,60})\'')
 
 
+# C-225: bounded excerpt length for the leading/trailing edge slivers B154 pulls from a
+# `.txt`/`.json`/`.md` sibling DATA-file section (see `_xfile_plaintext_data_file_fragments`,
+# defined near B154's check function below). Deliberately sized to match
+# `_XFILE_PLAINTEXT_LITERAL_RE`'s own upper bound (60 chars) above, NOT B102's 512-char
+# `_B102_EDGE_SAMPLE`: B102 can afford a wide sample because it then narrows to a base64-
+# alphabet RUN inside it, but plaintext has no equivalent narrowing step here, so the
+# sample itself must already be short — the same "a genuinely evasive fragment must be
+# SHORT" reasoning documented in the comment block above this line.
+_XFILE_PLAINTEXT_DATA_EXCERPT_LEN = 60
+
+
 def _b102_leading_run(text: str) -> str:
     """The base64-alphabet run touching the START of *text*, if any (bounded sample)."""
     head = text[:_B102_EDGE_SAMPLE]
@@ -5119,6 +5130,51 @@ def check_cross_file_payload(ctx: Context) -> Finding:
     )
 
 
+def _xfile_plaintext_data_file_fragments(blob: str) -> list[str]:
+    """C-225: sibling DATA-file (`.txt`/`.json`/`.md`) section EDGE excerpts, mined as
+    candidate PLAINTEXT fragments for B154 the way `_xfile_data_file_fragments` above
+    already mines them for B90's base64 case — but structurally different, not a copy.
+
+    B90's leg takes a data-file section's WHOLE body (bounded only by needing to collapse
+    to a single base64 run) because a base64 fragment has no natural "must be short"
+    ceiling of its own. B154's plaintext fragments DO have one: `_XFILE_PLAINTEXT_LITERAL_RE`
+    caps an individual code-literal fragment at 60 chars precisely because a genuinely
+    evasive split command fragment must be SHORT (see the comment block above that regex —
+    a fragment long enough to already read as a sentence would trip its own file's scan and
+    defeat the point of splitting). Taking a data file's whole body unbounded here would
+    violate that same discipline: a real README/CHANGELOG hundreds of chars long would
+    dominate the bounded-window join B154 uses and multiply incidental-substring-collision
+    risk — this is B154's OWN governing C-135 finding (see the comment block in
+    `check_cross_file_plaintext_payload` below).
+
+    So this samples only a short excerpt from each EDGE of the section body — mirroring
+    B102's structural idea (a split-across-files evasion straddles a SECTION BOUNDARY, so
+    that is where to sample) but sized like B154's own fragment discipline
+    (`_XFILE_PLAINTEXT_DATA_EXCERPT_LEN`, 60 chars), not B102's 512-char `_B102_EDGE_SAMPLE`:
+    B102 can afford a wide sample because it then narrows to a base64-alphabet RUN inside
+    it; plaintext has no equivalent narrowing step, so the sample itself must already be
+    short.
+
+    A body no longer than the excerpt bound (or shorter than 2 chars) contributes its
+    whole content ONCE — taking both a "leading" and a "trailing" slice of the same short
+    string would just duplicate one fragment into two identical entries, artificially
+    inflating the window-join fragment count without adding any new information.
+    """
+    frags: list[str] = []
+    for m in _MANIFEST_HEADER_RE.finditer(blob):
+        if not m.group("name").strip().lower().endswith(_XFILE_DATA_EXTS):
+            continue
+        body = m.group("body").strip()
+        if len(body) < 2:
+            continue
+        if len(body) <= _XFILE_PLAINTEXT_DATA_EXCERPT_LEN:
+            frags.append(body)
+            continue
+        frags.append(body[:_XFILE_PLAINTEXT_DATA_EXCERPT_LEN])
+        frags.append(body[-_XFILE_PLAINTEXT_DATA_EXCERPT_LEN:])
+    return frags
+
+
 def check_cross_file_plaintext_payload(ctx: Context) -> Finding:
     """B154 — a PLAINTEXT (non-base64) command payload reassembled from string literals
     split across a skill's files: the split-across-files evasion vector for a payload
@@ -5134,6 +5190,14 @@ def check_cross_file_plaintext_payload(ctx: Context) -> Finding:
     reassembled TEXT shape — the same zero-FP bar as B90's post-decode judgment, just
     without the decode step. WARN-only: whether the fragments are actually concatenated
     at runtime is an inference, same as B90.
+
+    C-225: also mines bounded leading/trailing EDGE excerpts from `.txt`/`.json`/`.md`
+    sibling DATA-file sections (`_xfile_plaintext_data_file_fragments`) as an additional,
+    independent fragment source — mirroring B90/C-206's data_frags leg — so a split
+    plaintext payload hiding in a data file (not just `.py`/`.sh`/`.js` source) is no
+    longer a blind spot. Those excerpts are collected FIRST, ahead of code literals (same
+    ordering B90 uses), and flow through the exact same bounded-window-join +
+    `_b154_payload_straddles` seam-check logic — no parallel matching path.
 
     Bounded by the same literal cap (_XFILE_LITERAL_CAP) and window-join cap
     (_XFILE_WINDOW_MAX_FRAGS) as B90 — a cap hit discloses UNKNOWN, never a silent miss.
@@ -5153,19 +5217,31 @@ def check_cross_file_plaintext_payload(ctx: Context) -> Finding:
         sources: list = []
         for attr in ("installed_skill_py", "installed_skill_shell", "installed_skill_js"):
             sources.extend(getattr(ctx, attr, {}).get(name, []))
-        if not sources:
+        # C-225: sibling DATA-file (.txt/.json/.md) bounded edge excerpts are an additional
+        # fragment source, independent of whether the skill has any py/sh/js source at all
+        # (mirrors B90/C-206's data_frags leg for the base64 case).
+        data_frags = _xfile_plaintext_data_file_fragments(
+            skills.get(name, "") if isinstance(skills, dict) else ""
+        )
+        if not sources and not data_frags:
             continue
         frags: list[str] = []
-        for _rel, src in sources:
-            for m in _XFILE_PLAINTEXT_LITERAL_RE.finditer(src):
-                content = m.group(1) if m.group(1) is not None else m.group(2)
-                if content:
-                    frags.append(content)
-                    if len(frags) >= _XFILE_LITERAL_CAP:
-                        cap_hit = True
-                        break
-            if cap_hit:
+        for content in data_frags:
+            frags.append(content)
+            if len(frags) >= _XFILE_LITERAL_CAP:
+                cap_hit = True
                 break
+        if not cap_hit:
+            for _rel, src in sources:
+                for m in _XFILE_PLAINTEXT_LITERAL_RE.finditer(src):
+                    content = m.group(1) if m.group(1) is not None else m.group(2)
+                    if content:
+                        frags.append(content)
+                        if len(frags) >= _XFILE_LITERAL_CAP:
+                            cap_hit = True
+                            break
+                if cap_hit:
+                    break
         if len(frags) < 2:
             continue
         # Deliberately NO unbounded full-in-order-join candidate here (unlike B90): with no
