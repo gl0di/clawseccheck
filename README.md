@@ -16,7 +16,10 @@
 </p>
 
 <p align="center">
-  <b>🔍 130+ security checks · ⛓️ 18 attack-chain detectors · 🧪 4,900+ automated tests · 📦 0 dependencies · 🔌 100% offline</b>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
+    <img src="docs/assets/stats-light.svg" alt="130+ security checks · 18 attack-chain detectors · 4,900+ automated tests · 0 dependencies · 100% offline" width="900">
+  </picture>
 </p>
 
 ---
