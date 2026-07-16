@@ -33,7 +33,7 @@ Documentation = "https://github.com/gl0di/clawseccheck/blob/main/docs/README.md"
 Changelog = "https://github.com/gl0di/clawseccheck/blob/main/CHANGELOG.md"
 Security = "https://github.com/gl0di/clawseccheck/blob/main/SECURITY.md"
 Releases = "https://github.com/gl0di/clawseccheck/releases"
-ClawHub = "https://clawhub.ai/gl0di/clawseccheck"
+ClawHub = "https://clawhub.ai/gl0di/skills/clawseccheck"
 Issues = "https://github.com/gl0di/clawseccheck/issues"
 
 [project.scripts]

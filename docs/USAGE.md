@@ -9,12 +9,12 @@ nothing here ever changes your config, and nothing ever leaves your machine.
 ## Install & run
 
 ```bash
-openclaw skills install clawseccheck            # from ClawHub (the slug is unique)
+openclaw skills install @gl0di/clawseccheck     # from ClawHub
 openclaw skills install git:gl0di/clawseccheck  # or straight from GitHub
 # then ask your agent: "audit my OpenClaw setup with clawseccheck"
 ```
 
-Skill page on ClawHub: **<https://clawhub.ai/gl0di/clawseccheck>**.
+Skill page on ClawHub: **<https://clawhub.ai/gl0di/skills/clawseccheck>**.
 
 Or install it as a standalone CLI (zero dependencies):
 
@@ -612,7 +612,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 | | Resource | What it is |
 |---|---|---|
-| 🦞 | **[ClawHub — clawseccheck](https://clawhub.ai/gl0di/clawseccheck)** | This skill's page — install, current version, changelog |
+| 🦞 | **[ClawHub — clawseccheck](https://clawhub.ai/gl0di/skills/clawseccheck)** | This skill's page — install, current version, changelog |
 | 📚 | [awesome-openclaw-skills](https://github.com/VoltAgent/awesome-openclaw-skills) | 5,300+ community skills, organized by category |
 | 🤖 | [awesome-openclaw-agents](https://github.com/mergisi/awesome-openclaw-agents) | Agent templates, real-world use cases & integrations |
 | 🛡️ | [OpenClaw gateway security docs](https://docs.openclaw.ai/gateway/security) | The platform's own hardening guide |

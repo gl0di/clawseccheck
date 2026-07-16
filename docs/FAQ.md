@@ -372,7 +372,7 @@ whenever you have real reason to suspect the host, not just a routine run.
 - **Use a fresh install of ClawSecCheck itself for the clean-host scan.** Don't reuse a
   copy of the tool that could have been sitting on the compromised host — install it
   fresh on the clean machine (`pipx install git+https://github.com/gl0di/clawseccheck` or
-  a fresh `openclaw skills install clawseccheck`) so the scanner's own binary is one the
+  a fresh `openclaw skills install @gl0di/clawseccheck`) so the scanner's own binary is one the
   malware never had a chance to touch either.
 - **Verify the engine digest out-of-band.** Compare `clawseccheck --verify-self`'s output
   against `SHA256SUMS.txt` published on the corresponding GitHub Release, signed with
