@@ -65,6 +65,7 @@ from ..skillast import (
 )
 from ..skillast import simulate_effects as _simulate_effects
 from ..textnorm import (
+    _nfkc_ascii_fold_changed,
     confusable_in_ascii_context,
     normalize_for_scan,
     obfuscation_signals,

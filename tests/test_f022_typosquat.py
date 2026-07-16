@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from clawseccheck import audit
-from clawseccheck.catalog import HIGH, PASS, WARN
+from clawseccheck.catalog import FAIL, HIGH, PASS, WARN
 from clawseccheck.checks import (
     _KNOWN_NAMES,
     _dep_names_in_skill,
@@ -232,6 +232,105 @@ def test_vet_source_flags_cyrillic_homoglyph_owner():
     f = vet_source(f"git:github.com/{homoglyph}/mytool@main")
     assert f.status == WARN
     assert any("resembles well-known 'discord'" in e for e in f.evidence)
+
+
+# ---------------------------------------------------------------------------
+# B-222: fullwidth-Unicode (and other NFKC-compatibility-decomposable) clones
+# of a known name evaded _squat_hits exactly like B-217's Cyrillic/Greek
+# clones did -- NFKC (part of normalize_for_scan) folds fullwidth "ｄｉｓｃｏｒｄ"
+# straight to plain ASCII "discord", but the OLD is_homoglyph gate
+# (confusable_in_ascii_context) only recognizes the curated 10-entry
+# Cyrillic/Greek table, so it returned False and the exact-fold-match got
+# silently swallowed by the "already a known name" exemption. is_homoglyph
+# now also fires on `_nfkc_ascii_fold_changed`, a generic (non-enumerated)
+# signal: it needs no per-block list because NFKC-compatibility-decomposing
+# to ASCII is exactly what fullwidth / Mathematical Alphanumeric Symbols are
+# FOR by Unicode's own design, whereas genuine non-Latin scripts never
+# decompose to ASCII under NFKC at all.
+# ---------------------------------------------------------------------------
+
+def test_squat_hits_fullwidth_clone_fires():
+    # Exact repro from the bug report: fullwidth spelling of "discord" NFKC-folds
+    # straight to the literal ASCII string "discord".
+    fullwidth = "ｄｉｓｃｏｒｄ"
+    hits = _squat_hits([fullwidth])
+    assert hits, f"Fullwidth clone of 'discord' must fire: {hits}"
+    assert (fullwidth, "discord", 0) in hits
+
+
+def test_squat_hits_math_bold_clone_fires():
+    # A second, independent NFKC-compatibility-decomposable evasion shape
+    # (Mathematical Sans-Serif Bold, U+1D5EE block) -- proves the signal is
+    # genuinely generic, not a fullwidth-only special case.
+    bold = "".join(chr(0x1D5EE + (ord(c) - ord("a"))) for c in "discord")
+    hits = _squat_hits([bold])
+    assert hits, f"Mathematical bold clone of 'discord' must fire: {hits}"
+    assert (bold, "discord", 0) in hits
+
+
+def test_squat_hits_whole_script_cyrillic_sentence_still_silent_with_new_signal():
+    # Regression guard: a genuine multi-word Cyrillic sentence (ordinary i18n
+    # prose, not an impersonation attempt) must not be swept in by the new
+    # NFKC-fold signal either -- real Cyrillic text is not compatibility-
+    # decomposable to ASCII, unlike fullwidth/math-alphanumeric forms.
+    hits = _squat_hits(["привет как дела сегодня"])
+    assert not hits, f"Genuine Cyrillic prose must not fire: {hits}"
+
+
+def test_squat_hits_known_legit_neighbor_plain_ascii_still_silent():
+    # C-135 regression guard (mirrors B-217's own adversarial pass): the new
+    # signal must never fire on plain ASCII input, so it can never break the
+    # B-185 legit-neighbor exemption for a REAL published package name.
+    from clawseccheck.checks._content import _KNOWN_LEGIT_NEIGHBORS
+    assert all(n.isascii() for n in _KNOWN_LEGIT_NEIGHBORS), (
+        "every _KNOWN_LEGIT_NEIGHBORS entry must be pure ASCII -- the literal "
+        "allowlisted spelling itself can never trip a Unicode-fold signal"
+    )
+    for dep in ("scapy", "boto", "panda"):
+        hits = _squat_hits([dep])
+        assert not hits, f"Legit neighbor '{dep}' (plain ASCII) must not fire: {hits}"
+
+
+def test_squat_hits_known_legit_neighbor_fullwidth_clone_not_exempted():
+    # Adversarial construction for B-222's mandatory check #3: a fullwidth-
+    # Unicode SPELLING that folds to a real _KNOWN_LEGIT_NEIGHBORS entry
+    # ("scapy", one edit from "scipy"). This is NOT the same string as the
+    # plain-ASCII allowlisted "scapy" -- exactly like a Cyrillic homoglyph
+    # clone of a known BRAND itself (test_squat_hits_cyrillic_homoglyph_clone_fires
+    # above) is deliberately NOT exempted by the "already a known name" carve-out
+    # -- so this is intended, pre-existing B-217/B-185 design carried over
+    # verbatim to the new signal, not a new false-fire: the plain-ASCII form
+    # (tested above) stays completely silent; only a literally Unicode-obfuscated
+    # spelling (never how a real manifest declares an ASCII package name) loses
+    # the exemption.
+    fullwidth_scapy = "ｓｃａｐｙ"
+    hits = _squat_hits([fullwidth_scapy])
+    assert hits == [(fullwidth_scapy, "scipy", 1)], hits
+
+
+def test_vet_source_flags_fullwidth_homoglyph_owner_stays_warn():
+    # Mirrors test_vet_source_flags_cyrillic_homoglyph_owner with a fullwidth
+    # clone -- confirms the new signal reaches the real vet_source entrypoint
+    # and, mandatory check #4, stays WARN (never escalates past WARN/FAIL
+    # severity mapping, which vet_source hardcodes independently of is_homoglyph).
+    from clawseccheck.checks import vet_source
+    fullwidth = "ｄｉｓｃｏｒｄ"
+    f = vet_source(f"git:github.com/{fullwidth}/mytool@main")
+    assert f.status == WARN
+    assert any("resembles well-known 'discord'" in e for e in f.evidence)
+
+
+def test_check_installed_skills_fullwidth_clone_skill_name_warns_not_fails(tmp_path):
+    # Mandatory check #4 at the B13 entrypoint: a skill directory literally
+    # named with the fullwidth clone must WARN (typosquat/impersonation
+    # heuristic), never FAIL -- B13's typosquat branch hardcodes WARN.
+    from clawseccheck.checks import check_installed_skills
+    fullwidth = "ｄｉｓｃｏｒｄ"
+    blob = f"# file: SKILL.md\n---\nname: {fullwidth}\ndescription: test\n---\nA tool.\n"
+    ctx = _make_ctx(tmp_path, {fullwidth: blob})
+    f = check_installed_skills(ctx)
+    assert f.status == WARN, f"Expected WARN, got {f.status!r}: {f.detail!r}"
+    assert f.status != FAIL
 
 
 # ---------------------------------------------------------------------------

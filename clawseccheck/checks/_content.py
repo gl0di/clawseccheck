@@ -31,6 +31,7 @@ from ..skillast import (
     analyze_python,
 )
 from ..textnorm import (
+    _nfkc_ascii_fold_changed,
     confusable_in_ascii_context,
     normalize_for_scan,
     obfuscation_signals,
@@ -3932,11 +3933,20 @@ def _squat_hits(
     Folding alone isn't sufficient, though: a FULL homoglyph clone folds to
     distance 0 against the real name, which is exactly what the "already a known
     name -- legitimate use" exemptions below are designed to skip. `is_homoglyph`
-    (gated the same way B93 gates it, via `confusable_in_ascii_context`, so a
-    whole-script non-Latin name is never swept in) distinguishes "genuinely
-    already the real ASCII name" from "only equals it after confusable-folding" --
-    the latter is the impersonation this bug exists to catch, not a legitimate
-    exact match, so those exemptions must NOT apply to it.
+    distinguishes "genuinely already the real ASCII name" from "only equals it
+    after confusable-folding" -- the latter is the impersonation this bug exists
+    to catch, not a legitimate exact match, so those exemptions must NOT apply
+    to it. It is True on EITHER of two independent signals (so a whole-script
+    non-Latin name is never swept in by either):
+      - `confusable_in_ascii_context` (B93's gate): a curated Cyrillic/Greek
+        lookalike sits inside an otherwise-Latin word (e.g. "dіѕcоrd").
+      - `_nfkc_ascii_fold_changed` (B-222): the candidate is spelled in a
+        non-ASCII Unicode form (fullwidth, Mathematical Alphanumeric Symbols
+        bold/italic/etc.) that Unicode's OWN compatibility-decomposition folds
+        onto plain ASCII (e.g. fullwidth "ｄｉｓｃｏｒｄ") -- distinct from the
+        curated-table signal because NFKC folds these by design, with no
+        enumerated block list needed, while genuine non-Latin scripts do not
+        decompose to ASCII under NFKC at all (see textnorm.py docstrings).
     """
     seen: set[tuple[str, str]] = set()
     hits: list[tuple[str, str, int]] = []
@@ -3944,7 +3954,7 @@ def _squat_hits(
 
     for cand in candidates:
         norm = _normalize_for_squat(cand)
-        is_homoglyph = confusable_in_ascii_context(cand)
+        is_homoglyph = confusable_in_ascii_context(cand) or _nfkc_ascii_fold_changed(cand)
         # Forms to check: normalized full name + each token
         forms_to_check = [norm] + _candidate_tokens(norm)
         for form in forms_to_check:

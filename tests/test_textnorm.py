@@ -6,7 +6,11 @@ from __future__ import annotations
 
 
 
-from clawseccheck.textnorm import normalize_for_scan, obfuscation_signals
+from clawseccheck.textnorm import (
+    _nfkc_ascii_fold_changed,
+    normalize_for_scan,
+    obfuscation_signals,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -225,3 +229,53 @@ def test_signals_word_joiner_still_flagged():
     text = "ob" + chr(0x2060) + "ey"
     signals = obfuscation_signals(text)
     assert "zero-width / invisible characters found" in signals
+
+
+# ---------------------------------------------------------------------------
+# B-222: _nfkc_ascii_fold_changed — the generic (non-enumerated) companion to
+# confusable_in_ascii_context. Catches fullwidth / Mathematical Alphanumeric
+# Symbols spellings that NFKC compatibility-decomposes straight to plain ASCII
+# (fullwidth "ｄｉｓｃｏｒｄ" -> "discord"), a class confusable_in_ascii_context's
+# curated Cyrillic/Greek table never covered because NFKC (not a lookalike
+# table) is what does the folding for these blocks.
+# ---------------------------------------------------------------------------
+
+def test_nfkc_fold_changed_fullwidth_true():
+    """Fullwidth spelling of 'discord' NFKC-folds to plain ASCII -> True."""
+    assert _nfkc_ascii_fold_changed("ｄｉｓｃｏｒｄ") is True
+
+
+def test_nfkc_fold_changed_math_bold_true():
+    """Mathematical Sans-Serif Bold spelling of 'discord' also folds to ASCII."""
+    bold = "".join(chr(0x1D5EE + (ord(c) - ord("a"))) for c in "discord")
+    assert _nfkc_ascii_fold_changed(bold) is True
+
+
+def test_nfkc_fold_changed_math_italic_true():
+    """A second Mathematical Alphanumeric Symbols style (italic) also folds."""
+    italic = "".join(chr(0x1D44E + (ord(c) - ord("a"))) for c in "discord")
+    assert _nfkc_ascii_fold_changed(italic) is True
+
+
+def test_nfkc_fold_changed_pure_ascii_false():
+    """Plain ASCII text has nothing to fold -> False (no exemption ever broken
+    for genuinely-ASCII input, e.g. real _KNOWN_LEGIT_NEIGHBORS entries)."""
+    assert _nfkc_ascii_fold_changed("discord") is False
+    assert _nfkc_ascii_fold_changed("scapy") is False
+
+
+def test_nfkc_fold_changed_genuine_cyrillic_prose_false():
+    """Genuine Cyrillic prose is NOT compatibility-equivalent to ASCII under
+    NFKC (unlike Cyrillic/Greek confusables, which need textnorm's OWN curated
+    table precisely because NFKC does not fold them) -- must stay False so
+    whole-script legitimate i18n is never swept in by this signal."""
+    assert _nfkc_ascii_fold_changed("привет как дела") is False
+
+
+def test_nfkc_fold_changed_genuine_greek_prose_false():
+    """Genuine Greek prose likewise does not NFKC-fold to ASCII -> False."""
+    assert _nfkc_ascii_fold_changed("Ελληνικά είναι ωραία") is False
+
+
+def test_nfkc_fold_changed_empty_string_false():
+    assert _nfkc_ascii_fold_changed("") is False

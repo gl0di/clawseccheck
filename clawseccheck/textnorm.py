@@ -255,3 +255,41 @@ def confusable_in_ascii_context(text: str) -> bool:
         if any(ord(ch) in _CONFUSABLES for ch in token):
             return True
     return False
+
+
+def _nfkc_ascii_fold_changed(text: str) -> bool:
+    """True when NFKC-normalizing some word-token of *text* turns it into a
+    DIFFERENT, purely-ASCII string -- i.e. the token is spelled in a non-ASCII
+    Unicode form (fullwidth, Mathematical Alphanumeric Symbols bold/italic/
+    fraktur/sans-serif, etc.) whose canonical Unicode identity IS an ASCII
+    letter/digit, just presented in another width or style.
+
+    This is a broader, non-enumerated companion to `confusable_in_ascii_context`'s
+    curated Cyrillic/Greek table: it needs no per-block list because "NFKC
+    compatibility-decomposes to plain ASCII" is exactly what those blocks are
+    FOR by Unicode's own design (fullwidth forms and the Mathematical
+    Alphanumeric Symbols block exist precisely as compatibility-equivalent
+    stylistic variants of ASCII) -- so one generic check covers the whole
+    class instead of chasing individual blocks (fullwidth today, some other
+    block tomorrow).
+
+    Genuine non-Latin scripts are NOT compatibility-equivalent to ASCII under
+    NFKC -- real Cyrillic/Greek/CJK letters do not decompose to Latin at all,
+    which is precisely why `confusable_in_ascii_context` needs its own curated
+    lookalike table instead of relying on NFKC for THAT class of homoglyph.
+    So whole-script legitimate prose is never swept in by this signal; only
+    characters whose Unicode identity already IS an ASCII letter/digit trigger
+    it.
+
+    Tokenized the same way as `confusable_in_ascii_context` (`\\w+`, UNICODE,
+    after stripping invisibles) so both signals see the same candidate spans.
+    Read-only, stdlib-only.
+    """
+    stripped = _INVISIBLE_RE.sub("", text)
+    for token in re.findall(r"\w+", stripped, re.UNICODE):
+        if token.isascii():
+            continue  # nothing non-ASCII to fold
+        folded = unicodedata.normalize("NFKC", token)
+        if folded != token and folded.isascii():
+            return True
+    return False
