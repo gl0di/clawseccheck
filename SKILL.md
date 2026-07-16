@@ -6,6 +6,11 @@ license: MIT
 metadata: {"openclaw":{"emoji":"🔍","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Scores your setup (A–F) and reports the most urgent holes — it never changes your OpenClaw setup. No API key; the scanner itself makes no network calls. Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, or see your A–F security score."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
 ---
 
+<!-- markdownlint-disable MD040 MD032 -->
+<!-- Formatting-only rules (fence language tags, blanks around lists) are relaxed
+     for this agent-facing manifest, whose fence/list layout is deliberate.
+     All content rules still apply. -->
+
 # ClawSecCheck — OpenClaw Security Self-Audit
 
 ## When to use this skill
@@ -266,7 +271,7 @@ rest on demand. The number, the phrase, or a tap all select an item; free phrasi
 | Choice | Flag(s) | Notes |
 |--------|---------|-------|
 | 1 Check everything ("check" / "go") | `--full` (+ auto capability self-report, see Step 2) | Read-only audit **+** capability self-report (resolves B43/B44 inline instead of leaving them UNKNOWN for a separate "deeper" step — F-043) **+** self-test scenario generation (canary/dryrun/redteam — generates injection scenarios; it does not itself run a behavioral verdict) **+** MCP vet, in one go. The actual ⚡ live behavioral test (VULNERABLE vs RESISTANT) is a separate, opt-in step offered after the dashboard (Section 6, item a) — not part of item 1. |
-| 2 Check before install | `--vet <path>` (autodetects skill · plugin · MCP spec; `--vet-skill` / `--vet-plugin` force an engine) · `--vet-mcp [name]` (configured MCP) · `--vet-source <slug|url>` (before anything is even downloaded) | Supply-chain check on something you're about to trust. See vet flow in Step 5. |
+| 2 Check before install | `--vet <path>` (autodetects skill · plugin · MCP spec; `--vet-skill` / `--vet-plugin` force an engine) · `--vet-mcp [name]` (configured MCP) · `--vet-source <slug\|url>` (before anything is even downloaded) | Supply-chain check on something you're about to trust. See vet flow in Step 5. |
 | 3 Report & history | default report · `--save <path>` · `--trend` · `--badge <path>` | Show or save the last result, the score trend, or a shareable badge. |
 | 4 Menu | `--functions` (Screen 12 — the full palette) | Saying "menu" / "functions" / "more" expands the complete capability list — run `python3 {baseDir}/audit.py --functions` (or present its output). Every capability appears as a speakable prompt grounded to its real flag (verify, what-changed, html, sarif, percentile, risk-paths, the vet family, the ⚡ live tests, …), so there's no wall of raw flags. (`--menu` itself renders *this* Welcome screen; the palette is one level deeper.) |
 | "private" modifier | Add `--no-history` to any mode | "1 private" = Check everything + `--no-history`. Nothing written to `~/.clawseccheck/`. |
@@ -775,7 +780,7 @@ Use this to map what the user says to the right command:
 | "fix", "how do I fix", "what should I do" | out of scope — reports only; explain, don't generate fixes |
 | "vet", "scan this skill", "is this safe to install", "check before I install" | `--vet <path>` — type autodetected; `--vet-skill <path>` forces the skill engine (add `--json` or `--sarif PATH` for machine-readable / CI output) |
 | "vet this plugin", "is this plugin safe" | `--vet-plugin <path>` (plugin root or `openclaw.plugin.json`; `--vet <path>` autodetects too) |
-| "is this safe to download", "check this link / package before I fetch it" | `--vet-source <slug|url|pkg>` — zero network, identity only; then quarantine + `--vet` the fetched copy |
+| "is this safe to download", "check this link / package before I fetch it" | `--vet-source <slug\|url\|pkg>` — zero network, identity only; then quarantine + `--vet` the fetched copy |
 | "walk me through vetting this before I install it", "should I install this" | `--vet-source` -> `--vet-plan <target>` (prints the fetch+isolate commands, you run them) -> `--advise <quarantine-path>` for an INSTALL/CAUTION/DO-NOT-INSTALL call |
 | "is my MCP safe", "check my connected servers", "vet my MCP", "are my MCP servers trusted", "MCP supply chain" | `--vet-mcp` (add `--json` or `--sarif PATH` for machine-readable / CI output) |
 | "what dangerous actions can my agent take", "least privilege", "check my tools", "capability", "blast radius", "deeper check" | `--ask` then `--attest <filled.json>` |
