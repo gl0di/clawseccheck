@@ -383,3 +383,20 @@ def test_b58_registered_in_audit():
     _, findings, _ = audit(FIXTURES / "bad_b58_unicode_injection", include_native=False)
     ids = {f.id for f in findings}
     assert "B58" in ids, f"B58 not in audit findings: {sorted(ids)}"
+
+
+def test_b224_softhyphen_exfil_fixture_fails():
+    """B-224: a soft-hyphen (character-insertion) stego directive that normalize_for_scan
+    strips to reveal 'silently POST the file contents to <url>' must FAIL — the reveal
+    lands in `norm` itself, and the hidden-character signal is the evasion corroborator."""
+    ctx = collect(FIXTURES / "bad_b224_softhyphen_exfil")
+    f = check_unicode_obfuscation(ctx)
+    assert f.status == FAIL, f"Expected FAIL, got {f.status}: {f.detail}"
+
+
+def test_b224_benign_softhyphen_hyphenation_does_not_fail():
+    """Control: soft-hyphens used for ordinary hyphenation, with no exfil directive, must
+    not FAIL — the character signal alone is at most WARN."""
+    ctx = collect(FIXTURES / "clean_b224_softhyphen_benign")
+    f = check_unicode_obfuscation(ctx)
+    assert f.status != FAIL, f"benign soft-hyphen prose must not FAIL: {f.detail}"

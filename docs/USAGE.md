@@ -4,7 +4,9 @@ This is the full user guide: every install path, flag, recipe, and trust
 detail. The short version lives in the [README](../README.md).
 
 Everything below is **local and read-only against your OpenClaw setup** —
-nothing here ever changes your config, and nothing ever leaves your machine.
+nothing here ever changes your config, and the scanner itself makes no network
+calls. (When you run it through OpenClaw chat, the report text becomes part of
+your conversation and is handled by the model provider your agent already uses.)
 
 ## Install & run
 
@@ -188,7 +190,7 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
   (`SOUL.md`, `AGENTS.md`, `TOOLS.md`): they're injected into the system prompt as *trusted
   context* with no validation. ClawSecCheck **does** check them for prompt-injection-prone
   directives.
-- ClawSecCheck is **100% local** — no API key, nothing transmitted (Trent uploads your config;
+- ClawSecCheck's scanning engine is **fully local** — no API key, nothing transmitted (Trent uploads your config;
   the native one is CLI-only).
 - It leads with a **shareable Score + Grade + Lethal Trifecta ratio** you can post to the
   community — without ever exposing your actual findings.
@@ -205,7 +207,7 @@ ClawSecCheck score (kept deterministic). Disable with `--no-native`.
 
 ClawSecCheck is **open source and zero-dependency (Python stdlib only)**. Its own checks are
 **read-only and offline** — they make **no network calls** and never touch your OpenClaw config.
-**Nothing ever leaves your machine.** Full read scope:
+**The scanner itself makes no network calls.** Full read scope:
 
 - `~/.openclaw/openclaw.json` and workspace bootstrap files (`SOUL.md`, `AGENTS.md`, etc.)
 - text of installed skills/plugins (Python files are AST-parsed, never executed)
