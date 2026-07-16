@@ -1,5 +1,5 @@
-<svg width="1240" height="128" viewBox="0 0 1240 128" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="130+ security checks - 18 attack-chain detectors - 4,900+ automated tests - 0 dependencies - 100% offline">
-  <title>130+ security checks - 18 attack-chain detectors - 4,900+ automated tests - 0 dependencies - 100% offline</title>
+<svg width="1240" height="128" viewBox="0 0 1240 128" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="130+ security checks - 18 attack-chain detectors - 4,900+ automated tests - 0 dependencies - 0 network calls">
+  <title>130+ security checks - 18 attack-chain detectors - 4,900+ automated tests - 0 dependencies - 0 network calls</title>
   <style>
     text { font-family: -apple-system, "Segoe UI", Roboto, "DejaVu Sans", Helvetica, Arial, sans-serif; }
     .card { opacity: 0; animation: rise .65s cubic-bezier(.2,.7,.3,1) forwards; }
@@ -50,8 +50,8 @@
   <line x1="992.0" y1="26" x2="992.0" y2="96" stroke="#d0d7de" stroke-width="1"/>
   <g class="card c4">
     <text class="icon" x="1116.0" y="34" text-anchor="middle">🔌</text>
-    <text class="num" x="1116.0" y="78" text-anchor="middle" fill="#c9302c" style="color:#c9302c">100%</text>
-    <text class="label" x="1116.0" y="103" text-anchor="middle">offline</text>
+    <text class="num" x="1116.0" y="78" text-anchor="middle" fill="#c9302c" style="color:#c9302c">0</text>
+    <text class="label" x="1116.0" y="103" text-anchor="middle">network calls</text>
   </g>
   <rect x="60" y="118" width="1120" height="2" rx="1" fill="#d0d7de" opacity=".55"/>
   <g class="scan">
