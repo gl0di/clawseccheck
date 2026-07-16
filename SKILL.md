@@ -133,7 +133,7 @@ bootstrap file) and returns **only** a typed verdict:
 
 ```json
 {
-  "verdict": "SAFE" | "SUSPICIOUS" | "DANGEROUS",
+  "verdict": "NO KNOWN ISSUE" | "SUSPICIOUS" | "DANGEROUS",
   "indicators": ["<plain description of each detected pattern>"],
   "risk_ids":   ["B18", "C5"]
 }
@@ -531,12 +531,12 @@ python3 {baseDir}/audit.py --vet <path-to-skill>
 The path is a local folder or `SKILL.md` file. If the user gives a URL or registry slug, run
 `--vet-source` on it first (see below), then have them fetch it into an isolated temp folder —
 never under `~/.openclaw` — and vet the local copy. The output is a **risk dossier**: an overall
-A–F grade + SAFE/SUSPICIOUS/DANGEROUS verdict over five axes — **danger** (how dangerous to use),
+A–F grade + NO KNOWN ISSUE/SUSPICIOUS/DANGEROUS verdict over five axes — **danger** (how dangerous to use),
 **build** (how it's built), **behavior** (how it thinks / behaves), **persistence** (what it
 stages for later), **connections** (whom it reaches out to). Lead with the grade + verdict, then
 name any axis that is WARN/FAIL and why; note that N/A axes weren't assessable (e.g. a doc-only
 skill with no code). Report the verdict in plain language:
-- SAFE -> "Grade looks clean — no suspicious patterns on any axis."
+- NO KNOWN ISSUE -> "Grade looks clean — no suspicious patterns on any axis."
 - SUSPICIOUS -> "A couple of axes are worth a closer look (I'll name them). I'd be cautious."
 - DANGEROUS -> "This skill contains patterns used by malware (the danger axis fails). Do not
   install it. If it's already installed, remove it and rotate any secrets it could have accessed."
@@ -596,7 +596,7 @@ python3 {baseDir}/audit.py --vet-mcp
 Reads every server listed under `mcp.servers.*` in `openclaw.json` and checks for supply-chain
 risk — unpinned install sources, plaintext-HTTP transport, environment secrets exposed to the
 server, and overly broad OAuth scope. Report the verdict per server in plain language:
-- SAFE -> "This MCP server looks well-configured."
+- NO KNOWN ISSUE -> "This MCP server looks well-configured."
 - SUSPICIOUS -> "This MCP server has some flags worth reviewing — see the details."
 - DANGEROUS -> "This MCP server has serious supply-chain issues. Consider removing or replacing it
   until the issues are resolved."

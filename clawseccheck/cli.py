@@ -104,7 +104,7 @@ def _record_run(capability: str, args) -> None:
 # and the embedded vet-mcp section inside --full.
 _VET_ICON_ASCII: dict[str, str] = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}
 _VET_ICON_UNI: dict[str, str] = {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔"}
-_VET_VERDICT: dict[str, str] = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS": "SAFE", "UNKNOWN": "UNKNOWN"}
+_VET_VERDICT: dict[str, str] = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS": "NO KNOWN ISSUE", "UNKNOWN": "UNKNOWN"}
 
 
 def vet_all(home_dir: Path, ascii_only: bool = False) -> int:
@@ -156,7 +156,7 @@ def vet_all(home_dir: Path, ascii_only: bool = False) -> int:
     _UNI = {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔"}
     _VERDICT = {
         "FAIL": "DANGEROUS", "WARN": "SUSPICIOUS",
-        "PASS": "looks SAFE", "UNKNOWN": "could not assess",
+        "PASS": "looks like no known issue", "UNKNOWN": "could not assess",
     }
 
     results: list[tuple[str, str, int]] = []  # (name, status, evidence_count)
@@ -199,11 +199,12 @@ def vet_all(home_dir: Path, ascii_only: bool = False) -> int:
     _emit("=" * 50)
     _emit("Aggregate summary:")
     col_w = max(len(r[0]) for r in results) + 2
-    _emit(f"  {'Skill':<{col_w}} {'Verdict':<12} Evidence items")
-    _emit(f"  {'-' * col_w} {'-' * 12} --------------")
+    verdict_w = max(len(v) for v in _VERDICT.values()) + 1
+    _emit(f"  {'Skill':<{col_w}} {'Verdict':<{verdict_w}} Evidence items")
+    _emit(f"  {'-' * col_w} {'-' * verdict_w} --------------")
     for name, status, ev_count in results:
         icon = _ASCII[status] if ascii_only else _UNI[status]
-        _emit(f"  {name:<{col_w}} {icon} {_VERDICT[status]:<13} {ev_count}")
+        _emit(f"  {name:<{col_w}} {icon} {_VERDICT[status]:<{verdict_w}} {ev_count}")
 
     total = len(results)
     fails = sum(1 for _, s, _ in results if s == "FAIL")

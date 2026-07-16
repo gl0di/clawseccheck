@@ -1111,7 +1111,7 @@ def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
 
 
 # Verdict words for the vetting modes (--vet / --vet-mcp), keyed by worst status.
-_VET_VERDICT = {FAIL: "DANGEROUS", WARN: "SUSPICIOUS", PASS: "SAFE", UNKNOWN: "UNKNOWN", "SKILL_ARCHIVE_PATH_TRAVERSAL": "UNKNOWN"}
+_VET_VERDICT = {FAIL: "DANGEROUS", WARN: "SUSPICIOUS", PASS: "NO KNOWN ISSUE", UNKNOWN: "UNKNOWN", "SKILL_ARCHIVE_PATH_TRAVERSAL": "UNKNOWN"}
 _VET_STATUS_RANK = {FAIL: 3, WARN: 2, UNKNOWN: 1, "SKILL_ARCHIVE_PATH_TRAVERSAL": 1, PASS: 0}
 
 

@@ -66,7 +66,7 @@ def test_vet_json_clean_is_safe(tmp_path, capsys):
     rc = main(["--vet", str(_clean_skill(tmp_path)), "--json"])
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
-    assert data["verdict"] == "SAFE"
+    assert data["verdict"] == "NO KNOWN ISSUE"
     # the dossier reports the target type, an overall grade, and a per-axis breakdown
     assert data["target_type"] == "skill"
     assert data["grade"] == "A"
@@ -261,7 +261,7 @@ def test_vet_plugin_text_dossier_clean_stays_grade_a(tmp_path, capsys):
     rc = main(["--vet-plugin", str(_clean_plugin(tmp_path))])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "SAFE" in out
+    assert "NO KNOWN ISSUE" in out
     assert "Grade: A" in out
 
 

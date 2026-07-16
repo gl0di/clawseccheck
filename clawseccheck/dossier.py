@@ -50,7 +50,7 @@ AXIS_LABEL: dict[str, str] = {
 VERDICT_WORD: dict[str, str] = {
     FAIL: "DANGEROUS",
     WARN: "SUSPICIOUS",
-    PASS: "SAFE",
+    PASS: "NO KNOWN ISSUE",
     UNKNOWN: "UNKNOWN",
 }
 

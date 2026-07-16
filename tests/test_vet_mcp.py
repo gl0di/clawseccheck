@@ -405,7 +405,7 @@ def test_cli_vet_mcp_safe_server_exits_zero(tmp_path, capsys):
     rc = main(["--home", str(home), "--vet-mcp", "--no-native"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "SAFE" in out
+    assert "NO KNOWN ISSUE" in out
 
 
 def test_cli_vet_mcp_suspicious_exits_one(tmp_path, capsys):

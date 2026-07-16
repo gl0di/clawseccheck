@@ -3,6 +3,18 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Breaking (output text): the vet dossier's own "SAFE" verdict word is now "NO KNOWN
+  ISSUE"** — `--vet` / `--vet-skill` / `--vet-plugin` / `--vet-mcp` / `--vet-all` /
+  `--advise`'s underlying dossier, in both the human-readable text and the `--json`
+  `verdict` field, plus SARIF output. `SUSPICIOUS` and `DANGEROUS` are unchanged. This
+  only renames our own tool's PASS-mapped verdict word; it does **not** touch the
+  separate `--judge-packet` judge-panel vocabulary (`adjudication.py`'s
+  `SAFE`/`SUSPICIOUS`/`DANGEROUS` contract with an external host-agent judge), which
+  still uses `SAFE` as before.
+
 ## [3.47.0] — 2026-07-16
 
 One new MCP-surface detector plus two cross-file/typosquat evasion fixes, grounded

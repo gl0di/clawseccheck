@@ -129,5 +129,5 @@ def test_vet_verdict_has_all_statuses():
     assert set(_VET_VERDICT) == {"FAIL", "WARN", "PASS", "UNKNOWN"}
     assert _VET_VERDICT["FAIL"] == "DANGEROUS"
     assert _VET_VERDICT["WARN"] == "SUSPICIOUS"
-    assert _VET_VERDICT["PASS"] == "SAFE"
+    assert _VET_VERDICT["PASS"] == "NO KNOWN ISSUE"
     assert _VET_VERDICT["UNKNOWN"] == "UNKNOWN"

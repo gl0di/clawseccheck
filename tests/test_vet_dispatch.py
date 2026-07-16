@@ -144,5 +144,5 @@ def test_cli_vet_plugin_json_stdout_is_pure(tmp_path, capsys):
     assert rc == 0
     payload = json.loads(captured.out)                   # stdout must parse as JSON
     assert payload["mode"] == "vet-plugin"
-    assert payload["verdict"] == "SAFE"
+    assert payload["verdict"] == "NO KNOWN ISSUE"
     assert "detected type: plugin" in captured.err       # note went to stderr

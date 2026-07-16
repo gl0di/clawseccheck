@@ -511,7 +511,7 @@ plus a five-axis roll-up and an overall grade. No full-audit `next_actions` / `c
 | `mode` | `str` | `"vet"` (skill), `"vet-plugin"`, `"vet-mcp"`, or `"vet-source"`. |
 | `target` | `str` | Path, name, slug, or URL of the vetted artifact. |
 | `target_type` | `str` | `"skill"`, `"plugin"`, `"mcp"`, or `"source"`. |
-| `verdict` | `str` | `"SAFE"`, `"SUSPICIOUS"`, `"DANGEROUS"`, or `"UNKNOWN"` (derived from the overall status). |
+| `verdict` | `str` | `"NO KNOWN ISSUE"`, `"SUSPICIOUS"`, `"DANGEROUS"`, or `"UNKNOWN"` (derived from the overall status). |
 | `grade` | `str` | Overall letter grade `A`–`F`, or `"N/A"` when nothing is assessable. |
 | `score` | `int` | 0–100 axis pass-rate behind the grade (0 when not assessable). |
 | `axes` | `array[Axis]` | The five risk axes, in fixed order (below). |
@@ -539,7 +539,7 @@ denominator) — never a fabricated PASS/FAIL. Examples: an MCP server spec has 
 code, so `persistence` is `"N/A"`; `--vet-source` never fetches the artifact, so every axis
 but `danger` is `"N/A"`. An axis with a producer but no measurable input (e.g. a skill with
 no executable code) is `"UNKNOWN"`, distinct from PASS. `verdict` maps the overall status:
-`FAIL`→DANGEROUS, `WARN`→SUSPICIOUS, `PASS`→SAFE, else UNKNOWN.
+`FAIL`→DANGEROUS, `WARN`→SUSPICIOUS, `PASS`→NO KNOWN ISSUE, else UNKNOWN.
 
 `grade` derivation: `danger == FAIL` → `F`; otherwise a weighted pass-rate over the
 assessable axes (PASS=1, WARN=0.5, FAIL=0; N/A and UNKNOWN excluded), with any WARN capping

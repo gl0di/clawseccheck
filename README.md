@@ -680,7 +680,7 @@ python3 audit.py --log audit.log            # also write log to a local file
   downloaded folder or `SKILL.md`; for a URL, clone it first, then vet the local copy). The output
   is a **risk dossier** — one A–F grade over five axes: **danger** (how dangerous to use), **build**
   (how it's built), **behavior** (how it thinks / behaves), **persistence** (what it stages for
-  later), and **connections** (whom it reaches out to) — with an overall SAFE / SUSPICIOUS /
+  later), and **connections** (whom it reaches out to) — with an overall NO KNOWN ISSUE / SUSPICIOUS /
   DANGEROUS verdict. Add `--json` for the machine-readable dossier (grade + per-axis breakdown +
   findings), or `--sarif PATH` to drop a SARIF file for CI / code scanning; exit code is `1` on
   SUSPICIOUS/DANGEROUS so `--vet … || fail` gates an install pipeline.
@@ -701,7 +701,7 @@ python3 audit.py --log audit.log            # also write log to a local file
 - **`--vet-mcp`** vets every MCP server listed under `mcp.servers.*` for supply-chain risk
   *before* you trust it. Flags unpinned installs (`npx @latest`, unversioned packages), `curl|sh`
   bootstrap, plaintext-HTTP remote transports, env-variable secret passthrough, and overly broad
-  OAuth scopes. Verdict per server: SAFE / SUSPICIOUS / DANGEROUS. Local and read-only — no
+  OAuth scopes. Verdict per server: NO KNOWN ISSUE / SUSPICIOUS / DANGEROUS. Local and read-only — no
   network calls; it writes only a one-line coverage-freshness entry under `~/.clawseccheck/`
   (suppressed by `--no-history`). Targets the #1 agent supply-chain gap: most tools audit your
   skills but not the MCP servers wired into your agent.
