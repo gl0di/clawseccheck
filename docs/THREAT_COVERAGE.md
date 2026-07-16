@@ -156,9 +156,11 @@ silent gap by definition; `tests/test_threat_coverage_ledger.py` fails the build
   (untrusted ingress) — cred-read + network-egress with NO ingress vector is the normal
   shape of an authenticated integration (a skill reading its own API token and calling that
   API), not an attack. Dropping the ingress requirement to catch the paper's broader 2-leg
-  pattern would flood real fleets (verified against this repo's own capability-family
-  substrate: `_b62_actual_families`'s `cred` family matches `os.environ[`/`os.getenv(`/
-  token-literal patterns present in nearly every API-calling skill). Covered today via
+  pattern would flood real fleets, since credential access co-located with network egress
+  is the authenticated-integration norm — which is exactly why B62 treats `cred` as an
+  *expected* capability for network/auth-category skills (C-239) rather than a surprise, and
+  its cred matcher (`_b62_actual_families`) now fires only on credential-shaped
+  `os.getenv`/`os.environ[` reads, not on every env-var access. Covered today via
   B105 (same cred+network legs co-located in ONE skill, not unioned across a pair, plus a
   secrecy-framing corroborator), RISK-19 (audit-themed skill + a separate high-blast skill,
   a different discriminator), and B62 (per-skill capability/intent mismatch). A narrower

@@ -22,6 +22,7 @@ from clawseccheck.checks import (
     _b62_declaration_text,
     _b62_disclosed_families,
     _b62_extract_declaration,
+    _b62_src_reads_cred,
     check_capability_intent_mismatch,
 )
 from clawseccheck.collector import Context
@@ -216,6 +217,80 @@ def test_b62_disclosed_families_empty_input_is_empty():
 
 
 # ---------------------------------------------------------------------------
+# Unit: _B62_IMPORT_CRED_RE (B-226/C-239 regression guard)
+#
+# B-226: the previous regex had a group-final `\b`, so its os.getenv/os.environ/
+# token branches never actually matched (their last char is `(`/`[`/a quote, not a
+# word char, so `\b` there is dead). The NAIVE fix (just delete the `\b`) was
+# C-135-REJECTED — it re-fired false WARNs on 7/8 benign skills because ANY
+# os.getenv/os.environ read (HOME, TZ, NO_COLOR, XDG_*, ...) counted as "cred". The
+# restructured regex below only matches credential-SHAPED env-var NAMES, and drops
+# the bare `token/secret/api_key[:=]` literal branch entirely (a pure local-variable
+# FP source; hardcoded secret literals are already caught by the scored skillast
+# HARDCODED_PROVIDER_SECRET finding).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("src", [
+    'os.getenv("API_KEY")',
+    'os.environ["TOKEN"]',
+    'os.getenv("AWS_SECRET_ACCESS_KEY")',
+    'os.getenv("WEATHER_API_KEY")',
+    'os.getenv("GITHUB_TOKEN")',
+    'os.getenv("NPM_TOKEN")',
+    'os.getenv("SESSION_TOKEN")',
+    'os.environ["CLIENT_SECRET"]',
+    'os.getenv("DB_PASSWORD")',
+    'os.getenv("TOKEN")',
+    'import keyring',
+])
+def test_b62_cred_regex_matches_credential_shaped(src):
+    """Real credential-shaped os.getenv/os.environ reads and keyring-family imports
+    must still match — this is exactly what the dead group-final `\\b` previously
+    made unreachable for the env/token branches (B-226)."""
+    assert _b62_src_reads_cred(src), f"expected a cred match for: {src!r}"
+
+
+@pytest.mark.parametrize("src", [
+    'os.getenv("HOME")',
+    'os.environ["NO_COLOR"]',
+    'os.getenv("XDG_CONFIG_HOME")',
+    'os.getenv("TZ")',
+    'os.environ.get("PATH")',
+    'token = t.split()[0]',
+    # adversarial: segment-level near-misses on the cred-word vocabulary must NOT
+    # match (MONKEY contains no cred word; CACHE_KEY/SORT_KEY/PARTITION_KEY end in
+    # "KEY" as a substring but not as a `_`-bounded segment equal to a cred word;
+    # AUTHOR is not a cred word at all).
+    'os.getenv("MONKEY_ISLAND")',
+    'os.getenv("CACHE_KEY")',
+    'os.getenv("AUTHOR")',
+    'os.getenv("SORT_KEY")',
+    'os.getenv("PARTITION_KEY")',
+    'import keyringx_helper',
+    'importlib.keyring',
+    # C-135 (C-239 precision pass): a bare ambiguous cred word (TOKEN/SECRET/PASSWORD)
+    # as a PREFIX of a benign config var (TOKEN_LIMIT), or with a benign noun PREFIX
+    # (DESIGN_TOKEN), is not a credential read. These are the realistic false-WARN class
+    # the naive vocabulary re-introduced; the segment classifier must reject them.
+    'os.getenv("TOKEN_LIMIT")',
+    'os.getenv("TOKEN_COUNT")',
+    'os.getenv("SECRET_SANTA")',
+    'os.environ["PASSWORD_MIN_LENGTH"]',
+    'os.getenv("DESIGN_TOKEN")',
+    'os.getenv("COLOR_TOKEN")',
+    'os.getenv("THEME_TOKEN")',
+    'os.getenv("MAX_TOKEN")',
+    'os.getenv("CONTEXT_TOKEN")',
+    'os.getenv("BEARER_NAME")',
+])
+def test_b62_cred_regex_does_not_match_non_credential(src):
+    """Non-secret config env-vars, the dropped local token/secret LITERAL branch,
+    and adversarial near-miss vocabulary must NOT match (this is the C-135-style
+    false-WARN surface the naive `\\b`-deletion fix would have re-introduced)."""
+    assert not _b62_src_reads_cred(src), f"unexpected cred match for: {src!r}"
+
+
+# ---------------------------------------------------------------------------
 # Unit: check_capability_intent_mismatch (synthetic contexts)
 # ---------------------------------------------------------------------------
 
@@ -370,6 +445,173 @@ def test_import_scan_single_write_does_not_warn_for_formatter():
 
 
 # ---------------------------------------------------------------------------
+# Unit: C-239 gate — credential-shaped env reads vs category expectations
+# ---------------------------------------------------------------------------
+
+def test_b62_cred_env_home_formatter_does_not_warn():
+    """A formatter reading os.getenv("HOME") — HOME is not credential-shaped, so it
+    never becomes a 'cred' capability at all — must PASS."""
+    ctx = _ctx_with_skill(
+        "md_fmt",
+        "---\nname: md_fmt\ndescription: A markdown formatter.\n---\n",
+        py_src='import os\ndef run(x):\n    home = os.getenv("HOME")\n    return x.strip()',
+        effect_profiles={},
+    )
+    f = check_capability_intent_mismatch(ctx)
+    assert f.status == PASS, f"expected PASS, got {f.status}: {f.detail}"
+
+
+def test_b62_cred_env_no_color_prettifier_does_not_warn():
+    """A prettifier reading os.environ["NO_COLOR"] — non-secret config — must PASS."""
+    ctx = _ctx_with_skill(
+        "pretty",
+        "---\nname: pretty\ndescription: A code prettifier.\n---\n",
+        py_src='import os\ndef run(x):\n    c = os.environ["NO_COLOR"]\n    return x',
+        effect_profiles={},
+    )
+    f = check_capability_intent_mismatch(ctx)
+    assert f.status == PASS, f"expected PASS, got {f.status}: {f.detail}"
+
+
+def test_b62_cred_env_xdg_config_home_parser_does_not_warn():
+    """A parser reading os.getenv("XDG_CONFIG_HOME") — non-secret config — must PASS."""
+    ctx = _ctx_with_skill(
+        "cfgparse",
+        "---\nname: cfgparse\ndescription: A config file parser.\n---\n",
+        py_src='import os\ndef run(x):\n    d = os.getenv("XDG_CONFIG_HOME")\n    return x',
+        effect_profiles={},
+    )
+    f = check_capability_intent_mismatch(ctx)
+    assert f.status == PASS, f"expected PASS, got {f.status}: {f.detail}"
+
+
+def test_b62_local_token_split_summarizer_does_not_warn():
+    """A summarizer doing `token = t.split()[0]` — the dropped LITERAL branch —
+    must PASS (this is exactly the local-variable FP the LITERAL branch caused)."""
+    ctx = _ctx_with_skill(
+        "summ",
+        "---\nname: summ\ndescription: A text summarizer.\n---\n",
+        py_src="def run(t):\n    token = t.split()[0]\n    return token",
+        effect_profiles={},
+    )
+    f = check_capability_intent_mismatch(ctx)
+    assert f.status == PASS, f"expected PASS, got {f.status}: {f.detail}"
+
+
+def test_b62_cred_env_tz_converter_does_not_warn():
+    """A converter reading os.getenv("TZ") — non-secret config — must PASS."""
+    ctx = _ctx_with_skill(
+        "conv",
+        "---\nname: conv\ndescription: A unit converter.\n---\n",
+        py_src='import os\ndef run(x):\n    tz = os.getenv("TZ")\n    return x',
+        effect_profiles={},
+    )
+    f = check_capability_intent_mismatch(ctx)
+    assert f.status == PASS, f"expected PASS, got {f.status}: {f.detail}"
+
+
+def test_b62_cred_env_api_client_self_auth_does_not_warn():
+    """C-239: an api-client reading its own WEATHER_API_KEY, plus a real network call,
+    must PASS — cred is now expected for network-category skills (self-authenticating
+    is normal, not a surprise)."""
+    ctx = _ctx_with_skill(
+        "weather_api_client",
+        "---\nname: weather_api_client\ndescription: An api-client for weather data.\n---\n",
+        py_src='import requests\nimport os\n'
+        'def run(x):\n'
+        '    key = os.getenv("WEATHER_API_KEY")\n'
+        '    return requests.get("https://weather.example", params={"key": key})',
+        effect_profiles={},
+    )
+    f = check_capability_intent_mismatch(ctx)
+    assert f.status == PASS, f"expected PASS, got {f.status}: {f.detail}"
+
+
+def test_b62_cred_env_fetcher_self_auth_does_not_warn():
+    """C-239: a fetcher reading its own GITHUB_TOKEN, plus a real network call, must
+    PASS — cred is now expected for the fetcher category too."""
+    ctx = _ctx_with_skill(
+        "gh_fetcher",
+        "---\nname: gh_fetcher\ndescription: A github fetcher.\n---\n",
+        py_src='import requests\nimport os\n'
+        'def run(x):\n'
+        '    tok = os.getenv("GITHUB_TOKEN")\n'
+        '    return requests.get("https://api.github.com", '
+        'headers={"Authorization": tok})',
+        effect_profiles={},
+    )
+    f = check_capability_intent_mismatch(ctx)
+    assert f.status == PASS, f"expected PASS, got {f.status}: {f.detail}"
+
+
+def test_b62_cred_disclosed_api_client_does_not_warn():
+    """An api-client that reads its own API key AND discloses "api key" in its
+    SKILL.md text — PASS on both grounds: cred is now expected for the api-client
+    category (C-239), and the disclosure text names it explicitly (B-145)."""
+    ctx = _ctx_with_skill(
+        "weather_api_client2",
+        "---\nname: weather_api_client2\ndescription: An api-client that fetches "
+        "weather data using your api key.\n---\n",
+        py_src='import requests\nimport os\n'
+        'def run(x):\n'
+        '    key = os.getenv("WEATHER_API_KEY")\n'
+        '    return requests.get("https://weather.example", params={"key": key})',
+        effect_profiles={},
+    )
+    f = check_capability_intent_mismatch(ctx)
+    assert f.status == PASS, f"expected PASS, got {f.status}: {f.detail}"
+
+
+def test_b62_cred_env_read_nonnetwork_formatter_warns():
+    """BAD: a formatter (text-only category) that reads a genuinely secret-shaped env
+    var with NO network capability — cred remains HIGH-SURPRISE for text-only
+    categories, so this must WARN and the evidence must mention cred."""
+    ctx = _ctx_with_skill(
+        "md_fmt2",
+        "---\nname: md_fmt2\ndescription: A markdown formatter.\n---\n",
+        py_src='import os\ndef run(x):\n'
+        '    token = os.getenv("AWS_SECRET_ACCESS_KEY")\n'
+        '    return x.strip()',
+        effect_profiles={},
+    )
+    f = check_capability_intent_mismatch(ctx)
+    assert f.status == WARN, f"expected WARN, got {f.status}: {f.detail}"
+    assert "cred" in " ".join(f.evidence)
+
+
+def test_b62_c135_summarizer_token_limit_does_not_warn():
+    """C-135 (C-239 precision pass): a text-only summarizer reading a benign
+    os.getenv("TOKEN_LIMIT") config must NOT WARN — TOKEN as the PREFIX of a config var
+    is not a credential read. This was the flagship false-WARN the precision pass found."""
+    ctx = _ctx_with_skill(
+        "smart_summarizer",
+        "---\nname: smart_summarizer\ndescription: A text summarizer that truncates long "
+        "documents.\n---\n",
+        py_src='import os\ndef run(x):\n    limit = int(os.getenv("TOKEN_LIMIT", "4000"))\n'
+        '    return x[:limit]',
+        effect_profiles={},
+    )
+    f = check_capability_intent_mismatch(ctx)
+    assert f.status == PASS, f"expected PASS, got {f.status}: {f.detail}"
+
+
+def test_b62_c135_renderer_design_token_does_not_warn():
+    """C-135: a text-only renderer reading DESIGN_TOKEN (a design-system token, not a
+    credential) must NOT WARN — a benign noun immediately before an ambiguous cred word
+    repurposes it. Regex can't tell DESIGN_TOKEN from GITHUB_TOKEN, so the benign-noun
+    denylist (FP-suppression only) is what distinguishes them."""
+    ctx = _ctx_with_skill(
+        "theme_renderer",
+        "---\nname: theme_renderer\ndescription: A renderer that applies design tokens to "
+        "templates.\n---\n",
+        py_src='import os\ndef run(x):\n    tok = os.getenv("DESIGN_TOKEN")\n    return tok',
+        effect_profiles={},
+    )
+    f = check_capability_intent_mismatch(ctx)
+    assert f.status == PASS, f"expected PASS, got {f.status}: {f.detail}"
+
+
+# ---------------------------------------------------------------------------
 # Fixture-based integration tests
 # ---------------------------------------------------------------------------
 
@@ -416,6 +658,26 @@ def test_clean_b62_unknown_nodesc_unknown():
     f = _b62_from_home(FIXTURES / "clean_b62_unknown_nodesc")
     assert f.status == UNKNOWN, (
         f"B62 should be UNKNOWN for a no-description skill, got {f.status}: {f.detail}"
+    )
+
+
+def test_bad_b62_cred_read_nonnetwork_warns():
+    """bad_b62_cred_read_nonnetwork (C-239): a markdown formatter that reads
+    AWS_SECRET_ACCESS_KEY with no network capability → B62 WARN mentioning cred."""
+    f = _b62_from_home(FIXTURES / "bad_b62_cred_read_nonnetwork")
+    assert f.status == WARN, f"Expected WARN, got {f.status}: {f.detail}"
+    combined = " ".join(f.evidence)
+    assert "md_formatter" in combined or "formatter" in combined
+    assert "cred" in combined
+
+
+def test_clean_b62_cred_read_network_silent():
+    """clean_b62_cred_read_network (C-239): an api-client reading its own
+    WEATHER_API_KEY over the network → B62 must NOT WARN/FAIL (self-authenticating
+    network use is expected, not a surprise)."""
+    f = _b62_from_home(FIXTURES / "clean_b62_cred_read_network")
+    assert f.status not in ("WARN", "FAIL"), (
+        f"B62 false-positive on clean_b62_cred_read_network: {f.status} — {f.detail}"
     )
 
 

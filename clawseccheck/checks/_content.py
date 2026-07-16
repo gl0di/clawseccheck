@@ -323,25 +323,27 @@ _B62_EXPECTED: dict[str, frozenset] = {
     "docs": frozenset({"read"}),
     "documentation": frozenset({"read"}),
     "generator": frozenset({"read", "write"}),  # doc/code gen may write
-    # network-expected
-    "fetcher": frozenset({"read", "network"}),
-    "downloader": frozenset({"read", "network", "write"}),
-    "scraper": frozenset({"read", "network"}),
-    "http": frozenset({"read", "network"}),
-    "api": frozenset({"read", "network"}),
-    "api-client": frozenset({"read", "network"}),
-    "webhook": frozenset({"read", "network"}),
-    "rss": frozenset({"read", "network"}),
-    "browser": frozenset({"read", "network"}),
-    "browse": frozenset({"read", "network"}),
+    # network-expected — C-239: `cred` added here too. A skill that talks to a
+    # network/exec surface authenticating itself (its own API key/token) is not a
+    # surprise; only text-only categories (above) keep cred as high-surprise.
+    "fetcher": frozenset({"read", "network", "cred"}),
+    "downloader": frozenset({"read", "network", "write", "cred"}),
+    "scraper": frozenset({"read", "network", "cred"}),
+    "http": frozenset({"read", "network", "cred"}),
+    "api": frozenset({"read", "network", "cred"}),
+    "api-client": frozenset({"read", "network", "cred"}),
+    "webhook": frozenset({"read", "network", "cred"}),
+    "rss": frozenset({"read", "network", "cred"}),
+    "browser": frozenset({"read", "network", "cred"}),
+    "browse": frozenset({"read", "network", "cred"}),
     # exec/write-expected
-    "installer": frozenset({"read", "write", "exec", "network"}),
-    "setup": frozenset({"read", "write", "exec", "network"}),
-    "bootstrap": frozenset({"read", "write", "exec", "network"}),
-    "deploy": frozenset({"read", "write", "exec", "network"}),
-    "deployer": frozenset({"read", "write", "exec", "network"}),
+    "installer": frozenset({"read", "write", "exec", "network", "cred"}),
+    "setup": frozenset({"read", "write", "exec", "network", "cred"}),
+    "bootstrap": frozenset({"read", "write", "exec", "network", "cred"}),
+    "deploy": frozenset({"read", "write", "exec", "network", "cred"}),
+    "deployer": frozenset({"read", "write", "exec", "network", "cred"}),
     # search/data: read-oriented
-    "search": frozenset({"read", "network"}),
+    "search": frozenset({"read", "network", "cred"}),
     "index": frozenset({"read", "write"}),
     "database": frozenset({"read", "write"}),
     "store": frozenset({"read", "write"}),
@@ -405,13 +407,64 @@ _B62_DISCLOSURE_PATTERNS: dict[str, re.Pattern] = {
 }
 
 
-_B62_IMPORT_CRED_RE = re.compile(
-    r"\b(?:import\s+(?:keyring|gnupg|cryptography|paramiko)|"
-    r"from\s+(?:keyring|cryptography)\s+import|"
-    r"os\.environ\s*\[|os\.getenv\s*\(|"
-    r"(?:password|secret|api[_-]?key|token)\s*[:=])\b",
+# B-226/C-239: a skill "reads a credential" via a keyring-family import OR an os.getenv/
+# os.environ read of a credential-SHAPED key. The env-key test is a segment classifier
+# (`_b62_env_key_is_credential`), not one big regex: the original group-final `\b` made the
+# env branches dead (B-226), and the naive `\b`-delete re-introduced a C-135 false-WARN class
+# (TOKEN_LIMIT / DESIGN_TOKEN / SECRET_SANTA — benign config vars). The classifier keys on
+# *shape*: an unambiguous COMPOUND cred word (API_KEY, CLIENT_SECRET, AUTH_TOKEN, …) counts
+# anywhere; a bare ambiguous word (TOKEN/SECRET/PASSWORD/BEARER) counts only as the FINAL
+# segment (so TOKEN_LIMIT/SECRET_SANTA don't) AND only when the preceding segment isn't a
+# benign noun that repurposes it (so DESIGN_TOKEN/MAX_TOKEN don't). The benign-noun list is
+# FP-suppression only — no real credential is named DESIGN_TOKEN, so it can never blind a
+# detection. The dropped `(?:password|secret|…)\s*[:=]` LITERAL branch (token = t.split())
+# stays dropped; hardcoded secret literals are already a scored skillast finding.
+_B62_CRED_MODULE_RE = re.compile(
+    r"\bimport\s+(?:keyring|gnupg|cryptography|paramiko)\b|"
+    r"\bfrom\s+(?:keyring|cryptography)\s+import\b",
     re.I,
 )
+_B62_ENV_READ_RE = re.compile(
+    r"os\.(?:getenv\s*\(|environ(?:\.get)?\s*[\[(])\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]"
+)
+# Unambiguous compound credential words — credential-shaped wherever they appear as a
+# `_`-bounded segment run.
+_B62_CRED_COMPOUND_RE = re.compile(
+    r"(?:^|_)(?:API_?KEY|APIKEY|ACCESS_?KEY|SECRET_?KEY|PRIVATE_?KEY|SIGNING_?KEY|"
+    r"ENCRYPTION_?KEY|AUTH_?TOKEN|ACCESS_?TOKEN|REFRESH_?TOKEN|SESSION_?TOKEN|"
+    r"CLIENT_?SECRET|PASSWD|PASSPHRASE|CREDENTIALS?)(?:_|$)"
+)
+# Ambiguous single cred words — credential only as the final segment with a non-benign prefix.
+_B62_CRED_AMBIG = frozenset({"BEARER", "SECRET", "TOKEN", "PASSWORD"})
+# Benign nouns that, immediately before an ambiguous word, repurpose it (design tokens, NLP
+# token budgets, …). FP-suppression only; never a detection blind spot.
+_B62_AMBIG_BENIGN_ADJ = frozenset({
+    "DESIGN", "COLOR", "COLOUR", "THEME", "STYLE", "SPACING", "LAYOUT", "FONT", "GRID",
+    "SIZE", "WIDTH", "HEIGHT", "RADIUS", "MARGIN", "PADDING", "MAX", "MIN", "NUM",
+    "CONTEXT", "CHUNK", "STOP", "START", "PAD", "EOS", "BOS", "SEP", "CSRF", "ANTI",
+})
+
+
+def _b62_env_key_is_credential(name: str) -> bool:
+    """True when a quoted env-var key name is credential-shaped (C-239 recall + C-135
+    precision). Compound cred words count anywhere; a bare ambiguous word counts only as the
+    final segment and only if the preceding segment isn't a benign noun."""
+    up = name.upper()
+    if _B62_CRED_COMPOUND_RE.search(up):
+        return True
+    segs = up.split("_")
+    if segs[-1] in _B62_CRED_AMBIG:
+        prev_seg = segs[-2] if len(segs) >= 2 else None
+        return prev_seg not in _B62_AMBIG_BENIGN_ADJ
+    return False
+
+
+def _b62_src_reads_cred(src: str) -> bool:
+    """True when Python source reads a credential — a keyring-family import, or an
+    os.getenv/os.environ read of a credential-shaped key."""
+    if _B62_CRED_MODULE_RE.search(src):
+        return True
+    return any(_b62_env_key_is_credential(m.group(1)) for m in _B62_ENV_READ_RE.finditer(src))
 
 
 _B62_IMPORT_EXEC_RE = re.compile(
@@ -2273,7 +2326,7 @@ def _b62_actual_families(
             families.add("network")
         if _B62_IMPORT_EXEC_RE.search(src):
             families.add("exec")
-        if _B62_IMPORT_CRED_RE.search(src):
+        if _b62_src_reads_cred(src):
             families.add("cred")
         if _B62_IMPORT_WRITE_RE.search(src):
             families.add("write")

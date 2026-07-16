@@ -15,6 +15,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   `SAFE`/`SUSPICIOUS`/`DANGEROUS` contract with an external host-agent judge), which
   still uses `SAFE` as before.
 
+### Fixed
+- **B62 (capability/intent mismatch) now detects credential-shaped environment-variable
+  reads it previously missed.** `os.getenv("…_API_KEY")` / `os.environ["…_TOKEN"]` and
+  similar credential-shaped keys now register a `cred` capability — a stale word boundary
+  had made those reads invisible. To avoid false alarms on the normal case (a network/API
+  skill authenticating to its own service), `cred` is now an *expected* capability for
+  network/auth-category skills, so only a text-only skill (formatter, linter, …) reading a
+  real secret is flagged. Non-secret env reads (`HOME`, `TZ`, `NO_COLOR`, `XDG_*`) and
+  plain locals named `token` are not matched. One-time effect: the first `--monitor` scan
+  after upgrading may show a self-healing capability-drift entry for a skill that
+  legitimately reads a secret env var (the `cred` capability was never recorded before);
+  it reconciles on the next scan.
+
 ## [3.48.0] — 2026-07-16
 
 Detection-quality release: three deterministic-FAIL checks that could never move the
