@@ -50,13 +50,14 @@ jobs:
       - name: Install markdownlint-cli
         run: npm install -g markdownlint-cli@0.44.0
       - name: Lint Markdown
+        # CHANGELOG.md stays ignored (high-churn release log, repeated structures).
+        # SKILL.md/SECURITY.md/SECURITY_MODEL.md are linted like everything else —
+        # SKILL.md relaxes two formatting-only rules via an inline
+        # markdownlint-disable comment instead of a whole-file ignore.
         run: |
           markdownlint '**/*.md' \
             --ignore node_modules \
             --ignore CHANGELOG.md \
-            --ignore SKILL.md \
-            --ignore SECURITY.md \
-            --ignore SECURITY_MODEL.md \
             --config .markdownlint.jsonc
 
   # -- L3: dependency review (PRs only) ----------------------------------------
@@ -77,10 +78,19 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install gitleaks
+        # Pinned version AND pinned SHA-256: the tarball is fetched from a GitHub
+        # release at runtime, so verify its digest before anything from it can run
+        # (same supply-chain discipline as the SHA-pinned actions). Bump SHA256
+        # together with VERSION — it's the linux_x64 line of the release's
+        # gitleaks_<VERSION>_checksums.txt.
         run: |
           VERSION="8.27.2"
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
-            | tar -xz -C /usr/local/bin gitleaks
+          SHA256="141c3b2dede46d8b3a53b47116da756bd223decc0374797559a6b50ecba5590c"
+          curl -sSfL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
+          echo "${SHA256}  gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf gitleaks.tar.gz -C /usr/local/bin gitleaks
+          rm gitleaks.tar.gz
       - name: Scan for secrets (gitleaks)
         run: gitleaks detect --source=. --config=.gitleaks.toml --redact --no-banner
 
