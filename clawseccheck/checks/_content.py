@@ -4932,35 +4932,94 @@ def check_cross_file_boundary_payload(ctx: Context) -> Finding:
 _XFILE_DATA_EXTS = (".txt", ".json", ".md")
 
 
+def _xfile_body_is_wrapped_base64(body: str) -> bool:
+    """B-223: true when `body` is either already a single unbroken base64-alphabet run (the
+    pre-B-223 case — unchanged), or genuinely LINE-WRAPPED the way `base64.encodebytes`/the
+    `base64` CLI wrap real payloads (76 columns by default, though other widths, e.g. 64,
+    are also common in the wild): every line but the last is ITSELF a pure, unbroken
+    base64-alphabet run, and every line but the last shares the SAME width.
+
+    This is the precision gate for the whole-body leg below. Stripping internal whitespace
+    before the base64-alphabet test (necessary so a genuinely wrapped blob is even
+    recognized at all) is not on its own a sufficient zero-FP bar: naively accepting
+    "collapses to the base64 alphabet after stripping ALL whitespace, including spaces"
+    would also wave through a single run-on sentence of plain words with no punctuation at
+    all (rare, but not impossible — a word list, a punctuation-free haiku) once its spaces
+    are stripped. Requiring every pre-strip line to ALREADY be a pure base64-alphabet run
+    (no embedded spaces or punctuation within a line) of uniform width is a far more
+    specific, and just as cheap, signal than "no punctuation happened to survive": ordinary
+    prose is wrapped for READABILITY at word boundaries (so almost every line still
+    contains internal spaces, which immediately fails the per-line alphabet test) and at
+    ragged lengths chosen by the words that fit, never at one fixed byte width repeated
+    line after line — genuine base64-CLI/`encodebytes` wrapping is the only realistic
+    source of BOTH properties at once. The residual case that could still slip through —
+    a real word-list file with no punctuation, one word per line, where every line but the
+    last happens to be exactly the same character count — is left to the existing
+    decode-and-check-dangerous-shape gate in `check_cross_file_payload` (see there): merely
+    collecting such a fragment produces no finding unless it also base64-decodes (with a
+    decode sink present) to a mostly-printable, dangerous-shaped payload.
+    """
+    if _XFILE_B64_FRAGMENT_RE.match(body):
+        return True
+    lines = body.splitlines()
+    if len(lines) < 2:
+        # A lone "line" that doesn't already match must contain whitespace OTHER than a
+        # wrapping newline (e.g. embedded spaces) -- that's prose, not a wrapped blob.
+        return False
+    *body_lines, last_line = lines
+    if not body_lines or not all(_XFILE_B64_FRAGMENT_RE.match(ln) for ln in body_lines):
+        return False
+    if not last_line or not _XFILE_B64_FRAGMENT_RE.match(last_line):
+        return False
+    widths = {len(ln) for ln in body_lines}
+    return len(widths) == 1 and len(last_line) <= next(iter(widths))
+
+
 def _xfile_data_file_fragments(blob: str) -> list[str]:
     """C-206: sibling DATA-file (`.txt`/`.json`/`.md`) section bodies from a skill's
     concatenated blob, mined for candidate base64 fragments the same two ways B90's
     existing loop already mines `.py`/`.sh`/`.js` CODE source:
 
-    (1) the WHOLE stripped body as one fragment, when it's itself a bare (unquoted)
-        base64 blob — the documented real-world evasion (SkillTrustBench case_01643/
-        case_03133, tracked as C-201/C-206): `_post_install.part1.txt` … `part5.txt`,
-        read via `open()` at runtime and concatenated, completely outside B90's
-        source-file allowlist and literal-quoting assumption.
+    (1) the WHOLE body, with internal whitespace stripped, as one fragment, when the
+        collapsed result is itself a bare (unquoted) base64 blob — the documented
+        real-world evasion (SkillTrustBench case_01643/case_03133, tracked as C-201/
+        C-206): `_post_install.part1.txt` … `part5.txt`, read via `open()` at runtime and
+        concatenated, completely outside B90's source-file allowlist and literal-quoting
+        assumption. Stripping whitespace (not just anchoring start-to-end) is what lets
+        this leg see a base64 blob line-wrapped at 76 columns (`base64.encodebytes`'s /
+        the `base64` CLI's default) or any other fixed width (B-223) — gated by
+        `_xfile_body_is_wrapped_base64` so a whitespace-free run of ordinary prose can't
+        coincidentally qualify.
     (2) any individually QUOTED base64-shaped literal inside the body (reusing the same
         `_XFILE_STRING_LITERAL_RE` extraction the code-source loop uses) — a data file
         can just as easily carry the fragment as a quoted JSON/markdown value instead of
-        bare content.
+        bare content. A quoted string literal can't itself contain a raw newline (the
+        extraction regex excludes `\n`), so this leg is already single-line and needs no
+        whitespace-stripping fix.
 
     Both legs reuse the SAME pure-base64-alphabet shape test B90 already applies to code
-    literals (`_XFILE_B64_FRAGMENT_RE`, anchored start-to-end — an internal newline breaks
-    it). A legitimate `.txt`/`.json`/`.md` file (README, license, changelog, wordlist, a
-    real manifest) essentially never collapses to a single unbroken base64-alphabet run,
-    nor typically carries an incidental long pure-base64 quoted value, so this reuses B90's
-    existing zero-FP bar rather than adding a new one.
+    literals (`_XFILE_B64_FRAGMENT_RE`, anchored start-to-end). A legitimate `.txt`/
+    `.json`/`.md` file (README, license, changelog, wordlist, a real manifest) essentially
+    never collapses to a single unbroken base64-alphabet run that is ALSO uniformly
+    line-wrapped, nor typically carries an incidental long pure-base64 quoted value, so
+    this reuses B90's existing zero-FP bar rather than adding a new one. And even in the
+    residual case where a collected fragment is coincidental, it is only ever a
+    *candidate*: `check_cross_file_payload` still requires it to actually base64-decode
+    (with a decode sink present in the skill's code) to a mostly-printable, dangerous-
+    shaped payload before anything fires — collection alone never produces a finding.
     """
     frags: list[str] = []
     for m in _MANIFEST_HEADER_RE.finditer(blob):
         if not m.group("name").strip().lower().endswith(_XFILE_DATA_EXTS):
             continue
         body = m.group("body").strip()
-        if body and _XFILE_B64_FRAGMENT_RE.match(body):
-            frags.append(body)
+        stripped_body = "".join(body.split())
+        if (
+            stripped_body
+            and _XFILE_B64_FRAGMENT_RE.match(stripped_body)
+            and _xfile_body_is_wrapped_base64(body)
+        ):
+            frags.append(stripped_body)
             continue
         for lm in _XFILE_STRING_LITERAL_RE.finditer(body):
             content = lm.group(1) if lm.group(1) is not None else lm.group(2)
