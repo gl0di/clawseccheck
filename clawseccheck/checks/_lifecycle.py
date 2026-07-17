@@ -34,6 +34,7 @@ from ._content import (
     _CLICKFIX_REMOTE_FETCH_RE,
     _clickfix_trusted_installer,
     _fence_ranges,
+    _secrecy_credential_or_encoding_anchor,
 )
 from . import _shared
 from ._shared import (
@@ -840,6 +841,14 @@ def check_cron_job_content(ctx: Context) -> Finding:
         fr = _fence_ranges(norm)
         cr = [(mm.start(), mm.end()) for mm in _B58_HTML_COMMENT_RE.finditer(norm)]
 
+        # B-231: a STRONG, unambiguous anchor gates whether a B63 secrecy hit may grade-cap
+        # on this cron surface. A bare secrecy phrase + a bare _EXFIL_RE keyword ("post") is
+        # AMBIGUOUS (a benign digest that withholds a detail vs a covert-exfil directive), so
+        # per project doctrine (§5 — ambiguous suppression → WARN, not FAIL) it stays WARN
+        # unless a B64 instruction-override, a curl|bash pipe-to-shell install directive, or a
+        # credential-path/encoded-blob co-occurs in the same field.
+        field_has_strong = False
+
         for mm in _B64_HIGH_CONFIDENCE_RE.finditer(norm):
             disp = _b64_classify(norm, mm.start(), mm.end(), fr, cr)
             if disp == "skip":
@@ -847,13 +856,11 @@ def check_cron_job_content(ctx: Context) -> Finding:
             snippet = mm.group().strip()
             if len(snippet) > 80:
                 snippet = snippet[:77] + "..."
-            (warn_ev if disp == "warn" else fail_ev).append(
-                f'{label}: instruction-override "{snippet}"'
-            )
-
-        for snippet, is_anchored in _b63_scan(norm, fr):
-            note = f'{label}: silent-instruction directive "{snippet}"'
-            (fail_ev if is_anchored else warn_ev).append(note)
+            if disp == "warn":
+                warn_ev.append(f'{label}: instruction-override "{snippet}"')
+            else:
+                fail_ev.append(f'{label}: instruction-override "{snippet}"')
+                field_has_strong = True
 
         cf = _CLICKFIX_REMOTE_FETCH_RE.search(norm)
         if cf and not _clickfix_trusted_installer(cf.group(0)):
@@ -861,6 +868,18 @@ def check_cron_job_content(ctx: Context) -> Finding:
             if len(snippet) > 80:
                 snippet = snippet[:77] + "..."
             fail_ev.append(f'{label}: remote-fetch/pipe-to-shell install directive "{snippet}"')
+            field_has_strong = True
+
+        if _secrecy_credential_or_encoding_anchor(norm):
+            field_has_strong = True
+
+        # B63 silent-instruction / secrecy-framed directive. B-231: on this cron surface a
+        # bare secrecy phrase + bare outbound verb ("post") is ambiguous with a benign
+        # scheduled digest that withholds one detail, so it only FAILs when a strong anchor
+        # co-occurs; otherwise it surfaces as WARN (no grade cap).
+        for snippet, is_anchored in _b63_scan(norm, fr):
+            note = f'{label}: silent-instruction directive "{snippet}"'
+            (fail_ev if (is_anchored and field_has_strong) else warn_ev).append(note)
 
     for job in ctx.cron_jobs:
         job_label = f"cron job '{job.get('id') or job.get('name') or '?'}'"

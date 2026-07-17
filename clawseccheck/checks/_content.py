@@ -773,6 +773,35 @@ _B64_ACTIONABLE_CONT_RE = re.compile(
 _B64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 
 
+def _secrecy_credential_or_encoding_anchor(window: str) -> bool:
+    """B-231 (fix/b231-cronhook-fp): the credential/encoding leg of the "strong,
+    unambiguous" secrecy anchor used ONLY by the cron (B168) and hook (B169) surfaces to
+    decide whether a B63 secrecy hit may grade-cap on those two surfaces.
+
+    On the cron/hook surface a bare ``_B63_SECRECY_RE`` phrase co-located with a bare
+    ``_EXFIL_RE`` keyword — the classic being the outbound verb "post" (``\\bPOST\\b`` is in
+    ``_EXFIL_RE``) — is AMBIGUOUS: a legitimate scheduled digest / webhook relay that
+    withholds one detail ("Post the standup summary to the team channel. Don't mention the
+    Q3 numbers.") looks identical to a covert-exfil directive. Per project doctrine (§5 —
+    ambiguous suppression is WARN, not FAIL) that bare pairing must NOT grade-cap; it stays
+    a FAIL only when a STRONGER anchor co-occurs. Two of the three strong anchors the fix
+    names — a B64 instruction-override and a curl|bash pipe-to-shell install — are detected
+    by their own reused detectors in the callers and grade-cap on their own. This helper
+    covers the third: a real credential-PATH read (``_CRED_RE``: the .ssh/.aws/.env family,
+    NOT the mere editorial noun "credentials") or an encoded blob (base64 / base64url,
+    >=40 chars). Bare ``_EXFIL_RE`` keywords (a bare "post"/"base64" token) are
+    DELIBERATELY excluded — that bare match is the false positive being fixed.
+
+    Scoped to the two callers; the shared ``_EXFIL_RE`` / ``_B63_SECRECY_RE`` / ``_b63_scan``
+    and every other B63 consumer are untouched.
+    """
+    return bool(
+        _CRED_RE.search(window)
+        or _B64_BLOB_RE.search(window)
+        or _B64URL_BLOB_RE.search(window)
+    )
+
+
 _B64_HIGH_CONFIDENCE_RE = re.compile(
     normalize_for_scan(
         r"(?:"

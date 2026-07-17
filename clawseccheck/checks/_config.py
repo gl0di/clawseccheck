@@ -33,6 +33,7 @@ from ._content import (
     _CLICKFIX_REMOTE_FETCH_RE,
     _clickfix_trusted_installer,
     _fence_ranges,
+    _secrecy_credential_or_encoding_anchor,
 )
 from ._shared import (
     EXPOSED_BINDS,
@@ -970,6 +971,15 @@ def check_hook_template_content(ctx: Context) -> Finding:
                 fr = _fence_ranges(norm)
                 cr = [(mm.start(), mm.end()) for mm in _B58_HTML_COMMENT_RE.finditer(norm)]
 
+                # B-231: a STRONG, unambiguous anchor gates whether a B63 secrecy hit may
+                # grade-cap on this hook-template surface. A bare secrecy phrase + a bare
+                # _EXFIL_RE keyword ("post") is AMBIGUOUS (a benign relayed digest that
+                # withholds a detail vs a covert-exfil directive), so per project doctrine
+                # (§5 — ambiguous suppression → WARN, not FAIL) it stays WARN unless a B64
+                # instruction-override, a curl|bash pipe-to-shell install directive, or a
+                # credential-path/encoded-blob co-occurs in the same template field.
+                field_has_strong = False
+
                 # B64: instruction-hierarchy override ("ignore all previous instructions").
                 for mm in _B64_HIGH_CONFIDENCE_RE.finditer(norm):
                     disp = _b64_classify(norm, mm.start(), mm.end(), fr, cr)
@@ -982,14 +992,7 @@ def check_hook_template_content(ctx: Context) -> Finding:
                         warn_ev.append(f'{source}: instruction-override "{snippet}"')
                     else:
                         fail_ev.append(f'{source}: instruction-override "{snippet}"')
-
-                # B63: silent-instruction / secrecy-framed directive.
-                for snippet, is_anchored in _b63_scan(norm, fr):
-                    label = f'{source}: silent-instruction directive "{snippet}"'
-                    if is_anchored:
-                        fail_ev.append(label)
-                    else:
-                        warn_ev.append(label)
+                        field_has_strong = True
 
                 # ClickFix-style remote-fetch/pipe-to-shell install directive (same
                 # detector B167 reuses for plugins.entries.<name>.config.appServer.command).
@@ -999,6 +1002,22 @@ def check_hook_template_content(ctx: Context) -> Finding:
                     if len(snippet) > 80:
                         snippet = snippet[:77] + "..."
                     fail_ev.append(f'{source}: remote-fetch/pipe-to-shell install directive "{snippet}"')
+                    field_has_strong = True
+
+                if _secrecy_credential_or_encoding_anchor(norm):
+                    field_has_strong = True
+
+                # B63: silent-instruction / secrecy-framed directive. B-231: on this
+                # hook-template surface a bare secrecy phrase + bare outbound verb ("post")
+                # is ambiguous with a benign relayed digest that withholds one detail, so it
+                # only FAILs when a strong anchor co-occurs; otherwise it surfaces as WARN
+                # (no grade cap).
+                for snippet, is_anchored in _b63_scan(norm, fr):
+                    label = f'{source}: silent-instruction directive "{snippet}"'
+                    if is_anchored and field_has_strong:
+                        fail_ev.append(label)
+                    else:
+                        warn_ev.append(label)
 
     if fail_ev:
         ev_summary = "; ".join(fail_ev[:4])
