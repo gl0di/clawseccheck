@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 from .. import attest as _attest
 from ..catalog import (
     CRITICAL,
@@ -1076,7 +1077,7 @@ _MCP_SAFE_URL_LOOKBEHIND = "".join(
 # ---------- B24: MCP server hardening ----------
 # Unpinned / dangerous install specs for stdio commands.
 _MCP_UNPINNED_RE = re.compile(
-    r"(?:npx|pip(?:x)?|uvx)\b[^\n]*?"  # npx / pip / pipx / uvx prefix
+    r"(?:npx|pip(?:x)?|uvx|yarn)\b[^\n]*?"  # npx / pip / pipx / uvx / yarn (dlx) prefix
     r"(?:"
     r"@latest"  # explicit @latest tag
     rf"|{_MCP_SAFE_URL_LOOKBEHIND}https?://"  # URL argument (not a known safe registry/index flag value)
@@ -1108,10 +1109,16 @@ _MCP_IEX_DOWNLOAD_RE = re.compile(
 )
 
 
-# Broad secret env vars.
+# Broad secret env vars. B-230: the original set was prefix-anchored to a handful of
+# cloud-provider families and missed common non-prefixed real-world names — GH_TOKEN
+# (GitHub CLI's own short form), SLACK_*_TOKEN (bot/app/user tokens), DATABASE_URL (a
+# connection string that itself embeds credentials), and npm's NPM_TOKEN/NPM_AUTH(_TOKEN)
+# publish-auth vars — each added as its own narrow, named alternative (not a broad prefix)
+# to avoid sweeping in unrelated vars (e.g. NPM_CONFIG_REGISTRY stays unflagged).
 _MCP_SECRET_ENV_RE = re.compile(
     r"^(OPENAI_API_KEY|ANTHROPIC_API_KEY|AWS_[A-Z_]+|AZURE_[A-Z_]+|GCP_[A-Z_]+|"
-    r"GOOGLE_[A-Z_]*(?:API_)?KEY|GITHUB_TOKEN|GITLAB_TOKEN|SECRET[_A-Z]*|"
+    r"GOOGLE_[A-Z_]*(?:API_)?KEY|GITHUB_TOKEN|GH_TOKEN|GITLAB_TOKEN|SLACK_[A-Z_]*TOKEN|"
+    r"DATABASE_URL|NPM_(?:TOKEN|AUTH(?:_TOKEN)?)|SECRET[_A-Z]*|"
     r"API_KEY[_A-Z]*|TOKEN[_A-Z]*)$",
     re.I,
 )
@@ -1129,6 +1136,39 @@ _MCP_META_IP_RE = re.compile(
     r")$",
     re.I,
 )
+
+
+# B-230: a bearer/API credential handed to an MCP endpoint via its own `headers` config
+# (grounded: mcp.servers.*.headers is a real field — "HTTP transport: extra HTTP headers
+# sent with every request", dist types.openclaw d.ts) — a compromised or rogue MCP server
+# can capture and replay it. Header-SCOPED matcher: deliberately NOT folded into the
+# broader SECRET_KEY_RE (checks/_shared.py), which feeds redaction and stays narrow on
+# purpose; this only inspects header keys/values, never a generic key name elsewhere.
+_MCP_HEADER_AUTH_KEY_RE = re.compile(r"^(authorization|proxy-authorization|x-api-key)$", re.I)
+_MCP_HEADER_BEARER_VALUE_RE = re.compile(r"^\s*bearer\s+\S+", re.I)
+
+
+# B-230: docker.sock / --privileged in an MCP server's OWN stdio launch command are the
+# same container-escape signal check_sandbox already detects for
+# agents.defaults.sandbox.docker.binds (checks/_config.py's inline "docker.sock" in
+# binds_str substring test) — the identical positive-evidence definition ("docker.sock"
+# appearing in the relevant text), applied here to a different config path (the MCP
+# server's own command/args, which check_sandbox never reads). Not literally imported
+# from checks/_config.py: that module's own docstring scopes its dependencies to layer-1
+# + checks/_shared only, and the check itself is a one-line substring test, not logic
+# worth threading a cross-topic import through — so the definition is mirrored here
+# rather than factored into a shared function, by design.
+_DOCKER_PRIVILEGED_FLAG_RE = re.compile(r"(?<![\w-])--privileged\b(?!-)", re.I)
+
+
+def _docker_sock_hit(text: str) -> bool:
+    """True when *text* references the host Docker socket (container-escape vector)."""
+    return "docker.sock" in text
+
+
+def _docker_privileged_flag_hit(text: str) -> bool:
+    """True when *text* passes Docker's ``--privileged`` flag (drops container isolation)."""
+    return bool(_DOCKER_PRIVILEGED_FLAG_RE.search(text))
 
 
 def _mcp_server_risks(name: str, spec: dict) -> tuple[list[str], list[str]]:
@@ -1176,6 +1216,26 @@ def _mcp_server_risks(name: str, spec: dict) -> tuple[list[str], list[str]]:
             f"interpreter (pipe-to-run install vector) ({safe_cmd})"
         )
 
+    # ---- B-230: docker.sock / --privileged in the MCP server's OWN stdio command ----
+    # Same container-escape signals check_sandbox already flags for
+    # agents.defaults.sandbox.docker.binds — here they surface via the server's own
+    # launch command/args (e.g. command="docker", args=["run", "-v",
+    # "/var/run/docker.sock:/var/run/docker.sock", ...]), a distinct config path
+    # check_sandbox never reads.
+    if _docker_sock_hit(full_cmd):
+        fails.append(
+            f"{name}: stdio command references the host Docker socket (docker.sock) — "
+            f"grants full host control to whatever it launches (container escape) ({safe_cmd})"
+        )
+    # --privileged is gated on the command actually mentioning docker/podman — the flag
+    # name alone is generic enough that requiring the container-runtime context keeps
+    # this from firing on an unrelated tool's own same-named flag (C-135).
+    if re.search(r"\b(?:docker|podman)\b", full_cmd, re.I) and _docker_privileged_flag_hit(full_cmd):
+        fails.append(
+            f"{name}: stdio command runs a container with --privileged — drops "
+            f"container isolation (container escape) ({safe_cmd})"
+        )
+
     # ---- env passthrough ----
     env = spec.get("env") or {}
     if isinstance(env, dict):
@@ -1191,6 +1251,22 @@ def _mcp_server_risks(name: str, spec: dict) -> tuple[list[str], list[str]]:
     # ---- tokenPassthrough / token-passthrough ----
     if spec.get("tokenPassthrough") is True or spec.get("token-passthrough") is True:
         fails.append(f"{name}: tokenPassthrough=true (host token forwarded to MCP server)")
+
+    # ---- B-230: headers.Authorization / bearer credential forwarded to the endpoint ----
+    # Real MCP field (dist d.ts): "HTTP transport: extra HTTP headers sent with every
+    # request." Header-scoped: only the header key/value shapes are inspected here, never
+    # widening the global SECRET_KEY_RE (which feeds redaction elsewhere). Only the header
+    # NAME is echoed — the value itself is never included in evidence.
+    headers = spec.get("headers") or {}
+    if isinstance(headers, dict):
+        for hkey, hval in headers.items():
+            hkey_s = str(hkey).strip()
+            if _MCP_HEADER_AUTH_KEY_RE.match(hkey_s) or _MCP_HEADER_BEARER_VALUE_RE.match(str(hval)):
+                warns.append(
+                    f"{name}: headers.{hkey_s} forwards a credential to the MCP endpoint "
+                    "— a compromised or rogue server can capture and replay it"
+                )
+                break
 
     # ---- allowedHosts ----
     allowed_hosts = spec.get("allowedHosts") or []
@@ -1218,6 +1294,25 @@ def _mcp_server_risks(name: str, spec: dict) -> tuple[list[str], list[str]]:
             warns.append(
                 f"{name}: remote MCP endpoint {sanitize_url_host_only(url)} "
                 "with no allowedHosts restriction"
+            )
+
+    # ---- B-230: sslVerify/ssl_verify=false on a remote endpoint (MITM) ----
+    # Real MCP field (dist types.openclaw d.ts): "HTTP TLS verification, disabled only
+    # for explicitly trusted private endpoints" (sslVerify; ssl_verify is its documented
+    # alias). So this fires ONLY when the endpoint is remote (non-loopback, per
+    # _mcp_url_is_local) AND not already recognizable as that blessed "explicitly trusted
+    # private endpoint": a private/RFC-1918/link-local host (_MCP_META_IP_RE), or any
+    # allowedHosts restriction configured at all, both suppress the finding — a genuinely
+    # private/allowlisted sslVerify=false endpoint must stay clean (C-135).
+    ssl_verify = spec.get("sslVerify", spec.get("ssl_verify"))
+    if ssl_verify is False and isinstance(url, str) and url.strip() and not _mcp_url_is_local(url):
+        ssl_host = (urlparse(url.strip()).hostname or "").lower()
+        if not allowed_hosts and not _MCP_META_IP_RE.match(ssl_host):
+            from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
+            fails.append(
+                f"{name}: sslVerify=false disables TLS certificate verification for "
+                f"remote MCP endpoint {sanitize_url_host_only(url)} — vulnerable to MITM "
+                "interception/tampering of tool calls and any forwarded headers"
             )
 
     return fails, warns
@@ -1255,8 +1350,9 @@ def check_mcp_hardening(ctx: Context) -> Finding:
             FAIL,
             f"{n} MCP server(s) ({names_preview}) have dangerous hardening issues — see evidence.",
             "Remove wildcard env passthrough, disable tokenPassthrough, restrict "
-            "allowedHosts to specific safe hosts, and pin MCP package specs to "
-            "exact versions.",
+            "allowedHosts to specific safe hosts, pin MCP package specs to exact "
+            "versions, drop docker.sock/--privileged from the server's own launch "
+            "command, and re-enable sslVerify for remote endpoints.",
             evidence=ev,
         )
 
@@ -1268,8 +1364,9 @@ def check_mcp_hardening(ctx: Context) -> Finding:
             "B24",
             WARN,
             f"{n} MCP server(s) ({names_preview}) have likely-insecure settings — see evidence.",
-            "Pin MCP package specs to exact versions (avoid @latest/URLs), restrict "
-            "allowedHosts to known-safe hosts, and avoid forwarding broad secret env vars.",
+            "Pin MCP package specs to exact versions (avoid @latest/URLs/yarn dlx), "
+            "restrict allowedHosts to known-safe hosts, avoid forwarding broad secret "
+            "env vars or Authorization headers, and enable sslVerify for remote endpoints.",
             evidence=ev,
         )
 

@@ -1,0 +1,16 @@
+{
+  "mcp": {
+    "servers": {
+      "ci-tool": {
+        "command": "node",
+        "args": ["index.js"],
+        "env": {
+          "GH_TOKEN": "placeholder-not-a-real-token",
+          "SLACK_BOT_TOKEN": "placeholder-not-a-real-token",
+          "DATABASE_URL": "postgres://user:placeholder@db.example.com/app",
+          "NPM_AUTH": "placeholder-not-a-real-token"
+        }
+      }
+    }
+  }
+}

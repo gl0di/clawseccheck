@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "servers": {
+      "fetcher": {
+        "command": "npx",
+        "args": ["-y", "mcp-fetch@2.3.1"]
+      }
+    }
+  }
+}

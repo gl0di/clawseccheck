@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "servers": {
+      "runner-tool": {
+        "command": "yarn",
+        "args": ["dlx", "some-mcp-pkg@latest"]
+      }
+    }
+  }
+}

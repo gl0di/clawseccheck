@@ -1,0 +1,11 @@
+{
+  "mcp": {
+    "servers": {
+      "internal-tool": {
+        "url": "https://internal-mcp.corp.example.com/api",
+        "sslVerify": false,
+        "allowedHosts": ["internal-mcp.corp.example.com"]
+      }
+    }
+  }
+}
