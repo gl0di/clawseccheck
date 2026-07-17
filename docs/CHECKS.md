@@ -821,7 +821,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B169 - Tool-output trust-boundary-inversion directive
+### B170 - Tool-output trust-boundary-inversion directive
 
 - Severity: HIGH
 - Block: hardening

@@ -1,6 +1,6 @@
-"""B169 — Tool-output trust-boundary-inversion directive (B-232 item 4).
+"""B170 — Tool-output trust-boundary-inversion directive (B-232 item 4).
 
-B67 flags the ABSENCE of a "treat tool output as data" declaration; B169 flags the
+B67 flags the ABSENCE of a "treat tool output as data" declaration; B170 flags the
 PRESENCE of the opposite (inverted) directive — text instructing the agent to treat
 fetched web/MCP/tool/API output as authoritative operator/system instructions.
 """
@@ -38,14 +38,14 @@ def test_unknown_when_both_empty():
 # ── WARN: fixture with a trust-inversion directive ─────────────────────────
 
 def test_warn_bad_fixture():
-    f = check_tool_output_trust_inversion(collect(FIXTURES / "bad_b169_trust_inversion"))
+    f = check_tool_output_trust_inversion(collect(FIXTURES / "bad_b170_trust_inversion"))
     assert f.status == WARN, f"Expected WARN, got {f.status}: {f.detail}"
     assert "trust-inversion" in f.detail.lower() or "trust-boundary-inversion" in f.detail.lower()
 
 
 def test_warn_never_escalates_to_fail():
     """Content-ring highest-FP-risk detector: capped at WARN, never FAIL."""
-    f = check_tool_output_trust_inversion(collect(FIXTURES / "bad_b169_trust_inversion"))
+    f = check_tool_output_trust_inversion(collect(FIXTURES / "bad_b170_trust_inversion"))
     assert f.status != "FAIL"
 
 
@@ -79,7 +79,7 @@ def test_warn_installed_skill_directive():
 # ── PASS: clean fixture with the correct (negated) declaration ─────────────
 
 def test_pass_clean_fixture():
-    f = check_tool_output_trust_inversion(collect(FIXTURES / "clean_b169_trust_declaration"))
+    f = check_tool_output_trust_inversion(collect(FIXTURES / "clean_b170_trust_declaration"))
     assert f.status == PASS, f"Expected PASS, got {f.status}: {f.detail}"
 
 
@@ -89,7 +89,7 @@ def test_pass_no_bootstrap_content():
     assert f.status == PASS
 
 
-# ── PASS: B67's own legit per-source trust-contract wordings never fire B169 ──
+# ── PASS: B67's own legit per-source trust-contract wordings never fire B170 ──
 
 def test_pass_b67_mcp_declaration():
     ctx = _ctx(

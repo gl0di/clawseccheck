@@ -3237,7 +3237,7 @@ SKILL_CONTENT_RING = (
     check_hex_private_key_exposure,  # B165 — hex-shaped crypto private-key value (C-200)
     check_remote_code_dependency,  # B157 — non-registry / remote-code dependency source (F-117)
     check_per_source_trust_contracts,  # B67 — per-source trust contracts
-    check_tool_output_trust_inversion,  # B169 — tool-output trust-inversion directive (B-232 item 4)
+    check_tool_output_trust_inversion,  # B170 — tool-output trust-inversion directive (B-232 item 4)
     check_forged_provenance,  # B74 — forged role / false-provenance
     check_install_policy,  # B42 — install-time policy (hooks + dir perms)
     check_import_from_writable,  # B86 — defensibility: import-path hijack surface (D1)
