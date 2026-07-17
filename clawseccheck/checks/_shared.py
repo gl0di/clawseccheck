@@ -879,6 +879,18 @@ def _read_jsonl_tail(path: Path, cap: int = _JSONL_SCAN_CAP) -> tuple[str, bool]
 #         access; the remote endpoint's own risk is the outbound leg instead), and (2)
 #         a benign-compound denylist (_MCP_BENIGN_COMPOUND_RE) that suppresses a
 #         capability keyword immediately followed by a docs/diagram/schema/etc. suffix.
+#
+# C-135 round 3 (both round-2 denylists over-suppressed, opening false negatives —
+# tightened here; see the two denylist definitions below for the full rationale):
+#   FN-1: _MCP_BENIGN_COMPOUND_RE wrongly included "viewer"/"explorer"/"dashboard"/
+#         "scanner" — those name a READER of the actual data (vault-viewer,
+#         postgres-viewer, s3-explorer, database-scanner), not a shape-only tool.
+#         Removed; only the true shape-only suffixes (diagram/designer/docs/
+#         documentation/schema/erd) remain.
+#   FN-2: _MCP_HOME_SHARED_BASENAMES wrongly included service-account / secret-bearing
+#         home names (git, backup(s), www/srv/web, repo(s)) — a filesystem MCP rooted
+#         there is a genuine sensitive-data grant. Removed; the remaining names are a
+#         deliberate, GR#5-motivated accepted residual (see the denylist's comment).
 
 # Capability keywords that, when they name an MCP server via the canonical
 # @scope/server-<cap> / mcp-server-<cap> / mcp-<cap> naming convention, mark a server
@@ -896,14 +908,20 @@ _MCP_DATA_CAP_RE = re.compile(
     re.I,
 )
 
-# FP-suppression denylist (C-135 round 2): a capability keyword immediately followed by
-# one of these benign-compound suffixes names a tool that inspects/documents/visualizes
-# a data store's SHAPE, not one that reads its contents — e.g. "database-diagram",
-# "redis-docs", "vault-scanner". Matched right after _MCP_DATA_CAP_RE's keyword; a bare
-# keyword with no such suffix (a real "server-postgres"/"server-vault") still flags.
+# FP-suppression denylist (C-135 round 2, tightened round 3): a capability keyword
+# immediately followed by one of these SHAPE-ONLY suffixes names a tool that inspects/
+# documents a data store's STRUCTURE, not one that reads its contents — e.g.
+# "database-diagram", "redis-docs", "server-database-schema". Matched right after
+# _MCP_DATA_CAP_RE's keyword; a bare keyword with no such suffix (a real
+# "server-postgres"/"server-vault") still flags.
+#
+# C-135 round 3 (FN-1): "viewer"/"explorer"/"dashboard"/"scanner" were REMOVED from this
+# denylist — those suffixes name a READER, not a shape-only tool (a "vault-viewer" reads
+# the actual secrets, a "postgres-viewer"/"mongodb-explorer"/"redis-viewer" reads DB rows,
+# an "s3-explorer"/"gdrive-viewer" reads cloud objects, a "database-scanner" dumps a DB),
+# so suppressing them was a real false-negative — they must still flag as data access.
 _MCP_BENIGN_COMPOUND_RE = re.compile(
-    r"\A[-_]?(diagram|designer|docs?|documentation|schema|erd|scanner|viewer|"
-    r"explorer|dashboard)\b",
+    r"\A[-_]?(diagram|designer|docs?|documentation|schema|erd)\b",
     re.I,
 )
 
@@ -926,18 +944,37 @@ _MCP_BROAD_FS_ROOTS = frozenset(
      "/home", "/users", "/root", "/etc", "/var"}
 )
 
-# FP-suppression denylist (C-135 round 2, FP-A): basenames directly under /home or
-# /Users that name a shared/service directory, NOT a private per-user home — e.g. the
-# standard macOS /Users/Shared folder, or a team's /home/data /home/git /home/projects
-# convention. A single path level under /home//Users is only "the whole user home" when
-# it is a plausible username, i.e. NOT one of these.
+# FP-suppression denylist (C-135 round 2, tightened round 3, FP-A): basenames directly
+# under /home or /Users that name a conventionally-shared/scratch/dev-workspace
+# directory, NOT a private per-user home — e.g. the standard macOS /Users/Shared folder,
+# or a team's /home/data /home/projects /home/workspace convention. A single path level
+# under /home//Users is only "the whole user home" when it is a plausible username, i.e.
+# NOT one of these.
+#
+# C-135 round 3 (FN-2): {git, backup, backups, www, srv, web, repo, repos} were REMOVED
+# from this denylist — those are service-account / secret-bearing home directories, not
+# harmless shares: /home/git is a git service user's home (~/.ssh deploy keys + every
+# repo it serves), /home/backup(s) holds whole-system backups / DB dumps, /home/www
+# ///srv//web are webroots (configs, .env, credentials), /home/repo(s) is a repo-hosting
+# account. Rooting a filesystem MCP there is a genuine sensitive-data grant, so
+# suppressing it was a real false-negative — they go back to broad (FAIL), a true
+# positive.
+#
+# The remaining names ARE kept as an intentional, accepted residual (not a bug): the
+# bare word after /home/ or /Users/ (e.g. "data", "projects", "workspace") is statically
+# undecidable — it can equally be a team's shared scratch/dev folder (the common case) OR
+# someone's actual private home directory named after its purpose. Per Golden Rule #5 a
+# false-positive FAIL is the hard blocker, so this ambiguity is deliberately tie-broken
+# toward PASS (no leg raised) rather than FAIL, accepting the narrower risk of a false
+# NEGATIVE on the rarer case where one of these really is a private, sensitive home.
+# Pinned by test_home_purpose_word_ambiguity_is_accepted_residual (do not "fix" this by
+# re-adding these names to the denylist without re-litigating the GR#5 tradeoff).
 _MCP_HOME_SHARED_BASENAMES = frozenset(
     {
-        "shared", "public", "guest", "default",
-        "workspace", "workspaces", "app", "apps", "data",
-        "git", "projects", "project", "repos", "repo",
-        "srv", "www", "web", "docs", "doc",
-        "common", "media", "backup", "backups", "tmp", "temp",
+        "shared", "public", "guest", "default", "common",
+        "workspace", "workspaces", "projects", "project",
+        "app", "apps", "data", "media", "docs", "doc",
+        "tmp", "temp",
     }
 )
 
@@ -950,10 +987,12 @@ def _mcp_fs_root_is_broad(raw) -> bool:
     root (a single sub-dir under a home, '.', a relative path) is NOT broad — it does not,
     by itself, raise the sensitive-data leg (§5 zero-FP). Flags (leading '-') are skipped.
 
-    C-135 round 2 (FP-A): a single level under /home or /Users is broad only when that
-    basename is a plausible per-user home — a shared/service directory (/Users/Shared,
-    /home/data, /home/git, ...) is NOT a private home and must stay non-broad, even
-    though it is nominally "one level under the homes parent" (_MCP_HOME_SHARED_BASENAMES).
+    C-135 round 2 (FP-A), tightened round 3: a single level under /home or /Users is
+    broad only when that basename is NOT a conventionally-shared/scratch name (see
+    _MCP_HOME_SHARED_BASENAMES) — e.g. /Users/Shared or /home/data stay non-broad, even
+    though nominally "one level under the homes parent". A service-account / secret-
+    bearing home (/home/git, /home/backup, /home/www, ...) is deliberately NOT in that
+    denylist (round 3, FN-2) and so still counts as broad.
     """
     p = str(raw).strip().strip('"').strip("'")
     if not p or p.startswith("-"):
@@ -977,9 +1016,11 @@ def _mcp_sensitive_reason(local_blob: str, args: list) -> str:
     never a remote server's url/host, which says nothing about local data access (a
     remote endpoint's own risk is the outbound leg, not this one).
 
-    Two sound signals: a known data/db/secret server package name that is NOT a benign
-    compound (diagram/docs/schema/scanner/... — inspects the shape, doesn't read the
-    data; _MCP_BENIGN_COMPOUND_RE), or a filesystem server ALSO rooted at a broad path.
+    Two sound signals: a known data/db/secret server package name that is NOT a
+    shape-only compound (diagram/designer/docs/documentation/schema/erd — inspects the
+    structure, doesn't read the data; _MCP_BENIGN_COMPOUND_RE), or a filesystem server
+    ALSO rooted at a broad path. A reader/browser compound (viewer/explorer/dashboard/
+    scanner) is deliberately NOT in that denylist (C-135 round 3, FN-1) — it still flags.
     """
     m = _MCP_DATA_CAP_RE.search(local_blob)
     if m and not _MCP_BENIGN_COMPOUND_RE.match(local_blob[m.end():]):

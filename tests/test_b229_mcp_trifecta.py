@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from clawseccheck import audit
 from clawseccheck.catalog import FAIL, PASS
 from clawseccheck.checks import (
@@ -77,7 +79,7 @@ def test_macos_shared_folder_not_broad():
 
 
 def test_linux_shared_service_dirs_not_broad():
-    for p in ("/home/shared", "/home/data", "/home/projects", "/home/git",
+    for p in ("/home/shared", "/home/data", "/home/projects",
               "/home/workspace", "/home/app"):
         assert _mcp_fs_root_is_broad(p) is False, f"{p} wrongly treated as broad"
 
@@ -94,6 +96,34 @@ def test_real_per_user_home_still_broad():
     counts as broad — the true-positive case must not regress."""
     for p in ("/home/alice", "/Users/dave", "/home/quentin", "/Users/nathan"):
         assert _mcp_fs_root_is_broad(p) is True, f"{p} wrongly excluded"
+
+
+# ── C-135 round 3, FN-2: service-account / secret-bearing home dirs were wrongly
+#    suppressed by the round-2 denylist — removed, so they go back to broad/FAIL. ──
+
+def test_service_account_home_dirs_are_broad_again():
+    """A filesystem MCP rooted at a service-account home is a genuine sensitive-data
+    grant (git's ~/.ssh deploy keys + every repo it serves; backup dumps; a webroot's
+    configs/.env; a repo-hosting account) — these must FAIL, not PASS."""
+    for p in ("/home/git", "/home/backup", "/home/backups", "/home/www",
+              "/home/srv", "/home/web", "/home/repo", "/home/repos"):
+        assert _mcp_fs_root_is_broad(p) is True, f"{p} wrongly excluded (FN-2 regression)"
+
+
+def test_home_purpose_word_ambiguity_is_accepted_residual():
+    """Accepted residual (GR#5 tie-break, documented next to _MCP_HOME_SHARED_BASENAMES):
+    a single conventionally-shared/scratch/dev-workspace basename directly under /home or
+    /Users (e.g. 'data', 'projects', 'workspace') is statically undecidable — it can
+    equally be a team's shared scratch folder (the common case) or someone's private home
+    named after its purpose. Golden Rule #5 tie-breaks a hard-blocker false-positive FAIL
+    toward PASS, accepting the narrower risk of a false negative on the rarer case. This
+    pins that deliberate choice as intentional, not a bug to "fix" by re-adding these
+    names to the service-account denylist."""
+    for p in ("/home/shared", "/Users/Shared", "/home/data", "/home/projects",
+              "/home/workspace", "/home/public", "/home/guest", "/home/default",
+              "/home/common", "/home/app", "/home/apps", "/home/media",
+              "/home/docs", "/home/doc", "/home/tmp", "/home/temp"):
+        assert _mcp_fs_root_is_broad(p) is False, f"{p}: accepted residual regressed"
 
 
 # ── _mcp_sensitive_reason: known-name + broad-root heuristics ───────────────────────
@@ -157,9 +187,44 @@ def test_database_schema_compound_does_not_flag():
     assert _mcp_sensitive_reason(blob, ["-y", "@scope/server-database-schema"]) == ""
 
 
-def test_vault_scanner_compound_does_not_flag():
-    blob = "npx -y mcp-server-vault-scanner"
-    assert _mcp_sensitive_reason(blob, ["-y", "mcp-server-vault-scanner"]) == ""
+# ── C-135 round 3, FN-1: "viewer"/"explorer"/"dashboard"/"scanner" were removed from
+#    the benign-compound denylist — a READER of the actual data must flag, not PASS. ──
+
+def test_reader_browser_compounds_now_flag():
+    """These suffixes name a tool that reads the real contents (a vault-viewer reads
+    secrets, a postgres-viewer/mongodb-explorer/redis-viewer reads DB rows, an
+    s3-explorer/gdrive-viewer reads cloud objects, a database-scanner dumps a DB) — NOT
+    a shape-only tool. Must flag as data access (the round-2 denylist wrongly suppressed
+    these; round 3 removes them)."""
+    for pkg in (
+        "mcp-server-vault-viewer",
+        "mcp-server-secret-explorer",
+        "mcp-server-credentials-dashboard",
+        "mcp-server-postgres-viewer",
+        "mcp-server-mongodb-explorer",
+        "mcp-server-redis-viewer",
+        "mcp-server-s3-explorer",
+        "mcp-server-gdrive-viewer",
+        "mcp-server-database-scanner",
+    ):
+        blob = f"npx -y {pkg}"
+        reason = _mcp_sensitive_reason(blob, ["-y", pkg])
+        assert reason, f"{pkg}: wrongly suppressed (FN-1 regression)"
+
+
+def test_shape_only_compounds_still_suppressed():
+    """True shape-only tools (diagram/designer/docs/documentation/schema/erd) still do
+    NOT flag — the round-3 tightening only removed the reader/browser suffixes."""
+    for pkg in (
+        "mcp-server-database-diagram",
+        "mcp-server-database-designer",
+        "mcp-server-redis-docs",
+        "mcp-server-vault-documentation",
+        "@scope/server-database-schema",
+        "mcp-server-database-erd",
+    ):
+        blob = f"npx -y {pkg}"
+        assert _mcp_sensitive_reason(blob, ["-y", pkg]) == "", f"{pkg}: wrongly flagged"
 
 
 def test_bare_data_keyword_without_compound_suffix_still_flags():
@@ -225,6 +290,72 @@ def test_a1_remote_mcp_alone_raises_outbound_leg():
     a1 = _a1({"mcp": {"servers": {"w": {"url": "https://api.example.com/mcp"}}}})
     assert "outbound actions" in (a1.evidence or [])
     assert "sensitive data" not in (a1.evidence or [])
+
+
+# ── C-135 round 3 pins: full 3/3 FAIL for the two FN classes just closed ────────────
+
+@pytest.mark.parametrize(
+    "pkg",
+    [
+        "mcp-server-vault-viewer",
+        "mcp-server-secret-explorer",
+        "mcp-server-postgres-viewer",
+        "mcp-server-database-scanner",
+    ],
+)
+def test_a1_reader_browser_mcp_is_full_trifecta_fail(pkg):
+    a1 = _a1({
+        "channels": {"telegram": {"enabled": True, "dmPolicy": "open"}},
+        "tools": {"web": {"fetch": {"enabled": True}}},
+        "mcp": {"servers": {"r": {"command": "npx", "args": ["-y", pkg]}}},
+    })
+    assert a1.status == FAIL, f"{pkg}: FN-1 regression — did not FAIL 3/3"
+    assert set(a1.evidence) == {"untrusted input", "sensitive data", "outbound actions"}
+
+
+@pytest.mark.parametrize("root", ["/home/git", "/home/backup", "/home/www"])
+def test_a1_service_account_home_fs_mcp_is_full_trifecta_fail(root):
+    a1 = _a1({
+        "channels": {"telegram": {"enabled": True, "dmPolicy": "open"}},
+        "tools": {"web": {"fetch": {"enabled": True}}},
+        "mcp": {"servers": {"fs": {
+            "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", root],
+        }}},
+    })
+    assert a1.status == FAIL, f"{root}: FN-2 regression — did not FAIL 3/3"
+    assert set(a1.evidence) == {"untrusted input", "sensitive data", "outbound actions"}
+
+
+@pytest.mark.parametrize(
+    "cfg_mcp",
+    [
+        {"erd": {"command": "npx", "args": ["-y", "mcp-server-database-diagram"]}},
+        {"docs": {"command": "npx", "args": ["-y", "mcp-server-redis-docs"]}},
+    ],
+)
+def test_a1_shape_only_mcp_stays_two_of_three(cfg_mcp):
+    a1 = _a1({
+        "channels": {"telegram": {"enabled": True, "dmPolicy": "allowlist"}},
+        "tools": {"web": {"fetch": {"enabled": True}}},
+        "mcp": {"servers": cfg_mcp},
+    })
+    assert a1.status != FAIL
+    assert "sensitive data" not in (a1.evidence or [])
+    assert len(a1.evidence) <= 2
+
+
+@pytest.mark.parametrize("root", ["/home/shared", "/Users/Shared", "/home/data", "/home/projects"])
+def test_a1_accepted_residual_shared_home_fs_mcp_stays_two_of_three(root):
+    a1 = _a1({
+        "channels": {"telegram": {"enabled": True, "dmPolicy": "allowlist"}},
+        "tools": {"web": {"fetch": {"enabled": True}}},
+        "mcp": {"servers": {"fs": {
+            "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", root],
+        }}},
+    })
+    assert a1.status != FAIL
+    assert "sensitive data" not in (a1.evidence or [])
+    assert len(a1.evidence) <= 2
 
 
 def test_a1_detail_names_mcp_server_as_capability_source():
