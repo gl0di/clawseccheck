@@ -123,6 +123,7 @@ check_config_trust_widening
 check_control_plane_mutation
 check_controlui_origins
 check_credential_blast_radius
+check_cron_job_content
 check_cron_scheduler
 check_cross_file_boundary_payload
 check_cross_file_payload
@@ -150,6 +151,7 @@ check_gateway
 check_gateway_rate_limit
 check_hex_private_key_exposure
 check_hook_policy_bypass
+check_hook_template_content
 check_host_audit
 check_host_edr
 check_host_egress_posture

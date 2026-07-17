@@ -23,7 +23,17 @@ from ..collector import (
     dig,
 )
 from ..safeio import walk_dir_safely
+from ..textnorm import normalize_for_scan
 
+from ._content import (
+    _B58_HTML_COMMENT_RE,
+    _B64_HIGH_CONFIDENCE_RE,
+    _b64_classify,
+    _b63_scan,
+    _CLICKFIX_REMOTE_FETCH_RE,
+    _clickfix_trusted_installer,
+    _fence_ranges,
+)
 from ._shared import (
     EXPOSED_BINDS,
     INPUT_TOOL_HINTS,
@@ -916,6 +926,110 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         PASS,
         "No dangerous break-glass override flags enabled.",
         "Keep these break-glass toggles off unless an incident temporarily requires one.",
+        pass_confidence="verified",
+    )
+
+
+def check_hook_template_content(ctx: Context) -> Finding:
+    """B169 (B-231 sub-item 2) — hooks.mappings[].messageTemplate / textTemplate content scan.
+
+    A hook mapping's ``messageTemplate``/``textTemplate`` splices an untrusted external
+    webhook payload into text the agent will read as part of a live turn (B48 only checks
+    the separate ``allowUnsafeExternalContent`` opt-in flag; the template string itself was
+    never routed through the content ring). This check CONSUMES the existing content-ring
+    detectors from ``checks/_content.py`` -- it does not add new detection logic of its own:
+
+    - ``_B64_HIGH_CONFIDENCE_RE`` + ``_b64_classify`` (B64 instruction-hierarchy override,
+      e.g. "ignore all previous instructions").
+    - ``_b63_scan`` (B63 silent-instruction / secrecy-framed directive).
+    - ``_CLICKFIX_REMOTE_FETCH_RE`` + ``_clickfix_trusted_installer`` (the same remote-fetch/
+      pipe-to-shell install-directive pattern B167 already reuses for appServer.command).
+
+    FAIL    — a template string matches a high-confidence override/install directive.
+    WARN    — a template string matches a weaker/ambiguous signal.
+    UNKNOWN — openclaw.json present but unparseable/unreadable.
+    PASS    — hooks.mappings has no messageTemplate/textTemplate, or none match.
+    """
+    unreadable = _config_unreadable("B169", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    mappings = dig(cfg, "hooks.mappings")
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+    if isinstance(mappings, list):
+        for i, m in enumerate(mappings):
+            if not isinstance(m, dict):
+                continue
+            for field_name in ("messageTemplate", "textTemplate"):
+                text = m.get(field_name)
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                source = f"hooks.mappings[{i}].{field_name}"
+                norm = normalize_for_scan(text)
+                fr = _fence_ranges(norm)
+                cr = [(mm.start(), mm.end()) for mm in _B58_HTML_COMMENT_RE.finditer(norm)]
+
+                # B64: instruction-hierarchy override ("ignore all previous instructions").
+                for mm in _B64_HIGH_CONFIDENCE_RE.finditer(norm):
+                    disp = _b64_classify(norm, mm.start(), mm.end(), fr, cr)
+                    if disp == "skip":
+                        continue
+                    snippet = mm.group().strip()
+                    if len(snippet) > 80:
+                        snippet = snippet[:77] + "..."
+                    if disp == "warn":
+                        warn_ev.append(f'{source}: instruction-override "{snippet}"')
+                    else:
+                        fail_ev.append(f'{source}: instruction-override "{snippet}"')
+
+                # B63: silent-instruction / secrecy-framed directive.
+                for snippet, is_anchored in _b63_scan(norm, fr):
+                    label = f'{source}: silent-instruction directive "{snippet}"'
+                    if is_anchored:
+                        fail_ev.append(label)
+                    else:
+                        warn_ev.append(label)
+
+                # ClickFix-style remote-fetch/pipe-to-shell install directive (same
+                # detector B167 reuses for plugins.entries.<name>.config.appServer.command).
+                cf = _CLICKFIX_REMOTE_FETCH_RE.search(norm)
+                if cf and not _clickfix_trusted_installer(cf.group(0)):
+                    snippet = cf.group(0).strip()
+                    if len(snippet) > 80:
+                        snippet = snippet[:77] + "..."
+                    fail_ev.append(f'{source}: remote-fetch/pipe-to-shell install directive "{snippet}"')
+
+    if fail_ev:
+        ev_summary = "; ".join(fail_ev[:4])
+        extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
+        return _finding(
+            "B169",
+            FAIL,
+            "A hooks.mappings[] messageTemplate/textTemplate carries an embedded "
+            "instruction-override or install directive: " + ev_summary + extra,
+            "Remove the embedded directive from the template, and treat inbound webhook "
+            "payload fields spliced into the template as untrusted content — never let a "
+            "hook template carry a live instruction to the agent.",
+            fail_ev + warn_ev,
+        )
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
+        return _finding(
+            "B169",
+            WARN,
+            "A hooks.mappings[] messageTemplate/textTemplate matches a weaker/ambiguous "
+            "directive signal: " + ev_summary + extra,
+            "Review the flagged template. If it merely documents or quotes an example "
+            "payload, no action is needed; if it is a live directive, remove it.",
+            warn_ev,
+        )
+    return _finding(
+        "B169",
+        PASS,
+        "No hooks.mappings[] messageTemplate/textTemplate carries an embedded directive.",
+        "Keep hook templates free of instruction-override or install-directive content.",
         pass_confidence="verified",
     )
 
