@@ -1,0 +1,17 @@
+{
+  "gateway": {
+    "bind": "0.0.0.0:8080",
+    "auth": {
+      "mode": "trusted-proxy",
+      "trustedProxy": {
+        "userHeader": "x-forwarded-user",
+        "requiredHeaders": ["x-forwarded-proto", "x-forwarded-host"],
+        "allowUsers": ["nick@example.com"]
+      }
+    }
+  },
+  "channels": { "telegram": { "dmPolicy": "allowlist", "groupPolicy": "allowlist" } },
+  "tools": { "profile": "minimal" },
+  "logging": { "redactSensitive": "tools" },
+  "models": { "main": { "provider": "ollama/llama3" } }
+}
