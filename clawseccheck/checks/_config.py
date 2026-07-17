@@ -785,23 +785,30 @@ def check_gateway(ctx: Context) -> Finding:
     # B-233: trusted-proxy auth is only as strong as the identity header it trusts. On a
     # non-loopback bind, without requiredHeaders/allowUsers genuinely constraining that
     # header, any direct network caller can self-declare identity — a spoofable full
-    # auth bypass, not "authenticated".
+    # auth bypass, not "authenticated". BUT (grounded: dist auth-B27MflKU.js
+    # authorizeTrustedProxy / authorizeGatewayConnectCore, gated by
+    # net-*.js isTrustedProxyAddress) OpenClaw itself rejects the connection before ever
+    # reading the identity header when the caller's SOURCE IP is not in a configured
+    # gateway.trustedProxies allow-list — so a genuine (non-wildcard) trustedProxies
+    # list is an equally valid identity constraint; only the total absence of ALL THREE
+    # (requiredHeaders, allowUsers, trustedProxies) is the real spoof surface.
     if (
         auth == "trusted-proxy"
         and bind
         and bind not in LOOPBACK
         and not dig(cfg, "gateway.auth.trustedProxy.requiredHeaders")
         and not dig(cfg, "gateway.auth.trustedProxy.allowUsers")
+        and not _trusted_proxies_ok(dig(cfg, "gateway.trustedProxies"))
     ):
         user_header = dig(cfg, "gateway.auth.trustedProxy.userHeader") or "x-forwarded-user"
         ev.append(
             f"gateway.auth.mode=trusted-proxy on non-loopback bind={bind} with no "
-            f"requiredHeaders/allowUsers configured — the {user_header!r} identity header "
-            "is attacker-spoofable"
+            f"requiredHeaders/allowUsers/trustedProxies configured — the {user_header!r} "
+            "identity header is attacker-spoofable"
         )
         fixes.append(
-            "Configure gateway.auth.trustedProxy.requiredHeaders and/or allowUsers to "
-            "constrain identity, or bind the gateway to loopback"
+            "Configure gateway.auth.trustedProxy.requiredHeaders and/or allowUsers, or "
+            "gateway.trustedProxies, to constrain identity, or bind the gateway to loopback"
         )
     open_ch = _open_channels(cfg)
     for name in open_ch:
@@ -1364,17 +1371,22 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
     requiredHeaders,allowUsers,allowLoopback}. Trusted-proxy auth delegates
     authentication to a reverse-proxy-supplied identity header; on a non-loopback bind an
     attacker who can reach the port directly can forge that header unless
-    requiredHeaders/allowUsers genuinely constrain it (B-233).
+    requiredHeaders/allowUsers genuinely constrain it (B-233) — OR (grounded: dist
+    auth-B27MflKU.js authorizeTrustedProxy / authorizeGatewayConnectCore, gated by
+    net-*.js isTrustedProxyAddress) OpenClaw itself rejects the connection by source IP
+    before ever reading the header when a genuine gateway.trustedProxies allow-list is
+    configured, so that is an equally valid constraint.
 
     UNKNOWN — trusted-proxy auth is not configured (auth.mode != 'trusted-proxy' and
               gateway.auth.trustedProxy.allowLoopback is not set).
-    FAIL    — auth.mode='trusted-proxy' AND the bind is non-loopback AND neither
-              requiredHeaders nor allowUsers is configured — any direct caller can
-              self-declare identity via the (spoofable) trusted-proxy header.
+    FAIL    — auth.mode='trusted-proxy' AND the bind is non-loopback AND none of
+              requiredHeaders, allowUsers, or a genuine gateway.trustedProxies allow-list
+              is configured — any direct caller can self-declare identity via the
+              (spoofable) trusted-proxy header.
     WARN    — gateway.auth.trustedProxy.allowLoopback=true AND the gateway bind is
               non-loopback (a same-host caller can still forge the header).
-    PASS    — loopback bind, or requiredHeaders/allowUsers genuinely constrain identity,
-              or trusted-proxy is not configured.
+    PASS    — loopback bind, or requiredHeaders/allowUsers/trustedProxies genuinely
+              constrain identity, or trusted-proxy is not configured.
     """
     cfg = ctx.config
     mode = dig(cfg, "gateway.auth.mode")
@@ -1395,21 +1407,24 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
     if mode == "trusted-proxy" and bind_host not in LOOPBACK:
         required_headers = dig(cfg, "gateway.auth.trustedProxy.requiredHeaders")
         allow_users = dig(cfg, "gateway.auth.trustedProxy.allowUsers")
-        if not required_headers and not allow_users:
+        trusted_proxies_ok = _trusted_proxies_ok(dig(cfg, "gateway.trustedProxies"))
+        if not required_headers and not allow_users and not trusted_proxies_ok:
             user_header = dig(cfg, "gateway.auth.trustedProxy.userHeader") or "x-forwarded-user"
             return _finding(
                 "B70",
                 FAIL,
                 f"gateway.auth.mode=trusted-proxy is bound to a non-loopback address "
-                f"(bind host={bind_host!r}) with no requiredHeaders/allowUsers configured "
-                f"— the {user_header!r} identity header is attacker-spoofable by any "
-                "direct caller.",
-                "Configure gateway.auth.trustedProxy.requiredHeaders and/or allowUsers to "
-                "constrain identity, or bind the gateway to loopback (127.0.0.1).",
+                f"(bind host={bind_host!r}) with no requiredHeaders/allowUsers/"
+                f"trustedProxies configured — the {user_header!r} identity header is "
+                "attacker-spoofable by any direct caller.",
+                "Configure gateway.auth.trustedProxy.requiredHeaders and/or allowUsers, "
+                "or gateway.trustedProxies, to constrain identity, or bind the gateway "
+                "to loopback (127.0.0.1).",
                 evidence=[
                     "gateway.auth.mode=trusted-proxy",
                     f"gateway.bind host={bind_host!r} (non-loopback)",
-                    "gateway.auth.trustedProxy.requiredHeaders/allowUsers not set",
+                    "gateway.auth.trustedProxy.requiredHeaders/allowUsers and "
+                    "gateway.trustedProxies not set",
                 ],
             )
     if allow_loopback is True and bind_host not in LOOPBACK:
@@ -1429,8 +1444,9 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
     return _finding(
         "B70",
         PASS,
-        "Trusted-proxy auth is loopback-only, has requiredHeaders/allowUsers "
-        "constraining identity, or is not configured (no header-spoof risk detected).",
-        "Keep gateway.auth.trustedProxy.requiredHeaders/allowUsers configured, or bind "
-        "the gateway to loopback.",
+        "Trusted-proxy auth is loopback-only, has requiredHeaders/allowUsers/"
+        "trustedProxies constraining identity, or is not configured (no header-spoof "
+        "risk detected).",
+        "Keep gateway.auth.trustedProxy.requiredHeaders/allowUsers and/or "
+        "gateway.trustedProxies configured, or bind the gateway to loopback.",
     )
