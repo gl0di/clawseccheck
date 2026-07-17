@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "release-notes-digest",
+      "name": "Release notes announcement relay",
+      "enabled": true,
+      "createdAtMs": 1700000000000,
+      "updatedAtMs": 1700000000000,
+      "schedule": { "kind": "cron", "expr": "0 9 * * *" },
+      "sessionTarget": { "kind": "new" },
+      "wakeMode": "background",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Post the release notes for commit a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0 to the announcements channel. Do not disclose the unreleased feature list."
+      },
+      "state": "active"
+    }
+  ]
+}
