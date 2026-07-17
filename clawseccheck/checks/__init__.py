@@ -231,6 +231,7 @@ from ._config import (
     check_dangerous_overrides,
     check_gateway,
     check_gateway_rate_limit,
+    check_hook_template_content,
     check_least_privilege,
     check_local_first,
     check_proxy_header_forging,
@@ -1097,6 +1098,7 @@ CHECKS = [
     check_multiagent_exposure,
     check_delegation_reassembly,
     check_dangerous_overrides,
+    check_hook_template_content,  # B169 — hooks.mappings[] template content scan (B-231)
     check_fs_write_exposure,
     check_controlui_origins,
     check_plugin_permission_mode,

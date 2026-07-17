@@ -714,6 +714,22 @@ CATALOG: list[CheckMeta] = [
     # B168 is RESERVED for the deferred B-231 cron-store sub-item (collector + content-
     # ring routing + deleteAfterRun+exec structural flag) -- not implemented in this
     # change; a follow-up change adds the CheckMeta alongside its check function.
+    # B169 (B-231 sub-item 2): hooks.mappings[].messageTemplate / textTemplate carry an
+    # untrusted external webhook payload into a live agent turn, but were never
+    # content-scanned -- only allowUnsafeExternalContent (B48) is checked. Reuses the
+    # content ring's own directive/install detectors (B64 instruction-hierarchy override,
+    # B63 silent-instruction/secrecy framing, and the ClickFix remote-fetch/pipe-to-shell
+    # pattern already reused by B167) over the template strings themselves.
+    CheckMeta(
+        "B169",
+        "Hook mapping messageTemplate/textTemplate carries an embedded directive",
+        HIGH,
+        "hardening",
+        "Prompt Injection / Trust Boundary",
+        scored=True,
+        confidence="MEDIUM",
+        surface="hooks",
+    ),
     # B158 (F-119): a declared skill/plugin load source (skills.load.extraDirs,
     # plugins.load.paths, or a .clawhub/lock.json skillFile) resolves to nothing on disk —
     # an unaudited auto-load gap. Advisory, WARN-only, unscored (declared-but-absent is

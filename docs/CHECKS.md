@@ -821,6 +821,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B169 - Hook mapping messageTemplate/textTemplate carries an embedded directive
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Prompt Injection / Trust Boundary
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Hook mapping messageTemplate/textTemplate carries an embedded directive
+- Remediation:
+  - none
+
 ## Advisory checks
 
 ### B158 - Declared skill-load source not present on disk (unaudited auto-load surface)
