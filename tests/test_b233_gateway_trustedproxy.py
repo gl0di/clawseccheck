@@ -20,7 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from clawseccheck.catalog import FAIL, PASS, WARN
-from clawseccheck.checks import check_gateway, check_trustedproxy_loopback
+from clawseccheck.checks import check_gateway, check_trustedproxy_loopback, _trusted_proxies_ok
 from clawseccheck.collector import Context, collect
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -185,6 +185,106 @@ def test_b2_trustedproxies_wildcard_still_fails():
     }
     f = check_gateway(_ctx(cfg))
     assert f.status == FAIL
+
+
+# ---------------------------------------------------------------------------
+# B-233 round 3 (C-135): a world-open / near-catch-all CIDR (0.0.0.0/0, ::/0, or any
+# IPv4 prefix shorter than /8 such as 0.0.0.0/1) is NOT a genuine trust boundary — every
+# source IP matches, so the identity header stays attacker-spoofable by anyone.
+# Grounded against dist isTrustedProxyAddress -> isIpInCidr -> ipaddr.parseCIDR
+# (prefix-len 0 matches all). Conversely, a blank/empty entry mixed with a genuine one
+# (OpenClaw ignores the blank candidate) must not sink an otherwise-valid allow-list.
+# ---------------------------------------------------------------------------
+
+def _cfg_with_trusted_proxies(value):
+    return {
+        "gateway": {
+            "bind": "0.0.0.0:8080",
+            "auth": {"mode": "trusted-proxy", "trustedProxy": {"userHeader": "x-forwarded-user"}},
+            "trustedProxies": value,
+        }
+    }
+
+
+def test_trusted_proxies_ok_rejects_world_open_ipv4():
+    assert _trusted_proxies_ok(["0.0.0.0/0"]) is False
+
+
+def test_trusted_proxies_ok_rejects_world_open_ipv6():
+    assert _trusted_proxies_ok(["::/0"]) is False
+
+
+def test_trusted_proxies_ok_rejects_over_broad_ipv4_prefix():
+    assert _trusted_proxies_ok(["0.0.0.0/1"]) is False
+
+
+def test_trusted_proxies_ok_ignores_blank_entry_alongside_a_genuine_one():
+    assert _trusted_proxies_ok(["10.0.0.5", ""]) is True
+
+
+def test_trusted_proxies_ok_specific_host_passes():
+    assert _trusted_proxies_ok(["10.0.0.5"]) is True
+
+
+def test_trusted_proxies_ok_bounded_private_cidr_passes():
+    assert _trusted_proxies_ok(["10.42.0.0/16"]) is True
+
+
+def test_trusted_proxies_ok_rfc1918_cidrs_pass():
+    assert _trusted_proxies_ok(["10.0.0.0/8"]) is True
+    assert _trusted_proxies_ok(["172.16.0.0/12"]) is True
+    assert _trusted_proxies_ok(["192.168.0.0/16"]) is True
+
+
+def test_trusted_proxies_ok_public_slash32_passes():
+    # A specific public LB IP (a /32) is still a real trust boundary.
+    assert _trusted_proxies_ok(["203.0.113.5"]) is True
+
+
+def test_trusted_proxies_ok_empty_and_wildcard_and_none_fail():
+    assert _trusted_proxies_ok([]) is False
+    assert _trusted_proxies_ok(["*"]) is False
+    assert _trusted_proxies_ok(None) is False
+
+
+def test_b2_trustedproxies_world_open_ipv4_still_fails():
+    f = check_gateway(_ctx(_cfg_with_trusted_proxies(["0.0.0.0/0"])))
+    assert f.status == FAIL
+
+
+def test_b2_trustedproxies_world_open_ipv6_still_fails():
+    f = check_gateway(_ctx(_cfg_with_trusted_proxies(["::/0"])))
+    assert f.status == FAIL
+
+
+def test_b2_trustedproxies_over_broad_ipv4_prefix_still_fails():
+    f = check_gateway(_ctx(_cfg_with_trusted_proxies(["0.0.0.0/1"])))
+    assert f.status == FAIL
+
+
+def test_b2_trustedproxies_specific_ip_plus_blank_entry_passes():
+    f = check_gateway(_ctx(_cfg_with_trusted_proxies(["10.0.0.5", ""])))
+    assert f.status == PASS
+
+
+def test_b70_trustedproxies_world_open_ipv4_still_fails():
+    f = check_trustedproxy_loopback(_ctx(_cfg_with_trusted_proxies(["0.0.0.0/0"])))
+    assert f.status == FAIL
+
+
+def test_b70_trustedproxies_world_open_ipv6_still_fails():
+    f = check_trustedproxy_loopback(_ctx(_cfg_with_trusted_proxies(["::/0"])))
+    assert f.status == FAIL
+
+
+def test_b70_trustedproxies_over_broad_ipv4_prefix_still_fails():
+    f = check_trustedproxy_loopback(_ctx(_cfg_with_trusted_proxies(["0.0.0.0/1"])))
+    assert f.status == FAIL
+
+
+def test_b70_trustedproxies_specific_ip_plus_blank_entry_passes():
+    f = check_trustedproxy_loopback(_ctx(_cfg_with_trusted_proxies(["10.0.0.5", ""])))
+    assert f.status == PASS
 
 
 # ---------------------------------------------------------------------------

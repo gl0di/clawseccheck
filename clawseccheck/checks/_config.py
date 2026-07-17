@@ -4,6 +4,7 @@ Carved verbatim out of the former single-file checks.py; no logic changes.
 Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 """
 from __future__ import annotations
+import ipaddress
 import re
 from pathlib import Path
 from .. import attest as _attest
@@ -409,19 +410,49 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
     return out
 
 
-def _trusted_proxies_ok(value) -> bool:
-    if isinstance(value, str):
-        return bool(value.strip()) and value.strip() != "*"
-    if isinstance(value, list):
-        if not value:
-            return False
-        for item in value:
-            if not isinstance(item, str):
-                return False
-            if not item.strip() or item.strip() == "*":
-                return False
+# B-233 round 3 (C-135): world-open / near-catch-all CIDRs (e.g. 0.0.0.0/0, ::/0,
+# 0.0.0.0/1) are NOT a genuine trust boundary — every source IP matches, so the
+# trusted-proxy identity header stays attacker-spoofable by anyone. Grounded against
+# dist isTrustedProxyAddress -> isIpInCidr -> ipaddr.parseCIDR (prefix-len 0 matches
+# all). Reject IPv4 prefixes shorter than /8 and IPv6 prefixes shorter than /16 — short
+# enough to cover 10.0.0.0/8 (RFC1918), 172.16.0.0/12, 192.168.0.0/16, and any bounded
+# corp range, while still rejecting anything that spans (or nearly spans) the public
+# internet.
+_MIN_IPV4_PREFIXLEN = 8
+_MIN_IPV6_PREFIXLEN = 16
+
+
+def _is_constraining_proxy_entry(entry) -> bool:
+    """True when *entry* is a genuine trusted-proxy identifier: a specific host, a
+    hostname, or a CIDR bounded enough to be a real trust boundary (not a catch-all)."""
+    if not isinstance(entry, str):
+        return False
+    s = entry.strip()
+    if not s or s == "*":
+        return False
+    try:
+        net = ipaddress.ip_network(s, strict=False)
+    except ValueError:
+        # Not a parseable IP/CIDR (e.g. a hostname) — a specific, non-wildcard
+        # identifier is still a genuine constraint.
         return True
-    return False
+    if net.version == 4 and net.prefixlen < _MIN_IPV4_PREFIXLEN:
+        return False
+    if net.version == 6 and net.prefixlen < _MIN_IPV6_PREFIXLEN:
+        return False
+    return True
+
+
+def _trusted_proxies_ok(value) -> bool:
+    """True when *value* (``gateway.trustedProxies``) contains at least one
+    genuinely-constraining entry once blank/wildcard/over-broad entries are ignored —
+    e.g. ``["10.0.0.5", ""]`` is OK (OpenClaw ignores the blank candidate and still
+    enforces 10.0.0.5); ``[]``, ``["*"]``, and ``["0.0.0.0/0"]`` are not."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return False
+    return any(_is_constraining_proxy_entry(item) for item in value)
 
 
 def check_control_plane_mutation(ctx: Context) -> Finding:
