@@ -26,6 +26,7 @@ from ._shared import (
     LOOPBACK,
     OUTBOUND_TOOL_HINTS,
     _channels,
+    _config_unreadable,
     _custom,
     _enabled_tools,
     _finding,
@@ -362,6 +363,9 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
     PASS — cacheTrace is not configured, OR redactSensitive == "tools".
     WARN — logging.cacheTrace.filePath is set AND redactSensitive != "tools".
     """
+    unreadable = _config_unreadable("B82", ctx)
+    if unreadable is not None:
+        return unreadable
     cfg = ctx.config
     trace_path = dig(cfg, "logging.cacheTrace.filePath")
     if not trace_path:
@@ -724,6 +728,9 @@ def check_discovery_mdns_mode(ctx: Context) -> Finding:
     PASS — mode is 'minimal', 'off', unset (default 'minimal'), or 'full' with loopback.
     WARN — mode == 'full' AND gateway bind is non-loopback.
     """
+    unreadable = _config_unreadable("B73", ctx)
+    if unreadable is not None:
+        return unreadable
     cfg = ctx.config
     mode = dig(cfg, "discovery.mdns.mode")
     if mode != "full":
@@ -954,6 +961,9 @@ def check_webfetch_redirects(ctx: Context) -> Finding:
     PASS — fetch disabled, maxRedirects unset, or maxRedirects <= 5.
     WARN — fetch enabled AND maxRedirects > 5.
     """
+    unreadable = _config_unreadable("B83", ctx)
+    if unreadable is not None:
+        return unreadable
     cfg = ctx.config
     if not dig(cfg, "tools.web.fetch.enabled"):
         return _finding(

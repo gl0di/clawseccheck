@@ -32,6 +32,7 @@ from ._shared import (
     OUTBOUND_TOOL_HINTS,
     _DESTRUCTIVE_HINTS,
     _HOOK_EXEC_RE,
+    _config_unreadable,
     _custom,
     _enabled_tools,
     _finding,
@@ -750,6 +751,9 @@ def check_cron_scheduler(ctx: Context) -> Finding:
     cannot tell legitimate schedules from attacker-planted persistence. This check is
     therefore UNKNOWN-only on presence and PASS when the field is absent.
     """
+    unreadable = _config_unreadable("C048", ctx)
+    if unreadable is not None:
+        return unreadable
     cron = dig(ctx.config, "cron")
     if cron:
         return _finding(
@@ -781,6 +785,9 @@ def check_hook_policy_bypass(ctx: Context) -> Finding:
     (tools.exec.mode / tools.elevated.allowFrom) is configured (something that could have
     been dropped). Everything else PASSes, so there is no UNKNOWN flood.
     """
+    unreadable = _config_unreadable("C6", ctx)
+    if unreadable is not None:
+        return unreadable
     cfg = ctx.config
     raw = dig(cfg, "meta.lastTouchedVersion") or dig(cfg, "lastTouchedVersion")
     parsed = _parse_version(str(raw)) if raw else None
@@ -1692,6 +1699,13 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
             "against disk.",
             "Run the audit against the OpenClaw profile directory (its openclaw.json).",
         )
+    # B-228: openclaw.json is present but unparseable/unreadable — same "can't reconcile
+    # declared sources against disk" reasoning as the not-found branch above, since
+    # skills.load.extraDirs / plugins.load.paths can't be read from a config that never
+    # parsed (a broken config isn't distinguishable from "declares nothing").
+    unreadable = _config_unreadable("B158", ctx)
+    if unreadable is not None:
+        return unreadable
 
     missing: list[str] = []
     for label, dirs in (
