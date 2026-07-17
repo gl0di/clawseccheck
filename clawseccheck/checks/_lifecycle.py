@@ -846,7 +846,9 @@ def check_cron_job_content(ctx: Context) -> Finding:
         # AMBIGUOUS (a benign digest that withholds a detail vs a covert-exfil directive), so
         # per project doctrine (§5 — ambiguous suppression → WARN, not FAIL) it stays WARN
         # unless a B64 instruction-override, a curl|bash pipe-to-shell install directive, or a
-        # credential-path/encoded-blob co-occurs in the same field.
+        # credential-path co-occurs in the same field. (The former base64-blob anchor was
+        # dropped in Wave-2 round-4 — a blob can't be told apart from a URL/path/hash in
+        # short text; see _content.py.)
         field_has_strong = False
 
         for mm in _B64_HIGH_CONFIDENCE_RE.finditer(norm):

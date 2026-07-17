@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "ci-status-relay",
+      "name": "CI status relay",
+      "enabled": true,
+      "createdAtMs": 1700000000000,
+      "updatedAtMs": 1700000000000,
+      "schedule": { "kind": "cron", "expr": "*/15 * * * *" },
+      "sessionTarget": { "kind": "new" },
+      "wakeMode": "background",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Post the CI status from https://github.com/acme/backend-services/actions/runs/summary to the ops channel. Don't mention the flaky tests."
+      },
+      "state": "active"
+    }
+  ]
+}
