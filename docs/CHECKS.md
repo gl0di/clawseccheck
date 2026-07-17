@@ -821,6 +821,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B168 - Cron job store payload.message / trigger.script carries an embedded directive
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Prompt Injection / Trust Boundary
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Cron job store payload.message / trigger.script carries an embedded directive
+- Remediation:
+  - none
+
 ### B169 - Hook mapping messageTemplate/textTemplate carries an embedded directive
 
 - Severity: HIGH

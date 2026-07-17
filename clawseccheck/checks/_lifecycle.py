@@ -26,6 +26,15 @@ from ..textnorm import (
     normalize_for_scan,
 )
 
+from ._content import (
+    _B58_HTML_COMMENT_RE,
+    _B64_HIGH_CONFIDENCE_RE,
+    _b64_classify,
+    _b63_scan,
+    _CLICKFIX_REMOTE_FETCH_RE,
+    _clickfix_trusted_installer,
+    _fence_ranges,
+)
 from . import _shared
 from ._shared import (
     INJECTION_PATTERNS,
@@ -772,6 +781,132 @@ def check_cron_scheduler(ctx: Context) -> Finding:
         PASS,
         "No top-level `cron` scheduler is configured.",
         "Keep recurring schedules disabled unless they are explicitly required and reviewed.",
+    )
+
+
+def check_cron_job_content(ctx: Context) -> Finding:
+    """B168 (B-231 sub-item 1) — cron JOB STORE content scan.
+
+    C048 (above) only sees the top-level `cron` config *key*; the actual scheduled job
+    payloads live in a separate store the collector now reads read-only (B-231):
+    ~/.openclaw/cron/jobs.json, or the SQLite-backed cron_jobs table when the JSON file
+    is absent (see collector._collect_cron). Recurring, unattended-execution jobs are a
+    persistence/exfil surface that was previously invisible — this CONSUMES the same
+    content-ring detectors B169 reuses (does not edit checks/_content.py):
+
+    - ``_B64_HIGH_CONFIDENCE_RE`` + ``_b64_classify`` (B64 instruction-hierarchy override).
+    - ``_b63_scan`` (B63 silent-instruction / secrecy-framed directive).
+    - ``_CLICKFIX_REMOTE_FETCH_RE`` + ``_clickfix_trusted_installer`` (remote-fetch/
+      pipe-to-shell pattern, same detector B167/B169 reuse).
+
+    Also flags a structural signal: `deleteAfterRun` combined with an executable
+    trigger.script or a command-kind payload is a self-erasing job — a legitimate one-shot
+    task can look like this too, so on its own it is WARN, not FAIL; it only adds to an
+    already-FAILing job's evidence.
+
+    FAIL    — a job's payload.message or trigger.script matches a high-confidence
+              override/install directive.
+    WARN    — a weaker/ambiguous content-ring signal, or a deleteAfterRun+exec job with
+              no other signal.
+    UNKNOWN — no cron store found (~/.openclaw/cron/jobs.json and the SQLite cron_jobs
+              table are both absent), or the store was found but could not be parsed/read.
+    PASS    — a cron store was read and no job triggers any signal.
+    """
+    if not ctx.cron_found:
+        return _finding(
+            "B168",
+            UNKNOWN,
+            "No cron job store found (~/.openclaw/cron/jobs.json and the SQLite-backed "
+            "cron_jobs table are both absent) — cannot determine.",
+            "If cron jobs are configured, ensure the store is owner-readable so a future "
+            "audit can inspect scheduled job payloads.",
+        )
+    if ctx.cron_parse_error:
+        return _finding(
+            "B168",
+            UNKNOWN,
+            "A cron job store was found but could not be parsed/read — cannot determine.",
+            "Fix the cron store (jobs.json or the state SQLite database) so it is valid "
+            "and owner-readable, then re-run the audit.",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+
+    def _scan_field(label: str, text) -> None:
+        if not isinstance(text, str) or not text.strip():
+            return
+        norm = normalize_for_scan(text)
+        fr = _fence_ranges(norm)
+        cr = [(mm.start(), mm.end()) for mm in _B58_HTML_COMMENT_RE.finditer(norm)]
+
+        for mm in _B64_HIGH_CONFIDENCE_RE.finditer(norm):
+            disp = _b64_classify(norm, mm.start(), mm.end(), fr, cr)
+            if disp == "skip":
+                continue
+            snippet = mm.group().strip()
+            if len(snippet) > 80:
+                snippet = snippet[:77] + "..."
+            (warn_ev if disp == "warn" else fail_ev).append(
+                f'{label}: instruction-override "{snippet}"'
+            )
+
+        for snippet, is_anchored in _b63_scan(norm, fr):
+            note = f'{label}: silent-instruction directive "{snippet}"'
+            (fail_ev if is_anchored else warn_ev).append(note)
+
+        cf = _CLICKFIX_REMOTE_FETCH_RE.search(norm)
+        if cf and not _clickfix_trusted_installer(cf.group(0)):
+            snippet = cf.group(0).strip()
+            if len(snippet) > 80:
+                snippet = snippet[:77] + "..."
+            fail_ev.append(f'{label}: remote-fetch/pipe-to-shell install directive "{snippet}"')
+
+    for job in ctx.cron_jobs:
+        job_label = f"cron job '{job.get('id') or job.get('name') or '?'}'"
+        _scan_field(f"{job_label}.payload.message", job.get("payload_message"))
+        _scan_field(f"{job_label}.trigger.script", job.get("trigger_script"))
+
+        is_exec = bool(job.get("trigger_script")) or job.get("payload_kind") == "command"
+        if job.get("delete_after_run") and is_exec:
+            warn_ev.append(
+                f"{job_label}: deleteAfterRun + exec trigger/command payload "
+                "(self-erasing job)"
+            )
+
+    if fail_ev:
+        ev_summary = "; ".join(fail_ev[:4])
+        extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
+        return _finding(
+            "B168",
+            FAIL,
+            "A cron job's payload.message or trigger.script carries an embedded "
+            "instruction-override or install directive: " + ev_summary + extra,
+            "Remove the embedded directive from the cron job. Treat cron as an unattended-"
+            "execution surface — never let a scheduled job carry a live instruction to the "
+            "agent or a remote-fetch/pipe-to-shell command.",
+            fail_ev + warn_ev,
+        )
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
+        return _finding(
+            "B168",
+            WARN,
+            "A cron job matches a weaker/ambiguous signal: " + ev_summary + extra,
+            "Review the flagged cron job. A deleteAfterRun one-shot exec job or an "
+            "ambiguous directive may be legitimate — confirm it was intentionally "
+            "configured.",
+            warn_ev,
+        )
+    return _finding(
+        "B168",
+        PASS,
+        f"Scanned {len(ctx.cron_jobs)} cron job(s): no embedded instruction-override or "
+        "install directive found.",
+        "Keep cron job payloads free of embedded directives; review new scheduled jobs "
+        "before they run unattended.",
+        pass_confidence="verified",
     )
 
 

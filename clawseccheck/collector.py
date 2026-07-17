@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import io
 import json
+import sqlite3
 import zipfile
 import tarfile
 import gzip
@@ -71,6 +72,13 @@ _ARCHIVE_MAX_EXPANSION_RATIO = 100
 # bounded — a 500MB config caps at 5MB read, not unbounded RSS growth.
 _MAX_CONFIG_BYTES = 5_000_000
 
+# B-231 sub-item 1: the cron job store (~/.openclaw/cron/jobs.json, or the SQLite-backed
+# cron_jobs table when the legacy JSON file is absent) is read-only, symlink-safe, and
+# capped the same way as the config/bootstrap reads above — a huge/padded store must not
+# load whole into memory or feed an unbounded number of jobs into the content-ring scan.
+_MAX_CRON_BYTES = _MAX_CONFIG_BYTES
+_MAX_CRON_JOBS = 200
+
 # B-111: an archive member name is attacker-controlled and NOT OS-length-limited (unlike a
 # real filesystem path) — a crafted zip/tar entry can carry a multi-KB name. It flows
 # uncapped into ctx.limit_hits / ctx.path_traversal_violations / ctx.file_manifest keys,
@@ -133,6 +141,13 @@ class Context:
     native: object = None                           # NativeResult from openclaw security audit
     host: object = None                             # hostwatch.detect() result; set by audit(include_host=True)
     include_host: bool = False                      # host-filesystem scanning enabled (audit(include_host=True) / not --no-host)
+    # B-231 sub-item 1: normalized cron jobs (from ~/.openclaw/cron/jobs.json, or the
+    # SQLite-backed cron_jobs table when the JSON file is absent). Each entry is a plain
+    # dict: id, name, enabled, delete_after_run, trigger_script, payload_kind,
+    # payload_message — the same shape regardless of which backing store it came from.
+    cron_jobs: list = field(default_factory=list)
+    cron_found: bool = False        # a cron store (JSON or SQLite) was found and read
+    cron_parse_error: bool = False  # a cron store was found but could not be parsed/read
     installed_skills: dict = field(default_factory=dict)  # skill name -> concatenated text
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
     installed_skill_shell: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .sh/.bash
@@ -1197,6 +1212,104 @@ def skill_load_roots(
     return out
 
 
+def _collect_cron(home: Path, ctx: Context) -> None:
+    """B-231 sub-item 1: read-only, symlink-safe, size/entry-capped collection of the
+    OpenClaw cron job store into ``ctx.cron_jobs``.
+
+    Two backing stores exist (grounded against the openclaw dist): the legacy JSON file
+    ``~/.openclaw/cron/jobs.json`` (``{"version": 1, "jobs": [CronJobSchema, ...]}``,
+    each job's ``payload``/``trigger`` sub-objects carrying ``message``/``script``), and
+    the SQLite-backed ``cron_jobs`` table in ``~/.openclaw/state/openclaw.sqlite``
+    (``job_id``, ``name``, ``enabled``, ``delete_after_run``, ``trigger_script``,
+    ``payload_kind``, ``payload_message`` columns). The JSON file is preferred when
+    present; the SQLite table is a read-only fallback. Neither present leaves
+    ``ctx.cron_found`` False, so a consuming check reports UNKNOWN, never a fake PASS.
+
+    Both branches resolve candidate files through ``safeio.walk_dir_safely`` — symlinks
+    and path-escapes are skipped, matching every other collector read.
+    """
+    cron_dir = home / "cron"
+    json_candidates = walk_dir_safely(cron_dir, max_files=50) if cron_dir.is_dir() else []
+    jobs_json = next((p for p in json_candidates if p.name == "jobs.json"), None)
+    if jobs_json is not None:
+        try:
+            with open(jobs_json, "rb") as fp:
+                raw, truncated = _read_with_limit(fp, _MAX_CRON_BYTES)
+            if truncated:
+                ctx.limit_hits.append(
+                    f"cron store '{jobs_json}' exceeded the "
+                    f"{_MAX_CRON_BYTES // 1_000_000}MB cap — content beyond the cap "
+                    "was NOT scanned"
+                )
+            store = json.loads(raw.decode("utf-8", errors="replace"))
+            jobs = store.get("jobs") if isinstance(store, dict) else None
+            if not isinstance(jobs, list):
+                jobs = []
+            ctx.cron_found = True
+            for job in jobs[:_MAX_CRON_JOBS]:
+                if not isinstance(job, dict):
+                    continue
+                payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+                trigger = job.get("trigger") if isinstance(job.get("trigger"), dict) else {}
+                ctx.cron_jobs.append({
+                    "id": job.get("id"),
+                    "name": job.get("name"),
+                    "enabled": job.get("enabled"),
+                    "delete_after_run": job.get("deleteAfterRun"),
+                    "trigger_script": trigger.get("script"),
+                    "payload_kind": payload.get("kind"),
+                    "payload_message": payload.get("message"),
+                })
+            if len(jobs) > _MAX_CRON_JOBS:
+                ctx.limit_hits.append(
+                    f"cron store '{jobs_json}' has {len(jobs)} jobs — only the first "
+                    f"{_MAX_CRON_JOBS} were scanned"
+                )
+        except (OSError, ValueError) as exc:
+            ctx.errors.append(f"could not parse {jobs_json}: {exc}")
+            ctx.cron_found = True
+            ctx.cron_parse_error = True
+        return
+
+    # No legacy JSON store -- fall back to the SQLite-backed cron_jobs table.
+    state_dir = home / "state"
+    sqlite_candidates = walk_dir_safely(state_dir, max_files=100) if state_dir.is_dir() else []
+    db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        return  # neither store present -> cron_found stays False (UNKNOWN, not a fake PASS)
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            cur = conn.execute(
+                "SELECT job_id, name, enabled, delete_after_run, trigger_script, "
+                "payload_kind, payload_message FROM cron_jobs LIMIT ?",
+                (_MAX_CRON_JOBS,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+        ctx.cron_found = True
+        for job_id, name, enabled, delete_after_run, trigger_script, payload_kind, payload_message in rows:
+            ctx.cron_jobs.append({
+                "id": job_id,
+                "name": name,
+                "enabled": bool(enabled) if enabled is not None else None,
+                "delete_after_run": bool(delete_after_run) if delete_after_run is not None else None,
+                "trigger_script": trigger_script,
+                "payload_kind": payload_kind,
+                "payload_message": payload_message,
+            })
+    except sqlite3.Error as exc:
+        # A state DB that exists but has no cron_jobs table yet (a fresh install where
+        # cron was never touched) is not a corrupt store -- treat like "not found" so the
+        # check reports the same honest UNKNOWN as no store at all, not a parse error.
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(f"could not read cron_jobs from {db_path}: {exc}")
+            ctx.cron_found = True
+            ctx.cron_parse_error = True
+
+
 def collect(home: Path | str = "~/.openclaw") -> Context:
     home = Path(home).expanduser()
     ctx = Context(home=home)
@@ -1275,6 +1388,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
             except OSError as exc:
                 ctx.errors.append(f"could not read {f}: {exc}")
 
+    _collect_cron(home, ctx)
     _read_installed_skills(home, ctx)
     return ctx
 

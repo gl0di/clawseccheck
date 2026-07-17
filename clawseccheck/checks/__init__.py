@@ -267,6 +267,7 @@ from ._lifecycle import (
     check_bootstrap_write_protection,
     check_clawhub_lock_verification,
     check_codex_project_trust,
+    check_cron_job_content,
     check_cron_scheduler,
     check_declared_skill_reconciliation,
     check_hook_policy_bypass,
@@ -1105,6 +1106,7 @@ CHECKS = [
     check_plugin_app_server_command,  # B167 — plugin appServer.command remote-fetch scan (B-231)
     check_hook_policy_bypass,
     check_cron_scheduler,
+    check_cron_job_content,  # B168 — cron job store payload.message/trigger.script scan (B-231)
     # Content-security ring — single source of truth (also consumed by vet_skill).
     # SKILL_CONTENT_RING is defined just above; changing it updates both the full audit
     # and the --vet path so they can never drift apart.

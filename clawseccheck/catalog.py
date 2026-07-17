@@ -711,9 +711,23 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",  # matches B57's plugins.entries.<name>.config.* precedent
     ),
-    # B168 is RESERVED for the deferred B-231 cron-store sub-item (collector + content-
-    # ring routing + deleteAfterRun+exec structural flag) -- not implemented in this
-    # change; a follow-up change adds the CheckMeta alongside its check function.
+    # B168 (B-231 sub-item 1): the cron job store (~/.openclaw/cron/jobs.json, or the
+    # SQLite-backed cron_jobs table when the JSON file is absent) was never collected --
+    # an entire unattended-execution surface was invisible. Reuses the same content-ring
+    # directive/install detectors B169 reuses over each job's payload.message /
+    # trigger.script, plus a structural deleteAfterRun+exec (self-erasing job) signal.
+    # UNKNOWN when the cron store is absent or unreadable -- a genuine "cannot determine",
+    # not a fake clean PASS (Golden Rule #4 / the B-228 _config_unreadable pattern).
+    CheckMeta(
+        "B168",
+        "Cron job store payload.message / trigger.script carries an embedded directive",
+        HIGH,
+        "hardening",
+        "Prompt Injection / Trust Boundary",
+        scored=True,
+        confidence="MEDIUM",
+        surface="hooks",
+    ),
     # B169 (B-231 sub-item 2): hooks.mappings[].messageTemplate / textTemplate carry an
     # untrusted external webhook payload into a live agent turn, but were never
     # content-scanned -- only allowUnsafeExternalContent (B48) is checked. Reuses the
