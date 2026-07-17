@@ -1,0 +1,18 @@
+{
+  "channels": {
+    "telegram": { "enabled": true, "dmPolicy": "open" }
+  },
+  "mcp": {
+    "servers": {
+      "fs": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/"]
+      }
+    }
+  },
+  "tools": {
+    "web": { "fetch": { "enabled": true } },
+    "profile": "minimal",
+    "exec": { "mode": "ask" }
+  }
+}

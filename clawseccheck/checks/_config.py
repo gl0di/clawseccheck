@@ -36,6 +36,7 @@ from ._shared import (
     _finding,
     _hint,
     _is_secret_reference,
+    _mcp_leg_contributions,
     _open_channels,
     _perms_loose,
     _plugins,
@@ -306,6 +307,17 @@ def _distance_note(active: list) -> str:
         f" activates it becomes immediately exploitable: one injected prompt is enough"
         f" to exfiltrate everything."
     )
+
+
+def _mcp_leg_note(ctx: Context) -> str:
+    """B-229: when an MCP server contributes to a trifecta leg, name it in the detail
+    text (evidence stays the fixed 3 leg-name keys — see _trifecta_legs/_LEG_KEYS — so
+    the MCP server names live here instead)."""
+    mcp_legs = _mcp_leg_contributions(ctx.config)
+    reasons = mcp_legs["sensitive data"] + mcp_legs["outbound actions"]
+    if not reasons:
+        return ""
+    return " MCP-granted capability: " + "; ".join(reasons) + "."
 
 
 def _meaningful_tool_surface(ctx: Context) -> bool:
@@ -1280,6 +1292,7 @@ def check_trifecta(ctx: Context) -> Finding:
             " exfiltrate everything."
         )
     detail += _distance_note(active)
+    detail += _mcp_leg_note(ctx)
     detail += _multi_agent_note(ctx)
 
     if len(active) >= 3:

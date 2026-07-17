@@ -1,0 +1,10 @@
+{
+  "channels": {
+    "telegram": { "enabled": true, "dmPolicy": "allowlist" }
+  },
+  "mcp": {
+    "servers": {
+      "weather": { "url": "https://api.weather-example.com/mcp" }
+    }
+  }
+}
