@@ -773,45 +773,10 @@ _B64_ACTIONABLE_CONT_RE = re.compile(
 _B64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 
 
-# B-231 (round 3 C-135): a maximal run over the union of the standard AND url-safe
-# base64 alphabets (incl. + / = _ -). Used ONLY by _has_genuine_b64_blob to isolate a
-# candidate blob before applying the distinctiveness test below. Deliberately NOT the
-# global _B64_BLOB_RE/_B64URL_BLOB_RE, which stay broad for the decode-and-judge path
-# (_reassembles_to_payload) and must keep matching pure-alphanumeric runs.
-_B64_ANCHOR_BLOB_RE = re.compile(r"[A-Za-z0-9+/=_-]{40,}")
-
-
-def _has_genuine_b64_blob(window: str) -> bool:
-    """B-231 (round 3 C-135): True only for a GENUINE base64/base64url blob (>=40 chars)
-    in *window* — NOT a 40-char git commit SHA (``[0-9a-f]{40}``), a long URL slug, a
-    UUID chain, or a hyphenated id, all of which satisfy the broad
-    ``_B64_BLOB_RE``/``_B64URL_BLOB_RE`` runs but are benign.
-
-    The distinctiveness test: a run qualifies only when it carries a base64-specific
-    signal — either a standard-base64 alphabet/padding char (``+`` ``/`` ``=``, none of
-    which occur in hex / slug / UUID text), or a MIXED upper+lower+digit alphabet (the
-    fingerprint of encoded random bytes). Pure-hex (git SHA), pure-lowercase (slug / UUID
-    hex), pure-uppercase, and pure-digit runs are rejected — none carry that signal.
-
-    Scoped to the cron (B168) / hook (B169) strong-anchor helper below; the broad global
-    ``_B64_BLOB_RE`` / ``_B64URL_BLOB_RE`` and their decode-and-judge callers are untouched.
-    """
-    for m in _B64_ANCHOR_BLOB_RE.finditer(window):
-        tok = m.group()
-        if any(c in tok for c in "+/="):
-            return True  # standard-base64 alphabet/padding — hex/slug/UUID never carry it
-        has_upper = any("A" <= c <= "Z" for c in tok)
-        has_lower = any("a" <= c <= "z" for c in tok)
-        has_digit = any(c.isdigit() for c in tok)
-        if has_upper and has_lower and has_digit:
-            return True  # mixed upper+lower+digit run — fingerprint of encoded random bytes
-    return False
-
-
 def _secrecy_credential_or_encoding_anchor(window: str) -> bool:
-    """B-231 (fix/b231-cronhook-fp): the credential/encoding leg of the "strong,
-    unambiguous" secrecy anchor used ONLY by the cron (B168) and hook (B169) surfaces to
-    decide whether a B63 secrecy hit may grade-cap on those two surfaces.
+    """B-231 (fix/b231-cronhook-fp): the credential leg of the "strong, unambiguous"
+    secrecy anchor used ONLY by the cron (B168) and hook (B169) surfaces to decide whether
+    a B63 secrecy hit may grade-cap on those two surfaces.
 
     On the cron/hook surface a bare ``_B63_SECRECY_RE`` phrase co-located with a bare
     ``_EXFIL_RE`` keyword — the classic being the outbound verb "post" (``\\bPOST\\b`` is in
@@ -819,29 +784,30 @@ def _secrecy_credential_or_encoding_anchor(window: str) -> bool:
     withholds one detail ("Post the standup summary to the team channel. Don't mention the
     Q3 numbers.") looks identical to a covert-exfil directive. Per project doctrine (§5 —
     ambiguous suppression is WARN, not FAIL) that bare pairing must NOT grade-cap; it stays
-    a FAIL only when a STRONGER anchor co-occurs. Two of the three strong anchors the fix
-    names — a B64 instruction-override and a curl|bash pipe-to-shell install — are detected
-    by their own reused detectors in the callers and grade-cap on their own. This helper
-    covers the third: a real credential-PATH read (``_CRED_RE``: the .ssh/.aws/.env family,
-    NOT the mere editorial noun "credentials") or a GENUINE encoded blob (base64 /
-    base64url, >=40 chars, per ``_has_genuine_b64_blob``). Bare ``_EXFIL_RE`` keywords (a
-    bare "post"/"base64" token) are DELIBERATELY excluded — that bare match is the false
+    a FAIL only when a STRONGER anchor co-occurs. Two of the strong anchors — a B64
+    instruction-override and a curl|bash pipe-to-shell install — are detected by their own
+    reused detectors in the callers and grade-cap on their own. This helper covers the
+    remaining one: a real credential-PATH read (``_CRED_RE``: the .ssh/.aws/.env family,
+    NOT the mere editorial noun "credentials"). Bare ``_EXFIL_RE`` keywords (a bare
+    "post"/"base64" token) are DELIBERATELY excluded — that bare match is the false
     positive being fixed.
 
-    B-231 (round 3 C-135): the encoded-blob leg now requires ``_has_genuine_b64_blob`` —
-    a base64-distinctive run — instead of the broad ``_B64_BLOB_RE``/``_B64URL_BLOB_RE``,
-    which also matched a 40-char git commit SHA, a URL slug, or a UUID chain. A benign
-    release-notes digest that names a commit SHA ("Post the release notes for commit
-    a1b2c3d4… Do not disclose the unreleased feature list.") no longer re-escalates the
-    ambiguous secrecy+"post" hit to a grade-capping FAIL.
+    Wave-2 round-4 C-135 (SIMPLIFY): the former base64-blob leg was REMOVED entirely. A
+    "genuine base64 blob" discriminator cannot soundly separate an encoded exfil payload
+    from an ordinary 40+char URL, filesystem path, git SHA, or crypto-id in short message
+    text — a URL/path carries '/', a git SHA is hex, a slug/UUID is a long token — so it
+    produced a grade-capping false-positive FAIL on plain benign text two C-135 rounds
+    running (a 40-char git SHA, then an ``https://github.com/…/actions/runs/summary`` URL).
+    Distinguishing a payload from a URL/path/hash in-band is not reliably possible, so the
+    leg is gone. Intended, acceptable consequence: a base64-encoded exfil payload in a
+    cron/hook message + secrecy + "post" now escalates to WARN (still surfaced at half
+    weight), not FAIL — a small, doctrine-aligned false negative. FAIL on these two
+    surfaces is reserved for the unambiguous override / curl-pipe / credential-path anchors.
 
     Scoped to the two callers; the shared ``_EXFIL_RE`` / ``_B63_SECRECY_RE`` / ``_b63_scan``
     and every other B63 consumer are untouched.
     """
-    return bool(
-        _CRED_RE.search(window)
-        or _has_genuine_b64_blob(window)
-    )
+    return bool(_CRED_RE.search(window))
 
 
 _B64_HIGH_CONFIDENCE_RE = re.compile(

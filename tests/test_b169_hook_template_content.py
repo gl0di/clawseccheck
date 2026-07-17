@@ -57,7 +57,9 @@ def test_install_directive_in_text_template_fails():
 # AMBIGUOUS on this surface -> WARN, not FAIL. A benign relayed digest that withholds
 # one detail must never grade-cap. FAIL is reserved for a STRONGER anchor: a B64
 # instruction-override, a curl|bash pipe-to-shell install directive, or a real
-# credential-path / encoded-blob co-occurring with the secrecy phrase.
+# credential-path co-occurring with the secrecy phrase. (Wave-2 round-4: the former
+# encoded-blob anchor leg was removed -- see test_b168_cron_job_content.py's SIMPLIFY
+# block; a base64 blob can't be told apart from a URL/path/hash in short text.)
 # ---------------------------------------------------------------------------
 
 _DIGEST_WITHHOLD_MESSAGES = [
