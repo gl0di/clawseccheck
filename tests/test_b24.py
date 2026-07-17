@@ -363,3 +363,227 @@ def test_b24_mixed_clean_and_warn():
         "outdated": {"command": "npx", "args": ["pkg@latest"]},
     })
     assert check_mcp_hardening(ctx).status == "WARN"
+
+
+# ---- B-230: docker.sock / --privileged in the MCP server's OWN stdio command ----
+
+def test_b230_docker_sock_in_command_fails():
+    ctx = _mcp({"tool": {
+        "command": "docker",
+        "args": ["run", "-v", "/var/run/docker.sock:/var/run/docker.sock", "attacker/img"],
+    }})
+    f = check_mcp_hardening(ctx)
+    assert f.status == "FAIL"
+    assert "docker.sock" in " ".join(f.evidence)
+
+
+def test_b230_docker_privileged_flag_fails():
+    ctx = _mcp({"tool": {"command": "docker", "args": ["run", "--privileged", "attacker/img"]}})
+    f = check_mcp_hardening(ctx)
+    assert f.status == "FAIL"
+    assert "--privileged" in " ".join(f.evidence)
+
+
+def test_b230_privileged_flag_without_docker_mention_does_not_fail():
+    """C-135: the --privileged flag alone (no docker/podman context) must not FAIL —
+    a generic tool could plausibly define its own same-named flag."""
+    ctx = _mcp({"tool": {"command": "mytool", "args": ["--privileged", "run"]}})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b230_bad_docker_sock_fixture_fails():
+    from clawseccheck.collector import collect
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    f = check_mcp_hardening(collect(fixtures / "bad_b230_mcp_docker_sock"))
+    assert f.status == "FAIL"
+
+
+def test_b230_bad_docker_privileged_fixture_fails():
+    from clawseccheck.collector import collect
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    f = check_mcp_hardening(collect(fixtures / "bad_b230_mcp_docker_privileged"))
+    assert f.status == "FAIL"
+
+
+# ---- B-230: sslVerify/ssl_verify=false on a remote endpoint (MITM) ----
+
+def test_b230_ssl_verify_false_remote_public_fails():
+    ctx = _mcp({"remote": {"url": "https://mcp.example.com/api", "sslVerify": False}})
+    f = check_mcp_hardening(ctx)
+    assert f.status == "FAIL"
+    assert "sslVerify" in " ".join(f.evidence)
+
+
+def test_b230_ssl_verify_false_snake_case_alias_fails():
+    ctx = _mcp({"remote": {"url": "https://mcp.example.com/api", "ssl_verify": False}})
+    assert check_mcp_hardening(ctx).status == "FAIL"
+
+
+def test_b230_ssl_verify_true_remote_does_not_fail():
+    ctx = _mcp({"remote": {"url": "https://mcp.example.com/api", "sslVerify": True}})
+    assert check_mcp_hardening(ctx).status != "FAIL"
+
+
+def test_b230_ssl_verify_false_with_allowedhosts_does_not_fail():
+    """C-135 trap: sslVerify=false is explicitly blessed by the OpenClaw dist for
+    'explicitly trusted private endpoints' — an allowlisted host must not FAIL."""
+    ctx = _mcp({"remote": {
+        "url": "https://internal-mcp.corp.example.com/api",
+        "sslVerify": False,
+        "allowedHosts": ["internal-mcp.corp.example.com"],
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b230_ssl_verify_false_private_rfc1918_host_does_not_fail():
+    """C-135 trap: a private RFC-1918 endpoint is exactly the 'trusted private
+    endpoint' the sslVerify field's own docs bless — must not FAIL even with no
+    allowedHosts configured."""
+    ctx = _mcp({"remote": {"url": "https://10.0.5.20/api", "sslVerify": False}})
+    assert check_mcp_hardening(ctx).status != "FAIL"
+
+
+def test_b230_ssl_verify_false_loopback_does_not_fail():
+    ctx = _mcp({"remote": {"url": "https://127.0.0.1:8443/api", "sslVerify": False}})
+    assert check_mcp_hardening(ctx).status != "FAIL"
+
+
+def test_b230_bad_ssl_verify_remote_fixture_fails():
+    from clawseccheck.collector import collect
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    f = check_mcp_hardening(collect(fixtures / "bad_b230_mcp_ssl_verify_remote"))
+    assert f.status == "FAIL"
+
+
+def test_b230_clean_ssl_verify_private_fixture_passes():
+    from clawseccheck.collector import collect
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    f = check_mcp_hardening(collect(fixtures / "clean_b230_mcp_ssl_verify_private"))
+    assert f.status == "PASS"
+
+
+# ---- B-230: headers.Authorization / bearer credential ----
+
+def test_b230_headers_authorization_warns():
+    ctx = _mcp({"remote": {
+        "url": "https://mcp.example.com/api",
+        "headers": {"Authorization": "Bearer placeholder-not-a-real-token"},
+    }})
+    f = check_mcp_hardening(ctx)
+    assert f.status == "WARN"
+    assert "headers.Authorization" in " ".join(f.evidence)
+
+
+def test_b230_headers_bearer_value_without_auth_key_warns():
+    ctx = _mcp({"remote": {
+        "url": "https://mcp.example.com/api",
+        "headers": {"X-Custom-Auth": "Bearer placeholder-not-a-real-token"},
+    }})
+    assert check_mcp_hardening(ctx).status == "WARN"
+
+
+def test_b230_headers_value_never_echoed_in_evidence():
+    ctx = _mcp({"remote": {
+        "url": "https://mcp.example.com/api",
+        "headers": {"Authorization": "Bearer super-secret-do-not-leak-9f8e7d"},
+    }})
+    f = check_mcp_hardening(ctx)
+    assert "super-secret-do-not-leak" not in " ".join(f.evidence)
+
+
+def test_b230_benign_headers_do_not_warn():
+    ctx = _mcp({"remote": {
+        "url": "https://mcp.example.com/api",
+        "allowedHosts": ["mcp.example.com"],
+        "headers": {"Accept": "application/json", "User-Agent": "my-mcp-client/1.0"},
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b230_bad_header_auth_fixture_warns():
+    from clawseccheck.collector import collect
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    f = check_mcp_hardening(collect(fixtures / "bad_b230_mcp_header_auth"))
+    assert f.status == "WARN"
+
+
+# ---- B-230: non-prefixed secret-env names ----
+
+def test_b230_gh_token_env_warns():
+    ctx = _mcp({"tool": {"command": "node", "args": ["x.js"], "env": {"GH_TOKEN": "placeholder"}}})
+    f = check_mcp_hardening(ctx)
+    assert f.status == "WARN"
+    assert "GH_TOKEN" in " ".join(f.evidence)
+
+
+def test_b230_slack_bot_token_env_warns():
+    ctx = _mcp({"tool": {
+        "command": "node", "args": ["x.js"], "env": {"SLACK_BOT_TOKEN": "placeholder"},
+    }})
+    assert check_mcp_hardening(ctx).status == "WARN"
+
+
+def test_b230_database_url_env_warns():
+    ctx = _mcp({"tool": {
+        "command": "node", "args": ["x.js"], "env": {"DATABASE_URL": "postgres://u:p@h/db"},
+    }})
+    assert check_mcp_hardening(ctx).status == "WARN"
+
+
+def test_b230_npm_auth_env_warns():
+    ctx = _mcp({"tool": {"command": "node", "args": ["x.js"], "env": {"NPM_AUTH": "placeholder"}}})
+    assert check_mcp_hardening(ctx).status == "WARN"
+
+
+def test_b230_npm_config_registry_env_does_not_warn():
+    """Precision guard: NPM_CONFIG_REGISTRY is not a secret — only NPM_TOKEN/
+    NPM_AUTH(_TOKEN) should match."""
+    ctx = _mcp({"tool": {
+        "command": "node", "args": ["x.js"],
+        "env": {"NPM_CONFIG_REGISTRY": "https://registry.npmjs.org/"},
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b230_bad_secret_env_fixture_warns():
+    from clawseccheck.collector import collect
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    f = check_mcp_hardening(collect(fixtures / "bad_b230_mcp_secret_env"))
+    assert f.status == "WARN"
+
+
+# ---- B-230: yarn dlx / explicit @latest unpinned specs ----
+
+def test_b230_yarn_dlx_latest_warns():
+    ctx = _mcp({"tool": {"command": "yarn", "args": ["dlx", "some-pkg@latest"]}})
+    f = check_mcp_hardening(ctx)
+    assert f.status == "WARN"
+    ev = " ".join(f.evidence).lower()
+    assert "unpinned" in ev or "@latest" in ev
+
+
+def test_b230_yarn_dlx_pinned_passes():
+    ctx = _mcp({"tool": {"command": "yarn", "args": ["dlx", "some-pkg@1.2.3"]}})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b230_bad_yarn_dlx_fixture_warns():
+    from clawseccheck.collector import collect
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    f = check_mcp_hardening(collect(fixtures / "bad_b230_mcp_yarn_dlx_latest"))
+    assert f.status == "WARN"
+
+
+# ---- C-135 zero-FP guards: legit configs must stay clean ----
+
+def test_b230_clean_pinned_npx_fixture_passes():
+    from clawseccheck.collector import collect
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    f = check_mcp_hardening(collect(fixtures / "clean_b230_mcp_pinned_npx"))
+    assert f.status == "PASS"
+
+
+def test_b230_legit_local_stdio_server_passes():
+    """A legit local MCP server (no url, no docker, no secrets) must stay clean."""
+    ctx = _mcp({"local-tool": {"command": "node", "args": ["dist/server.js"]}})
+    assert check_mcp_hardening(ctx).status == "PASS"

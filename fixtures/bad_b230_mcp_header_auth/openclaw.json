@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "remote-tool": {
+        "url": "https://mcp.example.com/api",
+        "transport": "streamable-http",
+        "headers": {
+          "Authorization": "Bearer placeholder-not-a-real-token"
+        }
+      }
+    }
+  }
+}

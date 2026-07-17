@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "servers": {
+      "remote-tool": {
+        "url": "https://mcp.example.com/api",
+        "sslVerify": false
+      }
+    }
+  }
+}
