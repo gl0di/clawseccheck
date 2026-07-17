@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "servers": {
+      "runner-tool": {
+        "command": "npx",
+        "args": ["-y", "some-mcp@beta"]
+      }
+    }
+  }
+}

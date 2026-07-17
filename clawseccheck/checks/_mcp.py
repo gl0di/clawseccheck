@@ -1076,12 +1076,27 @@ _MCP_SAFE_URL_LOOKBEHIND = "".join(
 
 # ---------- B24: MCP server hardening ----------
 # Unpinned / dangerous install specs for stdio commands.
+#
+# B-230 fix: the previous third alternative, `(?<![a-zA-Z0-9._-])@[a-zA-Z]`, matched
+# an `@` that starts a FRESH token — which is exactly the npm SCOPE prefix
+# (`@modelcontextprotocol/server-filesystem@2.1.0`), not an unpinned dist-tag. That
+# false-WARNed on essentially every scoped MCP package even when the version was fully
+# pinned, while simultaneously MISSING a real unscoped dist-tag like `some-mcp@beta`
+# (its `@` directly abuts the package name, so the old "not preceded by an identifier
+# char" lookbehind excluded it). The fix flips the anchor: a VERSION-position `@`
+# always directly abuts the end of a package-name token (no space before it — npm's
+# `pkg@version` / `@scope/pkg@version` syntax), so requiring a POSITIVE lookbehind for
+# an identifier char selects the version `@` and naturally excludes the scope `@`
+# (which is preceded by whitespace/quote/string-start, since it opens a fresh spec).
+# `(?!\d)` then keeps a pinned semver (`@1.2.3`, `@2.0.0-beta.1`) unmatched — only a
+# non-numeric dist-tag (`@latest`, `@beta`, `@next`, `@canary`, ...) in that position
+# is unpinned evidence.
 _MCP_UNPINNED_RE = re.compile(
     r"(?:npx|pip(?:x)?|uvx|yarn)\b[^\n]*?"  # npx / pip / pipx / uvx / yarn (dlx) prefix
     r"(?:"
     r"@latest"  # explicit @latest tag
     rf"|{_MCP_SAFE_URL_LOOKBEHIND}https?://"  # URL argument (not a known safe registry/index flag value)
-    r"|(?<![a-zA-Z0-9._-])(?!@[0-9])@(?![0-9])[a-zA-Z]"  # @scope but not pinned @1.2.3
+    r"|(?<=[a-zA-Z0-9._-])@(?!\d)[a-zA-Z][a-zA-Z0-9._-]*"  # unpinned dist-tag in VERSION position, not a scope prefix
     r")",
     re.I,
 )
