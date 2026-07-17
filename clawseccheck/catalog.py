@@ -744,6 +744,20 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="hooks",
     ),
+    # B170 (B-232 item 4): PRESENCE detector for a tool-output trust-boundary-inversion
+    # directive -- text telling the agent to treat fetched web/MCP/tool/API output as
+    # authoritative operator/system instructions. Mirrors B67 (which flags the ABSENCE
+    # of the correct "tool output is data" declaration) from the opposite direction.
+    # WARN-only (never FAIL) -- highest-FP surface in the project (content ring).
+    CheckMeta(
+        "B170",
+        "Tool-output trust-boundary-inversion directive",
+        HIGH,
+        "hardening",
+        "Prompt Injection / Trust Boundary",
+        confidence="MEDIUM",
+        surface="bootstrap",
+    ),
     # B158 (F-119): a declared skill/plugin load source (skills.load.extraDirs,
     # plugins.load.paths, or a .clawhub/lock.json skillFile) resolves to nothing on disk —
     # an unaudited auto-load gap. Advisory, WARN-only, unscored (declared-but-absent is
@@ -1704,6 +1718,7 @@ AST_MAP = {
     "B65": ("AST01", "AST05"),
     "B66": ("AST05",),
     "B67": ("AST05",),
+    "B170": ("AST05",),  # trust-inversion directive — presence-mirror of B67
     "C074": ("AST05",),
     "B4": ("AST06",),
     "B22": ("AST03", "AST06"),
@@ -1837,6 +1852,8 @@ OWASP_MAP = {
     "B66": ("LLM06",),
     # B67: per-source trust contracts — prompt injection via channel-specific gaps.
     "B67": ("LLM01", "LLM02"),
+    # B170: presence of a trust-boundary-inversion directive — prompt injection enabler.
+    "B170": ("LLM01", "LLM02"),
     "C4": ("LLM03",),
     "C5": ("LLM03",),
     # Gap-fill additions (E-013): content-injection and config-hygiene checks now mapped.
