@@ -28,6 +28,7 @@ from ._shared import (
     _TIER_NAME,
     _agent_legs,
     _channels,
+    _config_unreadable,
     _enabled_tools,
     _external_input_channels,
     _finding,
@@ -621,6 +622,9 @@ def check_subagent_spawn_limits(ctx: Context) -> Finding:
     PASS — limits unset (safe defaults) or within recommended, OR no untrusted ingress.
     WARN — a limit is explicitly raised beyond recommended AND an untrusted channel exists.
     """
+    unreadable = _config_unreadable("B81", ctx)
+    if unreadable is not None:
+        return unreadable
     cfg = ctx.config
     depth = dig(cfg, "agents.defaults.subagents.maxSpawnDepth")
     children = dig(cfg, "agents.defaults.subagents.maxChildrenPerAgent")

@@ -25,6 +25,7 @@ from ..collector import (
 
 from . import _shared
 from ._shared import (
+    _config_unreadable,
     _custom,
     _finding,
     _has_approval_gate,
@@ -478,6 +479,9 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
     PASS — field is true or unset (safe default).
     WARN — field is explicitly false.
     """
+    unreadable = _config_unreadable("B68", ctx)
+    if unreadable is not None:
+        return unreadable
     cfg = ctx.config
     val = dig(cfg, "tools.exec.applyPatch.workspaceOnly")
     if val is False:

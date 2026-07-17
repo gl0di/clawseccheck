@@ -32,6 +32,7 @@ from ..textnorm import (
 
 from ._shared import (
     SECRET_KEY_RE,
+    _config_unreadable,
     _KNOWN_EXFIL_HOST_RE,
     _finding,
     _mcp_has_remote,
@@ -1287,6 +1288,9 @@ def check_mcp_external_endpoint(ctx: Context) -> Finding:
     prove whether it is legitimate or attacker-controlled. This is UNKNOWN-only on
     non-local URLs and PASS when MCP is absent or limited to local/stdio endpoints.
     """
+    unreadable = _config_unreadable("C047", ctx)
+    if unreadable is not None:
+        return unreadable
     servers = _mcp_servers(ctx.config)
     external = []
     # B-073: keep only scheme://host of the endpoint in evidence — userinfo, path,

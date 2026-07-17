@@ -31,6 +31,7 @@ from ._shared import (
     SENSITIVE_TOOL_HINTS,
     _LEG_KEYS,
     _channels,
+    _config_unreadable,
     _enabled_tools,
     _external_input_channels,
     _finding,
@@ -657,6 +658,9 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
     false = nothing flagged (so a default config is a clean PASS — zero false positives).
     FAIL when a sandbox-escape or control-plane-auth-disable flag is on; WARN for the rest.
     """
+    unreadable = _config_unreadable("B48", ctx)
+    if unreadable is not None:
+        return unreadable
     cfg = ctx.config
     fails: list[str] = []
     warns: list[str] = []
@@ -832,6 +836,9 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
            is configured.
     WARN — token/password auth AND non-loopback bind AND no gateway.auth.rateLimit.
     """
+    unreadable = _config_unreadable("B80", ctx)
+    if unreadable is not None:
+        return unreadable
     cfg = ctx.config
     mode = dig(cfg, "gateway.auth.mode")
     if mode not in ("token", "password"):
@@ -988,6 +995,9 @@ def check_proxy_header_forging(ctx: Context) -> Finding:
     so this check is intentionally conservative: it raises UNKNOWN rather than
     FAIL when fallback is enabled but trusted-proxy data is absent/invalid.
     """
+    unreadable = _config_unreadable("C032", ctx)
+    if unreadable is not None:
+        return unreadable
     fallback = dig(ctx.config, "gateway.allowRealIpFallback")
     if not fallback:
         return _finding(
@@ -1172,6 +1182,14 @@ def check_secrets(ctx: Context) -> Finding:
             "~/.openclaw` so config-stored tokens are not readable by others.",
             ev,
         )
+    # B-228: openclaw.json present but unparseable/unreadable — bootstrap-file secrets
+    # (checked above, config-independent) still legitimately FAILed if present, but a
+    # clean verdict at this point is only trustworthy if the config itself was actually
+    # read. Guard the terminal PASS only (not the whole function) so the bootstrap scan
+    # above keeps working normally under a broken openclaw.json.
+    unreadable = _config_unreadable("B1", ctx)
+    if unreadable is not None:
+        return unreadable
     note = ""
     pc = "verified"
     if secret_paths:
@@ -1261,6 +1279,13 @@ def check_tls(ctx: Context) -> Finding:
             "`chmod 600 ~/.openclaw/openclaw.json` and `chmod 700 ~/.openclaw`.",
             ev,
         )
+    # B-228: guard the terminal PASS only — _perms_loose(ctx) above is a real, config-
+    # content-independent file-permission signal (still legitimately WARNs on a broken
+    # openclaw.json that is ALSO group/world-readable), so only the "transport is fine"
+    # claim (which needs the actual gateway.bind/gateway.tls.enabled values) is gated.
+    unreadable = _config_unreadable("B11", ctx)
+    if unreadable is not None:
+        return unreadable
     return _finding(
         "B11",
         PASS,

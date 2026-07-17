@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from ..catalog import (
     BY_ID,
+    UNKNOWN,
     Finding,
 )
 from ..collector import (
@@ -367,6 +368,36 @@ OUTBOUND_TOOL_HINTS = (
 
 def _meta(cid: str):
     return BY_ID[cid]
+
+
+# B-228: openclaw.json present but unparseable/unreadable (ctx.config_parse_error, B-166)
+# makes the collector fall back to ctx.config = {} — a check that reads ctx.config /
+# dig(ctx.config, ...) with no other guard then sees an empty-but-VALID-looking config and
+# emits an affirmative "clean" PASS it never actually earned (GR#4: report UNKNOWN, not a
+# fake PASS/FAIL, when a check genuinely can't determine state). This is a per-check
+# OPT-IN guard, not an engine-wide blanket: only a check whose verdict is primarily
+# CONFIG-content-derived should call it. A check whose primary evidence is bootstrap/
+# skills/host/trajectory data must not call this — it would suppress a real, config-
+# independent finding that has nothing to do with openclaw.json parsing. For a check that
+# mixes config-derived evidence with an independent non-config signal (e.g. B1's bootstrap-
+# file secret scan, B11's file-permission check), call this immediately before the check's
+# own terminal "clean" verdict rather than at the top of the function, so the independent
+# signal still gets a chance to FAIL/WARN on its own merits.
+def _config_unreadable(cid: str, ctx: Context) -> "Finding | None":
+    """UNKNOWN finding for *cid* when ctx.config could not actually be parsed, else None.
+
+    Callers: ``if (f := _config_unreadable("B1", ctx)) is not None: return f`` (or the
+    non-walrus two-line form) before trusting ``ctx.config``/``dig(ctx.config, ...)`` for
+    an affirmative verdict.
+    """
+    if not ctx.config_parse_error:
+        return None
+    return _finding(
+        cid,
+        UNKNOWN,
+        "openclaw.json present but unparseable/unreadable — cannot determine.",
+        "Fix openclaw.json so it is valid JSON and owner-readable, then re-run the audit.",
+    )
 
 
 def _finding(

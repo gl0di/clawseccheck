@@ -92,6 +92,7 @@ from ._shared import (
     OUTBOUND_TOOL_HINTS,
     _meta,
     _finding,
+    _config_unreadable,
     _channels,
     _UNTRUSTED_INPUT_POLICIES,
     _open_channels,
