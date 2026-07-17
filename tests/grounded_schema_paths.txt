@@ -34,6 +34,9 @@ gateway.auth.password
 gateway.auth.rateLimit
 gateway.auth.token
 gateway.auth.trustedProxy.allowLoopback
+gateway.auth.trustedProxy.allowUsers
+gateway.auth.trustedProxy.requiredHeaders
+gateway.auth.trustedProxy.userHeader
 gateway.bind
 gateway.controlUi.allowInsecureAuth
 gateway.controlUi.allowedOrigins

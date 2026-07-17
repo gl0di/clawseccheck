@@ -937,15 +937,15 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B70 - trustedProxy allowLoopback on non-loopback bind (header-spoof surface)
+### B70 - trusted-proxy auth without identity constraints on non-loopback bind (header-spoof surface)
 
-- Severity: LOW
+- Severity: HIGH
 - Block: hardening
 - Framework: Zero Trust / Proxy Headers
 - Scored: no
 - Confidence: HIGH
 - OWASP: none
-- What it checks: trustedProxy allowLoopback on non-loopback bind (header-spoof surface)
+- What it checks: trusted-proxy auth without identity constraints on non-loopback bind (header-spoof surface)
 - Remediation:
   - none
 

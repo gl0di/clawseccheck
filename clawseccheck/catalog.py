@@ -851,8 +851,9 @@ CATALOG: list[CheckMeta] = [
     ),
     CheckMeta(
         "B70",
-        "trustedProxy allowLoopback on non-loopback bind (header-spoof surface)",
-        LOW,
+        "trusted-proxy auth without identity constraints on non-loopback bind "
+        "(header-spoof surface)",
+        HIGH,
         "hardening",
         "Zero Trust / Proxy Headers",
         scored=False,
