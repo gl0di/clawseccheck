@@ -73,6 +73,78 @@ assert all(0x0590 > cp or cp > 0x05FF for cp in _CONFUSABLES), (
 
 
 # ---------------------------------------------------------------------------
+# Unicode Tag block (U+E0000–U+E007F) de-obfuscation (B-232).
+#
+# The Tag block is a set of "ASCII mirror" code points, invisible in virtually
+# every font/renderer (no glyph is defined for them anywhere). U+E0020–U+E007E
+# ("TAG SPACE" .. "TAG TILDE") each mirror ASCII 0x20–0x7E at a fixed offset
+# (-0xE0000), so a complete ASCII message can be smuggled as an entirely
+# invisible run of Tag characters ("ASCII smuggling" / invisible-Unicode prompt
+# injection). Unicode's own NFKC compatibility decomposition does NOT map the
+# Tag block to its ASCII mirror -- there is no compatibility-decomposition
+# relationship defined for these code points -- so `unicodedata.normalize(
+# "NFKC", ...)` leaves a Tag-encoded payload untouched: it is invisible AND
+# NFKC-inert, and never reaches INJECTION_PATTERNS unless decoded here.
+#
+# LEGITIMATE USE (must not false-fire): regional/subdivision flag emoji (the
+# Scotland / England / Wales flags, among others) are built from a black-flag
+# base (U+1F3F4) followed by a short Tag-character run spelling an ISO 3166-2
+# region code and terminated by U+E007F CANCEL TAG. See
+# _is_tag_run_flag_subdivision below -- this is the one documented benign use
+# of the block and is excluded from the WARN-worthy signal (though the
+# characters are still folded/stripped either way, same as any other
+# de-obfuscation pass).
+# ---------------------------------------------------------------------------
+_TAG_BLOCK_LO = 0xE0000
+_TAG_BLOCK_HI = 0xE007F
+_TAG_PRINTABLE_LO = 0xE0020  # TAG SPACE -> ASCII 0x20 ' '
+_TAG_PRINTABLE_HI = 0xE007E  # TAG TILDE -> ASCII 0x7E '~'
+_TAG_CANCEL = 0xE007F  # CANCEL TAG -- terminates a flag-subdivision run
+
+# Fold table: printable Tag chars decode to their ASCII mirror (revealing a
+# smuggled payload as plain, matchable text); the remaining non-printable Tag
+# code points -- U+E0000 LANGUAGE TAG (deprecated), U+E0001 (deprecated), the
+# unassigned U+E0002-E001F range, and CANCEL TAG itself -- fold to "" (i.e.
+# stripped), the same treatment _INVISIBLE_RE already gives other invisible
+# control ranges above.
+_TAG_TABLE: dict[int, str] = {
+    cp: (
+        chr(cp - _TAG_BLOCK_LO)
+        if _TAG_PRINTABLE_LO <= cp <= _TAG_PRINTABLE_HI
+        else ""
+    )
+    for cp in range(_TAG_BLOCK_LO, _TAG_BLOCK_HI + 1)
+}
+_TAG_BLOCK_TABLE = str.maketrans(_TAG_TABLE)
+
+_TAG_RUN_RE = re.compile("[\U000e0000-\U000e007f]+")
+
+# Black-flag base code point for regional/subdivision flag emoji sequences.
+_FLAG_BASE_CP = 0x1F3F4
+
+
+def _is_tag_run_flag_subdivision(text: str, m: "re.Match[str]") -> bool:
+    """True when the Tag-character run *m* is a legitimate regional/subdivision flag
+    emoji sequence: immediately preceded by the black-flag base (U+1F3F4) and
+    terminated by CANCEL TAG (U+E007F) -- the documented Unicode mechanism behind
+    flags like Scotland/England/Wales. Any other Tag run (bare, not flag-anchored, or
+    not CANCEL-terminated) is NOT exempted."""
+    start = m.start()
+    if start == 0 or ord(text[start - 1]) != _FLAG_BASE_CP:
+        return False
+    return ord(m.group()[-1]) == _TAG_CANCEL
+
+
+def _has_suspicious_tag_run(text: str) -> bool:
+    """True when *text* contains a Unicode Tag-block run that is NOT a legitimate
+    flag-subdivision sequence (see _is_tag_run_flag_subdivision)."""
+    for m in _TAG_RUN_RE.finditer(text):
+        if not _is_tag_run_flag_subdivision(text, m):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Emoji / pictographic codepoint ranges (B-088 / A3).
 #
 # unicodedata (stdlib) does not expose the Unicode "Extended_Pictographic"
@@ -163,15 +235,20 @@ def normalize_for_scan(text: str) -> str:
       1. Strip invisible / bidi-control characters
          (U+200B–200D, U+FEFF, U+202A–202E, U+2060, U+2066–2069, U+00AD).
       2. NFKC normalization (collapses fullwidth, ligatures, etc.).
-      3. Confusable folding: Cyrillic/Greek lookalikes → ASCII via
+      3. Unicode Tag-block (U+E0000–E007F) fold/strip: printable Tag chars decode to
+         their ASCII mirror (revealing an ASCII-smuggled payload); non-printable Tag
+         code points are stripped. NFKC does not touch this block (see *_TAG_TABLE*),
+         so it is handled explicitly here (B-232).
+      4. Confusable folding: Cyrillic/Greek lookalikes → ASCII via
          *_CONFUSABLES* (see module-level dict).
 
     Read-only and lossy by design: the original *text* is never mutated.
-    Hebrew characters (U+0590–05FF) are explicitly excluded from step 3.
+    Hebrew characters (U+0590–05FF) are explicitly excluded from step 4.
     """
     stripped = _INVISIBLE_RE.sub("", text)
     nfkc = unicodedata.normalize("NFKC", stripped)
-    return nfkc.translate(_CONFUSABLES_TABLE)
+    tag_decoded = nfkc.translate(_TAG_BLOCK_TABLE)
+    return tag_decoded.translate(_CONFUSABLES_TABLE)
 
 
 def _has_suspicious_zero_width(text: str, zero_width_re: "re.Pattern[str]") -> bool:
@@ -210,6 +287,8 @@ def obfuscation_signals(text: str) -> list[str]:
     Signal categories (all checked independently):
       - "zero-width / invisible characters found" — invisible chars stripped
       - "bidi-override / embedding controls found" — bidi controls stripped
+      - "Unicode Tag-block characters found" — Tag-block (U+E0000-E007F) run present,
+        not explained away as a legitimate flag-subdivision emoji sequence (B-232)
       - "confusable characters folded to ASCII" — confusable map applied
     """
     signals: list[str] = []
@@ -226,6 +305,8 @@ def obfuscation_signals(text: str) -> list[str]:
         signals.append("zero-width / invisible characters found")
     if _BIDI_RE.search(text):
         signals.append("bidi-override / embedding controls found")
+    if _has_suspicious_tag_run(text):
+        signals.append("Unicode Tag-block characters found")
 
     # Check whether confusable folding would change the NFKC-normalized text.
     nfkc = unicodedata.normalize("NFKC", _INVISIBLE_RE.sub("", text))
