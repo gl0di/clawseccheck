@@ -6,7 +6,9 @@ UNKNOWN when no MCP servers are configured.
 """
 from pathlib import Path
 
-from clawseccheck.checks import check_mcp_hardening
+import pytest
+
+from clawseccheck.checks import _MCP_UNPINNED_RE, check_mcp_hardening
 from clawseccheck.collector import Context
 
 
@@ -574,6 +576,73 @@ def test_b230_bad_yarn_dlx_fixture_warns():
     assert f.status == "WARN"
 
 
+# ---- B-230: unpinned dist-tag vs. npm scope prefix (the FP this section pins) ----
+#
+# The `@` in the npm SCOPE prefix (`@modelcontextprotocol/server-filesystem@2.1.0`)
+# must never be treated as unpinned-version evidence — only an `@` in the VERSION
+# position (directly abutting the package-name token, e.g. `pkg@beta`) counts.
+
+def test_b230_pinned_scoped_npx_passes():
+    """A fully-pinned scoped package (the overwhelmingly common real MCP shape,
+    e.g. @modelcontextprotocol/*) must not be flagged — the scope `@` is not a
+    version marker."""
+    ctx = _mcp({"filesystem": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem@2.1.0"],
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b230_pinned_scoped_yarn_dlx_passes():
+    ctx = _mcp({"tool": {"command": "yarn", "args": ["dlx", "@scope/mcp@1.2.3"]}})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b230_unscoped_disttag_beta_warns():
+    """Regression guard for the FN half of the bug: an unscoped dist-tag like
+    `pkg@beta` was previously MISSED entirely (only the scope `@` matched)."""
+    ctx = _mcp({"runner": {"command": "npx", "args": ["-y", "some-mcp@beta"]}})
+    f = check_mcp_hardening(ctx)
+    assert f.status == "WARN"
+    assert "unpinned" in " ".join(f.evidence).lower()
+
+
+def test_b230_scoped_disttag_beta_warns():
+    ctx = _mcp({"runner": {"command": "npx", "args": ["-y", "@scope/pkg@beta"]}})
+    assert check_mcp_hardening(ctx).status == "WARN"
+
+
+def test_b230_scoped_disttag_next_warns():
+    ctx = _mcp({"runner": {"command": "npx", "args": ["-y", "@scope/pkg@next"]}})
+    assert check_mcp_hardening(ctx).status == "WARN"
+
+
+def test_b230_unscoped_disttag_canary_warns():
+    ctx = _mcp({"runner": {"command": "npx", "args": ["-y", "pkg@canary"]}})
+    assert check_mcp_hardening(ctx).status == "WARN"
+
+
+def test_b230_pinned_prerelease_semver_passes():
+    """A pinned prerelease/build semver (starts with a digit) is still pinned,
+    not a dist-tag."""
+    ctx = _mcp({"tool": {"command": "npx", "args": ["-y", "pkg@2.0.0-beta.1"]}})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b230_bad_unpinned_disttag_fixture_warns():
+    from clawseccheck.collector import collect
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    f = check_mcp_hardening(collect(fixtures / "bad_b230_mcp_unpinned_disttag"))
+    assert f.status == "WARN"
+
+
+def test_b230_clean_pinned_scoped_fixture_passes():
+    from clawseccheck.collector import collect
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    f = check_mcp_hardening(collect(fixtures / "clean_b230_mcp_pinned_scoped"))
+    assert f.status == "PASS"
+
+
 # ---- C-135 zero-FP guards: legit configs must stay clean ----
 
 def test_b230_clean_pinned_npx_fixture_passes():
@@ -587,3 +656,42 @@ def test_b230_legit_local_stdio_server_passes():
     """A legit local MCP server (no url, no docker, no secrets) must stay clean."""
     ctx = _mcp({"local-tool": {"command": "node", "args": ["dist/server.js"]}})
     assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b24_bare_unscoped_no_version_still_passes():
+    """Regression guard (B-230 fix): an unscoped spec with no @version at all had
+    no match under the pre-fix regex either (no `@` character present at all) —
+    that pre-existing behavior for the no-version case is deliberately unchanged
+    by this fix, which only touches the scope-vs-version `@` distinction."""
+    ctx = _mcp({"tool": {"command": "npx", "args": ["-y", "some-mcp"]}})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+# ---- B-230: _MCP_UNPINNED_RE unit matrix — pinned-scoped/unscoped/yarn must NOT
+# match; an unpinned dist-tag (scoped or not) must match. Exercises the regex
+# directly so the scope-vs-version `@` distinction is pinned independent of the
+# rest of check_mcp_hardening's aggregation logic. ----
+
+@pytest.mark.parametrize("text", [
+    "npx -y @modelcontextprotocol/server-filesystem@2.1.0",
+    "npx -y @scope/pkg@1.2.3",
+    "npx -y pkg@1.2.3",
+    "yarn dlx @scope/mcp@1.2.3",
+    "npx -y pkg@2.0.0-beta.1",  # pinned prerelease semver: starts with a digit
+    "npx -y pkg@2.0.0+build5",  # pinned build metadata: starts with a digit
+    "npx -y some-mcp",  # no @version at all
+])
+def test_mcp_unpinned_re_does_not_match_pinned_specs(text):
+    assert _MCP_UNPINNED_RE.search(text) is None, text
+
+
+@pytest.mark.parametrize("text", [
+    "npx -y pkg@latest",
+    "npx -y some-mcp@beta",
+    "npx -y pkg@next",
+    "npx -y pkg@canary",
+    "npx -y @scope/pkg@latest",
+    "npx -y @scope/pkg@beta",
+])
+def test_mcp_unpinned_re_matches_dist_tags(text):
+    assert _MCP_UNPINNED_RE.search(text) is not None, text
