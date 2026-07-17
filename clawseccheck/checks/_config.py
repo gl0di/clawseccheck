@@ -410,21 +410,25 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
     return out
 
 
-# B-233 round 3 (C-135): world-open / near-catch-all CIDRs (e.g. 0.0.0.0/0, ::/0,
-# 0.0.0.0/1) are NOT a genuine trust boundary — every source IP matches, so the
+# B-233 round 3 (C-135): world-open / near-catch-all PUBLIC CIDRs (e.g. 0.0.0.0/0,
+# ::/0, 0.0.0.0/1) are NOT a genuine trust boundary — every source IP matches, so the
 # trusted-proxy identity header stays attacker-spoofable by anyone. Grounded against
 # dist isTrustedProxyAddress -> isIpInCidr -> ipaddr.parseCIDR (prefix-len 0 matches
-# all). Reject IPv4 prefixes shorter than /8 and IPv6 prefixes shorter than /16 — short
-# enough to cover 10.0.0.0/8 (RFC1918), 172.16.0.0/12, 192.168.0.0/16, and any bounded
-# corp range, while still rejecting anything that spans (or nearly spans) the public
-# internet.
+# all). A single host always constrains, and so does any PRIVATE range regardless of
+# prefix length — a private range (RFC1918 IPv4, or an IPv6 ULA like fc00::/7 / RFC4193)
+# is not globally routable, so an external attacker cannot source a connection from it,
+# whatever its prefix. Only reject over-broad PUBLIC ranges: IPv4 prefixes shorter than
+# /8 and IPv6 prefixes shorter than /16 — short enough that a genuine corp-sized public
+# allocation (a /24, a /32 LB IP) still passes, while anything spanning (or nearly
+# spanning) the public internet does not.
 _MIN_IPV4_PREFIXLEN = 8
 _MIN_IPV6_PREFIXLEN = 16
 
 
 def _is_constraining_proxy_entry(entry) -> bool:
     """True when *entry* is a genuine trusted-proxy identifier: a specific host, a
-    hostname, or a CIDR bounded enough to be a real trust boundary (not a catch-all)."""
+    hostname, a private range (any prefix), or a public CIDR bounded enough to be a
+    real trust boundary (not a catch-all)."""
     if not isinstance(entry, str):
         return False
     s = entry.strip()
@@ -435,6 +439,8 @@ def _is_constraining_proxy_entry(entry) -> bool:
     except ValueError:
         # Not a parseable IP/CIDR (e.g. a hostname) — a specific, non-wildcard
         # identifier is still a genuine constraint.
+        return True
+    if net.num_addresses == 1 or net.is_private:
         return True
     if net.version == 4 and net.prefixlen < _MIN_IPV4_PREFIXLEN:
         return False

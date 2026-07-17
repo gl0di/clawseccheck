@@ -241,6 +241,18 @@ def test_trusted_proxies_ok_public_slash32_passes():
     assert _trusted_proxies_ok(["203.0.113.5"]) is True
 
 
+def test_trusted_proxies_ok_public_slash24_passes():
+    # A genuine public /24 allocation is bounded enough (prefix >= /8) to constrain.
+    assert _trusted_proxies_ok(["8.8.8.0/24"]) is True
+
+
+def test_trusted_proxies_ok_ipv6_ula_passes_regardless_of_prefix():
+    # GR#5: fc00::/7 (RFC4193 IPv6 Unique Local Address) is NOT globally routable, so
+    # an external attacker cannot source from it — it constrains despite prefix 7 < 16.
+    assert _trusted_proxies_ok(["fc00::/7"]) is True
+    assert _trusted_proxies_ok(["fd00::/8"]) is True
+
+
 def test_trusted_proxies_ok_empty_and_wildcard_and_none_fail():
     assert _trusted_proxies_ok([]) is False
     assert _trusted_proxies_ok(["*"]) is False
@@ -267,6 +279,13 @@ def test_b2_trustedproxies_specific_ip_plus_blank_entry_passes():
     assert f.status == PASS
 
 
+def test_b2_trustedproxies_ipv6_ula_passes():
+    # GR#5: fc00::/7 is a private (non-globally-routable) IPv6 ULA range — a genuine
+    # constraint despite its short prefix.
+    f = check_gateway(_ctx(_cfg_with_trusted_proxies(["fc00::/7"])))
+    assert f.status == PASS
+
+
 def test_b70_trustedproxies_world_open_ipv4_still_fails():
     f = check_trustedproxy_loopback(_ctx(_cfg_with_trusted_proxies(["0.0.0.0/0"])))
     assert f.status == FAIL
@@ -284,6 +303,11 @@ def test_b70_trustedproxies_over_broad_ipv4_prefix_still_fails():
 
 def test_b70_trustedproxies_specific_ip_plus_blank_entry_passes():
     f = check_trustedproxy_loopback(_ctx(_cfg_with_trusted_proxies(["10.0.0.5", ""])))
+    assert f.status == PASS
+
+
+def test_b70_trustedproxies_ipv6_ula_passes():
+    f = check_trustedproxy_loopback(_ctx(_cfg_with_trusted_proxies(["fc00::/7"])))
     assert f.status == PASS
 
 
