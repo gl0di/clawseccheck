@@ -884,6 +884,114 @@ def _read_jsonl_tail(path: Path, cap: int = _JSONL_SCAN_CAP) -> tuple[str, bool]
     return text, True
 
 
+# ---------- B-229: MCP-granted capability folds into the lethal-trifecta legs ----------
+# MCP is OpenClaw's primary capability-extension surface, yet the trifecta legs
+# historically derived capability only from tools.*/credentials/ and never read
+# mcp.servers — so a server granting broad filesystem/database/secret access (the
+# "sensitive data" leg) or a remote/network endpoint (the "outbound" leg) counted for
+# nothing, and A1 under-reported the leg count. The wiring below is deliberately
+# CONSERVATIVE so a benign read-only MCP cannot manufacture a spurious 3/3 FAIL
+# (§5 zero-FP / C-135): only a KNOWN data/db/secret server package name, OR a filesystem
+# server rooted at a BROAD path, raises the sensitive leg — a narrowly project-scoped fs
+# root does not; and a loopback MCP endpoint is NOT outbound.
+
+# Capability keywords that, when they name an MCP server via the canonical
+# @scope/server-<cap> / mcp-server-<cap> / mcp-<cap> naming convention, mark a server
+# that inherently exposes sensitive data — a whole database, secret store, or cloud
+# drive. Grounded on the @modelcontextprotocol reference servers plus common third-party
+# naming. The MCP-naming anchor is REQUIRED so a bare keyword in a path/host cannot match
+# (e.g. a "db-helper" arg with no mcp/server- prefix stays unflagged).
+_MCP_DATA_CAP_RE = re.compile(
+    r"(?:@[\w.-]+/server-|mcp[-_]server[-_]|mcp[-_])"
+    r"(postgres(?:ql)?|mysql|mariadb|sqlite|mongo(?:db)?|redis|database|"
+    r"gdrive|google-?drive|dropbox|s3|vault|secrets?|credentials?|"
+    r"keychain|keyring|1password|onepassword|bitwarden)\b",
+    re.I,
+)
+
+# A filesystem MCP server (canonical @modelcontextprotocol/server-filesystem plus the
+# generic mcp-server-filesystem / filesystem-mcp naming). Anchored to the mcp/server-
+# naming so a bare "filesystem" token in a path cannot match. It raises the sensitive
+# leg ONLY when the server is ALSO rooted at a broad path (see _mcp_fs_root_is_broad).
+_MCP_FS_PKG_RE = re.compile(
+    r"(?:@[\w.-]+/server-filesystem|mcp[-_]server[-_]filesystem|"
+    r"filesystem[-_]mcp|server-filesystem)\b",
+    re.I,
+)
+
+# Filesystem roots broad enough that read access constitutes the sensitive-data leg:
+# the whole root, an entire user home, or a system-config tree. A project-scoped root
+# (e.g. '/home/user/project', '.', a single sub-dir) is intentionally NOT broad.
+_MCP_BROAD_FS_ROOTS = frozenset(
+    {"/", "~", "~/", "$home", "${home}", "%userprofile%",
+     "/home", "/users", "/root", "/etc", "/var"}
+)
+
+
+def _mcp_fs_root_is_broad(raw) -> bool:
+    """True when a filesystem-MCP root arg exposes broad private/system data.
+
+    Broad = the whole root ('/'), an entire user home ('~'/'$HOME'/'/home/<user>'/
+    '/Users/<user>'), or a system-config tree ('/etc', '/var'). A narrowly project-scoped
+    root (a single sub-dir under a home, '.', a relative path) is NOT broad — it does not,
+    by itself, raise the sensitive-data leg (§5 zero-FP). Flags (leading '-') are skipped.
+    """
+    p = str(raw).strip().strip('"').strip("'")
+    if not p or p.startswith("-"):
+        return False
+    low = (p.rstrip("/") or "/").lower()
+    if low in _MCP_BROAD_FS_ROOTS:
+        return True
+    # /home/<user> or /Users/<user> — exactly one level under the homes parent — grants
+    # the whole user home = broad; a deeper path (/home/<user>/project) is project-scoped.
+    segs = [s for s in low.split("/") if s]
+    return len(segs) == 2 and segs[0] in ("home", "users")
+
+
+def _mcp_sensitive_reason(blob: str, args: list) -> str:
+    """Human-readable reason an MCP server grants the sensitive-data leg, else ''.
+
+    Two sound signals only: a known data/db/secret server package name (inherently
+    exposes a data store), or a filesystem server ALSO rooted at a broad path.
+    """
+    m = _MCP_DATA_CAP_RE.search(blob)
+    if m:
+        return f"grants {m.group(1).lower()} access (a data/secret MCP server)"
+    if _MCP_FS_PKG_RE.search(blob):
+        broad = next((a for a in args if _mcp_fs_root_is_broad(a)), None)
+        if broad is not None:
+            return f"is a filesystem server rooted at a broad path ({broad!r})"
+    return ""
+
+
+def _mcp_leg_contributions(cfg: dict) -> dict:
+    """Map trifecta leg -> list of MCP-server evidence strings that contribute to it.
+
+    Each string NAMES the server so A1 can attribute the leg to its capability source.
+    Sensitive-data contributors: known data/db/secret servers or a broad-rooted fs
+    server. Outbound contributors: a remote/network endpoint that is NOT loopback (a
+    localhost MCP keeps data on the machine and is not an exfil path).
+    """
+    contribs: dict = {"sensitive data": [], "outbound actions": []}
+    for name, spec in _mcp_servers(cfg).items():
+        if not isinstance(spec, dict):
+            spec = {}
+        cmd = str(spec.get("command", ""))
+        raw_args = spec.get("args")
+        args = [str(a) for a in raw_args] if isinstance(raw_args, list) else []
+        url = str(spec.get("url", "") or "")
+        blob = " ".join([cmd] + args + [url])
+        reason = _mcp_sensitive_reason(blob, args)
+        if reason:
+            contribs["sensitive data"].append(f"MCP server {name!r} {reason}")
+        if _mcp_has_remote(spec) and not (url and _mcp_url_is_local(url)):
+            endpoint = url or str(spec.get("transport", "remote"))
+            contribs["outbound actions"].append(
+                f"MCP server {name!r} is a remote/network endpoint ({endpoint})"
+            )
+    return contribs
+
+
 # ---------------------------------------------------------------- Block A
 def _trifecta_legs(ctx: Context) -> dict:
     """The three lethal-trifecta legs computed from the GLOBAL config surface.
@@ -908,6 +1016,11 @@ def _trifecta_legs(ctx: Context) -> dict:
     # latter matches the synthetic "exec" _enabled_tools infers from a configured sandbox
     # (a hardening control, not an exec grant), which produced a spurious 3/3 FAIL.
     exec_enabled = _real_exec_enabled(cfg) and not _has_approval_gate(cfg)
+    # B-229: MCP is OpenClaw's primary capability-extension surface. A server granting
+    # broad fs/db/secret access raises the sensitive leg; a remote (non-loopback) endpoint
+    # raises the outbound leg. Deliberately conservative (see _mcp_leg_contributions) so a
+    # benign read-only / localhost MCP cannot manufacture a spurious 3/3 FAIL (§5).
+    mcp_legs = _mcp_leg_contributions(cfg)
     return {
         "untrusted input": (bool(untrusted_ch) or _hint(tools, INPUT_TOOL_HINTS) or web_fetch),
         "sensitive data": (
@@ -919,6 +1032,7 @@ def _trifecta_legs(ctx: Context) -> dict:
             _hint(tools, SENSITIVE_TOOL_HINTS)
             or (ctx.home / "credentials").is_dir()
             or exec_enabled  # B-061: ungated arbitrary code can read private files
+            or bool(mcp_legs["sensitive data"])  # B-229: fs-at-broad-root / db / secret MCP
         ),
         "outbound actions": (
             _hint(tools, OUTBOUND_TOOL_HINTS)
@@ -926,6 +1040,7 @@ def _trifecta_legs(ctx: Context) -> dict:
             or _profile_is_powerful(dig(cfg, "tools.profile"))
             or web_fetch
             or bool(_active_channels(cfg))  # enabled channels are bidirectional
+            or bool(mcp_legs["outbound actions"])  # B-229: remote/network MCP endpoint
         ),
     }
 
