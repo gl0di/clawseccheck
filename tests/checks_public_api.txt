@@ -190,6 +190,7 @@ check_path_safety
 check_pending_device_pairing_scope
 check_per_source_trust_contracts
 check_persona_jailbreak
+check_plugin_app_server_command
 check_plugin_permission_mode
 check_prompt_self_replication
 check_prose_bulk_exfil

@@ -695,6 +695,25 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="mcp",
     ),
+    # B167 (B-231): plugins.entries.<name>.config.appServer.command is an in-process
+    # plugin's own launch command -- executed automatically whenever the plugin loads.
+    # Reuses the same remote-fetch/pipe-to-shell detector B100/B103 use for skill install
+    # directives (curl|bash, wget|sh, bash <(curl), iwr|iex, npx -y https://, pip install
+    # https://), including the B-118 first-party-installer allowlist so a legitimate
+    # documented installer host does not false-FAIL.
+    CheckMeta(
+        "B167",
+        "Plugin appServer launch command is a remote-fetch/pipe-to-shell pattern",
+        HIGH,
+        "hardening",
+        "Supply Chain",
+        scored=True,
+        confidence="MEDIUM",
+        surface="skills",  # matches B57's plugins.entries.<name>.config.* precedent
+    ),
+    # B168 is RESERVED for the deferred B-231 cron-store sub-item (collector + content-
+    # ring routing + deleteAfterRun+exec structural flag) -- not implemented in this
+    # change; a follow-up change adds the CheckMeta alongside its check function.
     # B158 (F-119): a declared skill/plugin load source (skills.load.extraDirs,
     # plugins.load.paths, or a .clawhub/lock.json skillFile) resolves to nothing on disk —
     # an unaudited auto-load gap. Advisory, WARN-only, unscored (declared-but-absent is

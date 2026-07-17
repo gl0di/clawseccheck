@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from .. import attest as _attest
 from ..catalog import (
+    CRITICAL,
     FAIL,
     PASS,
     UNKNOWN,
@@ -190,6 +191,74 @@ _DANGER_FIXED = [
         False,
     ),
 ]
+
+
+# B-231: wildcard-authority detection for commands.ownerAllowFrom (FAIL/CRITICAL, above
+# the scoped-list case) and gateway.nodes.pairing.autoApproveCidrs (WARN only -- see the
+# NC-11 note below for why this one does NOT escalate to FAIL).
+#   * commands.ownerAllowFrom: command-auth-*.js resolveOwnerAuthorizationState() sets
+#     ownerAllowAll = hasWildcardAllowFrom(configOwnerAllowFromList), and
+#     isWildcardAllowFromEntry() is a literal `entry.trim() === "*"` check -- a bare
+#     "*" entry genuinely flips owner authority open to ANY sender. (The schema doc
+#     string "'*' is ignored" describes a narrower filter that drops "*" from the
+#     *explicit owner ID candidate* list built from the SAME array -- it does not
+#     describe the ownerAllowAll gate, which is the actual authorization decision.)
+#   * gateway.nodes.pairing.autoApproveCidrs: message-handler-*.js feeds the raw CIDR
+#     list straight into isTrustedProxyAddress() -- a literal 0.0.0.0/0 (or ::/0) entry
+#     matches every source IP, auto-approving first-time, ZERO-REQUESTED-SCOPE node
+#     pairing from anywhere (role/scope/metadata/public-key upgrades still need manual
+#     approval -- schema doc string). BUT: the internal schema recon (NC-11) records
+#     that OpenClaw's own docs (docs.openclaw.ai/gateway/security "not a vulnerability by
+#     design" list) explicitly name "reports treating configured
+#     gateway.nodes.pairing.autoApproveCidrs as vulnerability by itself" as OUT OF SCOPE,
+#     and the recon's own verdict is blunt: "Do NOT FAIL on gateway.nodes.pairing.* or
+#     pairing.autoApproveCidrs." So even the world-open case stays WARN, never FAIL --
+#     still surfaced (a 0.0.0.0/0 value is worth a human look), just not grade-capping.
+#
+# gateway.nodes.allowCommands is DELIBERATELY NOT given the same treatment: grounded
+# against node-command-policy-*.js, a literal "*" there is folded into a plain Set of
+# exact command-name strings (`allow.has(command)`) with NO wildcard special-case -- no
+# real node command is ever named "*", so it is an inert, near-meaningless entry, not a
+# broader grant than a scoped list. Escalating it above the existing scoped-list WARN
+# would be a fabricated claim; the existing any-non-empty-list WARN (unchanged) already
+# covers the real risk (a *named* dangerous command actually being allowed).
+def _is_owner_wildcard_allow_from(value) -> bool:
+    """True when *value* (``commands.ownerAllowFrom``) contains the literal ``"*"``
+    sentinel that flips OpenClaw's owner-authorization gate open to any sender."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return False
+    return any(isinstance(e, str) and e.strip() == "*" for e in value)
+
+
+def _is_world_open_cidr_entry(entry) -> bool:
+    """True when *entry* is a literal 'match any address' CIDR (0.0.0.0/0, ::/0) or the
+    bare "*" sentinel -- not merely broad, a genuine zero-constraint wildcard. A scoped
+    CIDR of any other prefix length (including a wide public range) is NOT flagged
+    here — only the unambiguous, unconstrained case."""
+    if not isinstance(entry, str):
+        return False
+    s = entry.strip()
+    if not s:
+        return False
+    if s == "*":
+        return True
+    try:
+        net = ipaddress.ip_network(s, strict=False)
+    except ValueError:
+        return False
+    return net.prefixlen == 0
+
+
+def _has_world_open_cidr(value) -> bool:
+    """True when *value* (``gateway.nodes.pairing.autoApproveCidrs``) contains at
+    least one world-open entry (see ``_is_world_open_cidr_entry``)."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return False
+    return any(_is_world_open_cidr_entry(e) for e in value)
 
 
 # F-036: for a 2/3 config, name the one missing leg + the concrete field that would
@@ -705,7 +774,10 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
 
     These are explicit opt-in overrides OpenClaw documents as 'keep disabled'. Absent /
     false = nothing flagged (so a default config is a clean PASS — zero false positives).
-    FAIL when a sandbox-escape or control-plane-auth-disable flag is on; WARN for the rest.
+    FAIL/CRITICAL when a wildcard-authority entry is active (commands.ownerAllowFrom or
+    gateway.nodes.pairing.autoApproveCidrs contains an unscoped "*"/0.0.0.0/0/::/0 —
+    B-231); FAIL/HIGH when a sandbox-escape or control-plane-auth-disable flag is on;
+    WARN for the rest (including a *scoped*, non-wildcard override of the same fields).
     """
     unreadable = _config_unreadable("B48", ctx)
     if unreadable is not None:
@@ -713,13 +785,41 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
     cfg = ctx.config
     fails: list[str] = []
     warns: list[str] = []
+    # B-231: wildcard-authority entries — genuinely worse than the scoped-list case
+    # below (an explicit, grounded "any sender"/"any IP" grant, not merely "a break-
+    # glass toggle is on") — tracked separately so the verdict can escalate FAIL/
+    # CRITICAL above the plain FAIL/HIGH the rest of this check returns.
+    wildcard_fails: list[str] = []
 
     for path, label, is_fail in _DANGER_FIXED:
         if dig(cfg, path):
             (fails if is_fail else warns).append(f"{path} — {label}")
 
+    owner_allow_from = dig(cfg, "commands.ownerAllowFrom")
+    if _is_owner_wildcard_allow_from(owner_allow_from):
+        wildcard_fails.append(
+            "commands.ownerAllowFrom contains '*' — owner-only command authority is "
+            "granted to ANY sender on any channel (not a scoped allowlist)"
+        )
+
+    auto_approve_cidrs = dig(cfg, "gateway.nodes.pairing.autoApproveCidrs")
+    if _has_world_open_cidr(auto_approve_cidrs):
+        # NC-11 (recon): OpenClaw's own "not a vulnerability by design" list names this
+        # exact field — stays WARN, never escalates to FAIL/wildcard_fails.
+        warns.append(
+            "gateway.nodes.pairing.autoApproveCidrs contains a world-open CIDR "
+            "(0.0.0.0/0 / ::/0 / '*') — first-time, zero-scope node-device pairing is "
+            "auto-approved from ANY IP address (role/scope/metadata/key-upgrade pairing "
+            "still requires manual approval)"
+        )
+
     nc = dig(cfg, "gateway.nodes.allowCommands")
     if isinstance(nc, list) and nc:
+        # B-231: a literal "*" entry here is NOT given the wildcard-authority
+        # treatment above — grounded against node-command-policy-*.js, allowCommands
+        # is folded into a plain Set of exact command-name strings with no wildcard
+        # special-case (`allow.has(command)`), so "*" never matches a real node
+        # command and is strictly inert, not a broader grant than a named command.
         warns.append(
             "gateway.nodes.allowCommands — extra node.invoke commands enabled "
             "(beyond gateway defaults; possible RCE surface)"
@@ -775,6 +875,22 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
                 "plugin private-network access (SSRF)"
             )
 
+    if wildcard_fails:
+        # B-231: severity ABOVE the scoped-list / other-break-glass FAIL — an explicit
+        # wildcard grant of owner authority or auto-approved device pairing to anyone
+        # is a step beyond a single break-glass toggle being left on.
+        return _finding(
+            "B48",
+            FAIL,
+            "Wildcard-authority override(s) grant owner command authority or device "
+            "auto-pairing to ANY sender/IP (see evidence).",
+            "Replace the wildcard with an explicit, scoped allowlist — e.g. "
+            "commands.ownerAllowFrom to your own channel-native ID(s), or "
+            "gateway.nodes.pairing.autoApproveCidrs to a specific host/private range. "
+            "Never leave either as an unscoped wildcard.",
+            evidence=wildcard_fails + fails + warns,
+            severity=CRITICAL,
+        )
     if fails:
         return _finding(
             "B48",
