@@ -1,0 +1,20 @@
+{
+  "channels": {
+    "telegram": { "enabled": true, "dmPolicy": "allowlist" }
+  },
+  "tools": {
+    "web": { "fetch": { "enabled": true } }
+  },
+  "mcp": {
+    "servers": {
+      "fs-mac-shared": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/Shared"]
+      },
+      "fs-linux-shared": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/shared"]
+      }
+    }
+  }
+}

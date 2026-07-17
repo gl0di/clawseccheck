@@ -894,13 +894,31 @@ def _read_jsonl_tail(path: Path, cap: int = _JSONL_SCAN_CAP) -> tuple[str, bool]
 # (§5 zero-FP / C-135): only a KNOWN data/db/secret server package name, OR a filesystem
 # server rooted at a BROAD path, raises the sensitive leg — a narrowly project-scoped fs
 # root does not; and a loopback MCP endpoint is NOT outbound.
+#
+# C-135 round 2 (two confirmed false-FAILs, fixed here):
+#   FP-A: a single path level under /home or /Users was treated as "the whole user
+#         home" even when it names a shared/service directory (e.g. /Users/Shared,
+#         /home/data) rather than a private per-user home — see
+#         _MCP_HOME_SHARED_BASENAMES.
+#   FP-B: the sensitive-data match ran over command+args+URL together, so (a) a
+#         REMOTE server's URL substring alone (e.g. a "mcp-database-docs" hostname)
+#         could raise the leg with zero local data access, and (b) a benign compound
+#         package name (a database-DIAGRAM/-DOCS/-SCHEMA tool, not a live DB client)
+#         matched the bare capability keyword. Fixed by (1) scoping the sensitive-data
+#         match to a stdio server's command/args ONLY — a remote server's url/host is
+#         NEVER consulted for the sensitive-data leg (it says nothing about local data
+#         access; the remote endpoint's own risk is the outbound leg instead), and (2)
+#         a benign-compound denylist (_MCP_BENIGN_COMPOUND_RE) that suppresses a
+#         capability keyword immediately followed by a docs/diagram/schema/etc. suffix.
 
 # Capability keywords that, when they name an MCP server via the canonical
 # @scope/server-<cap> / mcp-server-<cap> / mcp-<cap> naming convention, mark a server
 # that inherently exposes sensitive data — a whole database, secret store, or cloud
 # drive. Grounded on the @modelcontextprotocol reference servers plus common third-party
 # naming. The MCP-naming anchor is REQUIRED so a bare keyword in a path/host cannot match
-# (e.g. a "db-helper" arg with no mcp/server- prefix stays unflagged).
+# (e.g. a "db-helper" arg with no mcp/server- prefix stays unflagged). This pattern is
+# matched ONLY against a stdio server's command/args (see _mcp_leg_contributions) —
+# never a remote server's url, which says nothing about local data access.
 _MCP_DATA_CAP_RE = re.compile(
     r"(?:@[\w.-]+/server-|mcp[-_]server[-_]|mcp[-_])"
     r"(postgres(?:ql)?|mysql|mariadb|sqlite|mongo(?:db)?|redis|database|"
@@ -909,10 +927,22 @@ _MCP_DATA_CAP_RE = re.compile(
     re.I,
 )
 
+# FP-suppression denylist (C-135 round 2): a capability keyword immediately followed by
+# one of these benign-compound suffixes names a tool that inspects/documents/visualizes
+# a data store's SHAPE, not one that reads its contents — e.g. "database-diagram",
+# "redis-docs", "vault-scanner". Matched right after _MCP_DATA_CAP_RE's keyword; a bare
+# keyword with no such suffix (a real "server-postgres"/"server-vault") still flags.
+_MCP_BENIGN_COMPOUND_RE = re.compile(
+    r"\A[-_]?(diagram|designer|docs?|documentation|schema|erd|scanner|viewer|"
+    r"explorer|dashboard)\b",
+    re.I,
+)
+
 # A filesystem MCP server (canonical @modelcontextprotocol/server-filesystem plus the
 # generic mcp-server-filesystem / filesystem-mcp naming). Anchored to the mcp/server-
 # naming so a bare "filesystem" token in a path cannot match. It raises the sensitive
 # leg ONLY when the server is ALSO rooted at a broad path (see _mcp_fs_root_is_broad).
+# Matched ONLY against a stdio server's command/args, same scoping as _MCP_DATA_CAP_RE.
 _MCP_FS_PKG_RE = re.compile(
     r"(?:@[\w.-]+/server-filesystem|mcp[-_]server[-_]filesystem|"
     r"filesystem[-_]mcp|server-filesystem)\b",
@@ -927,6 +957,21 @@ _MCP_BROAD_FS_ROOTS = frozenset(
      "/home", "/users", "/root", "/etc", "/var"}
 )
 
+# FP-suppression denylist (C-135 round 2, FP-A): basenames directly under /home or
+# /Users that name a shared/service directory, NOT a private per-user home — e.g. the
+# standard macOS /Users/Shared folder, or a team's /home/data /home/git /home/projects
+# convention. A single path level under /home//Users is only "the whole user home" when
+# it is a plausible username, i.e. NOT one of these.
+_MCP_HOME_SHARED_BASENAMES = frozenset(
+    {
+        "shared", "public", "guest", "default",
+        "workspace", "workspaces", "app", "apps", "data",
+        "git", "projects", "project", "repos", "repo",
+        "srv", "www", "web", "docs", "doc",
+        "common", "media", "backup", "backups", "tmp", "temp",
+    }
+)
+
 
 def _mcp_fs_root_is_broad(raw) -> bool:
     """True when a filesystem-MCP root arg exposes broad private/system data.
@@ -935,6 +980,11 @@ def _mcp_fs_root_is_broad(raw) -> bool:
     '/Users/<user>'), or a system-config tree ('/etc', '/var'). A narrowly project-scoped
     root (a single sub-dir under a home, '.', a relative path) is NOT broad — it does not,
     by itself, raise the sensitive-data leg (§5 zero-FP). Flags (leading '-') are skipped.
+
+    C-135 round 2 (FP-A): a single level under /home or /Users is broad only when that
+    basename is a plausible per-user home — a shared/service directory (/Users/Shared,
+    /home/data, /home/git, ...) is NOT a private home and must stay non-broad, even
+    though it is nominally "one level under the homes parent" (_MCP_HOME_SHARED_BASENAMES).
     """
     p = str(raw).strip().strip('"').strip("'")
     if not p or p.startswith("-"):
@@ -943,21 +993,29 @@ def _mcp_fs_root_is_broad(raw) -> bool:
     if low in _MCP_BROAD_FS_ROOTS:
         return True
     # /home/<user> or /Users/<user> — exactly one level under the homes parent — grants
-    # the whole user home = broad; a deeper path (/home/<user>/project) is project-scoped.
+    # the whole user home = broad; a deeper path (/home/<user>/project) is project-scoped;
+    # a shared/service basename (/Users/Shared, /home/data) is not a private home either.
     segs = [s for s in low.split("/") if s]
-    return len(segs) == 2 and segs[0] in ("home", "users")
+    if len(segs) == 2 and segs[0] in ("home", "users"):
+        return segs[1] not in _MCP_HOME_SHARED_BASENAMES
+    return False
 
 
-def _mcp_sensitive_reason(blob: str, args: list) -> str:
-    """Human-readable reason an MCP server grants the sensitive-data leg, else ''.
+def _mcp_sensitive_reason(local_blob: str, args: list) -> str:
+    """Human-readable reason a STDIO MCP server grants the sensitive-data leg, else ''.
 
-    Two sound signals only: a known data/db/secret server package name (inherently
-    exposes a data store), or a filesystem server ALSO rooted at a broad path.
+    ``local_blob`` must be the server's command+args ONLY (see _mcp_leg_contributions) —
+    never a remote server's url/host, which says nothing about local data access (a
+    remote endpoint's own risk is the outbound leg, not this one).
+
+    Two sound signals: a known data/db/secret server package name that is NOT a benign
+    compound (diagram/docs/schema/scanner/... — inspects the shape, doesn't read the
+    data; _MCP_BENIGN_COMPOUND_RE), or a filesystem server ALSO rooted at a broad path.
     """
-    m = _MCP_DATA_CAP_RE.search(blob)
-    if m:
+    m = _MCP_DATA_CAP_RE.search(local_blob)
+    if m and not _MCP_BENIGN_COMPOUND_RE.match(local_blob[m.end():]):
         return f"grants {m.group(1).lower()} access (a data/secret MCP server)"
-    if _MCP_FS_PKG_RE.search(blob):
+    if _MCP_FS_PKG_RE.search(local_blob):
         broad = next((a for a in args if _mcp_fs_root_is_broad(a)), None)
         if broad is not None:
             return f"is a filesystem server rooted at a broad path ({broad!r})"
@@ -968,9 +1026,12 @@ def _mcp_leg_contributions(cfg: dict) -> dict:
     """Map trifecta leg -> list of MCP-server evidence strings that contribute to it.
 
     Each string NAMES the server so A1 can attribute the leg to its capability source.
-    Sensitive-data contributors: known data/db/secret servers or a broad-rooted fs
-    server. Outbound contributors: a remote/network endpoint that is NOT loopback (a
-    localhost MCP keeps data on the machine and is not an exfil path).
+    Sensitive-data contributors: a STDIO server whose command/args name a known
+    data/db/secret package (not a benign diagram/docs/schema compound) or a broad-rooted
+    fs root. A remote server's url/host is NEVER used for this leg (C-135 round 2, FP-B)
+    — it says nothing about local data access. Outbound contributors: a remote/network
+    endpoint that is NOT loopback (a localhost MCP keeps data on the machine and is not
+    an exfil path).
     """
     contribs: dict = {"sensitive data": [], "outbound actions": []}
     for name, spec in _mcp_servers(cfg).items():
@@ -979,11 +1040,13 @@ def _mcp_leg_contributions(cfg: dict) -> dict:
         cmd = str(spec.get("command", ""))
         raw_args = spec.get("args")
         args = [str(a) for a in raw_args] if isinstance(raw_args, list) else []
-        url = str(spec.get("url", "") or "")
-        blob = " ".join([cmd] + args + [url])
-        reason = _mcp_sensitive_reason(blob, args)
+        # Sensitive-data signal is local-only: command+args of a stdio server. A
+        # remote server's url is deliberately excluded (FP-B) — see docstring.
+        local_blob = " ".join([cmd] + args)
+        reason = _mcp_sensitive_reason(local_blob, args)
         if reason:
             contribs["sensitive data"].append(f"MCP server {name!r} {reason}")
+        url = str(spec.get("url", "") or "")
         if _mcp_has_remote(spec) and not (url and _mcp_url_is_local(url)):
             endpoint = url or str(spec.get("transport", "remote"))
             contribs["outbound actions"].append(

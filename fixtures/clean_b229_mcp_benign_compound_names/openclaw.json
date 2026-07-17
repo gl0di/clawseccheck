@@ -1,0 +1,17 @@
+{
+  "channels": {
+    "telegram": { "enabled": true, "dmPolicy": "allowlist" }
+  },
+  "tools": {
+    "web": { "fetch": { "enabled": true } }
+  },
+  "mcp": {
+    "servers": {
+      "erd": {
+        "command": "npx",
+        "args": ["-y", "mcp-server-database-diagram"]
+      },
+      "dbdocs": { "url": "https://mcp-database-docs.example.com/mcp" }
+    }
+  }
+}
