@@ -67,6 +67,35 @@ def test_flag_arg_not_a_root():
     assert _mcp_fs_root_is_broad("-y") is False
 
 
+# ── C-135 round 2, FP-A: shared/service dirs one level under /home or /Users are NOT
+#    "the whole user home" — only a plausible per-user home basename is broad. ───────
+
+def test_macos_shared_folder_not_broad():
+    """/Users/Shared is a standard OS-created macOS shared folder on every Mac, not a
+    private per-user home — must NOT be treated as broad."""
+    assert _mcp_fs_root_is_broad("/Users/Shared") is False
+
+
+def test_linux_shared_service_dirs_not_broad():
+    for p in ("/home/shared", "/home/data", "/home/projects", "/home/git",
+              "/home/workspace", "/home/app"):
+        assert _mcp_fs_root_is_broad(p) is False, f"{p} wrongly treated as broad"
+
+
+def test_semantically_identical_non_home_shares_stay_non_broad():
+    """Same shared-dir shape under a non-/home/-/Users/ parent already correctly stays
+    non-broad (unaffected by the denylist — these never matched the home/users branch)."""
+    for p in ("/srv/shared", "/mnt/data", "/opt/shared"):
+        assert _mcp_fs_root_is_broad(p) is False
+
+
+def test_real_per_user_home_still_broad():
+    """A plausible per-user home basename (not in the shared/service denylist) still
+    counts as broad — the true-positive case must not regress."""
+    for p in ("/home/alice", "/Users/dave", "/home/quentin", "/Users/nathan"):
+        assert _mcp_fs_root_is_broad(p) is True, f"{p} wrongly excluded"
+
+
 # ── _mcp_sensitive_reason: known-name + broad-root heuristics ───────────────────────
 
 def test_known_data_pkg_flags_regardless_of_args():
@@ -101,6 +130,58 @@ def test_bare_keyword_without_mcp_naming_anchor_does_not_flag():
 def test_benign_weather_api_does_not_flag():
     blob = "https://api.weather-example.com/mcp"
     assert _mcp_sensitive_reason(blob, []) == ""
+
+
+def test_known_vault_pkg_still_flags():
+    """True-positive control: a real secrets/vault MCP must still flag (must not
+    regress when the FP-B benign-compound denylist is added)."""
+    reason = _mcp_sensitive_reason("npx -y @modelcontextprotocol/server-vault", [])
+    assert reason and "vault" in reason
+
+
+# ── C-135 round 2, FP-B: benign-compound package names (diagram/docs/schema tools that
+#    inspect a data store's SHAPE, not its contents) must NOT flag as data access. ────
+
+def test_database_diagram_compound_does_not_flag():
+    blob = "npx -y mcp-server-database-diagram"
+    assert _mcp_sensitive_reason(blob, ["-y", "mcp-server-database-diagram"]) == ""
+
+
+def test_redis_docs_compound_does_not_flag():
+    blob = "npx -y mcp-server-redis-docs"
+    assert _mcp_sensitive_reason(blob, ["-y", "mcp-server-redis-docs"]) == ""
+
+
+def test_database_schema_compound_does_not_flag():
+    blob = "npx -y @scope/server-database-schema"
+    assert _mcp_sensitive_reason(blob, ["-y", "@scope/server-database-schema"]) == ""
+
+
+def test_vault_scanner_compound_does_not_flag():
+    blob = "npx -y mcp-server-vault-scanner"
+    assert _mcp_sensitive_reason(blob, ["-y", "mcp-server-vault-scanner"]) == ""
+
+
+def test_bare_data_keyword_without_compound_suffix_still_flags():
+    """Sanity control: the denylist only suppresses a keyword immediately followed by a
+    benign suffix — a real 'server-database' (no diagram/docs/schema tail) still flags."""
+    blob = "npx -y @modelcontextprotocol/server-database"
+    reason = _mcp_sensitive_reason(blob, ["-y", "@modelcontextprotocol/server-database"])
+    assert reason and "database" in reason
+
+
+def test_remote_url_substring_never_flags_sensitive_data():
+    """FP-B core fix: a REMOTE server's url/host is never consulted for the
+    sensitive-data leg — a 'mcp-database-docs' hostname grants no local data access.
+    _mcp_leg_contributions (the real production path) builds the sensitive-data probe
+    from command+args only and never feeds it the url, so this hostname substring
+    cannot manufacture a spurious sensitive leg; the remote endpoint correctly still
+    raises the outbound leg instead."""
+    contribs = _mcp_leg_contributions(
+        {"mcp": {"servers": {"dbdocs": {"url": "https://mcp-database-docs.example.com/mcp"}}}}
+    )
+    assert contribs["sensitive data"] == []
+    assert contribs["outbound actions"]  # the remote endpoint still raises outbound
 
 
 # ── _mcp_leg_contributions: remote/loopback outbound wiring ─────────────────────────
@@ -192,6 +273,43 @@ def test_clean_fixture_registered_in_full_audit_no_a1_fail():
     assert a1.status != FAIL
 
 
+# ── FP-A fixture: server-filesystem at /Users/Shared and /home/shared ───────────────
+
+def test_clean_fixture_shared_home_dirs_stays_two_of_three():
+    """FP-A regression pin: a filesystem MCP rooted at a shared/service dir under
+    /Users or /home (not a private per-user home) must NOT raise the sensitive leg,
+    even paired with an untrusted channel + outbound tool that would reach 3/3 if it
+    wrongly did."""
+    ctx = collect(FIXTURES / "clean_b229_mcp_shared_home_dir")
+    a1 = check_trifecta(ctx)
+    assert a1.status != FAIL
+    assert "sensitive data" not in (a1.evidence or [])
+    assert len(a1.evidence) <= 2
+
+
+def test_clean_fixture_shared_home_dirs_no_fail_in_full_audit():
+    _, findings, _ = audit(FIXTURES / "clean_b229_mcp_shared_home_dir")
+    assert not [f for f in findings if f.status == FAIL]
+
+
+# ── FP-B fixture: local database-diagram compound + remote database-docs URL ───────
+
+def test_clean_fixture_benign_compound_names_stays_two_of_three():
+    """FP-B regression pin: a local database-DIAGRAM package and a remote
+    database-DOCS URL must NOT raise the sensitive leg, even paired with an untrusted
+    channel + outbound tool that would reach 3/3 if either wrongly did."""
+    ctx = collect(FIXTURES / "clean_b229_mcp_benign_compound_names")
+    a1 = check_trifecta(ctx)
+    assert a1.status != FAIL
+    assert "sensitive data" not in (a1.evidence or [])
+    assert len(a1.evidence) <= 2
+
+
+def test_clean_fixture_benign_compound_names_no_fail_in_full_audit():
+    _, findings, _ = audit(FIXTURES / "clean_b229_mcp_benign_compound_names")
+    assert not [f for f in findings if f.status == FAIL]
+
+
 # ── Regression sweep (C-135 / Golden Rule #5): zero new false-positive FAIL ─────────
 
 # Existing MCP-bearing fixtures that must NOT flip to A1=FAIL now that MCP capability
@@ -203,6 +321,9 @@ _EXISTING_MCP_CLEAN_FIXTURES = (
     "clean_c014_egress_inventory",
     "clean_c047_mcp_localhost",
     "reliability/clean_multimodal_workstation",
+    "clean_b229_mcp_remote_benign",
+    "clean_b229_mcp_shared_home_dir",
+    "clean_b229_mcp_benign_compound_names",
 )
 
 
