@@ -214,6 +214,7 @@ check_supply_chain
 check_symlink_escape
 check_tls
 check_tool_output_trust
+check_tool_output_trust_inversion
 check_trigger_homoglyph
 check_trustedproxy_loopback
 check_unicode_obfuscation

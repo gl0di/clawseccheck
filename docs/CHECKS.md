@@ -821,6 +821,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B169 - Tool-output trust-boundary-inversion directive
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Prompt Injection / Trust Boundary
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: LLM01 Prompt Injection, LLM02 Sensitive Information Disclosure
+- What it checks: Tool-output trust-boundary-inversion directive
+- Remediation:
+  - none
+
 ## Advisory checks
 
 ### B158 - Declared skill-load source not present on disk (unaudited auto-load surface)
