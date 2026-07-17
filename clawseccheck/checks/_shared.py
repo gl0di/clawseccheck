@@ -895,33 +895,9 @@ def _read_jsonl_tail(path: Path, cap: int = _JSONL_SCAN_CAP) -> tuple[str, bool]
 # server rooted at a BROAD path, raises the sensitive leg — a narrowly project-scoped fs
 # root does not; and a loopback MCP endpoint is NOT outbound.
 #
-# C-135 round 2 (two confirmed false-FAILs, fixed here):
-#   FP-A: a single path level under /home or /Users was treated as "the whole user
-#         home" even when it names a shared/service directory (e.g. /Users/Shared,
-#         /home/data) rather than a private per-user home — see
-#         _MCP_HOME_SHARED_BASENAMES.
-#   FP-B: the sensitive-data match ran over command+args+URL together, so (a) a
-#         REMOTE server's URL substring alone (e.g. a "mcp-database-docs" hostname)
-#         could raise the leg with zero local data access, and (b) a benign compound
-#         package name (a database-DIAGRAM/-DOCS/-SCHEMA tool, not a live DB client)
-#         matched the bare capability keyword. Fixed by (1) scoping the sensitive-data
-#         match to a stdio server's command/args ONLY — a remote server's url/host is
-#         NEVER consulted for the sensitive-data leg (it says nothing about local data
-#         access; the remote endpoint's own risk is the outbound leg instead), and (2)
-#         a benign-compound denylist (_MCP_BENIGN_COMPOUND_RE) that suppresses a
-#         capability keyword immediately followed by a docs/diagram/schema/etc. suffix.
-#
-# C-135 round 3 (both round-2 denylists over-suppressed, opening false negatives —
-# tightened here; see the two denylist definitions below for the full rationale):
-#   FN-1: _MCP_BENIGN_COMPOUND_RE wrongly included "viewer"/"explorer"/"dashboard"/
-#         "scanner" — those name a READER of the actual data (vault-viewer,
-#         postgres-viewer, s3-explorer, database-scanner), not a shape-only tool.
-#         Removed; only the true shape-only suffixes (diagram/designer/docs/
-#         documentation/schema/erd) remain.
-#   FN-2: _MCP_HOME_SHARED_BASENAMES wrongly included service-account / secret-bearing
-#         home names (git, backup(s), www/srv/web, repo(s)) — a filesystem MCP rooted
-#         there is a genuine sensitive-data grant. Removed; the remaining names are a
-#         deliberate, GR#5-motivated accepted residual (see the denylist's comment).
+# The two FP-suppression denylists below plus the command/args-only sensitive-data
+# scoping were hardened across C-135 rounds 2-3 (false-FAILs removed without opening
+# false-negatives); each carries its own FP/FN + accepted-residual rationale inline.
 
 # Capability keywords that, when they name an MCP server via the canonical
 # @scope/server-<cap> / mcp-server-<cap> / mcp-<cap> naming convention, mark a server
