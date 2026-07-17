@@ -769,6 +769,82 @@ Remind the user:
 > "The badge is safe to share. Never post your detailed findings publicly — that would
 > show attackers exactly where your weaknesses are."
 
+#### Choice: behavioral audit / "what did my agent actually do" / "runtime audit" / "prove it happened"
+
+```
+python3 {baseDir}/audit.py --behavioral
+```
+
+Post-hoc, read-only, **metadata-only** (tool-call verb names and sequencing only — never
+arguments or return payloads). Reconstructs what the agent's own session trajectory shows
+it actually *did*, as opposed to the rest of the audit, which reports what it *could* do.
+WARN-only, never scored (Golden Rule #5) — it can never move the A–F grade.
+
+**Always relay this command's stdout to the user, in full — never summarize it away or
+drop it for looking short.** This is one of three flags (with `--analyze-trajectory` and
+`--judge-packet` below) whose output has been silently swallowed by some host agents;
+treat that as a gap in your own presentation, never as a signal that there was nothing
+to show:
+- "No trajectory sidecars found" -> say plainly there's no session history to analyze yet.
+- "No behavioral anomalies found" -> relay it as a clean pass.
+- Any `⚠` line (an ingress→sensitive→egress sequence proven by the log, or a
+  fail-then-succeed outcome anomaly) -> relay the finding's detail **and** its `fix:`
+  line verbatim — these are log-proven observations, not heuristics to trim.
+
+#### Choice: trajectory incident analysis / "did a suspicious skill's instructions actually run" / "was this indicator acted on"
+
+```
+python3 {baseDir}/audit.py --analyze-trajectory
+```
+
+Post-hoc, read-only. Correlates the credential/exfil/secret-path indicators named by your
+**installed skills** against real historical tool-call arguments — telling "instruction
+present" apart from "instruction acted on."
+
+**Never drop this output. A `⚠ INCIDENT SIGNAL` line is a real incident finding, not a
+routine audit line** — it means a named installed skill's known indicator actually
+appeared in a tool call your agent made, i.e. something already happened, not just
+something that could happen. Treat it as at least as urgent as a Dashboard 🔴 CRITICAL
+finding, and always:
+- relay the skill name, indicator, and tool-call count exactly as printed;
+- relay the tool's own remediation line verbatim — review those tool calls manually and
+  rotate any credential the referenced path/host could expose;
+- point the user at the "vet this skill" flow above for the implicated skill, so they get
+  the full risk dossier, not just this one correlation.
+
+If the output instead reads "NONE appeared," reassure the user those are indicators
+installed skills merely *declare* — never observed acting. "No trajectory sidecars found"
+or "No … indicators found to correlate" are legitimate empty states, not failures — relay
+those too, so the user knows the check ran rather than silently vanished.
+
+#### Choice: judge packet / "second opinion" / "review the borderline findings"
+
+```
+python3 {baseDir}/audit.py --judge-packet
+```
+
+A separate JSON artifact (`docs/OUTPUT_SCHEMA.md` §12), not part of `--json` — a list of
+borderline findings (UNKNOWN checks, FN-prone WARNs, dropped taint signals) already
+stripped of raw skill source, each phrased as one plain-language yes/no question for you
+(the host agent) to answer. It can run to hundreds of lines of JSON for a config with many
+findings.
+
+**Channel-aware delivery — never paste the raw JSON into chat, and never drop it because
+it's large:**
+1. Parse the `judgePacket` array and tell the user the **item count**, then list, per
+   item, the `finding_id`, `target`, and a one-line plain-language restatement of
+   `question` — not the raw JSON blob.
+2. Offer to save the full JSON to a local file the user can keep or hand to another tool
+   (e.g. `python3 {baseDir}/audit.py --judge-packet > judge-packet.json`).
+3. If the user wants an actual second opinion rather than just a listing, run the
+   "Judge-panel fan-out for `--judge-packet` items" protocol earlier in this document
+   (spawn 3 lensed judge subagents per item, majority-vote, feed the verdicts back via
+   `--judged`) — that section already covers presenting the resulting
+   "Second opinion (advisory)" panel.
+
+An empty array (`"judgePacket": []`) means nothing borderline was found — say so plainly;
+that is a legitimate clean result, not a dropped output.
+
 ---
 
 ## Natural-language to tool quick map
@@ -792,7 +868,9 @@ Use this to map what the user says to the right command:
 | "badge", "share my grade", "shareable", "certificate" | `--badge` or `--card` |
 | "HTML report", "full report" | `--html report.html` |
 | "JSON", "machine readable", "raw data" | `--json` |
-| "what did my agent actually do", "behavioral", "runtime audit", "did it really do that", "prove it happened" | `--behavioral` — post-hoc, proof-by-log tool-call sequences from the trajectory sidecar; metadata-only, WARN-only, never scored |
+| "what did my agent actually do", "behavioral", "runtime audit", "did it really do that", "prove it happened" | `--behavioral` — post-hoc, proof-by-log tool-call sequences from the trajectory sidecar; metadata-only, WARN-only, never scored. **Always relay the output — never drop it.** |
+| "did a suspicious skill's instructions actually run", "was this indicator acted on" | `--analyze-trajectory` — post-hoc, correlates installed-skill indicators against real tool-call arguments. **Any `⚠ INCIDENT SIGNAL` line is a real incident finding — never drop it.** |
+| "second opinion", "judge packet", "review the borderline findings" | `--judge-packet` — JSON list of borderline findings for host-agent review; summarize item count + per-item verdicts, offer to save large output to a file, **never paste raw JSON, never drop it** |
 
 ---
 
