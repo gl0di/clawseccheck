@@ -24,7 +24,9 @@ auth.profiles
 browser.ssrfPolicy.dangerouslyAllowPrivateNetwork
 channels
 channels.defaults.contextVisibility
+commands.ownerAllowFrom
 config.allowPrivateNetwork
+config.appServer.command
 config.permissionMode
 cron
 discovery.mdns.mode
@@ -44,6 +46,7 @@ gateway.egress
 gateway.host
 gateway.nodes.allowCommands
 gateway.nodes.denyCommands
+gateway.nodes.pairing.autoApproveCidrs
 gateway.tailscale.mode
 gateway.tls.enabled
 gateway.token

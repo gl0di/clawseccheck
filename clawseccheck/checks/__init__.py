@@ -635,6 +635,7 @@ from ._mcp import (
     check_mcp_hardening,
     check_mcp_server_exfil_host_in_args,
     check_mcp_tool_inheritance,
+    check_plugin_app_server_command,
     check_plugin_permission_mode,
     check_codex_plugin_hooks,
     check_orphaned_plugin_caches,
@@ -1099,6 +1100,7 @@ CHECKS = [
     check_fs_write_exposure,
     check_controlui_origins,
     check_plugin_permission_mode,
+    check_plugin_app_server_command,  # B167 — plugin appServer.command remote-fetch scan (B-231)
     check_hook_policy_bypass,
     check_cron_scheduler,
     # Content-security ring — single source of truth (also consumed by vet_skill).

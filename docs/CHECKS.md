@@ -809,6 +809,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B167 - Plugin appServer launch command is a remote-fetch/pipe-to-shell pattern
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Plugin appServer launch command is a remote-fetch/pipe-to-shell pattern
+- Remediation:
+  - none
+
 ## Advisory checks
 
 ### B158 - Declared skill-load source not present on disk (unaudited auto-load surface)

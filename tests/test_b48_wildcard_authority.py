@@ -1,17 +1,24 @@
-"""B48 / B-231: wildcard-authority overrides — commands.ownerAllowFrom and
-gateway.nodes.pairing.autoApproveCidrs — get a severity ABOVE the plain scoped-list
-FAIL/WARN case B48 already covers.
+"""B48 / B-231: wildcard-authority overrides.
 
-Grounded against the OpenClaw dist RUNTIME, not just the schema doc string:
-  * commands.ownerAllowFrom: command-auth-*.js resolveOwnerAuthorizationState() sets
-    ownerAllowAll = hasWildcardAllowFrom(configOwnerAllowFromList); isWildcardAllowFromEntry
-    is a literal `entry.trim() === "*"` check — a bare "*" flips owner authority open to
-    ANY sender. (The schema doc string "'*' is ignored" describes a narrower filter that
-    drops "*" from the *explicit owner ID candidate* list built from the same array — not
-    the ownerAllowAll authorization gate itself.)
-  * gateway.nodes.pairing.autoApproveCidrs: message-handler-*.js feeds the raw CIDR list
-    into isTrustedProxyAddress() — a literal 0.0.0.0/0 (or ::/0) matches every source IP,
-    auto-approving first-time device pairing from anywhere.
+commands.ownerAllowFrom containing a literal "*" gets a severity ABOVE the plain
+scoped-list FAIL/WARN case B48 already covers (FAIL/CRITICAL). Grounded against the
+OpenClaw dist RUNTIME, not just the schema doc string: command-auth-*.js
+resolveOwnerAuthorizationState() sets ownerAllowAll = hasWildcardAllowFrom(
+configOwnerAllowFromList); isWildcardAllowFromEntry is a literal `entry.trim() === "*"`
+check — a bare "*" flips owner authority open to ANY sender. (The schema doc string
+"'*' is ignored" describes a narrower filter that drops "*" from the *explicit owner ID
+candidate* list built from the same array — not the ownerAllowAll authorization gate
+itself.)
+
+gateway.nodes.pairing.autoApproveCidrs containing a world-open CIDR (0.0.0.0/0, ::/0, or
+"*") stays a plain WARN, NOT escalated to FAIL: although message-handler-*.js feeds the
+raw CIDR list straight into isTrustedProxyAddress() (a literal 0.0.0.0/0 genuinely
+matches every source IP for first-time, zero-scope node pairing), the internal schema
+recon (NC-11) records that OpenClaw's own docs name "reports treating configured
+gateway.nodes.pairing.autoApproveCidrs as vulnerability by itself" on their "not a
+vulnerability by design" list, with an explicit "do NOT FAIL on ... pairing.
+autoApproveCidrs" verdict. Escalating this field to FAIL/CRITICAL would contradict that
+grounded guidance, so it is surfaced as a WARN only.
 
 gateway.nodes.allowCommands is deliberately NOT given the same escalation: grounded
 against node-command-policy-*.js, a literal "*" there is folded into a plain Set of exact
@@ -81,22 +88,23 @@ def test_owner_allow_from_star_substring_not_flagged():
 
 
 # ---------------------------------------------------------------------------
-# gateway.nodes.pairing.autoApproveCidrs
+# gateway.nodes.pairing.autoApproveCidrs — WARN only, never FAIL (NC-11: OpenClaw's own
+# "not a vulnerability by design" list names this exact field).
 # ---------------------------------------------------------------------------
 
-def test_auto_approve_cidrs_world_open_ipv4_fails_critical():
+def test_auto_approve_cidrs_world_open_ipv4_warns_not_fails():
     cfg = {"gateway": {"nodes": {"pairing": {"autoApproveCidrs": ["0.0.0.0/0"]}}}}
     r = check_dangerous_overrides(_ctx(cfg))
-    assert r.status == FAIL
-    assert r.severity == CRITICAL
+    assert r.status == WARN
+    assert r.severity != CRITICAL
     assert any("autoApproveCidrs" in e for e in r.evidence)
 
 
-def test_auto_approve_cidrs_world_open_ipv6_fails_critical():
+def test_auto_approve_cidrs_world_open_ipv6_warns_not_fails():
     cfg = {"gateway": {"nodes": {"pairing": {"autoApproveCidrs": ["::/0"]}}}}
     r = check_dangerous_overrides(_ctx(cfg))
-    assert r.status == FAIL
-    assert r.severity == CRITICAL
+    assert r.status == WARN
+    assert r.severity != CRITICAL
 
 
 def test_auto_approve_cidrs_scoped_private_range_passes():

@@ -193,10 +193,9 @@ _DANGER_FIXED = [
 ]
 
 
-# B-231: wildcard-authority detection for commands.ownerAllowFrom and
-# gateway.nodes.pairing.autoApproveCidrs -- grounded against the dist RUNTIME (not just
-# the schema doc string, which is misleading for ownerAllowFrom -- see below), so these
-# get a severity ABOVE the scoped-list case (FAIL/CRITICAL vs the existing WARN/HIGH).
+# B-231: wildcard-authority detection for commands.ownerAllowFrom (FAIL/CRITICAL, above
+# the scoped-list case) and gateway.nodes.pairing.autoApproveCidrs (WARN only -- see the
+# NC-11 note below for why this one does NOT escalate to FAIL).
 #   * commands.ownerAllowFrom: command-auth-*.js resolveOwnerAuthorizationState() sets
 #     ownerAllowAll = hasWildcardAllowFrom(configOwnerAllowFromList), and
 #     isWildcardAllowFromEntry() is a literal `entry.trim() === "*"` check -- a bare
@@ -206,7 +205,15 @@ _DANGER_FIXED = [
 #     describe the ownerAllowAll gate, which is the actual authorization decision.)
 #   * gateway.nodes.pairing.autoApproveCidrs: message-handler-*.js feeds the raw CIDR
 #     list straight into isTrustedProxyAddress() -- a literal 0.0.0.0/0 (or ::/0) entry
-#     matches every source IP, auto-approving first-time device pairing from anywhere.
+#     matches every source IP, auto-approving first-time, ZERO-REQUESTED-SCOPE node
+#     pairing from anywhere (role/scope/metadata/public-key upgrades still need manual
+#     approval -- schema doc string). BUT: the internal schema recon (NC-11) records
+#     that OpenClaw's own docs (docs.openclaw.ai/gateway/security "not a vulnerability by
+#     design" list) explicitly name "reports treating configured
+#     gateway.nodes.pairing.autoApproveCidrs as vulnerability by itself" as OUT OF SCOPE,
+#     and the recon's own verdict is blunt: "Do NOT FAIL on gateway.nodes.pairing.* or
+#     pairing.autoApproveCidrs." So even the world-open case stays WARN, never FAIL --
+#     still surfaced (a 0.0.0.0/0 value is worth a human look), just not grade-capping.
 #
 # gateway.nodes.allowCommands is DELIBERATELY NOT given the same treatment: grounded
 # against node-command-policy-*.js, a literal "*" there is folded into a plain Set of
@@ -797,10 +804,13 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
 
     auto_approve_cidrs = dig(cfg, "gateway.nodes.pairing.autoApproveCidrs")
     if _has_world_open_cidr(auto_approve_cidrs):
-        wildcard_fails.append(
+        # NC-11 (recon): OpenClaw's own "not a vulnerability by design" list names this
+        # exact field — stays WARN, never escalates to FAIL/wildcard_fails.
+        warns.append(
             "gateway.nodes.pairing.autoApproveCidrs contains a world-open CIDR "
-            "(0.0.0.0/0 / ::/0 / '*') — first-time node-device pairing is "
-            "auto-approved from ANY IP address (not a scoped network)"
+            "(0.0.0.0/0 / ::/0 / '*') — first-time, zero-scope node-device pairing is "
+            "auto-approved from ANY IP address (role/scope/metadata/key-upgrade pairing "
+            "still requires manual approval)"
         )
 
     nc = dig(cfg, "gateway.nodes.allowCommands")

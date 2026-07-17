@@ -41,7 +41,9 @@ from ._shared import (
     _plugins,
 )
 from ._content import (
+    _CLICKFIX_REMOTE_FETCH_RE,
     _IOC_ONION_RE,
+    _clickfix_trusted_installer,
     _obf_clip,
 )
 from ._vet import (
@@ -1455,6 +1457,71 @@ def check_plugin_permission_mode(ctx: Context) -> Finding:
         PASS,
         "No installed plugin sets config.permissionMode=approve-all.",
         "Keep plugin permissionMode at 'ask'.",
+    )
+
+
+def check_plugin_app_server_command(ctx: Context) -> Finding:
+    """B167 (B-231) — plugins.entries.<name>.config.appServer.command content-scan.
+
+    Grounded: an in-process plugin's app-server launch command (e.g. the codex plugin's
+    ``plugins.entries.codex.config.appServer.command``) is executed automatically when
+    the plugin starts up — no separate opt-in gate like config.permissionMode (B57), so
+    a pipe-to-shell bootstrap planted here runs unconditionally. Reuses the same
+    remote-fetch/pipe-to-shell detector B100/B103 already use for skill install
+    directives (curl|bash, wget|sh, bash <(curl), iwr|iex, npx -y https://, pip install
+    https://), including the B-118 first-party-installer allowlist so a legitimate
+    documented installer command does not false-FAIL.
+
+    FAIL    — an installed plugin's appServer.command matches a remote-fetch/pipe-to-
+              shell pattern that is not a curated first-party installer.
+    PASS    — no installed plugin sets appServer.command, or every match is a curated
+              first-party installer.
+    UNKNOWN — no plugins installed (plugins.entries absent).
+    """
+    cfg = ctx.config
+    plugins = _plugins(cfg)
+    if not plugins:
+        return _finding(
+            "B167",
+            UNKNOWN,
+            "No plugins are installed (plugins.entries absent), so appServer launch "
+            "commands are not applicable.",
+            "When you install a plugin with an appServer.command override, keep it to a "
+            "pinned local executable path — never a remote-fetch/pipe-to-shell one-liner.",
+        )
+    offenders = []
+    for name, entry in plugins.items():
+        if not isinstance(entry, dict):
+            continue
+        cmd = dig(entry, "config.appServer.command")
+        if not isinstance(cmd, str) or not cmd.strip():
+            continue
+        m = _CLICKFIX_REMOTE_FETCH_RE.search(cmd)
+        if m and not _clickfix_trusted_installer(m.group(0)):
+            snippet = cmd.strip()
+            if len(snippet) > 120:
+                snippet = snippet[:117] + "..."
+            offenders.append(
+                f"plugins.entries.{name}.config.appServer.command: remote-fetch/"
+                f"pipe-to-shell pattern — \"{snippet}\""
+            )
+    if offenders:
+        return _finding(
+            "B167",
+            FAIL,
+            "One or more installed plugin(s) launch their app server with a remote-fetch/"
+            "pipe-to-shell command (see evidence).",
+            "Replace the launch command with a pinned local executable path (or a plain "
+            "HTTPS fetch from a curated first-party installer host) — never a "
+            "curl|bash/wget|sh/iwr|iex-style bootstrap.",
+            evidence=offenders,
+        )
+    return _finding(
+        "B167",
+        PASS,
+        "No installed plugin's appServer.command matches a remote-fetch/pipe-to-shell "
+        "pattern.",
+        "Keep appServer.command pinned to a local executable path.",
     )
 
 
