@@ -37,13 +37,24 @@ pair carries no signal state at all, so it composes safely instead.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from . import attest
 from . import logsafe as _logsafe
-from .checks import INJECTION_PATTERNS, SECRET_PATTERNS, _CRED_RE, _EXFIL_RE, _SECRET_PATH_RE
+from .checks import (
+    INJECTION_PATTERNS,
+    SECRET_PATTERNS,
+    _B64_BLOB_RE,
+    _B64URL_BLOB_RE,
+    _CRED_RE,
+    _EXFIL_RE,
+    _KNOWN_EXFIL_HOST_RE,
+    _SECRET_PATH_RE,
+)
 from .logdiscovery import LogSink
 from .scanbudget import audit_budget_exceeded
 from .textnorm import normalize_for_scan
@@ -114,9 +125,86 @@ def _add_sample(result: LogScanResult, signal: str, raw_snippet: str) -> None:
         result.samples.append(f"{signal}: {_logsafe.redact(raw_snippet)}")
 
 
-def _scan_line_content(result: LogScanResult, line: str, *, is_trajectory: bool = False) -> None:
+_PRINTABLE_DECODE_RATIO = 0.85  # same threshold checks/_content.py's _reassembles_to_payload
+# already uses for this exact discrimination — not a new number invented for this module.
+
+
+def _decodes_to_printable_blob(token: str) -> bool:
+    """B-249 FP fix (C-135, 2026-07-18): True only when *token* actually decodes as
+    base64 (standard or URL-safe) to bytes that are overwhelmingly printable — the real
+    signature of an encoded TEXT payload (a credential string, a stolen secret) as
+    opposed to incidental high-entropy bytes.
+
+    The bare shape tests this replaced (``_B64_BLOB_RE`` / ``_B64URL_BLOB_RE`` — a run of
+    40+ base64-alphabet characters, nothing else) are NOT an encoding discriminator at
+    all: any 40+ char run of hex digits (a git SHA, a sha256) or an ordinary hyphenated
+    URL/doc-slug ("getting-started-with-local-webhook-testing-and-tunnels") also matches
+    that character class, because base64's alphabet is just alnum (+ `-`/`_`). A real-fleet
+    adversarial pass (C-135) reproduced BOTH as live false positives: a benign kubectl/
+    ngrok devops sink (git-SHA build param) and a benign npm/docs sink (a plain-English
+    slug) both flipped this WARN-only class from silent to firing on ordinary developer
+    logs. This is the exact same unsound "bare blob" shape that
+    ``_secrecy_credential_or_encoding_anchor`` in checks/_content.py already tried and
+    RETRACTED for the same reason (two real-fleet false positives there too) — see that
+    function's docstring.
+
+    Decoding and measuring the printable-byte ratio of the RESULT (not the input) is a
+    genuine test: decoding a hex SHA or an English slug as base64 yields near-random
+    bytes (~30-40% printable in practice), while decoding a real base64-encoded text
+    string (a credential, a token) yields ~100% printable bytes almost always. This
+    reuses the SAME 0.85 threshold and the SAME "decode, then measure printable ratio"
+    technique ``_reassembles_to_payload`` (checks/_content.py) already uses to make this
+    exact distinction elsewhere in the codebase — not a new invented heuristic.
+
+    Deliberately does NOT reuse ``_content.py``'s ``_try_b64_decode``: that helper does
+    ``raw.decode("utf-8", "ignore")``, which silently DROPS invalid byte sequences before
+    the printable check ever runs — on random/garbage bytes that drops most of the
+    string, leaving a short "survivor" remainder that then reads as deceptively
+    printable. The ratio here is measured over the full raw decoded bytes.
+
+    Known accepted residual (documented, not chased further — WARN-only/scored=False,
+    never grade-affecting, Golden Rule #5 is about FAIL): a genuinely base64-encoded
+    ENGLISH-TEXT value in an otherwise-ordinary param (e.g. a webhook "sig=" test value)
+    decodes to printable text just like a real exfiltrated secret does — the two are
+    structurally identical once encoded, and no static content-shape test can tell them
+    apart without semantic judgment of what the value actually is. Narrowing further by
+    param name (an allowlist of "safe" names like sig/token/auth) was considered and
+    rejected: it is guessable/evadable by a real attacker and is exactly the kind of
+    additional narrow special case the project's C-135 history shows does not converge
+    (checks/_content.py's own retraction note; delete/simplify, don't keep stacking
+    conditions).
+    """
+    for urlsafe in (False, True):
+        try:
+            pad = (-len(token)) % 4
+            padded = token + "=" * pad
+            raw = (
+                base64.urlsafe_b64decode(padded)
+                if urlsafe
+                else base64.b64decode(padded, validate=True)
+            )
+        except (binascii.Error, ValueError):
+            continue
+        if not raw:
+            continue
+        printable = sum(1 for b in raw if 32 <= b < 127 or b in (9, 10, 13))
+        if printable / len(raw) >= _PRINTABLE_DECODE_RATIO:
+            return True
+    return False
+
+
+def _scan_line_content(
+    result: LogScanResult, line: str, *, is_trajectory: bool = False, cred_seen_before: bool = False
+) -> bool:
     """Classes 1 / 2 / 4 / 6 — plain-text pattern scan over one (already length-capped)
-    line. Applied uniformly to every sink kind, including trajectory sidecar lines."""
+    line. Applied uniformly to every sink kind, including trajectory sidecar lines.
+
+    ``cred_seen_before`` — True when an earlier line in THIS SAME sink already showed a
+    credential-shaped path read (``_CRED_RE``); feeds the B-249 cross-line exfil-evidence
+    extension below. Returns whether THIS line itself is a cred-path read, so the caller
+    can fold it into the running state for the next line (mirrors how ``last_seq``/
+    ``last_ts`` are threaded through ``scan_log_file``'s loop).
+    """
     normalized = normalize_for_scan(line)
 
     # Class 1 — injection_against_agent: a narrow, cheap subset of the content-ring's
@@ -140,6 +228,46 @@ def _scan_line_content(result: LogScanResult, line: str, *, is_trajectory: bool 
     if secret_m and exfil_m:
         lo, hi = min(secret_m.start(), exfil_m.start()), max(secret_m.end(), exfil_m.end())
         _add_sample(result, "exfil_evidence", _windowed(line, lo, hi))
+
+    # Class 2 extension (B-249): an OPAQUE base64-encoded exfil payload has no cleartext
+    # secret to pair against the same-line rule above, so a beacon that carries stolen
+    # data as a base64 GET/URL param (rather than a recognizable credential string) slips
+    # past it entirely — this was the confirmed gap: an injection -> cred-read -> base64
+    # GET-exfil-to-a-drop-host sequence produced neither exfil_evidence (no same-line
+    # secret) nor env_compromise_ioc (the exfil line carries no cred-shaped path itself).
+    # Corroborate ACROSS the sink instead of requiring same-line: a real credential-shaped
+    # PATH read (_CRED_RE — narrow: .aws/credentials, .ssh/id_*, keychain, wallet.dat, ...)
+    # EARLIER in this same sink, followed by a LATER line naming a KNOWN, low-base-rate
+    # drop-point host (_KNOWN_EXFIL_HOST_RE — the same narrow host list this check's own
+    # C-221 cross-artifact axis already trusts) that ALSO carries a base64-alphabet run of
+    # 40+ chars (_B64_BLOB_RE / _B64URL_BLOB_RE — the SAME vetted blob regexes the content-
+    # ring already uses; never a new pattern).
+    #
+    # CORRECTION (B-249 FP fix, C-135, 2026-07-18): a bare base64-BLOB-SHAPE match (just
+    # the character class, `_B64_BLOB_RE`/`_B64URL_BLOB_RE` alone) is NOT actually a base64
+    # discriminator and is NOT "materially narrower" than the retracted
+    # `_secrecy_credential_or_encoding_anchor` attempt this comment used to claim it was —
+    # a 40+ char run of hex digits (a git SHA) or an ordinary hyphenated URL/doc slug
+    # matches that same character class trivially. A real-fleet adversarial pass confirmed
+    # this fires on ordinary developer sessions: a kubectl/ngrok devops sink (cred-path
+    # ~/.kube/config, then a git-SHA build param to a *.ngrok-free.app host) and an
+    # npm/docs sink (cred-path ~/.npmrc, then a plain-English doc-slug URL to a
+    # *.ngrok-free.app host) both flipped this WARN-only class from silent to firing. The
+    # fix: additionally require the matched blob to actually DECODE (as real base64) to
+    # overwhelmingly printable bytes (`_decodes_to_printable_blob` — see its docstring for
+    # why this, unlike the character-class shape, is a genuine encoding test, and for the
+    # one documented residual it does not close).
+    if cred_seen_before:
+        host_m = _KNOWN_EXFIL_HOST_RE.search(line)
+        blob_m = _B64_BLOB_RE.search(line) or _B64URL_BLOB_RE.search(line)
+        if host_m and blob_m and _decodes_to_printable_blob(blob_m.group(0)):
+            lo, hi = min(host_m.start(), blob_m.start()), max(host_m.end(), blob_m.end())
+            _add_sample(
+                result,
+                "exfil_evidence",
+                "cred-read earlier in this sink, then an encoded param to a known drop "
+                "host: " + _windowed(line, lo, hi),
+            )
 
     # Class 4 — env_compromise_ioc: a credential-shaped path/secret-named path token AND
     # an exfil-transport/host token on the SAME line. C-135 note: the literal task spec
@@ -175,6 +303,8 @@ def _scan_line_content(result: LogScanResult, line: str, *, is_trajectory: bool 
     at_rest_m = secret_m or pan_m
     if at_rest_m:
         _add_sample(result, "secrets_at_rest", _windowed(line, at_rest_m.start(), at_rest_m.end()))
+
+    return bool(_CRED_RE.search(line))
 
 
 def _parse_iso_ts(ts: str):
@@ -266,6 +396,7 @@ def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None) -> Lo
     is_trajectory = sink.kind == "trajectory"
     last_seq = None
     last_ts = None
+    cred_seen = False  # B-249: has an EARLIER line in this sink shown a cred-path read?
 
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
@@ -299,7 +430,10 @@ def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None) -> Lo
                 if not line.strip():
                     continue
 
-                _scan_line_content(result, line, is_trajectory=is_trajectory)
+                cred_here = _scan_line_content(
+                    result, line, is_trajectory=is_trajectory, cred_seen_before=cred_seen
+                )
+                cred_seen = cred_seen or cred_here
                 if skill_iocs:
                     low = line.lower()
                     for tok in skill_iocs:

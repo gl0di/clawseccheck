@@ -1004,8 +1004,10 @@ def check_webfetch_redirects(ctx: Context) -> Finding:
 # dominated by benign lines, so an isolated single-class hit is noise, not a finding. WARN
 # fires only when >=2 distinct signal classes co-occur in the SAME sink, or a single class
 # that already carries its own strong internal corroboration fires (exfil_evidence is
-# already secret+exfil-host paired inside logscan.py; secrets_at_rest additionally needs
-# the sink to be world-readable, checked here via the same B19 perm-check helper above).
+# already secret+exfil-host paired inside logscan.py — either on the SAME line, or, per
+# B-249, a credential-path read earlier in the sink followed by a base64-encoded param to
+# a known drop host on a later line; secrets_at_rest additionally needs the sink to be
+# world-readable, checked here via the same B19 perm-check helper above).
 _LOG_HUNT_PER_FILE_BUDGET_S = 3.0
 
 
