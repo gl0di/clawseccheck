@@ -415,3 +415,43 @@ def test_b70_legacy_allowloopback_field_still_warns_without_mode():
                           "auth": {"trustedProxy": {"allowLoopback": True}}}})
     )
     assert f.status == WARN
+
+
+# ---------------------------------------------------------------------------
+# Cross-interpreter regression: the private-range test must not depend on
+# ipaddress.*Network.is_private, whose semantics differ across Python 3.9+.
+# On older interpreters is_private was "network address private AND broadcast
+# address private", so 0.0.0.0/0 and 0.0.0.0/1 both reported True — which would
+# accept a world-open proxy list as a genuine constraint and reinstate the
+# spoofable-gateway lying-PASS this check exists to prevent. These assert the
+# containment directly, so they hold identically on every supported Python.
+# ---------------------------------------------------------------------------
+
+def test_net_is_private_rejects_world_open_ranges_on_every_interpreter():
+    import ipaddress
+
+    from clawseccheck.checks import _net_is_private
+
+    for cidr in ("0.0.0.0/0", "0.0.0.0/1", "::/0", "128.0.0.0/1"):
+        assert _net_is_private(ipaddress.ip_network(cidr)) is False, cidr
+
+
+def test_net_is_private_accepts_genuine_private_ranges():
+    import ipaddress
+
+    from clawseccheck.checks import _net_is_private
+
+    for cidr in ("10.0.0.0/8", "172.20.0.0/14", "192.168.1.0/24",
+                 "127.0.0.0/8", "fc00::/7", "fd12:3456::/32", "fe80::/10"):
+        assert _net_is_private(ipaddress.ip_network(cidr)) is True, cidr
+
+
+def test_is_constraining_proxy_entry_does_not_consult_is_private():
+    # Guard the fix itself: a future refactor back to net.is_private would pass the
+    # behavioral tests above on a NEW interpreter while silently failing on 3.9.
+    import inspect
+
+    from clawseccheck.checks import _is_constraining_proxy_entry
+
+    # Match the ATTRIBUTE access (net.is_private), not our own helper's name.
+    assert ".is_private" not in inspect.getsource(_is_constraining_proxy_entry)

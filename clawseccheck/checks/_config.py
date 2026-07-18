@@ -517,6 +517,34 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
 _MIN_IPV4_PREFIXLEN = 8
 _MIN_IPV6_PREFIXLEN = 16
 
+# Do NOT use ``ipaddress.*Network.is_private`` here — its meaning changed across the
+# Python versions we support (3.9+). On older interpreters it was computed as
+# "network address is private AND broadcast address is private", which makes
+# ``0.0.0.0/0`` report is_private=True (0.0.0.0 falls in 0.0.0.0/8 and
+# 255.255.255.255 is itself special-cased), and likewise ``0.0.0.0/1`` (broadcast
+# 127.255.255.255 is loopback). Trusting it would accept a world-open proxy list as a
+# genuine constraint on those interpreters — reinstating the exact spoofable-gateway
+# lying-PASS this check exists to prevent. Test the containment explicitly instead, so
+# the verdict is identical on every supported Python.
+_PRIVATE_NETS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+)
+
+
+def _net_is_private(net) -> bool:
+    """True when *net* is wholly contained in a non-globally-routable range."""
+    return any(
+        net.version == private.version and net.subnet_of(private)
+        for private in _PRIVATE_NETS
+    )
+
 
 def _is_constraining_proxy_entry(entry) -> bool:
     """True when *entry* is a genuine trusted-proxy identifier: a specific host, a
@@ -533,7 +561,7 @@ def _is_constraining_proxy_entry(entry) -> bool:
         # Not a parseable IP/CIDR (e.g. a hostname) — a specific, non-wildcard
         # identifier is still a genuine constraint.
         return True
-    if net.num_addresses == 1 or net.is_private:
+    if net.num_addresses == 1 or _net_is_private(net):
         return True
     if net.version == 4 and net.prefixlen < _MIN_IPV4_PREFIXLEN:
         return False
