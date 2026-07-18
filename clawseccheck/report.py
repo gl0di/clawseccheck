@@ -1046,13 +1046,29 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
     return f"{header}{top}\n{body}\n{bot}"
 
 
+def _header_rule_width(header_line: str, ascii_only: bool) -> int:
+    """Rule width for a mascot header line: long enough to span the header text
+    plus a one-column buffer, accounting for MASCOT rendering as a double-width
+    column in most terminals even though it is a single Python character.
+
+    A hardcoded rule width (the previous approach) under-runs once the header
+    carries the mascot — this derives it from the actual line instead, so it
+    stays correct if the subtitle text ever changes too.
+    """
+    width = len(header_line)
+    if not ascii_only and brand.MASCOT in header_line:
+        width += 1
+    return width + 1
+
+
 def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
                    baseline: bool = False) -> str:
     mark = {"CRITICAL": "[X]", "HIGH": "[!]", "MEDIUM": "[~]", "INFO": "[i]"} if ascii_only \
         else {"CRITICAL": "⛔", "HIGH": "⚠️", "MEDIUM": "🔶", "INFO": "ℹ️"}
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "INFO": 3}
     ok = "[OK]" if ascii_only else "✅"
-    lines = [brand.header(subtitle="Threat Monitor", ascii_only=ascii_only), "=" * 30,
+    head = brand.header(subtitle="Threat Monitor", ascii_only=ascii_only)
+    lines = [head, "=" * _header_rule_width(head, ascii_only),
              f"Current: {score.score}/100  Grade: {score.grade}"]
     if baseline:
         lines += ["", "Baseline saved. Future runs will alert on what changes since now."]

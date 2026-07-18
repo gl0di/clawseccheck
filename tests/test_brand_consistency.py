@@ -131,6 +131,23 @@ class TestRenderMonitorHeader:
         out = render_monitor([], _score(), ascii_only=True, baseline=True)
         assert brand.MASCOT not in out
 
+    def test_rule_spans_the_mascot_header(self):
+        # A hardcoded "=" * 30 rule under-ran the header once it grew the mascot
+        # (display width 32, since MASCOT renders double-width): the "="-rule
+        # stopped 2 columns short of the title on the line above it. The rule
+        # must be at least as wide as the header's *display* width, not just its
+        # Python character count.
+        out = render_monitor([], _score(), baseline=True)
+        header, rule = out.splitlines()[:2]
+        display_width = len(header) + 1  # +1 for the double-width mascot column
+        assert len(rule) >= display_width
+
+    def test_ascii_rule_width_unchanged(self):
+        # The --ascii rule width must stay exactly what it was before this fix
+        # (no mascot => no under-run => no reason for the rule to move).
+        out = render_monitor([], _score(), ascii_only=True, baseline=True)
+        assert out.splitlines()[1] == "=" * 30
+
 
 # ── menu: render_onboarding / render_menu ─────────────────────────────────────
 
