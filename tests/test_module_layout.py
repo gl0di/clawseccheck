@@ -52,6 +52,13 @@ _EXEMPT = {
     "checks/_mcp.py": "~1,400 lines — the MCP / plugin checks + vet_mcp / vet_plugin (40 "
                       "symbols); topic-faithful and over budget by design. A finer split is "
                       "a later cycle.",
+    "checks/_egress.py": "~1,230 lines — the egress-hardening topic (proxy/TLS/SSRF/"
+                         "data-at-rest + web-fetch/log checks). Crossed the budget with "
+                         "B178's check_provider_baseurl (models.providers.<id>.baseUrl "
+                         "cleartext http:// leak) — kept adjacent to B155's "
+                         "check_outbound_proxy, its sibling check on the SAME provider "
+                         "object, rather than splitting one config object's security "
+                         "posture across two topic files. A finer split is a later cycle.",
     "checks/__init__.py": "~1,200 lines — the aggregator (every check import + the CHECKS "
                           "list + run_all). Its length is driven directly by the NUMBER OF "
                           "CHECKS (one import line per check, by design — see §3.1-a: no "
