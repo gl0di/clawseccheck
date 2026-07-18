@@ -22,6 +22,7 @@ from .catalog import (
     ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
 from .ansi import paint
+from .brand import grade_ansi, grade_hex
 from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
 from .guide import suggest_actions
@@ -116,8 +117,9 @@ def _sev_token(severity: str, *, ascii_only: bool = False, color: bool = False) 
     return f"{_SEV_GLYPH.get(severity, '⚪')} {word}"
 
 # ── ANSI colour palette (opt-in; see ansi.py) ────────────────────────────────
-# Grade → colour for the header grade letter + score-bar fill.
-_GRADE_COLOR = {"A": "green", "B": "green", "C": "yellow", "D": "bright_yellow", "F": "red"}
+# Grade → colour for the header grade letter + score-bar fill comes from
+# brand.grade_ansi() (brand.py is the single source of the grade→colour ramp;
+# see its module docstring for the shadowing bug this replaced).
 # Status → colour for finding icons / coverage states.
 _STATUS_COLOR = {
     FAIL: "red", WARN: "yellow", PASS: "green", UNKNOWN: "grey",
@@ -132,11 +134,6 @@ _STATUS_COLOR = {
 LOW_COVERAGE_FRAC = 0.35  # below this fraction assessable -> loud caution line (C-166)
 DRIFT_UNKNOWN_FRAC = 0.85  # at/above this fraction UNKNOWN -> hedged staleness nudge (C-165)
 DRIFT_MIN_SCORED = 20  # minimum scored_total before the staleness nudge is even considered
-
-
-def _grade_color(grade: str) -> str:
-    """Map a grade label (possibly 'A+', 'B-', …) to a palette colour name."""
-    return _GRADE_COLOR.get((grade or "")[:1].upper(), "grey")
 
 
 def _color_icons(icon: dict, color: bool) -> dict:
@@ -160,7 +157,7 @@ def _score_bar(score: int, grade: str, *, ascii_only: bool = False, color: bool 
     else:
         fill_s, empty_s, lb, rb = "█" * filled, "░" * empty, "", ""
     if color:
-        fill_s = paint(fill_s, _grade_color(grade), enabled=True)
+        fill_s = paint(fill_s, grade_ansi(grade), enabled=True)
         empty_s = paint(empty_s, "grey", enabled=True)
     return f"{lb}{fill_s}{empty_s}{rb}"
 
@@ -652,7 +649,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     issues = [f for f in findings
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
-    grade_disp = paint(score.grade, _grade_color(score.grade), "bold", enabled=True) if color else score.grade
+    grade_disp = paint(score.grade, grade_ansi(score.grade), "bold", enabled=True) if color else score.grade
     # Assurance honesty (R11): single source-of-truth coverage tally, computed once and
     # reused by both the C-166 low-coverage line (below) and the C-165 staleness nudge
     # (advisory band, further down) — never a second independent tally.
@@ -1074,9 +1071,6 @@ def render_events(events, ascii_only: bool = False) -> str:
     return _asciify(out) if ascii_only else out
 
 
-_GRADE_COLOR = {"A": "#4c1", "B": "#97ca00", "C": "#dfb317", "D": "#fe7d37", "F": "#e05d44"}
-
-
 def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     """A shields.io-style SVG badge (grade + score, plus a suppressed-critical marker —
     never finding details)."""
@@ -1088,7 +1082,7 @@ def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     n_hidden = sum(1 for f in findings if surfaced_despite_suppression(f))
     if n_hidden:
         value += f" *{n_hidden} suppressed"
-    color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
+    color = grade_hex(score.grade)
     lw = 8 + len(label) * 6          # rough text widths
     vw = 8 + len(value) * 7
     w = lw + vw
@@ -1590,7 +1584,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
 def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str:
     """Standalone self-contained HTML report (inline CSS, no external assets).
 
-    Includes grade badge (colored by _GRADE_COLOR), score, Lethal Trifecta ratio,
+    Includes grade badge (colored by brand.grade_hex), score, Lethal Trifecta ratio,
     and FAIL/WARN findings list. Owner view — shows findings with a note that
     this is private and must not be shared publicly.
 
@@ -1600,7 +1594,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
 
-    badge_color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
+    badge_color = grade_hex(score.grade)
     trifecta = _trifecta_ratio(findings)
     sev_color = {CRITICAL: "#e05d44", HIGH: "#fe7d37",
                  MEDIUM: "#dfb317", LOW: "#97ca00"}

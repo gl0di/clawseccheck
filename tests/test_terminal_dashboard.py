@@ -6,6 +6,7 @@ renderers are pure string builders over in-memory findings.
 from __future__ import annotations
 
 from clawseccheck.ansi import paint, should_color, strip_ansi
+from clawseccheck.brand import grade_ansi, grade_hex
 from clawseccheck.catalog import BY_ID, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
 from clawseccheck.report import _coverage_lines, _score_bar, render_report
 from clawseccheck.scoring import ScoreResult
@@ -116,6 +117,59 @@ class TestScoreBar:
         assert strip_ansi(colored) == plain  # colour is purely additive
 
 
+# ── B-234 regression: report.py grade-colour shadow bug ───────────────────────
+#
+# report.py used to define a module-level `_GRADE_COLOR` dict TWICE — once with
+# ansi.py palette *names* (e.g. "red"), once (much later in the file) with hex
+# codes (e.g. "#e05d44") for the SVG/HTML renderers. Python silently lets the
+# second module-level assignment shadow the first, so by the time _grade_color()
+# ran it only ever saw the hex dict — every terminal-colour call site fed a hex
+# string into ansi.paint(), which only recognizes style *names*, so `s in _CODES`
+# was always False and the grade letter / score-bar fill rendered with NO colour.
+# The existing test_color_wraps_fill above only asserts "an ESC code exists
+# somewhere in the output" — it passed even on the buggy code, because the
+# *empty* (grey) part of the bar still carried a valid code; it never inspected
+# the *filled*, grade-coloured segment specifically. These tests do.
+class TestGradeColorRouting:
+    def test_score_bar_fill_carries_the_grade_ansi_code(self):
+        # Grade F -> brand.GRADE_ANSI["F"] == "red" == ansi._CODES["red"] == "31".
+        # A hex-shadowed _grade_color() would silently drop this code entirely.
+        from clawseccheck.ansi import _CODES
+        colored = _score_bar(49, "F", color=True)
+        fill_only = colored.split(_ESC)[1] if _ESC in colored else ""
+        assert f"{_ESC}{_CODES['red']}m" in colored
+        # The code must land on the *filled* run, not just be present anywhere.
+        assert _CODES["red"] in fill_only
+
+    def test_score_bar_fill_color_tracks_grade_not_a_constant(self):
+        # Different grades must carry different SGR codes for the fill — proves
+        # the fill is actually keyed off `grade`, not a single hardcoded style.
+        from clawseccheck.ansi import _CODES
+        f_bar = _score_bar(40, "F", color=True)
+        c_bar = _score_bar(75, "C", color=True)
+        assert _CODES["red"] in f_bar
+        assert _CODES["yellow"] in c_bar
+
+    def test_all_grades_map_through_to_a_known_ansi_code(self):
+        from clawseccheck.ansi import _CODES
+        from clawseccheck.brand import grade_ansi
+        for g in "ABCDF":
+            assert grade_ansi(g) in _CODES, f"grade {g} -> {grade_ansi(g)!r} not in ansi._CODES"
+
+    def test_report_module_has_no_local_grade_color_dict(self):
+        # Structural guard: fail if a single merged `_GRADE_COLOR` (or the old
+        # `_grade_color()` helper) is ever reintroduced in report.py — that is
+        # exactly the shape of the original bug (two same-named module globals,
+        # second silently shadowing the first).
+        import clawseccheck.report as report
+        assert not hasattr(report, "_GRADE_COLOR")
+        assert not hasattr(report, "_grade_color")
+        # And confirm report.py is actually routing through brand.py's tier-
+        # separated accessors (the fix), not a private re-implementation.
+        assert report.grade_ansi is grade_ansi
+        assert report.grade_hex is grade_hex
+
+
 # ── coverage map ──────────────────────────────────────────────────────────────
 
 class TestCoverageLines:
@@ -172,3 +226,13 @@ class TestRenderReportColor:
     def test_no_color_default(self):
         # The default (no color kwarg) must never colourise — protects piped output.
         assert _ESC not in render_report(_findings(), _score())
+
+    def test_grade_badge_carries_the_grade_color_not_just_bold(self):
+        # B-234 regression: before the fix, the "Grade:" line only ever carried
+        # the bold code ("1") — the grade colour silently vanished because
+        # _grade_color() returned a hex string ansi.paint() didn't recognize.
+        # paint(text, grade_ansi(grade), "bold") joins codes as "<color>;1m".
+        from clawseccheck.ansi import _CODES
+        out = render_report(_findings(), _score(grade="F"), color=True)
+        grade_line = next(line for line in out.splitlines() if "Grade:" in line)
+        assert f"\x1b[{_CODES['red']};{_CODES['bold']}m" in grade_line
