@@ -246,3 +246,57 @@ def test_cli_verify_self_points_to_signed_release_digest(capsys):
     assert "SHA256SUMS.txt" in out
     assert "cosign" in out
     assert f"v{__version__}" in out
+
+
+def test_cli_verify_self_prints_exact_cosign_verify_command(capsys):
+    """CLAWSECCHECK-C-240: pointing at a signed SHA256SUMS.txt without the verification
+    command itself just leaves the user (or a host agent) to guess one — which is exactly
+    what let a host agent 'verify' by web-searching a checksum and reporting a fabricated
+    match instead of actually checking the cosign signature. The printed command must be
+    the real one: keyless/OIDC verify-blob against a bundle, scoped to this repo's identity
+    and the GitHub Actions OIDC issuer — grounded against .github/workflows/clawhub-publish.yml
+    (cosign sign-blob --yes --bundle SHA256SUMS.txt.bundle) and the same command already
+    published in README.md / docs/USAGE.md.
+    """
+    main(["--verify-self"])
+    out = capsys.readouterr().out
+    assert "cosign verify-blob" in out
+    assert "--bundle SHA256SUMS.txt.bundle" in out
+    assert "--certificate-identity-regexp" in out
+    assert "^https://github.com/gl0di/clawseccheck/" in out
+    assert "--certificate-oidc-issuer" in out
+    assert "https://token.actions.githubusercontent.com" in out
+    # The full invocation ends on the digest file being verified, not just named earlier.
+    assert out.rstrip().endswith("SHA256SUMS.txt")
+
+
+def test_cli_verify_self_warns_web_search_checksum_is_not_verification(capsys):
+    """The failure mode this task fixes: a host agent treating a web-searched checksum
+    match as 'verified'. The output must say plainly that a checksum alone isn't proof —
+    only running cosign is — so a host agent reading the report can't skip the signature
+    check and still claim it verified anything.
+    """
+    main(["--verify-self"])
+    out = capsys.readouterr().out.lower()
+    assert "proves nothing by" in out or "not verification" in out or "cosign" in out
+    # The caution line must appear before the command, guiding readers to run cosign.
+    assert "web page" in out or "chat reply" in out
+
+
+def test_cli_verify_self_cosign_guidance_is_unconditional():
+    """--verify-self's cosign guidance is static text describing an out-of-band
+    verification step, not a PASS/FAIL/UNKNOWN check verdict (it isn't a `check_*`
+    finding and never enters CATALOG/CHECKS) — so there is no UNKNOWN state to cover:
+    the command is always printed the same way, deterministically, regardless of
+    local config or environment. This test pins that (no state can suppress it).
+    """
+    import io
+    import contextlib
+
+    buf1, buf2 = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(buf1):
+        main(["--verify-self"])
+    with contextlib.redirect_stdout(buf2):
+        main(["--verify-self"])
+    assert "cosign verify-blob" in buf1.getvalue()
+    assert buf1.getvalue() == buf2.getvalue()
