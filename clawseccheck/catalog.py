@@ -776,6 +776,29 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="tools",
     ),
+    # B172 (B-236, re-scoped): inventory of standing ~/.openclaw/exec-approvals.json
+    # "allow-always" grants -- a persisted per-command exec approval that lives entirely
+    # outside openclaw.json and, before this check, no check ever read (grep for
+    # "exec-approvals" across clawseccheck/ was zero hits). Originally filed as a
+    # suspected tools.exec gate BYPASS (a standing grant making B8/B22/B23/B48 give a
+    # lying-PASS); B-236's own adversarial review REFUTED that: OpenClaw computes the
+    # effective exec policy as minSecurity(tools.exec.security, execApprovals.security)
+    # + maxAsk(tools.exec.ask, execApprovals.ask) (bash-tools*.js:581-582;
+    # exec-approvals-BIKWP8_V.js:1126-1140), so a standing grant can only TIGHTEN the
+    # gate, never loosen it -- B8/B22/B23/B48's PASS was already correct. This check is
+    # therefore a pure visibility/inventory advisory (WARN-only, never FAIL, scored=False):
+    # it surfaces a standing grant the user may have forgotten about, it does not claim
+    # the grant defeats any other check's verdict.
+    CheckMeta(
+        "B172",
+        "Standing exec-approvals.json allow-always grant (uninventoried persisted authority)",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Exec Approvals",
+        scored=False,
+        confidence="HIGH",
+        surface="tools",
+    ),
     # B158 (F-119): a declared skill/plugin load source (skills.load.extraDirs,
     # plugins.load.paths, or a .clawhub/lock.json skillFile) resolves to nothing on disk —
     # an unaudited auto-load gap. Advisory, WARN-only, unscored (declared-but-absent is

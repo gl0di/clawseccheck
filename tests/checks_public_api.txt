@@ -143,6 +143,7 @@ check_egress
 check_egress_inventory
 check_event_hook_interceptor
 check_exec_applypatch_workspace
+check_exec_approvals_grants
 check_exec_strict_inline_eval
 check_forged_provenance
 check_frontmatter_hygiene

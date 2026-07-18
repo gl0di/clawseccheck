@@ -79,6 +79,11 @@ _MAX_CONFIG_BYTES = 5_000_000
 _MAX_CRON_BYTES = _MAX_CONFIG_BYTES
 _MAX_CRON_JOBS = 200
 
+# B-236 (B172): the standing exec-approvals store (~/.openclaw/exec-approvals.json) is
+# read-only and size/entry-capped the same way as the cron store above.
+_MAX_EXEC_APPROVALS_BYTES = _MAX_CONFIG_BYTES
+_MAX_EXEC_APPROVALS_AGENTS = 200
+
 # B-111: an archive member name is attacker-controlled and NOT OS-length-limited (unlike a
 # real filesystem path) — a crafted zip/tar entry can carry a multi-KB name. It flows
 # uncapped into ctx.limit_hits / ctx.path_traversal_violations / ctx.file_manifest keys,
@@ -148,6 +153,12 @@ class Context:
     cron_jobs: list = field(default_factory=list)
     cron_found: bool = False        # a cron store (JSON or SQLite) was found and read
     cron_parse_error: bool = False  # a cron store was found but could not be parsed/read
+    # B-236 (B172): standing exec-approvals.json grants, one dict per agent present in
+    # the store's `agents` map: {agent_id, security, ask, allow_always_count}. Populated
+    # regardless of whether allow_always_count is 0 -- the consuming check filters.
+    exec_approvals_grants: list = field(default_factory=list)
+    exec_approvals_found: bool = False        # exec-approvals.json present and read
+    exec_approvals_parse_error: bool = False  # present but could not be parsed/read
     installed_skills: dict = field(default_factory=dict)  # skill name -> concatenated text
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
     installed_skill_shell: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .sh/.bash
@@ -1310,6 +1321,82 @@ def _collect_cron(home: Path, ctx: Context) -> None:
             ctx.cron_parse_error = True
 
 
+def _collect_exec_approvals(home: Path, ctx: Context) -> None:
+    """B-236 (B172): read-only collection of the standing OpenClaw exec-approvals
+    store (~/.openclaw/exec-approvals.json) into ``ctx.exec_approvals_grants``.
+
+    Grounded against the installed dist (exec-approvals-BIKWP8_V.js): the file is a
+    single top-level JSON object (written by OpenClaw itself via JSON.stringify --
+    never JSON5, so this reads it with plain ``json.loads``, not the config loader)
+    shaped ``{version, socket, defaults: {security, ask, askFallback, autoAllowSkills},
+    agents: {<agentId>: {security, ask, askFallback, allowlist: [{pattern, argPattern?,
+    source, id, ...}]}}}``. An ``agents.<id>.allowlist[]`` entry with
+    ``source == "allow-always"`` is a durable per-command exec approval persisted by a
+    historical "always allow" click -- a standing grant living entirely outside
+    openclaw.json that no check previously read (grep for "exec-approvals" across
+    clawseccheck/ was zero hits before this).
+
+    IMPORTANT (adversarially corrected during B-236's own review): OpenClaw computes
+    the EFFECTIVE exec policy as minSecurity(tools.exec.security, execApprovals.security)
+    + maxAsk(tools.exec.ask, execApprovals.ask) (bash-tools*.js:581-582;
+    exec-approvals-BIKWP8_V.js:1126-1140 -- runtime comment "Stricter values from
+    tools.exec and ...exec-approvals both apply"). A standing grant can only TIGHTEN
+    the openclaw.json gate, never loosen it -- so this collector exists to make a
+    persisted grant VISIBLE/inventoried (check_exec_approvals_grants, B172), not to
+    imply it bypasses tools.exec (it provably does not).
+
+    The file lives directly under ``home`` (a single fixed filename, not a
+    subdirectory to walk), so this checks ``is_symlink()`` itself rather than reusing
+    ``walk_dir_safely`` -- a symlinked store is treated as absent (never followed),
+    matching that helper's own symlink policy without walking the whole home tree just
+    to find one top-level file.
+
+    ``ctx.exec_approvals_found`` stays False when the file is absent -- a consuming
+    check reports UNKNOWN, never a fake PASS (Golden Rule #4, the B-228 pattern).
+    """
+    target = home / "exec-approvals.json"
+    if target.is_symlink() or not target.is_file():
+        return
+    try:
+        with open(target, "rb") as fp:
+            raw, truncated = _read_with_limit(fp, _MAX_EXEC_APPROVALS_BYTES)
+        if truncated:
+            ctx.limit_hits.append(
+                f"exec-approvals store '{target}' exceeded the "
+                f"{_MAX_EXEC_APPROVALS_BYTES // 1_000_000}MB cap — content beyond the "
+                "cap was NOT scanned"
+            )
+        store = json.loads(raw.decode("utf-8", errors="replace"))
+        if not isinstance(store, dict):
+            raise ValueError("exec-approvals.json root is not a JSON object")
+        agents = store.get("agents")
+        if not isinstance(agents, dict):
+            agents = {}
+        ctx.exec_approvals_found = True
+        for agent_id, agent in list(agents.items())[:_MAX_EXEC_APPROVALS_AGENTS]:
+            if not isinstance(agent, dict):
+                continue
+            allowlist = agent.get("allowlist")
+            allow_always_count = 0
+            if isinstance(allowlist, list):
+                allow_always_count = sum(
+                    1 for e in allowlist
+                    if isinstance(e, dict) and e.get("source") == "allow-always"
+                )
+            security = agent.get("security")
+            ask = agent.get("ask")
+            ctx.exec_approvals_grants.append({
+                "agent_id": agent_id if isinstance(agent_id, str) else str(agent_id),
+                "security": security if isinstance(security, str) else None,
+                "ask": ask if isinstance(ask, str) else None,
+                "allow_always_count": allow_always_count,
+            })
+    except (OSError, ValueError) as exc:
+        ctx.errors.append(f"could not parse {target}: {exc}")
+        ctx.exec_approvals_found = True
+        ctx.exec_approvals_parse_error = True
+
+
 def collect(home: Path | str = "~/.openclaw") -> Context:
     home = Path(home).expanduser()
     ctx = Context(home=home)
@@ -1389,6 +1476,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
                 ctx.errors.append(f"could not read {f}: {exc}")
 
     _collect_cron(home, ctx)
+    _collect_exec_approvals(home, ctx)
     _read_installed_skills(home, ctx)
     return ctx
 
