@@ -995,6 +995,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B180 - Injected directive found in agent memory (untrusted re-consumption surface)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Log Threat Intel / Memory Re-consumption
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: LLM01 Prompt Injection, LLM04 Data and Model Poisoning
+- What it checks: Injected directive found in agent memory (untrusted re-consumption surface)
+- Remediation:
+  - none
+
 ## Hardening checks
 
 ### B67 - Per-source tool-output trust contracts
