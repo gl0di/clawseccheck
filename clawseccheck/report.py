@@ -22,7 +22,7 @@ from .catalog import (
     ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
 from .ansi import paint
-from .brand import LOGO_SVG
+from .brand import LOGO_SVG, grade_ansi, grade_hex
 from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
 from .guide import suggest_actions
@@ -117,8 +117,11 @@ def _sev_token(severity: str, *, ascii_only: bool = False, color: bool = False) 
     return f"{_SEV_GLYPH.get(severity, '⚪')} {word}"
 
 # ── ANSI colour palette (opt-in; see ansi.py) ────────────────────────────────
-# Grade → colour for the header grade letter + score-bar fill.
-_GRADE_COLOR = {"A": "green", "B": "green", "C": "yellow", "D": "bright_yellow", "F": "red"}
+# Grade → colour for the header grade letter + score-bar fill. Sourced from
+# brand.GRADE_ANSI (single source of truth) via _grade_color()/grade_ansi() below —
+# a *second*, module-level `_GRADE_COLOR` name must never be (re)introduced here: it
+# previously shadowed this one with a hex dict meant for the SVG badge, which silently
+# killed terminal grade colouring (see brand.py's module docstring).
 # Status → colour for finding icons / coverage states.
 _STATUS_COLOR = {
     FAIL: "red", WARN: "yellow", PASS: "green", UNKNOWN: "grey",
@@ -136,8 +139,12 @@ DRIFT_MIN_SCORED = 20  # minimum scored_total before the staleness nudge is even
 
 
 def _grade_color(grade: str) -> str:
-    """Map a grade label (possibly 'A+', 'B-', …) to a palette colour name."""
-    return _GRADE_COLOR.get((grade or "")[:1].upper(), "grey")
+    """Map a grade label (possibly 'A+', 'B-', …) to a palette colour name.
+
+    Terminal-only (Tier 2) — delegates to brand.grade_ansi() so this module never
+    hand-keeps its own copy of the grade->colour ramp.
+    """
+    return grade_ansi(grade)
 
 
 def _color_icons(icon: dict, color: bool) -> dict:
@@ -1075,7 +1082,9 @@ def render_events(events, ascii_only: bool = False) -> str:
     return _asciify(out) if ascii_only else out
 
 
-_GRADE_COLOR = {"A": "#4c1", "B": "#97ca00", "C": "#dfb317", "D": "#fe7d37", "F": "#e05d44"}
+# Grade → hex colour for the SVG badge (HTML/badge-only, Tier 3) is brand.GRADE_HEX,
+# read via brand.grade_hex() below — never a second local `_GRADE_COLOR` dict (that
+# used to shadow the ANSI one above; see the comment near its definition).
 
 # The badge's mascot mark: a scaled-down nested-<svg> instance of brand.LOGO_SVG's own
 # vector paths — NOT the 🦞 mascot glyph. An emoji would break the badge's ASCII-safety
@@ -1103,7 +1112,7 @@ def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     n_hidden = sum(1 for f in findings if surfaced_despite_suppression(f))
     if n_hidden:
         value += f" *{n_hidden} suppressed"
-    color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
+    color = grade_hex(score.grade)
     icon_w = _LOGO_SIZE + 8 if _LOGO_INNER else 0  # icon + left/right padding; 0 if unavailable
     lw = 8 + len(label) * 6 + icon_w  # rough text widths
     vw = 8 + len(value) * 7
@@ -1614,7 +1623,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
 def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str:
     """Standalone self-contained HTML report (inline CSS, no external assets).
 
-    Includes grade badge (colored by _GRADE_COLOR), score, Lethal Trifecta ratio,
+    Includes grade badge (colored via brand.grade_hex()), score, Lethal Trifecta ratio,
     and FAIL/WARN findings list. Owner view — shows findings with a note that
     this is private and must not be shared publicly.
 
@@ -1624,7 +1633,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
 
-    badge_color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
+    badge_color = grade_hex(score.grade)
     trifecta = _trifecta_ratio(findings)
     sev_color = {CRITICAL: "#e05d44", HIGH: "#fe7d37",
                  MEDIUM: "#dfb317", LOW: "#97ca00"}
