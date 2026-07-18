@@ -11,6 +11,7 @@ from .. import attest as _attest
 from ..catalog import (
     CRITICAL,
     FAIL,
+    HIGH,
     PASS,
     UNKNOWN,
     WARN,
@@ -955,6 +956,193 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         PASS,
         "No dangerous break-glass override flags enabled.",
         "Keep these break-glass toggles off unless an incident temporarily requires one.",
+        pass_confidence="verified",
+    )
+
+
+# B171 (B-235): the privileged, opt-in commands.* subflags this check treats as the
+# "high-power in-chat surface" -- bash (raw host shell), config (read/write the running
+# config from chat, incl. secrets/gateway auth), mcp (rewrite mcp.servers -- point the
+# agent at an attacker-controlled MCP server), plugins (toggle plugin enablement). All
+# four default to false/unset in the dist CommandsSchema (docs/research/
+# openclaw-schema-recon.md §18) -- an absent/default config never trips this check.
+# `debug` (runtime-only overrides) is folded in at WARN-only weight -- narrower blast
+# radius than the four above, never drives a FAIL on its own.
+# `restart` is DELIBERATELY EXCLUDED: it `.default(true)` in the dist schema, so treating
+# it as a danger-enabled signal would false-FAIL every default config (Golden Rule #5).
+_B171_HIGH_POWER = {
+    "bash": "run arbitrary host shell commands (raw RCE)",
+    "config": "read/write the running OpenClaw config from chat (incl. secrets/gateway auth)",
+    "mcp": "rewrite mcp.servers from chat (point the agent at an attacker-controlled MCP server)",
+    "plugins": "toggle plugin enablement from chat",
+}
+_B171_CRITICAL_COMMANDS = frozenset({"bash", "config"})
+_B171_WARN_ONLY_COMMAND = "debug"
+_B171_WARN_ONLY_LABEL = "runtime-only config overrides from chat"
+
+
+def _b171_wildcard_allow_from_evidence(cfg: dict) -> list[str]:
+    """Wildcard-open commands.* gate entries.
+
+    Reuses the B-231 wildcard-authority detector (``_is_owner_wildcard_allow_from``) over
+    BOTH ``commands.ownerAllowFrom`` and every per-provider/global list inside
+    ``commands.allowFrom`` (a record keyed by provider id or the literal ``"*"`` for "all
+    providers" -- ``resolveCommandsAllowFromList`` in the dist's ``command-auth-*.js``,
+    grounded 2026-07-18).
+    """
+    out: list[str] = []
+    owner_allow_from = dig(cfg, "commands.ownerAllowFrom")
+    if _is_owner_wildcard_allow_from(owner_allow_from):
+        out.append("commands.ownerAllowFrom contains '*'")
+    allow_from = dig(cfg, "commands.allowFrom")
+    if isinstance(allow_from, dict):
+        for key, value in allow_from.items():
+            if _is_owner_wildcard_allow_from(value):
+                out.append(f"commands.allowFrom[{key!r}] contains '*'")
+    return out
+
+
+def check_privileged_commands_exposure(ctx: Context) -> Finding:
+    """B171 (B-235) — commands.bash/config/mcp/plugins in-chat privileged-command surface.
+
+    OpenClaw's root ``commands.*`` block exposes raw shell (``bash``), full config
+    read/write (``config``), MCP-server-registry rewrite (``mcp``), and plugin-enablement
+    toggling (``plugins``) as IN-CHAT commands, gated only by their own owner/elevated
+    allow-from mechanism (``commands.ownerAllowFrom`` / ``commands.allowFrom`` /
+    ``commands.useAccessGroups``) — entirely separate from B2's channel dmPolicy/
+    groupPolicy gate and B3's agent-tool allowlist. Before this check, ClawSecCheck had
+    ZERO references to commands.bash/config/mcp/plugins (B-235): a config with all four
+    enabled plus an open channel scored identically to the closed-channel baseline.
+
+    FAIL/CRITICAL — ``bash`` or ``config`` is enabled and the gate is wildcard-open
+        (``commands.ownerAllowFrom`` or an ``commands.allowFrom`` list contains ``"*"``),
+        or is completely unconfigured on a channel with an open dmPolicy/groupPolicy —
+        either way ANY chat sender who reaches that channel gets raw shell or full
+        config-mutation.
+    FAIL/HIGH — ``mcp`` or ``plugins`` is enabled under the same wildcard/open-channel-
+        with-no-gate condition (still unauthenticated, narrower blast radius).
+    WARN — a privileged command (incl. ``debug``) is enabled with no
+        ownerAllowFrom/allowFrom configured, on a channel that is NOT open (allowlist/
+        paired/pairing/disabled still constrains who reaches the command layer, but no
+        owner-scoped allowlist narrows it further — see docs/research §18); or
+        ``commands.useAccessGroups`` is explicitly ``false`` alongside an enabled
+        privileged command.
+    UNKNOWN — a privileged command is enabled with no gate configured and no channels are
+        configured at all (reachability genuinely can't be determined), or openclaw.json
+        is unreadable.
+    PASS — no privileged commands.* subflag is enabled, or every enabled one has a
+        scoped, non-wildcard ownerAllowFrom/allowFrom.
+    """
+    unreadable = _config_unreadable("B171", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+
+    # Literal dig() calls (not an f-string in a loop) so the §4 schema-grounding AST
+    # scanner (tests/test_schema_grounding.py) can see each path statically.
+    _commands_flags = {
+        "bash": bool(dig(cfg, "commands.bash")),
+        "config": bool(dig(cfg, "commands.config")),
+        "mcp": bool(dig(cfg, "commands.mcp")),
+        "plugins": bool(dig(cfg, "commands.plugins")),
+        "debug": bool(dig(cfg, "commands.debug")),
+    }
+    enabled_high = [k for k in _B171_HIGH_POWER if _commands_flags[k]]
+    debug_enabled = _commands_flags[_B171_WARN_ONLY_COMMAND]
+    if not enabled_high and not debug_enabled:
+        return _finding(
+            "B171",
+            PASS,
+            "No privileged in-chat commands.* surface (bash/config/mcp/plugins/debug) is "
+            "enabled.",
+            "Keep these disabled unless you specifically need in-chat privileged control; "
+            "if you do enable one, scope commands.ownerAllowFrom/allowFrom tightly.",
+            pass_confidence="verified",
+        )
+
+    enabled_all = enabled_high + ([_B171_WARN_ONLY_COMMAND] if debug_enabled else [])
+    descriptions = [
+        f"commands.{k} enabled ({_B171_HIGH_POWER.get(k, _B171_WARN_ONLY_LABEL)})"
+        for k in enabled_all
+    ]
+
+    wildcard_ev = _b171_wildcard_allow_from_evidence(cfg)
+    if wildcard_ev:
+        severity = CRITICAL if enabled_high and set(enabled_high) & _B171_CRITICAL_COMMANDS else HIGH
+        return _finding(
+            "B171",
+            FAIL,
+            "Privileged in-chat command(s) enabled with a wildcard-open owner/allow-from "
+            "gate — ANY chat sender who reaches the gate is authorized: "
+            + "; ".join(descriptions),
+            "Replace the wildcard with an explicit, scoped allowlist — e.g. "
+            "commands.ownerAllowFrom / commands.allowFrom to your own channel-native "
+            "ID(s). Never leave either as an unscoped '*'.",
+            evidence=descriptions + wildcard_ev,
+            severity=severity,
+        )
+
+    owner_allow_from = dig(cfg, "commands.ownerAllowFrom")
+    allow_from = dig(cfg, "commands.allowFrom")
+    gate_configured = bool(owner_allow_from) or bool(allow_from)
+    open_ch = _open_channels(cfg)
+
+    if not gate_configured and open_ch:
+        severity = CRITICAL if enabled_high and set(enabled_high) & _B171_CRITICAL_COMMANDS else HIGH
+        return _finding(
+            "B171",
+            FAIL,
+            "Privileged in-chat command(s) enabled with NO owner/allow-from gate "
+            "configured, on a channel with an open dm/group policy — ANY sender on that "
+            "channel is authorized (an empty commands.ownerAllowFrom/allowFrom removes "
+            "the owner-only check; see docs/research §18): " + "; ".join(descriptions),
+            "Set commands.ownerAllowFrom or commands.allowFrom to your own channel-native "
+            "ID(s), and/or set the open channel's dmPolicy/groupPolicy to 'allowlist' "
+            "(see B2).",
+            evidence=descriptions + [f"open channel(s): {', '.join(open_ch)}"],
+            severity=severity,
+        )
+
+    if not gate_configured and not _channels(cfg):
+        return _finding(
+            "B171",
+            UNKNOWN,
+            "Privileged in-chat command(s) enabled with no owner/allow-from gate "
+            "configured, and no channels are configured to assess reachability through: "
+            + "; ".join(descriptions),
+            "Set commands.ownerAllowFrom or commands.allowFrom to your own channel-native "
+            "ID(s) before connecting any channel.",
+            evidence=descriptions,
+        )
+
+    warn_ev = list(descriptions)
+    if not gate_configured:
+        warn_ev.append(
+            "commands.ownerAllowFrom/allowFrom not configured — any sender the connected, "
+            "non-open channel(s) already authorize is treated as command-owner"
+        )
+    if dig(cfg, "commands.useAccessGroups") is False:
+        warn_ev.append(
+            "commands.useAccessGroups=false — access-group enforcement layer disabled"
+        )
+    if warn_ev != descriptions:
+        return _finding(
+            "B171",
+            WARN,
+            "Privileged in-chat command(s) enabled with a broad or partially-configured "
+            "gate: " + "; ".join(warn_ev),
+            "Scope commands.ownerAllowFrom/allowFrom to your own channel-native ID(s), and "
+            "keep commands.useAccessGroups enabled.",
+            evidence=warn_ev,
+        )
+
+    return _finding(
+        "B171",
+        PASS,
+        "Privileged in-chat command(s) enabled with a scoped owner/allow-from gate: "
+        + "; ".join(descriptions),
+        "Keep commands.ownerAllowFrom/allowFrom scoped to your own channel-native ID(s).",
+        evidence=descriptions,
         pass_confidence="verified",
     )
 

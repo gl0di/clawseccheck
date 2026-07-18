@@ -236,6 +236,7 @@ from ._config import (
     check_hook_template_content,
     check_least_privilege,
     check_local_first,
+    check_privileged_commands_exposure,
     check_proxy_header_forging,
     check_sandbox,
     check_secrets,
@@ -1105,6 +1106,7 @@ CHECKS = [
     check_multiagent_exposure,
     check_delegation_reassembly,
     check_dangerous_overrides,
+    check_privileged_commands_exposure,  # B171 — commands.bash/config/mcp/plugins gate (B-235)
     check_hook_template_content,  # B169 — hooks.mappings[] template content scan (B-231)
     check_fs_write_exposure,
     check_controlui_origins,

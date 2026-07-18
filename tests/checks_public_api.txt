@@ -194,6 +194,7 @@ check_per_source_trust_contracts
 check_persona_jailbreak
 check_plugin_app_server_command
 check_plugin_permission_mode
+check_privileged_commands_exposure
 check_prompt_self_replication
 check_prose_bulk_exfil
 check_proxy_header_forging

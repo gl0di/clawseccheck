@@ -24,7 +24,14 @@ auth.profiles
 browser.ssrfPolicy.dangerouslyAllowPrivateNetwork
 channels
 channels.defaults.contextVisibility
+commands.allowFrom
+commands.bash
+commands.config
+commands.debug
+commands.mcp
 commands.ownerAllowFrom
+commands.plugins
+commands.useAccessGroups
 config.allowPrivateNetwork
 config.appServer.command
 config.permissionMode
