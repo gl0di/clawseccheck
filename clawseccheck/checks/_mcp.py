@@ -34,6 +34,7 @@ from ..textnorm import (
 from ._shared import (
     SECRET_KEY_RE,
     _config_unreadable,
+    _is_secret_reference,
     _KNOWN_EXFIL_HOST_RE,
     _finding,
     _mcp_has_remote,
@@ -1141,6 +1142,83 @@ _MCP_SECRET_ENV_RE = re.compile(
 )
 
 
+# B-248: _MCP_SECRET_ENV_RE above only matches the secret keyword as a PREFIX
+# (SECRET*, API_KEY*, TOKEN*) or one of a handful of fully-named alternatives — a
+# compound name that carries the keyword as a SUFFIX or in the middle (e.g.
+# STRIPE_SECRET_KEY, DB_PASSWORD) matches none of those alternatives and was
+# silently missed. Widening the NAME match alone would risk sweeping in a benign
+# var whose name merely mentions a secret-ish word but whose value is not itself a
+# credential (e.g. NOTIFY_TOKEN_ENABLED="true", SESSION_TOKEN_TTL_SECONDS="3600" —
+# NOT API_KEY_HEADER_NAME/TOKEN_TTL_SECONDS: those match _MCP_SECRET_ENV_RE's own
+# API_KEY*/TOKEN* prefix alternatives unconditionally and never reach this fallback
+# at all; that is a separate, pre-existing false positive, not one this fallback
+# introduces or fixes) — so a compound-name hit is corroborated by the VALUE itself
+# looking like real secret material via _mcp_value_looks_secret() (C-135) before it
+# counts as a hit; see the env/header loops below. Reuses the same SECRET_KEY_RE
+# substring match _secret_paths (checks/_shared.py) already uses for the generic
+# config-wide scan.
+#
+# B-248 follow-up (FALSE POSITIVE): the value-shape test originally accepted ANY
+# whitespace-free string >=8 chars with a digit or "special" char — and a POSIX/
+# Windows path or a bare URL trivially satisfies that via its own "/" or ":".
+# That misfired on the Docker-secrets / Kubernetes-projected-token / systemd-
+# credentials convention, where the env var deliberately holds a PATH to the
+# secret (DB_PASSWORD_FILE=/run/secrets/db_password, GITHUB_TOKEN_PATH=/var/run/
+# secrets/kubernetes.io/serviceaccount/token) or an unrelated public endpoint
+# (OAUTH_TOKEN_ENDPOINT=https://login.microsoftonline.com/...) — exactly the
+# operator who did NOT put the secret in the environment. A path or bare URL is
+# an INDIRECTION, never the secret material itself, so it is excluded here. A
+# URL that DOES embed a live inline credential (scheme://user:pass@host) is
+# still caught — by the separate, value-shape-only _MCP_CONN_STRING_CREDENTIAL_RE
+# check in the env loop below, which is untouched by this exclusion.
+_MCP_PATH_OR_URL_SHAPED_RE = re.compile(
+    r"^(?:/|~/|\.{1,2}/|[a-zA-Z]:[\\/]|[a-zA-Z][a-zA-Z0-9+.-]*://)"
+)
+
+
+def _mcp_value_looks_secret(val, min_len: int = 8) -> bool:
+    """True when *val* is plausibly an actual secret/credential value, not a
+    boolean flag, a plain number, an empty placeholder, a filesystem path or bare
+    URL (an indirection to a secret, not the secret itself), or a SecretRef
+    indirection (C-226). Deliberately does not require the value to already look
+    "random" — only that it is non-trivial and not an obvious non-secret — so
+    this stays a corroborating signal alongside a suspicious NAME, never a
+    name-only guess.
+    """
+    if not isinstance(val, str):
+        return False
+    v = val.strip()
+    if len(v) < min_len or _is_secret_reference(v):
+        return False
+    if any(ch.isspace() for ch in v):
+        return False
+    if v.lower() in {"true", "false", "null", "none", "undefined", "unset", ""}:
+        return False
+    if v.isdigit():
+        return False
+    if _MCP_PATH_OR_URL_SHAPED_RE.match(v):
+        return False
+    has_digit = any(c.isdigit() for c in v)
+    has_special = any(not c.isalnum() for c in v)
+    return has_digit or has_special or len(v) >= 20
+
+
+# B-248: a connection-string value carries its own inline credential in URI
+# userinfo (scheme://user:password@host) no matter what the env var is NAMED —
+# POSTGRES_CONNECTION_STRING, DB_DSN, REDIS_URL, and countless other real,
+# non-`DATABASE_URL` names all still embed a live password this way. This is
+# pure VALUE-shape evidence (a literal embedded credential), so it needs no name
+# widening at all and cannot be fooled by a name that gives no hint. The username
+# is optional (Redis's own convention omits it: `redis://:password@host`), so
+# that segment uses `*` not `+`; the password segment is captured (and required
+# non-empty) so a SecretRef indirection sitting in that position (an unusual but
+# possible templated value) is not misread as a live credential, and a bare
+# `user@host` with no password at all correctly does not match.
+_MCP_CONN_STRING_CREDENTIAL_RE = re.compile(
+    r"^[a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@'\"]*:([^\s@'\"]+)@[^\s@'\"]+"
+)
+
+
 # Metadata / internal IPs in allowedHosts.
 _MCP_META_IP_RE = re.compile(
     r"^(?:"
@@ -1158,11 +1236,20 @@ _MCP_META_IP_RE = re.compile(
 # B-230: a bearer/API credential handed to an MCP endpoint via its own `headers` config
 # (grounded: mcp.servers.*.headers is a real field — "HTTP transport: extra HTTP headers
 # sent with every request", dist types.openclaw d.ts) — a compromised or rogue MCP server
-# can capture and replay it. Header-SCOPED matcher: deliberately NOT folded into the
-# broader SECRET_KEY_RE (checks/_shared.py), which feeds redaction and stays narrow on
-# purpose; this only inspects header keys/values, never a generic key name elsewhere.
+# can capture and replay it. Header-SCOPED exact matcher for the small handful of fixed,
+# unambiguous header names (any value under one of these is a credential, full stop —
+# no value-shape corroboration needed).
 _MCP_HEADER_AUTH_KEY_RE = re.compile(r"^(authorization|proxy-authorization|x-api-key)$", re.I)
 _MCP_HEADER_BEARER_VALUE_RE = re.compile(r"^\s*bearer\s+\S+", re.I)
+
+
+# B-248: a custom header name outside that fixed allowlist (e.g. Figma's real MCP
+# auth header, `X-Figma-Token`) still forwards a credential — the vendor's own header
+# naming scheme is unbounded, so this falls back to the broader SECRET_KEY_RE
+# (checks/_shared.py) substring match, corroborated by the header's VALUE also
+# looking like real secret material (_mcp_value_looks_secret, C-135) so a header
+# whose name merely mentions a secret-ish word but carries a non-credential value
+# (e.g. a boolean feature flag) does not misfire.
 
 
 # B-230: docker.sock / --privileged in an MCP server's OWN stdio launch command are the
@@ -1260,8 +1347,24 @@ def _mcp_server_risks(name: str, spec: dict) -> tuple[list[str], list[str]]:
             if key == "*" or val == "*":
                 fails.append(f"{name}: env passthrough '*' (all env vars exposed)")
                 break
-            if _MCP_SECRET_ENV_RE.match(str(key)):
+            key_s = str(key)
+            if _MCP_SECRET_ENV_RE.match(key_s):
                 warns.append(f"{name}: env passes broad secret var {key}")
+            elif SECRET_KEY_RE.search(key_s) and _mcp_value_looks_secret(val):
+                # B-248: a compound secret-ish name (STRIPE_SECRET_KEY, DB_PASSWORD, ...)
+                # that _MCP_SECRET_ENV_RE's prefix-anchored alternatives miss, corroborated
+                # by the value itself looking like real secret material.
+                warns.append(f"{name}: env passes credential-shaped var {key}")
+            elif isinstance(val, str):
+                m = _MCP_CONN_STRING_CREDENTIAL_RE.match(val.strip())
+                if m and not _is_secret_reference(m.group(1)):
+                    # B-248: a connection-string value embeds its own credential no
+                    # matter what the var is NAMED (POSTGRES_CONNECTION_STRING, DB_DSN,
+                    # REDIS_URL, ...). The value itself is never included in evidence.
+                    warns.append(
+                        f"{name}: env var {key} embeds a connection-string credential "
+                        "(inline user:password in a URI)"
+                    )
     elif env == "*":
         fails.append(f"{name}: env passthrough '*' (all env vars exposed)")
 
@@ -1269,19 +1372,25 @@ def _mcp_server_risks(name: str, spec: dict) -> tuple[list[str], list[str]]:
     if spec.get("tokenPassthrough") is True or spec.get("token-passthrough") is True:
         fails.append(f"{name}: tokenPassthrough=true (host token forwarded to MCP server)")
 
-    # ---- B-230: headers.Authorization / bearer credential forwarded to the endpoint ----
+    # ---- B-230/B-248: headers.Authorization / bearer / credential-shaped header ----
     # Real MCP field (dist d.ts): "HTTP transport: extra HTTP headers sent with every
-    # request." Header-scoped: only the header key/value shapes are inspected here, never
-    # widening the global SECRET_KEY_RE (which feeds redaction elsewhere). Only the header
-    # NAME is echoed — the value itself is never included in evidence.
+    # request." Only the header NAME is ever echoed — the value itself is never
+    # included in evidence.
     headers = spec.get("headers") or {}
     if isinstance(headers, dict):
         for hkey, hval in headers.items():
             hkey_s = str(hkey).strip()
-            if _MCP_HEADER_AUTH_KEY_RE.match(hkey_s) or _MCP_HEADER_BEARER_VALUE_RE.match(str(hval)):
+            hval_s = hval if isinstance(hval, str) else str(hval)
+            if _MCP_HEADER_AUTH_KEY_RE.match(hkey_s) or _MCP_HEADER_BEARER_VALUE_RE.match(hval_s):
                 warns.append(
                     f"{name}: headers.{hkey_s} forwards a credential to the MCP endpoint "
                     "— a compromised or rogue server can capture and replay it"
+                )
+                break
+            if SECRET_KEY_RE.search(hkey_s) and _mcp_value_looks_secret(hval_s):
+                warns.append(
+                    f"{name}: headers.{hkey_s} forwards a credential-shaped value to the "
+                    "MCP endpoint — a compromised or rogue server can capture and replay it"
                 )
                 break
 

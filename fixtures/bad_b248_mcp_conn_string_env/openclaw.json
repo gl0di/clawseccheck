@@ -1,0 +1,14 @@
+{
+  "mcp": {
+    "servers": {
+      "crm-db": {
+        "command": "node",
+        "args": ["index.js"],
+        "env": {
+          "POSTGRES_CONNECTION_STRING": "postgres://appuser:not-a-real-password@crm-db.internal:5432/crm",
+          "DB_PASSWORD": "not-a-real-password-1234"
+        }
+      }
+    }
+  }
+}
