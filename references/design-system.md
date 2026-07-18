@@ -251,10 +251,10 @@ instead of a standalone headline. Source: `audit.py --json` (guided) / `audit.py
 **`text` profile (abridged — full section-by-section spec lives in `SKILL.md` Step 3):**
 
 ```text
-🦞 OpenClaw Security Audit — Grade F · 49/100
+🦞 OpenClaw Security Audit · Grade F · 49/100
 ████████░░░░░░░░  ·  21 issues
 
-— Findings —
+· Findings ·
 ┌──────────────────────────────
 │ 🌐 Exposure & Network — 1 issue(s)
 └──────────────────────────────
@@ -344,7 +344,7 @@ reports either "nothing changed" or a leveled list of alerts.
 **`text` profile (baseline):**
 
 ```text
-ClawSecCheck - Threat Monitor
+🦞 ClawSecCheck · Threat Monitor
 ==============================
 Current: 74/100  Grade: C
 
@@ -525,7 +525,7 @@ ratio, and nothing else** — no findings, no titles, no evidence, ever.
 ┌───────────────────────────────────────┐
 │  OpenClaw Security: C  ( 74/100)      │
 │  Lethal Trifecta: 2/3                 │
-│  audited by ClawSecCheck 🔍           │
+│  audited by ClawSecCheck 🦞           │
 └───────────────────────────────────────┘
 ```
 
@@ -595,7 +595,7 @@ grounding flag (in parens) so this palette and `cli.py` can't silently drift —
 **`text` profile (baseline):**
 
 ```text
-🦞 ClawSecCheck — everything it can do
+🦞 ClawSecCheck · everything it can do
 
 Scan  ✅ read-only
   Quick scan        "go" / "1"        {N} checks across your OpenClaw setup        (default)

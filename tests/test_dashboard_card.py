@@ -63,7 +63,7 @@ class TestRenderDashboard:
         out, findings = self._out()
         score = compute(findings)
         first = out.splitlines()[0]
-        assert first.startswith("🦞 OpenClaw Security Audit — Grade ")
+        assert first.startswith("🦞 OpenClaw Security Audit · Grade ")
         assert f"· {score.score}/100" in first
 
     def test_score_bar_and_issue_count(self):
@@ -83,7 +83,7 @@ class TestRenderDashboard:
 
     def test_findings_header_and_family_emoji(self):
         out, _ = self._out()
-        assert "— Findings —" in out
+        assert "· Findings ·" in out
         assert "│ 🌐 Exposure & Network" in out
         assert "│ 🔑 Privilege & Execution" in out
 

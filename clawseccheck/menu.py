@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from datetime import date
 
+from . import brand
+
 # (number, emoji, title, hint). The emoji is dropped in --ascii mode.
 # Each item maps to a real capability: 1 -> --full (audit + live self-test),
 # 2 -> --vet / --vet-mcp, 3 -> the report/save/trend/badge family, 4 -> the full
@@ -93,8 +95,7 @@ def render_onboarding(*, reason: str, home: str, n_checks: int | None = None,
     no I/O; the caller passes the (already-sanitized) home path and check count.
     English only; the host agent localizes. Read-only, fabricates no findings.
     """
-    sep = " - " if ascii_only else " · "
-    head = f"ClawSecCheck{sep}welcome" if ascii_only else f"🦞 ClawSecCheck{sep}welcome"
+    head = brand.header(subtitle="welcome", ascii_only=ascii_only)
 
     if reason == "empty":
         lead = f"{home} is here, but it's empty — no OpenClaw config in it yet."
@@ -122,8 +123,7 @@ def render_onboarding(*, reason: str, home: str, n_checks: int | None = None,
 def render_menu(*, version, build_age_days=None, last_check_days=None,
                 stale: bool = False, ascii_only: bool = False) -> str:
     """Render the capability menu as plain text. Pure — no I/O, no clock read."""
-    sep = " - " if ascii_only else " · "
-    head = f"ClawSecCheck{sep}v{version}" if ascii_only else f"🦞 ClawSecCheck{sep}v{version}"
+    head = brand.header(subtitle=f"v{version}", ascii_only=ascii_only)
     lines = [head, ""]
 
     for num, emoji, title, hint in _ITEMS:

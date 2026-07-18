@@ -154,7 +154,7 @@ def test_trend_prints_trend_line(tmp_path, capsys):
     hist = tmp_path / "history.jsonl"
     main(["--home", VULN] + BASE + ["--trend", "--history", str(hist)])
     out = capsys.readouterr().out
-    # render_trend header is "ClawSecCheck - Score Trend"
+    # render_trend header is "🦞 ClawSecCheck · Score Trend"
     assert "Score Trend" in out or "history" in out.lower() or "No history" in out or any(
         c.isdigit() for c in out
     )
@@ -221,7 +221,7 @@ def test_next_flag_standalone_no_report(capsys):
     """--next must not also print the full report."""
     main(["--home", VULN] + BASE + ["--next"])
     out = capsys.readouterr().out
-    assert "ClawSecCheck - OpenClaw Security Audit" not in out
+    assert "🦞 ClawSecCheck · OpenClaw Security Audit" not in out
 
 
 def test_next_flag_safe_fixture(capsys):
