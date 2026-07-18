@@ -330,10 +330,16 @@ CATALOG: list[CheckMeta] = [
     # agent's LLM endpoint. Dual-use caveat (explicit in the originating task): a custom
     # https:// baseUrl (self-hosted gateway / corporate proxy) is legitimate and
     # indistinguishable from an attacker repoint by static inspection alone, so it is
-    # NEVER flagged. Only a cleartext http:// scheme to a non-loopback host is sound,
-    # unambiguous positive evidence — the provider API key (Authorization header) and
-    # the full outbound model stream then travel in plaintext. FAIL-capable but scoped
-    # tight (HIGH confidence, deterministic field read) to hold Golden Rule #5.
+    # NEVER flagged. A cleartext http:// scheme to a public IP or unrecognized dotted
+    # hostname is sound, unambiguous positive evidence — FAIL. A cleartext http:// to a
+    # private/CGNAT-range IP or a bare single-label hostname (e.g. a docker-compose
+    # sibling service) is on-LAN-only exposure, indistinguishable from a benign local
+    # model runtime (Ollama/LM Studio, which carry no API key at all) — WARN, not FAIL
+    # (B-241 adversarial review, confirmed FP: OpenClaw's own
+    # LMSTUDIO_DOCKER_HOST_BASE_URL / LOCAL_OLLAMA_HOSTNAMES / isLoopbackOllamaBaseUrl
+    # treat host.docker.internal, 0.0.0.0, and 10/8+172.16/12+192.168/16+100.64.0.0/10
+    # as local — those FAILed before this fix). FAIL-capable but scoped tight (HIGH
+    # confidence, deterministic field read) to hold Golden Rule #5.
     CheckMeta(
         "B178",
         "Cleartext http:// baseUrl on a model provider (API-key + traffic leak)",

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from clawseccheck.catalog import FAIL, PASS, UNKNOWN
+from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_provider_baseurl
 from clawseccheck.collector import Context, collect
 
@@ -147,3 +147,98 @@ def test_http_to_ipv6_loopback_passes():
 def test_unparseable_config_is_unknown():
     f = check_provider_baseurl(_ctx({}, parse_error=True))
     assert f.status == UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# PASS: cleartext http:// to a hostname OpenClaw's own runtime treats as "the
+# local machine" for a model-provider baseUrl (CLAWSECCHECK-B-241 — confirmed FP:
+# these are FIRST-PARTY OpenClaw constants/hostnames, not attacker values).
+# Grounded: selection-JInn13lc.js isExplicitLocalHostnameBaseUrl / isLoopbackOllamaBaseUrl,
+# discovery-shared-XxlmIfaG.js LOCAL_OLLAMA_HOSTNAMES,
+# runtime-C40mDMdO.d.ts LMSTUDIO_DOCKER_HOST_BASE_URL.
+# ---------------------------------------------------------------------------
+
+def test_http_to_docker_host_internal_passes():
+    """The exact value of OpenClaw's own LMSTUDIO_DOCKER_HOST_BASE_URL constant."""
+    cfg = {"models": {"providers": {"lmstudio": {"baseUrl": "http://host.docker.internal:1234/v1"}}}}
+    f = check_provider_baseurl(_ctx(cfg))
+    assert f.status == PASS
+
+
+def test_http_to_orb_internal_hostnames_pass():
+    for host in ("docker.orb.internal", "host.orb.internal"):
+        cfg = {"models": {"providers": {"p": {"baseUrl": f"http://{host}:11434/v1"}}}}
+        assert check_provider_baseurl(_ctx(cfg)).status == PASS
+
+
+def test_http_to_unspecified_ipv4_passes():
+    """0.0.0.0 as a baseUrl target is in OpenClaw's own LOCAL_OLLAMA_HOSTNAMES."""
+    cfg = {"models": {"providers": {"ollama": {"baseUrl": "http://0.0.0.0:11434/v1"}}}}
+    f = check_provider_baseurl(_ctx(cfg))
+    assert f.status == PASS
+
+
+def test_http_to_unspecified_ipv6_passes():
+    cfg = {"models": {"providers": {"ollama": {"baseUrl": "http://[::]:11434/v1"}}}}
+    f = check_provider_baseurl(_ctx(cfg))
+    assert f.status == PASS
+
+
+def test_clean_fixture_local_model_baseurl_passes():
+    f = check_provider_baseurl(collect(FIXTURES / "clean_b178_local_model_baseurl"))
+    assert f.status == PASS
+
+
+# ---------------------------------------------------------------------------
+# WARN (not FAIL): cleartext http:// to a private/CGNAT-range host, or a bare
+# single-label hostname — an on-LAN-only exposure, ambiguous with a benign
+# homelab/Docker-Compose setup (CLAWSECCHECK-B-241 confirmed FP direction).
+# Grounded: selection-JInn13lc.js isLoopbackOllamaBaseUrl (10/8, 172.16/12,
+# 192.168/16, 100.64.0.0/10 CGNAT) and isBareProviderHostnameBaseUrl (no dot/colon).
+# ---------------------------------------------------------------------------
+
+def test_http_to_lan_ip_warns_not_fails():
+    cfg = {"models": {"providers": {"ollama-lan": {"baseUrl": "http://192.168.1.50:11434/v1"}}}}
+    f = check_provider_baseurl(_ctx(cfg))
+    assert f.status == WARN
+    blob = _blob(f)
+    assert "192.168.1.50" in blob
+    # the false API-key claim from the original FP report must not reappear
+    assert "the provider API key and the full outbound model stream travel in cleartext" not in blob
+
+
+def test_http_to_docker_compose_bare_hostname_warns():
+    cfg = {"models": {"providers": {"p": {"baseUrl": "http://ollama:11434/v1"}}}}
+    f = check_provider_baseurl(_ctx(cfg))
+    assert f.status == WARN
+
+
+def test_http_to_tailscale_cgnat_warns():
+    cfg = {"models": {"providers": {"p": {"baseUrl": "http://100.100.5.9:4000/v1"}}}}
+    f = check_provider_baseurl(_ctx(cfg))
+    assert f.status == WARN
+
+
+def test_http_to_10_range_warns():
+    cfg = {"models": {"providers": {"p": {"baseUrl": "http://10.0.12.4:4000/v1"}}}}
+    f = check_provider_baseurl(_ctx(cfg))
+    assert f.status == WARN
+
+
+def test_bad_fixture_private_network_baseurl_warns():
+    f = check_provider_baseurl(collect(FIXTURES / "bad_b178_private_network_baseurl"))
+    assert f.status == WARN
+
+
+# ---------------------------------------------------------------------------
+# Regression: the genuinely dangerous case must still FAIL — private/local
+# exemptions must not open a false negative on real public cleartext egress.
+# ---------------------------------------------------------------------------
+
+def test_http_to_public_fqdn_still_fails():
+    """A dotted hostname is not on the private/CGNAT list and not a bare
+    single-label name — this check cannot rule out that it resolves publicly,
+    so it must stay FAIL (same shape as the pre-existing corp-gateway test)."""
+    cfg = {"models": {"providers": {"p": {"baseUrl": "http://litellm.ai.svc.cluster.local:4000/v1"}}}}
+    f = check_provider_baseurl(_ctx(cfg))
+    assert f.status == FAIL

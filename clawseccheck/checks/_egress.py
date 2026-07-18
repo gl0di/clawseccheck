@@ -4,6 +4,7 @@ Carved verbatim out of the former single-file checks.py; no logic changes.
 Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 """
 from __future__ import annotations
+import ipaddress
 import os
 from pathlib import Path
 from urllib.parse import urlparse
@@ -353,18 +354,88 @@ def check_outbound_proxy(ctx: Context) -> Finding:
     )
 
 
+# B178 — hosts OpenClaw's own runtime treats as "the local machine" for a model-
+# provider baseUrl, beyond literal loopback (LOOPBACK). Grounded against the
+# installed dist (~/.npm-global/lib/node_modules/openclaw/dist):
+#   selection-JInn13lc.js:10859 isExplicitLocalHostnameBaseUrl — docker.orb.internal /
+#     host.docker.internal / host.orb.internal
+#   selection-JInn13lc.js:10844 isLocalOllamaBaseUrl's own host===... check — "0.0.0.0"
+#   discovery-shared-XxlmIfaG.js:37-46 LOCAL_OLLAMA_HOSTNAMES includes the above plus "::"
+#   runtime-C40mDMdO.d.ts:7 LMSTUDIO_DOCKER_HOST_BASE_URL="http://host.docker.internal:1234"
+#     — a first-party OpenClaw constant, not a hypothetical attacker value.
+# Deliberately NOT merged into the shared LOOPBACK set: LOOPBACK is also read for a
+# *gateway bind* (B73, EXPOSED_BINDS) where "0.0.0.0" means "listening on every
+# interface" — the opposite of local. These two sets model different questions
+# ("is this URL's target host local?" vs "is this bind exposed?") over overlapping
+# literals and must stay separate.
+_B178_LOCAL_MODEL_HOSTNAMES = {
+    "0.0.0.0", "::", "docker.orb.internal", "host.docker.internal", "host.orb.internal",
+}
+
+# B178 — IPv4/IPv6 ranges that never leave the private network (RFC1918 + link-local +
+# CGNAT + IPv6 ULA). A cleartext http:// baseUrl pointed at one of these can only be
+# intercepted by an on-LAN adversary, not the public Internet, so it is WARN, not FAIL.
+# Grounded against the same dist: selection-JInn13lc.js:10850 isLoopbackOllamaBaseUrl
+# treats 10/8, 172.16/12, 192.168/16 AND 100.64.0.0/10 (CGNAT — the range Tailscale
+# hands out) as local; discovery-shared-XxlmIfaG.js:61-66 isIpv4PrivateRange agrees on
+# 10/8, 172.16/12, 192.168/16. 169.254.0.0/16 (link-local) and fc00::/7 (IPv6 ULA) are
+# RFC1918-equivalent ranges no public router forwards.
+_B178_PRIVATE_NETS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+)
+
+
+def _b178_classify_host(host: str) -> str:
+    """Classify a non-loopback baseUrl host for B178: 'local' (never flagged),
+    'private' (WARN — on-LAN-only exposure, ambiguous with a benign homelab/compose
+    setup), or 'public' (FAIL — a public IP literal or a dotted hostname, which this
+    static, network-free check cannot distinguish from one that resolves publicly)."""
+    if host in _B178_LOCAL_MODEL_HOSTNAMES:
+        return "local"
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        addr = None
+    if addr is not None:
+        if any(addr.version == net.version and addr in net for net in _B178_PRIVATE_NETS):
+            return "private"
+        return "public"
+    # A bare single-label hostname (no dot, no colon) is a Docker-Compose-style
+    # sibling-service DNS name (e.g. "ollama") — resolvable only inside the private
+    # compose/orchestrator network, never off it. Grounded: selection-JInn13lc.js
+    # :10862 isBareProviderHostnameBaseUrl uses the identical no-dot/no-colon test.
+    if "." not in host and ":" not in host:
+        return "private"
+    return "public"
+
+
 def check_provider_baseurl(ctx: Context) -> Finding:
     """B178 — cleartext http:// baseUrl on a model provider (API-key + traffic leak).
 
     Grounded: ModelProviderSchema.baseUrl (zod-schema.core-DviqqtPj.js) — a real,
     optional, per-provider field B155 never reads. Dual-use: a custom https:// baseUrl
     (self-hosted gateway) is indistinguishable from an attacker repoint and is NEVER
-    flagged — only cleartext http:// to a non-loopback host is unambiguous: the
-    provider API key (Authorization header) + full model stream leak in plaintext.
+    flagged — only cleartext http:// is a signal at all, and even then only to a host
+    this check can't place on the local machine or the private network.
 
-    FAIL — a provider's baseUrl is http:// (not https://) to a non-loopback host.
-    PASS — every configured baseUrl (if any) is https://, or none is set (bundled
-           provider default, which is https).
+    FAIL — a provider's baseUrl is http:// to a host that is neither loopback, nor a
+           local-model hostname OpenClaw's own runtime treats as the local machine
+           (0.0.0.0, ::, *.docker.internal / *.orb.internal), nor a private/CGNAT/
+           link-local IP literal, nor a bare single-label hostname (e.g. a Docker-
+           Compose sibling service) — i.e. a public IP or a dotted hostname.
+    WARN  — a provider's baseUrl is http:// to a private-range IP or a bare hostname:
+           only an on-LAN adversary could intercept it, and the dominant real-world
+           instance of this shape (a local Ollama/LM Studio runtime) carries no API
+           key to leak in the first place — this check cannot tell that apart from a
+           credentialed corporate LiteLLM gateway on the same LAN, so it stays WARN.
+    PASS — every configured baseUrl (if any) is https://, loopback, or a recognized
+           local-model hostname, or none is set (bundled provider default, https).
     UNKNOWN — openclaw.json could not be parsed.
     """
     if (f := _config_unreadable("B178", ctx)) is not None:
@@ -373,6 +444,7 @@ def check_provider_baseurl(ctx: Context) -> Finding:
 
     providers = dig(ctx.config, "models.providers")
     fails: list[str] = []
+    warns: list[str] = []
     if isinstance(providers, dict):
         for pid, pspec in providers.items():
             if not isinstance(pspec, dict):
@@ -389,9 +461,21 @@ def check_provider_baseurl(ctx: Context) -> Finding:
                 continue
             if host in LOOPBACK or host.startswith("127."):
                 continue
+            shown = sanitize_url_host_only(base_url)
+            classification = _b178_classify_host(host)
+            if classification == "local":
+                continue
+            if classification == "private":
+                warns.append(
+                    f"models.providers.{pid}.baseUrl uses plain http:// to a private-"
+                    f"network host ({shown}) — unencrypted, but only reachable from "
+                    "the local network; if this provider requires an API key, that "
+                    "key would still be visible to any on-LAN observer"
+                )
+                continue
             fails.append(
-                f"models.providers.{pid}.baseUrl uses plain http:// to a non-loopback "
-                f"host ({sanitize_url_host_only(base_url)}) — the provider API key and "
+                f"models.providers.{pid}.baseUrl uses plain http:// to a non-loopback, "
+                f"non-private host ({shown}) — the provider API key and "
                 "the full outbound model stream travel in cleartext"
             )
 
@@ -402,13 +486,23 @@ def check_provider_baseurl(ctx: Context) -> Finding:
             "http:// baseUrl exposes the provider API key (Authorization header) and "
             "the entire model stream to network interception. A self-hosted/private "
             "proxy or gateway with valid TLS (https://) is fine.",
-            evidence=fails,
+            evidence=fails + warns,
+        )
+    if warns:
+        return _finding(
+            "B178", WARN, "; ".join(warns),
+            "If this baseUrl is a local model runtime (Ollama/LM Studio/vLLM) or an "
+            "internal gateway on your LAN, http:// is standard practice for it — no "
+            "action needed. If it carries a real credential, prefer https:// or keep "
+            "it behind a network you trust.",
+            evidence=warns,
         )
     return _finding(
         "B178", PASS,
-        "No model provider baseUrl uses a cleartext http:// endpoint.",
+        "No model provider baseUrl uses a cleartext http:// endpoint to a "
+        "public/unrecognized host.",
         "Keep any custom models.providers.<id>.baseUrl on https:// "
-        "(loopback http:// for a local model runtime is not flagged).",
+        "(loopback and local-model http:// targets are not flagged).",
     )
 
 
