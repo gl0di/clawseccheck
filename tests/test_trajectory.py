@@ -263,6 +263,65 @@ def test_find_trajectory_files_no_stats_arg_unaffected(tmp_path):
     assert len(files) == 3
 
 
+def test_find_trajectory_files_broken_symlink_does_not_corrupt_order(tmp_path):
+    # B-245 false-positive fix: a single unreadable path (here, a dangling
+    # symlink — e.g. a session archived to cold storage and left dangling) used
+    # to abort list.sort()'s single try/except entirely, leaving `files` in
+    # arbitrary glob order. `files[:max_files]` then dropped an arbitrary subset
+    # while the caller-facing message claims only the OLDEST sessions were
+    # skipped. The per-path mtime lookup must isolate that one failure so every
+    # real session still sorts by its true mtime and the newest N are the ones
+    # actually returned.
+    paths = _write_many(tmp_path, "main", 65)
+    sessions_dir = tmp_path / "agents" / "main" / "sessions"
+    (sessions_dir / "zz_archived.trajectory.jsonl").symlink_to(
+        "sessions/moved_to_nas.trajectory.jsonl"
+    )
+    stats: dict = {}
+    files = find_trajectory_files(tmp_path, max_files=60, stats=stats)
+    assert stats["files_total"] == 66
+    assert stats["files_capped"] is True
+    assert len(files) == 60
+    # The 5 newest real sessions must all be present...
+    for p in paths[-5:]:
+        assert p in files
+    # ...and the 5 oldest real sessions must all be absent — not an arbitrary
+    # subset that happens to include a recent one instead.
+    for p in paths[:5]:
+        assert p not in files
+
+
+def test_find_trajectory_files_disappearing_file_does_not_corrupt_order(tmp_path):
+    # Same failure mode, second real-world trigger: a live agent rotates/prunes a
+    # session file between the glob() and the sort() (the normal state during an
+    # in-agent audit run, not an edge case).
+    paths = _write_many(tmp_path, "main", 65)
+    victim = paths[30]
+
+    real_stat = Path.stat
+
+    def flaky_stat(self, *a, **kw):
+        if self == victim:
+            victim.unlink()
+            raise FileNotFoundError(victim)
+        return real_stat(self, *a, **kw)
+
+    Path.stat = flaky_stat
+    try:
+        stats: dict = {}
+        files = find_trajectory_files(tmp_path, max_files=60, stats=stats)
+    finally:
+        Path.stat = real_stat
+
+    assert stats["files_capped"] is True
+    assert len(files) == 60
+    assert victim not in files
+    # The 5 newest real sessions must still be intact and returned — not
+    # silently swapped out for an arbitrary older file.
+    for p in paths[-5:]:
+        assert p in files
+
+
 def test_read_proven_tools_meta_capped_over_max_files(tmp_path):
     _write_many(tmp_path, "main", 61)
     verbs, meta = read_proven_tools(tmp_path, max_files=60)

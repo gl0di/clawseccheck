@@ -59,10 +59,26 @@ def find_trajectory_files(
             stats["files_total"] = 0
             stats["files_capped"] = False
         return []
-    try:
-        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    except OSError:
-        pass
+    # Per-path mtime lookup that never raises: list.sort() evaluates the key for
+    # every element before comparing any of them, so if the plain
+    # `p.stat().st_mtime` lambda raised on ONE path (a broken symlink — e.g. a
+    # session archived to cold storage and left dangling — or a file removed by
+    # the live agent between the glob above and this sort), the whole sort
+    # aborted and `files` stayed in arbitrary os.scandir order. `files[:max_files]`
+    # then dropped an arbitrary subset while the caller-facing message claims the
+    # OLDEST sessions were skipped (B-245 false positive: a real recent session
+    # could be silently excluded while the report claims the gap is confined to
+    # the oldest history). Isolating the failure per-path keeps the sort total: an
+    # unreadable path sorts as the oldest entry (so it lands in the dropped tail
+    # exactly where a bogus/gone entry belongs) and every real path still sorts by
+    # its true mtime.
+    def _mtime_or_oldest(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return float("-inf")
+
+    files.sort(key=_mtime_or_oldest, reverse=True)
     if stats is not None:
         stats["files_total"] = len(files)
         stats["files_capped"] = len(files) > max_files
