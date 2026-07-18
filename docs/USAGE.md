@@ -492,7 +492,10 @@ python3 audit.py --log audit.log            # also write log to a local file
   **RESISTANT**. This is the live "battle-tested" complement to the passive checks.
 - **`--badge PATH`** writes a shields-style SVG (grade + score only) for your README / posts.
 - **`--trend`** records the current audit result to a local append-only history file and prints
-  a table of past scores with per-run arrows. History stays on your machine only.
+  a table of past scores with per-run arrows. Every recorded row is shown, each tagged with the
+  run that produced it (`[audit]`, or `[test]`/`[dev]` for a development/CI run picked up via
+  `CLAWSECCHECK_RUN_SOURCE`, or `[legacy]` for a pre-existing entry with no source recorded) —
+  nothing is ever hidden. History stays on your machine only.
 - **`--percentile`** compares your score against a bundled offline reference profile — no network,
   no telemetry.
 - **`--verbose` / `--debug` / `--log PATH`** activate structured local logging. Config values

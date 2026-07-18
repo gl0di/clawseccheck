@@ -505,73 +505,78 @@ def test_verify_ok_on_mixed_legacy_and_new_format_file(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F-128: --trend default filter (real audits only) + include_all
+# F-128 fix: --trend never silently drops rows — every row always renders,
+# always tagged with its source. (The default-on filter + include_all kwarg
+# this replaces silently dropped mixed-source rows with no disclosure, and
+# was defeatable via CLAWSECCHECK_RUN_SOURCE against a real audit run.)
 # ---------------------------------------------------------------------------
 
-def test_render_trend_hides_test_source_by_default(tmp_path):
+def test_render_trend_never_hides_test_source(tmp_path):
     path = str(tmp_path / "history.jsonl")
     record(_score(72, "C"), path=path, when="2026-06-15", source="audit")
     record(_score(50, "D"), path=path, when="2026-06-16", source="test")
     out = render_trend(load(path))
-    assert "2026-06-15" in out
-    assert "2026-06-16" not in out
-
-
-def test_render_trend_hides_dev_source_by_default(tmp_path):
-    path = str(tmp_path / "history.jsonl")
-    record(_score(72, "C"), path=path, when="2026-06-15", source="audit")
-    record(_score(50, "D"), path=path, when="2026-06-16", source="dev")
-    out = render_trend(load(path))
-    assert "2026-06-15" in out
-    assert "2026-06-16" not in out
-
-
-def test_render_trend_legacy_rows_count_as_real(tmp_path):
-    """A pre-F-128 entry predates the source concept entirely — it must not
-    be hidden by the new default filter as if it were a dev/test run."""
-    path = tmp_path / "history.jsonl"
-    path.write_text('{"date":"2026-06-10","score":60,"grade":"D"}\n', encoding="utf-8")
-    out = render_trend(load(str(path)))
-    assert "2026-06-10" in out
-
-
-def test_render_trend_include_all_shows_everything_with_source_tag(tmp_path):
-    path = str(tmp_path / "history.jsonl")
-    record(_score(72, "C"), path=path, when="2026-06-15", source="audit")
-    record(_score(50, "D"), path=path, when="2026-06-16", source="test")
-    out = render_trend(load(path), include_all=True)
     assert "2026-06-15" in out
     assert "2026-06-16" in out
     assert "[audit]" in out
     assert "[test]" in out
 
 
-def test_render_trend_include_all_shows_home_tag(tmp_path):
+def test_render_trend_never_hides_dev_source(tmp_path):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(72, "C"), path=path, when="2026-06-15", source="audit")
+    record(_score(50, "D"), path=path, when="2026-06-16", source="dev")
+    out = render_trend(load(path))
+    assert "2026-06-15" in out
+    assert "2026-06-16" in out
+    assert "[dev]" in out
+
+
+def test_render_trend_legacy_rows_render_and_are_tagged(tmp_path):
+    """A pre-F-128 entry predates the source concept entirely — it renders
+    and is honestly labeled "legacy" rather than hidden or guessed at."""
+    path = tmp_path / "history.jsonl"
+    path.write_text('{"date":"2026-06-10","score":60,"grade":"D"}\n', encoding="utf-8")
+    out = render_trend(load(str(path)))
+    assert "2026-06-10" in out
+    assert "[legacy]" in out
+
+
+def test_render_trend_shows_home_tag_when_known(tmp_path):
     path = str(tmp_path / "history.jsonl")
     record(_score(72, "C"), path=path, when="2026-06-15", home="~/.openclaw", source="audit")
-    out = render_trend(load(path), include_all=True)
+    out = render_trend(load(path))
     assert "~/.openclaw" in out
+    assert "[audit]" in out
 
 
-def test_render_trend_no_home_tag_when_include_all_false(tmp_path):
+def test_render_trend_no_home_tag_when_home_unknown(tmp_path):
     path = str(tmp_path / "history.jsonl")
-    record(_score(72, "C"), path=path, when="2026-06-15", home="~/.openclaw", source="audit")
+    record(_score(72, "C"), path=path, when="2026-06-15", source="audit")
     out = render_trend(load(path))
-    assert "~/.openclaw" not in out
-    assert "[audit]" not in out
+    assert "[audit]" in out
+    # No home was passed to record(), so no path should appear after the tag.
+    assert "~/" not in out
 
 
-def test_render_trend_all_hidden_shows_friendly_message(tmp_path):
-    path = str(tmp_path / "history.jsonl")
-    record(_score(50, "D"), path=path, when="2026-06-15", source="test")
-    out = render_trend(load(path))
-    assert "No audit runs yet" in out
-    assert "1 dev/test entry hidden" in out
-
-
-def test_render_trend_all_hidden_message_pluralizes_entries(tmp_path):
+def test_render_trend_all_test_rows_still_render_no_dev_test_message(tmp_path):
+    """A history made entirely of test/dev runs must still print those rows,
+    not the old 'No audit runs yet (N dev/test entries hidden)' message —
+    that message, and the include_all() kwarg it referenced, are gone."""
     path = str(tmp_path / "history.jsonl")
     record(_score(50, "D"), path=path, when="2026-06-15", source="test")
     record(_score(60, "D"), path=path, when="2026-06-16", source="dev")
     out = render_trend(load(path))
-    assert "2 dev/test entries hidden" in out
+    assert "No audit runs yet" not in out
+    assert "include_all" not in out
+    assert "2026-06-15" in out
+    assert "2026-06-16" in out
+    assert "[test]" in out
+    assert "[dev]" in out
+
+
+def test_render_trend_rejects_include_all_kwarg():
+    """The include_all parameter is removed entirely, not just defaulted —
+    passing it is a TypeError, not a silent no-op."""
+    with pytest.raises(TypeError):
+        render_trend([{"date": "2026-06-15", "score": 72, "grade": "C"}], include_all=True)

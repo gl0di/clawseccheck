@@ -204,49 +204,40 @@ def load(path: str = DEFAULT_HISTORY) -> list[dict]:
     return rows
 
 
-_REAL_SOURCES = ("audit", "legacy")
-
-
-def render_trend(rows: list[dict], ascii_only: bool = False, include_all: bool = False) -> str:
+def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
     """Return a compact human-readable trend string.
 
-    Each row shows a timestamp, GRADE and SCORE plus an arrow (▲▼· or ^v=)
-    relative to the previous *visible* row's score.  If nothing is visible a
-    friendly message is returned.
+    Every row is shown, always, in the order recorded — each line carries a
+    timestamp, GRADE, SCORE, an arrow (▲▼· or ^v=) relative to the *previous*
+    row's score, and a ``[source]`` tag (plus the audited home path, when
+    known).
 
     Parameters
     ----------
     rows:
         List of {date, score, grade, ts, home, source} dicts (as returned by
         load()), in chronological order. A plain {date, score, grade} dict
-        (no ts/home/source keys) works too — it renders as a "legacy" row.
+        (no ts/home/source keys) works too — it renders with a "legacy" tag.
     ascii_only:
         Use ASCII arrows (^, v, =) instead of unicode (▲, ▼, ·).
-    include_all:
-        F-128: by default only 'real' rows render — source "audit" or
-        "legacy" (a pre-F-128 entry that predates the source concept, so it
-        cannot be a dev/test run in disguise). Development/test runs (source
-        "test", or any other CLAWSECCHECK_RUN_SOURCE-tagged value such as
-        "dev") are hidden so they don't pollute the trend a user actually
-        cares about. Pass True to show every row regardless of source, with
-        an added ``[source]`` tag (plus the audited home path, when known) on
-        each line.
+
+    Design note (this replaces a default-on filter): an earlier version of
+    this function hid rows whose ``source`` wasn't "audit"/"legacy" and only
+    said so when *every* row was hidden — in the ordinary mixed case a
+    development/test/CI run vanished with no disclosure at all, and the
+    arrows were silently recomputed over the remaining subset, rewriting the
+    trend narrative (e.g. erasing two real "test"-tagged entries could flip
+    an apparent regression into an apparent improvement). The filter was also
+    trivially defeated: tagging a real audit's own run with
+    ``CLAWSECCHECK_RUN_SOURCE`` made it disappear from its own trend. Rather
+    than patch the disclosure message or add a CLI flag to reach the
+    now-removed ``include_all`` kwarg, the filter is deleted: every row
+    renders, unconditionally, with its source visible inline so a "test" or
+    "dev" run is legible as exactly that instead of being dropped or
+    disguised as a real "audit".
     """
     if not rows:
         return "No history yet. Run --trend again later to see your trend."
-
-    if include_all:
-        visible = rows
-    else:
-        visible = [r for r in rows if r.get("source", "legacy") in _REAL_SOURCES]
-
-    if not visible:
-        hidden = len(rows)
-        noun = "entry" if hidden == 1 else "entries"
-        return (
-            f"No audit runs yet ({hidden} dev/test {noun} hidden). "
-            "Call render_trend(..., include_all=True) to see them."
-        )
 
     if ascii_only:
         arrow_up, arrow_down, arrow_flat = "^", "v", "="
@@ -258,11 +249,11 @@ def render_trend(rows: list[dict], ascii_only: bool = False, include_all: bool =
     # ("🦞 ClawSecCheck" then "ClawSecCheck - Score Trend"), repeating the
     # wordmark — collapsed to the one brand header line.
     lines = [brand.header(subtitle="Score Trend", ascii_only=ascii_only), ""]
-    for i, row in enumerate(visible):
+    for i, row in enumerate(rows):
         if i == 0:
             arrow = arrow_flat
         else:
-            prev_score = visible[i - 1]["score"]
+            prev_score = rows[i - 1]["score"]
             curr_score = row["score"]
             if curr_score > prev_score:
                 arrow = arrow_up
@@ -272,13 +263,10 @@ def render_trend(rows: list[dict], ascii_only: bool = False, include_all: bool =
                 arrow = arrow_flat
 
         label = row.get("ts") or row["date"]
-        line = f"{label}  {row['grade']}  {row['score']}  {arrow}"
-        if include_all:
-            tag = f"  [{row.get('source', 'legacy')}]"
-            home = row.get("home")
-            if home:
-                tag += f"  {home}"
-            line += tag
+        line = f"{label}  {row['grade']}  {row['score']}  {arrow}  [{row.get('source', 'legacy')}]"
+        home = row.get("home")
+        if home:
+            line += f"  {home}"
         lines.append(line)
 
     return "\n".join(lines)
