@@ -89,7 +89,7 @@ No flags, no commands. Everything works as a conversation:
 | 🔐 **Secrets & data at rest** | Are your tokens, keys, and conversations lying around readable? |
 | 📡 **Monitoring & readiness** | Would you even notice a compromise — and could you investigate it? |
 
-On top of the 130+ individual checks, a **risk engine** hunts for deadly
+On top of the 140+ individual checks, a **risk engine** hunts for deadly
 *combinations* — chains like "untrusted input → reachable secrets → outbound
 tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)**.
 

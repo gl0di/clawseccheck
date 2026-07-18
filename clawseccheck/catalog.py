@@ -1730,6 +1730,31 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="hooks",
     ),
+    # B177 (B-240): OpenClaw's OWN persisted per-plugin ClawHub trust verdict
+    # (installed_plugin_index.install_records_json.<pluginId>.clawhubTrustDisposition, in
+    # the shared state SQLite DB ~/.openclaw/state/openclaw.sqlite) was never read (grep
+    # for "clawhubTrust"/"openclaw.sqlite" across clawseccheck/ was zero hits before this)
+    # -- a free, high-precision plugin-trust signal OpenClaw already computed and
+    # persisted itself. Grounded against the installed dist (installed-plugin-index-store-
+    # CWgFGnm0.js, installed-plugin-index-records-C_n191FN.js, types.openclaw-CXjMEWAQ.d.ts,
+    # clawhub-install-trust-DdnykQnp.js) and against the real file
+    # (~/.openclaw/state/openclaw.sqlite: table present, schema matches exactly). FAIL only
+    # on the unambiguous "blocked" disposition (OpenClaw's own moderation explicitly
+    # blocked the install); WARN on any other non-clean disposition ("review-required",
+    # "review-recommended", or a future value) and on clawhubTrustPending/Stale (an
+    # unverified/outdated verdict). UNKNOWN when the state DB, the index row, or the
+    # column is absent/locked/unreadable (Golden Rule #4) -- never a fake PASS. Read-only
+    # (file:...?mode=ro + PRAGMA query_only=1), never writes to the shared state DB.
+    CheckMeta(
+        "B177",
+        "OpenClaw's own persisted ClawHub trust verdict for an installed plugin",
+        HIGH,
+        "hardening",
+        "Supply Chain / Third-Party Trust Verdict",
+        scored=True,
+        confidence="HIGH",
+        surface="mcp",
+    ),
     # E-032 v1 — behavioral trajectory audit (--behavioral mode only, never part of the
     # main audit()/CHECKS list or the A-F score). Reads OpenClaw's trajectory sidecar
     # (agents/*/sessions/*.trajectory.jsonl, §9.1 grounded) and finds sequences PROVEN by
@@ -1940,6 +1965,7 @@ AST_MAP = {
     "B150": ("AST03",),  # systemd Restart=always persistence = durable over-privileged autonomy substrate (cf. B17)
     "B151": ("AST02",),  # codex connector shell hooks in the plugin doc-cache = supply-chain tamper (cf. B42/B94)
     "B152": ("AST02",),  # orphaned plugin cache not declared in plugins.entries = supply-chain visibility gap (cf. C5/C047)
+    "B177": ("AST02",),  # OpenClaw's own persisted ClawHub trust verdict = supply-chain compromise signal (cf. B5/B15/B24/B42)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
@@ -2052,6 +2078,7 @@ OWASP_MAP = {
     "B150": ("LLM06", "LLM10"),  # systemd Restart=always = durable autonomy substrate (cf. B17)
     "B151": ("LLM03",),  # codex connector shell hooks in the plugin doc-cache = Supply Chain
     "B152": ("LLM03",),  # orphaned plugin cache not declared in plugins.entries = Supply Chain
+    "B177": ("LLM03",),  # OpenClaw's own persisted ClawHub trust verdict = Supply Chain
 }
 
 

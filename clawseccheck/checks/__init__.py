@@ -653,6 +653,7 @@ from ._mcp import (
     check_mcp_server_exfil_host_in_args,
     check_mcp_tool_inheritance,
     check_plugin_app_server_command,
+    check_plugin_clawhub_trust,
     check_plugin_permission_mode,
     check_codex_plugin_hooks,
     check_orphaned_plugin_caches,
@@ -1163,6 +1164,7 @@ CHECKS = [
     check_audit_suppressions,  # B173 — security.audit.suppressions self-blinds native audit (B-237)
     check_install_policy_gate,  # B174 — security.installPolicy.* gate + exec-hook escape flags (B-238)
     check_hooks_enable_toggles,  # B179 — hooks.enabled / hooks.internal(.load.extraDirs) enable-toggle inventory (B-250)
+    check_plugin_clawhub_trust,  # B177 — OpenClaw's own persisted per-plugin ClawHub trust verdict (B-240)
 ]
 
 

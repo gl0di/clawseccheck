@@ -2086,3 +2086,143 @@ def check_orphaned_plugin_caches(ctx: Context) -> Finding:
         "or removed.",
         evidence=sorted(on_disk)[:6],
     )
+
+
+# ---------- B177 (B-240): OpenClaw's own persisted per-plugin ClawHub trust verdict ----------
+def check_plugin_clawhub_trust(ctx: Context) -> Finding:
+    """B177 (B-240) — OpenClaw's OWN persisted per-plugin ClawHub trust verdict.
+
+    OpenClaw computes and persists a ClawHub malware-scan/moderation verdict for every
+    plugin it installs via a ClawHub-scanned path, in the shared state SQLite database
+    (``installed_plugin_index.install_records_json``, collected read-only by
+    ``collector._collect_plugin_trust`` — see that function's docstring for the grounded
+    field-by-field source citation). This is the highest-precision plugin-trust signal
+    available locally without a network call, and was never previously read.
+
+    FAIL    — at least one installed plugin's ``clawhubTrustDisposition`` is "blocked" —
+              OpenClaw's own moderation explicitly blocked the install, yet it is
+              persisted (and, per the plugin index, may still be enabled).
+    WARN    — at least one installed plugin carries a non-clean, non-blocked disposition
+              ("review-required", "review-recommended", or any other future value), or a
+              ``clawhubTrustPending``/``clawhubTrustStale`` verdict (unverified/outdated) —
+              with no "blocked" verdict present.
+    UNKNOWN — the shared state database, the installed_plugin_index row, or the
+              install-records column is absent, locked, or unreadable/unparseable.
+    PASS    — the index was read and no installed plugin carries an adverse ClawHub
+              trust verdict (either every present disposition is "clean", or no
+              installed plugin carries ClawHub trust data at all — that reflects
+              absence of a bad verdict, not a positive clean scan for those installs).
+    """
+    if not ctx.plugin_trust_found:
+        return _finding(
+            "B177",
+            UNKNOWN,
+            "No persisted installed_plugin_index found in "
+            "~/.openclaw/state/openclaw.sqlite (the state database, the plugin index "
+            "row, or the install-records column is absent) — cannot determine OpenClaw's "
+            "own ClawHub trust verdict for installed plugins.",
+            "If plugins are installed, ensure ~/.openclaw/state/openclaw.sqlite is "
+            "present and owner-readable so a future audit can surface OpenClaw's own "
+            "ClawHub trust verdicts.",
+        )
+    if ctx.plugin_trust_parse_error:
+        return _finding(
+            "B177",
+            UNKNOWN,
+            "installed_plugin_index was found in ~/.openclaw/state/openclaw.sqlite but "
+            "could not be read or parsed (locked or corrupt) — cannot determine OpenClaw's "
+            "own ClawHub trust verdict for installed plugins.",
+            "Ensure ~/.openclaw/state/openclaw.sqlite is not held open exclusively by "
+            "another process and is a valid SQLite database, then re-run the audit.",
+        )
+
+    from ..logsafe import redact as _redact  # noqa: PLC0415
+
+    def _reason_snippet(rec: dict) -> str:
+        reasons = rec.get("reasons") or []
+        if not reasons:
+            return ""
+        return " (" + _redact(", ".join(reasons[:2])) + ")"
+
+    blocked_ev: list[str] = []
+    warn_ev: list[str] = []
+    clean_ids: list[str] = []
+    untracked_ids: list[str] = []
+
+    for rec in ctx.plugin_trust_records:
+        pid = rec["plugin_id"]
+        disposition = rec.get("disposition")
+        pending = rec.get("pending")
+        stale = rec.get("stale")
+
+        if disposition == "blocked":
+            blocked_ev.append(
+                f"{pid}: clawhubTrustDisposition=blocked{_reason_snippet(rec)}"
+            )
+            continue
+        if disposition and disposition != "clean":
+            warn_ev.append(
+                f"{pid}: clawhubTrustDisposition={disposition}{_reason_snippet(rec)}"
+            )
+            continue
+        if disposition == "clean":
+            clean_ids.append(pid)
+        else:
+            untracked_ids.append(pid)
+        if pending:
+            warn_ev.append(f"{pid}: ClawHub trust scan pending (not yet verified)")
+        if stale:
+            warn_ev.append(f"{pid}: ClawHub trust verdict stale (needs recheck)")
+
+    if blocked_ev:
+        ev = blocked_ev[:6] + warn_ev[: max(0, 6 - len(blocked_ev[:6]))]
+        extra_n = (len(blocked_ev) - len(blocked_ev[:6])) + (
+            len(warn_ev) - len(warn_ev[: max(0, 6 - len(blocked_ev[:6]))])
+        )
+        extra = f" (+{extra_n} more)" if extra_n > 0 else ""
+        return _finding(
+            "B177",
+            FAIL,
+            "OpenClaw's own ClawHub trust verdict marks installed plugin(s) as "
+            f"'blocked': {'; '.join(ev)}{extra}.",
+            "Uninstall or replace the blocked plugin(s) immediately — this is not a "
+            "heuristic, it is OpenClaw's own moderation decision. Do not override or "
+            "acknowledge the verdict without independently re-verifying provenance.",
+            evidence=ev,
+        )
+
+    if warn_ev:
+        ev = warn_ev[:6]
+        extra = f" (+{len(warn_ev) - 6} more)" if len(warn_ev) > 6 else ""
+        return _finding(
+            "B177",
+            WARN,
+            "OpenClaw's own ClawHub trust verdict flags installed plugin(s) as "
+            f"unverified or under review: {'; '.join(ev)}{extra}.",
+            "Review the flagged plugin(s) manually before continued use. A "
+            "'review-required'/'review-recommended' disposition or a pending/stale "
+            "verdict is not proof of malice, but it means ClawHub has not (yet) "
+            "cleared the install.",
+            evidence=ev,
+        )
+
+    detail = (
+        "No installed plugin in the persisted plugin index carries an adverse "
+        "ClawHub trust verdict."
+    )
+    if clean_ids and not untracked_ids:
+        detail += f" {len(clean_ids)} plugin(s) show an explicit 'clean' verdict."
+    elif untracked_ids:
+        detail += (
+            f" Note: {len(untracked_ids)} of {len(clean_ids) + len(untracked_ids)} "
+            "installed plugin(s) carry no ClawHub trust data at all (not installed via "
+            "a ClawHub-scanned path, or the scan has not run yet) — this reflects "
+            "absence of a bad verdict for those, not a positive clean scan."
+        )
+    return _finding(
+        "B177",
+        PASS,
+        detail,
+        "No action needed. Re-run after installing or updating plugins so a newly "
+        "computed ClawHub trust verdict is picked up.",
+    )
