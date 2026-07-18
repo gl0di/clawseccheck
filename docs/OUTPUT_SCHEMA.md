@@ -40,6 +40,7 @@ versioning §6 in `CLAUDE.md`).
 | `config_found` | `bool` | yes | `true` when an `openclaw.json` was present at the scanned home (vs a non-OpenClaw setup). |
 | `config_parse_error` | `bool` | yes | `true` when `openclaw.json` was present but could not be parsed into a config object (syntax error, size-cap truncation, or a non-object top level). A gating consumer should treat `true` as "scan incomplete", not a clean result — the run is UNKNOWN-heavy. A valid empty `{}` config is `false`. |
 | `errors` | `array[str]` | yes | Human-readable collection/parse messages (e.g. the `openclaw.json` parse error). Empty array on a clean run. |
+| `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §15. |
 | `scan_receipt` | `str` | yes | Deterministic content-integrity hash over all findings, formatted `"sha256:<64-hex-chars>"`. Same findings set (any order) always yields the same receipt; a changed finding set changes it. Not a security signature — a drift/tamper-evidence checksum for the scan output itself. |
 
 ### Skeleton
@@ -64,6 +65,13 @@ versioning §6 in `CLAUDE.md`).
   "config_found": true,
   "config_parse_error": false,
   "errors": [],
+  "inventory": {
+    "system": { "status": "FAIL", "findings": ["B2"] },
+    "agents": { "status": "PASS", "findings": [], "roster": ["(default)"], "attested": false },
+    "skills": [ { "name": "pdf", "verdict": "NO KNOWN ISSUE", "status": "PASS", "reasons": [] } ],
+    "mcp": [ { "name": "slack", "verdict": "ok", "reasons": [] } ],
+    "channels": { "status": "WARN", "findings": ["B26"], "roster": ["telegram"] }
+  },
   "scan_receipt": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 }
 ```
@@ -734,3 +742,35 @@ absent, it renders `"judge: DANGEROUS"`.
   available and may gain or lose sub-fields in minor releases.
 - The `--text` (human-readable) output format — not machine-parseable
   and not versioned.
+
+---
+
+## 15. `inventory` Object (F-131 — Inventory by Subject, Phase 1)
+
+Owner-facing regrouping of the SAME `findings` (§2) above by the entities an owner
+actually owns — System, Agents, Skills, MCP servers, Channels — instead of the 7
+analyst-facing security families the `--text` report groups by underneath it. Purely
+additive and presentation-only: it never changes `score`, `grade`, or any `Finding`;
+every finding id it lists also appears, unchanged, in the top-level `findings` array.
+
+Skills and MCP servers get a **per-instance** verdict (one entry per installed skill /
+configured MCP server, reusing the same scoring paths `--vet <skill>` / `--vet-mcp` use).
+System, Agents, and Channels stay **bucket-level** in Phase 1 — one rolled-up status plus
+the ids of the surface's own FAIL/WARN findings — because no `Finding` carries a
+precise per-instance (e.g. "which channel") attribution yet; that is deferred to a
+possible Phase 2.
+
+| Field | Type | Description |
+|---|---|---|
+| `system` | `object` | Bucket: `{"status": str, "findings": array[str]}`. `status` is the worst status (`FAIL` > `WARN` > `UNKNOWN` > `PASS`) among findings on the system surfaces (gateway, tools, secrets, monitoring, hooks, host, update, sessions); `findings` lists the ids of that bucket's own FAIL/WARN findings. |
+| `agents` | `object` | Bucket, same shape as `system`, plus: `roster` (`array[str]`) — agent names, preferring an attested roster (`--attest`) over the static `agents.list` config, falling back to `["(default)"]`; `attested` (`bool`) — `true` when the roster came from an attestation self-report. |
+| `skills` | `array[object]` | One entry per installed skill: `{"name": str, "verdict": str, "status": str, "reasons": array[str]}`. `verdict` reuses the same word set `--vet` uses (`"NO KNOWN ISSUE"`, `"SUSPICIOUS"`, `"DANGEROUS"`, `"UNKNOWN"`); `status` is the underlying `PASS`/`WARN`/`FAIL`/`UNKNOWN`; `reasons` holds up to 3 sanitised detail strings. Empty array when no skills are installed. A skill the per-skill scan budget could not reach reports `status: "UNKNOWN"` with a reason explaining why — never a false `"NO KNOWN ISSUE"`. |
+| `mcp` | `array[object]` | One entry per configured MCP server (both `mcp.servers` nesting and legacy `mcpServers`/`mcp_servers`): `{"name": str, "verdict": str, "reasons": array[str]}`. `verdict` is `"ok"` (no supply-chain/trust signal), or `"WARN"`/`"FAIL"`/`"UNKNOWN"`. Empty array when no MCP servers are configured. |
+| `channels` | `object` | Bucket, same shape as `system`, plus: `roster` (`array[str]`) — configured channel provider names (the `defaults` pseudo-provider excluded). |
+
+### Notes
+
+- `inventory` is always present (an empty/all-`PASS` shape when nothing is configured or
+  `ctx` is unavailable), matching every other always-present top-level field.
+- The exact wording of `reasons[]` entries is **not** part of the frozen contract (same
+  rule as `detail`/`fix` text elsewhere in this doc) — only the field names/types are.

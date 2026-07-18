@@ -179,6 +179,12 @@ class Context:
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
     installed_skill_shell: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .sh/.bash
     installed_skill_js: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .js/.ts
+    # skill name -> that skill's own resolved directory (the dir containing its SKILL.md).
+    # F-131: lets a per-skill Context be scoped to JUST that skill (mirrors vet_skill's
+    # Context(home=<skill dir>)) instead of the whole OpenClaw home, so home-wide-walking
+    # ring checks (B42 install-policy, B87 symlink-escape) don't cross-attribute another
+    # skill's evidence onto this one.
+    installed_skill_dirs: dict = field(default_factory=dict)
     attestation: dict = field(default_factory=dict)  # agent self-report (--attest); see attest.py
     _collected_skill_files: dict[str, list[dict]] = field(default_factory=dict)
 
@@ -1181,6 +1187,7 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                 ctx.installed_skill_py[key] = read_skill_python(target, ctx)
                 ctx.installed_skill_shell[key] = read_skill_shell(target, ctx)
                 ctx.installed_skill_js[key] = read_skill_js(target, ctx)
+                ctx.installed_skill_dirs[key] = target
             except OSError as exc:
                 ctx.errors.append(f"could not read skill {key}: {exc}")
 

@@ -79,6 +79,40 @@ FAMILY_LABEL: dict[str, str] = {
 }
 FAMILY_ORDER: tuple[str, ...] = tuple(FAMILY_LABEL.keys())
 
+# 14-surface -> 5-subject roll-up (F-131 Phase 1: owner-facing "Inventory by subject").
+# Additive metadata only, next to FAMILY_OF — no verdict/score impact. Distinct from
+# FAMILY_OF (analyst-facing security categories): this groups findings the way an owner
+# actually owns things — "my system", "my agents", "each of my skills" — per the approved
+# design docs/design/2026-07-17-subject-inventory-block-design.md (workspace-root only,
+# not shipped). Every SURFACES slug (incl. "trifecta") maps to exactly one subject; a
+# coherence test asserts completeness, mirroring FAMILY_OF's own contract.
+SUBJECT_OF: dict[str, str] = {
+    "gateway": "system",
+    "tools": "system",
+    "secrets": "system",
+    "monitoring": "system",
+    "hooks": "system",
+    "host": "system",
+    "update": "system",
+    "sessions": "system",
+    "agents": "agents",
+    "bootstrap": "agents",
+    "trifecta": "agents",  # A1: an agent-behavior signal, not a standalone bucket
+    "skills": "skills",
+    "mcp": "mcp",
+    "channels": "channels",
+}
+
+# Human-facing subject labels, in the fixed order the Inventory block renders them.
+SUBJECT_LABEL: dict[str, str] = {
+    "system": "System (OpenClaw core)",
+    "agents": "Agents",
+    "skills": "Skills",
+    "mcp": "MCP servers",
+    "channels": "Channels",
+}
+SUBJECT_ORDER: tuple[str, ...] = ("system", "agents", "skills", "mcp", "channels")
+
 
 @dataclass(frozen=True)
 class CheckMeta:
