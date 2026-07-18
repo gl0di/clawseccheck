@@ -185,6 +185,9 @@ def walk_dir_safely(
     exclude_vcs: bool = False,
     max_files: int | None = None,
     skips: list | None = None,
+    prune_dir=None,
+    keep_file=None,
+    capped: list | None = None,
 ) -> list[Path]:
     """Recursively walk base_dir, skipping symlinks and any file that escapes base_dir.
 
@@ -195,6 +198,26 @@ def walk_dir_safely(
     If `skips` (a list) is provided, each skipped symlink or path-escape is appended to it as
     a (path, reason) tuple so a caller can surface the drop instead of losing it silently
     (F-061) — the default (None) keeps the original behaviour for existing callers.
+
+    If `prune_dir` is provided, it is called as ``prune_dir(rel_parts)`` for every
+    subdirectory the walk is about to descend into, where `rel_parts` is that
+    subdirectory's path components *relative to* `base_dir` (e.g. ``("workspace",
+    "skills")``). Returning True prunes the whole subdirectory — its files never reach
+    `keep_file`/`max_files` at all. This lets a caller exclude a bulk/noise subtree
+    (e.g. a vendored cache dir) *before* it can consume the `max_files` budget, instead
+    of filtering it out of the result afterward (B-244: a post-hoc filter still lets an
+    excluded subtree starve real files below it in the walk order).
+
+    If `keep_file` is provided, it is called as ``keep_file(path)`` for every candidate
+    file (already past the symlink/escape/prune checks); only files for which it
+    returns True are collected and counted against `max_files` — so a file the caller
+    was always going to discard doesn't spend budget either (B-244).
+
+    If `capped` (a list) is provided and the walk stops early because `max_files` was
+    reached before the directory tree was fully traversed, a single sentinel (True) is
+    appended to it — so a caller can tell "genuinely truncated, more of the tree was
+    never reached" apart from "walked everything and it just happened to total
+    <= max_files files" (GR#4: no silent completeness claim over a capped scan).
     """
     try:
         root = base_dir.resolve()
@@ -204,13 +227,19 @@ def walk_dir_safely(
     out = []
     for dirpath, dirnames, filenames in os.walk(base_dir, topdown=True, followlinks=False):
         # Deterministic traversal
-        if exclude_pycache or exclude_vcs:
-            def _keep(d: str, _dirpath: str = dirpath) -> bool:
+        if exclude_pycache or exclude_vcs or prune_dir is not None:
+            rel_dirpath = os.path.relpath(dirpath, base_dir)
+
+            def _keep(d: str, _dirpath: str = dirpath, _rel: str = rel_dirpath) -> bool:
                 parts = (Path(_dirpath) / d).parts
                 if exclude_pycache and "__pycache__" in parts:
                     return False
                 if exclude_vcs and any(vcs in parts for vcs in _VCS_DIR_NAMES):
                     return False
+                if prune_dir is not None:
+                    rel_parts = (d,) if _rel == "." else Path(_rel).parts + (d,)
+                    if prune_dir(rel_parts):
+                        return False
                 return True
 
             dirnames[:] = [d for d in sorted(dirnames) if _keep(d)]
@@ -243,7 +272,19 @@ def walk_dir_safely(
             except OSError:
                 continue
 
-            out.append(p)
+            if keep_file is not None and not keep_file(p):
+                continue
+
+            # B-244 round 2: only report a genuine truncation. The cap must not fire
+            # merely because `out` reached `max_files` — that also happens when the
+            # walk had EXACTLY `max_files` candidates and nothing beyond them, which
+            # is a complete scan, not a capped one. So the budget check runs BEFORE
+            # appending: `p` itself is the first candidate the walk found *beyond*
+            # the already-full budget, i.e. positive proof more of the tree exists,
+            # and it is reported as capped without being counted into `out`.
             if max_files is not None and len(out) >= max_files:
+                if capped is not None:
+                    capped.append(True)
                 return out
+            out.append(p)
     return out
