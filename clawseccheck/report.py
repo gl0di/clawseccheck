@@ -23,6 +23,7 @@ from .catalog import (
     ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
 from .ansi import paint
+from .brand import BRAND_RED, GRADE_HEX, LOGO_SVG, SEVERITY, WORDMARK
 from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
 from .guide import suggest_actions
@@ -1100,9 +1101,6 @@ def render_events(events, ascii_only: bool = False) -> str:
     return _asciify(out) if ascii_only else out
 
 
-_GRADE_COLOR = {"A": "#4c1", "B": "#97ca00", "C": "#dfb317", "D": "#fe7d37", "F": "#e05d44"}
-
-
 def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     """A shields.io-style SVG badge (grade + score, plus a suppressed-critical marker —
     never finding details)."""
@@ -1114,7 +1112,7 @@ def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     n_hidden = sum(1 for f in findings if surfaced_despite_suppression(f))
     if n_hidden:
         value += f" *{n_hidden} suppressed"
-    color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
+    color = GRADE_HEX.get(score.grade, "#9f9f9f")
     lw = 8 + len(label) * 6          # rough text widths
     vw = 8 + len(value) * 7
     w = lw + vw
@@ -1616,8 +1614,9 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
 def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str:
     """Standalone self-contained HTML report (inline CSS, no external assets).
 
-    Includes grade badge (colored by _GRADE_COLOR), score, Lethal Trifecta ratio,
-    and FAIL/WARN findings list. Owner view — shows findings with a note that
+    Includes the brand mark + wordmark, a grade badge (colored via
+    brand.GRADE_HEX), score, Lethal Trifecta ratio, and FAIL/WARN findings list
+    (colored via brand.SEVERITY). Owner view — shows findings with a note that
     this is private and must not be shared publicly.
 
     All finding text is HTML-escaped.
@@ -1626,15 +1625,24 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
 
-    badge_color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
+    badge_color = GRADE_HEX.get(score.grade, "#9f9f9f")
     trifecta = _trifecta_ratio(findings)
-    sev_color = {CRITICAL: "#e05d44", HIGH: "#fe7d37",
-                 MEDIUM: "#dfb317", LOW: "#97ca00"}
 
     label_trifecta = "Lethal Trifecta:"
     label_capped = "Capped:"
     label_why = "Why:"
-    h1_text = "🔍 ClawSecCheck Security Audit Report"
+    # Brand mark + wordmark, split-coloured ("Claw" in BRAND_RED, the rest in the
+    # page's --ink token) so the graphical mark and the product name travel
+    # together in this HTML-only surface (Tier 3 — see brand.py's module docstring).
+    # The logo is aria-hidden: the adjacent wordmark text is the real accessible
+    # name, so a screen reader reads "ClawSecCheck Security Audit Report" once,
+    # not twice.
+    _claw, _rest = WORDMARK[:4], WORDMARK[4:]
+    h1_html = (
+        f'<span class="logo-mark" aria-hidden="true">{LOGO_SVG}</span>'
+        f'<span class="wordmark"><span class="wordmark-claw">{html.escape(_claw)}</span>'
+        f'{html.escape(_rest)}</span> Security Audit Report'
+    )
     title_text = "ClawSecCheck Security Audit Report"
     private_title = "⚠ Private Report"
     private_body = (
@@ -1650,7 +1658,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
                   for sev in (CRITICAL, HIGH, MEDIUM, LOW)}
 
     def _finding_card(f: Finding) -> str:
-        color = sev_color.get(f.severity, "#999")
+        sev_style = SEVERITY.get(f.severity)
+        color = sev_style.hex if sev_style else "#999"
         icon_char = "✕" if f.status == FAIL else "⚠"
         f_title = esc(_sanitize(f.title))
         f_detail = esc(_sanitize(f.detail)) if f.detail else ""
@@ -1701,7 +1710,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
 
     # Severity summary chips (only the severities that actually occur).
     summary_chips = "".join(
-        f'<span class="sev-chip" style="--sev:{sev_color[sev]};">'
+        f'<span class="sev-chip" style="--sev:{SEVERITY[sev].hex};">'
         f'<span class="sev-chip-n">{n}</span>{esc(sev)}</span>'
         for sev, n in sev_counts.items() if n)
     summary_html = f'<div class="summary">{summary_chips}</div>' if summary_chips else ""
@@ -1767,7 +1776,11 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
             padding: 2.25rem;
         }}
         .header {{ text-align: center; padding-bottom: 1.5rem; border-bottom: 1px solid var(--line); }}
-        .header h1 {{ font-size: 1.55rem; font-weight: 700; letter-spacing: -0.01em; }}
+        .header h1 {{ font-size: 1.55rem; font-weight: 700; letter-spacing: -0.01em;
+            display: flex; align-items: center; justify-content: center; gap: 0.45rem; }}
+        .logo-mark {{ display: inline-flex; flex: none; }}
+        .logo-mark svg {{ width: 1.6rem; height: 1.6rem; }}
+        .wordmark-claw {{ color: {BRAND_RED}; }}
         .grade-badge {{
             display: inline-flex; align-items: center; justify-content: center;
             width: 84px; height: 84px; margin: 1.25rem auto 0.75rem;
@@ -1850,7 +1863,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
 <body>
     <main class="container">
         <header class="header">
-            <h1>{esc(h1_text)}</h1>
+            <h1>{h1_html}</h1>
             <div class="grade-badge" aria-label="Grade {esc(score.grade)}">{esc(score.grade)}</div>
             <div class="scorewrap">
                 <div class="scoreline"><span>Security score</span><strong>{score.score}/100</strong></div>
