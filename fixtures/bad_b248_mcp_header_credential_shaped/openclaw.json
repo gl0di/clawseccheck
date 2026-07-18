@@ -1,0 +1,14 @@
+{
+  "mcp": {
+    "servers": {
+      "figma": {
+        "url": "https://mcp.figma.com/api",
+        "transport": "streamable-http",
+        "allowedHosts": ["mcp.figma.com"],
+        "headers": {
+          "X-Figma-Token": "figd_placeholder-not-a-real-token"
+        }
+      }
+    }
+  }
+}

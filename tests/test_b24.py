@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from clawseccheck.checks import _MCP_UNPINNED_RE, check_mcp_hardening
+from clawseccheck.checks import (
+    _MCP_CONN_STRING_CREDENTIAL_RE,
+    _MCP_UNPINNED_RE,
+    _mcp_value_looks_secret,
+    check_mcp_hardening,
+)
 from clawseccheck.collector import Context
 
 
@@ -695,3 +700,229 @@ def test_mcp_unpinned_re_does_not_match_pinned_specs(text):
 ])
 def test_mcp_unpinned_re_matches_dist_tags(text):
     assert _MCP_UNPINNED_RE.search(text) is not None, text
+
+
+# ---- B-248: plaintext secrets in mcp.servers.*.env / .headers were missed because
+# the detectors keyed on a fixed name allowlist, not on the VALUE'S shape. Two
+# distinct gaps: (1) a compound env-var name that carries the secret keyword as a
+# SUFFIX/middle token (STRIPE_SECRET_KEY, DB_PASSWORD) rather than the PREFIX
+# _MCP_SECRET_ENV_RE requires; (2) a connection-string value that embeds a live
+# credential (scheme://user:pass@host) regardless of what the var is named
+# (POSTGRES_CONNECTION_STRING); (3) a custom header name outside the fixed
+# authorization/proxy-authorization/x-api-key allowlist (X-Figma-Token). ----
+
+# ---- (1) compound secret-ish NAME, corroborated by the VALUE looking secret ----
+
+def test_b248_compound_name_stripe_secret_key_env_warns():
+    ctx = _mcp({"tool": {
+        "command": "node", "args": ["x.js"],
+        "env": {"STRIPE_SECRET_KEY": "sk-live-not-a-real-secret-91827364"},
+    }})
+    f = check_mcp_hardening(ctx)
+    assert f.status == "WARN"
+    assert "STRIPE_SECRET_KEY" in " ".join(f.evidence)
+
+
+def test_b248_compound_name_db_password_env_warns():
+    ctx = _mcp({"tool": {
+        "command": "node", "args": ["x.js"],
+        "env": {"DB_PASSWORD": "not-a-real-password-1234"},
+    }})
+    f = check_mcp_hardening(ctx)
+    assert f.status == "WARN"
+    assert "DB_PASSWORD" in " ".join(f.evidence)
+
+
+# ---- C-135: name-only would misfire on these — the value must also look secret ----
+
+def test_b248_secretish_name_boolean_value_does_not_warn():
+    """A secret-sounding name whose value is a plain boolean flag is not a
+    credential — NOTIFY_TOKEN_ENABLED=true must not warn. (Uses a name where
+    'token' is NOT a prefix — TOKEN_ENABLED itself already matches the older,
+    unrelated _MCP_SECRET_ENV_RE prefix rule unconditionally, so it would not
+    exercise this new corroboration path at all.)"""
+    ctx = _mcp({"tool": {
+        "command": "node", "args": ["x.js"],
+        "env": {"NOTIFY_TOKEN_ENABLED": "true"},
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b248_secretish_name_digit_only_value_does_not_warn():
+    """SESSION_TOKEN_TTL_SECONDS=3600 is a duration, not a credential. (Not
+    TOKEN_TTL_SECONDS — that would match the prefix-anchored _MCP_SECRET_ENV_RE
+    unconditionally, same reasoning as above.)"""
+    ctx = _mcp({"tool": {
+        "command": "node", "args": ["x.js"],
+        "env": {"SESSION_TOKEN_TTL_SECONDS": "3600"},
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b248_secretish_name_plain_word_value_does_not_warn():
+    """CUSTOM_API_KEY_HEADER_NAME describes which header carries the key — its
+    own value ("Authorization") is not itself a credential (no digit/special
+    char, short). (Not API_KEY_HEADER_NAME — that matches the prefix-anchored
+    _MCP_SECRET_ENV_RE unconditionally, same reasoning as above.)"""
+    ctx = _mcp({"tool": {
+        "command": "node", "args": ["x.js"],
+        "env": {"CUSTOM_API_KEY_HEADER_NAME": "Authorization"},
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+# ---- (2) connection-string VALUE embeds a credential, whatever the name ----
+
+def test_b248_postgres_connection_string_env_warns():
+    ctx = _mcp({"crm-db": {
+        "command": "node", "args": ["index.js"],
+        "env": {
+            "POSTGRES_CONNECTION_STRING": "postgres://appuser:not-a-real-pw@db.internal:5432/crm",
+        },
+    }})
+    f = check_mcp_hardening(ctx)
+    assert f.status == "WARN"
+    ev = " ".join(f.evidence)
+    assert "POSTGRES_CONNECTION_STRING" in ev
+    assert "not-a-real-pw" not in ev  # value never echoed
+
+
+def test_b248_redis_url_connection_string_env_warns():
+    """Any DSN-style name works — this is value-shape, not a name allowlist."""
+    ctx = _mcp({"cache": {
+        "command": "node", "args": ["index.js"],
+        "env": {"REDIS_DSN": "redis://:not-a-real-pw@cache.internal:6379/0"},
+    }})
+    assert check_mcp_hardening(ctx).status == "WARN"
+
+
+def test_b248_connection_string_no_password_does_not_warn():
+    """A URI with a bare username (no password) carries no credential to leak."""
+    ctx = _mcp({"tool": {
+        "command": "node", "args": ["x.js"],
+        "env": {"DB_URI": "postgres://readonly@db.internal:5432/crm"},
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b248_plain_https_url_env_var_does_not_warn():
+    """An ordinary URL with no userinfo credential must stay clean."""
+    ctx = _mcp({"tool": {
+        "command": "node", "args": ["x.js"],
+        "env": {"API_BASE_URL": "https://api.example.com/v1"},
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b248_connection_string_secretref_password_does_not_warn():
+    """C-226: a SecretRef indirection sitting in the password position is not a
+    live credential — must not warn."""
+    ctx = _mcp({"tool": {
+        "command": "node", "args": ["x.js"],
+        "env": {"DB_DSN": "postgres://appuser:${DB_PASS}@db.internal:5432/crm"},
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b248_bad_conn_string_env_fixture_warns():
+    from clawseccheck.collector import collect
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    f = check_mcp_hardening(collect(fixtures / "bad_b248_mcp_conn_string_env"))
+    assert f.status == "WARN"
+
+
+# ---- (3) custom header name outside the fixed allowlist, value-corroborated ----
+
+def test_b248_header_custom_token_name_warns():
+    ctx = _mcp({"figma": {
+        "url": "https://mcp.figma.com/api",
+        "allowedHosts": ["mcp.figma.com"],
+        "headers": {"X-Figma-Token": "figd_placeholder-not-a-real-token"},
+    }})
+    f = check_mcp_hardening(ctx)
+    assert f.status == "WARN"
+    ev = " ".join(f.evidence)
+    assert "X-Figma-Token" in ev
+    assert "figd_" not in ev  # value never echoed
+
+
+def test_b248_header_credential_shaped_flag_value_does_not_warn():
+    """A header literally named with 'token' but carrying a boolean flag value
+    (not a credential) must not warn — C-135 guard."""
+    ctx = _mcp({"tool": {
+        "url": "https://mcp.example.com/api",
+        "allowedHosts": ["mcp.example.com"],
+        "headers": {"X-Request-Token-Enabled": "true"},
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b248_bad_header_credential_shaped_fixture_warns():
+    from clawseccheck.collector import collect
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    f = check_mcp_hardening(collect(fixtures / "bad_b248_mcp_header_credential_shaped"))
+    assert f.status == "WARN"
+
+
+# ---- Clean fixture: every B-248 near-miss stays PASS in one config ----
+
+def test_b248_clean_benign_env_headers_fixture_passes():
+    from clawseccheck.collector import collect
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    f = check_mcp_hardening(collect(fixtures / "clean_b248_mcp_benign_env_headers"))
+    assert f.status == "PASS"
+
+
+# ---- Explicit UNKNOWN coverage: unaffected by the B-248 corroboration logic ----
+
+def test_b248_no_mcp_still_unknown():
+    assert check_mcp_hardening(_ctx({})).status == "UNKNOWN"
+
+
+# ---- Unit matrix: _mcp_value_looks_secret corroboration heuristic ----
+
+@pytest.mark.parametrize("val", [
+    "sk-live-not-a-real-secret-91827364",
+    "not-a-real-password-1234",
+    "a" * 20,  # long enough alone, even with no digit/special
+    "figd_placeholder-not-a-real-token",
+])
+def test_mcp_value_looks_secret_true_cases(val):
+    assert _mcp_value_looks_secret(val) is True, val
+
+
+@pytest.mark.parametrize("val", [
+    "",
+    "true",
+    "false",
+    "3600",
+    "Authorization",  # short, plain word — no digit/special
+    "short1",  # below min_len
+    "has a space in it 123!",  # whitespace disqualifies
+    "${DB_PASS}",  # pure SecretRef indirection
+    "$DB_PASS",
+    None,
+    123,
+])
+def test_mcp_value_looks_secret_false_cases(val):
+    assert _mcp_value_looks_secret(val) is False, val
+
+
+@pytest.mark.parametrize("text,expect_password", [
+    ("postgres://appuser:not-a-real-pw@db.internal:5432/crm", "not-a-real-pw"),
+    ("redis://:not-a-real-pw@cache.internal:6379/0", "not-a-real-pw"),  # empty username (Redis convention)
+    ("mysql://root:hunter2pw@127.0.0.1/app", "hunter2pw"),
+])
+def test_mcp_conn_string_credential_re_matches(text, expect_password):
+    m = _MCP_CONN_STRING_CREDENTIAL_RE.match(text)
+    assert m is not None, text
+    assert m.group(1) == expect_password
+
+
+@pytest.mark.parametrize("text", [
+    "postgres://readonly@db.internal:5432/crm",  # no password
+    "https://api.example.com/v1",  # no userinfo at all
+    "NODE_OPTIONS=--max-old-space-size=4096",  # not a URI at all
+])
+def test_mcp_conn_string_credential_re_does_not_match(text):
+    assert _MCP_CONN_STRING_CREDENTIAL_RE.match(text) is None, text

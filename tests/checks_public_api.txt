@@ -36,6 +36,7 @@ _KNOWN_ADVISORIES
 _KNOWN_EXFIL_HOST_RE
 _KNOWN_NAMES
 _MCP_BROAD_FS_ROOTS
+_MCP_CONN_STRING_CREDENTIAL_RE
 _MCP_DATA_CAP_RE
 _MCP_FS_PKG_RE
 _SECRET_PATH_RE
@@ -80,7 +81,9 @@ _mcp_fs_root_is_broad
 _mcp_has_remote
 _mcp_leg_contributions
 _mcp_sensitive_reason
+_mcp_server_risks
 _mcp_servers
+_mcp_value_looks_secret
 _negation_context
 _negation_governs_trigger
 _open_channels

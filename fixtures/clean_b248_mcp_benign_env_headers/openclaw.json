@@ -1,0 +1,22 @@
+{
+  "mcp": {
+    "servers": {
+      "api-client": {
+        "command": "node",
+        "args": ["index.js"],
+        "url": "https://api.example.com/v1",
+        "allowedHosts": ["api.example.com"],
+        "env": {
+          "NODE_ENV": "production",
+          "API_BASE_URL": "https://api.example.com/v1",
+          "SESSION_TOKEN_TTL_SECONDS": "3600",
+          "CUSTOM_API_KEY_HEADER_NAME": "Authorization"
+        },
+        "headers": {
+          "Accept": "application/json",
+          "X-Request-Token-Enabled": "true"
+        }
+      }
+    }
+  }
+}
