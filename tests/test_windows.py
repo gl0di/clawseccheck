@@ -47,3 +47,15 @@ def test_unicode_rendering_still_default():
     out = render_report(findings, score, ascii_only=False)
     assert "🦞" in out
     assert "🟠" in out or "🟡" in out
+
+
+def test_card_uses_brand_mascot_not_the_magnifier():
+    # C-241 regression: render_card's footer used to hardcode a stray 🔍
+    # (magnifier-glass brand-drift) as its own literal, independent of the
+    # header's 🦞 above it. Both must now read from clawseccheck.brand.
+    from clawseccheck import brand
+    _, findings, score = audit(FIXTURES / "home_safe")
+    card = render_card(score, findings, ascii_only=False)
+    assert "🔍" not in card
+    assert card.count(brand.MASCOT) == 2  # once in the header, once in the footer
+    assert brand.WORDMARK in card

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from . import brand
 from .catalog import CATALOG, CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding, remediation_for
 from .dossier import VERDICT_WORD, axis_for
 from .report import _sanitize, _sanitize_tree, surfaced_despite_suppression
@@ -172,7 +173,9 @@ def render_sarif(
             {
                 "tool": {
                     "driver": {
-                        "name": "ClawSecCheck",
+                        # Display name, single-sourced from brand.py (C-241); value is
+                        # unchanged ("ClawSecCheck") — see tests/test_sarif.py.
+                        "name": brand.WORDMARK,
                         "version": tool_version,
                         "informationUri": _INFO_URI,
                         "rules": rules,

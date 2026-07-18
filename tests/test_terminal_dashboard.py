@@ -5,9 +5,9 @@ renderers are pure string builders over in-memory findings.
 """
 from __future__ import annotations
 
-from clawseccheck.ansi import paint, should_color, strip_ansi
+from clawseccheck.ansi import _CODES, paint, should_color, strip_ansi
 from clawseccheck.catalog import BY_ID, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
-from clawseccheck.report import _coverage_lines, _score_bar, render_report
+from clawseccheck.report import _coverage_lines, _grade_color, _score_bar, render_report
 from clawseccheck.scoring import ScoreResult
 
 _ESC = "\x1b["
@@ -93,6 +93,24 @@ class TestPaint:
         assert strip_ansi(colored) == "hello"
 
 
+# ── grade colour (C-241: single-sourced from brand.GRADE_ANSI) ────────────────
+
+class TestGradeColor:
+    def test_returns_a_known_ansi_style_name_not_a_hex_string(self):
+        # Regression for the report.py `_GRADE_COLOR` shadow bug (see brand.py's
+        # module docstring): the ansi-name dict must win, never the hex dict a
+        # second definition used to silently replace it with.
+        for grade in ("A", "B", "C", "D", "F"):
+            color = _grade_color(grade)
+            assert color in _CODES, f"_grade_color({grade!r}) = {color!r} is not a known ansi.py style"
+            assert not color.startswith("#"), f"_grade_color({grade!r}) leaked a hex colour: {color!r}"
+
+    def test_matches_brand_grade_ansi(self):
+        from clawseccheck import brand
+        for grade in ("A", "B", "C", "D", "F"):
+            assert _grade_color(grade) == brand.grade_ansi(grade)
+
+
 # ── score bar ─────────────────────────────────────────────────────────────────
 
 class TestScoreBar:
@@ -114,6 +132,20 @@ class TestScoreBar:
         colored = _score_bar(49, "F", color=True)
         assert _ESC in colored
         assert strip_ansi(colored) == plain  # colour is purely additive
+
+    def test_fill_run_itself_is_coloured_not_just_the_empty_run(self):
+        # C-241 regression: report.py used to define `_GRADE_COLOR` twice under the
+        # same name — ANSI colour names, then (later in the file) hex codes for the
+        # HTML/SVG badge — so the second definition silently shadowed the first and
+        # `_grade_color()` always returned a hex string like "#e05d44". paint() drops
+        # any style name it doesn't recognise (ansi._CODES has no hex keys), so the
+        # FILL run rendered with no colour at all. The prior `test_color_wraps_fill`
+        # above didn't catch this: `empty_s` is separately painted "grey" (always a
+        # valid ansi.py name), so `_ESC in colored` was already true from the *empty*
+        # run alone. This test isolates the fill run specifically.
+        colored = _score_bar(49, "F", color=True)
+        fill_run = colored.split("\x1b[90m", 1)[0]  # everything before the grey empty run
+        assert _ESC in fill_run, f"the filled portion of the score bar carries no colour: {colored!r}"
 
 
 # ── coverage map ──────────────────────────────────────────────────────────────

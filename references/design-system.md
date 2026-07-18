@@ -525,7 +525,7 @@ ratio, and nothing else** — no findings, no titles, no evidence, ever.
 ┌───────────────────────────────────────┐
 │  OpenClaw Security: C  ( 74/100)      │
 │  Lethal Trifecta: 2/3                 │
-│  audited by ClawSecCheck 🔍           │
+│  audited by ClawSecCheck 🦞           │
 └───────────────────────────────────────┘
 ```
 

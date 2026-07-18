@@ -21,6 +21,7 @@ from .catalog import (
     FAMILY_LABEL, FAMILY_OF, FAMILY_ORDER,
     ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
+from . import brand
 from .ansi import paint
 from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
@@ -116,8 +117,11 @@ def _sev_token(severity: str, *, ascii_only: bool = False, color: bool = False) 
     return f"{_SEV_GLYPH.get(severity, '⚪')} {word}"
 
 # ── ANSI colour palette (opt-in; see ansi.py) ────────────────────────────────
-# Grade → colour for the header grade letter + score-bar fill.
-_GRADE_COLOR = {"A": "green", "B": "green", "C": "yellow", "D": "bright_yellow", "F": "red"}
+# Grade → colour for the header grade letter + score-bar fill is brand.GRADE_ANSI
+# (via _grade_color() below), single-sourced from brand.py. This file used to define
+# its own `_GRADE_COLOR` dict here — and a second, differently-typed one further down
+# for the HTML/SVG hex badge colour — both under the same name, so the later
+# definition silently shadowed this one (see brand.py's module docstring / C-241).
 # Status → colour for finding icons / coverage states.
 _STATUS_COLOR = {
     FAIL: "red", WARN: "yellow", PASS: "green", UNKNOWN: "grey",
@@ -135,8 +139,8 @@ DRIFT_MIN_SCORED = 20  # minimum scored_total before the staleness nudge is even
 
 
 def _grade_color(grade: str) -> str:
-    """Map a grade label (possibly 'A+', 'B-', …) to a palette colour name."""
-    return _GRADE_COLOR.get((grade or "")[:1].upper(), "grey")
+    """Map a grade label (possibly 'A+', 'B-', …) to a palette colour name (brand.GRADE_ANSI)."""
+    return brand.grade_ansi(grade)
 
 
 def _color_icons(icon: dict, color: bool) -> dict:
@@ -1016,18 +1020,22 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
     """Shareable badge — grade + score + trifecta ONLY. No findings, ever."""
     l1 = f"  OpenClaw Security: {score.grade:<2} ({score.score:>3}/100)"
     l2 = f"  Lethal Trifecta: {_trifecta_ratio(findings)}"
-    l3 = "  audited by ClawSecCheck" + ("" if ascii_only else " 🔍")
+    # C-241: this footer used to hardcode a stray 🔍 (magnifier-glass brand-drift —
+    # every other mascot touchpoint in the file uses 🦞) as its own separate string
+    # literal from the header below, so the two could drift independently. Both now
+    # read brand.MASCOT/brand.WORDMARK — one source, not two hand-kept literals.
+    l3 = f"  audited by {brand.WORDMARK}" + ("" if ascii_only else f" {brand.MASCOT}")
     width = 39
-    # 🦞 mascot header line, once (design-system Foundations); --ascii drops it to
+    # Mascot header line, once (design-system Foundations); --ascii drops it to
     # stay pure-ASCII, matching render_dashboard's convention.
-    header = "" if ascii_only else "🦞 ClawSecCheck\n"
+    header = "" if ascii_only else f"{brand.MASCOT} {brand.WORDMARK}\n"
     if ascii_only:
         top = bot = "+" + "-" * width + "+"
         body = "\n".join(f"|{ln:<{width}}|" for ln in (l1, l2, l3))
         return _asciify(f"{top}\n{body}\n{bot}")
     top = "┌" + "─" * width + "┐"
     bot = "└" + "─" * width + "┘"
-    # the magnifier emoji is double-width in many terminals; pad l3 one less
+    # the mascot emoji is double-width in many terminals; pad l3 one less
     body = "\n".join([
         f"│{l1:<{width}}│",
         f"│{l2:<{width}}│",
@@ -1074,9 +1082,6 @@ def render_events(events, ascii_only: bool = False) -> str:
     return _asciify(out) if ascii_only else out
 
 
-_GRADE_COLOR = {"A": "#4c1", "B": "#97ca00", "C": "#dfb317", "D": "#fe7d37", "F": "#e05d44"}
-
-
 def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     """A shields.io-style SVG badge (grade + score, plus a suppressed-critical marker —
     never finding details)."""
@@ -1088,7 +1093,7 @@ def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     n_hidden = sum(1 for f in findings if surfaced_despite_suppression(f))
     if n_hidden:
         value += f" *{n_hidden} suppressed"
-    color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
+    color = brand.grade_hex(score.grade)  # C-241: single-sourced (was a local _GRADE_COLOR dict)
     lw = 8 + len(label) * 6          # rough text widths
     vw = 8 + len(value) * 7
     w = lw + vw
@@ -1590,7 +1595,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
 def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str:
     """Standalone self-contained HTML report (inline CSS, no external assets).
 
-    Includes grade badge (colored by _GRADE_COLOR), score, Lethal Trifecta ratio,
+    Includes grade badge (colored by brand.GRADE_HEX), score, Lethal Trifecta ratio,
     and FAIL/WARN findings list. Owner view — shows findings with a note that
     this is private and must not be shared publicly.
 
@@ -1600,16 +1605,22 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
 
-    badge_color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
+    badge_color = brand.grade_hex(score.grade)  # C-241: single-sourced (was a local _GRADE_COLOR dict)
     trifecta = _trifecta_ratio(findings)
-    sev_color = {CRITICAL: "#e05d44", HIGH: "#fe7d37",
-                 MEDIUM: "#dfb317", LOW: "#97ca00"}
+    # C-241: this severity->hex ramp intentionally mirrors brand.GRADE_HEX (F for
+    # CRITICAL/HIGH, C for MEDIUM, B for LOW) rather than reusing brand.SEVERITY's
+    # .hex field — brand.SEVERITY exists for the finding-list severity *dot* (glyph)
+    # and derives LOW as a neutral grey there, which is a different, unrelated colour
+    # from this summary strip's existing LOW value. Deriving from GRADE_HEX keeps this
+    # single-sourced from brand.py while preserving the exact colours already shipped.
+    sev_color = {CRITICAL: brand.GRADE_HEX["F"], HIGH: brand.GRADE_HEX["D"],
+                 MEDIUM: brand.GRADE_HEX["C"], LOW: brand.GRADE_HEX["B"]}
 
     label_trifecta = "Lethal Trifecta:"
     label_capped = "Capped:"
     label_why = "Why:"
-    h1_text = "🔍 ClawSecCheck Security Audit Report"
-    title_text = "ClawSecCheck Security Audit Report"
+    h1_text = f"{brand.MASCOT} {brand.WORDMARK} Security Audit Report"
+    title_text = f"{brand.WORDMARK} Security Audit Report"
     private_title = "⚠ Private Report"
     private_body = (
         "This report contains detailed security findings and must"
