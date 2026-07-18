@@ -168,7 +168,7 @@ def _score_bar(score: int, grade: str, *, ascii_only: bool = False, color: bool 
     else:
         fill_s, empty_s, lb, rb = "█" * filled, "░" * empty, "", ""
     if color:
-        fill_s = paint(fill_s, _grade_color(grade), enabled=True)
+        fill_s = paint(fill_s, grade_ansi(grade), enabled=True)
         empty_s = paint(empty_s, "grey", enabled=True)
     return f"{lb}{fill_s}{empty_s}{rb}"
 
@@ -660,7 +660,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     issues = [f for f in findings
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
-    grade_disp = paint(score.grade, _grade_color(score.grade), "bold", enabled=True) if color else score.grade
+    grade_disp = paint(score.grade, grade_ansi(score.grade), "bold", enabled=True) if color else score.grade
     # Assurance honesty (R11): single source-of-truth coverage tally, computed once and
     # reused by both the C-166 low-coverage line (below) and the C-165 staleness nudge
     # (advisory band, further down) — never a second independent tally.
