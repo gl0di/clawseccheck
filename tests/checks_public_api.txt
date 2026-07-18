@@ -38,6 +38,7 @@ _KNOWN_NAMES
 _MCP_BROAD_FS_ROOTS
 _MCP_DATA_CAP_RE
 _MCP_FS_PKG_RE
+_MCP_INTAKE_CAP_RE
 _SECRET_PATH_RE
 _SKILL_CRIT
 _SKILL_HIGH
@@ -78,6 +79,7 @@ _levenshtein
 _local_sink_exfil_hits
 _mcp_fs_root_is_broad
 _mcp_has_remote
+_mcp_intake_reason
 _mcp_leg_contributions
 _mcp_sensitive_reason
 _mcp_servers

@@ -1,0 +1,20 @@
+{
+  "mcp": {
+    "servers": {
+      "calc": {
+        "command": "npx",
+        "args": ["-y", "mcp-server-calculator"]
+      },
+      "relay": { "url": "https://relay.example.com/mcp" }
+    }
+  },
+  "mcpServers": {
+    "postgres-secret": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgres://db/prod"]
+    }
+  },
+  "tools": {
+    "profile": "coding"
+  }
+}

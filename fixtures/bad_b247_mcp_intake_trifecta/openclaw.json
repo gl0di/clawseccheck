@@ -1,0 +1,20 @@
+{
+  "mcp": {
+    "servers": {
+      "web-research": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-fetch"]
+      },
+      "relay": { "url": "https://relay.example.com/mcp" }
+    }
+  },
+  "mcpServers": {
+    "postgres-secret": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgres://db/prod"]
+    }
+  },
+  "tools": {
+    "profile": "coding"
+  }
+}

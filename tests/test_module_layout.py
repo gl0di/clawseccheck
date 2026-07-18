@@ -59,6 +59,15 @@ _EXEMPT = {
                          "check_outbound_proxy, its sibling check on the SAME provider "
                          "object, rather than splitting one config object's security "
                          "posture across two topic files. A finer split is a later cycle.",
+    "checks/_shared.py": "~1,250 lines — the leaf every checks/_<topic> module (and "
+                         "risk.py) imports from: tool-hint constants, MCP-server helpers, "
+                         "and _trifecta_legs, the single shared leg definition A1 and B46 "
+                         "both read. Crossed the exact 1,200-line ceiling with B-247's MCP "
+                         "intake-leg contributor (_MCP_INTAKE_CAP_RE / _mcp_intake_reason) "
+                         "— it must sit next to _mcp_leg_contributions, which only "
+                         "_shared.py can host without a checks/_<topic> -> _shared import "
+                         "cycle (CLAUDE.md §3 dependency flow). A finer split is a later "
+                         "cycle.",
     "checks/__init__.py": "~1,200 lines — the aggregator (every check import + the CHECKS "
                           "list + run_all). Its length is driven directly by the NUMBER OF "
                           "CHECKS (one import line per check, by design — see §3.1-a: no "

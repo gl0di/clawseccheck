@@ -1039,21 +1039,71 @@ def _mcp_sensitive_reason(local_blob: str, args: list) -> str:
     return ""
 
 
+# B-247 (a B-229 residual): a server package that itself pulls untrusted EXTERNAL
+# content into the agent — fetch/web-search/browser/scraper, or a mailbox/feed/chat/
+# issue-tracker reader. Mirrors INPUT_TOOL_HINTS, anchored to the MCP package-naming
+# convention like _MCP_DATA_CAP_RE (a bare keyword with no such prefix cannot match).
+# Narrower than INPUT_TOOL_HINTS's bare "web": "mcp-server-web3"/"mcp-server-webhook"
+# name an unrelated blockchain tool / an OUTBOUND sink, not intake, so only the
+# "web-search" compound counts. "filesystem" is excluded on purpose — that is the
+# sensitive-data leg's domain (_MCP_FS_PKG_RE); folding it in here would duplicate it.
+_MCP_INTAKE_CAP_RE = re.compile(
+    r"(?:@[\w.-]+/server-|mcp[-_]server[-_]|mcp[-_])"
+    r"(fetch|web[-_]?search|browse(?:r)?|scrape(?:r)?|"
+    r"email|imap|gmail|rss|feed|slack|inbox|github[-_]?issues?)\b",
+    re.I,
+)
+
+
+def _mcp_intake_reason(blob: str) -> str:
+    """Human-readable reason an MCP server grants the trifecta's untrusted-input leg,
+    else ''.
+
+    Unlike ``_mcp_sensitive_reason``, ``blob`` is NOT local-only — callers pass
+    command+args+url combined (see _mcp_leg_contributions). A remote fetch/web-search/
+    inbox-style endpoint pulls untrusted external content into the agent's context just
+    like a local stdio one does; the "url says nothing about local access" reasoning
+    that excludes url from the sensitive-data probe is specific to LOCAL data exposure
+    and does not apply here. Reuses the shared shape-only-compound denylist
+    (_MCP_BENIGN_COMPOUND_RE), so a "mcp-server-slack-docs" (documentation ABOUT the
+    API, not a live reader) does not flag, same as the sensitive-data leg.
+    """
+    m = _MCP_INTAKE_CAP_RE.search(blob)
+    if m and not _MCP_BENIGN_COMPOUND_RE.match(blob[m.end():]):
+        return f"is a {m.group(1).lower()} server (pulls untrusted external content)"
+    return ""
+
+
 def _mcp_leg_contributions(cfg: dict) -> dict:
     """Map trifecta leg -> list of MCP-server evidence strings that contribute to it.
 
     Each string NAMES the server so A1 can attribute the leg to its capability source.
-    Sensitive-data contributors: a STDIO server whose command/args name a known
-    data/db/secret package (not a benign diagram/docs/schema compound) or a broad-rooted
-    fs root. A remote server's url/host is NEVER used for this leg (C-135 round 2, FP-B)
-    — it says nothing about local data access. Outbound contributors: a remote/network
-    endpoint that is NOT loopback (a localhost MCP keeps data on the machine and is not
-    an exfil path).
+    Untrusted-input contributors (B-247): a fetch/web-search/browser/scraper/email/
+    imap/gmail/rss/feed/slack/inbox/github-issues package, matched against command+
+    args+url combined — a remote intake endpoint is just as much an intake source as a
+    local one (see _mcp_intake_reason). Sensitive-data contributors: a STDIO server
+    whose command/args name a known data/db/secret package (not a benign diagram/docs/
+    schema compound) or a broad-rooted fs root. A remote server's url/host is NEVER
+    used for THIS leg (C-135 round 2, FP-B) — it says nothing about local data access.
+    Outbound contributors: a remote/network endpoint that is NOT loopback (a localhost
+    MCP keeps data on the machine and is not an exfil path).
     """
-    contribs: dict = {"sensitive data": [], "outbound actions": []}
+    contribs: dict = {"untrusted input": [], "sensitive data": [], "outbound actions": []}
     for name, spec in _mcp_servers(cfg).items():
         if not isinstance(spec, dict):
             spec = {}
+        # B-247 FP fix: an `enabled: false` server contributes NO tools to the agent —
+        # OpenClaw filters it out at every consumption site (server.enabled !== false in
+        # bundle-mcp-config-CdwmTK7W.js / tool-policy-pipeline-C3edOW1F.js / bundle-mcp-
+        # codex-DkMkPyae.js; McpServerSchema.enabled is optional boolean, zod-schema-
+        # O9ml_nmo.js). Use `is False`, not falsy/`not spec.get("enabled")` — an omitted
+        # key is the permissive default. This also repairs the pre-existing (B-229)
+        # sensitive-data/outbound blindness to the same field, not just the new intake
+        # leg: keeping a disabled entry in config (OpenClaw's own documented
+        # `mcp configure --disable` workflow, and A1's own remediation advice) must not
+        # itself manufacture a trifecta leg.
+        if spec.get("enabled") is False:
+            continue
         cmd = str(spec.get("command", ""))
         raw_args = spec.get("args")
         args = [str(a) for a in raw_args] if isinstance(raw_args, list) else []
@@ -1064,6 +1114,12 @@ def _mcp_leg_contributions(cfg: dict) -> dict:
         if reason:
             contribs["sensitive data"].append(f"MCP server {name!r} {reason}")
         url = str(spec.get("url", "") or "")
+        # B-247: intake probe covers command+args+url — a remote endpoint's identity
+        # IS meaningful here, unlike the sensitive-data probe above (see docstring).
+        intake_blob = f"{local_blob} {url}" if url else local_blob
+        intake_reason = _mcp_intake_reason(intake_blob)
+        if intake_reason:
+            contribs["untrusted input"].append(f"MCP server {name!r} {intake_reason}")
         if _mcp_has_remote(spec) and not (url and _mcp_url_is_local(url)):
             endpoint = url or str(spec.get("transport", "remote"))
             contribs["outbound actions"].append(
@@ -1100,9 +1156,18 @@ def _trifecta_legs(ctx: Context) -> dict:
     # broad fs/db/secret access raises the sensitive leg; a remote (non-loopback) endpoint
     # raises the outbound leg. Deliberately conservative (see _mcp_leg_contributions) so a
     # benign read-only / localhost MCP cannot manufacture a spurious 3/3 FAIL (§5).
+    # B-247 (a B-229 residual): a fetch/web-search/browser/scraper/mailbox/feed/chat/
+    # issue-tracker MCP server raises the untrusted-input leg too — B-229 only wired the
+    # sensitive-data and outbound legs, leaving a semantically identical MCP intake
+    # source (e.g. @modelcontextprotocol/server-fetch) invisible next to tools.web.fetch.
     mcp_legs = _mcp_leg_contributions(cfg)
     return {
-        "untrusted input": (bool(untrusted_ch) or _hint(tools, INPUT_TOOL_HINTS) or web_fetch),
+        "untrusted input": (
+            bool(untrusted_ch)
+            or _hint(tools, INPUT_TOOL_HINTS)
+            or web_fetch
+            or bool(mcp_legs["untrusted input"])  # B-247: fetch/web-search/inbox/... MCP
+        ),
         "sensitive data": (
             # Agent-readable private data: a data tool (db/credential/vault/fs_read/...)
             # or a credentials/ dir under the home. NOT gateway.auth.password — that is

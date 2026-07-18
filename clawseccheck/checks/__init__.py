@@ -141,6 +141,7 @@ from ._host import (
 
 from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has_remote, _mcp_servers, _mcp_url_is_local, _read_jsonl_tail, correlation_indicators, _CORR_INDICATOR_CAP,)
 from ._shared import (_MCP_DATA_CAP_RE, _MCP_FS_PKG_RE, _MCP_BROAD_FS_ROOTS, _mcp_fs_root_is_broad, _mcp_sensitive_reason, _mcp_leg_contributions,)
+from ._shared import (_MCP_INTAKE_CAP_RE, _mcp_intake_reason,)
 from ._egress import (
     _EXT_SKILL_HINTS,
     _USER_CONTENT_HOSTS,
