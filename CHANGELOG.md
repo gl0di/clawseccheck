@@ -3,6 +3,57 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.52.0] — 2026-07-18
+
+The report answers a question it previously dodged: **which of my things is the problem?**
+Findings are now also grouped by the subject they belong to — the system itself, each
+agent, each installed skill, each MCP server, each channel — with a per-instance verdict
+next to the skills and MCP servers, read from the same engine `--vet` uses.
+
+The grouping is additive. Every finding, severity, score and grade is exactly what it was.
+
+### Added
+- **"Inventory by subject" report block.** Above the existing family view, findings are
+  rostered by owner: System, Agents, Skills, MCP, Channels. Each installed skill and MCP
+  server carries its own verdict, so "something is wrong" becomes "*this* skill is
+  wrong". Present in the text report and, additively, in `--json`.
+- **B180 — the agent's own log corpus as an injection surface.** Text the agent writes and
+  later reads back is attacker-reachable: a directive planted in a log line or a memory
+  file is a real ingress. Flagged only with corroboration, so a log that merely *quotes*
+  an attack — an audit tool's own output, a security note — stays quiet.
+- **`--verify-self` now prints the command that actually verifies it.** It pointed at a
+  cosign-signed digest file and left you to work out the invocation; the exact keyless
+  verification command, with the identity and issuer the publish workflow really uses, is
+  now printed.
+- **History entries record when they happened and where they came from.** `history.jsonl`
+  gains a timestamp and a source tag (audit / dev / test) plus a filter, so a trend line
+  is no longer polluted by development runs. Existing entries without the new fields still
+  load and still render.
+
+### Fixed
+- **The inventory blamed the wrong skill.** Caught by adversarial review before release,
+  and worth describing because it defeated the whole point of the feature: each skill's
+  per-instance audit ran with the scan root still set to the *whole* OpenClaw home, so a
+  filesystem-level finding — a symlink escape, a world-writable directory — was
+  rediscovered for every skill and promoted into all of their verdicts. One skill's real
+  symlink made an unrelated, clean skill read as DANGEROUS. Each skill is now scanned
+  against its own directory, exactly as `--vet <skill>` already did.
+- **The canonical injection phrasing was unmatchable.** The log/memory scan keyed on a
+  pattern allowing exactly one word before "instructions", so "ignore **all previous**
+  instructions" — the textbook form — could not match at all. Widened for the log scan
+  only: the shared pattern list is also consumed *without* corroboration by the bootstrap
+  and content checks, where the same widening immediately produced false alarms on clean
+  fixtures whose own documentation quotes the attack as an example.
+
+### Changed
+- **The skill's icon is the lobster.** The catalogue metadata still showed a magnifier
+  while every renderer had moved to the mascot. The magnifier remains in the menu, where
+  it marks the "inspect" action rather than the brand.
+- **B160's ditransitive phrasing stays a documented miss.** "Send them, the credentials,
+  to `<host>`" is not detected. Widening the rule to catch it produced false alarms on
+  ordinary prose, so the miss is pinned by a test and left in place rather than traded for
+  a false positive.
+
 ## [3.51.0] — 2026-07-18
 
 Nine new checks over configuration surfaces the audit had never read, a fix for a check
