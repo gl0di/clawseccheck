@@ -22,6 +22,7 @@ from .catalog import (
     ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
 from .ansi import paint
+from .brand import SEVERITY as _BRAND_SEVERITY
 from .brand import grade_ansi, grade_hex
 from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
@@ -1596,8 +1597,10 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
 
     badge_color = grade_hex(score.grade)
     trifecta = _trifecta_ratio(findings)
-    sev_color = {CRITICAL: "#e05d44", HIGH: "#fe7d37",
-                 MEDIUM: "#dfb317", LOW: "#97ca00"}
+    # B-234 follow-up: single-source the HTML severity ramp from brand.SEVERITY
+    # instead of an independently hand-kept dict (was drifting: HIGH/LOW no
+    # longer matched brand.py's grade-derived hex values).
+    sev_color = {sev: style.hex for sev, style in _BRAND_SEVERITY.items()}
 
     label_trifecta = "Lethal Trifecta:"
     label_capped = "Capped:"
