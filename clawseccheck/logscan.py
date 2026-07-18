@@ -46,7 +46,7 @@ from datetime import datetime
 from . import attest
 from . import logsafe as _logsafe
 from .checks import (
-    INJECTION_PATTERNS,
+    LOG_SCAN_INJECTION_PATTERNS,
     SECRET_PATTERNS,
     _B64_BLOB_RE,
     _B64URL_BLOB_RE,
@@ -208,13 +208,20 @@ def _scan_line_content(
     normalized = normalize_for_scan(line)
 
     # Class 1 — injection_against_agent: a narrow, cheap subset of the content-ring's
-    # injection markers (INJECTION_PATTERNS, checks/_shared.py) over de-obfuscated text.
-    # Deliberately NOT the full ~247-regex SKILL_CONTENT_RING — that set is sized and
-    # calibrated for scanning trusted-author skill SOURCE, not arbitrary, attacker-
-    # influenced LOG text (design doc §6 DoS-surface note). Windowed over `normalized`
-    # (not `line`): normalize_for_scan can strip invisible/bidi chars, so a span found
-    # in `normalized` is not guaranteed to be a valid index into `line`.
-    for pat in INJECTION_PATTERNS:
+    # injection markers (INJECTION_PATTERNS, checks/_shared.py — PLUS one extra bounded
+    # canonical-override pattern, LOG_SCAN_INJECTION_PATTERNS, F-127/C-135: fixes an
+    # end-to-end FN where "ignore all previous instructions"/"disregard all prior
+    # instructions"/"forget everything above" — the single most canonical injection
+    # phrasing — missed INJECTION_PATTERNS' narrower single-modifier "ignore" form and had
+    # no "disregard"/"forget" verb at all; kept OUT of INJECTION_PATTERNS itself since that
+    # list is also consumed un-corroborated by B6/B58/C074, see LOG_SCAN_INJECTION_PATTERNS'
+    # docstring) over de-obfuscated text. Deliberately NOT the full ~247-regex
+    # SKILL_CONTENT_RING — that set is sized and calibrated for scanning trusted-author
+    # skill SOURCE, not arbitrary, attacker-influenced LOG text (design doc §6 DoS-surface
+    # note). Windowed over `normalized` (not `line`): normalize_for_scan can strip
+    # invisible/bidi chars, so a span found in `normalized` is not guaranteed to be a valid
+    # index into `line`.
+    for pat in LOG_SCAN_INJECTION_PATTERNS:
         m = pat.search(normalized)
         if m:
             _add_sample(result, "injection_against_agent", _windowed(normalized, m.start(), m.end()))

@@ -252,7 +252,7 @@ from ._config import (
     check_trustedproxy_loopback,
 )
 
-from ._shared import (INJECTION_PATTERNS, _FM_BLOCK_BARE_RE, _FM_BLOCK_HEADERED_RE, _HOOK_EXEC_RE, _skill_frontmatter_block,)
+from ._shared import (INJECTION_PATTERNS, LOG_SCAN_INJECTION_PATTERNS, _FM_BLOCK_BARE_RE, _FM_BLOCK_HEADERED_RE, _HOOK_EXEC_RE, _skill_frontmatter_block,)
 from ._lifecycle import (
     _APPROVAL_BYPASS_RE,
     _CRITICAL_BOOTSTRAP,
