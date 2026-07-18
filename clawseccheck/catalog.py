@@ -758,6 +758,24 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="bootstrap",
     ),
+    # B171 (B-235): root-level commands.* in-chat privileged-command surface
+    # (bash/config/mcp/plugins) was entirely uncovered -- enabling raw-shell chat commands
+    # plus an open channel scored identically to a closed-channel baseline (differential
+    # test, 2026-07-17 coverage-map campaign). FAIL only on positive evidence (wildcard
+    # owner/allow-from gate, or an empty gate on a channel already known to be open);
+    # WARN on an empty gate elsewhere / useAccessGroups disabled; UNKNOWN when reachability
+    # genuinely can't be assessed (no channels configured at all). Base severity HIGH,
+    # escalates to CRITICAL in-check for bash/config (see check_privileged_commands_exposure).
+    CheckMeta(
+        "B171",
+        "In-chat privileged command surface (commands.bash/config/mcp/plugins) weakly gated",
+        HIGH,
+        "hardening",
+        "Least Privilege / Break-Glass",
+        scored=True,
+        confidence="HIGH",
+        surface="tools",
+    ),
     # B158 (F-119): a declared skill/plugin load source (skills.load.extraDirs,
     # plugins.load.paths, or a .clawhub/lock.json skillFile) resolves to nothing on disk —
     # an unaudited auto-load gap. Advisory, WARN-only, unscored (declared-but-absent is
