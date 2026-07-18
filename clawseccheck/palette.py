@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import brand
+
 # Kind tags. The tool only ever EMITS live-test material; running it against the
 # agent is the live part and is always confirm-gated — so "live" is disclosed here.
 READONLY = "readonly"
@@ -182,7 +184,7 @@ def grounded_flags() -> set[str]:
 def _ascii(text: str) -> str:
     """Fold the few non-ASCII glyphs we emit down to safe ASCII for --ascii mode."""
     return (text
-            .replace("🦞 ", "").replace("🦞", "")
+            .replace(f"{brand.MASCOT} ", "").replace(brand.MASCOT, "")
             .replace("✅ ", "").replace("✅", "")
             .replace("⚠ ", "").replace("⚠", "")
             .replace("⚡", "(live)")
@@ -223,9 +225,7 @@ def render_palette(*, n_checks: int | None = None, ascii_only: bool = False) -> 
     pw = max(len(_q(e.prompt)) for e in entries)
     bw = max(len(e.blurb.replace("{n}", count)) for e in entries)
 
-    sep = " - " if ascii_only else " · "
-    head = f"ClawSecCheck{sep}everything it can do" if ascii_only \
-        else f"🦞 ClawSecCheck{sep}everything it can do"
+    head = brand.header(subtitle="everything it can do", ascii_only=ascii_only)
     lines = [head]
 
     for cat in _PALETTE:
