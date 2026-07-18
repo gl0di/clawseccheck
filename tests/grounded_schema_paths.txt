@@ -72,6 +72,7 @@ plugins.mcp
 proxy
 proxy.enabled
 proxy.proxyUrl
+security.audit.suppressions
 session.dmScope
 subagents.allowAgents
 tools.allow

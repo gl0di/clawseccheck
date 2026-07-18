@@ -4,7 +4,7 @@ Honest map of what ClawSecCheck checks today, what it does **not** yet check, an
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
 all (so they can't even surface as a finding). Updated 2026-07-18 for v3.50.0.
 
-Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 134 checks
+Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 135 checks
 total; see `docs/CHECKS.md` for the full generated list, plus the
 combinational risk engine `RISK-01..RISK-19`, the install-time vetters `--vet` (B13 plus
 the content-security ring — `SKILL_CONTENT_RING`, run against an uninstalled skill; AST-,
@@ -43,6 +43,7 @@ classified at all.
 | Plaintext secrets in config / bootstrap | B1 | Reports key paths, not values `[CHECK: B1]` |
 | System-prompt / secret leak in tool output | B9 | `[CHECK: B9]` |
 | Audit log & sensitive redaction | B10 | `[CHECK: B10]` |
+| Native-audit suppression list transparency | B173 | `security.audit.suppressions` permanently silences specific findings of OpenClaw's OWN `openclaw security audit` (and therefore native.py's fold-in of it too) — disclosed as WARN when non-empty, escalated to FAIL only when a suppressed checkId is grounded as unconditionally critical in the native audit source (B-237) `[CHECK: B173]` |
 | Local-first & model hygiene | B12 | `[CHECK: B12]` |
 | Gateway exposure & channel auth | B2, B11, B80 | IPv6-aware bind parsing; B80 flags auth without rate limiting on a non-loopback bind `[CHECK: B2, B11, B80]` |
 | Least privilege / dangerous tools | B3, B7, B8 | Approval gate via real `tools.exec.mode` `[CHECK: B3, B7, B8]` |

@@ -227,6 +227,9 @@ from ._config import (
     _pattern_hits_real_secret,
     _peragent_sandbox_evidence,
     _trusted_proxies_ok,
+    _NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS,
+    _is_native_unconditional_critical_check_id,
+    check_audit_suppressions,
     check_control_plane_mutation,
     check_controlui_origins,
     check_credential_blast_radius,
@@ -1147,6 +1150,7 @@ CHECKS = [
     check_orphaned_plugin_caches,  # B152 — on-disk plugin cache not in plugins.entries
     check_clawhub_lock_verification,  # B135 — accepted-despite-failed-verification install
     check_declared_skill_reconciliation,  # B158 — declared-but-unresolved skill-load source (F-119)
+    check_audit_suppressions,  # B173 — security.audit.suppressions self-blinds native audit (B-237)
 ]
 
 
