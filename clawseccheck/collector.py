@@ -84,6 +84,13 @@ _MAX_CRON_JOBS = 200
 _MAX_EXEC_APPROVALS_BYTES = _MAX_CONFIG_BYTES
 _MAX_EXEC_APPROVALS_AGENTS = 200
 
+# B-240 (B177): the persisted installed_plugin_index.install_records_json column (OpenClaw's
+# own ClawHub trust verdict per plugin) is read-only and size/entry-capped the same way as
+# the cron/exec-approvals stores above — a huge/padded blob must not load whole into memory
+# or feed an unbounded number of records into the finding text.
+_MAX_PLUGIN_TRUST_BYTES = _MAX_CONFIG_BYTES
+_MAX_PLUGIN_TRUST_RECORDS = 500
+
 # B-111: an archive member name is attacker-controlled and NOT OS-length-limited (unlike a
 # real filesystem path) — a crafted zip/tar entry can carry a multi-KB name. It flows
 # uncapped into ctx.limit_hits / ctx.path_traversal_violations / ctx.file_manifest keys,
@@ -159,6 +166,15 @@ class Context:
     exec_approvals_grants: list = field(default_factory=list)
     exec_approvals_found: bool = False        # exec-approvals.json present and read
     exec_approvals_parse_error: bool = False  # present but could not be parsed/read
+    # B-240 (B177): OpenClaw's OWN persisted per-plugin ClawHub trust verdict, read from
+    # the installed_plugin_index.install_records_json column in the shared state SQLite DB
+    # (~/.openclaw/state/openclaw.sqlite). Each entry: {plugin_id, disposition, scan_status,
+    # moderation_state, reasons (list[str]), pending, stale} — disposition is one of
+    # "clean" | "review-recommended" | "review-required" | "blocked" | None (no verdict
+    # persisted for that install yet).
+    plugin_trust_records: list = field(default_factory=list)
+    plugin_trust_found: bool = False        # installed_plugin_index row present and read
+    plugin_trust_parse_error: bool = False  # present but could not be read/parsed (locked/corrupt)
     installed_skills: dict = field(default_factory=dict)  # skill name -> concatenated text
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
     installed_skill_shell: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .sh/.bash
@@ -1397,6 +1413,124 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
         ctx.exec_approvals_parse_error = True
 
 
+def _collect_plugin_trust(home: Path, ctx: Context) -> None:
+    """B-240 (B177): read-only collection of OpenClaw's OWN persisted per-plugin ClawHub
+    trust verdict into ``ctx.plugin_trust_records``.
+
+    Grounded against the installed dist: OpenClaw persists a single-row
+    ``installed_plugin_index`` table (primary key ``index_key = 'installed-plugin-index'``)
+    in the shared state SQLite database, resolved to
+    ``~/.openclaw/state/openclaw.sqlite`` (openclaw-state-db-DzSsA9Ji.js:
+    resolveOpenClawStateSqlitePath -> <stateDir>/state/openclaw.sqlite; confirmed against
+    the real file: SQLite 3.x, table present). Its ``install_records_json`` column is a
+    JSON object keyed by pluginId (installed-plugin-index-store-CWgFGnm0.js:
+    readPersistedInstalledPluginIndexFromSqlite); each install record MAY carry
+    ``clawhubTrustDisposition`` ("clean" | "review-recommended" | "review-required" |
+    "blocked" — types.openclaw-CXjMEWAQ.d.ts:1308), ``clawhubTrustScanStatus``,
+    ``clawhubTrustModerationState``, ``clawhubTrustReasons`` (string[]),
+    ``clawhubTrustPending``, ``clawhubTrustStale`` (installed-plugin-index-records-
+    C_n191FN.js: CLAWHUB_TRUST_INSTALL_RECORD_FIELDS) — OpenClaw's own ClawHub malware-
+    scan/moderation verdict for that install, computed at install/refresh time
+    (clawhub-install-trust-DdnykQnp.js) and never previously read by ClawSecCheck (grep
+    for "clawhubTrust"/"openclaw.sqlite" across clawseccheck/ was zero hits before this).
+
+    The same state database also has ``auth_profile_stores``/``auth_profile_state`` tables
+    (columns: store_key, store_json/state_json, updated_at) that plausibly hold live MCP
+    OAuth credentials — this collector deliberately reads ONLY installed_plugin_index and
+    never touches those tables; openclaw.sqlite itself should stay 0600 regardless (B11
+    already covers general config/state-file permissions).
+
+    Opened READ-ONLY via the ``file:...?mode=ro`` URI plus ``PRAGMA query_only = 1`` — this
+    collector never writes to the shared state database. Reuses the exact
+    ``walk_dir_safely(state_dir)`` + filename-match pattern ``_collect_cron`` already uses
+    for the same file (symlink-safe, path-escape-safe).
+
+    ``ctx.plugin_trust_found`` stays False when the state DB, the table, or the index row
+    is absent — a consuming check reports UNKNOWN, never a fake PASS (Golden Rule #4).
+    ``ctx.plugin_trust_parse_error`` is set when the DB/table/row exist but the column
+    could not be read or parsed (locked DB, corrupt file, malformed JSON) — also surfaced
+    as UNKNOWN downstream, never a crash.
+    """
+    state_dir = home / "state"
+    sqlite_candidates = walk_dir_safely(state_dir, max_files=100) if state_dir.is_dir() else []
+    db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        return  # no state DB -> plugin_trust_found stays False (UNKNOWN, not a fake PASS)
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA query_only = 1")
+            cur = conn.execute(
+                "SELECT install_records_json FROM installed_plugin_index "
+                "WHERE index_key = 'installed-plugin-index'"
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        # A state DB that exists but predates the plugin index (no such table) is not a
+        # corrupt store -- same honest UNKNOWN as "not found", not a parse error (mirrors
+        # _collect_cron's identical "no such table" carve-out).
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(
+                f"could not read installed_plugin_index from {db_path}: {exc}"
+            )
+            ctx.plugin_trust_found = True
+            ctx.plugin_trust_parse_error = True
+        return
+
+    if row is None or row[0] is None:
+        return  # DB + table present, but no index row persisted yet -> stays UNKNOWN
+
+    raw = row[0]
+    if len(raw) > _MAX_PLUGIN_TRUST_BYTES:
+        ctx.limit_hits.append(
+            f"installed_plugin_index.install_records_json in {db_path} exceeded the "
+            f"{_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap — content beyond the cap was "
+            "NOT scanned"
+        )
+        raw = raw[:_MAX_PLUGIN_TRUST_BYTES]
+
+    try:
+        installs = json.loads(raw)
+    except ValueError as exc:
+        ctx.errors.append(f"could not parse install_records_json in {db_path}: {exc}")
+        ctx.plugin_trust_found = True
+        ctx.plugin_trust_parse_error = True
+        return
+    if not isinstance(installs, dict):
+        ctx.plugin_trust_found = True
+        ctx.plugin_trust_parse_error = True
+        return
+
+    ctx.plugin_trust_found = True
+    for plugin_id, rec in list(installs.items())[:_MAX_PLUGIN_TRUST_RECORDS]:
+        if not isinstance(rec, dict):
+            continue
+        disposition = rec.get("clawhubTrustDisposition")
+        reasons = rec.get("clawhubTrustReasons")
+        ctx.plugin_trust_records.append({
+            "plugin_id": plugin_id if isinstance(plugin_id, str) else str(plugin_id),
+            "disposition": disposition if isinstance(disposition, str) else None,
+            "scan_status": rec.get("clawhubTrustScanStatus")
+            if isinstance(rec.get("clawhubTrustScanStatus"), str) else None,
+            "moderation_state": rec.get("clawhubTrustModerationState")
+            if isinstance(rec.get("clawhubTrustModerationState"), str) else None,
+            "reasons": [r for r in reasons if isinstance(r, str)]
+            if isinstance(reasons, list) else [],
+            "pending": rec.get("clawhubTrustPending")
+            if isinstance(rec.get("clawhubTrustPending"), bool) else None,
+            "stale": rec.get("clawhubTrustStale")
+            if isinstance(rec.get("clawhubTrustStale"), bool) else None,
+        })
+    if len(installs) > _MAX_PLUGIN_TRUST_RECORDS:
+        ctx.limit_hits.append(
+            f"installed_plugin_index in {db_path} has {len(installs)} install record(s) — "
+            f"only the first {_MAX_PLUGIN_TRUST_RECORDS} were scanned"
+        )
+
+
 def collect(home: Path | str = "~/.openclaw") -> Context:
     home = Path(home).expanduser()
     ctx = Context(home=home)
@@ -1477,6 +1611,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
 
     _collect_cron(home, ctx)
     _collect_exec_approvals(home, ctx)
+    _collect_plugin_trust(home, ctx)
     _read_installed_skills(home, ctx)
     return ctx
 
