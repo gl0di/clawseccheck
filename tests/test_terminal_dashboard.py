@@ -172,3 +172,15 @@ class TestRenderReportColor:
     def test_no_color_default(self):
         # The default (no color kwarg) must never colourise — protects piped output.
         assert _ESC not in render_report(_findings(), _score())
+
+    def test_grade_letter_gets_a_real_ansi_colour_not_just_bold(self):
+        # Regression (brand.py header/colour migration): report.py used to define
+        # `_GRADE_COLOR` twice at module level — once with ansi.py palette *names*,
+        # later with hex codes for the HTML badge — so the second (hex) definition
+        # silently shadowed the first. `_grade_color()` therefore always resolved
+        # the hex dict, which ansi.paint() can't map (unknown style name, silently
+        # dropped), so the grade letter/score-bar fill rendered bold with NO actual
+        # colour. `_grade_color()` now reads brand.GRADE_ANSI directly.
+        from clawseccheck.ansi import _CODES
+        out = render_report(_findings(), _score(score=49, grade="F"), color=True)
+        assert f"{_ESC}{_CODES['red']};{_CODES['bold']}mF{_ESC}{_CODES['reset']}m" in out

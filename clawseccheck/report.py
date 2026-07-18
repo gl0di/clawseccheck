@@ -16,6 +16,7 @@ import re
 import tempfile
 from pathlib import Path
 
+from . import brand
 from .catalog import (
     BY_ID,
     FAMILY_LABEL, FAMILY_OF, FAMILY_ORDER,
@@ -116,8 +117,14 @@ def _sev_token(severity: str, *, ascii_only: bool = False, color: bool = False) 
     return f"{_SEV_GLYPH.get(severity, '⚪')} {word}"
 
 # ── ANSI colour palette (opt-in; see ansi.py) ────────────────────────────────
-# Grade → colour for the header grade letter + score-bar fill.
-_GRADE_COLOR = {"A": "green", "B": "green", "C": "yellow", "D": "bright_yellow", "F": "red"}
+# Grade → colour for the header grade letter + score-bar fill now comes from
+# brand.GRADE_ANSI (see _grade_color() below) — this module used to define its own
+# ANSI-name dict here, but a SECOND, later `_GRADE_COLOR = {...}` (hex, for the HTML
+# badge — still present further down) silently shadowed it at the module level, so
+# `_grade_color()` always resolved the hex dict and the terminal grade letter/score-
+# bar fill rendered bold with no actual colour. Two distinctly-named dicts
+# (brand.GRADE_ANSI vs. brand.GRADE_HEX) makes that class of bug structurally
+# impossible instead of relying on file-order discipline.
 # Status → colour for finding icons / coverage states.
 _STATUS_COLOR = {
     FAIL: "red", WARN: "yellow", PASS: "green", UNKNOWN: "grey",
@@ -136,7 +143,7 @@ DRIFT_MIN_SCORED = 20  # minimum scored_total before the staleness nudge is even
 
 def _grade_color(grade: str) -> str:
     """Map a grade label (possibly 'A+', 'B-', …) to a palette colour name."""
-    return _GRADE_COLOR.get((grade or "")[:1].upper(), "grey")
+    return brand.grade_ansi(grade)
 
 
 def _color_icons(icon: dict, color: bool) -> dict:
@@ -657,9 +664,9 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # reused by both the C-166 low-coverage line (below) and the C-165 staleness nudge
     # (advisory band, further down) — never a second independent tally.
     cov = assessment_coverage(findings)
-    # 🦞 mascot: header line only, once (design-system Foundations); --ascii drops it.
-    head = "ClawSecCheck - OpenClaw Security Audit" if ascii_only \
-        else "🦞 ClawSecCheck - OpenClaw Security Audit"
+    # Mascot + wordmark: header line only, once (design-system Foundations);
+    # --ascii drops the mascot and folds the separator (brand.header()).
+    head = brand.header(subtitle="OpenClaw Security Audit", ascii_only=ascii_only)
     lines = [head, "=" * 44,
              f"Score: {score.score}/100   Grade: {grade_disp}",
              _score_bar(score.score, score.grade, ascii_only=ascii_only, color=color)]
@@ -997,16 +1004,19 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         1 for f in findings
         if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)
     )
-    dash, dot = ("-", "-") if ascii_only else ("—", "·")
-    mascot = "" if ascii_only else "🦞 "
+    # Both separators used to be different characters (an em-dash for the "Audit —
+    # Grade"/"— Findings —" spots, a middle-dot for the "Grade F · 49/100" spot) — a
+    # visible drift within the same string. One brand separator everywhere now.
+    sep = brand.ASCII_SEPARATOR.strip() if ascii_only else brand.SEPARATOR.strip()
+    mascot = "" if ascii_only else f"{brand.MASCOT} "
     issues_word = "issue" if n_issues == 1 else "issues"
     lines = [
-        f"{mascot}OpenClaw Security Audit {dash} Grade {score.grade} {dot} {score.score}/100",
+        f"{mascot}OpenClaw Security Audit {sep} Grade {score.grade} {sep} {score.score}/100",
         f"{_score_bar(score.score, score.grade, ascii_only=ascii_only)}"
-        f"  {dot}  {n_issues} {issues_word}",
+        f"  {sep}  {n_issues} {issues_word}",
     ]
     lines.append("")
-    lines.append(f"{dash} Findings {dash}")
+    lines.append(f"{sep} Findings {sep}")
     body = render_dashboard_findings(findings, ascii_only=ascii_only).rstrip("\n")
     out = "\n".join(lines) + "\n" + body + "\n"
     return _asciify(out) if ascii_only else out
@@ -1016,18 +1026,18 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
     """Shareable badge — grade + score + trifecta ONLY. No findings, ever."""
     l1 = f"  OpenClaw Security: {score.grade:<2} ({score.score:>3}/100)"
     l2 = f"  Lethal Trifecta: {_trifecta_ratio(findings)}"
-    l3 = "  audited by ClawSecCheck" + ("" if ascii_only else " 🔍")
+    l3 = "  audited by ClawSecCheck" + ("" if ascii_only else f" {brand.MASCOT}")
     width = 39
-    # 🦞 mascot header line, once (design-system Foundations); --ascii drops it to
+    # Mascot header line, once (design-system Foundations); --ascii drops it to
     # stay pure-ASCII, matching render_dashboard's convention.
-    header = "" if ascii_only else "🦞 ClawSecCheck\n"
+    header = "" if ascii_only else f"{brand.header()}\n"
     if ascii_only:
         top = bot = "+" + "-" * width + "+"
         body = "\n".join(f"|{ln:<{width}}|" for ln in (l1, l2, l3))
         return _asciify(f"{top}\n{body}\n{bot}")
     top = "┌" + "─" * width + "┐"
     bot = "└" + "─" * width + "┘"
-    # the magnifier emoji is double-width in many terminals; pad l3 one less
+    # the mascot emoji is double-width in many terminals; pad l3 one less
     body = "\n".join([
         f"│{l1:<{width}}│",
         f"│{l2:<{width}}│",
@@ -1042,7 +1052,7 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
         else {"CRITICAL": "⛔", "HIGH": "⚠️", "MEDIUM": "🔶", "INFO": "ℹ️"}
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "INFO": 3}
     ok = "[OK]" if ascii_only else "✅"
-    lines = ["ClawSecCheck - Threat Monitor", "=" * 30,
+    lines = [brand.header(subtitle="Threat Monitor", ascii_only=ascii_only), "=" * 30,
              f"Current: {score.score}/100  Grade: {score.grade}"]
     if baseline:
         lines += ["", "Baseline saved. Future runs will alert on what changes since now."]
