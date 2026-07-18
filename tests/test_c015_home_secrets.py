@@ -6,7 +6,7 @@ from pathlib import Path
 
 from clawseccheck import audit
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
-from clawseccheck.checks import check_secrets_at_rest_home
+from clawseccheck.checks import _C015_MAX_SCAN_FILES, check_secrets_at_rest_home
 from clawseccheck.collector import Context, collect
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -278,3 +278,82 @@ def test_c015_adversarial_secretref_env_prefix_with_inline_blob_still_warns(tmp_
     (tmp_path / "openclaw.json").write_text(cfg_text, encoding="utf-8")
     f = check_secrets_at_rest_home(_ctx(tmp_path))
     assert f.status == WARN
+
+
+# ---------------------------------------------------------------------------
+# B-244: the walk-cap truncation family — a bulk/excluded subtree that sorts before
+# the real content must not silently starve the scan, and if the cap IS genuinely hit,
+# the verdict must disclose it rather than reading as a complete scan.
+# ---------------------------------------------------------------------------
+
+def _make_bulk_files(dirpath: Path, count: int, ext: str = ".md", body: str = "nothing here\n") -> None:
+    dirpath.mkdir(parents=True, exist_ok=True)
+    for i in range(count):
+        (dirpath / f"file{i:05d}{ext}").write_text(body, encoding="utf-8")
+
+
+def test_c015_prunes_codex_cache_before_budget_so_later_secret_is_still_found(tmp_path):
+    """B-244 repro: a codex-plugin-doc-cache subtree alone big enough to blow the
+    _C015_MAX_SCAN_FILES walk cap (sorts before 'workspace' under 'agents') must NOT
+    starve a real secret living in workspace/ — the cache is now excluded from the walk
+    itself, before it can consume any of the budget."""
+    (tmp_path / "openclaw.json").write_text("{}\n", encoding="utf-8")
+    doc_cache = (
+        tmp_path / "agents" / "main" / "agent" / "codex-home"
+        / ".tmp" / "plugins" / "plugins" / "base44"
+    )
+    _make_bulk_files(doc_cache, _C015_MAX_SCAN_FILES + 100, body="API_KEY=abc123 not-a-real-secret\n")
+
+    secret = _runtime_secret()
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "PASSWORDS.md").write_text(
+        "- Password: " + secret + "\n", encoding="utf-8"
+    )
+
+    f = check_secrets_at_rest_home(_ctx(tmp_path))
+    assert f.status == WARN
+    assert any("workspace/PASSWORDS.md" in item for item in f.evidence)
+    # The whole excluded cache never touched the budget, so this scan never capped.
+    assert "walk cap" not in f.detail
+
+
+def test_c015_flags_truncation_caveat_when_generic_bulk_hits_cap_with_no_secret_found(tmp_path):
+    """A large, NON-excluded early-alphabet subtree that genuinely exhausts the walk
+    cap before a later directory is reached must downgrade the clean verdict from a
+    confident PASS to an UNKNOWN that discloses the coverage gap (GR#4 / B-228
+    family) — never a clean 'scanned the home' headline over a partial scan."""
+    (tmp_path / "openclaw.json").write_text("{}\n", encoding="utf-8")
+    _make_bulk_files(tmp_path / "aaa_bulk", _C015_MAX_SCAN_FILES + 100)
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "notes.md").write_text("just notes, nothing secret\n", encoding="utf-8")
+
+    f = check_secrets_at_rest_home(_ctx(tmp_path))
+    assert f.status == UNKNOWN
+    assert "coverage is incomplete" in f.detail
+    assert f"{_C015_MAX_SCAN_FILES}-file walk cap" in f.detail
+
+
+def test_c015_capped_scan_still_warns_on_secret_found_before_the_cap(tmp_path):
+    """If a real secret is found in the portion of the home scanned before the cap
+    was hit, the WARN must still fire (a truncated scan is not a reason to suppress a
+    positive hit) — but the detail must still disclose that the scan was capped, so a
+    reader knows there may be MORE secrets in the unreached remainder."""
+    secret = _runtime_secret()
+    (tmp_path / "aaa_secret.env").write_text("TOKEN=" + secret + "\n", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text("{}\n", encoding="utf-8")
+    _make_bulk_files(tmp_path / "bbb_bulk", _C015_MAX_SCAN_FILES + 100)
+
+    f = check_secrets_at_rest_home(_ctx(tmp_path))
+    assert f.status == WARN
+    assert any("aaa_secret.env" in item for item in f.evidence)
+    assert "walk cap" in f.detail
+
+
+def test_c015_small_home_has_no_spurious_truncation_caveat(tmp_path):
+    """Regression: a home well under the scan cap must read exactly as before — no
+    caveat text leaking into a genuinely complete scan."""
+    (tmp_path / "openclaw.json").write_text("{}\n", encoding="utf-8")
+    f = check_secrets_at_rest_home(_ctx(tmp_path))
+    assert f.status == PASS
+    assert "walk cap" not in f.detail
+    assert "coverage is incomplete" not in f.detail

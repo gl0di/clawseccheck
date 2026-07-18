@@ -311,12 +311,27 @@ def _c015_is_codex_plugin_doc_cache(parts: tuple) -> bool:
 
 
 # ---------------------------------------------------------------- Block B
-def _c015_candidate_files(ctx: Context) -> list[Path]:
+# B-244: the codex-doc-cache / skill-dir exclusions used to run AFTER walk_dir_safely
+# already spent the _C015_MAX_SCAN_FILES budget on every raw file it saw — so a large
+# excluded subtree (e.g. a vendored codex plugin doc cache) could exhaust the whole
+# budget before the walk ever reached real candidate directories that sort later
+# alphabetically (workspace/, credentials/, identity/, ...), and the resulting
+# WARN/PASS carried no hint that the scan was incomplete. Both exclusions now run
+# DURING the walk via `prune_dir`/`keep_file`, so excluded material never consumes the
+# budget, and `capped` is threaded through so the caller can disclose a genuine
+# truncation instead of reading a partial scan as a complete one.
+def _c015_candidate_files(ctx: Context, capped: list | None = None) -> list[Path]:
     skip_roots = [(ctx.home / rel).resolve() for rel in SKILL_DIRS]
-    out: list[Path] = []
-    for path in walk_dir_safely(ctx.home, max_files=_C015_MAX_SCAN_FILES, exclude_pycache=True):
+    skill_dir_parts = tuple(Path(rel).parts for rel in SKILL_DIRS)
+
+    def _prune(rel_parts: tuple) -> bool:
+        if _c015_is_codex_plugin_doc_cache(rel_parts):
+            return True
+        return any(rel_parts[: len(root)] == root for root in skill_dir_parts)
+
+    def _keep_file(path: Path) -> bool:
         if not path.is_file():
-            continue
+            return False
         try:
             resolved = path.resolve()
         except OSError:
@@ -324,20 +339,27 @@ def _c015_candidate_files(ctx: Context) -> list[Path]:
         if any(
             resolved == root or root in resolved.parents for root in skip_roots if root.exists()
         ):
-            continue
+            return False
         if _c015_is_codex_plugin_doc_cache(resolved.parts):
-            continue
+            return False
         name = path.name.lower()
-        if (
+        return bool(
             path.suffix.lower() in _C015_TEXT_EXTS
             or name in {"openclaw.json", "openclaw.jsonc"}
             or name.startswith("openclaw.json.")
             or name.startswith("openclaw.jsonc.")
             or name.startswith(".env")
             or name in BOOTSTRAP_FILES
-        ):
-            out.append(path)
-    return out
+        )
+
+    return walk_dir_safely(
+        ctx.home,
+        max_files=_C015_MAX_SCAN_FILES,
+        exclude_pycache=True,
+        prune_dir=_prune,
+        keep_file=_keep_file,
+        capped=capped,
+    )
 
 
 def _pattern_hits_real_secret(patterns, text: str) -> bool:
@@ -1580,7 +1602,9 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
     skill dirs) that appears to contain an inline secret/token value. Evidence names files
     only — secret values are never echoed.
     """
-    candidates = _c015_candidate_files(ctx)
+    capped: list = []
+    candidates = _c015_candidate_files(ctx, capped)
+    scan_capped = bool(capped)
     if not candidates:
         return _finding(
             "C015",
@@ -1604,9 +1628,20 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
                 rel = path
             hits.append(f"{rel}: secret-like value detected")
 
+    # B-244: the walk cap can still be hit on a very large home even after excluded
+    # material is kept out of the budget (see _c015_candidate_files) — never let either
+    # verdict below read as a complete scan when it wasn't.
+    cap_note = (
+        f" Scan hit the {_C015_MAX_SCAN_FILES}-file walk cap before the home was fully"
+        " covered — additional secrets may exist in files not yet reached."
+        if scan_capped
+        else ""
+    )
+
     if hits:
         detail = (
             f"Plaintext secret-shaped value(s) found in {len(hits)} home file(s) — see evidence."
+            f"{cap_note}"
         )
         return _finding(
             "C015",
@@ -1614,6 +1649,20 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             detail,
             "Move plaintext secrets into `openclaw secrets configure` or narrowly-scoped environment variables, and keep bootstrap/config files free of inline tokens.",
             evidence=hits[:12],
+        )
+
+    if scan_capped:
+        # GR#4/B-228 family: a coverage gap must never roll up to a confident "scanned
+        # the home, all clean" headline — UNKNOWN, not PASS, until the rest is covered.
+        return _finding(
+            "C015",
+            UNKNOWN,
+            f"Scanned {len(candidates)} home file(s) before hitting the "
+            f"{_C015_MAX_SCAN_FILES}-file walk cap; no plaintext secret-shaped values in"
+            " what was scanned, but coverage is incomplete — the rest of the home was"
+            " never reached.",
+            "Re-run against a narrower home, or manually review any credentials/, "
+            "identity/, devices/, and workspace/ content not covered by this scan.",
         )
     return _finding(
         "C015",
