@@ -469,6 +469,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B174 - security.installPolicy.* operator gate + exec-hook escape flags
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain / Install Policy
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: security.installPolicy.* operator gate + exec-hook escape flags
+- Remediation:
+  - none
+
 ## Advisory checks
 
 ### B43 - Capability blast-radius / dangerous-verb inventory
@@ -854,6 +866,30 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: MEDIUM
 - OWASP: LLM01 Prompt Injection, LLM02 Sensitive Information Disclosure
 - What it checks: Tool-output trust-boundary-inversion directive
+- Remediation:
+  - none
+
+### B171 - In-chat privileged command surface (commands.bash/config/mcp/plugins) weakly gated
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Least Privilege / Break-Glass
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: In-chat privileged command surface (commands.bash/config/mcp/plugins) weakly gated
+- Remediation:
+  - none
+
+### B172 - Standing exec-approvals.json allow-always grant (uninventoried persisted authority)
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Exec Approvals
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Standing exec-approvals.json allow-always grant (uninventoried persisted authority)
 - Remediation:
   - none
 
@@ -1634,6 +1670,34 @@ Advisory checks are recorded for coverage but are not scored.
 - What it checks: Cross-file split plaintext payload (reassembled from string literals)
 - Remediation:
   - none
+
+### B173 - OpenClaw native-audit suppression list (security.audit.suppressions)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Transparency / Audit Suppression
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: OpenClaw native-audit suppression list (security.audit.suppressions)
+- Remediation:
+  - none
+
+## Hardening checks
+
+### B175 - Skill Workshop autonomous authoring + no-review install (approvalPolicy=auto)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Write Integrity / Self-Modification
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM04 Data and Model Poisoning, LLM06 Excessive Agency
+- What it checks: Skill Workshop autonomous authoring + no-review install (approvalPolicy=auto)
+- Remediation:
+  - none
+
+## Advisory checks
 
 ### T1 - Behavioral trifecta (observed ingress -> sensitive -> egress verb sequence)
 
