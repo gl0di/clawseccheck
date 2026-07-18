@@ -23,6 +23,7 @@ from . import (
     detect_vet_type, vet_mcp, vet_plugin, vet_skill, vet_source,
 )
 from . import __released__, __version__
+from .brand import WORDMARK
 from .collector import SKILL_DIRS
 from .update import update_notice
 from .ledger import freshness_notice as _compute_freshness, load_ledger, record_run
@@ -684,7 +685,7 @@ def _main(argv=None) -> int:
 
     if args.verify_self:
         combined, per_file = package_digest()
-        lines = [f"ClawSecCheck {__version__} — engine source digest (SHA-256)",
+        lines = [f"{WORDMARK} {__version__} — engine source digest (SHA-256)",
                  f"combined : {combined}",
                  ""]
         for name, digest in sorted(per_file.items()):

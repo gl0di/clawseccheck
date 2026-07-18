@@ -17,6 +17,9 @@ Offline, deterministic, stdlib only — no I/O, no network.
 """
 from __future__ import annotations
 
+import ast as _ast
+from pathlib import Path as _Path
+
 from clawseccheck import brand
 from clawseccheck.catalog import CRITICAL, FAIL, Finding
 from clawseccheck.history import render_trend
@@ -222,3 +225,119 @@ def test_ascii_drops_the_mascot_everywhere():
     ]
     for out in outputs:
         assert brand.MASCOT not in out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Source-level brand lock.
+#
+# The per-renderer tests above check RENDERED OUTPUT, so they only cover the
+# renderers that existed when they were written — a new renderer added tomorrow
+# with a hardcoded mascot would pass every one of them. These assert the
+# invariant at the source level instead: brand values live in brand.py and
+# nowhere else.
+#
+# Prose is exempt on purpose. Comments and docstrings legitimately discuss the
+# mascot (several explain the very bug this epic fixed), so the lock inspects
+# real string VALUES via ast rather than grepping lines — a grep cannot tell a
+# literal apart from a sentence about it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PKG = _Path(__file__).resolve().parents[1] / "clawseccheck"
+
+# menu.py's magnifier is a FUNCTIONAL action icon for the "Check everything" menu
+# entry (the magnifier means "inspect"), not a brand mark. It is the one allowed
+# use; anywhere else a magnifier is the old brand drift returning.
+_MAGNIFIER_ALLOWED = {"menu.py"}
+
+
+def _value_strings(path):
+    """Every string literal that is a real value — docstrings excluded."""
+    tree = _ast.parse(path.read_text(encoding="utf-8"))
+    docstrings = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.Module, _ast.ClassDef, _ast.FunctionDef, _ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None)
+            if body and isinstance(body[0], _ast.Expr) and isinstance(body[0].value, _ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                docstrings.add(id(body[0].value))
+    return [
+        n.value for n in _ast.walk(tree)
+        if isinstance(n, _ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings
+    ]
+
+
+def _package_modules():
+    return sorted(p for p in _PKG.rglob("*.py") if "__pycache__" not in p.parts)
+
+
+def test_the_mascot_has_exactly_one_home():
+    offenders = []
+    for path in _package_modules():
+        if path.name == "brand.py":
+            continue
+        if any(brand.MASCOT in s for s in _value_strings(path)):
+            offenders.append(str(path.relative_to(_PKG)))
+    assert not offenders, (
+        "the mascot is hardcoded outside brand.py — import brand.MASCOT (or "
+        f"brand.header()) instead: {offenders}"
+    )
+
+
+def test_the_wordmark_has_exactly_one_home():
+    offenders = []
+    for path in _package_modules():
+        if path.name == "brand.py":
+            continue
+        for s in _value_strings(path):
+            # A bare wordmark literal is drift. Longer sentences that merely contain
+            # the product name (report prose, remediation text) are not what this guards.
+            if s.strip() == brand.WORDMARK:
+                offenders.append(f"{path.relative_to(_PKG)}: {s!r}")
+    assert not offenders, (
+        "the wordmark is hardcoded outside brand.py — import brand.WORDMARK: " + str(offenders)
+    )
+
+
+def test_the_magnifier_never_returns_as_a_brand_mark():
+    offenders = []
+    for path in _package_modules():
+        if path.name in _MAGNIFIER_ALLOWED:
+            continue
+        if any("\U0001F50D" in s for s in _value_strings(path)):
+            offenders.append(str(path.relative_to(_PKG)))
+    assert not offenders, (
+        "a magnifier glyph is back in a shipped string — the brand mark is the mascot; "
+        f"only {sorted(_MAGNIFIER_ALLOWED)} may use it, as a functional action icon: {offenders}"
+    )
+
+
+def test_no_module_keeps_its_own_grade_colour_ramp():
+    """The B-234 shadow bug in one assertion.
+
+    report.py once defined `_GRADE_COLOR` twice — ANSI names, then hex — so the
+    second silently shadowed the first and the terminal grade lost its colour.
+    Any module-level dict mapping grade letters to colours, outside brand.py, is
+    that bug waiting to happen again.
+    """
+    grades = {"A", "B", "C", "D", "F"}
+    offenders = []
+    for path in _package_modules():
+        if path.name == "brand.py":
+            continue
+        tree = _ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:  # module level only
+            if not isinstance(node, (_ast.Assign, _ast.AnnAssign)):
+                continue
+            value = node.value
+            if not isinstance(value, _ast.Dict):
+                continue
+            keys = {k.value for k in value.keys
+                    if isinstance(k, _ast.Constant) and isinstance(k.value, str)}
+            if keys and keys <= grades and len(keys) >= 3:
+                targets = node.targets if isinstance(node, _ast.Assign) else [node.target]
+                names = [t.id for t in targets if isinstance(t, _ast.Name)]
+                offenders.append(f"{path.relative_to(_PKG)}: {names or '<dict>'}")
+    assert not offenders, (
+        "a grade->colour ramp is defined outside brand.py — use brand.grade_ansi() "
+        f"or brand.grade_hex(): {offenders}"
+    )
