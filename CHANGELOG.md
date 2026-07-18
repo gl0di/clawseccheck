@@ -3,6 +3,74 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.50.0] — 2026-07-18
+
+Recall release. A black-box test campaign against a real agent showed the scanner's weak
+axis was **false negatives**, not false positives: whole configuration surfaces were never
+read at all, and the lethal-trifecta engine ignored capability granted through MCP. This
+release closes that critical blind spot, audits four previously unread surfaces, hardens
+the MCP scan, and stops one class of dishonest PASS. Every FAIL-capable change went
+through an **independent** adversarial false-positive pass — which found a real false FAIL
+in each one, including a pre-existing bug that predates this release.
+
+Because four new checks read surfaces that were previously invisible, a config that
+scored clean before may now surface new findings. That is new coverage, not a regression.
+
+### Added
+- **B167 — plugin app-server command.** A plugin's `plugins.entries.<name>.config.appServer.command`
+  (and the top-level `config.appServer.command`) is a locally-spawned process that was never
+  inspected. It is now content-scanned like any other launch command.
+- **B168 — the cron job store.** Scheduled agent jobs are collected read-only and their
+  payloads content-scanned, so a persistence/exfil instruction parked in a cron entry is
+  visible to the audit. Reports `UNKNOWN` when no store exists, never a fake PASS.
+- **B169 — hook templates.** `hooks.mappings[].messageTemplate` / `.textTemplate` are text
+  injected into the agent's own context on a host event; they are now scanned with the same
+  content ring as skill text.
+- **B170 — tool-output trust-boundary inversion.** Detects instructions that tell the agent
+  to treat fetched or tool-returned content as authoritative — the "trust what you just
+  downloaded" shape that turns a benign fetch into an injection vector.
+- **Unicode Tag-block de-obfuscation.** Text smuggled in U+E0020–U+E007E (invisible ASCII
+  shadow characters) is now normalized before scanning, so B58 sees the hidden override.
+  Regional flag emoji are carved out and unaffected.
+- **B24 MCP hardening.** Five new server-definition signals: a mounted `docker.sock` or
+  `--privileged` container (FAIL — trivial host escape); `sslVerify: false` against a public
+  remote (FAIL); an `Authorization` header, a non-prefixed secret-shaped env var, and a
+  `yarn dlx`-style unpinned fetch (WARN).
+- **B48 — wildcard owner/pairing authority** is now escalated when authority is granted to
+  `*` rather than a scoped identity.
+- **B65** trigger vocabulary widened to cover document-marker activation.
+- **SKILL.md** now guides hosts to actually surface `--behavioral`, `--analyze-trajectory`
+  and `--judge-packet` output; some hosts were silently swallowing those sections.
+
+### Fixed
+- **A1 (Lethal Trifecta) was blind to MCP-granted capability.** The engine only counted
+  capability reachable through skills and config, so an agent whose sensitive-data or
+  outbound leg came from an MCP server could hold a complete trifecta and still score
+  clean. `mcp.servers` (and the legacy `mcpServers` shape) now contribute both legs: a
+  known data/database/secret-store server or a filesystem server rooted broadly counts as
+  the sensitive leg, and a remote server counts as the outbound leg.
+- **An unreadable config no longer produces a hollow PASS.** When `openclaw.json` cannot be
+  read or parsed, fourteen config-content checks returned PASS — reporting "no problem
+  found" for a file they never saw. They now return `UNKNOWN`. This path can only turn a
+  PASS into an UNKNOWN; it can never emit a FAIL.
+- **Spoofable trusted-proxy authentication on the gateway.** A non-loopback gateway bind
+  that relied on trusted-proxy headers was treated as authenticated. It now FAILs unless
+  identity is genuinely constrained by `requiredHeaders`, `allowUsers`, or
+  `gateway.trustedProxies`; a proxy list that is world-open or blank does not count as a
+  constraint, while any private range does.
+- **B24 flagged correctly pinned scoped packages as unpinned.** `@scope/pkg@2.1.0` matched
+  the unpinned-dist-tag pattern on its npm scope prefix, capping the grade a full letter on
+  an otherwise well-configured MCP setup. Pre-existing; found by the adversarial pass.
+
+### Known limitations (accepted, documented in-source, pinned by tests)
+- **B170** stays advisory (WARN) when a security document negates the attack it is
+  describing *after* naming the trigger. The surviving guard is backward-looking; a
+  forward-looking version was retracted twice for opening a cloaking false negative.
+- **B168 / B169** report encoded-payload exfil as WARN rather than FAIL when no strong
+  corroborating anchor is present.
+- **A1** resolves a `/home/<purpose-word>` filesystem root toward PASS, preferring a missed
+  detection over a false FAIL on a service home directory.
+
 ## [3.49.0] — 2026-07-16
 
 Detection precision + recall release: a new cross-artifact log-correlation axis, a
