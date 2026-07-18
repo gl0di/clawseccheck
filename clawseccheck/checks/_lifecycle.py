@@ -40,6 +40,7 @@ from . import _shared
 from ._shared import (
     INJECTION_PATTERNS,
     OUTBOUND_TOOL_HINTS,
+    SECRET_KEY_RE,
     _DESTRUCTIVE_HINTS,
     _HOOK_EXEC_RE,
     _config_unreadable,
@@ -1119,6 +1120,192 @@ def check_install_policy(ctx: Context) -> Finding:
         f"Scanned {len(skills)} installed skill(s): no risky install hooks, and skill "
         "dirs are not writable by other local users.",
         "Keep skill dirs owner-only and read any install/postinstall hook before trusting a skill.",
+    )
+
+
+# ---------- B174 (B-238): security.installPolicy.* operator gate + exec-hook escape flags ----------
+# Distinct from B42 (post-install hook CONTENT scanned out of a skill's own package.json).
+# B174 reads the operator-facing GATE itself: security.installPolicy.{enabled, targets,
+# exec:{command, args, env, passEnv, trustedDirs, allowInsecurePath, allowSymlinkCommand}}.
+# Grounded against the installed OpenClaw dist:
+#   - zod-schema-O9ml_nmo.js:670-687 (the exact object shape, .strict())
+#   - types.openclaw-CXjMEWAQ.d.ts:1597-1618 (same shape, doc comments)
+#   - install-policy-Barp1EUw.js resolvePolicy(): `if (!policy || policy.enabled !== true)
+#     return { kind: "disabled" }` -- ANY non-`true` enabled (absent key or explicit false)
+#     means installs/updates run with NO operator-owned review at all. When enabled=true,
+#     assertSecureCommandPath() validates the exec hook's own command path UNLESS
+#     allowInsecurePath/allowSymlinkCommand explicitly bypass it (dist source text: "Set
+#     allowInsecurePath=true for this policy to bypass this check when the path is trusted").
+# FAIL is reserved for positive, ungated evidence of a bypassed safety check (C-135
+# adversarial pass) -- the bare "not enabled" default state is common and often a
+# deliberate choice (many hosts never touch this operator-only gate), so it is WARN-only.
+#
+# B-238 (C-135 adversarial re-pass, 2026-07-18): the original FAIL condition treated
+# allowInsecurePath and allowSymlinkCommand as equally fatal literal booleans. Re-grounding
+# against the installed dist (install-policy-Barp1EUw.js assertSecureCommandPath(),
+# openclaw 2026.7.1-2) plus a live run of OpenClaw's OWN exported validateInstallPolicyStatic
+# against a real on-disk stable-symlink layout proved that was wrong on two counts:
+#
+#   1. allowSymlinkCommand ALONE only skips the "command must not be a symlink" text check.
+#      Execution then still: resolves the symlink, rejects a second-level symlink, enforces
+#      trustedDirs containment (if set), and -- because allowInsecurePath is a SEPARATE flag
+#      and stays false here -- runs the full permission probe (world/group-writable),
+#      ancestor-directory ownership walk, and uid-ownership check against the RESOLVED
+#      target. That is the standard update-alternatives/Homebrew/nix "stable alias ->
+#      versioned binary" packaging idiom; a real repro (a symlink to a 0755 root/user-owned
+#      versioned target) gets `{"issues":[]}` from OpenClaw's own validator. So this flag by
+#      itself bypasses nothing an attacker could exploit without already having write access
+#      the process would trust anyway -- it is DROPPED as a FAIL/WARN trigger entirely
+#      (deleted, not special-cased further, per the standing "simplify by deleting a fragile
+#      heuristic" lesson). It still shows up in evidence when paired with allowInsecurePath
+#      below, since that combination is where it actually matters.
+#   2. allowInsecurePath skips the permission/ownership checks on the (possibly
+#      symlink-resolved) target -- but assertSecureCommandPath() enforces trustedDirs
+#      containment BEFORE the `if (params.allowInsecurePath) return` early-out, so an
+#      operator who also sets exec.trustedDirs has still constrained the command to a
+#      directory they explicitly vouch for (this is OpenClaw's own documented remediation
+#      for the Windows-ACL-unavailable case: permissions-sY2quqHz.js's "ACL verification
+#      unavailable on Windows ... Set allowInsecurePath=true ... when the path is trusted").
+#      allowInsecurePath WITHOUT any trustedDirs constraint is unrestrained -- it accepts
+#      any path on the filesystem with zero permission/ownership verification -- and stays
+#      FAIL. allowInsecurePath WITH a non-empty trustedDirs is downgraded to WARN: real
+#      residual risk (trustedDirs containment doesn't itself verify the target file's own
+#      permissions), but not the "anything, anywhere, unchecked" shape a FAIL should be
+#      reserved for.
+#
+# passEnv forwards NAMED host env vars into the exec hook's child process by key; a
+# secret-shaped NAME is a heuristic only (a legitimate install-policy script may need e.g.
+# NPM_TOKEN to authenticate a private registry), so it stays WARN, never FAIL -- reuses the
+# same SECRET_KEY_RE / secret-key-name pattern _mcp.py already applies to an MCP server's
+# own `env` mapping.
+#
+# exec.command/args are deliberately NOT content-scanned for curl|sh pipe-to-shell shapes
+# here (the task's original fix-direction suggested reusing B100/B103): the dist spawns the
+# policy command directly with `shell: false` (install-policy-Barp1EUw.js runPolicyCommand),
+# so args are never shell-interpreted -- a pipe/redirect substring in one argv element
+# carries none of the risk it would in a shell-run string (unlike B167's
+# plugins.entries.<name>.config.appServer.command reuse case, which IS shell-shaped).
+# Transplanting that detector here would be an ungrounded, FP-prone reuse; skipped.
+def check_install_policy_gate(ctx: Context) -> Finding:
+    if not ctx.config_found:
+        return _finding(
+            "B174",
+            UNKNOWN,
+            "No openclaw.json found -- the install-policy gate (security.installPolicy) "
+            "cannot be assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B174", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    policy = dig(ctx.config, "security.installPolicy")
+    if not isinstance(policy, dict):
+        policy = {}
+    enabled = policy.get("enabled") is True
+
+    if not enabled:
+        return _finding(
+            "B174",
+            WARN,
+            "security.installPolicy is not enabled (the key is absent, or "
+            "enabled=false): skill/plugin installs and auto-updates run with no "
+            "operator-owned install-time policy gate at all.",
+            "Set security.installPolicy.enabled=true with a trusted "
+            "security.installPolicy.exec command to require an install-time policy "
+            "check before any skill/plugin install or update proceeds.",
+        )
+
+    exec_hook = policy.get("exec")
+    if not isinstance(exec_hook, dict):
+        return _finding(
+            "B174",
+            PASS,
+            "security.installPolicy is enabled with no exec hook configured -- "
+            "OpenClaw fails skill/plugin installs and updates closed until one is "
+            "set, so there is no escape-hatch flag to assess.",
+            "Configure security.installPolicy.exec with a trusted, absolute-path "
+            "command if you want installs to actually complete under the policy gate.",
+        )
+
+    insecure_path = exec_hook.get("allowInsecurePath") is True
+    symlink_command = exec_hook.get("allowSymlinkCommand") is True
+    trusted_dirs = exec_hook.get("trustedDirs")
+    has_trusted_dirs = isinstance(trusted_dirs, list) and any(
+        isinstance(d, str) and d.strip() for d in trusted_dirs
+    )
+
+    if insecure_path:
+        danger = ["exec.allowInsecurePath=true bypasses the install-policy command's "
+                   "own permission/ownership verification"]
+        if symlink_command:
+            danger.append(
+                "exec.allowSymlinkCommand=true also lets that command be a symlink, "
+                "so the (unverified) resolved target is what actually runs"
+            )
+        if has_trusted_dirs:
+            return _finding(
+                "B174",
+                WARN,
+                "security.installPolicy.exec.allowInsecurePath=true skips the "
+                "install-policy command's own permission/ownership checks, but "
+                "exec.trustedDirs constrains it to an operator-declared directory: "
+                + "; ".join(danger)
+                + ".",
+                "Confirm every directory in exec.trustedDirs is non-writable by "
+                "other users and owned by a trusted account (trustedDirs "
+                "containment does not itself verify the target file's own "
+                "permissions); prefer removing allowInsecurePath if the platform's "
+                "normal permission probe works.",
+                danger,
+            )
+        danger.append(
+            "no exec.trustedDirs is configured, so any filesystem path is "
+            "accepted with zero verification"
+        )
+        return _finding(
+            "B174",
+            FAIL,
+            "security.installPolicy.exec.allowInsecurePath=true bypasses the "
+            "install-time policy command's own path-safety checks with no "
+            "exec.trustedDirs to constrain it: "
+            + "; ".join(danger)
+            + ".",
+            "Remove allowInsecurePath (or set it to false), or scope it with a "
+            "non-empty exec.trustedDirs naming only directories you have "
+            "independently verified are trusted -- this command runs on every "
+            "skill/plugin install and update.",
+            danger,
+        )
+
+    pass_env = exec_hook.get("passEnv")
+    if isinstance(pass_env, list):
+        secret_names = [
+            str(k) for k in pass_env if isinstance(k, str) and SECRET_KEY_RE.search(k)
+        ]
+        if secret_names:
+            return _finding(
+                "B174",
+                WARN,
+                "security.installPolicy.exec.passEnv forwards secret-shaped host "
+                "env var name(s) to the install-time policy command: "
+                + ", ".join(secret_names[:6])
+                + ".",
+                "Confirm the install-policy command actually needs these; forward "
+                "only what it uses, and prefer security.installPolicy.exec.env with "
+                "a SecretRef indirection over passEnv for anything sensitive.",
+                secret_names,
+            )
+
+    return _finding(
+        "B174",
+        PASS,
+        "security.installPolicy is enabled with a configured exec hook and no "
+        "unrestrained allowInsecurePath escape flag or secret-shaped passEnv "
+        "forwarding detected (a bare allowSymlinkCommand does not itself bypass "
+        "the resolved target's own permission/ownership checks).",
+        "Keep the install-policy exec command's path owner-only and re-review it "
+        "whenever the policy changes.",
     )
 
 

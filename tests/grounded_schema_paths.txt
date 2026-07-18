@@ -80,6 +80,7 @@ proxy
 proxy.enabled
 proxy.proxyUrl
 security.audit.suppressions
+security.installPolicy
 session.dmScope
 subagents.allowAgents
 tools.allow

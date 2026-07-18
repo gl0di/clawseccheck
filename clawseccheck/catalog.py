@@ -378,6 +378,24 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B174 (B-238): the operator-facing install GATE itself -- security.installPolicy.*
+    # (enabled + the exec hook's allowInsecurePath/allowSymlinkCommand/trustedDirs/passEnv
+    # escape surface) -- distinct from B42, which only scans a skill's own postinstall
+    # hook content and skill-dir perms. FAIL is reserved for an unrestrained
+    # allowInsecurePath (no trustedDirs); trustedDirs narrows it to WARN, a bare
+    # allowSymlinkCommand alone doesn't bypass the resolved-target's own permission checks
+    # and is not a finding trigger, and the bare "not enabled" default state is WARN-only
+    # (C-135 adversarial re-pass, B-238: ground truth is install-policy-Barp1EUw.js
+    # assertSecureCommandPath()).
+    CheckMeta(
+        "B174",
+        "security.installPolicy.* operator gate + exec-hook escape flags",
+        HIGH,
+        "hardening",
+        "Supply Chain / Install Policy",
+        confidence="HIGH",
+        surface="skills",
+    ),
     # Attestation layer (v0.26.0) — enriched by the agent's self-report (--attest).
     # ATTESTED confidence: weaker than a config fact; advisory (not scored) so the
     # static grade is unaffected when no attestation is supplied (finding -> UNKNOWN).
@@ -1742,6 +1760,7 @@ AST_MAP = {
     "B15": ("AST02",),
     "B24": ("AST02",),
     "B42": ("AST02",),
+    "B174": ("AST02",),
     "C5": ("AST02",),
     "C047": ("AST02",),
     "B3": ("AST03",),
@@ -1885,6 +1904,7 @@ OWASP_MAP = {
     "B39": ("LLM02",),
     "B41": ("LLM02", "LLM06"),
     "B42": ("LLM03",),
+    "B174": ("LLM03",),
     "B43": ("LLM06",),
     "B44": ("LLM06",),
     "B45": ("LLM06",),

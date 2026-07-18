@@ -1,0 +1,22 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": { "mode": "token", "token": "a-very-long-token-of-32-characters" }
+  },
+  "channels": { "telegram": { "dmPolicy": "allowlist", "groupPolicy": "allowlist" } },
+  "tools": { "profile": "minimal" },
+  "logging": { "redactSensitive": "tools" },
+  "models": { "main": { "provider": "ollama/llama3" } },
+  "security": {
+    "installPolicy": {
+      "enabled": true,
+      "targets": ["skill", "plugin"],
+      "exec": {
+        "source": "exec",
+        "command": "/usr/local/bin/openclaw-install-policy",
+        "args": ["--check"],
+        "allowInsecurePath": true
+      }
+    }
+  }
+}

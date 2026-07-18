@@ -166,6 +166,7 @@ check_image_attr_injection
 check_incident_readiness
 check_install_directive_supply_chain
 check_install_policy
+check_install_policy_gate
 check_installed_skills
 check_instruction_hierarchy_override
 check_interpreter_interpolation_injection
