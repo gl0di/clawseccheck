@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "servers": {
+      "web-research": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-fetch"]
+      }
+    }
+  }
+}

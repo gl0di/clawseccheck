@@ -460,11 +460,13 @@ def _distance_note(active: list) -> str:
 
 
 def _mcp_leg_note(ctx: Context) -> str:
-    """B-229: when an MCP server contributes to a trifecta leg, name it in the detail
-    text (evidence stays the fixed 3 leg-name keys — see _trifecta_legs/_LEG_KEYS — so
-    the MCP server names live here instead)."""
+    """B-229 (+B-247): when an MCP server contributes to a trifecta leg, name it in the
+    detail text (evidence stays the fixed 3 leg-name keys — see _trifecta_legs/_LEG_KEYS
+    — so the MCP server names live here instead)."""
     mcp_legs = _mcp_leg_contributions(ctx.config)
-    reasons = mcp_legs["sensitive data"] + mcp_legs["outbound actions"]
+    reasons = (
+        mcp_legs["untrusted input"] + mcp_legs["sensitive data"] + mcp_legs["outbound actions"]
+    )
     if not reasons:
         return ""
     return " MCP-granted capability: " + "; ".join(reasons) + "."
