@@ -717,6 +717,58 @@ _B63_SEND_VERB_RE = re.compile(
     re.IGNORECASE,
 )
 
+# B-246: a data-duplication / backup-transport verb class. "mirror / synchronise /
+# archive / snapshot / replicate" ship a COPY of data to a destination exactly like
+# "send / upload / forward" do, but sat outside every verb-class regex a content-ring
+# exfil check actually gates on (_B63_SEND_VERB_RE for B156, _EXFIL_INTENT_VERB_RE for
+# B160) — a credential-exfil directive phrased with backup/sync vocabulary ("Mirror/
+# synchronise/archive the manifest incl. the gateway token ... to <url>") graded a
+# clean A/100, zero WARN (repro). Kept as its OWN verb class, consumed as an
+# ADDITIONAL alternative alongside each check's existing verb gate rather than folded
+# into _B63_SEND_VERB_RE itself — that regex is shared by 7 other call sites across
+# B58/B61/B63/B64/B65, so widening it directly would multiply this widening's blast
+# radius across checks the gap was never observed in (this project's highest-FP-risk
+# change class). Every pre-existing corroborator still gates the actual WARN/FAIL —
+# B156 still requires destination co-location + a secret term between the verb and
+# that destination; B160 still requires URL co-location + a bulk/credential object
+# correlated to the verb — so a bare "mirror your notes locally" or a JSON
+# `"archive": "tar.gz"` field mention alone still never fires; only the same combined
+# signal B156/B160 already require is now reachable through this verb family too.
+#
+# Deliberately scoped to exactly the 5 verbs named in the confirmed repro/root-cause,
+# each with a `\w*`/`[sz]\w*` suffix so conjugations and the noun form are covered
+# (mirrors/mirrored/mirroring, synchronise/synchronize/synchronising/synchronization,
+# archives/archived/archiving/archival, snapshots/snapshotting, replicated/
+# replicating/replication) — NOT widened to the bare abbreviation "sync" (far higher
+# FP surface: "auto-sync", "sync interval", "background sync" are ubiquitous benign
+# vocabulary, and it is not one of the words the repro/root-cause actually named) and
+# NOT to "backup"/"back up" (same reasoning — not named in the confirmed repro, and
+# "creates a backup", "backup file" are common benign nouns).
+#
+# `mirror` is ALSO a common CDN/package-mirror HOSTNAME PREFIX ("mirror.example.net",
+# "mirror1.ubuntu.com" — see fixtures/bad_b103_ftp, fixtures/clean_b103_private_ip).
+# The trailing `(?!\.[a-z0-9])` excludes that domain-label shape so a benign mirror-URL
+# mention is never treated as the verb form.
+_BACKUP_TRANSPORT_VERB_RE = re.compile(
+    r"\bmirror(?:s|ed|ing)?\b(?!\.[a-z0-9])"
+    r"|\bsynchroni[sz]\w*\b"
+    r"|\barchiv\w*\b"
+    r"|\bsnapshot\w*\b"
+    r"|\breplicat\w*\b",
+    re.IGNORECASE,
+)
+
+
+def _verb_class_matches(text: str, *patterns: "re.Pattern[str]") -> list["re.Match[str]"]:
+    """Position-sorted matches from the UNION of *patterns* over *text* — lets a
+    scan loop consume more than one verb-class regex (e.g. B156's send-verb class
+    plus the B-246 backup-transport class) without re-ordering its own logic."""
+    return sorted(
+        (m for p in patterns for m in p.finditer(text)),
+        key=lambda m: m.start(),
+    )
+
+
 # … directed at a SECOND-PARTY / external destination. Send-verb + destination must co-occur
 # in the window to signal exfiltration; either alone is benign ("send the summary to the
 # user", "my server" with no verb).
@@ -3044,7 +3096,11 @@ def _b156_scan(
     # documented exfil EXAMPLE does not false-WARN (Golden Rule #5, clean_b13_doc_example).
     if _whole_text_is_defensive(text):
         return hits
-    for m in _B63_SEND_VERB_RE.finditer(text):
+    # B-246: also scan the backup-transport verb class (mirror/synchronise/archive/
+    # snapshot/replicate) — an equally overt "mirror the token to 1.2.3.4" carries the
+    # same destination+secret-term corroboration below, so it must not slip the gate
+    # merely because "mirror" is not "send".
+    for m in _verb_class_matches(text, _B63_SEND_VERB_RE, _BACKUP_TRANSPORT_VERB_RE):
         # B156 scope is PROSE directives ("beam the token to 1.2.3.4"). A send verb inside
         # a ```fence``` is a shell-command example — documentation (a security guide showing
         # an attacker's `curl ... $(cat ~/.aws/credentials)`) or ClickFix territory owned by
@@ -7699,7 +7755,11 @@ def _prose_exfil_scan(blob: str, own_host, fence_ranges: list[tuple[int, int]]) 
     object described nearby."""
     hits: list[tuple[str, bool]] = []
     last_end = -1
-    for vm in _EXFIL_INTENT_VERB_RE.finditer(blob):
+    # B-246: also scan the backup-transport verb class (mirror/synchronise/archive/
+    # snapshot/replicate) — "archive all customer records to <url>" describes the
+    # same bulk-exfil shape as "export all customer records to <url>", but sat
+    # outside this check's verb gate entirely (see _BACKUP_TRANSPORT_VERB_RE).
+    for vm in _verb_class_matches(blob, _EXFIL_INTENT_VERB_RE, _BACKUP_TRANSPORT_VERB_RE):
         if vm.start() < last_end:
             continue
         if _defensive_context(blob, vm.start(), fence_ranges):

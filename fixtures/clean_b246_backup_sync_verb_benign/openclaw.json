@@ -1,0 +1,5 @@
+{
+  "gateway": { "bind": "127.0.0.1:8080" },
+  "tools": { "profile": "minimal" },
+  "models": { "main": { "provider": "ollama/llama3" } }
+}
