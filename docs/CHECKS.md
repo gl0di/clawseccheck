@@ -393,6 +393,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B178 - Cleartext http:// baseUrl on a model provider (API-key + traffic leak)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Proxy / Egress Hardening
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Cleartext http:// baseUrl on a model provider (API-key + traffic leak)
+- Remediation:
+  - none
+
 ### B39 - Session visibility / cross-user transcript leak
 
 - Severity: MEDIUM
@@ -1599,6 +1611,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B176 - Standing operator authority in paired device store (devices/paired.json)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Identity / Standing Authority
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: LLM06 Excessive Agency
+- What it checks: Standing operator authority in paired device store (devices/paired.json)
+- Remediation:
+  - none
+
 ### B135 - Accepted-despite-failed-verification skill install (.clawhub/lock.json)
 
 - Severity: MEDIUM
@@ -1694,6 +1718,34 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: LLM04 Data and Model Poisoning, LLM06 Excessive Agency
 - What it checks: Skill Workshop autonomous authoring + no-review install (approvalPolicy=auto)
+- Remediation:
+  - none
+
+## Advisory checks
+
+### B179 - Hooks enable-toggle attack-surface inventory (hooks.enabled / hooks.internal.load.extraDirs)
+
+- Severity: LOW
+- Block: advisory
+- Framework: Attack Surface / Hook Exposure
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Hooks enable-toggle attack-surface inventory (hooks.enabled / hooks.internal.load.extraDirs)
+- Remediation:
+  - none
+
+## Hardening checks
+
+### B177 - OpenClaw's own persisted ClawHub trust verdict for an installed plugin
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain / Third-Party Trust Verdict
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: OpenClaw's own persisted ClawHub trust verdict for an installed plugin
 - Remediation:
   - none
 
