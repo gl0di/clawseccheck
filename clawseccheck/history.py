@@ -12,6 +12,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from . import brand
 from .locking import journal_lock
 from .monitor import (
     SCHEMA_VERSION, _chain_hash, _iter_jsonl, _last_chain_hash, _rotate_journal, _schema_ok,
@@ -134,10 +135,11 @@ def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
     else:
         arrow_up, arrow_down, arrow_flat = "▲", "▼", "·"
 
-    # 🦞 mascot header line, once (design-system Foundations); --ascii drops it to
-    # stay pure-ASCII, matching render_dashboard/render_card's convention.
-    lines = [] if ascii_only else ["🦞 ClawSecCheck"]
-    lines += ["ClawSecCheck - Score Trend", ""]
+    # Mascot header line, once (design-system Foundations); --ascii drops it and
+    # folds the separator (brand.header()). This used to be two separate lines
+    # ("🦞 ClawSecCheck" then "ClawSecCheck - Score Trend"), repeating the
+    # wordmark — collapsed to the one brand header line.
+    lines = [brand.header(subtitle="Score Trend", ascii_only=ascii_only), ""]
     for i, row in enumerate(rows):
         if i == 0:
             arrow = arrow_flat

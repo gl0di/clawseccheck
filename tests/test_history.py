@@ -140,7 +140,7 @@ def test_render_trend_empty_message():
 
 def test_render_trend_contains_header():
     rows = [{"date": "2026-06-15", "score": 72, "grade": "C"}]
-    assert "ClawSecCheck - Score Trend" in render_trend(rows)
+    assert "ClawSecCheck · Score Trend" in render_trend(rows)
 
 
 def test_render_trend_contains_dates_and_grades(tmp_path):
