@@ -38,6 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 INIT = ROOT / "clawseccheck" / "__init__.py"
 SKILL = ROOT / "SKILL.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
+THREAT_COVERAGE = ROOT / "docs" / "THREAT_COVERAGE.md"
 
 _SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 
@@ -174,20 +175,34 @@ def main(argv: list[str] | None = None) -> int:
         sys.exit("error: could not update __released__ in clawseccheck/__init__.py")
     skill_new = _sub_or_die(
         SKILL, r"^version:\s*\S+", f"version: {new_version}", "version:")
+    # The threat matrix states which release it was last ground against; if that line
+    # goes stale the matrix silently claims coverage it never re-verified. Restamping it
+    # here keeps tests/test_doc_facts.py green — but the stamp is a claim, so re-read the
+    # matrix when the catalog changed.
+    threat_new = _sub_or_die(
+        THREAT_COVERAGE,
+        r"Updated \d{4}-\d{2}-\d{2} for v\d+\.\d+\.\d+",
+        f"Updated {date} for v{new_version}",
+        "THREAT_COVERAGE 'Updated … for v…' line")
 
     if args.dry_run:
         print(f"[dry-run] {cur} -> {new_version}  (released {date})")
-        print("[dry-run] would update: clawseccheck/__init__.py, SKILL.md, CHANGELOG.md")
+        print("[dry-run] would update: clawseccheck/__init__.py, SKILL.md, "
+              "CHANGELOG.md, docs/THREAT_COVERAGE.md")
         print("[dry-run] CHANGELOG stub:\n" + _changelog_stub(new_version, date))
         return 0
 
     INIT.write_text(init_new2, encoding="utf-8")
     SKILL.write_text(skill_new, encoding="utf-8")
+    THREAT_COVERAGE.write_text(threat_new, encoding="utf-8")
     _insert_changelog(new_version, date, dry=False)
 
     print(f"bumped {cur} -> {new_version}  (released {date})")
-    print("updated: clawseccheck/__init__.py, SKILL.md, CHANGELOG.md")
-    print("next: fill the CHANGELOG prose, run tests + ruff, then:")
+    print("updated: clawseccheck/__init__.py, SKILL.md, CHANGELOG.md, "
+          "docs/THREAT_COVERAGE.md")
+    print("next: fill the CHANGELOG prose, re-ground the docs whose facts changed")
+    print("      (python3 -m pytest tests/test_doc_facts.py -q names any that drifted),")
+    print("      run tests + ruff, then:")
     print(f"  git commit -am 'chore: v{new_version} — <summary>'")
     print(f"  git tag v{new_version} && git push origin main --tags")
     return 0

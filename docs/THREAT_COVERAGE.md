@@ -2,13 +2,13 @@
 
 Honest map of what ClawSecCheck checks today, what it does **not** yet check, and where
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
-all (so they can't even surface as a finding). Updated 2026-07-16 for v3.49.0.
+all (so they can't even surface as a finding). Updated 2026-07-18 for v3.50.0.
 
-Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 130 checks
+Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 134 checks
 total; see `docs/CHECKS.md` for the full generated list, plus the
 combinational risk engine `RISK-01..RISK-19`, the install-time vetters `--vet` (B13 plus
-the content-security ring — B59–B105 / B135–B158 on an uninstalled skill; AST-, injection-,
-and capability-intent-aware) / `--vet-mcp`, the **attestation
+the content-security ring — `SKILL_CONTENT_RING`, run against an uninstalled skill; AST-,
+injection-, and capability-intent-aware) / `--vet-mcp`, the **attestation
 layer** (`--ask` / `--attest`, with a guided interrogation protocol so the agent self-builds
 the report; `--attest -` reads stdin) that feeds the agent's self-report into B43/B44, and
 the **behavioral trajectory audit** (`--behavioral`, E-032/E-039) — T1/T2/T3, proof-by-log

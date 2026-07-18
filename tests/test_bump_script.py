@@ -58,19 +58,53 @@ def _seed(tmp_path: Path):
     skill.write_text("---\nname: clawseccheck\nversion: 1.8.2\n---\n", encoding="utf-8")
     chg = tmp_path / "CHANGELOG.md"
     chg.write_text("# Changelog\n\n## [1.8.2] — 2026-06-23\n\nold entry\n", encoding="utf-8")
-    return init, skill, chg
+    threat = tmp_path / "docs" / "THREAT_COVERAGE.md"
+    threat.parent.mkdir(parents=True)
+    threat.write_text("# Threat coverage matrix\n\nUpdated 2026-06-23 for v1.8.2.\n", encoding="utf-8")
+    return init, skill, chg, threat
 
 
-def _point_module_at(monkeypatch, tmp_path, init, skill, chg):
+def _point_module_at(monkeypatch, tmp_path, init, skill, chg, threat):
     monkeypatch.setattr(bump, "ROOT", tmp_path)
     monkeypatch.setattr(bump, "INIT", init)
     monkeypatch.setattr(bump, "SKILL", skill)
     monkeypatch.setattr(bump, "CHANGELOG", chg)
+    monkeypatch.setattr(bump, "THREAT_COVERAGE", threat)
+
+
+def test_every_bump_target_path_is_redirected_into_tmp(tmp_path, monkeypatch):
+    """Guard the isolation itself.
+
+    `bump.py` writes to module-level Path constants. `_point_module_at` redirects them at
+    tmp_path — but only the ones it knows about. Adding a new target to bump.py without
+    adding it here makes the suite write into the REAL repo: that is exactly how a full
+    run started stamping "Updated 2026-07-01 for v1.8.3" into the working tree's
+    docs/THREAT_COVERAGE.md. Tests must write nothing outside tmp_path, so enumerate the
+    module's write targets and prove every one of them was redirected.
+    """
+    seeded = _seed(tmp_path)
+    _point_module_at(monkeypatch, tmp_path, *seeded)
+
+    targets = {
+        name: value
+        for name, value in vars(bump).items()
+        if isinstance(value, Path) and name.isupper()
+    }
+    assert targets, "expected bump.py to expose its write targets as module-level Paths"
+
+    escaped = {
+        name: str(path) for name, path in targets.items()
+        if tmp_path not in path.parents and path != tmp_path
+    }
+    assert not escaped, (
+        "these bump.py paths still point at the real repo — add them to _point_module_at "
+        f"(and seed them in _seed): {escaped}"
+    )
 
 
 def test_bump_patch_updates_all_four_sources(tmp_path, monkeypatch):
-    init, skill, chg = _seed(tmp_path)
-    _point_module_at(monkeypatch, tmp_path, init, skill, chg)
+    init, skill, chg, threat = _seed(tmp_path)
+    _point_module_at(monkeypatch, tmp_path, init, skill, chg, threat)
 
     rc = bump.main(["patch", "--date", "2026-07-01"])
     assert rc == 0
@@ -85,8 +119,8 @@ def test_bump_patch_updates_all_four_sources(tmp_path, monkeypatch):
 
 
 def test_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
-    init, skill, chg = _seed(tmp_path)
-    _point_module_at(monkeypatch, tmp_path, init, skill, chg)
+    init, skill, chg, threat = _seed(tmp_path)
+    _point_module_at(monkeypatch, tmp_path, init, skill, chg, threat)
     before = (init.read_text(), skill.read_text(), chg.read_text())
 
     rc = bump.main(["minor", "--dry-run"])
@@ -96,21 +130,21 @@ def test_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
 
 
 def test_set_rejects_bad_semver(tmp_path, monkeypatch):
-    init, skill, chg = _seed(tmp_path)
-    _point_module_at(monkeypatch, tmp_path, init, skill, chg)
+    init, skill, chg, threat = _seed(tmp_path)
+    _point_module_at(monkeypatch, tmp_path, init, skill, chg, threat)
     with pytest.raises(SystemExit):
         bump.main(["--set", "1.8"])
 
 
 def test_refuses_same_version(tmp_path, monkeypatch):
-    init, skill, chg = _seed(tmp_path)
-    _point_module_at(monkeypatch, tmp_path, init, skill, chg)
+    init, skill, chg, threat = _seed(tmp_path)
+    _point_module_at(monkeypatch, tmp_path, init, skill, chg, threat)
     with pytest.raises(SystemExit):
         bump.main(["--set", "1.8.2"])
 
 
 def test_bad_date_rejected(tmp_path, monkeypatch):
-    init, skill, chg = _seed(tmp_path)
-    _point_module_at(monkeypatch, tmp_path, init, skill, chg)
+    init, skill, chg, threat = _seed(tmp_path)
+    _point_module_at(monkeypatch, tmp_path, init, skill, chg, threat)
     with pytest.raises(SystemExit):
         bump.main(["patch", "--date", "not-a-date"])
