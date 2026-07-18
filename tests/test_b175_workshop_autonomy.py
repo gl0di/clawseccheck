@@ -55,6 +55,116 @@ def test_bad_fixture_fails():
 
 
 # ---------------------------------------------------------------------------
+# B-239: enabled+auto but skill_workshop is unreachable -> WARN, not FAIL
+#
+# Grounded in openclaw 2026.7.1 dist: openclaw-tools-KulZ1cdH.js:14415 omits the
+# skill_workshop tool outright for sandboxed sessions; status-message-CQq9FqoB.js:73
+# makes agents.defaults.sandbox.mode=="all" unconditionally sandboxed; tool-policy-
+# BHUGxE3p.js / effective-tool-policy-CRZGJ2R3.js run tools.deny/tools.allow (global
+# and per-agent) as narrowing pipeline filters; tool-catalog-C8xbUFNe.js gives
+# skill_workshop profiles=["coding"] only, so "minimal"/"messaging" omit it.
+# ---------------------------------------------------------------------------
+
+def test_sandboxed_fixture_warns_not_fails():
+    """The PRIMARY reported case (B-239): a fully-sandboxed fleet
+    (agents.defaults.sandbox.mode="all") never constructs the skill_workshop tool at
+    all, so the config can't run the pipeline it superficially declares."""
+    r = check_skill_workshop_autonomy(collect(FIXTURES / "bad_b175_workshop_sandboxed_warn"))
+    assert r.status == WARN
+    assert any("unreachable" in e for e in r.evidence)
+
+
+def test_global_tools_deny_warns_not_fails():
+    cfg = {
+        "tools": {"deny": ["skill_workshop", "exec", "browser"]},
+        "skills": {"workshop": {"autonomous": {"enabled": True}, "approvalPolicy": "auto"}},
+    }
+    r = check_skill_workshop_autonomy(_ctx(cfg))
+    assert r.status == WARN
+
+
+def test_sole_agent_strict_allowlist_warns_not_fails():
+    cfg = {
+        "agents": {"list": [{"id": "main", "tools": {"allow": ["read", "grep", "find", "ls"]}}]},
+        "skills": {"workshop": {"autonomous": {"enabled": True}, "approvalPolicy": "auto"}},
+    }
+    r = check_skill_workshop_autonomy(_ctx(cfg))
+    assert r.status == WARN
+
+
+def test_minimal_profile_warns_not_fails():
+    cfg = {
+        "tools": {"profile": "minimal"},
+        "skills": {"workshop": {"autonomous": {"enabled": True}, "approvalPolicy": "auto"}},
+    }
+    r = check_skill_workshop_autonomy(_ctx(cfg))
+    assert r.status == WARN
+
+
+def test_messaging_profile_warns_not_fails():
+    cfg = {
+        "tools": {"profile": "messaging"},
+        "skills": {"workshop": {"autonomous": {"enabled": True}, "approvalPolicy": "auto"}},
+    }
+    r = check_skill_workshop_autonomy(_ctx(cfg))
+    assert r.status == WARN
+
+
+# ---------------------------------------------------------------------------
+# Anti-FN guardrails: don't let the reachability gate hide a genuinely live pipeline
+# ---------------------------------------------------------------------------
+
+def test_unrecognized_profile_value_still_fails():
+    """"readonly" is NOT a real tools.profile literal anywhere in the OpenClaw dist
+    (register-CvPzWKo8.js SUPPORTED_TOOL_PROFILES is exactly
+    {minimal, coding, messaging, full}) — an unrecognized profile string does not
+    restrict the tool set at all, so it must not be treated as neutralizing."""
+    cfg = {
+        "tools": {"profile": "readonly"},
+        "skills": {"workshop": {"autonomous": {"enabled": True}, "approvalPolicy": "auto"}},
+    }
+    r = check_skill_workshop_autonomy(_ctx(cfg))
+    assert r.status == FAIL
+
+
+def test_coding_and_full_profiles_still_fail():
+    """Both real profiles that DO include skill_workshop must not be misread as
+    neutralizing."""
+    for profile in ("coding", "full"):
+        cfg = {
+            "tools": {"profile": profile},
+            "skills": {"workshop": {"autonomous": {"enabled": True}, "approvalPolicy": "auto"}},
+        }
+        r = check_skill_workshop_autonomy(_ctx(cfg))
+        assert r.status == FAIL, profile
+
+
+def test_multi_agent_restriction_stays_ambiguous_and_fails():
+    """A restrictive allowlist on ONE of several declared agents doesn't prove the
+    tool is unreachable fleet-wide (another agent may still reach it) — stay
+    conservative and keep FAIL rather than guess an unmodeled multi-agent scope."""
+    cfg = {
+        "agents": {
+            "list": [
+                {"id": "restricted", "tools": {"allow": ["read", "grep"]}},
+                {"id": "unrestricted"},
+            ]
+        },
+        "skills": {"workshop": {"autonomous": {"enabled": True}, "approvalPolicy": "auto"}},
+    }
+    r = check_skill_workshop_autonomy(_ctx(cfg))
+    assert r.status == FAIL
+
+
+def test_dangerous_baseline_no_neutralizing_signal_still_fails():
+    """No sandbox, no deny/allow, no profile restriction at all -- the genuinely
+    dangerous case the check exists to catch."""
+    cfg = {"skills": {"workshop": {"autonomous": {"enabled": True}, "approvalPolicy": "auto"}}}
+    r = check_skill_workshop_autonomy(_ctx(cfg))
+    assert r.status == FAIL
+
+
+# ---------------------------------------------------------------------------
 # WARN: exactly one risky field set (a partial gap, not the full pipeline)
 # ---------------------------------------------------------------------------
 

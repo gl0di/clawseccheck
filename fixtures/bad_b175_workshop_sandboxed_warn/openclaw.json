@@ -1,0 +1,13 @@
+{
+  "agents": {
+    "defaults": {
+      "sandbox": { "mode": "all", "workspaceAccess": "ro" }
+    }
+  },
+  "skills": {
+    "workshop": {
+      "autonomous": { "enabled": true },
+      "approvalPolicy": "auto"
+    }
+  }
+}
