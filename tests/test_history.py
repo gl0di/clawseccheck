@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +10,9 @@ from types import SimpleNamespace
 import pytest
 
 from clawseccheck.cli import main
-from clawseccheck.history import DEFAULT_HISTORY, load, record, render_trend, verify
+from clawseccheck.history import (
+    DEFAULT_HISTORY, _run_source, _sanitize_home, load, record, render_trend, verify,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -28,15 +31,18 @@ def _score(score: int, grade: str) -> SimpleNamespace:
 def test_record_and_load_three_entries(tmp_path):
     path = str(tmp_path / "history.jsonl")
 
-    record(_score(72, "C"), path=path, when="2026-06-15")
-    record(_score(81, "B"), path=path, when="2026-06-17")
-    record(_score(90, "A"), path=path, when="2026-06-19")
+    record(_score(72, "C"), path=path, when="2026-06-15", source="audit")
+    record(_score(81, "B"), path=path, when="2026-06-17", source="audit")
+    record(_score(90, "A"), path=path, when="2026-06-19", source="audit")
 
     rows = load(path)
     assert len(rows) == 3
-    assert rows[0] == {"date": "2026-06-15", "score": 72, "grade": "C"}
-    assert rows[1] == {"date": "2026-06-17", "score": 81, "grade": "B"}
-    assert rows[2] == {"date": "2026-06-19", "score": 90, "grade": "A"}
+    assert rows[0] == {"date": "2026-06-15", "score": 72, "grade": "C",
+                        "ts": "2026-06-15T00:00:00", "home": None, "source": "audit"}
+    assert rows[1] == {"date": "2026-06-17", "score": 81, "grade": "B",
+                        "ts": "2026-06-17T00:00:00", "home": None, "source": "audit"}
+    assert rows[2] == {"date": "2026-06-19", "score": 90, "grade": "A",
+                        "ts": "2026-06-19T00:00:00", "home": None, "source": "audit"}
 
 
 def test_record_creates_parent_dir(tmp_path):
@@ -145,9 +151,9 @@ def test_render_trend_contains_header():
 
 def test_render_trend_contains_dates_and_grades(tmp_path):
     path = str(tmp_path / "history.jsonl")
-    record(_score(72, "C"), path=path, when="2026-06-15")
-    record(_score(81, "B"), path=path, when="2026-06-17")
-    record(_score(90, "A"), path=path, when="2026-06-19")
+    record(_score(72, "C"), path=path, when="2026-06-15", source="audit")
+    record(_score(81, "B"), path=path, when="2026-06-17", source="audit")
+    record(_score(90, "A"), path=path, when="2026-06-19", source="audit")
 
     out = render_trend(load(path))
     assert "2026-06-15" in out
@@ -214,7 +220,7 @@ def test_render_trend_first_row_always_flat(tmp_path):
 
 def test_render_trend_single_entry_full(tmp_path):
     path = str(tmp_path / "history.jsonl")
-    record(_score(55, "D"), path=path, when="2026-06-19")
+    record(_score(55, "D"), path=path, when="2026-06-19", source="audit")
     out = render_trend(load(path))
     assert "2026-06-19" in out
     assert "55" in out
@@ -333,3 +339,244 @@ def test_cli_verify_history_exits_one_on_tampered_chain(tmp_path, capsys):
     rc = main(["--verify-history", "--history", str(path)])
     assert rc == 1
     assert "BROKEN" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# F-128: 'ts' timestamp
+# ---------------------------------------------------------------------------
+
+def test_record_ts_defaults_to_now_iso_format(tmp_path):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(70, "C"), path=path, source="audit")  # when=None -> real now()
+    rows = load(path)
+    assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", rows[0]["ts"])
+
+
+def test_record_when_bare_date_sets_ts_to_midnight(tmp_path):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(70, "C"), path=path, when="2026-06-15", source="audit")
+    rows = load(path)
+    assert rows[0]["date"] == "2026-06-15"
+    assert rows[0]["ts"] == "2026-06-15T00:00:00"
+
+
+def test_record_when_accepts_full_iso_datetime(tmp_path):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(70, "C"), path=path, when="2026-06-15T09:30:45", source="audit")
+    rows = load(path)
+    assert rows[0]["date"] == "2026-06-15"  # back-compat display/sort field
+    assert rows[0]["ts"] == "2026-06-15T09:30:45"
+
+
+# ---------------------------------------------------------------------------
+# F-128: run-source tag — detection priority
+# ---------------------------------------------------------------------------
+
+def test_run_source_explicit_arg_wins_over_everything(monkeypatch):
+    monkeypatch.setenv("CLAWSECCHECK_RUN_SOURCE", "dev")
+    assert _run_source("ci") == "ci"
+
+
+def test_run_source_env_override_wins_over_pytest_detection(monkeypatch):
+    monkeypatch.setenv("CLAWSECCHECK_RUN_SOURCE", "dev")
+    # PYTEST_CURRENT_TEST is set (this IS a pytest run) but the explicit env
+    # override must still win.
+    assert _run_source() == "dev"
+
+
+def test_run_source_detects_pytest_as_test(monkeypatch):
+    monkeypatch.delenv("CLAWSECCHECK_RUN_SOURCE", raising=False)
+    # pytest sets PYTEST_CURRENT_TEST for the duration of every test — no
+    # per-call-site plumbing needed to get "test" here.
+    assert _run_source() == "test"
+
+
+def test_run_source_defaults_to_audit_outside_pytest(monkeypatch):
+    monkeypatch.delenv("CLAWSECCHECK_RUN_SOURCE", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    assert _run_source() == "audit"
+
+
+def test_record_source_auto_detected_as_test_under_pytest(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAWSECCHECK_RUN_SOURCE", raising=False)
+    path = str(tmp_path / "history.jsonl")
+    record(_score(70, "C"), path=path, when="2026-06-15")  # no explicit source=
+    rows = load(path)
+    assert rows[0]["source"] == "test"
+
+
+def test_record_source_explicit_arg(tmp_path):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(70, "C"), path=path, when="2026-06-15", source="audit")
+    rows = load(path)
+    assert rows[0]["source"] == "audit"
+
+
+# ---------------------------------------------------------------------------
+# F-128: 'home' — sanitized audited path
+# ---------------------------------------------------------------------------
+
+def test_sanitize_home_none_stays_none():
+    assert _sanitize_home(None) is None
+
+
+def test_sanitize_home_empty_string_stays_empty():
+    assert _sanitize_home("") == ""
+
+
+def test_sanitize_home_passthrough_for_ordinary_path():
+    assert _sanitize_home("~/.openclaw") == "~/.openclaw"
+
+
+def test_sanitize_home_strips_control_chars():
+    dirty = "~/.openclaw\x1b[31m\x00evil"
+    clean = _sanitize_home(dirty)
+    assert "\x1b" not in clean
+    assert "\x00" not in clean
+
+
+def test_record_stores_sanitized_home(tmp_path):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(70, "C"), path=path, when="2026-06-15", home="~/.openclaw", source="audit")
+    rows = load(path)
+    assert rows[0]["home"] == "~/.openclaw"
+
+
+def test_record_home_defaults_to_none_when_not_supplied(tmp_path):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(70, "C"), path=path, when="2026-06-15", source="audit")
+    rows = load(path)
+    assert rows[0]["home"] is None
+
+
+# ---------------------------------------------------------------------------
+# F-128: backward compat — a pre-F-128 entry lacking ts/home/source
+# ---------------------------------------------------------------------------
+
+def test_load_legacy_entry_fills_honest_unknown_defaults(tmp_path):
+    """A pre-F-128 line has no ts/home/source concept at all. load() must not
+    guess — it reports the honest 'don't know' state (None/None) and tags the
+    source 'legacy' (distinct from 'audit', since it predates the real-vs-dev
+    distinction this task adds)."""
+    path = tmp_path / "history.jsonl"
+    path.write_text('{"date":"2026-06-10","score":60,"grade":"D"}\n', encoding="utf-8")
+    rows = load(str(path))
+    assert len(rows) == 1
+    assert rows[0]["ts"] is None
+    assert rows[0]["home"] is None
+    assert rows[0]["source"] == "legacy"
+
+
+def test_load_forward_compat_entry_with_new_fields_and_unchanged_schema(tmp_path):
+    """F-128 added ts/home/source WITHOUT bumping _schema (still 1) — a build
+    that predates F-128 would still accept the line (extra keys tolerated),
+    and this build must read the new fields back correctly."""
+    path = tmp_path / "history.jsonl"
+    entry = {
+        "date": "2026-07-17", "score": 55, "grade": "D",
+        "ts": "2026-07-17T10:00:00", "home": "~/.openclaw", "source": "audit",
+        "_schema": 1,
+    }
+    path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+    rows = load(str(path))
+    assert len(rows) == 1
+    assert rows[0]["ts"] == "2026-07-17T10:00:00"
+    assert rows[0]["home"] == "~/.openclaw"
+    assert rows[0]["source"] == "audit"
+
+
+def test_verify_ok_on_mixed_legacy_and_new_format_file(tmp_path):
+    """DoD: --verify-history stays OK across the legacy/new-format boundary in
+    one file — the hash-chain scheme is entry-shape-agnostic (F-094/C-162), so
+    adding ts/home/source doesn't need a chain migration."""
+    path = tmp_path / "history.jsonl"
+    path.write_text('{"date":"2026-06-10","score":60,"grade":"D"}\n', encoding="utf-8")
+    record(_score(72, "C"), path=str(path), when="2026-06-15", source="audit")
+    record(_score(81, "B"), path=str(path), when="2026-06-17", source="audit")
+    ok, msg = verify(str(path))
+    assert ok is True
+    assert msg == "OK"
+
+    rows = load(str(path))
+    assert len(rows) == 3
+    assert rows[0]["source"] == "legacy"
+    assert rows[1]["source"] == "audit"
+    assert rows[2]["source"] == "audit"
+
+
+# ---------------------------------------------------------------------------
+# F-128 fix: --trend never silently drops rows — every row always renders,
+# always tagged with its source. (The default-on filter + include_all kwarg
+# this replaces silently dropped mixed-source rows with no disclosure, and
+# was defeatable via CLAWSECCHECK_RUN_SOURCE against a real audit run.)
+# ---------------------------------------------------------------------------
+
+def test_render_trend_never_hides_test_source(tmp_path):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(72, "C"), path=path, when="2026-06-15", source="audit")
+    record(_score(50, "D"), path=path, when="2026-06-16", source="test")
+    out = render_trend(load(path))
+    assert "2026-06-15" in out
+    assert "2026-06-16" in out
+    assert "[audit]" in out
+    assert "[test]" in out
+
+
+def test_render_trend_never_hides_dev_source(tmp_path):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(72, "C"), path=path, when="2026-06-15", source="audit")
+    record(_score(50, "D"), path=path, when="2026-06-16", source="dev")
+    out = render_trend(load(path))
+    assert "2026-06-15" in out
+    assert "2026-06-16" in out
+    assert "[dev]" in out
+
+
+def test_render_trend_legacy_rows_render_and_are_tagged(tmp_path):
+    """A pre-F-128 entry predates the source concept entirely — it renders
+    and is honestly labeled "legacy" rather than hidden or guessed at."""
+    path = tmp_path / "history.jsonl"
+    path.write_text('{"date":"2026-06-10","score":60,"grade":"D"}\n', encoding="utf-8")
+    out = render_trend(load(str(path)))
+    assert "2026-06-10" in out
+    assert "[legacy]" in out
+
+
+def test_render_trend_shows_home_tag_when_known(tmp_path):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(72, "C"), path=path, when="2026-06-15", home="~/.openclaw", source="audit")
+    out = render_trend(load(path))
+    assert "~/.openclaw" in out
+    assert "[audit]" in out
+
+
+def test_render_trend_no_home_tag_when_home_unknown(tmp_path):
+    path = str(tmp_path / "history.jsonl")
+    record(_score(72, "C"), path=path, when="2026-06-15", source="audit")
+    out = render_trend(load(path))
+    assert "[audit]" in out
+    # No home was passed to record(), so no path should appear after the tag.
+    assert "~/" not in out
+
+
+def test_render_trend_all_test_rows_still_render_no_dev_test_message(tmp_path):
+    """A history made entirely of test/dev runs must still print those rows,
+    not the old 'No audit runs yet (N dev/test entries hidden)' message —
+    that message, and the include_all() kwarg it referenced, are gone."""
+    path = str(tmp_path / "history.jsonl")
+    record(_score(50, "D"), path=path, when="2026-06-15", source="test")
+    record(_score(60, "D"), path=path, when="2026-06-16", source="dev")
+    out = render_trend(load(path))
+    assert "No audit runs yet" not in out
+    assert "include_all" not in out
+    assert "2026-06-15" in out
+    assert "2026-06-16" in out
+    assert "[test]" in out
+    assert "[dev]" in out
+
+
+def test_render_trend_rejects_include_all_kwarg():
+    """The include_all parameter is removed entirely, not just defaulted —
+    passing it is a TypeError, not a silent no-op."""
+    with pytest.raises(TypeError):
+        render_trend([{"date": "2026-06-15", "score": 72, "grade": "C"}], include_all=True)
