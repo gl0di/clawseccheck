@@ -18,7 +18,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
-    <img src="docs/assets/stats-light.svg" alt="130+ security checks · 19 attack-chain detectors · 5,000+ automated tests · 0 dependencies · 0 network calls" width="900">
+    <img src="docs/assets/stats-light.svg" alt="140+ security checks · 19 attack-chain detectors · 5,000+ automated tests · 0 dependencies · 0 network calls" width="900">
   </picture>
 </p>
 
@@ -187,7 +187,7 @@ red-team self-tests — is documented in the **[User guide](docs/USAGE.md)**.
 | Document | What it covers |
 |---|---|
 | [User guide](docs/USAGE.md) | Every flag, recipe, monitoring mode, and trust detail |
-| [Check catalog](docs/CHECKS.md) | All 130+ checks: what they verify and how to remediate |
+| [Check catalog](docs/CHECKS.md) | All 140+ checks: what they verify and how to remediate |
 | [Threat coverage](docs/THREAT_COVERAGE.md) | OWASP LLM Top 10 / Agentic threat mapping |
 | [Output schema](docs/OUTPUT_SCHEMA.md) | The frozen `--json` / SARIF contract |
 | [FAQ](docs/FAQ.md) | Common questions, incl. the compromised-host protocol |

@@ -237,6 +237,7 @@ from ._config import (
     check_gateway,
     check_gateway_rate_limit,
     check_hook_template_content,
+    check_hooks_enable_toggles,
     check_least_privilege,
     check_local_first,
     check_privileged_commands_exposure,
@@ -1159,6 +1160,7 @@ CHECKS = [
     check_declared_skill_reconciliation,  # B158 — declared-but-unresolved skill-load source (F-119)
     check_audit_suppressions,  # B173 — security.audit.suppressions self-blinds native audit (B-237)
     check_install_policy_gate,  # B174 — security.installPolicy.* gate + exec-hook escape flags (B-238)
+    check_hooks_enable_toggles,  # B179 — hooks.enabled / hooks.internal(.load.extraDirs) enable-toggle inventory (B-250)
 ]
 
 

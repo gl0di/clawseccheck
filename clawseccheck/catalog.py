@@ -1681,6 +1681,36 @@ CATALOG: list[CheckMeta] = [
         "Write Integrity / Self-Modification",
         surface="skills",
     ),
+    # B179 (B-250): hooks.webhooks / hooks.internal(.load.extraDirs) enable-toggle
+    # inventory. The originating bug report's field name "hooks.webhooks" is NOT a real
+    # config path -- grounded against the dist, the native audit's own inventory line
+    # (audit.nondeep.runtime-C3y1Q5Fi.js:205-212) computes its "hooks.webhooks: enabled/
+    # disabled" DISPLAY LABEL from the real field `hooks.enabled`
+    # (`cfg.hooks?.enabled === true`), there is no separate `hooks.webhooks` key anywhere
+    # in schema-DRyO1XBt.js. The real internal-hooks surface is `hooks.internal.enabled`,
+    # `.entries`, `.installs`, and `.load.extraDirs` (schema-DRyO1XBt.js:1063-1068,
+    # mirrored by hasConfiguredInternalHooks() in configured-pV8SaeM2.js:20-28). Before
+    # this check, clawseccheck had zero references to any of these five fields.
+    # `hooks.internal.load.extraDirs` is the sharpest signal -- it names extra
+    # directories OpenClaw searches for internal hook MODULES at startup, i.e. a
+    # startup arbitrary-module-load / persistence surface, not just an enable flag.
+    # Severity LOW and WARN-only (never FAIL), scored=False (pure attack-surface
+    # inventory, advisory block): the real fleet config has no `hooks` key at all (no
+    # live miss today), and the native audit itself treats this as "info", not
+    # WARN/FAIL. The higher-risk adjacent hooks.* surfaces already have dedicated
+    # checks -- hooks.token (B1), hooks.mappings[].allowUnsafeExternalContent (B48),
+    # hooks.mappings[] template content (B169), hooks.gmail.allowUnsafeExternalContent
+    # (B48) -- this check only fills the toggle-visibility gap next to them.
+    CheckMeta(
+        "B179",
+        "Hooks enable-toggle attack-surface inventory (hooks.enabled / hooks.internal.load.extraDirs)",
+        LOW,
+        "advisory",
+        "Attack Surface / Hook Exposure",
+        scored=False,
+        confidence="HIGH",
+        surface="hooks",
+    ),
     # E-032 v1 — behavioral trajectory audit (--behavioral mode only, never part of the
     # main audit()/CHECKS list or the A-F score). Reads OpenClaw's trajectory sidecar
     # (agents/*/sessions/*.trajectory.jsonl, §9.1 grounded) and finds sequences PROVEN by
