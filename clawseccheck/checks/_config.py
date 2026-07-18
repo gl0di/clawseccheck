@@ -1540,6 +1540,131 @@ def check_hook_template_content(ctx: Context) -> Finding:
     )
 
 
+def check_hooks_enable_toggles(ctx: Context) -> Finding:
+    """B179 (B-250): inventory of hooks.enabled / hooks.internal(.load.extraDirs)
+    enable-toggles.
+
+    Grounded against the installed dist (2026.7.1): the native audit's own inventory
+    line labels its `hooks.enabled` reading "hooks.webhooks" for display purposes only
+    (`audit.nondeep.runtime-C3y1Q5Fi.js:205-212` — `webhooksEnabled = cfg.hooks?.enabled
+    === true`); there is no separate `hooks.webhooks` config key in
+    `schema-DRyO1XBt.js`. The real internal-hooks surface is `hooks.internal.enabled`,
+    `.entries`, `.installs`, and `.load.extraDirs` (`schema-DRyO1XBt.js:1063-1068`,
+    mirrored by `hasConfiguredInternalHooks()` in `configured-pV8SaeM2.js:20-28`). Before
+    this check, clawseccheck had zero references to any of these five fields (B169 only
+    content-scans `hooks.mappings[].messageTemplate`/`textTemplate` — the template TEXT,
+    not these enable-toggles).
+
+    `hooks.internal.load.extraDirs` gets the sharpest wording: it names extra
+    directories OpenClaw searches for internal hook MODULES at startup — a startup
+    arbitrary-module-load / persistence surface, not merely an enable flag.
+
+    WARN    — any of hooks.enabled, hooks.internal.enabled, an enabled
+              hooks.internal.entries[] item, a hooks.internal.installs[] record, or a
+              non-blank hooks.internal.load.extraDirs entry is configured (see evidence).
+    UNKNOWN — openclaw.json present but unparseable/unreadable.
+    PASS    — none of the above is configured (the common case — the real fleet config
+              has no `hooks` key at all).
+    """
+    unreadable = _config_unreadable("B179", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    evidence: list[str] = []
+    extra_dirs_hit = False
+
+    if dig(cfg, "hooks.enabled") is True:
+        evidence.append(
+            "hooks.enabled — inbound webhook hooks endpoint + mapping execution "
+            "pipeline enabled"
+        )
+
+    internal_enabled = dig(cfg, "hooks.internal.enabled")
+    if internal_enabled is True:
+        evidence.append(
+            "hooks.internal.enabled — internal hook runtime enabled (all configured "
+            "internal hooks may load)"
+        )
+
+    # Mirror hasConfiguredInternalHooks()'s own short-circuit (configured-pV8SaeM2.js:
+    # "if (!internal || internal.enabled === false) return false"): an EXPLICIT
+    # hooks.internal.enabled: false disables internal-hook loading outright, so stale
+    # entries/installs/extraDirs left under a disabled block are not a live load
+    # surface and must not WARN.
+    if internal_enabled is not False:
+        entries = dig(cfg, "hooks.internal.entries")
+        if isinstance(entries, dict):
+            enabled_names = sorted(
+                name
+                for name, entry in entries.items()
+                if isinstance(name, str)
+                and not (isinstance(entry, dict) and entry.get("enabled") is False)
+            )
+            if enabled_names:
+                shown = ", ".join(enabled_names[:6])
+                more = f" (+{len(enabled_names) - 6} more)" if len(enabled_names) > 6 else ""
+                plural = "y" if len(enabled_names) == 1 else "ies"
+                evidence.append(f"hooks.internal.entries — enabled entr{plural}: {shown}{more}")
+
+        installs = dig(cfg, "hooks.internal.installs")
+        if isinstance(installs, dict) and installs:
+            evidence.append(
+                f"hooks.internal.installs — {len(installs)} internal hook install(s) registered"
+            )
+
+        extra_dirs = dig(cfg, "hooks.internal.load.extraDirs")
+        if isinstance(extra_dirs, list):
+            named = sorted({d for d in extra_dirs if isinstance(d, str) and d.strip()})
+            if named:
+                extra_dirs_hit = True
+                shown = ", ".join(named[:6])
+                more = f" (+{len(named) - 6} more)" if len(named) > 6 else ""
+                plural = "y" if len(named) == 1 else "ies"
+                evidence.append(
+                    "hooks.internal.load.extraDirs — additional startup module-load "
+                    f"director{plural} searched for internal hooks: {shown}{more}"
+                )
+
+    if not evidence:
+        return _finding(
+            "B179",
+            PASS,
+            "hooks.enabled is not set and no hooks.internal load surface (enabled "
+            "flag, an enabled entry, an install record, or load.extraDirs) is "
+            "configured.",
+            "No action needed. If hooks are enabled later, review "
+            "hooks.internal.load.extraDirs closely — OpenClaw loads and executes any "
+            "internal hook module it discovers in those directories at startup.",
+            pass_confidence="verified",
+        )
+
+    ev_summary = "; ".join(evidence)
+    if extra_dirs_hit:
+        detail = (
+            "hooks.internal.load.extraDirs configures additional startup module-load "
+            "directories for internal hooks — a code-exec/persistence surface: "
+            + ev_summary
+        )
+        fix = (
+            "Review every directory in hooks.internal.load.extraDirs: OpenClaw loads "
+            "and executes any internal hook module discovered there at startup. Keep "
+            "the list minimal, point it only at directories you control and have "
+            "reviewed, and treat it like any other trusted-code load path."
+        )
+    else:
+        detail = (
+            "Inbound webhook hooks and/or internal hook loading is enabled: " + ev_summary
+        )
+        fix = (
+            "This is a visibility inventory, not a misconfiguration finding — "
+            "hooks.enabled and hooks.internal are legitimate automation features. "
+            "Confirm the enabled surface is intentional; hooks.token (B1), "
+            "hooks.mappings[].allowUnsafeExternalContent (B48), and hook-template "
+            "content scanning (B169) already cover the higher-risk adjacent settings."
+        )
+    return _finding("B179", WARN, detail, fix, evidence)
+
+
 def check_gateway(ctx: Context) -> Finding:
     cfg = ctx.config
     ev = []

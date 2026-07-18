@@ -60,6 +60,11 @@ gateway.token
 gateway.tools.allow
 gateway.trustedProxies
 heartbeat
+hooks.enabled
+hooks.internal.enabled
+hooks.internal.entries
+hooks.internal.installs
+hooks.internal.load.extraDirs
 hooks.mappings
 hooks.token
 lastTouchedVersion
