@@ -771,6 +771,59 @@ def test_b248_secretish_name_plain_word_value_does_not_warn():
     assert check_mcp_hardening(ctx).status == "PASS"
 
 
+# ---- B-248 FP fix: a *_FILE/*_PATH/*_DIR/*_ENDPOINT env var pointing at a
+# secret INDIRECTION (Docker-secrets / Kubernetes-projected-token / systemd-
+# credentials convention) is not itself secret material — the whole point of
+# that convention is to keep the live secret OUT of the environment. ----
+
+@pytest.mark.parametrize("key,val", [
+    ("DB_PASSWORD_FILE", "/run/secrets/db_password"),
+    ("GITHUB_TOKEN_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
+    ("SLACK_TOKEN_FILE", "/etc/mcp/slack.token"),
+    ("PASSWORD_STORE_DIR", "/home/op/.password-store"),
+    # TIKTOKEN contains the substring "token" (SECRET_KEY_RE is a bare substring
+    # match) even though it names a tokenizer cache, not a credential.
+    ("TIKTOKEN_CACHE_DIR", "/var/cache/tiktoken"),
+    ("OAUTH_TOKEN_ENDPOINT", "https://login.microsoftonline.com/common/oauth2/v2.0/token"),
+])
+def test_b248_secretish_name_path_or_url_indirection_env_does_not_warn(key, val):
+    ctx = _mcp({"tool": {"command": "node", "args": ["x.js"], "env": {key: val}}})
+    assert check_mcp_hardening(ctx).status == "PASS", (key, val)
+
+
+def test_b248_secretish_name_path_indirection_header_does_not_warn():
+    ctx = _mcp({"tool": {
+        "url": "https://mcp.example.com/api",
+        "allowedHosts": ["mcp.example.com"],
+        "headers": {"X-Vault-Token-Path": "/etc/vault/token-file"},
+    }})
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
+def test_b248_real_repro_config_stays_pass():
+    """End-to-end regression pin for the exact config that flipped B24
+    PASS -> WARN (the confirmed B-248 false positive): three servers using the
+    Docker-secrets / k8s-projected-token / public-OAuth-endpoint conventions."""
+    ctx = _mcp({
+        "postgres": {
+            "command": "docker", "args": ["run", "--rm", "-i", "mcp/postgres:1.4.2"],
+            "env": {"PGHOST": "db.internal", "DB_PASSWORD_FILE": "/run/secrets/db_password"},
+        },
+        "github": {
+            "command": "/usr/local/bin/mcp-github",
+            "env": {"GITHUB_TOKEN_PATH": "/var/run/secrets/kubernetes.io/serviceaccount/token"},
+        },
+        "openai-tools": {
+            "command": "/usr/local/bin/mcp-oai",
+            "env": {
+                "TIKTOKEN_CACHE_DIR": "/var/cache/tiktoken",
+                "OAUTH_TOKEN_ENDPOINT": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            },
+        },
+    })
+    assert check_mcp_hardening(ctx).status == "PASS"
+
+
 # ---- (2) connection-string VALUE embeds a credential, whatever the name ----
 
 def test_b248_postgres_connection_string_env_warns():
@@ -903,6 +956,16 @@ def test_mcp_value_looks_secret_true_cases(val):
     "$DB_PASS",
     None,
     123,
+    # B-248 FP fix: path/URL-shaped values are an INDIRECTION to a secret
+    # (Docker-secrets / k8s-projected-token / systemd-credentials convention,
+    # or a plain public endpoint), never the secret material itself.
+    "/run/secrets/db_password",
+    "/var/run/secrets/kubernetes.io/serviceaccount/token",
+    "~/.password-store/db",
+    "./secrets/db.token",
+    "../secrets/db.token",
+    r"C:\secrets\db_password.txt",
+    "https://login.microsoftonline.com/common/oauth2/v2.0/token",
 ])
 def test_mcp_value_looks_secret_false_cases(val):
     assert _mcp_value_looks_secret(val) is False, val

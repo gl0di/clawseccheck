@@ -1153,12 +1153,33 @@ _MCP_SECRET_ENV_RE = re.compile(
 # secret material via _mcp_value_looks_secret() (C-135) before it counts as a hit;
 # see the env/header loops below. Reuses the same SECRET_KEY_RE substring match
 # _secret_paths (checks/_shared.py) already uses for the generic config-wide scan.
+#
+# B-248 follow-up (FALSE POSITIVE): the value-shape test originally accepted ANY
+# whitespace-free string >=8 chars with a digit or "special" char — and a POSIX/
+# Windows path or a bare URL trivially satisfies that via its own "/" or ":".
+# That misfired on the Docker-secrets / Kubernetes-projected-token / systemd-
+# credentials convention, where the env var deliberately holds a PATH to the
+# secret (DB_PASSWORD_FILE=/run/secrets/db_password, GITHUB_TOKEN_PATH=/var/run/
+# secrets/kubernetes.io/serviceaccount/token) or an unrelated public endpoint
+# (OAUTH_TOKEN_ENDPOINT=https://login.microsoftonline.com/...) — exactly the
+# operator who did NOT put the secret in the environment. A path or bare URL is
+# an INDIRECTION, never the secret material itself, so it is excluded here. A
+# URL that DOES embed a live inline credential (scheme://user:pass@host) is
+# still caught — by the separate, value-shape-only _MCP_CONN_STRING_CREDENTIAL_RE
+# check in the env loop below, which is untouched by this exclusion.
+_MCP_PATH_OR_URL_SHAPED_RE = re.compile(
+    r"^(?:/|~/|\.{1,2}/|[a-zA-Z]:[\\/]|[a-zA-Z][a-zA-Z0-9+.-]*://)"
+)
+
+
 def _mcp_value_looks_secret(val, min_len: int = 8) -> bool:
     """True when *val* is plausibly an actual secret/credential value, not a
-    boolean flag, a plain number, an empty placeholder, or a SecretRef indirection
-    (C-226). Deliberately does not require the value to already look "random" —
-    only that it is non-trivial and not an obvious non-secret — so this stays a
-    corroborating signal alongside a suspicious NAME, never a name-only guess.
+    boolean flag, a plain number, an empty placeholder, a filesystem path or bare
+    URL (an indirection to a secret, not the secret itself), or a SecretRef
+    indirection (C-226). Deliberately does not require the value to already look
+    "random" — only that it is non-trivial and not an obvious non-secret — so
+    this stays a corroborating signal alongside a suspicious NAME, never a
+    name-only guess.
     """
     if not isinstance(val, str):
         return False
@@ -1170,6 +1191,8 @@ def _mcp_value_looks_secret(val, min_len: int = 8) -> bool:
     if v.lower() in {"true", "false", "null", "none", "undefined", "unset", ""}:
         return False
     if v.isdigit():
+        return False
+    if _MCP_PATH_OR_URL_SHAPED_RE.match(v):
         return False
     has_digit = any(c.isdigit() for c in v)
     has_special = any(not c.isalnum() for c in v)

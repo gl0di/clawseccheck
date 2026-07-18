@@ -10,11 +10,15 @@
           "NODE_ENV": "production",
           "API_BASE_URL": "https://api.example.com/v1",
           "SESSION_TOKEN_TTL_SECONDS": "3600",
-          "CUSTOM_API_KEY_HEADER_NAME": "Authorization"
+          "CUSTOM_API_KEY_HEADER_NAME": "Authorization",
+          "DB_PASSWORD_FILE": "/run/secrets/db_password",
+          "GITHUB_TOKEN_PATH": "/var/run/secrets/kubernetes.io/serviceaccount/token",
+          "OAUTH_TOKEN_ENDPOINT": "https://login.microsoftonline.com/common/oauth2/v2.0/token"
         },
         "headers": {
           "Accept": "application/json",
-          "X-Request-Token-Enabled": "true"
+          "X-Request-Token-Enabled": "true",
+          "X-Vault-Token-Path": "/etc/vault/token-file"
         }
       }
     }
