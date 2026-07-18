@@ -7742,6 +7742,28 @@ _BULK_CRED_OBJECT_RE = re.compile(
 # consistent safe-direction bias (a WARN-grade false positive is tolerable; missing
 # a real exfil directive is not), the looser proximity-only design is kept -- the
 # ditransitive gap is tracked as non-blocking debt in the project's issue tracker.
+#
+# B-216 (re-verification, no code change): re-attempted the round-4 "exclude when the
+# pronoun is immediately followed by a determiner+noun" fix in isolation and reproduced
+# the SAME round-4 verdict -- REJECTED. It structurally cannot tell the legitimate
+# ditransitive shape ("them the monthly invoice") apart from an attacker's euphemism
+# ("them the encoded blob" / "the archive" / "the data dump"): both are a bare pronoun
+# followed by a determiner+noun, so any blanket structural exclusion opens the exact
+# same evasion the round-4 note already flags, no matter how the determiner set is
+# tuned. A narrower variant -- demote only when the noun after the pronoun matches a
+# curated "routine correspondence" allowlist (invoice/receipt/newsletter/reminder/...)
+# instead of any noun -- was reasoned through rather than shipped: it is an
+# FP-suppression allowlist (not a detection enumeration, so it doesn't fall foul of
+# this project's anti-enumeration doctrine on its face), but it still (a) only ever
+# covers the nouns someone thought to list, so the FP class stays open for anything
+# not on it, and (b) is exactly the class of live-regex change this codebase's own
+# process requires an independent adversarial ("try to break this") pass on before
+# shipping -- a pass this file cannot give itself. Absent that second, genuinely
+# independent review, shipping it would trade a known, bounded, WARN-grade false
+# positive for an unreviewed, unbounded false negative -- the wrong direction per this
+# file's own doctrine above. Left open as an accepted, low-priority, WARN-grade-only
+# residual; a sound fix (if one exists) needs a real content-based judgment of the
+# trailing object, not another syntactic pronoun-window tweak.
 _BULK_CRED_PRONOUN_BACKREF_RE = re.compile(r"\b(?:them|it|these|those)\b", re.I)
 _BULK_CRED_PRONOUN_OBJECT_WINDOW = 20  # chars right after the verb: "  them to ", "  it all to "
 

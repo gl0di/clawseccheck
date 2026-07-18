@@ -582,6 +582,65 @@ def test_c135_and_joined_trailing_clause_pronoun_variant_does_not_correlate():
 
 
 # ---------------------------------------------------------------------------
+# B-216: a ditransitive "send them <object> to <URL>" shape -- "them" reads as the
+# object's RECIPIENT (customers/subscribers), not a pronoun backreference to an
+# earlier bulk-credential mention -- still falls inside the round-4 proximity window
+# and correlates. Confirmed (again) during B-216 to be a genuine, but SOUND-UNFIXABLE-
+# for-now, residual: see the B-216 comment above `_BULK_CRED_PRONOUN_BACKREF_RE` for
+# why both fix directions considered (a blanket determiner+noun exclusion, and a
+# narrower safe-noun allowlist) were rejected or left unshipped. These tests PIN the
+# accepted WARN-grade behavior so a future change doesn't silently flip it to PASS
+# (which would be a real, unreviewed false negative) without deliberately revisiting
+# this decision. No separate UNKNOWN case applies here -- UNKNOWN is gated solely on
+# `ctx.installed_skills` being empty (see test_no_installed_skills_is_unknown above),
+# not on this correlation logic.
+# ---------------------------------------------------------------------------
+
+def test_b216_ditransitive_invoice_recipient_stays_warn_accepted_residual():
+    blob = (
+        "# file: SKILL.md\n"
+        "This tool manages all stored passwords securely. Later, send them the "
+        "monthly invoice to https://billing.example.com/invoices\n"
+    )
+    f = check_prose_bulk_exfil(_ctx(blob))
+    assert f.status == WARN  # accepted residual, not FAIL and not silently PASS
+
+
+def test_b216_ditransitive_reminder_email_recipient_stays_warn_accepted_residual():
+    blob = (
+        "# file: SKILL.md\n"
+        "This tool manages all stored passwords securely. Later, send them a "
+        "reminder email via https://mailer.example.com/send\n"
+    )
+    f = check_prose_bulk_exfil(_ctx(blob))
+    assert f.status == WARN
+
+
+def test_b216_ditransitive_newsletter_recipient_stays_warn_accepted_residual():
+    blob = (
+        "# file: SKILL.md\n"
+        "This tool manages all stored passwords securely. Later, send them the "
+        "weekly newsletter through https://newsletter.example.com/dispatch\n"
+    )
+    f = check_prose_bulk_exfil(_ctx(blob))
+    assert f.status == WARN
+
+
+def test_b216_no_bulk_cred_mention_ditransitive_shape_alone_stays_pass():
+    # Contrast/clean case: the SAME ditransitive "send them <object> to <URL>" shape
+    # with no earlier bulk-credential mention at all -- confirms the WARN above is
+    # driven by the (mis-)correlation with the earlier passwords sentence, not by the
+    # ditransitive shape on its own, and that ordinary correspondence-sending prose
+    # stays clean absent any credential/bulk-data signal.
+    blob = (
+        "# file: SKILL.md\n"
+        "Later in the onboarding flow, send them the monthly invoice to "
+        "https://billing.example.com/invoices\n"
+    )
+    assert check_prose_bulk_exfil(_ctx(blob)).status == PASS
+
+
+# ---------------------------------------------------------------------------
 # Integration via vet_skill()
 # ---------------------------------------------------------------------------
 
