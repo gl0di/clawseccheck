@@ -148,6 +148,7 @@ from ._egress import (
     _weak_allowlist_entries,
     check_browser_ssrf,
     check_outbound_proxy,
+    check_provider_baseurl,
     check_cachetrace_redaction,
     check_config_audit_log,
     check_config_health_integrity,
@@ -1094,6 +1095,7 @@ CHECKS = [
     check_control_plane_mutation,
     check_browser_ssrf,
     check_outbound_proxy,
+    check_provider_baseurl,  # B178 — models.providers.<id>.baseUrl cleartext http:// leak
     check_session_visibility,
     check_untrusted_context,
     check_wildcard_group_ingress,

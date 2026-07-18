@@ -353,6 +353,65 @@ def check_outbound_proxy(ctx: Context) -> Finding:
     )
 
 
+def check_provider_baseurl(ctx: Context) -> Finding:
+    """B178 — cleartext http:// baseUrl on a model provider (API-key + traffic leak).
+
+    Grounded: ModelProviderSchema.baseUrl (zod-schema.core-DviqqtPj.js) — a real,
+    optional, per-provider field B155 never reads. Dual-use: a custom https:// baseUrl
+    (self-hosted gateway) is indistinguishable from an attacker repoint and is NEVER
+    flagged — only cleartext http:// to a non-loopback host is unambiguous: the
+    provider API key (Authorization header) + full model stream leak in plaintext.
+
+    FAIL — a provider's baseUrl is http:// (not https://) to a non-loopback host.
+    PASS — every configured baseUrl (if any) is https://, or none is set (bundled
+           provider default, which is https).
+    UNKNOWN — openclaw.json could not be parsed.
+    """
+    if (f := _config_unreadable("B178", ctx)) is not None:
+        return f
+    from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
+
+    providers = dig(ctx.config, "models.providers")
+    fails: list[str] = []
+    if isinstance(providers, dict):
+        for pid, pspec in providers.items():
+            if not isinstance(pspec, dict):
+                continue
+            base_url = pspec.get("baseUrl")
+            if not isinstance(base_url, str) or not base_url.strip():
+                continue
+            try:
+                parsed = urlparse(base_url.strip())
+            except (ValueError, AttributeError):
+                continue
+            host = (parsed.hostname or "").lower()
+            if (parsed.scheme or "").lower() != "http" or not host:
+                continue
+            if host in LOOPBACK or host.startswith("127."):
+                continue
+            fails.append(
+                f"models.providers.{pid}.baseUrl uses plain http:// to a non-loopback "
+                f"host ({sanitize_url_host_only(base_url)}) — the provider API key and "
+                "the full outbound model stream travel in cleartext"
+            )
+
+    if fails:
+        return _finding(
+            "B178", FAIL, "; ".join(fails),
+            "Point models.providers.<id>.baseUrl at an https:// endpoint — a cleartext "
+            "http:// baseUrl exposes the provider API key (Authorization header) and "
+            "the entire model stream to network interception. A self-hosted/private "
+            "proxy or gateway with valid TLS (https://) is fine.",
+            evidence=fails,
+        )
+    return _finding(
+        "B178", PASS,
+        "No model provider baseUrl uses a cleartext http:// endpoint.",
+        "Keep any custom models.providers.<id>.baseUrl on https:// "
+        "(loopback http:// for a local model runtime is not flagged).",
+    )
+
+
 def check_cachetrace_redaction(ctx: Context) -> Finding:
     """B82 — cacheTrace transcripts persisted without tool-output redaction.
 

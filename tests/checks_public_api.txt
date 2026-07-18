@@ -200,6 +200,7 @@ check_plugin_permission_mode
 check_privileged_commands_exposure
 check_prompt_self_replication
 check_prose_bulk_exfil
+check_provider_baseurl
 check_proxy_header_forging
 check_pth_persistence
 check_remote_code_dependency
