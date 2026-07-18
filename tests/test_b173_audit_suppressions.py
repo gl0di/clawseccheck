@@ -44,6 +44,19 @@ def test_b173_bad_fixture_low_severity_suppression_warns():
     assert any("logging.redact_off" in e for e in r.evidence)
 
 
+def test_b173_bad_fixture_trusted_proxy_notice_suppression_warns_not_fails():
+    # B-237: suppressing gateway.trusted_proxy_auth is a knowingly-accepted disclosure of a
+    # native notice that fires unconditionally whenever trusted-proxy auth is enabled at all
+    # (audit-UjVvFwCi.js:245-254) -- its remediation is a verification checklist, not a config
+    # change a correctly-hardened operator (e.g. behind Pomerium/Caddy/nginx SSO) can act on.
+    # Escalating this to FAIL was a confirmed false positive; must stay WARN-only.
+    r = check_audit_suppressions(
+        collect(FIXTURES / "bad_b173_trusted_proxy_notice_suppression")
+    )
+    assert r.status == "WARN"
+    assert any("gateway.trusted_proxy_auth" in e for e in r.evidence)
+
+
 # ---- clean / absent configuration -> PASS (zero false positives) ----
 
 def test_b173_empty_config_passes():
@@ -145,6 +158,37 @@ def test_b173_fs_config_perms_writable_suppression_fails():
         {"checkId": "fs.config.perms_writable", "reason": "known"},
     ]}}}
     assert check_audit_suppressions(_ctx(cfg)).status == "FAIL"
+
+
+def test_b173_trusted_proxy_no_proxies_suppression_still_fails():
+    # Real defect (empty trustedProxies -> "All requests will be rejected") -- must keep
+    # escalating even though the sibling gateway.trusted_proxy_auth notice does not (B-237).
+    cfg = {"security": {"audit": {"suppressions": [
+        {"checkId": "gateway.trusted_proxy_no_proxies"},
+    ]}}}
+    assert check_audit_suppressions(_ctx(cfg)).status == "FAIL"
+
+
+def test_b173_trusted_proxy_no_user_header_suppression_still_fails():
+    cfg = {"security": {"audit": {"suppressions": [
+        {"checkId": "gateway.trusted_proxy_no_user_header"},
+    ]}}}
+    assert check_audit_suppressions(_ctx(cfg)).status == "FAIL"
+
+
+def test_b173_trusted_proxy_auth_suppression_warns_not_fails():
+    # B-237 confirmed false positive: gateway.trusted_proxy_auth is literally
+    # severity:"critical" in the native source, but it fires unconditionally whenever
+    # gateway.auth.mode === "trusted-proxy" is set at all (a verification notice, not a
+    # defect with actionable remediation) -- see the in-source comment above
+    # _NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS. A reviewed suppression of it must stay
+    # WARN-only, never escalate.
+    cfg = {"security": {"audit": {"suppressions": [
+        {"checkId": "gateway.trusted_proxy_auth", "reason": "reviewed, proxy handles SSO"},
+    ]}}}
+    r = check_audit_suppressions(_ctx(cfg))
+    assert r.status == "WARN"
+    assert any("gateway.trusted_proxy_auth" in e for e in r.evidence)
 
 
 def test_b173_elevated_allowfrom_wildcard_templated_checkid_fails():
