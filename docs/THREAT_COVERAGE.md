@@ -4,7 +4,7 @@ Honest map of what ClawSecCheck checks today, what it does **not** yet check, an
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
 all (so they can't even surface as a finding). Updated 2026-07-18 for v3.51.0.
 
-Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 143 checks
+Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 144 checks
 total; see `docs/CHECKS.md` for the full generated list, plus the
 combinational risk engine `RISK-01..RISK-19`, the install-time vetters `--vet` (B13 plus
 the content-security ring — `SKILL_CONTENT_RING`, run against an uninstalled skill; AST-,
@@ -88,6 +88,7 @@ classified at all.
 | Filesystem-write tool exposure | B55 | Broad fs-write without scoping `[CHECK: B55]` |
 | **Config-write / config-health / session-approval advisories** | B77, B78, B79 | **B77:** reads `~/.openclaw/logs/config-audit.jsonl` for unexpected writers or suspicious-diff flags (advisory, `scored=False`). **B78:** reads `config-health.json` for a non-null `lastObservedSuspiciousSignature` field (advisory). **B79:** samples recent Codex session JSONL files to detect `approval_policy=never` on every sampled turn (advisory) `[CHECK: B77, B78, B79]` |
 | **Log corpus threat-hunting (advisory)** | B164 | Content-scans the agent's OWN log/transcript corpus (trajectory sidecars, `logging.file`, `cacheTrace`, session transcripts, config-audit log, memory files, install backups) for signals against the agent (injected instructions surfacing in log content) and against its environment (exfil evidence, dangerous-capability use, compromise IOCs, tamper/anomaly, at-rest secrets). Quiet-by-default (base-rate discipline): WARN only when ≥2 signal classes co-occur in one sink, or a single class with inherent same-line/permission corroboration fires (exfil evidence is secret+exfil-host paired; secrets-at-rest also needs a world-readable sink); isolated single-class hits are suppressed to a quiet report hint, never a WARN. Also correlates across artifacts (C-221): when an installed skill's own text names a high-specificity IOC (a known drop-host or a credential/secret-shaped path) and that same IOC turns up in the agent's log corpus: a **known drop-host** match alone WARNs (genuinely low base-rate), while a **credential/secret-path** match is only a corroborator — it counts as one extra signal class, so it needs a co-occurring class to WARN (a helper skill legitimately naming and reading `~/.aws/credentials` can't sole-trigger a false alarm). Redacted token + declaring skill name + count only — raw log content never emitted. Advisory, `scored=False`, never FAILs `[CHECK: B164]` |
+| **Agent memory as an untrusted re-consumption surface (advisory)** | B180 | The "logs the agent reads back as untrusted input" leg of E-044 Phase 5 (originally reserved as B162, an external Sentry/Datadog-style observability-MCP framing that hit a real grounding-gate wall — OpenClaw exposes no config field distinguishing an untrusted-ingest log/observability MCP server from any other; B162 stays permanently skipped). Re-scoped onto a surface that IS grounded: the agent's own `<workspace>/memory/**` corpus (the same `memory` LogSink kind B7/B19 already use) is architecturally distinct from every other B164 sink — it is the one OpenClaw is grounded to RE-CONSUME as trusted context in a later session (a `memory_search`-style tool observed in trajectory `data.name`), not a write-only diagnostic trail. Content-scans memory files (same `logscan.py` six-class scanner B164 uses — zero new regex) for an injected directive (`injection_against_agent`, reusing `INJECTION_PATTERNS`). Quiet-by-default like B164: an isolated injection-marker hit with nothing else corroborating in the SAME memory file stays PASS — this is deliberately how a memory note that merely QUOTES an attack (a security note, an audit tool's own output) is kept from firing; WARN requires that hit to co-occur with >=1 other independent signal class in the same file. Complements B7 (structural: is there access control on memory writes) and B164 (broad forensic sweep across every sink kind) rather than duplicating either. Advisory, `scored=False`, never FAILs `[CHECK: B180]` |
 | Codex/device-pairing hygiene | B136, B138, B176 | B136 flags Codex CLI project `trust_level="trusted"`; B138 flags a dangling high-scope pending device pairing; B176 (B-243) inventories standing `operator.admin`/`operator.write` authority in the *approved* device store (`devices/paired.json`) — B138 only ever audited the pending *request*, nothing previously read the resulting grant. WARN-only advisory (count + age, never the token value) — matches B138's precedent that >=1 paired operator device is the expected state, never FAIL `[CHECK: B136, B138, B176]` |
 | Cron scheduler persistence surface | C048, B168 | Top-level cron entries; B168 (B-231) collects and content-scans the cron job store (`payload.message` / `trigger.script`) for injected directives, flags a `deleteAfterRun`+exec self-erasing job, and returns UNKNOWN on an absent/unreadable store `[CHECK: C048, B168]` |
 | Injection-like text in HTML image attributes | C074 | `[CHECK: C074]` |
@@ -215,10 +216,10 @@ OWASP Agentic (ASI) classes below, not stretched into a category they don't fit.
 
 | Code | Category | ClawSecCheck checks |
 |---|---|---|
-| LLM01 | Prompt Injection | A1, B2, B6, B21, B23, B26, B30, B48, B56, B58, B59, B60, B61, B64, B67, B74, B140, C074 |
+| LLM01 | Prompt Injection | A1, B2, B6, B21, B23, B26, B30, B48, B56, B58, B59, B60, B61, B64, B67, B74, B140, B180, C074 |
 | LLM02 | Sensitive Information Disclosure | B1, B9, B11, B12, B14, B19, B39, B41, B59, B61, B67, C014, C015 |
 | LLM03 | Supply Chain | B5, B13, B15, B24, B25, B33, B42, B57, B103, B135, B151, B152, B177, C4, C5, C047 |
-| LLM04 | Data and Model Poisoning | B7, B20, B22, B55 |
+| LLM04 | Data and Model Poisoning | B7, B20, B22, B55, B180 |
 | LLM05 | Improper Output Handling | B21, B47 |
 | LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B62, B63, B65, B66, B68, B69, B71, B72, B76, B79, B105, B136, B138, B150, B176, T1, T3 |
 | LLM07 | System Prompt Leakage | B9 |
@@ -245,7 +246,7 @@ finding in `--json` (`"ast": [...]`).
 | AST02 | Supply Chain Compromise | B5, B13, B15, B24, B25, B42, B57, B103, B135, B151, B152, B177, C5, C047 |
 | AST03 | Over-Privileged Skills | B3, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B68, B69, B71, B72, B75, B76, B79, B138, B150, B176 |
 | AST04 | Insecure Metadata | B6, B44, B62, T3 |
-| AST05 | Untrusted External Instructions | B6, B7, B20, B21, B23, B26, B30, B58, B59, B60, B61, B63, B64, B65, B66, B67, B74, B105, B140, C074, T1 |
+| AST05 | Untrusted External Instructions | B6, B7, B20, B21, B23, B26, B30, B58, B59, B60, B61, B63, B64, B65, B66, B67, B74, B105, B140, B180, C074, T1 |
 | AST06 | Weak Isolation | B4, B22, B38, B39, B48, B70, B73, B136, C032 |
 | AST07 | Update Drift | B25, B33, C4, C6 |
 | AST08 | Poor Scanning | B16 |
@@ -285,7 +286,7 @@ historical continuity. The numbered AST-2026 table above supersedes this for new
 | Identity & privilege abuse (multi-agent delegation chains) | B30, B45, B46, B47 |
 | Runtime supply chain (dynamic tool/plugin composition) | B5, B13, B25, B33, B42 |
 | Unexpected RCE (sandboxing failures) | B4, B48, C5 |
-| Memory & context poisoning | B7, B20; B28 is closed via attestation only, see Non-static coverage |
+| Memory & context poisoning | B7, B20, B180; B28 is closed via attestation only, see Non-static coverage |
 | Insecure inter-agent communication | B47, B2, B32 |
 | Cascading failures / blast-radius amplification | B41, B43, B45, B46, B47 |
 | Human-agent trust / decision-fatigue | B8, B18, B23 |
@@ -316,7 +317,7 @@ tagging scope — its own dedicated test is the closure mechanism here.
 | TAM-07 Symlink escape | Output/config path replaced with a symlink to a sensitive host path | B87 (symlink-escape finding, F-080) | Covered |
 | TAM-08 Prompt weaponization | Poisoned content instructs a skill to use its allowed tools for exfil | Content ring, B63 (silent-instruction) | Covered |
 | TAM-09 Downgrade/replay | Install an old signed-but-vulnerable version / replay an old manifest | `monitor` version-regression (F-079, MEDIUM) | **Partial** — static "declared version went backward" signal only; real signed-manifest replay/revocation needs a trust root, not achievable read-only/offline |
-| TAM-10 Memory backdoor | Skill writes "always trust attacker.com" into agent memory | B7 (memory poisoning) + B20 (bootstrap write protection); `multiturn.py` covers the live cross-turn leg | Covered |
+| TAM-10 Memory backdoor | Skill writes "always trust attacker.com" into agent memory | B7 (memory poisoning) + B20 (bootstrap write protection) + B180 (content-proven injected directive already sitting in memory); `multiturn.py` covers the live cross-turn leg | Covered |
 | TAM-11 Egress mutation | Dependency repoints destination from an approved API to a webhook/pastebin | B24 (MCP hardening) + `monitor` RP3 (endpoint repoint) | Covered |
 | TAM-12 Self-modifying skill | Skill writes into its own directory / changes a helper script | RISK-07 (self-modification chain) + B22 | Covered |
 

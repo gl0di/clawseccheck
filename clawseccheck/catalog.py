@@ -961,6 +961,46 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="monitoring",
     ),
+    # B180 (F-127/E-044 Phase 5): the agent's own MEMORY corpus (the `memory` LogSink
+    # kind in logdiscovery.py — `<workspace>/memory/**`, the same convention B7/B19
+    # already use) is architecturally distinct from every other sink B164 already sweeps:
+    # a trajectory sidecar or `logging.file` is a write-only diagnostic trail nobody feeds
+    # back to the agent, but memory is grounded (a `memory_search`-style tool observed in
+    # trajectory `data.name`) to be RE-CONSUMED as trusted context in a later session — the
+    # exact "logs the agent reads back are attacker-reachable text" ingress this task's
+    # spec (docs/specs/2026-07-13-log-threat-hunting-design.md §4 Phase 5) targets. The
+    # original Phase-5 framing (an external Sentry/Datadog-style observability MCP tool
+    # reading a public untrusted-ingest DSN, reserved as B162) hit a real grounding-gate
+    # wall: OpenClaw exposes no config field distinguishing an untrusted-ingest log/
+    # observability MCP server from any other (verified against the installed dist,
+    # 2026-07-16 comment on this task) — B162 stays permanently skipped. B180 re-scopes the
+    # same underlying idea onto a surface that IS grounded: memory content itself.
+    #
+    # Reuses logdiscovery.discover_log_sinks (filtered to kind="memory") + logscan.
+    # scan_log_file wholesale — zero new regex, zero new dig() path, the same vetted
+    # INJECTION_PATTERNS class-1 detector B164 already uses. Distinct verdict rule from
+    # B164 on purpose: this task's own brief warns that a log/memory line QUOTING an
+    # attack (an audit tool's own output, a security note) must not fire — so, exactly
+    # like B164's class-1 alone, an isolated injection_against_agent hit with no other
+    # co-occurring signal class in the SAME memory file stays PASS (quiet-by-default);
+    # WARN requires >=2 signal classes co-occurring, one of them injection_against_agent.
+    # Advisory (scored=False), never FAILs — the same Golden Rule #5 rationale B164
+    # documents (a content heuristic over an attacker-influenced corpus must never hard-
+    # fail the audit). Complements, not duplicates: B7 is the structural/config check (is
+    # there access-control on memory writes at all — near-universal WARN/UNKNOWN today
+    # per recon P15's confirmed absence of any memory.* config key); B164 is the broad
+    # forensic sweep across every sink kind; B180 is the targeted, re-consumption-framed
+    # verdict specifically for memory content already carrying positive evidence.
+    CheckMeta(
+        "B180",
+        "Injected directive found in agent memory (untrusted re-consumption surface)",
+        MEDIUM,
+        "advisory",
+        "Log Threat Intel / Memory Re-consumption",
+        scored=False,
+        confidence="MEDIUM",
+        surface="monitoring",
+    ),
     # B67 (C-092): per-source tool-output trust contracts.
     # Complements B21 (generic trust boundary): checks that bootstrap has
     # channel-specific DATA/instruction declarations for each active high-risk
@@ -1908,6 +1948,7 @@ AST_MAP = {
     "B44": ("AST03", "AST04"),
     "B62": ("AST04",),
     "B7": ("AST05",),
+    "B180": ("AST05",),  # content-proven sibling of B7 — an injected directive actually found in memory
     "B20": ("AST05",),
     "B21": ("AST05",),
     "B23": ("AST05", "AST03"),
@@ -2007,6 +2048,7 @@ OWASP_MAP = {
     "B5": ("LLM03",),
     "B6": ("LLM01",),
     "B7": ("LLM04",),
+    "B180": ("LLM01", "LLM04"),  # content-proven injected directive IN memory — both Prompt Injection and the B7 Data/Model Poisoning angle
     "B8": ("LLM06",),
     "B9": ("LLM07", "LLM02"),
     "B11": ("LLM02",),

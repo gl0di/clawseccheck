@@ -190,6 +190,7 @@ check_mcp_hardening
 check_mcp_server_exfil_host_in_args
 check_mcp_tool_inheritance
 check_memory_poisoning
+check_memory_reconsumption_injection
 check_monitoring
 check_multiagent_exposure
 check_node_denycommands_ineffective
