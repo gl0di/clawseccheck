@@ -155,9 +155,9 @@ class SeverityStyle:
 # design-system.md's Layer 0 glyph legend and report.py's existing severity dots.
 SEVERITY: dict[str, SeverityStyle] = {
     "CRITICAL": SeverityStyle("🔴", GRADE_ANSI["F"], GRADE_HEX["F"]),
-    "HIGH": SeverityStyle("🟠", GRADE_ANSI["F"], GRADE_HEX["F"]),
+    "HIGH": SeverityStyle("🟠", GRADE_ANSI["D"], GRADE_HEX["D"]),
     "MEDIUM": SeverityStyle("🟡", GRADE_ANSI["C"], GRADE_HEX["C"]),
-    "LOW": SeverityStyle("⚪", _DEFAULT_ANSI, _DEFAULT_HEX),
+    "LOW": SeverityStyle("⚪", GRADE_ANSI["B"], GRADE_HEX["B"]),
 }
 """Severity name -> :class:`SeverityStyle`. The severity **glyph** (Tier 1) is what
 actually reaches a chat channel; ``ansi``/``hex`` are additive, higher-reach-tier

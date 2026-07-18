@@ -23,7 +23,7 @@ from .catalog import (
     ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
 from .ansi import paint
-from .brand import BRAND_RED, GRADE_HEX, LOGO_SVG, SEVERITY, WORDMARK
+from .brand import BRAND_RED, LOGO_SVG, SEVERITY, WORDMARK, grade_ansi, grade_hex
 from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
 from .guide import suggest_actions
@@ -119,10 +119,10 @@ def _sev_token(severity: str, *, ascii_only: bool = False, color: bool = False) 
 
 # ── ANSI colour palette (opt-in; see ansi.py) ────────────────────────────────
 # Grade → colour for the header grade letter + score-bar fill now comes from
-# brand.GRADE_ANSI (see _grade_color() below) — this module used to define its own
+# brand.GRADE_ANSI, called directly at each site — this module used to define its own
 # ANSI-name dict here, but a SECOND, later `_GRADE_COLOR = {...}` (hex, for the HTML
 # badge — still present further down) silently shadowed it at the module level, so
-# `_grade_color()` always resolved the hex dict and the terminal grade letter/score-
+# the grade lookup always resolved the hex dict and the terminal grade letter/score-
 # bar fill rendered bold with no actual colour. Two distinctly-named dicts
 # (brand.GRADE_ANSI vs. brand.GRADE_HEX) makes that class of bug structurally
 # impossible instead of relying on file-order discipline.
@@ -141,10 +141,6 @@ LOW_COVERAGE_FRAC = 0.35  # below this fraction assessable -> loud caution line 
 DRIFT_UNKNOWN_FRAC = 0.85  # at/above this fraction UNKNOWN -> hedged staleness nudge (C-165)
 DRIFT_MIN_SCORED = 20  # minimum scored_total before the staleness nudge is even considered
 
-
-def _grade_color(grade: str) -> str:
-    """Map a grade label (possibly 'A+', 'B-', …) to a palette colour name."""
-    return brand.grade_ansi(grade)
 
 
 def _color_icons(icon: dict, color: bool) -> dict:
@@ -1112,7 +1108,7 @@ def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     n_hidden = sum(1 for f in findings if surfaced_despite_suppression(f))
     if n_hidden:
         value += f" *{n_hidden} suppressed"
-    color = GRADE_HEX.get(score.grade, "#9f9f9f")
+    color = grade_hex(score.grade)
     lw = 8 + len(label) * 6          # rough text widths
     vw = 8 + len(value) * 7
     w = lw + vw
@@ -1625,7 +1621,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
 
-    badge_color = GRADE_HEX.get(score.grade, "#9f9f9f")
+    badge_color = grade_hex(score.grade)
     trifecta = _trifecta_ratio(findings)
 
     label_trifecta = "Lethal Trifecta:"

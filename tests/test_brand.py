@@ -156,12 +156,14 @@ class TestSeverity:
         assert brand.SEVERITY["LOW"].glyph == "⚪"
 
     def test_severity_colours_are_derived_from_the_grade_ramp_not_hand_duplicated(self):
-        # CRITICAL/HIGH ride grade F's colours; MEDIUM rides grade C's — asserted
+        # Each severity rides one grade band: CRITICAL=F, HIGH=D, MEDIUM=C, LOW=B.
+        # These are the values report.py rendered before the brand migration, so the
+        # single-sourcing must not silently recolour anyone's existing report.
         # by equality to the SAME source dicts so the two can't silently drift.
         assert brand.SEVERITY["CRITICAL"].ansi == brand.GRADE_ANSI["F"]
         assert brand.SEVERITY["CRITICAL"].hex == brand.GRADE_HEX["F"]
-        assert brand.SEVERITY["HIGH"].ansi == brand.GRADE_ANSI["F"]
-        assert brand.SEVERITY["HIGH"].hex == brand.GRADE_HEX["F"]
+        assert brand.SEVERITY["HIGH"].ansi == brand.GRADE_ANSI["D"]
+        assert brand.SEVERITY["HIGH"].hex == brand.GRADE_HEX["D"]
         assert brand.SEVERITY["MEDIUM"].ansi == brand.GRADE_ANSI["C"]
         assert brand.SEVERITY["MEDIUM"].hex == brand.GRADE_HEX["C"]
 

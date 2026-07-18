@@ -79,6 +79,10 @@ def build_incident(ctx, findings, score, *, when: str | None = None) -> dict:
         when = datetime.now().isoformat(timespec="seconds")
 
     return {
+        # C-241: a machine-readable tool identifier (matches the CLI binary/package
+        # name), deliberately lowercase and distinct from brand.WORDMARK's display
+        # name ("ClawSecCheck", used e.g. by sarif.py's driver.name) — pinned exactly
+        # by tests/test_incident.py; do not "fix" the casing to match the display name.
         "tool": "clawseccheck",
         "version": __version__,
         "purpose": (

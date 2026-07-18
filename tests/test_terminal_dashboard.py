@@ -5,7 +5,7 @@ renderers are pure string builders over in-memory findings.
 """
 from __future__ import annotations
 
-from clawseccheck.ansi import paint, should_color, strip_ansi
+from clawseccheck.ansi import _CODES, paint, should_color, strip_ansi
 from clawseccheck.brand import grade_ansi, grade_hex
 from clawseccheck.catalog import BY_ID, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
 from clawseccheck.report import _coverage_lines, _score_bar, render_report
@@ -94,6 +94,27 @@ class TestPaint:
         assert strip_ansi(colored) == "hello"
 
 
+# ── grade colour (C-241: single-sourced from brand.GRADE_ANSI) ────────────────
+
+class TestGradeColor:
+    # report.py no longer wraps the lookup in a local `_grade_color()` — call sites
+    # use brand.grade_ansi() directly, so that is what these pin. The guard itself
+    # still matters: the shadow bug was a HEX string reaching ansi.paint(), which
+    # silently drops unknown style names and renders the grade with no colour.
+    def test_returns_a_known_ansi_style_name_not_a_hex_string(self):
+        for grade in ("A", "B", "C", "D", "F"):
+            color = grade_ansi(grade)
+            assert color in _CODES, f"grade_ansi({grade!r}) = {color!r} is not a known ansi.py style"
+            assert not color.startswith("#"), f"grade_ansi({grade!r}) leaked a hex colour: {color!r}"
+
+    def test_hex_and_ansi_ramps_stay_distinct(self):
+        # The two ramps must never collapse into one dict again — that collapse is
+        # exactly what made the hex values reachable from the terminal path.
+        for grade in ("A", "B", "C", "D", "F"):
+            assert grade_ansi(grade) != grade_hex(grade)
+            assert grade_hex(grade).startswith("#")
+
+
 # ── score bar ─────────────────────────────────────────────────────────────────
 
 class TestScoreBar:
@@ -115,6 +136,20 @@ class TestScoreBar:
         colored = _score_bar(49, "F", color=True)
         assert _ESC in colored
         assert strip_ansi(colored) == plain  # colour is purely additive
+
+    def test_fill_run_itself_is_coloured_not_just_the_empty_run(self):
+        # C-241 regression: report.py used to define `_GRADE_COLOR` twice under the
+        # same name — ANSI colour names, then (later in the file) hex codes for the
+        # HTML/SVG badge — so the second definition silently shadowed the first and
+        # `_grade_color()` always returned a hex string like "#e05d44". paint() drops
+        # any style name it doesn't recognise (ansi._CODES has no hex keys), so the
+        # FILL run rendered with no colour at all. The prior `test_color_wraps_fill`
+        # above didn't catch this: `empty_s` is separately painted "grey" (always a
+        # valid ansi.py name), so `_ESC in colored` was already true from the *empty*
+        # run alone. This test isolates the fill run specifically.
+        colored = _score_bar(49, "F", color=True)
+        fill_run = colored.split("\x1b[90m", 1)[0]  # everything before the grey empty run
+        assert _ESC in fill_run, f"the filled portion of the score bar carries no colour: {colored!r}"
 
 
 # ── B-234 regression: report.py grade-colour shadow bug ───────────────────────
