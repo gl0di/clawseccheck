@@ -133,6 +133,102 @@ def test_pass_when_only_low_scope_present(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# B-243 FP fix: a device whose every token has been revoked holds no live
+# authority, even though `scopes`/`approvedScopes` still list the historical
+# grant (`openclaw devices revoke` deliberately leaves those fields alone --
+# device-pairing-Dw7KWdQ7.js:783-812). Grounded: OpenClaw's own auth path
+# treats a token with `revokedAtMs` set as dead (server-aux-handlers-
+# BfM3vWwc.js:870).
+# ---------------------------------------------------------------------------
+
+def test_pass_when_only_token_is_revoked(tmp_path):
+    """The FP this fix closes: scopes/approvedScopes still list operator.admin/
+    operator.write (the historical baseline `openclaw devices revoke` leaves
+    untouched), but the device's only token carries `revokedAtMs` -- OpenClaw's
+    own auth returns null for it, so the device holds no live authority."""
+    d = tmp_path / "devices"
+    d.mkdir()
+    (d / "paired.json").write_text(
+        '{"hash-abc": {"deviceId": "old-laptop-0001", "platform": "linux", '
+        '"role": "operator", "roles": ["operator"], '
+        '"scopes": ["operator.admin", "operator.write"], '
+        '"approvedScopes": ["operator.admin", "operator.write"], '
+        '"tokens": {"operator": {"role": "operator", '
+        '"scopes": ["operator.admin", "operator.write"], '
+        '"createdAtMs": 1700000000000, "revokedAtMs": 1784000000000}}, '
+        '"createdAtMs": 1700000000000, "lastSeenAtMs": 1700000002000}}',
+        encoding="utf-8",
+    )
+    f = check_paired_device_operator_authority(_ctx(tmp_path))
+    assert f.status == PASS
+
+
+def test_warn_when_token_is_live_not_revoked(tmp_path):
+    """Direction (b): an un-revoked (live) operator token must still WARN --
+    the revoked-token skip must never swallow a genuine live grant."""
+    d = tmp_path / "devices"
+    d.mkdir()
+    (d / "paired.json").write_text(
+        '{"hash-xyz": {"deviceId": "unknown-android-1", "platform": "android", '
+        '"approvedScopes": ["operator.admin"], '
+        '"tokens": {"operator": {"role": "operator", '
+        '"scopes": ["operator.admin"], "createdAtMs": 1784000000000}}, '
+        '"lastSeenAtMs": 1784000002000}}',
+        encoding="utf-8",
+    )
+    f = check_paired_device_operator_authority(_ctx(tmp_path))
+    assert f.status == WARN
+    assert any("unknown-android-1" in e for e in f.evidence)
+
+
+def test_warn_when_only_some_tokens_revoked(tmp_path):
+    """A device holding one revoked role token and one live role token must
+    still WARN -- only an all-revoked `tokens` dict is treated as dead."""
+    d = tmp_path / "devices"
+    d.mkdir()
+    (d / "paired.json").write_text(
+        '{"hash-mix": {"deviceId": "mixed-device-1", "platform": "linux", '
+        '"roles": ["operator", "viewer"], '
+        '"approvedScopes": ["operator.admin", "operator.write"], '
+        '"tokens": {'
+        '"viewer": {"role": "viewer", "scopes": ["operator.read"], '
+        '"createdAtMs": 1700000000000, "revokedAtMs": 1784000000000}, '
+        '"operator": {"role": "operator", '
+        '"scopes": ["operator.admin", "operator.write"], '
+        '"createdAtMs": 1784000000000}}, '
+        '"lastSeenAtMs": 1784000002000}}',
+        encoding="utf-8",
+    )
+    f = check_paired_device_operator_authority(_ctx(tmp_path))
+    assert f.status == WARN
+
+
+def test_warn_when_tokens_field_absent():
+    """No `tokens` field at all (as in the bad fixture) -- unchanged prior
+    behavior: still WARN, since we have no revocation evidence either way."""
+    f = check_paired_device_operator_authority(
+        _ctx(FIXTURES / "bad_b176_paired_operator_admin")
+    )
+    assert f.status == WARN
+
+
+def test_warn_when_tokens_dict_is_empty(tmp_path):
+    """An empty `tokens` dict is not evidence of revocation -- `all()` over
+    an empty iterable is vacuously True, so this pins that we guard against
+    treating "no tokens recorded" as "all tokens revoked"."""
+    d = tmp_path / "devices"
+    d.mkdir()
+    (d / "paired.json").write_text(
+        '{"d1": {"deviceId": "device-1", "platform": "linux", '
+        '"approvedScopes": ["operator.admin"], "tokens": {}, '
+        '"lastSeenAtMs": 1784000002000}}',
+        encoding="utf-8",
+    )
+    f = check_paired_device_operator_authority(_ctx(tmp_path))
+    assert f.status == WARN
+
+
+# ---------------------------------------------------------------------------
 # C-135: never FAIL, whatever the shape
 # ---------------------------------------------------------------------------
 

@@ -2199,14 +2199,31 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
 # never FAIL, exactly matching B138's precedent (a pending high-scope request is also
 # common/expected and still only WARNs). Verified against the real ~/.openclaw/devices/
 # paired.json (2 devices, both operator-scope, both <2 days old) -- WARN, never FAIL.
+#
+# B-243 FP fix: `openclaw devices revoke --device <id> --role <role>` (device-pairing-
+# Dw7KWdQ7.js:783-812) writes ONLY `tokens[role].revokedAtMs` -- it deliberately leaves
+# the device entry's `scopes`/`approvedScopes` untouched (they remain the historical
+# approval baseline `resolveApprovedDeviceScopeBaseline` still reads for re-pairing, same
+# file line 246). OpenClaw's own auth path treats a revoked token as dead
+# (server-aux-handlers-BfM3vWwc.js:870: `if (!operatorToken || operatorToken.revokedAtMs)
+# return null`; same guard in device-pairing-Dw7KWdQ7.js:615 verifyDeviceToken). So a
+# device whose `tokens` dict is present and every entry in it carries `revokedAtMs` holds
+# NO live authority, whatever `scopes`/`approvedScopes` still say -- it is skipped below.
+# When `tokens` is absent, empty, or has any live (non-revoked) entry, behavior is
+# unchanged: still WARN. This only ever reads the `revokedAtMs` timestamp off `tokens` --
+# never a token/publicKey value -- so the never-echo-token-material contract still holds.
 def check_paired_device_operator_authority(ctx: Context) -> Finding:
     """B176 (B-243) -- standing operator authority in paired device store
     (devices/paired.json).
 
     PASS    -- devices/paired.json is absent (nothing paired yet), OR present with no
-              device holding a high-privilege scope (operator.admin / operator.write).
-    WARN    -- one or more paired devices hold operator.admin/operator.write authority
-              -- an inventory advisory (count + age), never proof of compromise.
+              device holding a *live* high-privilege scope (operator.admin /
+              operator.write) -- a device whose every token has been revoked
+              (`tokens[role].revokedAtMs` set for all roles) does not count, even if
+              `scopes`/`approvedScopes` still list the historical grant.
+    WARN    -- one or more paired devices hold standing operator.admin/operator.write
+              authority via a live (non-revoked) token -- an inventory advisory (count +
+              age), never proof of compromise.
     UNKNOWN -- devices/paired.json exists but is unreadable or not valid JSON.
     """
     import json as _json
@@ -2273,6 +2290,18 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
                 scopes.update(s for s in values if isinstance(s, str))
         granted = sorted(s for s in scopes if s in _HIGH_SCOPE_NAMES)
         if not granted:
+            continue
+
+        tokens = entry.get("tokens")
+        if (
+            isinstance(tokens, dict)
+            and tokens
+            and all(
+                isinstance(t, dict) and t.get("revokedAtMs") for t in tokens.values()
+            )
+        ):
+            # Every token this device holds has been revoked -- no live standing
+            # authority remains (see the B-243 grounding note above). Skip it.
             continue
 
         device_id = entry.get("deviceId") or key
