@@ -464,6 +464,8 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         "files_scanned": meta["files_scanned"],
         "unknown_version": meta["unknown_version"],
         "truncated": meta["truncated"],
+        "files_total": meta.get("files_total", 0),
+        "files_capped": meta.get("files_capped", False),
         "event_count": len(events),
         "thread_count": 0,
         "findings": [],
@@ -506,6 +508,16 @@ def render_behavioral_analysis(ctx, *, explicit_path: str | None = None, ascii_o
         lines.append(f"  {q} A trajectory file exceeded the per-file scan cap — the "
                      "unscanned remainder was never analyzed. Results are INCOMPLETE "
                      "(treat as UNKNOWN, not authoritative).")
+    if r["files_capped"]:
+        # B-245: the per-BYTE cap above (C-180) was already disclosed; the per-FILE
+        # cap silently dropped the oldest sessions with no note at all. Mirror the
+        # same "INCOMPLETE, not authoritative" caveat so a clean T1/T2/T3 verdict
+        # never reads as "your whole history is clean" when it wasn't all examined.
+        lines.append(
+            f"  {q} Scanned the {r['files_scanned']} most recent of {r['files_total']} "
+            "trajectory file(s) — the oldest session(s) were not analyzed. Results are "
+            "INCOMPLETE (treat as UNKNOWN, not authoritative)."
+        )
 
     any_warn = False
     for f in r["findings"]:

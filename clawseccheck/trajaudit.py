@@ -121,6 +121,8 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         "files_scanned": 0,
         "unknown_version": False,
         "truncated": False,
+        "files_total": 0,
+        "files_capped": False,
         "tool_calls": 0,
         "indicator_count": len(indicators),
         "verbs": set(),
@@ -130,9 +132,13 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     if explicit_path:
         p = Path(explicit_path).expanduser()
         files = [p] if p.is_file() else []
+        result["files_total"] = len(files)
     else:
         home = getattr(ctx, "home", None)
-        files = find_trajectory_files(home) if isinstance(home, Path) else []
+        stats: dict = {}
+        files = find_trajectory_files(home, stats=stats) if isinstance(home, Path) else []
+        result["files_total"] = stats.get("files_total", 0)
+        result["files_capped"] = stats.get("files_capped", False)
     if not files:
         return result
     result["present"] = True
@@ -191,6 +197,14 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
         lines.append(f"  {q} A trajectory file exceeded the per-file scan cap — the "
                      "unscanned remainder was never analyzed. Results are INCOMPLETE "
                      "(treat as UNKNOWN, not authoritative).")
+    if r["files_capped"]:
+        # B-245: mirrors the truncated-byte caveat above (C-180), but for the per-FILE
+        # cap, which previously dropped the oldest sessions with no disclosure at all.
+        lines.append(
+            f"  {q} Scanned the {r['files_scanned']} most recent of {r['files_total']} "
+            "trajectory file(s) — the oldest session(s) were not analyzed. Results are "
+            "INCOMPLETE (treat as UNKNOWN, not authoritative)."
+        )
 
     if r["hits"]:
         lines.append(f"  {warn} INCIDENT SIGNAL — an installed skill's indicator appeared in "

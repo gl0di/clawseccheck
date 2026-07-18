@@ -432,3 +432,76 @@ def test_analyze_no_truncation_on_small_file(tmp_path):
     (d / "s.trajectory.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
     r = analyze(_ctx(tmp_path))
     assert r["truncated"] is False
+
+
+# ---------------------------------------------------------------------------
+# B-245 — per-FILE cap (_MAX_FILES) disclosure: unlike the per-byte cap above
+# (C-180, disclosed via `truncated`), the per-file cap used to silently drop the
+# oldest sessions with no signal anywhere in the output. These pin the fix:
+# `analyze()`'s `files_total`/`files_capped` and the matching summary caveat.
+# ---------------------------------------------------------------------------
+
+def _write_capped_home(tmp_path, extra_files: int):
+    """Write _MAX_FILES + extra_files synthetic sessions with distinct mtimes, the
+    OLDEST one (dropped when capped) carrying a real T1 trifecta so a silent drop
+    would otherwise hide a genuine finding."""
+    import json
+    import os
+
+    from clawseccheck.trajectory import _MAX_FILES
+
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True)
+    base = 1_700_000_000
+
+    def write(i: int, events: list[tuple[str, str]]):
+        p = d / f"s{i}.trajectory.jsonl"
+        lines = []
+        for seq, (name, thread) in enumerate(events, start=1):
+            lines.append(json.dumps({
+                "traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call",
+                "ts": str(seq), "seq": seq, "sessionId": f"s{i}",
+                "data": {"name": name, "threadId": thread},
+            }))
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.utime(p, (base + i, base + i))
+
+    total = _MAX_FILES + extra_files
+    # oldest session (i=0) — a real ingress -> sensitive -> egress trifecta, only
+    # visible if this file is actually scanned.
+    write(0, [("web_fetch", "th0"), ("read_credential_file", "th0"), ("send_message", "th0")])
+    for i in range(1, total):
+        write(i, [("list_files", f"th{i}")])
+    return total
+
+
+def test_analyze_files_capped_marked_and_oldest_session_missed(tmp_path):
+    total = _write_capped_home(tmp_path, extra_files=1)
+    from clawseccheck.trajectory import _MAX_FILES
+
+    r = analyze(_ctx(tmp_path))
+    assert r["files_total"] == total
+    assert r["files_capped"] is True
+    assert r["files_scanned"] == _MAX_FILES
+    # the oldest session's trifecta (in the dropped file) is genuinely missed —
+    # confirms the disclosure is needed, not a claim this is desirable.
+    assert all(f.status != WARN for f in r["findings"])
+
+    out = render_behavioral_analysis(_ctx(tmp_path))
+    assert "INCOMPLETE" in out
+    assert f"{_MAX_FILES} most recent of {total}" in out
+    assert "oldest session" in out
+
+
+def test_analyze_not_capped_at_max_files_no_disclosure(tmp_path):
+    """Regression guard: sitting exactly AT the cap (not over it) must not read as
+    capped — that's a complete scan, not a truncated one."""
+    from clawseccheck.trajectory import _MAX_FILES
+
+    _write_capped_home(tmp_path, extra_files=0)
+    r = analyze(_ctx(tmp_path))
+    assert r["files_total"] == _MAX_FILES
+    assert r["files_capped"] is False
+
+    out = render_behavioral_analysis(_ctx(tmp_path))
+    assert "most recent" not in out
