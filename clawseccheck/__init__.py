@@ -23,7 +23,7 @@ from .native import run_native_audit
 from .prescan import read_last_mode, record_mode
 from .report import (
     render_card, render_dashboard, render_dashboard_findings, render_events, render_json,
-    render_monitor, render_report, render_svg, render_vet_json,
+    render_monitor, render_report, render_subject_inventory, render_svg, render_vet_json,
 )
 from .risk import risk_paths, render_risk_paths
 from .scoring import ScoreResult, compute
@@ -73,6 +73,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
 __all__ = [
     "audit", "brand", "collect", "run_all", "compute", "ScoreResult", "run_native_audit",
     "render_report", "render_dashboard", "render_dashboard_findings", "render_card", "render_json", "render_monitor",
+    "render_subject_inventory",
     "render_svg", "render_vet_json", "vet_skill", "vet_mcp", "vet_plugin", "vet_source", "detect_vet_type",
     "make_canary", "evaluate", "render_canary",
     "snapshot", "diff", "load_state", "save_state", "__version__", "__released__",

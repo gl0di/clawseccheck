@@ -78,10 +78,13 @@ _EXEMPT = {
                           "aggregator pattern itself. A finer split is a later cycle.",
     "skillast.py": "2,139 lines — the python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target).",
-    "report.py": "1,720 lines — the output renderers; its own split is deferred to a "
-                 "later cycle (I-022 secondary target).",
-    "catalog.py": "1,585 lines — the CheckMeta CATALOG (one entry per check) + BY_ID; "
-                  "reference data / a manifest, not branching logic.",
+    "report.py": "~2,260 lines — the output renderers; grew further with F-131's "
+                 "Inventory-by-subject block (its own additive presentation layer, not "
+                 "branching check logic). Its own split is deferred to a later cycle "
+                 "(I-022 secondary target).",
+    "catalog.py": "~2,290 lines — the CheckMeta CATALOG (one entry per check) + BY_ID + "
+                  "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
+                  "manifest, not branching logic.",
     "collector.py": "~1,240 lines — the read-only collection layer (config / bootstrap / skill "
                     "collection + the Context dataclass + byte-format classify_bytes); a "
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "

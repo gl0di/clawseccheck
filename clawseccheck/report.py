@@ -20,6 +20,7 @@ from . import brand
 from .catalog import (
     BY_ID,
     FAMILY_LABEL, FAMILY_OF, FAMILY_ORDER,
+    SUBJECT_LABEL, SUBJECT_OF, SUBJECT_ORDER,
     ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
 from .ansi import paint
@@ -599,6 +600,18 @@ def _family_of(f) -> str | None:
     return FAMILY_OF.get(meta.surface)
 
 
+def _subject_of(f) -> str | None:
+    """Map a finding to one of the 5 Inventory-by-subject buckets (F-131 §4.2) via its
+    catalog surface. Unlike `_family_of`, A1 needs no special case: its surface is
+    "trifecta", already present in SUBJECT_OF (routed to "agents" — an agent-behavior
+    signal). Findings with an id outside CATALOG return None (dropped from every bucket,
+    same "nothing silently counted" stance as _family_of's "Other" fallback)."""
+    meta = BY_ID.get(f.id)
+    if meta is None:
+        return None
+    return SUBJECT_OF.get(meta.surface)
+
+
 def _render_finding_compact(lines, icon, f):
     """One-line roster entry for PASS/UNKNOWN — full detail would bury the FAILs/WARNs."""
     lines.append(f"  {icon[f.status]} [{f.severity}] {_sanitize(f.title)}")
@@ -638,6 +651,333 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
             f"secrets={br['secret_paths']}"
         )
     lines.append("")
+
+
+# ── Inventory by subject (F-131 Phase 1) ────────────────────────────────────────────
+# Owner-facing regrouping of the SAME findings by the entities an owner actually owns
+# (System / Agents / Skills / MCP / Channels) instead of the 7 analyst-facing families
+# rendered below. Purely additive + scoring-neutral (design doc §4.7): never reads
+# anything the main audit didn't already collect, never emits a new FAIL, never touches
+# score/grade/`scored` findings. Skills and MCP get a per-instance verdict by reusing the
+# shipped vet_skill/vet_mcp scoring paths (no second engine); System/Agents/Channels stay
+# bucket-level in Phase 1 (no `subject` field on Finding yet — that is Phase 2, design §6).
+#
+# Design-vs-implementation note: the design doc's §4.6 JSON sketch shows "channels" as a
+# list of PER-CHANNEL {name, status, findings} entries, but §4.4 is explicit that Channels
+# (like System/Agents) stays BUCKET-level in Phase 1 -- no Finding carries a per-channel
+# attribution today, and inventing one via string-matching evidence text would be exactly
+# the kind of second, fragile engine the design and CLAUDE.md §2 both warn against. This
+# implementation follows §4.4 (the more specific, algorithmic rule): "channels" is one
+# bucket dict carrying the channel-name roster + the rolled-up worst status + the
+# channels-surface finding ids, mirroring "system"'s shape. Precise per-channel routing is
+# exactly what Phase 2's `subject` field is for.
+
+# Skill verdict words reuse the SAME vet-verdict vocabulary `--vet` already ships
+# (module-level `_VET_VERDICT`, defined further down next to render_vet_json/
+# render_advise) -- referenced lazily inside the functions below (not at class/module
+# scope) purely because of file position; it is the exact same table, not a copy, so a
+# skill flagged here reads identically to running `--vet <skill>` directly.
+
+
+def _worst_of_statuses(statuses) -> str:
+    """Rolled-up worst status across a plain iterable of status strings; PASS (all-clear)
+    when empty or nothing recognized. FAIL < WARN < UNKNOWN < PASS per _STATUS_ORDER."""
+    ranked = [s for s in statuses if s in _STATUS_ORDER]
+    if not ranked:
+        return PASS
+    return min(ranked, key=lambda s: _STATUS_ORDER.get(s, 9))
+
+
+def _worst_status(members) -> str:
+    """Rolled-up worst status across a set of findings; PASS (all-clear) when empty."""
+    return _worst_of_statuses(f.status for f in members)
+
+
+def _skill_inventory(ctx) -> list[dict]:
+    """Per-skill verdict for the Inventory block (design §4.4): run the SAME scoring
+    path `vet_skill()` uses (check_installed_skills + the shared content-security ring)
+    against each already-collected skill, WITHOUT re-reading from disk -- reuses
+    ctx.installed_skills/_py/_shell/_js exactly as the main audit already populated them.
+
+    Bound by scanbudget (C-159), mirroring how `run_all` itself is budgeted: a per-skill
+    hard wall-clock cap (POSIX) plus a cooperative whole-loop cap. Once either is
+    exhausted, remaining skills report UNKNOWN with an explicit reason -- never a false
+    "clean" (design §4.4 / §5.5)."""
+    from .checks import _run_content_ring, _VET_MERGE_RANK, check_installed_skills  # noqa: PLC0415
+    from .collector import Context  # noqa: PLC0415
+    from .scanbudget import (  # noqa: PLC0415
+        DEFAULT_CHECK_BUDGET_S, ScanBudgetExceeded, audit_budget_exceeded, audit_deadline,
+        check_deadline,
+    )
+
+    skills = getattr(ctx, "installed_skills", None) or {}
+    if not skills:
+        return []
+    home = getattr(ctx, "home", None)
+    py_map = getattr(ctx, "installed_skill_py", None) or {}
+    sh_map = getattr(ctx, "installed_skill_shell", None) or {}
+    js_map = getattr(ctx, "installed_skill_js", None) or {}
+    out: list[dict] = []
+    # One check-sized cooperative budget for the WHOLE per-skill loop (mirrors run_all
+    # treating this entire block as one "virtual check" against the audit's time budget).
+    deadline = audit_deadline(DEFAULT_CHECK_BUDGET_S)
+    for name, blob in skills.items():
+        if audit_budget_exceeded(deadline):
+            out.append({
+                "name": name, "verdict": _VET_VERDICT[UNKNOWN], "status": UNKNOWN,
+                "reasons": ["scan time budget exhausted before this skill was reached"],
+            })
+            continue
+        skill_ctx = Context(home=home)
+        skill_ctx.installed_skills = {name: blob}
+        skill_ctx.installed_skill_py = {name: py_map.get(name, [])}
+        skill_ctx.installed_skill_shell = {name: sh_map.get(name, [])}
+        skill_ctx.installed_skill_js = {name: js_map.get(name, [])}
+        try:
+            with check_deadline(DEFAULT_CHECK_BUDGET_S):
+                base = check_installed_skills(skill_ctx)
+                ring = _run_content_ring(skill_ctx)
+        except ScanBudgetExceeded:
+            out.append({
+                "name": name, "verdict": _VET_VERDICT[UNKNOWN], "status": UNKNOWN,
+                "reasons": ["per-skill scan budget exhausted"],
+            })
+            continue
+        except Exception:  # noqa: BLE001 — a presentation-only block must never break the audit
+            out.append({
+                "name": name, "verdict": _VET_VERDICT[UNKNOWN], "status": UNKNOWN,
+                "reasons": ["could not be assessed"],
+            })
+            continue
+        pool = [base, *ring]
+        primary = max(pool, key=lambda fx: _VET_MERGE_RANK.get(fx.status, 0))
+        reasons: list[str] = []
+        for fx in pool:
+            d = _sanitize(fx.detail) if fx.detail else ""
+            if d and d not in reasons:
+                reasons.append(d)
+        out.append({
+            "name": name,
+            "verdict": _VET_VERDICT.get(primary.status, str(primary.status)),
+            "status": primary.status if primary.status in (FAIL, WARN, PASS, UNKNOWN) else UNKNOWN,
+            "reasons": reasons[:3],
+        })
+    return out
+
+
+def _mcp_inventory(ctx) -> list[dict]:
+    """Per-server mini-verdict for the Inventory block (design §4.4): reuse `vet_mcp`'s
+    OWN axis logic (`_vet_mcp_server`) directly against the already-parsed roster from
+    ctx.config, instead of vet_mcp()'s file-target path (which would re-read config from
+    disk). Universal roster shape (§2): `_mcp_servers` already folds mcp.servers (nested)
+    and legacy mcpServers/mcp_servers/tools.mcp/plugins.mcp into one dict."""
+    from .checks import _mcp_servers, _vet_mcp_server  # noqa: PLC0415
+
+    cfg = getattr(ctx, "config", None) or {}
+    servers = _mcp_servers(cfg)
+    out: list[dict] = []
+    for name, spec in servers.items():
+        try:
+            dangerous, suspicious = _vet_mcp_server(name, spec if isinstance(spec, dict) else {})
+        except Exception:  # noqa: BLE001 — presentation-only block must never break the audit
+            out.append({"name": name, "verdict": UNKNOWN, "reasons": ["could not be assessed"]})
+            continue
+        if dangerous:
+            status, raw_reasons = FAIL, dangerous
+        elif suspicious:
+            status, raw_reasons = WARN, suspicious
+        else:
+            status, raw_reasons = PASS, []
+        prefix = f"{name}: "
+        reasons = [
+            _sanitize(r[len(prefix):] if r.startswith(prefix) else r) for r in raw_reasons[:3]
+        ]
+        out.append({
+            "name": name,
+            "verdict": "ok" if status == PASS else status,
+            "reasons": reasons,
+        })
+    return out
+
+
+def _agents_roster(ctx) -> tuple[list[str], bool]:
+    """Agent roster + whether it is attested (design §4.3): prefer the agent's own
+    self-report (`attest.attested_agents`, stronger per-agent detail) over the static
+    `agents.list` config roster; fall back to a single-default-agent roster when neither
+    is present -- never an empty roster (System is the only true singleton subject)."""
+    from .attest import attested_agents  # noqa: PLC0415
+    from .collector import dig  # noqa: PLC0415
+
+    att = attested_agents(getattr(ctx, "attestation", None) or {})
+    if att:
+        return [a["name"] for a in att], True
+    agents_list = dig(getattr(ctx, "config", None) or {}, "agents.list")
+    if isinstance(agents_list, list) and agents_list:
+        names: list[str] = []
+        for i, a in enumerate(agents_list):
+            name = a.get("name") if isinstance(a, dict) else None
+            if isinstance(name, str) and name.strip():
+                names.append(name.strip())
+            else:
+                names.append(f"agent[{i}]")
+        return names, False
+    return ["(default)"], False
+
+
+def _channels_roster(ctx) -> list[str]:
+    """Channel roster (design §4.3): provider keys of `_channels(ctx.config)`, dropping
+    the `defaults` pseudo-provider (not a real channel instance)."""
+    from .checks import _channels  # noqa: PLC0415
+
+    cfg = getattr(ctx, "config", None) or {}
+    return [k for k in _channels(cfg) if k != "defaults"]
+
+
+def _empty_inventory() -> dict:
+    """A fresh, all-clear inventory shape — every nested list/dict is newly allocated
+    per call (no shared mutable state across callers) — for when `ctx` is unavailable."""
+    return {
+        "system": {"status": PASS, "findings": []},
+        "agents": {"status": PASS, "findings": [], "roster": [], "attested": False},
+        "skills": [],
+        "mcp": [],
+        "channels": {"status": PASS, "findings": [], "roster": []},
+    }
+
+
+def build_inventory(findings: list[Finding], ctx) -> dict:
+    """Build the additive `"inventory"` JSON payload (design §4.6). Presentation-only:
+    reads only what the main audit already collected on `ctx`, and re-groups the SAME
+    `findings` list the family view (above) renders — never alters score/grade, never
+    emits a new Finding. Every SURFACES slug routes to exactly one of the 5 subjects
+    (SUBJECT_OF coherence, mirrored by tests/test_subject_inventory.py)."""
+    if ctx is None:
+        return _empty_inventory()
+    unsuppressed = [f for f in findings if not getattr(f, "suppressed", False)]
+    by_subject: dict[str, list[Finding]] = {s: [] for s in SUBJECT_ORDER}
+    for f in unsuppressed:
+        subj = _subject_of(f)
+        if subj in by_subject:
+            by_subject[subj].append(f)
+
+    def _bucket(subject: str) -> dict:
+        members = by_subject.get(subject, [])
+        issues = [f for f in members if f.status in (FAIL, WARN)]
+        return {"status": _worst_status(members), "findings": [f.id for f in issues]}
+
+    system = _bucket("system")
+
+    agents_roster, attested = _agents_roster(ctx)
+    agents = _bucket("agents")
+    agents["roster"] = agents_roster
+    agents["attested"] = attested
+
+    channels = _bucket("channels")
+    channels["roster"] = _channels_roster(ctx)
+
+    return {
+        "system": system,
+        "agents": agents,
+        "skills": _skill_inventory(ctx),
+        "mcp": _mcp_inventory(ctx),
+        "channels": channels,
+    }
+
+
+def _inventory_bucket_lines(label: str, bucket: dict, by_id: dict, *, ascii_only: bool) -> list[str]:
+    icon = _ICON_ASCII if ascii_only else _ICON
+    status = bucket.get("status", PASS)
+    fids = bucket.get("findings") or []
+    marker = icon.get(status, icon.get(UNKNOWN, "?"))
+    count_text = f"{len(fids)} issue(s)" if fids else "clear"
+    out = [f" {label} — {marker} {count_text}"]
+    for fid in fids:
+        f = by_id.get(fid)
+        if f is None:
+            continue
+        out.append(f"   {icon.get(f.status, '?')} {f.id}  {_sanitize(f.title)}")
+    return out
+
+
+def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool = False,
+                              color: bool = False) -> str:
+    """Owner-facing "Inventory by subject" block (F-131 Phase 1) -- System / Agents /
+    Skills / MCP / Channels, each with a rolled-up status; Skills and MCP additionally
+    get a per-instance verdict (design §4.4/§4.5). Purely additive/presentation: `--ascii`
+    degrades cleanly (no unicode/color), and this returns "" when `ctx` is unavailable —
+    same "skip, don't guess" precedent `render_report` already uses for the capability-
+    graph / credential-surface sections below."""
+    if ctx is None:
+        return ""
+    inv = build_inventory(findings, ctx)
+    by_id = {f.id: f for f in findings}
+    icon = _ICON_ASCII if ascii_only else _ICON
+    rule_char = "=" if ascii_only else "═"
+    lines: list[str] = ["== INVENTORY BY SUBJECT " + rule_char * 44]
+
+    lines.extend(_inventory_bucket_lines(SUBJECT_LABEL["system"], inv["system"], by_id,
+                                          ascii_only=ascii_only))
+
+    ag = inv["agents"]
+    roster = ag.get("roster") or []
+    n = len(roster)
+    ag_label = f"{SUBJECT_LABEL['agents']} ({n} agent{'s' if n != 1 else ''}" + (
+        ")" if ag.get("attested") else " - roster not attested)"
+    )
+    lines.extend(_inventory_bucket_lines(ag_label, ag, by_id, ascii_only=ascii_only))
+    if not ag.get("attested"):
+        lines.append("   note  attest (--attest) for per-agent separation (B45/B47)")
+
+    skills = inv["skills"]
+    n_skills = len(skills)
+    flagged = [s for s in skills if s.get("status") in (FAIL, WARN, UNKNOWN)]
+    flagged_names = {s["name"] for s in flagged}
+    if n_skills == 0:
+        lines.append(f" {SUBJECT_LABEL['skills']} (none installed)")
+    else:
+        sk_marker = icon.get(_worst_of_statuses(s["status"] for s in flagged), "?")
+        count_text = f"{len(flagged)} flagged" if flagged else "clear"
+        lines.append(f" {SUBJECT_LABEL['skills']} ({n_skills} installed) — {sk_marker} {count_text}")
+        # Skill/server/channel names are untrusted (directory names, config keys) --
+        # _sanitize() every one before it reaches a line, same as finding title/detail
+        # elsewhere in this file (B164: no raw ANSI/control chars may reach the terminal).
+        clean = [_sanitize(s["name"]) for s in skills if s["name"] not in flagged_names]
+        if clean:
+            lines.append(f"   {icon.get(PASS, '?')} {len(clean)} clean: " + ", ".join(clean))
+        for s in flagged:
+            reason_text = "; ".join(s.get("reasons") or []) or s["verdict"]
+            lines.append(f"   {icon.get(s['status'], '?')} {_sanitize(s['name'])}  {s['verdict']} - {reason_text}")
+
+    mcp = inv["mcp"]
+    n_mcp = len(mcp)
+    if n_mcp == 0:
+        lines.append(f" {SUBJECT_LABEL['mcp']} (none configured)")
+    else:
+        mcp_ok = [_sanitize(m["name"]) for m in mcp if m["verdict"] == "ok"]
+        mcp_bad = [m for m in mcp if m["verdict"] != "ok"]
+        mcp_marker = icon.get(_worst_of_statuses(m["verdict"] for m in mcp_bad), "?")
+        count_text = f"{len(mcp_bad)} flagged" if mcp_bad else "clear"
+        lines.append(f" {SUBJECT_LABEL['mcp']} ({n_mcp}) — {mcp_marker} {count_text}")
+        if mcp_ok:
+            lines.append(f"   {icon.get(PASS, '?')} " + " | ".join(mcp_ok))
+        for m in mcp_bad:
+            reason_text = "; ".join(m.get("reasons") or []) or m["verdict"]
+            lines.append(f"   {icon.get(m['verdict'], '?')} {_sanitize(m['name'])}  {reason_text}")
+
+    ch = inv["channels"]
+    croster = ch.get("roster") or []
+    cn = len(croster)
+    ch_label = f"{SUBJECT_LABEL['channels']} ({cn})" if cn else f"{SUBJECT_LABEL['channels']} (none configured)"
+    lines.extend(_inventory_bucket_lines(ch_label, ch, by_id, ascii_only=ascii_only))
+    if croster:
+        lines.append(f"   roster: {', '.join(_sanitize(c) for c in croster)}")
+
+    lines.append(rule_char * 68)
+    lines.append(" (details by security family below)")
+    out = "\n".join(lines).rstrip() + "\n"
+    if ascii_only:
+        return _asciify(out)
+    return out
 
 
 def render_report(findings: list[Finding], score: ScoreResult,
@@ -928,6 +1268,15 @@ def render_report(findings: list[Finding], score: ScoreResult,
     lines.append(f"Scan receipt: sha256:{compute_scan_receipt(findings)}")
 
     out = "\n".join(lines).rstrip() + "\n"
+
+    # F-131 Phase 1: "Inventory by subject" — additive, prepended ABOVE the 7-family
+    # view above (design §4.1). Purely presentational: does not touch score/grade/
+    # findings, and is "" (no-op) when ctx is unavailable (mirrors the ctx-gated
+    # capability-graph/credential-surface sections above).
+    inv_text = render_subject_inventory(findings, ctx, ascii_only=ascii_only, color=color)
+    if inv_text:
+        out = inv_text + "\n" + out
+
     if ascii_only:
         return _asciify(out)
     return out
@@ -1627,6 +1976,10 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     payload["config_found"] = bool(getattr(ctx, "config_found", False)) if ctx is not None else False
     payload["config_parse_error"] = bool(getattr(ctx, "config_parse_error", False)) if ctx is not None else False
     payload["errors"] = [_sanitize(e) for e in getattr(ctx, "errors", [])] if ctx is not None else []
+    # F-131 Phase 1: "Inventory by subject" — additive top-level key (design §4.6).
+    # Presentation-only: never alters score/grade/findings above; empty/UNKNOWN-shaped
+    # when ctx is unavailable (build_inventory's own ctx-is-None fallback).
+    payload["inventory"] = build_inventory(findings, ctx)
     payload["scan_receipt"] = f"sha256:{compute_scan_receipt(findings)}"
     return json.dumps(_sanitize_tree(payload), ensure_ascii=True, indent=2)
 
