@@ -1,0 +1,18 @@
+{
+  "f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3": {
+    "deviceId": "cli-f6e5d4c3",
+    "publicKey": "REDACTED",
+    "platform": "linux",
+    "clientId": "clawcli",
+    "clientMode": "normal",
+    "role": "viewer",
+    "roles": ["viewer"],
+    "scopes": ["operator.read"],
+    "approvedScopes": ["operator.read"],
+    "tokens": {"viewer": {"token": "REDACTED"}},
+    "createdAtMs": 1751000000000,
+    "approvedAtMs": 1751000000000,
+    "lastSeenAtMs": 1751000000000,
+    "lastSeenReason": "heartbeat"
+  }
+}

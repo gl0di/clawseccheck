@@ -1547,6 +1547,25 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="agents",
     ),
+    # B176 (B-243): standing operator authority in the paired-device store
+    # (devices/paired.json). B138 audits a *pending* pairing request; nothing
+    # previously read the *approved* store a pairing lands in once granted, which
+    # carries a live standing operator token + granted scopes (schema recon
+    # docs/research/openclaw-schema-recon.md §14.3: scopes/approvedScopes/tokens/
+    # lastSeenAtMs). >=1 paired operator-scope device is the EXPECTED state for every
+    # normal install (the user's own phone/laptop) — never FAIL; matches B138's
+    # advisory precedent exactly (a pending high-scope request is also common/expected
+    # and still only WARNs). Never reads the `tokens` field's value.
+    CheckMeta(
+        "B176",
+        "Standing operator authority in paired device store (devices/paired.json)",
+        MEDIUM,
+        "advisory",
+        "Identity / Standing Authority",
+        scored=False,
+        confidence="MEDIUM",
+        surface="agents",
+    ),
     # B135: a skill installed despite ClawHub's own verification rejecting it
     # (.clawhub/lock.json verification.ok=false / decision="fail"). Deterministic
     # config-field fact (the lock file explicitly records the registry's own
@@ -1886,6 +1905,7 @@ AST_MAP = {
     "B135": ("AST02",),  # accepted-despite-failed-verification install = supply-chain trust bypass (cf. B103/B95)
     "B136": ("AST06",),  # codex trust_level="trusted" disables approval/sandbox gating = weak isolation (cf. B4/B48/B70)
     "B138": ("AST03",),  # dangling high-scope pending device pairing = over-privileged-skill risk awaiting approval (cf. B79)
+    "B176": ("AST03",),  # standing operator.admin/write authority in paired-device store = over-privileged control-plane grant (cf. B138)
     "B140": ("AST05",),  # wildcard group ingress, no allowFrom = untrusted external instructions (cf. B26/B67)
     "B150": ("AST03",),  # systemd Restart=always persistence = durable over-privileged autonomy substrate (cf. B17)
     "B151": ("AST02",),  # codex connector shell hooks in the plugin doc-cache = supply-chain tamper (cf. B42/B94)
@@ -1997,6 +2017,7 @@ OWASP_MAP = {
     "B135": ("LLM03",),  # accepted-despite-failed-verification install = Supply Chain (cf. B103)
     "B136": ("LLM06",),  # codex trust_level="trusted" disables approval/sandbox = Excessive Agency (cf. B4/B8)
     "B138": ("LLM06",),  # dangling high-scope pending device pairing = Excessive Agency (cf. B79)
+    "B176": ("LLM06",),  # standing operator.admin/write authority in paired-device store = Excessive Agency (cf. B138)
     "B140": ("LLM01",),  # wildcard group ingress, no allowFrom = Prompt Injection surface (cf. B21/B67)
     "B150": ("LLM06", "LLM10"),  # systemd Restart=always = durable autonomy substrate (cf. B17)
     "B151": ("LLM03",),  # codex connector shell hooks in the plugin doc-cache = Supply Chain

@@ -284,6 +284,7 @@ from ._lifecycle import (
     check_known_vulns,
     check_memory_poisoning,
     check_offboarding_hygiene,
+    check_paired_device_operator_authority,
     check_pending_device_pairing_scope,
     check_self_modification,
     check_session_approval_policy,
@@ -1152,6 +1153,7 @@ CHECKS = [
     check_offboarding_hygiene,  # B104 — decommissioning/offboarding hygiene (F-089)
     check_codex_project_trust,  # B136 — Codex CLI project trust_level="trusted"
     check_pending_device_pairing_scope,  # B138 — dangling high-scope pending device pairing
+    check_paired_device_operator_authority,  # B176 — standing operator authority in devices/paired.json (B-243)
     check_systemd_persistence,  # B150 — systemd user-unit Restart=always persistence
     check_codex_plugin_hooks,  # B151 — codex connector shell hooks in the plugin doc-cache
     check_orphaned_plugin_caches,  # B152 — on-disk plugin cache not in plugins.entries

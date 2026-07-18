@@ -1,0 +1,24 @@
+{
+  "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6": {
+    "deviceId": "webchat-a1b2c3d4",
+    "publicKey": "REDACTED",
+    "platform": "web",
+    "clientId": "clawwebchat",
+    "clientMode": "normal",
+    "role": "operator",
+    "roles": ["operator"],
+    "scopes": ["operator.read"],
+    "approvedScopes": [
+      "operator.admin",
+      "operator.read",
+      "operator.write",
+      "operator.approvals",
+      "operator.pairing"
+    ],
+    "tokens": {"operator": {"token": "REDACTED"}},
+    "createdAtMs": 1751000000000,
+    "approvedAtMs": 1751000000000,
+    "lastSeenAtMs": 1751000000000,
+    "lastSeenReason": "heartbeat"
+  }
+}
