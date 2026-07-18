@@ -275,9 +275,16 @@ def walk_dir_safely(
             if keep_file is not None and not keep_file(p):
                 continue
 
-            out.append(p)
+            # B-244 round 2: only report a genuine truncation. The cap must not fire
+            # merely because `out` reached `max_files` — that also happens when the
+            # walk had EXACTLY `max_files` candidates and nothing beyond them, which
+            # is a complete scan, not a capped one. So the budget check runs BEFORE
+            # appending: `p` itself is the first candidate the walk found *beyond*
+            # the already-full budget, i.e. positive proof more of the tree exists,
+            # and it is reported as capped without being counted into `out`.
             if max_files is not None and len(out) >= max_files:
                 if capped is not None:
                     capped.append(True)
                 return out
+            out.append(p)
     return out

@@ -310,6 +310,51 @@ def _c015_is_codex_plugin_doc_cache(parts: tuple) -> bool:
     return any(parts[i : i + n] == marker for i in range(len(parts) - n + 1))
 
 
+# B-244 round 2: a false WARN on the user's REAL ~/.openclaw. ``agent/plugins/<id>/
+# catalog.json`` is OpenClaw's own machine-generated plugin model-catalog cache — not
+# user-authored — grounded in the dist (not the recon):
+#   dist/plugin-model-catalog-*.js  isPluginModelCatalogRelativePath(): the canonical
+#     path shape is exactly ``plugins/<pluginId>/catalog.json`` relative to the agent
+#     dir; isGeneratedPluginModelCatalog(): the written object's top-level
+#     ``generatedBy`` is the literal string ``"openclaw-plugin-model-catalog-v1"``.
+#   dist/models-config-*.js  buildPluginCatalogWrites(): writes exactly
+#     ``{generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY, providers}`` to that path —
+#     no other code path writes this file.
+#   dist/provider-catalog-*.js: the bundled nvidia provider's catalog entry ships
+#     ``apiKey: "NVIDIA_API_KEY"`` verbatim — the env-var NAME, not a secret value —
+#     confirmed at runtime by dist/extensions/nvidia/index.js reading
+#     ``ctx.env.NVIDIA_API_KEY``.
+# So a plugin-catalog ``apiKey`` field commonly holds a bare env-var name, which is
+# not a C-226 SecretRef indirection in the narrow ``$NAME``/``${NAME}``/
+# ``secretref-env:`` sense _is_secret_reference recognises, so C015's generic
+# keyword pattern false-positived on it — same B-124 class as the codex plugin
+# doc-cache exclusion above, at a different path.
+#
+# Deliberately requires BOTH the canonical path shape AND the ``generatedBy``
+# content marker (mirroring OpenClaw's own two-part discriminator) rather than
+# widening ``_is_secret_reference`` itself: that helper is shared by every other
+# secret-detecting check, and a generic "bare SCREAMING_SNAKE_CASE value is a
+# reference" rule would blind-spot a real hardcoded password typed in that shape
+# anywhere else it is consulted. A file that merely sits at this path but lacks the
+# marker (never written by OpenClaw) is still scanned normally.
+def _c015_is_generated_plugin_model_catalog(parts: tuple, text: str) -> bool:
+    """True if *parts* end in ``agent/plugins/<pluginId>/catalog.json`` and *text*
+    parses as JSON carrying OpenClaw's own generated-catalog marker."""
+    if len(parts) < 4 or parts[-1] != "catalog.json":
+        return False
+    if parts[-4] != "agent" or parts[-3] != "plugins":
+        return False
+    import json as _json
+
+    try:
+        parsed = _json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and parsed.get("generatedBy") == (
+        "openclaw-plugin-model-catalog-v1"
+    )
+
+
 # ---------------------------------------------------------------- Block B
 # B-244: the codex-doc-cache / skill-dir exclusions used to run AFTER walk_dir_safely
 # already spent the _C015_MAX_SCAN_FILES budget on every raw file it saw — so a large
@@ -1620,6 +1665,8 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
+            continue
+        if _c015_is_generated_plugin_model_catalog(path.parts, text):
             continue
         if _c015_has_secret(text):
             try:
