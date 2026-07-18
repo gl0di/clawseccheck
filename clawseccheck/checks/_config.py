@@ -981,6 +981,62 @@ _B171_WARN_ONLY_COMMAND = "debug"
 _B171_WARN_ONLY_LABEL = "runtime-only config overrides from chat"
 
 
+# B171 (B-235 FP fix, grounded 2026-07-18): a channel's own
+# dmPolicy/groupPolicy=='open' does NOT by itself mean every reachable sender also gets
+# the in-chat commands.* surface. dm-policy-shared-*.js resolveOpenDmAllowlistAccess's own
+# doc comment: "dmPolicy=open, where '*' means fully open and a configured allowlist still
+# restricts the accepted sender set" -- a non-wildcard channel-/account-level `allowFrom`
+# on an "open" dmPolicy blocks every other sender at ingress (reason
+# dm_policy_not_allowlisted), so nobody but the listed sender(s) ever reaches the command
+# layer at all. For groups, message ingress genuinely is unconditional once
+# groupPolicy=='open' (group-access-*.js evaluateMatchedGroupAccessForPolicy), but
+# resolveDmGroupAccessWithCommandGate still feeds the channel's own `allowFrom` AND
+# `groupAllowFrom` into resolveControlCommandGate as separate command authorizers -- a
+# configured, non-wildcard list there is real (if not exhaustively provider-verified)
+# evidence that the privileged command itself is scoped, not open to "ANY sender". Treating
+# `_open_channels()` (dmPolicy/groupPolicy=='open' alone, shared with B2's different
+# "anyone can command" question) as sufficient evidence of unauthenticated command exposure
+# false-FAILed exactly this shape. Fix: for THIS leg only, a channel counts as open only
+# when the relevant sender list is itself absent/empty or wildcard; a scoped list falls
+# through to the WARN leg below instead of asserting "ANY sender" with a FAIL/CRITICAL.
+def _b171_scoped_list(value) -> bool:
+    """True when *value* is a non-empty allow-from list that does NOT contain the "*"
+    wildcard -- i.e. it genuinely narrows the accepted sender set rather than leaving it
+    wide open."""
+    return isinstance(value, list) and len(value) > 0 and not _is_owner_wildcard_allow_from(value)
+
+
+def _b171_open_channels(cfg: dict) -> list[str]:
+    """B171's own narrower notion of "open" for the no-commands-gate FAIL leg.
+
+    Excludes a channel/account whose own dmPolicy=='open' is scoped by a non-wildcard
+    channel-level `allowFrom`, or whose groupPolicy=='open' is scoped by a non-wildcard
+    `groupAllowFrom`/`allowFrom` -- see the module comment above for the dist grounding.
+    Deliberately duplicated rather than parameterizing the shared `_open_channels()` (B2):
+    B2 asks a different question (gateway auth / "anyone can command") that is out of
+    scope for this fix.
+    """
+    out: list[str] = []
+    for name, c in _channels(cfg).items():
+        if not isinstance(c, dict) or c.get("enabled") is False:
+            continue
+        nodes = [c] + list((c.get("accounts") or {}).values())
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            dm_open = node.get("dmPolicy") == "open" and not _b171_scoped_list(
+                node.get("allowFrom")
+            )
+            group_open = node.get("groupPolicy") == "open" and not (
+                _b171_scoped_list(node.get("groupAllowFrom"))
+                or _b171_scoped_list(node.get("allowFrom"))
+            )
+            if dm_open or group_open:
+                out.append(name)
+                break
+    return out
+
+
 def _b171_wildcard_allow_from_evidence(cfg: dict) -> list[str]:
     """Wildcard-open commands.* gate entries.
 
@@ -1085,7 +1141,7 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
     owner_allow_from = dig(cfg, "commands.ownerAllowFrom")
     allow_from = dig(cfg, "commands.allowFrom")
     gate_configured = bool(owner_allow_from) or bool(allow_from)
-    open_ch = _open_channels(cfg)
+    open_ch = _b171_open_channels(cfg)
 
     if not gate_configured and open_ch:
         severity = CRITICAL if enabled_high and set(enabled_high) & _B171_CRITICAL_COMMANDS else HIGH

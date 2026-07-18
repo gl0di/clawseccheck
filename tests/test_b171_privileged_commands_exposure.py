@@ -181,6 +181,110 @@ def test_disabled_open_channel_does_not_count_as_open():
 
 
 # ---------------------------------------------------------------------------
+# B-235 FP fix: dmPolicy/groupPolicy=='open' scoped by the channel's OWN
+# non-wildcard allowFrom/groupAllowFrom is not "ANY sender" -- dm-policy-shared-*.js
+# resolveOpenDmAllowlistAccess still blocks every sender not on that list at ingress, and
+# resolveDmGroupAccessWithCommandGate feeds the same lists into the control-command
+# authorizer for groups. WARN, not FAIL/CRITICAL -- see the _b171_open_channels()
+# docstring in checks/_config.py and docs/research/openclaw-schema-recon.md §18.
+# ---------------------------------------------------------------------------
+
+def test_bash_enabled_no_gate_dmopen_scoped_allow_from_warns_not_fails():
+    cfg = {
+        "commands": {"bash": True, "config": True},
+        "channels": {
+            "telegram": {
+                "enabled": True,
+                "dmPolicy": "open",
+                "allowFrom": ["987654321"],
+                "groupPolicy": "disabled",
+            }
+        },
+    }
+    r = check_privileged_commands_exposure(_ctx(cfg))
+    assert r.status == WARN
+    assert r.status != FAIL
+
+
+def test_bash_enabled_no_gate_dmopen_scoped_account_level_allow_from_warns():
+    # Same shape, but the scoped allowFrom lives under channels.<p>.accounts.<id> rather
+    # than the channel root -- both are walked by _b171_open_channels().
+    cfg = {
+        "commands": {"bash": True},
+        "channels": {
+            "telegram": {
+                "enabled": True,
+                "accounts": {
+                    "default": {"dmPolicy": "open", "allowFrom": ["987654321"]}
+                },
+            }
+        },
+    }
+    r = check_privileged_commands_exposure(_ctx(cfg))
+    assert r.status == WARN
+
+
+def test_mcp_enabled_no_gate_groupopen_scoped_group_allow_from_warns_not_fails():
+    cfg = {
+        "commands": {"mcp": True},
+        "channels": {
+            "telegram": {
+                "enabled": True,
+                "dmPolicy": "allowlist",
+                "allowFrom": ["987654321"],
+                "groupPolicy": "open",
+                "groupAllowFrom": ["987654321"],
+            }
+        },
+    }
+    r = check_privileged_commands_exposure(_ctx(cfg))
+    assert r.status == WARN
+    assert r.status != FAIL
+
+
+def test_bash_enabled_no_gate_dmopen_wildcard_allow_from_still_fails_critical():
+    # The channel-level allowFrom carries the real "*" -- genuinely open, must still FAIL.
+    cfg = {
+        "commands": {"bash": True},
+        "channels": {
+            "telegram": {"enabled": True, "dmPolicy": "open", "allowFrom": ["*"]}
+        },
+    }
+    r = check_privileged_commands_exposure(_ctx(cfg))
+    assert r.status == FAIL
+    assert r.severity == CRITICAL
+
+
+def test_bash_enabled_no_gate_dmopen_empty_allow_from_still_fails_critical():
+    # dmPolicy=open with NO channel-level allowFrom at all -- genuinely open (matches
+    # test_bash_enabled_no_gate_open_dm_channel_fails_critical; kept as an explicit
+    # regression pin for the same shape).
+    cfg = {
+        "commands": {"bash": True},
+        "channels": {"telegram": {"enabled": True, "dmPolicy": "open", "allowFrom": []}},
+    }
+    r = check_privileged_commands_exposure(_ctx(cfg))
+    assert r.status == FAIL
+    assert r.severity == CRITICAL
+
+
+def test_mcp_enabled_no_gate_groupopen_wildcard_group_allow_from_still_fails_high():
+    cfg = {
+        "commands": {"mcp": True},
+        "channels": {
+            "telegram": {
+                "enabled": True,
+                "groupPolicy": "open",
+                "groupAllowFrom": ["*"],
+            }
+        },
+    }
+    r = check_privileged_commands_exposure(_ctx(cfg))
+    assert r.status == FAIL
+    assert r.severity == HIGH
+
+
+# ---------------------------------------------------------------------------
 # WARN: privileged command enabled + no gate, but the channel isn't open (allowlist/
 # paired/pairing/disabled still constrains who reaches the command layer)
 # ---------------------------------------------------------------------------
