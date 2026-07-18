@@ -29,24 +29,43 @@ _MAX_FILES = 60
 _MAX_BYTES_PER_FILE = 8_000_000
 
 
-def find_trajectory_files(home: Path, *, max_files: int = _MAX_FILES) -> list[Path]:
+def find_trajectory_files(
+    home: Path, *, max_files: int = _MAX_FILES, stats: dict | None = None
+) -> list[Path]:
     """Return trajectory sidecar paths under *home* (newest-first, capped at *max_files*).
 
     Read-only glob of the grounded sidecar layout
     ``agents/*/sessions/*.trajectory.jsonl`` (recon §9.1). Returns ``[]`` on any error, or
     when *home* is not a ``Path``, so callers can treat "no on-disk record" uniformly. Only
     paths are returned — no file contents are read here (§8).
+
+    If ``stats`` (a dict) is provided, it is populated with ``files_total`` (the number of
+    trajectory sidecars found before the cap was applied) and ``files_capped`` (True when
+    *max_files* caused files to be dropped, i.e. ``files_total > max_files``). This mirrors
+    ``safeio.walk_dir_safely``'s ``capped`` out-param (B-244): the per-BYTE scan cap is
+    already disclosed (C-180 ``truncated``), but the per-FILE cap silently dropped the
+    oldest sessions with no signal a caller could surface — B-245 closes that gap. The
+    default (``None``) keeps the original behaviour for existing callers.
     """
     if not isinstance(home, Path):
+        if stats is not None:
+            stats["files_total"] = 0
+            stats["files_capped"] = False
         return []
     try:
         files = list(home.glob("agents/*/sessions/*.trajectory.jsonl"))
     except OSError:
+        if stats is not None:
+            stats["files_total"] = 0
+            stats["files_capped"] = False
         return []
     try:
         files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         pass
+    if stats is not None:
+        stats["files_total"] = len(files)
+        stats["files_capped"] = len(files) > max_files
     return files[:max_files]
 
 
@@ -60,15 +79,24 @@ def read_proven_tools(
 
     ``verbs`` is the set of raw ``data.name`` values from ``tool.call`` records in files
     whose ``traceSchema``/``schemaVersion`` match the grounded format. ``meta`` reports
-    ``present`` (any trajectory file found), ``files_scanned``, and ``unknown_version``
+    ``present`` (any trajectory file found), ``files_scanned``, ``unknown_version``
     (a trajectory line carried an unrecognised schema version — caller should treat the
-    proven set as incomplete / UNKNOWN rather than authoritative).
+    proven set as incomplete / UNKNOWN rather than authoritative), ``files_total`` (the
+    number of trajectory sidecars found before the per-file cap), and ``files_capped``
+    (True when the per-file cap dropped the oldest sessions — B-245: this proven-tool set
+    is then incomplete too, same as ``unknown_version``).
 
     Only ``data.name`` is read; call/return payloads are never touched.
     """
     verbs: set[str] = set()
-    meta = {"present": False, "files_scanned": 0, "unknown_version": False}
-    files = find_trajectory_files(home, max_files=max_files)
+    meta = {
+        "present": False, "files_scanned": 0, "unknown_version": False,
+        "files_total": 0, "files_capped": False,
+    }
+    stats: dict = {}
+    files = find_trajectory_files(home, max_files=max_files, stats=stats)
+    meta["files_total"] = stats.get("files_total", 0)
+    meta["files_capped"] = stats.get("files_capped", False)
     if not files:
         return verbs, meta
     meta["present"] = True
@@ -154,16 +182,26 @@ def read_events(
     metadata. Same version gate and DoS bounds as ``read_proven_tools``.
 
     ``explicit_path`` scans a single given ``.trajectory.jsonl`` file instead of
-    globbing *home* (mirrors ``trajaudit.analyze``'s CLI PATH argument).
+    globbing *home* (mirrors ``trajaudit.analyze``'s CLI PATH argument). ``files_total``/
+    ``files_capped`` (B-245) report the per-file cap the same way ``truncated`` already
+    reports the per-byte cap (C-180); with ``explicit_path`` there is no cap to hit, so
+    ``files_capped`` stays False and ``files_total`` is just the (0 or 1) file scanned.
     """
     events: list[dict] = []
-    meta = {"present": False, "files_scanned": 0, "unknown_version": False, "truncated": False}
+    meta = {
+        "present": False, "files_scanned": 0, "unknown_version": False, "truncated": False,
+        "files_total": 0, "files_capped": False,
+    }
 
     if explicit_path:
         p = Path(explicit_path).expanduser()
         files = [p] if p.is_file() else []
+        meta["files_total"] = len(files)
     else:
-        files = find_trajectory_files(home, max_files=max_files)
+        stats: dict = {}
+        files = find_trajectory_files(home, max_files=max_files, stats=stats)
+        meta["files_total"] = stats.get("files_total", 0)
+        meta["files_capped"] = stats.get("files_capped", False)
     if not files:
         return events, meta
     meta["present"] = True

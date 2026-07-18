@@ -182,3 +182,78 @@ def test_no_truncation_on_small_file(tmp_path):
     c.installed_skills = {}
     r = analyze(c)
     assert r["truncated"] is False
+
+
+# ---------------------------------------------------------------------------
+# B-245 — per-FILE cap (_MAX_FILES) disclosure: same blind spot as
+# behavioral.py's T1/T2 — the per-byte cap is disclosed (`truncated`, C-180)
+# but the per-file cap used to silently drop the oldest sessions with no
+# signal at all. Mirrors the equivalent tests in test_behavioral.py.
+# ---------------------------------------------------------------------------
+
+def _write_many_sessions(home: Path, n: int) -> None:
+    import os
+
+    sess = home / "agents" / "main" / "sessions"
+    sess.mkdir(parents=True, exist_ok=True)
+    base = 1_700_000_000
+    for i in range(n):
+        rec = {
+            "traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call",
+            "ts": str(i), "seq": 1, "data": {"name": "bash", "arguments": {}},
+        }
+        p = sess / f"s{i}.trajectory.jsonl"
+        p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        os.utime(p, (base + i, base + i))
+
+
+def test_files_capped_marked_incomplete_over_max_files(tmp_path):
+    from clawseccheck.trajectory import _MAX_FILES
+
+    total = _MAX_FILES + 1
+    _write_many_sessions(tmp_path, total)
+    c = Context(home=tmp_path)
+    c.config = {}
+    c.bootstrap = {}
+    c.installed_skills = {}
+    r = analyze(c)
+    assert r["files_total"] == total
+    assert r["files_capped"] is True
+    assert r["files_scanned"] == _MAX_FILES
+
+    out = render_trajectory_analysis(c)
+    assert "INCOMPLETE" in out
+    assert f"{_MAX_FILES} most recent of {total}" in out
+
+
+def test_files_not_capped_at_max_files_no_disclosure(tmp_path):
+    from clawseccheck.trajectory import _MAX_FILES
+
+    _write_many_sessions(tmp_path, _MAX_FILES)
+    c = Context(home=tmp_path)
+    c.config = {}
+    c.bootstrap = {}
+    c.installed_skills = {}
+    r = analyze(c)
+    assert r["files_total"] == _MAX_FILES
+    assert r["files_capped"] is False
+
+    out = render_trajectory_analysis(c)
+    assert "most recent" not in out
+
+
+def test_explicit_path_files_total_and_not_capped(tmp_path):
+    home = tmp_path
+    sess = home / "agents" / "main" / "sessions"
+    sess.mkdir(parents=True)
+    line = json.dumps({"traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                       "type": "tool.call", "data": {"name": "bash", "arguments": {}}})
+    path = sess / "s.trajectory.jsonl"
+    path.write_text(line + "\n", encoding="utf-8")
+    c = Context(home=home)
+    c.config = {}
+    c.bootstrap = {}
+    c.installed_skills = {}
+    r = analyze(c, explicit_path=str(path))
+    assert r["files_total"] == 1
+    assert r["files_capped"] is False

@@ -9,9 +9,10 @@ Offline, stdlib only.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
-from clawseccheck.trajectory import read_events, read_proven_tools
+from clawseccheck.trajectory import find_trajectory_files, read_events, read_proven_tools
 
 
 def _write_traj(home: Path, session: str, records: list[dict]) -> None:
@@ -27,6 +28,23 @@ def _call(name: str, arguments: dict) -> dict:
         "ts": "2026-07-03T00:00:00Z", "seq": 1, "sessionId": "s",
         "data": {"name": name, "arguments": arguments, "toolCallId": "c1"},
     }
+
+
+def _write_many(home: Path, agent: str, n: int) -> list[Path]:
+    """Write *n* minimal, distinctly-timestamped trajectory sidecars — one per
+    synthetic session — so find_trajectory_files' newest-first mtime sort has a
+    deterministic order to cap against (B-245)."""
+    d = home / "agents" / agent / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    base = 1_700_000_000
+    paths = []
+    for i in range(n):
+        rec = _call(f"tool_{i}", {})
+        p = d / f"s{i}.trajectory.jsonl"
+        p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        os.utime(p, (base + i, base + i))
+        paths.append(p)
+    return paths
 
 
 def test_reader_missing_home_is_empty(tmp_path):
@@ -199,3 +217,92 @@ def test_read_events_explicit_path_missing_file_is_empty(tmp_path):
     events, meta = read_events(tmp_path, explicit_path=str(tmp_path / "nope.jsonl"))
     assert events == []
     assert meta["present"] is False
+
+
+# ---------------------------------------------------------------------------
+# B-245 — per-FILE cap (_MAX_FILES) disclosure: the per-byte cap has been
+# disclosed (`truncated`, C-180) since it was added, but the per-file cap
+# silently dropped the oldest sessions with no signal at all. find_trajectory_files'
+# `stats` out-param and read_proven_tools/read_events' `files_total`/`files_capped`
+# meta fields close that gap — mirrors safeio.walk_dir_safely's `capped` (B-244).
+# ---------------------------------------------------------------------------
+
+def test_find_trajectory_files_stats_missing_home(tmp_path):
+    stats: dict = {}
+    files = find_trajectory_files(tmp_path / "nope", stats=stats)
+    assert files == []
+    assert stats == {"files_total": 0, "files_capped": False}
+
+
+def test_find_trajectory_files_stats_not_capped_at_max(tmp_path):
+    _write_many(tmp_path, "main", 60)
+    stats: dict = {}
+    files = find_trajectory_files(tmp_path, max_files=60, stats=stats)
+    assert len(files) == 60
+    assert stats["files_total"] == 60
+    assert stats["files_capped"] is False
+
+
+def test_find_trajectory_files_stats_capped_over_max(tmp_path):
+    _write_many(tmp_path, "main", 61)
+    stats: dict = {}
+    files = find_trajectory_files(tmp_path, max_files=60, stats=stats)
+    assert len(files) == 60
+    assert stats["files_total"] == 61
+    assert stats["files_capped"] is True
+    # newest-first: the 61 mtimes are base..base+60, so the dropped file is the
+    # very oldest one (s0) — the returned set must be the 60 newest, not it.
+    assert (tmp_path / "agents" / "main" / "sessions" / "s0.trajectory.jsonl") not in files
+
+
+def test_find_trajectory_files_no_stats_arg_unaffected(tmp_path):
+    # Default (no `stats`) must keep the original return-type/behaviour for every
+    # existing caller (incident.py, logdiscovery.py, trajaudit.py, checks/_host.py).
+    _write_many(tmp_path, "main", 3)
+    files = find_trajectory_files(tmp_path)
+    assert len(files) == 3
+
+
+def test_read_proven_tools_meta_capped_over_max_files(tmp_path):
+    _write_many(tmp_path, "main", 61)
+    verbs, meta = read_proven_tools(tmp_path, max_files=60)
+    assert meta["files_total"] == 61
+    assert meta["files_capped"] is True
+    assert meta["files_scanned"] == 60
+
+
+def test_read_proven_tools_meta_not_capped_at_max_files(tmp_path):
+    _write_many(tmp_path, "main", 60)
+    verbs, meta = read_proven_tools(tmp_path, max_files=60)
+    assert meta["files_total"] == 60
+    assert meta["files_capped"] is False
+    assert meta["files_scanned"] == 60
+
+
+def test_read_proven_tools_meta_no_sidecar_is_uncapped(tmp_path):
+    verbs, meta = read_proven_tools(tmp_path / "nope")
+    assert meta["files_total"] == 0
+    assert meta["files_capped"] is False
+
+
+def test_read_events_meta_capped_over_max_files(tmp_path):
+    _write_many(tmp_path, "main", 61)
+    events, meta = read_events(tmp_path, max_files=60)
+    assert meta["files_total"] == 61
+    assert meta["files_capped"] is True
+    assert meta["files_scanned"] == 60
+
+
+def test_read_events_meta_not_capped_at_max_files(tmp_path):
+    _write_many(tmp_path, "main", 60)
+    events, meta = read_events(tmp_path, max_files=60)
+    assert meta["files_total"] == 60
+    assert meta["files_capped"] is False
+
+
+def test_read_events_explicit_path_files_total_and_not_capped(tmp_path):
+    _write_traj(tmp_path, "sess1", [_call("bash", {"command": "ls"})])
+    path = tmp_path / "agents" / "main" / "sessions" / "sess1.trajectory.jsonl"
+    events, meta = read_events(tmp_path / "unused", explicit_path=str(path))
+    assert meta["files_total"] == 1
+    assert meta["files_capped"] is False
