@@ -1429,6 +1429,157 @@ def check_memory_poisoning(ctx: Context) -> Finding:
     )
 
 
+# B180 (F-127/E-044 Phase 5): content-scan the agent's own MEMORY corpus specifically —
+# ---------------------------------------------------------------------------------------
+# see catalog.py's CheckMeta("B180", ...) comment for the full grounding/scoping story.
+# Short version: memory (`<workspace>/memory/**`, the same LogSink kind B7/B19 already
+# use) is the one log-like sink OpenClaw's own architecture is grounded to RE-CONSUME as
+# trusted context in a later session — unlike a trajectory sidecar or `logging.file`,
+# which are write-only diagnostic trails. B7 (above) is the structural/config half ("is
+# there access control on memory writes"); B180 is the content half ("has an injected
+# directive actually landed in memory already"), reusing logdiscovery + logscan wholesale
+# (zero new regex, zero new dig() path).
+_B180_PER_FILE_BUDGET_S = 3.0
+
+
+def _b180_corroborated(nonzero_classes: set) -> bool:
+    """True when a memory sink's nonzero signal classes clear the WARN bar: an actual
+    injection marker (the whole point of this check) PLUS at least one other independent
+    signal class corroborating it in the SAME file.
+
+    Mirrors B164's own quiet-by-default discipline (checks/_egress.py's
+    `_log_hunt_corroborated`) for the identical reason: this task's own brief warns that a
+    memory line QUOTING an attack (an audit tool's own output, a security note written by
+    the agent itself) must not fire — an isolated `injection_against_agent` hit alone is
+    exactly that classic false positive, so it stays quiet (PASS) until something else in
+    the same file corroborates it actually being live, attacker-influenced content rather
+    than a report/note ABOUT an attack.
+    """
+    return "injection_against_agent" in nonzero_classes and len(nonzero_classes) >= 2
+
+
+def check_memory_reconsumption_injection(ctx: Context) -> Finding:
+    """B180 — an injected directive found in the agent's own memory corpus (content scan,
+    advisory). The "logs the agent reads back as untrusted input" leg of E-044 Phase 5.
+
+    Discovers every memory-kind sink (`logdiscovery.discover_log_sinks`, filtered to
+    ``kind == "memory"`` — ``<workspace>/memory/**``, the same convention B7/B19 already
+    use) and content-scans each one (`logscan.scan_log_file` — the SAME vetted six-class
+    scanner B164 uses; no new pattern is invented here).
+
+    WARN    — at least one memory file corroborates (see ``_b180_corroborated``): an
+              `injection_against_agent` hit PLUS >=1 other independent signal class
+              co-occurring in that SAME file.
+    PASS    — memory file(s) were found and scanned but none corroborated. An isolated
+              injection marker with nothing else in the same file — the "log line quoting
+              an attack" case this check is explicitly built not to fire on — is counted
+              and reported, never WARNed on individually.
+    UNKNOWN — no memory-kind sink was found, or none were readable/non-empty.
+    Never FAIL — a content heuristic over a corpus the agent itself may have been tricked
+    into writing must never hard-fail the audit (Golden Rule #5); advisory (scored=False)
+    for exactly this reason, same as B164.
+    """
+    # Lazy import: logscan.py (a Layer-1 leaf) itself imports from the checks aggregator
+    # (`from .checks import ...`) to reuse the engine's own vetted indicator regexes —
+    # importing it at this module's top level would cycle back through
+    # `checks/__init__.py` before it finishes defining this very function. Same reason
+    # `check_log_threat_hunt` (B164, checks/_egress.py) imports it lazily too.
+    from ..logdiscovery import discover_log_sinks  # noqa: PLC0415
+    from ..logscan import scan_log_file  # noqa: PLC0415
+    from ..scanbudget import audit_deadline  # noqa: PLC0415
+
+    memory_sinks = [s for s in discover_log_sinks(ctx) if s.kind == "memory"]
+    if not memory_sinks:
+        return _finding(
+            "B180",
+            UNKNOWN,
+            "No agent memory files found (no <workspace>/memory/** content) — nothing to "
+            "content-scan for a re-consumption injection risk.",
+            "No action needed unless the agent uses persistent memory; if it does, a "
+            "future run will pick it up automatically.",
+        )
+
+    corroborated: dict[str, set] = {}
+    all_samples: list[str] = []
+    any_scanned = False
+    any_truncated = False
+    any_timed_out = False
+    isolated_hits = 0
+
+    for sink in memory_sinks:
+        deadline = audit_deadline(_B180_PER_FILE_BUDGET_S)
+        result = scan_log_file(sink, deadline)
+        any_truncated = any_truncated or result.truncated
+        any_timed_out = any_timed_out or result.timed_out
+        if result.bytes_scanned == 0:
+            continue
+        any_scanned = True
+
+        nonzero = {cls for cls, n in result.counts.items() if n > 0}
+        if "injection_against_agent" not in nonzero:
+            continue
+
+        try:
+            rel = str(sink.path.relative_to(ctx.home))
+        except ValueError:
+            rel = sink.path.name
+
+        if _b180_corroborated(nonzero):
+            corroborated[rel] = nonzero
+            all_samples.extend(result.samples[:5])
+        else:
+            isolated_hits += 1
+
+    if not any_scanned:
+        return _finding(
+            "B180",
+            UNKNOWN,
+            f"{len(memory_sinks)} memory file(s) found but none were readable/non-empty "
+            "— nothing to content-scan.",
+            "Ensure the agent's memory files are readable by the auditing user.",
+        )
+
+    note = ""
+    if any_truncated:
+        note += " Some file(s) hit the scan's byte/line cap — results may be incomplete."
+    if any_timed_out:
+        note += " Some file(s) hit the per-file scan timeout — results may be incomplete."
+
+    if corroborated:
+        n_sinks = len(corroborated)
+        shown = list(corroborated.items())[:5]
+        detail = "; ".join(f"{sink}: {', '.join(sorted(classes))}" for sink, classes in shown)
+        if n_sinks > 5:
+            detail += f" (+{n_sinks - 5} more file(s))"
+        return _finding(
+            "B180",
+            WARN,
+            f"Corroborated injected-directive signal in {n_sinks} memory file(s): "
+            f"{detail}.{note}",
+            "Review the named memory file(s) manually (redacted-evidence samples are "
+            "attached to this finding). Memory content is re-read as trusted context "
+            "in future sessions — treat a corroborated hit as a live compromise lead, not "
+            "just a note, and investigate how the directive reached memory.",
+            evidence=all_samples[:20],
+        )
+
+    detail = f"{len(memory_sinks)} memory file(s) scanned; no corroborated injected-directive signal."
+    if isolated_hits:
+        detail += (
+            f" {isolated_hits} isolated injection-marker hit(s) suppressed (no corroborating "
+            "signal in the same file — e.g. a security note merely quoting an attack phrase)."
+        )
+    detail += note
+    return _finding(
+        "B180",
+        PASS,
+        detail,
+        "No action needed. Isolated hits are intentionally not WARNed on individually "
+        "(base-rate discipline, mirrors B164) — the suppressed count is in this finding's "
+        "detail text.",
+    )
+
+
 def _b104_user_home(home: Path) -> "Path | None":
     """The user's home ONLY when *home* is a real ``~/.openclaw`` profile directly under it, so
     B104 adds the personal ``~/.agents/skills`` tier for a live audit but stays hermetic on

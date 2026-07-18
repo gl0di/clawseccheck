@@ -1204,6 +1204,42 @@ INJECTION_PATTERNS = [
 ]
 
 
+# F-127 (2026-07-18, C-135): logscan.py's class 1 (`injection_against_agent`) used
+# INJECTION_PATTERNS[0] alone and missed the single most canonical injection phrasing —
+# "ignore all previous instructions" stacks TWO modifiers ("all" + "previous") where
+# INJECTION_PATTERNS[0] allows exactly one, and "disregard"/"forget" (the next two most
+# common override verbs — "Disregard all prior instructions", "Forget everything above")
+# aren't covered by any verb there at all. Fixed end-to-end FN on check_memory_reconsumption_
+# injection (B180): 3 of 4 textbook poisoned-memory payloads returned PASS despite an
+# unambiguous cred-read + attacker-host exfil line the scanner DID see as a second class.
+#
+# Deliberately NOT folded into INJECTION_PATTERNS itself: that list is also consumed
+# un-corroborated by check_bootstrap_injection (B6 — a bare match is a direct FAIL, no
+# second-signal gate) and by the B58/C074 content-ring checks. Re-fleet testing (the §4
+# C-135 adversarial pass) showed widening INJECTION_PATTERNS in place immediately reopened
+# B6 as a FALSE FAIL on two clean fixtures whose SOUL.md legitimately QUOTES this exact
+# phrase as a worked example in a prompt-injection-defense doc (fixtures/clean_b64_defensive,
+# fixtures/clean_b64_signatures) — B6 has no quote/report-frame discriminator the way B64
+# (`_b64_reported_or_quoted`) does, and retrofitting that machinery into B6 is a separate,
+# larger change than this task's confirmed defect. This pattern is used ONLY by logscan.py's
+# class 1, which feeds check_log_threat_hunt (B164) and check_memory_reconsumption_injection
+# (B180) — BOTH of which already gate on 2-class corroboration in the SAME file before ever
+# surfacing anything above PASS (see `_b180_corroborated` / `_log_hunt_corroborated`), so an
+# isolated match here (the "security note quoting an attack" case) still cannot WARN on its
+# own. Reuses the SAME bounded-filler shape checks/_content.py's `_B74_TURN_DIRECTIVE_RE`
+# already uses for this identical "override imperative" concept (0-3 filler words between
+# verb and target noun; bounded quantifier, no catastrophic-backtracking risk) — not a new
+# heuristic, just the missing verb/modifier-count coverage, narrowly scoped to the two
+# checks whose own corroboration gate already absorbs the quote-vs-live-directive ambiguity.
+LOG_SCAN_INJECTION_PATTERNS = INJECTION_PATTERNS + [
+    re.compile(
+        r"\b(?:ignore|disregard|forget)\b(?:\s+\S+){0,3}?\s+"
+        r"(?:instructions?|messages?|orders?|directives?|everything|above|before)\b",
+        re.I,
+    ),
+]
+
+
 _FM_BLOCK_BARE_RE = re.compile(
     r"\A---\s*\n(?P<fm>(?:.*?\n)*?)^---\s*\n",
     re.MULTILINE,

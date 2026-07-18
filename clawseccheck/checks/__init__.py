@@ -252,7 +252,7 @@ from ._config import (
     check_trustedproxy_loopback,
 )
 
-from ._shared import (INJECTION_PATTERNS, _FM_BLOCK_BARE_RE, _FM_BLOCK_HEADERED_RE, _HOOK_EXEC_RE, _skill_frontmatter_block,)
+from ._shared import (INJECTION_PATTERNS, LOG_SCAN_INJECTION_PATTERNS, _FM_BLOCK_BARE_RE, _FM_BLOCK_HEADERED_RE, _HOOK_EXEC_RE, _skill_frontmatter_block,)
 from ._lifecycle import (
     _APPROVAL_BYPASS_RE,
     _CRITICAL_BOOTSTRAP,
@@ -286,6 +286,7 @@ from ._lifecycle import (
     check_install_policy_gate,
     check_known_vulns,
     check_memory_poisoning,
+    check_memory_reconsumption_injection,
     check_offboarding_hygiene,
     check_paired_device_operator_authority,
     check_pending_device_pairing_scope,
@@ -1159,6 +1160,7 @@ CHECKS = [
     check_webfetch_redirects,
     check_incident_readiness,
     check_log_threat_hunt,  # B164 — content-scan the agent's own log corpus (F-124/E-044)
+    check_memory_reconsumption_injection,  # B180 — injected directive found in agent memory (F-127/E-044 Phase 5)
     check_offboarding_hygiene,  # B104 — decommissioning/offboarding hygiene (F-089)
     check_codex_project_trust,  # B136 — Codex CLI project trust_level="trusted"
     check_pending_device_pairing_scope,  # B138 — dangling high-scope pending device pairing
