@@ -82,6 +82,9 @@ proxy.proxyUrl
 security.audit.suppressions
 security.installPolicy
 session.dmScope
+skills.workshop.allowSymlinkTargetWrites
+skills.workshop.approvalPolicy
+skills.workshop.autonomous.enabled
 subagents.allowAgents
 tools.allow
 tools.alsoAllow

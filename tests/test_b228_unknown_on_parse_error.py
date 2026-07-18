@@ -38,6 +38,7 @@ from clawseccheck.checks import (
     check_mcp_external_endpoint,      # C047
     check_proxy_header_forging,       # C032
     check_secrets,                    # B1
+    check_skill_workshop_autonomy,    # B175
     check_subagent_spawn_limits,      # B81
     check_tls,                        # B11
     check_webfetch_redirects,         # B83
@@ -62,6 +63,7 @@ GUARDED_CHECKS = [
     check_cron_scheduler,             # C048
     check_hook_policy_bypass,         # C6
     check_declared_skill_reconciliation,  # B158
+    check_skill_workshop_autonomy,    # B175
 ]
 
 # Assembled at runtime so no contiguous secret-shaped literal exists in source.
@@ -70,7 +72,7 @@ _AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
 
 def test_guarded_checks_are_config_dependent_sanity():
     # Guard against a future rename silently dropping a check from the manifest above.
-    assert len(GUARDED_CHECKS) == 14
+    assert len(GUARDED_CHECKS) == 15
 
 
 class TestTruncatedJson:

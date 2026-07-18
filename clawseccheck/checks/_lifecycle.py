@@ -1649,6 +1649,210 @@ def check_self_modification(ctx: Context) -> Finding:
     )
 
 
+# ---------- B175: Skill Workshop autonomous authoring + no-review install ----------
+# Real OpenClaw schema (grounded 2026-07-18, dist config-XlfFMqhc.js
+# resolveSkillWorkshopConfig + zod-schema-O9ml_nmo.js:1510-1516):
+#   skills.workshop.autonomous.enabled        bool,              default false
+#   skills.workshop.approvalPolicy            "pending" | "auto", default "pending"
+#   skills.workshop.allowSymlinkTargetWrites  bool,              default false
+#
+# Spec correction: the originating bug report assumed approvalPolicy
+# and allowSymlinkTargetWrites live NESTED under .autonomous, and assumed a "manual"
+# policy value. Neither is true: both are SIBLINGS of `autonomous` directly under
+# skills.workshop, and the only two literals the schema accepts are "pending" (the safe
+# default) and "auto" — any other value, or an omitted key, resolves to "pending"
+# (readApprovalPolicy() in config-XlfFMqhc.js only special-cases the literal "auto").
+#
+# skills.workshop.autonomous.enabled=true lets the agent AUTHOR brand-new executable
+# skill proposals from conversation signals with no explicit user request
+# (get-reply-OTG64ybi.js: `skillSuggestionEnabled = !autonomous.enabled` — autonomous
+# mode replaces the normal suggest-then-ask flow). approvalPolicy="auto" removes the
+# human confirmation step for EVERY skill_workshop lifecycle call
+# (propose/apply/reject/quarantine) — agent-tools.before-tool-call-C95DXQXZ.js:608:
+# `if (resolveSkillWorkshopConfig(params.config).approvalPolicy === "auto") return;`
+# short-circuits resolveSkillWorkshopToolApproval before it ever builds a
+# requireApproval gate. The combination (enabled=true + approvalPolicy=auto) is the
+# full unattended self-modification pipeline the bug report names: the agent can
+# conceive of, write, AND install new executable code from a single conversation turn
+# with zero human review — treated as FAIL. Any one gap alone (autonomous authoring
+# still review-gated before install; OR approvalPolicy=auto with no autonomous
+# authoring; OR allowSymlinkTargetWrites widening where an apply can write) is a real
+# but lesser risk — WARN. Disabled/all-default is the safe common case — PASS.
+#
+# B-239 fix: enabled+auto alone does NOT mean the pipeline is exercisable — both
+# fields are read at exactly one call site each and neither implies the skill_workshop
+# TOOL is actually constructed for a session. Grounded in the same 2026.7.1 dist:
+#   - openclaw-tools-KulZ1cdH.js:14415 omits the tool outright when the session is
+#     sandboxed (`...options?.sandboxed ? [] : [createSkillWorkshopTool(...)]`), and
+#     status-message-CQq9FqoB.js:73 makes agents.defaults.sandbox.mode == "all"
+#     unconditionally sandboxed (`if (sandboxMode === "all") return true;`) — not a
+#     misconfigurable policy, a hard guarantee.
+#   - tool-policy-BHUGxE3p.js / effective-tool-policy-CRZGJ2R3.js run tools.deny and
+#     tools.allow (global and per-agent, via agents.list[].tools.*) as a pipeline of
+#     narrowing filters: any single layer denying "skill_workshop", or any non-"*"
+#     allowlist that omits it, drops it from the effective tool set for that layer's
+#     scope, and no later layer can add it back.
+#   - tool-catalog-C8xbUFNe.js CORE_TOOL_DEFINITIONS gives skill_workshop
+#     profiles=["coding"] only; register-CvPzWKo8.js SUPPORTED_TOOL_PROFILES is
+#     exactly {minimal, coding, messaging, full} — "minimal"/"messaging" omit it,
+#     "full" is allow:["*"] (includes it). Any OTHER tools.profile string (including
+#     the non-existent "readonly" — not a real profile literal anywhere in the dist)
+#     is unrecognized and does not restrict the tool set at all, so it must NOT be
+#     treated as neutralizing.
+#   - Upstream's own doctor check treats "workshop autonomous on but skill_workshop
+#     tool-policy-hidden" as a real, occurring, fixable misconfiguration in its own
+#     right (core/doctor/skill-workshop-tool-policy, tool-policy-diagnostic-Dw481WN4.js:
+#     `if (!params.workshopEnabled) return null;`), i.e. upstream agrees this
+#     combination is a deployment state that happens, not a hypothetical.
+# So when enabled+auto both hold but the tool is provably unreachable, this is a
+# dead-but-dangerous config, not a live one: downgrade to WARN (one tool-policy edit
+# re-arms the full pipeline) instead of a FAIL that asserts a capability the config
+# forbids — the same doctrine already codified at _shared._real_exec_enabled (don't
+# raise a sensitive leg on a containment control, don't assert a capability the config
+# doesn't declare). This is a reachability HEURISTIC, not a full policy simulator: it
+# does not model alsoAllow/group-expansion/multi-agent scoping, so it only downgrades
+# on a POSITIVE removal signal and leaves ambiguous/unmodeled shapes (e.g. a per-agent
+# restriction inside a multi-agent fleet where other agents remain unrestricted) as
+# reachable — erring toward FAIL, never toward a false PASS/WARN.
+#
+# Real, schema-recognized tools.profile literals whose built-in allowlist omits
+# skill_workshop (see the grounding block above). "coding" and "full" both include
+# it, so they are deliberately absent here; any unrecognized string (e.g. "readonly")
+# is likewise absent — it is not a real profile and does not restrict anything.
+_WORKSHOP_SAFE_PROFILES = frozenset({"minimal", "messaging"})
+
+
+def _skill_workshop_reachable(cfg: dict) -> bool:
+    """Best-effort: could the skill_workshop tool still be constructed/called?
+
+    Returns True (reachable, i.e. "don't downgrade") whenever no concrete config
+    signal removes the tool, or the removal signal is scoped ambiguously (e.g. only
+    one of several declared agents restricts it).
+    """
+    if dig(cfg, "agents.defaults.sandbox.mode") == "all":
+        return False
+
+    def _names(value) -> set:
+        return {str(v).strip() for v in value} if isinstance(value, list) else set()
+
+    if "skill_workshop" in _names(dig(cfg, "tools.deny")):
+        return False
+
+    global_allow = _names(dig(cfg, "tools.allow"))
+    if global_allow and "*" not in global_allow and "skill_workshop" not in global_allow:
+        return False
+
+    profile = dig(cfg, "tools.profile")
+    if isinstance(profile, str) and profile.strip().lower() in _WORKSHOP_SAFE_PROFILES:
+        return False
+
+    agents_list = dig(cfg, "agents.list")
+    # Only trust a per-agent deny/allow when it is the SOLE declared agent — with
+    # multiple agents a single agent's restriction doesn't prove the tool is
+    # unreachable fleet-wide, so stay conservative and leave it reachable (FAIL).
+    if isinstance(agents_list, list) and len(agents_list) == 1:
+        agent = agents_list[0]
+        if isinstance(agent, dict):
+            if "skill_workshop" in _names(dig(agent, "tools.deny")):
+                return False
+            agent_allow = _names(dig(agent, "tools.allow"))
+            if agent_allow and "*" not in agent_allow and "skill_workshop" not in agent_allow:
+                return False
+
+    return True
+
+
+def check_skill_workshop_autonomy(ctx: Context) -> Finding:
+    if (f := _config_unreadable("B175", ctx)) is not None:
+        return f
+
+    cfg = ctx.config
+    enabled = dig(cfg, "skills.workshop.autonomous.enabled") is True
+    is_auto = dig(cfg, "skills.workshop.approvalPolicy") == "auto"
+    symlink_writes = dig(cfg, "skills.workshop.allowSymlinkTargetWrites") is True
+
+    if not (enabled or is_auto or symlink_writes):
+        return _finding(
+            "B175",
+            PASS,
+            "Skill Workshop autonomous authoring is disabled and lifecycle actions "
+            "(propose/apply/reject/quarantine) require review — approvalPolicy is not "
+            '"auto".',
+            "—",
+        )
+
+    reasons = []
+    if enabled:
+        reasons.append(
+            "skills.workshop.autonomous.enabled=true (agent auto-authors skill "
+            "proposals from conversation signals with no user request)"
+        )
+    if is_auto:
+        reasons.append(
+            'skills.workshop.approvalPolicy="auto" (no human confirmation before a '
+            "skill_workshop proposal is applied/installed)"
+        )
+    if symlink_writes:
+        reasons.append(
+            "skills.workshop.allowSymlinkTargetWrites=true (apply can write through "
+            "symlinked workspace skill paths into shared/trusted skill roots)"
+        )
+
+    if enabled and is_auto:
+        if _skill_workshop_reachable(cfg):
+            return _finding(
+                "B175",
+                FAIL,
+                "Skill Workshop can autonomously AUTHOR new executable skill code from "
+                "conversation signals AND install it with no human review step: "
+                + "; ".join(reasons)
+                + ".",
+                'Set skills.workshop.approvalPolicy to the default "pending" so every '
+                "generated proposal needs an explicit `openclaw skills workshop apply` "
+                "decision before it installs; also consider disabling "
+                "skills.workshop.autonomous.enabled if unattended skill authoring is not "
+                "intended.",
+                evidence=reasons,
+            )
+        # B-239: enabled+auto is set, but a separate tool-policy/sandbox control
+        # (agents.defaults.sandbox.mode="all", a tools.deny/tools.allow that omits
+        # skill_workshop, or tools.profile="minimal"/"messaging") makes the
+        # skill_workshop tool itself unreachable — the full pipeline can't actually
+        # run today. That is a dead-but-dangerous config, not a live exploit path, so
+        # this is a WARN, not a FAIL on a forbidden capability.
+        reasons.append(
+            "skill_workshop is currently unreachable (sandboxed session, tools.deny, "
+            "a strict tools.allow that omits it, or a read-restricted tools.profile) — "
+            "so this pipeline is dormant, not live"
+        )
+        return _finding(
+            "B175",
+            WARN,
+            "Skill Workshop autonomy is fully configured for unattended authoring + "
+            "install, but the skill_workshop tool is not currently reachable: "
+            + "; ".join(reasons)
+            + ". One tool-policy edit (removing the deny/allow restriction, dropping "
+            "out of sandbox.mode=all, or widening tools.profile) re-arms the full "
+            "unattended pipeline.",
+            'Keep skills.workshop.approvalPolicy at the default "pending" (never '
+            '"auto") and disable skills.workshop.autonomous.enabled unless unattended '
+            "authoring is genuinely intended — don't rely on tool-policy/sandboxing "
+            "alone to contain it, since either can be loosened independently later.",
+            evidence=reasons,
+        )
+
+    return _finding(
+        "B175",
+        WARN,
+        "Skill Workshop autonomy posture has a partial gap: " + "; ".join(reasons) + ".",
+        'Keep skills.workshop.approvalPolicy at the default "pending" (never "auto"), '
+        "disable skills.workshop.autonomous.enabled unless unattended authoring is "
+        "intended, and leave allowSymlinkTargetWrites at its default false unless a "
+        "shared/trusted skill root genuinely needs it.",
+        evidence=reasons,
+    )
+
+
 def check_session_approval_policy(ctx: Context) -> Finding:
     import json as _json
 

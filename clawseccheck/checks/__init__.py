@@ -287,6 +287,7 @@ from ._lifecycle import (
     check_pending_device_pairing_scope,
     check_self_modification,
     check_session_approval_policy,
+    check_skill_workshop_autonomy,
     check_supply_chain,
     check_update_pinning,
     check_version,
@@ -1082,6 +1083,7 @@ CHECKS = [
     check_data_atrest,
     check_bootstrap_write_protection,
     check_self_modification,
+    check_skill_workshop_autonomy,  # B175 — skills.workshop autonomous authoring + approvalPolicy=auto
     check_backups,
     check_version,
     check_tool_output_trust,

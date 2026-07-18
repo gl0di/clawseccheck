@@ -59,7 +59,7 @@ classified at all.
 | Subagent delegation | B18, B72, B81 | Elevated/exec inheritance w/o approval (real approval gate); B72 flags `allowAgents` wildcard; B81 flags spawn limits raised beyond recommended defaults `[CHECK: B18, B72, B81]` |
 | Data at-rest perms | B19, B82 | Group/world-readable memory/log dirs; B82 covers `cacheTrace` transcripts persisted without tool-output redaction `[CHECK: B19, B82]` |
 | Bootstrap/memory write protection | B20 | Identity-file writability `[CHECK: B20]` |
-| Self-modification risk | B22 | Writable identity + tools + no approval `[CHECK: B22]` |
+| Self-modification risk | B22, B175 | Writable identity + tools + no approval; B175 covers the Skill Workshop's own autonomy surface — `skills.workshop.autonomous.enabled=true` (agent auto-authors new executable skill proposals from conversation signals) combined with `approvalPolicy="auto"` (every propose/apply/reject/quarantine lifecycle call skips human confirmation) — FAIL on the full auto-author+auto-install combo, WARN on any single gap (incl. `allowSymlinkTargetWrites=true`), PASS on the safe `"pending"` default `[CHECK: B22, B175]` |
 | Approval-bypass directives | B23 | "do X without asking" in bootstrap `[CHECK: B23]` |
 | Update / pinning hygiene | B25, C4, C6 | Pinned releases; C6 covers a pre-v2026.6.10 hook-composition tool-policy drop `[CHECK: B25, C4, C6]` |
 | Untrusted-context exposure | B26, B140 | `channels.<p>.contextVisibility` — untrusted group/quote/history context injected into the model (config side; B21 is the policy side); B140 flags wildcard group ingress with no `allowFrom` restriction `[CHECK: B26, B140]` |
