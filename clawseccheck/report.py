@@ -1097,9 +1097,24 @@ def render_events(events, ascii_only: bool = False) -> str:
     return _asciify(out) if ascii_only else out
 
 
+# The badge's mascot mark: a scaled-down nested-<svg> instance of brand.LOGO_SVG's own
+# vector paths — NOT the 🦞 mascot glyph. An emoji would break the badge's ASCII-safety
+# guarantee (test_features.py's `svg.encode("ascii")`), since shields.io-style badges
+# are meant to be embeddable byte-for-byte in Markdown/HTML without an encoding
+# declaration. Deriving the icon from LOGO_SVG's own markup (rather than hand-drawing a
+# second glyph) means it can never drift from brand.py: if the mark's paths ever change,
+# this updates for free.
+_LOGO_TAG_RE = re.compile(r"^<svg[^>]*>(.*)</svg>$", re.DOTALL)
+_LOGO_MATCH = _LOGO_TAG_RE.match(LOGO_SVG.strip())
+_LOGO_INNER = _LOGO_MATCH.group(1) if _LOGO_MATCH else ""  # "" degrades to no icon, never a crash
+_LOGO_SIZE = 14  # px — fits the badge's 20px height with a few px of margin
+
+
 def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     """A shields.io-style SVG badge (grade + score, plus a suppressed-critical marker —
-    never finding details)."""
+    never finding details). Carries a small mark derived from brand.LOGO_SVG — Tier 3
+    (HTML/badge-only) per brand.py's reach split: a graphical mark cannot reach a chat
+    channel, only this static file."""
     label = "OpenClaw Security"
     value = f"{score.grade} {score.score}/100"
     # B-163: if a score-capping CRITICAL/HIGH FAIL (or sensitive id) was hidden via
@@ -1109,9 +1124,17 @@ def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     if n_hidden:
         value += f" *{n_hidden} suppressed"
     color = grade_hex(score.grade)
-    lw = 8 + len(label) * 6          # rough text widths
+    icon_w = _LOGO_SIZE + 8 if _LOGO_INNER else 0  # icon + left/right padding; 0 if unavailable
+    lw = 8 + len(label) * 6 + icon_w  # rough text widths
     vw = 8 + len(value) * 7
     w = lw + vw
+    icon = ""
+    if _LOGO_INNER:
+        icon_y = (20 - _LOGO_SIZE) / 2
+        icon = (
+            f'<svg x="4" y="{icon_y:.0f}" width="{_LOGO_SIZE}" height="{_LOGO_SIZE}" '
+            f'viewBox="0 0 64 64">{_LOGO_INNER}</svg>'
+        )
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="20" '
         f'role="img" aria-label="{label}: {value}">'
@@ -1120,9 +1143,10 @@ def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
         f'<rect rx="3" width="{w}" height="20" fill="#555"/>'
         f'<rect rx="3" x="{lw}" width="{vw}" height="20" fill="{color}"/>'
         f'<rect rx="3" width="{w}" height="20" fill="url(#s)"/>'
+        f'{icon}'
         f'<g fill="#fff" text-anchor="middle" '
         f'font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="11">'
-        f'<text x="{lw / 2:.0f}" y="14">{label}</text>'
+        f'<text x="{(icon_w + lw) / 2:.0f}" y="14">{label}</text>'
         f'<text x="{lw + vw / 2:.0f}" y="14">{value}</text>'
         f'</g></svg>'
     )
