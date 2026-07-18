@@ -9,6 +9,7 @@ owner-only under ~/.clawseccheck/; nothing is ever uploaded. Opt out with
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -22,9 +23,55 @@ from .safeio import secure_append_text, secure_dir
 
 DEFAULT_HISTORY = "~/.clawseccheck/history.jsonl"
 
+# F-128: run-source tags. "audit" is a real invocation; "test"/"dev" (or any other
+# value an env override supplies) mark development/CI noise so --trend can filter
+# it out by default. "legacy" is not assignable here — it is load()'s own label
+# for a pre-F-128 entry that predates the source concept entirely (see load()).
+_SOURCE_ENV = "CLAWSECCHECK_RUN_SOURCE"
 
-def record(score, path: str = DEFAULT_HISTORY, when: str | None = None) -> None:
-    """Append one JSON line {date, score, grade, chain_hash} to the history file.
+
+def _run_source(source: str | None = None) -> str:
+    """Resolve the run-source tag (F-128) for a new history entry.
+
+    Priority, highest first:
+      1. an explicit *source* argument (a caller that already knows better);
+      2. the ``CLAWSECCHECK_RUN_SOURCE`` env override (CI/dev harnesses can
+         tag their own runs, e.g. "dev");
+      3. ``PYTEST_CURRENT_TEST`` — pytest sets this automatically for every
+         test, so the suite's own audit runs self-tag as "test" with no
+         per-call-site plumbing;
+      4. otherwise "audit" — a real, non-test invocation.
+    """
+    if source:
+        return source
+    env_source = os.environ.get(_SOURCE_ENV)
+    if env_source:
+        return env_source
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return "test"
+    return "audit"
+
+
+def _sanitize_home(value: str | None) -> str | None:
+    """Run an audited-home string through report._sanitize before it is stored.
+
+    Strips terminal-control/bidi/zero-width characters and redacts any
+    secret-shaped substring (same treatment every other untrusted string gets
+    before it reaches a report or a journal) — a no-op for an ordinary path
+    like ``~/.openclaw``. Local import: report.py sits in the same "Layer 3"
+    cluster as history.py (CLAUDE.md §3), and this keeps the coupling
+    load-bearing only where it is actually used.
+    """
+    if not value:
+        return value
+    from .report import _sanitize  # noqa: PLC0415
+    return _sanitize(str(value))
+
+
+def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
+           home: str | None = None, source: str | None = None) -> None:
+    """Append one JSON line {date, ts, score, grade, home, source, chain_hash}
+    to the history file.
 
     Parameters
     ----------
@@ -33,7 +80,27 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None) -> None:
     path:
         Path to the history JSONL file.  ``~`` is expanded.
     when:
-        ISO date string (``YYYY-MM-DD``).  Defaults to today's date.
+        Either a bare ISO date (``YYYY-MM-DD``) or a full ISO datetime
+        (``YYYY-MM-DDTHH:MM:SS``). Defaults to ``datetime.now()``. A bare date
+        still sets 'date' for back-compat display/sorting; 'ts' is then that
+        date at midnight. Mainly a testing knob — real callers leave it None
+        and get the actual wall-clock time.
+    home:
+        The audited home path (e.g. ``~/.openclaw``), sanitized (see
+        _sanitize_home) before being stored. None if the caller doesn't know
+        it — the field is still written, as None, so every F-128-era entry has
+        a consistent shape.
+    source:
+        Explicit run-source override. None lets _run_source() auto-detect it
+        (see there) — "test" under pytest, "audit" otherwise, or the
+        ``CLAWSECCHECK_RUN_SOURCE`` env value when set.
+
+    F-128: 'ts' (full ISO datetime, seconds precision) and the 'home'/'source'
+    tags let a trend tell a real audit apart from a development or test run.
+    All three are additive and, like every other field, inside the hashed
+    payload — chain_hash covers them the same as 'date'/'score'/'grade'. A
+    pre-F-128 entry that lacks them still loads (history.load() fills the
+    honest gap: ts=None, home=None, source="legacy") and still renders.
 
     F-094: each entry carries a 'chain_hash' — sha256(prev_chain_hash +
     canonical_json(entry)), the same tamper-evident scheme monitor.py's event
@@ -53,11 +120,23 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None) -> None:
     unbounded — see monitor._rotate_journal.
     """
     if when is None:
-        when = datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now()
+        date = now.strftime("%Y-%m-%d")
+        ts = now.isoformat(timespec="seconds")
+    else:
+        date = when[:10]
+        ts = when if "T" in when else f"{when}T00:00:00"
 
     p = Path(path).expanduser()
-    base = {"date": when, "score": int(score.score), "grade": str(score.grade),
-            "_schema": SCHEMA_VERSION}
+    base = {
+        "date": date,
+        "score": int(score.score),
+        "grade": str(score.grade),
+        "ts": ts,
+        "home": _sanitize_home(home),
+        "source": _run_source(source),
+        "_schema": SCHEMA_VERSION,
+    }
     # Symlink-safe: dir 0700 and an O_NOFOLLOW append, so a planted symlink at
     # history.jsonl can never redirect this default-path write to another file.
     # record() runs by default on every audit, so it degrades quietly (refuse =
@@ -84,12 +163,19 @@ def verify(path: str = DEFAULT_HISTORY) -> "tuple[bool, str]":
 
 
 def load(path: str = DEFAULT_HISTORY) -> list[dict]:
-    """Read the JSONL history file and return a list of {date, score, grade} dicts.
+    """Read the JSONL history file and return a list of
+    {date, score, grade, ts, home, source} dicts.
 
     Blank lines and malformed JSON lines are skipped gracefully. A line whose
     '_schema' (C-162) is a newer major than this build understands is skipped too
     (no crash, no misparse) — absent/legacy or current '_schema' loads normally.
     Returns an empty list if the file does not exist.
+
+    F-128: 'ts'/'home'/'source' are additive fields a pre-F-128 entry never
+    wrote. Rather than guess, a missing 'ts'/'home' loads as None and a
+    missing 'source' loads as "legacy" — distinct from "audit" on purpose,
+    since a legacy entry predates the real-vs-dev/test distinction entirely
+    and must not silently masquerade as a verified real-audit run.
     """
     p = Path(path).expanduser()
     if not p.is_file():
@@ -105,30 +191,62 @@ def load(path: str = DEFAULT_HISTORY) -> list[dict]:
                 continue
             try:
                 # Validate expected keys exist
-                rows.append({"date": obj["date"], "score": obj["score"], "grade": obj["grade"]})
+                row = {"date": obj["date"], "score": obj["score"], "grade": obj["grade"]}
             except KeyError:
                 continue  # skip incomplete lines
+            row["ts"] = obj.get("ts")
+            row["home"] = obj.get("home")
+            row["source"] = obj.get("source", "legacy")
+            rows.append(row)
     except OSError:
         return []
 
     return rows
 
 
-def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
+_REAL_SOURCES = ("audit", "legacy")
+
+
+def render_trend(rows: list[dict], ascii_only: bool = False, include_all: bool = False) -> str:
     """Return a compact human-readable trend string.
 
-    Each row shows DATE  GRADE  SCORE plus an arrow (▲▼· or ^v=) relative to
-    the previous row's score.  If rows is empty a friendly message is returned.
+    Each row shows a timestamp, GRADE and SCORE plus an arrow (▲▼· or ^v=)
+    relative to the previous *visible* row's score.  If nothing is visible a
+    friendly message is returned.
 
     Parameters
     ----------
     rows:
-        List of {date, score, grade} dicts, in chronological order.
+        List of {date, score, grade, ts, home, source} dicts (as returned by
+        load()), in chronological order. A plain {date, score, grade} dict
+        (no ts/home/source keys) works too — it renders as a "legacy" row.
     ascii_only:
         Use ASCII arrows (^, v, =) instead of unicode (▲, ▼, ·).
+    include_all:
+        F-128: by default only 'real' rows render — source "audit" or
+        "legacy" (a pre-F-128 entry that predates the source concept, so it
+        cannot be a dev/test run in disguise). Development/test runs (source
+        "test", or any other CLAWSECCHECK_RUN_SOURCE-tagged value such as
+        "dev") are hidden so they don't pollute the trend a user actually
+        cares about. Pass True to show every row regardless of source, with
+        an added ``[source]`` tag (plus the audited home path, when known) on
+        each line.
     """
     if not rows:
         return "No history yet. Run --trend again later to see your trend."
+
+    if include_all:
+        visible = rows
+    else:
+        visible = [r for r in rows if r.get("source", "legacy") in _REAL_SOURCES]
+
+    if not visible:
+        hidden = len(rows)
+        noun = "entry" if hidden == 1 else "entries"
+        return (
+            f"No audit runs yet ({hidden} dev/test {noun} hidden). "
+            "Call render_trend(..., include_all=True) to see them."
+        )
 
     if ascii_only:
         arrow_up, arrow_down, arrow_flat = "^", "v", "="
@@ -140,11 +258,11 @@ def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
     # ("🦞 ClawSecCheck" then "ClawSecCheck - Score Trend"), repeating the
     # wordmark — collapsed to the one brand header line.
     lines = [brand.header(subtitle="Score Trend", ascii_only=ascii_only), ""]
-    for i, row in enumerate(rows):
+    for i, row in enumerate(visible):
         if i == 0:
             arrow = arrow_flat
         else:
-            prev_score = rows[i - 1]["score"]
+            prev_score = visible[i - 1]["score"]
             curr_score = row["score"]
             if curr_score > prev_score:
                 arrow = arrow_up
@@ -153,6 +271,14 @@ def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
             else:
                 arrow = arrow_flat
 
-        lines.append(f"{row['date']}  {row['grade']}  {row['score']}  {arrow}")
+        label = row.get("ts") or row["date"]
+        line = f"{label}  {row['grade']}  {row['score']}  {arrow}"
+        if include_all:
+            tag = f"  [{row.get('source', 'legacy')}]"
+            home = row.get("home")
+            if home:
+                tag += f"  {home}"
+            line += tag
+        lines.append(line)
 
     return "\n".join(lines)
