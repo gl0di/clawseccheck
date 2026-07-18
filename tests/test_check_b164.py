@@ -300,3 +300,39 @@ def test_b164_cred_path_cross_corroborates_a_co_occurring_class(tmp_path):
     f = check_log_threat_hunt(ctx)
     assert f.status == WARN
     assert "cross-artifact-ioc" in f.detail
+
+
+# ------------------------------------------------- B-249 round 2: bare-blob FP fix (C-135)
+def test_b164_pass_on_ordinary_kubectl_session_with_git_sha_build_param(tmp_path):
+    """Check-level pin for the confirmed false positive: an everyday devops session
+    (checking ~/.kube/config, then polling a preview tunnel with a git-SHA build param)
+    must PASS, not WARN — a 40-char hex git SHA is not an encoded exfil payload."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "agent.log").write_text(
+        '{"role":"assistant","text":"Checking cluster access via ~/.kube/config before deploy."}\n'
+        '{"tool":"bash","cmd":"kubectl --kubeconfig ~/.kube/config get pods -n staging"}\n'
+        '{"role":"assistant","text":"Deploy done. Verifying the preview tunnel is live."}\n'
+        '{"tool":"web_fetch","url":"https://demo-app.ngrok-free.app/health?'
+        'build=4f8a2c19b7de035a91cc6d24ef7b0a3d5e91c8fa"}\n',
+        encoding="utf-8",
+    )
+    f = check_log_threat_hunt(_ctx(tmp_path))
+    assert f.status == PASS
+    assert "exfil_evidence" not in f.detail
+
+
+def test_b164_pass_on_npmrc_read_then_plain_english_doc_slug_url(tmp_path):
+    """Check-level pin: reading ~/.npmrc then fetching a documentation URL whose slug is
+    plain English prose (not an encoded payload) must PASS, not WARN."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "agent.log").write_text(
+        '{"tool":"read","path":"/home/dev/.npmrc"}\n'
+        '{"tool":"web_fetch","url":"https://docs-preview.ngrok-free.app/guides/'
+        'getting-started-with-local-webhook-testing-and-tunnels"}\n',
+        encoding="utf-8",
+    )
+    f = check_log_threat_hunt(_ctx(tmp_path))
+    assert f.status == PASS
+    assert "exfil_evidence" not in f.detail
