@@ -272,6 +272,7 @@ from ._lifecycle import (
     check_cron_job_content,
     check_cron_scheduler,
     check_declared_skill_reconciliation,
+    check_exec_approvals_grants,
     check_hook_policy_bypass,
     check_human_approval,
     check_install_policy,
@@ -1113,6 +1114,7 @@ CHECKS = [
     check_hook_policy_bypass,
     check_cron_scheduler,
     check_cron_job_content,  # B168 — cron job store payload.message/trigger.script scan (B-231)
+    check_exec_approvals_grants,  # B172 — standing exec-approvals.json allow-always grant inventory (B-236)
     # Content-security ring — single source of truth (also consumed by vet_skill).
     # SKILL_CONTENT_RING is defined just above; changing it updates both the full audit
     # and the --vet path so they can never drift apart.

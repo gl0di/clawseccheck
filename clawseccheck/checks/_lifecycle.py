@@ -931,6 +931,92 @@ def check_cron_job_content(ctx: Context) -> Finding:
     )
 
 
+def check_exec_approvals_grants(ctx: Context) -> Finding:
+    """B172 (B-236, re-scoped): inventory of standing exec-approvals.json "allow-always"
+    grants.
+
+    ``~/.openclaw/exec-approvals.json`` is OpenClaw's persisted per-agent exec-approval
+    store (grounded against the dist: exec-approvals-BIKWP8_V.js). A historical "always
+    allow" click on an exec confirmation prompt writes a durable
+    ``agents.<id>.allowlist[]`` entry with ``source: "allow-always"`` -- a standing,
+    per-command exec grant living entirely outside openclaw.json that, before this
+    check, no check in the project ever read.
+
+    B-236 was originally filed on the premise that such a grant SILENTLY OVERRIDES the
+    ``tools.exec`` gate, making B8/B22/B23/B48 report a lying-PASS. That premise was
+    adversarially REFUTED during the task's own review: OpenClaw computes the effective
+    exec policy as ``minSecurity(tools.exec.security, execApprovals.security) +
+    maxAsk(tools.exec.ask, execApprovals.ask)`` (bash-tools*.js:581-582;
+    exec-approvals-BIKWP8_V.js:1126-1140 -- runtime comment "Stricter values from
+    tools.exec and ...exec-approvals both apply") -- a standing grant can only TIGHTEN
+    the openclaw.json gate, never loosen it. So this check never contradicts B8/B22/
+    B23/B48's PASS; it is a pure visibility/inventory advisory (a persisted grant you
+    may have forgotten about), not a correctness fix for those checks.
+
+    WARN    — at least one agent has 1+ "allow-always" allowlist entries: name them so
+              the user can review/revoke stale standing grants.
+    PASS    — the store was read and no agent has an "allow-always" entry (the common
+              case -- e.g. freshly-provisioned defaults/agents are both empty `{}`).
+    UNKNOWN — exec-approvals.json is absent (or a symlink, never followed), or was
+              found but could not be parsed/read.
+    """
+    if not ctx.exec_approvals_found:
+        return _finding(
+            "B172",
+            UNKNOWN,
+            "No exec-approvals.json store found at ~/.openclaw/exec-approvals.json — "
+            "cannot determine whether any standing 'always allow' exec grants are "
+            "persisted.",
+            "If exec approvals have ever been granted, ensure the store is "
+            "owner-readable so a future audit can inventory it.",
+        )
+    if ctx.exec_approvals_parse_error:
+        return _finding(
+            "B172",
+            UNKNOWN,
+            "exec-approvals.json was found but could not be parsed/read — cannot "
+            "determine whether any standing 'always allow' exec grants are persisted.",
+            "Fix the exec-approvals.json store so it is valid JSON and owner-readable, "
+            "then re-run the audit.",
+        )
+
+    grants = [g for g in ctx.exec_approvals_grants if g.get("allow_always_count")]
+    if not grants:
+        return _finding(
+            "B172",
+            PASS,
+            "exec-approvals.json was read and no agent has a standing 'allow-always' "
+            "exec grant.",
+            "Standing grants are created by clicking 'always allow' on an exec "
+            "confirmation prompt — avoid them for anything you would not want run "
+            "unattended.",
+            pass_confidence="verified",
+        )
+
+    evidence = [
+        f"agent '{g['agent_id']}': {g['allow_always_count']} allow-always pattern(s)"
+        + (f", security={g['security']}" if g.get("security") else "")
+        + (f", ask={g['ask']}" if g.get("ask") else "")
+        for g in grants
+    ]
+    ev_summary = "; ".join(evidence[:4])
+    extra = f" (+{len(evidence) - 4} more)" if len(evidence) > 4 else ""
+    return _finding(
+        "B172",
+        WARN,
+        "OpenClaw has standing 'allow-always' exec grant(s) persisted outside "
+        "openclaw.json: " + ev_summary + extra + ". These do NOT bypass the "
+        "openclaw.json tools.exec gate (OpenClaw always applies the stricter of the "
+        "two), but they ARE a durable per-command exec authority that may have been "
+        "forgotten.",
+        "Review standing exec approvals with `openclaw approvals get`, then revoke any "
+        "'always allow' pattern that is no longer wanted with `openclaw approvals "
+        "allowlist remove \"<pattern>\"` (or inspect ~/.openclaw/exec-approvals.json "
+        "directly).",
+        evidence,
+    )
+
+
 def check_hook_policy_bypass(ctx: Context) -> Finding:
     """C6 (C-052) — advisory: pre-v2026.6.10 hook-registry composition could silently
     drop trusted tool policies at runtime (fixed v2026.6.10).

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "defaults": {},
+  "agents": {
+    "main": {
+      "security": "full",
+      "ask": "off",
+      "allowlist": [
+        {
+          "id": "b1a2c3d4-0000-4000-8000-000000000001",
+          "pattern": "/usr/bin/rg *",
+          "source": "allow-always"
+        },
+        {
+          "id": "b1a2c3d4-0000-4000-8000-000000000002",
+          "pattern": "~/Projects/**/bin/deploy",
+          "source": "allow-always"
+        }
+      ]
+    }
+  }
+}
