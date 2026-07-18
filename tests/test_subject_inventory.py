@@ -13,17 +13,22 @@ Offline, read-only, stdlib only.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from clawseccheck import audit
 from clawseccheck.catalog import (
     FAIL, PASS, SUBJECT_LABEL, SUBJECT_OF, SUBJECT_ORDER, SURFACES, UNKNOWN,
 )
-from clawseccheck.collector import Context
+from clawseccheck.collector import Context, collect
 from clawseccheck.report import (
     _agents_roster, _channels_roster, _mcp_inventory, _skill_inventory, _subject_of,
     build_inventory, render_json, render_report, render_subject_inventory,
 )
+
+posix_only = pytest.mark.skipif(os.name != "posix", reason="symlinks are POSIX-only")
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 VULN = FIXTURES / "home_vuln"
@@ -123,6 +128,56 @@ def test_skill_inventory_mixed_roster_each_gets_its_own_verdict():
     by_name = {e["name"]: e for e in out}
     assert by_name["good-skill"]["status"] == PASS
     assert by_name["mal-skill"]["status"] == FAIL
+
+
+@posix_only
+def test_skill_inventory_does_not_cross_attribute_home_wide_symlink_escape(tmp_path):
+    """Regression (adversarial finding on F-131): B87 (symlink-escape) and B42
+    (install-policy dir-perm) walk the filesystem from ctx.home rather than reading
+    ctx.installed_skills, so a naive per-skill Context that leaves `home` pointing at
+    the WHOLE OpenClaw home re-discovers the SAME home-wide condition for every skill
+    in the loop and cross-attributes one skill's own evidence (a symlink planted
+    inside skill B's own directory) onto a completely unrelated, actually-clean skill
+    A. The per-skill Context must scope `home` to that skill's OWN directory
+    (mirroring vet_skill's `Context(home=<skill dir>)`) so each skill's verdict
+    reflects only its own directory -- reads identically to `--vet <skill>`."""
+    home = tmp_path / "openclaw-home"
+    alpha = home / "workspace" / "skills" / "benign-alpha"
+    beta = home / "workspace" / "skills" / "benign-beta"
+    alpha.mkdir(parents=True)
+    beta.mkdir(parents=True)
+    (alpha / "SKILL.md").write_text(
+        "---\nname: benign-alpha\ndescription: Formats dates.\n---\n"
+        "Prints a date nicely. Reads nothing, writes nothing, no network.\n",
+        encoding="utf-8",
+    )
+    (beta / "SKILL.md").write_text(
+        "---\nname: benign-beta\ndescription: Converts celsius to fahrenheit.\n---\n"
+        "Multiply by 9/5 and add 32.\n",
+        encoding="utf-8",
+    )
+    # ONE skill (beta) gets a sensitive symlink planted inside ITS OWN directory;
+    # alpha is completely untouched.
+    sensitive = tmp_path / "fakehome" / ".ssh"
+    sensitive.mkdir(parents=True)
+    (beta / "creds").symlink_to(sensitive, target_is_directory=True)
+
+    ctx = collect(home)
+    assert set(ctx.installed_skills) == {"benign-alpha", "benign-beta"}
+    out = _skill_inventory(ctx)
+    by_name = {e["name"]: e for e in out}
+
+    # The actually-clean skill must stay clean...
+    assert by_name["benign-alpha"]["status"] == PASS
+    assert by_name["benign-alpha"]["verdict"] == "NO KNOWN ISSUE"
+    for reason in by_name["benign-alpha"]["reasons"]:
+        assert "benign-beta" not in reason, f"alpha's reasons name beta's evidence: {reason!r}"
+
+    # ...while the skill that actually owns the symlink is still correctly flagged
+    # (the fix must not trade the false positive for a false negative).
+    assert by_name["benign-beta"]["status"] == FAIL
+    assert by_name["benign-beta"]["verdict"] == "DANGEROUS"
+    assert any("sensitive" in r or "symlink" in r for r in by_name["benign-beta"]["reasons"])
 
 
 # ── MCP: per-server mini-verdict (reuses _vet_mcp_server / _mcp_servers) ──────────────

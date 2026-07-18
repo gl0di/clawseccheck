@@ -699,6 +699,19 @@ def _skill_inventory(ctx) -> list[dict]:
     against each already-collected skill, WITHOUT re-reading from disk -- reuses
     ctx.installed_skills/_py/_shell/_js exactly as the main audit already populated them.
 
+    Each skill's per-skill Context.home is scoped to THAT skill's own directory
+    (ctx.installed_skill_dirs[name], falling back to the whole-home Context.home only
+    when a directory wasn't recorded -- e.g. a hand-built test Context), mirroring
+    vet_skill()'s `Context(home=<skill dir>)`. Two ring members walk the filesystem
+    from ctx.home rather than reading ctx.installed_skills (B42 install-policy dir-perm
+    scan, B87 symlink-escape scan) -- without this scoping they silently re-discover the
+    SAME home-wide condition for every skill in the loop and `max(pool, key=rank)`
+    promotes it to every OTHER skill's headline verdict too, cross-attributing one
+    skill's evidence (e.g. a symlink planted inside skill B's own directory) onto an
+    unrelated, actually-clean skill A. Scoping home to the single skill directory lets
+    both checks' own existing vet-mode branch (a directory carrying a root SKILL.md)
+    take over, exactly as it already does for `--vet <skill>`.
+
     Bound by scanbudget (C-159), mirroring how `run_all` itself is budgeted: a per-skill
     hard wall-clock cap (POSIX) plus a cooperative whole-loop cap. Once either is
     exhausted, remaining skills report UNKNOWN with an explicit reason -- never a false
@@ -717,6 +730,7 @@ def _skill_inventory(ctx) -> list[dict]:
     py_map = getattr(ctx, "installed_skill_py", None) or {}
     sh_map = getattr(ctx, "installed_skill_shell", None) or {}
     js_map = getattr(ctx, "installed_skill_js", None) or {}
+    dir_map = getattr(ctx, "installed_skill_dirs", None) or {}
     out: list[dict] = []
     # One check-sized cooperative budget for the WHOLE per-skill loop (mirrors run_all
     # treating this entire block as one "virtual check" against the audit's time budget).
@@ -728,7 +742,7 @@ def _skill_inventory(ctx) -> list[dict]:
                 "reasons": ["scan time budget exhausted before this skill was reached"],
             })
             continue
-        skill_ctx = Context(home=home)
+        skill_ctx = Context(home=dir_map.get(name, home))
         skill_ctx.installed_skills = {name: blob}
         skill_ctx.installed_skill_py = {name: py_map.get(name, [])}
         skill_ctx.installed_skill_shell = {name: sh_map.get(name, [])}
