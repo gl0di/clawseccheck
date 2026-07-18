@@ -694,6 +694,16 @@ def _main(argv=None) -> int:
         lines.append("Compare the 'combined' value against the digest printed by a trusted release.")
         lines.append("Any mismatch means a source file was modified after that release.")
         lines.append(f"Trusted digest: see SHA256SUMS.txt on the v{__version__} GitHub Release, signed via cosign.")
+        lines.append("")
+        lines.append("A checksum you just read off a web page or a chat reply proves nothing by")
+        lines.append("itself — it could be tampered with too. Verify the cosign signature instead")
+        lines.append("(after downloading SHA256SUMS.txt and SHA256SUMS.txt.bundle from that Release):")
+        lines.append("")
+        lines.append("  cosign verify-blob \\")
+        lines.append("    --bundle SHA256SUMS.txt.bundle \\")
+        lines.append('    --certificate-identity-regexp "^https://github.com/gl0di/clawseccheck/" \\')
+        lines.append("    --certificate-oidc-issuer https://token.actions.githubusercontent.com \\")
+        lines.append("    SHA256SUMS.txt")
         _emit("\n".join(lines))
         return 0
 
