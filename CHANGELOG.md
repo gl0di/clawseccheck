@@ -61,6 +61,12 @@ scored clean before may now surface new findings. That is new coverage, not a re
 - **B24 flagged correctly pinned scoped packages as unpinned.** `@scope/pkg@2.1.0` matched
   the unpinned-dist-tag pattern on its npm scope prefix, capping the grade a full letter on
   an otherwise well-configured MCP setup. Pre-existing; found by the adversarial pass.
+- **On Python 3.9, a world-open `gateway.trustedProxies` was accepted as a real
+  constraint.** The new trusted-proxy check asked `ipaddress` whether a range was private,
+  but on 3.9 that answer was derived from a network's first and last address alone — which
+  makes `0.0.0.0/0` and `0.0.0.0/1` both report "private". On that interpreter the check
+  therefore emitted the very spoofable-gateway PASS it was written to prevent. Containment
+  is now tested explicitly, so the verdict is identical on every supported Python.
 
 ### Known limitations (accepted, documented in-source, pinned by tests)
 - **B170** stays advisory (WARN) when a security document negates the attack it is
