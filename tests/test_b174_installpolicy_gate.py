@@ -10,8 +10,15 @@ assertSecureCommandPath(), types.openclaw-CXjMEWAQ.d.ts:1597).
 Severity shape (C-135 adversarial pass, zero-FP-FAIL doctrine):
   - not enabled (absent key OR enabled=false)              -> WARN (a common/deliberate
     posture on most real hosts, never positive evidence of an active vulnerability)
-  - enabled + exec.allowInsecurePath/allowSymlinkCommand    -> FAIL (literal, unambiguous
-    escape booleans that bypass a real path-safety check)
+  - enabled + exec.allowInsecurePath=true, no trustedDirs   -> FAIL (unrestrained: any
+    path, zero permission/ownership verification)
+  - enabled + exec.allowInsecurePath=true + trustedDirs set -> WARN (trustedDirs
+    containment is enforced before the allowInsecurePath early-return, so the command is
+    still constrained to an operator-declared directory -- residual risk, not FAIL)
+  - enabled + exec.allowSymlinkCommand=true alone           -> PASS (only skips the
+    "must not be a symlink" text check; the resolved target still gets the full
+    permission/ownership verification -- grounded against a live run of OpenClaw's own
+    validateInstallPolicyStatic on a real stable-symlink layout: B-238)
   - enabled + secret-shaped exec.passEnv name(s), no escape -> WARN (heuristic on an env
     var NAME, not a value -- a legitimate install-policy script may need e.g. NPM_TOKEN)
   - enabled + benign/absent exec, no danger signal          -> PASS
@@ -133,18 +140,24 @@ def test_allow_insecure_path_true_fails(tmp_path):
     assert any("allowInsecurePath" in e for e in r.evidence)
 
 
-def test_allow_symlink_command_true_fails(tmp_path):
+def test_allow_symlink_command_alone_is_not_fail(tmp_path):
+    """B-238 (C-135 re-pass): allowSymlinkCommand ALONE only skips the "must not be a
+    symlink" text check -- assertSecureCommandPath() still resolves the symlink and runs
+    the full permission/ownership verification against the RESOLVED target (grounded
+    against install-policy-Barp1EUw.js + a live run of OpenClaw's own
+    validateInstallPolicyStatic against a real stable-symlink layout: {"issues":[]}).
+    This is the standard update-alternatives/Homebrew/nix "stable alias -> versioned
+    binary" packaging idiom and must not FAIL."""
     home = _home(tmp_path, config={"security": {"installPolicy": {
         "enabled": True,
         "exec": {
             "source": "exec",
-            "command": "/opt/policy/check.sh",
+            "command": "/usr/local/bin/openclaw-install-gate",
             "allowSymlinkCommand": True,
         },
     }}})
     r = check_install_policy_gate(collect(home))
-    assert r.status == FAIL
-    assert any("allowSymlinkCommand" in e for e in r.evidence)
+    assert r.status == PASS
 
 
 def test_both_escape_flags_false_is_not_fail(tmp_path):
@@ -211,6 +224,64 @@ def test_escape_flag_beats_passenv_secret_still_fail(tmp_path):
 # ---------------------------------------------------------------------------
 # Never a false-positive FAIL on a merely-narrow (but safe) target list
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# B-238 (C-135 re-pass): allowInsecurePath + exec.trustedDirs downgrade to WARN
+# ---------------------------------------------------------------------------
+
+def test_allow_insecure_path_with_trusted_dirs_warns_not_fails(tmp_path):
+    """allowInsecurePath skips permission/ownership checks, but
+    assertSecureCommandPath() enforces trustedDirs containment BEFORE the
+    allowInsecurePath early-return, so a non-empty trustedDirs still constrains the
+    command to an operator-declared directory -- OpenClaw's own documented remediation
+    for the Windows-ACL-probe-unavailable case. Real residual risk (trustedDirs
+    containment doesn't verify the target's own permissions) -> WARN, not FAIL."""
+    home = _home(tmp_path, config={"security": {"installPolicy": {
+        "enabled": True,
+        "exec": {
+            "source": "exec",
+            "command": "/opt/corp-security/bin/install-gate",
+            "trustedDirs": ["/opt/corp-security/bin"],
+            "allowInsecurePath": True,
+        },
+    }}})
+    r = check_install_policy_gate(collect(home))
+    assert r.status == WARN
+    assert any("allowInsecurePath" in e for e in r.evidence)
+
+
+def test_allow_insecure_path_with_empty_trusted_dirs_still_fails(tmp_path):
+    """An empty trustedDirs list constrains nothing -- must not be treated as a
+    genuine containment and downgraded."""
+    home = _home(tmp_path, config={"security": {"installPolicy": {
+        "enabled": True,
+        "exec": {
+            "source": "exec",
+            "command": "/opt/policy/check.sh",
+            "trustedDirs": [],
+            "allowInsecurePath": True,
+        },
+    }}})
+    r = check_install_policy_gate(collect(home))
+    assert r.status == FAIL
+
+
+def test_allow_insecure_path_and_symlink_command_no_trusted_dirs_still_fails(tmp_path):
+    """The genuinely dangerous combination -- both escape flags, no trustedDirs
+    constraint -- must still FAIL (false-negative direction)."""
+    home = _home(tmp_path, config={"security": {"installPolicy": {
+        "enabled": True,
+        "exec": {
+            "source": "exec",
+            "command": "/tmp/world-writable/gate.sh",
+            "allowInsecurePath": True,
+            "allowSymlinkCommand": True,
+        },
+    }}})
+    r = check_install_policy_gate(collect(home))
+    assert r.status == FAIL
+    assert any("allowInsecurePath" in e for e in r.evidence)
+
 
 def test_narrow_targets_list_does_not_affect_verdict(tmp_path):
     home = _home(tmp_path, config={"security": {"installPolicy": {

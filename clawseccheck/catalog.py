@@ -379,10 +379,14 @@ CATALOG: list[CheckMeta] = [
         surface="skills",
     ),
     # B174 (B-238): the operator-facing install GATE itself -- security.installPolicy.*
-    # (enabled + the exec hook's allowInsecurePath/allowSymlinkCommand/passEnv escape
-    # surface) -- distinct from B42, which only scans a skill's own postinstall hook
-    # content and skill-dir perms. FAIL is reserved for the two literal escape booleans;
-    # the bare "not enabled" default state is WARN-only (C-135: common/deliberate).
+    # (enabled + the exec hook's allowInsecurePath/allowSymlinkCommand/trustedDirs/passEnv
+    # escape surface) -- distinct from B42, which only scans a skill's own postinstall
+    # hook content and skill-dir perms. FAIL is reserved for an unrestrained
+    # allowInsecurePath (no trustedDirs); trustedDirs narrows it to WARN, a bare
+    # allowSymlinkCommand alone doesn't bypass the resolved-target's own permission checks
+    # and is not a finding trigger, and the bare "not enabled" default state is WARN-only
+    # (C-135 adversarial re-pass, B-238: ground truth is install-policy-Barp1EUw.js
+    # assertSecureCommandPath()).
     CheckMeta(
         "B174",
         "security.installPolicy.* operator gate + exec-hook escape flags",
