@@ -275,6 +275,7 @@ from ._lifecycle import (
     check_hook_policy_bypass,
     check_human_approval,
     check_install_policy,
+    check_install_policy_gate,
     check_known_vulns,
     check_memory_poisoning,
     check_offboarding_hygiene,
@@ -1147,6 +1148,7 @@ CHECKS = [
     check_orphaned_plugin_caches,  # B152 — on-disk plugin cache not in plugins.entries
     check_clawhub_lock_verification,  # B135 — accepted-despite-failed-verification install
     check_declared_skill_reconciliation,  # B158 — declared-but-unresolved skill-load source (F-119)
+    check_install_policy_gate,  # B174 — security.installPolicy.* gate + exec-hook escape flags (B-238)
 ]
 
 
