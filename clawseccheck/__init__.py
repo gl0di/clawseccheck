@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import baseline as _baseline
+from . import brand
 from .baseline import apply as apply_baseline
 from .baseline import fingerprint, load_ignore
 from .canary import evaluate, make_canary, render_canary
@@ -70,7 +71,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
 
 
 __all__ = [
-    "audit", "collect", "run_all", "compute", "ScoreResult", "run_native_audit",
+    "audit", "brand", "collect", "run_all", "compute", "ScoreResult", "run_native_audit",
     "render_report", "render_dashboard", "render_dashboard_findings", "render_card", "render_json", "render_monitor",
     "render_svg", "render_vet_json", "vet_skill", "vet_mcp", "vet_plugin", "vet_source", "detect_vet_type",
     "make_canary", "evaluate", "render_canary",
