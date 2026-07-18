@@ -3,6 +3,88 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.51.0] — 2026-07-18
+
+Nine new checks over configuration surfaces the audit had never read, a fix for a check
+that punished you for taking its own advice, and a single source of truth for the brand.
+The catalog goes from 134 to 143 checks.
+
+Every new check that can FAIL went through an **independent** adversarial pass — a
+separate reviewer whose only job was to find a configuration where it fires wrongly. It
+found one in four of the five config checks, after each author's own review had reported
+clean. Those are all fixed below rather than shipped.
+
+### Added
+- **B171 — in-chat privileged commands.** `commands.bash` / `.config` / `.mcp` /
+  `.plugins` let a chat message run a shell, rewrite the running config, or repoint the
+  agent at another MCP server. None of it was read. Now scored against its own
+  `ownerAllowFrom` / `allowFrom` / `useAccessGroups` gate.
+- **B172 — standing exec approvals.** Inventories `allow-always` grants in
+  `exec-approvals.json` — persisted authority that lives outside `openclaw.json` and is
+  easy to forget. Advisory only: OpenClaw merges those grants as stricter-wins, so a
+  standing grant cannot loosen your exec gate, and this check does not pretend otherwise.
+- **B173 — native-audit suppressions.** `security.audit.suppressions` permanently silences
+  findings from OpenClaw's own audit, and ClawSecCheck folds that audit in — so a
+  suppression blinded both. The list is now disclosed, and suppressing a genuinely
+  critical native check escalates.
+- **B174 — install policy.** `security.installPolicy.*`, the operator gate on skill and
+  plugin installation, plus its exec-hook escape flags.
+- **B175 — autonomous skill workshop.** `skills.workshop.autonomous` with
+  `approvalPolicy=auto` writes and installs code with no human review.
+- **B176 — paired devices.** `devices/paired.json` holds standing operator tokens; only
+  pending pairings were audited. Reports presence and age, never a token value.
+- **B177 — OpenClaw's own plugin verdict.** `openclaw.sqlite` already stores a per-plugin
+  ClawHub trust verdict. Reading it (read-only, stdlib `sqlite3`) is free signal that was
+  being thrown away.
+- **B178 — provider base URLs.** A cleartext `http://` `models.providers.<id>.baseUrl`
+  sends your API key over the wire in plaintext. A custom `https://` endpoint is a normal
+  private-proxy setup and is not flagged.
+- **B179 — hook toggles.** `hooks.webhooks` / `hooks.internal` enable-toggles and extra
+  load directories.
+
+### Fixed
+- **A1 punished you for following its own remediation.** When A1 flags an MCP-driven
+  lethal trifecta, the fix it recommends is to disable the server — but a server marked
+  `"enabled": false` still contributed its capability legs, so a hardened config scored
+  **F/49 instead of A/94**. Disabled servers are now skipped entirely. Grounded against
+  OpenClaw's own dist, which filters them at every consumption site.
+- **A1 was still blind to MCP as an untrusted-input source.** The previous release added
+  the sensitive-data and outbound legs from `mcp.servers`; the intake leg is now covered
+  too, so an all-MCP trifecta no longer scores clean.
+- **The secrets-at-rest scan silently stopped after 500 files.** On a real home the budget
+  was exhausted by an excluded plugin cache long before the walk reached `workspace/`,
+  `credentials/` or `identity/` — and the check still reported as though it had read the
+  home. Exclusions now apply during the walk, and a truncated scan that finds nothing
+  reports UNKNOWN instead of a confident clean verdict. On a 10,000-file home the scan is
+  no longer capped at all.
+- **Secret detection flagged the indirection instead of the secret.** `DB_PASSWORD_FILE`
+  or `GITHUB_TOKEN_PATH` pointing at a Docker/Kubernetes secrets mount was read as secret
+  material because the *path* contained punctuation and digits. A path or bare URL is now
+  understood as a pointer; a connection string with an embedded credential still fires.
+- **Trusted-proxy identity constraints on Python 3.9.** Carried over from v3.50.0 and
+  worth repeating: the ranges considered non-routable are now tested explicitly rather
+  than asked of `ipaddress`, whose answer differed across supported interpreters.
+- **The terminal grade letter lost its colour.** `report.py` defined the same name twice —
+  ANSI colour names, then hex codes for the badge — so the second silently shadowed the
+  first and every grade rendered bold but uncoloured. Both are gone; the two ramps now
+  live in `brand.py` under distinct names, which makes the collision impossible rather
+  than merely fixed.
+- **The threat-monitor rule ran short.** The mascot is double-width, so a hardcoded
+  underline stopped two columns before the end of its own heading.
+
+### Changed
+- **Brand values have one home.** `clawseccheck/brand.py` now owns the mascot, wordmark,
+  separators, header and frame builders, both colour ramps, the severity styles and the
+  logo. It is organised by how far each thing actually reaches: a chat user sees plain
+  text only, so meaning never depends on colour or on a logo rendering — those exist for
+  terminals and HTML respectively. A source-level test keeps it that way: brand literals
+  outside `brand.py` fail the build, and it caught one survivor in the CLI on its first run.
+- **Backup-and-sync exfil vocabulary was narrowed, not widened.** An attempt to catch
+  "archive/snapshot/replicate the credentials to …" produced false alarms on ordinary
+  prose, because those words are everyday nouns. The ambiguous verbs were dropped rather
+  than patched around; a directive phrased *only* in that vocabulary is a documented,
+  test-pinned miss.
+
 ## [3.50.0] — 2026-07-18
 
 Recall release. A black-box test campaign against a real agent showed the scanner's weak
