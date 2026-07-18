@@ -22,7 +22,7 @@ from .catalog import (
     ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
 from .ansi import paint
-from .brand import BRAND_RED, GRADE_HEX, LOGO_SVG, SEVERITY, WORDMARK
+from .brand import BRAND_RED, GRADE_ANSI, GRADE_HEX, LOGO_SVG, SEVERITY, WORDMARK
 from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
 from .guide import suggest_actions
@@ -117,8 +117,11 @@ def _sev_token(severity: str, *, ascii_only: bool = False, color: bool = False) 
     return f"{_SEV_GLYPH.get(severity, '⚪')} {word}"
 
 # ── ANSI colour palette (opt-in; see ansi.py) ────────────────────────────────
-# Grade → colour for the header grade letter + score-bar fill.
-_GRADE_COLOR = {"A": "green", "B": "green", "C": "yellow", "D": "bright_yellow", "F": "red"}
+# Grade → colour for the header grade letter + score-bar fill. Sourced from
+# brand.GRADE_ANSI (not a local dict) so this can never collide with the
+# unrelated grade→hex badge/HTML palette the way the old same-named
+# module-level `_GRADE_COLOR` dict (defined twice in this file) once did —
+# see brand.py's module docstring for the bug that motivated the split.
 # Status → colour for finding icons / coverage states.
 _STATUS_COLOR = {
     FAIL: "red", WARN: "yellow", PASS: "green", UNKNOWN: "grey",
@@ -137,7 +140,7 @@ DRIFT_MIN_SCORED = 20  # minimum scored_total before the staleness nudge is even
 
 def _grade_color(grade: str) -> str:
     """Map a grade label (possibly 'A+', 'B-', …) to a palette colour name."""
-    return _GRADE_COLOR.get((grade or "")[:1].upper(), "grey")
+    return GRADE_ANSI.get((grade or "")[:1].upper(), "grey")
 
 
 def _color_icons(icon: dict, color: bool) -> dict:
@@ -1075,9 +1078,6 @@ def render_events(events, ascii_only: bool = False) -> str:
     return _asciify(out) if ascii_only else out
 
 
-_GRADE_COLOR = {"A": "#4c1", "B": "#97ca00", "C": "#dfb317", "D": "#fe7d37", "F": "#e05d44"}
-
-
 def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     """A shields.io-style SVG badge (grade + score, plus a suppressed-critical marker —
     never finding details)."""
@@ -1089,7 +1089,7 @@ def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     n_hidden = sum(1 for f in findings if surfaced_despite_suppression(f))
     if n_hidden:
         value += f" *{n_hidden} suppressed"
-    color = _GRADE_COLOR.get(score.grade, "#9f9f9f")
+    color = GRADE_HEX.get(score.grade, "#9f9f9f")
     lw = 8 + len(label) * 6          # rough text widths
     vw = 8 + len(value) * 7
     w = lw + vw

@@ -173,19 +173,52 @@ def test_html_report_badge_color_matches_brand_grade_hex():
     assert f"--grade: {expected};" in html
 
 
+_FINDING_CARD_RE = re.compile(
+    r'<article class="finding" style="--sev:(#[0-9a-fA-F]+);">.*?'
+    r'<span class="sev-pill">([A-Z]+)</span>.*?</article>',
+    re.DOTALL,
+)
+
+
 def test_html_report_severity_colors_match_brand_severity():
     """Every severity chip/finding-card color (`--sev:{hex}`) for a severity
     that actually occurs must equal brand.SEVERITY[severity].hex — compared
     against brand.py's live constants, not a hardcoded hex literal, so the
-    test tracks the single source of truth instead of re-duplicating it."""
+    test tracks the single source of truth instead of re-duplicating it.
+
+    Scoped to BOTH surfaces independently (summary chips and finding cards),
+    not just an `in html` existence check over the whole document: a chip
+    emitting the right hex can't mask a card emitting the wrong one (or vice
+    versa) the way a single substring search over the full page can."""
     _, findings, score = audit(FIXTURES / "home_vuln")
     html = render_html(findings, score)
     issues = [f for f in findings if f.status in (FAIL, "WARN") and not getattr(f, "suppressed", False)]
     severities_present = {f.severity for f in issues}
     assert severities_present, "fixture must exercise at least one severity"
+
+    # Summary chips: `<span class="sev-chip" style="--sev:{hex};">`.
     for sev in severities_present:
         expected = SEVERITY[sev].hex
         assert f"--sev:{expected};" in html
+
+    # Finding cards: each card's own `--sev:` must match ITS OWN severity
+    # pill, not just some hex appearing somewhere in the document. This is
+    # what mutation-testing proved the old `in html` check could not catch:
+    # a `_finding_card` that hardcodes one hex for every severity still
+    # satisfies "the right hexes appear somewhere" (the chips supply them)
+    # while every card itself is wrong.
+    cards = _FINDING_CARD_RE.findall(html)
+    assert len(cards) == len(issues), (
+        f"expected one finding-card match per issue ({len(issues)}), got {len(cards)} — "
+        "the card-scoping regex may be out of sync with render_html's markup"
+    )
+    for color, sev in cards:
+        expected = SEVERITY[sev].hex
+        assert color == expected, (
+            f"finding card for severity {sev!r} rendered --sev:{color} but "
+            f"brand.SEVERITY[{sev!r}].hex is {expected} — drift reintroduced "
+            "in the card path"
+        )
 
 
 def test_html_report_unknown_grade_falls_back_to_default_color():
