@@ -1092,6 +1092,18 @@ def _mcp_leg_contributions(cfg: dict) -> dict:
     for name, spec in _mcp_servers(cfg).items():
         if not isinstance(spec, dict):
             spec = {}
+        # B-247 FP fix: an `enabled: false` server contributes NO tools to the agent —
+        # OpenClaw filters it out at every consumption site (server.enabled !== false in
+        # bundle-mcp-config-CdwmTK7W.js / tool-policy-pipeline-C3edOW1F.js / bundle-mcp-
+        # codex-DkMkPyae.js; McpServerSchema.enabled is optional boolean, zod-schema-
+        # O9ml_nmo.js). Use `is False`, not falsy/`not spec.get("enabled")` — an omitted
+        # key is the permissive default. This also repairs the pre-existing (B-229)
+        # sensitive-data/outbound blindness to the same field, not just the new intake
+        # leg: keeping a disabled entry in config (OpenClaw's own documented
+        # `mcp configure --disable` workflow, and A1's own remediation advice) must not
+        # itself manufacture a trifecta leg.
+        if spec.get("enabled") is False:
+            continue
         cmd = str(spec.get("command", ""))
         raw_args = spec.get("args")
         args = [str(a) for a in raw_args] if isinstance(raw_args, list) else []

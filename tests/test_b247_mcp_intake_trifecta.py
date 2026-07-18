@@ -163,6 +163,36 @@ def test_leg_contributions_calculator_mcp_does_not_raise_untrusted_input():
     assert contribs["untrusted input"] == []
 
 
+def test_leg_contributions_disabled_intake_server_is_skipped():
+    """B-247 FP fix: `enabled: false` must suppress the server from ALL three legs, not
+    just intake — an operator who disables a server (OpenClaw's own documented
+    `mcp configure --disable` remediation, and A1's own advice to 'break the trifecta')
+    must not still get flagged for a server that contributes zero tools."""
+    contribs = _mcp_leg_contributions(
+        {"mcp": {"servers": {"w": {
+            "enabled": False,
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-fetch"],
+        }}}}
+    )
+    assert contribs["untrusted input"] == []
+    assert contribs["sensitive data"] == []
+    assert contribs["outbound actions"] == []
+
+
+def test_leg_contributions_enabled_true_intake_server_still_flags():
+    """Control: an explicit `enabled: true` (or omitted, the permissive default) must
+    still raise the leg — only `enabled is False` suppresses."""
+    contribs = _mcp_leg_contributions(
+        {"mcp": {"servers": {"w": {
+            "enabled": True,
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-fetch"],
+        }}}}
+    )
+    assert contribs["untrusted input"]
+
+
 def test_leg_contributions_does_not_touch_existing_sensitive_or_outbound():
     """A pure intake MCP must not manufacture sensitive-data or outbound-actions
     contributions — the three legs stay independently computed."""
@@ -220,6 +250,55 @@ def test_a1_isolating_control_swap_intake_flips_to_full_trifecta_fail():
     assert set(a1_after.evidence) == {"untrusted input", "sensitive data", "outbound actions"}
 
 
+def test_a1_disabled_intake_mcp_alone_does_not_raise_untrusted_input_leg():
+    """The exact adversary repro, in-memory: a fetch-shaped server with `enabled:
+    false` must not raise the intake leg (OpenClaw never starts it — server.enabled
+    !== false is enforced at every consumption site, see _mcp_leg_contributions)."""
+    a1 = _a1({"mcp": {"servers": {"w": {
+        "enabled": False,
+        "command": "npx", "args": ["-y", "@modelcontextprotocol/server-fetch"],
+    }}}})
+    assert "untrusted input" not in (a1.evidence or [])
+
+
+def test_a1_isolating_control_disable_flag_flips_full_trifecta_fail_to_pass():
+    """The adversary's exact isolating control: identical config except the intake
+    MCP's `enabled` flag. FAIL only when enabled is true/omitted; PASS at 2/3 when
+    enabled is false — proving the flag, not the server's mere presence, is what must
+    gate the leg."""
+    base = {
+        "mcpServers": {"postgres-secret": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-postgres", "postgres://db/prod"],
+        }},
+        "mcp": {"servers": {"relay": {"url": "https://relay.example.com/mcp"}}},
+        "tools": {"profile": "coding"},
+    }
+    disabled = dict(base, mcp={"servers": {
+        **base["mcp"]["servers"],
+        "web-research": {
+            "enabled": False,
+            "command": "npx", "args": ["-y", "@modelcontextprotocol/server-fetch"],
+        },
+    }})
+    enabled = dict(base, mcp={"servers": {
+        **base["mcp"]["servers"],
+        "web-research": {
+            "enabled": True,
+            "command": "npx", "args": ["-y", "@modelcontextprotocol/server-fetch"],
+        },
+    }})
+
+    a1_disabled = _a1(disabled)
+    a1_enabled = _a1(enabled)
+
+    assert a1_disabled.status != FAIL
+    assert "untrusted input" not in (a1_disabled.evidence or [])
+
+    assert a1_enabled.status == FAIL
+    assert set(a1_enabled.evidence) == {"untrusted input", "sensitive data", "outbound actions"}
+
+
 def test_a1_detail_names_mcp_server_as_intake_capability_source():
     a1 = _a1({
         "mcpServers": {"postgres-secret": {
@@ -266,6 +345,23 @@ def test_clean_isolating_control_fixture_stays_two_of_three():
 
 def test_clean_isolating_control_fixture_no_fail_in_full_audit():
     _, findings, _ = audit(FIXTURES / "clean_b247_mcp_no_intake_stays_two_of_three")
+    assert not [f for f in findings if f.status == FAIL]
+
+
+def test_clean_disabled_intake_fixture_stays_two_of_three():
+    """The false-positive fixture: byte-identical to bad_b247_mcp_intake_trifecta's
+    intake-bearing server except `"enabled": false` on the fetch server. Must NOT
+    reach 3/3 — the disabled flag, not the server's absence, is the isolating
+    control."""
+    ctx = collect(FIXTURES / "clean_b247_mcp_disabled_intake_stays_two_of_three")
+    a1 = check_trifecta(ctx)
+    assert a1.status != FAIL
+    assert "untrusted input" not in (a1.evidence or [])
+    assert len(a1.evidence) <= 2
+
+
+def test_clean_disabled_intake_fixture_no_fail_in_full_audit():
+    _, findings, _ = audit(FIXTURES / "clean_b247_mcp_disabled_intake_stays_two_of_three")
     assert not [f for f in findings if f.status == FAIL]
 
 
