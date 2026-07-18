@@ -2183,6 +2183,167 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
     )
 
 
+# ---------- B176 (B-243): standing operator authority in paired device store (devices/paired.json) ----------
+# Real shape (docs/research/openclaw-schema-recon.md §14.3): a dict keyed by device-id
+# hash; each entry: deviceId, publicKey, platform, clientId, clientMode, role, roles,
+# scopes, approvedScopes, tokens, createdAtMs, approvedAtMs, lastSeenAtMs,
+# lastSeenReason. Once a pending pairing (B138) is approved it moves HERE and carries a
+# live standing operator token + the granted scopes -- B138 only ever audits the
+# *request*; nothing previously read the resulting *grant*. This check never reads the
+# `tokens` field's value and never echoes any token/publicKey material -- only
+# deviceId/platform/scope-name/age, each routed through logsafe.redact() as defense in
+# depth before it reaches a Finding.
+#
+# C-135 guard: >=1 paired operator-scope device is the EXPECTED state for every normal
+# OpenClaw install (the user's own phone/laptop) -- so this is WARN/advisory inventory,
+# never FAIL, exactly matching B138's precedent (a pending high-scope request is also
+# common/expected and still only WARNs). Verified against the real ~/.openclaw/devices/
+# paired.json (2 devices, both operator-scope, both <2 days old) -- WARN, never FAIL.
+#
+# B-243 FP fix: `openclaw devices revoke --device <id> --role <role>` (device-pairing-
+# Dw7KWdQ7.js:783-812) writes ONLY `tokens[role].revokedAtMs` -- it deliberately leaves
+# the device entry's `scopes`/`approvedScopes` untouched (they remain the historical
+# approval baseline `resolveApprovedDeviceScopeBaseline` still reads for re-pairing, same
+# file line 246). OpenClaw's own auth path treats a revoked token as dead
+# (server-aux-handlers-BfM3vWwc.js:870: `if (!operatorToken || operatorToken.revokedAtMs)
+# return null`; same guard in device-pairing-Dw7KWdQ7.js:615 verifyDeviceToken). So a
+# device whose `tokens` dict is present and every entry in it carries `revokedAtMs` holds
+# NO live authority, whatever `scopes`/`approvedScopes` still say -- it is skipped below.
+# When `tokens` is absent, empty, or has any live (non-revoked) entry, behavior is
+# unchanged: still WARN. This only ever reads the `revokedAtMs` timestamp off `tokens` --
+# never a token/publicKey value -- so the never-echo-token-material contract still holds.
+def check_paired_device_operator_authority(ctx: Context) -> Finding:
+    """B176 (B-243) -- standing operator authority in paired device store
+    (devices/paired.json).
+
+    PASS    -- devices/paired.json is absent (nothing paired yet), OR present with no
+              device holding a *live* high-privilege scope (operator.admin /
+              operator.write) -- a device whose every token has been revoked
+              (`tokens[role].revokedAtMs` set for all roles) does not count, even if
+              `scopes`/`approvedScopes` still list the historical grant.
+    WARN    -- one or more paired devices hold standing operator.admin/operator.write
+              authority via a live (non-revoked) token -- an inventory advisory (count +
+              age), never proof of compromise.
+    UNKNOWN -- devices/paired.json exists but is unreadable or not valid JSON.
+    """
+    import json as _json
+    import time as _time
+
+    paired_path = ctx.home / "devices" / "paired.json"
+    if not paired_path.is_file():
+        return _finding(
+            "B176",
+            PASS,
+            "no devices/paired.json found — no paired devices to evaluate.",
+            "No action needed.",
+        )
+
+    try:
+        data = _json.loads(paired_path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return _finding(
+            "B176",
+            UNKNOWN,
+            "devices/paired.json present but unreadable — cannot evaluate paired "
+            "device operator authority.",
+            "Ensure devices/paired.json is owner-readable, or review it manually.",
+        )
+    except ValueError:
+        return _finding(
+            "B176",
+            UNKNOWN,
+            "devices/paired.json present but not valid JSON — cannot evaluate paired "
+            "device operator authority.",
+            "Review devices/paired.json manually for paired devices holding standing "
+            "operator authority.",
+        )
+
+    if not isinstance(data, dict):
+        return _finding(
+            "B176",
+            UNKNOWN,
+            "devices/paired.json present but not in the expected format — cannot "
+            "evaluate paired device operator authority.",
+            "Review devices/paired.json manually for paired devices holding standing "
+            "operator authority.",
+        )
+
+    if not data:
+        return _finding(
+            "B176",
+            PASS,
+            "devices/paired.json found but empty — no paired devices to evaluate.",
+            "No action needed.",
+        )
+
+    from ..logsafe import redact as _redact  # noqa: PLC0415
+
+    now_ms = _time.time() * 1000.0
+    high_scope_ev: list[str] = []
+    for key, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        scopes: set = set()
+        for scope_key in ("approvedScopes", "scopes"):
+            values = entry.get(scope_key)
+            if isinstance(values, (list, tuple)):
+                scopes.update(s for s in values if isinstance(s, str))
+        granted = sorted(s for s in scopes if s in _HIGH_SCOPE_NAMES)
+        if not granted:
+            continue
+
+        tokens = entry.get("tokens")
+        if (
+            isinstance(tokens, dict)
+            and tokens
+            and all(
+                isinstance(t, dict) and t.get("revokedAtMs") for t in tokens.values()
+            )
+        ):
+            # Every token this device holds has been revoked -- no live standing
+            # authority remains (see the B-243 grounding note above). Skip it.
+            continue
+
+        device_id = entry.get("deviceId") or key
+        platform = entry.get("platform", "unknown")
+        last_seen = entry.get("lastSeenAtMs") or entry.get("approvedAtMs") or entry.get("createdAtMs")
+        age_desc = "unknown"
+        if isinstance(last_seen, (int, float)) and last_seen > 0:
+            age_days = max(0.0, (now_ms - last_seen) / 86_400_000.0)
+            age_desc = f"{age_days:.1f}d"
+        high_scope_ev.append(
+            _redact(
+                f"deviceId={device_id} platform={platform} scopes={granted} "
+                f"lastSeenAgeDays={age_desc}"
+            )
+        )
+
+    if not high_scope_ev:
+        return _finding(
+            "B176",
+            PASS,
+            f"{len(data)} paired device(s) found; none hold operator.admin/"
+            "operator.write authority.",
+            "Continue reviewing paired devices periodically.",
+        )
+
+    detail = "; ".join(high_scope_ev[:6]) + (
+        f" (+{len(high_scope_ev) - 6} more)" if len(high_scope_ev) > 6 else ""
+    )
+    return _finding(
+        "B176",
+        WARN,
+        f"{len(high_scope_ev)} paired device(s) hold standing operator.admin/"
+        f"operator.write authority: {detail}.",
+        "Confirm every listed device is one you still use and recognize (`openclaw "
+        "devices list`); remove any unknown or stale device (`openclaw devices remove "
+        "<deviceId>`) and rotate the token of any you keep "
+        "(`openclaw devices rotate --device <id> --role <role>`) so an old standing "
+        "token cannot be replayed.",
+        evidence=high_scope_ev[:6],
+    )
+
+
 # ---------- B135: accepted-despite-failed-verification skill install (.clawhub/lock.json) ----------
 # Real shape (docs/research/openclaw-schema-recon.md §14.5): {"version": ..., "skills":
 # {<slug>: {"version", "installedAt", "registry", "artifact", "skillFile", "verification":

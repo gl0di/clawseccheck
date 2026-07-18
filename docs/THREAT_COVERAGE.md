@@ -88,7 +88,7 @@ classified at all.
 | Filesystem-write tool exposure | B55 | Broad fs-write without scoping `[CHECK: B55]` |
 | **Config-write / config-health / session-approval advisories** | B77, B78, B79 | **B77:** reads `~/.openclaw/logs/config-audit.jsonl` for unexpected writers or suspicious-diff flags (advisory, `scored=False`). **B78:** reads `config-health.json` for a non-null `lastObservedSuspiciousSignature` field (advisory). **B79:** samples recent Codex session JSONL files to detect `approval_policy=never` on every sampled turn (advisory) `[CHECK: B77, B78, B79]` |
 | **Log corpus threat-hunting (advisory)** | B164 | Content-scans the agent's OWN log/transcript corpus (trajectory sidecars, `logging.file`, `cacheTrace`, session transcripts, config-audit log, memory files, install backups) for signals against the agent (injected instructions surfacing in log content) and against its environment (exfil evidence, dangerous-capability use, compromise IOCs, tamper/anomaly, at-rest secrets). Quiet-by-default (base-rate discipline): WARN only when ≥2 signal classes co-occur in one sink, or a single class with inherent same-line/permission corroboration fires (exfil evidence is secret+exfil-host paired; secrets-at-rest also needs a world-readable sink); isolated single-class hits are suppressed to a quiet report hint, never a WARN. Also correlates across artifacts (C-221): when an installed skill's own text names a high-specificity IOC (a known drop-host or a credential/secret-shaped path) and that same IOC turns up in the agent's log corpus: a **known drop-host** match alone WARNs (genuinely low base-rate), while a **credential/secret-path** match is only a corroborator — it counts as one extra signal class, so it needs a co-occurring class to WARN (a helper skill legitimately naming and reading `~/.aws/credentials` can't sole-trigger a false alarm). Redacted token + declaring skill name + count only — raw log content never emitted. Advisory, `scored=False`, never FAILs `[CHECK: B164]` |
-| Codex/device-pairing hygiene | B136, B138 | B136 flags Codex CLI project `trust_level="trusted"`; B138 flags a dangling high-scope pending device pairing `[CHECK: B136, B138]` |
+| Codex/device-pairing hygiene | B136, B138, B176 | B136 flags Codex CLI project `trust_level="trusted"`; B138 flags a dangling high-scope pending device pairing; B176 (B-243) inventories standing `operator.admin`/`operator.write` authority in the *approved* device store (`devices/paired.json`) — B138 only ever audited the pending *request*, nothing previously read the resulting grant. WARN-only advisory (count + age, never the token value) — matches B138's precedent that >=1 paired operator device is the expected state, never FAIL `[CHECK: B136, B138, B176]` |
 | Cron scheduler persistence surface | C048, B168 | Top-level cron entries; B168 (B-231) collects and content-scans the cron job store (`payload.message` / `trigger.script`) for injected directives, flags a `deleteAfterRun`+exec self-erasing job, and returns UNKNOWN on an absent/unreadable store `[CHECK: C048, B168]` |
 | Injection-like text in HTML image attributes | C074 | `[CHECK: C074]` |
 | Egress inventory / secrets-at-rest scan | C014, C015 | C014 enumerates the outbound-capable surface; C015 scans the OpenClaw home for secrets at rest `[CHECK: C014, C015]` |
@@ -220,7 +220,7 @@ OWASP Agentic (ASI) classes below, not stretched into a category they don't fit.
 | LLM03 | Supply Chain | B5, B13, B15, B24, B25, B33, B42, B57, B103, B135, B151, B152, C4, C5, C047 |
 | LLM04 | Data and Model Poisoning | B7, B20, B22, B55 |
 | LLM05 | Improper Output Handling | B21, B47 |
-| LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B62, B63, B65, B66, B68, B69, B71, B72, B76, B79, B105, B136, B138, B150, T1, T3 |
+| LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B62, B63, B65, B66, B68, B69, B71, B72, B76, B79, B105, B136, B138, B150, B176, T1, T3 |
 | LLM07 | System Prompt Leakage | B9 |
 | LLM08 | Vector and Embedding Weaknesses | — (no agent-config surface; RAG/embedding concern) |
 | LLM09 | Misinformation | — (model output / overreliance; out of scope) |
@@ -243,7 +243,7 @@ finding in `--json` (`"ast": [...]`).
 |---|---|---|
 | AST01 | Malicious Skills | B13, B60, B63, B65, C048 |
 | AST02 | Supply Chain Compromise | B5, B13, B15, B24, B25, B42, B57, B103, B135, B151, B152, C5, C047 |
-| AST03 | Over-Privileged Skills | B3, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B68, B69, B71, B72, B75, B76, B79, B138, B150 |
+| AST03 | Over-Privileged Skills | B3, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B68, B69, B71, B72, B75, B76, B79, B138, B150, B176 |
 | AST04 | Insecure Metadata | B6, B44, B62, T3 |
 | AST05 | Untrusted External Instructions | B6, B7, B20, B21, B23, B26, B30, B58, B59, B60, B61, B63, B64, B65, B66, B67, B74, B105, B140, C074, T1 |
 | AST06 | Weak Isolation | B4, B22, B38, B39, B48, B70, B73, B136, C032 |
