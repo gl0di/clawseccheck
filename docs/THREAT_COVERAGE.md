@@ -43,6 +43,7 @@ classified at all.
 | Plaintext secrets in config / bootstrap | B1 | Reports key paths, not values `[CHECK: B1]` |
 | System-prompt / secret leak in tool output | B9 | `[CHECK: B9]` |
 | Audit log & sensitive redaction | B10 | `[CHECK: B10]` |
+| Native-audit suppression list transparency | B173 | `security.audit.suppressions` permanently silences specific findings of OpenClaw's OWN `openclaw security audit` (and therefore native.py's fold-in of it too) — disclosed as WARN when non-empty, escalated to FAIL only when a suppressed checkId is grounded as unconditionally critical in the native audit source (B-237) `[CHECK: B173]` |
 | Local-first & model hygiene | B12 | `[CHECK: B12]` |
 | Gateway exposure & channel auth | B2, B11, B80 | IPv6-aware bind parsing; B80 flags auth without rate limiting on a non-loopback bind `[CHECK: B2, B11, B80]` |
 | Least privilege / dangerous tools | B3, B7, B8 | Approval gate via real `tools.exec.mode` `[CHECK: B3, B7, B8]` |

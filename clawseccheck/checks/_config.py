@@ -1268,6 +1268,152 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
         evidence=descriptions,
         pass_confidence="verified",
     )
+# ---------- B173 (B-237): security.audit.suppressions self-blinds the native audit ----------
+# Grounded: zod-schema-O9ml_nmo.js SecuritySchema — security.audit.suppressions is an array
+# of { checkId: string().min(1), titleIncludes?, detailIncludes?, reason? } (all `.strict()`).
+# audit-UjVvFwCi.js's runSecurityAudit() applies these via applySecurityAuditSuppressions()
+# BEFORE returning `openclaw security audit --json`'s output — so a suppressed finding never
+# reaches native.py's fold-in either (native.py execs that exact command and only ever sees
+# the post-suppression `findings` array). A non-empty list is not itself a vulnerability —
+# it is how an operator knowingly accepts a specific, reviewed native finding — so this stays
+# WARN/disclosure by default. It escalates to FAIL only when a suppressed checkId is one this
+# project has grounded, directly against audit-UjVvFwCi.js, as UNCONDITIONALLY
+# severity:"critical" there (a literal `severity: "critical"` in the source, never a
+# `cond ? "critical" : "warn"` ternary whose true branch we cannot re-derive statically without
+# duplicating OpenClaw's own runtime-exposure logic — and a wrong guess would be exactly the
+# false-FAIL Golden Rule #5 forbids) AND that literal-critical finding fires on an actual
+# DEFECT with actionable remediation — not merely on a feature being enabled at all. Literal
+# `severity: "critical"` in the native source is necessary but not sufficient: B-237 found
+# `gateway.trusted_proxy_auth` is literally critical yet fires unconditionally whenever
+# `gateway.auth.mode === "trusted-proxy"` (audit-UjVvFwCi.js:245-254), with a remediation that
+# is a verification checklist ("Verify: (1)... (2)... (3)...", see the trusted-proxy setup
+# guide), not a config change. There is no underlying condition a correctly-configured
+# trusted-proxy operator (e.g. behind Pomerium/Caddy/nginx SSO) can fix to clear it — it is
+# OpenClaw's own documented enterprise auth mode, and every operator running it will see this
+# finding forever. Escalating a knowing, reviewed suppression of that notice to FAIL/CRITICAL
+# is a false positive (an operator correctly using a supported feature gets told to abandon
+# it) — so `gateway.trusted_proxy_auth` is deliberately excluded here and stays WARN-only via
+# the disclosure path below. The three checkIds that fire on REAL trusted-proxy
+# misconfiguration remain in the set and keep escalating: `gateway.trusted_proxy_no_proxies`
+# ("All requests will be rejected" — empty trustedProxies), `gateway.trusted_proxy_no_user_header`
+# (missing userHeader), and the generic `gateway.bind_no_auth` catch-all when trusted-proxy
+# auth itself is misconfigured badly enough to not count as a shared secret. Deliberately
+# scoped to the core `runSecurityAudit` orchestrator in audit-UjVvFwCi.js only; checkIds from
+# its channel-security/deep-probe extension modules are covered by the disclosure WARN but
+# never escalate here.
+_NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS = frozenset({
+    "gateway.bind_no_auth",
+    "gateway.loopback_no_auth",
+    "gateway.control_ui.allowed_origins_required",
+    "gateway.tailscale_funnel",
+    "gateway.control_ui.device_auth_disabled",
+    "gateway.trusted_proxy_no_proxies",
+    "gateway.trusted_proxy_no_user_header",
+    "fs.state_dir.perms_world_writable",
+    "fs.config.perms_writable",
+    "fs.config.perms_world_readable",
+})
+
+
+def _is_native_unconditional_critical_check_id(check_id: str) -> bool:
+    """True for a grounded always-critical native-audit checkId — an exact match from
+    ``_NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS``, or the templated
+    ``tools.elevated.allowFrom.<provider>.wildcard`` shape (audit-UjVvFwCi.js
+    collectElevatedFindings — the provider name varies, the ``.wildcard`` suffix and
+    unconditional ``severity: "critical"`` do not)."""
+    return (
+        check_id in _NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS
+        or (
+            check_id.startswith("tools.elevated.allowFrom.")
+            and check_id.endswith(".wildcard")
+        )
+    )
+
+
+def check_audit_suppressions(ctx: Context) -> Finding:
+    """B173 (B-237) — ``security.audit.suppressions`` permanently silences specific findings
+    of OpenClaw's OWN built-in ``openclaw security audit`` (and therefore native.py's
+    fold-in of it too), with nothing previously disclosing that a suppression list exists.
+
+    Absent/empty list → PASS (nothing suppressed). Non-empty → WARN, naming the suppressed
+    checkId(s) — a suppression is a knowingly-accepted native finding, not itself a
+    vulnerability. FAIL/CRITICAL only when a suppressed checkId is one this project has
+    grounded as unconditionally critical in the native audit source (see
+    ``_NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS``) — a config write that permanently quiets one
+    of those is positive evidence, not a guess.
+    """
+    unreadable = _config_unreadable("B173", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    suppressions = dig(cfg, "security.audit.suppressions")
+    if not isinstance(suppressions, list) or not suppressions:
+        return _finding(
+            "B173",
+            PASS,
+            "No security.audit.suppressions configured — OpenClaw's built-in "
+            "`openclaw security audit` runs unfiltered.",
+            "Keep security.audit.suppressions empty unless you are knowingly accepting a "
+            "specific, reviewed native-audit finding.",
+            pass_confidence="verified",
+        )
+
+    critical_hits: list[str] = []
+    disclosed: list[str] = []
+    for i, entry in enumerate(suppressions):
+        if not isinstance(entry, dict):
+            continue
+        check_id = entry.get("checkId")
+        if not isinstance(check_id, str) or not check_id.strip():
+            continue
+        check_id = check_id.strip()
+        label = f"security.audit.suppressions[{i}]: checkId={check_id!r}"
+        reason = entry.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            # Disclose that a reason was recorded without echoing the operator-authored
+            # free-text value itself into evidence/reports.
+            label += " (reason given)"
+        disclosed.append(label)
+        if _is_native_unconditional_critical_check_id(check_id):
+            critical_hits.append(check_id)
+
+    if not disclosed:
+        # Non-empty list but no entry had a recognizable checkId (malformed hand-edit —
+        # OpenClaw's own schema requires checkId, so a real config always has one). Still
+        # worth a look, but there is nothing concrete to name — WARN, not a guess FAIL.
+        return _finding(
+            "B173",
+            WARN,
+            "security.audit.suppressions is non-empty but no entry has a usable checkId.",
+            "Check security.audit.suppressions for malformed entries — each needs a "
+            "non-empty checkId string.",
+            evidence=[f"security.audit.suppressions has {len(suppressions)} entrie(s)"],
+        )
+
+    if critical_hits:
+        return _finding(
+            "B173",
+            FAIL,
+            "security.audit.suppressions silences a native-audit check this project has "
+            "grounded as unconditionally critical: "
+            f"{', '.join(sorted(set(critical_hits)))}.",
+            "Remove the suppression for the critical checkId(s) above and fix the underlying "
+            "condition instead — do not permanently silence a critical finding of OpenClaw's "
+            "own built-in security audit.",
+            evidence=disclosed,
+            severity=CRITICAL,
+        )
+    return _finding(
+        "B173",
+        WARN,
+        f"security.audit.suppressions has {len(disclosed)} configured entry/entries — "
+        "OpenClaw's built-in `openclaw security audit` (and ClawSecCheck's fold-in of it) "
+        "will never show these findings again.",
+        "Review each suppressed checkId periodically and remove it once the accepted risk "
+        "no longer applies. A non-empty list is not itself a vulnerability, only a "
+        "transparency signal.",
+        evidence=disclosed,
+    )
 
 
 def check_hook_template_content(ctx: Context) -> Finding:

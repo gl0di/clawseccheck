@@ -1,0 +1,24 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": {
+      "mode": "trusted-proxy",
+      "trustedProxy": { "userHeader": "x-forwarded-user", "allowLoopback": false }
+    },
+    "trustedProxies": ["10.42.0.11", "10.42.0.12"]
+  },
+  "channels": { "telegram": { "dmPolicy": "allowlist", "groupPolicy": "allowlist" } },
+  "tools": { "profile": "minimal" },
+  "security": {
+    "audit": {
+      "suppressions": [
+        {
+          "checkId": "gateway.trusted_proxy_auth",
+          "reason": "Reviewed: reverse proxy terminates TLS and SSO, trustedProxies pinned"
+        }
+      ]
+    }
+  },
+  "logging": { "redactSensitive": "tools" },
+  "models": { "main": { "provider": "ollama/llama3" } }
+}

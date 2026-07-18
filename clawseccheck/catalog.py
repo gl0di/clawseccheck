@@ -1617,6 +1617,26 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B173 (B-237): security.audit.suppressions[] permanently silences specific findings of
+    # OpenClaw's OWN built-in `openclaw security audit` -- and since native.py's fold-in only
+    # ever sees what that CLI already returns, a suppression blindfolds BOTH the native audit
+    # AND ClawSecCheck's fold-in of it, with nothing previously flagging that a suppression
+    # list even exists. Grounded: zod-schema-O9ml_nmo.js SecuritySchema.audit.suppressions[]
+    # = { checkId (required), titleIncludes?, detailIncludes?, reason? }. A non-empty list is
+    # not itself a vulnerability -- legitimate, knowingly-accepted native findings get
+    # suppressed -- so the default is WARN (disclosure), scored like B41/B48. FAIL only when a
+    # suppressed checkId is one of a small, grounded set audit-UjVvFwCi.js's own
+    # runSecurityAudit gives an UNCONDITIONAL severity:"critical" (no runtime-state ternary).
+    CheckMeta(
+        "B173",
+        "OpenClaw native-audit suppression list (security.audit.suppressions)",
+        MEDIUM,
+        "advisory",
+        "Transparency / Audit Suppression",
+        scored=True,
+        confidence="HIGH",
+        surface="monitoring",
+    ),
     # E-032 v1 — behavioral trajectory audit (--behavioral mode only, never part of the
     # main audit()/CHECKS list or the A-F score). Reads OpenClaw's trajectory sidecar
     # (agents/*/sessions/*.trajectory.jsonl, §9.1 grounded) and finds sequences PROVEN by
