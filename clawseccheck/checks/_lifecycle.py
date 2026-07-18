@@ -1376,6 +1376,99 @@ def check_self_modification(ctx: Context) -> Finding:
     )
 
 
+# ---------- B175: Skill Workshop autonomous authoring + no-review install ----------
+# Real OpenClaw schema (grounded 2026-07-18, dist config-XlfFMqhc.js
+# resolveSkillWorkshopConfig + zod-schema-O9ml_nmo.js:1510-1516):
+#   skills.workshop.autonomous.enabled        bool,              default false
+#   skills.workshop.approvalPolicy            "pending" | "auto", default "pending"
+#   skills.workshop.allowSymlinkTargetWrites  bool,              default false
+#
+# Spec correction: the originating bug report assumed approvalPolicy
+# and allowSymlinkTargetWrites live NESTED under .autonomous, and assumed a "manual"
+# policy value. Neither is true: both are SIBLINGS of `autonomous` directly under
+# skills.workshop, and the only two literals the schema accepts are "pending" (the safe
+# default) and "auto" — any other value, or an omitted key, resolves to "pending"
+# (readApprovalPolicy() in config-XlfFMqhc.js only special-cases the literal "auto").
+#
+# skills.workshop.autonomous.enabled=true lets the agent AUTHOR brand-new executable
+# skill proposals from conversation signals with no explicit user request
+# (get-reply-OTG64ybi.js: `skillSuggestionEnabled = !autonomous.enabled` — autonomous
+# mode replaces the normal suggest-then-ask flow). approvalPolicy="auto" removes the
+# human confirmation step for EVERY skill_workshop lifecycle call
+# (propose/apply/reject/quarantine) — agent-tools.before-tool-call-C95DXQXZ.js:608:
+# `if (resolveSkillWorkshopConfig(params.config).approvalPolicy === "auto") return;`
+# short-circuits resolveSkillWorkshopToolApproval before it ever builds a
+# requireApproval gate. The combination (enabled=true + approvalPolicy=auto) is the
+# full unattended self-modification pipeline the bug report names: the agent can
+# conceive of, write, AND install new executable code from a single conversation turn
+# with zero human review — treated as FAIL. Any one gap alone (autonomous authoring
+# still review-gated before install; OR approvalPolicy=auto with no autonomous
+# authoring; OR allowSymlinkTargetWrites widening where an apply can write) is a real
+# but lesser risk — WARN. Disabled/all-default is the safe common case — PASS.
+def check_skill_workshop_autonomy(ctx: Context) -> Finding:
+    if (f := _config_unreadable("B175", ctx)) is not None:
+        return f
+
+    cfg = ctx.config
+    enabled = dig(cfg, "skills.workshop.autonomous.enabled") is True
+    is_auto = dig(cfg, "skills.workshop.approvalPolicy") == "auto"
+    symlink_writes = dig(cfg, "skills.workshop.allowSymlinkTargetWrites") is True
+
+    if not (enabled or is_auto or symlink_writes):
+        return _finding(
+            "B175",
+            PASS,
+            "Skill Workshop autonomous authoring is disabled and lifecycle actions "
+            "(propose/apply/reject/quarantine) require review — approvalPolicy is not "
+            '"auto".',
+            "—",
+        )
+
+    reasons = []
+    if enabled:
+        reasons.append(
+            "skills.workshop.autonomous.enabled=true (agent auto-authors skill "
+            "proposals from conversation signals with no user request)"
+        )
+    if is_auto:
+        reasons.append(
+            'skills.workshop.approvalPolicy="auto" (no human confirmation before a '
+            "skill_workshop proposal is applied/installed)"
+        )
+    if symlink_writes:
+        reasons.append(
+            "skills.workshop.allowSymlinkTargetWrites=true (apply can write through "
+            "symlinked workspace skill paths into shared/trusted skill roots)"
+        )
+
+    if enabled and is_auto:
+        return _finding(
+            "B175",
+            FAIL,
+            "Skill Workshop can autonomously AUTHOR new executable skill code from "
+            "conversation signals AND install it with no human review step: "
+            + "; ".join(reasons)
+            + ".",
+            'Set skills.workshop.approvalPolicy to the default "pending" so every '
+            "generated proposal needs an explicit `openclaw skills workshop apply` "
+            "decision before it installs; also consider disabling "
+            "skills.workshop.autonomous.enabled if unattended skill authoring is not "
+            "intended.",
+            evidence=reasons,
+        )
+
+    return _finding(
+        "B175",
+        WARN,
+        "Skill Workshop autonomy posture has a partial gap: " + "; ".join(reasons) + ".",
+        'Keep skills.workshop.approvalPolicy at the default "pending" (never "auto"), '
+        "disable skills.workshop.autonomous.enabled unless unattended authoring is "
+        "intended, and leave allowSymlinkTargetWrites at its default false unless a "
+        "shared/trusted skill root genuinely needs it.",
+        evidence=reasons,
+    )
+
+
 def check_session_approval_policy(ctx: Context) -> Finding:
     import json as _json
 

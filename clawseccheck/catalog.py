@@ -1576,6 +1576,32 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B175 (E-047): Skill Workshop autonomous authoring + no-review
+    # install. Grounded 2026-07-18 against the installed dist
+    # (config-XlfFMqhc.js:resolveSkillWorkshopConfig, zod-schema-O9ml_nmo.js:1510-1516)
+    # AFTER the originating bug report's assumed field shape turned out wrong: the report
+    # nested approvalPolicy/allowSymlinkTargetWrites under .autonomous and assumed a
+    # "manual" policy value. The real schema has them as SIBLINGS of `autonomous` directly
+    # under skills.workshop, and the only two literals it accepts are "pending" (the safe
+    # default) and "auto" — anything else, including an omitted key, resolves to "pending".
+    # skills.workshop.autonomous.enabled=true lets the agent author brand-new executable
+    # skill proposals from conversation signals with no user request
+    # (get-reply-OTG64ybi.js: autonomous mode replaces the normal suggest-then-ask flow).
+    # approvalPolicy="auto" removes the human confirmation step for every skill_workshop
+    # lifecycle call (propose/apply/reject/quarantine) —
+    # agent-tools.before-tool-call-C95DXQXZ.js:608 short-circuits the approval-gate builder
+    # before it ever runs. The combination is the full unattended self-modification
+    # pipeline the bug names: conceive, author, AND install new executable code from a
+    # single conversation turn, zero human review. HIGH confidence — a deterministic
+    # config-field fact, not a heuristic.
+    CheckMeta(
+        "B175",
+        "Skill Workshop autonomous authoring + no-review install (approvalPolicy=auto)",
+        HIGH,
+        "hardening",
+        "Write Integrity / Self-Modification",
+        surface="skills",
+    ),
     # E-032 v1 — behavioral trajectory audit (--behavioral mode only, never part of the
     # main audit()/CHECKS list or the A-F score). Reads OpenClaw's trajectory sidecar
     # (agents/*/sessions/*.trajectory.jsonl, §9.1 grounded) and finds sequences PROVEN by
@@ -1722,6 +1748,7 @@ AST_MAP = {
     "C074": ("AST05",),
     "B4": ("AST06",),
     "B22": ("AST03", "AST06"),
+    "B175": ("AST03", "AST06"),  # skill workshop auto-author + no-review install = over-privileged self-modification (cf. B22)
     "B39": ("AST06",),
     "B48": ("AST06", "AST03"),
     "B70": ("AST06",),
@@ -1813,6 +1840,7 @@ OWASP_MAP = {
     "B20": ("LLM04",),
     "B21": ("LLM01", "LLM05"),
     "B22": ("LLM04", "LLM06"),
+    "B175": ("LLM04", "LLM06"),  # skill workshop auto-author + no-review install = Data/Model Poisoning + Excessive Agency (cf. B22)
     "B23": ("LLM01", "LLM06"),
     "B24": ("LLM03",),
     "B25": ("LLM03",),

@@ -208,6 +208,7 @@ check_sender_identity
 check_session_approval_policy
 check_session_visibility
 check_silent_instruction
+check_skill_workshop_autonomy
 check_social_engineering_phishing
 check_subagent_spawn_limits
 check_subagents
