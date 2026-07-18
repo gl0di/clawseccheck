@@ -1148,11 +1148,15 @@ _MCP_SECRET_ENV_RE = re.compile(
 # STRIPE_SECRET_KEY, DB_PASSWORD) matches none of those alternatives and was
 # silently missed. Widening the NAME match alone would risk sweeping in a benign
 # var whose name merely mentions a secret-ish word but whose value is not itself a
-# credential (e.g. API_KEY_HEADER_NAME="Authorization", TOKEN_TTL_SECONDS="3600") —
-# so a compound-name hit is corroborated by the VALUE itself looking like real
-# secret material via _mcp_value_looks_secret() (C-135) before it counts as a hit;
-# see the env/header loops below. Reuses the same SECRET_KEY_RE substring match
-# _secret_paths (checks/_shared.py) already uses for the generic config-wide scan.
+# credential (e.g. NOTIFY_TOKEN_ENABLED="true", SESSION_TOKEN_TTL_SECONDS="3600" —
+# NOT API_KEY_HEADER_NAME/TOKEN_TTL_SECONDS: those match _MCP_SECRET_ENV_RE's own
+# API_KEY*/TOKEN* prefix alternatives unconditionally and never reach this fallback
+# at all; that is a separate, pre-existing false positive, not one this fallback
+# introduces or fixes) — so a compound-name hit is corroborated by the VALUE itself
+# looking like real secret material via _mcp_value_looks_secret() (C-135) before it
+# counts as a hit; see the env/header loops below. Reuses the same SECRET_KEY_RE
+# substring match _secret_paths (checks/_shared.py) already uses for the generic
+# config-wide scan.
 #
 # B-248 follow-up (FALSE POSITIVE): the value-shape test originally accepted ANY
 # whitespace-free string >=8 chars with a digit or "special" char — and a POSIX/
