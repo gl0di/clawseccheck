@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import pytest
 
 from clawseccheck.integrity import package_digest
 from clawseccheck.cli import main
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
@@ -275,12 +278,55 @@ def test_cli_verify_self_warns_web_search_checksum_is_not_verification(capsys):
     match as 'verified'. The output must say plainly that a checksum alone isn't proof —
     only running cosign is — so a host agent reading the report can't skip the signature
     check and still claim it verified anything.
+
+    CLAWSECCHECK-C-240 adversarial follow-up: the original version of this test also
+    accepted a bare "cosign" in out — an arm that was unconditionally true even before
+    this feature existed (the "signed via cosign." trusted-digest line a few lines above
+    already contains it), so the assertion never actually exercised the caution text and
+    a semantic inversion of the advice ("a checksum you read off a web page is fine proof
+    on its own; no need to run anything") passed it. There is no sound narrower substring
+    match that resists an adversarial rewording of a natural-language caution, so this
+    pins the literal sentence instead of a fuzzy keyword heuristic.
     """
     main(["--verify-self"])
-    out = capsys.readouterr().out.lower()
-    assert "proves nothing by" in out or "not verification" in out or "cosign" in out
-    # The caution line must appear before the command, guiding readers to run cosign.
-    assert "web page" in out or "chat reply" in out
+    out = capsys.readouterr().out
+    assert (
+        "A checksum you just read off a web page or a chat reply proves nothing by\n"
+        "itself — it could be tampered with too. Verify the cosign signature instead"
+    ) in out
+
+
+def test_cli_verify_self_cosign_command_matches_published_docs(capsys):
+    """CLAWSECCHECK-C-240 adversarial follow-up: cli.py's printed cosign invocation is a
+    fourth copy of the same command already published in README.md and docs/USAGE.md, and
+    nothing enforced the three staying in sync — a change that only edited one of them (or
+    that appended verification-defeating flags like --insecure-ignore-tlog /
+    --insecure-ignore-sct, which silently disable Rekor transparency-log and SCT checks)
+    would pass every other test in this file. Derive the expected command from the docs
+    instead of restating a fifth hand-typed copy here, so the three stay provably equal.
+    """
+
+    def cosign_command_lines(text):
+        lines = text.splitlines()
+        start = next(i for i, ln in enumerate(lines) if "cosign verify-blob" in ln)
+        collected = []
+        for ln in lines[start:]:
+            token = ln.strip().rstrip("\\").strip()
+            collected.append(token)
+            if token == "SHA256SUMS.txt":
+                break
+        else:
+            raise AssertionError("cosign command block never reached SHA256SUMS.txt")
+        return collected
+
+    readme_cmd = cosign_command_lines((REPO / "README.md").read_text(encoding="utf-8"))
+    usage_cmd = cosign_command_lines((REPO / "docs" / "USAGE.md").read_text(encoding="utf-8"))
+
+    main(["--verify-self"])
+    cli_cmd = cosign_command_lines(capsys.readouterr().out)
+
+    assert readme_cmd == usage_cmd == cli_cmd
+    assert not any("insecure" in line for line in cli_cmd)
 
 
 def test_cli_verify_self_cosign_guidance_is_unconditional():
