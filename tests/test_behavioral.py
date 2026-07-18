@@ -234,6 +234,34 @@ def test_t1_warns_on_canonical_email_exfil_pattern():
     assert f.status == WARN
 
 
+def test_t1_pass_on_base64_get_exfil_via_web_fetch_accepted_limitation():
+    """B-249, documented/accepted limitation, NOT a regression to "fix" here: a full
+    ingress -> sensitive -> (disguised egress) sequence is observed, yet T1 stays
+    silent. The third leg is a GET-based exfil beacon carrying stolen data as a
+    base64 URL param on an ordinary web_fetch call — but 'web_fetch' classifies as
+    ingress (INPUT_TOOL_HINTS), same as the first leg, regardless of what its
+    (unread) arguments actually contain: T1 is metadata-only by contract (§8,
+    structurally enforced by trajectory.read_events() never exposing
+    data.arguments), so it can never tell this fetch apart from an ordinary
+    ingress fetch. This exact sequence (cred-read then a beacon-shaped fetch) is
+    instead caught by B164/logscan.py's cross-line corroboration (see
+    tests/test_check_b164.py's B-249 tests) — the layer that already has a sound,
+    bounded precedent for reading raw argument text. See the in-source note above
+    _classify_verb_role for the full reasoning."""
+    groups = {
+        "th1": [
+            {"type": "tool.call", "name": "browse_page", "seq": 1},  # ingress leg
+            {"type": "tool.call", "name": "read_credential_file", "seq": 2},  # sensitive leg
+            # web_fetch's arguments (destination host + base64 param) are exactly what
+            # make THIS call an exfil beacon, but T1 never reads them — only the verb
+            # NAME, which reads identically to an ordinary ingress fetch.
+            {"type": "tool.call", "name": "web_fetch", "seq": 3},
+        ]
+    }
+    f = check_behavioral_trifecta(groups)
+    assert f.status == PASS
+
+
 def test_t1_pass_on_ordinary_web_files_chat_workflow():
     """C-170 regression: 'search the web, look at repo files, post a summary to
     Slack' is an entirely mundane combo, not a lethal-trifecta pattern — an earlier

@@ -54,7 +54,29 @@ from .trajectory import read_events, read_proven_tools
 #    narrowing it there would weaken A1, a change out of this check's scope).
 _T_SENSITIVE_HINTS = ("db", "sql", "postgres", "supabase", "secret", "credential", "vault")
 
-
+# B-249 (accepted, documented limitation — NOT a bug to "fix" by reading arguments):
+# a GET-based exfil beacon that carries stolen data as a base64/high-entropy URL param on
+# an ordinary `web_fetch`/`fetch`/`browse` call is INVISIBLE to T1. `_classify_verb_role`
+# below classifies a verb by NAME ONLY ("web_fetch" -> "ingress", via INPUT_TOOL_HINTS'
+# "web"/"fetch" hints) — correct for the overwhelming common case (a fetch verb really is
+# an ingress leg, reading a page into the agent), but indistinguishable, at the verb-name
+# level, from the SAME verb used as an outbound beacon. Telling those two apart needs the
+# call's ARGUMENTS (destination host + param shape) — and this module's own §8 contract,
+# stated at the top of this file and structurally enforced by `trajectory.read_events()`
+# (which never extracts `data.arguments`/`output`/`result`/`contentItems` in the first
+# place — there is no argument data in an `events` dict to read), makes that a hard
+# boundary, not a style choice. Reading arguments here would break the metadata-only
+# privacy contract every T1/T2/T3 finding relies on for its ATTESTED-tier confidence.
+#
+# This is NOT the same shape as an unsound regex retraction (C-135/§2.5) — it is a
+# genuine, structural blind spot in a verb-name-only heuristic, not a false positive to
+# suppress. The check that CAN see this pattern is B164 (logscan.py): it plain-text scans
+# the raw trajectory/log line (already an established, narrower precedent — see
+# logscan.py's own module docstring on why that's a sound, bounded exception to the
+# metadata-only rule) and, per B-249, now correlates a credential-path read earlier in a
+# sink with a base64-encoded param to a known drop host on a later line. See
+# tests/test_behavioral.py's B-249 regression for a test-pinned confirmation that T1
+# stays silent on exactly this shape, and B164's own tests for the corroborated catch.
 def _classify_verb_role(name: str | None) -> str | None:
     """Classify one tool verb as "ingress" / "sensitive" / "egress" / None.
 

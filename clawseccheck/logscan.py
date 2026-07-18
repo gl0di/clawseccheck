@@ -43,7 +43,16 @@ from datetime import datetime
 
 from . import attest
 from . import logsafe as _logsafe
-from .checks import INJECTION_PATTERNS, SECRET_PATTERNS, _CRED_RE, _EXFIL_RE, _SECRET_PATH_RE
+from .checks import (
+    INJECTION_PATTERNS,
+    SECRET_PATTERNS,
+    _B64_BLOB_RE,
+    _B64URL_BLOB_RE,
+    _CRED_RE,
+    _EXFIL_RE,
+    _KNOWN_EXFIL_HOST_RE,
+    _SECRET_PATH_RE,
+)
 from .logdiscovery import LogSink
 from .scanbudget import audit_budget_exceeded
 from .textnorm import normalize_for_scan
@@ -114,9 +123,18 @@ def _add_sample(result: LogScanResult, signal: str, raw_snippet: str) -> None:
         result.samples.append(f"{signal}: {_logsafe.redact(raw_snippet)}")
 
 
-def _scan_line_content(result: LogScanResult, line: str, *, is_trajectory: bool = False) -> None:
+def _scan_line_content(
+    result: LogScanResult, line: str, *, is_trajectory: bool = False, cred_seen_before: bool = False
+) -> bool:
     """Classes 1 / 2 / 4 / 6 — plain-text pattern scan over one (already length-capped)
-    line. Applied uniformly to every sink kind, including trajectory sidecar lines."""
+    line. Applied uniformly to every sink kind, including trajectory sidecar lines.
+
+    ``cred_seen_before`` — True when an earlier line in THIS SAME sink already showed a
+    credential-shaped path read (``_CRED_RE``); feeds the B-249 cross-line exfil-evidence
+    extension below. Returns whether THIS line itself is a cred-path read, so the caller
+    can fold it into the running state for the next line (mirrors how ``last_seq``/
+    ``last_ts`` are threaded through ``scan_log_file``'s loop).
+    """
     normalized = normalize_for_scan(line)
 
     # Class 1 — injection_against_agent: a narrow, cheap subset of the content-ring's
@@ -140,6 +158,41 @@ def _scan_line_content(result: LogScanResult, line: str, *, is_trajectory: bool 
     if secret_m and exfil_m:
         lo, hi = min(secret_m.start(), exfil_m.start()), max(secret_m.end(), exfil_m.end())
         _add_sample(result, "exfil_evidence", _windowed(line, lo, hi))
+
+    # Class 2 extension (B-249): an OPAQUE base64-encoded exfil payload has no cleartext
+    # secret to pair against the same-line rule above, so a beacon that carries stolen
+    # data as a base64 GET/URL param (rather than a recognizable credential string) slips
+    # past it entirely — this was the confirmed gap: an injection -> cred-read -> base64
+    # GET-exfil-to-a-drop-host sequence produced neither exfil_evidence (no same-line
+    # secret) nor env_compromise_ioc (the exfil line carries no cred-shaped path itself).
+    # Corroborate ACROSS the sink instead of requiring same-line: a real credential-shaped
+    # PATH read (_CRED_RE — narrow: .aws/credentials, .ssh/id_*, keychain, wallet.dat, ...)
+    # EARLIER in this same sink, followed by a LATER line naming a KNOWN, low-base-rate
+    # drop-point host (_KNOWN_EXFIL_HOST_RE — the same narrow host list this check's own
+    # C-221 cross-artifact axis already trusts) that ALSO carries a base64-alphabet run of
+    # 40+ chars (_B64_BLOB_RE / _B64URL_BLOB_RE — the SAME vetted blob regexes the content-
+    # ring already uses; never a new pattern).
+    #
+    # A bare base64-blob match ALONE would be unsound (a git SHA, UUID, or URL path
+    # segment all qualify — see checks/_content.py's _secrecy_credential_or_encoding_anchor
+    # docstring, where exactly that shape was tried and RETRACTED after two real-fleet
+    # false-positive FAILs on plain benign text). This is materially narrower than that
+    # retracted attempt: it fires only when a real credential-path access is ALREADY
+    # PROVEN earlier in the SAME sink AND the later line names a host from the narrow
+    # known-drop-point list — not a bare blob anywhere in free text. And unlike that
+    # retracted B63 surface, this check is WARN-only/advisory (scored=False, never FAIL —
+    # Golden Rule #5), so even a residual false hit here can never move the grade.
+    if cred_seen_before:
+        host_m = _KNOWN_EXFIL_HOST_RE.search(line)
+        blob_m = _B64_BLOB_RE.search(line) or _B64URL_BLOB_RE.search(line)
+        if host_m and blob_m:
+            lo, hi = min(host_m.start(), blob_m.start()), max(host_m.end(), blob_m.end())
+            _add_sample(
+                result,
+                "exfil_evidence",
+                "cred-read earlier in this sink, then an encoded param to a known drop "
+                "host: " + _windowed(line, lo, hi),
+            )
 
     # Class 4 — env_compromise_ioc: a credential-shaped path/secret-named path token AND
     # an exfil-transport/host token on the SAME line. C-135 note: the literal task spec
@@ -175,6 +228,8 @@ def _scan_line_content(result: LogScanResult, line: str, *, is_trajectory: bool 
     at_rest_m = secret_m or pan_m
     if at_rest_m:
         _add_sample(result, "secrets_at_rest", _windowed(line, at_rest_m.start(), at_rest_m.end()))
+
+    return bool(_CRED_RE.search(line))
 
 
 def _parse_iso_ts(ts: str):
@@ -266,6 +321,7 @@ def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None) -> Lo
     is_trajectory = sink.kind == "trajectory"
     last_seq = None
     last_ts = None
+    cred_seen = False  # B-249: has an EARLIER line in this sink shown a cred-path read?
 
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
@@ -299,7 +355,10 @@ def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None) -> Lo
                 if not line.strip():
                     continue
 
-                _scan_line_content(result, line, is_trajectory=is_trajectory)
+                cred_here = _scan_line_content(
+                    result, line, is_trajectory=is_trajectory, cred_seen_before=cred_seen
+                )
+                cred_seen = cred_seen or cred_here
                 if skill_iocs:
                     low = line.lower()
                     for tok in skill_iocs:
