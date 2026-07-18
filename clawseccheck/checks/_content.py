@@ -7742,6 +7742,53 @@ _BULK_CRED_OBJECT_RE = re.compile(
 # consistent safe-direction bias (a WARN-grade false positive is tolerable; missing
 # a real exfil directive is not), the looser proximity-only design is kept -- the
 # ditransitive gap is tracked as non-blocking debt in the project's issue tracker.
+#
+# B-216 (re-verification, no code change): re-attempted a "exclude when the pronoun is
+# immediately followed by a determiner+noun" fix in isolation and reached the SAME
+# REJECTED verdict as round 4 -- but via an INDEPENDENT argument, not a restatement of
+# round 4's. Do not conflate the two: round 4 rejected its (differently-shaped) fix
+# because tightening the window silenced a legitimate ADVERBIAL backreference ("send
+# them right away, without any delay, to <URL>"); a determiner+noun exclusion does NOT
+# touch that case at all ("right away" is not a determiner+noun, so it stays correctly
+# WARN under this candidate too -- verified). B-216's own, separate reason is EUPHEMISM
+# EVASION: the candidate can't tell the legitimate ditransitive shape ("them the
+# monthly invoice") apart from an attacker's euphemism ("them the encoded blob" / "the
+# archive" / "the data dump") -- both are a bare pronoun followed by a determiner+noun,
+# so any blanket structural exclusion reopens that evasion, no matter how the
+# determiner set is tuned (verified: deleting "them" from each euphemism sentence flips
+# WARN->PASS, confirming the pronoun leg is the sole catcher of that shape). A narrower
+# variant -- demote only when the noun after the pronoun matches a curated "routine
+# correspondence" allowlist (invoice/receipt/newsletter/reminder/...) instead of any
+# noun -- was reasoned through rather than shipped: it is an FP-suppression allowlist
+# (not a detection enumeration, so it doesn't fall foul of this project's
+# anti-enumeration doctrine on its face), but it still (a) only ever covers the nouns
+# someone thought to list, so the FP class stays open for anything not on it, and (b)
+# is exactly the class of live-regex change this codebase's own process requires an
+# independent adversarial ("try to break this") pass on before shipping -- a pass this
+# file cannot give itself. Absent that second, genuinely independent review, shipping
+# it would trade a WARN-grade false positive for an unreviewed false negative -- the
+# wrong direction per this file's own doctrine above.
+#
+# Severity of the accepted residual (corrected 2026-07-18, was previously understated
+# as "bounded" / "low-priority, WARN-grade-only" -- both claims were wrong): (1) it is
+# NOT bounded to one sentence -- a credential-shaped sentence in one file correlates
+# with a benign ditransitive sentence in a DIFFERENT file, across a "# file:" marker
+# (verified: a README.md "manages all stored passwords" line + a SKILL.md "send them
+# the monthly invoice" line correlate and WARN, exactly like the same-file case). (2)
+# check_prose_bulk_exfil's own audit-path status is capped at WARN (this can never
+# reach FAIL -- _bulk_cred_object_correlated only feeds is_bulk_cred, and only is_cred
+# maps to FAIL), but B160 is also a member of SKILL_CONTENT_RING, which --vet consumes
+# to grade a THIRD-PARTY SKILL. There, this WARN degrades the skill's headline verdict:
+# ordinary billing-correspondence prose ("...send them the monthly invoice to <URL>",
+# with an unrelated earlier "manages all stored passwords" sentence) flips a benign
+# skill from Grade A / NO KNOWN ISSUE / score 100 to Grade B / SUSPICIOUS / score 83 in
+# --vet -- a user-facing verdict change on someone else's skill, not a cosmetic WARN
+# line in the full audit. See tests/test_b216_ditransitive_vet_grade.py, which pins
+# that dossier-level flip so a future change to the vet mapping doesn't silently
+# swallow it either. This residual therefore stays accepted (never FAIL, and the C-135
+# analysis above is sound) but is tracked as a real --vet accuracy gap, not a
+# low-priority nit; a sound fix (if one exists) needs a real content-based judgment of
+# the trailing object, not another syntactic pronoun-window tweak.
 _BULK_CRED_PRONOUN_BACKREF_RE = re.compile(r"\b(?:them|it|these|those)\b", re.I)
 _BULK_CRED_PRONOUN_OBJECT_WINDOW = 20  # chars right after the verb: "  them to ", "  it all to "
 
