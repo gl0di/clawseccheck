@@ -1189,10 +1189,10 @@ CATALOG: list[CheckMeta] = [
     ),
     CheckMeta(
         "B82",
-        "cacheTrace transcripts persisted without tool-output redaction",
+        "Cache-trace diagnostics persist full turn transcripts to disk",
         MEDIUM,
         "hardening",
-        "Secrets / At-Rest Redaction",
+        "Data Protection",
         scored=False,
         surface="secrets",
     ),
@@ -2078,7 +2078,7 @@ AST_MAP = {
     "C032": ("AST06",),  # trusting spoofable forwarded headers = weak boundary (cf. B70)
     "B80": ("AST06",),  # no rate limiting on an exposed auth'd gateway = weak isolation (cf. B70)
     "B81": ("AST03",),  # raised subagent spawn limits = over-privileged delegation (cf. B72)
-    "B82": ("AST02",),  # unredacted transcripts at rest = supply-chain/secret exposure (cf. C5)
+    "B82": ("AST02",),  # bulk turn transcripts at rest = sensitive-data exposure (cf. C5)
     "B83": ("AST06",),  # excessive redirect-follow on fetch = weak isolation/SSRF (cf. B38)
     "B84": (
         "AST03",

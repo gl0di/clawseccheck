@@ -5,7 +5,14 @@ logs (journald / bash_history are out of scope; see the workspace design doc §1
 grounds that boundary against the real dist). The sinks this module knows about:
 
   - ``logging.file``                    — config-declared primary JSONL log
-  - ``logging.cacheTrace.filePath``     — config-declared cache-trace transcript JSONL
+  - ``diagnostics.cacheTrace.filePath`` — config-declared cache-trace transcript JSONL
+                                           (NOT ``logging.cacheTrace.*``, which does not
+                                           exist in the dist — see B82 in checks/_egress.py),
+                                           PLUS its conventional default
+                                           ``logs/cache-trace.jsonl`` when ``filePath`` is
+                                           unset — which is the common shape, since
+                                           ``filePath`` is optional and tracing is switched
+                                           on with ``enabled`` alone
   - trajectory sidecars                 — ``agents/*/sessions/*.trajectory.jsonl``
                                            (on by default; reuses ``trajectory.find_trajectory_files``)
   - session transcripts                 — ``agents/*/sessions/*.jsonl`` (NOT the trajectory
@@ -72,8 +79,14 @@ def _is_regular_readable_file(path: Path) -> bool:
 
 
 def _config_path_sink(ctx: Context, dotted_path: str, kind: str) -> "LogSink | None":
-    """Resolve a config-declared file path (``logging.file`` / ``logging.cacheTrace.filePath``)
-    to a LogSink, or None when unset / not a real file."""
+    """Resolve a config-declared file path (``logging.file`` /
+    ``diagnostics.cacheTrace.filePath``) to a LogSink, or None when unset / not a real
+    file.
+
+    Deliberately path-based, not gated on ``diagnostics.cacheTrace.enabled``: a trace file
+    written during an earlier debugging session still exists — and still holds transcript
+    content worth scanning — after tracing is switched back off.
+    """
     value = dig(ctx.config, dotted_path)
     if not isinstance(value, str) or not value.strip():
         return None
@@ -122,6 +135,29 @@ def _transcript_sinks(home: Path, budget: int) -> list[LogSink]:
                 continue
             out.append(LogSink(path=f, kind="transcript", source="convention"))
     return out
+
+
+def _default_cache_trace_sink(home: Path) -> "LogSink | None":
+    """``logs/cache-trace.jsonl`` — where cache tracing writes when ``filePath`` is unset.
+
+    ``resolveCacheTraceConfig`` (``dist/selection-JInn13lc.js:1052``) resolves the
+    destination as ``config?.filePath?.trim() || env.OPENCLAW_CACHE_TRACE_FILE?.trim()``
+    and otherwise falls back to ``path.join(resolveStateDir(env), "logs",
+    "cache-trace.jsonl")`` — and ``resolveStateDir`` defaults to the same state root this
+    module is handed as ``home`` (``dist/config-utils-Cn9AD66v.js:65-77``). Since
+    ``filePath`` is optional and ``enabled`` alone switches tracing on, the default path
+    is the COMMON shape; keying discovery on ``filePath`` alone found the sink only for
+    the minority of configs that set it explicitly.
+
+    Path-based like the rest of this module, and deliberately not gated on ``enabled``: a
+    trace file left behind by an earlier debugging session still holds transcript content
+    worth scanning after tracing is switched back off. An ``OPENCLAW_CACHE_TRACE_FILE``
+    override is not observable from the config and is therefore not resolved here.
+    """
+    p = home / "logs" / "cache-trace.jsonl"
+    if not _is_regular_readable_file(p):
+        return None
+    return LogSink(path=p, kind="cache_trace", source="convention")
 
 
 def _config_audit_sink(home: Path) -> "LogSink | None":
@@ -214,9 +250,15 @@ def discover_log_sinks(ctx: Context) -> list[LogSink]:
     if config_log is not None:
         _add_many([config_log])
 
-    cache_trace = _config_path_sink(ctx, "logging.cacheTrace.filePath", "cache_trace")
+    cache_trace = _config_path_sink(ctx, "diagnostics.cacheTrace.filePath", "cache_trace")
     if cache_trace is not None:
         _add_many([cache_trace])
+    # `filePath` is optional — `enabled` alone starts tracing — so also probe the
+    # conventional default. Deduplication by resolved path means a config that DOES set
+    # `filePath` to this same location still yields one sink, not two.
+    default_cache_trace = _default_cache_trace_sink(home)
+    if default_cache_trace is not None:
+        _add_many([default_cache_trace])
 
     traj_files = find_trajectory_files(home, max_files=_MAX_PER_SOURCE)
     _add_many(

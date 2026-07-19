@@ -19,9 +19,40 @@ enforcement is split into two guards:
     manifest cannot rubber-stamp an ungrounded path. Adding a new `dig()` path therefore
     requires updating the manifest (or CI fails) AND grounding it in the recon (or this
     local test fails).
+  * `test_manifest_root_paths_resolve_against_installed_dist` — C-249, the third layer,
+    also local-only (skips when OpenClaw is not installed). See below.
 
 The manifest lists only config-path strings that are already visible in the shipped source
 (`checks/` etc.) and public docs — it carries no internal research content.
+
+C-249 — why two authorities were not enough
+-------------------------------------------
+Both layers above compare one INTERNAL artifact against another: source `dig()` paths vs
+the manifest, and the manifest vs the recon. Neither ever consults OpenClaw itself. So when
+the recon and the manifest carry the SAME error, the guard rubber-stamps a path OpenClaw's
+own validator rejects — which is exactly how B-262 survived a full schema re-baseline: with
+`logging.cacheTrace.filePath` in the manifest and the recon vouching for it, both layers ran
+green while the real field was `diagnostics.cacheTrace.filePath`.
+
+The third layer resolves each manifest path's PARENT CHAIN against the installed dist
+(`~/.npm-global/lib/node_modules/openclaw/dist/zod-schema*.js`), which carries the real zod
+config schema. Matching leaf keys alone would NOT have caught B-262 — `filePath` does exist,
+just under `diagnostics.cacheTrace` rather than `logging.cacheTrace` — so this layer walks
+every component in order, from `OpenClawSchema` down, and a path is grounded only when each
+component is a direct key of the object its parent denotes.
+
+`_dist_direct_keys()` is a small zod-expression reader, not a JS engine: it follows const
+aliases (`tools: ToolsSchema`), object-literal shapes (`object(ToolExecBaseShape)`), spreads
+(`...CommonToolPolicyFields`) and union branches. Its verdicts were cross-checked against a
+real `OpenClawSchema.safeParse()` on 14 probes — six disputed paths, seven controls and the
+B-262 phantom — and agreed on all of them.
+
+Paths the current schema does NOT contain live in `_NOT_IN_CURRENT_SCHEMA` with their
+disproof, because a few are legitimate: Golden Rule #6 asks the audit to read legacy and
+alternate config shapes, and an older OpenClaw's field is absent from today's dist by
+definition. That register is the point of the layer — the reads are declared and reviewed
+rather than merely believed. `test_register_entries_are_still_absent_from_the_dist` keeps it
+shrinking: the moment a registered path becomes resolvable, the entry has to go.
 
 B-251 — how a path becomes visible to this guard
 ------------------------------------------------
@@ -81,6 +112,7 @@ import re
 import sys
 import textwrap
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -90,12 +122,95 @@ import pytest
 # relative to it so the guard works in CI, where the repo root IS the skill tree. Only the
 # recon doc lives at the workspace root (one level up) and is local-only.
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RECON_FILE = REPO_ROOT.parent / "docs" / "research" / "openclaw-schema-recon.md"
+_RECON_RELATIVE = Path("docs") / "research" / "openclaw-schema-recon.md"
+
+
+def _find_recon_file() -> Path:
+    """The workspace-root recon doc, searched up the ancestor chain.
+
+    It used to be pinned at exactly `REPO_ROOT.parent`, which is right for the normal
+    `<workspace>/skill/` layout and wrong for a git worktree: from
+    `<workspace>/.worktrees/<name>/` the parent is `.worktrees/`, so the path never
+    existed and `test_manifest_is_grounded_in_recon` SKIPPED. Every worktree build —
+    which is how the parallel-agent work actually runs — therefore had the recon layer
+    silently switched off, the same vacuity class this module exists to close.
+
+    Walking up finds it in both layouts and still finds nothing in CI (no ancestor of the
+    checkout carries it), so the intended local-only skip is preserved."""
+    for ancestor in REPO_ROOT.parents:
+        candidate = ancestor / _RECON_RELATIVE
+        if candidate.is_file():
+            return candidate
+    # Nothing found: keep the historical spelling so the skip message names the place a
+    # reader expects the doc to be.
+    return REPO_ROOT.parent / _RECON_RELATIVE
+
+
+RECON_FILE = _find_recon_file()
 SOURCE_DIR = REPO_ROOT / "clawseccheck"
 MANIFEST_FILE = Path(__file__).resolve().parent / "grounded_schema_paths.txt"
 
+# C-249 third authority: the INSTALLED OpenClaw package. Local-only, like the recon —
+# absent in CI and on a machine without OpenClaw, where the layer skips. Read-only.
+OPENCLAW_DIST = Path.home() / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
+# The zod object the whole openclaw.json is parsed against. Anchoring the walk here is what
+# makes a ROOT-namespace manifest entry a checkable claim ("this is a real top-level key").
+DIST_ROOT_SCHEMA = "OpenClawSchema"
+
 # Allowlist for configuration paths that are allowed even if not parsed from markdown
 ALLOWLISTED_PATHS: set[str] = set()
+
+# DENYLIST — paths PROVEN not to exist in the OpenClaw schema. This closes a hole in the
+# recon layer: `_parse_recon_paths()` harvests every dotted token in the doc, and it cannot
+# tell an attestation ("`x.y` is a real field") from a CORRECTION ("`x.y` does not exist").
+# So the moment the recon documents a phantom in order to warn about it, that phantom
+# starts passing `_is_grounded()` — which is exactly how B-262 stayed invisible: the recon
+# AND the manifest were both wrong about `logging.cacheTrace.filePath`, and the guard
+# rubber-stamped it. A denylisted path is never grounded, however the recon phrases it.
+#
+# Add an entry only with the disproof recorded next to it, and only for a path some part of
+# the codebase might plausibly reach for again.
+_PHANTOM_PATHS = frozenset(
+    {
+        # B-262. `grep -rF "logging.cacheTrace"` over the installed package = 0 hits, and
+        # the `logging` zod object is `.strict()` with exactly {level, file, maxFileBytes,
+        # consoleLevel, consoleStyle, redactSensitive, redactPatterns}
+        # (zod-schema-O9ml_nmo.js:1059-1070), so a config carrying it is rejected at load
+        # time. The real object is `diagnostics.cacheTrace` (:1050-1056).
+        "logging.cacheTrace",
+        # B-263. The four would-be GLOBAL egress allowlists C014 used to accept as proof of
+        # a restricted posture. OpenClaw exposes no static egress-control config field at
+        # all, and each of these is rejected at config load. Disproof against the installed
+        # 2026.7.1-2 dist: `grep -rF` = 0 hits for `network.egress`, `gateway.egress` and
+        # `tools.http`; and safeParse against the real root schema (47 keys, no `network`,
+        # no `egress`) rejects every one of them —
+        #   {"network": {"egress": [...]}}       -> unrecognized_keys@<root>
+        #   {"gateway": {"egress": {...}}}       -> unrecognized_keys@gateway
+        #   {"egress": [...]}                    -> unrecognized_keys@<root>
+        #   {"tools": {"http": {"allow": [...]}}} -> unrecognized_keys@tools
+        # while the controls `gateway.port` and `tools.allow` parse cleanly.
+        #
+        # These need the denylist MORE than B-262 did, because the recon does not merely
+        # mention them in a correction: it ALSO still lists `tools.http.allow` in its
+        # positive field inventory ("allowed HTTP endpoints or profiles"). Both spellings
+        # feed `_parse_recon_paths()` as ordinary dotted tokens, so all four scored as
+        # grounded — a re-added `dig(cfg, "gateway.egress")` plus a manifest line passed
+        # BOTH layers green. Verified before this entry existed, not assumed.
+        #
+        # `tools.http` is denylisted at the PARENT, not at `tools.http.allow`: the whole
+        # object is absent from the strict `ToolsSchema`, so every child is a phantom and
+        # `_is_phantom`'s prefix match must cover siblings too.
+        "gateway.egress",
+        "network.egress",
+        "egress",
+        "tools.http",
+    }
+)
+
+
+def _is_phantom(path: str) -> bool:
+    """True when *path* is a denylisted phantom, or hangs off one."""
+    return any(path == p or path.startswith(p + ".") for p in _PHANTOM_PATHS)
 
 # Manifest namespace for a path read off something other than the OpenClaw config root
 # (an entry of `agents.list`, an MCP server entry, a skill's frontmatter metadata, ...).
@@ -652,6 +767,11 @@ def _is_grounded(path: str, recon_paths: set[str]) -> bool:
     object it hangs off. Pinning the base is the manifest-vs-source guard's job."""
     if path.startswith(RELATIVE_PREFIX):
         path = path[len(RELATIVE_PREFIX):]
+    # A proven phantom is never grounded, no matter how the recon spells it out. The recon
+    # mentions these paths precisely to warn about them, and the harvester cannot tell that
+    # apart from an attestation — see _PHANTOM_PATHS.
+    if _is_phantom(path):
+        return False
     if path in recon_paths:
         return True
     for recon_p in recon_paths:
@@ -717,6 +837,78 @@ def test_manifest_is_grounded_in_recon():
     )
 
 
+def test_proven_phantom_paths_are_never_grounded():
+    """B-262 regression, on the GUARD rather than the check.
+
+    The recon documents `logging.cacheTrace.filePath` at length — to say it does not
+    exist. `_parse_recon_paths()` harvests dotted tokens and cannot tell a correction from
+    an attestation, so before the denylist the disproven path scored as grounded, and a
+    future `dig()` of it plus a manifest entry would have passed BOTH layers silently:
+    exactly the failure mode that let B-262 ship. Recon prose must not be able to
+    resurrect it."""
+    # Synthetic recon set, so this runs in CI too (the recon doc is local-only). It is
+    # deliberately the WORST case: the phantom present as a bare harvested token, which is
+    # precisely what the real doc's corrective prose produces.
+    recon_paths = {"logging.cacheTrace.filePath", "logging.cacheTrace", "logging.file"}
+    assert not _is_grounded("logging.cacheTrace", recon_paths)
+    assert not _is_grounded("logging.cacheTrace.filePath", recon_paths)
+    # children of a phantom are phantoms too
+    assert not _is_grounded("logging.cacheTrace.enabled", recon_paths)
+    # ... and the namespaced form cannot sneak past by prefixing
+    assert not _is_grounded(RELATIVE_PREFIX + "logging.cacheTrace.filePath", recon_paths)
+
+
+def test_proven_phantom_egress_paths_are_never_grounded():
+    """B-263 regression, on the GUARD rather than on C014.
+
+    C014 used four would-be global egress allowlists as proof of a restricted posture; all
+    four are rejected by the real schema. Removing them from the check and the manifest is
+    not enough on its own — the grounding layers still scored them as REAL, so re-adding a
+    `dig()` of any one plus a manifest line passed both guards green. Worse than B-262: the
+    recon does not only correct these, it ALSO still lists `tools.http.allow` among its
+    positive field inventory, and `_parse_recon_paths()` harvests both spellings
+    identically.
+    """
+    # Deliberately the worst case: every phantom present as a bare harvested token, exactly
+    # what the recon's corrective prose AND its positive inventory line both produce.
+    recon_paths = {
+        "network.egress", "gateway.egress", "egress", "tools.http.allow",
+        "tools.allow", "gateway.bind",
+    }
+    for phantom in ("network.egress", "gateway.egress", "egress", "tools.http.allow"):
+        assert not _is_grounded(phantom, recon_paths), phantom
+        assert not _is_grounded(RELATIVE_PREFIX + phantom, recon_paths), phantom
+    # `tools.http` is denylisted at the parent, so unlisted siblings are phantoms too.
+    assert not _is_grounded("tools.http.deny", recon_paths)
+    # The real neighbours must survive: denylisting these must not cost real coverage.
+    assert _is_grounded("tools.allow", recon_paths)
+    assert _is_grounded("gateway.bind", recon_paths)
+
+
+def test_phantom_denylist_does_not_shadow_the_real_path():
+    """The denylist must be surgical: `diagnostics.cacheTrace.*` is the REAL object and
+    has to stay groundable, and a merely similar prefix must not be caught either."""
+    recon_paths = {"diagnostics.cacheTrace.filePath", "logging.cacheTrace.filePath"}
+    assert _is_grounded("diagnostics.cacheTrace.filePath", recon_paths)
+    assert not _is_phantom("diagnostics.cacheTrace.filePath")
+    assert not _is_phantom("logging.cacheTraceExtra")
+    assert not _is_phantom("logging.file")
+    # B-263: the bare `egress` entry must match the top-level key and its children only —
+    # a name that merely STARTS WITH "egress" is a different key and must stay groundable.
+    assert _is_phantom("egress")
+    assert _is_phantom("egress.allow")
+    assert not _is_phantom("egressPolicy")
+    assert not _is_phantom("gateway.egressPolicy")
+    # ... and denylisting `tools.http` must not swallow the real `tools.*` siblings.
+    assert not _is_phantom("tools.allow")
+    assert not _is_phantom("tools.httpTimeout")
+
+
+def test_no_manifest_entry_is_a_proven_phantom():
+    """The denylist is only worth having if it is actually applied to the manifest."""
+    assert not [p for p in _parse_manifest_paths() if _is_phantom(p.replace(RELATIVE_PREFIX, ""))]
+
+
 # --------------------------------------------------------------------------------------
 # Resolver regression tests (B-251).
 #
@@ -777,10 +969,10 @@ def test_wrapper_parameter_is_harvested_from_its_call_sites(tmp_path, monkeypatc
 
             def discover(ctx):
                 _sink(ctx, "logging.file", "config_log")
-                _sink(ctx, dotted_path="logging.cacheTrace.filePath", kind="cache_trace")
+                _sink(ctx, dotted_path="diagnostics.cacheTrace.filePath", kind="cache_trace")
         """,
     })
-    assert paths == {"logging.file", "logging.cacheTrace.filePath"}
+    assert paths == {"logging.file", "diagnostics.cacheTrace.filePath"}
 
 
 def test_duplicate_wrapper_name_raises_instead_of_resolving_the_wrong_def(tmp_path, monkeypatch):
@@ -971,3 +1163,616 @@ def test_wrapper_with_no_call_site_anywhere_raises(tmp_path, monkeypatch):
             """,
         })
     assert "no call site" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------------------
+# C-249 — the THIRD authority: the installed OpenClaw dist.
+#
+# The two guards above only ever compare one internal artifact against another, so a shared
+# error passes both. This layer resolves each manifest path's PARENT CHAIN against the real
+# zod config schema shipped in the installed package. Local-only: it skips cleanly when
+# OpenClaw is not installed, exactly as the recon layer skips without the recon doc (B-106),
+# so CI stays green on a checkout that has neither.
+#
+# Read-only, offline, stdlib-only: the dist files are parsed as text, never imported or run.
+# --------------------------------------------------------------------------------------
+
+_JS_IDENT = r"[A-Za-z_$][A-Za-z0-9_$]*"
+# Characters after which a `/` opens a regex literal rather than meaning division. The zod
+# schema is full of `.regex(/^svc:[a-z0-9]{0,61}$/)`, whose braces would otherwise wreck
+# every bracket count downstream.
+_JS_REGEX_PRECEDERS = frozenset("(,=:[!&|?{};+-*%~^<>\n")
+# zod object constructors whose argument carries the shape.
+_ZOD_OBJECT_CTORS = ("object", "strictObject", "looseObject")
+# Alias/spread expansion is bounded; the schema's real nesting is far shallower than this.
+_DIST_MAX_DEPTH = 8
+
+# Manifest paths the CURRENT dist does not contain, each with the disproof that put it here.
+#
+# This register is the layer's whole point, so treat adding to it as the reviewed act it is.
+# An entry is legitimate only when the read is deliberate — Golden Rule #6 asks the audit to
+# understand legacy and alternate config shapes, and a field an older OpenClaw accepted is
+# absent from today's dist by definition. What makes these six benign, and B-262 not, is
+# that every one of them is read BESIDE the real path in the same expression: the real key
+# is consulted first and the dead term only ever contributes when it is absent. A phantom
+# read ALONE (B-262) or read as positive proof of a safe posture (B-263) is a defect, not a
+# register entry.
+#
+# Verdicts below are from `OpenClawSchema.safeParse()` on the installed 2026.7.1-2 dist, not
+# from this file's reader — the reader was cross-checked against it, not trusted over it.
+_NOT_IN_CURRENT_SCHEMA = {
+    "agents.subagents": (
+        "safeParse: unrecognized_keys@agents (the object holds exactly {defaults, list}); "
+        "the real path is agents.defaults.subagents. checks/_agents.py:119 tries it as the "
+        "first of three branches in _has_subagents(), which also tests the real "
+        "agents.defaults.subagents and a multi-entry agents.list — a dead branch, and the "
+        "function's answer does not depend on it."
+    ),
+    "gateway.host": (
+        "safeParse: unrecognized_keys@gateway; binding is configured via gateway.bind / "
+        "gateway.customBindHost. monitor.py:418 reads it as the last term of a fallback "
+        "chain that already ends in a literal default, so it cannot change the outcome."
+    ),
+    "gateway.token": (
+        "safeParse: unrecognized_keys@gateway; the real path is gateway.auth.token. Every "
+        "read is `dig(cfg, 'gateway.auth.token') or dig(cfg, 'gateway.token')` "
+        "(report.py:298 and :521, checks/_config.py:809 and :1697) — legacy second term."
+    ),
+    "lastTouchedVersion": (
+        "safeParse: unrecognized_keys@<root>; the real path is meta.lastTouchedVersion, and "
+        "the root object is .strict(). Every read is "
+        "`dig(cfg, 'meta.lastTouchedVersion') or dig(cfg, 'lastTouchedVersion')` "
+        "(checks/_lifecycle.py:1035, :1319, :3637) — legacy second term."
+    ),
+    "plugins.mcp": (
+        "safeParse: unrecognized_keys@plugins. checks/_shared.py:859 folds it into an MCP "
+        "server map that has already merged the real mcp.servers plus the mcpServers / "
+        "mcp_servers legacy spellings, so it only ever adds servers, never hides any."
+    ),
+    "tools.mcp": (
+        "safeParse: unrecognized_keys@tools. Same call site and same reasoning as "
+        "plugins.mcp (checks/_shared.py:859) — the two are the one `or` expression."
+    ),
+    # --- relative namespace ------------------------------------------------------------
+    # These are not absences at all: they are read off objects OpenClaw deliberately leaves
+    # OPEN, or off files that are not openclaw.json. A schema cannot list keys it has handed
+    # to plugins, channels and skill authors, so no dist evidence can exist either way and
+    # the unanchored walk necessarily comes back empty.
+    RELATIVE_PREFIX + "config.allowPrivateNetwork": (
+        "Read off a plugin entry (checks/_config.py:981, over _plugins(cfg)). "
+        "PluginEntrySchema.config is `record(string(), unknown())` "
+        "(zod-schema-O9ml_nmo.js:788-806) — an open, plugin-defined bag, so its keys are "
+        "outside the schema by design."
+    ),
+    RELATIVE_PREFIX + "config.permissionMode": (
+        "Read off an MCP server entry (checks/_mcp.py:1660). MCP server entries carry "
+        "server-defined config, not openclaw.json's own key space."
+    ),
+    RELATIVE_PREFIX + "config.appServer.command": (
+        "Read off an MCP server entry (checks/_mcp.py:1717) — same open server-defined "
+        "config object as config.permissionMode above."
+    ),
+    RELATIVE_PREFIX + "network.dangerouslyAllowPrivateNetwork": (
+        "Read off a channel's node entries (checks/_config.py:965). ChannelsSchema is "
+        "`.passthrough()` (zod-schema.channels-config-ORTHga0n.js:68-78), so per-channel "
+        "entries are open and their keys are not enumerable from the schema."
+    ),
+    RELATIVE_PREFIX + "openclaw.user-invocable": (
+        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py:4344), not "
+        "off openclaw.json. Skill frontmatter is a separate file format."
+    ),
+    RELATIVE_PREFIX + "openclaw.disable-model-invocation": (
+        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py:4349) — same "
+        "file format as openclaw.user-invocable above."
+    ),
+    RELATIVE_PREFIX + "openclaw.install": (
+        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py:6460) for "
+        "B103's install-directive provenance check. Skill frontmatter, not openclaw.json."
+    ),
+    RELATIVE_PREFIX + "openclaw.install.npmSpec": (
+        "Read off a package/plugin manifest (checks/_mcp.py:236), not off openclaw.json."
+    ),
+}
+
+
+def _blank_js_noncode(text: str) -> str:
+    """Overwrite comment, string and regex-literal CONTENT with spaces, keeping every other
+    character at its original offset. Bracket counting downstream is only sound once braces
+    that live inside `"{"` or `/x{2,3}/` are gone."""
+    out = list(text)
+    i, n = 0, len(text)
+    prev = ""
+
+    def blank(start: int, stop: int) -> None:
+        for k in range(max(start, 0), min(stop, n)):
+            if out[k] != "\n":
+                out[k] = " "
+
+    while i < n:
+        c = text[i]
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j)
+            i = j
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            blank(i, j)
+            i = j
+            continue
+        if c in "\"'`":
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == c:
+                    j += 1
+                    break
+                j += 1
+            blank(i + 1, j - 1)
+            i, prev = j, c
+            continue
+        if c == "/" and (prev == "" or prev in _JS_REGEX_PRECEDERS):
+            j, in_class, closed = i + 1, False, False
+            while j < n:
+                ch = text[j]
+                if ch == "\\":
+                    j += 2
+                    continue
+                if ch == "\n":
+                    break
+                if ch == "[":
+                    in_class = True
+                elif ch == "]":
+                    in_class = False
+                elif ch == "/" and not in_class:
+                    j, closed = j + 1, True
+                    break
+                j += 1
+            if closed:
+                blank(i + 1, j - 1)
+                i, prev = j, "/"
+                continue
+        if not c.isspace():
+            prev = c
+        i += 1
+    return "".join(out)
+
+
+def _match_bracket(code: str, start: int) -> int:
+    """Index just past the bracket group that opens at `start`, or -1 if unbalanced."""
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    stack = [pairs[code[start]]]
+    i = start + 1
+    while i < len(code) and stack:
+        c = code[i]
+        if c in pairs:
+            stack.append(pairs[c])
+        elif c in ")]}":
+            if c != stack[-1]:
+                return -1
+            stack.pop()
+        i += 1
+    return i if not stack else -1
+
+
+def _depth0_brace(expr: str):
+    """Index of the first `{` at bracket-depth 0 of `expr`, or None. Distinguishes
+    `object({...})` (an inline shape) from `object(ToolExecBaseShape)` (a named one)."""
+    depth = 0
+    for i, c in enumerate(expr):
+        if c == "{" and depth == 0:
+            return i
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+    return None
+
+
+def _object_body_members(body: str):
+    """`(key -> value-expression, [spread names])` for members at depth 0 of an object
+    literal body. Depth 0 is what makes this a DIRECT-key reader: a key belonging to some
+    nested object cannot be mistaken for one of this object's own."""
+    keys: dict = {}
+    spreads: list = []
+
+    def take(segment: str) -> None:
+        spread = re.match(r"\s*\.\.\.\s*(" + _JS_IDENT + r")", segment)
+        if spread:
+            spreads.append(spread.group(1))
+            return
+        # String-literal keys arrive here already blanked, hence the `"\s*"` forms.
+        member = re.match(r"\s*(" + _JS_IDENT + r"|\"\s*\"|'\s*')\s*:", segment)
+        if member:
+            keys[member.group(1)] = segment[member.end():]
+
+    depth, start = 0, 0
+    for i, c in enumerate(body):
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            take(body[start:i])
+            start = i + 1
+    take(body[start:])
+    return keys, spreads
+
+
+def _dist_direct_keys(expr: str, consts: dict, visited=None, depth: int = 0) -> dict:
+    """`key -> [value-expression, ...]` for the keys DIRECTLY on the object(s) `expr`
+    denotes, following the four indirections the real schema uses:
+
+      * const aliases          `tools: ToolsSchema`
+      * named shapes           `object(ToolExecBaseShape)`
+      * spreads                `{ ...CommonToolPolicyFields, web: ... }`
+      * union branches         `union([object({a}), object({b})])` -> both a and b
+
+    A key maps to a LIST because unions and spreads can supply the same key from more than
+    one branch; the walk then continues down every one of them.
+
+    Known limits, deliberate and in the safe direction — every one of them can only make a
+    real path look unresolved (a loud failure a human then grounds), never make a fabricated
+    path look real:
+      * `visited` expands each const at most once per top-level call, so a const reachable
+        through two branches contributes only via the first.
+      * Dynamic key spaces (`record(string(), X)`) end the walk: a record's keys are values,
+        not schema, so nothing below one can be confirmed.
+      * Alias/spread expansion stops at `_DIST_MAX_DEPTH`.
+    """
+    if depth > _DIST_MAX_DEPTH:
+        return {}
+    visited = set() if visited is None else visited
+    result: dict = {}
+
+    def absorb(body: str) -> None:
+        keys, spreads = _object_body_members(body)
+        for key, value in keys.items():
+            result.setdefault(key, []).append(value)
+        for name in spreads:
+            if name in consts and name not in visited:
+                visited.add(name)
+                for key, values in _dist_direct_keys(consts[name], consts, visited, depth + 1).items():
+                    result.setdefault(key, []).extend(values)
+
+    ctor_re = re.compile(r"\b(" + "|".join(_ZOD_OBJECT_CTORS) + r")\s*\(")
+    ident_re = re.compile(r"\b(" + _JS_IDENT + r")\b")
+    i, n = 0, len(expr)
+    while i < n:
+        ctor = ctor_re.search(expr, i)
+        ident = ident_re.search(expr, i)
+        brace = expr.find("{", i)
+        candidates = [x for x in (
+            ctor.start() if ctor else None,
+            ident.start() if ident else None,
+            brace if brace >= 0 else None,
+        ) if x is not None]
+        if not candidates:
+            break
+        first = min(candidates)
+
+        if ctor is not None and ctor.start() == first:
+            paren = expr.index("(", ctor.end() - 1)
+            close = _match_bracket(expr, paren)
+            if close < 0:
+                break
+            inner = expr[paren + 1:close - 1]
+            inner_brace = _depth0_brace(inner)
+            if inner_brace is not None:
+                body_close = _match_bracket(inner, inner_brace)
+                if body_close > 0:
+                    absorb(inner[inner_brace + 1:body_close - 1])
+            else:
+                # `object(ToolExecBaseShape)` — the shape is a named object literal.
+                for key, values in _dist_direct_keys(inner, consts, visited, depth + 1).items():
+                    result.setdefault(key, []).extend(values)
+            i = close
+            continue
+
+        if brace >= 0 and brace == first:
+            # A bare object literal, e.g. `const CommonToolPolicyFields = { allow: ... }`.
+            body_close = _match_bracket(expr, brace)
+            if body_close < 0:
+                break
+            absorb(expr[brace + 1:body_close - 1])
+            i = body_close
+            continue
+
+        name = ident.group(1)
+        if name in consts and name not in visited:
+            visited.add(name)
+            for key, values in _dist_direct_keys(consts[name], consts, visited, depth + 1).items():
+                result.setdefault(key, []).extend(values)
+        i = ident.end()
+    return result
+
+
+@lru_cache(maxsize=4)
+def _dist_schema_consts_at(dist_dir: str) -> dict:
+    """`NAME -> value-expression` for every top-level `const NAME = ...` across the dist's
+    zod-schema modules. The schema is spread over several of them (`ToolsSchema` lives in
+    `zod-schema.agent-runtime-*.js`, not the main module), so all are read as one namespace.
+
+    Cached on the directory PATH rather than on nothing, so a test that repoints
+    `OPENCLAW_DIST` gets a fresh parse instead of the previous directory's schema. Callers
+    must treat the result as read-only — it is shared."""
+    consts: dict = {}
+    for js_file in sorted(Path(dist_dir).glob("zod-schema*.js")):
+        code = _blank_js_noncode(js_file.read_text(encoding="utf-8", errors="replace"))
+        for match in re.finditer(r"(?m)^(?:const|let|var)\s+(" + _JS_IDENT + r")\s*=\s*", code):
+            start, depth, i = match.end(), 0, match.end()
+            while i < len(code):
+                c = code[i]
+                if c in "([{":
+                    depth += 1
+                elif c in ")]}":
+                    depth -= 1
+                elif c == ";" and depth == 0:
+                    break
+                i += 1
+            consts.setdefault(match.group(1), code[start:i])
+    return consts
+
+
+def _dist_schema_consts() -> dict:
+    return _dist_schema_consts_at(str(OPENCLAW_DIST))
+
+
+def _resolves_in_dist(path: str, expr: str, consts: dict) -> bool:
+    """True when every component of `path` is a direct key of the object its parent denotes,
+    walking down from `expr`.
+
+    Walking the FULL CHAIN is the whole point. A leaf-key sweep would have called B-262's
+    `logging.cacheTrace.filePath` grounded, because `filePath` is a real key — of
+    `diagnostics.cacheTrace`. Here the walk stops at `cacheTrace`, which `logging` (a strict
+    object holding exactly {level, file, maxFileBytes, consoleLevel, consoleStyle,
+    redactSensitive, redactPatterns}) does not have."""
+    frontier = [expr]
+    for part in path.split("."):
+        nxt: list = []
+        for candidate in frontier:
+            keys = _dist_direct_keys(candidate, consts)
+            if part in keys:
+                nxt.extend(keys[part])
+        if not nxt:
+            return False
+        frontier = nxt
+    return True
+
+
+def _require_dist() -> dict:
+    """The parsed dist schema, or a clean skip when OpenClaw is not installed."""
+    if not OPENCLAW_DIST.is_dir():
+        pytest.skip(
+            f"OpenClaw dist not present at {OPENCLAW_DIST} — the dist-grounding layer is "
+            "local-only (CI checks out only the skill tree, which cannot contain it)"
+        )
+    consts = _dist_schema_consts()
+    # Anti-vacuity. If a future OpenClaw renames the root schema or reshapes these modules,
+    # this layer must say so rather than quietly grade every path against an empty schema —
+    # a guard that can silently see nothing is worse than no guard (B-251).
+    assert DIST_ROOT_SCHEMA in consts, (
+        f"'{DIST_ROOT_SCHEMA}' was not found in {OPENCLAW_DIST}/zod-schema*.js "
+        f"({len(consts)} top-level schema consts parsed). The installed OpenClaw has "
+        "reshaped its config schema; re-ground DIST_ROOT_SCHEMA before trusting this layer."
+    )
+    return consts
+
+
+def _manifest_root_paths() -> set:
+    return {p for p in _parse_manifest_paths() if not p.startswith(RELATIVE_PREFIX)}
+
+
+def _synthetic_dist_consts(mapping: dict) -> dict:
+    """A synthetic `NAME -> expression` schema, blanked exactly as `_dist_schema_consts()`
+    blanks the real dist. Tests below must exercise the SAME composition production uses —
+    handing raw source straight to the reader would test a pipeline that does not exist."""
+    return {name: _blank_js_noncode(expr) for name, expr in mapping.items()}
+
+
+def test_dist_root_schema_parses_to_a_plausible_config_shape():
+    """Anti-vacuity for the layer itself: prove the reader actually SEES the schema.
+
+    Every test below is a negative check ("nothing failed to resolve"), and negative checks
+    pass just as happily against an empty schema as against a correct one. This pins the
+    positive side: the root object parsed, it has a realistic number of top-level keys, and
+    keys known to be there are there."""
+    consts = _require_dist()
+    root_keys = _dist_direct_keys(consts[DIST_ROOT_SCHEMA], consts)
+    assert len(root_keys) >= 30, (
+        f"Only {len(root_keys)} top-level keys parsed out of {DIST_ROOT_SCHEMA} "
+        f"({sorted(root_keys)}). The reader has lost track of the schema's shape."
+    )
+    for expected in ("gateway", "tools", "agents", "logging", "diagnostics", "mcp", "hooks"):
+        assert expected in root_keys, f"{expected!r} missing from the parsed root schema"
+
+
+def test_manifest_root_paths_resolve_against_installed_dist():
+    """C-249 third layer: every ROOT-namespace manifest path resolves, component by
+    component, in the installed OpenClaw config schema — or is registered as a known
+    absence with its disproof.
+
+    This is the layer that consults OpenClaw itself instead of another internal artifact, so
+    it is the one that can catch a path the manifest AND the recon are both wrong about."""
+    consts = _require_dist()
+    root = consts[DIST_ROOT_SCHEMA]
+
+    unresolved = sorted(
+        p for p in _manifest_root_paths()
+        if p not in _NOT_IN_CURRENT_SCHEMA and not _resolves_in_dist(p, root, consts)
+    )
+
+    assert not unresolved, (
+        f"{len(unresolved)} manifest path(s) do not exist in the installed OpenClaw config "
+        f"schema ({OPENCLAW_DIST}):\n"
+        + "\n".join(f"  - {p}" for p in unresolved)
+        + "\n\nThe walk failed at the first component that is not a direct key of its "
+        "parent. Either the path is fabricated — fix the dig() call, the manifest AND the "
+        "recon, since all three can be wrong together (B-262) — or the read is a deliberate "
+        "legacy/alternate shape, in which case register it in _NOT_IN_CURRENT_SCHEMA with "
+        "its safeParse disproof and the real path it sits beside."
+    )
+
+
+def test_manifest_relative_paths_resolve_somewhere_in_the_dist():
+    """The same full-chain walk for `relative:` entries, but UNANCHORED.
+
+    A relative path is read off some nested object the guard cannot identify — that is what
+    the namespace means — so there is no parent to anchor to and this can only ask whether
+    ANY schema object in the dist has the chain. Read the green as "this shape exists
+    somewhere in OpenClaw", never as "this field is real at the object we read it from".
+    Pinning the base object stays the manifest-vs-source guard's job."""
+    consts = _require_dist()
+    unresolved = sorted(
+        p for p in _parse_manifest_paths()
+        if p.startswith(RELATIVE_PREFIX)
+        and p not in _NOT_IN_CURRENT_SCHEMA
+        and not any(
+            _resolves_in_dist(p[len(RELATIVE_PREFIX):], expr, consts) for expr in consts.values()
+        )
+    )
+    assert not unresolved, (
+        f"{len(unresolved)} relative manifest path(s) match no object anywhere in the "
+        f"installed schema ({OPENCLAW_DIST}):\n"
+        + "\n".join(f"  - {p}" for p in unresolved)
+        + "\n\nRegister it in _NOT_IN_CURRENT_SCHEMA if it is deliberately a non-config "
+        "shape (skill frontmatter, an MCP server entry, a plugin manifest)."
+    )
+
+
+def test_register_entries_are_still_absent_from_the_dist():
+    """The register must SHRINK, never harden into an allowlist.
+
+    A registered path that starts resolving means OpenClaw added the field (or the entry was
+    wrong all along). Either way the read is no longer a known absence and the entry has to
+    go, or the register would go on excusing a path nothing is checking any more — the
+    rubber stamp this layer exists to remove, rebuilt one level up."""
+    consts = _require_dist()
+    root = consts[DIST_ROOT_SCHEMA]
+    resurrected = []
+    for path in sorted(_NOT_IN_CURRENT_SCHEMA):
+        if path.startswith(RELATIVE_PREFIX):
+            bare = path[len(RELATIVE_PREFIX):]
+            found = any(_resolves_in_dist(bare, expr, consts) for expr in consts.values())
+        else:
+            found = _resolves_in_dist(path, root, consts)
+        if found:
+            resurrected.append(path)
+    assert not resurrected, (
+        "These paths are registered in _NOT_IN_CURRENT_SCHEMA as absent, but the installed "
+        "OpenClaw schema now resolves them:\n"
+        + "\n".join(f"  - {p}" for p in resurrected)
+        + "\n\nDrop the register entry so the path is grounded normally."
+    )
+
+
+def test_register_has_no_entries_the_manifest_no_longer_carries():
+    """A register entry outlives its dig() path silently unless something says otherwise."""
+    stale = sorted(set(_NOT_IN_CURRENT_SCHEMA) - _parse_manifest_paths())
+    assert not stale, (
+        "_NOT_IN_CURRENT_SCHEMA excuses path(s) the manifest no longer lists:\n"
+        + "\n".join(f"  - {p}" for p in stale)
+        + "\n\nRemove them — the dig() call is gone, so the excuse is dead weight."
+    )
+
+
+def test_register_entries_carry_a_disproof():
+    """An undocumented register entry is indistinguishable from a rubber stamp."""
+    for path, reason in _NOT_IN_CURRENT_SCHEMA.items():
+        assert reason and len(reason) > 30, f"{path} is registered without a real disproof"
+
+
+def test_dist_layer_rejects_the_b262_phantom():
+    """The DoD proof: the layer must go RED on the exact path B-262 shipped.
+
+    `logging.cacheTrace.filePath` passed BOTH internal layers — the manifest listed it and
+    the recon vouched for it — while OpenClaw's strict `logging` object rejects it outright.
+    A leaf-key sweep would rubber-stamp it too, since `filePath` is a real key of the real
+    `diagnostics.cacheTrace`. Only the full parent-chain walk separates them."""
+    consts = _require_dist()
+    root = consts[DIST_ROOT_SCHEMA]
+    assert not _resolves_in_dist("logging.cacheTrace.filePath", root, consts)
+    assert not _resolves_in_dist("logging.cacheTrace", root, consts)
+    # The real path, and the shared leaf that makes a leaf-only check useless here.
+    assert _resolves_in_dist("diagnostics.cacheTrace.filePath", root, consts)
+    assert _resolves_in_dist("logging.file", root, consts)
+
+
+def test_dist_layer_rejects_the_b263_egress_phantoms():
+    """Same proof for the four would-be global egress allowlists (B-263). The recon still
+    lists `tools.http.allow` in its POSITIVE field inventory, so the recon layer cannot be
+    the one to catch these — the dist can."""
+    consts = _require_dist()
+    root = consts[DIST_ROOT_SCHEMA]
+    for phantom in ("network.egress", "gateway.egress", "egress", "tools.http.allow", "tools.http"):
+        assert not _resolves_in_dist(phantom, root, consts), phantom
+    # The real neighbours must stay resolvable — a guard that rejects everything is no guard.
+    for real in ("tools.allow", "gateway.bind", "gateway.port", "mcp.servers"):
+        assert _resolves_in_dist(real, root, consts), real
+
+
+def test_dist_layer_walks_the_whole_chain_not_just_the_leaf(tmp_path):
+    """Pin the property that separates this layer from the coarse sweep that missed B-262,
+    on a synthetic schema so it holds independently of what OpenClaw ships today."""
+    consts = _synthetic_dist_consts({
+        "OpenClawSchema": """object({
+            logging: object({ level: string(), file: string() }).strict().optional(),
+            diagnostics: object({
+                cacheTrace: object({ filePath: string() }).strict().optional()
+            }).strict().optional()
+        }).strict()""",
+    })
+    root = consts["OpenClawSchema"]
+    # The leaf exists — under the OTHER parent. Chain walking is what tells them apart.
+    assert _resolves_in_dist("diagnostics.cacheTrace.filePath", root, consts)
+    assert not _resolves_in_dist("logging.cacheTrace.filePath", root, consts)
+    assert not _resolves_in_dist("logging.cacheTrace", root, consts)
+
+
+def test_dist_reader_follows_aliases_spreads_named_shapes_and_unions():
+    """The four indirections the real schema uses. Without any one of them the layer would
+    report a real path as fabricated — a false alarm is as corrosive as a rubber stamp."""
+    consts = _synthetic_dist_consts({
+        "Shape": "{ allow: array(string()), deny: array(string()) }",
+        "ExecSchema": "object(Shape).strict().optional()",
+        "ToolsSchema": "object({ ...Shape, exec: ExecSchema }).strict().optional()",
+        "Root": "object({ tools: ToolsSchema, either: union([object({ a: string() }), object({ b: string() })]) }).strict()",
+    })
+    root = consts["Root"]
+    assert _resolves_in_dist("tools.allow", root, consts)        # spread
+    assert _resolves_in_dist("tools.exec.deny", root, consts)    # alias + named shape
+    assert _resolves_in_dist("either.a", root, consts)           # union branch 1
+    assert _resolves_in_dist("either.b", root, consts)           # union branch 2
+    assert not _resolves_in_dist("tools.exec.allowlist", root, consts)
+    assert not _resolves_in_dist("either.c", root, consts)
+
+
+def test_dist_reader_ignores_braces_inside_strings_and_regexes():
+    """`.regex(/^svc:[a-z0-9]{0,61}$/)` and `"}"` appear throughout the real schema. An
+    unblanked brace there throws off every bracket count that follows, which would make the
+    layer's verdicts arbitrary rather than wrong in one direction."""
+    consts = _synthetic_dist_consts({
+        "Root": """object({
+            name: string().regex(/^svc:[a-z0-9]{0,61}$/).optional(),
+            note: literal("}) not a real close ({"),
+            gateway: object({ bind: string() }).strict().optional()
+        }).strict()""",
+    })
+    root = consts["Root"]
+    assert _resolves_in_dist("gateway.bind", root, consts)
+    assert not _resolves_in_dist("gateway.host", root, consts)
+
+
+def test_dist_layer_skips_cleanly_when_openclaw_is_not_installed(monkeypatch):
+    """B-106 constraint: CI checks out only the skill tree, so the dist is absent there and
+    this layer must SKIP, exactly as the recon layer does — not error, and not fail."""
+    monkeypatch.setattr(
+        sys.modules[__name__], "OPENCLAW_DIST", Path("/nonexistent/openclaw/dist")
+    )
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _require_dist()
+    assert "local-only" in str(excinfo.value)

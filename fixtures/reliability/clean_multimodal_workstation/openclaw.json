@@ -48,8 +48,5 @@
         "fallbacks": ["ollama/llama3"]
       }
     }
-  },
-  "network": {
-    "egress": ["api.openai.com", "registry.npmjs.org"]
   }
 }

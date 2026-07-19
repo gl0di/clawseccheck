@@ -6,6 +6,6 @@
   "channels": { "telegram": { "dmPolicy": "allowlist", "groupPolicy": "allowlist" } },
   "tools": { "profile": "minimal" },
   "logging": { "redactSensitive": "tools" },
-  "diagnostics": { "cacheTrace": { "enabled": true } },
+  "diagnostics": { "cacheTrace": { "enabled": "true" } },
   "models": { "main": { "provider": "ollama/llama3" } }
 }
