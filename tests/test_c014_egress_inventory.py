@@ -145,6 +145,17 @@ def test_fixture_bad_c014_warns():
     assert check_egress_inventory(collect(FIXTURES / "bad_c014_egress_inventory")).status == WARN
 
 
+def test_fixture_bad_c014_unrestricted_tool_warns():
+    """An outbound-capable tool and nothing else: the WARN is attributable to the tool.
+
+    Deliberately narrower than bad_c014_egress_inventory (channels + MCP + tools), so a
+    regression in the tool leg alone cannot hide behind another surface's evidence.
+    """
+    f = check_egress_inventory(collect(FIXTURES / "bad_c014_egress_tool_unrestricted"))
+    assert f.status == WARN
+    assert f.evidence == ["tool webhook: outbound-capable (no explicit restriction signal)"]
+
+
 def test_fixture_clean_c014_passes():
     assert check_egress_inventory(collect(FIXTURES / "clean_c014_egress_inventory")).status == PASS
 
