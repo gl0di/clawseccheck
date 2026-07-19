@@ -115,6 +115,32 @@ _PHANTOM_PATHS = frozenset(
         # (zod-schema-O9ml_nmo.js:1059-1070), so a config carrying it is rejected at load
         # time. The real object is `diagnostics.cacheTrace` (:1050-1056).
         "logging.cacheTrace",
+        # B-263. The four would-be GLOBAL egress allowlists C014 used to accept as proof of
+        # a restricted posture. OpenClaw exposes no static egress-control config field at
+        # all, and each of these is rejected at config load. Disproof against the installed
+        # 2026.7.1-2 dist: `grep -rF` = 0 hits for `network.egress`, `gateway.egress` and
+        # `tools.http`; and safeParse against the real root schema (47 keys, no `network`,
+        # no `egress`) rejects every one of them —
+        #   {"network": {"egress": [...]}}       -> unrecognized_keys@<root>
+        #   {"gateway": {"egress": {...}}}       -> unrecognized_keys@gateway
+        #   {"egress": [...]}                    -> unrecognized_keys@<root>
+        #   {"tools": {"http": {"allow": [...]}}} -> unrecognized_keys@tools
+        # while the controls `gateway.port` and `tools.allow` parse cleanly.
+        #
+        # These need the denylist MORE than B-262 did, because the recon does not merely
+        # mention them in a correction: it ALSO still lists `tools.http.allow` in its
+        # positive field inventory ("allowed HTTP endpoints or profiles"). Both spellings
+        # feed `_parse_recon_paths()` as ordinary dotted tokens, so all four scored as
+        # grounded — a re-added `dig(cfg, "gateway.egress")` plus a manifest line passed
+        # BOTH layers green. Verified before this entry existed, not assumed.
+        #
+        # `tools.http` is denylisted at the PARENT, not at `tools.http.allow`: the whole
+        # object is absent from the strict `ToolsSchema`, so every child is a phantom and
+        # `_is_phantom`'s prefix match must cover siblings too.
+        "gateway.egress",
+        "network.egress",
+        "egress",
+        "tools.http",
     }
 )
 
@@ -769,6 +795,33 @@ def test_proven_phantom_paths_are_never_grounded():
     assert not _is_grounded(RELATIVE_PREFIX + "logging.cacheTrace.filePath", recon_paths)
 
 
+def test_proven_phantom_egress_paths_are_never_grounded():
+    """B-263 regression, on the GUARD rather than on C014.
+
+    C014 used four would-be global egress allowlists as proof of a restricted posture; all
+    four are rejected by the real schema. Removing them from the check and the manifest is
+    not enough on its own — the grounding layers still scored them as REAL, so re-adding a
+    `dig()` of any one plus a manifest line passed both guards green. Worse than B-262: the
+    recon does not only correct these, it ALSO still lists `tools.http.allow` among its
+    positive field inventory, and `_parse_recon_paths()` harvests both spellings
+    identically.
+    """
+    # Deliberately the worst case: every phantom present as a bare harvested token, exactly
+    # what the recon's corrective prose AND its positive inventory line both produce.
+    recon_paths = {
+        "network.egress", "gateway.egress", "egress", "tools.http.allow",
+        "tools.allow", "gateway.bind",
+    }
+    for phantom in ("network.egress", "gateway.egress", "egress", "tools.http.allow"):
+        assert not _is_grounded(phantom, recon_paths), phantom
+        assert not _is_grounded(RELATIVE_PREFIX + phantom, recon_paths), phantom
+    # `tools.http` is denylisted at the parent, so unlisted siblings are phantoms too.
+    assert not _is_grounded("tools.http.deny", recon_paths)
+    # The real neighbours must survive: denylisting these must not cost real coverage.
+    assert _is_grounded("tools.allow", recon_paths)
+    assert _is_grounded("gateway.bind", recon_paths)
+
+
 def test_phantom_denylist_does_not_shadow_the_real_path():
     """The denylist must be surgical: `diagnostics.cacheTrace.*` is the REAL object and
     has to stay groundable, and a merely similar prefix must not be caught either."""
@@ -777,6 +830,15 @@ def test_phantom_denylist_does_not_shadow_the_real_path():
     assert not _is_phantom("diagnostics.cacheTrace.filePath")
     assert not _is_phantom("logging.cacheTraceExtra")
     assert not _is_phantom("logging.file")
+    # B-263: the bare `egress` entry must match the top-level key and its children only —
+    # a name that merely STARTS WITH "egress" is a different key and must stay groundable.
+    assert _is_phantom("egress")
+    assert _is_phantom("egress.allow")
+    assert not _is_phantom("egressPolicy")
+    assert not _is_phantom("gateway.egressPolicy")
+    # ... and denylisting `tools.http` must not swallow the real `tools.*` siblings.
+    assert not _is_phantom("tools.allow")
+    assert not _is_phantom("tools.httpTimeout")
 
 
 def test_no_manifest_entry_is_a_proven_phantom():
