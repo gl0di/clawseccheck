@@ -6,6 +6,13 @@
 # runs in CI, where the recon doc is absent. Adding a new dig("some.path") requires
 # adding it here AND grounding it in the recon (the local recon-consistency test
 # enforces the latter). Keep sorted; one path per line. See CLAWSECCHECK B-106.
+#
+# Two sections, because dig()'s FIRST argument decides what a path is relative to and
+# the two are different claims about the schema (openclaw.json has no top-level
+# `sandbox` key, for instance — `sandbox.docker.*` is only ever read off an entry of
+# `agents.list`). Keep each section sorted independently.
+#
+# --- read off the OpenClaw config ROOT ---------------------------------------------
 agents.defaults.heartbeat
 agents.defaults.model
 agents.defaults.sandbox.docker.binds
@@ -35,9 +42,6 @@ commands.mcp
 commands.ownerAllowFrom
 commands.plugins
 commands.useAccessGroups
-config.allowPrivateNetwork
-config.appServer.command
-config.permissionMode
 cron
 discovery.mdns.mode
 gateway.allowRealIpFallback
@@ -65,7 +69,6 @@ gateway.tls.enabled
 gateway.token
 gateway.tools.allow
 gateway.trustedProxies
-heartbeat
 hooks.enabled
 hooks.gmail.allowUnsafeExternalContent
 hooks.internal.enabled
@@ -78,30 +81,20 @@ lastTouchedVersion
 logging.cacheTrace.filePath
 logging.file
 logging.redactSensitive
-mcp.servers
 meta.lastTouchedVersion
 models.providers
-network.dangerouslyAllowPrivateNetwork
 network.egress
-openclaw.disable-model-invocation
-openclaw.install
-openclaw.install.npmSpec
-openclaw.user-invocable
 plugins.allow
 plugins.mcp
 proxy
 proxy.enabled
 proxy.proxyUrl
-sandbox.docker.dangerouslyAllowContainerNamespaceJoin
-sandbox.docker.dangerouslyAllowExternalBindSources
-sandbox.docker.dangerouslyAllowReservedContainerTargets
 security.audit.suppressions
 security.installPolicy
 session.dmScope
 skills.workshop.allowSymlinkTargetWrites
 skills.workshop.approvalPolicy
 skills.workshop.autonomous.enabled
-subagents.allowAgents
 tools.allow
 tools.alsoAllow
 tools.deny
@@ -122,3 +115,25 @@ tools.web.fetch.maxRedirects
 tools.web.fetch.useTrustedEnvProxy
 update.auto
 update.auto.enabled
+
+# --- read off a NESTED object, not the config root ---------------------------------
+# An `agents.list` entry, an MCP server entry, a plugin entry, a skill's frontmatter
+# metadata object, ... The `relative:` prefix is a manifest namespace, not part of the
+# path: it keeps a relative leaf from granting blanket grounding to the same string
+# used against the config root (and the reverse). See CLAWSECCHECK B-251.
+relative:config.allowPrivateNetwork
+relative:config.appServer.command
+relative:config.permissionMode
+relative:heartbeat
+relative:mcp.servers
+relative:network.dangerouslyAllowPrivateNetwork
+relative:openclaw.disable-model-invocation
+relative:openclaw.install
+relative:openclaw.install.npmSpec
+relative:openclaw.user-invocable
+relative:sandbox.docker.dangerouslyAllowContainerNamespaceJoin
+relative:sandbox.docker.dangerouslyAllowExternalBindSources
+relative:sandbox.docker.dangerouslyAllowReservedContainerTargets
+relative:subagents.allowAgents
+relative:tools.allow
+relative:tools.deny
