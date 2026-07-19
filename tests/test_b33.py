@@ -64,6 +64,14 @@ def test_parse_version_strips_rc_suffix():
     assert _parse_version("2026.3.0-rc1") == (2026, 3, 0)
 
 
+def test_parse_version_strips_numeric_correction_suffix():
+    """B-264: a hyphenated correction release ("2026.7.1-2", observed live in
+    package.json/lastTouchedVersion) truncates identically to its base version —
+    _parse_version cannot distinguish a correction release from its base."""
+    assert _parse_version("2026.7.1-2") == (2026, 7, 1)
+    assert _parse_version("2026.7.1-2") == _parse_version("2026.7.1")
+
+
 def test_parse_version_four_components():
     assert _parse_version("2026.1.28.1") == (2026, 1, 28, 1)
 
@@ -324,3 +332,34 @@ def test_b33_does_not_add_unverified_cve_2026_25593():
     assert "GHSA-2026-25593" not in ghsa_ids
     for ghsa, *_ in _KNOWN_ADVISORIES:
         assert "25593" not in ghsa
+
+
+# ---------------------------------------------------------------------------
+# B-264: hyphenated correction-release version pin (e.g. "2026.7.1-2", observed
+# live in ~/.npm-global's package.json and the real ~/.openclaw/openclaw.json
+# lastTouchedVersion). No _KNOWN_ADVISORIES entry currently shares a base tuple
+# with a correction release, so this is a latent-guard pin, not a behavior change:
+# it documents today's (correct) PASS and the boundary shape a future advisory
+# must not collide with (see the in-source warning at _lifecycle.py:109).
+# ---------------------------------------------------------------------------
+
+def test_b33_correction_release_suffix_passes_current_table():
+    """"2026.7.1-2" is past every current advisory fix -> PASS (no live FP)."""
+    result = check_known_vulns(_ver_ctx("2026.7.1-2"))
+    assert result.status == PASS
+
+
+def test_b33_correction_release_at_vulnerable_boundary_fails():
+    """"2026.2.13-2" truncates to (2026, 2, 13) == max_vuln for GHSA-g6q9/-cv7m
+    -> FAIL, same as its base version "2026.2.13"."""
+    result = check_known_vulns(_ver_ctx("2026.2.13-2"))
+    assert result.status == FAIL
+    assert result.status == check_known_vulns(_ver_ctx("2026.2.13")).status
+
+
+def test_b33_correction_release_past_boundary_passes():
+    """"2026.2.14-2" truncates to (2026, 2, 14), past all known-advisory fixes
+    -> PASS, same as its base version "2026.2.14"."""
+    result = check_known_vulns(_ver_ctx("2026.2.14-2"))
+    assert result.status == PASS
+    assert result.status == check_known_vulns(_ver_ctx("2026.2.14")).status
