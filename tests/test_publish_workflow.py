@@ -290,6 +290,47 @@ def test_dangling_link_guard_detects_a_missing_target() -> None:
     )
 
 
+def test_publish_workflow_node_satisfies_clawhub_engine() -> None:
+    """Node must be >= the pinned clawhub's declared engine (C-248).
+
+    clawhub@0.22.0 declares "engines": {"node": ">=22"}; running it on Node 20 emitted an
+    EBADENGINE warning on every publish — the release-token-holding step executing outside
+    its supported range.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    match = re.search(r'node-version:\s*"?(\d+)"?', text)
+    assert match, "No node-version pin found in the publish workflow."
+    assert int(match.group(1)) >= 22, (
+        f"node-version is {match.group(1)}, but the pinned clawhub declares "
+        "engines.node >= 22. Publishing would run the CLI outside its supported range."
+    )
+
+
+def test_publish_workflow_dry_runs_before_publishing() -> None:
+    """A --dry-run preflight must precede the real upload (C-248).
+
+    Grounded: clawhub 0.22.0's `publish` command exposes --dry-run ("Preview without
+    publishing"), which validates the folder/manifest/semver without uploading.
+    """
+    lines = _lines()
+    dry_idx = next((i for i, ln in enumerate(lines) if "--dry-run" in ln), -1)
+    assert dry_idx != -1, (
+        "No '--dry-run' preflight found. A broken bundle should fail before the real "
+        "publish writes anything to the registry."
+    )
+    real_publish_idx = next(
+        (
+            i for i, ln in enumerate(lines)
+            if "clawhub publish" in ln and i > dry_idx
+        ),
+        -1,
+    )
+    assert real_publish_idx != -1, (
+        "Found a --dry-run but no subsequent real 'clawhub publish' — the preflight "
+        "must come BEFORE the actual publish, not replace it."
+    )
+
+
 def test_publish_workflow_does_not_echo_token() -> None:
     """No line must both echo/cat a value and reference CLAWHUB_TOKEN."""
     for line in _lines():

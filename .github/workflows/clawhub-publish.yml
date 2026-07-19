@@ -36,7 +36,11 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: "20"
+          # clawhub@0.22.0 declares "engines": { "node": ">=22" } in its package.json.
+          # On Node 20 every publish ran under an npm EBADENGINE warning — the CLI was
+          # executing outside its supported range while holding the release token.
+          # Keep this >= the pinned clawhub's declared engine (C-248).
+          node-version: "22"
 
       - name: Install ClawHub CLI
         # Pinned to exact version to prevent supply-chain risk from a compromised
@@ -165,6 +169,46 @@ jobs:
           # they'd add ~650KB of dead weight to every skill install.
           rm -rf dist/clawseccheck/docs/assets
           echo "Staged for publish:" && ls -1 dist/clawseccheck
+
+      - name: Preflight — verify the staged tree locally
+        # Cheap, offline, deterministic checks on the artifact we are about to upload.
+        # These run before the CLI dry-run so an obviously broken bundle fails with a
+        # precise message instead of a generic CLI error (C-248).
+        run: |
+          set -euo pipefail
+          test -f dist/clawseccheck/SKILL.md \
+            || { echo "::error::staged tree has no SKILL.md — clawhub would reject it"; exit 1; }
+          # Every relative link in SKILL.md must resolve inside the staged tree. This is the
+          # publish-time twin of tests/test_publish_workflow.py's static cross-check (B-254).
+          MISSING=0
+          while IFS= read -r target; do
+            case "$target" in http*|mailto:*|"#"*) continue ;; esac
+            if [ ! -e "dist/clawseccheck/${target%%#*}" ]; then
+              echo "::error::SKILL.md links to '${target}' but it is not in the staged tree"
+              MISSING=1
+            fi
+          done < <(grep -oE '\]\([^)]+\)' dist/clawseccheck/SKILL.md | sed -E 's/^\]\(//; s/\)$//')
+          [ "$MISSING" -eq 0 ] || exit 1
+          echo "Preflight OK — SKILL.md present and every relative link resolves."
+
+      # NB: this step's name deliberately does not spell out the CLI invocation verbatim —
+      # the basename/display-name tests locate the real command by that exact substring,
+      # and a step name containing it would shadow the command they mean to inspect.
+      - name: Preflight — dry-run the upload (no write)
+        # Grounded: the CLI exposes `--dry-run` ("Preview without publishing", clawhub
+        # 0.22.0 dist/cli.js) on the same `publish` command used below. It validates the
+        # folder, rejects a plugin-shaped tree, requires SKILL.md, checks the semver, and
+        # resolves the version against the registry — all WITHOUT uploading. Running it
+        # with the identical flag set means a bundle that fails here would have failed the
+        # real publish, but before anything is written to the registry.
+        run: >
+          clawhub publish ./dist/clawseccheck
+          --slug clawseccheck
+          --owner gl0di
+          --name "ClawSecCheck — OpenClaw Security Self-Audit"
+          --version "${{ steps.ver.outputs.version }}"
+          --changelog "Release ${{ steps.ver.outputs.version }} (${{ github.sha }})"
+          --dry-run
 
       - name: Publish skill
         # --name sets the human-facing ClawHub title (grounded: the CLI's `publish --help`
