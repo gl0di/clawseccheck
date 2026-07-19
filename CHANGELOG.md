@@ -3,6 +3,47 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.53.0] — 2026-07-19
+
+Closes an evasion in the skill scanner, un-blinds the check that keeps the tool honest
+about OpenClaw's config schema, and makes the brand and voice rules enforceable in CI.
+
+### Fixed
+- **A skill could hide malware from the scanner by adding two lines that never run.** The
+  scanner tracks whether a name still refers to the real decode helper or has been locally
+  reassigned. It computed that by walking a function's entire subtree, so a *sibling*
+  function reusing the name was mistaken for the caller reassigning it. A never-called
+  decoy — `def _unused_decoy(): _decode = None` — was enough to downgrade a hidden-payload
+  execution from critical to informational on otherwise-detected malware. Since whoever
+  writes the skill also writes the decoy, this was cheap to abuse. Scope is now resolved
+  per function body rather than per subtree, so the decoy no longer hides anything.
+- **A `nonlocal` write no longer taints unrelated outer variables.** The same over-broad
+  walk seeded a `nonlocal`-assigned name into *every* enclosing scope, not the one Python
+  actually rebinds. An outer function that happened to reuse the same short variable name
+  for something unrelated could be reported as executing a decoded payload when it never
+  did. Both halves shared one root cause and are fixed together — fixing only the first
+  would have widened the second.
+- **The guard against invented config fields could no longer see through a helper.** The
+  check that requires every OpenClaw config path the tool reads to be a real, documented
+  field only recognised paths written literally at the point of use. Paths passed through
+  a small wrapper — or built in a loop over a table of flags — were invisible to it, so
+  eleven real paths were never grounded and the check reported success while inspecting
+  almost nothing. It now resolves those forms, and a path it genuinely cannot resolve
+  fails the build by name instead of vanishing quietly.
+
+### Added
+- **The brand and voice rules are now enforced, not just documented.** Tests pin the skill
+  manifest's icon against the single brand source, and check rendered output for three
+  things the style guide has always asked for: no internal check identifiers leaking into
+  human-readable text, no alarmist shouting, and the "this report never leaves your
+  machine" line still present in the HTML report.
+
+### Changed
+- The self-test harness titles (canary, red-team, dry-run) now build their header from the
+  shared brand module instead of hand-rolling it, so all headers stay in step.
+- The README banner's logo mark is generated from the brand module's SVG rather than an
+  emoji glyph. The published banner image itself is unchanged for now; only its source is.
+
 ## [3.52.1] — 2026-07-19
 
 ### Fixed

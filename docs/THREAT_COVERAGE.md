@@ -2,7 +2,7 @@
 
 Honest map of what ClawSecCheck checks today, what it does **not** yet check, and where
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
-all (so they can't even surface as a finding). Updated 2026-07-19 for v3.52.1.
+all (so they can't even surface as a finding). Updated 2026-07-19 for v3.53.0.
 
 Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 144 checks
 total; see `docs/CHECKS.md` for the full generated list, plus the
