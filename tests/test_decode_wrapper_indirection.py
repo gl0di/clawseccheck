@@ -1070,9 +1070,10 @@ def test_b215_with_statement_target_does_not_sweep_in_a_same_named_grandparent()
 _DECODE_HELPER = "import base64\ndef _decode(b):\n    return base64.b64decode(b)\n"
 
 
-def _run_body_binds(body: str) -> set[str]:
-    """`_own_bound_names` of the `run()` defined by `_DECODE_HELPER + body`."""
-    tree = ast.parse(_DECODE_HELPER + body)
+def _run_binds(src: str) -> set[str]:
+    """`_own_bound_names` of the `run()` defined in `src` -- what the scope model
+    believes `run` rebinds locally, asserted alongside the verdict it moves."""
+    tree = ast.parse(src)
     run = next(n for n in tree.body if getattr(n, "name", None) == "run")
     return _own_bound_names(run)
 
@@ -1091,7 +1092,7 @@ def test_b214_control_unshadowed_wrapper_call_still_flags():
     # wrapper call really does resolve to the module-level `_decode` and must fire.
     # Without this, a shadow test could pass for the wrong reason (nothing firing).
     src = _shadow_case("")
-    assert "_decode" not in _run_body_binds(src[len(_DECODE_HELPER):])
+    assert "_decode" not in _run_binds(src)
     assert "OBFUSCATED_EXEC" in _crit_rules(src)
 
 
@@ -1103,7 +1104,7 @@ def test_b214_import_binds_and_shadows_the_composing_name():
         "    from mylib import thing as _decode\n",
     ):
         src = _shadow_case(line)
-        assert "_decode" in _run_body_binds(src[len(_DECODE_HELPER):]), line
+        assert "_decode" in _run_binds(src), line
         assert "OBFUSCATED_EXEC" not in _rules(src), line
 
 
@@ -1111,7 +1112,7 @@ def test_b214_import_star_binds_nothing():
     # `from x import *` binds an unknowable set; it must not be read as binding the
     # literal name "*", and it must not suppress the wrapper match.
     src = _shadow_case("    from mylib import *\n")
-    assert "*" not in _run_body_binds(src[len(_DECODE_HELPER):])
+    assert "*" not in _run_binds(src)
     assert "OBFUSCATED_EXEC" in _crit_rules(src)
 
 
@@ -1122,7 +1123,7 @@ def test_b214_except_handler_alias_binds_and_shadows_the_composing_name():
         "    except Exception as _decode:\n"
         "        pass\n"
     )
-    assert "_decode" in _run_body_binds(src[len(_DECODE_HELPER):])
+    assert "_decode" in _run_binds(src)
     assert "OBFUSCATED_EXEC" not in _rules(src)
 
 
@@ -1130,7 +1131,7 @@ def test_b214_del_binds_and_shadows_the_composing_name():
     # `del x` makes x local to the scope: a later read raises UnboundLocalError
     # rather than falling through to the module-level binding, so it is a real shadow.
     src = _shadow_case("    del _decode\n")
-    assert "_decode" in _run_body_binds(src[len(_DECODE_HELPER):])
+    assert "_decode" in _run_binds(src)
     assert "OBFUSCATED_EXEC" not in _rules(src)
 
 
@@ -1142,7 +1143,7 @@ def test_b214_match_capture_patterns_bind_and_shadow_the_composing_name():
         "    match cmd:\n        case {**_decode}:\n            pass\n",  # MatchMapping.rest
     ):
         src = _shadow_case(line, params="cmd")
-        assert "_decode" in _run_body_binds(src[len(_DECODE_HELPER):]), line
+        assert "_decode" in _run_binds(src), line
         assert "OBFUSCATED_EXEC" not in _rules(src), line
 
 
@@ -1150,7 +1151,7 @@ def test_b214_lambda_parameter_does_not_shadow_the_enclosing_scope():
     # A lambda opens its OWN scope: its parameter binds nothing in the enclosing
     # function, so it must not suppress the wrapper match.
     src = _shadow_case("    f = lambda _decode: _decode\n")
-    binds = _run_body_binds(src[len(_DECODE_HELPER):])
+    binds = _run_binds(src)
     assert "_decode" not in binds and "f" in binds
     assert "OBFUSCATED_EXEC" in _crit_rules(src)
 
@@ -1161,7 +1162,7 @@ def test_b214_walrus_inside_a_lambda_body_does_not_shadow_the_enclosing_scope():
     # subtree walk counted it as an enclosing binding and MISSED this payload
     # entirely -- a false negative, and a cheap evasion primitive.
     src = _shadow_case("    f = lambda x: (_decode := x)\n")
-    assert "_decode" not in _run_body_binds(src[len(_DECODE_HELPER):])
+    assert "_decode" not in _run_binds(src)
     assert "OBFUSCATED_EXEC" in _crit_rules(src)
 
 
@@ -1233,25 +1234,25 @@ def test_b214_walrus_in_a_nested_def_default_shadows_the_enclosing_scope():
     # rebinds invisible and resolved the later call to the module-level helper -- a
     # crit false positive on code that only ever calls the local identity lambda.
     src = _shadow_case("    def h(a=(_decode := (lambda x: x))):\n        pass\n")
-    assert "_decode" in _run_body_binds(src[len(_DECODE_HELPER):])
+    assert "_decode" in _run_binds(src)
     assert "OBFUSCATED_EXEC" not in _rules(src)
 
 
 def test_b214_walrus_in_a_decorator_shadows_the_enclosing_scope():
     src = _shadow_case("    @(_decode := (lambda f: f))\n    def h():\n        pass\n")
-    assert "_decode" in _run_body_binds(src[len(_DECODE_HELPER):])
+    assert "_decode" in _run_binds(src)
     assert "OBFUSCATED_EXEC" not in _rules(src)
 
 
 def test_b214_walrus_in_a_lambda_default_shadows_the_enclosing_scope():
     src = _shadow_case("    g = lambda a=(_decode := (lambda x: x)): a\n")
-    assert "_decode" in _run_body_binds(src[len(_DECODE_HELPER):])
+    assert "_decode" in _run_binds(src)
     assert "OBFUSCATED_EXEC" not in _rules(src)
 
 
 def test_b214_walrus_in_a_class_base_shadows_the_enclosing_scope():
     src = _shadow_case("    class C((_decode := object)):\n        pass\n")
-    assert "_decode" in _run_body_binds(src[len(_DECODE_HELPER):])
+    assert "_decode" in _run_binds(src)
     assert "OBFUSCATED_EXEC" not in _rules(src)
 
 
@@ -1260,5 +1261,5 @@ def test_b214_nested_def_body_is_still_not_the_enclosing_scope():
     # NOT turn into descending into its body. A rebind inside the body binds there,
     # not in `run`, so it must not suppress -- this is the B-214 dead-decoy guarantee.
     src = _shadow_case("    def h(a=1):\n        _decode = None\n")
-    assert "_decode" not in _run_body_binds(src[len(_DECODE_HELPER):])
+    assert "_decode" not in _run_binds(src)
     assert "OBFUSCATED_EXEC" in _crit_rules(src)
