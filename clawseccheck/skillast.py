@@ -565,21 +565,66 @@ def _call_args_tainted(node: ast.Call, tainted: set[str]) -> tuple:
     return any_tainted, direct
 
 
+# The AST nodes that open a NEW binding scope in Python. A name bound inside one of
+# these is local to it, not to the enclosing scope, so every per-scope walk in this
+# module must stop here. Shared by `_scope_own_nodes` and `_own_bound_names` so the two
+# cannot drift apart again (B-214 follow-up: they did, and it cost a crit false FAIL).
+_NESTED_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _enclosing_evaluated_parts(node: ast.AST) -> list:
+    """The sub-expressions of a nested scope node that Python evaluates in the
+    ENCLOSING scope, not inside the new one: decorators, argument defaults,
+    annotations, and class bases/keywords. Only the body is the new scope.
+
+    This matters because a walrus in any of them really does bind in the enclosing
+    scope -- `def h(a=(_decode := ...))` inside `run()` binds `_decode` in `run`. A
+    name walk that skipped the whole node treated such a rebind as invisible and
+    resolved a later `_decode(...)` to an unrelated module-level helper, a crit
+    false positive. Pathological in real code, but sound to model and cheap to get
+    right, so it is not left as an accepted residual."""
+    parts: list = []
+    parts.extend(getattr(node, "decorator_list", None) or [])
+    args = getattr(node, "args", None)
+    if args is not None:
+        parts.extend(args.defaults or [])
+        parts.extend(d for d in (args.kw_defaults or []) if d is not None)
+        for a in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg):
+            if a is not None and a.annotation is not None:
+                parts.append(a.annotation)
+    if getattr(node, "returns", None) is not None:
+        parts.append(node.returns)
+    parts.extend(getattr(node, "bases", None) or [])
+    parts.extend(kw.value for kw in (getattr(node, "keywords", None) or []))
+    return parts
+
+
 def _scope_own_nodes(scope: ast.AST):
     """Yield nodes belonging to `scope`'s own body, WITHOUT descending into nested
     function/class/lambda scopes (whose local names are unrelated). Used so a local
-    name reused across sibling functions is resolved per-scope, not conflated."""
-    body = (
-        scope.body
-        if isinstance(scope, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef))
-        else [scope]
-    )
-    stack = list(body)
+    name reused across sibling functions is resolved per-scope, not conflated.
+
+    B-214 follow-up: the nested-scope boundary is applied to the SEED body as well as
+    to descendants. It used to filter only `iter_child_nodes(n)`, so a nested `def`
+    sitting directly in `scope.body` was pushed unfiltered and its whole body leaked
+    into the parent's node set -- the boundary held at depth >= 2 but not at depth 1.
+    That leak was masked while `_decode_composing_funcnames` shadowed names over the
+    entire subtree; once the shadow set was correctly narrowed to a scope's own
+    bindings the two walks disagreed, and a nested closure's `return` counted as the
+    OUTER function's return path while that closure's rebinding no longer subtracted
+    -- a crit false-positive OBFUSCATED_EXEC on a wrapper returning a plain literal.
+    Both walks must stop at the same boundary or one re-opens the other's bug."""
+    if isinstance(scope, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
+        # Seed with the scope's own statements, minus any nested scope defined
+        # directly in it -- same boundary the child filter below applies.
+        stack = [b for b in scope.body if not isinstance(b, _NESTED_SCOPE_NODES)]
+    else:
+        stack = [scope]  # the root IS the scope being analysed; never filter it out
     while stack:
         n = stack.pop()
         yield n
         for child in ast.iter_child_nodes(n):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            if isinstance(child, _NESTED_SCOPE_NODES):
                 continue  # nested scope — resolved on its own pass
             stack.append(child)
 
@@ -1092,9 +1137,13 @@ def _own_bound_names(scope: ast.AST) -> set[str]:
         n = stack.pop()
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             bound.add(n.name)  # the NAME binds here; the body is its own scope
+            stack.extend(_enclosing_evaluated_parts(n))
             continue
         if isinstance(n, ast.Lambda):
-            continue  # own scope, binds nothing in ours
+            # Binds no name of its own here, and its body is its own scope -- but its
+            # defaults are evaluated in ours (`_enclosing_evaluated_parts`).
+            stack.extend(_enclosing_evaluated_parts(n))
+            continue
         if isinstance(n, ast.Assign):
             for t in n.targets:
                 bound |= _assign_target_names(t)
