@@ -1749,6 +1749,18 @@ Advisory checks are recorded for coverage but are not scored.
 
 ## Hardening checks
 
+### B181 - Installed skill modified after install (recorded ClawHub install hashes)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain / Post-Install Integrity
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: Installed skill modified after install (recorded ClawHub install hashes)
+- Remediation:
+  - none
+
 ### B177 - OpenClaw's own persisted ClawHub trust verdict for an installed plugin
 
 - Severity: HIGH

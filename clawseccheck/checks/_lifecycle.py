@@ -2725,6 +2725,336 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
     )
 
 
+# ---------- B181 (B-257): post-install tamper detection against recorded install hashes ----------
+# ClawHub records SHA-256 digests of a skill's files AT INSTALL TIME, on the user's own
+# disk, and nothing ever compared them to the bytes now there. A skill that was verified at
+# install and modified afterwards — by the user, by another agent, or by another skill —
+# was invisible to us.
+#
+# This is a STRICTLY STRONGER trust anchor than `--monitor`: monitoring detects change since
+# WE first looked, so anything already tampered with before our first scan is baked into the
+# baseline as "normal". A recorded install hash detects change since the REGISTRY installed
+# it, which covers exactly that blind spot. Purely local — the digests are already on disk;
+# no network call is involved or possible (Golden Rule #1).
+#
+# Grounded against the installed ClawHub CLI (clawhub@0.22.0) and the real files on disk:
+#   * `<workdir>/.clawhub/lock.json` — dist/skills.js:118 readLockfile() reads
+#     `.clawhub/lock.json` with a `.clawdhub/` legacy fallback, so BOTH are handled here
+#     (Golden Rule #6). Per skill slug it carries `skillFile: {path, sha256}` and, under
+#     `verification.artifact.files[]`, a full per-file manifest of `{path, size, sha256}`.
+#   * `<skill dir>/.clawhub/origin.json` — dist/skills.js:137-166 readSkillOrigin(), same
+#     `.clawdhub/` legacy fallback; carries the same `skillFile: {path, sha256}` and exists
+#     independently of the lock, so a relocated install is still covered.
+#   * The digest is over RAW FILE BYTES, hex-encoded: dist/skills.js hashes each entry with
+#     `sha256Hex(bytes)` over the extracted bytes and records `size: bytes.byteLength`.
+#     Verified empirically against the real install — the recorded SKILL.md digest equals
+#     `sha256(SKILL.md bytes)`, and all 77 manifest entries matched.
+#   * Skill directory: dist/cli.js:94 resolves the skills dir as `resolve(workdir, "skills")`
+#     (overridable with `--dir`), so `<lock parent>/skills/<slug>` is tried first and the
+#     package's own SKILL_DIRS are used as fallbacks for a relocated install.
+#
+# Files present on disk but ABSENT from the manifest are deliberately NOT flagged: the real
+# install carries 61 of them (`__pycache__/*.pyc`, the installer's own `_meta.json` and
+# `.clawhub/origin.json`), so flagging extras would be a guaranteed false positive.
+_B181_MAX_BYTES_PER_FILE = 8_000_000
+_B181_MAX_FILES_PER_SKILL = 500
+_B181_MAX_FILES_TOTAL = 3000
+_B181_DOT_DIRS = (".clawhub", ".clawdhub")
+
+
+def _b181_confined_path(base: Path, rel: str):
+    """Resolve *rel* under *base*, or None if it escapes / is not a usable relative path.
+
+    The recorded paths come out of a JSON file on disk, so they are treated as untrusted
+    input: absolute paths, NUL bytes, and any traversal that lands outside *base* are
+    refused rather than read (the CLI sanitizes the same way when it extracts an archive).
+    """
+    if not isinstance(rel, str) or not rel.strip() or "\x00" in rel:
+        return None
+    candidate = Path(rel)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return None
+    target = base / candidate
+    try:
+        resolved_base = base.resolve()
+        resolved = target.resolve()
+    except OSError:
+        return None
+    if resolved != resolved_base and resolved_base not in resolved.parents:
+        return None
+    return target
+
+
+def _b181_sha256(path: Path):
+    """('ok', hexdigest) | ('missing', None) | ('unreadable', None) | ('too-large', None)."""
+    import hashlib
+
+    try:
+        if not path.is_file():
+            return "missing", None
+        if path.stat().st_size > _B181_MAX_BYTES_PER_FILE:
+            return "too-large", None
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(block)
+    except OSError:
+        return "unreadable", None
+    return "ok", digest.hexdigest()
+
+
+def _b181_read_json(path: Path):
+    import json as _json
+
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _b181_recorded_files(record: dict) -> "list[tuple[str, str]]":
+    """(relpath, sha256hex) pairs recorded in a lock entry or an origin.json.
+
+    Both `skillFile: {path, sha256}` and the richer
+    `verification.artifact.files[]: [{path, size, sha256}]` manifest are read; duplicates
+    collapse (the manifest normally repeats the skillFile entry).
+    """
+    out: "dict[str, str]" = {}
+
+    def _add(path_val, sha_val):
+        if isinstance(path_val, str) and isinstance(sha_val, str) and sha_val.strip():
+            out.setdefault(path_val, sha_val.strip().lower())
+
+    sf = record.get("skillFile")
+    if isinstance(sf, dict):
+        _add(sf.get("path"), sf.get("sha256"))
+    verification = record.get("verification")
+    if isinstance(verification, dict):
+        artifact = verification.get("artifact")
+        if isinstance(artifact, dict):
+            files = artifact.get("files")
+            if isinstance(files, list):
+                for entry in files[:_B181_MAX_FILES_PER_SKILL]:
+                    if isinstance(entry, dict):
+                        _add(entry.get("path"), entry.get("sha256"))
+    return sorted(out.items())
+
+
+def _b181_skill_dir(home: Path, slug: str, lock_parent):
+    """Resolve slug -> installed skill directory, or None.
+
+    `<lock parent>/skills/<slug>` first (dist/cli.js:94 resolves the skills dir as
+    `resolve(workdir, "skills")`), then the package's own SKILL_DIRS so a `--dir`-relocated
+    or differently-rooted install still resolves.
+    """
+    from ..collector import SKILL_DIRS
+
+    candidates = []
+    if lock_parent is not None:
+        candidates.append(lock_parent / "skills" / slug)
+    candidates.extend(home / rel / slug for rel in SKILL_DIRS)
+    for cand in candidates:
+        try:
+            if cand.is_dir():
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _b181_provenance_records(home: Path):
+    """[(slug, skill_dir | None, record, source_label)] from every lock + origin.json found."""
+    from ..collector import SKILL_DIRS, WORKSPACE_DIRS
+
+    records = []
+    seen_dirs: set = set()
+
+    for rel in [""] + list(WORKSPACE_DIRS):
+        for dot in _B181_DOT_DIRS:
+            lock_path = home / rel / dot / "lock.json"
+            if not lock_path.is_file():
+                continue
+            data = _b181_read_json(lock_path)
+            skills = data.get("skills") if data else None
+            if not isinstance(skills, dict):
+                continue
+            for slug, entry in skills.items():
+                if not isinstance(entry, dict) or not isinstance(slug, str):
+                    continue
+                skill_dir = _b181_skill_dir(home, slug, lock_path.parent.parent)
+                if skill_dir is not None:
+                    seen_dirs.add(str(skill_dir))
+                records.append((slug, skill_dir, entry, f"{dot}/lock.json"))
+
+    # Per-skill origin.json — independent of any lock, so a relocated or lock-less install
+    # is still covered. Skipped for a skill already contributed by a lock entry above.
+    for rel in SKILL_DIRS:
+        root = home / rel
+        try:
+            children = sorted(root.iterdir()) if root.is_dir() else []
+        except OSError:
+            continue
+        for skill_dir in children:
+            try:
+                if not skill_dir.is_dir() or skill_dir.name.startswith("."):
+                    continue
+            except OSError:
+                continue
+            if str(skill_dir) in seen_dirs:
+                continue
+            for dot in _B181_DOT_DIRS:
+                origin = skill_dir / dot / "origin.json"
+                if not origin.is_file():
+                    continue
+                data = _b181_read_json(origin)
+                if data is None:
+                    continue
+                seen_dirs.add(str(skill_dir))
+                records.append(
+                    (data.get("slug") or skill_dir.name, skill_dir, data, f"{dot}/origin.json")
+                )
+                break
+    return records
+
+
+def check_skill_install_tamper(ctx: Context) -> Finding:
+    """B181 (B-257) — an installed skill's bytes no longer match the SHA-256 digests
+    ClawHub recorded for it at install time.
+
+    FAIL    — a recorded digest disagrees with the file's current bytes: the skill was
+              modified after it was installed and verified.
+    WARN    — no digest disagrees, but a recorded file is now missing, or a skill is
+              installed as a directory symlink (a working-tree link, whose recorded
+              hashes cannot meaningfully apply).
+    PASS    — at least one recorded digest was checked and every one of them matched.
+    UNKNOWN — no install-time digest is recorded anywhere, or every recorded file was
+              unreadable / too large to hash, or a record's skill directory could not be
+              located. Never a fake PASS (Golden Rule #4).
+    """
+    records = _b181_provenance_records(ctx.home)
+    if not records:
+        return _finding(
+            "B181",
+            UNKNOWN,
+            "No ClawHub install records (.clawhub/lock.json or a skill's "
+            ".clawhub/origin.json) were found, so there is no recorded install-time hash "
+            "to compare the skills on disk against — post-install modification cannot be "
+            "detected either way.",
+            "Skills installed through ClawHub record a SHA-256 of their files at install "
+            "time. If you installed skills another way, verify their contents against the "
+            "upstream source yourself.",
+        )
+
+    tampered: list[str] = []
+    missing: list[str] = []
+    linked: list[str] = []
+    unverifiable: list[str] = []
+    verified = 0
+    budget = _B181_MAX_FILES_TOTAL
+
+    for slug, skill_dir, record, source in records:
+        recorded = _b181_recorded_files(record)
+        if not recorded:
+            unverifiable.append(f"{slug}: {source} records no file hashes")
+            continue
+        if skill_dir is None:
+            unverifiable.append(f"{slug}: recorded in {source} but its install directory "
+                                "could not be located on disk")
+            continue
+        try:
+            is_link = skill_dir.is_symlink()
+        except OSError:
+            is_link = False
+        if is_link:
+            # A whole-directory symlink is the documented way to point an install at a
+            # working tree, where a mismatch against the install-time hash is expected and
+            # constant. Reported (never silently skipped) rather than FAILed: an attacker
+            # gains nothing by choosing this louder path, since editing the files in place
+            # is both easier and still caught below as a FAIL.
+            linked.append(f"{slug}: installed as a symlink to another directory — "
+                          f"install-time hashes from {source} cannot apply")
+            continue
+        for rel, expected in recorded:
+            if budget <= 0:
+                unverifiable.append(f"{slug}: file budget exhausted before all recorded "
+                                    "files were hashed")
+                break
+            budget -= 1
+            target = _b181_confined_path(skill_dir, rel)
+            if target is None:
+                unverifiable.append(f"{slug}: {source} records an unusable path")
+                continue
+            state, digest = _b181_sha256(target)
+            if state == "ok":
+                if digest == expected:
+                    verified += 1
+                else:
+                    tampered.append(f"{slug}: '{rel}' does not match the digest recorded "
+                                    f"in {source} at install time")
+            elif state == "missing":
+                missing.append(f"{slug}: '{rel}' is recorded in {source} but is gone")
+            else:
+                unverifiable.append(f"{slug}: '{rel}' could not be hashed ({state})")
+
+    if tampered:
+        extra = f" (+{len(tampered) - 6} more)" if len(tampered) > 6 else ""
+        return _finding(
+            "B181",
+            FAIL,
+            "Installed skill file(s) no longer match the SHA-256 digests ClawHub recorded "
+            "at install time — they were modified after the skill was installed and "
+            "verified: " + "; ".join(tampered[:6]) + extra,
+            "Treat the skill as untrusted until you can explain the change. Reinstall it "
+            "from ClawHub to restore the verified bytes, and review the modified file "
+            "first — if you did not edit it yourself, something else on this machine "
+            "(another agent, another skill, or an attacker) rewrote a skill the agent "
+            "auto-loads.",
+            evidence=tampered[:6],
+        )
+
+    if missing or linked:
+        items = missing + linked
+        extra = f" (+{len(items) - 6} more)" if len(items) > 6 else ""
+        return _finding(
+            "B181",
+            WARN,
+            "No modified skill file was found, but the install-time record could not be "
+            "fully matched to what is on disk: " + "; ".join(items[:6]) + extra,
+            "A file recorded at install time that is now gone, or a skill directory linked "
+            "to a working tree, both mean the bytes running today are not the bytes "
+            "ClawHub verified. Reinstall the skill if the change was not deliberate.",
+            evidence=items[:6],
+        )
+
+    if verified:
+        note = (
+            f" ({len(unverifiable)} recorded file(s) could not be checked)"
+            if unverifiable
+            else ""
+        )
+        return _finding(
+            "B181",
+            PASS,
+            f"Every install-time digest that could be checked matches the bytes on disk "
+            f"({verified} file(s) verified against ClawHub's install records){note}.",
+            "No action needed.",
+            evidence=unverifiable[:6],
+        )
+
+    extra = f" (+{len(unverifiable) - 6} more)" if len(unverifiable) > 6 else ""
+    return _finding(
+        "B181",
+        UNKNOWN,
+        "ClawHub install records were found but not one recorded digest could be checked "
+        "against disk, so post-install modification cannot be ruled in or out: "
+        + "; ".join(unverifiable[:6])
+        + extra,
+        "Check that the installed skill directories are readable, then re-run the audit.",
+        evidence=unverifiable[:6],
+    )
+
+
 def check_declared_skill_reconciliation(ctx: Context) -> Finding:
     """B158 (F-119) — a config declares a skill/plugin LOAD SOURCE that resolves to nothing on
     disk right now. The audit can only scan what is present, so a declared-but-absent source is
