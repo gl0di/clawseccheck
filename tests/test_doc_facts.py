@@ -50,6 +50,18 @@ _RISK_RANGE_RE = re.compile(r"RISK-01\.\.RISK-(\d+)")
 # real count reaches the next multiple of ten, the doc has to be restated.
 _OPEN_CLAIM_SLACK = 10
 
+# "6,236 automated tests" — with or without the thousands comma.
+_TEST_COUNT_RE = re.compile(r"(\d{1,3}(?:,\d{3})+|\d{4,6})\+?\s*(?:automated\s+)?tests\b", re.IGNORECASE)
+
+# Below this, the run is a subset rather than the suite, so the collected count says
+# nothing about the true total.
+_FULL_SUITE_FLOOR = 3000
+
+# How far the stated figure may fall behind before it stops informing the reader. Wide
+# enough that ordinary commits do not redden CI, narrow enough that a stale claim cannot
+# survive to a release.
+_TEST_CLAIM_SLACK = 400
+
 
 def _shipped_files():
     return [p for p in SHIPPED_TEXT if p.exists()]
@@ -133,3 +145,39 @@ def test_changelog_is_exempt_from_the_count_pins():
     """Guard the guard: a past entry legitimately quotes the count that was true then, so
     CHANGELOG.md must never be swept into the files above."""
     assert not any(p.name == "CHANGELOG.md" for p in _shipped_files())
+
+
+def test_test_count_claims_are_true_and_not_badly_stale(request):
+    """"6,236 automated tests" must not overstate, and must not rot the way "5,000+" did.
+
+    Why a band and not equality: the suite grows on ordinary commits, so pinning the exact
+    number would turn every added test into a red build — the doc would be accurate and the
+    project unworkable. Why not leave it open-ended: "5,000+" stayed technically true while
+    the real figure passed 6,200, which is how a claim becomes useless without ever becoming
+    a lie. So the rule is the one that actually protects a reader: never claim more tests
+    than exist, and restate once the gap gets wide enough to mislead.
+
+    Skips on a partial run, where the collected count is not the suite total. CI runs the
+    whole suite, so the guard is live exactly where a release is cut.
+    """
+    actual = len(request.session.items)
+    if actual < _FULL_SUITE_FLOOR:
+        import pytest
+
+        pytest.skip(f"partial run ({actual} collected) — count claims need the full suite")
+
+    wrong = []
+    for path in _shipped_files():
+        text = path.read_text(encoding="utf-8")
+        for m in _TEST_COUNT_RE.finditer(text):
+            claimed = int(m.group(1).replace(",", ""))
+            line = text[: m.start()].count("\n") + 1
+            where = f"{path.relative_to(REPO)}:{line}"
+            if claimed > actual:
+                wrong.append(f"{where} claims {claimed:,} tests but only {actual:,} exist")
+            elif actual - claimed >= _TEST_CLAIM_SLACK:
+                wrong.append(
+                    f"{where} says {claimed:,} while the suite has {actual:,} — "
+                    f"restate it (drifted by {actual - claimed:,})"
+                )
+    assert not wrong, "test-count claims need attention:\n  " + "\n  ".join(wrong)
