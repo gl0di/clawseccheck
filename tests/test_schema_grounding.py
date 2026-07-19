@@ -97,6 +97,32 @@ MANIFEST_FILE = Path(__file__).resolve().parent / "grounded_schema_paths.txt"
 # Allowlist for configuration paths that are allowed even if not parsed from markdown
 ALLOWLISTED_PATHS: set[str] = set()
 
+# DENYLIST — paths PROVEN not to exist in the OpenClaw schema. This closes a hole in the
+# recon layer: `_parse_recon_paths()` harvests every dotted token in the doc, and it cannot
+# tell an attestation ("`x.y` is a real field") from a CORRECTION ("`x.y` does not exist").
+# So the moment the recon documents a phantom in order to warn about it, that phantom
+# starts passing `_is_grounded()` — which is exactly how B-262 stayed invisible: the recon
+# AND the manifest were both wrong about `logging.cacheTrace.filePath`, and the guard
+# rubber-stamped it. A denylisted path is never grounded, however the recon phrases it.
+#
+# Add an entry only with the disproof recorded next to it, and only for a path some part of
+# the codebase might plausibly reach for again.
+_PHANTOM_PATHS = frozenset(
+    {
+        # B-262. `grep -rF "logging.cacheTrace"` over the installed package = 0 hits, and
+        # the `logging` zod object is `.strict()` with exactly {level, file, maxFileBytes,
+        # consoleLevel, consoleStyle, redactSensitive, redactPatterns}
+        # (zod-schema-O9ml_nmo.js:1059-1070), so a config carrying it is rejected at load
+        # time. The real object is `diagnostics.cacheTrace` (:1050-1056).
+        "logging.cacheTrace",
+    }
+)
+
+
+def _is_phantom(path: str) -> bool:
+    """True when *path* is a denylisted phantom, or hangs off one."""
+    return any(path == p or path.startswith(p + ".") for p in _PHANTOM_PATHS)
+
 # Manifest namespace for a path read off something other than the OpenClaw config root
 # (an entry of `agents.list`, an MCP server entry, a skill's frontmatter metadata, ...).
 RELATIVE_PREFIX = "relative:"
@@ -652,6 +678,11 @@ def _is_grounded(path: str, recon_paths: set[str]) -> bool:
     object it hangs off. Pinning the base is the manifest-vs-source guard's job."""
     if path.startswith(RELATIVE_PREFIX):
         path = path[len(RELATIVE_PREFIX):]
+    # A proven phantom is never grounded, no matter how the recon spells it out. The recon
+    # mentions these paths precisely to warn about them, and the harvester cannot tell that
+    # apart from an attestation — see _PHANTOM_PATHS.
+    if _is_phantom(path):
+        return False
     if path in recon_paths:
         return True
     for recon_p in recon_paths:
@@ -715,6 +746,42 @@ def test_manifest_is_grounded_in_recon():
         + "\n".join(f"  - {p}" for p in missing)
         + f"\n\nEvery entry in {MANIFEST_FILE.name} must be documented in:\n  {RECON_FILE}"
     )
+
+
+def test_proven_phantom_paths_are_never_grounded():
+    """B-262 regression, on the GUARD rather than the check.
+
+    The recon documents `logging.cacheTrace.filePath` at length — to say it does not
+    exist. `_parse_recon_paths()` harvests dotted tokens and cannot tell a correction from
+    an attestation, so before the denylist the disproven path scored as grounded, and a
+    future `dig()` of it plus a manifest entry would have passed BOTH layers silently:
+    exactly the failure mode that let B-262 ship. Recon prose must not be able to
+    resurrect it."""
+    # Synthetic recon set, so this runs in CI too (the recon doc is local-only). It is
+    # deliberately the WORST case: the phantom present as a bare harvested token, which is
+    # precisely what the real doc's corrective prose produces.
+    recon_paths = {"logging.cacheTrace.filePath", "logging.cacheTrace", "logging.file"}
+    assert not _is_grounded("logging.cacheTrace", recon_paths)
+    assert not _is_grounded("logging.cacheTrace.filePath", recon_paths)
+    # children of a phantom are phantoms too
+    assert not _is_grounded("logging.cacheTrace.enabled", recon_paths)
+    # ... and the namespaced form cannot sneak past by prefixing
+    assert not _is_grounded(RELATIVE_PREFIX + "logging.cacheTrace.filePath", recon_paths)
+
+
+def test_phantom_denylist_does_not_shadow_the_real_path():
+    """The denylist must be surgical: `diagnostics.cacheTrace.*` is the REAL object and
+    has to stay groundable, and a merely similar prefix must not be caught either."""
+    recon_paths = {"diagnostics.cacheTrace.filePath", "logging.cacheTrace.filePath"}
+    assert _is_grounded("diagnostics.cacheTrace.filePath", recon_paths)
+    assert not _is_phantom("diagnostics.cacheTrace.filePath")
+    assert not _is_phantom("logging.cacheTraceExtra")
+    assert not _is_phantom("logging.file")
+
+
+def test_no_manifest_entry_is_a_proven_phantom():
+    """The denylist is only worth having if it is actually applied to the manifest."""
+    assert not [p for p in _parse_manifest_paths() if _is_phantom(p.replace(RELATIVE_PREFIX, ""))]
 
 
 # --------------------------------------------------------------------------------------
