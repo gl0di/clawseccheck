@@ -4443,7 +4443,7 @@ template.
 
 Adds the **attestation layer** — the first time the audit reads more than config files.
 The static scan sees only what the config *records*; an agent's real tool/verb inventory,
-whether untrusted input can reach a side-effect, and host monitors a file scan can't see
+whether untrusted input can reach a side-effect, and host monitors the host scan can't see
 are not in any config field. The agent now self-reports those facts in a small JSON
 (`--ask` emits a template, `--attest` consumes it), unlocking capability-level least
 privilege without inventing config fields. Local, read-only, no network — the self-report
@@ -4621,13 +4621,14 @@ agent on an unmonitored machine is a real exposure — if it were compromised, t
 completely unseen.
 
 ### Added
-- **Five host-monitor detection checks (B50–B54)**, all read-only and filesystem-only (no
-  subprocess, no network): **B50** network monitoring / IDS (Suricata, Zeek, Snort, Little Snitch,
-  Sysmon), **B51** host audit / syscall logging (auditd, OpenBSM, Sysmon), **B52** file-integrity
-  monitoring (AIDE, Tripwire, osquery), **B53** endpoint protection / EDR (Wazuh, CrowdStrike,
-  ClamAV, Microsoft Defender, Santa), **B54** host firewall (ufw, firewalld, nftables, macOS ALF,
-  Windows Firewall). Cross-platform (Linux full; macOS / Windows best-effort); whatever cannot be
-  determined read-only is reported **UNKNOWN**, never a fabricated positive.
+- **Five host-monitor detection checks (B50–B54)**, all read-only (no subprocess, no network;
+  Windows also uses a handful of read-only registry queries): **B50** network monitoring / IDS
+  (Suricata, Zeek, Snort, Little Snitch, Sysmon), **B51** host audit / syscall logging (auditd,
+  OpenBSM, Sysmon), **B52** file-integrity monitoring (AIDE, Tripwire, osquery), **B53** endpoint
+  protection / EDR (Wazuh, CrowdStrike, ClamAV, Microsoft Defender, Santa), **B54** host firewall
+  (ufw, firewalld, nftables, macOS ALF, Windows Firewall). Cross-platform (Linux full; macOS /
+  Windows best-effort); whatever cannot be determined read-only is reported **UNKNOWN**, never
+  a fabricated positive.
 - **RISK-10** capability path: *powerful agent on an unmonitored host*. Fires only on positive
   evidence that all four detection classes (IDS / audit / FIM / EDR) are absent **and** the agent is
   high-privilege (can exec/write **and** is reachable by untrusted input) — i.e. a breach would be

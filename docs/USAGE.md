@@ -170,9 +170,10 @@ The narrative version, in one paragraph per theme:
   (confused-deputy chains) be assessed; without it those checks honestly report `UNKNOWN`.
 - **Data at rest & host posture:** group/world-readable memory/log directories,
   at-rest write protection of bootstrap files and the OpenClaw install tree, plus a
-  read-only, filesystem-only detection of host defensive monitors — network IDS, audit
-  logging, file-integrity monitoring, EDR, host firewall. LOW severity, never FAIL: a
-  missing monitor is at most a WARN, and anything not determinable read-only is `UNKNOWN`.
+  read-only detection of host defensive monitors (filesystem/PATH checks, plus a handful
+  of read-only Windows-registry queries on Windows) — network IDS, audit logging,
+  file-integrity monitoring, EDR, host firewall. LOW severity, never FAIL: a missing
+  monitor is at most a WARN, and anything not determinable read-only is `UNKNOWN`.
 - **Incident readiness:** presence and tamper-resistance of OpenClaw's per-session
   trajectory sidecars — the on-disk record a post-incident investigation depends on.
 
@@ -213,7 +214,8 @@ ClawSecCheck is **open source and zero-dependency (Python stdlib only)**. Its ow
 - text of installed skills/plugins (Python files are AST-parsed, never executed)
 - `~/.openclaw/logs/config-audit.jsonl` and `config-health.json` (config-log checks)
 - `~/.openclaw/agents/.../sessions/*.jsonl` (approval-policy posture)
-- host OS path-existence checks for IDS/FIM/EDR/firewall config
+- host OS path-existence checks for IDS/FIM/EDR/firewall config, plus a handful of
+  read-only Windows-registry queries on Windows for the same signals
 - credential-store path-existence inventory: whether `.env`, SSH key dirs, keychain/keyring
   directories, and browser cookie stores **exist** near the agent home — contents never read.
 
@@ -598,8 +600,9 @@ hard false positives on real configs.
 - **May produce false positives and false negatives.** Evidence-gating keeps noise low,
   but heuristics can miss novel attack patterns and can misread edge-case configurations.
 - **Read scope is bounded:** config, bootstrap markdown, installed-skill text, OpenClaw log
-  files, agent session logs, host OS path-existence checks, and credential-store path presence
-  — not an exhaustive scan of your filesystem, and credential-store contents are never read.
+  files, agent session logs, host OS path-existence checks (plus a handful of read-only
+  Windows-registry queries on Windows), and credential-store path presence — not an
+  exhaustive scan of your filesystem, and credential-store contents are never read.
 - **UNKNOWN is not PASS.** Unreadable files or unparseable configs are reported as
   UNKNOWN and excluded from the score, never silently marked safe.
 - **Vetting the scanner itself** (`--vet` pointed at ClawSecCheck's own source) reports

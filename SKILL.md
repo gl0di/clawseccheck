@@ -23,8 +23,9 @@ Activate when the user says anything like:
 It is **read-only with respect to your OpenClaw setup** — it never touches `openclaw.json`, your
 skills, or your bootstrap files, and it reaches the network only through your own host agent (see
 `--vet` below) — so it is safe to run on request. That promise is scoped, not absolute: it also runs
-a bounded, filesystem-only scan of the **host** the agent runs on (beyond OpenClaw's own scope — see
-"host recon" below), and it writes its **own** local report/history state under `~/.clawseccheck/`
+a bounded, read-only scan of the **host** the agent runs on (filesystem/PATH checks, plus a handful
+of read-only Windows-registry queries on Windows — beyond OpenClaw's own scope — see "host recon"
+below), and it writes its **own** local report/history state under `~/.clawseccheck/`
 (nothing about your agent — see "what it writes" below). Before the first run, tell the user in one
 line what it will read (their OpenClaw config, bootstrap files, log files, agent session logs, the
 text of installed skills, and credential-store path existence — all read-only, nothing leaves the
@@ -43,7 +44,9 @@ It runs a **read-only** local script that inspects the user's own agent. **Full 
 - `~/.openclaw/agents/.../sessions/*.jsonl` — Codex session logs for approval-policy posture
 - **host recon (beyond OpenClaw's own scope, skip with `--no-host`):** path-existence checks for
   IDS, FIM, EDR, firewall config files and systemd enable-symlinks, plus the *presence* (never the
-  value) of a handful of proxy-shaped env vars (`http_proxy`/`https_proxy`/...) — filesystem/env-name
+  value) of a handful of proxy-shaped env vars (`http_proxy`/`https_proxy`/...); on Windows only, a
+  handful of read-only registry queries under `HKEY_LOCAL_MACHINE` for the same signals (a service
+  key's existence, the firewall's on/off state — never a secret value) — filesystem/env-name/registry
   reads only, no subprocess, no network
 - credential-store path-existence inventory: checks whether `.env`, SSH key dirs, keychain/keyring
   directories, and browser cookie stores **exist** near the agent home (never reads their contents)
@@ -72,9 +75,10 @@ It checks, among other things:
 - the **Lethal Trifecta** (untrusted input x sensitive data x outbound actions — keep at most 2 of 3 active together),
 - gateway exposure, channel authentication, plaintext secrets, least privilege, execution sandbox,
   MCP server trust, the agent's egress surface, and whether threat monitoring is active,
-- the **host's defensive posture** (read-only, filesystem-only): whether the machine the agent runs
-  on has any network IDS, host audit logging, file-integrity monitoring, endpoint/EDR sensor, or
-  host firewall — so a powerful agent isn't running blind on an unwatched box,
+- the **host's defensive posture** (read-only — filesystem/PATH checks, plus a handful of read-only
+  Windows-registry queries on Windows): whether the machine the agent runs on has any network IDS,
+  host audit logging, file-integrity monitoring, endpoint/EDR sensor, or host firewall — so a
+  powerful agent isn't running blind on an unwatched box,
 - the **content of installed skills/plugins** for the ClawHavoc malware class — shell-exec,
   credential/wallet theft, paste-host uploads, and base64-obfuscated payloads (decoded and
   re-scanned, never executed),
@@ -617,7 +621,7 @@ this section directly when the user asks about capability/blast-radius **outside
 mid-conversation, on an older result, or to refresh self-report data since the last `--full` run.
 
 The static scan reads config files only. It cannot see the agent's **real tool/verb inventory**,
-whether untrusted input can reach a side-effect, or host monitors a file scan can't detect — none
+whether untrusted input can reach a side-effect, or host monitors the host scan can't detect — none
 of that is in any config field. The **attestation layer** lets the running agent self-report those
 facts so the audit can classify capability-level blast radius (B43/B44).
 
@@ -655,7 +659,7 @@ service, or module names:
 If the probe runs and finds one or more matches, set `host_monitors` to the matched name(s). If it
 runs clean (no matches), set `host_monitors` to `[]` — a probed "none found" is a real, agent-
 verified answer, not a guess. Only fall back to asking the user — "Is there any security
-monitoring on this machine that a file scan wouldn't see — a work EDR agent, a network IDS on the
+monitoring on this machine that the host scan wouldn't see — a work EDR agent, a network IDS on the
 gateway?" → `host_monitors` — when you have no shell access or the probe errors out.
 
 If neither the probe nor the user can answer, leave the field `unknown` — never invent an answer.

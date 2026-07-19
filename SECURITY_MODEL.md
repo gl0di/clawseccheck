@@ -114,12 +114,15 @@ doing — so a reviewer can check the claim against the code rather than take it
   runs unless `--no-native` is passed. It is the single fixed, read-only, argument-list-
   hardcoded external command ClawSecCheck can ever invoke (no `shell=True`, a timeout,
   captured output) — see `native.py`.
-- **The host-level filesystem scan is similarly opt-out, not opt-in by an extra grant:**
+- **The host-level scan is similarly opt-out, not opt-in by an extra grant:**
   `audit()`'s `include_host` flag drives whether `hostwatch.detect()` runs (B50–B54,
   B101 — path-existence and config-text checks for IDS/FIM/EDR/firewall/egress-policy
   presence); the CLI sets it from `not args.no_host`, so `--no-host` is the way to
-  disable it. This layer never runs a subprocess or touches the network — it only
-  `stat()`s paths and reads known config file text.
+  disable it. This layer never runs a subprocess or touches the network — on Linux and
+  macOS it only `stat()`s paths, globs known directories, and reads known config file
+  text; on Windows it additionally issues a handful of read-only `winreg` queries under
+  `HKEY_LOCAL_MACHINE` (a service key's existence, the `EnableFirewall` value) — no
+  writes, and no value more sensitive than an on/off state.
 
 ## Deny-by-construction vs. runtime policy
 
