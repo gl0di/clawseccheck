@@ -66,6 +66,35 @@ def test_discover_finds_cache_trace_sink(tmp_path):
     assert any(s.kind == "cache_trace" and s.path == ct for s in sinks)
 
 
+def test_discover_finds_cache_trace_at_its_default_path(tmp_path):
+    """`filePath` is optional and `enabled` alone switches tracing on, so the COMMON
+    shape writes to `<state>/logs/cache-trace.jsonl` (`selection-JInn13lc.js:1052`).
+    Keying discovery on `filePath` alone left that majority case undiscoverable."""
+    (tmp_path / "logs").mkdir()
+    ct = tmp_path / "logs" / "cache-trace.jsonl"
+    ct.write_text("{}\n", encoding="utf-8")
+    ctx = _ctx(tmp_path, {"diagnostics": {"cacheTrace": {"enabled": True}}})
+    sinks = logdiscovery.discover_log_sinks(ctx)
+    assert any(s.kind == "cache_trace" and s.path == ct for s in sinks)
+
+
+def test_discover_does_not_double_count_cache_trace_at_the_default_path(tmp_path):
+    """A config whose explicit `filePath` IS the default location must yield one sink."""
+    (tmp_path / "logs").mkdir()
+    ct = tmp_path / "logs" / "cache-trace.jsonl"
+    ct.write_text("{}\n", encoding="utf-8")
+    ctx = _ctx(tmp_path, {"diagnostics": {"cacheTrace": {"filePath": str(ct)}}})
+    sinks = logdiscovery.discover_log_sinks(ctx)
+    assert len([s for s in sinks if s.kind == "cache_trace"]) == 1
+
+
+def test_discover_ignores_default_cache_trace_when_file_absent(tmp_path):
+    """Discovery is path-based, but it still only reports files that exist."""
+    ctx = _ctx(tmp_path, {"diagnostics": {"cacheTrace": {"enabled": True}}})
+    sinks = logdiscovery.discover_log_sinks(ctx)
+    assert not any(s.kind == "cache_trace" for s in sinks)
+
+
 def test_discover_finds_trajectory_sinks(tmp_path):
     sess = tmp_path / "agents" / "main" / "sessions"
     sess.mkdir(parents=True)
