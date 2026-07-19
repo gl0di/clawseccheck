@@ -122,7 +122,31 @@ import pytest
 # relative to it so the guard works in CI, where the repo root IS the skill tree. Only the
 # recon doc lives at the workspace root (one level up) and is local-only.
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RECON_FILE = REPO_ROOT.parent / "docs" / "research" / "openclaw-schema-recon.md"
+_RECON_RELATIVE = Path("docs") / "research" / "openclaw-schema-recon.md"
+
+
+def _find_recon_file() -> Path:
+    """The workspace-root recon doc, searched up the ancestor chain.
+
+    It used to be pinned at exactly `REPO_ROOT.parent`, which is right for the normal
+    `<workspace>/skill/` layout and wrong for a git worktree: from
+    `<workspace>/.worktrees/<name>/` the parent is `.worktrees/`, so the path never
+    existed and `test_manifest_is_grounded_in_recon` SKIPPED. Every worktree build —
+    which is how the parallel-agent work actually runs — therefore had the recon layer
+    silently switched off, the same vacuity class this module exists to close.
+
+    Walking up finds it in both layouts and still finds nothing in CI (no ancestor of the
+    checkout carries it), so the intended local-only skip is preserved."""
+    for ancestor in REPO_ROOT.parents:
+        candidate = ancestor / _RECON_RELATIVE
+        if candidate.is_file():
+            return candidate
+    # Nothing found: keep the historical spelling so the skip message names the place a
+    # reader expects the doc to be.
+    return REPO_ROOT.parent / _RECON_RELATIVE
+
+
+RECON_FILE = _find_recon_file()
 SOURCE_DIR = REPO_ROOT / "clawseccheck"
 MANIFEST_FILE = Path(__file__).resolve().parent / "grounded_schema_paths.txt"
 
