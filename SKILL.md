@@ -926,7 +926,8 @@ network is an **explicit, user-initiated** action — never something the skill 
 ## Reference docs (loaded on demand, not at audit time)
 
 To keep this playbook lean, a supplementary reference lives outside it and is read
-only when needed: the full CLI flag reference in [`references/cli-flags.md`](references/cli-flags.md).
+only when needed: the less-common CLI flags in [`references/cli-flags.md`](references/cli-flags.md).
+It is the long tail, not the complete list — run `clawseccheck --help` for that.
 
 ---
 

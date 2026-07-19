@@ -5,8 +5,8 @@ forbidden from doing, the trust boundaries it operates within, its own capabilit
 surface / least-privilege posture, and what it does not claim to guarantee.
 
 To report a vulnerability, see [`SECURITY.md`](SECURITY.md). For engine-tampering
-detection and the honest limits of self-verification, see the README's
-["trust no one"](README.md#%EF%B8%8F-important--trust-no-one-including-this-skill)
+detection and the honest limits of self-verification, see the User guide's
+["trust no one"](docs/USAGE.md#important--trust-no-one-including-this-skill)
 section and the FAQ's
 ["What if the host is already compromised?"](docs/FAQ.md#what-if-the-host-is-already-compromised).
 
@@ -27,7 +27,7 @@ ClawSecCheck is a **local, read-only** audit tool. Its permitted operations are:
 - **Print** a structured report to stdout (text, JSON, SARIF, HTML, SVG badge).
 - **Write to disk** its own state under `~/.clawseccheck/`: a one-line score-history
   entry **by default** (opt out `--no-history`), and — only when you ask —
-  `--save`, `--badge`, `--html`, `--sarif`, `--monitor` state, `--sbom`, `--log`.
+  `--save`, `--badge`, `--html`, `--sarif`, `--monitor` state, `--log`.
   `--purge` deletes that store. It never writes your OpenClaw config.
 - **Run one fixed, read-only subprocess** — `openclaw security audit --json` — with
   a timeout, `capture_output=True`, and no `shell=True`, only when `--no-native` is
@@ -45,15 +45,14 @@ introduced:
 - **Network access by default.** No HTTP requests, DNS lookups, socket connections, or
   telemetry. Network access is not a planned feature.
 - **Mutating OpenClaw config.** The tool must not write to `~/.openclaw/` or any
-  agent-managed path without an explicit, confirmation-gated `--fix` mode (not yet
-  implemented). The name promises a *check*.
+  agent-managed path. The name promises a *check*.
 - **Printing secret values.** Config values that may contain credentials, tokens, or
   other secrets must be redacted via `logsafe.redact()` before appearing in any
-  output channel (text, JSON, log, HTML, SARIF, prompts).
+  output channel (text, JSON, SARIF, HTML, SVG badge, log).
 - **Trusting external content as instructions.** Finding titles, evidence strings,
-  fix text, and skill content surfaced in `--prompts` output are untrusted audit data.
-  They must be sanitized and presented as quoted evidence, never as executable
-  instructions.
+  and skill content surfaced in any report are untrusted audit data. They must be
+  sanitized and presented as quoted evidence, never as executable instructions —
+  `report.py`'s `_sanitize()` is the shared boundary every renderer routes through.
 
 ## Trust boundaries
 
@@ -74,8 +73,18 @@ introduced:
   The parser treats it as data, not as code or instructions.
 - The one subprocess (`openclaw security audit`) is invoked with a fixed, hardcoded
   argument list. Its output is parsed as JSON, not evaluated.
-- State files written by `--monitor` and `--trend` contain only hashes, scores, and
-  check IDs — no raw config values and no secret material.
+- The `--monitor` state file (`~/.clawseccheck/state.json`) holds the score, the grade,
+  per-check statuses, and content hashes of skills, bootstrap and memory files — plus,
+  for rug-pull detection, a per-MCP-server snapshot of real config values: `command`,
+  the first `args` entry, `transport`, `url`, `oauth.scope`, environment variable
+  **names**, and tool names (`monitor.py`, `_mcp_detail_sig`). Server, channel and skill
+  names and the gateway bind host are stored as read. **No secret material is:**
+  environment **values** are never recorded (only key names, with a secret-shaped key
+  marked `*`), and `command`, `args[0]` and `url` are passed through
+  `redact_urls_in_text()` / `sanitize_url_host_only()` before entering the snapshot, so
+  a credential embedded in a URL argument is stripped rather than persisted.
+  `--trend` writes no state file — it appends a score-history line and reads
+  `history.jsonl` back.
 - The tool runs with whatever OS permissions the invoking user has. It does not
   attempt privilege escalation.
 
@@ -99,7 +108,7 @@ doing — so a reviewer can check the claim against the code rather than take it
 - **All writes are confined to `~/.clawseccheck/`.** The one place ClawSecCheck writes
   by default (a one-line score-history entry; opt out with `--no-history`) and the
   places it writes only on explicit request (`--save`, `--monitor` state/journal,
-  `--badge`, `--html`, `--sarif`, `--log`, `--sbom`) all live under that single owner-only
+  `--badge`, `--html`, `--sarif`, `--log`) all live under that single owner-only
   directory tree, or an explicit path the user names on the command line. `safeio.py`
   enforces this at the filesystem-primitive level: directories are created mode `0700`
   at creation time (no transient world-readable window from umask) and refused if they
@@ -208,8 +217,8 @@ ClawSecCheck's own source **intentionally contains dangerous-token strings** —
 this is a security tool whose entire job is to search *other* skills' code for exactly
 those patterns. Those tokens appear as **detection data**: regex literals, AST rule
 names, comments, docstrings, and finding-text describing what the check looks for — not
-as executed code paths in this tool. `checks.py` and `skillast.py`'s Python analysis is
-stdlib `ast` (parse-only, never executed); the shell and JS/TS analyzers are lexical/
+as executed code paths in this tool. The `checks/` package and `skillast.py`'s Python
+analysis is stdlib `ast` (parse-only, never executed); the shell and JS/TS analyzers are lexical/
 regex passes over text. Nothing this project reads from a third-party skill or plugin is
 ever imported, called, or run.
 

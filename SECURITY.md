@@ -54,7 +54,9 @@ policy for any future fix/apply mode, see [`SECURITY_MODEL.md`](SECURITY_MODEL.m
 In-scope issues include:
 
 - Logic bugs that produce false PASS results for genuinely unsafe configs.
-- Output channels that could be exploited for prompt injection (e.g. `--prompts`).
+- Output channels that could be exploited for prompt injection (the text report,
+  `--json`, `--sarif`, `--html`) — anywhere untrusted config or skill content reaches
+  a reader without being sanitized as quoted evidence.
 - Any code path that reads, writes, or executes more than the documented scope.
 - Dependency or supply-chain issues in the publish workflow.
 

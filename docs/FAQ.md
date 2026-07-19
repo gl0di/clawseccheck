@@ -377,8 +377,8 @@ whenever you have real reason to suspect the host, not just a routine run.
 - **Verify the engine digest out-of-band.** Compare `clawseccheck --verify-self`'s output
   against `SHA256SUMS.txt` published on the corresponding GitHub Release, signed with
   [cosign](https://github.com/sigstore/cosign) in keyless mode — see the
-  ["trust no one" section](../README.md#-important--trust-no-one-including-this-skill)
-  in the README for the exact `cosign verify-blob` command. This gives `--verify-self` a
+  ["trust no one" section](USAGE.md#important--trust-no-one-including-this-skill)
+  in the User guide for the exact `cosign verify-blob` command. This gives `--verify-self` a
   trusted anchor to compare against, instead of just self-reporting.
 - **Reproducibility as a tripwire.** ClawSecCheck is deterministic and stdlib-only: given
   the same config, a second clean install run should produce identical findings. If two

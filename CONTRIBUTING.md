@@ -47,7 +47,7 @@ check needs:
   must), plus explicit `UNKNOWN`-path coverage,
 - zero false-positive FAILs on realistic configs — precision is this project's
   reputation; a noisy check will not be merged,
-- a regenerated `docs/CHECKS.md` (`python3 scripts/gen_checks_docs.py`).
+- a regenerated `docs/CHECKS.md` (`python3 scripts/gen_checks_docs.py --write`).
 
 ## Pull requests
 

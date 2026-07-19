@@ -80,7 +80,7 @@ versioning §6 in `CLAUDE.md`).
 
 ## 2. Finding Object
 
-Shared by `--json`, `--json` with `--risk`, and `--vet` mode.
+Shared by `--json` and `--vet` mode.
 
 | Field | Type | Description |
 |---|---|---|
@@ -740,8 +740,8 @@ absent, it renders `"judge: DANGEROUS"`.
   fields — these may change to improve accuracy without a version bump.
 - `runs[0].properties.*` SARIF extension fields — present only when context is
   available and may gain or lose sub-fields in minor releases.
-- The `--text` (human-readable) output format — not machine-parseable
-  and not versioned.
+- The default human-readable text output (printed when neither `--json` nor `--sarif`
+  is given) — not machine-parseable and not versioned.
 
 ---
 
@@ -749,7 +749,7 @@ absent, it renders `"judge: DANGEROUS"`.
 
 Owner-facing regrouping of the SAME `findings` (§2) above by the entities an owner
 actually owns — System, Agents, Skills, MCP servers, Channels — instead of the 7
-analyst-facing security families the `--text` report groups by underneath it. Purely
+analyst-facing security families the text report groups by underneath it. Purely
 additive and presentation-only: it never changes `score`, `grade`, or any `Finding`;
 every finding id it lists also appears, unchanged, in the top-level `findings` array.
 

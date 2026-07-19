@@ -66,7 +66,7 @@ classified at all.
 | Untrusted-context exposure | B26, B140 | `channels.<p>.contextVisibility` — untrusted group/quote/history context injected into the model (config side; B21 is the policy side); B140 flags wildcard group ingress with no `allowFrom` restriction `[CHECK: B26, B140]` |
 | Known-vulnerable version gate | B33 | `meta.lastTouchedVersion` vs a maintained advisory table (seeded: GHSA-g8p2-7wf7-98mq, fixed 2026.1.29) `[CHECK: B33]` |
 | Credential blast-radius | B41 | `auth.profiles.*` + gateway token vs reachability; PII-safe (provider names only) `[CHECK: B41]` |
-| **Capability blast-radius (verb-level least privilege)** | B43 | Attested via `--attest`. Classifies the agent's REAL held verbs: `MAILBOX_CONFIG` (auto-forward/filter/delegation), `DESTRUCTIVE` (delete-forever), `EGRESS` (send/forward), `REVERSIBLE`. Reversible-only ⇒ PASS; high-blast + ungated ⇒ FAIL. `ATTESTED` confidence — has its own id/fixture/test the same as a static check, so it's tagged CHECK; the *residual* case with no config or self-report at all is the ATTEST-band B28 row below `[CHECK: B43]` |
+| **Capability blast-radius (verb-level least privilege)** | B43 | Attested via `--attest`. Classifies the agent's REAL held verbs: `MAILBOX_CONFIG` (auto-forward/filter/delegation), `DESTRUCTIVE` (delete-forever), `EGRESS` (send/forward), `REVERSIBLE`. Reversible-only ⇒ PASS; high-blast + ungated ⇒ FAIL. `ATTESTED` confidence — has its own id/fixture/test the same as a static check, so it's tagged CHECK; the *residual* case with no config or self-report at all is the ATTEST-band dirty-input taint/provenance row below `[CHECK: B43]` |
 | **Self-report ⇄ config drift** | B44 | Attested. Config grants a high-blast verb the agent omitted ⇒ WARN (drift / blind-spot / injection-mask). Impossible for a static-only scan `[CHECK: B44]` |
 | Declared vs. proven capability drift | B84, T3 | B84 (static): declared `tools.allow` vs the agent's own attested-effective set vs what the trajectory log actually proves was used. T3 (`--behavioral`): a high-blast verb PROVEN in the trajectory log that `tools.allow` never declared — the runtime-observed sibling of B84 `[CHECK: B84, T3]` |
 | Incident readiness | B85 | Is a tamper-resistant tool-use trail actually present (trajectory sidecar reachable, not rotated away) — the precondition for T1–T3 and B84 to have anything to read `[CHECK: B85]` |
@@ -283,12 +283,12 @@ historical continuity. The numbered AST-2026 table above supersedes this for new
 
 | ASI threat class | ClawSecCheck checks |
 |---|---|
-| Goal hijacking / prompt injection | A1, B6, B21, B23, B26; B28 is closed via attestation only, see Non-static coverage |
+| Goal hijacking / prompt injection | A1, B6, B21, B23, B26; the taint/provenance leg (reserved as B28, never implemented as its own id) is closed via attestation only — see the dirty-input taint/provenance row under Non-static coverage |
 | Tool misuse (unsafe delegation / parameter injection) | B3, B18, B31, B45, B46, B47 |
 | Identity & privilege abuse (multi-agent delegation chains) | B30, B45, B46, B47 |
 | Runtime supply chain (dynamic tool/plugin composition) | B5, B13, B25, B33, B42 |
 | Unexpected RCE (sandboxing failures) | B4, B48, C5 |
-| Memory & context poisoning | B7, B20, B180; B28 is closed via attestation only, see Non-static coverage |
+| Memory & context poisoning | B7, B20, B180; the taint/provenance leg (reserved as B28, never implemented as its own id) is closed via attestation only — see the dirty-input taint/provenance row under Non-static coverage |
 | Insecure inter-agent communication | B47, B2, B32 |
 | Cascading failures / blast-radius amplification | B41, B43, B45, B46, B47 |
 | Human-agent trust / decision-fatigue | B8, B18, B23 |

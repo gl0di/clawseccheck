@@ -168,8 +168,9 @@ clawseccheck --html report.html      # standalone HTML report (private)
 clawseccheck --fail-under 70         # CI gate: exit 1 if score < 70
 ```
 
-Every flag, recipe, and mode — vetting engines, drift monitoring, attestation,
-red-team self-tests — is documented in the **[User guide](docs/USAGE.md)**.
+The **[User guide](docs/USAGE.md)** covers the modes and recipes — vetting engines,
+drift monitoring, attestation, red-team self-tests. `clawseccheck --help` is the
+complete flag list.
 
 </details>
 
@@ -186,13 +187,13 @@ red-team self-tests — is documented in the **[User guide](docs/USAGE.md)**.
 
 | Document | What it covers |
 |---|---|
-| [User guide](docs/USAGE.md) | Every flag, recipe, monitoring mode, and trust detail |
+| [User guide](docs/USAGE.md) | Recipes, monitoring modes, and trust details |
 | [Check catalog](docs/CHECKS.md) | All 146 checks: what they verify and how to remediate |
 | [Threat coverage](docs/THREAT_COVERAGE.md) | OWASP LLM Top 10 / Agentic threat mapping |
 | [Output schema](docs/OUTPUT_SCHEMA.md) | The frozen `--json` / SARIF contract |
 | [FAQ](docs/FAQ.md) | Common questions, incl. the compromised-host protocol |
 | [Security model](SECURITY_MODEL.md) | ClawSecCheck's own capability surface and self-defense |
-| [Contributing](CONTRIBUTING.md) | Dev setup, tests, how to author a new check |
+| [Contributing](https://github.com/gl0di/clawseccheck/blob/main/CONTRIBUTING.md) | Dev setup, tests, how to author a new check |
 
 ## 🙌 Feedback, security, license
 
