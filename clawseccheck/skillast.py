@@ -1027,52 +1027,99 @@ def _assign_target_names(target: ast.AST) -> set[str]:
     return set()
 
 
-def _shadowed_names_in_subtree(fn: ast.AST) -> set[str]:
-    """C-202 / C-135 round 3: names that get locally rebound SOMEWHERE within `fn`'s
-    own subtree -- `fn`'s own parameters, nested def/class names at any depth, or
-    assignment/for/with/walrus targets at any depth. Over-inclusive on purpose: any
-    name that COULD be locally rebound must be treated as "maybe not the module-level
-    name of the same identifier", because Python's scoping rules make a rebinding
-    anywhere in a function shadow that name for the function's ENTIRE body, not just
-    after the rebinding line. This closes a real false positive: a function parameter,
-    nested helper, or local variable named the same as a genuine module-level
-    decode-composing function (e.g. `_decode`, or an ordinary name like `process`)
-    was being treated as though it WERE that function, purely by string match."""
-    shadowed: set[str] = set()
-    if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        args = fn.args
+# `match`-statement capture patterns bind names too, but their AST node types only
+# exist on Python 3.10+. Resolved once at import time so this module still imports on
+# the 3.9 floor, where `match` cannot be parsed at all and these stay empty/None.
+_MATCH_BIND_NODES = tuple(
+    t for t in (getattr(ast, "MatchAs", None), getattr(ast, "MatchStar", None)) if t is not None
+)
+_MATCH_MAPPING_NODE = getattr(ast, "MatchMapping", None)
+
+
+def _own_bound_names(scope: ast.AST) -> set[str]:
+    """Names Python itself would make a local of `scope`: its own parameters, plus
+    every def/class name, assignment/for/with/walrus/import/except/match target in
+    `scope`'s OWN body. The walk STOPS at nested function, class and lambda
+    boundaries -- a name bound inside a nested scope is a local of THAT scope and
+    shadows nothing out here, so it cannot change what a reference in THIS scope
+    resolves to. (A nested def/class still contributes its own NAME, which really is
+    bound here; only its body is skipped.)
+
+    Deliberately position-INSENSITIVE within the scope: Python makes a name local to
+    a function for the function's ENTIRE body if it is bound anywhere in it, so a
+    rebinding on the last line shadows an outer name on the first line too. That part
+    of the old over-approximation was correct and is kept.
+
+    B-214/B-215 replaced an earlier whole-subtree (`ast.walk`) version that also
+    collected every binding inside nested functions. That extra over-inclusion was
+    wrong in both directions at once, which is why one helper fixes two opposite bugs:
+
+      * B-214 (false NEGATIVE -- an evasion). `_scope_chain_shadow` unions this set
+        for every ancestor, so a binding inside ONE nested function stripped the name
+        from an unrelated SIBLING nested function that genuinely called the
+        module-level helper. Since the attacker authors the file being vetted, a
+        two-line, never-called dead decoy (`def _unused(): _decode = None`) was a
+        cheap, fully controllable way to silence decode->exec detection on otherwise
+        caught malware.
+      * B-215 (false POSITIVE). It is also what made precise `nonlocal` target
+        resolution impossible -- an intermediate ancestor that merely READS the
+        nonlocal-written name lost visibility of it, because the write inside the
+        nested function counted as that ancestor's own shadowing binding. See
+        `_nonlocal_target_scopes`.
+
+    Both halves had to land together: fixing either alone trades one bug for the
+    other.
+    """
+    bound: set[str] = set()
+
+    def add_args(args: ast.arguments) -> None:
         for a in (*args.posonlyargs, *args.args, *args.kwonlyargs):
-            shadowed.add(a.arg)
+            bound.add(a.arg)
         if args.vararg:
-            shadowed.add(args.vararg.arg)
+            bound.add(args.vararg.arg)
         if args.kwarg:
-            shadowed.add(args.kwarg.arg)
-    for n in ast.walk(fn):
-        if n is fn:
+            bound.add(args.kwarg.arg)
+
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        add_args(scope.args)
+    body = (
+        scope.body
+        if isinstance(scope, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef))
+        else [scope]
+    )
+    stack = list(body)
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(n.name)  # the NAME binds here; the body is its own scope
             continue
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            shadowed.add(n.name)
-            args = n.args
-            for a in (*args.posonlyargs, *args.args, *args.kwonlyargs):
-                shadowed.add(a.arg)
-            if args.vararg:
-                shadowed.add(args.vararg.arg)
-            if args.kwarg:
-                shadowed.add(args.kwarg.arg)
-        elif isinstance(n, ast.ClassDef):
-            shadowed.add(n.name)
-        elif isinstance(n, ast.Assign):
+        if isinstance(n, ast.Lambda):
+            continue  # own scope, binds nothing in ours
+        if isinstance(n, ast.Assign):
             for t in n.targets:
-                shadowed |= _assign_target_names(t)
+                bound |= _assign_target_names(t)
         elif isinstance(n, (ast.AugAssign, ast.AnnAssign)) and isinstance(n.target, ast.Name):
-            shadowed.add(n.target.id)
+            bound.add(n.target.id)
         elif isinstance(n, (ast.For, ast.AsyncFor)):
-            shadowed |= _assign_target_names(n.target)
+            bound |= _assign_target_names(n.target)
         elif isinstance(n, ast.withitem) and n.optional_vars is not None:
-            shadowed |= _assign_target_names(n.optional_vars)
+            bound |= _assign_target_names(n.optional_vars)
         elif isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name):
-            shadowed.add(n.target.id)
-    return shadowed
+            bound.add(n.target.id)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            for alias in n.names:
+                if alias.asname:
+                    bound.add(alias.asname)
+                elif alias.name != "*":
+                    bound.add(alias.name.split(".")[0])
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            bound.add(n.name)
+        elif _MATCH_BIND_NODES and isinstance(n, _MATCH_BIND_NODES) and n.name:
+            bound.add(n.name)
+        elif _MATCH_MAPPING_NODE is not None and isinstance(n, _MATCH_MAPPING_NODE) and n.rest:
+            bound.add(n.rest)
+        stack.extend(ast.iter_child_nodes(n))
+    return bound
 
 
 def _build_toplevel_owner_map(funcs: list, classes: list | None = None) -> tuple[dict, dict]:
@@ -1137,16 +1184,20 @@ def _build_toplevel_owner_map(funcs: list, classes: list | None = None) -> tuple
 
 
 def _scope_chain_shadow(scope: ast.AST, parent_scope: dict, shadow_cache: dict) -> set[str]:
-    """Union of shadowed-name sets (see `_shadowed_names_in_subtree`) for `scope` and
-    every ancestor scope up its real lexical nesting chain (B-210) -- a name locally
-    rebound at ANY enclosing level between a node and module scope is no longer
-    resolvable to an outer/module binding of the same name, so the check must walk
-    the whole chain, not just the node's own immediate scope."""
+    """Union of the own-bound-name sets (see `_own_bound_names`) of `scope` and every
+    ancestor scope up its real lexical nesting chain (B-210) -- a name locally rebound
+    at ANY enclosing level between a node and module scope is no longer resolvable to
+    an outer/module binding of the same name, so the check must walk the whole chain,
+    not just the node's own immediate scope.
+
+    `shadow_cache` is the per-scope `_own_bound_names` memo, shared with
+    `_tainted_names_visible` and `_nonlocal_target_scopes` so each scope is analysed
+    once per file."""
     shadowed: set[str] = set()
     s = scope
     while s is not None:
         if s not in shadow_cache:
-            shadow_cache[s] = _shadowed_names_in_subtree(s)
+            shadow_cache[s] = _own_bound_names(s)
         shadowed |= shadow_cache[s]
         s = parent_scope.get(s)
     return shadowed
@@ -1157,7 +1208,7 @@ def _decode_composing_visible(
 ) -> set[str]:
     """The subset of `composing` actually visible (not locally shadowed anywhere along
     node's real lexical scope chain -- B-210) at `node`'s position -- see
-    `_shadowed_names_in_subtree` / `_scope_chain_shadow`. Module-level nodes (not
+    `_own_bound_names` / `_scope_chain_shadow`. Module-level nodes (not
     owned by any function) see the full `composing` set unmodified."""
     if not composing:
         return composing
@@ -1238,14 +1289,15 @@ def _decode_composing_funcnames(tree: ast.AST) -> set[str]:
     name (a parameter, a nested helper, or a local reassignment) -- an ordinary name
     reused elsewhere in the file (e.g. `_decode`, `process`, `parse`) is not the same
     function just because it shares a string. Each candidate function only sees the
-    composing names not shadowed somewhere within its own subtree
-    (`_shadowed_names_in_subtree`)."""
+    composing names it does not itself rebind in its own body (`_own_bound_names`;
+    B-214 narrowed that from the old whole-subtree walk, which let a binding in a
+    never-called nested decoy suppress the match)."""
     funcs = [
         n
         for n in getattr(tree, "body", [])
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
-    shadowed_by_fn = {fn: _shadowed_names_in_subtree(fn) for fn in funcs}
+    shadowed_by_fn = {fn: _own_bound_names(fn) for fn in funcs}
     composing: set[str] = set()
     for _ in range(4):
         changed = False
@@ -1620,7 +1672,7 @@ def _tainted_names_visible(
 
     def get_shadow(s: ast.AST) -> set[str]:
         if s not in shadow_cache:
-            shadow_cache[s] = _shadowed_names_in_subtree(s)
+            shadow_cache[s] = _own_bound_names(s)
         return shadow_cache[s]
 
     visible = set(tainted.get(scope, ()))
