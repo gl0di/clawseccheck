@@ -1189,15 +1189,15 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B82 - cacheTrace transcripts persisted without tool-output redaction
+### B82 - Cache-trace diagnostics persist full turn transcripts to disk
 
 - Severity: MEDIUM
 - Block: hardening
-- Framework: Secrets / At-Rest Redaction
+- Framework: Data Protection
 - Scored: no
 - Confidence: HIGH
 - OWASP: LLM02 Sensitive Information Disclosure
-- What it checks: cacheTrace transcripts persisted without tool-output redaction
+- What it checks: Cache-trace diagnostics persist full turn transcripts to disk
 - Remediation:
   - none
 
