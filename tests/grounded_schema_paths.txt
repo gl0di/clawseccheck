@@ -43,7 +43,6 @@ commands.ownerAllowFrom
 commands.plugins
 commands.useAccessGroups
 cron
-diagnostics.cacheTrace
 diagnostics.cacheTrace.filePath
 discovery.mdns.mode
 gateway.allowRealIpFallback

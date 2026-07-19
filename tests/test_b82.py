@@ -81,7 +81,16 @@ def test_b82_enabled_without_filepath_still_warns():
     `$OPENCLAW_STATE_DIR/logs/cache-trace.jsonl`, so it must not be excused."""
     f = _b82({"diagnostics": {"cacheTrace": {"enabled": True}}})
     assert f.status == WARN
-    assert any("defaults to" in e for e in f.evidence)
+    assert any("logs/cache-trace.jsonl" in e for e in f.evidence)
+
+
+def test_b82_default_path_evidence_names_the_env_override():
+    """`resolveCacheTraceConfig` resolves `config?.filePath?.trim() ||
+    env.OPENCLAW_CACHE_TRACE_FILE?.trim()` before falling back to the state-dir default
+    (`selection-JInn13lc.js:1052`), so evidence claiming a bare unconditional default
+    would overstate what the config alone can tell us."""
+    f = _b82({"diagnostics": {"cacheTrace": {"enabled": True}}})
+    assert any("OPENCLAW_CACHE_TRACE_FILE" in e for e in f.evidence)
 
 
 # ── the phantom path is gone ────────────────────────────────────────────────────
@@ -141,6 +150,57 @@ def test_b82_unknown_is_distinct_from_the_key_being_absent():
     """`dig()` collapses "absent" and "present but null" to None; B82 must not."""
     assert _b82({"diagnostics": {"cacheTrace": {}}}).status == PASS
     assert _b82({"diagnostics": {"cacheTrace": {"enabled": None}}}).status == UNKNOWN
+
+
+def test_b82_malformed_cachetrace_container_is_unknown_not_pass():
+    """The same principle one level UP. `diagnostics.cacheTrace` is declared as a
+    `.strict()` object, and the schema uses `.optional()` with zero `.nullable()`
+    anywhere, so a string / list / null there is rejected at load time just as a
+    non-boolean `enabled` is. The key is NOT "unset" — the container is malformed and the
+    running state is undeterminable, so asserting "unset and defaults to false" would be
+    an affirmative false claim, the exact GR#4 failure B82 was repaired to remove."""
+    for bad in ("true", None, [], 0, "off"):
+        f = _b82({"diagnostics": {"cacheTrace": bad}})
+        assert f.status == UNKNOWN, bad
+        assert "defaults to false" not in f.detail, bad
+
+
+def test_b82_malformed_diagnostics_container_is_unknown_not_pass():
+    """And one level up again — `diagnostics` itself is a `.strict().optional()` object
+    (`zod-schema-O9ml_nmo.js:1050-1057`)."""
+    for bad in ("on", None, [], 42):
+        f = _b82({"diagnostics": bad})
+        assert f.status == UNKNOWN, bad
+        assert "defaults to false" not in f.detail, bad
+
+
+def test_b82_no_malformed_shape_yields_an_affirmative_unset_claim():
+    """Sweep: every reachable malformed shape must avoid the affirmative sentence. A PASS
+    here is only legitimate when the key or a container is GENUINELY absent."""
+    malformed = [
+        {"diagnostics": "on"},
+        {"diagnostics": None},
+        {"diagnostics": []},
+        {"diagnostics": {"cacheTrace": "true"}},
+        {"diagnostics": {"cacheTrace": None}},
+        {"diagnostics": {"cacheTrace": []}},
+        {"diagnostics": {"cacheTrace": {"enabled": "true"}}},
+        {"diagnostics": {"cacheTrace": {"enabled": None}}},
+        {"diagnostics": {"cacheTrace": {"enabled": 1}}},
+    ]
+    for cfg in malformed:
+        f = _b82(cfg)
+        assert f.status == UNKNOWN, cfg
+        assert "is unset" not in f.detail, cfg
+
+
+def test_b82_genuinely_absent_containers_still_pass():
+    """The counterweight to the three tests above: narrowing PASS must not swallow the
+    B-228 invariant that a valid config declaring nothing dangerous PASSes. A bare `{}`
+    has no `diagnostics` key at all."""
+    for cfg in ({}, {"diagnostics": {}}, {"diagnostics": {"cacheTrace": {}}},
+                {"logging": {"redactSensitive": "tools"}}):
+        assert _b82(cfg).status == PASS, cfg
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────────

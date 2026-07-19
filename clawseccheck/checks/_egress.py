@@ -506,6 +506,29 @@ def check_provider_baseurl(ctx: Context) -> Finding:
     )
 
 
+def _b82_undeterminable(path: str, value: object, expected: str) -> Finding:
+    """B82's single UNKNOWN shape, shared by all three malformed levels.
+
+    ``diagnostics``, ``diagnostics.cacheTrace`` and ``.enabled`` are all declared inside
+    ``.strict()`` zod objects (``dist/zod-schema-O9ml_nmo.js:1050-1057``), and the schema
+    uses ``.optional()`` with **zero** ``.nullable()`` anywhere, so an explicit ``null``
+    is rejected exactly like a string or a list. A config carrying any of these shapes
+    does not load at all, which makes the agent's real cache-trace state undeterminable
+    from the file — UNKNOWN, never an affirmative claim in either direction.
+    """
+    return _finding(
+        "B82",
+        UNKNOWN,
+        f"{path} is present but is not {expected}, so whether cache-trace transcripts "
+        "are being written cannot be determined. OpenClaw declares it inside a strict "
+        "schema and rejects the whole config at load time when the shape is wrong, so "
+        "the running agent is not using what this file says.",
+        f"Set {path} to {expected}, or remove it entirely to take the built-in default "
+        "(cache tracing off), then re-run the audit.",
+        evidence=[f"{path}={value!r} (expected {expected})"],
+    )
+
+
 def check_cachetrace_redaction(ctx: Context) -> Finding:
     """B82 — cache-trace diagnostics persist full turn transcripts to disk.
 
@@ -524,8 +547,12 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
 
         enabled = parseBooleanValue(env.OPENCLAW_CACHE_TRACE) ?? config?.enabled ?? false
 
-    and falls back to ``$OPENCLAW_STATE_DIR/logs/cache-trace.jsonl`` when no ``filePath``
-    is given. So ``enabled:true`` with no ``filePath`` still writes transcripts, and
+    and resolves the destination as ``config?.filePath?.trim() ||
+    env.OPENCLAW_CACHE_TRACE_FILE?.trim()``, falling back to
+    ``$OPENCLAW_STATE_DIR/logs/cache-trace.jsonl`` when neither is set
+    (``selection-JInn13lc.js:1052``). So ``enabled:true`` with no ``filePath`` still
+    writes transcripts — the writer bails only on the flag
+    (``createCacheTrace``: ``if (!cfg.enabled) return null``, ``:1083``) — and
     ``filePath`` set with ``enabled:false`` writes nothing. Keying on ``filePath`` would
     be a false-positive WARN on the latter, which is why the port is deliberately not 1:1.
 
@@ -540,10 +567,14 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
 
     WARN    — ``diagnostics.cacheTrace.enabled`` is ``true``.
     PASS    — it is explicitly ``false``, OR unset (the built-in default is ``false``,
-              per ``config?.enabled ?? false``).
-    UNKNOWN — it is present but NOT a boolean. ``enabled`` is declared ``boolean()`` in a
-              ``.strict()`` object, so such a config is rejected at load time and we
-              cannot say what the agent is actually running.
+              per ``config?.enabled ?? false``). "Unset" means the key, or either
+              enclosing container, is genuinely ABSENT.
+    UNKNOWN — ``enabled`` is present but NOT a boolean, or either enclosing container
+              (``diagnostics`` / ``diagnostics.cacheTrace``) is present but not an
+              object. All three are declared inside ``.strict()`` objects, so such a
+              config is rejected at load time and we cannot say what the agent is
+              actually running. Note the schema uses ``.optional()`` and contains zero
+              ``.nullable()``, so an explicit ``null`` is malformed here, not "unset".
 
     On "unset" being PASS rather than UNKNOWN: the ``OPENCLAW_CACHE_TRACE`` env var
     overrides the config, and no config audit can observe it — but it overrides an
@@ -564,10 +595,22 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B82", ctx)
     if unreadable is not None:
         return unreadable
-    cfg = ctx.config
-    # Read the cacheTrace object once, so "key absent" and "key present with a bad value"
-    # stay distinguishable — dig() collapses both to None.
-    trace_cfg = dig(cfg, "diagnostics.cacheTrace")
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    # Walk the two containers by hand rather than through dig(): dig() collapses "key
+    # absent" and "key present but malformed" to the same None, and here those two states
+    # have OPPOSITE verdicts. Absent is the documented default (`?? false` → PASS), while a
+    # container of the wrong type is rejected by the .strict() zod object at load time, so
+    # the agent is NOT running this file and its cache-trace state is undeterminable —
+    # GR#4 requires UNKNOWN there, not an affirmative "unset and defaults to false".
+    diagnostics = cfg.get("diagnostics")
+    if "diagnostics" in cfg and not isinstance(diagnostics, dict):
+        return _b82_undeterminable("diagnostics", diagnostics, "a JSON object")
+    trace_cfg = diagnostics.get("cacheTrace") if isinstance(diagnostics, dict) else None
+    if isinstance(diagnostics, dict) and "cacheTrace" in diagnostics:
+        if not isinstance(trace_cfg, dict):
+            return _b82_undeterminable(
+                "diagnostics.cacheTrace", trace_cfg, "a JSON object"
+            )
     if not isinstance(trace_cfg, dict) or "enabled" not in trace_cfg:
         return _finding(
             "B82",
@@ -597,7 +640,8 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
             where = f"diagnostics.cacheTrace.filePath={trace_path!r}"
         else:
             where = (
-                "diagnostics.cacheTrace.filePath unset — defaults to "
+                "diagnostics.cacheTrace.filePath unset — written to "
+                "$OPENCLAW_CACHE_TRACE_FILE if set, else "
                 "$OPENCLAW_STATE_DIR/logs/cache-trace.jsonl"
             )
         return _finding(
@@ -614,16 +658,8 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
             "to false so only digests are recorded.",
             evidence=["diagnostics.cacheTrace.enabled=True", where],
         )
-    return _finding(
-        "B82",
-        UNKNOWN,
-        "diagnostics.cacheTrace.enabled is set to a non-boolean value, so whether "
-        "cache-trace transcripts are being written cannot be determined — OpenClaw "
-        "declares this field as a boolean inside a strict object and rejects the config "
-        "outright when it is anything else.",
-        "Set diagnostics.cacheTrace.enabled to a real JSON boolean (false unless you are "
-        "actively debugging), then re-run the audit.",
-        evidence=[f"diagnostics.cacheTrace.enabled={enabled!r} (expected true or false)"],
+    return _b82_undeterminable(
+        "diagnostics.cacheTrace.enabled", enabled, "a JSON boolean"
     )
 
 
