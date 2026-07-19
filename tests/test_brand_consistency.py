@@ -20,7 +20,11 @@ Beyond the per-renderer header checks, this file carries three more locks:
   the suite pinned it, so reverting it to a magnifier used to pass every test;
 * **the hand-rolled-header lock** — a source-level guard that sees a header built
   by hand instead of through :func:`brand.header`, which the earlier
-  ``s.strip() == brand.WORDMARK`` guard sailed straight past;
+  ``s.strip() == brand.WORDMARK`` guard sailed straight past. It reads each
+  string-producing *expression*, not just plain literals, so a header ASSEMBLED by
+  interpolation or concatenation (``f"{brand.WORDMARK} - New Screen"``) is caught
+  too — that shape is the likeliest drift now that every header-rendering module
+  imports ``brand``, and a literal-only scan is structurally blind to it;
 * **the voice invariants** — design-system.md Layer 0 ("plain language always —
   never internal codes; calm, not alarmist; local · read-only · nothing leaves
   your machine") asserted over RENDERED output from a real audit, not over a grep
@@ -39,6 +43,7 @@ from pathlib import Path as _Path
 from clawseccheck import audit, brand
 from clawseccheck.catalog import BY_ID, CRITICAL, FAIL, Finding
 from clawseccheck.dedup import deduplicate_findings
+from clawseccheck.guide import render_next_actions, suggest_actions
 from clawseccheck.history import render_trend
 from clawseccheck.menu import render_menu, render_onboarding
 from clawseccheck.palette import render_palette
@@ -390,13 +395,113 @@ _HEADER_SEPARATORS = "".join(sorted({
     brand.SEPARATOR.strip(), brand.ASCII_SEPARATOR.strip(), "—", "–", ":", "|",
 }))
 
+# The separator must carry whitespace on at least one side. brand.header() always
+# emits one (" · " / " - "), and so did every hand-rolled header this task
+# migrated, so requiring it costs no detection — while a wordmark welded straight
+# onto its next character is a slug, not a header ("ClawSecCheck-report.html",
+# "ClawSecCheck-v3.53.0"), and those used to trip this guard spuriously.
+#
+# Known residual: a colon-prefixed sentence ("ClawSecCheck: nothing to do.") still
+# matches, because a space after the colon is exactly what a colon header has too.
+# Separating them needs a capitalisation/word-count heuristic, which would be a
+# fragile condition guarding a string that does not exist in the package today —
+# left alone deliberately rather than traded for a real blind spot.
 _HAND_ROLLED_HEADER_RE = _re.compile(
-    r"^\s*(?:{mascot}\s*)?{wordmark}\s*[{seps}]".format(
+    r"^\s*(?:{mascot}\s*)?{wordmark}(?:\s+[{seps}]|[{seps}]\s)".format(
         mascot=_re.escape(brand.MASCOT),
         wordmark=_re.escape(brand.WORDMARK),
         seps=_re.escape(_HEADER_SEPARATORS),
     )
 )
+
+# ── Seeing a header that is ASSEMBLED rather than written out ────────────────
+#
+# Matching the regex against plain `ast.Constant` literals only would lock the
+# single least likely shape. Every module that renders a header now imports
+# `brand`, so `brand.WORDMARK` is in scope exactly where a header gets written —
+# which makes `f"{brand.WORDMARK} - New Screen"` the MOST ergonomic way to drift,
+# and a literal-only scan is structurally blind to it. Verified before this was
+# added: of the five natural drift shapes, only the plain literal was caught.
+#
+# So each string-producing expression is rebuilt from its parts, with `brand.X`
+# references resolved to their real values, and the regex runs over THAT.
+
+# What an expression splices in that cannot be known at parse time (a variable, a
+# call, a number). NUL is deliberate: no wordmark, mascot or separator pattern can
+# match it, so an unresolvable piece can never manufacture a hit.
+_UNRESOLVED = "\x00"
+
+# A `str.format()` replacement field. Only used to fill a template in argument
+# order — enough to see `"{} - New Screen".format(brand.WORDMARK)`.
+_FORMAT_FIELD_RE = _re.compile(r"\{[^{}]*\}")
+
+
+def _brand_reference(node):
+    """The value behind `brand.WORDMARK` / a bare `WORDMARK` import, else None."""
+    if isinstance(node, _ast.Attribute) and isinstance(node.value, _ast.Name) \
+            and node.value.id == "brand":
+        name = node.attr
+    elif isinstance(node, _ast.Name):
+        name = node.id
+    else:
+        return None
+    if not name.isupper():
+        return None
+    value = getattr(brand, name, None)
+    return value if isinstance(value, str) else None
+
+
+def _render_expression(node) -> str:
+    """The string an expression evaluates to, as far as source alone can tell."""
+    resolved = _brand_reference(node)
+    if resolved is not None:
+        return resolved
+    if isinstance(node, _ast.Constant):
+        return node.value if isinstance(node.value, str) else _UNRESOLVED
+    if isinstance(node, _ast.JoinedStr):  # an f-string
+        return "".join(_render_expression(v) for v in node.values)
+    if isinstance(node, _ast.FormattedValue):  # one {...} inside an f-string
+        return _render_expression(node.value)
+    if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):  # "a" + b
+        return _render_expression(node.left) + _render_expression(node.right)
+    if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute) \
+            and node.func.attr == "format":
+        filler = iter([_render_expression(a) for a in node.args])
+        return _FORMAT_FIELD_RE.sub(
+            lambda _m: next(filler, _UNRESOLVED), _render_expression(node.func.value)
+        )
+    return _UNRESOLVED
+
+
+def _assembled_strings_from_source(src: str) -> list:
+    """Every string an expression in *src* can produce — docstrings excluded.
+
+    Composite nodes are rendered whole AND their parts are rendered on their own
+    (an `ast.walk` sees both), which is harmless: a fragment can only match if it
+    already carries the wordmark and a separator, in which case it is drift too.
+    """
+    tree = _ast.parse(src)
+    docstrings = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.Module, _ast.ClassDef, _ast.FunctionDef, _ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None)
+            if body and isinstance(body[0], _ast.Expr) and isinstance(body[0].value, _ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                docstrings.add(id(body[0].value))
+    return [
+        _render_expression(n) for n in _ast.walk(tree)
+        if isinstance(n, (_ast.Constant, _ast.JoinedStr, _ast.BinOp, _ast.Call))
+        and id(n) not in docstrings
+    ]
+
+
+def _hand_rolled_headers_in_source(src: str) -> list:
+    """The hand-rolled brand headers *src* contains, deduplicated and ordered."""
+    seen = []
+    for s in _assembled_strings_from_source(src):
+        if _HAND_ROLLED_HEADER_RE.match(s) and s not in seen:
+            seen.append(s)
+    return seen
 
 
 def test_no_module_hand_rolls_a_brand_header():
@@ -404,9 +509,8 @@ def test_no_module_hand_rolls_a_brand_header():
     for path in _package_modules():
         if path.name == "brand.py":
             continue
-        for s in _value_strings(path):
-            if _HAND_ROLLED_HEADER_RE.match(s):
-                offenders.append(f"{path.relative_to(_PKG)}: {s!r}")
+        for s in _hand_rolled_headers_in_source(path.read_text(encoding="utf-8")):
+            offenders.append(f"{path.relative_to(_PKG)}: {s!r}")
     assert not offenders, (
         "a brand header is built by hand instead of through brand.header() — that is how "
         "the separator/mascot drifts back in one renderer at a time: " + str(offenders)
@@ -416,31 +520,48 @@ def test_no_module_hand_rolls_a_brand_header():
 def test_the_header_lock_recognizes_the_shape_it_replaced():
     """The guard above is only worth having if it still matches the real drift.
 
-    A regex that quietly stops matching anything passes forever, so pin both
-    directions with the actual strings this task removed and the actual prose it
-    must never touch.
+    Pinned through the SAME extractor the guard uses, over synthetic module
+    SOURCE — not against runtime strings. An f-string written in a test is already
+    an ordinary string by the time it is compared, so matching one would certify
+    the regex against a shape the source scan can never encounter, and read as
+    coverage of the interpolated case while providing none. Every case below is
+    real Python text, parsed exactly as a shipped module is.
     """
     drifted = [
-        "ClawSecCheck - active canary self-test",   # was canary.render_canary
-        "ClawSecCheck - Live Red-Team Suite v1",    # was redteam.render_suite
-        "ClawSecCheck - Runtime Dry-Run Harness",   # was dryrun.render_dryrun
-        f"{brand.MASCOT} {brand.WORDMARK} · Some New Screen",
-        f"{brand.WORDMARK} — Some New Screen",
-        f"{brand.WORDMARK}: Some New Screen",
+        '_t = "ClawSecCheck - active canary self-test"',   # was canary.render_canary
+        '_t = "ClawSecCheck - Live Red-Team Suite v1"',    # was redteam.render_suite
+        '_t = "ClawSecCheck - Runtime Dry-Run Harness"',   # was dryrun.render_dryrun
+        '_t = f"{brand.MASCOT} {brand.WORDMARK} · Some New Screen"',
+        '_t = f"{brand.WORDMARK} — Some New Screen"',
+        '_t = f"{brand.WORDMARK}: Some New Screen"',
+        '_t = brand.WORDMARK + " - Some New Screen"',
+        '_t = brand.WORDMARK + brand.SEPARATOR + "Some New Screen"',
+        '_t = "{} - Some New Screen".format(brand.WORDMARK)',
+        '_t = f"{MASCOT} {WORDMARK} | Some New Screen"',   # `from .brand import ...` style
     ]
-    for s in drifted:
-        assert _HAND_ROLLED_HEADER_RE.match(s), f"the lock no longer sees drift: {s!r}"
+    for src in drifted:
+        assert _hand_rolled_headers_in_source(src), f"the lock no longer sees drift: {src!r}"
 
     prose = [
-        "ClawSecCheck OpenClaw security self-audit (read-only).",
-        "ClawSecCheck Security Audit Report",
-        "ClawSecCheck audits an OpenClaw setup for security holes — I just need to find yours:",
-        "Generated locally by ClawSecCheck · read-only · this report never leaves your machine",
-        "A newer ClawSecCheck is available: v",
-        "Nothing to purge — no ClawSecCheck local store files found.",
+        '_t = "ClawSecCheck OpenClaw security self-audit (read-only)."',
+        '_t = "ClawSecCheck Security Audit Report"',
+        '_t = "ClawSecCheck audits an OpenClaw setup for security holes'
+        ' — I just need to find yours:"',
+        '_t = "Generated locally by ClawSecCheck · read-only'
+        ' · this report never leaves your machine"',
+        '_t = f"A newer {brand.WORDMARK} is available: v{latest}"',
+        '_t = "Nothing to purge — no ClawSecCheck local store files found."',
+        # The migrated shape itself must stay invisible, or the guard would flag
+        # the very call it exists to push authors towards.
+        '_t = brand.header("Some New Screen", ascii_only=ascii_only)',
+        '_t = brand.header("Some New Screen") + (" 🧪" if not ascii_only else "")',
+        # A wordmark welded onto the next character is a slug, not a header.
+        '_t = "ClawSecCheck-report.html"',
+        '_t = "ClawSecCheck-v3.53.0"',
+        '_t = f"{brand.WORDMARK}-{version}.html"',
     ]
-    for s in prose:
-        assert not _HAND_ROLLED_HEADER_RE.match(s), f"the lock fires on real prose: {s!r}"
+    for src in prose:
+        assert not _hand_rolled_headers_in_source(src), f"the lock fires on real prose: {src!r}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -594,6 +715,9 @@ def _owner_facing_surfaces(ctx, findings, score) -> dict:
         "render_card": render_card(score, findings),
         "render_monitor": render_monitor([("HIGH", "a check changed")], score),
         "render_html": _visible_text(render_html(findings, score)),
+        # A standalone CLI surface in its own right (`--next`, and appended to the
+        # default run), so the voice contract has to hold over it too.
+        "render_next_actions": render_next_actions(suggest_actions(findings, score)),
     }
 
 
