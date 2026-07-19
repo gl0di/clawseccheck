@@ -106,6 +106,18 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal — the single file that defines the
 # Unknown / future versions that do not appear in this table are treated as PASS
 # only against the entries here; they may still be vulnerable to undiscovered issues.
 # Each entry: (ghsa_id, max_vulnerable_version_tuple, fixed_version_str, short_desc)
+#
+# ⚠️ CORRECTION-RELEASE SUFFIX WARNING (B-264): _parse_version() truncates at the first
+# non-dotted-integer character, so a hyphenated correction release collapses onto its
+# base version — "2026.7.1-2" parses identically to "2026.7.1" (both -> (2026, 7, 1)).
+# OpenClaw does ship this shape in the wild (observed: package.json "2026.7.1-2").
+# The compare below is `parsed <= max_vuln`, so if a fix for THIS advisory ever lands in
+# a correction release, max_vuln must NOT share a base tuple with that release's fixed
+# version: e.g. max_vuln=(2026, 7, 1) would FAIL the already-fixed "2026.7.1-2" (false
+# positive, GR#5), while max_vuln=(2026, 7, 0) would PASS the still-vulnerable "2026.7.1"
+# (false negative). Neither is safe — a correction-release fix needs a comparator change
+# (e.g. a (base_tuple, correction_int) pair), not a new table row. Until then, do not add
+# an advisory whose max_vulnerable_version_tuple equals a fixed release's base tuple.
 _KNOWN_ADVISORIES: list[tuple[str, tuple[int, ...], str, str]] = [
     (
         "GHSA-g8p2-7wf7-98mq",
