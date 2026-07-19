@@ -270,6 +270,52 @@ def test_a_traversal_path_yields_unknown_not_a_read(tmp_path):
     assert any("unusable path" in e for e in f.evidence)
 
 
+def test_a_same_named_skill_in_another_workspace_is_not_compared(tmp_path):
+    """Adversarial (C-135): two workspaces can each hold a `skills/<slug>` of the same name
+    with different content. Falling back to "some other workspace's copy" would compare a
+    lock against bytes it never described — a false-positive FAIL on two legitimately
+    different installs. An unresolvable lock entry must report UNKNOWN instead."""
+    home = _copy_clean(tmp_path)
+    # The lock's own workspace loses its skills dir...
+    shutil.rmtree(home / "workspace" / "skills")
+    # ...while a DIFFERENT workspace holds an unrelated skill of the same slug.
+    other = home / "workspace-home" / "skills" / "demo-skill"
+    other.mkdir(parents=True)
+    (other / "SKILL.md").write_text("a different skill that happens to share the slug",
+                                    encoding="utf-8")
+    f = check_skill_install_tamper(_ctx(home))
+    assert f.status == UNKNOWN
+    assert any("could not be located" in e for e in f.evidence)
+
+
+def test_a_relocated_install_is_still_covered_by_its_own_origin_record(tmp_path):
+    """The counterpart to the test above: refusing to guess costs no coverage, because a
+    skill installed outside the lock's workspace carries its OWN .clawhub/origin.json next
+    to its files, where the directory is known exactly."""
+    home = _copy_clean(tmp_path)
+    moved = home / "workspace-home" / "skills" / "demo-skill"
+    moved.parent.mkdir(parents=True)
+    shutil.move(str(home / "workspace" / "skills" / "demo-skill"), str(moved))
+    shutil.rmtree(home / "workspace" / ".clawhub")
+    (moved / ".clawhub").mkdir()
+    (moved / ".clawhub" / "origin.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "registry": "https://clawhub.ai",
+                "slug": "demo-skill",
+                "installedVersion": "1.0.0",
+                "installedAt": 1751000000000,
+                "skillFile": {"path": "SKILL.md", "sha256": _sha256(moved / "SKILL.md")},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert check_skill_install_tamper(_ctx(home)).status == PASS
+    (moved / "SKILL.md").write_text("tampered", encoding="utf-8")
+    assert check_skill_install_tamper(_ctx(home)).status == FAIL
+
+
 def test_recorded_files_merges_skillfile_and_the_manifest():
     lock = json.loads((CLEAN / "workspace" / ".clawhub" / "lock.json").read_text())
     pairs = _b181_recorded_files(lock["skills"]["demo-skill"])

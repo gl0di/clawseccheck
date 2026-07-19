@@ -2841,26 +2841,27 @@ def _b181_recorded_files(record: dict) -> "list[tuple[str, str]]":
     return sorted(out.items())
 
 
-def _b181_skill_dir(home: Path, slug: str, lock_parent):
-    """Resolve slug -> installed skill directory, or None.
+def _b181_skill_dir(slug: str, lock_parent: Path):
+    """Resolve a lock entry's slug -> its installed skill directory, or None.
 
-    `<lock parent>/skills/<slug>` first (dist/cli.js:94 resolves the skills dir as
-    `resolve(workdir, "skills")`), then the package's own SKILL_DIRS so a `--dir`-relocated
-    or differently-rooted install still resolves.
+    ONLY `<lock parent>/skills/<slug>` — the workdir-relative location the CLI itself
+    resolves (dist/cli.js:94: `resolve(workdir, "skills")`). Deliberately no fallback
+    search across the other SKILL_DIRS: two workspaces can each hold a `skills/<slug>` of
+    the same name with different content, and picking "some other workspace's copy of a
+    skill with this slug" would compare a lock against bytes it never described — a
+    false-positive FAIL on two legitimately different installs (Golden Rule #5).
+
+    Nothing is lost by refusing to guess. A skill installed somewhere this lock does not
+    describe carries its OWN `.clawhub/origin.json` next to its files, and that record is
+    picked up by the second pass in `_b181_provenance_records` — where the directory is
+    known exactly, because the record lives inside it. An unresolvable lock entry reports
+    UNKNOWN, which is the honest answer.
     """
-    from ..collector import SKILL_DIRS
-
-    candidates = []
-    if lock_parent is not None:
-        candidates.append(lock_parent / "skills" / slug)
-    candidates.extend(home / rel / slug for rel in SKILL_DIRS)
-    for cand in candidates:
-        try:
-            if cand.is_dir():
-                return cand
-        except OSError:
-            continue
-    return None
+    cand = lock_parent / "skills" / slug
+    try:
+        return cand if cand.is_dir() else None
+    except OSError:
+        return None
 
 
 def _b181_provenance_records(home: Path):
@@ -2882,7 +2883,7 @@ def _b181_provenance_records(home: Path):
             for slug, entry in skills.items():
                 if not isinstance(entry, dict) or not isinstance(slug, str):
                     continue
-                skill_dir = _b181_skill_dir(home, slug, lock_path.parent.parent)
+                skill_dir = _b181_skill_dir(slug, lock_path.parent.parent)
                 if skill_dir is not None:
                     seen_dirs.add(str(skill_dir))
                 records.append((slug, skill_dir, entry, f"{dot}/lock.json"))
