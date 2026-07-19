@@ -1084,7 +1084,8 @@ _MATCH_MAPPING_NODE = getattr(ast, "MatchMapping", None)
 def _own_bound_names(scope: ast.AST) -> set[str]:
     """Names Python itself would make a local of `scope`: its own parameters, plus
     every def/class name, assignment/for/with/walrus/import/except/match target in
-    `scope`'s OWN body. The walk STOPS at nested function, class and lambda
+    `scope`'s OWN body, MINUS every name `scope` declares `global` or `nonlocal`
+    (B-261 -- see below). The walk STOPS at nested function, class and lambda
     boundaries -- a name bound inside a nested scope is a local of THAT scope and
     shadows nothing out here, so it cannot change what a reference in THIS scope
     resolves to. (A nested def/class still contributes its own NAME, which really is
@@ -1114,8 +1115,53 @@ def _own_bound_names(scope: ast.AST) -> set[str]:
 
     Both halves had to land together: fixing either alone trades one bug for the
     other.
+
+    B-261 (false NEGATIVE -- an evasion) is the third distinct rule, and the one this
+    subtraction encodes: a `global`/`nonlocal` declaration means the name is NOT a
+    fresh local of `scope` at all. The assignment rebinds the module (or the enclosing)
+    binding IN PLACE, so it must not be counted as a shadow of the very binding it
+    writes to. Without the subtraction, a scope that both declared the name and
+    consumed it -- `nonlocal x; x = base64.b64decode(...); exec(x)` all inside ONE
+    nested function -- seeded the taint into the ancestor bucket (B-215) and then
+    subtracted that same ancestor away again in `_tainted_names_visible`, so the exec
+    read clean. B-214/B-215 both concerned OTHER scopes' view of the name; this is the
+    writing scope's view of its own write.
+
+    Note this is a subtraction, not another special case: a plain local assignment with
+    no declaration still shadows exactly as before -- the declaration is the whole
+    discriminator, and it is the same one Python's own compiler uses. It also makes
+    `_nonlocal_target_scopes` strictly more faithful for free: an ancestor that
+    declares the name `global` can never be what a `nonlocal` binds to, and no longer
+    claims to be.
+
+    SCOPE OF THIS SET -- read before reusing it as a shadow. "Not a local of `scope`"
+    is only HALF of what a `global` declaration means, and it is the only half this
+    function is entitled to model. The other half -- that a reference in `scope` skips
+    every ENCLOSING FUNCTION and resolves at module level -- is a property of the
+    RESOLUTION WALK, not of any one scope's binding set, so it lives in
+    `_tainted_names_visible`. Landing the subtraction alone (B-261, first attempt)
+    produced a real false-positive FAIL: `global t` in a nested helper made an
+    ENCLOSING function's same-named decoded local read as visible taint, which it
+    provably never is. The two declarations are NOT symmetric here, and the asymmetry
+    is why only one of them needs that extra step:
+
+      * `nonlocal n` resolves to the nearest ENCLOSING FUNCTION that binds `n` --
+        Python's syntax guarantees such an ancestor exists -- so the walk stops itself:
+        that ancestor contributes `n` to the shadow out of its own binding set, and
+        nothing further out (module included) stays visible. Dropping `n` here is
+        therefore complete on its own.
+      * `global n` carries NO such guarantee. Nothing has to bind `n` between `scope`
+        and module, so nothing is obliged to re-contribute the shadow -- and when an
+        enclosing function DOES bind `n`, that ancestor is exactly the one whose taint
+        must stay hidden, yet its shadow is merged only AFTER its own bucket is read.
+        Dropping `n` here is necessary but not sufficient; see `_tainted_names_visible`.
     """
     bound: set[str] = set()
+    # Names this scope declares as belonging to an OUTER binding. Collected by the same
+    # scope-bounded walk as `bound`, so a declaration inside a nested function is not
+    # attributed here -- no owner_map needed (cf. `_global_declared_names`, which walks
+    # a whole subtree and therefore does need one).
+    declared_outer: set[str] = set()
 
     def add_args(args: ast.arguments) -> None:
         for a in (*args.posonlyargs, *args.args, *args.kwonlyargs):
@@ -1143,6 +1189,11 @@ def _own_bound_names(scope: ast.AST) -> set[str]:
             # Binds no name of its own here, and its body is its own scope -- but its
             # defaults are evaluated in ours (`_enclosing_evaluated_parts`).
             stack.extend(_enclosing_evaluated_parts(n))
+            continue
+        if isinstance(n, (ast.Global, ast.Nonlocal)):
+            # B-261: declares the name is not a local here. Python forbids declaring a
+            # parameter global/nonlocal, so this never fights `add_args`.
+            declared_outer.update(n.names)
             continue
         if isinstance(n, ast.Assign):
             for t in n.targets:
@@ -1173,7 +1224,7 @@ def _own_bound_names(scope: ast.AST) -> set[str]:
         elif _MATCH_MAPPING_NODE is not None and isinstance(n, _MATCH_MAPPING_NODE) and n.rest:
             bound.add(n.rest)
         stack.extend(ast.iter_child_nodes(n))
-    return bound
+    return bound - declared_outer if declared_outer else bound
 
 
 def _build_toplevel_owner_map(funcs: list, classes: list | None = None) -> tuple[dict, dict]:
@@ -1760,7 +1811,17 @@ def _tainted_names_visible(
     OUTWARD (checking each ancestor's bucket BEFORE merging that ancestor's own
     shadow set into the running total) so a scope's own tainted assignment is never
     checked against its OWN shadow set — which would incorrectly treat a taint
-    source as shadowing itself and silently drop a real closure read."""
+    source as shadowing itself and silently drop a real closure read.
+
+    B-261: a name `scope` declares `global` is not resolved by that outward walk at
+    all — Python jumps straight to the module binding. Modelling it as a walk (which
+    the first attempt at B-261 effectively did, by dropping the name from `scope`'s
+    own shadow set and letting the ordinary chain walk proceed) reads every ENCLOSING
+    FUNCTION's same-named local on the way out and produced a real false-positive
+    FAIL. So the redirect is applied as a redirect: the name is shadowed for the whole
+    chain, then taken from the module bucket directly. `nonlocal` needs nothing here —
+    it resolves to an ancestor that, by Python's own syntax rules, binds the name and
+    therefore ends the walk itself (see `_own_bound_names`)."""
     scope = owner_map.get(node)
     if scope is None:
         return set(tainted.get(None, ()))
@@ -1770,8 +1831,15 @@ def _tainted_names_visible(
             shadow_cache[s] = _own_bound_names(s)
         return shadow_cache[s]
 
+    # Names `scope` declares `global` in its OWN body (owner_map-filtered, so a
+    # declaration inside a nested function is not attributed here — B-209).
+    global_here = _global_declared_names(scope, owner_map)
+
     visible = set(tainted.get(scope, ()))
-    cumulative_shadow = set(get_shadow(scope))
+    # `get_shadow` has already subtracted `global_here` (it is not a local binding);
+    # add it back for the chain walk, because no enclosing FUNCTION's binding of the
+    # name is reachable from here whatever else the chain does or does not bind.
+    cumulative_shadow = set(get_shadow(scope)) | global_here
     ancestor = parent_scope.get(scope)
     while True:
         bucket = tainted.get(ancestor, set())
@@ -1780,6 +1848,10 @@ def _tainted_names_visible(
             break
         cumulative_shadow |= get_shadow(ancestor)
         ancestor = parent_scope.get(ancestor)
+    # The redirect itself: a `global`-declared name IS the module binding, so it is
+    # visible whenever that binding is tainted — no accumulated shadow can hide it.
+    if global_here:
+        visible |= set(tainted.get(None, ())) & global_here
     return visible
 
 
