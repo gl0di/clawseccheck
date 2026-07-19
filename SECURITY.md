@@ -35,8 +35,13 @@ as `<REDACTED>` or `sk-XXXX`.
 
 ## Scope
 
-ClawSecCheck is a **local, read-only** audit tool. It reads only the files it is
-pointed at (OpenClaw config, bootstrap markdown, installed-skill text) and writes only
+ClawSecCheck is a **local, read-only** audit tool. Its read scope is bounded and
+documented: your OpenClaw config, bootstrap markdown, installed-skill text, OpenClaw log
+files and agent session logs, and — unless you pass `--no-host` — a host-posture scan
+beyond OpenClaw's own scope (security-tool config paths and binaries on `PATH`, the text
+of a few known firewall config files, the names of proxy-shaped env vars, and on Windows
+read-only `HKEY_LOCAL_MACHINE` registry queries). `SKILL.md` and
+[`SECURITY_MODEL.md`](SECURITY_MODEL.md) list the full surface. It writes only
 its own state under `~/.clawseccheck/` — by default a one-line score-history entry
 (opt out with `--no-history`), and other files only when you ask (`--save`, `--badge`,
 `--sarif`, `--monitor`, `--log`). It never writes to your OpenClaw config, and it makes

@@ -781,8 +781,8 @@ made stricter, no new false-FAIL surface.
 
 ### Changed
 - **Capability disclosure tightened in SKILL.md/README.md.** "Read-only" is now stated as
-  scoped to your OpenClaw setup rather than absolute; host-security recon (filesystem/env-
-  name checks, no subprocess, no network) is disclosed explicitly instead of implied;
+  scoped to your OpenClaw setup rather than absolute; host-security recon (read-only local
+  checks, no subprocess, no network) is disclosed explicitly instead of implied;
   `--no-history`/`--no-host`/`--no-native`/`--purge` are listed together; and `--vet`/
   `--vet-source` are stated up front as asking *your own host agent* to fetch, never
   ClawSecCheck itself. No functionality or check-logic changed.
@@ -4443,7 +4443,7 @@ template.
 
 Adds the **attestation layer** — the first time the audit reads more than config files.
 The static scan sees only what the config *records*; an agent's real tool/verb inventory,
-whether untrusted input can reach a side-effect, and host monitors the host scan can't see
+whether untrusted input can reach a side-effect, and host monitors a file scan can't see
 are not in any config field. The agent now self-reports those facts in a small JSON
 (`--ask` emits a template, `--attest` consumes it), unlocking capability-level least
 privilege without inventing config fields. Local, read-only, no network — the self-report
