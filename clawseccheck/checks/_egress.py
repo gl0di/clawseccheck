@@ -507,48 +507,123 @@ def check_provider_baseurl(ctx: Context) -> Finding:
 
 
 def check_cachetrace_redaction(ctx: Context) -> Finding:
-    """B82 — cacheTrace transcripts persisted without tool-output redaction.
+    """B82 — cache-trace diagnostics persist full turn transcripts to disk.
 
-    Grounded (recon: logging.cacheTrace.filePath, logging.redactSensitive). The
-    cache-trace JSONL persists full prompt/response transcripts to disk; without
-    redactSensitive="tools" those transcripts can carry secrets at rest.
+    Grounded against the INSTALLED dist, not the recon:
 
-    PASS — cacheTrace is not configured, OR redactSensitive == "tools".
-    WARN — logging.cacheTrace.filePath is set AND redactSensitive != "tools".
+      - config gate: ``diagnostics.cacheTrace.enabled``
+        (``dist/zod-schema-O9ml_nmo.js:1050-1056`` declares the ``diagnostics.cacheTrace``
+        object; ``dist/selection-JInn13lc.js:1049`` is the runtime read).
+      - NOT ``logging.cacheTrace.*``. That path does not exist anywhere in the package
+        (``grep -rF "logging.cacheTrace"`` = 0 hits) and the ``logging`` zod object is
+        ``.strict()`` (``zod-schema-O9ml_nmo.js:1059-1070``), so a config carrying it is
+        rejected outright. Reading it made this check's "not configured" branch an
+        affirmative FALSE claim for every user who actually HAD cache tracing on.
+
+    The enable gate is ``enabled``, NOT ``filePath`` — ``resolveCacheTraceConfig`` reads::
+
+        enabled = parseBooleanValue(env.OPENCLAW_CACHE_TRACE) ?? config?.enabled ?? false
+
+    and falls back to ``$OPENCLAW_STATE_DIR/logs/cache-trace.jsonl`` when no ``filePath``
+    is given. So ``enabled:true`` with no ``filePath`` still writes transcripts, and
+    ``filePath`` set with ``enabled:false`` writes nothing. Keying on ``filePath`` would
+    be a false-positive WARN on the latter, which is why the port is deliberately not 1:1.
+
+    Redaction here is NOT config-gated: every payload field the trace writes goes through
+    ``redactAgentDiagnosticPayload`` (``selection-JInn13lc.js:828`` —
+    ``redactSecrets(sanitizeDiagnosticPayload(...))``), and ``logging.redactSensitive`` is
+    never consulted by that module. This check therefore does not claim the sink is
+    unredacted; it reports that a bulk per-turn transcript sink is switched on — which
+    OpenClaw's own schema descriptor flags as something to "enable ... temporarily for
+    debugging and disable afterward to reduce sensitive log footprint"
+    (``dist/schema-DRyO1XBt.js:104``).
+
+    WARN    — ``diagnostics.cacheTrace.enabled`` is ``true``.
+    PASS    — it is explicitly ``false``, OR unset (the built-in default is ``false``,
+              per ``config?.enabled ?? false``).
+    UNKNOWN — it is present but NOT a boolean. ``enabled`` is declared ``boolean()`` in a
+              ``.strict()`` object, so such a config is rejected at load time and we
+              cannot say what the agent is actually running.
+
+    On "unset" being PASS rather than UNKNOWN: the ``OPENCLAW_CACHE_TRACE`` env var
+    overrides the config, and no config audit can observe it — but it overrides an
+    explicit ``enabled:false`` exactly as it overrides an absent key, so that uncertainty
+    cannot distinguish the two. Treating "unset" as UNKNOWN on those grounds would mean
+    B82 could never legitimately PASS at all. Unset is therefore reported as PASS on the
+    documented default, with the env-var caveat named in the remediation, matching the
+    house rule that a valid config declaring nothing dangerous PASSes (the invariant
+    tests/test_b228_unknown_on_parse_error.py pins across every ``_config_unreadable``
+    guarded check).
+
+    Known limitation, deliberately not branched on: setting ``includeMessages`` /
+    ``includePrompt`` / ``includeSystem`` all to ``false`` narrows an enabled trace to
+    digests and fingerprints, at which point this WARN overstates the footprint. Reading
+    those three would add three more grounded paths for a strictly advisory refinement,
+    so the remediation names them instead. WARN never FAILs, so this cannot trip GR#5.
     """
     unreadable = _config_unreadable("B82", ctx)
     if unreadable is not None:
         return unreadable
     cfg = ctx.config
-    trace_path = dig(cfg, "logging.cacheTrace.filePath")
-    if not trace_path:
+    # Read the cacheTrace object once, so "key absent" and "key present with a bad value"
+    # stay distinguishable — dig() collapses both to None.
+    trace_cfg = dig(cfg, "diagnostics.cacheTrace")
+    if not isinstance(trace_cfg, dict) or "enabled" not in trace_cfg:
         return _finding(
             "B82",
             PASS,
-            "No cache-trace transcript file is configured, so full transcripts are not "
-            "persisted to disk.",
-            "If you enable logging.cacheTrace.filePath, also set logging.redactSensitive "
-            'to "tools" so persisted transcripts don\'t carry secrets.',
+            "Cache-trace diagnostics are not switched on in the config "
+            "(diagnostics.cacheTrace.enabled is unset and defaults to false), so no "
+            "per-turn transcript sink is configured.",
+            "Pin diagnostics.cacheTrace.enabled to false so the intent is explicit and "
+            "auditable, and keep the OPENCLAW_CACHE_TRACE environment variable unset — "
+            "it overrides the config at runtime.",
         )
-    redact = dig(cfg, "logging.redactSensitive")
-    if redact == "tools":
+    enabled = trace_cfg.get("enabled")
+    if enabled is False:
         return _finding(
             "B82",
             PASS,
-            "Cache-trace transcripts are persisted with tool-output redaction "
-            '(logging.redactSensitive="tools").',
-            'Keep logging.redactSensitive at "tools" while cache-trace logging is on.',
+            "Cache-trace diagnostics are explicitly disabled "
+            "(diagnostics.cacheTrace.enabled=false), so per-turn prompt and message "
+            "transcripts are not being appended to disk.",
+            "Leave diagnostics.cacheTrace.enabled at false. Note that the "
+            "OPENCLAW_CACHE_TRACE environment variable overrides this setting at "
+            "runtime, so keep it unset outside debugging sessions.",
+        )
+    if enabled is True:
+        trace_path = trace_cfg.get("filePath")
+        if isinstance(trace_path, str) and trace_path.strip():
+            where = f"diagnostics.cacheTrace.filePath={trace_path!r}"
+        else:
+            where = (
+                "diagnostics.cacheTrace.filePath unset — defaults to "
+                "$OPENCLAW_STATE_DIR/logs/cache-trace.jsonl"
+            )
+        return _finding(
+            "B82",
+            WARN,
+            "Cache-trace diagnostics are enabled — every agent turn appends its prompt, "
+            "system prompt and full message payloads to a JSONL file on disk. OpenClaw "
+            "redacts known secret patterns from those payloads, but the transcript is "
+            "still a bulk record of conversation content at rest.",
+            "Set diagnostics.cacheTrace.enabled to false once the debugging session that "
+            "needed it is over — OpenClaw's own schema recommends enabling it only "
+            "temporarily. To keep tracing on with a smaller footprint, set "
+            "diagnostics.cacheTrace.includeMessages, .includePrompt and .includeSystem "
+            "to false so only digests are recorded.",
+            evidence=["diagnostics.cacheTrace.enabled=True", where],
         )
     return _finding(
         "B82",
-        WARN,
-        "logging.cacheTrace.filePath persists full transcripts to disk but "
-        'logging.redactSensitive is not "tools" — secrets can be written at rest.',
-        'Set logging.redactSensitive to "tools", or disable logging.cacheTrace.filePath.',
-        evidence=[
-            f"logging.cacheTrace.filePath={trace_path!r}",
-            f"logging.redactSensitive={redact!r}",
-        ],
+        UNKNOWN,
+        "diagnostics.cacheTrace.enabled is set to a non-boolean value, so whether "
+        "cache-trace transcripts are being written cannot be determined — OpenClaw "
+        "declares this field as a boolean inside a strict object and rejects the config "
+        "outright when it is anything else.",
+        "Set diagnostics.cacheTrace.enabled to a real JSON boolean (false unless you are "
+        "actively debugging), then re-run the audit.",
+        evidence=[f"diagnostics.cacheTrace.enabled={enabled!r} (expected true or false)"],
     )
 
 

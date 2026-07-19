@@ -43,6 +43,7 @@ commands.ownerAllowFrom
 commands.plugins
 commands.useAccessGroups
 cron
+diagnostics.cacheTrace
 diagnostics.cacheTrace.filePath
 discovery.mdns.mode
 gateway.allowRealIpFallback
@@ -79,7 +80,6 @@ hooks.internal.load.extraDirs
 hooks.mappings
 hooks.token
 lastTouchedVersion
-logging.cacheTrace.filePath
 logging.file
 logging.redactSensitive
 meta.lastTouchedVersion

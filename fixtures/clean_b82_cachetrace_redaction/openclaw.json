@@ -5,9 +5,12 @@
   },
   "channels": { "telegram": { "dmPolicy": "allowlist", "groupPolicy": "allowlist" } },
   "tools": { "profile": "minimal" },
-  "logging": {
-    "redactSensitive": "tools",
-    "cacheTrace": { "filePath": "~/.openclaw/cache-trace.jsonl" }
+  "logging": { "redactSensitive": "tools" },
+  "diagnostics": {
+    "cacheTrace": {
+      "enabled": false,
+      "filePath": "~/.openclaw/cache-trace.jsonl"
+    }
   },
   "models": { "main": { "provider": "ollama/llama3" } }
 }
