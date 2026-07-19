@@ -1362,3 +1362,229 @@ def test_b261_benign_same_scope_nonlocal_write_stays_silent():
         "    return bump\n"
     )
     assert _rules(src) == set()
+
+
+# ---------------------------------------------------------------------------
+# B-261, second half: `global` is a REDIRECT, not a walk.
+#
+# Dropping a declared name from `_own_bound_names` is necessary but, for `global`,
+# not sufficient -- and shipping only that produced a real false-positive FAIL.
+# `global n` in a nested helper made an ENCLOSING function's same-named decoded
+# local read as visible taint, though the two are provably different variables.
+# The declarations are asymmetric, and these tests pin both directions:
+#
+#   nonlocal n -> nearest ENCLOSING FUNCTION that binds n. Python's syntax
+#                 guarantees one exists, so that ancestor re-contributes the shadow
+#                 and the ordinary outward walk stops itself. Module never reached.
+#   global n   -> the MODULE binding, always. Every enclosing function is skipped
+#                 whether or not it binds n, and no accumulated shadow may hide the
+#                 module bucket.
+#
+# The discriminating pair is `..._reaches_a_module_level_decode` (crit) against
+# `..._does_not_expose_an_enclosing_functions_decode` (silent): identical syntax,
+# opposite verdicts, decided solely by WHICH scope holds the decode.
+# ---------------------------------------------------------------------------
+
+def test_b261_nested_global_does_not_expose_an_enclosing_functions_decode():
+    # THE false positive this half of the fix exists to prevent, in its realistic
+    # form: `make_registrar`'s `template` is a decoded bundled asset; `register`'s
+    # `template` is the module-level one it declares `global`. Different variables,
+    # so the decoded bytes provably cannot reach the exec. Fully benign -- must not
+    # be crit. (No external input anywhere, so no other rule confounds the verdict.)
+    src = (
+        "import base64\n"
+        "template = ''\n"
+        "def make_registrar():\n"
+        "    template = base64.b64decode(b'aGVsbG8=')\n"
+        "    open('/tmp/asset.bin', 'wb').write(template)\n"
+        "    def register():\n"
+        "        global template\n"
+        "        template = 'PLUGINS = {}'\n"
+        "        exec(template)\n"
+        "    return register\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b261_nested_global_reaches_a_module_level_decode():
+    # The other half of the discriminating pair, and the reason the FP above cannot
+    # be fixed by simply reverting to a shadow: same shape, decode moved to MODULE
+    # level, where `global` says the name really does resolve. Must stay crit even
+    # though `outer` binds the same bare name -- a plain outward walk would let that
+    # unrelated binding shadow the module bucket and lose the detection.
+    src = (
+        "import base64\n"
+        "blob = base64.b64decode(b'eA==')\n"
+        "def outer():\n"
+        "    blob = 'unrelated'\n"
+        "    def inner():\n"
+        "        global blob\n"
+        "        exec(blob)\n"
+        "    inner()\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b261_nested_global_does_not_expose_an_enclosing_augmented_assignment():
+    # Same FP through `+=` rather than `=`: AugAssign is a binding form too, so the
+    # subtraction reaches it and the redirect has to cover it as well.
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    buf = base64.b64decode(b'eA==')\n"
+        "    def inner():\n"
+        "        global buf\n"
+        "        buf += 'x'\n"
+        "        exec(buf)\n"
+        "    inner()\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b261_global_in_a_method_does_not_expose_the_enclosing_functions_decode():
+    # Same FP reached through a class body nested in a function -- the method chains
+    # to `make` via parent_scope, so the redirect must apply on that path too.
+    src = (
+        "import base64\n"
+        "tmpl = ''\n"
+        "def make():\n"
+        "    tmpl = base64.b64decode(b'eA==')\n"
+        "    class R:\n"
+        "        def go(self):\n"
+        "            global tmpl\n"
+        "            tmpl = 'print(1)'\n"
+        "            exec(tmpl)\n"
+        "    return tmpl, R\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b261_global_declared_but_never_assigned_does_not_expose_an_enclosing_decode():
+    # The declaration alone redirects -- there need be no assignment at all. This
+    # shape was a latent false positive even BEFORE the B-261 work (the name never
+    # entered any shadow set, so the enclosing bucket was always exposed); modelling
+    # `global` as a redirect rather than as an absent binding closes it too.
+    src = (
+        "import base64\n"
+        "blob = ''\n"
+        "def outer():\n"
+        "    blob = base64.b64decode(b'eA==')\n"
+        "    def inner():\n"
+        "        global blob\n"
+        "        exec(blob)\n"
+        "    inner()\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b261_nested_global_write_and_exec_in_the_same_function_flags():
+    # The ticket's own repro reached through `global` from a NESTED scope, not just
+    # a top-level one: write and exec in one inner function. Guards the FP fixes
+    # above from being over-applied into a detection hole.
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    def inner():\n"
+        "        global g\n"
+        "        g = base64.b64decode(b'eA==')\n"
+        "        exec(g)\n"
+        "    inner()\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b261_global_write_in_an_enclosing_scope_is_visible_to_a_nested_read():
+    # `outer` writes the decode to MODULE scope via `global`; `inner` declares
+    # nothing, so its read falls through `outer` (which binds no local `n`) to that
+    # same module binding. Real flow -- and the case that makes dropping a declared
+    # name from `_own_bound_names` load-bearing: keep it as a shadow and `outer`
+    # hides the module bucket from `inner`, reopening the evasion.
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    global n\n"
+        "    n = base64.b64decode(b'eA==')\n"
+        "    def inner():\n"
+        "        exec(n)\n"
+        "    inner()\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b261_global_skips_every_enclosing_function_not_just_the_nearest():
+    # Generalization guard: the redirect is not a one-level patch. TWO enclosing
+    # functions each hold their own decoded local; `c`'s `global t` skips both.
+    src = (
+        "import base64\n"
+        "t = ''\n"
+        "def a():\n"
+        "    t = base64.b64decode(b'eA==')\n"
+        "    def b():\n"
+        "        t = base64.b64decode(b'eQ==')\n"
+        "        def c():\n"
+        "            global t\n"
+        "            t = 'x'\n"
+        "            exec(t)\n"
+        "        c()\n"
+        "    b()\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b261_global_skipping_still_reaches_module_through_a_deep_chain():
+    # The paired true positive for the above: same three-level shape, decode moved
+    # to module scope. Both enclosing bindings are skipped in this direction too,
+    # so neither may shadow the module bucket away.
+    src = (
+        "import base64\n"
+        "t = base64.b64decode(b'eA==')\n"
+        "def a():\n"
+        "    t = 1\n"
+        "    def b():\n"
+        "        t = 2\n"
+        "        def c():\n"
+        "            global t\n"
+        "            exec(t)\n"
+        "        c()\n"
+        "    b()\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b261_global_in_a_nested_function_does_not_unshadow_the_outer_scope():
+    # Owner attribution for `global`, the axis the `nonlocal` control above does not
+    # cover: `helper` declares `_decode` global, but `run` binds it as a genuine
+    # local. The declaration belongs to `helper` alone, so `run` keeps its shadow
+    # and the wrapper call must stay silent.
+    src = (
+        _DECODE_HELPER
+        + "def run():\n"
+        "    _decode = None\n"
+        "    def helper():\n"
+        "        global _decode\n"
+        "        _decode = None\n"
+        "    payload = _decode(b'eA==')\n"
+        "    exec(payload)\n"
+    )
+    assert "_decode" in _run_binds(src)
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b261_nested_nonlocal_does_not_expose_a_module_level_decode():
+    # The mirror direction, pinning that `nonlocal` needs NO redirect: `inner`'s `x`
+    # is `outer`'s cell, never the tainted module-level `x`. Nothing special-cases
+    # this -- `outer` binds `x` and so re-contributes the shadow before the walk
+    # reaches module. If a future change gives `nonlocal` the `global` treatment,
+    # this goes red.
+    src = (
+        "import base64\n"
+        "x = base64.b64decode(b'eA==')\n"
+        "def outer():\n"
+        "    x = 1\n"
+        "    def inner():\n"
+        "        nonlocal x\n"
+        "        x = 'safe'\n"
+        "        exec(x)\n"
+        "    inner()\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)

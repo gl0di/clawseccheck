@@ -1133,6 +1133,28 @@ def _own_bound_names(scope: ast.AST) -> set[str]:
     `_nonlocal_target_scopes` strictly more faithful for free: an ancestor that
     declares the name `global` can never be what a `nonlocal` binds to, and no longer
     claims to be.
+
+    SCOPE OF THIS SET -- read before reusing it as a shadow. "Not a local of `scope`"
+    is only HALF of what a `global` declaration means, and it is the only half this
+    function is entitled to model. The other half -- that a reference in `scope` skips
+    every ENCLOSING FUNCTION and resolves at module level -- is a property of the
+    RESOLUTION WALK, not of any one scope's binding set, so it lives in
+    `_tainted_names_visible`. Landing the subtraction alone (B-261, first attempt)
+    produced a real false-positive FAIL: `global t` in a nested helper made an
+    ENCLOSING function's same-named decoded local read as visible taint, which it
+    provably never is. The two declarations are NOT symmetric here, and the asymmetry
+    is why only one of them needs that extra step:
+
+      * `nonlocal n` resolves to the nearest ENCLOSING FUNCTION that binds `n` --
+        Python's syntax guarantees such an ancestor exists -- so the walk stops itself:
+        that ancestor contributes `n` to the shadow out of its own binding set, and
+        nothing further out (module included) stays visible. Dropping `n` here is
+        therefore complete on its own.
+      * `global n` carries NO such guarantee. Nothing has to bind `n` between `scope`
+        and module, so nothing is obliged to re-contribute the shadow -- and when an
+        enclosing function DOES bind `n`, that ancestor is exactly the one whose taint
+        must stay hidden, yet its shadow is merged only AFTER its own bucket is read.
+        Dropping `n` here is necessary but not sufficient; see `_tainted_names_visible`.
     """
     bound: set[str] = set()
     # Names this scope declares as belonging to an OUTER binding. Collected by the same
@@ -1789,7 +1811,17 @@ def _tainted_names_visible(
     OUTWARD (checking each ancestor's bucket BEFORE merging that ancestor's own
     shadow set into the running total) so a scope's own tainted assignment is never
     checked against its OWN shadow set — which would incorrectly treat a taint
-    source as shadowing itself and silently drop a real closure read."""
+    source as shadowing itself and silently drop a real closure read.
+
+    B-261: a name `scope` declares `global` is not resolved by that outward walk at
+    all — Python jumps straight to the module binding. Modelling it as a walk (which
+    the first attempt at B-261 effectively did, by dropping the name from `scope`'s
+    own shadow set and letting the ordinary chain walk proceed) reads every ENCLOSING
+    FUNCTION's same-named local on the way out and produced a real false-positive
+    FAIL. So the redirect is applied as a redirect: the name is shadowed for the whole
+    chain, then taken from the module bucket directly. `nonlocal` needs nothing here —
+    it resolves to an ancestor that, by Python's own syntax rules, binds the name and
+    therefore ends the walk itself (see `_own_bound_names`)."""
     scope = owner_map.get(node)
     if scope is None:
         return set(tainted.get(None, ()))
@@ -1799,8 +1831,15 @@ def _tainted_names_visible(
             shadow_cache[s] = _own_bound_names(s)
         return shadow_cache[s]
 
+    # Names `scope` declares `global` in its OWN body (owner_map-filtered, so a
+    # declaration inside a nested function is not attributed here — B-209).
+    global_here = _global_declared_names(scope, owner_map)
+
     visible = set(tainted.get(scope, ()))
-    cumulative_shadow = set(get_shadow(scope))
+    # `get_shadow` has already subtracted `global_here` (it is not a local binding);
+    # add it back for the chain walk, because no enclosing FUNCTION's binding of the
+    # name is reachable from here whatever else the chain does or does not bind.
+    cumulative_shadow = set(get_shadow(scope)) | global_here
     ancestor = parent_scope.get(scope)
     while True:
         bucket = tainted.get(ancestor, set())
@@ -1809,6 +1848,10 @@ def _tainted_names_visible(
             break
         cumulative_shadow |= get_shadow(ancestor)
         ancestor = parent_scope.get(ancestor)
+    # The redirect itself: a `global`-declared name IS the module binding, so it is
+    # visible whenever that binding is tainted — no accumulated shadow can hide it.
+    if global_here:
+        visible |= set(tainted.get(None, ())) & global_here
     return visible
 
 
