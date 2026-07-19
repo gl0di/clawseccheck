@@ -180,10 +180,24 @@ jobs:
             || { echo "::error::staged tree has no SKILL.md — clawhub would reject it"; exit 1; }
           # Every relative link in SKILL.md must resolve inside the staged tree. This is the
           # publish-time twin of tests/test_publish_workflow.py's static cross-check (B-254).
+          #
+          # THE LINK-TARGET NORMALISATION CONTRACT (four rules, applied in this order).
+          # tests/test_publish_workflow.py's _normalise_link_target() implements the exact
+          # same four rules in Python, and test_preflight_shell_agrees_with_python_normaliser
+          # executes THIS block and diffs its output against that function. Change one side
+          # and the suite goes red — the two resolvers cannot drift apart again.
+          #   1. drop an optional `"title"` suffix (everything from the first whitespace)
+          #   2. skip absolute URLs / mailto: / pure #anchors
+          #   3. drop the #fragment
+          #   4. drop a leading ./
           MISSING=0
-          while IFS= read -r target; do
-            case "$target" in http*|mailto:*|"#"*) continue ;; esac
-            if [ ! -e "dist/clawseccheck/${target%%#*}" ]; then
+          while IFS= read -r raw; do
+            target="${raw%% *}"
+            case "$target" in http://*|https://*|mailto:*|"#"*) continue ;; esac
+            target="${target%%#*}"
+            target="${target#./}"
+            [ -n "$target" ] || continue
+            if [ ! -e "dist/clawseccheck/${target}" ]; then
               echo "::error::SKILL.md links to '${target}' but it is not in the staged tree"
               MISSING=1
             fi
@@ -191,9 +205,11 @@ jobs:
           [ "$MISSING" -eq 0 ] || exit 1
           echo "Preflight OK — SKILL.md present and every relative link resolves."
 
-      # NB: this step's name deliberately does not spell out the CLI invocation verbatim —
-      # the basename/display-name tests locate the real command by that exact substring,
-      # and a step name containing it would shadow the command they mean to inspect.
+      # NB: this step runs `clawhub publish` too, so it is the SECOND invocation in this
+      # file. tests/test_publish_workflow.py is step-aware (it attributes each invocation
+      # to its own step and tells the two apart by --dry-run) precisely so that this
+      # preflight cannot shadow the real Publish step's path/--name guards. Do not go back
+      # to locating "the publish command" by first-match on a raw line scan.
       - name: Preflight — dry-run the upload (no write)
         # Grounded: the CLI exposes `--dry-run` ("Preview without publishing", clawhub
         # 0.22.0 dist/cli.js) on the same `publish` command used below. It validates the

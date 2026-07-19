@@ -5,16 +5,24 @@ files that actually ship in the public ClawHub release, BEFORE the (external, no
 ported here — see recon) clawrange-style pre-release gates would catch it.
 
 "What ships" is derived from the *actual* staging step in
-`.github/workflows/clawhub-publish.yml` (the "Stage publishable files" step's
-`cp -r ...` line) — not guessed. That line currently copies:
+`.github/workflows/clawhub-publish.yml` (the "Stage publishable files" step) — not
+guessed. That step currently copies, across **all** of its `cp` lines:
 
     clawseccheck SKILL.md README.md LICENSE SECURITY.md SECURITY_MODEL.md
     CHANGELOG.md pyproject.toml docs audit.py
+    references/cli-flags.md
 
 `clawseccheck` and `docs` are directories; we expand them to every `git ls-files`
 entry under those paths so new files added later are automatically covered without
 editing this test. Per the workflow, `__pycache__` is pruned from `clawseccheck/`
 after staging, so it is excluded here too (dev artifact, never actually ships).
+
+Note the parser reads EVERY `cp` line into the staging dir, not just the `cp -r` one.
+It originally matched only `cp -r ... dist/clawseccheck/`, so when a second, plain
+`cp` line was added to stage `references/cli-flags.md`, that newly-published file fell
+outside the scan set — this guard silently under-covered exactly what it promises to
+drift loudly about. A file that ships must be scanned; adding a new `cp` line without
+adding it to _EXPECTED_STAGED_SOURCES now fails loudly instead.
 
 Markers checked (all internal-only; must never appear in a shipped file):
   - the internal Pulse server hostname (`pulse.in10ix`)
@@ -40,11 +48,14 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "clawhub-publish.yml"
 
-# The workflow copies these top-level entries verbatim (see the "Stage publishable
-# files" step). Kept as a literal fallback list; _staged_top_level_entries() below
-# parses the real `cp -r` line out of the workflow so this drifts loudly (test
-# failure) rather than silently if the workflow ever changes what it ships.
-_EXPECTED_TOP_LEVEL = [
+STAGING_DIR = "dist/clawseccheck"
+
+# Every source path the workflow's staging step copies, in order, across all its `cp`
+# lines. _staged_source_paths() below parses them out of the real workflow so this
+# drifts loudly (test failure) rather than silently if the workflow changes what it
+# ships. A new entry here means a newly-published file — check whether it needs marker
+# scanning before you add it.
+_EXPECTED_STAGED_SOURCES = [
     "clawseccheck",
     "SKILL.md",
     "README.md",
@@ -55,6 +66,7 @@ _EXPECTED_TOP_LEVEL = [
     "pyproject.toml",
     "docs",
     "audit.py",
+    "references/cli-flags.md",
 ]
 
 pytestmark = pytest.mark.skipif(
@@ -73,29 +85,43 @@ _MARKERS: list[tuple[str, re.Pattern]] = [
 ]
 
 
-def _staged_top_level_entries() -> list[str]:
-    """Parse the real `cp -r <entries> dist/clawseccheck/` line out of the workflow.
+def _staged_source_paths() -> list[str]:
+    """Parse EVERY `cp ... dist/clawseccheck/...` source path out of the workflow.
 
-    This is the source of truth for "what ships" (task spec point 1) — we do not
-    guess or hardcode independently of the workflow file. Falls back to the literal
-    list above only if the expected line shape isn't found (so a workflow rewrite
-    fails this test loudly instead of silently under-covering).
+    This is the source of truth for "what ships" — we do not guess or hardcode
+    independently of the workflow file. Handles both shapes the staging step uses:
+
+        cp -r A B C dist/clawseccheck/                 -> ["A", "B", "C"]
+        cp references/x.md dist/clawseccheck/references/ -> ["references/x.md"]
+
+    Matching only the first shape is what let a newly-published file slip outside this
+    guard's scan set, so every `cp` into the staging dir is read.
     """
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    match = re.search(r"cp -r\s+(.*?)\s+dist/clawseccheck/", text, re.DOTALL)
-    assert match is not None, (
-        "Could not find the 'cp -r ... dist/clawseccheck/' staging line in "
-        f"{WORKFLOW_PATH} — the publish workflow's file list changed shape; "
-        "update this test's parsing (or the _EXPECTED_TOP_LEVEL fallback) to match."
+    # Join shell line-continuations so a multi-line `cp` reads as one command.
+    joined = re.sub(r"\\\s*\n\s*", " ", text)
+
+    sources: list[str] = []
+    for line in joined.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("cp "):
+            continue
+        args = [a for a in stripped[len("cp "):].split() if not a.startswith("-")]
+        if len(args) < 2 or not args[-1].startswith(STAGING_DIR):
+            continue
+        sources.extend(args[:-1])
+
+    assert sources, (
+        f"Could not find any 'cp ... {STAGING_DIR}/' staging line in {WORKFLOW_PATH} — "
+        "the publish workflow's staging step changed shape; update this parser rather "
+        "than letting the guard silently scan nothing."
     )
-    # The cp line is continued across lines with trailing backslashes.
-    entries = match.group(1).replace("\\", " ").split()
-    assert entries == _EXPECTED_TOP_LEVEL, (
-        f"Publish workflow now stages {entries!r}, expected {_EXPECTED_TOP_LEVEL!r} — "
-        "update _EXPECTED_TOP_LEVEL (and re-check whether new shipped files need "
-        "different marker handling) before trusting this test's coverage."
+    assert sources == _EXPECTED_STAGED_SOURCES, (
+        f"Publish workflow now stages {sources!r}, expected {_EXPECTED_STAGED_SOURCES!r} "
+        "— update _EXPECTED_STAGED_SOURCES (and re-check whether newly shipped files "
+        "need marker scanning) before trusting this test's coverage."
     )
-    return entries
+    return sources
 
 
 def _git_ls_files(*pathspecs: str) -> list[str]:
@@ -118,7 +144,7 @@ def _shipped_files() -> list[Path]:
     state without a subprocess-heavy or YAML-parsing dependency). `__pycache__` is
     excluded to mirror the workflow's post-copy prune step.
     """
-    entries = _staged_top_level_entries()
+    entries = _staged_source_paths()
     files: list[Path] = []
     for entry in entries:
         abs_entry = REPO_ROOT / entry
@@ -154,12 +180,34 @@ def _shipped_md_and_py_files() -> list[Path]:
 # --- the actual gate --------------------------------------------------------
 
 
-def test_workflow_stages_expected_top_level_entries() -> None:
-    """Sanity check the staging line parses to a non-empty, sane file list."""
-    entries = _staged_top_level_entries()
+def test_workflow_stages_expected_source_paths() -> None:
+    """Sanity check the staging step parses to a non-empty, sane file list."""
+    entries = _staged_source_paths()
     assert entries, "Parsed an empty staging list from the publish workflow."
     assert "clawseccheck" in entries
     assert "SKILL.md" in entries
+
+
+def test_every_staged_file_is_inside_the_marker_scan_set() -> None:
+    """Guard the guard's SCOPE: every shipped .md must actually get scanned.
+
+    The failure this pins down is a coverage hole, not a leak. A second `cp` line added
+    `references/cli-flags.md` to the published bundle, but the parser only understood the
+    `cp -r` line, so that file shipped without ever being checked for internal markers —
+    while this module's docstring promised it would "drift loudly rather than silently".
+    A guard that quietly stops covering new files is worse than no guard.
+    """
+    scanned = {str(p.relative_to(REPO_ROOT)) for p in _shipped_md_and_py_files()}
+    missing = []
+    for entry in _staged_source_paths():
+        path = REPO_ROOT / entry
+        if path.is_file() and path.suffix == ".md" and entry not in scanned:
+            missing.append(entry)
+
+    assert not missing, (
+        f"These files are published but never scanned for internal markers: {missing!r}.\n"
+        "Every shipped .md must be inside _shipped_md_and_py_files()."
+    )
 
 
 def test_shipped_md_and_py_files_are_nonempty() -> None:
