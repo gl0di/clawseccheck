@@ -36,6 +36,16 @@ def test_c014_warns_when_surfaces_have_no_restriction_signals():
 
 
 def test_c014_passes_when_restriction_signals_exist():
+    """Multiple restricted surfaces + one unrestricted surface still PASS, and every
+    surface is inventoried.
+
+    This config carries FOUR restriction signals at once, so it cannot pin any individual
+    one — `test_c014_single_restriction_limb_alone_yields_pass` below is what does that.
+    What it *can* pin is inventory completeness: PASS must not stop C014 listing the
+    unrestricted `http_post` surface, because the PASS wording tells the reader to go read
+    the per-surface lines and treat any unrestricted surface as open. Asserting the exact
+    evidence list is what makes that promise real.
+    """
     ctx = _ctx({
         "tools": {
             "allow": ["exec", "http_post"],
@@ -46,10 +56,71 @@ def test_c014_passes_when_restriction_signals_exist():
     })
     f = check_egress_inventory(ctx)
     assert f.status == PASS
-    # Every restriction signal C014 can report is PER-SURFACE — OpenClaw has no global
-    # egress-control field (see B-263 regression tests below).
-    assert any("dmPolicy=allowlist" in item for item in f.evidence)
-    assert any("local stdio subprocess" in item for item in f.evidence)
+    assert f.evidence == [
+        "channel slack: outbound-capable path (dmPolicy=allowlist, groupPolicy=allowlist)",
+        "tool exec: outbound-capable (approval gate present)",
+        "tool http_post: outbound-capable (no explicit restriction signal)",
+        "MCP local: local stdio subprocess",
+    ]
+
+
+# --- Each restriction limb must be able to carry PASS ON ITS OWN ---
+#
+# Every restriction signal C014 can report is PER-SURFACE: OpenClaw has no global
+# egress-control field (see the B-263 regression tests below). `restricted` is therefore an
+# OR across surfaces, and that makes a multi-signal config useless for pinning any single
+# limb — the other limbs keep producing PASS while one rots.
+#
+# Measured, not assumed: disabling each `restricted = True` in check_egress_inventory() one
+# at a time left this whole file green for the dmPolicy limb, the groupPolicy limb, the exec
+# approval gate, the tools.elevated.allowFrom limb, and the MCP local-stdio limb. Only the
+# two MCP allowedHosts/local-URL limbs were caught, by their own dedicated tests below.
+#
+# So each limb gets a config where it is the ONLY restriction signal on the ONLY surface.
+# PASS then depends on that one limb alone, and pinning the exact evidence list keeps the
+# assertion about restriction SEMANTICS rather than about a string the check appends
+# unconditionally.
+
+_SINGLE_RESTRICTION_LIMBS = [
+    (
+        "channel dmPolicy allowlist",
+        {"channels": {"slack": {"dmPolicy": "allowlist"}}},
+        "channel slack: outbound-capable path (dmPolicy=allowlist)",
+    ),
+    (
+        "channel groupPolicy allowlist",
+        {"channels": {"slack": {"groupPolicy": "allowlist"}}},
+        "channel slack: outbound-capable path (groupPolicy=allowlist)",
+    ),
+    (
+        "exec approval gate",
+        {"tools": {"allow": ["exec"], "exec": {"mode": "ask"}}},
+        "tool exec: outbound-capable (approval gate present)",
+    ),
+    (
+        "tools.elevated.allowFrom",
+        {"tools": {"allow": ["elevated"], "elevated": {"allowFrom": ["owner"]}}},
+        "tool elevated: outbound-capable (sender allowlist configured)",
+    ),
+    (
+        "MCP local stdio transport",
+        {"mcp": {"servers": {"local": {"command": "npx", "args": ["-y", "srv"]}}}},
+        "MCP local: local stdio subprocess",
+    ),
+]
+
+
+@pytest.mark.parametrize("label,cfg,expected_evidence", _SINGLE_RESTRICTION_LIMBS,
+                         ids=[label for label, _, _ in _SINGLE_RESTRICTION_LIMBS])
+def test_c014_single_restriction_limb_alone_yields_pass(label, cfg, expected_evidence):
+    f = check_egress_inventory(_ctx(copy.deepcopy(cfg)))
+    assert f.status == PASS, (
+        f"{label} is the only restriction signal on the only surface, so C014 must PASS "
+        f"on it alone — got {f.status}. If this limb was intentionally removed, remove its "
+        "entry here too; do not let it rot silently."
+    )
+    # One surface, one line: the PASS cannot be coming from somewhere else.
+    assert f.evidence == [expected_evidence]
 
 
 # --- B-263: schema-rejected keys must never certify egress as restricted ---
