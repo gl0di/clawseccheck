@@ -1,9 +1,9 @@
 """Guard tests for the SVG badge's mascot mark and the README banner's brand
-grounding (CLAWSECCHECK-C-242 / epic E-048).
+grounding (CLAWSECCHECK-C-242 / C-247 / epic E-048).
 
-Two separate surfaces, one rule for both: colour and mascot must be traceable back
-to clawseccheck.brand — never a second, independently hand-kept literal that could
-silently drift from it.
+Two separate surfaces, one rule for both: colour and logo mark must be traceable
+back to clawseccheck.brand — never a second, independently hand-kept literal that
+could silently drift from it.
 
 Offline, stdlib only, read-only — no writes outside tmp_path.
 """
@@ -20,6 +20,7 @@ from pathlib import Path
 import clawseccheck.brand as brand
 from clawseccheck import audit, render_svg
 from clawseccheck.scoring import ScoreResult
+import scripts.gen_banner as gen_banner
 from scripts.gen_banner import build_banner_html
 
 REPO = Path(__file__).resolve().parents[1]
@@ -80,16 +81,65 @@ class TestBadgeMascotMark:
             assert icon_x + icon_w < float(root.get("width"))
 
 
-# ── docs/assets/src/banner.html: colour + mascot sourced from brand.py ───────
+# ── docs/assets/src/banner.html: colour + logo mark sourced from brand.py ────
 
 class TestBannerGroundedInBrand:
     def test_banner_uses_the_brand_red_accent_not_a_bare_literal_only(self):
         text = BANNER_PATH.read_text(encoding="utf-8")
         assert brand.BRAND_RED in text
 
-    def test_banner_uses_the_brand_mascot(self):
+    def test_banner_carries_the_brand_logo_svg(self):
+        """The banner is an HTML/badge-only surface (brand.py's Tier 3): it must
+        carry the graphical LOGO_SVG mark itself — the same rule report.py's
+        --html export follows — not the MASCOT text glyph. CLAWSECCHECK-C-247
+        (E-048's third LOGO_SVG leg); single-sourced, never a second hand-pasted
+        copy of the SVG markup."""
         text = BANNER_PATH.read_text(encoding="utf-8")
-        assert brand.MASCOT in text
+        assert brand.LOGO_SVG in text
+
+    def test_banner_no_longer_embeds_the_mascot_glyph(self):
+        """Pins the design choice, not just today's output: the banner used to
+        render MASCOT as a plain-text emoji glyph in the logo slot; it now
+        carries the graphical mark instead. A regression back to the bare emoji
+        must fail this test."""
+        text = BANNER_PATH.read_text(encoding="utf-8")
+        assert brand.MASCOT not in text
+
+    def test_logo_slot_is_wider_than_the_mark_so_the_layout_does_not_shift(self):
+        """The mark is 84x84, but the slot holding it is deliberately wider.
+
+        The banner used to put the MASCOT emoji here at ``font-size: 84px``, and a
+        glyph occupies its *advance* width, not its font-size — 104.81px, not 84px.
+        Dropping in a bare 84x84 SVG narrowed the slot by 20.81px, and because
+        ``.brand`` is a flex row feeding ``.left {flex: 1.25}`` that shortfall
+        propagated: measured in headless Chrome at 1280x640, ``h1`` x 210.81 ->
+        190.00 and the whole terminal ``.card`` x 800.83 -> 780.02. The wordmark and
+        the entire right-hand card slid left.
+
+        This pins the property that prevents that regression — the slot is an
+        explicit box strictly wider than the mark — rather than just today's
+        numbers, so a future re-rasterization stays a mark swap and not a
+        recomposition.
+        """
+        assert gen_banner.SLOT_W_PX > gen_banner.MARK_PX
+        body = build_banner_html()
+        assert f"width: {gen_banner.SLOT_W_PX}px; height: {gen_banner.MARK_PX}px" in body
+        assert f"width: {gen_banner.MARK_PX}px; height: {gen_banner.MARK_PX}px" in body
+        # centred in the slot, so the restored side bearings sit evenly around it
+        assert "justify-content: center" in body
+
+    def test_logo_wrapper_is_aria_hidden_so_the_brand_is_announced_once(self):
+        """brand.LOGO_SVG carries its own ``role="img" aria-label="ClawSecCheck"``
+        and it sits immediately before ``<h1>ClawSecCheck</h1>``. Without
+        aria-hidden on the wrapper a screen reader announces the brand name twice.
+        report.py's --html export wraps the same constant in
+        ``aria-hidden="true"`` for exactly this reason; the banner must not diverge
+        from the pattern it copies."""
+        body = build_banner_html()
+        assert '<div class="claw" aria-hidden="true">' in body
+        # the wordmark right after it is the real accessible name
+        assert 'aria-hidden="true">' + brand.LOGO_SVG in body
+        assert "<h1>Claw" in body
 
     def test_banner_is_byte_identical_to_the_generator_output(self):
         """The load-bearing guard: banner.html is not just *consistent with*
@@ -124,4 +174,4 @@ class TestGenBannerIsDeterministic:
 
     def test_generated_html_has_no_leftover_template_placeholders(self):
         body = build_banner_html()
-        assert "{rgb}" not in body and "{red}" not in body and "{mascot}" not in body
+        assert "{rgb}" not in body and "{red}" not in body and "{logo_svg}" not in body
