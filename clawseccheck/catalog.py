@@ -1671,6 +1671,11 @@ CATALOG: list[CheckMeta] = [
     # rejected install can exist (e.g. a security researcher's own test skill),
     # so this is awareness of an accepted-despite-rejection state, not proof of
     # compromise — matches B136/B138's precedent in the same E-030 epic.
+    # B-258: only an actual registry VERDICT reaches this WARN. A failed verification
+    # whose every recorded reason is inconclusive — ClawHub's security audit still
+    # running, or the skill-card document not published — is reported UNKNOWN instead,
+    # because "has not answered yet" is not "rejected". See the classification block in
+    # checks/_lifecycle.py; it is fail-closed, so an unclassified code still WARNs.
     CheckMeta(
         "B135",
         "Accepted-despite-failed-verification skill install (.clawhub/lock.json)",
@@ -1827,6 +1832,50 @@ CATALOG: list[CheckMeta] = [
         scored=False,
         confidence="HIGH",
         surface="hooks",
+    ),
+    # B181 (B-257): an installed skill's bytes no longer match the SHA-256 digests ClawHub
+    # recorded for it AT INSTALL TIME (.clawhub/lock.json -> skills.<slug>.skillFile +
+    # verification.artifact.files[]; and the per-skill .clawhub/origin.json). Both records
+    # already sit on the user's own disk and were never read, so a skill verified at install
+    # and modified afterwards was invisible to us. Strictly stronger than --monitor, which
+    # only detects change since WE first looked and therefore bakes any pre-existing
+    # tampering into its baseline. FAIL is a hard cryptographic fact about the user's own
+    # files with an unambiguous fix (reinstall), so unlike B135's "someone else's judgment"
+    # this one is scored. WARN, not FAIL, for a whole-directory symlink install (the
+    # documented working-tree link, where a mismatch is expected and constant) and for a
+    # recorded file that is now simply gone. UNKNOWN whenever nothing is recorded or nothing
+    # could be hashed — never a fake PASS.
+    CheckMeta(
+        "B181",
+        "Installed skill modified after install (recorded ClawHub install hashes)",
+        HIGH,
+        "hardening",
+        "Supply Chain / Post-Install Integrity",
+        scored=True,
+        confidence="HIGH",
+        surface="skills",
+    ),
+    # B182 (B-259): the ClawHub CLI's plaintext API-token store. It sits at documented,
+    # fixed paths OUTSIDE the OpenClaw home ($CLAWHUB_CONFIG_PATH, else
+    # ~/.config/clawhub/config.json and its darwin/XDG/APPDATA/legacy-`clawdhub` variants),
+    # so C015 — which is rooted at the OpenClaw home — never reached it and nothing checked
+    # its permissions. The token publishes new versions of the user's OWN skills, so any
+    # agent or skill that can read files gets a supply-chain pivot onto every install.
+    # FAIL only when a token is actually present AND someone other than the owner can read
+    # the file: the CLI writes it 0600 and re-chmods on every write, so a looser mode is a
+    # real deviation, and the group-readable leg reuses B-189's singleton-group down-rank so
+    # a user-private-group box never false-FAILs. Absent store -> UNKNOWN, never FAIL. The
+    # token VALUE is never read into a message, logged, or placed in evidence (§8) — only
+    # its presence and the file's mode.
+    CheckMeta(
+        "B182",
+        "ClawHub CLI API token store readable by others (outside the OpenClaw home)",
+        MEDIUM,
+        "hardening",
+        "Secrets Vault / Supply Chain",
+        scored=True,
+        confidence="HIGH",
+        surface="secrets",
     ),
     # B177 (B-240): OpenClaw's OWN persisted per-plugin ClawHub trust verdict
     # (installed_plugin_index.install_records_json.<pluginId>.clawhubTrustDisposition, in
@@ -2065,6 +2114,8 @@ AST_MAP = {
     "B151": ("AST02",),  # codex connector shell hooks in the plugin doc-cache = supply-chain tamper (cf. B42/B94)
     "B152": ("AST02",),  # orphaned plugin cache not declared in plugins.entries = supply-chain visibility gap (cf. C5/C047)
     "B177": ("AST02",),  # OpenClaw's own persisted ClawHub trust verdict = supply-chain compromise signal (cf. B5/B15/B24/B42)
+    "B181": ("AST02",),  # installed skill modified after install = supply-chain tamper on an auto-loaded artifact (cf. B5/B78/B86)
+    "B182": ("AST02",),  # exposed ClawHub publish token = supply-chain pivot into every install (cf. B1/B41)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
@@ -2179,6 +2230,8 @@ OWASP_MAP = {
     "B151": ("LLM03",),  # codex connector shell hooks in the plugin doc-cache = Supply Chain
     "B152": ("LLM03",),  # orphaned plugin cache not declared in plugins.entries = Supply Chain
     "B177": ("LLM03",),  # OpenClaw's own persisted ClawHub trust verdict = Supply Chain
+    "B181": ("LLM03",),  # installed skill modified after install = Supply Chain
+    "B182": ("LLM02", "LLM03"),  # exposed ClawHub publish token = Sensitive Information Disclosure + Supply Chain
 }
 
 

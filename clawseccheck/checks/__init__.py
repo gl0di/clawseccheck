@@ -265,6 +265,14 @@ from ._lifecycle import (
     _POSTINSTALL_RE,
     _SOFT_BOOTSTRAP,
     _VERSION_LEADING_INTS_RE,
+    _b135_is_pending_security,
+    _b135_reasons_are_inconclusive,
+    _b135_records_adverse_security,
+    _b181_confined_path,
+    _b181_recorded_files,
+    _b182_audits_this_users_own_home,
+    _b182_candidate_stores,
+    _b182_readable_by_others,
     _iter_entries,
     _parse_version,
     _writable_identity_files,
@@ -291,7 +299,9 @@ from ._lifecycle import (
     check_paired_device_operator_authority,
     check_pending_device_pairing_scope,
     check_self_modification,
+    check_clawhub_token_store,
     check_session_approval_policy,
+    check_skill_install_tamper,
     check_skill_workshop_autonomy,
     check_supply_chain,
     check_update_pinning,
@@ -1169,6 +1179,8 @@ CHECKS = [
     check_codex_plugin_hooks,  # B151 — codex connector shell hooks in the plugin doc-cache
     check_orphaned_plugin_caches,  # B152 — on-disk plugin cache not in plugins.entries
     check_clawhub_lock_verification,  # B135 — accepted-despite-failed-verification install
+    check_skill_install_tamper,  # B181 — installed skill modified since its recorded install hash (B-257)
+    check_clawhub_token_store,  # B182 — ClawHub CLI plaintext token store perms, outside the OpenClaw home (B-259)
     check_declared_skill_reconciliation,  # B158 — declared-but-unresolved skill-load source (F-119)
     check_audit_suppressions,  # B173 — security.audit.suppressions self-blinds native audit (B-237)
     check_install_policy_gate,  # B174 — security.installPolicy.* gate + exec-hook escape flags (B-238)

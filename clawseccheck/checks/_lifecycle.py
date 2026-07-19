@@ -2507,15 +2507,139 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
 # registry's own aggregate decision was "pass" (a disclosed security-audit tool tripping its
 # own detection regexes — see reference note on scanner FP against detection signatures) —
 # flagging on the sub-signals would reproduce that false positive.
+#
+# B-258: "the registry rejected this" and "the registry has not answered yet" are different
+# facts, and the check used to collapse them — it WARNed on ok=False/decision="fail" without
+# looking at WHY. A live lock entry was recorded while ClawHub's security audit was still
+# running, so the install carried decision="fail" with reasons
+# ["card.missing", "security.status_not_clean", "security.pending"] and
+# verification.security = {"status": "pending", "passed": false, "rawStatus": null,
+# "verdict": null, "checkedAt": null} — an unfinished audit, not a security verdict. It
+# cleared on its own once the audit completed. Reporting that as "the registry rejected
+# this skill" is simply untrue, so a rejection whose reasons are ALL inconclusive now
+# reports UNKNOWN instead.
+#
+# The classification is fail-closed on purpose (Golden Rule #5, both directions): the
+# reason codes are server-generated and NOT enumerable client-side — the CLI's own schema
+# types them as a bare `reasons: "string[]"` (clawhub@0.22.0
+# dist/schema/schemas.js:681-699, ApiV1SkillVerifyResponseSchema, where `security` is
+# likewise typed "unknown") — so only the specific codes observed on a real lock file are
+# treated as inconclusive. Any other code, an unrecognised future code, and an empty
+# reasons list all keep the WARN. That means a genuine rejection can never be silenced by
+# this narrowing; the worst case is that a future "not answered yet" code still WARNs
+# until it is observed and added here.
+_B135_NON_VERDICT_REASONS = frozenset(
+    {
+        # ClawHub's security audit had not finished at install time. Explicitly a
+        # not-yet-answered state, corroborated by security.status == "pending".
+        "security.pending",
+        # The skill-card DOCUMENT (skill-card.md) is not published for this version —
+        # `card: {"available": false, "path": "skill-card.md", "sha256": null, ...}` in
+        # the real lock. A listing-completeness gate, carrying no security verdict.
+        "card.missing",
+    }
+)
+
+# Inconclusive ONLY while the security audit is unfinished: "not clean" is derived from
+# `security.status`, so when that status is itself "pending" this code restates the
+# pending fact rather than reporting a verdict. With any other status ("clean" per a later
+# live read, or a future value such as a flagged/malicious one) it is a real verdict and
+# keeps the WARN.
+_B135_STATUS_DERIVED_REASON = "security.status_not_clean"
+_B135_PENDING_SECURITY_STATUSES = frozenset({"pending"})
+# The one status that positively records "audited, nothing found". Anything else that is
+# neither clean nor pending is a verdict against the skill.
+_B135_CLEAN_SECURITY_STATUSES = frozenset({"clean"})
+
+
+def _b135_is_pending_security(verification: dict) -> bool:
+    """True only when the lock POSITIVELY records ClawHub's security audit as unfinished.
+
+    Fail-closed on missing data: an absent, malformed, or null `security` block is NOT
+    pending. "The registry has not answered yet" is a claim that has to be *recorded* to be
+    believed — inferring it from what is simply not there would downgrade a genuine
+    rejection to UNKNOWN on the strength of absent data, which is exactly what
+    `_b135_reasons_are_inconclusive` refuses to do for `reasons`. The two helpers now agree.
+    """
+    security = verification.get("security")
+    if not isinstance(security, dict):
+        return False
+    status = security.get("status")
+    if not isinstance(status, str):
+        return False
+    return status.strip().lower() in _B135_PENDING_SECURITY_STATUSES
+
+
+def _b135_records_adverse_security(verification: dict) -> bool:
+    """True when the `security` block itself records a verdict AGAINST the skill.
+
+    Read for its own sake rather than only through `reasons`, so a real verdict outranks an
+    otherwise-inconclusive reason list: `reasons: ["card.missing"]` is a listing-completeness
+    gate, but the same entry carrying `security.passed: false` with a flagged status is a
+    rejection and has to keep its WARN.
+
+    A positively-pending status outranks everything here. Grounded in the real lock on
+    disk, which carries `{"status": "pending", "passed": false, "rawStatus": null,
+    "verdict": null}` — `passed` is false *because* the audit has not finished, so reading
+    it as a verdict would undo the pending split entirely. Only the top-level aggregate is
+    consulted; `signals.*` sub-scanner statuses are deliberately ignored, since an
+    individual scanner's opinion is not the registry's answer.
+    """
+    security = verification.get("security")
+    if not isinstance(security, dict):
+        return False
+    if _b135_is_pending_security(verification):
+        return False
+    if security.get("passed") is False:
+        return True
+    for key in ("status", "rawStatus", "verdict"):
+        value = security.get(key)
+        if not isinstance(value, str):
+            continue
+        token = value.strip().lower()
+        if not token:
+            continue
+        if token not in _B135_CLEAN_SECURITY_STATUSES:
+            return True
+    return False
+
+
+def _b135_reasons_are_inconclusive(verification: dict, reasons) -> bool:
+    """True when EVERY recorded reason is a not-a-security-verdict one.
+
+    An empty/absent/non-list `reasons` returns False: a rejection with no reason recorded
+    is still a rejection, and must not be downgraded on the strength of missing data.
+    """
+    if not isinstance(reasons, list) or not reasons:
+        return False
+    # A recorded verdict against the skill settles it, whatever the reason codes say.
+    if _b135_records_adverse_security(verification):
+        return False
+    pending = _b135_is_pending_security(verification)
+    for raw in reasons:
+        if not isinstance(raw, str):
+            return False
+        code = raw.strip()
+        if code in _B135_NON_VERDICT_REASONS:
+            continue
+        if code == _B135_STATUS_DERIVED_REASON and pending:
+            continue
+        return False
+    return True
+
 def check_clawhub_lock_verification(ctx: Context) -> Finding:
     """B135 — accepted-despite-failed-verification skill install (.clawhub/lock.json).
 
     PASS    — no .clawhub/lock.json found in any workspace, OR every locked skill's
               verification.ok is true and decision is not "fail".
     WARN    — at least one locked skill has verification.ok == False or
-              decision == "fail" — the registry's own check rejected it, yet it is
-              installed and present in the lock file.
-    UNKNOWN — a .clawhub/lock.json was found but is unreadable or not valid JSON.
+              decision == "fail" for a reason that is an actual registry verdict —
+              the registry's own check rejected it, yet it is installed and present
+              in the lock file.
+    UNKNOWN — a .clawhub/lock.json was found but is unreadable or not valid JSON; OR
+              (B-258) the only failed verifications are ones whose every recorded
+              reason is inconclusive (an unfinished security audit / a missing skill
+              card), which is "the registry has not answered yet", not a rejection.
     """
     import json as _json
 
@@ -2546,6 +2670,7 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
         )
 
     rejected_ev: list[str] = []
+    inconclusive_ev: list[str] = []
     any_parsed = False
     any_unreadable = False
 
@@ -2584,10 +2709,16 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
                     else "unknown"
                 )
                 version = entry.get("version", "unknown")
-                rejected_ev.append(
+                line = (
                     f"{slug}@{version}: decision={decision!r} ok={ok!r} "
                     f"reasons=[{reasons_str}] signature={sig_status}"
                 )
+                # B-258: separate "rejected" from "not answered yet" — see the block
+                # comment above this function for why and how the split is fail-closed.
+                if _b135_reasons_are_inconclusive(verification, reasons):
+                    inconclusive_ev.append(line)
+                else:
+                    rejected_ev.append(line)
 
     if rejected_ev:
         detail = "; ".join(rejected_ev[:6]) + (
@@ -2612,12 +2743,653 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
             "Review .clawhub/lock.json manually.",
         )
 
+    if inconclusive_ev:
+        detail = "; ".join(inconclusive_ev[:6]) + (
+            f" (+{len(inconclusive_ev) - 6} more)" if len(inconclusive_ev) > 6 else ""
+        )
+        return _finding(
+            "B135",
+            UNKNOWN,
+            "ClawHub verification did not pass for skill(s), but every recorded reason is "
+            "inconclusive — an unfinished security audit or a missing skill card, not a "
+            f"registry verdict, so no rejection can be read from it: {detail}.",
+            "Re-check these skills once ClawHub's audit has completed (re-installing or "
+            "updating the skill refreshes the recorded verification). A verdict that stays "
+            "unresolved, or reasons that change to a real rejection code, is worth a manual "
+            "review of the skill's provenance.",
+            evidence=inconclusive_ev[:6],
+        )
+
     return _finding(
         "B135",
         PASS,
         "all ClawHub-installed skills passed registry verification (or no lock file "
         "was found).",
         "No action needed.",
+    )
+
+
+# ---------- B181 (B-257): post-install tamper detection against recorded install hashes ----------
+# ClawHub records SHA-256 digests of a skill's files AT INSTALL TIME, on the user's own
+# disk, and nothing ever compared them to the bytes now there. A skill that was verified at
+# install and modified afterwards — by the user, by another agent, or by another skill —
+# was invisible to us.
+#
+# This is a STRICTLY STRONGER trust anchor than `--monitor`: monitoring detects change since
+# WE first looked, so anything already tampered with before our first scan is baked into the
+# baseline as "normal". A recorded install hash detects change since the REGISTRY installed
+# it, which covers exactly that blind spot. Purely local — the digests are already on disk;
+# no network call is involved or possible (Golden Rule #1).
+#
+# Grounded against the installed ClawHub CLI (clawhub@0.22.0) and the real files on disk:
+#   * `<workdir>/.clawhub/lock.json` — dist/skills.js:118 readLockfile() tries
+#     `.clawhub/lock.json` then the `.clawdhub/` legacy path and RETURNS THE FIRST that
+#     parses, while writeLockfile() only ever writes `.clawhub`. Both names are therefore
+#     recognised (Golden Rule #6) but as a PRECEDENCE ladder, never a union — see
+#     `_b181_provenance_records` for why unioning them false-positives. Per skill slug the
+#     entry carries `skillFile: {path, sha256}` and, under `verification.artifact.files[]`,
+#     a full per-file manifest of `{path, size, sha256}`.
+#   * `<skill dir>/.clawhub/origin.json` — dist/skills.js:137-166 readSkillOrigin(), the
+#     same first-one-wins `.clawdhub/` fallback; carries the same `skillFile: {path,
+#     sha256}` and exists independently of the lock, so a relocated install is covered.
+#   * The digest is over RAW FILE BYTES, hex-encoded: dist/skills.js hashes each entry with
+#     `sha256Hex(bytes)` over the extracted bytes and records `size: bytes.byteLength`.
+#     Verified empirically against the real install — the recorded SKILL.md digest equals
+#     `sha256(SKILL.md bytes)`, and all 77 manifest entries matched.
+#   * Skill directory: dist/cli.js:94 resolves the skills dir as `resolve(workdir, "skills")`
+#     (overridable with `--dir`), so `<lock parent>/skills/<slug>` is tried first and the
+#     package's own SKILL_DIRS are used as fallbacks for a relocated install.
+#
+# Files present on disk but ABSENT from the manifest are deliberately NOT flagged: the real
+# install carries 61 of them (`__pycache__/*.pyc`, the installer's own `_meta.json` and
+# `.clawhub/origin.json`), so flagging extras would be a guaranteed false positive.
+_B181_MAX_BYTES_PER_FILE = 8_000_000
+_B181_MAX_FILES_PER_SKILL = 500
+_B181_MAX_FILES_TOTAL = 3000
+_B181_DOT_DIRS = (".clawhub", ".clawdhub")
+
+
+def _b181_confined_path(base: Path, rel: str):
+    """Resolve *rel* under *base*, or None if it escapes / is not a usable relative path.
+
+    The recorded paths come out of a JSON file on disk, so they are treated as untrusted
+    input: absolute paths, NUL bytes, and any traversal that lands outside *base* are
+    refused rather than read (the CLI sanitizes the same way when it extracts an archive).
+    """
+    if not isinstance(rel, str) or not rel.strip() or "\x00" in rel:
+        return None
+    candidate = Path(rel)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return None
+    target = base / candidate
+    try:
+        resolved_base = base.resolve()
+        resolved = target.resolve()
+    except OSError:
+        return None
+    if resolved != resolved_base and resolved_base not in resolved.parents:
+        return None
+    return target
+
+
+def _b181_sha256(path: Path):
+    """('ok', hexdigest) | ('missing', None) | ('unreadable', None) | ('too-large', None)."""
+    import hashlib
+
+    try:
+        if not path.is_file():
+            return "missing", None
+        if path.stat().st_size > _B181_MAX_BYTES_PER_FILE:
+            return "too-large", None
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(block)
+    except OSError:
+        return "unreadable", None
+    return "ok", digest.hexdigest()
+
+
+def _b181_read_json(path: Path):
+    import json as _json
+
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _b181_recorded_files(record: dict) -> "tuple[list[tuple[str, str]], list[str]]":
+    """((relpath, sha256hex) pairs, paths recorded with CONTRADICTORY digests).
+
+    Both `skillFile: {path, sha256}` and the richer
+    `verification.artifact.files[]: [{path, size, sha256}]` manifest are read. Identical
+    duplicates collapse (the manifest normally repeats the skillFile entry with the same
+    digest — verified against the real install, where all 77 entries agreed).
+
+    A path recorded TWICE WITH DIFFERENT DIGESTS is reported separately instead of being
+    silently resolved to whichever was seen first. Both records are written in one pass
+    over one artifact, so they cannot legitimately disagree; when they do, the install
+    record contradicts itself and no on-disk byte sequence can satisfy both. Keeping only
+    the first digest let a tampered manifest entry hide behind a matching `skillFile`.
+    """
+    out: "dict[str, str]" = {}
+    conflicts: "set[str]" = set()
+
+    def _add(path_val, sha_val):
+        if not (isinstance(path_val, str) and isinstance(sha_val, str) and sha_val.strip()):
+            return
+        sha = sha_val.strip().lower()
+        previous = out.get(path_val)
+        if previous is None:
+            out[path_val] = sha
+        elif previous != sha:
+            conflicts.add(path_val)
+
+    sf = record.get("skillFile")
+    if isinstance(sf, dict):
+        _add(sf.get("path"), sf.get("sha256"))
+    verification = record.get("verification")
+    if isinstance(verification, dict):
+        artifact = verification.get("artifact")
+        if isinstance(artifact, dict):
+            files = artifact.get("files")
+            if isinstance(files, list):
+                for entry in files[:_B181_MAX_FILES_PER_SKILL]:
+                    if isinstance(entry, dict):
+                        _add(entry.get("path"), entry.get("sha256"))
+    return sorted(out.items()), sorted(conflicts)
+
+
+def _b181_skill_dir(slug: str, lock_parent: Path):
+    """Resolve a lock entry's slug -> its installed skill directory, or None.
+
+    ONLY `<lock parent>/skills/<slug>` — the workdir-relative location the CLI itself
+    resolves (dist/cli.js:94: `resolve(workdir, "skills")`). Deliberately no fallback
+    search across the other SKILL_DIRS: two workspaces can each hold a `skills/<slug>` of
+    the same name with different content, and picking "some other workspace's copy of a
+    skill with this slug" would compare a lock against bytes it never described — a
+    false-positive FAIL on two legitimately different installs (Golden Rule #5).
+
+    Nothing is lost by refusing to guess. A skill installed somewhere this lock does not
+    describe carries its OWN `.clawhub/origin.json` next to its files, and that record is
+    picked up by the second pass in `_b181_provenance_records` — where the directory is
+    known exactly, because the record lives inside it. An unresolvable lock entry reports
+    UNKNOWN, which is the honest answer.
+    """
+    cand = lock_parent / "skills" / slug
+    try:
+        return cand if cand.is_dir() else None
+    except OSError:
+        return None
+
+
+def _b181_provenance_records(home: Path):
+    """[(slug, skill_dir | None, record, source_label)] from every lock + origin.json found."""
+    from ..collector import SKILL_DIRS, WORKSPACE_DIRS
+
+    records = []
+    seen_dirs: set = set()
+
+    for rel in [""] + list(WORKSPACE_DIRS):
+        # PRECEDENCE, not union. dist/skills.js:118 readLockfile() walks
+        # [.clawhub/lock.json, .clawdhub/lock.json] and RETURNS THE FIRST that parses,
+        # while writeLockfile() only ever writes .clawhub — so a user carried across the
+        # clawdhub->clawhub rename keeps a stale .clawdhub/lock.json holding the OLD
+        # version's digests, which the CLI itself never reads again. Unioning the two
+        # would compare today's bytes against a superseded record and FAIL a skill that
+        # was legitimately updated (Golden Rule #5). Mirror the CLI: first parse wins.
+        for dot in _B181_DOT_DIRS:
+            lock_path = home / rel / dot / "lock.json"
+            if not lock_path.is_file():
+                continue
+            data = _b181_read_json(lock_path)
+            skills = data.get("skills") if data else None
+            if not isinstance(skills, dict):
+                # Unparseable/!schema — the CLI falls through to the legacy path, so do we.
+                continue
+            for slug, entry in skills.items():
+                if not isinstance(entry, dict) or not isinstance(slug, str):
+                    continue
+                skill_dir = _b181_skill_dir(slug, lock_path.parent.parent)
+                if skill_dir is not None:
+                    seen_dirs.add(str(skill_dir))
+                records.append((slug, skill_dir, entry, f"{dot}/lock.json"))
+            break
+
+    # Per-skill origin.json — independent of any lock, so a relocated or lock-less install
+    # is still covered. Skipped for a skill already contributed by a lock entry above.
+    for rel in SKILL_DIRS:
+        root = home / rel
+        try:
+            children = sorted(root.iterdir()) if root.is_dir() else []
+        except OSError:
+            continue
+        for skill_dir in children:
+            try:
+                if not skill_dir.is_dir() or skill_dir.name.startswith("."):
+                    continue
+            except OSError:
+                continue
+            if str(skill_dir) in seen_dirs:
+                continue
+            for dot in _B181_DOT_DIRS:
+                origin = skill_dir / dot / "origin.json"
+                if not origin.is_file():
+                    continue
+                data = _b181_read_json(origin)
+                if data is None:
+                    continue
+                seen_dirs.add(str(skill_dir))
+                records.append(
+                    (data.get("slug") or skill_dir.name, skill_dir, data, f"{dot}/origin.json")
+                )
+                break
+    return records
+
+
+def check_skill_install_tamper(ctx: Context) -> Finding:
+    """B181 (B-257) — an installed skill's bytes no longer match the SHA-256 digests
+    ClawHub recorded for it at install time.
+
+    FAIL    — a recorded digest disagrees with the file's current bytes: the skill was
+              modified after it was installed and verified.
+    WARN    — no digest disagrees, but a recorded file is now missing, or a skill is
+              installed as a directory symlink (a working-tree link, whose recorded
+              hashes cannot meaningfully apply).
+    PASS    — at least one recorded digest was checked and every one of them matched.
+    UNKNOWN — no install-time digest is recorded anywhere, or every recorded file was
+              unreadable / too large to hash, or a record's skill directory could not be
+              located. Never a fake PASS (Golden Rule #4).
+    """
+    records = _b181_provenance_records(ctx.home)
+    if not records:
+        return _finding(
+            "B181",
+            UNKNOWN,
+            "No ClawHub install records (.clawhub/lock.json or a skill's "
+            ".clawhub/origin.json) were found, so there is no recorded install-time hash "
+            "to compare the skills on disk against — post-install modification cannot be "
+            "detected either way.",
+            "Skills installed through ClawHub record a SHA-256 of their files at install "
+            "time. If you installed skills another way, verify their contents against the "
+            "upstream source yourself.",
+        )
+
+    tampered: list[str] = []
+    missing: list[str] = []
+    linked: list[str] = []
+    unverifiable: list[str] = []
+    verified = 0
+    budget = _B181_MAX_FILES_TOTAL
+
+    for slug, skill_dir, record, source in records:
+        recorded, conflicting = _b181_recorded_files(record)
+        # A record that disagrees with itself is a tamper signal in its own right, and is
+        # reported whether or not the install directory can be located on disk.
+        for rel in conflicting:
+            tampered.append(f"{slug}: {source} records two different install-time digests "
+                            f"for '{rel}' — the install record contradicts itself")
+        if not recorded:
+            unverifiable.append(f"{slug}: {source} records no file hashes")
+            continue
+        if skill_dir is None:
+            unverifiable.append(f"{slug}: recorded in {source} but its install directory "
+                                "could not be located on disk")
+            continue
+        try:
+            is_link = skill_dir.is_symlink()
+        except OSError:
+            is_link = False
+        if is_link:
+            # A whole-directory symlink is the documented way to point an install at a
+            # working tree, where a mismatch against the install-time hash is expected and
+            # constant. Reported (never silently skipped) rather than FAILed: an attacker
+            # gains nothing by choosing this louder path, since editing the files in place
+            # is both easier and still caught below as a FAIL.
+            linked.append(f"{slug}: installed as a symlink to another directory — "
+                          f"install-time hashes from {source} cannot apply")
+            continue
+        for rel, expected in recorded:
+            if budget <= 0:
+                unverifiable.append(f"{slug}: file budget exhausted before all recorded "
+                                    "files were hashed")
+                break
+            budget -= 1
+            target = _b181_confined_path(skill_dir, rel)
+            if target is None:
+                unverifiable.append(f"{slug}: {source} records an unusable path")
+                continue
+            state, digest = _b181_sha256(target)
+            if state == "ok":
+                if digest == expected:
+                    verified += 1
+                else:
+                    tampered.append(f"{slug}: '{rel}' does not match the digest recorded "
+                                    f"in {source} at install time")
+            elif state == "missing":
+                missing.append(f"{slug}: '{rel}' is recorded in {source} but is gone")
+            else:
+                unverifiable.append(f"{slug}: '{rel}' could not be hashed ({state})")
+
+    if tampered:
+        extra = f" (+{len(tampered) - 6} more)" if len(tampered) > 6 else ""
+        return _finding(
+            "B181",
+            FAIL,
+            "Installed skill file(s) no longer match the SHA-256 digests ClawHub recorded "
+            "at install time — they were modified after the skill was installed and "
+            "verified: " + "; ".join(tampered[:6]) + extra,
+            "Treat the skill as untrusted until you can explain the change. Reinstall it "
+            "from ClawHub to restore the verified bytes, and review the modified file "
+            "first — if you did not edit it yourself, something else on this machine "
+            "(another agent, another skill, or an attacker) rewrote a skill the agent "
+            "auto-loads.",
+            evidence=tampered[:6],
+        )
+
+    if missing or linked:
+        items = missing + linked
+        extra = f" (+{len(items) - 6} more)" if len(items) > 6 else ""
+        return _finding(
+            "B181",
+            WARN,
+            "No modified skill file was found, but the install-time record could not be "
+            "fully matched to what is on disk: " + "; ".join(items[:6]) + extra,
+            "A file recorded at install time that is now gone, or a skill directory linked "
+            "to a working tree, both mean the bytes running today are not the bytes "
+            "ClawHub verified. Reinstall the skill if the change was not deliberate.",
+            evidence=items[:6],
+        )
+
+    if verified:
+        note = (
+            f" ({len(unverifiable)} recorded file(s) could not be checked)"
+            if unverifiable
+            else ""
+        )
+        return _finding(
+            "B181",
+            PASS,
+            f"Every install-time digest that could be checked matches the bytes on disk "
+            f"({verified} file(s) verified against ClawHub's install records){note}.",
+            "No action needed.",
+            evidence=unverifiable[:6],
+        )
+
+    extra = f" (+{len(unverifiable) - 6} more)" if len(unverifiable) > 6 else ""
+    return _finding(
+        "B181",
+        UNKNOWN,
+        "ClawHub install records were found but not one recorded digest could be checked "
+        "against disk, so post-install modification cannot be ruled in or out: "
+        + "; ".join(unverifiable[:6])
+        + extra,
+        "Check that the installed skill directories are readable, then re-run the audit.",
+        evidence=unverifiable[:6],
+    )
+
+
+# ---------- B182 (B-259): ClawHub CLI token store — presence + permissions ----------
+# The ClawHub CLI stores a long-lived API token in a PLAINTEXT JSON file at documented,
+# fixed paths OUTSIDE the OpenClaw home. C015 is rooted at the OpenClaw home and therefore
+# never reaches it, and nothing else checked its permissions — so the credential that can
+# publish new versions of the user's OWN skills sat entirely unaudited. Any agent or skill
+# that can read files gets a supply-chain pivot from it: push a malicious version and it
+# lands on every install.
+#
+# Grounded against the installed CLI (clawhub@0.22.0, dist/config.js getGlobalConfigPath()
+# + resolveConfigPath(), and dist/homedir.js resolveHome()):
+#   * $CLAWHUB_CONFIG_PATH / $CLAWDHUB_CONFIG_PATH override everything, as an exact path.
+#   * darwin  -> <home>/Library/Application Support/clawhub/config.json
+#   * $XDG_CONFIG_HOME set -> $XDG_CONFIG_HOME/clawhub/config.json
+#   * win32   -> %APPDATA%/clawhub/config.json
+#   * default -> <home>/.config/clawhub/config.json
+#   Every one of those has a legacy `clawdhub/` sibling that resolveConfigPath() falls back
+#   to, so both names are checked (Golden Rule #6).
+# The file's shape is `{registry: string, token?: string}` (dist/schema/schemas.js
+# GlobalConfigSchema); the CLI reads the credential as `cfg?.token`
+# (dist/cli/authToken.js). The CLI itself writes the file 0600 and re-chmods it on every
+# write ("This protects API tokens from being read by other users", dist/config.js
+# writeGlobalConfig), so anything looser is a real deviation, not a default.
+#
+# §8 doctrine: the token VALUE is never read into a reported string, never logged, and
+# never placed in evidence. Only its PRESENCE (a non-empty string under the `token` key)
+# and the file's mode are used.
+_B182_DIR_NAMES = ("clawhub", "clawdhub")
+_B182_ENV_OVERRIDES = ("CLAWHUB_CONFIG_PATH", "CLAWDHUB_CONFIG_PATH")
+
+
+def _b182_audits_this_users_own_home(ctx: Context) -> bool:
+    """True when ctx.home is THIS process's own OpenClaw profile directory.
+
+    The process environment describes where *this* user's ClawHub CLI keeps its token. It
+    therefore only describes the audited home when that home is this user's real one. Under
+    a fixture scan or an explicit ``--home``, the audited home belongs to someone else, and
+    letting $XDG_CONFIG_HOME / $CLAWHUB_CONFIG_PATH steer the scan would attribute the
+    auditor's own token store to the audited home — a false-positive FAIL driven purely by
+    the environment the tool happens to run in (Golden Rule #5).
+
+    The gate mirrors the collector's `_read_installed_skills` (B-161), which reaches
+    ``~/.agents/skills`` on exactly the same condition and for exactly the same reason:
+    "fixture/custom --home scans must remain hermetic and never absorb unrelated skills".
+    """
+    try:
+        user_home = Path.home().resolve()
+        audited = ctx.home.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return audited.parent == user_home and audited.name.startswith(".openclaw")
+
+
+def _b182_candidate_stores(ctx: Context) -> "list[Path]":
+    """Every plausible ClawHub CLI token-store path, deduplicated, in CLI precedence order.
+
+    The user's home is taken from ``ctx.home.parent`` (ctx.home is the OpenClaw home, so its
+    parent is ``~``) — the same idiom B150 uses to reach ``~/.config``.
+
+    The environment-driven locations ($CLAWHUB_CONFIG_PATH / $CLAWDHUB_CONFIG_PATH /
+    $XDG_CONFIG_HOME / %APPDATA%) are absolute paths with no relationship to the audited
+    home, so they are consulted ONLY when auditing this user's own home
+    (`_b182_audits_this_users_own_home`). That keeps a `--home`/fixture scan hermetic and
+    reproducible regardless of the environment it runs in, while a real self-audit still
+    follows the CLI's full precedence ladder and so cannot miss a genuinely relocated store.
+
+    Unlike the CLI, which resolves exactly ONE location for the platform it is running on,
+    every candidate is considered here: a store left behind by another layout is still an
+    exposed credential. A path that does not exist contributes nothing, so widening the
+    candidate set cannot manufacture a finding.
+    """
+    home = ctx.home.parent
+    roots: "list[Path]" = []
+
+    parents = [
+        home / "Library" / "Application Support",  # darwin
+        home / ".config",                          # POSIX default
+    ]
+
+    if _b182_audits_this_users_own_home(ctx):
+        for var in _B182_ENV_OVERRIDES:
+            raw = os.environ.get(var)
+            if raw and raw.strip():
+                roots.append(Path(raw.strip()))  # an exact FILE path, not a directory
+        for var in ("XDG_CONFIG_HOME", "APPDATA"):
+            raw = os.environ.get(var)
+            if raw and raw.strip():
+                parents.append(Path(raw.strip()))
+
+    out: "list[Path]" = []
+    seen: set = set()
+    for path in roots + [p / name / "config.json" for p in parents for name in _B182_DIR_NAMES]:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
+
+
+def _b182_readable_by_others(st) -> "bool | None":
+    """Is this file readable by someone OTHER than its owner?
+
+    True  — world-readable, or group-readable with a group that has other members.
+    False — owner-only in effect (including the user-private-group / umask-002 case,
+            where group-read is not actually exploitable by anyone — B-189's precedent).
+    None  — not determinable (non-POSIX: Windows uses NTFS ACLs, so st_mode is meaningless
+            there and must never produce a mode-based finding).
+    """
+    if not _shared._is_posix():
+        return None
+    mode = st.st_mode & 0o777
+    if mode & 0o004:
+        return True
+    if mode & 0o040:
+        return _shared._group_has_other_members(st.st_gid, st.st_uid) is not False
+    return False
+
+
+def check_clawhub_token_store(ctx: Context) -> Finding:
+    """B182 (B-259) — the ClawHub CLI's plaintext API-token store, and who can read it.
+
+    FAIL    — a store holds a token and is readable by someone other than its owner.
+    WARN    — a store holds a token and is owner-only, but its directory is writable by
+              others (the file can be swapped or removed out from under the CLI).
+    PASS    — a store exists with no token in it, or holds one that only its owner can read.
+    UNKNOWN — no store found, or one was found but could not be read/parsed. Never a fake
+              PASS (Golden Rule #4).
+
+    The token value itself is never read into a message, logged, or placed in evidence —
+    only whether the `token` key holds a non-empty string (§8).
+    """
+    import json as _json
+
+    exposed: list[str] = []
+    swappable: list[str] = []
+    safe: list[str] = []
+    tokenless: list[str] = []
+    unreadable: list[str] = []
+    found_any = False
+
+    for store in _b182_candidate_stores(ctx):
+        try:
+            if not store.is_file():
+                continue
+        except OSError:
+            continue
+        found_any = True
+        try:
+            data = _json.loads(store.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            unreadable.append(f"{store}: present but could not be read or parsed")
+            continue
+        if not isinstance(data, dict):
+            unreadable.append(f"{store}: present but is not a JSON object")
+            continue
+
+        # PRESENCE only — the value is never bound to a reported string (§8).
+        raw_token = data.get("token")
+        has_token = isinstance(raw_token, str) and bool(raw_token.strip())
+        if not has_token:
+            tokenless.append(f"{store}: no token stored")
+            continue
+
+        try:
+            st = store.stat()
+        except OSError:
+            unreadable.append(f"{store}: holds a token but its permissions are unreadable")
+            continue
+
+        others_can_read = _b182_readable_by_others(st)
+        if others_can_read is None:
+            unreadable.append(
+                f"{store}: holds a token; POSIX mode bits are not meaningful on this "
+                "platform, so its permissions could not be assessed"
+            )
+            continue
+        mode = oct(st.st_mode & 0o777)[-3:]
+        if others_can_read:
+            exposed.append(f"{store}: holds a ClawHub API token and is mode {mode}")
+            continue
+
+        dir_writable = False
+        try:
+            dir_writable = _writable_by_others(store.parent.stat())
+        except OSError:
+            pass
+        if dir_writable:
+            swappable.append(
+                f"{store}: token file is owner-only (mode {mode}) but its directory is "
+                "writable by others"
+            )
+        else:
+            safe.append(f"{store}: holds a ClawHub API token, mode {mode} (owner-only)")
+
+    if exposed:
+        return _finding(
+            "B182",
+            FAIL,
+            "A ClawHub CLI API token is stored in plaintext in a file other users on this "
+            "machine can read: " + "; ".join(exposed[:4]) + ". That token can publish new "
+            "versions of your own skills, so anything able to read it — another agent, "
+            "another skill, any local account — gains a supply-chain pivot onto every "
+            "install of them.",
+            "Restrict the file to its owner (`chmod 600` on the path above; the ClawHub CLI "
+            "writes it 0600 itself, so a looser mode means something changed it). If you "
+            "cannot rule out that it was read, revoke the token and log in again to mint a "
+            "fresh one.",
+            evidence=exposed[:4],
+        )
+
+    if swappable:
+        return _finding(
+            "B182",
+            WARN,
+            "A ClawHub CLI API token file is owner-only, but the directory holding it is "
+            "writable by others, so the file can be replaced or removed: "
+            + "; ".join(swappable[:4]),
+            "Restrict the containing directory to its owner (`chmod 700`); the ClawHub CLI "
+            "creates it 0700 itself.",
+            evidence=swappable[:4],
+        )
+
+    if safe or tokenless:
+        detail = (
+            "The ClawHub CLI token store is present and only its owner can read it: "
+            + "; ".join(safe[:4])
+            if safe
+            else "A ClawHub CLI config was found with no API token stored in it: "
+            + "; ".join(tokenless[:4])
+        )
+        return _finding(
+            "B182",
+            PASS,
+            detail + ".",
+            "No action needed. This credential lives outside the OpenClaw home, so keep it "
+            "owner-only — it publishes skills, and nothing in OpenClaw's own config "
+            "protects it.",
+            evidence=(safe + tokenless)[:4],
+        )
+
+    if found_any or unreadable:
+        return _finding(
+            "B182",
+            UNKNOWN,
+            "A ClawHub CLI config file was found but its token state or permissions could "
+            "not be determined: " + "; ".join(unreadable[:4]),
+            "Check the file manually — it holds a token that can publish new versions of "
+            "your skills, and it should be readable only by you.",
+            evidence=unreadable[:4],
+        )
+
+    return _finding(
+        "B182",
+        UNKNOWN,
+        "No ClawHub CLI token store was found at any of its documented locations, so "
+        "whether a publish-capable API token is sitting in plaintext on this machine "
+        "could not be determined.",
+        "If you use the ClawHub CLI, confirm its config file is readable only by you — it "
+        "lives outside the OpenClaw home, so nothing in OpenClaw's own configuration "
+        "protects it.",
     )
 
 

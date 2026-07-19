@@ -33,6 +33,13 @@ _KV_RE = re.compile(
 # miss (B-009).  These are full-token shapes, so each match is replaced wholesale.
 # Kept here (not in checks.SECRET_PATTERNS) so they only widen *redaction* and do
 # not introduce new config-scan findings / false-positive FAILs.
+#
+# Deliberately NOT here: the ClawHub CLI token shape (`clh_…`). It lives in
+# checks/_shared.py's SECRET_PATTERNS instead, because that token needs BOTH surfaces —
+# a copy of one in a config/bootstrap file is a real B1 plaintext-secret finding, not
+# only something to mask on the way to a log. redact() iterates SECRET_PATTERNS before
+# this list, so `clh_…` is still redacted here; do not "fix" the apparent omission by
+# duplicating the pattern into this list — that would only substitute it twice.
 _EXTRA_SECRET_PATTERNS = [
     re.compile(r"gh[opsur]_[A-Za-z0-9]{20,}"),                 # GitHub PAT / OAuth / app tokens
     re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),               # Slack tokens

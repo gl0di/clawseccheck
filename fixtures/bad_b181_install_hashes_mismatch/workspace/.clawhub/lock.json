@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "skills": {
+    "demo-skill": {
+      "version": "1.0.0",
+      "installedAt": 1751000000000,
+      "registry": "https://clawhub.ai",
+      "artifact": {
+        "kind": "archive",
+        "sha256": "5555555555555555555555555555555555555555555555555555555555555",
+        "integrity": "sha256-REDACTED"
+      },
+      "skillFile": {
+        "path": "SKILL.md",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "verification": {
+        "schema": "clawhub.skill.verify.v1",
+        "ok": true,
+        "decision": "pass",
+        "reasons": [],
+        "artifact": {
+          "sourceFingerprint": "5555555555555555555555555555555555555555555555555555555555555",
+          "bundleFingerprints": [],
+          "files": [
+            {
+              "path": "SKILL.md",
+              "size": 191,
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "contentType": "text/markdown"
+            },
+            {
+              "path": "notes.txt",
+              "size": 40,
+              "sha256": "41f486b1a6928e20525aa7ffe79c57d1e11a961d839af6b9894ed13313f6d782",
+              "contentType": "text/plain"
+            }
+          ]
+        },
+        "signature": {
+          "status": "unsigned"
+        }
+      }
+    }
+  }
+}
