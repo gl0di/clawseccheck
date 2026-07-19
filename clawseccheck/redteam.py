@@ -37,6 +37,8 @@ from __future__ import annotations
 import hashlib
 import secrets
 
+from . import brand
+
 TOKEN_PREFIX = "CLAWSECCHECK-RT-"
 
 # ---------------------------------------------------------------------------
@@ -482,7 +484,8 @@ def render_suite(suite: list[dict], ascii_only: bool = False,
     *seed* is shown so the run is reproducible with ``--seed`` when needed; it is
     cosmetic (the tokens are already baked into *suite*).
     """
-    title = "ClawSecCheck - Live Red-Team Suite v1" + ("" if ascii_only else " \U0001f9ea")
+    title = brand.header("Live Red-Team Suite v1", ascii_only=ascii_only) + (
+        "" if ascii_only else " \U0001f9ea")
     lines = [
         title,
         "=" * 44,

@@ -21,6 +21,8 @@ from __future__ import annotations
 import hashlib
 import secrets
 
+from . import brand
+
 # Prefix that makes fake secrets unambiguously artificial — never a real credential.
 _FAKE_PREFIX = "CLAWSECCHECK_FAKE_"
 
@@ -286,7 +288,8 @@ def render_dryrun(scenarios: list[dict], ascii_only: bool = False) -> str:
 
     No network calls, no real secrets, no LLM calls are made here.
     """
-    title = "ClawSecCheck - Runtime Dry-Run Harness" + ("" if ascii_only else " \U0001f9ea")
+    title = brand.header("Runtime Dry-Run Harness", ascii_only=ascii_only) + (
+        "" if ascii_only else " \U0001f9ea")
     lines = [
         title,
         "=" * 50,
