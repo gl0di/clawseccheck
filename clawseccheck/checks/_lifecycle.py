@@ -106,6 +106,31 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal — the single file that defines the
 # Unknown / future versions that do not appear in this table are treated as PASS
 # only against the entries here; they may still be vulnerable to undiscovered issues.
 # Each entry: (ghsa_id, max_vulnerable_version_tuple, fixed_version_str, short_desc)
+#
+# ⚠️ CORRECTION-RELEASE SUFFIX WARNING (B-264): _parse_version() truncates at the first
+# non-dotted-integer character, so a hyphenated correction release collapses onto its
+# base version — "2026.7.1-2" parses identically to "2026.7.1" (both -> (2026, 7, 1)).
+# OpenClaw does ship this shape in the wild (observed: package.json "2026.7.1-2").
+# Consequence: the `parsed <= max_vuln` compare below cannot tell a base version from any
+# of its correction releases, so "X", "X-1", "X-2" … always receive the SAME verdict. This
+# table can therefore only place a boundary BETWEEN base versions, never inside one base
+# version's correction-release family.
+#
+# RULE: max_vulnerable_version_tuple must never be the base tuple of a version whose
+# correction releases straddle this advisory — i.e. never split an "X" / "X-N" family.
+# It breaks in BOTH directions, and checking max_vuln against fixed_version_str only
+# catches the first:
+#   (a) the FIX lands in a correction release (X vulnerable, X-2 fixed) —
+#       max_vuln=(2026, 7, 1) with fixed="2026.7.1-2" FAILs the already-fixed "2026.7.1-2"
+#       (false positive, GR#5) and hands a user already on it the self-contradicting
+#       remediation "upgrade to >= 2026.7.1-2".
+#   (b) a REGRESSION is introduced in a correction release (X clean, X-2 vulnerable, fixed
+#       in a later base) — max_vuln=(2026, 7, 1) with fixed="2026.7.2" does NOT share a
+#       base tuple with the fixed version, so rule (a) alone would wave the row through,
+#       yet the clean "2026.7.1" FAILs (false positive, GR#5). Backing max_vuln down to
+#       (2026, 7, 0) instead PASSes the vulnerable "2026.7.1-2" (false negative).
+# Neither direction is expressible here: a correction-release boundary needs a comparator
+# change (e.g. a (base_tuple, correction_int) pair), not a new table row.
 _KNOWN_ADVISORIES: list[tuple[str, tuple[int, ...], str, str]] = [
     (
         "GHSA-g8p2-7wf7-98mq",
@@ -187,14 +212,23 @@ def _iter_entries(cfg: dict):
 def _parse_version(ver: str) -> tuple[int, ...] | None:
     """Parse the leading dotted-integer portion of a version string.
 
-    Handles "2026.2.9", "2026.1.28", and strips any trailing "-dev"/"-beta"/
-    "-rc1"/etc. suffix.  Returns None if fewer than 2 integer components can
-    be parsed.
+    Handles "2026.2.9", "2026.1.28", and strips ANY trailing suffix — alphabetic
+    ("-dev"/"-beta"/"-rc1") and numeric ("-2") alike.  Returns None if fewer than
+    2 integer components can be parsed.
+
+    ⚠️ The numeric case is NOT merely a prerelease marker: a hyphen-numeric suffix is
+    OpenClaw's correction-release shape, and stripping it makes a correction release
+    compare EQUAL to its base version — ordering within a base version is lost, not
+    just normalized.  Before adding an advisory whose boundary lands on such a version,
+    read the correction-release warning above _KNOWN_ADVISORIES.
 
     Examples:
         "2026.1.29"     -> (2026, 1, 29)
         "2026.2.9"      -> (2026, 2, 9)
         "2026.1.28-dev" -> (2026, 1, 28)
+        "2026.7.1-2"    -> (2026, 7, 1)   (correction release collapses onto its
+                                           base — see the warning above
+                                           _KNOWN_ADVISORIES)
         "nightly"       -> None
         "2026"          -> None   (single component — ambiguous)
     """

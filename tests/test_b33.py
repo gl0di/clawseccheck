@@ -64,6 +64,14 @@ def test_parse_version_strips_rc_suffix():
     assert _parse_version("2026.3.0-rc1") == (2026, 3, 0)
 
 
+def test_parse_version_strips_numeric_correction_suffix():
+    """B-264: a hyphenated correction release ("2026.7.1-2", observed live in
+    package.json/lastTouchedVersion) truncates identically to its base version —
+    _parse_version cannot distinguish a correction release from its base."""
+    assert _parse_version("2026.7.1-2") == (2026, 7, 1)
+    assert _parse_version("2026.7.1-2") == _parse_version("2026.7.1")
+
+
 def test_parse_version_four_components():
     assert _parse_version("2026.1.28.1") == (2026, 1, 28, 1)
 
@@ -324,3 +332,65 @@ def test_b33_does_not_add_unverified_cve_2026_25593():
     assert "GHSA-2026-25593" not in ghsa_ids
     for ghsa, *_ in _KNOWN_ADVISORIES:
         assert "25593" not in ghsa
+
+
+# ---------------------------------------------------------------------------
+# B-264: hyphenated correction-release version pin (e.g. "2026.7.1-2", observed
+# live in ~/.npm-global's package.json and the real ~/.openclaw/openclaw.json
+# lastTouchedVersion). No _KNOWN_ADVISORIES entry currently shares a base tuple
+# with a correction release, so this is a latent-guard pin, not a behavior change:
+# it documents today's (correct) PASS and the boundary shape a future advisory
+# must not collide with (see the correction-release warning above the
+# _KNOWN_ADVISORIES table in clawseccheck/checks/_lifecycle.py).
+# ---------------------------------------------------------------------------
+
+def test_b33_correction_release_suffix_passes_current_table():
+    """"2026.7.1-2" is past every current advisory fix -> PASS (no live FP).
+
+    ⚠️ If a future advisory legitimately covers <= 2026.7.x this WILL go red. Do NOT
+    simply bump the version literal to make it pass — that silently discards the guard.
+    A red here means the new advisory's boundary may split a correction-release family;
+    re-read the warning above _KNOWN_ADVISORIES and pick a boundary that does not, or
+    change the comparator.
+    """
+    result = check_known_vulns(_ver_ctx("2026.7.1-2"))
+    assert result.status == PASS
+
+
+def test_b33_correction_release_at_vulnerable_boundary_fails():
+    """"2026.2.13-2" truncates to (2026, 2, 13) == max_vuln for GHSA-g6q9/-cv7m
+    -> FAIL, same as its base version "2026.2.13"."""
+    result = check_known_vulns(_ver_ctx("2026.2.13-2"))
+    assert result.status == FAIL
+    assert result.status == check_known_vulns(_ver_ctx("2026.2.13")).status
+
+
+def test_b33_correction_release_past_boundary_passes():
+    """"2026.2.14-2" truncates to (2026, 2, 14), past all known-advisory fixes
+    -> PASS, same as its base version "2026.2.14"."""
+    result = check_known_vulns(_ver_ctx("2026.2.14-2"))
+    assert result.status == PASS
+    assert result.status == check_known_vulns(_ver_ctx("2026.2.14")).status
+
+
+def test_b33_no_advisory_boundary_lands_on_its_own_fix_base():
+    """Mechanized half of the correction-release rule: no row may set max_vuln to the
+    base tuple of its own fixed version.
+
+    That combination means the fix shipped in a correction release of the boundary
+    version, and since _parse_version collapses "X-N" onto "X", the already-fixed
+    build would FAIL (GR#5 false positive) with the self-contradicting remediation
+    "upgrade to >= <the version you are on>".
+
+    NOTE — this pins only direction (a) of the rule. Direction (b), a regression
+    INTRODUCED in a correction release, produces a row that satisfies this assertion
+    and still false-FAILs the clean base version; it is not derivable from the table
+    alone, so it stays a prose rule. See the warning above _KNOWN_ADVISORIES.
+    """
+    from clawseccheck.checks import _KNOWN_ADVISORIES
+    for ghsa, max_vuln, fixed_ver, _desc in _KNOWN_ADVISORIES:
+        assert _parse_version(fixed_ver) != max_vuln, (
+            f"{ghsa}: max_vuln {max_vuln} equals the base tuple of fixed version "
+            f"{fixed_ver!r} — a correction-release fix cannot be expressed in this "
+            f"table; see the warning above _KNOWN_ADVISORIES"
+        )
