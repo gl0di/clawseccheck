@@ -1084,7 +1084,8 @@ _MATCH_MAPPING_NODE = getattr(ast, "MatchMapping", None)
 def _own_bound_names(scope: ast.AST) -> set[str]:
     """Names Python itself would make a local of `scope`: its own parameters, plus
     every def/class name, assignment/for/with/walrus/import/except/match target in
-    `scope`'s OWN body. The walk STOPS at nested function, class and lambda
+    `scope`'s OWN body, MINUS every name `scope` declares `global` or `nonlocal`
+    (B-261 -- see below). The walk STOPS at nested function, class and lambda
     boundaries -- a name bound inside a nested scope is a local of THAT scope and
     shadows nothing out here, so it cannot change what a reference in THIS scope
     resolves to. (A nested def/class still contributes its own NAME, which really is
@@ -1114,8 +1115,31 @@ def _own_bound_names(scope: ast.AST) -> set[str]:
 
     Both halves had to land together: fixing either alone trades one bug for the
     other.
+
+    B-261 (false NEGATIVE -- an evasion) is the third distinct rule, and the one this
+    subtraction encodes: a `global`/`nonlocal` declaration means the name is NOT a
+    fresh local of `scope` at all. The assignment rebinds the module (or the enclosing)
+    binding IN PLACE, so it must not be counted as a shadow of the very binding it
+    writes to. Without the subtraction, a scope that both declared the name and
+    consumed it -- `nonlocal x; x = base64.b64decode(...); exec(x)` all inside ONE
+    nested function -- seeded the taint into the ancestor bucket (B-215) and then
+    subtracted that same ancestor away again in `_tainted_names_visible`, so the exec
+    read clean. B-214/B-215 both concerned OTHER scopes' view of the name; this is the
+    writing scope's view of its own write.
+
+    Note this is a subtraction, not another special case: a plain local assignment with
+    no declaration still shadows exactly as before -- the declaration is the whole
+    discriminator, and it is the same one Python's own compiler uses. It also makes
+    `_nonlocal_target_scopes` strictly more faithful for free: an ancestor that
+    declares the name `global` can never be what a `nonlocal` binds to, and no longer
+    claims to be.
     """
     bound: set[str] = set()
+    # Names this scope declares as belonging to an OUTER binding. Collected by the same
+    # scope-bounded walk as `bound`, so a declaration inside a nested function is not
+    # attributed here -- no owner_map needed (cf. `_global_declared_names`, which walks
+    # a whole subtree and therefore does need one).
+    declared_outer: set[str] = set()
 
     def add_args(args: ast.arguments) -> None:
         for a in (*args.posonlyargs, *args.args, *args.kwonlyargs):
@@ -1143,6 +1167,11 @@ def _own_bound_names(scope: ast.AST) -> set[str]:
             # Binds no name of its own here, and its body is its own scope -- but its
             # defaults are evaluated in ours (`_enclosing_evaluated_parts`).
             stack.extend(_enclosing_evaluated_parts(n))
+            continue
+        if isinstance(n, (ast.Global, ast.Nonlocal)):
+            # B-261: declares the name is not a local here. Python forbids declaring a
+            # parameter global/nonlocal, so this never fights `add_args`.
+            declared_outer.update(n.names)
             continue
         if isinstance(n, ast.Assign):
             for t in n.targets:
@@ -1173,7 +1202,7 @@ def _own_bound_names(scope: ast.AST) -> set[str]:
         elif _MATCH_MAPPING_NODE is not None and isinstance(n, _MATCH_MAPPING_NODE) and n.rest:
             bound.add(n.rest)
         stack.extend(ast.iter_child_nodes(n))
-    return bound
+    return bound - declared_outer if declared_outer else bound
 
 
 def _build_toplevel_owner_map(funcs: list, classes: list | None = None) -> tuple[dict, dict]:

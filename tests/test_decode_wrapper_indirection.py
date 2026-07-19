@@ -1263,3 +1263,102 @@ def test_b214_nested_def_body_is_still_not_the_enclosing_scope():
     src = _shadow_case("    def h(a=1):\n        _decode = None\n")
     assert "_decode" not in _run_binds(src)
     assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+# ---------------------------------------------------------------------------
+# B-261 (false NEGATIVE, evasion): the THIRD distinct scope rule, after B-214
+# (shadow resolution across SIBLING scopes) and B-215 (which ancestor a nonlocal
+# taint is seeded into). Both of those concerned some OTHER scope's view of the
+# name. This one is the writing scope's view of its OWN write: the scope that
+# binds a name via `nonlocal`/`global` is not creating a fresh local, so it must
+# keep seeing that name as tainted for the rest of its own body.
+#
+# The pre-fix failure was self-cancelling: `_tainted_names` seeded the taint into
+# the ancestor bucket (B-215), then `_tainted_names_visible` subtracted that very
+# ancestor back out again, because `_own_bound_names` counted the declared rebind
+# as the writing scope's own shadowing local. The exec read clean.
+# ---------------------------------------------------------------------------
+
+def test_b261_nonlocal_write_and_exec_in_the_same_function_flags():
+    # The repro: the `nonlocal` write AND the exec that consumes it live in ONE
+    # inner function. B-210's `nonlocal` case only ever covered the write and the
+    # read landing in DIFFERENT scopes.
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    x = None\n"
+        "    def inner():\n"
+        "        nonlocal x\n"
+        "        x = base64.b64decode(b'eA==')\n"
+        "        exec(x)\n"
+        "    inner()\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b261_global_write_and_exec_in_the_same_function_flags():
+    # Same root cause reached through `global` -- an equally cheap evasion, and one
+    # that would have stayed open had the fix keyed on `nonlocal` alone.
+    src = (
+        "import base64\n"
+        "def f():\n"
+        "    global x\n"
+        "    x = base64.b64decode(b'eA==')\n"
+        "    exec(x)\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b261_declared_names_are_not_own_bound_names():
+    # Structural half: a declared rebind is not a local of the declaring scope, so
+    # `_own_bound_names` must not report it even though an Assign targets it.
+    tree = ast.parse(
+        "def run():\n"
+        "    nonlocal_free = 1\n"
+        "    global g\n"
+        "    g = 2\n"
+    )
+    run = next(n for n in tree.body if getattr(n, "name", None) == "run")
+    binds = _own_bound_names(run)
+    assert "nonlocal_free" in binds  # a plain local is still bound here
+    assert "g" not in binds  # the `global` target is not
+
+
+def test_b261_genuine_local_rebind_still_shadows():
+    # The discrimination this fix turns on: WITHOUT a declaration, the very same
+    # assignment is a fresh local and must still shadow the module-level wrapper.
+    # If this ever goes green-by-firing, the fix has over-reached into B-214's job.
+    src = _shadow_case("    _decode = None\n")
+    assert "_decode" in _run_binds(src)
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b261_declaration_in_a_nested_function_does_not_unshadow_the_outer_scope():
+    # Owner-correctness of the subtraction: `helper` declares `_decode` nonlocal,
+    # but `run` binds it as a genuine local of its own. The declaration belongs to
+    # `helper` alone, so `run` must keep its shadow and stay silent. A subtraction
+    # that leaked across the nested-function boundary would reopen a false positive
+    # here -- this is the FP-direction control for the fix.
+    src = _shadow_case(
+        "    _decode = None\n"
+        "    def helper():\n"
+        "        nonlocal _decode\n"
+        "        _decode = None\n"
+    )
+    assert "_decode" in _run_binds(src)
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b261_benign_same_scope_nonlocal_write_stays_silent():
+    # Clean control: the exact scope shape of the repro with no decode->exec chain
+    # anywhere. The fix must buy detection only where a real decode reaches a sink.
+    src = (
+        "def make_counter():\n"
+        "    total = 0\n"
+        "    def bump(n):\n"
+        "        nonlocal total\n"
+        "        total = total + n\n"
+        "        return total\n"
+        "    return bump\n"
+    )
+    assert _rules(src) == set()
