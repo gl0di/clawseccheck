@@ -9,7 +9,17 @@ proves it doesn't over-trigger on a decode helper that never reaches exec/eval.
 """
 from __future__ import annotations
 
-from clawseccheck.skillast import analyze_python
+import ast
+import sys
+
+import pytest
+
+from clawseccheck.skillast import (
+    _build_toplevel_owner_map,
+    _nonlocal_target_scopes,
+    _own_bound_names,
+    analyze_python,
+)
 
 
 def _rules(src: str) -> set[str]:
@@ -703,3 +713,553 @@ def test_c135_nonlocal_write_does_not_leak_to_unrelated_same_named_function():
         "    exec(payload)\n"
     )
     assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+# ---------------------------------------------------------------------------
+# B-214 (false NEGATIVE, evasion) + B-215 (false POSITIVE): one shared root cause.
+# The shadow model walked a scope's ENTIRE subtree, counting bindings inside nested
+# functions as shadowing the enclosing scope. `_own_bound_names` now stops at nested
+# scope boundaries, which closes both directions at once -- fixing either alone
+# trades one bug for the other (see `_nonlocal_declared_names`).
+# ---------------------------------------------------------------------------
+
+def test_b214_shadow_in_sibling_nested_function_does_not_suppress_real_call():
+    # A local rebind of `_decode` inside ONE nested function must not strip the
+    # module-level wrapper from an unrelated SIBLING nested function that genuinely
+    # calls it. Python scopes that rebind to `helper_unrelated` alone.
+    src = (
+        "import base64\n"
+        "def _decode(blob):\n"
+        "    return base64.b64decode(blob)\n"
+        "def outer():\n"
+        "    def helper_unrelated():\n"
+        "        _decode = lambda x: x\n"
+        "        return _decode('noop')\n"
+        "    def helper_real():\n"
+        "        payload = _decode(b'eA==')\n"
+        "        exec(payload)\n"
+        "    helper_unrelated()\n"
+        "    helper_real()\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b214_never_called_dead_decoy_does_not_suppress_detection():
+    # The real-world weaponised form, and why B-214 was urgent rather than academic:
+    # the attacker authors the skill being vetted, so a two-line NEVER-CALLED decoy
+    # was a cheap, fully controllable way to silence decode->exec detection on
+    # otherwise-caught malware. `_unused_decoy` has no runtime effect whatsoever.
+    src = (
+        "import base64\n"
+        "def _decode(blob):\n"
+        "    return base64.b64decode(blob)\n"
+        "def run():\n"
+        "    def _unused_decoy():\n"
+        "        _decode = None\n"
+        "    payload = _decode(b'eA==')\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b214_dead_decoy_nested_two_levels_deep_does_not_suppress_detection():
+    # Same evasion buried one level further down, so the fix cannot be a
+    # depth-1 special case.
+    src = (
+        "import base64\n"
+        "def _decode(blob):\n"
+        "    return base64.b64decode(blob)\n"
+        "def run():\n"
+        "    def _lvl1():\n"
+        "        def _lvl2():\n"
+        "            _decode = None\n"
+        "        return _lvl2\n"
+        "    payload = _decode(b'eA==')\n"
+        "    exec(payload)\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b214_decoy_inside_composing_wrapper_does_not_suppress_it():
+    # The same decoy aimed at `_decode_composing_funcnames` instead: a dead nested
+    # rebind of the chained helper `_step2` must not stop `_decode` from being
+    # recognised as decode-composing in the first place.
+    src = (
+        "import base64\n"
+        "def _step2(b):\n"
+        "    return base64.b64decode(b)\n"
+        "def _decode(x):\n"
+        "    def _decoy():\n"
+        "        _step2 = None\n"
+        "    return _step2(x)\n"
+        "exec(_decode(blob))\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b214_genuine_own_scope_shadow_still_suppresses():
+    # FP-safety control for B-214's narrowing: a rebind in the calling scope's OWN
+    # body is a real shadow in Python and must still suppress. This is the C-135
+    # round-3 guarantee -- narrowing the walk must not give it up.
+    src = (
+        "import base64\n"
+        "def _decode(blob):\n"
+        "    return base64.b64decode(blob)\n"
+        "def outer():\n"
+        "    def helper_real():\n"
+        "        _decode = lambda x: x\n"
+        "        payload = _decode(b'eA==')\n"
+        "        exec(payload)\n"
+        "    helper_real()\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b214_shadow_in_enclosing_scope_still_suppresses_nested_call():
+    # The other half of the FP-safety control: a rebind in an ENCLOSING scope really
+    # does shadow the module-level name for the nested function too, so the
+    # ancestor-chain walk must stay.
+    src = (
+        "import base64\n"
+        "def _decode(blob):\n"
+        "    return base64.b64decode(blob)\n"
+        "def outer():\n"
+        "    _decode = lambda x: x\n"
+        "    def helper_real():\n"
+        "        payload = _decode(b'eA==')\n"
+        "        exec(payload)\n"
+        "    helper_real()\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b215_grandparent_reusing_name_not_swept_in_by_nonlocal_write():
+    # `nonlocal x` in `inner` binds to `outer`'s own `x` -- the NEAREST enclosing
+    # scope that binds the name. `grandparent`'s same-named local is a different
+    # variable that no write ever touches, so its exec() must stay silent.
+    src = (
+        "import base64\n"
+        "def grandparent():\n"
+        "    x = 'grandparents own local, never touched by any nonlocal write'\n"
+        "    def outer():\n"
+        "        x = 'outers own local (the REAL nonlocal target for inner)'\n"
+        "        def inner():\n"
+        "            nonlocal x\n"
+        "            x = base64.b64decode(b'eA==')\n"
+        "        inner()\n"
+        "        return x\n"
+        "    outer()\n"
+        "    exec(x)\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b215_unrelated_reuse_two_levels_out_not_swept_in():
+    # Same shape one level deeper, to prove the resolution walks to the nearest
+    # binder rather than stopping at a fixed depth.
+    src = (
+        "import base64\n"
+        "def grandparent():\n"
+        "    x = 'grandparents own unrelated local'\n"
+        "    def mid():\n"
+        "        x = 'mids own unrelated local'\n"
+        "        def outer():\n"
+        "            x = 'the real nonlocal target'\n"
+        "            def inner():\n"
+        "                nonlocal x\n"
+        "                x = base64.b64decode(b'eA==')\n"
+        "            inner()\n"
+        "        outer()\n"
+        "    mid()\n"
+        "    exec(x)\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b215_grandparent_is_the_real_target_still_flags():
+    # Positive control for B-215: when the intermediate scope does NOT bind the name,
+    # the grandparent genuinely IS what `nonlocal` rebinds -- must still fire. This is
+    # the false-negative the narrowing must not open.
+    src = (
+        "import base64\n"
+        "def grandparent():\n"
+        "    x = 'safe default'\n"
+        "    def outer():\n"
+        "        def inner():\n"
+        "            nonlocal x\n"
+        "            x = base64.b64decode(b'eA==')\n"
+        "        inner()\n"
+        "    outer()\n"
+        "    exec(x)\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b215_intermediate_scope_sharing_the_cell_via_nonlocal_still_flags():
+    # An intermediate ancestor that ALSO declares the name `nonlocal` is not the
+    # target -- it shares the very same cell, one level further out. It must be
+    # seeded alongside the real target, not mistaken for it, so its own read fires.
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    payload = 'safe'\n"
+        "    def mid():\n"
+        "        nonlocal payload\n"
+        "        def inner():\n"
+        "            nonlocal payload\n"
+        "            payload = base64.b64decode(b'eA==')\n"
+        "        inner()\n"
+        "        exec(payload)\n"
+        "    mid()\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+# --- B-215: every binding form the target scope may use -------------------------
+#
+# These three used to assert ONLY `OBFUSCATED_EXEC in _crit_rules(src)`, which is
+# vacuous: when `_nonlocal_target_scopes` cannot model a binding form it returns []
+# and the caller falls back to seeding EVERY ancestor, which produces that same
+# positive verdict. So the assertion could not tell "binding form correctly modelled"
+# from "binding form not modelled at all" -- with `add_args`, the `ast.For` branch,
+# the `ast.withitem` branch, or the entire resolver body disabled, all three still
+# passed. Each now pins the resolution two ways the fallback cannot fake:
+#   1. structurally, on `_nonlocal_target_scopes` -- it must NAME the target scope
+#      (the fallback returns [], the "unmodelled" signal);
+#   2. behaviourally, with a same-named GRANDPARENT local that must NOT be swept in
+#      (the fallback seeds it and the grandparent's own exec fires -- the exact
+#      B-215 false positive).
+
+
+def _nonlocal_targets(src: str, name: str = "payload") -> list[str]:
+    """Names of the scope(s) `_nonlocal_target_scopes` resolves the `nonlocal name`
+    write in `src` to. `[]` means the binding form is unmodelled and the caller falls
+    back to over-approximating -- which is precisely what these tests must detect."""
+    tree = ast.parse(src)
+    top = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    owner_map, parent_scope = _build_toplevel_owner_map(top)
+    scope = next(
+        (
+            owner_map.get(n)
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Nonlocal) and name in n.names
+        ),
+        None,
+    )
+    assert scope is not None, "test source has no `nonlocal` declaration to resolve"
+    targets = _nonlocal_target_scopes(name, scope, parent_scope, owner_map, {}, {})
+    return [getattr(t, "name", "<module>") for t in targets]
+
+
+def test_b215_nonlocal_target_bound_by_a_parameter_still_flags():
+    # The target scope's binding need not be an assignment -- a parameter binds the
+    # name just as well, and the resolution must recognise every binding form or it
+    # would silently fall back to over-approximating.
+    src = (
+        "import base64\n"
+        "def outer(payload):\n"
+        "    def inner():\n"
+        "        nonlocal payload\n"
+        "        payload = base64.b64decode(b'eA==')\n"
+        "    inner()\n"
+        "    exec(payload)\n"
+    )
+    assert _nonlocal_targets(src) == ["outer"]
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b215_parameter_target_does_not_sweep_in_a_same_named_grandparent():
+    # The negative half: `outer`'s PARAMETER is the real target, so `gp`'s unrelated
+    # local of the same name is never written and its exec must stay silent.
+    src = (
+        "import base64\n"
+        "def gp():\n"
+        "    payload = 'gp own local, never touched by the nonlocal write'\n"
+        "    def outer(payload):\n"
+        "        def inner():\n"
+        "            nonlocal payload\n"
+        "            payload = base64.b64decode(b'eA==')\n"
+        "        inner()\n"
+        "    outer(b'')\n"
+        "    exec(payload)\n"
+    )
+    assert _nonlocal_targets(src) == ["outer"]
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b215_nonlocal_target_bound_by_a_for_loop_still_flags():
+    src = (
+        "import base64\n"
+        "def outer(items):\n"
+        "    for payload in items:\n"
+        "        pass\n"
+        "    def inner():\n"
+        "        nonlocal payload\n"
+        "        payload = base64.b64decode(b'eA==')\n"
+        "    inner()\n"
+        "    exec(payload)\n"
+    )
+    assert _nonlocal_targets(src) == ["outer"]
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b215_for_loop_target_does_not_sweep_in_a_same_named_grandparent():
+    src = (
+        "import base64\n"
+        "def gp(items):\n"
+        "    payload = 'gp own local, never touched by the nonlocal write'\n"
+        "    def outer():\n"
+        "        for payload in items:\n"
+        "            pass\n"
+        "        def inner():\n"
+        "            nonlocal payload\n"
+        "            payload = base64.b64decode(b'eA==')\n"
+        "        inner()\n"
+        "    outer()\n"
+        "    exec(payload)\n"
+    )
+    assert _nonlocal_targets(src) == ["outer"]
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b215_nonlocal_target_bound_by_a_with_statement_still_flags():
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    with open('seed.bin', 'rb') as payload:\n"
+        "        pass\n"
+        "    def inner():\n"
+        "        nonlocal payload\n"
+        "        payload = base64.b64decode(b'eA==')\n"
+        "    inner()\n"
+        "    exec(payload)\n"
+    )
+    assert _nonlocal_targets(src) == ["outer"]
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b215_with_statement_target_does_not_sweep_in_a_same_named_grandparent():
+    src = (
+        "import base64\n"
+        "def gp():\n"
+        "    payload = 'gp own local, never touched by the nonlocal write'\n"
+        "    def outer():\n"
+        "        with open('seed.bin', 'rb') as payload:\n"
+        "            pass\n"
+        "        def inner():\n"
+        "            nonlocal payload\n"
+        "            payload = base64.b64decode(b'eA==')\n"
+        "        inner()\n"
+        "    outer()\n"
+        "    exec(payload)\n"
+    )
+    assert _nonlocal_targets(src) == ["outer"]
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+# --- B-214: every binding form `_own_bound_names` claims to model -----------------
+#
+# `_own_bound_names` decides whether a scope locally rebinds a decode-composing name
+# and therefore must NOT resolve it to the module-level helper. Each form below is
+# verdict-moving: on the pre-B-214 subtree walk every one of them produced a crit
+# OBFUSCATED_EXEC false positive (the local rebind was invisible, so `_decode(...)`
+# was read as a call to the module-level wrapper). They shipped with no coverage --
+# deleting any single branch left the suite green -- so each is pinned here twice:
+# once on `_own_bound_names` directly, once on the verdict it moves.
+
+_DECODE_HELPER = "import base64\ndef _decode(b):\n    return base64.b64decode(b)\n"
+
+
+def _run_binds(src: str) -> set[str]:
+    """`_own_bound_names` of the `run()` defined in `src` -- what the scope model
+    believes `run` rebinds locally, asserted alongside the verdict it moves."""
+    tree = ast.parse(src)
+    run = next(n for n in tree.body if getattr(n, "name", None) == "run")
+    return _own_bound_names(run)
+
+
+def _shadow_case(binding_line: str, params: str = "") -> str:
+    return _DECODE_HELPER + (
+        f"def run({params}):\n"
+        f"{binding_line}"
+        "    payload = _decode(b'eA==')\n"
+        "    exec(payload)\n"
+    )
+
+
+def test_b214_control_unshadowed_wrapper_call_still_flags():
+    # The control every case below is measured against: with NO local rebind the
+    # wrapper call really does resolve to the module-level `_decode` and must fire.
+    # Without this, a shadow test could pass for the wrong reason (nothing firing).
+    src = _shadow_case("")
+    assert "_decode" not in _run_binds(src)
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b214_import_binds_and_shadows_the_composing_name():
+    for line in (
+        "    import _decode\n",
+        "    import mylib as _decode\n",
+        "    from mylib import _decode\n",
+        "    from mylib import thing as _decode\n",
+    ):
+        src = _shadow_case(line)
+        assert "_decode" in _run_binds(src), line
+        assert "OBFUSCATED_EXEC" not in _rules(src), line
+
+
+def test_b214_import_star_binds_nothing():
+    # `from x import *` binds an unknowable set; it must not be read as binding the
+    # literal name "*", and it must not suppress the wrapper match.
+    src = _shadow_case("    from mylib import *\n")
+    assert "*" not in _run_binds(src)
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b214_except_handler_alias_binds_and_shadows_the_composing_name():
+    src = _shadow_case(
+        "    try:\n"
+        "        pass\n"
+        "    except Exception as _decode:\n"
+        "        pass\n"
+    )
+    assert "_decode" in _run_binds(src)
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b214_del_binds_and_shadows_the_composing_name():
+    # `del x` makes x local to the scope: a later read raises UnboundLocalError
+    # rather than falling through to the module-level binding, so it is a real shadow.
+    src = _shadow_case("    del _decode\n")
+    assert "_decode" in _run_binds(src)
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 10), reason="match statements are 3.10+ syntax")
+def test_b214_match_capture_patterns_bind_and_shadow_the_composing_name():
+    for line in (
+        "    match cmd:\n        case _decode:\n            pass\n",  # MatchAs
+        "    match cmd:\n        case [*_decode]:\n            pass\n",  # MatchStar
+        "    match cmd:\n        case {**_decode}:\n            pass\n",  # MatchMapping.rest
+    ):
+        src = _shadow_case(line, params="cmd")
+        assert "_decode" in _run_binds(src), line
+        assert "OBFUSCATED_EXEC" not in _rules(src), line
+
+
+def test_b214_lambda_parameter_does_not_shadow_the_enclosing_scope():
+    # A lambda opens its OWN scope: its parameter binds nothing in the enclosing
+    # function, so it must not suppress the wrapper match.
+    src = _shadow_case("    f = lambda _decode: _decode\n")
+    binds = _run_binds(src)
+    assert "_decode" not in binds and "f" in binds
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+def test_b214_walrus_inside_a_lambda_body_does_not_shadow_the_enclosing_scope():
+    # The `ast.Lambda` skip, in the direction that moves a verdict: a walrus in a
+    # lambda BODY binds in the lambda's scope, not the enclosing one. The pre-B-214
+    # subtree walk counted it as an enclosing binding and MISSED this payload
+    # entirely -- a false negative, and a cheap evasion primitive.
+    src = _shadow_case("    f = lambda x: (_decode := x)\n")
+    assert "_decode" not in _run_binds(src)
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+# --- B-214 follow-up: the two per-scope walks must stop at the SAME boundary -------
+
+
+def test_b214_nested_closure_return_is_not_the_outer_functions_return_path():
+    # Found by adversarial C-135 review of the B-214 fix itself. `_own_bound_names`
+    # was narrowed to stop at nested-scope boundaries, but `_scope_own_nodes` -- which
+    # enumerates a function's return paths -- filtered nested scopes only among a
+    # node's CHILDREN, never among the scope's own top-level body statements. So a
+    # nested `def` sitting directly in the body leaked its whole body into the
+    # parent's node set: the closure's `return _decode(...)` counted as the OUTER
+    # function's return path, while the closure's own rebinding of that name no longer
+    # subtracted. `get_template` returns a plain string literal and decodes nothing,
+    # yet was classified decode-composing -- a crit false positive that reached the
+    # real `--vet` path as B13 FAIL / CRITICAL on a benign skill.
+    src = (
+        "import base64\n"
+        "def decode_field(v):\n"
+        "    return base64.b64decode(v)\n"
+        "def get_template():\n"
+        "    def render():\n"
+        '        decode_field = REGISTRY["decoder"]\n'
+        '        return decode_field("x")\n'
+        "    return \"print('hello')\"\n"
+        "exec(get_template())\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b214_nested_def_first_in_body_does_not_leak_its_return_path():
+    # The same leak reduced to its mechanism, independent of any shadowing: a nested
+    # closure that genuinely decodes must not make its ENCLOSING function look
+    # decode-composing when that function returns a literal.
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    def inner():\n"
+        "        return base64.b64decode(b'eA==')\n"
+        "    return 'plain literal'\n"
+        "exec(outer())\n"
+    )
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b214_outer_function_own_return_path_still_flags():
+    # FP-safety control for the boundary fix: narrowing the walk must not stop the
+    # OUTER function's own return path from being seen. Same shape, decode moved out
+    # of the closure and onto `outer`'s own return.
+    src = (
+        "import base64\n"
+        "def outer():\n"
+        "    def inner():\n"
+        "        return 'unused'\n"
+        "    return base64.b64decode(b'eA==')\n"
+        "exec(outer())\n"
+    )
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
+
+
+# --- B-214 follow-up: a nested scope's node is not entirely "someone else's scope" --
+
+
+def test_b214_walrus_in_a_nested_def_default_shadows_the_enclosing_scope():
+    # Only a nested scope's BODY is the new scope. Its argument defaults, decorators,
+    # annotations and class bases are evaluated in the ENCLOSING one, so a walrus
+    # there genuinely rebinds the enclosing name. Skipping the whole node made these
+    # rebinds invisible and resolved the later call to the module-level helper -- a
+    # crit false positive on code that only ever calls the local identity lambda.
+    src = _shadow_case("    def h(a=(_decode := (lambda x: x))):\n        pass\n")
+    assert "_decode" in _run_binds(src)
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b214_walrus_in_a_decorator_shadows_the_enclosing_scope():
+    src = _shadow_case("    @(_decode := (lambda f: f))\n    def h():\n        pass\n")
+    assert "_decode" in _run_binds(src)
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b214_walrus_in_a_lambda_default_shadows_the_enclosing_scope():
+    src = _shadow_case("    g = lambda a=(_decode := (lambda x: x)): a\n")
+    assert "_decode" in _run_binds(src)
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b214_walrus_in_a_class_base_shadows_the_enclosing_scope():
+    src = _shadow_case("    class C((_decode := object)):\n        pass\n")
+    assert "_decode" in _run_binds(src)
+    assert "OBFUSCATED_EXEC" not in _rules(src)
+
+
+def test_b214_nested_def_body_is_still_not_the_enclosing_scope():
+    # FP-safety control for the above: descending into a nested def's defaults must
+    # NOT turn into descending into its body. A rebind inside the body binds there,
+    # not in `run`, so it must not suppress -- this is the B-214 dead-decoy guarantee.
+    src = _shadow_case("    def h(a=1):\n        _decode = None\n")
+    assert "_decode" not in _run_binds(src)
+    assert "OBFUSCATED_EXEC" in _crit_rules(src)
