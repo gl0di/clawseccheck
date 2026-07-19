@@ -1060,20 +1060,33 @@ def check_egress_inventory(ctx: Context) -> Finding:
     Complements B14's short summary with per-surface evidence: channels, outbound-capable
     tools, MCP servers, and clearly external-service skills. Advisory only: it surfaces the
     raw egress posture, not a blocking verdict.
+
+    OpenClaw exposes NO global egress-control config field, so every restriction signal
+    below is necessarily PER-SURFACE (a channel policy, a sender allowlist, an approval
+    gate, an MCP `allowedHosts` / local-stdio transport). This check used to consult four
+    would-be global allowlists — `gateway.egress`, `network.egress`, a top-level `egress`,
+    and `tools.http.allow` — and none of them exists. Each is rejected at config load with
+    a zod `unrecognized_keys` issue: the root object (zod-schema-O9ml_nmo.js:984-1572, 47
+    keys) has no `network` and no `egress`, the `gateway` object (:1338-1482, 21 keys) has
+    no `egress`, and `ToolsSchema` is `.strict()` with no `http` key
+    (zod-schema.agent-runtime-C02vY4RT.js:723-758, plus the `...CommonToolPolicyFields`
+    spread at :512-519 — profile/allow/alsoAllow/deny/byProvider/toolsBySender).
+
+    Because clawseccheck reads raw JSON via dig() and never validates against zod, schema
+    absence did NOT make those limbs dead code: adding any one of the four to a config
+    flipped C014 from WARN to PASS with the evidence "global egress restriction
+    configured". A config OpenClaw would refuse to load could therefore launder an
+    unrestricted egress posture into a clean verdict. Do not reintroduce them.
+
+    The nearest REAL fields are deliberately not counted as restriction signals here:
+    `proxy.*` only routes traffic through an operator-managed forward proxy whose policy
+    is enforced off-box and cannot be verified locally (B155 already reports it as
+    informational), and `browser.ssrfPolicy.hostnameAllowlist` binds the browser surface
+    alone (B38's concern, not an egress-wide control).
     """
     cfg = ctx.config
     evidence = []
     restricted = False
-
-    global_allow = (
-        dig(cfg, "gateway.egress")
-        or dig(cfg, "network.egress")
-        or cfg.get("egress")
-        or dig(cfg, "tools.http.allow")
-    )
-    if global_allow:
-        restricted = True
-        evidence.append("global egress restriction configured")
 
     channels = _channels(cfg)
     for name, chan in channels.items():
@@ -1111,8 +1124,6 @@ def check_egress_inventory(ctx: Context) -> Finding:
                 notes.append("sender allowlist configured")
             else:
                 notes.append("no sender allowlist detected")
-        if tool != "elevated" and global_allow:
-            notes.append("global egress restriction configured")
         evidence.append(
             f"tool {tool}: outbound-capable ({'; '.join(notes) or 'no explicit restriction signal'})"
         )
@@ -1148,9 +1159,8 @@ def check_egress_inventory(ctx: Context) -> Finding:
     for name in ext:
         evidence.append(f"skill {name}: external-service capability")
 
-    surface_count = len(
-        [line for line in evidence if not line.startswith("global egress restriction")]
-    )
+    # Every evidence line is now a surface; there is no global-restriction line to skip.
+    surface_count = len(evidence)
     if not surface_count:
         return _finding(
             "C014",
@@ -1162,15 +1172,22 @@ def check_egress_inventory(ctx: Context) -> Finding:
         return _finding(
             "C014",
             PASS,
-            f"Egress inventory: {surface_count} outbound-capable surface(s) found; explicit restriction signals are present — see evidence.",
+            f"Egress inventory: {surface_count} outbound-capable surface(s) found; at least one "
+            "carries a per-surface restriction signal — see evidence. OpenClaw has no global "
+            "egress-control setting, so this is not a guarantee that egress is restricted: "
+            "read the per-surface lines and treat any unrestricted surface as open.",
             "Keep outbound-capable tools, MCP endpoints, and channels on tight allowlists and retain approval on high-impact actions.",
             evidence=evidence,
         )
     return _finding(
         "C014",
         WARN,
-        f"Egress inventory: {surface_count} outbound-capable surface(s) found with no explicit restriction signals — see evidence.",
-        "Add hostname/egress allowlists where supported, keep outbound channels narrow, and require approval for exec/send-style actions.",
+        f"Egress inventory: {surface_count} outbound-capable surface(s) found with no explicit "
+        "restriction signal on any of them — see evidence. OpenClaw has no global egress-control "
+        "setting, so egress can only be narrowed per surface.",
+        "Add per-surface restrictions where OpenClaw supports them — channel dmPolicy/groupPolicy "
+        "allowlists, tools.elevated.allowFrom, an exec approval gate, MCP allowedHosts or a local "
+        "stdio transport — and keep outbound channels narrow.",
         evidence=evidence,
     )
 

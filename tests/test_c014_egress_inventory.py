@@ -1,5 +1,8 @@
 """C014 — egress inventory of outbound-capable surfaces."""
+import copy
 from pathlib import Path
+
+import pytest
 
 from clawseccheck import audit
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
@@ -36,7 +39,6 @@ def test_c014_passes_when_restriction_signals_exist():
     ctx = _ctx({
         "tools": {
             "allow": ["exec", "http_post"],
-            "http": {"allow": ["api.example.com"]},
             "exec": {"mode": "ask"},
         },
         "channels": {"slack": {"dmPolicy": "allowlist", "groupPolicy": "allowlist"}},
@@ -44,7 +46,53 @@ def test_c014_passes_when_restriction_signals_exist():
     })
     f = check_egress_inventory(ctx)
     assert f.status == PASS
-    assert any("global egress restriction configured" in item for item in f.evidence)
+    # Every restriction signal C014 can report is PER-SURFACE — OpenClaw has no global
+    # egress-control field (see B-263 regression tests below).
+    assert any("dmPolicy=allowlist" in item for item in f.evidence)
+    assert any("local stdio subprocess" in item for item in f.evidence)
+
+
+# --- B-263: schema-rejected keys must never certify egress as restricted ---
+#
+# C014 used to treat four would-be global allowlists as proof of a restricted egress
+# posture. None of them exists: the OpenClaw root object rejects `network` and `egress`,
+# the `gateway` object rejects `egress`, and the strict `ToolsSchema` rejects `http` —
+# each with a zod `unrecognized_keys` issue, i.e. OpenClaw REFUSES to load such a config.
+# clawseccheck reads raw JSON and never validates against zod, so these were not dead
+# branches: any one of them flipped a wide-open config from WARN to PASS. A config the
+# agent cannot even load must not be able to launder an unrestricted posture into a
+# clean verdict.
+
+_UNRESTRICTED_BASE = {
+    "tools": {"allow": ["webhook"]},
+    "channels": {"discord": {"dmPolicy": "open"}},
+}
+
+_SCHEMA_REJECTED_EGRESS_KEYS = [
+    ("gateway.egress", {"gateway": {"egress": {"allow": ["exfil.example.com"]}}}),
+    ("network.egress", {"network": {"egress": ["exfil.example.com"]}}),
+    ("top-level egress", {"egress": ["exfil.example.com"]}),
+    ("tools.http.allow", {"tools": {"allow": ["webhook"], "http": {"allow": ["x.example.com"]}}}),
+]
+
+
+def test_c014_baseline_without_restriction_is_warn():
+    """Control for the regression below: the base config must genuinely be WARN."""
+    f = check_egress_inventory(_ctx(copy.deepcopy(_UNRESTRICTED_BASE)))
+    assert f.status == WARN
+
+
+@pytest.mark.parametrize("label,patch", _SCHEMA_REJECTED_EGRESS_KEYS,
+                         ids=[label for label, _ in _SCHEMA_REJECTED_EGRESS_KEYS])
+def test_c014_schema_rejected_key_does_not_certify_restriction(label, patch):
+    cfg = copy.deepcopy(_UNRESTRICTED_BASE)
+    cfg.update(copy.deepcopy(patch))
+    f = check_egress_inventory(_ctx(cfg))
+    assert f.status == WARN, (
+        f"{label} does not exist in the OpenClaw schema (config would be rejected at "
+        f"load) yet it flipped C014 to {f.status}"
+    )
+    assert not any("global egress restriction" in item for item in f.evidence)
 
 
 # --- QUALITY: MCP allowedHosts wildcard / user-content host is a weak mitigation ---
