@@ -147,6 +147,25 @@ SECRET_PATTERNS = [
     # not change what this pattern matches (group(0)/start()/end() are unaffected),
     # so existing .sub()/.search() callers (logsafe.redact, logscan.py) are unaffected.
     re.compile(r"(?:password|secret|api[_-]?key|token)\s*[:=]\s*['\"]?([^\s'\"]{8,})", re.I),
+    # ClawHub CLI API token. Appended LAST on purpose: the index-referencing comments in
+    # tests/test_b01.py (SECRET_PATTERNS[0]/[2]/[4]) stay correct.
+    #
+    # Grounding (Golden Rule #4): the `clh_` prefix is documented by the installed ClawHub
+    # CLI itself — `clawhub login --token clh_...` in its README (clawhub@0.22.0). The CLI
+    # performs NO client-side length/charset validation of the token: `dist/cli/authToken.js`
+    # only reads `cfg?.token` and `dist/schema/schemas.js` types it as a bare `"string?"`.
+    # So the suffix matcher below is deliberately generous rather than a claimed format —
+    # over-matching only costs an extra redaction, while under-matching would let a real
+    # publish-capable token through our own output.
+    #
+    # Why this belongs in the shared detector list and not only in logsafe's redaction-only
+    # extras: a ClawHub token grants publish rights over the user's own skills, so a copy of
+    # one sitting in an OpenClaw config/bootstrap file is exactly the plaintext-secret state
+    # B1 exists to flag — a detection gap, not just a redaction gap. No capturing group, so
+    # `_pattern_hits_real_secret` treats it like the other concrete literal formats
+    # (sk-ant-…/AKIA…/AIza…) and fires on any match; a `${VAR}` indirection cannot collide
+    # with a `clh_`-prefixed literal.
+    re.compile(r"clh_[A-Za-z0-9_-]{8,}"),
 ]
 
 
