@@ -3,6 +3,7 @@
 Reads the YAML as plain text — no pyyaml dependency (stdlib only).
 """
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -16,12 +17,34 @@ WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "clawhub-publish.yml"
 SKILL_PATH = REPO_ROOT / "SKILL.md"
 README_PATH = REPO_ROOT / "README.md"
 
-# Every shipped markdown file that the staging step copies AND that links out to other
-# repo paths. Both are read by users of an installed skill, so a relative link in either
-# one that the bundle does not carry is a 404 on every ClawHub install. SKILL.md was
-# guarded first (B-254); README.md is staged by the same `cp` line and had the same
-# defect — a relative CONTRIBUTING.md link to a file the bundle never included.
-LINKING_STAGED_DOCS = {"SKILL.md": SKILL_PATH, "README.md": README_PATH}
+# Every shipped markdown file that links out to other repo paths. All of them are read by
+# users of an installed skill, so a relative link the bundle does not carry is a 404 on
+# every ClawHub install.
+#
+# DERIVED, never hand-listed. SKILL.md was guarded first (B-254), then README.md — and a
+# hand-maintained pair is exactly what let the third site through: docs/README.md carried
+# the same dangling ../CONTRIBUTING.md link and was invisible to a two-entry allowlist.
+# `docs/` is copied wholesale, so a doc added there ships without anyone editing this
+# file. Deriving the set from the workflow's own staging step means a new staged doc is
+# covered the day it lands.
+def _linking_staged_docs() -> dict:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    staged = _staged_paths(text)
+    purged = _purged_paths(text)
+    out = {}
+    for path in sorted(REPO_ROOT.rglob("*.md")):
+        if any(part in {".git", "node_modules", "fixtures", "dist"} for part in path.parts):
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        # CHANGELOG.md is exempt for the same reason test_doc_facts.py exempts it: it is a
+        # historical record, not a navigation surface. Its entries quote link syntax as
+        # PROSE — the B59 entry contains a literal `![](http…?data=…)` illustrating the
+        # exfil shape that check detects — which is a description, not a link to resolve.
+        if rel == "CHANGELOG.md":
+            continue
+        if _is_shipped(rel, staged, purged) and _relative_links(path):
+            out[rel] = path
+    return out
 
 STAGING_DIR = "dist/clawseccheck"
 
@@ -339,12 +362,30 @@ def _normalise_link_target(raw: str):
 
 
 def _relative_links(path: Path) -> list[str]:
-    """Relative (non-URL, non-anchor) markdown link targets declared in *path*."""
+    """Relative (non-URL, non-anchor) markdown link targets declared in *path*.
+
+    Returned repo-relative, resolved against the LINKING DOC'S OWN directory: `CHECKS.md`
+    inside docs/FAQ.md means docs/CHECKS.md, and `../clawseccheck/catalog.py` means
+    clawseccheck/catalog.py. Resolving against the repo root instead was correct only
+    while every guarded doc sat at the root, and reported ten false danglers the moment
+    the guarded set grew to include docs/.
+    """
     targets = []
+    try:
+        base = path.parent.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        # A doc outside the repo — the pre-fix guard test feeds a tmp_path copy of a
+        # root-level doc. Treat it as sitting at the repo root, which is what it stands in for.
+        base = ""
     for raw in _MD_LINK_RE.findall(path.read_text(encoding="utf-8")):
         target = _normalise_link_target(raw)
-        if target is not None:
-            targets.append(target)
+        if target is None:
+            continue
+        resolved = os.path.normpath(os.path.join(base, target))
+        # A link escaping the repo is not something the bundle can carry either way.
+        if resolved.startswith(".."):
+            continue
+        targets.append(Path(resolved).as_posix())
     return targets
 
 
@@ -382,6 +423,31 @@ def _is_shipped(target: str, staged: set, purged: set) -> bool:
     return under(staged) and not under(purged)
 
 
+# Computed here rather than beside its definition: it needs the parsing helpers above,
+# and it must exist at import time for the parametrize below.
+LINKING_STAGED_DOCS = _linking_staged_docs()
+
+
+def test_the_guarded_doc_set_is_derived_and_covers_the_known_sites() -> None:
+    """Guard the guard: an empty or shrunken set would pass every link check silently.
+
+    The floor names the three docs that have each shipped a dangling link — SKILL.md
+    (B-254, references/), README.md and docs/README.md (both ../CONTRIBUTING.md). It is a
+    floor, not an equality: the set is meant to grow on its own when a staged doc gains a
+    relative link, which is the whole reason it is derived rather than hand-listed.
+    """
+    assert len(LINKING_STAGED_DOCS) >= 3, (
+        f"only {len(LINKING_STAGED_DOCS)} staged docs with relative links were derived "
+        f"({sorted(LINKING_STAGED_DOCS)!r}) — the staging parser or _relative_links is "
+        "not seeing what it should, and the link cross-check is near-vacuous."
+    )
+    for required in ("SKILL.md", "README.md", "docs/README.md"):
+        assert required in LINKING_STAGED_DOCS, (
+            f"{required} is staged and links out, but fell out of the derived set — "
+            "the cross-check below would no longer cover it."
+        )
+
+
 def test_staging_parser_is_not_vacuous() -> None:
     """Guard the guard: a parse that silently returns nothing would pass everything.
 
@@ -390,7 +456,8 @@ def test_staging_parser_is_not_vacuous() -> None:
     dangling-link test below would go vacuously green — the exact hollow-PASS shape
     these cross-checks exist to prevent.
     """
-    staged = _staged_paths(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    workflow_text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    staged = _staged_paths(workflow_text)
     assert staged, (
         "_staged_paths() parsed no files out of the publish workflow. The staging step "
         "was probably reshaped — update the parser, don't let this test pass vacuously."
@@ -406,11 +473,14 @@ def test_staging_parser_is_not_vacuous() -> None:
             f"No relative markdown links parsed out of {doc_name} — the link cross-check "
             f"below would be vacuous for it. Check _MD_LINK_RE against its actual syntax."
         )
-    # Both docs must actually be staged, or the cross-check guards a file nobody ships.
+    # Each guarded doc must actually reach the bundle, or the cross-check guards a file
+    # nobody ships. Tested with _is_shipped rather than literal membership: `docs/` is
+    # copied as a directory, so docs/CHECKS.md never appears in `staged` by name.
+    purged = _purged_paths(workflow_text)
     for doc_name in LINKING_STAGED_DOCS:
-        assert doc_name in staged, (
+        assert _is_shipped(doc_name, staged, purged), (
             f"{doc_name} is cross-checked for dangling links but the staging step does "
-            f"not copy it. Either stage it or drop it from LINKING_STAGED_DOCS."
+            f"not carry it into the bundle. Either stage it or exclude it."
         )
 
 

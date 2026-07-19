@@ -5,7 +5,7 @@ Reading order depends on who you are:
 ## I just want to use it
 
 1. [Project README](../README.md) — what it is, quick start, trust story
-2. [USAGE.md](USAGE.md) — the full user guide: every flag, recipe, and mode
+2. [USAGE.md](USAGE.md) — the user guide: recipes, monitoring modes, and trust details
 3. [FAQ.md](FAQ.md) — common questions, including "what if the host is already
    compromised?"
 
@@ -28,7 +28,7 @@ Reading order depends on who you are:
 
 ## I want to contribute
 
-1. [../CONTRIBUTING.md](../CONTRIBUTING.md) — ground rules, dev setup, PR flow
+1. [CONTRIBUTING.md](https://github.com/gl0di/clawseccheck/blob/main/CONTRIBUTING.md) — ground rules, dev setup, PR flow
 2. [CHECK_AUTHORING.md](CHECK_AUTHORING.md) — how to write a new check
 3. [RELEASING.md](RELEASING.md) — the maintainer release protocol
 

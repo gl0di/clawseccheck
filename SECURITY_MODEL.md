@@ -74,15 +74,25 @@ introduced:
 - The one subprocess (`openclaw security audit`) is invoked with a fixed, hardcoded
   argument list. Its output is parsed as JSON, not evaluated.
 - The `--monitor` state file (`~/.clawseccheck/state.json`) holds the score, the grade,
-  per-check statuses, and content hashes of skills, bootstrap and memory files — plus,
-  for rug-pull detection, a per-MCP-server snapshot of real config values: `command`,
-  the first `args` entry, `transport`, `url`, `oauth.scope`, environment variable
-  **names**, and tool names (`monitor.py`, `_mcp_detail_sig`). Server, channel and skill
-  names and the gateway bind host are stored as read. **No secret material is:**
-  environment **values** are never recorded (only key names, with a secret-shaped key
-  marked `*`), and `command`, `args[0]` and `url` are passed through
-  `redact_urls_in_text()` / `sanitize_url_host_only()` before entering the snapshot, so
-  a credential embedded in a URL argument is stripped rather than persisted.
+  and per-check statuses, plus enough of your setup to detect drift in it. That is more
+  than hashes, so here is the whole list (`monitor.py`, `snapshot()`):
+  - **Bootstrap files** — a content hash only.
+  - **Skills** — a content hash, the B62 capability-family set, and any declared
+    frontmatter version (`_skill_sig`).
+  - **Memory files** — the path, a content hash, which injection patterns matched (the
+    detector's own pattern text, not your prose), and the `scheme://host` of every URL
+    found in the file (`_snapshot_memory_text`).
+  - **MCP servers** — for rug-pull detection, real config values: `command`, the first
+    `args` entry, `transport`, `url`, `oauth.scope`, environment variable **names**, and
+    tool names (`_mcp_detail_sig`).
+  - Server, channel and skill names and the gateway bind host are stored as read.
+
+  **No secret material is stored.** Environment **values** are never recorded — only key
+  names, with a secret-shaped key marked `*`. `command`, `args[0]`, `url` and every
+  memory-file URL are passed through `redact_urls_in_text()` /
+  `sanitize_url_host_only()` *before* entering the snapshot, so a credential in a URL's
+  userinfo or query string is stripped rather than persisted (B-105).
+
   `--trend` writes no state file — it appends a score-history line and reads
   `history.jsonl` back.
 - The tool runs with whatever OS permissions the invoking user has. It does not
