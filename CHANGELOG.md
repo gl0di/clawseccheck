@@ -3,6 +3,17 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.52.1] — 2026-07-19
+
+### Fixed
+- **Your grade is back at the top of the report.** The inventory block introduced in
+  v3.52.0 was placed above the entire report rather than above the findings section, so
+  the header and the A–F grade landed roughly forty lines down, under the inventory. In a
+  chat channel — where the reader often sees only the first screenful — that hid the one
+  number the audit exists to give you. The block now sits between the score and the
+  findings, which is also where its own closing line ("details by security family below")
+  was always meant to point.
+
 ## [3.52.0] — 2026-07-18
 
 The report answers a question it previously dodged: **which of my things is the problem?**
