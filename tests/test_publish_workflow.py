@@ -14,6 +14,14 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "clawhub-publish.yml"
 SKILL_PATH = REPO_ROOT / "SKILL.md"
+README_PATH = REPO_ROOT / "README.md"
+
+# Every shipped markdown file that the staging step copies AND that links out to other
+# repo paths. Both are read by users of an installed skill, so a relative link in either
+# one that the bundle does not carry is a 404 on every ClawHub install. SKILL.md was
+# guarded first (B-254); README.md is staged by the same `cp` line and had the same
+# defect — a relative CONTRIBUTING.md link to a file the bundle never included.
+LINKING_STAGED_DOCS = {"SKILL.md": SKILL_PATH, "README.md": README_PATH}
 
 STAGING_DIR = "dist/clawseccheck"
 
@@ -330,14 +338,19 @@ def _normalise_link_target(raw: str):
     return target or None
 
 
-def _skill_relative_links() -> list[str]:
-    """Relative (non-URL, non-anchor) markdown link targets declared in SKILL.md."""
+def _relative_links(path: Path) -> list[str]:
+    """Relative (non-URL, non-anchor) markdown link targets declared in *path*."""
     targets = []
-    for raw in _MD_LINK_RE.findall(SKILL_PATH.read_text(encoding="utf-8")):
+    for raw in _MD_LINK_RE.findall(path.read_text(encoding="utf-8")):
         target = _normalise_link_target(raw)
         if target is not None:
             targets.append(target)
     return targets
+
+
+def _skill_relative_links() -> list[str]:
+    """Relative markdown link targets declared in SKILL.md."""
+    return _relative_links(SKILL_PATH)
 
 
 def _purged_paths(text: str) -> set:
@@ -388,36 +401,56 @@ def test_staging_parser_is_not_vacuous() -> None:
         f"Parser did not find SKILL.md among staged paths {sorted(staged)!r} — "
         "the staging step's cp lines are not being parsed correctly."
     )
-    assert _skill_relative_links(), (
-        "No relative markdown links parsed out of SKILL.md — the link cross-check "
-        "below would be vacuous. Check _MD_LINK_RE against SKILL.md's actual syntax."
-    )
+    for doc_name, doc_path in sorted(LINKING_STAGED_DOCS.items()):
+        assert _relative_links(doc_path), (
+            f"No relative markdown links parsed out of {doc_name} — the link cross-check "
+            f"below would be vacuous for it. Check _MD_LINK_RE against its actual syntax."
+        )
+    # Both docs must actually be staged, or the cross-check guards a file nobody ships.
+    for doc_name in LINKING_STAGED_DOCS:
+        assert doc_name in staged, (
+            f"{doc_name} is cross-checked for dangling links but the staging step does "
+            f"not copy it. Either stage it or drop it from LINKING_STAGED_DOCS."
+        )
 
 
-def test_every_skill_md_relative_link_is_staged_for_publish() -> None:
-    """Every relative link in SKILL.md must resolve in the published tree (B-254).
+@pytest.mark.parametrize("doc_name", sorted(LINKING_STAGED_DOCS))
+def test_every_relative_link_in_a_staged_doc_is_staged_for_publish(doc_name: str) -> None:
+    """Every relative link in a staged doc must resolve in the published tree (B-254).
 
     Root cause this pins down: the staging step is a hand-maintained `cp` allowlist that
-    nothing cross-checked against the manifest. `references/` was simply missing, so every
-    ClawHub install shipped a dead link to references/cli-flags.md. Adding a link to
-    SKILL.md without staging its target now fails the build here instead of silently
-    shipping a 404 to users.
+    nothing cross-checked against the docs it copies. `references/` was simply missing, so
+    every ClawHub install shipped a dead link to references/cli-flags.md. Adding a link
+    without staging its target now fails the build here instead of silently shipping a
+    404 to users.
+
+    Covers README.md as well as SKILL.md: both are staged, both link out, and README
+    carried the same defect (a relative CONTRIBUTING.md link, a file the bundle does not
+    include). Guarding only the manifest left the other half of the published reading
+    surface unchecked.
+
+    Note the image links under docs/assets/ do not appear here: README references those
+    with raw `<img src=...>` HTML, which `_MD_LINK_RE` deliberately does not match. That
+    purge is intentional (~650KB of repo-page art kept out of installs) and stays
+    unflagged without needing a special case.
     """
+    doc_path = LINKING_STAGED_DOCS[doc_name]
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
     staged = _staged_paths(text)
     purged = _purged_paths(text)
-    links = _skill_relative_links()
 
-    for target in links:
+    for target in _relative_links(doc_path):
         # The link must not be dangling in the source repo either.
         assert (REPO_ROOT / target).exists(), (
-            f"SKILL.md links to {target!r}, which does not exist in the repo."
+            f"{doc_name} links to {target!r}, which does not exist in the repo."
         )
         assert _is_shipped(target, staged, purged), (
-            f"SKILL.md links to {target!r} but the publish workflow's staging step never "
-            f"copies it, so every ClawHub install ships a dangling link.\n"
+            f"{doc_name} links to {target!r} but the publish workflow's staging step "
+            f"never copies it, so every ClawHub install ships a dangling link.\n"
             f"Staged paths: {sorted(staged)!r}\n"
-            f"Fix: copy it into {STAGING_DIR}/ in the 'Stage publishable files' step."
+            f"Fix: either copy it into {STAGING_DIR}/ in the 'Stage publishable files' "
+            f"step, or make the link an absolute https://github.com/... URL if the "
+            f"target is a repo-side concern that should not ship."
         )
 
 
@@ -447,6 +480,49 @@ def test_dangling_link_guard_detects_a_missing_target() -> None:
         "Removing the references/ copy from the staging step did NOT make "
         "references/cli-flags.md look unstaged — the cross-check is not actually "
         "sensitive to the regression it is meant to catch."
+    )
+
+
+def test_readme_link_guard_detects_the_pre_fix_contributing_link(tmp_path) -> None:
+    """Negative control: the README leg must fire on the exact defect it was added for.
+
+    Before the fix, README's documentation table linked `[Contributing](CONTRIBUTING.md)`
+    relatively. CONTRIBUTING.md is not in the staging step's `cp` allowlist, so that link
+    404'd on every ClawHub install — the same defect class as the references/ one, in the
+    other staged doc. Reconstructs that pre-fix README and asserts the shipped predicate
+    reports it as unstaged, so this leg cannot go quietly vacuous the way a guard that
+    only ever sees a fixed tree does.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    staged, purged = _staged_paths(text), _purged_paths(text)
+
+    pre_fix = tmp_path / "README.md"
+    pre_fix.write_text(
+        "| [User guide](docs/USAGE.md) | Recipes |\n"
+        "| [Contributing](CONTRIBUTING.md) | Dev setup |\n",
+        encoding="utf-8",
+    )
+    targets = _relative_links(pre_fix)
+    assert "CONTRIBUTING.md" in targets, (
+        f"The pre-fix README fixture did not parse into a CONTRIBUTING.md link: {targets!r}"
+    )
+
+    assert not _is_shipped("CONTRIBUTING.md", staged, purged), (
+        "CONTRIBUTING.md now counts as shipped, so the README leg of the link guard "
+        "would no longer catch the regression it was added for. If the staging step "
+        "genuinely started copying it, delete this control; do not leave it toothless."
+    )
+    # The control must not be self-fulfilling: a normal staged target still passes.
+    assert _is_shipped("docs/USAGE.md", staged, purged), (
+        "docs/USAGE.md must count as shipped — otherwise this control proves nothing "
+        "beyond _is_shipped() rejecting everything."
+    )
+
+    # And the real README must no longer carry that relative link.
+    assert "CONTRIBUTING.md" not in _relative_links(README_PATH), (
+        "README.md links to CONTRIBUTING.md relatively again. It is not staged for "
+        "publish, so that link is dead on every ClawHub install — use the absolute "
+        "https://github.com/gl0di/clawseccheck/blob/main/CONTRIBUTING.md URL instead."
     )
 
 
