@@ -11,7 +11,9 @@
   .wrap { display: flex; width: 100%; padding: 0 84px; align-items: center; gap: 56px; }
   .left { flex: 1.25; }
   .brand { display: flex; align-items: center; gap: 22px; }
-  .claw { font-size: 84px; line-height: 1; filter: drop-shadow(0 6px 22px rgba(227,66,52,.45)); }
+  .claw { display: flex; line-height: 0; }
+  .claw svg { width: 84px; height: 84px; display: block;
+              filter: drop-shadow(0 6px 22px rgba(227,66,52,.45)); }
   h1 { margin: 0; font-size: 78px; font-weight: 800; letter-spacing: -1.5px; }
   h1 .sec { color: #e34234; }
   .tag { margin: 14px 0 0 4px; font-size: 25px; color: #c9b8b2; font-style: italic; }
@@ -47,7 +49,7 @@
 <body>
 <div class="wrap">
   <div class="left">
-    <div class="brand"><div class="claw">🦞</div>
+    <div class="brand"><div class="claw"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="ClawSecCheck"><circle cx="32" cy="32" r="30" fill="#e34234"/><path d="M20 24 Q13 32 20 40" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round"/><path d="M44 24 Q51 32 44 40" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round"/><circle cx="32" cy="32" r="5" fill="#fff"/></svg></div>
       <h1>Claw<span class="sec">Sec</span>Check</h1>
     </div>
     <div class="tag">The claw that checks your claws.</div>

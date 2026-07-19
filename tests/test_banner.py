@@ -1,9 +1,9 @@
 """Guard tests for the SVG badge's mascot mark and the README banner's brand
-grounding (CLAWSECCHECK-C-242 / epic E-048).
+grounding (CLAWSECCHECK-C-242 / C-247 / epic E-048).
 
-Two separate surfaces, one rule for both: colour and mascot must be traceable back
-to clawseccheck.brand — never a second, independently hand-kept literal that could
-silently drift from it.
+Two separate surfaces, one rule for both: colour and logo mark must be traceable
+back to clawseccheck.brand — never a second, independently hand-kept literal that
+could silently drift from it.
 
 Offline, stdlib only, read-only — no writes outside tmp_path.
 """
@@ -80,16 +80,29 @@ class TestBadgeMascotMark:
             assert icon_x + icon_w < float(root.get("width"))
 
 
-# ── docs/assets/src/banner.html: colour + mascot sourced from brand.py ───────
+# ── docs/assets/src/banner.html: colour + logo mark sourced from brand.py ────
 
 class TestBannerGroundedInBrand:
     def test_banner_uses_the_brand_red_accent_not_a_bare_literal_only(self):
         text = BANNER_PATH.read_text(encoding="utf-8")
         assert brand.BRAND_RED in text
 
-    def test_banner_uses_the_brand_mascot(self):
+    def test_banner_carries_the_brand_logo_svg(self):
+        """The banner is an HTML/badge-only surface (brand.py's Tier 3): it must
+        carry the graphical LOGO_SVG mark itself — the same rule report.py's
+        --html export follows — not the MASCOT text glyph. CLAWSECCHECK-C-247
+        (E-048's third LOGO_SVG leg); single-sourced, never a second hand-pasted
+        copy of the SVG markup."""
         text = BANNER_PATH.read_text(encoding="utf-8")
-        assert brand.MASCOT in text
+        assert brand.LOGO_SVG in text
+
+    def test_banner_no_longer_embeds_the_mascot_glyph(self):
+        """Pins the design choice, not just today's output: the banner used to
+        render MASCOT as a plain-text emoji glyph in the logo slot; it now
+        carries the graphical mark instead. A regression back to the bare emoji
+        must fail this test."""
+        text = BANNER_PATH.read_text(encoding="utf-8")
+        assert brand.MASCOT not in text
 
     def test_banner_is_byte_identical_to_the_generator_output(self):
         """The load-bearing guard: banner.html is not just *consistent with*
@@ -124,4 +137,4 @@ class TestGenBannerIsDeterministic:
 
     def test_generated_html_has_no_leftover_template_placeholders(self):
         body = build_banner_html()
-        assert "{rgb}" not in body and "{red}" not in body and "{mascot}" not in body
+        assert "{rgb}" not in body and "{red}" not in body and "{logo_svg}" not in body

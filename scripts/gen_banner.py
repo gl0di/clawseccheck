@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate docs/assets/src/banner.html from clawseccheck.brand — the single source
-of brand truth — so the README banner's mascot and accent colour can never drift
+of brand truth — so the README banner's logo mark and accent colour can never drift
 from brand.py the way they previously could (the file matched brand.py's values only
 by hand-kept coincidence, not by construction).
 
@@ -51,7 +51,12 @@ def build_banner_html() -> str:
     r, g, b = _hex_to_rgb(brand.BRAND_RED)
     rgb = f"{r},{g},{b}"
     red = brand.BRAND_RED
-    mascot = brand.MASCOT
+    # E-048's third LOGO_SVG leg (CLAWSECCHECK-C-247): the banner is an HTML/badge-only
+    # surface (brand.py's Tier 3), so it carries the graphical mark itself rather than
+    # the MASCOT emoji glyph — single-sourced from brand.LOGO_SVG, never pasted/hand-drawn
+    # here or in the generated HTML (see report.py's --html export for the same pattern:
+    # LOGO_SVG embedded inline, sized purely via CSS on the wrapping element).
+    logo_svg = brand.LOGO_SVG
     return f"""<!doctype html><meta charset="utf-8">
 <style>
   * {{ box-sizing: border-box; }}
@@ -65,7 +70,9 @@ def build_banner_html() -> str:
   .wrap {{ display: flex; width: 100%; padding: 0 84px; align-items: center; gap: 56px; }}
   .left {{ flex: 1.25; }}
   .brand {{ display: flex; align-items: center; gap: 22px; }}
-  .claw {{ font-size: 84px; line-height: 1; filter: drop-shadow(0 6px 22px rgba({rgb},.45)); }}
+  .claw {{ display: flex; line-height: 0; }}
+  .claw svg {{ width: 84px; height: 84px; display: block;
+              filter: drop-shadow(0 6px 22px rgba({rgb},.45)); }}
   h1 {{ margin: 0; font-size: 78px; font-weight: 800; letter-spacing: -1.5px; }}
   h1 .sec {{ color: {red}; }}
   .tag {{ margin: 14px 0 0 4px; font-size: 25px; color: #c9b8b2; font-style: italic; }}
@@ -101,7 +108,7 @@ def build_banner_html() -> str:
 <body>
 <div class="wrap">
   <div class="left">
-    <div class="brand"><div class="claw">{mascot}</div>
+    <div class="brand"><div class="claw">{logo_svg}</div>
       <h1>Claw<span class="sec">Sec</span>Check</h1>
     </div>
     <div class="tag">The claw that checks your claws.</div>
