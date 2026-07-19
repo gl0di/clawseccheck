@@ -1114,6 +1114,11 @@ def _own_bound_names(scope: ast.AST) -> set[str]:
                     bound.add(alias.name.split(".")[0])
         elif isinstance(n, ast.ExceptHandler) and n.name:
             bound.add(n.name)
+        elif isinstance(n, ast.Delete):
+            # `del x` makes x local to this scope too (a later read raises
+            # UnboundLocalError rather than falling through to an outer binding).
+            for t in n.targets:
+                bound |= _assign_target_names(t)
         elif _MATCH_BIND_NODES and isinstance(n, _MATCH_BIND_NODES) and n.name:
             bound.add(n.name)
         elif _MATCH_MAPPING_NODE is not None and isinstance(n, _MATCH_MAPPING_NODE) and n.rest:
@@ -1552,32 +1557,65 @@ def _nonlocal_declared_names(fn: ast.AST, owner_map: dict) -> set[str]:
     so an unrelated same-named local really does shadow it) but wrong for
     `nonlocal`, whose "outer" binding IS, by construction, that ancestor's own
     local — the exact thing shadow-subtraction was designed to protect, not defeat.
-    `_tainted_names` instead seeds the tainted name directly into EVERY ancestor
-    scope's OWN bucket (not filtered through the chain-walk's shadow subtraction at
-    all) — a safe over-approximation (visible regardless of which exact ancestor is
-    the real target) since precisely replicating Python's own name-resolution
-    algorithm is out of proportion for a best-effort static scanner.
+    `_tainted_names` therefore seeds the tainted name directly into the ancestor
+    bucket(s) `_nonlocal_target_scopes` resolves, bypassing the chain-walk's shadow
+    subtraction entirely.
 
-    C-135 (verification pass): seeding EVERY ancestor rather than only the nearest
-    one that actually binds the name is over-inclusive by construction — a
-    GRANDPARENT scope (beyond the real nonlocal target) that happens to reuse the
-    same bare name for its own, completely unrelated local can get swept in too
-    (confirmed real, narrow trigger: 3+ nesting levels, exact bare-name reuse at the
-    grandparent level). A "resolve to the nearest ancestor with its own binding"
-    refinement was evaluated and REJECTED: it interacts badly with
-    `_tainted_names_visible`'s shadow subtraction, which treats a scope's own
-    over-inclusive whole-subtree walk (`_shadowed_names_in_subtree`, which does not
-    stop at nested-function boundaries) as blocking outer visibility — an
-    INTERMEDIATE ancestor scope that merely READS the nonlocal-tainted name (without
-    itself locally binding it) would then incorrectly lose visibility, trading this
-    accepted narrow false-positive for a worse false-negative. Kept as documented,
-    safe-direction residual debt rather than "fixed" with a regression."""
+    B-215: that seeding used to hit EVERY ancestor, which swept in a GRANDPARENT
+    scope beyond the real target that happened to reuse the same bare name for its
+    own unrelated local (narrow but real: 3+ nesting levels, exact bare-name reuse).
+    The obvious "resolve to the nearest ancestor that binds the name" refinement was
+    evaluated and rejected ONCE BEFORE, correctly: paired with the then whole-subtree
+    shadow walk it made an INTERMEDIATE ancestor that merely READS the name lose
+    visibility of it, trading the false positive for a worse false negative. That
+    blocker was the subtree walk, not the refinement — with `_own_bound_names` now
+    stopping at nested-function boundaries (B-214), a nested write no longer counts
+    as an intermediate ancestor's own shadowing binding, so the precise resolution
+    is finally sound. Both halves had to land together."""
     return {
         n2
         for n in ast.walk(fn)
         if isinstance(n, ast.Nonlocal) and owner_map.get(n) is fn
         for n2 in n.names
     }
+
+
+def _nonlocal_target_scopes(
+    name: str,
+    scope: ast.AST,
+    parent_scope: dict,
+    owner_map: dict,
+    own_bound_cache: dict,
+    nonlocal_cache: dict,
+) -> list:
+    """B-215: the ancestor scope(s) a `nonlocal name` write inside `scope` actually
+    lands in. Python binds it to the NEAREST enclosing function scope with its own
+    binding for `name` — so a grandparent further out that merely reuses the same bare
+    name for an unrelated local of its own is NOT written to and must not be seeded.
+
+    An intermediate ancestor that itself declares `name` nonlocal is not the target
+    either: it shares the very same cell, one level further out. Those are returned
+    ALONGSIDE the real target (they genuinely see the write), not mistaken for it.
+
+    Returns [] when no ancestor owns a binding. Valid Python guarantees one exists, so
+    that means a binding form this module does not model; the caller then falls back to
+    the old seed-every-ancestor over-approximation rather than dropping the taint,
+    keeping any residual error in the false-positive direction instead of opening a
+    detection hole."""
+    shared: list = []
+    ancestor = parent_scope.get(scope)
+    while ancestor is not None:
+        if ancestor not in nonlocal_cache:
+            nonlocal_cache[ancestor] = _nonlocal_declared_names(ancestor, owner_map)
+        if name in nonlocal_cache[ancestor]:
+            shared.append(ancestor)  # same cell, real target is further out
+        else:
+            if ancestor not in own_bound_cache:
+                own_bound_cache[ancestor] = _own_bound_names(ancestor)
+            if name in own_bound_cache[ancestor]:
+                return shared + [ancestor]
+        ancestor = parent_scope.get(ancestor)
+    return []
 
 
 def _tainted_names(
@@ -1606,8 +1644,8 @@ def _tainted_names(
     — real `global` semantics, not the syntactic nesting owner_map otherwise uses;
     B-209: scoped to the assignment's OWN immediate function, not any top-level
     ancestor — see `_global_declared_names`). A `nonlocal`-declared target is instead
-    seeded into every ANCESTOR scope's own bucket directly (see
-    `_nonlocal_declared_names`).
+    seeded directly into the bucket of the ancestor scope Python would really rebind
+    (B-215 — see `_nonlocal_declared_names` / `_nonlocal_target_scopes`).
     Use `_tainted_names_visible()` to resolve the subset actually visible at a call
     site's own scope, including via a genuine closure read of an enclosing scope's
     own tainted local (B-210)."""
@@ -1640,10 +1678,18 @@ def _tainted_names(
                         if t.id in global_names:
                             tainted.setdefault(None, set()).add(t.id)
                         elif t.id in nonlocal_names:
-                            ancestor = parent_scope.get(scope)
-                            while ancestor is not None:
-                                tainted.setdefault(ancestor, set()).add(t.id)
-                                ancestor = parent_scope.get(ancestor)
+                            targets = _nonlocal_target_scopes(
+                                t.id, scope, parent_scope, owner_map, shadow_cache, nonlocal_cache
+                            )
+                            if not targets:
+                                # Unresolvable binding form -- fall back to the
+                                # pre-B-215 over-approximation (see that helper).
+                                ancestor = parent_scope.get(scope)
+                                while ancestor is not None:
+                                    targets.append(ancestor)
+                                    ancestor = parent_scope.get(ancestor)
+                            for target_scope in targets:
+                                tainted.setdefault(target_scope, set()).add(t.id)
                         else:
                             tainted.setdefault(scope, set()).add(t.id)
     return tainted
