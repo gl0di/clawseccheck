@@ -5,7 +5,9 @@ logs (journald / bash_history are out of scope; see the workspace design doc §1
 grounds that boundary against the real dist). The sinks this module knows about:
 
   - ``logging.file``                    — config-declared primary JSONL log
-  - ``logging.cacheTrace.filePath``     — config-declared cache-trace transcript JSONL
+  - ``diagnostics.cacheTrace.filePath`` — config-declared cache-trace transcript JSONL
+                                           (NOT ``logging.cacheTrace.*``, which does not
+                                           exist in the dist — see B82 in checks/_egress.py)
   - trajectory sidecars                 — ``agents/*/sessions/*.trajectory.jsonl``
                                            (on by default; reuses ``trajectory.find_trajectory_files``)
   - session transcripts                 — ``agents/*/sessions/*.jsonl`` (NOT the trajectory
@@ -72,8 +74,14 @@ def _is_regular_readable_file(path: Path) -> bool:
 
 
 def _config_path_sink(ctx: Context, dotted_path: str, kind: str) -> "LogSink | None":
-    """Resolve a config-declared file path (``logging.file`` / ``logging.cacheTrace.filePath``)
-    to a LogSink, or None when unset / not a real file."""
+    """Resolve a config-declared file path (``logging.file`` /
+    ``diagnostics.cacheTrace.filePath``) to a LogSink, or None when unset / not a real
+    file.
+
+    Deliberately path-based, not gated on ``diagnostics.cacheTrace.enabled``: a trace file
+    written during an earlier debugging session still exists — and still holds transcript
+    content worth scanning — after tracing is switched back off.
+    """
     value = dig(ctx.config, dotted_path)
     if not isinstance(value, str) or not value.strip():
         return None
@@ -214,7 +222,7 @@ def discover_log_sinks(ctx: Context) -> list[LogSink]:
     if config_log is not None:
         _add_many([config_log])
 
-    cache_trace = _config_path_sink(ctx, "logging.cacheTrace.filePath", "cache_trace")
+    cache_trace = _config_path_sink(ctx, "diagnostics.cacheTrace.filePath", "cache_trace")
     if cache_trace is not None:
         _add_many([cache_trace])
 

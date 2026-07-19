@@ -61,7 +61,7 @@ def test_discover_ignores_config_log_when_file_missing(tmp_path):
 def test_discover_finds_cache_trace_sink(tmp_path):
     ct = tmp_path / "cache-trace.jsonl"
     ct.write_text("{}\n", encoding="utf-8")
-    ctx = _ctx(tmp_path, {"logging": {"cacheTrace": {"filePath": str(ct)}}})
+    ctx = _ctx(tmp_path, {"diagnostics": {"cacheTrace": {"filePath": str(ct)}}})
     sinks = logdiscovery.discover_log_sinks(ctx)
     assert any(s.kind == "cache_trace" and s.path == ct for s in sinks)
 
@@ -159,7 +159,8 @@ def test_discover_all_kinds_together(tmp_path):
     backup_dir.mkdir()
     (backup_dir / "openclaw.json.bak").write_text("{}\n", encoding="utf-8")
 
-    ctx = _ctx(tmp_path, {"logging": {"file": str(log_file), "cacheTrace": {"filePath": str(ct)}}})
+    ctx = _ctx(tmp_path, {"logging": {"file": str(log_file)},
+                          "diagnostics": {"cacheTrace": {"filePath": str(ct)}}})
     sinks = logdiscovery.discover_log_sinks(ctx)
     assert _kinds(sinks) == {
         "config_log", "cache_trace", "trajectory", "transcript",

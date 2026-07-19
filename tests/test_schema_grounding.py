@@ -777,10 +777,10 @@ def test_wrapper_parameter_is_harvested_from_its_call_sites(tmp_path, monkeypatc
 
             def discover(ctx):
                 _sink(ctx, "logging.file", "config_log")
-                _sink(ctx, dotted_path="logging.cacheTrace.filePath", kind="cache_trace")
+                _sink(ctx, dotted_path="diagnostics.cacheTrace.filePath", kind="cache_trace")
         """,
     })
-    assert paths == {"logging.file", "logging.cacheTrace.filePath"}
+    assert paths == {"logging.file", "diagnostics.cacheTrace.filePath"}
 
 
 def test_duplicate_wrapper_name_raises_instead_of_resolving_the_wrong_def(tmp_path, monkeypatch):
