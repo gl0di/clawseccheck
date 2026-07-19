@@ -1855,6 +1855,28 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="skills",
     ),
+    # B182 (B-259): the ClawHub CLI's plaintext API-token store. It sits at documented,
+    # fixed paths OUTSIDE the OpenClaw home ($CLAWHUB_CONFIG_PATH, else
+    # ~/.config/clawhub/config.json and its darwin/XDG/APPDATA/legacy-`clawdhub` variants),
+    # so C015 — which is rooted at the OpenClaw home — never reached it and nothing checked
+    # its permissions. The token publishes new versions of the user's OWN skills, so any
+    # agent or skill that can read files gets a supply-chain pivot onto every install.
+    # FAIL only when a token is actually present AND someone other than the owner can read
+    # the file: the CLI writes it 0600 and re-chmods on every write, so a looser mode is a
+    # real deviation, and the group-readable leg reuses B-189's singleton-group down-rank so
+    # a user-private-group box never false-FAILs. Absent store -> UNKNOWN, never FAIL. The
+    # token VALUE is never read into a message, logged, or placed in evidence (§8) — only
+    # its presence and the file's mode.
+    CheckMeta(
+        "B182",
+        "ClawHub CLI API token store readable by others (outside the OpenClaw home)",
+        MEDIUM,
+        "hardening",
+        "Secrets Vault / Supply Chain",
+        scored=True,
+        confidence="HIGH",
+        surface="secrets",
+    ),
     # B177 (B-240): OpenClaw's OWN persisted per-plugin ClawHub trust verdict
     # (installed_plugin_index.install_records_json.<pluginId>.clawhubTrustDisposition, in
     # the shared state SQLite DB ~/.openclaw/state/openclaw.sqlite) was never read (grep

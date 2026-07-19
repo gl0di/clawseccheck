@@ -3055,6 +3055,239 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
     )
 
 
+# ---------- B182 (B-259): ClawHub CLI token store — presence + permissions ----------
+# The ClawHub CLI stores a long-lived API token in a PLAINTEXT JSON file at documented,
+# fixed paths OUTSIDE the OpenClaw home. C015 is rooted at the OpenClaw home and therefore
+# never reaches it, and nothing else checked its permissions — so the credential that can
+# publish new versions of the user's OWN skills sat entirely unaudited. Any agent or skill
+# that can read files gets a supply-chain pivot from it: push a malicious version and it
+# lands on every install.
+#
+# Grounded against the installed CLI (clawhub@0.22.0, dist/config.js getGlobalConfigPath()
+# + resolveConfigPath(), and dist/homedir.js resolveHome()):
+#   * $CLAWHUB_CONFIG_PATH / $CLAWDHUB_CONFIG_PATH override everything, as an exact path.
+#   * darwin  -> <home>/Library/Application Support/clawhub/config.json
+#   * $XDG_CONFIG_HOME set -> $XDG_CONFIG_HOME/clawhub/config.json
+#   * win32   -> %APPDATA%/clawhub/config.json
+#   * default -> <home>/.config/clawhub/config.json
+#   Every one of those has a legacy `clawdhub/` sibling that resolveConfigPath() falls back
+#   to, so both names are checked (Golden Rule #6).
+# The file's shape is `{registry: string, token?: string}` (dist/schema/schemas.js
+# GlobalConfigSchema); the CLI reads the credential as `cfg?.token`
+# (dist/cli/authToken.js). The CLI itself writes the file 0600 and re-chmods it on every
+# write ("This protects API tokens from being read by other users", dist/config.js
+# writeGlobalConfig), so anything looser is a real deviation, not a default.
+#
+# §8 doctrine: the token VALUE is never read into a reported string, never logged, and
+# never placed in evidence. Only its PRESENCE (a non-empty string under the `token` key)
+# and the file's mode are used.
+_B182_DIR_NAMES = ("clawhub", "clawdhub")
+_B182_ENV_OVERRIDES = ("CLAWHUB_CONFIG_PATH", "CLAWDHUB_CONFIG_PATH")
+
+
+def _b182_candidate_stores(ctx: Context) -> "list[Path]":
+    """Every plausible ClawHub CLI token-store path, deduplicated, in CLI precedence order.
+
+    The user's home is taken from ``ctx.home.parent`` (ctx.home is the OpenClaw home, so its
+    parent is ``~``) — the same idiom B150 uses to reach ``~/.config`` — which keeps the
+    check deterministic under ``--home`` instead of reading the process's real HOME.
+
+    Unlike the CLI, which resolves exactly ONE location for the platform it is running on,
+    every candidate is considered here: a store left behind by another layout is still an
+    exposed credential. A path that does not exist contributes nothing, so widening the
+    candidate set cannot manufacture a finding.
+    """
+    home = ctx.home.parent
+    roots: "list[Path]" = []
+
+    for var in _B182_ENV_OVERRIDES:
+        raw = os.environ.get(var)
+        if raw and raw.strip():
+            roots.append(Path(raw.strip()))  # an exact FILE path, not a directory
+
+    parents = [
+        home / "Library" / "Application Support",  # darwin
+        home / ".config",                          # POSIX default
+    ]
+    for var in ("XDG_CONFIG_HOME", "APPDATA"):
+        raw = os.environ.get(var)
+        if raw and raw.strip():
+            parents.append(Path(raw.strip()))
+
+    out: "list[Path]" = []
+    seen: set = set()
+    for path in roots + [p / name / "config.json" for p in parents for name in _B182_DIR_NAMES]:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
+
+
+def _b182_readable_by_others(st) -> "bool | None":
+    """Is this file readable by someone OTHER than its owner?
+
+    True  — world-readable, or group-readable with a group that has other members.
+    False — owner-only in effect (including the user-private-group / umask-002 case,
+            where group-read is not actually exploitable by anyone — B-189's precedent).
+    None  — not determinable (non-POSIX: Windows uses NTFS ACLs, so st_mode is meaningless
+            there and must never produce a mode-based finding).
+    """
+    if not _shared._is_posix():
+        return None
+    mode = st.st_mode & 0o777
+    if mode & 0o004:
+        return True
+    if mode & 0o040:
+        return _shared._group_has_other_members(st.st_gid, st.st_uid) is not False
+    return False
+
+
+def check_clawhub_token_store(ctx: Context) -> Finding:
+    """B182 (B-259) — the ClawHub CLI's plaintext API-token store, and who can read it.
+
+    FAIL    — a store holds a token and is readable by someone other than its owner.
+    WARN    — a store holds a token and is owner-only, but its directory is writable by
+              others (the file can be swapped or removed out from under the CLI).
+    PASS    — a store exists with no token in it, or holds one that only its owner can read.
+    UNKNOWN — no store found, or one was found but could not be read/parsed. Never a fake
+              PASS (Golden Rule #4).
+
+    The token value itself is never read into a message, logged, or placed in evidence —
+    only whether the `token` key holds a non-empty string (§8).
+    """
+    import json as _json
+
+    exposed: list[str] = []
+    swappable: list[str] = []
+    safe: list[str] = []
+    tokenless: list[str] = []
+    unreadable: list[str] = []
+    found_any = False
+
+    for store in _b182_candidate_stores(ctx):
+        try:
+            if not store.is_file():
+                continue
+        except OSError:
+            continue
+        found_any = True
+        try:
+            data = _json.loads(store.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            unreadable.append(f"{store}: present but could not be read or parsed")
+            continue
+        if not isinstance(data, dict):
+            unreadable.append(f"{store}: present but is not a JSON object")
+            continue
+
+        # PRESENCE only — the value is never bound to a reported string (§8).
+        raw_token = data.get("token")
+        has_token = isinstance(raw_token, str) and bool(raw_token.strip())
+        if not has_token:
+            tokenless.append(f"{store}: no token stored")
+            continue
+
+        try:
+            st = store.stat()
+        except OSError:
+            unreadable.append(f"{store}: holds a token but its permissions are unreadable")
+            continue
+
+        others_can_read = _b182_readable_by_others(st)
+        if others_can_read is None:
+            unreadable.append(
+                f"{store}: holds a token; POSIX mode bits are not meaningful on this "
+                "platform, so its permissions could not be assessed"
+            )
+            continue
+        mode = oct(st.st_mode & 0o777)[-3:]
+        if others_can_read:
+            exposed.append(f"{store}: holds a ClawHub API token and is mode {mode}")
+            continue
+
+        dir_writable = False
+        try:
+            dir_writable = _writable_by_others(store.parent.stat())
+        except OSError:
+            pass
+        if dir_writable:
+            swappable.append(
+                f"{store}: token file is owner-only (mode {mode}) but its directory is "
+                "writable by others"
+            )
+        else:
+            safe.append(f"{store}: holds a ClawHub API token, mode {mode} (owner-only)")
+
+    if exposed:
+        return _finding(
+            "B182",
+            FAIL,
+            "A ClawHub CLI API token is stored in plaintext in a file other users on this "
+            "machine can read: " + "; ".join(exposed[:4]) + ". That token can publish new "
+            "versions of your own skills, so anything able to read it — another agent, "
+            "another skill, any local account — gains a supply-chain pivot onto every "
+            "install of them.",
+            "Restrict the file to its owner (`chmod 600` on the path above; the ClawHub CLI "
+            "writes it 0600 itself, so a looser mode means something changed it). If you "
+            "cannot rule out that it was read, revoke the token and log in again to mint a "
+            "fresh one.",
+            evidence=exposed[:4],
+        )
+
+    if swappable:
+        return _finding(
+            "B182",
+            WARN,
+            "A ClawHub CLI API token file is owner-only, but the directory holding it is "
+            "writable by others, so the file can be replaced or removed: "
+            + "; ".join(swappable[:4]),
+            "Restrict the containing directory to its owner (`chmod 700`); the ClawHub CLI "
+            "creates it 0700 itself.",
+            evidence=swappable[:4],
+        )
+
+    if safe or tokenless:
+        detail = (
+            "The ClawHub CLI token store is present and only its owner can read it: "
+            + "; ".join(safe[:4])
+            if safe
+            else "A ClawHub CLI config was found with no API token stored in it: "
+            + "; ".join(tokenless[:4])
+        )
+        return _finding(
+            "B182",
+            PASS,
+            detail + ".",
+            "No action needed. This credential lives outside the OpenClaw home, so keep it "
+            "owner-only — it publishes skills, and nothing in OpenClaw's own config "
+            "protects it.",
+            evidence=(safe + tokenless)[:4],
+        )
+
+    if found_any or unreadable:
+        return _finding(
+            "B182",
+            UNKNOWN,
+            "A ClawHub CLI config file was found but its token state or permissions could "
+            "not be determined: " + "; ".join(unreadable[:4]),
+            "Check the file manually — it holds a token that can publish new versions of "
+            "your skills, and it should be readable only by you.",
+            evidence=unreadable[:4],
+        )
+
+    return _finding(
+        "B182",
+        UNKNOWN,
+        "No ClawHub CLI token store was found at any of its documented locations, so "
+        "whether a publish-capable API token is sitting in plaintext on this machine "
+        "could not be determined.",
+        "If you use the ClawHub CLI, confirm its config file is readable only by you — it "
+        "lives outside the OpenClaw home, so nothing in OpenClaw's own configuration "
+        "protects it.",
+    )
+
+
 def check_declared_skill_reconciliation(ctx: Context) -> Finding:
     """B158 (F-119) — a config declares a skill/plugin LOAD SOURCE that resolves to nothing on
     disk right now. The audit can only scan what is present, so a declared-but-absent source is
