@@ -361,8 +361,14 @@ def test_render_report_includes_inventory_block_above_family_view():
     ctx, findings, score = audit(VULN)
     out = render_report(findings, score, ctx=ctx)
     assert "== INVENTORY BY SUBJECT" in out
-    # The block must appear BEFORE the family-grouped detail report.
-    assert out.index("INVENTORY BY SUBJECT") < out.index("Score:")
+    # Locked decision 1 (design section 3): the block sits above the 7-FAMILY VIEW, not
+    # above the whole report. The grade is the headline and must stay at the top —
+    # prepending the block to the entire report buried it under ~40 lines of findings,
+    # and the block's own closing line ("details by security family below") only reads
+    # correctly when the family view is what actually follows it.
+    assert out.index("Score:") < out.index("INVENTORY BY SUBJECT")
+    assert out.index("INVENTORY BY SUBJECT") < out.index("grouped by area")
+    assert out.index("details by security family below") < out.index("grouped by area")
 
 
 def test_render_report_without_ctx_omits_inventory_block():
@@ -395,5 +401,21 @@ def test_family_view_content_unchanged_by_inventory_prepend(monkeypatch):
     without_inv = render_report(findings, score, ctx=ctx)
 
     assert with_inv != without_inv
-    assert with_inv.endswith(without_inv)
     assert "INVENTORY BY SUBJECT" not in without_inv
+
+    # The block is INSERTED between the score preamble and the family view, so the report
+    # is no longer a suffix of itself. What must hold is that nothing else moved: the
+    # family view is carried over verbatim, and the preamble above it is unchanged.
+    def _split_at_family(text):
+        rows = text.split("\n")
+        i = next(i for i, row in enumerate(rows) if "grouped by area" in row)
+        return "\n".join(rows[:i]), "\n".join(rows[i:])
+
+    pre_with, family_with = _split_at_family(with_inv)
+    pre_without, family_without = _split_at_family(without_inv)
+
+    assert family_with == family_without
+    # Drop the block itself from the with-inventory preamble; inter-section whitespace is
+    # not content, so compare rstripped.
+    pre_with_no_block = pre_with[:pre_with.index("== INVENTORY BY SUBJECT")]
+    assert pre_with_no_block.rstrip() == pre_without.rstrip()

@@ -1132,6 +1132,18 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 f" {n_scored} assessable check(s)."
             )
     lines.append("")
+    # F-131 Phase 1: "Inventory by subject" sits directly ABOVE the 7-family view (design
+    # §3, locked decision 1) — NOT above the whole report. It closes with "(details by
+    # security family below)", which only reads correctly when the family view is what
+    # follows it; prepending the block to the entire report pushed the header and the
+    # grade underneath ~40 lines of findings, which is the one thing that decision
+    # forbade ("nothing existing is restructured"). Presentational only, and "" when ctx
+    # is unavailable (mirrors the ctx-gated sections above).
+    inv_text = render_subject_inventory(findings, ctx, ascii_only=ascii_only, color=color)
+    if inv_text:
+        lines.append("")
+        lines.extend(inv_text.split("\n"))
+
     unsuppressed_all = [f for f in findings if not getattr(f, "suppressed", False)]
     if not unsuppressed_all:
         lines.append(f"No known attack pattern matched. Keep it that way. {ok}")
@@ -1282,14 +1294,6 @@ def render_report(findings: list[Finding], score: ScoreResult,
     lines.append(f"Scan receipt: sha256:{compute_scan_receipt(findings)}")
 
     out = "\n".join(lines).rstrip() + "\n"
-
-    # F-131 Phase 1: "Inventory by subject" — additive, prepended ABOVE the 7-family
-    # view above (design §4.1). Purely presentational: does not touch score/grade/
-    # findings, and is "" (no-op) when ctx is unavailable (mirrors the ctx-gated
-    # capability-graph/credential-surface sections above).
-    inv_text = render_subject_inventory(findings, ctx, ascii_only=ascii_only, color=color)
-    if inv_text:
-        out = inv_text + "\n" + out
 
     if ascii_only:
         return _asciify(out)
