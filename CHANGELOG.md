@@ -781,8 +781,8 @@ made stricter, no new false-FAIL surface.
 
 ### Changed
 - **Capability disclosure tightened in SKILL.md/README.md.** "Read-only" is now stated as
-  scoped to your OpenClaw setup rather than absolute; host-security recon (filesystem/env-
-  name checks, no subprocess, no network) is disclosed explicitly instead of implied;
+  scoped to your OpenClaw setup rather than absolute; host-security recon (read-only local
+  checks, no subprocess, no network) is disclosed explicitly instead of implied;
   `--no-history`/`--no-host`/`--no-native`/`--purge` are listed together; and `--vet`/
   `--vet-source` are stated up front as asking *your own host agent* to fetch, never
   ClawSecCheck itself. No functionality or check-logic changed.
@@ -4621,13 +4621,14 @@ agent on an unmonitored machine is a real exposure — if it were compromised, t
 completely unseen.
 
 ### Added
-- **Five host-monitor detection checks (B50–B54)**, all read-only and filesystem-only (no
-  subprocess, no network): **B50** network monitoring / IDS (Suricata, Zeek, Snort, Little Snitch,
-  Sysmon), **B51** host audit / syscall logging (auditd, OpenBSM, Sysmon), **B52** file-integrity
-  monitoring (AIDE, Tripwire, osquery), **B53** endpoint protection / EDR (Wazuh, CrowdStrike,
-  ClamAV, Microsoft Defender, Santa), **B54** host firewall (ufw, firewalld, nftables, macOS ALF,
-  Windows Firewall). Cross-platform (Linux full; macOS / Windows best-effort); whatever cannot be
-  determined read-only is reported **UNKNOWN**, never a fabricated positive.
+- **Five host-monitor detection checks (B50–B54)**, all read-only (no subprocess, no network;
+  Windows also uses a handful of read-only registry queries): **B50** network monitoring / IDS
+  (Suricata, Zeek, Snort, Little Snitch, Sysmon), **B51** host audit / syscall logging (auditd,
+  OpenBSM, Sysmon), **B52** file-integrity monitoring (AIDE, Tripwire, osquery), **B53** endpoint
+  protection / EDR (Wazuh, CrowdStrike, ClamAV, Microsoft Defender, Santa), **B54** host firewall
+  (ufw, firewalld, nftables, macOS ALF, Windows Firewall). Cross-platform (Linux full; macOS /
+  Windows best-effort); whatever cannot be determined read-only is reported **UNKNOWN**, never
+  a fabricated positive.
 - **RISK-10** capability path: *powerful agent on an unmonitored host*. Fires only on positive
   evidence that all four detection classes (IDS / audit / FIM / EDR) are absent **and** the agent is
   high-privilege (can exec/write **and** is reachable by untrusted input) — i.e. a breach would be

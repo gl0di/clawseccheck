@@ -22,7 +22,7 @@ attestation four checks produce real verdicts:
 
 Two more checks are assisted (not blocked) by attestation:
 
-- **B50–B54** (host monitors): declaring a monitor the file scan cannot see
+- **B50–B54** (host monitors): declaring a monitor the host scan cannot see
   upgrades UNKNOWN to PASS (ATTESTED confidence).
 - **B20** (bootstrap write protection) and **C5** (OpenClaw binary safety):
   `paths` fields point the engine at non-standard locations it then stat()s
