@@ -2547,21 +2547,61 @@ _B135_NON_VERDICT_REASONS = frozenset(
 # keeps the WARN.
 _B135_STATUS_DERIVED_REASON = "security.status_not_clean"
 _B135_PENDING_SECURITY_STATUSES = frozenset({"pending"})
+# The one status that positively records "audited, nothing found". Anything else that is
+# neither clean nor pending is a verdict against the skill.
+_B135_CLEAN_SECURITY_STATUSES = frozenset({"clean"})
 
 
 def _b135_is_pending_security(verification: dict) -> bool:
-    """True when the lock records ClawHub's security audit as unfinished (or unrecorded).
+    """True only when the lock POSITIVELY records ClawHub's security audit as unfinished.
 
-    Absent/None is treated as pending because that is indistinguishable from "no verdict
-    was written" — the same not-yet-answered state, never a rejection.
+    Fail-closed on missing data: an absent, malformed, or null `security` block is NOT
+    pending. "The registry has not answered yet" is a claim that has to be *recorded* to be
+    believed — inferring it from what is simply not there would downgrade a genuine
+    rejection to UNKNOWN on the strength of absent data, which is exactly what
+    `_b135_reasons_are_inconclusive` refuses to do for `reasons`. The two helpers now agree.
     """
     security = verification.get("security")
     if not isinstance(security, dict):
-        return True
+        return False
     status = security.get("status")
-    if status is None:
+    if not isinstance(status, str):
+        return False
+    return status.strip().lower() in _B135_PENDING_SECURITY_STATUSES
+
+
+def _b135_records_adverse_security(verification: dict) -> bool:
+    """True when the `security` block itself records a verdict AGAINST the skill.
+
+    Read for its own sake rather than only through `reasons`, so a real verdict outranks an
+    otherwise-inconclusive reason list: `reasons: ["card.missing"]` is a listing-completeness
+    gate, but the same entry carrying `security.passed: false` with a flagged status is a
+    rejection and has to keep its WARN.
+
+    A positively-pending status outranks everything here. Grounded in the real lock on
+    disk, which carries `{"status": "pending", "passed": false, "rawStatus": null,
+    "verdict": null}` — `passed` is false *because* the audit has not finished, so reading
+    it as a verdict would undo the pending split entirely. Only the top-level aggregate is
+    consulted; `signals.*` sub-scanner statuses are deliberately ignored, since an
+    individual scanner's opinion is not the registry's answer.
+    """
+    security = verification.get("security")
+    if not isinstance(security, dict):
+        return False
+    if _b135_is_pending_security(verification):
+        return False
+    if security.get("passed") is False:
         return True
-    return isinstance(status, str) and status.strip().lower() in _B135_PENDING_SECURITY_STATUSES
+    for key in ("status", "rawStatus", "verdict"):
+        value = security.get(key)
+        if not isinstance(value, str):
+            continue
+        token = value.strip().lower()
+        if not token:
+            continue
+        if token not in _B135_CLEAN_SECURITY_STATUSES:
+            return True
+    return False
 
 
 def _b135_reasons_are_inconclusive(verification: dict, reasons) -> bool:
@@ -2571,6 +2611,9 @@ def _b135_reasons_are_inconclusive(verification: dict, reasons) -> bool:
     is still a rejection, and must not be downgraded on the strength of missing data.
     """
     if not isinstance(reasons, list) or not reasons:
+        return False
+    # A recorded verdict against the skill settles it, whatever the reason codes say.
+    if _b135_records_adverse_security(verification):
         return False
     pending = _b135_is_pending_security(verification)
     for raw in reasons:
@@ -2583,6 +2626,7 @@ def _b135_reasons_are_inconclusive(verification: dict, reasons) -> bool:
             continue
         return False
     return True
+
 def check_clawhub_lock_verification(ctx: Context) -> Finding:
     """B135 — accepted-despite-failed-verification skill install (.clawhub/lock.json).
 

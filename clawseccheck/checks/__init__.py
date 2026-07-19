@@ -267,6 +267,7 @@ from ._lifecycle import (
     _VERSION_LEADING_INTS_RE,
     _b135_is_pending_security,
     _b135_reasons_are_inconclusive,
+    _b135_records_adverse_security,
     _b181_confined_path,
     _b181_recorded_files,
     _b182_candidate_stores,

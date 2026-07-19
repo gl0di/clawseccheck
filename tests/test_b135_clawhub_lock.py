@@ -1,6 +1,8 @@
 """B135 — accepted-despite-failed-verification skill install (.clawhub/lock.json)."""
 from pathlib import Path
 
+import pytest
+
 from clawseccheck.catalog import CATALOG, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_clawhub_lock_verification
 from clawseccheck.collector import Context
@@ -248,3 +250,101 @@ def test_a_real_rejection_outranks_a_pending_one(tmp_path):
     assert f.status == WARN
     assert any("rejected" in e for e in f.evidence)
     assert not any("waiting" in e for e in f.evidence)
+
+
+# ---------------------------------------------------------------------------
+# B-258 follow-up: the pending split must be fail-CLOSED on missing data.
+#
+# The first cut treated an absent / malformed / null `security` block as pending, on the
+# reasoning that it was indistinguishable from "no verdict was written". That inverted the
+# rule its own sibling states — "a rejection with no reason recorded is still a rejection,
+# and must not be downgraded on the strength of missing data" — and turned genuine
+# rejections into UNKNOWN. "Not answered yet" is a claim that has to be RECORDED to be
+# believed, so only a positively-pending status counts.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "security",
+    [
+        pytest.param(None, id="no-security-block"),
+        pytest.param({"status": None}, id="status-null"),
+        pytest.param({"status": ""}, id="status-empty"),
+        pytest.param("malicious", id="security-not-a-dict"),
+        pytest.param({"passed": False}, id="no-status-key"),
+    ],
+)
+def test_warn_when_the_security_block_cannot_confirm_a_pending_audit(tmp_path, security):
+    """`security.status_not_clean` is only excused while the audit is POSITIVELY pending."""
+    f = check_clawhub_lock_verification(
+        _pending_lock(tmp_path, ["security.status_not_clean"], security)
+    )
+    assert f.status == WARN, f"a rejection was downgraded on missing data: {security!r}"
+
+
+def test_a_recorded_verdict_outranks_a_card_missing_only_reason_list(tmp_path):
+    """`card.missing` alone is inconclusive, but the security block is read for its own
+    sake — a malicious verdict recorded next to it is still a rejection."""
+    f = check_clawhub_lock_verification(
+        _pending_lock(
+            tmp_path,
+            ["card.missing"],
+            {"status": "malicious", "passed": False, "verdict": "malicious"},
+        )
+    )
+    assert f.status == WARN
+
+
+def test_a_pending_audit_still_outranks_its_own_passed_false(tmp_path):
+    """GR#5 the other way, grounded in the REAL lock on disk, which carries
+    `{"status": "pending", "passed": false, "rawStatus": null, "verdict": null}` —
+    `passed` is false BECAUSE the audit has not finished. Reading it as a verdict would
+    undo the pending split on the user's own machine."""
+    f = check_clawhub_lock_verification(
+        _pending_lock(
+            tmp_path,
+            ["card.missing", "security.status_not_clean", "security.pending"],
+            {"status": "pending", "passed": False, "rawStatus": None, "verdict": None},
+        )
+    )
+    assert f.status == UNKNOWN
+
+
+def test_sub_scanner_signals_are_not_read_as_the_registrys_verdict(tmp_path):
+    """The real pending lock nests `signals.staticScan.status: "suspicious"`. An individual
+    scanner's opinion is not the registry's aggregate answer, and that particular one is a
+    known false positive against this project's own detection regexes."""
+    f = check_clawhub_lock_verification(
+        _pending_lock(
+            tmp_path,
+            ["card.missing", "security.status_not_clean", "security.pending"],
+            {
+                "status": "pending",
+                "passed": False,
+                "signals": {"staticScan": {"status": "suspicious"}},
+            },
+        )
+    )
+    assert f.status == UNKNOWN
+
+
+def test_the_bad_fixture_needs_no_security_block_to_stay_a_rejection(tmp_path):
+    """The shipped bad fixture records reasons ["card.missing", "security.status_not_clean"]
+    and NO security block at all. That shape must WARN on its own — if it only warns once a
+    security block is bolted on, the pending split is failing open."""
+    import json
+
+    lock = json.loads(
+        (
+            FIXTURES
+            / "bad_b135_clawhub_lock_reject"
+            / "workspace"
+            / ".clawhub"
+            / "lock.json"
+        ).read_text(encoding="utf-8")
+    )
+    verification = lock["skills"]["sketchy-skill"]["verification"]
+    assert "security" not in verification, "fixture was edited to prop the check up"
+    assert check_clawhub_lock_verification(
+        _ctx(FIXTURES / "bad_b135_clawhub_lock_reject")
+    ).status == WARN
