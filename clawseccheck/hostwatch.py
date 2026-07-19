@@ -7,9 +7,11 @@ endpoint/EDR sensor, or a host firewall. A powerful agent on an unwatched host i
 a real exposure: if it were compromised, the activity could go completely unseen.
 
 Doctrine (matches the rest of ClawSecCheck):
-- **No subprocess, no network.** We inspect only the filesystem: well-known config
-  paths, binary names on PATH (``shutil.which`` reads PATH, it does NOT execute),
-  systemd enable-symlinks, and read-only config/plist files.
+- **No subprocess, no network.** We read well-known config paths, binary names on
+  PATH (``shutil.which`` reads PATH, it does NOT execute), systemd enable-symlinks,
+  and read-only config/plist files. On Windows we additionally issue read-only
+  ``HKEY_LOCAL_MACHINE`` service-key lookups via ``winreg`` (see
+  :func:`_win_service_exists`); those read key existence only and take no values.
 - **No fabricated positives.** Every signal here is grounded against authoritative
   upstream docs for each monitor. Low-confidence signals are
   deliberately omitted — an honest ``unknown`` beats a wrong ``present``/``absent``.
