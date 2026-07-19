@@ -3161,12 +3161,40 @@ _B182_DIR_NAMES = ("clawhub", "clawdhub")
 _B182_ENV_OVERRIDES = ("CLAWHUB_CONFIG_PATH", "CLAWDHUB_CONFIG_PATH")
 
 
+def _b182_audits_this_users_own_home(ctx: Context) -> bool:
+    """True when ctx.home is THIS process's own OpenClaw profile directory.
+
+    The process environment describes where *this* user's ClawHub CLI keeps its token. It
+    therefore only describes the audited home when that home is this user's real one. Under
+    a fixture scan or an explicit ``--home``, the audited home belongs to someone else, and
+    letting $XDG_CONFIG_HOME / $CLAWHUB_CONFIG_PATH steer the scan would attribute the
+    auditor's own token store to the audited home — a false-positive FAIL driven purely by
+    the environment the tool happens to run in (Golden Rule #5).
+
+    The gate mirrors the collector's `_read_installed_skills` (B-161), which reaches
+    ``~/.agents/skills`` on exactly the same condition and for exactly the same reason:
+    "fixture/custom --home scans must remain hermetic and never absorb unrelated skills".
+    """
+    try:
+        user_home = Path.home().resolve()
+        audited = ctx.home.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return audited.parent == user_home and audited.name.startswith(".openclaw")
+
+
 def _b182_candidate_stores(ctx: Context) -> "list[Path]":
     """Every plausible ClawHub CLI token-store path, deduplicated, in CLI precedence order.
 
     The user's home is taken from ``ctx.home.parent`` (ctx.home is the OpenClaw home, so its
-    parent is ``~``) — the same idiom B150 uses to reach ``~/.config`` — which keeps the
-    check deterministic under ``--home`` instead of reading the process's real HOME.
+    parent is ``~``) — the same idiom B150 uses to reach ``~/.config``.
+
+    The environment-driven locations ($CLAWHUB_CONFIG_PATH / $CLAWDHUB_CONFIG_PATH /
+    $XDG_CONFIG_HOME / %APPDATA%) are absolute paths with no relationship to the audited
+    home, so they are consulted ONLY when auditing this user's own home
+    (`_b182_audits_this_users_own_home`). That keeps a `--home`/fixture scan hermetic and
+    reproducible regardless of the environment it runs in, while a real self-audit still
+    follows the CLI's full precedence ladder and so cannot miss a genuinely relocated store.
 
     Unlike the CLI, which resolves exactly ONE location for the platform it is running on,
     every candidate is considered here: a store left behind by another layout is still an
@@ -3176,19 +3204,20 @@ def _b182_candidate_stores(ctx: Context) -> "list[Path]":
     home = ctx.home.parent
     roots: "list[Path]" = []
 
-    for var in _B182_ENV_OVERRIDES:
-        raw = os.environ.get(var)
-        if raw and raw.strip():
-            roots.append(Path(raw.strip()))  # an exact FILE path, not a directory
-
     parents = [
         home / "Library" / "Application Support",  # darwin
         home / ".config",                          # POSIX default
     ]
-    for var in ("XDG_CONFIG_HOME", "APPDATA"):
-        raw = os.environ.get(var)
-        if raw and raw.strip():
-            parents.append(Path(raw.strip()))
+
+    if _b182_audits_this_users_own_home(ctx):
+        for var in _B182_ENV_OVERRIDES:
+            raw = os.environ.get(var)
+            if raw and raw.strip():
+                roots.append(Path(raw.strip()))  # an exact FILE path, not a directory
+        for var in ("XDG_CONFIG_HOME", "APPDATA"):
+            raw = os.environ.get(var)
+            if raw and raw.strip():
+                parents.append(Path(raw.strip()))
 
     out: "list[Path]" = []
     seen: set = set()

@@ -21,9 +21,18 @@ The token VALUE is never read into a message, logged, or placed in evidence — 
 assert that too (§8). The fixture's token is an inert, clearly-labelled placeholder: it is
 not secret-shaped, so secret scanners stay quiet.
 
-Permission-sensitive cases run against a COPY of the fixture inside pytest's tmp_path, so
-the mode is set explicitly rather than inherited from the checkout umask, and nothing is
-written into the repository.
+Most permission-sensitive cases run against a COPY of the fixture inside pytest's tmp_path,
+so the mode is set explicitly rather than inherited from the checkout umask, and nothing is
+written into the repository. That isolation has a cost: it means the SHIPPED fixture could
+stop demonstrating anything without a single test noticing, which is exactly what happened
+(it fired only because a umask-002 checkout left it 0664). conftest.py now pins that one
+file open, and `test_the_shipped_bad_fixture_demonstrates_the_finding_in_place` scans it
+where it lives to hold the pin.
+
+The env-override ladder ($CLAWHUB_CONFIG_PATH / $XDG_CONFIG_HOME / …) points at absolute
+paths unrelated to the audited home, so the check consults it only when auditing this
+process's own home. Tests that exercise the ladder opt in with `_own_home`; the rest prove
+the auditor's environment cannot steer a scan of someone else's home.
 """
 from __future__ import annotations
 
@@ -52,8 +61,13 @@ _FIXTURE_PLACEHOLDER = "fixture-placeholder-not-a-real-token"
 
 @pytest.fixture(autouse=True)
 def _hermetic_env(monkeypatch):
-    """The check honours the same env overrides the CLI does, so clear them — otherwise a
-    real value in the developer's environment could steer a test at a real file."""
+    """Clear the CLI's env overrides so a real value in the developer's environment cannot
+    steer a test at a real file.
+
+    Defence in depth only. The check itself now ignores these variables unless it is
+    auditing this process's own home, so scrubbing them here is no longer what makes the
+    suite hermetic — it just keeps each test's starting state explicit. The tests that
+    exercise the override ladder opt back in via `_own_home`."""
     for var in (
         "CLAWHUB_CONFIG_PATH",
         "CLAWDHUB_CONFIG_PATH",
@@ -209,23 +223,64 @@ def test_macos_application_support_location_is_checked(tmp_path):
     assert check_clawhub_token_store(_ctx(home)).status == FAIL
 
 
-def test_xdg_config_home_override_is_honoured(tmp_path, monkeypatch):
+def _own_home(monkeypatch, home):
+    """Make the audited home look like the one THIS process belongs to.
+
+    The env overrides describe where this user's CLI keeps its token, so the check only
+    consults them when auditing this user's own home — see
+    `test_env_overrides_are_ignored_when_auditing_someone_elses_home` for why.
+    """
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path(home)))
+
+
+def test_xdg_config_home_override_is_honoured_for_this_users_own_home(tmp_path, monkeypatch):
     home = _copy(BAD, tmp_path, mode=0o644)
     xdg = tmp_path / "xdg"
     (home / ".config").rename(xdg)
+    _own_home(monkeypatch, home)
     assert check_clawhub_token_store(_ctx(home)).status == UNKNOWN
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
     assert check_clawhub_token_store(_ctx(home)).status == FAIL
 
 
-def test_explicit_config_path_override_is_honoured(tmp_path, monkeypatch):
+def test_explicit_config_path_override_is_honoured_for_this_users_own_home(tmp_path, monkeypatch):
     home = _copy(BAD, tmp_path, mode=0o644)
     moved = tmp_path / "elsewhere.json"
     shutil.move(str(home / ".config" / "clawhub" / "config.json"), str(moved))
     moved.chmod(0o644)
+    _own_home(monkeypatch, home)
     assert check_clawhub_token_store(_ctx(home)).status == UNKNOWN
     monkeypatch.setenv("CLAWHUB_CONFIG_PATH", str(moved))
     assert check_clawhub_token_store(_ctx(home)).status == FAIL
+
+
+@pytest.mark.parametrize(
+    "var",
+    ["XDG_CONFIG_HOME", "APPDATA", "CLAWHUB_CONFIG_PATH", "CLAWDHUB_CONFIG_PATH"],
+)
+def test_env_overrides_are_ignored_when_auditing_someone_elses_home(tmp_path, monkeypatch, var):
+    """A `--home`/fixture scan must not be steered by the AUDITOR's own environment.
+
+    Regression guard. The env vars hold absolute paths with no relationship to the audited
+    home, so honouring them unconditionally attributed the auditor's own token store to
+    whatever home was being scanned: a world-readable store anywhere on the box turned
+    every clean fixture into a B182 FAIL (Golden Rule #5), and even a correctly-locked one
+    silently flipped clean fixtures from UNKNOWN to PASS.
+    """
+    # A world-readable token store somewhere else entirely — the auditor's own.
+    elsewhere = tmp_path / "auditor" / "clawhub"
+    elsewhere.mkdir(parents=True)
+    store = elsewhere / "config.json"
+    store.write_text(json.dumps({"registry": "https://clawhub.ai", "token": "x" * 20}))
+    store.chmod(0o644)
+
+    audited = _copy(CLEAN, tmp_path, mode=0o600)  # a different, benign home
+    monkeypatch.setenv(var, str(store if var.endswith("PATH") else elsewhere.parent))
+
+    finding = check_clawhub_token_store(_ctx(audited))
+    assert finding.status != FAIL, f"${var} steered the audit of an unrelated home"
+    assert str(tmp_path / "auditor") not in finding.detail
+    assert all(str(tmp_path / "auditor") not in str(p) for p in _b182_candidate_stores(_ctx(audited)))
 
 
 def test_candidate_list_is_deduplicated_and_home_derived(tmp_path):
@@ -270,3 +325,25 @@ def test_meta_is_scored_secrets():
     assert m.scored is True
     assert m.surface == "secrets"
     assert m.confidence == "HIGH"
+
+
+def test_the_shipped_bad_fixture_demonstrates_the_finding_in_place():
+    """The bad fixture is scanned WHERE IT SHIPS, not as a chmod'd tmp_path copy.
+
+    Every other permission case copies the fixture and sets the mode explicitly, so all of
+    them passed even when the shipped file did not actually demonstrate anything: its mode
+    was inherited from the checkout umask (0664 on a umask-002 box), and under `umask 077`
+    it checked out 0600 and the audit returned PASS. conftest.py now pins it open the same
+    way it pins openclaw.json shut, and this test is what holds that pin in place.
+    """
+    finding = check_clawhub_token_store(_ctx(BAD))
+    assert finding.status == FAIL, (
+        "the shipped bad fixture no longer demonstrates B182 — check conftest.py's "
+        "_LOOSE_FIXTURE_FILES pin"
+    )
+    assert _FIXTURE_PLACEHOLDER not in finding.detail
+    assert all(_FIXTURE_PLACEHOLDER not in e for e in finding.evidence)
+
+
+def test_the_shipped_clean_fixture_passes_in_place():
+    assert check_clawhub_token_store(_ctx(CLEAN)).status == PASS

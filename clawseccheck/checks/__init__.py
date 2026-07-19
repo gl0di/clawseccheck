@@ -270,6 +270,7 @@ from ._lifecycle import (
     _b135_records_adverse_security,
     _b181_confined_path,
     _b181_recorded_files,
+    _b182_audits_this_users_own_home,
     _b182_candidate_stores,
     _b182_readable_by_others,
     _iter_entries,
