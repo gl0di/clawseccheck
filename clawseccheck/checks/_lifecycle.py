@@ -2507,15 +2507,95 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
 # registry's own aggregate decision was "pass" (a disclosed security-audit tool tripping its
 # own detection regexes — see reference note on scanner FP against detection signatures) —
 # flagging on the sub-signals would reproduce that false positive.
+#
+# B-258: "the registry rejected this" and "the registry has not answered yet" are different
+# facts, and the check used to collapse them — it WARNed on ok=False/decision="fail" without
+# looking at WHY. A live lock entry was recorded while ClawHub's security audit was still
+# running, so the install carried decision="fail" with reasons
+# ["card.missing", "security.status_not_clean", "security.pending"] and
+# verification.security = {"status": "pending", "passed": false, "rawStatus": null,
+# "verdict": null, "checkedAt": null} — an unfinished audit, not a security verdict. It
+# cleared on its own once the audit completed. Reporting that as "the registry rejected
+# this skill" is simply untrue, so a rejection whose reasons are ALL inconclusive now
+# reports UNKNOWN instead.
+#
+# The classification is fail-closed on purpose (Golden Rule #5, both directions): the
+# reason codes are server-generated and NOT enumerable client-side — the CLI's own schema
+# types them as a bare `reasons: "string[]"` (clawhub@0.22.0
+# dist/schema/schemas.js:681-699, ApiV1SkillVerifyResponseSchema, where `security` is
+# likewise typed "unknown") — so only the specific codes observed on a real lock file are
+# treated as inconclusive. Any other code, an unrecognised future code, and an empty
+# reasons list all keep the WARN. That means a genuine rejection can never be silenced by
+# this narrowing; the worst case is that a future "not answered yet" code still WARNs
+# until it is observed and added here.
+_B135_NON_VERDICT_REASONS = frozenset(
+    {
+        # ClawHub's security audit had not finished at install time. Explicitly a
+        # not-yet-answered state, corroborated by security.status == "pending".
+        "security.pending",
+        # The skill-card DOCUMENT (skill-card.md) is not published for this version —
+        # `card: {"available": false, "path": "skill-card.md", "sha256": null, ...}` in
+        # the real lock. A listing-completeness gate, carrying no security verdict.
+        "card.missing",
+    }
+)
+
+# Inconclusive ONLY while the security audit is unfinished: "not clean" is derived from
+# `security.status`, so when that status is itself "pending" this code restates the
+# pending fact rather than reporting a verdict. With any other status ("clean" per a later
+# live read, or a future value such as a flagged/malicious one) it is a real verdict and
+# keeps the WARN.
+_B135_STATUS_DERIVED_REASON = "security.status_not_clean"
+_B135_PENDING_SECURITY_STATUSES = frozenset({"pending"})
+
+
+def _b135_is_pending_security(verification: dict) -> bool:
+    """True when the lock records ClawHub's security audit as unfinished (or unrecorded).
+
+    Absent/None is treated as pending because that is indistinguishable from "no verdict
+    was written" — the same not-yet-answered state, never a rejection.
+    """
+    security = verification.get("security")
+    if not isinstance(security, dict):
+        return True
+    status = security.get("status")
+    if status is None:
+        return True
+    return isinstance(status, str) and status.strip().lower() in _B135_PENDING_SECURITY_STATUSES
+
+
+def _b135_reasons_are_inconclusive(verification: dict, reasons) -> bool:
+    """True when EVERY recorded reason is a not-a-security-verdict one.
+
+    An empty/absent/non-list `reasons` returns False: a rejection with no reason recorded
+    is still a rejection, and must not be downgraded on the strength of missing data.
+    """
+    if not isinstance(reasons, list) or not reasons:
+        return False
+    pending = _b135_is_pending_security(verification)
+    for raw in reasons:
+        if not isinstance(raw, str):
+            return False
+        code = raw.strip()
+        if code in _B135_NON_VERDICT_REASONS:
+            continue
+        if code == _B135_STATUS_DERIVED_REASON and pending:
+            continue
+        return False
+    return True
 def check_clawhub_lock_verification(ctx: Context) -> Finding:
     """B135 — accepted-despite-failed-verification skill install (.clawhub/lock.json).
 
     PASS    — no .clawhub/lock.json found in any workspace, OR every locked skill's
               verification.ok is true and decision is not "fail".
     WARN    — at least one locked skill has verification.ok == False or
-              decision == "fail" — the registry's own check rejected it, yet it is
-              installed and present in the lock file.
-    UNKNOWN — a .clawhub/lock.json was found but is unreadable or not valid JSON.
+              decision == "fail" for a reason that is an actual registry verdict —
+              the registry's own check rejected it, yet it is installed and present
+              in the lock file.
+    UNKNOWN — a .clawhub/lock.json was found but is unreadable or not valid JSON; OR
+              (B-258) the only failed verifications are ones whose every recorded
+              reason is inconclusive (an unfinished security audit / a missing skill
+              card), which is "the registry has not answered yet", not a rejection.
     """
     import json as _json
 
@@ -2546,6 +2626,7 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
         )
 
     rejected_ev: list[str] = []
+    inconclusive_ev: list[str] = []
     any_parsed = False
     any_unreadable = False
 
@@ -2584,10 +2665,16 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
                     else "unknown"
                 )
                 version = entry.get("version", "unknown")
-                rejected_ev.append(
+                line = (
                     f"{slug}@{version}: decision={decision!r} ok={ok!r} "
                     f"reasons=[{reasons_str}] signature={sig_status}"
                 )
+                # B-258: separate "rejected" from "not answered yet" — see the block
+                # comment above this function for why and how the split is fail-closed.
+                if _b135_reasons_are_inconclusive(verification, reasons):
+                    inconclusive_ev.append(line)
+                else:
+                    rejected_ev.append(line)
 
     if rejected_ev:
         detail = "; ".join(rejected_ev[:6]) + (
@@ -2610,6 +2697,23 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
             ".clawhub/lock.json found but unreadable or not valid JSON — cannot evaluate "
             "ClawHub skill-verification state.",
             "Review .clawhub/lock.json manually.",
+        )
+
+    if inconclusive_ev:
+        detail = "; ".join(inconclusive_ev[:6]) + (
+            f" (+{len(inconclusive_ev) - 6} more)" if len(inconclusive_ev) > 6 else ""
+        )
+        return _finding(
+            "B135",
+            UNKNOWN,
+            "ClawHub verification did not pass for skill(s), but every recorded reason is "
+            "inconclusive — an unfinished security audit or a missing skill card, not a "
+            f"registry verdict, so no rejection can be read from it: {detail}.",
+            "Re-check these skills once ClawHub's audit has completed (re-installing or "
+            "updating the skill refreshes the recorded verification). A verdict that stays "
+            "unresolved, or reasons that change to a real rejection code, is worth a manual "
+            "review of the skill's provenance.",
+            evidence=inconclusive_ev[:6],
         )
 
     return _finding(

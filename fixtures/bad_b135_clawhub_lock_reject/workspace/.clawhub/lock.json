@@ -25,6 +25,13 @@
           "url": null,
           "sha256": null
         },
+        "security": {
+          "status": "suspicious",
+          "passed": false,
+          "rawStatus": "suspicious",
+          "verdict": null,
+          "checkedAt": 1751000000000
+        },
         "signature": {
           "status": "unsigned"
         }

@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "skills": {
+    "audit-still-running": {
+      "version": "1.2.3",
+      "installedAt": 1751000000000,
+      "registry": "https://clawhub.ai",
+      "artifact": {
+        "kind": "archive",
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333",
+        "integrity": "sha256-REDACTED"
+      },
+      "skillFile": {
+        "path": "SKILL.md",
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333"
+      },
+      "verification": {
+        "schema": "clawhub.skill.verify.v1",
+        "ok": false,
+        "decision": "fail",
+        "reasons": [
+          "card.missing",
+          "security.status_not_clean",
+          "security.pending"
+        ],
+        "card": {
+          "available": false,
+          "path": "skill-card.md",
+          "url": "https://example.invalid/skills/audit-still-running/card",
+          "sha256": null,
+          "size": null,
+          "contentType": null
+        },
+        "provenance": {
+          "source": "unavailable",
+          "reason": "No server-resolved import provenance is stored for this version."
+        },
+        "security": {
+          "status": "pending",
+          "passed": false,
+          "rawStatus": null,
+          "verdict": null,
+          "confidence": null,
+          "summary": null,
+          "model": null,
+          "checkedAt": null
+        },
+        "signature": {
+          "status": "unsigned"
+        }
+      }
+    }
+  }
+}

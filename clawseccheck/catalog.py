@@ -1671,6 +1671,11 @@ CATALOG: list[CheckMeta] = [
     # rejected install can exist (e.g. a security researcher's own test skill),
     # so this is awareness of an accepted-despite-rejection state, not proof of
     # compromise — matches B136/B138's precedent in the same E-030 epic.
+    # B-258: only an actual registry VERDICT reaches this WARN. A failed verification
+    # whose every recorded reason is inconclusive — ClawHub's security audit still
+    # running, or the skill-card document not published — is reported UNKNOWN instead,
+    # because "has not answered yet" is not "rejected". See the classification block in
+    # checks/_lifecycle.py; it is fail-closed, so an unclassified code still WARNs.
     CheckMeta(
         "B135",
         "Accepted-despite-failed-verification skill install (.clawhub/lock.json)",
