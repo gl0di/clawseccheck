@@ -152,6 +152,14 @@ jobs:
           cp -r clawseccheck SKILL.md README.md LICENSE \
                 SECURITY.md SECURITY_MODEL.md CHANGELOG.md pyproject.toml docs audit.py \
                 dist/clawseccheck/
+          # SKILL.md points the host agent at references/cli-flags.md for the full flag
+          # reference; without it every ClawHub install shipped a dangling link (B-254).
+          # Ship ONLY what the manifest actually links: references/design-system.md is a
+          # repo-internal design doc with no runtime role, so it stays out of installs.
+          # tests/test_publish_workflow.py cross-checks every relative SKILL.md link
+          # against what this step copies, so a new link cannot silently go dangling.
+          mkdir -p dist/clawseccheck/references
+          cp references/cli-flags.md dist/clawseccheck/references/
           find dist/clawseccheck -name '__pycache__' -type d -prune -exec rm -rf {} + || true
           # Repo-page images (README banner/screenshot + their sources) are for GitHub only —
           # they'd add ~650KB of dead weight to every skill install.

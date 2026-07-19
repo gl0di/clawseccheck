@@ -3,14 +3,19 @@
 Reads the YAML as plain text — no pyyaml dependency (stdlib only).
 """
 import json
+import re
 from pathlib import Path
 
 import pytest
 
-WORKFLOW_PATH = (
-    Path(__file__).resolve().parents[1] / ".github" / "workflows" / "clawhub-publish.yml"
-)
-SKILL_PATH = Path(__file__).resolve().parents[1] / "SKILL.md"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "clawhub-publish.yml"
+SKILL_PATH = REPO_ROOT / "SKILL.md"
+
+STAGING_DIR = "dist/clawseccheck"
+
+# A markdown inline link: ](target). Captures everything up to the closing paren.
+_MD_LINK_RE = re.compile(r"\]\(([^)]+)\)")
 
 
 def _skill_display_name_en() -> str:
@@ -132,6 +137,156 @@ def test_publish_sets_display_name_matching_skill_md() -> None:
     assert f'--name "{expected}"' in text, (
         f"publish workflow must pass --name \"{expected}\" (from SKILL.md "
         "metadata.display_name.en); found no matching --name flag."
+    )
+
+
+def _join_continuations(text: str) -> list[str]:
+    """Collapse trailing-backslash shell line continuations into single logical lines."""
+    logical: list[str] = []
+    buf = ""
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.endswith("\\"):
+            buf += stripped[:-1].strip() + " "
+            continue
+        logical.append((buf + stripped).strip())
+        buf = ""
+    if buf:
+        logical.append(buf.strip())
+    return logical
+
+
+def _staged_paths(text: str) -> set[str]:
+    """Paths (relative to the staging root) that the workflow's `cp` lines produce.
+
+    Models the two shapes the staging step actually uses:
+        cp -r A B C  dist/clawseccheck/           -> "A", "B", "C"
+        cp references/cli-flags.md dist/clawseccheck/references/ -> "references/cli-flags.md"
+
+    A `cp` of SRC into DEST lands at <DEST minus the staging prefix>/<basename(SRC)>.
+    Anything later deleted by an `rm -rf dist/clawseccheck/...` line is removed again,
+    so the deliberate `docs/assets` purge is honoured rather than papered over.
+    """
+    staged: set[str] = set()
+    removed: set[str] = set()
+
+    for line in _join_continuations(text):
+        if line.startswith("rm -rf "):
+            for token in line[len("rm -rf "):].split():
+                if token.startswith(STAGING_DIR + "/"):
+                    removed.add(token[len(STAGING_DIR) + 1:].rstrip("/"))
+            continue
+        if not line.startswith("cp "):
+            continue
+        args = [a for a in line[len("cp "):].split() if not a.startswith("-")]
+        if len(args) < 2:
+            continue
+        sources, dest = args[:-1], args[-1].rstrip("/")
+        if not dest.startswith(STAGING_DIR):
+            continue
+        subdir = dest[len(STAGING_DIR):].strip("/")
+        for src in sources:
+            base = src.rstrip("/").rsplit("/", 1)[-1]
+            staged.add(f"{subdir}/{base}" if subdir else base)
+
+    return {
+        path
+        for path in staged
+        if not any(path == r or path.startswith(r + "/") for r in removed)
+    }
+
+
+def _skill_relative_links() -> list[str]:
+    """Relative (non-URL, non-anchor) markdown link targets declared in SKILL.md."""
+    targets = []
+    for raw in _MD_LINK_RE.findall(SKILL_PATH.read_text(encoding="utf-8")):
+        target = raw.strip().split()[0]  # drop an optional "title" suffix
+        if target.startswith(("http://", "https://", "mailto:", "#")):
+            continue
+        targets.append(target.split("#", 1)[0])  # strip any anchor
+    return targets
+
+
+def test_staging_parser_is_not_vacuous() -> None:
+    """Guard the guard: a parse that silently returns nothing would pass everything.
+
+    Without this, a future reformat of the staging step (different quoting, a heredoc,
+    a move to an action) would make _staged_paths() return an empty set and the
+    dangling-link test below would go vacuously green — the exact hollow-PASS shape
+    these cross-checks exist to prevent.
+    """
+    staged = _staged_paths(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    assert staged, (
+        "_staged_paths() parsed no files out of the publish workflow. The staging step "
+        "was probably reshaped — update the parser, don't let this test pass vacuously."
+    )
+    # SKILL.md is mandatory for any clawhub publish; if the parser cannot see it, it is
+    # not actually reading the staging step.
+    assert "SKILL.md" in staged, (
+        f"Parser did not find SKILL.md among staged paths {sorted(staged)!r} — "
+        "the staging step's cp lines are not being parsed correctly."
+    )
+    assert _skill_relative_links(), (
+        "No relative markdown links parsed out of SKILL.md — the link cross-check "
+        "below would be vacuous. Check _MD_LINK_RE against SKILL.md's actual syntax."
+    )
+
+
+def test_every_skill_md_relative_link_is_staged_for_publish() -> None:
+    """Every relative link in SKILL.md must resolve in the published tree (B-254).
+
+    Root cause this pins down: the staging step is a hand-maintained `cp` allowlist that
+    nothing cross-checked against the manifest. `references/` was simply missing, so every
+    ClawHub install shipped a dead link to references/cli-flags.md. Adding a link to
+    SKILL.md without staging its target now fails the build here instead of silently
+    shipping a 404 to users.
+    """
+    staged = _staged_paths(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    links = _skill_relative_links()
+
+    for target in links:
+        # The link must not be dangling in the source repo either.
+        assert (REPO_ROOT / target).exists(), (
+            f"SKILL.md links to {target!r}, which does not exist in the repo."
+        )
+        covered = any(
+            target == entry or target.startswith(entry.rstrip("/") + "/")
+            for entry in staged
+        )
+        assert covered, (
+            f"SKILL.md links to {target!r} but the publish workflow's staging step never "
+            f"copies it, so every ClawHub install ships a dangling link.\n"
+            f"Staged paths: {sorted(staged)!r}\n"
+            f"Fix: copy it into {STAGING_DIR}/ in the 'Stage publishable files' step."
+        )
+
+
+def test_dangling_link_guard_detects_a_missing_target() -> None:
+    """Negative control: the cross-check must actually fire when staging drops a path.
+
+    Feeds the parser a staging step with the references/ copy deleted — i.e. the exact
+    pre-B-254 workflow — and asserts references/cli-flags.md is then reported as unstaged.
+    This proves the guard has teeth without needing anyone to hand-mutate the workflow.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    regressed = "\n".join(
+        line for line in text.splitlines()
+        if "cp references/cli-flags.md" not in line
+    )
+    assert regressed != text, (
+        "Expected to find the 'cp references/cli-flags.md' staging line to remove; "
+        "the B-254 fix appears to have been reworded — update this negative control."
+    )
+
+    staged_after_regression = _staged_paths(regressed)
+    assert not any(
+        "references/cli-flags.md" == entry
+        or "references/cli-flags.md".startswith(entry.rstrip("/") + "/")
+        for entry in staged_after_regression
+    ), (
+        "Removing the references/ copy from the staging step did NOT make "
+        "references/cli-flags.md look unstaged — the cross-check is not actually "
+        "sensitive to the regression it is meant to catch."
     )
 
 
