@@ -76,9 +76,10 @@ def test_the_clean_fixture_hashes_are_the_real_digests():
     """Guards the fixtures themselves: if someone edits the fixture skill without
     restamping the lock, the clean fixture would start FAILing for the wrong reason."""
     lock = json.loads((CLEAN / "workspace" / ".clawhub" / "lock.json").read_text())
-    recorded = dict(_b181_recorded_files(lock["skills"]["demo-skill"]))
+    pairs, conflicts = _b181_recorded_files(lock["skills"]["demo-skill"])
+    assert conflicts == [], "the clean fixture's own records contradict each other"
     skill_dir = CLEAN / "workspace" / "skills" / "demo-skill"
-    for rel, expected in recorded.items():
+    for rel, expected in dict(pairs).items():
         assert _sha256(skill_dir / rel) == expected, rel
 
 
@@ -206,6 +207,44 @@ def test_legacy_clawdhub_lock_directory_is_read(tmp_path):
     assert check_skill_install_tamper(_ctx(home)).status == PASS
 
 
+def test_a_stale_legacy_lock_does_not_override_the_current_one(tmp_path):
+    """dist/skills.js:118 readLockfile() returns the FIRST lock that parses and
+    writeLockfile() only ever writes `.clawhub`, so the dot-dirs are a PRECEDENCE ladder,
+    not a union.
+
+    Regression guard (Golden Rule #5). A user carried across the clawdhub->clawhub rename
+    keeps a stale `.clawdhub/lock.json` holding the OLD version's digests, which the CLI
+    itself never reads again. Reading both made a legitimately-updated skill FAIL as
+    tampered against a superseded record.
+    """
+    home = _copy_clean(tmp_path)
+    ws = home / "workspace"
+    skill_md = ws / "skills" / "demo-skill" / "SKILL.md"
+
+    # The stale legacy lock records the digest of a PREVIOUS version of the skill.
+    stale = json.loads((ws / ".clawhub" / "lock.json").read_text())
+    stale["skills"]["demo-skill"]["skillFile"] = {"path": "SKILL.md", "sha256": "d" * 64}
+    stale["skills"]["demo-skill"].get("verification", {}).pop("artifact", None)
+    (ws / ".clawdhub").mkdir()
+    (ws / ".clawdhub" / "lock.json").write_text(json.dumps(stale))
+
+    # `.clawhub/lock.json` is current and matches disk, so the CLI would call this clean.
+    assert _sha256(skill_md) != "d" * 64
+    assert check_skill_install_tamper(_ctx(home)).status == PASS
+
+
+def test_the_legacy_lock_is_still_used_when_the_current_one_does_not_parse(tmp_path):
+    """The fallback is a fallback: an unparseable `.clawhub/lock.json` must not shadow a
+    usable legacy one, which is exactly what the CLI's try/next loop does."""
+    home = _copy_clean(tmp_path)
+    ws = home / "workspace"
+    good = (ws / ".clawhub" / "lock.json").read_text()
+    (ws / ".clawdhub").mkdir()
+    (ws / ".clawdhub" / "lock.json").write_text(good)
+    (ws / ".clawhub" / "lock.json").write_text("{ not json")
+    assert check_skill_install_tamper(_ctx(home)).status == PASS
+
+
 def test_per_skill_origin_json_works_without_any_lock(tmp_path):
     """`.clawhub/origin.json` lives in the skill folder and exists independently of the
     lock, so a relocated or lock-less install is still covered."""
@@ -318,10 +357,40 @@ def test_a_relocated_install_is_still_covered_by_its_own_origin_record(tmp_path)
 
 def test_recorded_files_merges_skillfile_and_the_manifest():
     lock = json.loads((CLEAN / "workspace" / ".clawhub" / "lock.json").read_text())
-    pairs = _b181_recorded_files(lock["skills"]["demo-skill"])
+    pairs, conflicts = _b181_recorded_files(lock["skills"]["demo-skill"])
     paths = [p for p, _ in pairs]
     assert paths == sorted(set(paths)), "duplicate SKILL.md entry not collapsed"
     assert "SKILL.md" in paths and "notes.txt" in paths
+    assert conflicts == []
+
+
+def test_contradictory_digests_for_one_path_are_not_silently_resolved():
+    """`skillFile` and the artifact manifest are written in one pass over one artifact, so
+    they cannot legitimately disagree. Keeping only the first digest let a tampered
+    manifest entry hide behind a matching `skillFile` and report PASS."""
+    record = {
+        "skillFile": {"path": "SKILL.md", "sha256": "a" * 64},
+        "verification": {"artifact": {"files": [{"path": "SKILL.md", "sha256": "b" * 64}]}},
+    }
+    pairs, conflicts = _b181_recorded_files(record)
+    assert conflicts == ["SKILL.md"]
+    assert dict(pairs)["SKILL.md"] == "a" * 64  # first still wins for the hash comparison
+
+
+def test_a_self_contradictory_install_record_fails_even_when_disk_matches_one_digest(tmp_path):
+    home = _copy_clean(tmp_path)
+    lock_path = home / "workspace" / ".clawhub" / "lock.json"
+    lock = json.loads(lock_path.read_text())
+    entry = lock["skills"]["demo-skill"]
+    on_disk = _sha256(home / "workspace" / "skills" / "demo-skill" / "SKILL.md")
+    entry["skillFile"] = {"path": "SKILL.md", "sha256": on_disk}
+    entry["verification"]["artifact"]["files"] = [
+        {"path": "SKILL.md", "sha256": "c" * 64}  # a tampered manifest entry
+    ]
+    lock_path.write_text(json.dumps(lock))
+    finding = check_skill_install_tamper(_ctx(home))
+    assert finding.status == FAIL
+    assert "contradicts itself" in finding.detail
 
 
 def test_meta_is_scored_supply_chain():

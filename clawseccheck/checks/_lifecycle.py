@@ -2782,13 +2782,16 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
 # no network call is involved or possible (Golden Rule #1).
 #
 # Grounded against the installed ClawHub CLI (clawhub@0.22.0) and the real files on disk:
-#   * `<workdir>/.clawhub/lock.json` — dist/skills.js:118 readLockfile() reads
-#     `.clawhub/lock.json` with a `.clawdhub/` legacy fallback, so BOTH are handled here
-#     (Golden Rule #6). Per skill slug it carries `skillFile: {path, sha256}` and, under
-#     `verification.artifact.files[]`, a full per-file manifest of `{path, size, sha256}`.
-#   * `<skill dir>/.clawhub/origin.json` — dist/skills.js:137-166 readSkillOrigin(), same
-#     `.clawdhub/` legacy fallback; carries the same `skillFile: {path, sha256}` and exists
-#     independently of the lock, so a relocated install is still covered.
+#   * `<workdir>/.clawhub/lock.json` — dist/skills.js:118 readLockfile() tries
+#     `.clawhub/lock.json` then the `.clawdhub/` legacy path and RETURNS THE FIRST that
+#     parses, while writeLockfile() only ever writes `.clawhub`. Both names are therefore
+#     recognised (Golden Rule #6) but as a PRECEDENCE ladder, never a union — see
+#     `_b181_provenance_records` for why unioning them false-positives. Per skill slug the
+#     entry carries `skillFile: {path, sha256}` and, under `verification.artifact.files[]`,
+#     a full per-file manifest of `{path, size, sha256}`.
+#   * `<skill dir>/.clawhub/origin.json` — dist/skills.js:137-166 readSkillOrigin(), the
+#     same first-one-wins `.clawdhub/` fallback; carries the same `skillFile: {path,
+#     sha256}` and exists independently of the lock, so a relocated install is covered.
 #   * The digest is over RAW FILE BYTES, hex-encoded: dist/skills.js hashes each entry with
 #     `sha256Hex(bytes)` over the extracted bytes and records `size: bytes.byteLength`.
 #     Verified empirically against the real install — the recorded SKILL.md digest equals
@@ -2857,18 +2860,32 @@ def _b181_read_json(path: Path):
     return data if isinstance(data, dict) else None
 
 
-def _b181_recorded_files(record: dict) -> "list[tuple[str, str]]":
-    """(relpath, sha256hex) pairs recorded in a lock entry or an origin.json.
+def _b181_recorded_files(record: dict) -> "tuple[list[tuple[str, str]], list[str]]":
+    """((relpath, sha256hex) pairs, paths recorded with CONTRADICTORY digests).
 
     Both `skillFile: {path, sha256}` and the richer
-    `verification.artifact.files[]: [{path, size, sha256}]` manifest are read; duplicates
-    collapse (the manifest normally repeats the skillFile entry).
+    `verification.artifact.files[]: [{path, size, sha256}]` manifest are read. Identical
+    duplicates collapse (the manifest normally repeats the skillFile entry with the same
+    digest — verified against the real install, where all 77 entries agreed).
+
+    A path recorded TWICE WITH DIFFERENT DIGESTS is reported separately instead of being
+    silently resolved to whichever was seen first. Both records are written in one pass
+    over one artifact, so they cannot legitimately disagree; when they do, the install
+    record contradicts itself and no on-disk byte sequence can satisfy both. Keeping only
+    the first digest let a tampered manifest entry hide behind a matching `skillFile`.
     """
     out: "dict[str, str]" = {}
+    conflicts: "set[str]" = set()
 
     def _add(path_val, sha_val):
-        if isinstance(path_val, str) and isinstance(sha_val, str) and sha_val.strip():
-            out.setdefault(path_val, sha_val.strip().lower())
+        if not (isinstance(path_val, str) and isinstance(sha_val, str) and sha_val.strip()):
+            return
+        sha = sha_val.strip().lower()
+        previous = out.get(path_val)
+        if previous is None:
+            out[path_val] = sha
+        elif previous != sha:
+            conflicts.add(path_val)
 
     sf = record.get("skillFile")
     if isinstance(sf, dict):
@@ -2882,7 +2899,7 @@ def _b181_recorded_files(record: dict) -> "list[tuple[str, str]]":
                 for entry in files[:_B181_MAX_FILES_PER_SKILL]:
                     if isinstance(entry, dict):
                         _add(entry.get("path"), entry.get("sha256"))
-    return sorted(out.items())
+    return sorted(out.items()), sorted(conflicts)
 
 
 def _b181_skill_dir(slug: str, lock_parent: Path):
@@ -2916,6 +2933,13 @@ def _b181_provenance_records(home: Path):
     seen_dirs: set = set()
 
     for rel in [""] + list(WORKSPACE_DIRS):
+        # PRECEDENCE, not union. dist/skills.js:118 readLockfile() walks
+        # [.clawhub/lock.json, .clawdhub/lock.json] and RETURNS THE FIRST that parses,
+        # while writeLockfile() only ever writes .clawhub — so a user carried across the
+        # clawdhub->clawhub rename keeps a stale .clawdhub/lock.json holding the OLD
+        # version's digests, which the CLI itself never reads again. Unioning the two
+        # would compare today's bytes against a superseded record and FAIL a skill that
+        # was legitimately updated (Golden Rule #5). Mirror the CLI: first parse wins.
         for dot in _B181_DOT_DIRS:
             lock_path = home / rel / dot / "lock.json"
             if not lock_path.is_file():
@@ -2923,6 +2947,7 @@ def _b181_provenance_records(home: Path):
             data = _b181_read_json(lock_path)
             skills = data.get("skills") if data else None
             if not isinstance(skills, dict):
+                # Unparseable/!schema — the CLI falls through to the legacy path, so do we.
                 continue
             for slug, entry in skills.items():
                 if not isinstance(entry, dict) or not isinstance(slug, str):
@@ -2931,6 +2956,7 @@ def _b181_provenance_records(home: Path):
                 if skill_dir is not None:
                     seen_dirs.add(str(skill_dir))
                 records.append((slug, skill_dir, entry, f"{dot}/lock.json"))
+            break
 
     # Per-skill origin.json — independent of any lock, so a relocated or lock-less install
     # is still covered. Skipped for a skill already contributed by a lock entry above.
@@ -2999,7 +3025,12 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
     budget = _B181_MAX_FILES_TOTAL
 
     for slug, skill_dir, record, source in records:
-        recorded = _b181_recorded_files(record)
+        recorded, conflicting = _b181_recorded_files(record)
+        # A record that disagrees with itself is a tamper signal in its own right, and is
+        # reported whether or not the install directory can be located on disk.
+        for rel in conflicting:
+            tampered.append(f"{slug}: {source} records two different install-time digests "
+                            f"for '{rel}' — the install record contradicts itself")
         if not recorded:
             unverifiable.append(f"{slug}: {source} records no file hashes")
             continue
