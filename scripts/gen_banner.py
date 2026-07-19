@@ -37,6 +37,35 @@ from clawseccheck import brand  # noqa: E402  (sys.path bootstrap above must run
 
 OUTPUT = ROOT / "docs" / "assets" / "src" / "banner.html"
 
+# ── The logo slot's geometry ─────────────────────────────────────────────────
+#
+# The mark itself renders at MARK_PX; the *slot* that holds it is wider, at
+# SLOT_W_PX, and the mark is centred inside it.
+#
+# Why the slot is wider than the mark, and why this exact number: the banner used
+# to put the MASCOT emoji here at ``font-size: 84px``. A glyph's box is its
+# advance width, not its font-size — Noto Color Emoji's 🦞 advances 104.81px at
+# 84px — so the emoji occupied a 104.81 x 84 box, ~10.4px of side bearing on each
+# side of ~84px of ink. Dropping in an 84 x 84 SVG therefore does NOT preserve the
+# composition: it narrows the slot by 20.81px, and because `.brand` is a flex row
+# feeding `.left {flex: 1.25}`, that shortfall propagates — measured in headless
+# Chrome at 1280x640, `h1` x 210.81 -> 190.00, `.left` w 660.83 -> 640.02 and the
+# whole terminal `.card` x 800.83 -> 780.02. The wordmark and the entire right-hand
+# card slide left, and `.promise` stops being clamped by its own max-width.
+#
+# Pinning the slot to the width the emoji actually held keeps every other element
+# where the shipped PNG has it (so re-rasterizing is a mark swap, not a
+# recomposition) and restores the optical breathing room the side bearings gave
+# between mark and wordmark. It also makes the geometry *more* stable than before:
+# the composition no longer depends on which emoji font the rasterizing machine
+# happens to have installed.
+#
+# This is a deliberate design constant, not a stray magic number. brand.LOGO_SVG is
+# PROVISIONAL (see brand.py) — when the final mark art lands, revisit the slot
+# rather than assuming this number still serves it.
+MARK_PX = 84
+SLOT_W_PX = 104.81
+
 
 def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     """``"#e34234"`` -> ``(227, 66, 52)`` — the banner's glow/shadow rgba(...) stops
@@ -51,11 +80,16 @@ def build_banner_html() -> str:
     r, g, b = _hex_to_rgb(brand.BRAND_RED)
     rgb = f"{r},{g},{b}"
     red = brand.BRAND_RED
-    # E-048's third LOGO_SVG leg (CLAWSECCHECK-C-247): the banner is an HTML/badge-only
-    # surface (brand.py's Tier 3), so it carries the graphical mark itself rather than
-    # the MASCOT emoji glyph — single-sourced from brand.LOGO_SVG, never pasted/hand-drawn
-    # here or in the generated HTML (see report.py's --html export for the same pattern:
-    # LOGO_SVG embedded inline, sized purely via CSS on the wrapping element).
+    # E-048's third LOGO_SVG leg: the banner is an HTML/badge-only surface (brand.py's
+    # Tier 3), so it carries the graphical mark itself rather than the MASCOT emoji
+    # glyph — single-sourced from brand.LOGO_SVG, never pasted/hand-drawn here or in the
+    # generated HTML. Two details are copied deliberately from report.py's --html export,
+    # which embeds the same constant:
+    #   * the SVG is inlined verbatim and sized purely via CSS on the wrapper;
+    #   * the wrapper is aria-hidden. LOGO_SVG carries its own
+    #     role="img" aria-label="ClawSecCheck", and it sits immediately before the
+    #     <h1>ClawSecCheck</h1> wordmark — without aria-hidden a screen reader would
+    #     announce the brand name twice. The adjacent text is the real accessible name.
     logo_svg = brand.LOGO_SVG
     return f"""<!doctype html><meta charset="utf-8">
 <style>
@@ -70,8 +104,9 @@ def build_banner_html() -> str:
   .wrap {{ display: flex; width: 100%; padding: 0 84px; align-items: center; gap: 56px; }}
   .left {{ flex: 1.25; }}
   .brand {{ display: flex; align-items: center; gap: 22px; }}
-  .claw {{ display: flex; line-height: 0; }}
-  .claw svg {{ width: 84px; height: 84px; display: block;
+  .claw {{ width: {SLOT_W_PX}px; height: {MARK_PX}px; display: flex; line-height: 0;
+          align-items: center; justify-content: center; }}
+  .claw svg {{ width: {MARK_PX}px; height: {MARK_PX}px; display: block;
               filter: drop-shadow(0 6px 22px rgba({rgb},.45)); }}
   h1 {{ margin: 0; font-size: 78px; font-weight: 800; letter-spacing: -1.5px; }}
   h1 .sec {{ color: {red}; }}
@@ -108,7 +143,7 @@ def build_banner_html() -> str:
 <body>
 <div class="wrap">
   <div class="left">
-    <div class="brand"><div class="claw">{logo_svg}</div>
+    <div class="brand"><div class="claw" aria-hidden="true">{logo_svg}</div>
       <h1>Claw<span class="sec">Sec</span>Check</h1>
     </div>
     <div class="tag">The claw that checks your claws.</div>
