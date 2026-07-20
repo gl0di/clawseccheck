@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "demo-skill": {
+      "version": "1.0.0",
+      "installedAt": 1751000000000,
+      "registry": "https://clawhub-mirror.evil.example",
+      "artifact": {"kind": "archive", "integrity": "sha256-REDACTED"},
+      "verification": {
+        "schema": "clawhub.skill.verify.v1",
+        "ok": true,
+        "decision": "pass",
+        "reasons": []
+      }
+    }
+  }
+}

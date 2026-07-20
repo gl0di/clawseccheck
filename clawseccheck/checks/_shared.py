@@ -89,6 +89,76 @@ def _group_has_other_members(gid: int, owner_uid: int) -> "bool | None":
     return False
 
 
+def _dir_replaceable_by_others(path: Path) -> "str | None":
+    """Can another local account replace what lives in *path*? Returns the reason, or None.
+
+    Mirrors C5's ``_writable_kind`` (``checks/_capability.py``) so the two agree on what
+    "someone else could swap this code" means:
+
+    * a STICKY directory (``/tmp``, mode 1777) is never flagged — the sticky bit blocks
+      cross-owner rename/delete, so it is not a replace vector. This is why "the target is
+      under /tmp" is NOT on its own a finding: a 0700 directory inside /tmp is as private
+      as one in the user's home, and treating the location as the signal would key a
+      verdict on a path string rather than on an actual privilege;
+    * group-write is only reported when the owning group has, or may have, a member other
+      than the owner (``_group_has_other_members``) — a user-private group is not an
+      exposure, and B-127 already paid for that lesson;
+    * non-POSIX hosts return None. NTFS ACLs are not POSIX mode bits, and inventing a
+      verdict from ``st_mode`` on Windows would be fabrication.
+
+    Read-only: one ``stat()``, no reads, no writes.
+    """
+    if not _is_posix():
+        return None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    mode = st.st_mode
+    if mode & 0o1000:
+        return None
+    world = bool(mode & 0o002)
+    group = bool(mode & 0o020)
+    if world and group:
+        return "group- and world-writable"
+    if world:
+        return "world-writable"
+    if group:
+        if _group_has_other_members(st.st_gid, st.st_uid) is False:
+            return None
+        return "group-writable"
+    return None
+
+
+def _file_readable_by_others(path: Path) -> "str | None":
+    """Can another local account READ *path*? Returns the reason, or None.
+
+    The read-side sibling of ``_dir_replaceable_by_others``, same rules: POSIX only, and
+    group-read is only reported when the owning group has (or may have) a member other
+    than the owner, so a user-private group — the default on most Linux distributions —
+    is not reported as an exposure. Used where a file may hold a secret; a 0644/0664 mode
+    on a user-private-group box is the distro default and not, on its own, a leak.
+    """
+    if not _is_posix():
+        return None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    mode = st.st_mode
+    world = bool(mode & 0o004)
+    group = bool(mode & 0o040)
+    if world and group:
+        return "group- and world-readable"
+    if world:
+        return "world-readable"
+    if group:
+        if _group_has_other_members(st.st_gid, st.st_uid) is False:
+            return None
+        return "group-readable"
+    return None
+
+
 LOOPBACK = {"127.0.0.1", "localhost", "::1", "", "loopback", "local"}
 
 

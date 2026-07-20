@@ -3168,6 +3168,240 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
     )
 
 
+# ---------- B184 (B-291, ENV-5): which ClawHub issued the supply-chain verdicts we trust ----------
+# Three shipped checks consume a verdict that a REGISTRY issues, and none of them ever asked
+# WHICH registry issued it:
+#   * B135 reads `verification.decision` out of .clawhub/lock.json
+#   * B177 reads `clawhubTrustDisposition` out of the state DB
+#   * B181 compares on-disk bytes against hashes recorded from the registry's own manifest
+# Repoint the registry and all three still report health — on the redirected host's word.
+# B181's manifest leg is the sharpest case: the digests it verifies against were written by
+# whoever served the artifact, so they match by construction. The audit does not merely go
+# quiet; it affirmatively PASSes supply-chain checks whose evidence the redirect supplied.
+#
+# **Scope, stated exactly (Golden Rule #4, and the honest-labelling rule).** This check
+# CLOSES the detection half only. Detecting the redirect is fully local: the endpoint each
+# skill was actually installed from is persisted on disk. Deciding whether the redirected
+# host serves malicious skills would require resolving and contacting it, which this tool
+# does not and must not do (Golden Rule #1). So a WARN here says "these verdicts came from a
+# host that is not the public ClawHub" — never "that host is malicious". It cannot be
+# inferred from anything read here, and no output may imply it.
+#
+# Grounded against the installed OpenClaw dist:
+#   * clawhub-DxyvW6TD.js:16 DEFAULT_CLAWHUB_URL = "https://clawhub.ai"
+#   * :37 normalizeBaseUrl() — `OPENCLAW_CLAWHUB_URL || CLAWHUB_URL || DEFAULT`, then
+#     `.replace(/\/+$/, "")`. :336 resolveClawHubBaseUrl() is a thin alias, so EVERY
+#     consumer inherits the override. :339 isDefaultClawHubBaseUrl() is exactly the
+#     normalized-string comparison mirrored below.
+#   * :17/:41 the sibling GitHub codeload ladder —
+#     `OPENCLAW_CLAWHUB_GITHUB_CODELOAD_BASE_URL || CLAWHUB_GITHUB_CODELOAD_BASE_URL ||
+#     "https://codeload.github.com"` — is where a github-sourced install's BYTES come from,
+#     so covering only the API ladder would leave a trivially equivalent bypass.
+#   * status-WbH6V7lU.js:1245 and :1258 write `registry: resolveClawHubBaseUrl(...)` into
+#     BOTH the per-skill .clawhub/origin.json AND workspace/.clawhub/lock.json. That is the
+#     primary evidence source: an on-disk, agent-written record of where each skill ACTUALLY
+#     came from, which survives the environment variable being unset again.
+#   * :1235 gates only `verificationVersion` on `installKind === "github"`; `registry` is
+#     written unconditionally and GitHub provenance goes to the SEPARATE `sourceUrl` key. So
+#     a github-sourced install still records the canonical registry — flagging it would be a
+#     false positive, and there is a pinned fixture for exactly that case.
+#   * host-env-security-CWC2ZCy4.js:317-322 blockedOverridePrefixes is exactly
+#     ["GIT_CONFIG_", "NPM_CONFIG_", "CARGO_REGISTRIES_", "TF_VAR_"] — zero CLAWHUB/OPENCLAW_
+#     entries — so the state-dir dotenv loader does NOT filter these vars, even though
+#     dotenv-eb21SB3p.js:177-185 blocks the same "CLAWHUB_"/"OPENCLAW_CLAWHUB_" prefixes in a
+#     WORKSPACE .env. A redirect written to ~/.openclaw/.env therefore persists across
+#     restarts, which is why the dotenv leg is read at all.
+#
+# WARN, never FAIL. A self-hosted or enterprise ClawHub mirror is a real, intentional,
+# disclosed deployment, and a FAIL would punish it — the same reasoning that makes B157 WARN
+# on a non-registry source and that backs the private-registry allowlist in _mcp.py. scored
+# is False for the same reason: "not the public host" is a fact to confirm, not a proven
+# misconfiguration, and it must not move the grade.
+_B184_CANONICAL_REGISTRY_HOST = "clawhub.ai"
+_B184_CANONICAL_CODELOAD_HOST = "codeload.github.com"
+
+# Both env ladders, in the dist's own precedence order. Omitting the bare fallbacks would
+# make the check bypassable by setting the second variable in each pair instead of the first.
+_B184_REGISTRY_ENV_VARS = ("OPENCLAW_CLAWHUB_URL", "CLAWHUB_URL")
+_B184_CODELOAD_ENV_VARS = (
+    "OPENCLAW_CLAWHUB_GITHUB_CODELOAD_BASE_URL",
+    "CLAWHUB_GITHUB_CODELOAD_BASE_URL",
+)
+# The *_TOKEN ladder (OPENCLAW_CLAWHUB_TOKEN / CLAWHUB_TOKEN / CLAWHUB_AUTH_TOKEN,
+# clawhub-DxyvW6TD.js:57) is deliberately NOT read here: SECRET_KEY_RE already matches those
+# names, and a credential is a different concern from an endpoint. Do not double-count it.
+
+
+def _b184_is_canonical(raw, canonical_host: str) -> "bool | None":
+    """Is *raw* the canonical public endpoint? None when it is not a usable URL string.
+
+    Mirrors ``normalizeBaseUrl`` (clawhub-DxyvW6TD.js:37-38) — trailing slashes are stripped
+    before comparison — but is deliberately MORE permissive in two ways, because each extra
+    acceptance can only remove a false positive and cannot let a redirect through:
+
+      * scheme and host are compared case-insensitively. ``https://ClawHub.ai`` is the same
+        host by DNS; the dist's exact string compare would call it non-default, and WARNing
+        on letter case would be a finding about typography, not about where bytes come from.
+      * a bare trailing "/" path is equivalent to no path.
+
+    Anything else — a different host, ANY userinfo or port or path, or a downgrade to
+    ``http://`` — is not canonical. A scheme downgrade is a real interception vector and a
+    userinfo prefix (``https://clawhub.ai@evil.example``) is the classic look-alike, so
+    neither may be waived.
+
+    Values carrying whitespace or control characters are refused OUTRIGHT rather than
+    parsed. ``urlsplit`` strips ASCII tab/newline before parsing (bpo-43882), and pinning the
+    verdict to a stdlib normalization detail that has moved across Python versions is exactly
+    the 3.9-vs-3.12 hazard that has flipped a verdict in this project before. Refusing them
+    makes the answer identical on every interpreter, and a control character in a registry
+    URL is never legitimate anyway.
+    """
+    from urllib.parse import urlsplit  # noqa: PLC0415
+
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        return False
+    try:
+        parts = urlsplit(value.rstrip("/"))
+    except ValueError:
+        return False
+    if parts.scheme.lower() != "https":
+        return False
+    if parts.username or parts.password:
+        return False
+    try:
+        if parts.port is not None:
+            return False
+    except ValueError:
+        return False
+    if (parts.hostname or "").lower() != canonical_host:
+        return False
+    return not (parts.path or parts.query or parts.fragment)
+
+
+def check_clawhub_registry_provenance(ctx: Context) -> Finding:
+    """B184 (B-291, ENV-5) — which ClawHub issued the supply-chain verdicts B135/B177/B181
+    report on.
+
+    WARN    — a skill records a non-canonical registry, or a persistent environment override
+              repoints the registry/codeload endpoint. Never FAIL: a self-hosted or
+              enterprise mirror is legitimate and disclosed.
+    PASS    — every endpoint observed is the public ClawHub.
+    UNKNOWN — nothing recorded the endpoint and no override was observable, so the issuer of
+              those verdicts cannot be determined either way (Golden Rule #4).
+
+    Evidence is taken in the order of how well it describes the AUDITED subject:
+
+    1. The ``registry`` recorded per skill in ``.clawhub/lock.json`` /
+       ``.clawhub/origin.json``. This is the strongest source and the only retrospective
+       one: it is what the agent itself wrote at install time, it names the host that issued
+       the verdicts already on disk, and it survives the environment variable being unset.
+    2. ``~/.openclaw/.env`` / ``~/.config/openclaw/gateway.env``, which OpenClaw loads into
+       ``process.env`` at startup — a redirect that persists across restarts and applies to
+       the NEXT install or update.
+    3. This process's own environment, and only when the audited home is this user's own.
+       ``dotenv_override`` already applies that gate; it is the weakest evidence, because
+       the auditor's process environment is not necessarily the agent's.
+
+    A shell ``export`` in the terminal that launched an already-running agent leaves no
+    on-disk trace and is not visible from here. That residual is a false NEGATIVE — it can
+    only make this check too quiet, never too loud.
+    """
+    from ..collector import dotenv_override  # noqa: PLC0415
+
+    recorded_bad: "list[str]" = []
+    env_bad: "list[str]" = []
+    observed_canonical = 0
+
+    for slug, _skill_dir, record, source in _b181_provenance_records(ctx.home):
+        if not isinstance(record, dict):
+            continue
+        verdict = _b184_is_canonical(record.get("registry"), _B184_CANONICAL_REGISTRY_HOST)
+        if verdict is None:
+            continue
+        if verdict:
+            observed_canonical += 1
+        else:
+            recorded_bad.append(
+                f"{slug}: installed from {record.get('registry')!r}, recorded in {source}"
+            )
+
+    for names, host, what in (
+        (_B184_REGISTRY_ENV_VARS, _B184_CANONICAL_REGISTRY_HOST, "the ClawHub API endpoint"),
+        (
+            _B184_CODELOAD_ENV_VARS,
+            _B184_CANONICAL_CODELOAD_HOST,
+            "the GitHub codeload endpoint that serves skill archives",
+        ),
+    ):
+        for name in names:
+            raw, origin = dotenv_override(ctx, name)
+            verdict = _b184_is_canonical(raw, host)
+            if verdict is None:
+                continue
+            if verdict:
+                observed_canonical += 1
+            else:
+                env_bad.append(f"{name}={raw!r} ({origin}) repoints {what}")
+            # The dist's ladder is first-non-empty-wins, so a set variable makes the rest of
+            # its own pair unreachable. Reporting the shadowed one too would be a finding
+            # about a value the product never reads.
+            break
+
+    if recorded_bad or env_bad:
+        items = recorded_bad + env_bad
+        extra = f" (+{len(items) - 6} more)" if len(items) > 6 else ""
+        return _finding(
+            "B184",
+            WARN,
+            "Skills are installed from, or updates are pointed at, a ClawHub endpoint other "
+            "than the public https://clawhub.ai: "
+            + "; ".join(items[:6])
+            + extra
+            + ". This matters beyond the endpoint itself: the supply-chain verdicts this "
+            "report relies on are issued BY that host — the install decision B135 reads, "
+            "the plugin trust disposition B177 reads, and the install-time file digests "
+            "B181 verifies against all come from whoever served the skill. A PASS on those "
+            "three checks is that host's assurance, not an independent one.",
+            "If this is your organisation's own ClawHub mirror, nothing is wrong — record "
+            "that it is expected, and read B135/B177/B181 as statements about your mirror. "
+            "If you did not configure it, treat it as a supply-chain incident: find what "
+            "set it (check ~/.openclaw/.env and any agent or skill able to write there), "
+            "restore the default endpoint, and reinstall the affected skills so their "
+            "verification records are re-issued by the public registry. This check reports "
+            "only WHERE the skills came from — it does not and cannot judge whether that "
+            "host served anything malicious, which would need a network lookup this tool "
+            "deliberately never makes.",
+            evidence=items[:6],
+        )
+
+    if observed_canonical:
+        return _finding(
+            "B184",
+            PASS,
+            f"Every recorded ClawHub endpoint is the public https://clawhub.ai "
+            f"({observed_canonical} record(s)/setting(s) checked), so the supply-chain "
+            f"verdicts B135, B177 and B181 report on were issued by the public registry.",
+            "No action needed.",
+        )
+
+    return _finding(
+        "B184",
+        UNKNOWN,
+        "No ClawHub install record (.clawhub/lock.json or a skill's .clawhub/origin.json) "
+        "recorded which registry it came from, and no persistent endpoint override was "
+        "readable, so it cannot be determined which host issued the supply-chain verdicts "
+        "that B135, B177 and B181 report on.",
+        "If skills were installed some other way, confirm for yourself where they came "
+        "from. Running the audit on the machine and account the agent runs as, with no "
+        "--home argument, also lets the persistent override locations be checked.",
+    )
+
+
 # ---------- B182 (B-259): ClawHub CLI token store — presence + permissions ----------
 # The ClawHub CLI stores a long-lived API token in a PLAINTEXT JSON file at documented,
 # fixed paths OUTSIDE the OpenClaw home. C015 is rooted at the OpenClaw home and therefore
@@ -3179,6 +3413,12 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
 # Grounded against the installed CLI (clawhub@0.22.0, dist/config.js getGlobalConfigPath()
 # + resolveConfigPath(), and dist/homedir.js resolveHome()):
 #   * $CLAWHUB_CONFIG_PATH / $CLAWDHUB_CONFIG_PATH override everything, as an exact path.
+#     B-291: OpenClaw's OWN embedded ClawHub client reads the same token store through a
+#     THREE-rung ladder whose first rung the standalone CLI does not have —
+#     `OPENCLAW_CLAWHUB_CONFIG_PATH || CLAWHUB_CONFIG_PATH || CLAWDHUB_CONFIG_PATH`
+#     (dist/clawhub-DxyvW6TD.js:49, resolveClawHubConfigPaths). It has HIGHER precedence
+#     than both vars grounded above, so a store relocated with it was invisible to this
+#     check — a silent miss, since an unfound store reports UNKNOWN rather than FAIL.
 #   * darwin  -> <home>/Library/Application Support/clawhub/config.json
 #   * $XDG_CONFIG_HOME set -> $XDG_CONFIG_HOME/clawhub/config.json
 #   * win32   -> %APPDATA%/clawhub/config.json
@@ -3195,7 +3435,14 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
 # never placed in evidence. Only its PRESENCE (a non-empty string under the `token` key)
 # and the file's mode are used.
 _B182_DIR_NAMES = ("clawhub", "clawdhub")
-_B182_ENV_OVERRIDES = ("CLAWHUB_CONFIG_PATH", "CLAWDHUB_CONFIG_PATH")
+_B182_ENV_OVERRIDES = (
+    # Precedence order, highest first (dist/clawhub-DxyvW6TD.js:49). Order is documentary
+    # here — every candidate that exists on disk is examined, so a lower rung can never
+    # mask a higher one.
+    "OPENCLAW_CLAWHUB_CONFIG_PATH",
+    "CLAWHUB_CONFIG_PATH",
+    "CLAWDHUB_CONFIG_PATH",
+)
 
 
 def _b182_audits_this_users_own_home(ctx: Context) -> bool:

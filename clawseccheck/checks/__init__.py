@@ -139,6 +139,8 @@ from ._host import (
     check_host_egress_posture,
     check_incident_readiness,
     check_systemd_persistence,
+    check_bundled_root_override,
+    check_unit_embedded_gateway_secret,
 )
 
 from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has_remote, _mcp_servers, _mcp_url_is_local, _read_jsonl_tail, correlation_indicators, _CORR_INDICATOR_CAP,)
@@ -264,6 +266,9 @@ from ._config import (
 from ._shared import (INJECTION_PATTERNS, LOG_SCAN_INJECTION_PATTERNS, _FM_BLOCK_BARE_RE, _FM_BLOCK_HEADERED_RE, _HOOK_EXEC_RE, _skill_frontmatter_block,)
 from ._lifecycle import (
     _APPROVAL_BYPASS_RE,
+    _B182_ENV_OVERRIDES,
+    _B184_CODELOAD_ENV_VARS,
+    _B184_REGISTRY_ENV_VARS,
     _CRITICAL_BOOTSTRAP,
     _FLOATING_REF_RE,
     _HOOK_POLICY_FIX_VERSION,
@@ -282,6 +287,7 @@ from ._lifecycle import (
     _b182_audits_this_users_own_home,
     _b182_candidate_stores,
     _b182_readable_by_others,
+    _b184_is_canonical,
     _iter_entries,
     _parse_version,
     _writable_identity_files,
@@ -292,6 +298,7 @@ from ._lifecycle import (
     check_bootstrap_injection,
     check_bootstrap_write_protection,
     check_clawhub_lock_verification,
+    check_clawhub_registry_provenance,
     check_codex_project_trust,
     check_cron_job_content,
     check_cron_scheduler,
@@ -1194,11 +1201,14 @@ CHECKS = [
     check_clawhub_lock_verification,  # B135 — accepted-despite-failed-verification install
     check_skill_install_tamper,  # B181 — installed skill modified since its recorded install hash (B-257)
     check_clawhub_token_store,  # B182 — ClawHub CLI plaintext token store perms, outside the OpenClaw home (B-259)
+    check_clawhub_registry_provenance,  # B184 — WHICH ClawHub issued the B135/B177/B181 verdicts (B-291, ENV-5)
     check_declared_skill_reconciliation,  # B158 — declared-but-unresolved skill-load source (F-119)
     check_audit_suppressions,  # B173 — security.audit.suppressions self-blinds native audit (B-237)
     check_install_policy_gate,  # B174 — security.installPolicy.* gate + exec-hook escape flags (B-238)
     check_hooks_enable_toggles,  # B179 — hooks.enabled / hooks.internal(.load.extraDirs) enable-toggle inventory (B-250)
     check_plugin_clawhub_trust,  # B177 — OpenClaw's own persisted per-plugin ClawHub trust verdict (B-240)
+    check_bundled_root_override,  # B186 — bundled skills/hooks code-load root relocated by env override (B-289, ENV-3)
+    check_unit_embedded_gateway_secret,  # B193 — gateway credential inlined in a systemd user unit (B-290, ENV-4)
 ]
 
 

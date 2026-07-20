@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenClaw Gateway
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/openclaw gateway run
+Restart=always
+Environment=OPENCLAW_GATEWAY_PORT=8899
+Environment=OPENCLAW_SERVICE_KIND=gateway
+Environment="OPENCLAW_WINDOWS_TASK_NAME=OpenClaw Gateway"
+
+[Install]
+WantedBy=default.target

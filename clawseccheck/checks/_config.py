@@ -23,6 +23,7 @@ from ..collector import (
     SKILL_DIRS,
     Context,
     dig,
+    persistent_env_evidence,
 )
 from ..safeio import walk_dir_safely
 from ..textnorm import normalize_for_scan
@@ -787,6 +788,76 @@ def check_controlui_origins(ctx: Context) -> Finding:
     )
 
 
+# ---------------------------------------------------------------------------
+# B-290 (ENV-4): the gateway's auth credential can come from the ENVIRONMENT, not the
+# config — and when it does, it supplies the auth MODE as well.
+#
+# resolveGatewayAuth (auth-resolve-NyPBrh8F.js:19-46) resolves the credential first, then
+# derives the mode:
+#     else if (authConfig.mode) { mode = authConfig.mode; ... }
+#     else if (password)        { mode = "password"; modeSource = "password"; }
+#     else if (token)           { mode = "token";    modeSource = "token"; }
+# and the credential itself comes from resolveGatewayCredentialsFromValues
+# (credentials-DesN22Ui.js:30-42), which reads env.OPENCLAW_GATEWAY_TOKEN and
+# env.OPENCLAW_GATEWAY_PASSWORD (:32-33).
+#
+# The consequence is decisive for B2: server-runtime-config-r5ejxORO.js:78 refuses a
+# non-loopback bind unless `hasSharedSecret`, and that shared secret may be entirely
+# env-supplied — so a host with `gateway.bind=0.0.0.0` and NO `gateway.auth` block is
+# genuinely authenticated, and B2's FAIL on it was a false positive on a correctly
+# secured host.
+#
+# THREE deliberate constraints keep this from becoming a lying PASS:
+#
+# 1. It is ASYMMETRIC. Presence of an env credential is a POSITIVE signal only; ABSENCE
+#    is never read as "no auth". The auditing process's environment is not the gateway
+#    service's, so a check that FAILed on env absence would false-positive massively —
+#    and B2's existing FAIL when nothing is observable is the CORRECT, deliberate
+#    false-negative boundary (Golden Rule #5).
+# 2. Evidence must be PERSISTENT and on disk — a systemd unit's Environment=/
+#    EnvironmentFile=, or a global runtime dotenv file. `persistent_env_evidence`
+#    explicitly does NOT fall back to os.environ: a token exported in the operator's
+#    terminal says nothing about a service started months ago by systemd, and letting it
+#    clear a CRITICAL finding would key the verdict on the shell the audit happened to be
+#    launched from. The ambient-shell case therefore stays a FAIL, not a PASS.
+# 3. "env WINS over config" is FALSE for server auth and is not relied on here.
+#    resolveGatewayAuth passes tokenPrecedence/passwordPrecedence: "config-first"
+#    (auth-resolve-NyPBrh8F.js:23-24), so a configured token beats the env one. The gap
+#    is only the config-LESS path, which is exactly what the softening is scoped to.
+#
+# WHY THIS CANNOT PRODUCE A LYING PASS — the argument that justifies softening a CRITICAL
+# check at all. Suppose an observed credential does NOT actually reach the running
+# gateway (say it sits only in ~/.config/openclaw/gateway.env, which
+# loadGlobalRuntimeDotEnvFiles loads by default, dotenv-global-mWLbBl_z.js:87-100, but
+# which resolveGatewayRunDotEnvPaths — pre-bootstrap-8G8HyMEQ.js:55-62, <stateDir>/.env
+# plus <configDir>/.env — does not name for `gateway run`). Then `hasSharedSecret` is
+# false, and server-runtime-config-r5ejxORO.js:78 throws
+# "refusing to bind gateway to <host>:<port> without auth" — an UNCONDITIONAL guard with
+# no bypass flag anywhere in the dist. So the gateway does not start.
+#
+# The two outcomes are therefore: the credential reaches the gateway (it is authenticated,
+# and the old FAIL was the false positive), or it does not (there is no listener at all).
+# Neither leaves a live, exposed, unauthenticated gateway that this check has been talked
+# out of reporting. That is the whole reason the softening is sound; if a future change to
+# OpenClaw made that bind guard conditional, this reasoning — and this softening — would
+# have to be revisited.
+_GATEWAY_ENV_CREDENTIAL_VARS = ("OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_PASSWORD")
+
+
+def _gateway_env_credential(ctx: Context) -> "tuple[str | None, str | None]":
+    """An env-supplied gateway credential observed in a persistent artifact.
+
+    Returns ``(value, source)`` or ``(None, None)``. The value is returned only so the
+    caller can test presence — it is a secret and must never reach a message, evidence
+    entry, or log (§8).
+    """
+    for var in _GATEWAY_ENV_CREDENTIAL_VARS:
+        value, source = persistent_env_evidence(ctx, var)
+        if value is not None and value.strip():
+            return value, source or "an environment file"
+    return None, None
+
+
 def check_credential_blast_radius(ctx: Context) -> Finding:
     """B41 — Credential blast-radius assessment.
 
@@ -809,6 +880,14 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
     # --- inventory credential surface ---
     profiles = dig(cfg, "auth.profiles") or {}
     has_gateway_token = bool(dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token"))
+    # B-290 (ENV-4): the gateway credential does not have to be in the config at all.
+    # resolveGatewayCredentialsFromValues (credentials-DesN22Ui.js:32-33) reads
+    # OPENCLAW_GATEWAY_TOKEN / OPENCLAW_GATEWAY_PASSWORD straight from the environment, so
+    # a config-only inventory undercounts a host whose gateway secret lives in its systemd
+    # unit or a global dotenv file. Persistent artifacts only — never os.environ, whose
+    # contents belong to the auditing shell rather than to the gateway service.
+    _env_gw_token, _env_gw_src = _gateway_env_credential(ctx)
+    has_env_gateway_token = _env_gw_token is not None
 
     # Collect unique provider names from profile keys of the form "<provider>:<account>"
     # CRITICAL: extract only the part BEFORE the first ":" — never the account/email.
@@ -821,7 +900,7 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
                 seen.add(provider)
                 providers.append(provider)
 
-    has_credentials = bool(providers) or has_gateway_token
+    has_credentials = bool(providers) or has_gateway_token or has_env_gateway_token
 
     if not has_credentials:
         return _finding(
@@ -837,16 +916,22 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
     has_outbound = _hint(tools, OUTBOUND_TOOL_HINTS) or bool(dig(cfg, "tools.elevated.allowFrom"))
     reachable = has_untrusted_ingress and has_outbound
 
-    n = len(providers) + (1 if has_gateway_token else 0)
+    any_gateway_token = has_gateway_token or has_env_gateway_token
+    n = len(providers) + (1 if any_gateway_token else 0)
     provider_list = ", ".join(sorted(providers))
-    gateway_note = " + gateway token" if has_gateway_token else ""
+    gateway_note = " + gateway token" if any_gateway_token else ""
 
-    # Build evidence list — provider names and gateway marker only, never emails/values
+    # Build evidence list — provider names and gateway marker only, never emails/values.
+    # B-290: the env-supplied case records only WHERE the credential is configured, never
+    # its value; `_gateway_env_credential` returns the value solely so presence can be
+    # tested, and it is never placed in a message or in evidence (§8).
     evidence: list[str] = []
     if providers:
         evidence.append(f"providers: {provider_list}")
     if has_gateway_token:
         evidence.append("gateway-token: present")
+    elif has_env_gateway_token:
+        evidence.append(f"gateway-token: present, supplied by {_env_gw_src}")
 
     if reachable:
         detail = (
@@ -1683,14 +1768,50 @@ def check_gateway(ctx: Context) -> Finding:
     # gateway.controlUi.allowInsecureAuth", not generic boilerplate the config already meets).
     # Clauses join with "; " so each fired condition contributes one fragment.
     fixes = []
+    # B-290: clauses that are worth DISCLOSING but are not proof of a misconfiguration.
+    # They never escalate the status; they only add a WARN when nothing FAIL-worthy fired.
+    soft_ev: list[str] = []
     bind = parse_bind_host(dig(cfg, "gateway.bind", ""))
     auth = dig(cfg, "gateway.auth.mode")
     if bind and bind not in LOOPBACK and auth in (None, "none"):
-        ev.append(f"gateway.bind={bind or '?'} exposed with auth.mode={auth}")
-        fixes.append(
-            "Bind the gateway to loopback or require auth "
-            "(gateway.auth.mode=token, token >=24 chars)"
+        # B-290 (ENV-4): `auth is None` — i.e. gateway.auth.mode absent or null — is
+        # EXACTLY the condition under which resolveGatewayAuth derives the mode from an
+        # env-resolved credential instead (auth-resolve-NyPBrh8F.js:34-42, `else if
+        # (authConfig.mode)`). So when a persistent artifact carries
+        # OPENCLAW_GATEWAY_TOKEN/_PASSWORD, this bind is authenticated and the FAIL was a
+        # false positive on a correctly secured host.
+        #
+        # `auth == "none"` is deliberately NOT softened: "none" is truthy in the dist, so
+        # the mode stays "none", `hasSharedSecret` stays false, and
+        # server-runtime-config-r5ejxORO.js:78 refuses the non-loopback bind outright.
+        # An explicit mode=none is a decision, not an omission.
+        #
+        # NOT softened either: a config-supplied `gateway.auth.token` with no `mode`,
+        # which the dist also treats as authenticated. That is a real adjacent
+        # false-positive FAIL, but it is a config-only path with no env component, so it
+        # is out of ENV-4's scope and left for separate triage rather than widened into
+        # here on the way past.
+        _env_cred, _env_cred_src = (
+            _gateway_env_credential(ctx) if auth is None else (None, None)
         )
+        if _env_cred is not None:
+            soft_ev.append(
+                f"gateway.bind={bind} is non-loopback and the config sets no "
+                f"gateway.auth.mode, but a gateway credential is supplied by the "
+                f"environment ({_env_cred_src}) — OpenClaw derives auth.mode from it, so "
+                "the gateway is authenticated. Reported as disclosure, not exposure"
+            )
+            fixes.append(
+                "No action required if the environment-supplied gateway credential is "
+                "intentional. Setting gateway.auth.mode explicitly makes the posture "
+                "readable from the config alone"
+            )
+        else:
+            ev.append(f"gateway.bind={bind or '?'} exposed with auth.mode={auth}")
+            fixes.append(
+                "Bind the gateway to loopback or require auth "
+                "(gateway.auth.mode=token, token >=24 chars)"
+            )
     # gateway.http.no_auth does NOT exist in OpenClaw schema (auth is enforced by default)
     if dig(cfg, "gateway.controlUi.allowInsecureAuth"):
         ev.append("gateway.controlUi.allowInsecureAuth enabled")
@@ -1742,7 +1863,12 @@ def check_gateway(ctx: Context) -> Finding:
     if ev:
         _insecure_auth_only = ev == ["gateway.controlUi.allowInsecureAuth enabled"]
         sev = WARN if _insecure_auth_only else FAIL
-        return _finding("B2", sev, "; ".join(ev), "; ".join(fixes), ev)
+        # soft_ev rides along in the detail so the report still says WHY the exposed bind
+        # was not counted, but it can never raise the status — every escalation still
+        # comes from `ev`.
+        return _finding("B2", sev, "; ".join(ev + soft_ev), "; ".join(fixes), ev + soft_ev)
+    if soft_ev:
+        return _finding("B2", WARN, "; ".join(soft_ev), "; ".join(fixes), soft_ev)
     if not cfg:
         return _finding(
             "B2",

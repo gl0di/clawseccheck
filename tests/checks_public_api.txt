@@ -24,6 +24,9 @@ SKILL_CONTENT_RING
 UNKNOWN
 WARN
 _AUTONOMY_RE
+_B182_ENV_OVERRIDES
+_B184_CODELOAD_ENV_VARS
+_B184_REGISTRY_ENV_VARS
 _B62_EXPECTED
 _B62_HIGH_SURPRISE
 _B74_ROLE_BLOCK_RE
@@ -57,6 +60,7 @@ _b181_recorded_files
 _b182_audits_this_users_own_home
 _b182_candidate_stores
 _b182_readable_by_others
+_b184_is_canonical
 _b58_hidden_segments
 _b62_actual_families
 _b62_classify_category
@@ -132,9 +136,11 @@ check_autonomy
 check_bootstrap_injection
 check_bootstrap_write_protection
 check_browser_ssrf
+check_bundled_root_override
 check_cachetrace_redaction
 check_capability_blast_radius
 check_capability_intent_mismatch
+check_clawhub_registry_provenance
 check_clawhub_token_store
 check_clickfix_setup_section
 check_codex_project_trust
@@ -250,6 +256,7 @@ check_tool_output_trust_inversion
 check_trigger_homoglyph
 check_trustedproxy_loopback
 check_unicode_obfuscation
+check_unit_embedded_gateway_secret
 check_unsafe_deserialization
 check_untrusted_context
 check_update_pinning

@@ -1895,10 +1895,83 @@ CATALOG: list[CheckMeta] = [
         # exactly what a target divergence puts in doubt.
         surface="monitoring",
     ),
+    # B184 (B-291, ENV-5): WHICH ClawHub issued the supply-chain verdicts B135/B177/B181
+    # consume. Repointing the registry (OPENCLAW_CLAWHUB_URL / CLAWHUB_URL, and the sibling
+    # codeload ladder) turns all three into attacker-issued lying PASSes — B181 in
+    # particular verifies bytes against digests recorded from whoever served the artifact,
+    # so they match by construction. Detection is fully local: OpenClaw persists the
+    # endpoint per skill as `registry` in .clawhub/lock.json and .clawhub/origin.json
+    # (dist/status-WbH6V7lU.js:1245,1258), files B181 already opens and never read the field
+    # from. WARN-only and scored=False: a self-hosted / enterprise mirror is legitimate and
+    # disclosed, so a FAIL would false-positive on it (the B157 non-registry-source
+    # precedent). CLOSES only the DETECTION half — judging whether the redirected host
+    # serves malware would require contacting it, which Golden Rule #1 forbids, and no
+    # output may imply otherwise.
+    CheckMeta(
+        "B184",
+        "Skills installed from a ClawHub endpoint other than the public registry",
+        MEDIUM,
+        "hardening",
+        "Supply Chain / Provenance",
+        scored=False,
+        confidence="HIGH",
+        surface="skills",
+    ),
+    # B186 (B-289, ENV-3): OPENCLAW_BUNDLED_SKILLS_DIR / OPENCLAW_BUNDLED_HOOKS_DIR
+    # relocate the bundled code-load roots, and OpenClaw honours both UNCONDITIONALLY
+    # (bundled-dir-BQFrcRIS.js:22-24, workspace-zj1TEEka.js:54-56) — no existence check, no
+    # trust check, ahead of every legitimate resolution path. Unlike tampering with the
+    # npm-owned install tree this needs no privileged write at all: one extra
+    # `Environment=` line in the user's systemd unit, or one line in a global dotenv file.
+    #
+    # scored=False on purpose. The near-universal state is UNKNOWN (no override observed),
+    # which is out of the denominator either way; the state that DOES occur benignly is
+    # WARN, for a source-checkout developer who relocated the root deliberately — scoring
+    # it would dock the grade of a setup that is working as its owner intended. The FAIL
+    # branch (target directory writable by other local accounts) still surfaces in the
+    # report and trips --exit-code; it just does not distort the score.
+    #
+    # HIGH, not CRITICAL: what is proven is an unenumerated code-load root, not that
+    # hostile code is in it. OPENCLAW_BUNDLED_PLUGINS_DIR is deliberately NOT covered —
+    # OpenClaw trust-gates that one (bundled-dir-DKbeVv7V.js:124-134) and flagging it would
+    # be a false positive on the product's own internal uses.
+    CheckMeta(
+        "B186",
+        "Bundled skills/hooks code-load root relocated by an environment override",
+        HIGH,
+        "advisory",
+        "Supply Chain / Code Load Roots",
+        scored=False,
+        confidence="HIGH",
+        surface="skills",
+    ),
+    # B193 (B-290, ENV-4): a gateway token/password written INLINE into a systemd user
+    # unit's `Environment=` line. Grounded in OpenClaw's own service audit, which raises
+    # `gatewayTokenEmbedded` for exactly this (service-audit-bKq3tdW1.js:185-192) and
+    # deliberately exempts an EnvironmentFile-sourced value (:247) — so this check reads
+    # only the inline subset.
+    #
+    # scored=False and MEDIUM: OpenClaw rates its own finding "recommended", and a unit
+    # that merely followed an older install path should not be graded as a breach. The
+    # FAIL branch is reserved for the case where the privilege is real and checkable —
+    # the unit file is readable by another local account — mirroring B182.
+    #
+    # ID note: B185 and B187-B191 are reserved by other in-flight work; B193 is the next
+    # free identifier above the reserved range.
+    CheckMeta(
+        "B193",
+        "Gateway credential embedded in plaintext in a systemd user unit",
+        MEDIUM,
+        "advisory",
+        "Secrets Vault / Gateway",
+        scored=False,
+        confidence="HIGH",
+        surface="secrets",
+    ),
     # B192 (B-282, ENV-6): documented break-glass env toggles left on in a persistent
     # dotenv file. scored=False, WARN-capable only — OpenClaw's own docs instruct users to
     # set OPENCLAW_ALLOW_INSECURE_PRIVATE_WS in some setups, so a FAIL would punish
-    # following the vendor manual. IDs B184-B191 are reserved by other in-flight work.
+    # following the vendor manual. IDs B185-B191 are reserved by other in-flight work.
     CheckMeta(
         "B192",
         "Break-glass environment toggle left enabled in a global dotenv file",
@@ -2174,6 +2247,9 @@ AST_MAP = {
     "B177": ("AST02",),  # OpenClaw's own persisted ClawHub trust verdict = supply-chain compromise signal (cf. B5/B15/B24/B42)
     "B181": ("AST02",),  # installed skill modified after install = supply-chain tamper on an auto-loaded artifact (cf. B5/B78/B86)
     "B182": ("AST02",),  # exposed ClawHub publish token = supply-chain pivot into every install (cf. B1/B41)
+    "B184": ("AST02",),  # skills installed from a redirected registry = supply-chain compromise at the source (cf. B135/B177/B181)
+    "B186": ("AST02",),  # relocated bundled skills/hooks root = supply-chain code-load root the scanners never enumerated (cf. B184)
+    "B193": ("AST02",),  # gateway secret inlined in the service unit = credential exposure on the persistence surface (cf. B182)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
@@ -2290,6 +2366,9 @@ OWASP_MAP = {
     "B177": ("LLM03",),  # OpenClaw's own persisted ClawHub trust verdict = Supply Chain
     "B181": ("LLM03",),  # installed skill modified after install = Supply Chain
     "B182": ("LLM02", "LLM03"),  # exposed ClawHub publish token = Sensitive Information Disclosure + Supply Chain
+    "B184": ("LLM03",),  # skills installed from a redirected registry = Supply Chain
+    "B186": ("LLM03",),  # relocated bundled skills/hooks code-load root = Supply Chain
+    "B193": ("LLM02",),  # gateway secret inlined in the service unit = Sensitive Information Disclosure
 }
 
 

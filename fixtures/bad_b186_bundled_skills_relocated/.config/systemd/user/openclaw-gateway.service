@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenClaw Gateway
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/openclaw gateway run
+Restart=always
+Environment=OPENCLAW_GATEWAY_PORT=8899
+Environment=OPENCLAW_BUNDLED_SKILLS_DIR=/nonexistent/relocated-skills
+Environment=OPENCLAW_BUNDLED_HOOKS_DIR=/nonexistent/relocated-hooks
+
+[Install]
+WantedBy=default.target

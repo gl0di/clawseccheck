@@ -209,6 +209,22 @@ class Context:
     dotenv_sources: dict = field(default_factory=dict)
     dotenv_files: list = field(default_factory=list)  # global dotenv files found and read
     dotenv_found: bool = False                        # at least one global dotenv exists
+    # B-289/B-290 (ENV-3/ENV-4): the environment the OpenClaw *service* actually runs
+    # with, read off disk from OpenClaw-related systemd user units — `Environment=` lines
+    # plus any file named by `EnvironmentFile=`. This is the artifact that matters: the
+    # gateway runs under systemd with its OWN environment, so the auditing process's
+    # os.environ describes a different process entirely (see env_evidence).
+    # `unit_env_inline` maps each key that came from an INLINE `Environment=` line to the
+    # unit file that inlined it — OpenClaw's own service audit treats an inline value
+    # differently from an EnvironmentFile-sourced one (service-audit-bKq3tdW1.js:247).
+    # It deliberately stores the unit path rather than the value: a caller that needs to
+    # reason about an inlined secret must never be handed a second copy of it (§8).
+    unit_env_values: dict = field(default_factory=dict)
+    unit_env_sources: dict = field(default_factory=dict)
+    unit_env_inline: dict = field(default_factory=dict)
+    unit_env_files: list = field(default_factory=list)  # unit files found and read
+    unit_env_found: bool = False       # at least one OpenClaw-related unit was read
+    unit_env_unreadable: bool = False  # a candidate unit existed but could not be read
     native: object = None                           # NativeResult from openclaw security audit
     host: object = None                             # hostwatch.detect() result; set by audit(include_host=True)
     include_host: bool = False                      # host-filesystem scanning enabled (audit(include_host=True) / not --no-host)
@@ -1367,6 +1383,41 @@ def _is_own_source(p: Path) -> bool:
     return all(m in head for m in _OWN_ENGINE_MARKERS)
 
 
+def _iter_skill_dirs_guarded(base: Path, allow_symlink: bool, ctx: Context):
+    """``iter_discovered_skill_dirs`` that degrades to a limit hit instead of raising.
+
+    B-289: skill roots used to be either inside the audited home or named by the config,
+    so an unreadable entry was a remote possibility. OPENCLAW_BUNDLED_SKILLS_DIR makes the
+    root an ARBITRARY absolute path chosen by whoever set the variable, and a directory
+    containing an entry this process cannot stat is then reachable — the discovery walk
+    raises ``PermissionError`` and takes the WHOLE audit down with it.
+
+    Found by the adversarial pass, not by a fixture: pointing the override at ``/tmp`` is
+    enough on a stock Ubuntu box, because ``/tmp/snap-private-tmp`` is root-only. That
+    turns "an attacker who can write the systemd unit" into "an attacker who can stop the
+    audit from producing any report at all" — a denial-of-audit for the price of one line.
+
+    A partial walk is recorded as a limit hit, never swallowed: consumers of
+    ``ctx.installed_skills`` treat a limit hit as "this view is incomplete" and report
+    UNKNOWN rather than a clean PASS over a scan that never finished.
+    """
+    it = _iter_discovered_skill_dirs(
+        base, allow_symlink_entries=allow_symlink, limit_hits=ctx.limit_hits
+    )
+    while True:
+        try:
+            item = next(it)
+        except StopIteration:
+            return
+        except OSError as exc:
+            ctx.limit_hits.append(
+                f"skill discovery under '{base}' stopped early ({exc.__class__.__name__}) "
+                "— skills beyond that point were NOT scanned"
+            )
+            return
+        yield item
+
+
 def _read_installed_skills(home: Path, ctx: Context) -> None:
     seen: set[str] = set()
     # (base_dir, allow_symlink_entries). The hardcoded roots refuse symlinked skill dirs —
@@ -1396,6 +1447,23 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     # <plugin>/skills/ that enter the auto-load surface; discover them so they're scanned like
     # any other installed skill instead of being silently invisible.
     roots.extend((pp / "skills", False) for pp in _config_plugin_load_paths(home, ctx.config))
+    # B-289 (ENV-3): OPENCLAW_BUNDLED_SKILLS_DIR relocates the bundled skills root, and
+    # resolveBundledSkillsDir (bundled-dir-BQFrcRIS.js:22-24) honours it unconditionally.
+    # The relocated directory is a real auto-load root, so its skills go through the SAME
+    # content scanners as every other tier rather than a second engine. Only a relocation
+    # evidenced by a persistent artifact is followed — the auditing shell's environment is
+    # not the agent's (see persistent_env_evidence). Note this ADDS a load root: the
+    # default bundled-dist tier is still not scanned (SKILL_TIER_ORDER omits it), so this
+    # is an unenumerated-root fix, not a stale-snapshot one.
+    for _var, _kind, _value, _src in bundled_root_overrides(ctx):
+        if _kind != "skills":
+            continue  # a hooks root holds hook modules, not SKILL.md dirs — B186 discloses it
+        try:
+            _override = Path(_value).expanduser()
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if _override.is_dir():
+            roots.append((_override, False))
     plugin_skills = home / "plugin-skills"
     if plugin_skills.is_dir():
         roots.append((plugin_skills, True))
@@ -1410,9 +1478,7 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         if base_key in seen_roots:
             continue
         seen_roots.add(base_key)
-        for sd, target in _iter_discovered_skill_dirs(
-            base, allow_symlink_entries=allow_symlink, limit_hits=ctx.limit_hits
-        ):
+        for sd, target in _iter_skill_dirs_guarded(base, allow_symlink, ctx):
             if len(ctx.installed_skills) >= _MAX_SKILLS:
                 # B-268: this used to `return` — the collection stopped dead, leaving
                 # ctx.installed_skills a silently truncated view with no trace that more
@@ -2232,6 +2298,363 @@ def dotenv_override(ctx: Context, key: str) -> "tuple[str | None, str | None]":
     return None, None
 
 
+# ---------------------------------------------------------------------------
+# B-289/B-290 (ENV-3/ENV-4): the systemd user unit's OWN environment.
+#
+# Why this exists at all: OpenClaw's gateway runs as a systemd user service, so the
+# environment that decides its behaviour is the unit's, not the auditing shell's. Reading
+# `os.environ` and calling it "the agent's environment" would be a category error — the
+# variable an attacker plants in the unit is invisible there, and a variable the operator
+# happens to have exported in their own shell is not the service's. Every verdict that
+# moves on env evidence therefore keys on a PERSISTENT, on-disk artifact only
+# (`persistent_env_evidence` below).
+#
+# Grounded against the installed dist, not the recon:
+#   systemd-B4Oq2owH.js:276-287   readSystemdServiceRuntime's own unit walk: trim each
+#                                 line, skip blanks and '#', then `Environment=` ->
+#                                 parseSystemdEnvAssignment, `EnvironmentFile=` -> spec list
+#   systemd-unit-DVDnVbxX.js:70-99  parseSystemdEnvAssignment — strip one matched wrapping
+#                                 quote pair with backslash escapes, split at the FIRST
+#                                 '=' (index must be > 0)
+#   systemd-unit-DVDnVbxX.js:101-110 parseSystemdEnvAssignments — splitArgsPreservingQuotes
+#                                 with escapeMode "backslash", quoteChars ' and ",
+#                                 quoteStart "item-start" (a quote only opens a run at the
+#                                 start of an item), then one assignment per token
+#   systemd-B4Oq2owH.js:400-402   expandSystemdSpecifier — ONLY "%h" is expanded
+#   systemd-B4Oq2owH.js:403-405   parseEnvironmentFileSpecs — same quote-preserving split
+#   systemd-B4Oq2owH.js:430-447   resolveSystemdEnvironmentFiles — optional leading '-',
+#                                 relative specs resolved against the unit's directory,
+#                                 unreadable files skipped silently
+#   systemd-B4Oq2owH.js:406-418   parseEnvironmentFileLine — '#'/';' comments, split at the
+#                                 first '=', strip one matched wrapping quote pair
+#   systemd-B4Oq2owH.js:294-297   merge order: {...inline, ...fromFiles} — an
+#                                 EnvironmentFile value OVERRIDES the inline one
+#
+# Anything this parser cannot reproduce with confidence is simply not reported. Under-
+# reading a key costs a false negative; mis-parsing one would cost a false WARN, and only
+# the former is acceptable here (same rule as _parse_dotenv).
+_MAX_UNIT_BYTES = 256_000
+_MAX_UNIT_FILES = 40
+_MAX_ENV_FILES = 40
+_MAX_UNIT_ENV_ENTRIES = 500
+
+
+def _split_preserving_quotes(raw: str) -> "list[str]":
+    """Mirror ``splitArgsPreservingQuotes(raw, {escapeMode:"backslash", quoteStart:"item-start"})``.
+
+    A quote character opens a quoted run only at the START of an item
+    (systemd-unit-DVDnVbxX.js:102-105); once an item has begun, a quote is a literal.
+    """
+    items: "list[str]" = []
+    cur = ""
+    started = False
+    quote: "str | None" = None
+    escape = False
+    for ch in raw:
+        if escape:
+            cur += ch
+            escape = False
+            started = True
+            continue
+        if ch == "\\":
+            escape = True
+            started = True
+            continue
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            else:
+                cur += ch
+            continue
+        if ch in ("'", '"') and not started:
+            quote = ch
+            started = True
+            continue
+        if ch.isspace():
+            if started:
+                items.append(cur)
+                cur = ""
+                started = False
+            continue
+        cur += ch
+        started = True
+    if started:
+        items.append(cur)
+    return items
+
+
+def _portable_env_key(key: str) -> "str | None":
+    """A POSIX-portable identifier, or None. Same rule as ``_parse_dotenv``.
+
+    A key the product would reject (normalizeEnvVarKey with {portable: true},
+    host-env-security-CWC2ZCy4.js:414-419) is not a key the product will honour, so it is
+    not evidence.
+    """
+    key = key.strip()
+    if not key or not (key[0].isalpha() or key[0] == "_"):
+        return None
+    if not all(c.isalnum() or c == "_" for c in key):
+        return None
+    return key
+
+
+def parse_systemd_env_assignments(raw: str) -> "list[tuple[str, str]]":
+    """Parse the right-hand side of one ``Environment=`` line into (key, value) pairs.
+
+    systemd allows several space-separated assignments on one line, each optionally
+    quoted as a whole (``Environment="A=b c" D=e``) — the real unit on a stock install
+    uses exactly that shape. Mirrors parseSystemdEnvAssignments
+    (systemd-unit-DVDnVbxX.js:101-110); tokens without a '=' past position 0 are dropped,
+    as the dist drops them.
+    """
+    out: "list[tuple[str, str]]" = []
+    for token in _split_preserving_quotes(raw):
+        key, sep, value = token.partition("=")
+        if not sep:
+            continue
+        norm = _portable_env_key(key)
+        if norm is None:
+            continue
+        out.append((norm, value))
+    return out
+
+
+def _parse_environment_file(text: str) -> "list[tuple[str, str]]":
+    """Mirror ``parseEnvironmentFileLine`` (systemd-B4Oq2owH.js:406-418) over a whole file."""
+    out: "list[tuple[str, str]]" = []
+    for line in text.splitlines():
+        if len(out) >= _MAX_UNIT_ENV_ENTRIES:
+            break
+        trimmed = line.strip()
+        if not trimmed or trimmed.startswith("#") or trimmed.startswith(";"):
+            continue
+        eq = trimmed.find("=")
+        if eq <= 0:
+            continue
+        norm = _portable_env_key(trimmed[:eq])
+        if norm is None:
+            continue
+        value = trimmed[eq + 1:].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        out.append((norm, value))
+    return out
+
+
+def systemd_user_unit_dir(home: Path) -> Path:
+    """``~/.config/systemd/user`` expressed relative to the AUDITED home.
+
+    ``home.parent`` is ``~`` for a real OpenClaw profile directory — the same idiom B150
+    and B182 already use to reach ``~/.config`` — so a fixture or ``--home`` scan reads
+    the fixture's own units and never this machine's.
+    """
+    return home.parent / ".config" / "systemd" / "user"
+
+
+def systemd_unit_is_openclaw_related(unit_name: str, exec_start: str) -> bool:
+    """True if the unit's file name or ExecStart= line mentions 'openclaw'.
+
+    The single definition; ``checks/_host.py`` B150 delegates here rather than keeping a
+    second copy that could drift.
+    """
+    return "openclaw" in unit_name.lower() or "openclaw" in exec_start.lower()
+
+
+def _read_environment_file(spec: str, unit_path: Path, home: Path, ctx: Context) -> None:
+    """Read one ``EnvironmentFile=`` spec into ``ctx.unit_env_values``.
+
+    Mirrors resolveSystemdEnvironmentFiles (systemd-B4Oq2owH.js:430-447): an optional
+    leading '-' (ignore-if-missing) is stripped, ``%h`` expands to the user's home, a
+    relative path resolves against the unit's own directory, and an unreadable file is
+    skipped silently. Any OTHER ``%`` specifier is left unexpanded and the spec dropped —
+    guessing at it would read the wrong file.
+    """
+    pathname = spec[1:].strip() if spec.startswith("-") else spec
+    if not pathname:
+        return
+    pathname = pathname.replace("%h", str(home.parent))
+    if "%" in pathname:
+        return
+    candidate = Path(pathname)
+    if not candidate.is_absolute():
+        candidate = unit_path.parent / candidate
+    try:
+        if candidate.is_symlink() or not candidate.is_file():
+            return
+        with open(candidate, "rb") as fp:
+            raw, truncated = _read_with_limit(fp, _MAX_UNIT_BYTES)
+    except OSError as exc:
+        ctx.errors.append(f"could not read {candidate}: {exc}")
+        return
+    if truncated:
+        ctx.limit_hits.append(
+            f"EnvironmentFile '{candidate}' exceeded the {_MAX_UNIT_BYTES // 1000}KB cap — "
+            "content beyond the cap was NOT scanned"
+        )
+    for key, value in _parse_environment_file(raw.decode("utf-8", errors="replace")):
+        if key not in ctx.unit_env_values and len(ctx.unit_env_values) >= _MAX_UNIT_ENV_ENTRIES:
+            break
+        # File values override inline ones, matching the dist's merge order
+        # (systemd-B4Oq2owH.js:294-297). The inline map is NOT updated, so a caller can
+        # still tell an inline-embedded secret from a file-backed one.
+        ctx.unit_env_values[key] = value
+        ctx.unit_env_sources[key] = f"{candidate} (EnvironmentFile= of {unit_path.name})"
+
+
+def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
+    """Read the environment of OpenClaw-related systemd user units (B-289/B-290).
+
+    Silent on any host without ``~/.config/systemd/user`` — macOS, Windows, a container,
+    or simply a user who never installed the service. ``ctx.unit_env_unreadable`` records
+    the distinct "a unit is there but we could not read it" state so a consuming check can
+    say UNKNOWN instead of inventing a clean PASS.
+    """
+    units_dir = systemd_user_unit_dir(home)
+    if not units_dir.is_dir():
+        return
+    try:
+        unit_files = sorted(
+            p for p in units_dir.iterdir()
+            if p.is_file() and not p.is_symlink() and p.suffix == ".service"
+        )[:_MAX_UNIT_FILES]
+    except OSError as exc:
+        ctx.errors.append(f"could not list {units_dir}: {exc}")
+        ctx.unit_env_unreadable = True
+        return
+
+    pending_files: "list[tuple[str, Path]]" = []
+    for unit_path in unit_files:
+        try:
+            with open(unit_path, "rb") as fp:
+                raw, truncated = _read_with_limit(fp, _MAX_UNIT_BYTES)
+        except OSError:
+            ctx.unit_env_unreadable = True
+            continue
+        text = raw.decode("utf-8", errors="replace")
+        if truncated:
+            ctx.limit_hits.append(
+                f"systemd unit '{unit_path.name}' exceeded the "
+                f"{_MAX_UNIT_BYTES // 1000}KB cap — content beyond the cap was NOT scanned"
+            )
+
+        exec_start = ""
+        env_lines: "list[str]" = []
+        file_specs: "list[str]" = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("ExecStart=") and not exec_start:
+                exec_start = stripped[len("ExecStart="):].strip()
+            elif stripped.startswith("Environment="):
+                env_lines.append(stripped[len("Environment="):].strip())
+            elif stripped.startswith("EnvironmentFile="):
+                spec = stripped[len("EnvironmentFile="):].strip()
+                if spec:
+                    file_specs.append(spec)
+        if not systemd_unit_is_openclaw_related(unit_path.name, exec_start):
+            continue
+
+        ctx.unit_env_found = True
+        ctx.unit_env_files.append(str(unit_path))
+        for raw_line in env_lines:
+            if len(ctx.unit_env_values) >= _MAX_UNIT_ENV_ENTRIES:
+                break
+            for key, value in parse_systemd_env_assignments(raw_line):
+                ctx.unit_env_values[key] = value
+                ctx.unit_env_inline[key] = str(unit_path)
+                ctx.unit_env_sources[key] = f"{unit_path} (Environment=)"
+        for spec in file_specs:
+            for token in _split_preserving_quotes(spec):
+                if len(pending_files) >= _MAX_ENV_FILES:
+                    break
+                pending_files.append((token, unit_path))
+
+    # Bounded: a unit is attacker-writable in the threat model this check exists for, and
+    # `EnvironmentFile=` accepts arbitrary absolute paths, so an unbounded spec list would
+    # be a cheap way to turn one 256KB file into hundreds of thousands of open() calls.
+    for token, unit_path in pending_files:
+        _read_environment_file(token, unit_path, home, ctx)
+
+
+def persistent_env_evidence(ctx: Context, key: str) -> "tuple[str | None, str | None]":
+    """The value of *key* as delivered by a PERSISTENT on-disk artifact, and its source.
+
+    Consults, in the order the product resolves them for a service-run agent:
+
+    1. the systemd unit's ``Environment=`` / ``EnvironmentFile=`` — already in
+       ``process.env`` when the agent starts, which is exactly why the global dotenv
+       loader then skips the key (``preExistingKeys.has(key)``,
+       dotenv-global-mWLbBl_z.js:44-46 / :66);
+    2. the two global runtime dotenv files.
+
+    It deliberately does NOT fall back to ``os.environ``. This function backs verdict-
+    moving decisions — softening B2's exposed-gateway FAIL, and B186's override
+    disclosure — and the auditing shell's environment is not the service's. Letting an
+    exported variable in the operator's terminal clear a CRITICAL finding about a
+    separate long-running process would be keying a verdict on something outside the
+    audited subject entirely. Where no persistent artifact carries the key, the honest
+    answer is "unknown", not "authenticated" (Golden Rule #5, and the ENV-3 trap that
+    ``os.environ`` alone manufactures a lying PASS).
+
+    ``dotenv_override`` keeps its own os.environ leg for the callers that want a
+    best-effort read of this user's own live setup; the two are intentionally different.
+    """
+    value = ctx.unit_env_values.get(key)
+    if isinstance(value, str) and value.strip():
+        return value, ctx.unit_env_sources.get(key)
+    value = ctx.dotenv_values.get(key)
+    if isinstance(value, str) and value.strip():
+        return value, ctx.dotenv_sources.get(key)
+    return None, None
+
+
+def env_evidence_readable(ctx: Context) -> bool:
+    """True when at least one env-bearing artifact was actually read.
+
+    The discriminator between "no override is set" and "we could not see whether one is
+    set". A check that cannot tell those apart must report UNKNOWN.
+    """
+    return bool(ctx.unit_env_found or ctx.dotenv_found)
+
+
+# The two bundled-root relocation variables OpenClaw honours UNCONDITIONALLY (B-289).
+#   bundled-dir-BQFrcRIS.js:22-24  resolveBundledSkillsDir — `const override =
+#       process.env.OPENCLAW_BUNDLED_SKILLS_DIR?.trim(); if (override) return override;`
+#       returns BEFORE every legitimate resolution path, with no existence or trust check.
+#   workspace-zj1TEEka.js:54-56    resolveBundledHooksDir — identical shape.
+#
+# OPENCLAW_BUNDLED_PLUGINS_DIR is deliberately ABSENT from this tuple and must never be
+# added: bundled-dir-DKbeVv7V.js:124-134 resolves the override and then gates it through
+# resolveTrustedExistingOverride (:77-85), which requires the realpath to be pathContains-ed
+# by a trusted bundled-plugin root under the package root AND to pass
+# hasUsableBundledPluginTree. `OPENCLAW_BUNDLED_PLUGINS_DIR=/tmp/evil` is REJECTED; the only
+# bypass (shouldTrustTestBundledPluginsDirOverride, :32-34) requires VITEST. OpenClaw
+# hardened exactly one of the three. Flagging it would be a false positive on the benign
+# internal uses at bundled-ClxzUaje.js:145 and dist/plugin-sdk/qa-runner-runtime.js.
+OPENCLAW_BUNDLED_ROOT_ENV_VARS = (
+    ("OPENCLAW_BUNDLED_SKILLS_DIR", "skills"),
+    ("OPENCLAW_BUNDLED_HOOKS_DIR", "hooks"),
+)
+
+
+def bundled_root_overrides(ctx: Context) -> "list[tuple[str, str, str, str]]":
+    """Observed bundled-root relocations, as (var, kind, value, source).
+
+    Persistent artifacts only — see ``persistent_env_evidence``.
+    """
+    out: "list[tuple[str, str, str, str]]" = []
+    for var, kind in OPENCLAW_BUNDLED_ROOT_ENV_VARS:
+        value, source = persistent_env_evidence(ctx, var)
+        if value is None:
+            continue
+        value = value.strip()
+        if not value:
+            continue  # `?.trim()` falsy — the dist falls through to normal resolution
+        out.append((var, kind, value, source or "an environment file"))
+    return out
+
+
 def collect(home: Path | str = "~/.openclaw") -> Context:
     home = Path(home).expanduser()
     ctx = Context(home=home)
@@ -2312,6 +2735,9 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
                 ctx.errors.append(f"could not read {f}: {exc}")
 
     _collect_global_dotenv(home, ctx)
+    # Must precede _read_installed_skills: a bundled-skills-root relocation observed here
+    # adds a load root that the content scanners then cover (B-289).
+    _collect_systemd_unit_env(home, ctx)
     _collect_cron(home, ctx)
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)

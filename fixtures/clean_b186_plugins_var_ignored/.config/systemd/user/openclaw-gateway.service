@@ -1,0 +1,9 @@
+[Unit]
+Description=OpenClaw Gateway
+
+[Service]
+ExecStart=/usr/bin/openclaw gateway run
+Environment=OPENCLAW_BUNDLED_PLUGINS_DIR=/nonexistent/relocated-plugins
+
+[Install]
+WantedBy=default.target

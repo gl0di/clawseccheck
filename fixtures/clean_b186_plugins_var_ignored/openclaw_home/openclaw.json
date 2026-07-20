@@ -1,0 +1,6 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1",
+    "auth": { "mode": "token", "token": "REPLACE_WITH_A_REAL_32_CHAR_VALUE" }
+  }
+}
