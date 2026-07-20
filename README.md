@@ -18,7 +18,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
-    <img src="docs/assets/stats-light.svg" alt="143 security checks · 19 attack-chain detectors · 6,787 automated tests · 0 dependencies · 0 network calls" width="900">
+    <img src="docs/assets/stats-light.svg" alt="145 security checks · 19 attack-chain detectors · 6,787 automated tests · 0 dependencies · 0 network calls" width="900">
   </picture>
 </p>
 
@@ -89,7 +89,7 @@ No flags, no commands. Everything works as a conversation:
 | 🔐 **Secrets & data at rest** | Are your tokens, keys, and conversations lying around readable? |
 | 📡 **Monitoring & readiness** | Would you even notice a compromise — and could you investigate it? |
 
-On top of the 143 individual checks, a **risk engine** hunts for deadly
+On top of the 145 individual checks, a **risk engine** hunts for deadly
 *combinations* — chains like "untrusted input → reachable secrets → outbound
 tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)**.
 
@@ -188,7 +188,7 @@ complete flag list.
 | Document | What it covers |
 |---|---|
 | [User guide](docs/USAGE.md) | Recipes, monitoring modes, and trust details |
-| [Check catalog](docs/CHECKS.md) | All 143 checks: what they verify and how to remediate |
+| [Check catalog](docs/CHECKS.md) | All 145 checks: what they verify and how to remediate |
 | [Threat coverage](docs/THREAT_COVERAGE.md) | OWASP LLM Top 10 / Agentic threat mapping |
 | [Output schema](docs/OUTPUT_SCHEMA.md) | The frozen `--json` / SARIF contract |
 | [FAQ](docs/FAQ.md) | Common questions, incl. the compromised-host protocol |

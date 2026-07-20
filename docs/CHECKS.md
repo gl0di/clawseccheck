@@ -1773,6 +1773,30 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B183 - Audited config file differs from the one OpenClaw resolves
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Config Integrity
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Audited config file differs from the one OpenClaw resolves
+- Remediation:
+  - none
+
+### B192 - Break-glass environment toggle left enabled in a global dotenv file
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Config Integrity
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Break-glass environment toggle left enabled in a global dotenv file
+- Remediation:
+  - none
+
 ### B177 - OpenClaw's own persisted ClawHub trust verdict for an installed plugin
 
 - Severity: HIGH
