@@ -3,6 +3,61 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.54.0] — 2026-07-20
+
+Extends the audit to the ClawHub supply chain — where a skill came from and whether it
+still matches what was installed — and removes two checks that were reporting PASS from
+config fields OpenClaw does not read.
+
+### Added
+- **Post-install skill tampering is now detected (B181).** ClawHub records a content hash
+  when it installs a skill. Nothing was comparing that record against what is on disk, so a
+  skill edited after installation — by another tool, another skill, or a person — passed
+  the audit looking exactly like the version that was vetted. B181 re-hashes each installed
+  skill and reports the ones that no longer match their recorded install hash.
+- **The ClawHub CLI's plaintext token store is now audited (B182).** The publishing CLI
+  keeps its `clh_` API token unencrypted on disk. Any skill with file read and network
+  access could take it and publish under the owner's identity. The check reports the store's
+  presence and its permissions.
+
+### Fixed
+- **B82 reported on a config field that does not exist.** It read
+  `logging.cacheTrace.filePath`, a path OpenClaw never resolves, and returned PASS for every
+  configuration — including the ones it existed to catch. It now reads the real cache-trace
+  sink, and reports `UNKNOWN` rather than PASS when the containers it needs are malformed.
+- **C014 certified egress as "restricted" from keys the schema rejects.** Four of the keys
+  it accepted as evidence of a restriction are discarded by OpenClaw at load time, so a
+  config that set only those was graded as having egress controls it did not have.
+- **B135 read an unfinished ClawHub audit as a registry rejection**, and absent security
+  data as an audit still in progress — two ways to report a verdict the registry had not
+  given.
+- **Taint analysis lost track of values rebound through `global`/`nonlocal`.** A rebind
+  inside the declaring scope became invisible, and a `global` declaration was read as an
+  absent binding rather than a redirect to the module scope — both let tainted data reach a
+  sink unnoticed.
+- **B182 could be steered by the auditor's own environment** when scanning a different home,
+  and **B181 could resolve a lock entry to a same-named skill in another workspace.** Both
+  made a scan's result depend on the machine running it.
+- The ClawHub lock dot-directories are now read as a precedence ladder rather than merged,
+  matching how the CLI itself resolves them.
+- `multiturn.evaluate()` honors the acknowledgement token as a vulnerable trigger, with the
+  refusal guard scoped to the token's own sentence.
+- `references/cli-flags.md` is staged for publication, so the link from `SKILL.md` resolves
+  in an installed copy.
+
+### Changed
+- **Redaction and the secret detectors now recognise the ClawHub CLI token prefix**, so a
+  `clh_` token can no longer reach a report, a log, or the terminal in the clear.
+- **The schema-grounding guard checks against the installed OpenClaw distribution**, a third
+  authority alongside the shipped manifest and the recon notes — and the first that cannot
+  be wrong in the same direction as either.
+- **The shipped docs state exact figures and CI pins them.** The counts a reader sees —
+  checks and tests — are now asserted against the code on every run, and the check count
+  advertises the 143 checks a default audit runs rather than the catalog size.
+- The host-scan disclosure is corrected: it reads Windows registry service keys, not only
+  the filesystem.
+- The publish workflow builds on Node 22 and preflights the bundle before uploading.
+
 ## [3.53.0] — 2026-07-19
 
 Closes an evasion in the skill scanner, un-blinds the check that keeps the tool honest
