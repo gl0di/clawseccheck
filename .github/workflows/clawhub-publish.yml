@@ -17,6 +17,11 @@ on:
         description: "Version to publish (blank = use SKILL.md frontmatter version)"
         required: false
         default: ""
+      skip_previous_release_check:
+        description: "Publish even if the PREVIOUS release never surfaced on ClawHub"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   publish:
@@ -138,6 +143,71 @@ jobs:
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
 
+      - name: Preflight — confirm the PREVIOUS release actually surfaced on ClawHub
+        # `clawhub publish` printing "OK. Published <slug>@<ver> (<id>)" is NOT proof that
+        # users can get the release. On 2026-07-20 v3.54.0 published successfully (id
+        # k976gwey83j4s49sb7xfk4fzz58axb52) and never appeared: the registry's own scan
+        # reported status "succeeded" while its PRIMARY verdict (clawscan.json) came back
+        # null — along with skillspector.json and virustotal.json — so the version stayed
+        # accepted-but-invisible. Nothing in this pipeline noticed; a human found it four
+        # hours later by loading the web page.
+        #
+        # This gate deliberately checks the PREVIOUS release, not the one about to be
+        # published. By the time a new release runs, hours or days have passed, so a 404 is
+        # unambiguous and this can safely be a hard failure. Checking the CURRENT version
+        # straight after upload could NOT be a hard gate — legitimate indexing lag has been
+        # observed at 29+ minutes (v3.52.1) — which is why that one is warn-only, after the
+        # publish step below.
+        #
+        # PREV comes from CHANGELOG.md rather than git tags: actions/checkout does not fetch
+        # tags by default, and tests/test_version_coherence.py already pins the changelog's
+        # top entry to __version__, so the second entry is the previous release by
+        # construction.
+        env:
+          SKIP_CHECK: ${{ inputs.skip_previous_release_check }}
+        run: |
+          set -uo pipefail
+          if [ "${SKIP_CHECK:-false}" = "true" ]; then
+            echo "::notice::Previous-release check skipped by explicit workflow input."
+            exit 0
+          fi
+          PREV="$(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md \
+                  | sed -n '2p' | tr -cd '0-9.')"
+          if [ -z "$PREV" ]; then
+            echo "::notice::No previous CHANGELOG entry (first release?) — nothing to verify."
+            exit 0
+          fi
+          API="https://clawhub.ai/api/v1/skills/clawseccheck/versions/${PREV}"
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$API" || echo 000)"
+          if [ "$CODE" = "200" ]; then
+            echo "Previous release ${PREV} is live on ClawHub."
+            exit 0
+          fi
+
+          echo "::error::Previous release ${PREV} is NOT on ClawHub (HTTP ${CODE}). It was" \
+               "published but never surfaced — publishing another version on top of it will" \
+               "bury the problem. Investigate first, or re-run with" \
+               "skip_previous_release_check=true to proceed deliberately."
+
+          # Auto-diagnose so nobody has to repeat the manual investigation. A stalled scan
+          # shows up as null scanner outputs (~5 bytes) next to a populated static-analysis
+          # and a manifest that still claims status "succeeded".
+          echo "--- stored scan report for ${PREV} ---"
+          if clawhub scan download clawseccheck --version "$PREV" >/tmp/scandl.txt 2>&1; then
+            cat /tmp/scandl.txt
+            ZIP="$(sed -n 's/^Report ZIP: //p' /tmp/scandl.txt | head -1)"
+            if [ -n "$ZIP" ] && [ -f "$ZIP" ] && unzip -o -q "$ZIP" -d /tmp/scanrep; then
+              echo "scanner outputs (a ~5-byte file is a null verdict):"
+              for f in /tmp/scanrep/*.json; do
+                printf '  %8s bytes  %s\n' "$(wc -c <"$f")" "$(basename "$f")"
+              done
+              echo "manifest:"; cat /tmp/scanrep/manifest.json || true
+            fi
+          else
+            cat /tmp/scandl.txt || true
+          fi
+          exit 1
+
       - name: Stage publishable files (exclude tests/ + fixtures/)
         # ClawSecCheck is a security auditor: tests/ and fixtures/ contain intentionally
         # vulnerable example configs (docker.sock, allowFrom "*", dangerouslyAllowPrivateNetwork)
@@ -239,6 +309,30 @@ jobs:
           --name "ClawSecCheck — OpenClaw Security Self-Audit"
           --version "${{ steps.ver.outputs.version }}"
           --changelog "Release ${{ steps.ver.outputs.version }} (${{ github.sha }})"
+
+      - name: Check whether this version surfaced (warn only)
+        # Deliberately NOT a hard gate. Indexing lag is real and variable: v3.53.0 was fully
+        # processed in ~20 minutes, while v3.52.1 still 404'd 29 minutes after upload and
+        # landed later with a backdated createdAt. Failing the build on that would be a false
+        # alarm, and this repo does not ship false alarms. A version that never surfaces is
+        # caught for real by the previous-release gate at the top of the NEXT release.
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -uo pipefail
+          API="https://clawhub.ai/api/v1/skills/clawseccheck/versions/${VER}"
+          for i in $(seq 1 10); do
+            CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$API" || echo 000)"
+            if [ "$CODE" = "200" ]; then
+              echo "Version ${VER} is live on ClawHub (visible after ~${i} min)."
+              exit 0
+            fi
+            sleep 60
+          done
+          echo "::warning::Version ${VER} was accepted but is not visible after 10 minutes" \
+               "(HTTP ${CODE}). This is usually just indexing lag. If it never appears, the" \
+               "next release will fail its previous-release preflight — check the page, or" \
+               "run: clawhub scan download clawseccheck --version ${VER}"
 
       # Create a matching GitHub Release so the "Latest release" badge tracks the tag.
       # Uses the runner's built-in gh CLI (no third-party action → respects the

@@ -837,3 +837,64 @@ def test_publish_workflow_does_not_echo_token() -> None:
         assert not (echoes and references_token), (
             f"Line appears to echo/cat CLAWHUB_TOKEN (supply-chain risk): {line!r}"
         )
+
+
+def test_publish_workflow_verifies_previous_release_surfaced() -> None:
+    """A hard gate must confirm the PREVIOUS release is actually live on ClawHub.
+
+    `clawhub publish` printing "OK. Published …" is not proof of publication: v3.54.0
+    was accepted (with a version id) and never surfaced, because the registry's scan
+    reported status "succeeded" while its primary verdict came back null. Nothing in the
+    pipeline noticed for four hours. This gate is the detection mechanism — it must query
+    the registry, and it must be able to fail the build.
+    """
+    code = _code_lines()
+    joined = "\n".join(text for _, text in code)
+
+    assert "/api/v1/skills/clawseccheck/versions/" in joined, (
+        "The publish workflow must query the ClawHub versions endpoint to confirm a "
+        "release actually surfaced. Without it, an accepted-but-invisible version looks "
+        "like a successful release."
+    )
+
+    # The gate must precede the real upload: publishing on top of a release that never
+    # surfaced buries the problem instead of surfacing it.
+    def first_index_containing(needle: str) -> int:
+        for lineno, text in code:
+            if needle in text:
+                return lineno
+        return -1
+
+    gate = first_index_containing("/api/v1/skills/clawseccheck/versions/")
+    publish = _real_publish_invocation()["line"]
+    assert 0 <= gate < publish, (
+        f"The registry check (line {gate}) must run before the real publish "
+        f"(line {publish}), so a broken previous release blocks the next upload."
+    )
+
+
+def test_publish_workflow_post_publish_check_is_warn_only() -> None:
+    """The post-publish visibility poll must warn, never fail the build.
+
+    Indexing lag is real and variable — v3.53.0 was processed in ~20 minutes while
+    v3.52.1 still 404'd 29 minutes after upload and landed later. Turning this poll into
+    a hard failure would produce a false alarm on ordinary releases, which this project
+    does not ship. A version that genuinely never surfaces is caught by the
+    previous-release gate on the NEXT run, where a 404 is unambiguous.
+    """
+    for step in _steps():
+        body = "\n".join(text for _, text in step)
+        if "warn only" not in body.lower():
+            continue
+        assert "::warning::" in body, (
+            "The post-publish visibility step must emit a ::warning:: annotation."
+        )
+        assert "exit 1" not in " ".join(body.split()), (
+            "The post-publish visibility poll must NOT fail the build — normal indexing "
+            "lag has been observed well past its timeout, so failing here is a false "
+            "alarm. Hard detection belongs in the previous-release gate."
+        )
+        return
+    raise AssertionError(
+        "No warn-only post-publish visibility step found in the publish workflow."
+    )
