@@ -76,6 +76,26 @@ _EXEMPT = {
                           "budget with C-207's check_self_privesc_directive (B159); there is "
                           "no topic to split imports/registration into without breaking the "
                           "aggregator pattern itself. A finer split is a later cycle.",
+    "monitor.py": "~1,300 lines — the drift-snapshot/diff engine (snapshot() builds every "
+                  "dimension, diff() compares them, plus the hash-chained journal). Crossed "
+                  "the budget with B-267/B-268: the skill signature gained a full-directory "
+                  "fingerprint independent of the malware-scan budget, and every capped "
+                  "collection (skills, memory files) gained a persisted truncation frontier "
+                  "so a cap-evicted entry is no longer diffed as a deletion. Both are "
+                  "cross-cutting corrections to snapshot()/diff() themselves, not a new "
+                  "topic that could live elsewhere — splitting them out would separate a "
+                  "dimension's snapshot half from its diff half. A finer split (per-dimension "
+                  "snapshot/diff pairs) is a later cycle.",
+    "risk.py": "~1,210 lines — the combinational attack-chain engine (RISK-01..RISK-19: one "
+               "_rule_* per chain plus the shared leg predicates they compose). Crossed the "
+               "1,200-line ceiling by ~13 lines with B-283 (c), which taught "
+               "_channels_with_visibility_all the account -> channel -> default precedence "
+               "the dist resolver uses; that helper MUST stay here rather than move to "
+               "checks/_shared.py, because risk.py imports only via the checks aggregator "
+               "(CLAUDE.md §3.1-a) and RISK-18 calls it directly. Splitting the rules from "
+               "the predicates they share would separate a chain from its own evidence. A "
+               "finer split (one module per severity tier, or rules/ + predicates.py) is a "
+               "later cycle.",
     "skillast.py": "2,139 lines — the python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target).",
     "report.py": "~2,260 lines — the output renderers; grew further with F-131's "

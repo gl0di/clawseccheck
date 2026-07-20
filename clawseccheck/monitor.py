@@ -240,7 +240,22 @@ def _snapshot_memory_text(path: str, text: str) -> dict:
     }
 
 
-def _snapshot_memory_files(ctx) -> dict:
+def _snapshot_memory_files(ctx, capped: "list | None" = None) -> dict:
+    """Snapshot the persistent-memory surface.
+
+    B-268: when *capped* (a list) is given, every path that is PRESENT on disk and eligible
+    but did not make it into the returned dict because a cap evicted it is appended to it —
+    the truncation frontier. Without it, `diff()` cannot tell "this file is gone" from "this
+    file is still here, we just stopped looking", and reported the second as the first: a
+    note grown past `_MEMORY_MAX_BYTES` produced "Persistent memory file removed" while `ls`
+    showed it at 220,918 bytes, and 40 new early-sorting files pushed 34 untouched notes out
+    of the count cap and reported every one of them as removed. Same out-param idiom as
+    `walk_dir_safely`'s `skips`/`capped`, so existing callers are unaffected.
+
+    Note the count cap is now evaluated per-candidate instead of breaking the loop: the walk
+    must reach every eligible path to record an exact frontier. Only the READ is skipped, so
+    the cap still bounds the work it exists to bound.
+    """
     from .collector import WORKSPACE_DIRS
 
     seen: set[Path] = set()
@@ -255,8 +270,6 @@ def _snapshot_memory_files(ctx) -> dict:
         if not mem_dir.is_dir():
             continue
         for p in sorted(mem_dir.rglob("*")):
-            if len(out) >= _MEMORY_MAX_FILES:
-                break
             if p.is_symlink() or not p.is_file():
                 continue
             if p.suffix.lower() not in _MEMORY_TEXT_EXTS and p.suffix:
@@ -268,11 +281,24 @@ def _snapshot_memory_files(ctx) -> dict:
             if rel in seen:
                 continue
             seen.add(rel)
+            if len(out) >= _MEMORY_MAX_FILES:
+                if capped is not None:
+                    capped.append(str(rel))
+                continue
             try:
                 raw = p.read_bytes()
             except OSError:
+                # Present on disk but unreadable (e.g. chmod 000). Same class of gap as a
+                # cap eviction — absent from `out` for a collection reason, not a disk
+                # fact — so it joins the frontier rather than being reported as removed.
+                if capped is not None:
+                    capped.append(str(rel))
                 continue
             if len(raw) > _MEMORY_MAX_BYTES or b"\x00" in raw:
+                # Present and eligible, but deliberately not fingerprinted (oversized, or
+                # binary). Its absence from `out` is a scan decision, not a disk fact.
+                if capped is not None:
+                    capped.append(str(rel))
                 continue
             try:
                 text = raw.decode("utf-8", "replace")
@@ -286,7 +312,18 @@ def _snapshot_memory_files(ctx) -> dict:
 def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]],
                           trust_removals: bool = True) -> None:
     pm, cm = prev.get("memory", {}), curr.get("memory", {})
+    # B-268: the cap frontier on each side — paths that were on disk but not fingerprinted.
+    # An entry absent from a snapshot's `memory` dict is only evidence of absence when it is
+    # also absent from that snapshot's frontier.
+    prev_capped = set(prev.get("memory_capped") or ())
+    curr_capped = set(curr.get("memory_capped") or ())
     for path in sorted(cm.keys() - pm.keys()):
+        if path in prev_capped:
+            # It did not "appear" — it was already on disk last run, merely beyond the cap.
+            # Announcing it as new misdates the incident, which is exactly how a
+            # pre-existing poisoned note got reported as freshly planted once unrelated
+            # files were deleted and it fell back inside the cap.
+            continue
         entry = cm[path]
         if entry.get("signals") or entry.get("urls"):
             alerts.append((
@@ -336,7 +373,27 @@ def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]],
     for path in sorted(pm.keys() - cm.keys()):
         if path in bootstrap_owned:
             continue
+        if path in curr_capped:
+            # B-268: still on disk this run, just cap-evicted. Not a removal.
+            continue
         alerts.append(("INFO", f"Persistent memory file removed since last check: '{path}'."))
+
+    # B-268 disclosure: a bare all-clear over a truncated view is the lie the FN twin
+    # exploits — past the cap the region is never read, so a live injection/exfil payload
+    # on an oversized note returned "No new threats since last check". Ordering is by
+    # filename, i.e. attacker-controlled, so the eviction is something an attacker can
+    # ARRANGE. State the gap instead of implying coverage.
+    if curr_capped:
+        n = len(curr_capped)
+        alerts.append((
+            "MEDIUM",
+            f"{n} persistent memory file(s) are present but NOT monitored — they exceed "
+            f"the {_MEMORY_MAX_FILES}-file / {_MEMORY_MAX_BYTES // 1000}KB inspection cap, "
+            f"or could not be read (e.g. {', '.join(sorted(curr_capped)[:3])}). Content "
+            "changes in those files are not detected. Split or archive oversized notes, "
+            "reduce the number of memory files, or restore read access to regain full "
+            "coverage.",
+        ))
 
 
 def _mcp_sig(ctx) -> dict:
@@ -450,18 +507,68 @@ def _b62_families(name: str, ctx) -> "frozenset":
 
 
 def _skill_sig(ctx) -> dict:
-    """name -> {hash, caps, version} — content hash plus the capability-family
-    set (B62-derived) and any declared frontmatter version. Old snapshots stored
-    a bare hash string; diff() sniffs str-vs-dict for back-compat.
+    """name -> {hash, tree, tree_complete, scan_partial, caps, version}.
+
+    ``hash`` is the historical digest of the SCANNED blob; ``tree`` is the B-267
+    full-directory fingerprint that actually answers "did this skill change?". Old
+    snapshots stored a bare hash string, and pre-B-267 snapshots carry a dict with no
+    ``tree`` key; diff() handles both (see ``_skill_entry``).
+
+    B-267: hashing only ``ctx.installed_skills[name]`` made the drift signal inherit the
+    malware-scanner's budget. That blob is TEXT-only and capped, so the three stealthiest
+    in-place backdoors — a same-size binary swap under ``bin/``, an appended directive in a
+    file past the per-skill budget, and an edit inside a file dropped whole for exceeding
+    the per-file cap — every one of them left the stored signature byte-identical and the
+    monitor silent. Measured first-hand on all three before the fix: zero alerts. This is
+    the exact scenario --monitor exists for (malware landing in a skill already trusted),
+    and the tool was holding the contradicting evidence: the collector already records a
+    ``limit_hits`` line saying content beyond the cap was NOT scanned, which monitor.py
+    never read.
+
+    ``scan_partial`` carries that evidence into the snapshot. It does NOT weaken the change
+    signal — ``tree`` covers the unscanned region for change-detection purposes — but it
+    marks a skill whose CONTENT was never fully vetted, so a "NEW"/"CHANGED" alert can say
+    so rather than implying the new state was inspected and found benign.
     """
+    from .collector import skill_tree_signature  # noqa: PLC0415 (leaf import, no cycle)
+
+    partial = _scan_truncated_skills(ctx)
     out = {}
     for name, blob in ctx.installed_skills.items():
         m = _SKILL_VERSION_RE.search(blob)
-        out[name] = {
+        entry = {
             "hash": _h(blob),
             "caps": sorted(_b62_families(name, ctx)),
             "version": m.group(1) if m else None,
+            "scan_partial": name in partial,
         }
+        skill_dir = (getattr(ctx, "installed_skill_dirs", None) or {}).get(name)
+        if skill_dir is not None:
+            try:
+                sig = skill_tree_signature(skill_dir)
+            except OSError:
+                sig = None
+            if sig is not None:
+                entry["tree"] = sig["digest"]
+                entry["tree_complete"] = bool(sig["complete"])
+        out[name] = entry
+    return out
+
+
+# B-267: the collector's per-skill text-cap limit_hit, e.g.
+#   text scan of skill 'clawstealth' hit the 1000KB/500-file cap — …
+# Parsed rather than re-derived so there is a single source of truth for "was this skill's
+# content fully scanned?" — the collector decides, monitor only reports.
+_SCAN_TRUNCATED_RE = re.compile(r"text scan of skill '([^']+)' hit the ")
+
+
+def _scan_truncated_skills(ctx) -> "set[str]":
+    """Names of skills whose CONTENT scan the collector reports as truncated."""
+    out: set[str] = set()
+    for hit in (getattr(ctx, "limit_hits", None) or []):
+        m = _SCAN_TRUNCATED_RE.search(str(hit))
+        if m:
+            out.add(m.group(1))
     return out
 
 
@@ -551,6 +658,9 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
     """
     native = getattr(ctx, "native", None)
     native_count = len(getattr(native, "findings", []) or []) if native else 0
+    # B-268: capture each collection's truncation frontier alongside the collection itself,
+    # so diff() can tell "absent from disk" from "absent from the capped view".
+    _mem_capped: list[str] = []
     snap = {
         "version": SNAPSHOT_VERSION,
         "score": score.score,
@@ -559,7 +669,7 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
                    if not getattr(f, "suppressed", False)},
         "skills": _skill_sig(ctx),
         "bootstrap": {n: _h(t) for n, t in ctx.bootstrap.items()},
-        "memory": _snapshot_memory_files(ctx),
+        "memory": _snapshot_memory_files(ctx, capped=_mem_capped),
         "native_count": native_count,
         "ignore_hash": _ignore_hash(ctx.home),
         # Agent Watch — connection / trust surface, so drift in what the agent is
@@ -571,6 +681,15 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
         "channels": _channel_sig(ctx),
         "gateway_bind": _gateway_bind(ctx),
     }
+    snap["memory_capped"] = sorted(_mem_capped)
+    # B-268: the skills frontier comes from the collector (which is where the cap lives).
+    # `skills_capped` lists names present on disk but never read; `skills_frontier_partial`
+    # says that list is itself incomplete, in which case diff() must not use it as a
+    # completeness oracle and suppresses skill removals wholesale.
+    snap["skills_capped"] = sorted(getattr(ctx, "skills_capped_names", None) or ())
+    snap["skills_capped_count"] = int(getattr(ctx, "skills_capped_count", 0) or 0)
+    snap["skills_frontier_partial"] = bool(getattr(ctx, "skills_frontier_partial", False))
+
     host = getattr(ctx, "host", None)
     if host and host.get("supported"):
         snap["host"] = {cls: info.get("status")
@@ -649,20 +768,80 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
             return v.get("hash", ""), v.get("caps"), v.get("version")
         return v, None, None          # legacy bare-hash snapshot
 
+    def _skill_changed(p, c) -> bool:
+        """B-267: did this skill change? Prefer the full-directory ``tree`` fingerprint.
+
+        The scanned-text ``hash`` is a strict subset of the tree — TEXT-only, capped — so
+        where the two disagree the tree is right and the hash is blind. Only when a side
+        lacks ``tree`` (a legacy bare-hash snapshot, or one written before this fix) does
+        the comparison fall back to the old hash, rather than fabricating a diff against a
+        key that was never recorded. That fallback is self-healing: the first snapshot
+        written after upgrade carries a tree, so at most one run stays on the old signal.
+        """
+        p_tree = p.get("tree") if isinstance(p, dict) else None
+        c_tree = c.get("tree") if isinstance(c, dict) else None
+        if p_tree and c_tree:
+            return p_tree != c_tree
+        return _skill_entry(p)[0] != _skill_entry(c)[0]
+
     def _ver_tuple(s: str) -> tuple:
         toks = re.split(r"[.\-+]", s)
         return tuple((0, int(t)) if t.isdigit() else (1, t) for t in toks)
 
     ps, cs = prev.get("skills", {}), curr.get("skills", {})
+    # B-268: the skills truncation frontier on each side (see snapshot()). `ctx.installed_
+    # skills` is capped at _MAX_SKILLS and its fill order is filename order — attacker-
+    # controlled — so a flood of early-sorting skill dirs evicts real ones from the view.
+    # Diffed as ground truth that produced a phantom "Skill 's299' was removed" while s299
+    # sat on disk untouched (measured: 310 skills + one aaa*-named addition).
+    prev_sk_capped = set(prev.get("skills_capped") or ())
+    curr_sk_capped = set(curr.get("skills_capped") or ())
+    prev_sk_partial = bool(prev.get("skills_frontier_partial"))
+    curr_sk_partial = bool(curr.get("skills_frontier_partial"))
     for name in sorted(cs.keys() - ps.keys()):
+        if name in prev_sk_capped:
+            # Known to have been on disk last run, merely beyond the cap. Calling it NEW
+            # would misdate the install — the CRITICAL says "this is when malware lands",
+            # and that claim must not be made about a skill that was already there.
+            continue
+        _partial = isinstance(cs[name], dict) and cs[name].get("scan_partial")
+        _scan_note = (" NOTE: this skill is too large to scan in full, so the audit's "
+                      "verdict on it covers only part of its content." if _partial else "")
+        if prev_sk_partial:
+            # The previous frontier was itself truncated, so we cannot confirm this skill
+            # is new. Down-rank and disclose rather than suppress: staying silent about a
+            # possibly-just-installed skill is the worse error of the two, and this is the
+            # project's standing rule that an ambiguous signal is reported at reduced
+            # strength rather than asserted or dropped.
+            alerts.append(("HIGH",
+                           f"Skill '{name}' is now being inspected and was not inspected "
+                           "last run — it may be newly installed, or it may have been "
+                           "present all along outside the inspection cap (too many skills "
+                           "were installed last run to tell). Vet its source." + _scan_note))
+            continue
         alerts.append(("CRITICAL",
                        f"NEW skill installed since last check: '{name}' — vet its source "
-                       "before trusting it (this is when malware lands)."))
+                       "before trusting it (this is when malware lands)." + _scan_note))
     for name in sorted(ps.keys() & cs.keys()):
         p_hash, p_caps, p_ver = _skill_entry(ps[name])
         c_hash, c_caps, c_ver = _skill_entry(cs[name])
-        if p_hash != c_hash:
-            alerts.append(("HIGH", f"Installed skill '{name}' CHANGED since last check — re-review it."))
+        if _skill_changed(ps[name], cs[name]):
+            _partial = isinstance(cs[name], dict) and cs[name].get("scan_partial")
+            alerts.append(("HIGH",
+                           f"Installed skill '{name}' CHANGED since last check — re-review it."
+                           + (" NOTE: this skill is too large to scan in full, so the "
+                              "change may lie outside the region the audit inspects."
+                              if _partial else "")))
+        elif (isinstance(cs[name], dict) and cs[name].get("tree")
+              and cs[name].get("tree_complete") is False):
+            # B-267: the fingerprint walk itself could not cover the whole directory, so an
+            # unchanged digest is NOT proof of no change. Say so rather than let silence
+            # imply coverage (the same B-074 rule that turns a truncated scan into UNKNOWN
+            # instead of PASS).
+            alerts.append(("INFO",
+                           f"Installed skill '{name}' is too large to fingerprint in full — "
+                           "part of its directory is not covered by change detection, so "
+                           "'unchanged' cannot be confirmed for that region."))
 
         # Capability diff — only when BOTH sides carry structured caps (new-format
         # snapshots); a legacy/UNKNOWN side skips silently rather than fabricating a diff.
@@ -693,7 +872,31 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                 pass
     if trust_removals:
         for name in sorted(ps.keys() - cs.keys()):
+            # B-268: still on disk this run, just cap-evicted — not a removal. When the
+            # frontier is itself truncated we cannot tell the two apart for ANY name, so
+            # every removal is suppressed: a missed removal notice (INFO) is a far smaller
+            # harm than a burst of fabricated ones, and the disclosure below states that
+            # coverage is incomplete.
+            if name in curr_sk_capped or curr_sk_partial:
+                continue
             alerts.append(("INFO", f"Skill '{name}' was removed."))
+
+    # B-268 disclosure. The FN twin is the serious half: a 300-skill flood hid a skill
+    # exfiltrating an SSH key at Grade A, and replaced a live HIGH poisoning alert with
+    # five fabricated "removed" lines. Since fill order is filename order, an attacker can
+    # choose which skills fall outside the audited set. An all-clear over that view is not
+    # honest, so the truncation is stated explicitly.
+    _sk_capped_n = int(curr.get("skills_capped_count") or len(curr_sk_capped))
+    if _sk_capped_n:
+        _eg = sorted(curr_sk_capped)[:3]
+        alerts.append((
+            "HIGH",
+            f"{_sk_capped_n} installed skill(s) were NOT collected — the inspection cap "
+            "was reached, so they are neither scanned nor monitored for change"
+            + (f" (e.g. {', '.join(_eg)})" if _eg else "")
+            + ". Skills are collected in filename order, so which ones fall outside the "
+            "cap is not a security decision. Reduce the number of installed skills to "
+            "restore full coverage."))
 
     pb, cb = prev.get("bootstrap", {}), curr.get("bootstrap", {})
     for name in sorted(pb.keys() & cb.keys()):

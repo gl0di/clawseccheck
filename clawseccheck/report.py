@@ -944,6 +944,16 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
 
     skills = inv["skills"]
     n_skills = len(skills)
+    # B-268: `inv["skills"]` is built from ctx.installed_skills, which the collector caps at
+    # _MAX_SKILLS. Printing its length as "(N installed)" reported the CAP as the inventory
+    # total — a home with 311 skills on disk rendered "Skills (300 installed)", and the 11
+    # unexamined ones were invisible in the very block whose job is to enumerate what is
+    # installed. Disclose the truncation instead of presenting a capped view as a census.
+    n_skipped = int(getattr(ctx, "skills_capped_count", 0) or 0)
+    installed_text = (
+        f"{n_skills} inspected, {n_skipped} NOT inspected — inspection cap reached"
+        if n_skipped else f"{n_skills} installed"
+    )
     flagged = [s for s in skills if s.get("status") in (FAIL, WARN, UNKNOWN)]
     flagged_names = {s["name"] for s in flagged}
     if n_skills == 0:
@@ -951,7 +961,11 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
     else:
         sk_marker = icon.get(_worst_of_statuses(s["status"] for s in flagged), "?")
         count_text = f"{len(flagged)} flagged" if flagged else "clear"
-        lines.append(f" {SUBJECT_LABEL['skills']} ({n_skills} installed) — {sk_marker} {count_text}")
+        lines.append(f" {SUBJECT_LABEL['skills']} ({installed_text}) — {sk_marker} {count_text}")
+        if n_skipped:
+            lines.append(
+                f"   {icon.get(UNKNOWN, '?')} {n_skipped} skill(s) beyond the inspection "
+                "cap were not scanned; their verdict is unknown, not clean")
         # Skill/server/channel names are untrusted (directory names, config keys) --
         # _sanitize() every one before it reaches a line, same as finding title/detail
         # elsewhere in this file (B164: no raw ANSI/control chars may reach the terminal).

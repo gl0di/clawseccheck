@@ -6,6 +6,7 @@ No network. No writes. Pure stdlib.
 from __future__ import annotations
 
 import math
+import hashlib
 import io
 import json
 import sqlite3
@@ -54,6 +55,12 @@ _OWN_SKILL_NAMES = {"clawseccheck"}
 # flags the scanner's embedded attack signatures + red-team payloads as malware.
 _OWN_ENGINE_MARKERS = ("def check_installed_skills", "def vet_skill", "_SKILL_CRIT")
 _MAX_SKILLS = 300
+# B-268: how many cap-evicted skill NAMES are retained as the truncation frontier. Names
+# are cheap (a directory basename), but the frontier must not itself become an unbounded
+# allocation on a deliberate 100k-skill flood. Past this point ctx.skills_frontier_partial
+# goes True and consumers must stop using the name list as a completeness oracle. Set well
+# above _MAX_SKILLS so any plausible real fleet keeps an EXACT frontier.
+_MAX_SKILL_FRONTIER_NAMES = 5_000
 # B-144 follow-up: raised 60_000 -> 200_000 -> 1_000_000, all three caps kept in lock-
 # step. _MAX_FILE_BYTES must move WITH _MAX_BYTES_PER_SKILL, not independently — a
 # single file over _MAX_FILE_BYTES is dropped whole by collect_skill_files before the
@@ -220,6 +227,21 @@ class Context:
     # shape of deliberate cap-evasion padding, distinct from limit_hits (which fires on
     # ANY cap — archive/py/text — including a genuine high-entropy oversized asset).
     padding_anomalies: list[str] = field(default_factory=list)
+
+    # B-268: the _MAX_SKILLS truncation frontier. `installed_skills` is a capped VIEW of
+    # the filesystem, and a consumer that diffs it against a previous view (monitor.py) or
+    # prints its length as an inventory total (report.py) was reading that view as ground
+    # truth. These three fields make the partiality explicit and machine-readable:
+    #   skills_capped_names — directory names DISCOVERED but not read because the cap was
+    #     already full. Bounded by _MAX_SKILL_FRONTIER_NAMES so a 100k-skill flood cannot
+    #     turn the frontier itself into an unbounded allocation.
+    #   skills_capped_count — the true number skipped, exact even when the name list above
+    #     was itself truncated.
+    #   skills_frontier_partial — True when skills_capped_names is incomplete, i.e. a
+    #     consumer may NOT use "absent from the name list" to conclude "absent from disk".
+    skills_capped_names: list[str] = field(default_factory=list)
+    skills_capped_count: int = 0
+    skills_frontier_partial: bool = False
 
     @property
     def bootstrap_blob(self) -> str:
@@ -919,6 +941,117 @@ def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
     return "\n".join(parts)
 
 
+# B-267: budgets for skill_tree_signature() — the CHANGE-DETECTION walk, deliberately
+# separate from and far wider than the malware-SCAN budgets above. The scan caps exist to
+# bound regex/AST/entropy work on attacker-supplied content; fingerprinting costs one
+# streamed sha256 per file, so it can cover ground the scanner never will. Measured on the
+# real ~/.openclaw: the largest installed skill is 2,190 files / 7.5MB and fingerprints in
+# ~0.65s — comfortably inside both budgets, and paid only on a --monitor run (snapshot() is
+# the sole caller), never on a plain audit.
+_SIG_MAX_FILES = 20_000
+_SIG_MAX_TOTAL_BYTES = 200_000_000
+_SIG_CHUNK = 1 << 20
+
+
+def skill_tree_signature(skill_dir: Path) -> dict:
+    """Fingerprint EVERY file under one skill directory, independent of the scan budget.
+
+    Returns ``{"digest": str, "files": int, "bytes": int, "complete": bool}``.
+
+    B-267: ``_read_skill_text`` builds the blob the audit SCANS — TEXT-classified files
+    only, truncated at ``_MAX_BYTES_PER_SKILL``, with any single file over
+    ``_MAX_FILE_BYTES`` dropped whole before the budget logic ever sees it. Hashing that
+    blob (which is what monitor's ``_skill_sig`` used to do, alone) answers "did the part
+    we scanned change?", and monitor was reporting the answer as "did the skill change?".
+    Those differ precisely where it matters: swapping ``bin/helper`` (non-TEXT), appending
+    a directive to a file past the per-skill budget, or editing inside an oversized
+    ``REFERENCE.md`` all leave the scanned blob byte-identical. Verified first-hand — all
+    three produced ZERO monitor alerts before this function existed.
+
+    Change detection does not need the scan budget, so this walk does not inherit it. Each
+    file contributes ``relpath\\0size\\0sha256(content)`` to a canonical, sorted fold, so
+    the digest moves on any content edit, size change, addition, removal or rename —
+    including in regions no scanner will ever read.
+
+    ``complete`` is False when the walk itself hit ``_SIG_MAX_FILES`` /
+    ``_SIG_MAX_TOTAL_BYTES``, i.e. part of the tree was never fingerprinted. An UNCHANGED
+    digest is proof of no change only when ``complete`` is True; callers must treat the
+    incomplete case as unknown rather than as evidence of stability (same discipline B-074
+    applies to a truncated scan).
+
+    NARROWS, does not close — two blind spots remain, both inherited deliberately:
+
+    * ``__pycache__`` and VCS metadata (``.git``/``.hg``/``.svn``) are excluded, matching
+      ``collect_skill_files``'s existing B-125 boundary. They are already outside the
+      audited surface, and including them would fire a "skill CHANGED" alert on every
+      ``git status`` or interpreter run — a false positive on ordinary use. A payload
+      parked *only* inside ``.git/`` is therefore still invisible here, exactly as it is
+      to every other part of the audit.
+    * Symlinks are skipped (``walk_dir_safely``), so re-pointing a symlink inside a skill
+      does not move the digest. Symlink entries are separately surfaced as tamper signals
+      by F-061's ``symlink_skips``.
+
+    Read-only and never raises: an unreadable file folds in a stable ``unreadable`` marker
+    (stable, so a persistently chmod-000 file does not flap an alert every run) rather
+    than being dropped silently, which would make it indistinguishable from a deletion.
+    """
+    capped: list = []
+    files = walk_dir_safely(
+        skill_dir,
+        exclude_pycache=True,
+        exclude_vcs=True,
+        max_files=_SIG_MAX_FILES,
+        capped=capped,
+    )
+    entries: list[tuple[str, str]] = []
+    total = 0
+    complete = not capped
+    for f in sorted(files):
+        try:
+            rel = str(f.relative_to(skill_dir))
+        except (ValueError, OSError):
+            rel = f.name
+        try:
+            if not f.is_file():
+                continue
+            size = f.stat().st_size
+        except OSError:
+            entries.append((rel, "unreadable"))
+            continue
+        if total + size > _SIG_MAX_TOTAL_BYTES:
+            # Budget exhausted: record the file's existence and size (both still real
+            # evidence) but not its content digest, and declare the walk incomplete.
+            entries.append((rel, f"{size}:uncovered"))
+            complete = False
+            continue
+        digest = hashlib.sha256()
+        try:
+            with open(f, "rb") as fh:
+                while True:
+                    chunk = fh.read(_SIG_CHUNK)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+        except OSError:
+            entries.append((rel, "unreadable"))
+            continue
+        total += size
+        entries.append((rel, f"{size}:{digest.hexdigest()}"))
+
+    fold = hashlib.sha256()
+    for rel, mark in sorted(entries):
+        fold.update(rel.encode("utf-8", "replace"))
+        fold.update(b"\x00")
+        fold.update(mark.encode("ascii", "replace"))
+        fold.update(b"\n")
+    return {
+        "digest": fold.hexdigest()[:32],
+        "files": len(entries),
+        "bytes": total,
+        "complete": complete,
+    }
+
+
 def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str | None:
     """F-116: concatenate the source of a Jupyter notebook's `code` cells so the AST/taint
     engine (which otherwise sees only .py/.sh/.js) can analyze them. Returns joined Python
@@ -1239,7 +1372,27 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
             base, allow_symlink_entries=allow_symlink, limit_hits=ctx.limit_hits
         ):
             if len(ctx.installed_skills) >= _MAX_SKILLS:
-                return
+                # B-268: this used to `return` — the collection stopped dead, leaving
+                # ctx.installed_skills a silently truncated view with no trace that more
+                # existed. Two consumers then read that view as filesystem ground truth:
+                # monitor's skill diff reported every uncollected name as "was removed"
+                # (measured: 310 skills + one early-sorting addition => a phantom
+                # "Skill 's299' was removed"), and the inventory line printed its length
+                # as the installed total. Worse, discovery order is filename order, which
+                # is ATTACKER-CONTROLLED: flooding aaa*-named skills pushes a real one out
+                # of the scanned set entirely, and nothing recorded a limit hit, so B13
+                # still reported a clean verdict over a scan that never saw it.
+                #
+                # Keep walking so the frontier is EXACT — the skipped dirs are only
+                # enumerated (a bounded directory listing, already capped by
+                # skilldiscovery's _MAX_DIRS), never read, so the cap still does its job
+                # of bounding content work.
+                ctx.skills_capped_count += 1
+                if len(ctx.skills_capped_names) < _MAX_SKILL_FRONTIER_NAMES:
+                    ctx.skills_capped_names.append(sd.name)
+                else:
+                    ctx.skills_frontier_partial = True
+                continue
             # B-265: self-exclusion is CONTENT-verified, never basename-verified. Test the
             # resolved `target` (the real bytes), not `sd` — a symlinked plugin-skills entry
             # must be judged by what it points at. A malicious skill renamed to an own-skill
@@ -1267,6 +1420,17 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                 ctx.installed_skill_dirs[key] = target
             except OSError as exc:
                 ctx.errors.append(f"could not read skill {key}: {exc}")
+
+    # B-268: record the cap hit, mirroring what skilldiscovery.py already does for its
+    # sibling _MAX_DIRS cap. This is what makes check_installed_skills (B13) degrade to
+    # UNKNOWN instead of reporting a clean PASS over a scan that never reached the skills
+    # beyond the cap — the existing B-074 discipline, which this cap alone was bypassing.
+    if ctx.skills_capped_count:
+        ctx.limit_hits.append(
+            f"installed-skill collection hit the {_MAX_SKILLS}-skill cap — "
+            f"{ctx.skills_capped_count} further skill director"
+            f"{'y was' if ctx.skills_capped_count == 1 else 'ies were'} NOT read"
+        )
 
 
 # Skill-load tiers in PRECEDENCE order, HIGHEST-WINS first. Grounded against the dist loader
