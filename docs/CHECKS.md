@@ -1785,6 +1785,46 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B184 - Skills installed from a ClawHub endpoint other than the public registry
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Supply Chain / Provenance
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: Skills installed from a ClawHub endpoint other than the public registry
+- Remediation:
+  - none
+
+## Advisory checks
+
+### B186 - Bundled skills/hooks code-load root relocated by an environment override
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Supply Chain / Code Load Roots
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: Bundled skills/hooks code-load root relocated by an environment override
+- Remediation:
+  - none
+
+### B193 - Gateway credential embedded in plaintext in a systemd user unit
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Secrets Vault / Gateway
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM02 Sensitive Information Disclosure
+- What it checks: Gateway credential embedded in plaintext in a systemd user unit
+- Remediation:
+  - none
+
+## Hardening checks
+
 ### B192 - Break-glass environment toggle left enabled in a global dotenv file
 
 - Severity: MEDIUM
@@ -2163,3 +2203,25 @@ These paths are computed from multiple checks. They fire only when every leg is 
   other high-capability skill's action — route genuinely risky actions
   (exec/network/write) through a human-approval step that reads the actual action, not a
   different skill's summary of it.
+
+### RISK-21 - Group-origin session provably reached a high-blast tool
+
+- Severity: MEDIUM
+- Pattern: MEDIUM (RISK-21, F-135): open group ingress + a high-blast verb PROVEN from it.
+- Chain: {channel_name} (open to non-owner senders: {reason}) -> group / channel-origin session in the trajectory log -> proven high-blast tool call ({shown})
+- Why:
+  The channel '{channel_name}' admits group messages from senders who are not the owner
+  ({reason}), and the trajectory log records a session opened from a group or channel
+  surface on '{channel_name}' in which the agent actually invoked {shown}. Both halves of
+  this exposure were already visible in isolation — the posture as a config finding, the
+  tool use as a log observation — but nothing related them, so a setup where an untrusted
+  surface has demonstrably reached a high-blast primitive looked the same as one where it
+  never had. It is not proof that a group sender caused those specific calls: that needs
+  the call arguments, which this tool never reads.
+- Fix:
+  Decide whether group senders on '{channel_name}' are meant to reach
+  exec/destructive/mailbox-config tools at all. If not, restrict the channel (set
+  groupPolicy to 'allowlist' and list the permitted senders in groupAllowFrom, or scope
+  the groups entry so it is not '*'). If open group access is intentional — a community
+  bot, say — put the high-blast tools behind a human approval step (tools.exec.mode='ask')
+  so an untrusted message cannot reach them unattended.
