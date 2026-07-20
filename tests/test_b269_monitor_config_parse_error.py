@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from clawseccheck import audit
-from clawseccheck.catalog import FAIL, UNKNOWN
+from clawseccheck.catalog import BY_ID, FAIL, UNKNOWN
 from clawseccheck.cli import main
 from clawseccheck.monitor import diff, load_state, snapshot
 
@@ -279,13 +279,19 @@ def test_now_failing_out_of_a_blind_run_is_downranked_and_disclosed():
     )
 
 
-def test_a_clean_baseline_still_yields_the_definite_high_alert():
-    """The down-ranking is scoped to blind runs only — a normal comparison is unchanged."""
+def test_a_clean_baseline_still_yields_the_definite_undownranked_alert():
+    """The down-ranking is scoped to blind runs only — a normal comparison is unchanged.
+
+    B-280: the definite alert now carries the check's CATALOG severity rather than a flat
+    "HIGH" literal, so this asserts against ``BY_ID`` instead of a hardcoded level. What
+    the test actually guards is unchanged: a clean baseline produces the full-strength
+    alert with no "untrustworthy baseline" caveat, never the blind-run MEDIUM.
+    """
     prev = {"score": 90, "grade": "A", "skills": {}, "bootstrap": {}, "checks": {"B2": "PASS"}}
     curr = {"score": 49, "grade": "F", "skills": {}, "bootstrap": {}, "checks": {"B2": FAIL}}
 
     hits = [(lvl, m) for lvl, m in diff(prev, curr) if "Now FAILING" in m]
-    assert [lvl for lvl, _ in hits] == ["HIGH"]
+    assert [lvl for lvl, _ in hits] == [BY_ID["B2"].severity]
     assert all("not a trustworthy baseline" not in m for _, m in hits)
 
 

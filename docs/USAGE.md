@@ -124,7 +124,7 @@ skill itself uses, see [`SKILL.md`](../SKILL.md#natural-language-to-tool-quick-m
 | "Fix this for me" | It won't — ClawSecCheck reports problems and risks, never fixes. Each finding states what's wrong and why; `--json`/SARIF carry structured `fix`/`remediation` data for your own tooling, and the [check catalog](CHECKS.md) documents remediation guidance per check. Nothing is ever applied for you. | `clawseccheck` (read the report) / `--json` |
 | "Am I vulnerable to prompt injection?" | Runs live self-tests: a benign injection canary, a broader dry-run harness, or both plus red-team payloads together. | `--canary` · `--dryrun` · `--self-test` |
 | "What dangerous actions can my agent actually take?" | Emits a self-report template for your agent to fill in with its real tool/verb inventory, then scores the blast radius (EXEC, DESTRUCTIVE, EGRESS, …) once you feed it back. | `--ask` then `--attest <file>` |
-| "Watch for changes over time" | Re-audits and alerts on what changed since last time (new skill, config drift, a check flipping PASS→FAIL). **Note:** this is the one opt-in exception to read-only — it writes a small local snapshot (`~/.clawseccheck/state.json`) so it has something to diff against next run. | `--monitor` |
+| "Watch for changes over time" | Re-audits and alerts on what changed since last time (new skill, config drift, a memory-file edit, a check leaving PASS). **Note:** this is the one opt-in exception to read-only — it writes a small local snapshot (`~/.clawseccheck/state.json`) so it has something to diff against next run. | `--monitor` |
 | "Am I improving? How do I rank?" | Shows your score history over time, or how your current score compares to an offline reference profile — no network either way. | `--trend` · `--percentile` |
 | "Share my grade without leaking my findings" | Produces just the grade + score (+ Lethal Trifecta ratio) — safe to post; your actual findings never appear. | `--card` (prints it) · `--badge grade.svg` (writes an SVG) |
 | "What's actually installed — skills, MCP servers, versions?" | Exports a local bill-of-materials (skills, MCP servers, hashes, declared/unpinned dependencies) as JSON. | `--sbom` |
@@ -335,12 +335,28 @@ for a monitoring skill/plugin (ClawSec, `openclaw-security-monitor`, …) or mon
 config; if none is found it warns you and tells you how to add one.
 
 **`--monitor` — Agent Watch.** One way to *get* monitoring: re-audit on a schedule and alert,
-**by severity**, on what **changed** — a new or modified installed skill, `SOUL.md` drift, a dropped
-score, a check going PASS → FAIL, **a newly connected MCP server, a new channel, the gateway becoming
+**by severity**, on what **changed** — a new or modified installed skill, `SOUL.md` drift, **any
+change to a file under `<workspace>/memory/`**, a dropped score, **a check leaving PASS (for FAIL,
+WARN or UNKNOWN)**, **a newly connected MCP server, a new channel, the gateway becoming
 network-exposed, or a host monitor disappearing**. Each run appends the changes to a private local
 journal (`~/.clawseccheck/events.jsonl`, owner-only, never uploaded); view the timeline with
-`--watch-log`. (Drift detection is upgrade-safe: an older snapshot never produces spurious
-"new connection" alerts.)
+`--watch-log`.
+
+A regression alert carries the **catalog severity of the check that regressed**, so a CRITICAL
+check going FAIL is reported as CRITICAL — matching how the full audit renders the same finding —
+rather than a flat HIGH for every check.
+
+Two things worth knowing about how the comparison behaves:
+
+- **Drift detection is upgrade-safe for the dimensions a snapshot can predate.** The MCP,
+  rug-pull, channel, gateway, host and persistent-memory comparisons each require their key in
+  *both* the stored and the current snapshot, so an older snapshot never produces spurious "new
+  connection", "new memory file", or rug-pull alerts after an upgrade — such a dimension is
+  skipped for exactly one run, then compares normally.
+- **An unchanged grade is not evidence that nothing got worse.** The displayed score is capped by
+  the most severe open FAIL (a CRITICAL FAIL pins it at 49), so on a config that already holds one
+  it cannot fall further. `--monitor` therefore also tracks the uncapped pass-rate underneath and
+  reports degradation even while the grade sits still.
 
 ```bash
 python3 audit.py --monitor                 # first run = baseline, then alerts on changes

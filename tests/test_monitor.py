@@ -477,7 +477,15 @@ def test_diff_flags_memory_signal_injection(tmp_path):
     ctx2, findings2, score2 = audit(tmp_path)
     alerts = diff(base, snapshot(ctx2, findings2, score2))
     assert any(level == "HIGH" for level, _ in alerts)
-    assert any("workspace-home/memory/notes.md" in msg and "instruction override" in msg for level, msg in alerts)
+    hits = [msg for _, msg in alerts if "workspace-home/memory/notes.md" in msg]
+    assert hits, f"no alert named the changed file: {alerts}"
+    assert any("instruction-override" in msg for msg in hits), hits
+    # The alert must name the phrase CLASS, never splice raw regex source: these messages
+    # land permanently in the hash-chained journal, where an unreadable pattern leaks
+    # implementation detail and tells the reader nothing.
+    assert not any(("(?:" in msg) or ("\\b" in msg) for msg in hits), (
+        f"raw regex source spliced into a journal-bound alert: {hits}"
+    )
 
 
 def test_diff_flags_new_memory_file_with_url(tmp_path):
@@ -508,3 +516,37 @@ def test_memory_removed_alert_when_file_disappears(tmp_path):
     alerts = diff(base, snapshot(ctx2, findings2, score2))
     assert any(level == "INFO" for level, _ in alerts)
     assert any("removed" in msg and "workspace-home/memory/notes.md" in msg for level, msg in alerts)
+
+
+# --------------------------------------------------------------- LOW severity rendering
+
+def test_render_monitor_gives_low_a_glyph_and_sorts_it_above_info():
+    """LOW is a real catalog severity. A LOW alert must render with a mark and sort ABOVE
+    INFO — a LOW check that regressed to FAIL is a security finding, INFO is a counter.
+    Omitting LOW from the maps dropped its glyph and sank it to the bottom of the report.
+    """
+    from clawseccheck.report import render_monitor
+    from clawseccheck.scoring import compute
+
+    alerts = [
+        ("INFO", "an informational counter moved"),
+        ("LOW", "a LOW check regressed"),
+        ("MEDIUM", "a MEDIUM thing changed"),
+    ]
+    out = render_monitor(alerts, compute([]), ascii_only=True)
+
+    assert "[-] " in out, f"LOW rendered without its mark:\n{out}"
+    assert out.index("a LOW check regressed") < out.index("an informational counter moved"), (
+        f"LOW must sort above INFO:\n{out}"
+    )
+    assert out.index("a MEDIUM thing changed") < out.index("a LOW check regressed")
+
+
+def test_render_events_gives_low_a_glyph():
+    """The journal renderer shares the vocabulary: a LOW entry must not lose its mark on
+    the way into the permanent record."""
+    from clawseccheck.report import render_events
+
+    out = render_events([{"level": "LOW", "message": "a LOW event", "ts": "2026-07-20T00:00:00Z"}],
+                        ascii_only=True)
+    assert "[-]" in out, f"LOW event rendered without its mark:\n{out}"

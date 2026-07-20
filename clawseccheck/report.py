@@ -1038,6 +1038,16 @@ def render_report(findings: list[Finding], score: ScoreResult,
     if score.capped:
         lines.append(f"(capped from {score.raw_score} - open {score.cap_severity or 'CRITICAL'} finding)")
 
+    # B-281 (ENV-1): name the file this grade actually describes. OpenClaw resolves its
+    # config through OPENCLAW_CONFIG_PATH / OPENCLAW_HOME / OPENCLAW_STATE_DIR (what
+    # `openclaw --profile` sets) and prefers an existing legacy clawdbot.json, so the
+    # audited file is a RESOLVED path, not a foregone conclusion. Printing it is what lets
+    # a reader notice that a grade describes a stale, dormant config; B183 does the
+    # comparison, but this line stands on its own and costs nothing when they agree.
+    _audited_path = getattr(ctx, "config_path", None) if ctx is not None else None
+    if _audited_path is not None:
+        lines.append(f"Audited config: {_audited_path}")
+
     # C-166: loud caution line when only a small slice of the catalog could be assessed —
     # a high grade over a thin slice can otherwise read as a full clean bill of health.
     # Human-report-only; never alters score/grade. Gated on score.assessable so the N/A
@@ -1441,9 +1451,14 @@ def _header_rule_width(header_line: str, ascii_only: bool) -> int:
 
 def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
                    baseline: bool = False) -> str:
-    mark = {"CRITICAL": "[X]", "HIGH": "[!]", "MEDIUM": "[~]", "INFO": "[i]"} if ascii_only \
-        else {"CRITICAL": "⛔", "HIGH": "⚠️", "MEDIUM": "🔶", "INFO": "ℹ️"}
-    order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "INFO": 3}
+    # LOW is a real catalog severity and must outrank INFO: a LOW check that regressed to
+    # FAIL is a security finding, while INFO is an informational counter. Omitting it made
+    # a LOW alert render with no glyph and sort as though it were the least important line
+    # in the report.
+    mark = {"CRITICAL": "[X]", "HIGH": "[!]", "MEDIUM": "[~]", "LOW": "[-]", "INFO": "[i]"} \
+        if ascii_only \
+        else {"CRITICAL": "⛔", "HIGH": "⚠️", "MEDIUM": "🔶", "LOW": "⚪", "INFO": "ℹ️"}
+    order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
     ok = "[OK]" if ascii_only else "✅"
     head = brand.header(subtitle="Threat Monitor", ascii_only=ascii_only)
     lines = [head, "=" * _header_rule_width(head, ascii_only),
@@ -1462,8 +1477,11 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
 
 def render_events(events, ascii_only: bool = False) -> str:
     """Render the Agent Watch event journal (timeline of what changed when)."""
-    mark = {"CRITICAL": "[X]", "HIGH": "[!]", "MEDIUM": "[~]", "INFO": "[i]"} if ascii_only \
-        else {"CRITICAL": "⛔", "HIGH": "⚠️", "MEDIUM": "🔶", "INFO": "ℹ️"}
+    # Same severity vocabulary as render_monitor — a journal entry written at LOW must not
+    # lose its glyph on the way into the permanent record.
+    mark = {"CRITICAL": "[X]", "HIGH": "[!]", "MEDIUM": "[~]", "LOW": "[-]", "INFO": "[i]"} \
+        if ascii_only \
+        else {"CRITICAL": "⛔", "HIGH": "⚠️", "MEDIUM": "🔶", "LOW": "⚪", "INFO": "ℹ️"}
     if not events:
         out = "Agent Watch journal\n" + "=" * 30 + "\n\nNo recorded change events yet.\n"
         return _asciify(out) if ascii_only else out
@@ -2006,6 +2024,11 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     # read as a silent all-clear — config_parse_error is a clean gating boolean and errors
     # carries the human-readable parse message(s) that were previously only in the text run.
     payload["config_found"] = bool(getattr(ctx, "config_found", False)) if ctx is not None else False
+    # B-281 (ENV-1): WHICH file was audited, not merely whether one was found. Every
+    # verdict in this payload describes exactly this path; a bare `config_found: true`
+    # let a report about a stale, dormant config read as a report about the live agent.
+    _audited = getattr(ctx, "config_path", None) if ctx is not None else None
+    payload["audited_config_path"] = str(_audited) if _audited is not None else None
     payload["config_parse_error"] = bool(getattr(ctx, "config_parse_error", False)) if ctx is not None else False
     payload["errors"] = [_sanitize(e) for e in getattr(ctx, "errors", [])] if ctx is not None else []
     # F-131 Phase 1: "Inventory by subject" — additive top-level key (design §4.6).
