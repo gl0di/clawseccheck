@@ -1794,7 +1794,27 @@ def check_gateway(ctx: Context) -> Finding:
         _env_cred, _env_cred_src = (
             _gateway_env_credential(ctx) if auth is None else (None, None)
         )
-        if _env_cred is not None:
+        # C-135 (independent adversarial pass on B-290): presence alone is NOT enough to
+        # clear this FAIL, and softening on truthiness made the scanner lie. The bind guard
+        # that justifies the softening at all — server-runtime-config-r5ejxORO.js:66,78 —
+        # tests `hasSharedSecret`, which is satisfied by a ONE-CHARACTER token: mode derives
+        # to "token", the throw does not fire, and the gateway binds to 0.0.0.0 and listens.
+        # `assertGatewayAuthConfigured` (auth-B27MflKU.js:183-197) rejects only a MISSING
+        # credential; no minimum length exists anywhere in the dist. So "authenticated, or
+        # no listener at all" holds for the credential-ABSENT case but NOT for the
+        # credential-WEAK case, which is a live, world-reachable gateway one guess deep.
+        #
+        # The bar is the one this very check already applies to a config token below
+        # (`0 < len(token) < 24`) — identical posture must not get opposite verdicts
+        # depending on where the credential is stored. It also realigns us with OpenClaw's
+        # own audit, which fires `gateway.token_too_short` on exactly this input
+        # (audit-UjVvFwCi.js:239, `auth.mode === "token" && token.length < 24`) — being
+        # weaker than the vendor's audit on a CRITICAL check is not a defensible position.
+        #
+        # Only the LENGTH of the credential is read. The value never reaches evidence, a
+        # message, a fix string, or a log (§8).
+        _env_cred_strong = _env_cred is not None and len(_env_cred.strip()) >= 24
+        if _env_cred is not None and _env_cred_strong:
             soft_ev.append(
                 f"gateway.bind={bind} is non-loopback and the config sets no "
                 f"gateway.auth.mode, but a gateway credential is supplied by the "
@@ -1805,6 +1825,17 @@ def check_gateway(ctx: Context) -> Finding:
                 "No action required if the environment-supplied gateway credential is "
                 "intentional. Setting gateway.auth.mode explicitly makes the posture "
                 "readable from the config alone"
+            )
+        elif _env_cred is not None:
+            ev.append(
+                f"gateway.bind={bind} is non-loopback and the only gateway credential is "
+                f"an environment-supplied secret shorter than 24 chars ({_env_cred_src}) — "
+                "OpenClaw binds and listens on it, so the gateway is world-reachable "
+                "behind a guessable secret"
+            )
+            fixes.append(
+                "Replace the environment-supplied gateway credential with one of at least "
+                "24 characters, or bind the gateway to loopback"
             )
         else:
             ev.append(f"gateway.bind={bind or '?'} exposed with auth.mode={auth}")

@@ -322,3 +322,69 @@ def test_override_root_that_cannot_be_walked_does_not_crash_the_audit(tmp_path):
         os.chmod(blocked, 0o755)
     # The audit completed rather than raising, and said so.
     assert isinstance(ctx.installed_skills, dict)
+
+
+# ---------------------------------------------------------------------------
+# C-135 residual closed: the softening is gated on credential STRENGTH.
+#
+# The independent adversarial pass on B-290 found that presence alone cleared the
+# CRITICAL exposed-bind FAIL. It does not any more: the bind guard that justifies the
+# softening (server-runtime-config-r5ejxORO.js:66,78) is satisfied by a one-character
+# token, so a weak env credential is a LIVE world-reachable gateway, not a secured one.
+# The bar is the one check_gateway already applies to a config token.
+# ---------------------------------------------------------------------------
+
+def test_short_env_credential_does_not_clear_the_exposed_bind_fail(tmp_path):
+    """A one-guess-deep secret is exposure, not authentication.
+
+    `hasSharedSecret` is true for ANY non-empty token, so OpenClaw binds to 0.0.0.0 and
+    listens. `assertGatewayAuthConfigured` (auth-B27MflKU.js:183-197) rejects only a
+    MISSING credential, and no minimum length exists anywhere in the dist — so the
+    "authenticated, or no listener at all" argument does NOT cover this case.
+    """
+    for weak in ("a", "changeme", "password", "1234567890123456789012"):
+        f = check_gateway(
+            collect(_home(tmp_path, EXPOSED_NO_AUTH,
+                          unit_lines=f"Environment=OPENCLAW_GATEWAY_TOKEN={weak}\n"))
+        )
+        assert f.status == FAIL, f"{weak!r} ({len(weak)} chars) must not soften B2"
+        assert "shorter than 24 chars" in f.detail
+
+    # The leak assertion needs a value that cannot occur in English prose by chance —
+    # asserting `"a" not in detail` only proves the alphabet is unused. Assembled from
+    # fragments so no contiguous secret-shaped literal exists in the source (§2.3).
+    marker = "Zq7" + "Wv2" + "Xj9"
+    f = check_gateway(
+        collect(_home(tmp_path, EXPOSED_NO_AUTH,
+                      unit_lines=f"Environment=OPENCLAW_GATEWAY_TOKEN={marker}\n"))
+    )
+    assert f.status == FAIL
+    assert marker not in f.detail, "the credential value must never reach the report"
+    assert marker not in " ".join(f.evidence or [])
+    assert marker not in " ".join(f.fix or [])
+
+
+def test_env_credential_at_the_boundary(tmp_path):
+    """23 chars fails, 24 passes — the same bar the config-token clause uses."""
+    below = check_gateway(
+        collect(_home(tmp_path, EXPOSED_NO_AUTH,
+                      unit_lines="Environment=OPENCLAW_GATEWAY_TOKEN=" + "a" * 23 + "\n"))
+    )
+    assert below.status == FAIL
+
+    at = check_gateway(
+        collect(_home(tmp_path, EXPOSED_NO_AUTH,
+                      unit_lines="Environment=OPENCLAW_GATEWAY_TOKEN=" + "a" * 24 + "\n"))
+    )
+    assert at.status == WARN
+    assert "the gateway is authenticated" in at.detail
+
+
+def test_short_env_password_is_also_not_enough(tmp_path):
+    """The password leg takes the same bar as the token leg."""
+    f = check_gateway(
+        collect(_home(tmp_path, EXPOSED_NO_AUTH,
+                      unit_lines="Environment=OPENCLAW_GATEWAY_PASSWORD=hunter2\n"))
+    )
+    assert f.status == FAIL
+    assert "shorter than 24 chars" in f.detail
