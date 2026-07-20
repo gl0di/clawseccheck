@@ -35,8 +35,10 @@ from ._shared import (
     _finding,
     _has_approval_gate,
     _hint,
+    _resolved_channel_nodes,
     _trifecta_legs,
     _web_fetch_enabled,
+    _wildcard_group_gap,
 )
 
 
@@ -910,86 +912,14 @@ def check_untrusted_context(ctx: Context) -> Finding:
     )
 
 
-def _b140_is_wildcard_allow_entry(entry) -> bool:
-    """True when *entry* is OpenClaw's literal ``"*"`` allow-everyone sentinel.
-
-    Mirrors the dist's own normalization (``isWildcardEntry`` in
-    audit.nondeep.runtime-*.js: ``normalizeStringifiedOptionalString(value) === "*"``,
-    i.e. ``String(value).trim()``), so a padded ``" * "`` counts and a numeric entry
-    never can. Same shape as ``_is_owner_wildcard_allow_from`` in ``_config.py``;
-    duplicated locally per this package's topic-module precedent rather than
-    cross-imported between sibling topics.
-    """
-    return isinstance(entry, str) and entry.strip() == "*"
-
-
-def _b140_allow_from_is_present(value) -> bool:
-    """True when *value* is a configured (non-absent, non-empty) allowFrom source.
-
-    An empty list is NOT present: OpenClaw treats it as "no entries", which falls
-    through to the next source (``allowFrom?.length ? ... : void 0`` in the LINE
-    group resolver, and ``Array.isArray(groupAllowFrom) && length > 0`` in
-    ``resolveGroupAllowFromSources``). Non-list, non-string truthy values are
-    accepted as-is so this check does not change verdicts on shapes OpenClaw's own
-    schema would reject anyway.
-    """
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, list):
-        return bool(value)
-    return bool(value)
-
-
-def _b140_effective_allow_from(wildcard_group, provider_cfg):
-    """Return the allowFrom list that actually governs the ``groups["*"]`` entry.
-
-    Grounded on the dist's group-allowlist resolution order (LINE monitor-*.js:
-    ``firstDefined(groupConfig?.allowFrom, account.config.groupAllowFrom,
-    account.config.allowFrom?.length ? account.config.allowFrom : void 0)``) — the
-    FIRST configured source wins outright; the later ones are fallbacks, not a union.
-
-    Order matters for correctness, not just tidiness: a per-group ``allowFrom: ["*"]``
-    beside a channel-level ``allowFrom: ["owner"]`` leaves the group wide open, so an
-    "any source restricts it" test would emit exactly the lying PASS this function
-    exists to prevent.
-
-    Returns ``None`` when no source is configured at all.
-    """
-    group_allow_from = (
-        wildcard_group.get("allowFrom") if isinstance(wildcard_group, dict) else None
-    )
-    for source in (
-        group_allow_from,
-        # channels.<provider>.groupAllowFrom — a channel-level array sibling of
-        # `groups`, present in the bundled schema for telegram/line/feishu/zalo/
-        # matrix/imessage/msteams/googlechat/nextcloud. It was never read before
-        # B-266, so a config scoped only via groupAllowFrom used to WARN falsely.
-        provider_cfg.get("groupAllowFrom"),
-        provider_cfg.get("allowFrom"),
-    ):
-        if _b140_allow_from_is_present(source):
-            return source
-    return None
-
-
-def _b140_restriction_gap(wildcard_group, provider_cfg):
-    """Return a short reason string when the wildcard group is effectively open, else None.
-
-    Two distinct ways to be open, deliberately reported apart — before B-266 they were
-    indistinguishable in the output, and the ``["*"]`` one printed a PASS.
-    """
-    effective = _b140_effective_allow_from(wildcard_group, provider_cfg)
-    if effective is None:
-        return "no allowFrom configured"
-    entries = effective if isinstance(effective, list) else [effective]
-    if any(_b140_is_wildcard_allow_entry(e) for e in entries):
-        # OpenClaw's isSenderIdAllowed() short-circuits `if (allow.hasWildcard)
-        # return true;` BEFORE consulting senderId, so a "*" among otherwise-narrow
-        # entries still admits every sender — a non-empty list is not a restriction.
-        return "allowFrom contains '*' — admits every sender"
-    return None
+# B-297: the `_b140_*` privates that used to live here (`_b140_is_wildcard_allow_entry`
+# / `_b140_allow_from_is_present` / `_b140_effective_allow_from` / `_b140_restriction_gap`)
+# MOVED VERBATIM to checks/_shared.py as `_is_wildcard_allow_entry` /
+# `_allow_from_is_present` / `_effective_group_allow_from` / `_wildcard_group_gap`. They
+# were the only model of the `groups {"*": ...}` shape in the package and were unreachable
+# from risk.py's ingress leg (a topic module may not be imported by the risk engine, and
+# risk.py imports only via the checks aggregator — CLAUDE.md §3.1-a). B140 and the ingress
+# leg now share ONE predicate; extend it in _shared.py, never fork it back to here.
 
 
 def check_wildcard_group_ingress(ctx: Context) -> Finding:
@@ -1022,10 +952,15 @@ def check_wildcard_group_ingress(ctx: Context) -> Finding:
        schema has no such field, so an ignored `users` entry would buy a lying PASS
        to silence an advisory WARN. Doing it per-provider is a separate, separately
        grounded change; until then those two providers can draw a false WARN.
-    2. Multi-account configs. `channels.<p>.accounts.<id>.groups` is not walked
-       (only the top-level provider node), so a wildcard group nested under an
-       account is missed entirely. Pre-dates B-266; B171 shows the `[c] + accounts`
-       shape this would need.
+    2. CLOSED by B-297. `channels.<p>.accounts.<id>.groups` used to be unwalked (only
+       the top-level provider node), so a wildcard group nested under an account was
+       missed entirely. `_resolved_channel_nodes` now evaluates the MERGED account
+       config the dist's own `mergeAccountConfig` produces — which is stricter than the
+       `[c] + accounts` idiom this note originally proposed: a raw per-node read would
+       have false-WARNed on a base-level `groups {"*"}` restricted by an account-level
+       `allowFrom` (and vice versa). One residual remains, in the missed-WARN direction:
+       an implicit default account synthesised from channel-level credentials alongside
+       explicit `accounts` is not modelled (see `_resolved_channel_nodes`).
     3. `groupPolicy: "disabled"` is not consulted, so a wildcard group entry on a
        channel with groups switched off can still draw a WARN.
 
@@ -1041,6 +976,14 @@ def check_wildcard_group_ingress(ctx: Context) -> Finding:
               allowFrom restricting it. Advisory only — never FAIL, since a public/
               community bot may intentionally accept any group.
     UNKNOWN — no channels configured; cannot assess.
+
+    B-297: the predicate itself now lives in `checks/_shared.py`
+    (`_wildcard_group_gap` / `_resolved_channel_nodes`) so the risk engine's ingress
+    leg reads the SAME definition of "this wildcard group is unrestricted". B140's own
+    verdict semantics are unchanged: still WARN-never-FAIL, still `channels.defaults`-
+    excluded, still evaluated over every configured provider whether or not it is
+    `enabled` (the ingress leg's `_open_wildcard_group_channels` additionally skips
+    `enabled: False`, which is a caller-side scoping choice, not a different predicate).
     """
     providers = {
         k: v for k, v in _channels(ctx.config).items() if k != "defaults" and isinstance(v, dict)
@@ -1057,15 +1000,15 @@ def check_wildcard_group_ingress(ctx: Context) -> Finding:
     affected: list[str] = []
     reasons: list[str] = []
     for provider, provider_cfg in providers.items():
-        groups = provider_cfg.get("groups")
-        if not isinstance(groups, dict) or "*" not in groups:
-            continue
-        gap = _b140_restriction_gap(groups.get("*"), provider_cfg)
-        if gap:
-            # evidence stays BARE provider names — it is consumed as an exact-membership
-            # list by callers and tests; the "why" rides in the detail text instead.
-            affected.append(provider)
-            reasons.append(f"{provider} ({gap})")
+        for node in _resolved_channel_nodes(provider_cfg):
+            gap = _wildcard_group_gap(node)
+            if gap:
+                # evidence stays BARE provider names — it is consumed as an exact-
+                # membership list by callers and tests; the "why" rides in the detail
+                # text instead.
+                affected.append(provider)
+                reasons.append(f"{provider} ({gap})")
+                break
 
     if affected:
         return _finding(

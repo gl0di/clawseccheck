@@ -19,7 +19,9 @@ from .checks import (
     _external_input_channels,
     _has_approval_gate,
     _hint,
+    _open_wildcard_group_channels,
     _reassembly,
+    _resolved_channel_nodes,
     SENSITIVE_TOOL_HINTS,
     INPUT_TOOL_HINTS,
     OUTBOUND_TOOL_HINTS,
@@ -88,13 +90,46 @@ def _has_sensitive_data(tools: list[str], ctx: Context) -> bool:
 
 
 def _open_channel_labels(cfg: dict) -> list[str]:
-    """Human-readable labels for open dm/group channels, e.g. 'telegram (open group)'."""
+    """Human-readable labels for open dm/group channels, e.g. 'telegram (open group)'.
+
+    B-297: also labels the ``channels.<p>.groups {"*": ...}`` shape. That shape declares
+    NO dmPolicy/groupPolicy field, so the policy-value tests below returned [] on the
+    commonest real open-group config — and because RISK-01 gates on this helper alone
+    (``if not open_ch: return None``), "Untrusted sender can reach host execution" could
+    not fire on it at all, statically, no matter what the other legs said. The predicate
+    is ``_open_wildcard_group_channels`` in checks/_shared.py, the SAME one B140 uses —
+    imported through the checks aggregator per CLAUDE.md §3.1-a, deliberately NOT
+    re-implemented here (a second, drifting copy of "wildcard means unrestricted" is the
+    defect class this change removes).
+
+    ADVISORY, not scored. Every RiskPath is outside the A–F score by construction:
+    cli.py computes ``score = audit(...)`` before ``risk_paths(...)`` is called, and
+    scoring.py does not import this module — so a chain that newly fires here cannot
+    create a FAIL or move the grade. That is what keeps B140's WARN-never-FAIL contract
+    intact (a community bot may intentionally accept any group) while still letting the
+    chain be reported.
+
+    A wildcard group's ``requireMention: true`` is surfaced as mitigating context in the
+    label, NOT treated as closing the path: it changes what triggers the bot, not who is
+    allowed to trigger it.
+    """
     labels = []
     channels = cfg.get("channels")
     if not isinstance(channels, dict):
         return labels
+    open_wildcard = _open_wildcard_group_channels(cfg)
     for name, c in channels.items():
         if not isinstance(c, dict):
+            continue
+        if name in open_wildcard:
+            mention = any(
+                isinstance(node.get("groups"), dict)
+                and isinstance(node["groups"].get("*"), dict)
+                and node["groups"]["*"].get("requireMention") is True
+                for node in _resolved_channel_nodes(c)
+            )
+            suffix = ", any group, mention-gated" if mention else ", any group"
+            labels.append(f"{name} (open group{suffix})")
             continue
         nodes = [c] + list((c.get("accounts") or {}).values())
         for node in nodes:

@@ -575,6 +575,211 @@ def _open_channels(cfg: dict) -> list[str]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# B-297 — the wildcard-group ingress shape, as ONE definition
+# ---------------------------------------------------------------------------
+# `channels.<p>.groups {"*": {...}}` is how open group access is actually written: it
+# carries NO dmPolicy/groupPolicy field at all, so every policy-value predicate in this
+# package (_open_channels / _external_input_channels / risk.py's _open_channel_labels)
+# scored it as "no external ingress". B140 (check_wildcard_group_ingress) was the single
+# place that understood the shape, and nothing outside checks/_agents.py could reach it.
+#
+# These four helpers were LIFTED VERBATIM out of checks/_agents.py (they were the
+# `_b140_*` privates B-266 landed) into this leaf so B140 and the ingress leg read one
+# definition of "this wildcard group is effectively unrestricted". Writing a second,
+# subtly-different notion of "wildcard means unrestricted" is the exact defect class this
+# change exists to remove — extend THESE, never fork them.
+
+def _is_wildcard_allow_entry(entry) -> bool:
+    """True when *entry* is OpenClaw's literal ``"*"`` allow-everyone sentinel.
+
+    Mirrors the dist's own normalization (``isWildcardEntry`` in
+    audit.nondeep.runtime-*.js: ``normalizeStringifiedOptionalString(value) === "*"``,
+    i.e. ``String(value).trim()``), so a padded ``" * "`` counts and a numeric entry
+    never can. Same shape as ``_is_owner_wildcard_allow_from`` in ``_config.py``.
+    """
+    return isinstance(entry, str) and entry.strip() == "*"
+
+
+def _allow_from_is_present(value) -> bool:
+    """True when *value* is a configured (non-absent, non-empty) allowFrom source.
+
+    An empty list is NOT present: OpenClaw treats it as "no entries", which falls
+    through to the next source (``allowFrom?.length ? ... : void 0`` in the LINE
+    group resolver, and ``Array.isArray(groupAllowFrom) && length > 0`` in
+    ``resolveGroupAllowFromSources``, allow-from-o-cfFFcK.js:31-33). Non-list,
+    non-string truthy values are accepted as-is so this does not change verdicts on
+    shapes OpenClaw's own schema would reject anyway.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return bool(value)
+    return bool(value)
+
+
+def _effective_group_allow_from(wildcard_group, node):
+    """Return the allowFrom list that actually governs a ``groups["*"]`` entry.
+
+    Grounded on the dist's group-allowlist resolution order (LINE monitor-*.js:
+    ``firstDefined(groupConfig?.allowFrom, account.config.groupAllowFrom,
+    account.config.allowFrom?.length ? account.config.allowFrom : void 0)``) — the
+    FIRST configured source wins outright; the later ones are fallbacks, not a union.
+
+    Order matters for correctness, not just tidiness: a per-group ``allowFrom: ["*"]``
+    beside a channel-level ``allowFrom: ["owner"]`` leaves the group wide open, so an
+    "any source restricts it" test would emit exactly the lying PASS this function
+    exists to prevent.
+
+    *node* is a RESOLVED channel node (see ``_resolved_channel_nodes``) — i.e. the
+    ``account.config`` the dist's own resolver reads, not necessarily the raw
+    ``channels.<p>`` dict. Returns ``None`` when no source is configured at all.
+    """
+    group_allow_from = (
+        wildcard_group.get("allowFrom") if isinstance(wildcard_group, dict) else None
+    )
+    for source in (
+        group_allow_from,
+        # channels.<provider>.groupAllowFrom — a channel-level array sibling of
+        # `groups`, present in the bundled schema for telegram/line/feishu/zalo/
+        # matrix/imessage/msteams/googlechat/nextcloud. It was never read before
+        # B-266, so a config scoped only via groupAllowFrom used to WARN falsely.
+        node.get("groupAllowFrom"),
+        node.get("allowFrom"),
+    ):
+        if _allow_from_is_present(source):
+            return source
+    return None
+
+
+def _wildcard_group_gap(node) -> str | None:
+    """Reason string when *node* has an effectively-unrestricted ``groups["*"]``, else None.
+
+    Two distinct ways to be open, deliberately reported apart — before B-266 they were
+    indistinguishable in the output, and the ``["*"]`` one printed a PASS.
+    """
+    if not isinstance(node, dict):
+        return None
+    groups = node.get("groups")
+    if not isinstance(groups, dict) or "*" not in groups:
+        return None
+    effective = _effective_group_allow_from(groups.get("*"), node)
+    if effective is None:
+        return "no allowFrom configured"
+    entries = effective if isinstance(effective, list) else [effective]
+    if any(_is_wildcard_allow_entry(e) for e in entries):
+        # OpenClaw's isSenderIdAllowed() short-circuits `if (allow.hasWildcard)
+        # return true;` BEFORE consulting senderId (allow-from-o-cfFFcK.js:43-47), so
+        # a "*" among otherwise-narrow entries still admits every sender — a non-empty
+        # list is not a restriction.
+        return "allowFrom contains '*' — admits every sender"
+    return None
+
+
+def _resolved_channel_nodes(c: dict) -> list[dict]:
+    """The channel-config nodes that actually govern a running account.
+
+    NOT the ``[c] + list(accounts.values())`` idiom the policy helpers above use. That
+    idiom reads each node RAW, which is unsound for ``groups``/``allowFrom`` because the
+    two live on different keys and an account inherits whichever it does not override.
+    Grounded on the dist's ``mergeAccountConfig`` (account-helpers-BAtt8fRD.js:88-105):
+
+        const base = {...channelConfig} minus "accounts" (and omitKeys)
+        const merged = { ...base, ...accountConfig }
+
+    — a shallow spread where the account wins key-by-key and inherits the rest. So the
+    two FALSE-POSITIVE shapes a raw per-node read would produce are both avoided here:
+    a base-level ``groups {"*"}`` beside an account-level ``allowFrom``, and a base-level
+    ``allowFrom`` beside an account-level ``groups {"*"}`` — the dist merges both into one
+    restricted account config, and so do we.
+
+    NARROWS, does not close: when ``accounts`` is configured the raw channel node is not
+    itself evaluated, because every runtime account is a merged node. The dist CAN also
+    synthesise an extra implicit "default" account from channel-level credentials
+    (``hasImplicitDefaultAccount``, account-helpers-BAtt8fRD.js:16-22), but which keys
+    trigger that is per-channel (``implicitDefaultAccount.channelKeys``) and is NOT
+    modelled here — so a wildcard group reachable only through an implicit default
+    account alongside explicit accounts is a known false NEGATIVE. That is the safe
+    direction under Golden Rule #5 and is deliberate; do not "fix" it by also evaluating
+    the raw base node, which reintroduces the first false positive above.
+    """
+    accounts = c.get("accounts")
+    if not isinstance(accounts, dict) or not accounts:
+        return [c]
+    base = {k: v for k, v in c.items() if k != "accounts"}
+    merged = [{**base, **acc} for acc in accounts.values() if isinstance(acc, dict)]
+    return merged or [c]
+
+
+def _wildcard_group_is_reachable(node) -> bool:
+    """False when a node's wildcard group cannot receive group messages at all.
+
+    REACHABILITY, not restriction — deliberately separate from ``_wildcard_group_gap``,
+    which answers only "is this wildcard group unrestricted by allowFrom". Two config
+    shapes switch group ingress off outright, both grounded in the dist:
+
+    * ``groupPolicy: "disabled"`` — a schema-valid value (``GroupPolicySchema =
+      _enum(["open","disabled","allowlist"])``, zod-schema.core-DviqqtPj.js:424-428)
+      that every group-access resolver gates on FIRST and unconditionally:
+      ``if (params.groupPolicy === "disabled") return { allowed: false, reason:
+      "disabled" }`` (group-access-CyF0dAER.js:9/14/44/75, and
+      message-handler.preflight-CmntKN5R.js:264).
+    * a wildcard entry's own ``enabled: false`` — ``isGroup && groupPolicy !==
+      "disabled" && groupEntry?.enabled === false`` builds a route with
+      ``enabled: false`` (channel2.runtime-Bb6oxd87.js:237), which
+      ``evaluateGroupRouteAccessForPolicy`` rejects with ``reason: "route_disabled"``.
+
+    Found by the C-135 adversarial pass on B-297, which is the only reason this exists:
+    without it, a leftover ``groups {"*": ...}`` beside ``groupPolicy: "disabled"`` — a
+    perfectly ordinary way to turn group access off without deleting the block — became
+    "untrusted ingress", flipping B41 to WARN and firing RISK-01/02/03 on a config that
+    admits no group message at all. B140 tolerated that shape as an advisory false WARN
+    (its documented gap #3); promoting it into the ingress leg would have made the same
+    unsound inference drive a CRITICAL chain, which is not tolerable.
+
+    Scoped to the ingress leg on purpose: B140's own verdict is unchanged by B-297, so
+    its gap #3 stays exactly as documented rather than being silently re-tuned here.
+    """
+    if not isinstance(node, dict):
+        return False
+    if node.get("groupPolicy") == "disabled":
+        return False
+    groups = node.get("groups")
+    wildcard = groups.get("*") if isinstance(groups, dict) else None
+    if isinstance(wildcard, dict) and wildcard.get("enabled") is False:
+        return False
+    return True
+
+
+def _open_wildcard_group_channels(cfg: dict) -> dict:
+    """Map channel name -> reason, for channels open via a reachable, unrestricted
+    ``groups["*"]`` entry.
+
+    The ingress-leg counterpart of B140: same restriction predicate, but additionally
+    scoped to what can actually receive a message —
+
+    * ``enabled: False`` channels are skipped (B-041 — a disabled channel ingests
+      nothing), so this composes with ``_external_input_channels`` / ``_open_channels``,
+      which already skip them;
+    * ``_wildcard_group_is_reachable`` drops group-ingress-off nodes (C-135, see there).
+
+    ``channels.defaults`` is a config block, not a provider, and is excluded (the same
+    rule B140 and B26 apply).
+    """
+    out = {}
+    for name, c in _channels(cfg).items():
+        if name == "defaults" or not isinstance(c, dict) or c.get("enabled") is False:
+            continue
+        for node in _resolved_channel_nodes(c):
+            gap = _wildcard_group_gap(node)
+            if gap and _wildcard_group_is_reachable(node):
+                out[name] = gap
+                break
+    return out
+
+
 def _external_input_channels(cfg: dict) -> list[str]:
     """Channels that admit external (non-owner) senders regardless of how restricted.
 
@@ -583,13 +788,23 @@ def _external_input_channels(cfg: dict) -> list[str]:
     'untrusted input' leg and credential / ingress-path checks (B-032). ``groupPolicy``
     is normalized first so a Feishu channel's ``"allowall"`` alias counts as ``"open"``
     (B-283; Feishu-scoped — see ``_norm_group_policy``).
+
+    B-297: a channel is ALSO external-input when it carries an effectively-unrestricted
+    ``groups {"*": ...}`` entry (``_open_wildcard_group_channels``). That shape declares
+    no dmPolicy/groupPolicy at all, so the policy-value test above returned [] on the
+    commonest real open-group config and every consumer of this helper — the risk
+    engine's ingress leg included — read it as "no external ingress".
     """
+    open_wildcard = _open_wildcard_group_channels(cfg)
     out = []
     for name, c in _channels(cfg).items():
         # B-041: skip enabled:false channels (a disabled channel admits no external
         # input), matching _untrusted_input_channels. A disabled allowlist/pairing channel
         # otherwise drove §5 hard-FAIL false positives (B39) and spurious WARNs (B41/B46).
         if not isinstance(c, dict) or c.get("enabled") is False:
+            continue
+        if name in open_wildcard:
+            out.append(name)
             continue
         nodes = [c] + list((c.get("accounts") or {}).values())
         for node in nodes:
