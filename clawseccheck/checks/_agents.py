@@ -906,16 +906,131 @@ def check_untrusted_context(ctx: Context) -> Finding:
     )
 
 
+def _b140_is_wildcard_allow_entry(entry) -> bool:
+    """True when *entry* is OpenClaw's literal ``"*"`` allow-everyone sentinel.
+
+    Mirrors the dist's own normalization (``isWildcardEntry`` in
+    audit.nondeep.runtime-*.js: ``normalizeStringifiedOptionalString(value) === "*"``,
+    i.e. ``String(value).trim()``), so a padded ``" * "`` counts and a numeric entry
+    never can. Same shape as ``_is_owner_wildcard_allow_from`` in ``_config.py``;
+    duplicated locally per this package's topic-module precedent rather than
+    cross-imported between sibling topics.
+    """
+    return isinstance(entry, str) and entry.strip() == "*"
+
+
+def _b140_allow_from_is_present(value) -> bool:
+    """True when *value* is a configured (non-absent, non-empty) allowFrom source.
+
+    An empty list is NOT present: OpenClaw treats it as "no entries", which falls
+    through to the next source (``allowFrom?.length ? ... : void 0`` in the LINE
+    group resolver, and ``Array.isArray(groupAllowFrom) && length > 0`` in
+    ``resolveGroupAllowFromSources``). Non-list, non-string truthy values are
+    accepted as-is so this check does not change verdicts on shapes OpenClaw's own
+    schema would reject anyway.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return bool(value)
+    return bool(value)
+
+
+def _b140_effective_allow_from(wildcard_group, provider_cfg):
+    """Return the allowFrom list that actually governs the ``groups["*"]`` entry.
+
+    Grounded on the dist's group-allowlist resolution order (LINE monitor-*.js:
+    ``firstDefined(groupConfig?.allowFrom, account.config.groupAllowFrom,
+    account.config.allowFrom?.length ? account.config.allowFrom : void 0)``) — the
+    FIRST configured source wins outright; the later ones are fallbacks, not a union.
+
+    Order matters for correctness, not just tidiness: a per-group ``allowFrom: ["*"]``
+    beside a channel-level ``allowFrom: ["owner"]`` leaves the group wide open, so an
+    "any source restricts it" test would emit exactly the lying PASS this function
+    exists to prevent.
+
+    Returns ``None`` when no source is configured at all.
+    """
+    group_allow_from = (
+        wildcard_group.get("allowFrom") if isinstance(wildcard_group, dict) else None
+    )
+    for source in (
+        group_allow_from,
+        # channels.<provider>.groupAllowFrom — a channel-level array sibling of
+        # `groups`, present in the bundled schema for telegram/line/feishu/zalo/
+        # matrix/imessage/msteams/googlechat/nextcloud. It was never read before
+        # B-266, so a config scoped only via groupAllowFrom used to WARN falsely.
+        provider_cfg.get("groupAllowFrom"),
+        provider_cfg.get("allowFrom"),
+    ):
+        if _b140_allow_from_is_present(source):
+            return source
+    return None
+
+
+def _b140_restriction_gap(wildcard_group, provider_cfg):
+    """Return a short reason string when the wildcard group is effectively open, else None.
+
+    Two distinct ways to be open, deliberately reported apart — before B-266 they were
+    indistinguishable in the output, and the ``["*"]`` one printed a PASS.
+    """
+    effective = _b140_effective_allow_from(wildcard_group, provider_cfg)
+    if effective is None:
+        return "no allowFrom configured"
+    entries = effective if isinstance(effective, list) else [effective]
+    if any(_b140_is_wildcard_allow_entry(e) for e in entries):
+        # OpenClaw's isSenderIdAllowed() short-circuits `if (allow.hasWildcard)
+        # return true;` BEFORE consulting senderId, so a "*" among otherwise-narrow
+        # entries still admits every sender — a non-empty list is not a restriction.
+        return "allowFrom contains '*' — admits every sender"
+    return None
+
+
 def check_wildcard_group_ingress(ctx: Context) -> Finding:
     """B140 — Wildcard group ingress with no allowFrom restriction (B-139).
 
     Some channel providers (e.g. Telegram) support a per-group config block keyed by
     group ID, with a "*" key matching ANY group the bot is added to. If a provider
-    configures groups["*"] and no allowFrom restricts it — neither a per-group
-    allowFrom on the "*" entry itself, nor a channel-level allowFrom sibling of
-    groups — the bot will answer in any group anyone adds it to, from anyone who
-    triggers it (e.g. via requireMention). This is an open, unrestricted group-ingress
-    surface.
+    configures groups["*"] and no allowFrom *effectively* restricts it — neither a
+    per-group allowFrom on the "*" entry itself, nor a channel-level groupAllowFrom
+    or allowFrom sibling of groups — the bot will answer in any group anyone adds it
+    to, from anyone who triggers it (e.g. via requireMention). This is an open,
+    unrestricted group-ingress surface.
+
+    "Effectively" is the whole point (B-266): an allowlist whose winning entry set
+    contains the literal "*" is NOT a restriction, because OpenClaw's
+    isSenderIdAllowed() returns true on hasWildcard before it ever looks at the
+    sender. Testing the list for bare truthiness — as this check did until B-266 —
+    turned `allowFrom: ["*"]`, the most open config expressible, into a PASS reading
+    "No configured channel has an unrestricted wildcard ('*') group entry."
+
+    NARROWS, does not close. Three gaps survive B-266, all pre-existing (none is
+    introduced by this fix) and all in the false-WARN / missed-WARN direction, never
+    the lying-PASS direction:
+
+    1. Per-group sender scoping under another key. GoogleChat and Matrix key their
+       per-group allowlist as `users` (`groupEntry?.users ??
+       account.config.groupAllowFrom`), and Matrix may use `rooms` in place of
+       `groups` entirely. Not read here. Accepting a bare `users` key on EVERY
+       provider would be unsound in the dangerous direction — Telegram's group
+       schema has no such field, so an ignored `users` entry would buy a lying PASS
+       to silence an advisory WARN. Doing it per-provider is a separate, separately
+       grounded change; until then those two providers can draw a false WARN.
+    2. Multi-account configs. `channels.<p>.accounts.<id>.groups` is not walked
+       (only the top-level provider node), so a wildcard group nested under an
+       account is missed entirely. Pre-dates B-266; B171 shows the `[c] + accounts`
+       shape this would need.
+    3. `groupPolicy: "disabled"` is not consulted, so a wildcard group entry on a
+       channel with groups switched off can still draw a WARN.
+
+    Adversarially probed (C-135, self-run — NOT an independent pass): a wildcard DM
+    `allowFrom: ["*"]` beside a narrow `groupAllowFrom` correctly stays PASS, because
+    a non-empty groupAllowFrom wins outright for group chats and B140's claim is
+    scoped to group ingress — the open-DM exposure is B171/B2's question. Pinned by
+    test_b140_wildcard_dm_allowfrom_beside_narrow_groupallowfrom_passes so it is not
+    later "tightened" into a false positive.
 
     PASS    — channels are configured but none has an unrestricted wildcard group.
     WARN    — at least one channel has a wildcard ("*") group entry with no effective
@@ -936,28 +1051,29 @@ def check_wildcard_group_ingress(ctx: Context) -> Finding:
         )
 
     affected: list[str] = []
+    reasons: list[str] = []
     for provider, provider_cfg in providers.items():
         groups = provider_cfg.get("groups")
         if not isinstance(groups, dict) or "*" not in groups:
             continue
-        wildcard_group = groups.get("*")
-        group_allow_from = (
-            wildcard_group.get("allowFrom") if isinstance(wildcard_group, dict) else None
-        )
-        channel_allow_from = provider_cfg.get("allowFrom")
-        if not group_allow_from and not channel_allow_from:
+        gap = _b140_restriction_gap(groups.get("*"), provider_cfg)
+        if gap:
+            # evidence stays BARE provider names — it is consumed as an exact-membership
+            # list by callers and tests; the "why" rides in the detail text instead.
             affected.append(provider)
+            reasons.append(f"{provider} ({gap})")
 
     if affected:
         return _finding(
             "B140",
             WARN,
-            "Wildcard ('*') group entry with no allowFrom restriction — the bot will "
-            "respond in ANY group it is added to, from any sender who triggers it. "
-            f"Affected channel(s): {', '.join(affected)}.",
-            "Set allowFrom (channel-level, or on the '*' group entry itself) to "
-            "restrict who can trigger the bot in wildcard-matched groups, or replace "
-            "the wildcard with an explicit allowlist of group IDs.",
+            "Wildcard ('*') group entry with no effective allowFrom restriction — the "
+            "bot will respond in ANY group it is added to, from any sender who "
+            f"triggers it. Affected channel(s): {', '.join(reasons)}.",
+            "Set a wildcard-free allowFrom (on the '*' group entry, or channel-level "
+            "groupAllowFrom/allowFrom) to restrict who can trigger the bot in "
+            "wildcard-matched groups, or replace the wildcard with an explicit "
+            "allowlist of group IDs. An allowFrom of ['*'] is not a restriction.",
             evidence=affected,
         )
 
