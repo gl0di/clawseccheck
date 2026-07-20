@@ -54,6 +54,14 @@ from .trajectory import read_events, read_proven_tools
 #    narrowing it there would weaken A1, a change out of this check's scope).
 _T_SENSITIVE_HINTS = ("db", "sql", "postgres", "supabase", "secret", "credential", "vault")
 
+# The check ids this module owns. They are CATALOGUED like every other check, but they
+# never run in a default `audit()` — only under `--behavioral`. That distinction is not
+# otherwise derivable (`scored=False` is shared with 68 ordinary checks), so this tuple is
+# the single source of truth for it, and `tests/test_doc_facts.py` subtracts it from the
+# catalog to pin the "N security checks" figure the README advertises. Without it the badge
+# counts three checks a default run never executes.
+BEHAVIORAL_CHECK_IDS = ("T1", "T2", "T3")
+
 # B-249 (accepted, documented limitation — NOT a bug to "fix" by reading arguments):
 # a GET-based exfil beacon that carries stolen data as a base64/high-entropy URL param on
 # an ordinary `web_fetch`/`fetch`/`browse` call is INVISIBLE to T1. `_classify_verb_role`

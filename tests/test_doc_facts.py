@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 
 from clawseccheck import __released__, __version__
+from clawseccheck.behavioral import BEHAVIORAL_CHECK_IDS
 from clawseccheck.catalog import CATALOG
 
 REPO = Path(__file__).resolve().parents[1]
@@ -41,7 +42,11 @@ SHIPPED_TEXT = (
 # "these 3 checks" is not a coverage claim.
 _CATALOG_SCALE = 50
 
-_BARE_COUNT_RE = re.compile(r"(?<![+\w])(\d{2,4})\s+checks\b", re.IGNORECASE)
+# One optional adjective may sit between the number and the noun — "143 security checks",
+# "143 individual checks". Without it the badge text (the single most-read claim) and the
+# README prose both sail past this guard: found the hard way, when a deliberately-wrong 146
+# passed a run that was supposed to go red.
+_BARE_COUNT_RE = re.compile(r"(?<![+\w])(\d{2,4})\s+(?:[a-z]+\s+)?checks\b", re.IGNORECASE)
 _OPEN_COUNT_RE = re.compile(r"(\d{2,4})\+\s*(?:security\s+)?checks\b", re.IGNORECASE)
 _RISK_RANGE_RE = re.compile(r"RISK-01\.\.RISK-(\d+)")
 
@@ -67,9 +72,20 @@ def _shipped_files():
     return [p for p in SHIPPED_TEXT if p.exists()]
 
 
-def test_bare_check_counts_match_the_catalog():
-    """"134 checks" must mean len(CATALOG) — no "+", no wiggle room."""
-    actual = len(CATALOG)
+def _runnable_check_count():
+    """How many checks a DEFAULT audit actually runs.
+
+    Not `len(CATALOG)`. The T-series is catalogued but only executes under
+    `--behavioral`, so counting the catalog advertises three checks an ordinary run never
+    performs. A reader takes "N security checks" to mean N things that ran — measured on a
+    real `--json` audit, exactly this many ids appear.
+    """
+    return len(CATALOG) - len(BEHAVIORAL_CHECK_IDS)
+
+
+def test_bare_check_counts_match_what_a_default_audit_runs():
+    """"143 checks" must mean the checks that actually execute — no "+", no wiggle room."""
+    actual = _runnable_check_count()
     wrong = []
     for path in _shipped_files():
         text = path.read_text(encoding="utf-8")
@@ -79,13 +95,13 @@ def test_bare_check_counts_match_the_catalog():
                 continue
             if claimed != actual:
                 line = text[: m.start()].count("\n") + 1
-                wrong.append(f"{path.relative_to(REPO)}:{line} says {claimed}, catalog has {actual}")
+                wrong.append(f"{path.relative_to(REPO)}:{line} says {claimed}, a default audit runs {actual}")
     assert not wrong, "stale check-count claims in shipped docs:\n  " + "\n  ".join(wrong)
 
 
 def test_open_ended_check_counts_are_true_and_not_a_decade_stale():
     """"130+ checks" must be true, and must be restated once the count reaches 140."""
-    actual = len(CATALOG)
+    actual = _runnable_check_count()
     wrong = []
     for path in _shipped_files():
         text = path.read_text(encoding="utf-8")
@@ -96,10 +112,10 @@ def test_open_ended_check_counts_are_true_and_not_a_decade_stale():
             line = text[: m.start()].count("\n") + 1
             where = f"{path.relative_to(REPO)}:{line}"
             if claimed > actual:
-                wrong.append(f"{where} claims {claimed}+ but the catalog only has {actual}")
+                wrong.append(f"{where} claims {claimed}+ but a default audit only runs {actual}")
             elif actual - claimed >= _OPEN_CLAIM_SLACK:
                 wrong.append(
-                    f"{where} says {claimed}+ while the catalog has {actual} — "
+                    f"{where} says {claimed}+ while a default audit runs {actual} — "
                     f"restate it (nearest ten at or below {actual})"
                 )
     assert not wrong, "open-ended check-count claims need attention:\n  " + "\n  ".join(wrong)
