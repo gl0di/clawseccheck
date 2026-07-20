@@ -36,6 +36,27 @@ SNAPSHOT_VERSION = 2
 DEFAULT_STATE = "~/.clawseccheck/state.json"
 DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
 
+# B-270 — the three states a monitor baseline can be in, as decided in ONE place
+# (``read_baseline``). ABSENT and CORRUPT used to be collapsed into a single None, which
+# is what let a destroyed baseline render the same reassuring line as a genuine first run.
+BASELINE_ABSENT = "absent"    # no state file at all — a real first run
+BASELINE_CORRUPT = "corrupt"  # a file is there but carries no usable snapshot
+BASELINE_OK = "ok"            # a non-empty dict snapshot to compare against
+
+# B-270 — emitted (rendered AND journaled) when a prior baseline existed but could not be
+# used. Kept here, next to the predicate that decides it, so the screen and the journal
+# cannot drift apart: report.py renders whatever alert list the CLI passes to the journal.
+BASELINE_CORRUPT_ALERT = (
+    "HIGH",
+    "The previous monitor baseline could not be read (truncated, unreadable, or not a "
+    "valid snapshot). Any change made between the last good run and this one could NOT be "
+    "compared and is therefore NOT reported. Investigate why the state file was lost — a "
+    "baseline that disappears is itself worth explaining.",
+)
+# Deliberately makes no claim about whether a replacement was written: this string is
+# journaled BEFORE the new state file is saved, and the save can fail (B-271). Whether a
+# replacement exists is stated by report.render_monitor, which knows the write's outcome.
+
 # C-162: schema stamp for hash-chained journal lines (history.jsonl / events.jsonl).
 # Stamped INSIDE the hashed payload (so verify_chain authenticates it too — a planted
 # _schema value breaks the chain like any other tampered field). Bumped only for a
@@ -438,8 +459,8 @@ def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]],
     # B-268: the cap frontier on each side — paths that were on disk but not fingerprinted.
     # An entry absent from a snapshot's `memory` dict is only evidence of absence when it is
     # also absent from that snapshot's frontier.
-    prev_capped = set(prev.get("memory_capped") or ())
-    curr_capped = set(curr.get("memory_capped") or ())
+    prev_capped = _frontier(prev, "memory_capped")
+    curr_capped = _frontier(curr, "memory_capped")
     for path in sorted(cm.keys() - pm.keys()):
         if path in prev_capped:
             # It did not "appear" — it was already on disk last run, merely beyond the cap.
@@ -459,7 +480,7 @@ def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]],
     # (diff()'s `pb[name] != cb[name]` loop), so the plain "changed" backstop added below
     # must skip them or every SOUL.md edit produces two alerts saying the same thing at two
     # severities — the exact double-reporting B-275 removed from the removal branch.
-    bootstrap_change_owned = set(prev.get("bootstrap") or {}) & set(curr.get("bootstrap") or {})
+    bootstrap_change_owned = set(_dim(prev, "bootstrap")) & set(_dim(curr, "bootstrap"))
     for path in sorted(pm.keys() & cm.keys()):
         p = pm[path]
         c = cm[path]
@@ -590,7 +611,7 @@ def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]],
     # B-275: SOUL/AGENTS/TOOLS/MEMORY/memory.md are BOTH bootstrap files and memory files,
     # so from here on their removal is already reported once by the bootstrap dimension.
     # Skip them here so a single deletion is not alerted twice at two different severities.
-    bootstrap_owned = set(prev.get("bootstrap") or {})
+    bootstrap_owned = set(_dim(prev, "bootstrap"))
     for path in sorted(pm.keys() - cm.keys()):
         if path in bootstrap_owned:
             continue
@@ -930,6 +951,62 @@ _CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind")
 _SHRINKABLE_DIMENSIONS = ("skills", "bootstrap", "memory")
 
 
+def _dim(snap: dict, key: str) -> dict:
+    """B-270: a snapshot dimension as a dict — ``{}`` when absent OR the wrong type.
+
+    ``read_baseline`` guarantees the snapshot itself is a non-empty dict, but says nothing
+    about what is *inside* it: a hand-edited or partially-corrupted state file can hold
+    ``{"skills": [1,2]}``, and every dimension loop below assumes ``.keys()``. Coercing to
+    ``{}`` makes such a dimension a no-op for one run instead of an AttributeError that
+    takes the whole monitor run down — the same self-healing, absent-key-is-a-no-op idiom
+    the B-267 ``tree`` fallback and the RP2 ``args_pkg`` gate already use.
+    """
+    val = snap.get(key)
+    return val if isinstance(val, dict) else {}
+
+
+def _both_dims(prev: dict, curr: dict, key: str) -> "tuple[dict, dict] | None":
+    """B-270: ``(prev[key], curr[key])`` when BOTH sides carry a dict there, else None.
+
+    Preserves the deliberate *presence* guard the mcp / mcp_detail / channels / host blocks
+    already carried ("guarded so an old snapshot without these keys never produces spurious
+    'new X' alerts after upgrade") and extends it to *type*, so a corrupted dimension is
+    skipped rather than crashing. Skipping is the conservative direction here: comparing a
+    real side against a coerced ``{}`` would report every live entry as newly appeared.
+    """
+    p, c = prev.get(key), curr.get(key)
+    if isinstance(p, dict) and isinstance(c, dict):
+        return p, c
+    return None
+
+
+def _frontier(snap: dict, key: str) -> set:
+    """B-270: a truncation-frontier dimension (``*_capped``) as a set of strings.
+
+    Same reasoning as ``_dim``: the frontier keys are consumed with ``set(... or ())``,
+    which raises TypeError on an int and silently yields dict KEYS on a dict. An
+    unusable frontier must degrade to "nothing known to be capped", which is the same
+    value a pre-frontier snapshot supplies — already a handled, self-healing case.
+    """
+    val = snap.get(key)
+    if isinstance(val, (list, tuple, set, frozenset)):
+        return {v for v in val if isinstance(v, str)}
+    return set()
+
+
+def _num(snap: dict, key: str, default: int = 0) -> "int | float":
+    """B-270: a numeric snapshot field, or *default* when absent or non-numeric.
+
+    ``curr["score"] < prev["score"]`` raises TypeError when a hand-edited snapshot holds a
+    string there; bool is excluded because ``True < 2`` compares as 1 and would silently
+    fabricate a score-drop alert out of a corrupted field.
+    """
+    val = snap.get(key)
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return val
+    return default
+
+
 def _raw_score_scope(findings) -> str:
     """C-135/FIX1: a hash of exactly the check ids ``scoring.compute()`` folded into THIS
     run's ``raw_score`` denominator — scored, not UNKNOWN/ARCHIVE, and not suppressed
@@ -1112,7 +1189,15 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
 
 def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     """Return (level, message) alerts. Empty on first run or no change."""
-    if not prev:
+    # B-270: a usable baseline is a NON-EMPTY DICT — the same predicate ``read_baseline``
+    # applies, restated here because ``diff`` is public API and a caller can hand it
+    # anything. The old bare truthiness check let a truthy non-dict (``[1,2,3]``, ``42``,
+    # ``"abc"``) straight through to ``prev.get("skills", {})``, which raised
+    # AttributeError; because the crash preceded ``save_state`` the poisoned file was never
+    # replaced, so the run failed identically forever (measured: rc=1 on three consecutive
+    # runs, state.json unchanged). An empty dict still returns no alerts, as before — but
+    # the CLI no longer describes that as a clean comparison.
+    if not isinstance(prev, dict) or not prev:
         return []
     alerts: list[tuple[str, str]] = []
 
@@ -1174,14 +1259,14 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
         toks = re.split(r"[.\-+]", s)
         return tuple((0, int(t)) if t.isdigit() else (1, t) for t in toks)
 
-    ps, cs = prev.get("skills", {}), curr.get("skills", {})
+    ps, cs = _dim(prev, "skills"), _dim(curr, "skills")
     # B-268: the skills truncation frontier on each side (see snapshot()). `ctx.installed_
     # skills` is capped at _MAX_SKILLS and its fill order is filename order — attacker-
     # controlled — so a flood of early-sorting skill dirs evicts real ones from the view.
     # Diffed as ground truth that produced a phantom "Skill 's299' was removed" while s299
     # sat on disk untouched (measured: 310 skills + one aaa*-named addition).
-    prev_sk_capped = set(prev.get("skills_capped") or ())
-    curr_sk_capped = set(curr.get("skills_capped") or ())
+    prev_sk_capped = _frontier(prev, "skills_capped")
+    curr_sk_capped = _frontier(curr, "skills_capped")
     prev_sk_partial = bool(prev.get("skills_frontier_partial"))
     curr_sk_partial = bool(curr.get("skills_frontier_partial"))
     for name in sorted(cs.keys() - ps.keys()):
@@ -1284,7 +1369,7 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
             "cap is not a security decision. Reduce the number of installed skills to "
             "restore full coverage."))
 
-    pb, cb = prev.get("bootstrap", {}), curr.get("bootstrap", {})
+    pb, cb = _dim(prev, "bootstrap"), _dim(curr, "bootstrap")
     for name in sorted(pb.keys() & cb.keys()):
         if pb[name] != cb[name]:
             alerts.append(("HIGH", f"{name} changed since last check — possible prompt / memory "
@@ -1349,7 +1434,7 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     # report a fabricated "score dropped" as the real checks come back. The coverage
     # alert above says so explicitly instead.
     if not (prev_blind or curr_blind):
-        if curr.get("score", 0) < prev.get("score", 0):
+        if _num(curr, "score") < _num(prev, "score"):
             alerts.append(("HIGH", f"Security score dropped: {prev.get('grade')} {prev.get('score')} "
                                    f"-> {curr.get('grade')} {curr.get('score')}."))
         else:
@@ -1393,7 +1478,7 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                     "nothing got worse. Review the check-level alerts in this run.",
                 ))
 
-    pc, cc = prev.get("checks", {}), curr.get("checks", {})
+    pc, cc = _dim(prev, "checks"), _dim(curr, "checks")
     for cid, status in cc.items():
         if status == FAIL and pc.get(cid) != FAIL:
             # B-269: a check that read UNKNOWN only because the PREVIOUS run could not
@@ -1514,8 +1599,8 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                     "readable.",
                 ))
 
-    if curr.get("native_count", 0) > prev.get("native_count", 0):
-        delta = curr["native_count"] - prev["native_count"]
+    if _num(curr, "native_count") > _num(prev, "native_count"):
+        delta = _num(curr, "native_count") - _num(prev, "native_count")
         alerts.append(("INFO", f"openclaw security audit reports {delta} more issue(s) than last time."))
 
     prev_ih = prev.get("ignore_hash", "")
@@ -1527,8 +1612,9 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
 
     # --- Agent Watch: connection / trust-surface drift (guarded so an old snapshot
     #     without these keys never produces spurious 'new X' alerts after upgrade) ---
-    if compare_config and "mcp" in prev and "mcp" in curr:
-        pm, cm = prev["mcp"], curr["mcp"]
+    _mcp_pair = _both_dims(prev, curr, "mcp")
+    if compare_config and _mcp_pair is not None:
+        pm, cm = _mcp_pair
         for name in sorted(cm.keys() - pm.keys()):
             alerts.append(("CRITICAL", f"NEW MCP server connected since last check: '{name}' — "
                            "vet it before trusting (new tool/data trust surface)."))
@@ -1542,8 +1628,9 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     # --- Rug-pull detection (RP1-RP3): fine-grained MCP server manifest drift ---
     # Only runs when BOTH snapshots carry the structured mcp_detail key (guarded so an
     # old snapshot without this key never produces spurious alerts after upgrade).
-    if compare_config and "mcp_detail" in prev and "mcp_detail" in curr:
-        pd, cd = prev["mcp_detail"], curr["mcp_detail"]
+    _detail_pair = _both_dims(prev, curr, "mcp_detail")
+    if compare_config and _detail_pair is not None:
+        pd, cd = _detail_pair
         for name in sorted(set(pd) & set(cd)):
             ps, cs = pd[name], cd[name]
             if not isinstance(ps, dict) or not isinstance(cs, dict):
@@ -1648,8 +1735,9 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                                        f"changed for '{tool}' — re-review the server's "
                                        "declared affordances."))
 
-    if compare_config and "channels" in prev and "channels" in curr:
-        pch, cch = prev["channels"], curr["channels"]
+    _chan_pair = _both_dims(prev, curr, "channels")
+    if compare_config and _chan_pair is not None:
+        pch, cch = _chan_pair
         for name in sorted(cch.keys() - pch.keys()):
             alerts.append(("HIGH", f"NEW channel '{name}' appeared since last check — "
                            "confirm its auth / allowlist before it can reach the agent."))
@@ -1665,17 +1753,22 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
             alerts.append(("INFO", f"Channel '{name}' is no longer configured — the agent "
                            "can no longer be reached over it."))
 
-    if (compare_config and "gateway_bind" in prev and "gateway_bind" in curr
-            and prev["gateway_bind"] != curr["gateway_bind"]):
+    # B-270: both sides must be STRINGS, not merely present — `cb in EXPOSED_BINDS` raises
+    # TypeError on an unhashable (list/dict) value from a corrupted snapshot, and a
+    # non-string bind is not a bind address we can reason about anyway.
+    _pgb, _cgb = prev.get("gateway_bind"), curr.get("gateway_bind")
+    if (compare_config and isinstance(_pgb, str) and isinstance(_cgb, str)
+            and _pgb != _cgb):
         from .checks import EXPOSED_BINDS  # noqa: PLC0415
-        cb = curr["gateway_bind"]
+        cb = _cgb
         exposed = cb in EXPOSED_BINDS
         alerts.append(("CRITICAL" if exposed else "HIGH",
-                       f"Gateway bind changed: '{prev['gateway_bind']}' -> '{cb}'"
+                       f"Gateway bind changed: '{_pgb}' -> '{cb}'"
                        + (" (now exposed to the network!)" if exposed else "")))
 
-    if "host" in prev and "host" in curr:
-        ph, ch = prev["host"], curr["host"]
+    _host_pair = _both_dims(prev, curr, "host")
+    if _host_pair is not None:
+        ph, ch = _host_pair
         for cls in sorted(set(ph) & set(ch)):
             if ph[cls] == "present" and ch[cls] != "present":
                 alerts.append(("HIGH", f"Host monitor '{cls}' is no longer detected — "
@@ -1684,14 +1777,81 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     return alerts
 
 
-def load_state(path: str | Path = DEFAULT_STATE) -> dict | None:
+def read_baseline(path: str | Path = DEFAULT_STATE) -> "tuple[str, dict | None]":
+    """B-270: the ONE definition of "is there a usable monitor baseline?".
+
+    Returns ``(status, snapshot)`` where *status* is one of ``BASELINE_ABSENT`` /
+    ``BASELINE_CORRUPT`` / ``BASELINE_OK`` and *snapshot* is the parsed dict only when the
+    status is OK.
+
+    Before this, ``load_state`` returned raw ``json.loads`` output and collapsed absent,
+    corrupt and unreadable into a single ``None``, and three call sites each decided for
+    themselves what that meant — ``diff()`` on truthiness, ``cli.py`` on ``is None`` for the
+    "first run" wording and on ``is not None`` for the tamper sub-grade. The three
+    disagreed, which is what produced these measured behaviours against a state file
+    holding ``{}``/``[]``/``0``/``""``/``false``: ``diff()`` saw a falsy baseline and
+    returned no alerts, the wording call site saw "not None" and rendered *No new threats
+    since last check* over a config that had genuinely changed, and the tamper sub-grade
+    saw "present" and awarded full HIGH-weight credit for a baseline that could not detect
+    anything (measured on ``fixtures/home_safe``: 24/100 with ``{}`` on disk vs 3/100 with
+    no file at all — 21 points of hollow credit).
+
+    Splitting *absent* from *corrupt* is the point. Collapsing them is what let a corrupt
+    baseline render the reassuring first-run line "Baseline saved." — indistinguishable
+    from a genuine first run, so a silently destroyed baseline looked like a healthy new
+    one. ``tests/test_b107_atomic_write.py`` names this exact harm; B-107 fixed only the
+    write side.
+
+    A file that exists but cannot be read, parsed, or is not a non-empty JSON object is
+    CORRUPT, not ABSENT: a directory at the state path, a 0-byte file, a truncated write, a
+    ``chmod 000``, a planted (possibly broken) symlink, and a hand-edited ``null``/``42``/
+    ``"abc"``/``[1,2,3]`` all land here rather than being mistaken for a first run.
+
+    ⚠ Scope — this NARROWS L1, it does not close it. Two gaps remain, both by construction:
+
+    * A forged but structurally *valid* snapshot still wins. Nothing here authenticates the
+      file's contents against the run that wrote it — this validates shape, not provenance.
+    * **Deletion still reads as ABSENT.** An attacker who can write the state file can also
+      remove it, and a removed baseline is indistinguishable from a genuine first run using
+      the state file alone, so it still renders "Baseline saved." Detecting that needs an
+      out-of-band record that a baseline once existed (the journal or the history file
+      could carry one); that is a separate design, deliberately not half-built here.
+
+    What it does close is the *corruption* half: a baseline that is present but unusable can
+    no longer masquerade as either a healthy first run or a clean comparison.
+    """
     p = Path(path).expanduser()
-    if not p.is_file():
-        return None
+    # `exists()` follows symlinks, so a broken symlink reports False — check the link
+    # itself too, or a planted dangling symlink at the state path reads as "first run".
+    if not p.exists() and not p.is_symlink():
+        return BASELINE_ABSENT, None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+        raw = p.read_text(encoding="utf-8")
+    except OSError:
+        # Unreadable (perms), a directory, a dangling symlink: present but unusable.
+        return BASELINE_CORRUPT, None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return BASELINE_CORRUPT, None
+    if not isinstance(payload, dict) or not payload:
+        # Non-dict payloads are what crashed diff() with an AttributeError at
+        # `prev.get("skills", {})` — and because the crash happened BEFORE save_state, the
+        # poison was never replaced, so the failure repeated on every subsequent run.
+        # An empty dict is equally unusable: every dimension comparison is a no-op.
+        return BASELINE_CORRUPT, None
+    return BASELINE_OK, payload
+
+
+def load_state(path: str | Path = DEFAULT_STATE) -> dict | None:
+    """The previously saved snapshot, or None when there is no *usable* one.
+
+    B-270 narrowed this: it now returns None for a present-but-unusable baseline as well as
+    an absent one, so no caller can reach ``diff()`` with a payload that is not a non-empty
+    dict. Callers that need to tell *absent* from *corrupt* apart — the report wording and
+    the tamper sub-grade both do — must use ``read_baseline`` instead.
+    """
+    return read_baseline(path)[1]
 
 
 def save_state(path: str | Path, snap: dict) -> None:
@@ -1722,9 +1882,21 @@ def _last_chain_hash(p: Path) -> str:
     return last
 
 
-def record_events(alerts, path: str | Path = DEFAULT_EVENTS, when: str | None = None) -> None:
+def record_events(alerts, path: str | Path = DEFAULT_EVENTS,
+                  when: str | None = None) -> "str | None":
     """Append each drift alert to a local, owner-only event journal (a timeline of
     what changed when). No-op when there are no alerts. Never uploaded — local only.
+
+    B-278: returns None on success (including "nothing to record"), and the OSError text
+    when the append FAILED. It still never raises — ``tests/test_symlink_safety.py``
+    pins that a planted symlink at the journal path must not take a monitor run down —
+    but the failure is no longer invisible. Silently dropping an append is the worst
+    failure mode a tamper-evident journal has: the record looks intact and is not.
+    Reproduced with a plain ``chmod 0444`` on events.jsonl — no attacker, no symlink: a
+    CRITICAL "Gateway bind changed 127.0.0.1 -> 0.0.0.0" alert printed, rc=0, the journal
+    stayed 0 bytes, and because the baseline had already advanced the next run reported
+    "No new threats since last check" over the now-exposed gateway. The caller is
+    responsible for not consuming the event when this returns non-None (see cli.py).
 
     Each entry carries a 'chain_hash' field: sha256(prev_chain_hash + canonical_json)
     so the journal is tamper-evident. Existing entries without 'chain_hash' are treated
@@ -1740,12 +1912,12 @@ def record_events(alerts, path: str | Path = DEFAULT_EVENTS, when: str | None = 
     re-chained) once it exceeds the retention cap — see ``_rotate_journal``.
     """
     if not alerts:
-        return
+        return None
     if when is None:
         from datetime import datetime  # noqa: PLC0415
         when = datetime.now().isoformat(timespec="seconds")
     p = Path(path).expanduser()
-    try:  # symlink-safe append; never raise from the event journal
+    try:  # symlink-safe append; never RAISE from the event journal — report instead
         secure_dir(p.parent)
         with journal_lock(p):
             prev_hash = _last_chain_hash(p)
@@ -1758,8 +1930,9 @@ def record_events(alerts, path: str | Path = DEFAULT_EVENTS, when: str | None = 
                 prev_hash = ch
             secure_append_text(p, "\n".join(lines_out) + "\n")
             _rotate_journal(p)
-    except OSError:
-        pass
+    except OSError as exc:
+        return str(exc)
+    return None
 
 
 def _schema_ok(entry: dict) -> bool:

@@ -211,3 +211,61 @@ def test_save_successful_write_returns_zero(tmp_path, capsys):
     rc = main(["--home", VULN] + BASE + ["--save", str(out)])
     assert rc == 0
     assert out.is_file()
+
+
+# ---------------------------------------------------------------------------
+# --monitor is a write mode too (CLAWSECCHECK-B-271 / B-278)
+#
+# It was the sole outlier in this file's contract: on an unwritable --state it printed
+# "Baseline saved." (before the save was even attempted), footnoted the failure on stdout,
+# and returned 0 — so a cron job that had persisted nothing for months looked healthy.
+# Every --monitor run here redirects --state, --events AND --history into tmp_path:
+# --monitor deliberately records a history point even under --no-history, so leaving
+# --history at its default would write to the user's real ~/.clawseccheck store.
+# ---------------------------------------------------------------------------
+
+def _monitor(tmp_path: Path, state=None, events=None):
+    return main(["--home", VULN, "--no-native", "--monitor", "--ascii",
+                 "--state", str(state or tmp_path / "state.json"),
+                 "--events", str(events or tmp_path / "events.jsonl"),
+                 "--history", str(tmp_path / "history.jsonl")])
+
+
+def test_monitor_unwritable_state_returns_nonzero(tmp_path, capsys):
+    """A directory at the state path: secure_dir() chmods a parent we own back to 0700,
+    so the obvious 'read-only parent' repro would silently succeed instead."""
+    state = tmp_path / "state.json"
+    state.mkdir()
+    assert _monitor(tmp_path, state=state) != 0
+
+
+def test_monitor_state_under_unwritable_grandparent_returns_nonzero(tmp_path, capsys):
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        rc = _monitor(tmp_path, state=ro / "sub" / "state.json")
+    finally:
+        ro.chmod(0o700)
+    assert rc != 0
+
+
+def test_monitor_symlinked_state_returns_nonzero(tmp_path, capsys):
+    link = tmp_path / "state.json"
+    link.symlink_to(tmp_path / "nowhere.json")
+    assert _monitor(tmp_path, state=link) != 0
+
+
+def test_monitor_write_failure_emits_no_success_wording(tmp_path, capsys):
+    state = tmp_path / "state.json"
+    state.mkdir()
+    _monitor(tmp_path, state=state)
+    assert "Baseline saved." not in capsys.readouterr().out
+
+
+def test_monitor_successful_run_returns_zero(tmp_path, capsys):
+    state = tmp_path / "state.json"
+    rc = _monitor(tmp_path, state=state)
+    assert rc == 0
+    assert state.is_file()
+    assert "Baseline saved." in capsys.readouterr().out

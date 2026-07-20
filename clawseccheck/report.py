@@ -1450,7 +1450,28 @@ def _header_rule_width(header_line: str, ascii_only: bool) -> int:
 
 
 def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
-                   baseline: bool = False) -> str:
+                   baseline: bool = False, persisted: bool = True,
+                   baseline_corrupt: bool = False) -> str:
+    """Render the --monitor body.
+
+    *baseline* — this was a genuine first run (no prior state file at all).
+
+    *persisted* — B-271: the new baseline was actually written to disk. When it was NOT,
+    every affirmation this function makes is false, so both of them are withheld: "Baseline
+    saved." is a direct lie, and "No new threats since last check ✅" reads as an all-clear
+    for ongoing monitoring that is not in fact running. Alerts computed this run ARE still
+    real (the comparison happened against a real baseline) and are still shown; the CLI
+    prints the failure verdict on stderr and exits non-zero.
+
+    *baseline_corrupt* — B-270: a prior baseline existed but could not be used. This is
+    NOT a first run (saying "Baseline saved." there is what made a destroyed baseline look
+    like a healthy new one) and NOT a clean comparison. The CLI supplies the explanatory
+    alert itself, so that one string reaches the screen and the journal identically; all
+    this flag adds is the closing note that a replacement baseline now exists — which is
+    printed only when it actually got written.
+
+    All three default to the pre-B-270/B-271 behaviour, so existing callers are unchanged.
+    """
     # LOW is a real catalog severity and must outrank INFO: a LOW check that regressed to
     # FAIL is a security finding, while INFO is an informational counter. Omitting it made
     # a LOW alert render with no glyph and sort as though it were the least important line
@@ -1463,14 +1484,26 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     head = brand.header(subtitle="Threat Monitor", ascii_only=ascii_only)
     lines = [head, "=" * _header_rule_width(head, ascii_only),
              f"Current: {score.score}/100  Grade: {score.grade}"]
-    if baseline:
-        lines += ["", "Baseline saved. Future runs will alert on what changes since now."]
-    elif not alerts:
-        lines += ["", f"No new threats since last check. {ok}"]
-    else:
-        lines += ["", f"{len(alerts)} change(s) detected since last check:", ""]
+    def _alert_lines() -> list:
+        out = ["", f"{len(alerts)} change(s) detected since last check:", ""]
         for level, msg in sorted(alerts, key=lambda a: order.get(a[0], 9)):
-            lines.append(f"{mark.get(level, '[*]')} {_sanitize(msg)}")
+            out.append(f"{mark.get(level, '[*]')} {_sanitize(msg)}")
+        return out
+
+    if not persisted:
+        # B-271: nothing was written, so make no claim about the baseline either way.
+        if alerts:
+            lines += _alert_lines()
+    elif baseline:
+        lines += ["", "Baseline saved. Future runs will alert on what changes since now."]
+    else:
+        if alerts:
+            lines += _alert_lines()
+        else:
+            lines += ["", f"No new threats since last check. {ok}"]
+        if baseline_corrupt:
+            lines += ["", "A replacement baseline has been saved from this run; future "
+                          "runs will alert on what changes since now."]
     out = "\n".join(lines).rstrip() + "\n"
     return _asciify(out) if ascii_only else out
 

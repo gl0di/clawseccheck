@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from . import (
-    audit, diff, fingerprint, load_events, load_ignore, load_state, make_canary, record_events,
+    audit, diff, fingerprint, load_events, load_ignore, make_canary, record_events,
     render_canary, render_card, render_dashboard, render_dashboard_findings, render_events,
     render_json, render_monitor,
     render_report, render_svg, render_vet_json, save_state, snapshot,
@@ -25,6 +25,11 @@ from . import (
 from . import __released__, __version__
 from .brand import WORDMARK
 from .collector import SKILL_DIRS
+# B-270: the shared baseline predicate. Imported from the submodule rather than the package
+# root so the new vocabulary does not have to widen the curated public API in __init__.py.
+from .monitor import (
+    BASELINE_ABSENT, BASELINE_CORRUPT, BASELINE_CORRUPT_ALERT, BASELINE_OK, read_baseline,
+)
 from .update import update_notice
 from .ledger import freshness_notice as _compute_freshness, load_ledger, record_run
 from . import risk as _risk
@@ -1067,22 +1072,72 @@ def _main(argv=None) -> int:
         return 0
 
     if args.monitor:
-        prev = load_state(args.state)
+        # B-270: ONE predicate decides what "no usable baseline" means, and it tells
+        # *absent* (a real first run) apart from *corrupt* (a prior baseline existed and is
+        # gone). Both used to collapse into `prev is None`, so a destroyed baseline
+        # rendered the same reassuring "Baseline saved." line as a healthy first run.
+        base_status, prev = read_baseline(args.state)
         # B-269: snapshot() needs the previous state so that a run which could not read
         # openclaw.json preserves the last known-good config baseline instead of writing
         # the collapsed (empty) view over it — see monitor._degrade_snapshot.
         snap = snapshot(ctx, findings, score, prev=prev)
         alerts = diff(prev, snap)
-        _emit(render_monitor(alerts, score, ascii_only, baseline=prev is None))
-        try:
-            save_state(args.state, snap)
-        except OSError as exc:
-            _emit(f"\n(could not save monitor state: {exc})")
-        record_events(alerts, args.events)  # Agent Watch: append the drift to the local journal
+        if base_status == BASELINE_CORRUPT:
+            # prev is None here, so diff() produced nothing to compare — the lost baseline
+            # IS the event. Prepended (not rendered separately) so the identical string
+            # reaches the screen and the tamper-evident journal.
+            alerts = [BASELINE_CORRUPT_ALERT] + alerts
+        # ── B-278 + B-271: write order is a deliberate choice, documented here ──────────
+        # Journal FIRST, then advance the baseline, and skip the advance if the journal
+        # write failed. The alternative (advance first) is what lost drift permanently: a
+        # `chmod 0444` events.jsonl swallowed a CRITICAL gateway-exposure alert while the
+        # baseline moved on, so the next run compared against the NEW state and reported
+        # "No new threats" over an exposed gateway. Not advancing keeps the event
+        # unconsumed: the same drift is re-detected next run and gets another chance to be
+        # recorded. That re-detection is not a false alert — the change really is still
+        # there — and a later, unrelated change is still caught, because the diff is taken
+        # against the older baseline and reports the union.
+        # The accepted cost: if the journal succeeds and the *state* write then fails, the
+        # next run re-detects the same drift and journals it a second time. A duplicated
+        # line in the timeline is strictly recoverable; a missing one is not, and the
+        # duplicate only follows a failure that is now loud and non-zero anyway.
+        journal_err = record_events(alerts, args.events)
+        state_err = None
+        if journal_err is None:
+            try:
+                save_state(args.state, snap)
+            except OSError as exc:
+                state_err = str(exc)
+        persisted = journal_err is None and state_err is None
+        # B-271: render AFTER the writes, and tell the renderer whether they landed — the
+        # success wording used to be printed before the save was even attempted.
+        _emit(render_monitor(alerts, score, ascii_only,
+                             baseline=base_status == BASELINE_ABSENT,
+                             persisted=persisted,
+                             baseline_corrupt=base_status == BASELINE_CORRUPT))
         # --monitor records a score-history point as part of tracking drift, even under
         # --no-history; the conflict is surfaced as a stderr note (B-066), not silently
-        # honored, to keep monitor's drift baseline intact.
+        # honored, to keep monitor's drift baseline intact. Recorded even on the failure
+        # paths below: this run's score was really measured, and the trend should not gain
+        # a hole because a different file was unwritable.
         history_record(score, args.history)
+        # B-271/B-278: a write mode that could not write must not report success. --badge /
+        # --html / --sarif / --save all return 1 on OSError; --monitor was the sole outlier,
+        # returning 0 forever while persisting nothing, so cron saw a healthy job.
+        if journal_err is not None:
+            print(f"MONITORING NOT ESTABLISHED — could not record drift events to "
+                  f"{args.events}: {journal_err}\n"
+                  "The drift above was NOT written to the journal, so the baseline was "
+                  "deliberately left unchanged and this run's changes will be re-reported "
+                  "next time. Fix the journal path's permissions and re-run.",
+                  file=sys.stderr)
+            return 1
+        if state_err is not None:
+            print(f"MONITORING NOT ESTABLISHED — could not write monitor state to "
+                  f"{args.state}: {state_err}\n"
+                  "No baseline was saved, so this run cannot detect future changes. Fix "
+                  "the state path's permissions and re-run.", file=sys.stderr)
+            return 1
         return 0
 
     if args.json:
@@ -1109,7 +1164,11 @@ def _main(argv=None) -> int:
         # Tamper Score sub-grade — human report only; presentation-layer only, never
         # alters score/grade/findings. mon_present reflects whether a --monitor
         # baseline snapshot already exists on disk for this state file.
-        mon_present = load_state(args.state) is not None
+        # B-270: the SAME predicate the --monitor path uses, instead of this call site's
+        # own `is not None` rule. A state file holding `{}` used to satisfy `is not None`
+        # and earn full HIGH-weight tamper credit for a baseline that cannot detect
+        # anything — measured on fixtures/home_safe as 24/100 vs 3/100 with no file at all.
+        mon_present = read_baseline(args.state)[0] == BASELINE_OK
         tamper = tamper_subgrade(findings, mon_present)
         parts = [render_report(findings, score, ascii_only, native=ctx.native,
                                risk=paths, update_notice=notice, freshness_notice=f_notice,
