@@ -16,7 +16,7 @@ import json
 import re
 from pathlib import Path
 
-from .catalog import BY_ID, FAIL
+from .catalog import BY_ID, FAIL, UNKNOWN
 from .locking import journal_lock
 from .logsafe import redact_urls_in_text, sanitize_url_host_only
 from .safeio import secure_append_text, secure_dir, secure_write_text
@@ -283,7 +283,8 @@ def _snapshot_memory_files(ctx) -> dict:
     return out
 
 
-def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]]) -> None:
+def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]],
+                          trust_removals: bool = True) -> None:
     pm, cm = prev.get("memory", {}), curr.get("memory", {})
     for path in sorted(cm.keys() - pm.keys()):
         entry = cm[path]
@@ -322,7 +323,19 @@ def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]])
                 + ", ".join(added_urls) + ".",
             ))
 
+    if not trust_removals:
+        # B-269: this run could not read openclaw.json, so a memory file that lived under a
+        # config-declared workspace has simply dropped out of the collected view. Its
+        # "disappearance" is a collection artifact, not an event.
+        return
+
+    # B-275: SOUL/AGENTS/TOOLS/MEMORY/memory.md are BOTH bootstrap files and memory files,
+    # so from here on their removal is already reported once by the bootstrap dimension.
+    # Skip them here so a single deletion is not alerted twice at two different severities.
+    bootstrap_owned = set(prev.get("bootstrap") or {})
     for path in sorted(pm.keys() - cm.keys()):
+        if path in bootstrap_owned:
+            continue
         alerts.append(("INFO", f"Persistent memory file removed since last check: '{path}'."))
 
 
@@ -401,6 +414,15 @@ def _channel_sig(ctx) -> dict:
     if isinstance(chans, dict):
         for name, c in chans.items():
             if not isinstance(c, dict):
+                # C-135/FIX4: shorthand form (e.g. "telegram": true) enables/disables the
+                # channel without a per-channel policy object to inspect. Record it as
+                # PRESENT with an unknown-but-tracked shape rather than skipping it
+                # outright — the old `continue` here made the channel invisible to drift
+                # detection, so switching between shorthand and an explicit {} object (or
+                # vice versa) made a still-live channel read as "no longer configured" in
+                # diff()'s removal branch. Keying on repr(c) still detects a genuine
+                # true<->false flip while never fabricating a deletion.
+                out[name] = _h(f"shorthand={c!r}")
                 continue
             nodes = [c] + list((c.get("accounts") or {}).values())
             dm = any(isinstance(n, dict) and n.get("dmPolicy") == "open" for n in nodes)
@@ -443,7 +465,90 @@ def _skill_sig(ctx) -> dict:
     return out
 
 
-def snapshot(ctx, findings, score) -> dict:
+# B-269 — dimensions of the snapshot that are built from ``ctx.config``. When
+# openclaw.json cannot be read/parsed the collector falls back to ``ctx.config = {}`` and
+# every one of these collapses to empty, which ``diff()`` used to read as fact.
+_CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind")
+
+# B-269 — dimensions collected from disk that an unreadable config can still SHRINK,
+# because the config declares extra roots to scan: ``agents.defaults.workspace`` /
+# ``agents.list[].workspace`` add bootstrap + memory roots, ``skills.load.extraDirs`` adds
+# skill roots. Verified first-hand: with those keys set, a chmod 000 on openclaw.json drops
+# the custom-workspace SOUL.md and the extra-dir skill out of the collected view, which the
+# old code reported as "Skill 'helper' was removed."
+#
+# The invariant that makes the repair sound: an unreadable config can only make an entry
+# DISAPPEAR from the collected view, never appear. So on a blind run a disappearance here
+# is untrustworthy, while an addition or a content change is still real evidence.
+# Checked, not assumed: every config consumer in the collection path only ever EXTENDS the
+# set of roots to scan — _read_installed_skills appends _config_workspace_dirs,
+# _config_extra_skill_dirs and _config_plugin_load_paths to `roots`, and the bootstrap scan
+# appends _config_workspace_dirs to `_ws_dirs`. No config key narrows or filters discovery,
+# so ctx.config == {} yields a subset, never a superset.
+_SHRINKABLE_DIMENSIONS = ("skills", "bootstrap", "memory")
+
+
+def _degrade_snapshot(snap: dict, prev: "dict | None") -> None:
+    """B-269/FIX2 (C-135 follow-up): mark and repair a snapshot taken while openclaw.json
+    was unreadable, OR simply ABSENT this run after having previously been present (see
+    ``snapshot()``'s widened blind predicate) — both leave the collector with the same
+    collapsed ``ctx.config = {}`` view, so both need the same repair.
+
+    Writing the collapsed (empty) config view into the baseline is what made ``diff()``
+    fabricate "MCP server 'X' was removed." / "Gateway bind changed: '127.0.0.1' -> ''"
+    against a byte-identical config, and then fire a burst of "NEW MCP server connected"
+    CRITICALs the moment the file became readable again — all while the score *rose*,
+    because the checks that would have failed had silently become UNKNOWN and UNKNOWN is
+    excluded from the score denominator.
+
+    The state is *unknown*, not empty, so the last known-good values are carried forward
+    rather than overwritten:
+
+    * ``_CONFIG_DIMENSIONS`` are taken wholesale from the previous snapshot.
+    * ``_SHRINKABLE_DIMENSIONS`` are union-merged — previous entries survive, this run's
+      values win wherever both sides have the key.
+
+    Nothing is lost, only deferred: the next run that CAN read the config compares against
+    this preserved baseline, so a real change made during the blind window is reported
+    then, in the right direction, instead of being drowned in fabricated ones.
+
+    ``config_baseline`` records whether a baseline actually existed to carry (``carried``)
+    or the blind run had nothing to fall back on (``unknown`` — e.g. the very first monitor
+    run was blind, or the previous run was blind too and never had a baseline itself).
+    ``diff()`` refuses to compare config dimensions against an ``unknown`` baseline rather
+    than treating emptiness as fact.
+
+    This does NOT change scoring: the run's measured ``score``/``grade``/``checks`` are left
+    exactly as the audit produced them (per GR#4 the UNKNOWN-exclusion design is correct).
+    ``diff()`` declines to *compare* them across a blind boundary instead.
+    """
+    snap["config_parse_error"] = True
+    have_baseline = isinstance(prev, dict) and (
+        not prev.get("config_parse_error") or prev.get("config_baseline") == "carried"
+    )
+    if not have_baseline:
+        snap["config_baseline"] = "unknown"
+        return
+    snap["config_baseline"] = "carried"
+    for key in _CONFIG_DIMENSIONS:
+        if key in prev:
+            snap[key] = prev[key]
+    for key in _SHRINKABLE_DIMENSIONS:
+        prev_dim, curr_dim = prev.get(key), snap.get(key)
+        if isinstance(prev_dim, dict) and isinstance(curr_dim, dict):
+            snap[key] = {**prev_dim, **curr_dim}
+
+
+def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
+    """Build the drift snapshot for this run.
+
+    *prev* is the previously saved snapshot, used to preserve the baseline when this run
+    could not read openclaw.json (B-269 — see ``_degrade_snapshot``) and to carry forward
+    the "was a real config ever seen" bit that decides whether a config that is simply
+    ABSENT this run counts as blind too (C-135 FIX2 — see the ``config_ever_seen`` /
+    ``config_missing_blind`` computation below). Passing None keeps the historical
+    behaviour for a first run or a caller with no stored state.
+    """
     native = getattr(ctx, "native", None)
     native_count = len(getattr(native, "findings", []) or []) if native else 0
     snap = {
@@ -470,6 +575,33 @@ def snapshot(ctx, findings, score) -> dict:
     if host and host.get("supported"):
         snap["host"] = {cls: info.get("status")
                         for cls, info in (host.get("classes") or {}).items()}
+
+    # C-135 FIX2: sticky "was a real config ever seen" bit, carried forward across an
+    # arbitrarily long run of blind snapshots (same "once True, stays True" pattern as
+    # ``config_baseline == 'carried'``). It is what lets the widened blind predicate below
+    # tell "openclaw.json used to be readable and just vanished" (a benign atomic-replace
+    # window — `jq ... > tmp && mv tmp openclaw.json` — a `mv openclaw.json
+    # openclaw.json.bak` mid-troubleshooting, or a home not yet mounted on a cron-driven
+    # run) apart from "this home never had an openclaw.json at all" (a non-OpenClaw setup,
+    # or the very first run ever). Only the former is treated as blind — a user who
+    # genuinely never configured OpenClaw must never get a permanent "Could not read
+    # openclaw.json" alert, which is exactly the false alarm B-269 exists to prevent.
+    prev_had_config = bool(isinstance(prev, dict) and prev.get("config_ever_seen"))
+    snap["config_ever_seen"] = bool(getattr(ctx, "config_found", False)) or prev_had_config
+
+    parse_error = bool(getattr(ctx, "config_parse_error", False))
+    # C-135 FIX2: collector.py defines config_parse_error = config_found and not parsed_ok,
+    # so a config that is simply ABSENT this run (config_found False) leaves
+    # config_parse_error False too — B-269's original guard never fired for it, so
+    # _degrade_snapshot() never ran, trust_removals stayed True in diff(), and the same
+    # collapsed ctx.config = {} view B-269 already knows is untrustworthy got written into
+    # the baseline as fact: a full fabrication burst (skill/MCP/channel "removed", gateway
+    # bind "changed") followed by a CRITICAL "NEW ... connected" burst the moment the file
+    # reappeared unchanged. Gated on prev_had_config (see above) so a config-less setup is
+    # unaffected.
+    config_missing_blind = (not getattr(ctx, "config_found", False)) and prev_had_config
+    if parse_error or config_missing_blind:
+        _degrade_snapshot(snap, prev)
     return snap
 
 
@@ -478,6 +610,39 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     if not prev:
         return []
     alerts: list[tuple[str, str]] = []
+
+    # --- B-269: was either side collected while openclaw.json was unreadable? ---------
+    prev_blind = bool(prev.get("config_parse_error"))
+    curr_blind = bool(curr.get("config_parse_error"))
+    # A blind snapshot only carries a usable config baseline when there was a good one to
+    # carry forward (see _degrade_snapshot); otherwise its config dimensions are empty
+    # because nothing is known, not because nothing is configured.
+    prev_config_usable = not prev_blind or prev.get("config_baseline") == "carried"
+    compare_config = not curr_blind and prev_config_usable
+    # A blind run's disappearances are collection artifacts, not events. _degrade_snapshot
+    # already union-merges the shrinkable dimensions so these sets come out empty, but the
+    # guard is kept independent of it so a caller that builds a snapshot without passing
+    # *prev* still cannot fabricate a removal.
+    trust_removals = not curr_blind
+
+    if curr_blind:
+        unknown = sum(1 for s in (curr.get("checks") or {}).values() if s == UNKNOWN)
+        alerts.append((
+            "HIGH",
+            "Could not read openclaw.json this run — MCP, channel and gateway drift were "
+            f"NOT evaluated and {unknown} check(s) report UNKNOWN. This run covers less "
+            "ground than the last full one, so its score/grade are not comparable: a "
+            "higher number here means reduced coverage, not improved security. The last "
+            "known-good values were kept as the drift baseline. Fix or restore "
+            "openclaw.json and re-run to resume full drift detection."))
+    elif prev_blind:
+        alerts.append((
+            "INFO",
+            "openclaw.json is readable again — full drift detection resumed; "
+            + ("MCP/channel/gateway state was compared against the last known-good "
+               "baseline." if prev_config_usable else
+               "no known-good config baseline existed (the previous run could not read it "
+               "either), so MCP/channel/gateway drift is measured from this run onward.")))
 
     def _skill_entry(v):
         if isinstance(v, dict):
@@ -526,28 +691,146 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                                    "(TAM-09, best-effort static)."))
             except TypeError:
                 pass
-    for name in sorted(ps.keys() - cs.keys()):
-        alerts.append(("INFO", f"Skill '{name}' was removed."))
+    if trust_removals:
+        for name in sorted(ps.keys() - cs.keys()):
+            alerts.append(("INFO", f"Skill '{name}' was removed."))
 
     pb, cb = prev.get("bootstrap", {}), curr.get("bootstrap", {})
     for name in sorted(pb.keys() & cb.keys()):
         if pb[name] != cb[name]:
             alerts.append(("HIGH", f"{name} changed since last check — possible prompt / memory "
                                    "poisoning (drift)."))
-    for name in sorted(cb.keys() - pb.keys()):
+
+    # C-135 FIX1: ctx.bootstrap is keyed "<workspace-label>/<NAME>.md", where the label
+    # depends on scan order plus a resolved-path de-dup (collector.py). The exact same
+    # inode, with byte-identical content still read by the agent, can land under a
+    # DIFFERENT key after a benign refactor — e.g. deleting now-redundant symlinks so
+    # files resolve under their real mount label, or renaming the workspace dir and
+    # updating the config to match. A bare key-set diff cannot tell that apart from a real
+    # deletion. Pair each removed key with an added key carrying the IDENTICAL content
+    # hash and treat the pair as a MOVE — neither a removal nor a new file — before either
+    # loop below runs. This cannot mask a genuine deletion: if identical content is still
+    # present under another key, the agent is still reading it, so there is nothing left
+    # to alert on either direction. (Measured separation: a benign rename pairs every
+    # removed/added key as a move; a genuine deletion of guardrail files has no added side
+    # to pair with at all.)
+    _boot_removed, _boot_added = pb.keys() - cb.keys(), cb.keys() - pb.keys()
+    _boot_moved_from: "set[str]" = set()
+    _boot_moved_to: "set[str]" = set()
+    for _r in sorted(_boot_removed):
+        for _a in sorted(_boot_added - _boot_moved_to):
+            if pb[_r] == cb[_a]:
+                _boot_moved_from.add(_r)
+                _boot_moved_to.add(_a)
+                break
+
+    for name in sorted(_boot_added - _boot_moved_to):
         alerts.append(("INFO", f"New bootstrap file appeared: {name}."))
+    # B-275: the removal branch the bootstrap dimension never had — deleting SOUL.md /
+    # IDENTITY.md / USER.md / HEARTBEAT.md / BOOTSTRAP.md used to be completely silent,
+    # while *modifying* the same file alerted HIGH. That asymmetry manufactured confidence:
+    # the cheapest way to drop the agent's standing guardrails was also the only way that
+    # produced no alert at all.
+    #
+    # MEDIUM, not the HIGH used for a content change: removal is also ordinary
+    # housekeeping — a user retiring a HEARTBEAT.md they never used is not an attack — and
+    # unlike a content change there is no poisoning signal in the event itself, only lost
+    # coverage. The wording states what was OBSERVED and asks for confirmation, and
+    # deliberately covers both causes of a disappearance: the file was deleted/moved, or it
+    # is still there but no longer readable (a chmod 000 on USER.md alone drops it from
+    # ctx.bootstrap).
+    #
+    # C-135 FIX3: it deliberately stops at the observation and does NOT go on to assert
+    # "so its standing instructions no longer reach the agent" — a key disappearing from
+    # this scan-order-dependent map is not proof the agent stopped reading the underlying
+    # file (the FIX1 move case immediately above is exactly that: the key changed, the
+    # file did not). An unsupported claim about a consequence this tool cannot observe is
+    # treated as a defect in its own right, independent of whether the underlying WARN/FAIL
+    # verdict is correct.
+    if trust_removals:
+        for name in sorted(_boot_removed - _boot_moved_from):
+            alerts.append(("MEDIUM",
+                           f"Bootstrap file no longer being read: {name} (deleted, moved, "
+                           "or no longer readable). Confirm you intended this."))
 
-    _append_memory_alerts(prev, curr, alerts)
+    _append_memory_alerts(prev, curr, alerts, trust_removals=trust_removals)
 
-    if curr.get("score", 0) < prev.get("score", 0):
+    # B-269: a partially-evaluated run is not comparable to a full one in EITHER direction
+    # — a blind run's score is inflated by UNKNOWN-exclusion, so the run after it would
+    # report a fabricated "score dropped" as the real checks come back. The coverage
+    # alert above says so explicitly instead.
+    if not (prev_blind or curr_blind) and curr.get("score", 0) < prev.get("score", 0):
         alerts.append(("HIGH", f"Security score dropped: {prev.get('grade')} {prev.get('score')} "
                                f"-> {curr.get('grade')} {curr.get('score')}."))
 
     pc, cc = prev.get("checks", {}), curr.get("checks", {})
     for cid, status in cc.items():
         if status == FAIL and pc.get(cid) != FAIL:
+            # B-269: a check that read UNKNOWN only because the PREVIOUS run could not
+            # parse the config was not passing then — re-reading it as FAIL now is the
+            # config becoming legible again, not a new failure. Writing that into the
+            # hash-chained journal would make a fabricated claim permanent.
+            #
+            # NARROWS, does not close: a snapshot records only the status, not WHY a check
+            # was UNKNOWN, so this also mutes the rare check that read UNKNOWN during the
+            # blind window for a config-independent reason and genuinely turned FAIL on the
+            # very next run. That is a bounded one-run false negative (the FAIL is still in
+            # the run's own report, and the next diff sees FAIL on both sides), accepted in
+            # preference to writing a fabricated "Now FAILING" into a tamper-evident
+            # journal. Distinguishing the two would need a per-check reason code in the
+            # snapshot, which is a schema change (SNAPSHOT_VERSION) beyond this fix.
+            # A blind run's checks dict is not a valid comparison baseline in ANY status,
+            # not just UNKNOWN. Measured on the real ~/.openclaw: with openclaw.json
+            # momentarily absent, A1 reads WARN (not UNKNOWN) off the collapsed
+            # ctx.config == {} view, and the run scores C/79 against the true F/49. So a
+            # guard keyed only on UNKNOWN let a definite "Now FAILING: Lethal Trifecta"
+            # reach the tamper-evident journal on the very next run with nothing changed.
+            #
+            # Going silent instead would trade that lie for a false negative — a genuine
+            # regression landing right after a blind window would never be announced. So
+            # the alert still fires, but it is DOWN-RANKED and re-worded to disclose that
+            # the comparison crossed a window where the baseline could not be trusted.
+            # This follows the project rule that an ambiguous signal is reported at WARN
+            # strength rather than asserted or suppressed.
+            # prev UNKNOWN out of a blind run carries no information at all — the check
+            # was not passing then, so announcing a transition would be pure fabrication.
+            # That case stays fully muted.
+            if prev_blind and pc.get(cid) == UNKNOWN:
+                continue
             title = BY_ID[cid].title if cid in BY_ID else cid
+            if prev_blind:
+                alerts.append((
+                    "MEDIUM",
+                    f"Now FAILING: {title} — but the previous run could not read the "
+                    "config, so its recorded state is not a trustworthy baseline. This "
+                    "may be the config becoming legible again rather than a new failure. "
+                    "Re-run to get a clean comparison.",
+                ))
+                continue
             alerts.append(("HIGH", f"Now FAILING: {title}."))
+            # Honest labelling — what the prev_blind guard above does and does NOT fix.
+            #
+            # CLOSED here: no drift alert derived from a blind run's checks dict can reach
+            # the journal any more, whatever status that run happened to record.
+            #
+            # NOT CLOSED, and not closable from monitor.py: the blind run's own verdict is
+            # still wrong at the source. A check that mixes config-derived evidence without
+            # calling checks/_shared.py's opt-in _config_unreadable() guard (B-228) keeps
+            # computing a real-looking verdict from the collapsed ctx.config == {} view
+            # that B-269 already established is untrustworthy. A1 (check_trifecta in
+            # checks/_config.py) is one such check, so a blind run reports C/79 on a host
+            # whose true grade is F/49 — an inflated grade, not merely a spurious alert.
+            # Fixing that means giving A1 and its siblings the same opt-in guard B11 has,
+            # which is a checks/_config.py change with its own adversarial review. Filed as
+            # a follow-up; this module can only refuse to compare against the bad baseline,
+            # which is what it now does.
+            #
+            # Accepted cost of keying on prev_blind alone: a check that genuinely turns FAIL
+            # on the run right after a blind one is not announced for that one run. Bounded
+            # and self-healing — the FAIL is still in that run's own report, and the next
+            # diff sees FAIL on both sides. Preferred over writing a fabricated claim into
+            # a tamper-evident journal, and consistent with the score-drop guard's identical
+            # refusal to compare across a blind run.
 
     if curr.get("native_count", 0) > prev.get("native_count", 0):
         delta = curr["native_count"] - prev["native_count"]
@@ -562,7 +845,7 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
 
     # --- Agent Watch: connection / trust-surface drift (guarded so an old snapshot
     #     without these keys never produces spurious 'new X' alerts after upgrade) ---
-    if "mcp" in prev and "mcp" in curr:
+    if compare_config and "mcp" in prev and "mcp" in curr:
         pm, cm = prev["mcp"], curr["mcp"]
         for name in sorted(cm.keys() - pm.keys()):
             alerts.append(("CRITICAL", f"NEW MCP server connected since last check: '{name}' — "
@@ -577,7 +860,7 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     # --- Rug-pull detection (RP1-RP3): fine-grained MCP server manifest drift ---
     # Only runs when BOTH snapshots carry the structured mcp_detail key (guarded so an
     # old snapshot without this key never produces spurious alerts after upgrade).
-    if "mcp_detail" in prev and "mcp_detail" in curr:
+    if compare_config and "mcp_detail" in prev and "mcp_detail" in curr:
         pd, cd = prev["mcp_detail"], curr["mcp_detail"]
         for name in sorted(set(pd) & set(cd)):
             ps, cs = pd[name], cd[name]
@@ -667,7 +950,7 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                                        f"changed for '{tool}' — re-review the server's "
                                        "declared affordances."))
 
-    if "channels" in prev and "channels" in curr:
+    if compare_config and "channels" in prev and "channels" in curr:
         pch, cch = prev["channels"], curr["channels"]
         for name in sorted(cch.keys() - pch.keys()):
             alerts.append(("HIGH", f"NEW channel '{name}' appeared since last check — "
@@ -675,8 +958,17 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
         for name in sorted(pch.keys() & cch.keys()):
             if pch[name] != cch[name]:
                 alerts.append(("MEDIUM", f"Channel '{name}' openness/auth changed — review it."))
+        # B-275: the channels dimension had no removal branch either. INFO, not HIGH:
+        # de-configuring a channel SHRINKS the agent's reachable surface, and users retire
+        # channels routinely — worth recording in the journal, not worth alarming over.
+        # (Unreachable on a blind run: this whole block is behind compare_config, so a
+        # collapsed config can never present itself as a channel deletion.)
+        for name in sorted(pch.keys() - cch.keys()):
+            alerts.append(("INFO", f"Channel '{name}' is no longer configured — the agent "
+                           "can no longer be reached over it."))
 
-    if "gateway_bind" in prev and "gateway_bind" in curr and prev["gateway_bind"] != curr["gateway_bind"]:
+    if (compare_config and "gateway_bind" in prev and "gateway_bind" in curr
+            and prev["gateway_bind"] != curr["gateway_bind"]):
         from .checks import EXPOSED_BINDS  # noqa: PLC0415
         cb = curr["gateway_bind"]
         exposed = cb in EXPOSED_BINDS

@@ -1068,7 +1068,10 @@ def _main(argv=None) -> int:
 
     if args.monitor:
         prev = load_state(args.state)
-        snap = snapshot(ctx, findings, score)
+        # B-269: snapshot() needs the previous state so that a run which could not read
+        # openclaw.json preserves the last known-good config baseline instead of writing
+        # the collapsed (empty) view over it — see monitor._degrade_snapshot.
+        snap = snapshot(ctx, findings, score, prev=prev)
         alerts = diff(prev, snap)
         _emit(render_monitor(alerts, score, ascii_only, baseline=prev is None))
         try:

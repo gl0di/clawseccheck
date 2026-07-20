@@ -1,0 +1,63 @@
+{
+  "gateway": {
+    "bind": "127.0.0.1:8080",
+    "auth": {
+      "mode": "token",
+      "token": "a-very-long-token-of-32-characters"
+    },
+    "tailscale": {
+      "funnel": false
+    },
+    "auth_no_rate_limit": false
+  },
+  "tools": {
+    "profile": "minimal",
+    "exec": {
+      "mode": "ask"
+    },
+    "elevated": {
+      "allowFrom": [
+        "owner-123"
+      ]
+    }
+  },
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "mode": "non-main",
+        "docker": {
+          "network": "bridge"
+        }
+      }
+    }
+  },
+  "mcp": {
+    "servers": {
+      "weather": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "weather-mcp@1.4.2"
+        ],
+        "transport": "stdio"
+      }
+    }
+  },
+  "plugins": {
+    "allow": [
+      "trentclaw"
+    ],
+    "installs_unpinned_npm_specs": false,
+    "installs_missing_integrity": false,
+    "tools_reachable_policy": "restricted"
+  },
+  "logging": {
+    "redactSensitive": "tools",
+    "audit": true
+  },
+  "models": {
+    "main": {
+      "provider": "local-llama"
+    }
+  }
+}
