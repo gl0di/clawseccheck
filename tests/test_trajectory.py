@@ -365,3 +365,134 @@ def test_read_events_explicit_path_files_total_and_not_capped(tmp_path):
     events, meta = read_events(tmp_path / "unused", explicit_path=str(path))
     assert meta["files_total"] == 1
     assert meta["files_capped"] is False
+
+
+# ---------------------------------------------------------------------------
+# B-298 — session ORIGIN bucketing. `sessionKey` is on 100% of real trajectory
+# records and was never read by anything in the package; it is the only field that
+# says WHERE a session came from, which no tool verb name can express.
+#
+# Shapes are grounded in the installed dist, not invented: `parseAgentSessionKey`
+# (`agent:<agentId>:<rest>`), `buildAgentPeerSessionKey`
+# (`<channel>:<peerKind>:<peerId>`, `<channel>:<accountId>:direct:<peerId>`,
+# `direct:<peerId>`), `buildDashboardSessionKey` (`dashboard:<uuid>`),
+# `buildAgentMainSessionKey` (`main`), and the `cron:`/`subagent:`/`acp:`/
+# `explicit:`/`voice:`/`boot` prefixes.
+# ---------------------------------------------------------------------------
+
+# (session_key, expected_kind, expected_channel) — one row per grounded shape, so this
+# asserts the INVARIANT across the whole shape matrix rather than one spelling.
+_ORIGIN_MATRIX = [
+    # external, multi-party peer kinds — the only ones a detector may arm ingress on
+    ("agent:main:telegram:group:g-1", "group", "telegram"),
+    ("agent:main:discord:channel:c-1", "channel", "discord"),
+    ("agent:main:unknown:group:legacy-1", "group", "unknown"),   # legacy remap shape
+    ("agent:main:matrix:GROUP:g-1", "group", "matrix"),          # case-insensitive kind
+    # 1:1 DM shapes — all three dmScope spellings fold to "direct"
+    ("agent:main:telegram:direct:p-1", "direct", "telegram"),
+    ("agent:main:telegram:acct7:direct:p-1", "direct", "telegram"),
+    ("agent:main:slack:dm:p-1", "direct", "slack"),
+    ("agent:main:direct:p-1", "direct", None),
+    # non-peer surfaces
+    ("agent:main:dashboard:0000-uuid", "dashboard", None),
+    ("agent:main:main", "main", None),
+    ("agent:main:global", "global", None),
+    ("agent:main:cron:job1:run:r1", "cron", None),
+    ("agent:main:subagent:abc", "subagent", None),
+    ("agent:main:acp:abc", "acp", None),
+    ("agent:main:explicit:sess-1", "explicit", None),
+    ("agent:main:voice:call:1", "voice", None),
+    ("agent:main:boot", "boot", None),
+    # a parseable key of an unrecognised shape (e.g. a custom session.mainKey)
+    ("agent:main:my-custom-main-key", "other", None),
+]
+
+
+def test_parse_session_origin_matrix():
+    from clawseccheck.trajectory import parse_session_origin
+
+    for key, kind, channel in _ORIGIN_MATRIX:
+        assert parse_session_origin(key) == (kind, channel), key
+
+
+def test_parse_session_origin_unparseable_is_unknown_not_a_guess():
+    """§4: an absent / malformed / non-agent-scoped key reports UNKNOWN (None), never a
+    fabricated origin. A detector must then leave its leg unarmed."""
+    from clawseccheck.trajectory import parse_session_origin
+
+    for key in (None, "", "   ", 12, ["agent", "main", "x"], "agent:main", "agent:main:",
+                "agent::telegram:group:g-1", "telegram:group:g-1", "notagent:a:b"):
+        assert parse_session_origin(key) == (None, None), repr(key)
+
+
+def test_parse_session_origin_never_returns_the_peer_id():
+    """§8: the peer-id segment of a real session key is PII (a live host's key embeds a
+    Telegram user id). Only the bucketed KIND and the channel id may escape."""
+    from clawseccheck.trajectory import parse_session_origin
+
+    peer = "3076" + "15315"
+    for key in (
+        f"agent:main:telegram:direct:{peer}",
+        f"agent:main:telegram:acct7:direct:{peer}",
+        f"agent:main:telegram:group:{peer}",
+        f"agent:main:direct:{peer}",
+        f"agent:main:dashboard:{peer}",
+    ):
+        assert peer not in "|".join(str(v) for v in parse_session_origin(key)), key
+
+
+def test_read_events_surfaces_origin_kind_and_channel(tmp_path):
+    rec = _call("bash", {"command": "ls"})
+    rec["sessionKey"] = "agent:main:telegram:group:g-1"
+    _write_traj(tmp_path, "sess1", [rec])
+    events, _ = read_events(tmp_path)
+    assert events[0]["origin"] == "group"
+    assert events[0]["originChannel"] == "telegram"
+
+
+def test_read_events_origin_is_none_when_session_key_absent(tmp_path):
+    """UNKNOWN path: pre-B-298 fixtures (and any record without a sessionKey) report
+    origin None — no affirmative claim either way."""
+    _write_traj(tmp_path, "sess1", [_call("bash", {"command": "ls"})])
+    events, _ = read_events(tmp_path)
+    assert events[0]["origin"] is None
+    assert events[0]["originChannel"] is None
+
+
+def test_read_events_never_leaks_the_session_key_peer_id(tmp_path):
+    """§8 end-to-end: the raw sessionKey (peer id included) must not reach the event
+    dicts the behavioral engine and its findings are built from."""
+    peer = "3076" + "15315"
+    rec = _call("bash", {"command": "ls"})
+    rec["sessionKey"] = f"agent:main:telegram:direct:{peer}"
+    _write_traj(tmp_path, "sess1", [rec])
+    events, _ = read_events(tmp_path)
+    blob = json.dumps(events)
+    assert peer not in blob
+    assert "sessionKey" not in blob
+    assert events[0]["origin"] == "direct"
+
+
+def test_parse_session_origin_c135_near_misses_do_not_bucket_as_external():
+    """C-135 adversarial pass (B-298): the ONLY thing allowed to bucket as an external
+    group/channel origin is the literal peer-kind token followed by a peer id. These are
+    the near-misses probed while trying to make the ingress leg fire wrongly — a bare
+    kind token with no peer id, a substring, a plural, and every real non-peer key
+    observed on a live host. Each must bucket as something T1 never arms."""
+    from clawseccheck.trajectory import EXTERNAL_ORIGIN_KINDS, parse_session_origin
+
+    near_misses = [
+        "agent:main:telegram:group",          # kind token, but NO peer id after it
+        "agent:main:group",                   # bare token in the surface slot
+        "agent:main:channel",
+        "agent:main:grouping:x:y",            # substring, not the token
+        "agent:main:x:groups:y",              # plural, not the token
+        "agent:main:verification-model-picker",   # real custom key seen on a live host
+        "agent:main:workboard-default-card",
+        "agent:main:heartbeat-recovered-20260720",
+        "agent:main:dashboard:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "agent:main:cron:nightly:run:r1",
+    ]
+    for key in near_misses:
+        kind, _ = parse_session_origin(key)
+        assert kind not in EXTERNAL_ORIGIN_KINDS, key

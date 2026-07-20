@@ -11,9 +11,11 @@ so a check can report *proven* — log-observed, not self-reported — tool use.
 log-observed upgrade to the attestation self-report path.
 
 Security (§8): this reads the user's own logs, which may contain secrets. It reads ONLY
-``data.name`` (the tool identity, not a secret) and the version marker — it NEVER reads
-``data.arguments``, ``data.output``, ``data.result`` or ``data.contentItems`` (the
-sensitive call/return payloads). Stdlib-only, read-only, no network.
+``data.name`` (the tool identity, not a secret), the version marker, and the top-level
+``sessionKey``'s ORIGIN KIND (see ``parse_session_origin`` — never the peer id it
+embeds) — it NEVER reads ``data.arguments``, ``data.output``, ``data.result`` or
+``data.contentItems`` (the sensitive call/return payloads). Stdlib-only, read-only,
+no network.
 """
 from __future__ import annotations
 
@@ -158,6 +160,91 @@ def read_proven_tools(
 _EVENT_TYPES = ("tool.call", "tool.result", "prompt.submitted")
 
 
+# ---------------------------------------------------------------------------
+# Session ORIGIN — where a session was opened FROM, bucketed by KIND only (B-298).
+# ---------------------------------------------------------------------------
+#
+# Every trajectory record carries a top-level `sessionKey`. Grounded in the installed
+# dist: `parseAgentSessionKey` (session-key-utils-A-JGvyXu.js) splits it as
+# `agent:<agentId>:<rest>`, and `buildAgentPeerSessionKey` (session-key-VWT_xzM9.js)
+# builds `<rest>` for an externally-delivered session as
+# `<channel>:<peerKind>:<peerId>` (or `<channel>:<accountId>:direct:<peerId>` under the
+# per-account-channel-peer DM scope; `direct:<peerId>` under per-peer). Non-peer
+# surfaces get their own literal prefix — `dashboard:<uuid>`
+# (session-create-service-14oZxrT5.js `buildDashboardSessionKey`), `main`
+# (`buildAgentMainSessionKey`), `cron:` / `subagent:` / `acp:` / `explicit:` / `voice:`
+# / `boot` / `global`.
+#
+# §8 PRIVACY — this is why the function returns a KIND, not the key. The peer id
+# segment is real PII: a live host's key reads `agent:main:telegram:direct:<numeric
+# telegram user id>`. Nothing here ever returns, logs or emits that segment; the only
+# strings that escape are the bounded peer KIND and the lowercase channel id.
+#
+# Canonical peer kinds (dist session-chat-type-shared-DlB0c25q.js
+# `CANONICAL_PEER_KINDS`, mirrored by session-key-utils' `SESSION_DELIVERY_PEER_KINDS`).
+_PEER_KINDS = ("direct", "dm", "group", "channel")
+
+# Literal non-peer session prefixes OpenClaw builds (see the dist cites above).
+_SESSION_PREFIX_KINDS = (
+    "dashboard", "cron", "subagent", "acp", "explicit", "voice", "boot", "main", "global",
+)
+
+# The origin kinds that mean "this session was opened by a MULTI-PARTY EXTERNAL
+# surface" — a group chat or a broadcast channel, where a message can be authored by
+# somebody who is not the owner. Deliberately EXCLUDES "direct": a 1:1 DM is
+# overwhelmingly the owner talking to his own bot (measured on a real host: 1,774 of
+# 3,896 records are one `telegram:direct:<owner id>` session), so arming on it would
+# manufacture noise on ordinary owner traffic. See behavioral.py for the residual that
+# leaves open.
+EXTERNAL_ORIGIN_KINDS = ("group", "channel")
+
+
+def parse_session_origin(session_key) -> tuple:
+    """Return ``(kind, channel)`` for a trajectory record's top-level ``sessionKey``.
+
+    ``kind`` is the ORIGIN bucket — one of the canonical peer kinds folded the way
+    OpenClaw's own ``parseCanonicalSessionPeerShape`` folds them ("dm" -> "direct"),
+    one of the literal non-peer prefixes in ``_SESSION_PREFIX_KINDS``, ``"other"`` for
+    a parseable key whose shape we do not recognise, or ``None`` when the key is
+    absent/unparseable (the honest UNKNOWN — §4: never guessed).
+
+    ``channel`` is the lowercase channel id (e.g. "telegram") when the shape carries
+    one, else ``None``.
+
+    §8: the peer-id segment is NEVER returned. Neither is the account id.
+    """
+    if not isinstance(session_key, str):
+        return (None, None)
+    parts = [p.strip() for p in session_key.strip().split(":")]
+    # `agent:<agentId>:<rest>` — dist `parseAgentSessionKey`.
+    if len(parts) < 3 or parts[0].lower() != "agent" or not parts[1]:
+        return (None, None)
+    rest = parts[2:]
+    if not rest[0]:
+        return (None, None)
+    head = rest[0].lower()
+
+    # Peer shapes, in the SAME precedence order as the dist's own
+    # `parseCanonicalSessionPeerShape`: peer-kind at index 0 (no channel segment),
+    # then index 1, then index 2 (the account-scoped form). A peer id must follow the
+    # kind, or it is not a delivery shape at all.
+    if head in ("direct", "dm") and len(rest) >= 2 and rest[1]:
+        return ("direct", None)
+    if len(rest) >= 3 and rest[1].lower() in _PEER_KINDS and rest[2]:
+        kind = rest[1].lower()
+        return ("direct" if kind == "dm" else kind, head)
+    if len(rest) >= 4 and rest[1] and rest[2].lower() in _PEER_KINDS and rest[3]:
+        kind = rest[2].lower()
+        return ("direct" if kind == "dm" else kind, head)
+
+    if head in _SESSION_PREFIX_KINDS:
+        return (head, None)
+    # A parseable key we don't recognise — e.g. a custom `session.mainKey`, which
+    # `normalizeMainKey` substitutes for the literal "main". Bucketed as "other" and
+    # never armed as ingress: this fails toward a missed detection, never a false one.
+    return ("other", None)
+
+
 def _event_outcome(rec_type: str, data: dict) -> str | None:
     """Classify a tool.result's outcome from status/isError/success (§9.1 grounded).
 
@@ -185,17 +272,24 @@ def read_events(
 ) -> tuple[list[dict], dict]:
     """Return (events, meta) — §8-safe event metadata for the behavioral engine.
 
-    Each event is ``{type, name, ts, seq, sessionId, turnId, threadId, outcome}`` for
-    ``tool.call``/``tool.result``/``prompt.submitted`` records (§9.1 grounded envelope).
-    ``name`` and ``outcome`` are ``None`` where the event type doesn't carry them
-    (e.g. ``prompt.submitted`` has no tool name; only ``tool.result`` has an outcome).
-    ``sessionId`` (top-level, not sensitive — a session identifier) lets a caller scope
-    grouping to one session, since ``seq`` is a per-session counter (§9.1), not globally
-    unique across trajectory files (C-170 adversarial finding).
+    Each event is ``{type, name, ts, seq, sessionId, turnId, threadId, outcome, origin,
+    originChannel}`` for ``tool.call``/``tool.result``/``prompt.submitted`` records
+    (§9.1 grounded envelope). ``name`` and ``outcome`` are ``None`` where the event type
+    doesn't carry them (e.g. ``prompt.submitted`` has no tool name; only ``tool.result``
+    has an outcome). ``sessionId`` (top-level, not sensitive — a session identifier) lets
+    a caller scope grouping to one session, since ``seq`` is a per-session counter
+    (§9.1), not globally unique across trajectory files (C-170 adversarial finding).
+
+    ``origin``/``originChannel`` (B-298) are ``parse_session_origin()``'s bucketed read
+    of the top-level ``sessionKey`` — the surface the session was opened from. They let
+    a detector tell an externally-delivered message apart from the owner's own typing,
+    which no tool VERB NAME can express. ``origin`` is ``None`` when the key is absent
+    or unparseable — an honest UNKNOWN, never a guess.
 
     NEVER reads ``data.arguments``/``data.output``/``data.result``/``data.contentItems``
-    — the sensitive call/return payloads (§8). Only tool/event identity and sequencing
-    metadata. Same version gate and DoS bounds as ``read_proven_tools``.
+    — the sensitive call/return payloads (§8), nor the ``sessionKey``'s peer-id segment
+    (PII — see ``parse_session_origin``). Only tool/event identity, origin KIND, and
+    sequencing metadata. Same version gate and DoS bounds as ``read_proven_tools``.
 
     ``explicit_path`` scans a single given ``.trajectory.jsonl`` file instead of
     globbing *home* (mirrors ``trajaudit.analyze``'s CLI PATH argument). ``files_total``/
@@ -257,6 +351,7 @@ def read_events(
                     if not isinstance(data, dict):
                         data = {}
                     name = data.get("name")
+                    origin, origin_channel = parse_session_origin(rec.get("sessionKey"))
                     events.append({
                         "type": rec_type,
                         "name": name.strip() if isinstance(name, str) and name.strip() else None,
@@ -266,6 +361,8 @@ def read_events(
                         "turnId": data.get("turnId"),
                         "threadId": data.get("threadId"),
                         "outcome": _event_outcome(rec_type, data),
+                        "origin": origin,
+                        "originChannel": origin_channel,
                     })
         except OSError:
             continue

@@ -10,8 +10,9 @@ agent actually DO" — reconstructed from OpenClaw's trajectory sidecar
 from declared capability.
 
 §8 privacy boundary: reads ONLY `trajectory.read_events()`'s metadata — `type`, `name`,
-`ts`, `seq`, `sessionId`, `turnId`, `threadId`, `outcome`. NEVER reads
-`arguments`/`output`/`result`/`contentItems` (the sensitive call/return payloads).
+`ts`, `seq`, `sessionId`, `turnId`, `threadId`, `outcome`, `origin`, `originChannel`.
+NEVER reads `arguments`/`output`/`result`/`contentItems` (the sensitive call/return
+payloads), nor the `sessionKey` peer-id segment `origin` is bucketed from (PII).
 
 Findings are WARN-only, `scored=False` (Golden Rule #5) — a heuristic on observed VERB
 NAMES classified by role (ingress/sensitive/egress), not on the untouched payload
@@ -28,7 +29,7 @@ from . import attest
 from .catalog import PASS, UNKNOWN, WARN
 from .checks import INPUT_TOOL_HINTS, _finding
 from .collector import dig
-from .trajectory import read_events, read_proven_tools
+from .trajectory import EXTERNAL_ORIGIN_KINDS, read_events, read_proven_tools
 
 # C-170 adversarial pass found the naive "reuse A1's three hint tuples verbatim"
 # design (still used for `INPUT_TOOL_HINTS` below) has two real bugs when applied
@@ -105,6 +106,52 @@ def _classify_verb_role(name: str | None) -> str | None:
     return None
 
 
+# B-298 — the CHANNEL ingress leg. `_classify_verb_role` above can only see a tool VERB
+# NAME, and the single most common real injection vector carries none: a message
+# arriving over a configured channel is a `prompt.submitted` event whose `data` has no
+# `name` at all, so `_classify_verb_role(None)` is None and the trifecta could never
+# START. That was an in-repo ASYMMETRY, not a design choice — T1 was built to mirror A1's
+# ingress/sensitive/egress leg model but copied only the `INPUT_TOOL_HINTS` half and
+# dropped A1's FIRST ingress condition, `_untrusted_input_channels`.
+#
+# The signal that restores it is the record's own `sessionKey` origin, bucketed by
+# `trajectory.parse_session_origin` — NOT "a thread that begins with prompt.submitted".
+# Measured on a real host (73 sidecars, 3,896 records): that naive rule arms EVERY
+# thread — 67 of 67 — because the owner typing at his own dashboard submits prompts
+# exactly like a channel does. The group/channel scoping arms 0 of those 67. That gap
+# (67 vs 0) IS the design: `direct`, `dashboard`, `main` and `other` origins are never
+# armed, so ordinary owner traffic (2,001 dashboard + 1,774 `telegram:direct` records
+# on that host, the latter all one owner session) cannot manufacture a trifecta.
+#
+# HONEST LABELLING — this NARROWS the gap, it does not close it:
+#  * A DM-delivered injection from a non-owner still does not arm ingress. `direct`
+#    origin is indistinguishable, from the session key alone, between "the owner DMs
+#    his bot" and "a stranger DMs the bot under an open dmPolicy"; arming it would
+#    reproduce exactly the false-positive shape above. Telling those apart needs the
+#    channel's configured dmPolicy, which A1 already reads STATICALLY — so the posture
+#    is flagged, only the runtime corroboration is missing.
+#  * T1 remains unable to fire at all on a core-tools agent, for a reason INDEPENDENT
+#    of this leg: `_T_SENSITIVE_HINTS` matches no OpenClaw core tool, and an agent that
+#    does everything through `bash` classifies as EGRESS/EXEC. On the real host, 0 of
+#    1,270 observed tool calls classify as sensitive. Fixing ingress alone therefore
+#    does not make T1 functional there.
+def _classify_event_role(event: dict) -> str | None:
+    """Classify one EVENT into a trifecta leg — verb role first, then channel origin.
+
+    Falls through to the channel ingress leg only for an event that carries no verb
+    role at all, so an explicit verb classification always wins.
+    """
+    role = _classify_verb_role(event.get("name"))
+    if role:
+        return role
+    if (
+        event.get("type") == "prompt.submitted"
+        and event.get("origin") in EXTERNAL_ORIGIN_KINDS
+    ):
+        return "ingress"
+    return None
+
+
 def _sort_key(event: dict):
     """Deterministic (seq, ts) ordering key — events with a missing/non-int seq sort
     after those with one (so partial data never silently reorders known-good events)."""
@@ -171,41 +218,59 @@ def _disambiguated_labels(firing_keys: list[str]) -> list[str]:
 # order (by seq/ts), within one thread.
 # ---------------------------------------------------------------------------
 
-def _t1_thread_trifecta(thread_events: list[dict]) -> bool:
-    """True when this thread's events show ingress before sensitive before egress."""
-    seen_ingress = False
+def _t1_thread_trifecta(thread_events: list[dict]) -> str | None:
+    """How this thread's ingress leg was armed, when it shows ingress -> sensitive ->
+    egress in that order; ``None`` when it shows no trifecta.
+
+    Returns ``"verb"`` when an ingress TOOL VERB opened the chain, or the external
+    origin kind ("group"/"channel") when an externally-delivered channel message did
+    (B-298). The caller needs the distinction: reporting "an ingress verb ran" for a
+    channel-armed firing would be a false statement about what the log shows.
+    """
+    armed_by: str | None = None
     seen_sensitive_after_ingress = False
     for ev in thread_events:
-        role = _classify_verb_role(ev.get("name"))
+        role = _classify_event_role(ev)
         if role == "ingress":
-            seen_ingress = True
-        elif role == "sensitive" and seen_ingress:
+            if armed_by is None:
+                armed_by = "verb" if ev.get("name") else str(ev.get("origin"))
+        elif role == "sensitive" and armed_by is not None:
             seen_sensitive_after_ingress = True
         elif role == "egress" and seen_sensitive_after_ingress:
-            return True
-    return False
+            return armed_by
+    return None
 
 
 def check_behavioral_trifecta(groups: dict[str, list[dict]]) -> object:
     """T1 — behavioral trifecta, proven by the trajectory log (not declared capability).
 
-    WARN — at least one thread shows an ingress-verb, then a sensitive-verb, then an
-           egress-verb, in that order.
+    WARN — at least one thread shows an ingress leg (an ingress VERB, or an
+           externally-delivered group/channel message — B-298), then a sensitive-verb,
+           then an egress-verb, in that order.
     PASS — threads present, no thread shows the ordered sequence.
     """
     firing_keys: list[str] = []
+    armed_by: dict[str, str] = {}
     for group_key, thread_events in groups.items():
-        if _t1_thread_trifecta(thread_events):
+        ingress = _t1_thread_trifecta(thread_events)
+        if ingress:
             firing_keys.append(group_key)
-    firing = _disambiguated_labels(firing_keys)
+            armed_by[group_key] = ingress
+    # Annotate AFTER disambiguation so the session-collision logic still keys off the
+    # bare thread label (C-180), and so a verb-armed firing keeps its plain label.
+    firing = [
+        label if armed_by[key] == "verb" else f"{label} [external {armed_by[key]} message]"
+        for key, label in zip(firing_keys, _disambiguated_labels(firing_keys))
+    ]
 
     if firing:
         detail = "; ".join(firing[:6]) + (f" (+{len(firing) - 6} more)" if len(firing) > 6 else "")
         return _finding(
             "T1",
             WARN,
-            "Behavioral trifecta observed — an ingress verb, then a sensitive-data "
-            f"verb, then an egress verb, ran in this order within a thread: {detail}.",
+            "Behavioral trifecta observed — an ingress leg (an ingress verb, or an "
+            "externally-delivered group/channel message), then a sensitive-data verb, "
+            f"then an egress verb, ran in this order within a thread: {detail}.",
             "Review the trajectory sidecar for the named thread(s) manually. This is "
             "proof-by-log of the same pattern A1 flags by capability — untrusted input "
             "reached sensitive data and then left the agent, in one observed sequence.",
@@ -214,8 +279,8 @@ def check_behavioral_trifecta(groups: dict[str, list[dict]]) -> object:
     return _finding(
         "T1",
         PASS,
-        "No thread shows an ingress -> sensitive -> egress verb sequence in the "
-        "trajectory log.",
+        "No thread shows an ingress -> sensitive -> egress sequence in the trajectory "
+        "log.",
         "No action needed.",
     )
 

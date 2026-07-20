@@ -533,3 +533,198 @@ def test_analyze_not_capped_at_max_files_no_disclosure(tmp_path):
 
     out = render_behavioral_analysis(_ctx(tmp_path))
     assert "most recent" not in out
+
+
+# ---------------------------------------------------------------------------
+# B-298 — the CHANNEL ingress leg.
+#
+# Before this, T1's ingress leg was VERB-NAME-ONLY. A message delivered over a
+# configured channel — the most common real injection vector — arrives as a
+# `prompt.submitted` event carrying no `data.name`, so `_classify_verb_role(None)`
+# was None and the trifecta could never START: a poisoned group message -> read a
+# credential -> send it out showed only sensitive->egress and T1 stayed a hollow PASS.
+#
+# The leg is now armed off the record's `sessionKey` ORIGIN KIND, and ONLY for a
+# group/channel peer kind. The rejected alternative — "a thread that begins with
+# prompt.submitted" — was measured on a real host to flag 74 of 85 threads, 46 of them
+# owner-origin sessions where the "untrusted input" is the owner typing at his own
+# dashboard. The tests below pin both halves of that: the group case fires, and every
+# owner-origin bucket stays silent on the identical sensitive+egress pair.
+# ---------------------------------------------------------------------------
+
+def _prompt(seq, origin, channel=None, thread="th1"):
+    return {"type": "prompt.submitted", "name": None, "seq": seq, "ts": str(seq),
+            "sessionId": "s1", "threadId": thread, "origin": origin,
+            "originChannel": channel}
+
+
+def _tool(seq, name, thread="th1", origin="group", channel="telegram"):
+    return {"type": "tool.call", "name": name, "seq": seq, "ts": str(seq),
+            "sessionId": "s1", "threadId": thread, "origin": origin,
+            "originChannel": channel}
+
+
+def test_t1_warns_on_channel_delivered_message_then_sensitive_then_egress():
+    """The defect, directly: no ingress VERB runs anywhere in this thread, yet the
+    canonical poisoned-message -> read-secret -> exfil sequence is present."""
+    groups = {"th1": [
+        _prompt(1, "group", "telegram"),
+        _tool(2, "read_credential_file"),
+        _tool(3, "send_message"),
+    ]}
+    f = check_behavioral_trifecta(groups)
+    assert f.status == WARN
+    # the finding must say the ingress leg was a channel message, not "an ingress verb"
+    assert "external group message" in f.evidence[0]
+
+
+def test_t1_warns_on_broadcast_channel_origin():
+    groups = {"th1": [
+        _prompt(1, "channel", "discord"),
+        _tool(2, "vault_get_secret", origin="channel", channel="discord"),
+        _tool(3, "send_message", origin="channel", channel="discord"),
+    ]}
+    assert check_behavioral_trifecta(groups).status == WARN
+
+
+def test_t1_does_not_arm_on_owner_or_unknown_origins():
+    """THE decisive false-positive guard. Every non-external origin bucket, given the
+    IDENTICAL sensitive+egress pair that fires for a group origin, must stay PASS —
+    including None (no sessionKey / unparseable), which is the honest UNKNOWN.
+
+    "direct" is in this list on purpose: a 1:1 DM is overwhelmingly the owner talking
+    to his own bot (measured: 1,774 of one real host's 3,896 records are a single
+    telegram:direct owner session), and the session key alone cannot tell that apart
+    from a stranger's DM. Arming it would reproduce exactly the 74-of-85-threads false
+    positive this design exists to avoid. See the residual note in behavioral.py.
+    """
+    for origin in ("direct", "dashboard", "main", "global", "cron", "subagent", "acp",
+                   "explicit", "voice", "boot", "other", None):
+        groups = {"th1": [
+            _prompt(1, origin, "telegram"),
+            _tool(2, "read_credential_file", origin=origin),
+            _tool(3, "send_message", origin=origin),
+        ]}
+        assert check_behavioral_trifecta(groups).status == PASS, origin
+
+
+def test_t1_channel_ingress_still_requires_the_order():
+    """A channel message arriving AFTER the sensitive read must not retro-arm the leg —
+    the ordering invariant the whole check rests on is unchanged."""
+    groups = {"th1": [
+        _tool(1, "read_credential_file"),
+        _prompt(2, "group", "telegram"),
+        _tool(3, "send_message"),
+    ]}
+    assert check_behavioral_trifecta(groups).status == PASS
+
+
+def test_t1_channel_origin_alone_is_not_a_trifecta():
+    """A group-origin thread with no sensitive leg must stay silent — otherwise every
+    group message becomes a finding, which is noise, not detection."""
+    groups = {"th1": [
+        _prompt(1, "group", "telegram"),
+        _tool(2, "list_calendars"),
+        _tool(3, "send_message"),
+    ]}
+    assert check_behavioral_trifecta(groups).status == PASS
+
+
+def test_t1_non_prompt_events_do_not_arm_ingress_by_origin_alone():
+    """Only the `prompt.submitted` event — the message delivery itself — arms the leg.
+    If any group-origin event did, the leg would be armed at position 0 for the whole
+    session and the ordering requirement would collapse."""
+    groups = {"th1": [
+        _tool(1, "list_calendars"),           # group origin, but not a prompt
+        _tool(2, "read_credential_file"),
+        _tool(3, "send_message"),
+    ]}
+    assert check_behavioral_trifecta(groups).status == PASS
+
+
+def test_t1_verb_armed_firing_keeps_its_plain_label():
+    """No annotation regression: a firing opened by a real ingress VERB must not be
+    mislabelled as an external message."""
+    groups = {"th1": [
+        {"type": "tool.call", "name": "web_fetch", "seq": 1},
+        {"type": "tool.call", "name": "read_credential_file", "seq": 2},
+        {"type": "tool.call", "name": "send_message", "seq": 3},
+    ]}
+    f = check_behavioral_trifecta(groups)
+    assert f.status == WARN
+    assert f.evidence == ["th1"]
+
+
+def test_t1_verb_role_wins_over_channel_origin():
+    """An event that DOES carry a verb role keeps it — the origin fallback only applies
+    where the verb-name classifier had nothing to say."""
+    groups = {"th1": [
+        _tool(1, "web_fetch"),                # ingress by verb, in a group session
+        _tool(2, "read_credential_file"),
+        _tool(3, "send_message"),
+    ]}
+    f = check_behavioral_trifecta(groups)
+    assert f.status == WARN
+    assert f.evidence == ["th1"]  # armed by the verb, so no external-message annotation
+
+
+def test_t1_channel_finding_never_emits_a_peer_id(tmp_path):
+    """§8 end-to-end through the real reader: a group session key embedding a peer id
+    fires T1, and neither the id nor the raw key appears anywhere in the output."""
+    import json
+
+    peer = "3076" + "15315"
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True)
+    key = f"agent:main:telegram:group:{peer}"
+
+    def line(seq, rec_type, name):
+        rec = {"traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": rec_type,
+               "ts": str(seq), "seq": seq, "sessionId": "s1", "sessionKey": key,
+               "data": {"threadId": "th1", "turnId": "th1",
+                        **({"name": name} if name else {})}}
+        return json.dumps(rec) + "\n"
+
+    (d / "s.trajectory.jsonl").write_text(
+        line(1, "prompt.submitted", None)
+        + line(2, "tool.call", "read_credential_file")
+        + line(3, "tool.call", "send_message"),
+        encoding="utf-8",
+    )
+    r = analyze(_ctx(tmp_path))
+    t1 = next(f for f in r["findings"] if f.id == "T1")
+    assert t1.status == WARN
+    blob = " ".join([t1.detail, t1.fix, *t1.evidence,
+                     render_behavioral_analysis(_ctx(tmp_path), ascii_only=True)])
+    assert peer not in blob
+    assert key not in blob
+    assert "external group message" in blob
+
+
+def test_traj_channel_group_ingress_fixture_warns():
+    """Bad fixture: a group-origin channel message opens the chain, with NO ingress verb
+    anywhere in the thread."""
+    r = analyze(_ctx(FIXTURES / "traj_channel_group_ingress"))
+    t1 = next(f for f in r["findings"] if f.id == "T1")
+    assert t1.status == WARN
+
+
+def test_traj_channel_owner_clean_fixture_silent():
+    """Clean fixture: dashboard-origin and telegram:direct-origin threads carrying the
+    SAME sensitive+egress pair as the bad fixture. Owner traffic must not manufacture a
+    trifecta — this is the pair that makes the bad fixture's WARN meaningful."""
+    r = analyze(_ctx(FIXTURES / "traj_channel_owner_clean"))
+    assert all(f.status != WARN for f in r["findings"])
+
+
+def test_behavioral_checks_stay_unscored():
+    """Owner decision (2026-07-20): T1/T2/T3 are advisory and stay scored=False
+    permanently. B-298 improves T1's recall; it must not move the A-F grade."""
+    from clawseccheck.behavioral import BEHAVIORAL_CHECK_IDS
+    from clawseccheck.catalog import BY_ID
+    from clawseccheck.checks import CHECKS
+
+    for cid in BEHAVIORAL_CHECK_IDS:
+        assert BY_ID[cid].scored is False, cid
+    catalogued = {getattr(fn, "__name__", "") for fn in CHECKS}
+    assert "check_behavioral_trifecta" not in catalogued
