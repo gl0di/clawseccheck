@@ -1,0 +1,13 @@
+{
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "groups": {
+        "*": {}
+      },
+      "groupAllowFrom": [
+        "synthetic-owner-1"
+      ]
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "groups": {
+        "*": {}
+      }
+    }
+  }
+}

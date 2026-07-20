@@ -4,13 +4,26 @@ Detects dangerous CAPABILITY CHAINS — not isolated property checks. A chain
 fires only on POSITIVE evidence for every link; UNKNOWN inputs yield no chain
 (zero false-positives by design).
 
+Chains are ADVISORY: they are derived from the audit, never part of it. No chain
+carries a CheckMeta, and none can move the A–F grade — cli.py computes the score
+before calling ``risk_paths``, and scoring.py does not import this module.
+
+Almost every rule is a pure function of config + findings. The one exception is
+RISK-21 (F-135), which additionally reads the trajectory sidecars under ``ctx.home``
+— metadata only (tool verb names and session-key ORIGIN KINDS; never call arguments,
+never the peer id) — so that "a channel is open to non-owner senders" and "a
+high-blast verb provably ran from such a session" can finally be related.
+
 English-only. Read-only. Pure stdlib.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
+from . import attest as _attest
+from . import trajectory as _trajectory
 from .catalog import CRITICAL, FAIL, HIGH, MEDIUM, WARN, Finding
 from .checks import (
     _b62_actual_families,
@@ -1089,6 +1102,207 @@ def _rule_skill_composition_trust_transfer(ctx: Context) -> RiskPath | None:
     )
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# F-135 / RISK-21 — the first chain that joins CONFIG POSTURE with the LOG
+# ──────────────────────────────────────────────────────────────────────────────
+# Until now this engine took only static findings, and the log-observed half of the
+# tool (behavioral.py / trajectory.py) was a terminal `--behavioral` branch that never
+# reached the audit. So "a channel admits non-owner senders" and "a high-blast verb
+# provably ran" were both known and never related. RISK-21 relates them.
+#
+# WHY THE COARSE JOIN IS NOT WHAT THIS IS. "An open channel exists" AND "a high-blast
+# verb is proven somewhere in the log" fires on the maintainer's own machine: measured
+# there, an open wildcard-group telegram channel sits beside 867 proven `bash` calls,
+# and every one of those calls came from `telegram:direct` (the owner's own DM),
+# `dashboard` (his own web UI) or an unrecognised `other` key — ZERO group/channel
+# origins across 73 sidecars. The join therefore runs per SESSION ORIGIN
+# (`trajectory.read_proven_tools_by_origin`), and it stays silent on that host, which is
+# the single most important property of this rule.
+#
+# ADVISORY, and structurally so. RiskPaths are outside the A–F score by construction:
+# cli.py computes `score = audit(...)` BEFORE calling `risk_paths(...)`, and scoring.py
+# does not import this module. That matters more here than for the static chains,
+# because of the owner's 2026-07-20 ruling that only an ARGUMENTS-corroborated runtime
+# signal may ever affect the grade, and only as a cap. This rule is metadata-only — it
+# reads a verb NAME and a session-key ORIGIN KIND, never a call's arguments — so it must
+# not move the grade, and it cannot. `tests/test_risk21_*.py` pins that.
+#
+# §8: the only strings that can escape are the bounded origin kind, the channel id and
+# the tool verb names. The `sessionKey`'s peer-id segment is real PII (a live host's key
+# reads `agent:main:telegram:direct:<telegram user id>`) and is never read into the
+# bucket key — see `trajectory.parse_session_origin`.
+
+# EGRESS is deliberately EXCLUDED from the blast classes below, though
+# `attest.HIGH_BLAST_CLASSES` includes it. A channel-connected agent answers a group
+# message by SENDING — an agent holding an MCP `slack_send_message` / `sessions_send`
+# tool produces an EGRESS-classified call in essentially every group session it ever
+# serves. Arming on that would make this chain fire on every group-enabled bot that has
+# ever replied, i.e. on ordinary traffic, which is noise rather than signal. The three
+# kept classes are the ones ordinary conversational traffic does NOT produce, and EXEC
+# already subsumes egress in practice (attest.py's own taxonomy note: arbitrary command
+# execution subsumes curl, rm and config mutation).
+#
+# HONEST LABELLING — this NARROWS the gap, it does not close it. Excluding EGRESS means
+# a group-origin exfil performed purely through a dedicated send verb is a known false
+# NEGATIVE here; the static posture for it is what A1/RISK-02 already report, and the
+# runtime sequence is what T1 reports under `--behavioral`.
+_R21_BLAST_CLASSES = ("EXEC", "DESTRUCTIVE", "MAILBOX_CONFIG")
+
+
+def _open_group_channels(cfg: dict) -> dict:
+    """Channel name -> reason, for channels whose GROUP ingress admits non-owner senders.
+
+    Two arms, and deliberately no third notion of "open":
+
+    * the wildcard-group shape, via ``_open_wildcard_group_channels`` — the SAME
+      predicate B140 and the B-297 ingress leg use, imported through the checks
+      aggregator (CLAUDE.md §3.1-a). It is already allowFrom-aware, already skips
+      ``enabled: false`` channels and ``channels.defaults``, and already drops nodes
+      whose group ingress is switched off outright.
+    * an explicit ``groupPolicy: "open"`` (plus Feishu's ``"allowall"`` alias, which
+      only Feishu's schema accepts — see ``_norm_group_policy``, mirrored inline here
+      exactly as ``_open_channel_labels`` above mirrors it).
+
+    The second arm needs NO allowFrom test, and that is a dist fact rather than a
+    simplification: the live sender gate short-circuits
+    ``if (params.policy.groupPolicy === "open") return allow("group_policy_open")``
+    BEFORE it consults any allowlist (message-access-DucCKzfO.js:193, inside
+    ``resolveChannelMessageIngress``), so a ``groupAllowFrom`` beside an open
+    groupPolicy does not restrict anything. (The ``@deprecated`` SDK helper
+    ``resolveSenderScopedGroupPolicy``, group-access-CyF0dAER.js:8-10, DOES downgrade
+    open->allowlist when ``groupAllowFrom`` is non-empty — reading that one instead
+    would have produced a silent false negative on every open group with a leftover
+    allowlist.)
+
+    DM policy is excluded on purpose. This helper feeds a join whose runtime leg is a
+    GROUP/CHANNEL-origin session, so a channel that is open for DMs but allowlisted for
+    groups must not arm it. ``_open_channel_labels`` above answers the different, broader
+    question RISK-01 asks and correctly mixes both.
+
+    An ABSENT ``groupPolicy`` never arms this. That is a positive-evidence choice with a
+    real ambiguity behind it: the bundled zod schemas default several providers to
+    ``"allowlist"`` (bundled-channel-config-schema-CkfMA6sO.js:250 and siblings) while
+    the runtime resolver defaults a CONFIGURED provider to ``"open"``
+    (``resolveOpenProviderRuntimeGroupPolicy``, runtime-group-policy-BEjP88cf.js:29-37).
+    Arming on absence would therefore chain on a shape we cannot prove is open — a false
+    positive. Not arming is a false negative, which is the safe direction here.
+    """
+    out = dict(_open_wildcard_group_channels(cfg))
+    channels = cfg.get("channels")
+    if not isinstance(channels, dict):
+        return out
+    for name, c in channels.items():
+        if name == "defaults" or not isinstance(c, dict) or c.get("enabled") is False:
+            continue
+        if name in out:
+            continue
+        for node in _resolved_channel_nodes(c):
+            if not isinstance(node, dict):
+                continue
+            policy = node.get("groupPolicy")
+            if policy == "open" or (name == "feishu" and policy == "allowall"):
+                out[name] = 'groupPolicy is "open" — any group member may command the agent'
+                break
+    return out
+
+
+def _rule_open_group_proven_blast(ctx: Context, cfg: dict) -> RiskPath | None:
+    """MEDIUM (RISK-21, F-135): open group ingress + a high-blast verb PROVEN from it.
+
+    Fires only when all of the following hold, each on positive evidence:
+
+    1. a channel's GROUP ingress admits non-owner senders (``_open_group_channels``);
+    2. the trajectory log contains a ``tool.call`` whose session was opened from a
+       GROUP or CHANNEL surface on THAT SAME channel (``EXTERNAL_ORIGIN_KINDS`` — the
+       same bucket OpenClaw's own ``sessionKey.includes(":group:") ||
+       includes(":channel:")`` discriminator uses, status-message-CQq9FqoB.js:445);
+    3. that verb classifies EXEC / DESTRUCTIVE / MAILBOX_CONFIG (see
+       ``_R21_BLAST_CLASSES`` on why EGRESS is excluded).
+
+    HONEST LABELLING — what this does NOT claim. It does not prove a group sender
+    CAUSED a particular tool call. The evidence is that the session carrying the call
+    was opened from a multi-party surface and that surface is open to non-owner
+    senders; the causal step between a specific message and a specific call needs the
+    call's arguments, which the §8 metadata-only contract puts out of reach. Read it as
+    "this exposure is not hypothetical here", not as an attribution.
+
+    No trajectory (absent, or ``OPENCLAW_TRAJECTORY`` off) means the runtime leg is
+    UNPROVEN, not proven-absent — and this rule then stays silent rather than inventing
+    a chain, per this module's contract. The same holds when the scan's own bounds bite:
+    ``read_proven_tools_by_origin`` caps at 60 sidecars / 8 MB each, so on a busy host a
+    group-origin blast call sitting only in a dropped older session is a miss. Silence is
+    therefore never an all-clear for this exposure — it means "not proven here". The
+    STATIC half of it is what RISK-01 and A1 report unconditionally, and neither depends
+    on the log.
+    """
+    open_groups = _open_group_channels(cfg)
+    if not open_groups:
+        return None
+    home = getattr(ctx, "home", None)
+    if not isinstance(home, Path):
+        return None
+    by_origin, meta = _trajectory.read_proven_tools_by_origin(home)
+    if not meta.get("present"):
+        return None
+
+    # Config channel keys and session-key channel ids are both lowercase provider ids
+    # in the dist (`normalizeLowercaseStringOrEmpty(params.channel)`,
+    # session-key-VWT_xzM9.js:143), but fold both sides anyway so a hand-written
+    # `channels.Telegram` cannot silently break the join.
+    lowered = {name.lower(): name for name in open_groups}
+    hits: dict = {}
+    for (kind, channel), verbs in by_origin.items():
+        if kind not in _trajectory.EXTERNAL_ORIGIN_KINDS:
+            continue
+        if not isinstance(channel, str):
+            continue
+        name = lowered.get(channel.lower())
+        if name is None:
+            continue
+        blast = {v for v in verbs if _attest.classify_verb(v) in _R21_BLAST_CLASSES}
+        if blast:
+            hits.setdefault(name, set()).update(blast)
+    if not hits:
+        return None
+
+    # Deterministic pick: by_origin's iteration order follows sidecar mtime, which is
+    # not a property of the config and must never decide what the report says.
+    channel_name = sorted(hits)[0]
+    verbs = sorted(hits[channel_name])
+    shown = ", ".join(verbs[:5]) + (", …" if len(verbs) > 5 else "")
+    reason = open_groups[channel_name]
+    return RiskPath(
+        id="RISK-21",
+        severity=MEDIUM,
+        title="Group-origin session provably reached a high-blast tool",
+        chain=[
+            f"{channel_name} (open to non-owner senders: {reason})",
+            "group / channel-origin session in the trajectory log",
+            f"proven high-blast tool call ({shown})",
+        ],
+        why=(
+            f"The channel '{channel_name}' admits group messages from senders who are "
+            f"not the owner ({reason}), and the trajectory log records a session opened "
+            f"from a group or channel surface on '{channel_name}' in which the agent "
+            f"actually invoked {shown}. Both halves of this exposure were already "
+            "visible in isolation — the posture as a config finding, the tool use as a "
+            "log observation — but nothing related them, so a setup where an untrusted "
+            "surface has demonstrably reached a high-blast primitive looked the same as "
+            "one where it never had. It is not proof that a group sender caused those "
+            "specific calls: that needs the call arguments, which this tool never reads."
+        ),
+        fix=(
+            f"Decide whether group senders on '{channel_name}' are meant to reach "
+            "exec/destructive/mailbox-config tools at all. If not, restrict the channel "
+            "(set groupPolicy to 'allowlist' and list the permitted senders in "
+            "groupAllowFrom, or scope the groups entry so it is not '*'). If open group "
+            "access is intentional — a community bot, say — put the high-blast tools "
+            "behind a human approval step (tools.exec.mode='ask') so an untrusted "
+            "message cannot reach them unattended."
+        ),
+    )
+
+
 def risk_paths(ctx: Context, findings: list[Finding],
                 ignore: set[str] | None = None) -> list[RiskPath]:
     """Compute dangerous capability chains from config + existing findings.
@@ -1096,6 +1310,12 @@ def risk_paths(ctx: Context, findings: list[Finding],
     Returns [] when no chains are detected. Each rule fires only on POSITIVE
     evidence for every link — no chain is invented from absent data.
     Deduplicated by id; sorted by severity (CRITICAL first).
+
+    F-135: RISK-21 additionally reads the trajectory sidecars under ``ctx.home``
+    (metadata only — verb names and session-key ORIGIN KINDS, never call arguments or
+    the peer id), so this function now performs bounded read-only file I/O. The bounds
+    are ``trajectory``'s own (60 files / 8 MB per file); measured at ~0.1 s on a host
+    with 73 sidecars. Every other rule remains a pure function of config + findings.
 
     `ignore` is the parsed `.clawseccheckignore` entry set (see baseline.py). A
     RiskPath whose id (e.g. "RISK-03") appears in `ignore` is marked
@@ -1185,6 +1405,10 @@ def risk_paths(ctx: Context, findings: list[Finding],
         candidates.append(path)
 
     path = _rule_skill_composition_trust_transfer(ctx)
+    if path:
+        candidates.append(path)
+
+    path = _rule_open_group_proven_blast(ctx, cfg)
     if path:
         candidates.append(path)
 

@@ -87,26 +87,33 @@ def find_trajectory_files(
     return files[:max_files]
 
 
-def read_proven_tools(
+def read_proven_tools_by_origin(
     home: Path,
     *,
     max_files: int = _MAX_FILES,
     max_bytes_per_file: int = _MAX_BYTES_PER_FILE,
-) -> tuple[set[str], dict]:
-    """Return ``(verbs, meta)`` for tool verbs observed in trajectory sidecars under *home*.
+) -> tuple[dict, dict]:
+    """Return ``(by_origin, meta)`` — proven tool verbs BUCKETED by session origin.
 
-    ``verbs`` is the set of raw ``data.name`` values from ``tool.call`` records in files
-    whose ``traceSchema``/``schemaVersion`` match the grounded format. ``meta`` reports
-    ``present`` (any trajectory file found), ``files_scanned``, ``unknown_version``
-    (a trajectory line carried an unrecognised schema version — caller should treat the
-    proven set as incomplete / UNKNOWN rather than authoritative), ``files_total`` (the
-    number of trajectory sidecars found before the per-file cap), and ``files_capped``
-    (True when the per-file cap dropped the oldest sessions — B-245: this proven-tool set
-    is then incomplete too, same as ``unknown_version``).
+    ``by_origin`` maps ``(origin_kind, origin_channel)`` -> the set of raw ``data.name``
+    values proven in sessions of that origin, where the pair is
+    ``parse_session_origin()``'s bucketed read of the record's top-level ``sessionKey``
+    (``(None, None)`` for a record whose key is absent or unparseable — the honest
+    UNKNOWN bucket, never folded into a named origin). ``meta`` is exactly the meta
+    ``read_proven_tools`` documents.
 
-    Only ``data.name`` is read; call/return payloads are never touched.
+    F-135 exists because the flat ``read_proven_tools`` set cannot answer the only
+    question that separates signal from noise here: *which surface* the session that ran
+    a verb was opened from. On a real host 867 proven ``bash`` calls sit in the log and
+    every one of them came from the owner's own DM or dashboard — a consumer that can
+    only see "bash was proven somewhere" cannot tell that apart from a group sender
+    reaching exec, and would fire on the owner's own machine.
+
+    §8: the bucket key carries the origin KIND and the channel id only. The
+    ``sessionKey``'s peer-id segment (real PII) is never read into it — see
+    ``parse_session_origin``. Per-verb payloads are still never touched.
     """
-    verbs: set[str] = set()
+    by_origin: dict = {}
     meta = {
         "present": False, "files_scanned": 0, "unknown_version": False,
         "files_total": 0, "files_capped": False,
@@ -116,7 +123,7 @@ def read_proven_tools(
     meta["files_total"] = stats.get("files_total", 0)
     meta["files_capped"] = stats.get("files_capped", False)
     if not files:
-        return verbs, meta
+        return by_origin, meta
     meta["present"] = True
 
     for path in files:
@@ -147,11 +154,45 @@ def read_proven_tools(
                     data = rec.get("data")
                     name = data.get("name") if isinstance(data, dict) else None
                     if isinstance(name, str) and name.strip():
-                        verbs.add(name.strip())
+                        origin = parse_session_origin(rec.get("sessionKey"))
+                        by_origin.setdefault(origin, set()).add(name.strip())
         except OSError:
             continue
         meta["files_scanned"] += 1
 
+    return by_origin, meta
+
+
+def read_proven_tools(
+    home: Path,
+    *,
+    max_files: int = _MAX_FILES,
+    max_bytes_per_file: int = _MAX_BYTES_PER_FILE,
+) -> tuple[set[str], dict]:
+    """Return ``(verbs, meta)`` for tool verbs observed in trajectory sidecars under *home*.
+
+    ``verbs`` is the set of raw ``data.name`` values from ``tool.call`` records in files
+    whose ``traceSchema``/``schemaVersion`` match the grounded format. ``meta`` reports
+    ``present`` (any trajectory file found), ``files_scanned``, ``unknown_version``
+    (a trajectory line carried an unrecognised schema version — caller should treat the
+    proven set as incomplete / UNKNOWN rather than authoritative), ``files_total`` (the
+    number of trajectory sidecars found before the per-file cap), and ``files_capped``
+    (True when the per-file cap dropped the oldest sessions — B-245: this proven-tool set
+    is then incomplete too, same as ``unknown_version``).
+
+    Only ``data.name`` is read; call/return payloads are never touched.
+
+    F-135: this is now the origin-agnostic UNION of ``read_proven_tools_by_origin``
+    rather than a second copy of the same scan loop. Deliberately a union, not a
+    re-scan — the flat set every existing caller (B84, T3) reads is unchanged by
+    construction, and there is one place where a parsing/version rule can drift.
+    """
+    by_origin, meta = read_proven_tools_by_origin(
+        home, max_files=max_files, max_bytes_per_file=max_bytes_per_file
+    )
+    verbs: set[str] = set()
+    for names in by_origin.values():
+        verbs |= names
     return verbs, meta
 
 

@@ -1,0 +1,2 @@
+{"traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "prompt.submitted", "ts": "2026-07-20T00:00:01Z", "seq": 1, "sessionId": "sess-dash", "sessionKey": "agent:main:dashboard:synthetic-uuid-1", "data": {"turnId": "t1", "threadId": "t1", "imagesCount": 0}}
+{"traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call", "ts": "2026-07-20T00:00:02Z", "seq": 2, "sessionId": "sess-dash", "sessionKey": "agent:main:dashboard:synthetic-uuid-1", "data": {"name": "bash", "arguments": {}, "toolCallId": "c2", "turnId": "t1", "threadId": "t1"}}

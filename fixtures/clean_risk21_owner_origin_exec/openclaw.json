@@ -1,0 +1,12 @@
+{
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "groups": {
+        "*": {
+          "requireMention": true
+        }
+      }
+    }
+  }
+}
