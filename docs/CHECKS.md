@@ -1823,6 +1823,58 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B185 - Poisoned tool description in what OpenClaw actually sent to the model
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Prompt Injection / Tool Poisoning
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM01 Prompt Injection
+- What it checks: Poisoned tool description in what OpenClaw actually sent to the model
+- Remediation:
+  - none
+
+### B190 - Debug traffic-capture proxy enabled, redirected, or holding captured traffic
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Data at Rest / Egress Interception
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Debug traffic-capture proxy enabled, redirected, or holding captured traffic
+- Remediation:
+  - none
+
+## Hardening checks
+
+### B188 - State database with device keys and auth tokens is readable by other users
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Data at Rest / Credential Exposure
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: State database with device keys and auth tokens is readable by other users
+- Remediation:
+  - none
+
+## Advisory checks
+
+### B189 - Cron job executed and erased its own definition (run log without a job)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Scheduled Task Integrity
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Cron job executed and erased its own definition (run log without a job)
+- Remediation:
+  - none
+
 ## Hardening checks
 
 ### B192 - Break-glass environment toggle left enabled in a global dotenv file
@@ -2203,6 +2255,31 @@ These paths are computed from multiple checks. They fire only when every leg is 
   other high-capability skill's action — route genuinely risky actions
   (exec/network/write) through a human-approval step that reads the actual action, not a
   different skill's summary of it.
+
+### RISK-20 - Remotely reachable hook ingress with an unconstrained session-key policy
+
+- Severity: HIGH
+- Pattern: HIGH (RISK-20, B-288): remotely-reachable hook ingress with an unconstrained
+- Chain: gateway reachable beyond loopback ({exposure}) -> hooks.enabled — inbound /hooks/agent endpoint serving -> detail
+- Why:
+  The gateway is reachable beyond loopback ({exposure}) and the inbound hook endpoint is
+  enabled, while its session/agent policy is unconstrained: {detail}. A caller holding the
+  hook token can therefore write into session keys it was never meant to touch — placing
+  content into another session's history, where the agent reads it as trusted prior
+  context — and/or route its request to any configured agent, including the default one.
+  OpenClaw's own audit rates each of these critical under exactly this remote-exposure
+  condition; ClawSecCheck reports it one notch lower because the endpoint still requires
+  hooks.token, so this is blast-radius amplification for a token holder rather than an
+  unauthenticated takeover. It is not evidence that the endpoint has been reached: every
+  link here is config posture.
+- Fix:
+  Constrain the hook policy rather than the network path, since the point of hooks is to
+  be reachable. Set hooks.allowedSessionKeyPrefixes to a narrow prefix (for example
+  ["hook:"]) so request-supplied keys cannot escape their own namespace — or set
+  hooks.allowRequestSessionKey=false and let hooks.defaultSessionKey decide the session.
+  Set hooks.allowedAgentIds to an explicit allowlist of the agents hooks may drive (or []
+  to deny hook agent routing entirely). If the gateway does not need to be remotely
+  reachable, setting gateway.bind to the loopback profile closes the chain instead.
 
 ### RISK-21 - Group-origin session provably reached a high-blast tool
 
