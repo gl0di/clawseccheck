@@ -24,9 +24,11 @@ from ..catalog import (
 )
 from ..collector import (
     _MAX_BYTES_PER_SKILL,
+    LIMIT_DOMAIN_SKILL,
     Context,
     _read_skill_text,
     dig,
+    limit_hits_for,
     read_skill_python,
     read_skill_shell,
     read_skill_js,
@@ -2887,7 +2889,18 @@ def check_installed_skills(ctx: Context) -> Finding:
     # content beyond the cap was NOT scanned, so the result is UNKNOWN, never a clean PASS.
     # Ranked above the WARN buckets (like the parse-error UNKNOWN): a payload padded past the
     # cap must not read as covered. Crit/high FAIL above still take precedence.
-    if getattr(ctx, "limit_hits", None):
+    #
+    # W-DB2 round-3: scoped to the SKILL domain. This branch used to read the whole
+    # undifferentiated ``ctx.limit_hits`` bucket, so a cap hit in ANY of ~50 unrelated
+    # collectors made this check announce "Skill scanning was truncated ... coverage is
+    # incomplete" — a false statement inside a HIGH scored finding — and destroyed a
+    # genuine PASS. Measured on a benign home with one clean skill and one benign daily
+    # cron job: at 500 cron run-log rows B13 flipped PASS -> UNKNOWN with the skill scan
+    # untouched and complete. ``limit_hits_for`` keeps UNTAGGED entries (Golden Rule #4:
+    # an entry that cannot say which scan it truncated must not be assumed harmless), so
+    # this can only ever narrow to the truth, never invent a clean PASS.
+    skill_limit_hits = limit_hits_for(ctx, LIMIT_DOMAIN_SKILL)
+    if skill_limit_hits:
         # F-087: padding_anomalies is a SEPARATE, narrower channel — only the text-slice
         # path in collector.py writes it, and only when the discarded tail is low-entropy
         # filler (the shape of deliberate cap-evasion padding). An archive-limit or
@@ -2912,7 +2925,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             HIGH,
             UNKNOWN,
             "Skill scanning was truncated / hit limits — coverage is incomplete: "
-            + "; ".join(ctx.limit_hits[:6]),
+            + "; ".join(skill_limit_hits[:6]),
             "Content beyond the size/file cap was not scanned; a payload padded past the "
             "cap can hide there. Review the skill manually or split oversized files.",
         )

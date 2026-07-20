@@ -52,6 +52,7 @@ _agent_config_write_hits
 _agent_is_powerful
 _agent_legs
 _allow_from_is_present
+_ancestors_allow_other_access
 _b135_is_pending_security
 _b135_reasons_are_inconclusive
 _b135_records_adverse_security
@@ -107,6 +108,7 @@ _norm_group_policy
 _open_channels
 _open_wildcard_group_channels
 _other_can_reach_read
+_other_can_reach_write
 _parse_source_target
 _parse_version
 _peragent_sandbox_evidence
@@ -154,6 +156,7 @@ check_control_plane_mutation
 check_controlui_origins
 check_credential_blast_radius
 check_cron_job_content
+check_cron_run_log_orphans
 check_cron_scheduler
 check_cross_file_boundary_payload
 check_cross_file_payload
@@ -161,6 +164,7 @@ check_cross_file_plaintext_payload
 check_cross_skill_combined_effect
 check_dangerous_overrides
 check_data_atrest
+check_debug_proxy_capture
 check_declared_effective_proven
 check_declared_skill_reconciliation
 check_delegation_reassembly
@@ -247,6 +251,7 @@ check_silent_instruction
 check_skill_install_tamper
 check_skill_workshop_autonomy
 check_social_engineering_phishing
+check_state_db_atrest
 check_subagent_spawn_limits
 check_subagents
 check_subagents_allow_agents

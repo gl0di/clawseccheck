@@ -8,6 +8,7 @@ import os
 import re
 from pathlib import Path
 from .. import attest as _attest
+from .. import trajectory as _trajectory  # B-294/B189: session pivot for erased cron jobs
 from ..catalog import (
     BY_ID,
     FAIL,
@@ -848,8 +849,18 @@ def check_cron_job_content(ctx: Context) -> Finding:
     WARN    — a weaker/ambiguous content-ring signal, or a deleteAfterRun+exec job with
               no other signal.
     UNKNOWN — no cron store found (~/.openclaw/cron/jobs.json and the SQLite cron_jobs
-              table are both absent), or the store was found but could not be parsed/read.
-    PASS    — a cron store was read and no job triggers any signal.
+              table are both absent), or the store was found but could not be parsed/read,
+              or (B-294) the store was read and is EMPTY while the cron_run_logs execution
+              trail shows jobs did run — the definitions that ran are gone, so there is
+              nothing left to scan and a PASS would be a lie; or (W-DB2 round-3) the
+              definitions came from a legacy jobs.json that the live SQLite cron_jobs table
+              SHADOWS, so the scanned set is provably not the set that executes. All three
+              suppress only a clean verdict — a FAIL/WARN found in what WAS read still
+              stands, so none of them can hide a payload the scan actually caught.
+    PASS    — a cron store was read and no job triggers any signal. B-294: when the store
+              was read but held zero jobs and there is no execution trail either, the PASS
+              carries pass_confidence="no_signal" rather than "verified" — nothing was
+              actually inspected, so the clean verdict is by absence, not by evidence.
     """
     if not ctx.cron_found:
         return _finding(
@@ -867,6 +878,28 @@ def check_cron_job_content(ctx: Context) -> Finding:
             "A cron job store was found but could not be parsed/read — cannot determine.",
             "Fix the cron store (jobs.json or the state SQLite database) so it is valid "
             "and owner-readable, then re-run the audit.",
+        )
+    # B-294 (DISK-3): the store was read successfully but holds ZERO job definitions, while
+    # the run-log table shows jobs DID execute. Every definition that ran is gone -- which is
+    # the PRODUCT DEFAULT, not necessarily an attack (one-shot `kind:"at"` jobs default to
+    # deleteAfterRun TRUE and are deleted after a successful run) -- so this is emphatically
+    # not a FAIL. But it is equally not a PASS: this check's entire job is to scan job
+    # payloads, and here there were none to scan. Before B-294 the collector could not tell
+    # "empty" from "clean", so this returned PASS/pass_confidence="verified" over an
+    # execution history the audit had never opened. B189 carries the advisory detail and the
+    # session pivot; B168 just stops claiming a verified clean bill of health.
+    if ctx.cron_store_empty and ctx.cron_run_logs:
+        return _finding(
+            "B168",
+            UNKNOWN,
+            f"The cron job store was read and holds no job definitions, but the cron "
+            f"run-log table records {len(ctx.cron_run_logs)} past execution(s) — the jobs "
+            "that ran no longer exist, so their payloads cannot be scanned. This is the "
+            "expected shape for one-shot jobs (deleteAfterRun defaults to true for "
+            "`at`-schedule jobs), not proof of tampering.",
+            "See B189 for the execution trail and the session IDs to pivot into. To review "
+            "what a since-erased job actually did, read the session transcript it ran under "
+            "(`--analyze-trajectory`); the run log does not retain the job's payload.",
         )
 
     fail_ev: list[str] = []
@@ -958,6 +991,44 @@ def check_cron_job_content(ctx: Context) -> Finding:
             "configured.",
             warn_ev,
         )
+    # W-DB2 round-3 (Finding 3): the SHADOWED-STORE gate, and it is deliberately HERE —
+    # after the FAIL and WARN returns above, not before the scan.
+    #
+    # B189 already establishes that on an upgraded install the definitions read from a
+    # leftover ~/.openclaw/cron/jobs.json "are not the ones the runtime actually uses", and
+    # declines to compare against them. B168 — the check that actually SCANS JOB PAYLOADS —
+    # was left ungated, so it answered PASS/pass_confidence="verified" over a definition set
+    # it has been proven not to be reading. Reproduced end-to-end: stale benign jobs.json +
+    # a hostile live row in the SQLite cron_jobs table -> B168 PASS "verified", the exfil
+    # directive never read.
+    #
+    # Grounded in the shipped dist, not inferred: ``loadCronJobsStoreWithConfigJobs``
+    # (store-ScQ9SjOe.js:709-723) derives a store key from the resolved store path, calls
+    # ``loadCronRows`` (store-ScQ9SjOe.js:643) against SQLite, and returns those rows when
+    # ``rows.length > 0``; otherwise it returns an EMPTY store (``jobs: []``). It never
+    # falls back to reading the JSON file for job content. So whenever the table holds rows,
+    # what this check scanned is provably not what executes.
+    #
+    # ORDERING IS THE WHOLE POINT — this must not suppress a payload scan that would
+    # otherwise have run. A FAIL or WARN above is a POSITIVE observation about a file that
+    # really is on disk and really does carry that directive; it stays exactly as it was
+    # (verified by the control: a hostile stale jobs.json under a shadowed store still
+    # FAILs). Only the verdict-by-ABSENCE is unsound here — "no directive found" is a claim
+    # about a set, and the set was the wrong one — so only the PASS degrades to UNKNOWN.
+    # Same asymmetry B189 applies to truncation, for the same reason.
+    if ctx.cron_store_shadowed:
+        return _finding(
+            "B168",
+            UNKNOWN,
+            f"Scanned {len(ctx.cron_jobs)} cron job definition(s) from a legacy "
+            "~/.openclaw/cron/jobs.json and found no embedded directive — but the state "
+            "SQLite cron_jobs table also holds rows, and the shipped runtime reads job "
+            "definitions from that table, not from the JSON file. The jobs that actually "
+            "run were therefore never scanned, so a clean bill of health cannot be given.",
+            "If ~/.openclaw/cron/jobs.json is a leftover from an older OpenClaw that no "
+            "longer reads it, move it aside so the audit scans the live SQLite cron_jobs "
+            "table instead, then re-run the audit.",
+        )
     return _finding(
         "B168",
         PASS,
@@ -965,7 +1036,208 @@ def check_cron_job_content(ctx: Context) -> Finding:
         "install directive found.",
         "Keep cron job payloads free of embedded directives; review new scheduled jobs "
         "before they run unattended.",
-        pass_confidence="verified",
+        # B-294: "verified" means positive evidence of security was found. Scanning zero
+        # jobs is evidence of nothing, so an empty store downgrades to "no_signal" (the
+        # tier catalog.py already defines for "PASS by absence of a bad signal").
+        pass_confidence="no_signal" if ctx.cron_store_empty else "verified",
+    )
+
+
+def check_cron_run_log_orphans(ctx: Context) -> Finding:
+    """B189 (B-294, DISK-3) — cron EXECUTION trail without a surviving job definition.
+
+    B168 above scans the cron job *definitions*. This check reads the other half: the
+    ``cron_run_logs`` table (collector._collect_cron_run_logs), which records what actually
+    RAN. The trail deliberately outlives the definition — one-shot (`kind:"at"`) jobs default
+    to ``deleteAfterRun`` TRUE, the runner deletes the row after a successful run, and
+    ``cron_run_logs`` has no foreign key to ``cron_jobs`` — so a job that was added, executed
+    and self-erased is invisible to B168 but leaves rows here.
+
+    ADVISORY ONLY, AND DELIBERATELY NEVER A FAIL (``scored=False`` in catalog.py). Because
+    self-erasure is the PRODUCT DEFAULT, an orphaned run log is the NORMAL steady state on
+    any box that uses one-shot scheduling: every benign "remind me at 5pm" produces one, and
+    ``replaceCronRows`` (ordinary config sync) plus ``pruneCronRunLogRows`` (history
+    trimming) create orphans transiently from routine operation too. A bare "orphan => FAIL"
+    would false-positive on essentially every real user — a hard Golden Rule #5 blocker. This
+    mirrors how B168 already grades ``deleteAfterRun`` as WARN, not FAIL.
+
+    HONEST SCOPE — this NARROWS DISK-3, it does not close it. The run record carries no copy
+    of the erased job's ``payload.message``: ``entry_json`` is ``JSON.stringify(entry)`` of
+    the RUN record (jobId/status/summary/session/model/timing), so it is NOT content-scanned
+    here and the original directive is NOT recoverable from this table. What this surfaces is
+    THAT something ran and WHERE TO LOOK — the ``session_id``/``session_key``/``run_id``
+    pivot into the session/trajectory record ClawSecCheck already mines
+    (``--analyze-trajectory``). Reconstructing what an erased job instructed the agent to do
+    requires reading that session, which is outside a static store read.
+
+    "ORPHAN" IS DEFINED BY ABSENCE, SO THE DEFINITION SET MUST BE COMPLETE. ``ctx.cron_jobs``
+    is not always the whole set, and both ways it can be partial used to be silent:
+    ``_collect_cron`` caps the job read at ``_MAX_CRON_JOBS`` rows, and its SQLite SELECT has
+    no ORDER BY while the run-log read takes the most RECENT rows — so past the cap the two
+    sides are sampled on different axes and their difference is meaningless; and a leftover
+    legacy ``cron/jobs.json`` (which the shipped dist never unlinks and no longer reads for
+    job content — rows live in SQLite via ``replaceCronRows``) shadows the live table
+    entirely. The collector now flags both (``cron_jobs_truncated`` / ``cron_store_shadowed``
+    plus a ``limit_hits`` entry) instead of letting either pass silently, and the two are
+    handled DIFFERENTLY because they are not the same kind of incompleteness:
+
+      * truncation yields a strict SUBSET of the real definitions, so "every run-logged job
+        was found" cannot be falsified by the unread remainder — the no-orphan PASS stays
+        sound and is still emitted. Only an apparent ORPHAN is unsound, so that becomes
+        UNKNOWN.
+      * a shadowing legacy store yields a DIFFERENT set, not a subset — it can invent
+        orphans AND hide real ones — so no verdict is available in either direction.
+
+    WARN    — run history exists for job_id(s) with no surviving definition (advisory).
+    PASS    — every job_id with run history still has a definition; nothing was erased.
+              Also emitted when the definition read was truncated but still covered every
+              job id that appears in the run log (see the subset argument above).
+    UNKNOWN — no state DB / no cron_run_logs table / table present but empty (pruning can
+              empty it, so "no rows" is not evidence nothing ran); the job definitions could
+              not be read at all; a legacy JSON store shadows the live SQLite table; or the
+              definition read was truncated AND an apparent orphan turned up — each of which
+              makes orphan-ness uncomputable.
+    """
+    if not ctx.cron_run_logs_found:
+        return _finding(
+            "B189",
+            UNKNOWN,
+            "No cron run-log table found (the state SQLite database or its cron_run_logs "
+            "table is absent) — cannot determine whether any scheduled job ran and erased "
+            "itself.",
+            "No action needed if cron is unused. If cron jobs are configured, keep "
+            "~/.openclaw/state/openclaw.sqlite owner-readable so a future audit can inspect "
+            "the execution trail.",
+        )
+    if ctx.cron_run_logs_parse_error:
+        return _finding(
+            "B189",
+            UNKNOWN,
+            "The cron run-log table was found but could not be read — cannot determine.",
+            "Ensure ~/.openclaw/state/openclaw.sqlite is owner-readable and not locked by a "
+            "running agent, then re-run the audit.",
+        )
+    if not ctx.cron_run_logs:
+        return _finding(
+            "B189",
+            UNKNOWN,
+            "The cron run-log table is present but empty — no execution history to examine. "
+            "OpenClaw prunes this table on its own, so an empty table is not evidence that "
+            "nothing ever ran.",
+            "No action needed. Re-run the audit after scheduled jobs have executed if you "
+            "want the execution trail reviewed.",
+        )
+    if not ctx.cron_found or ctx.cron_parse_error:
+        # Run history exists but the DEFINITION set is unknown, so every row would look
+        # "orphaned" for a reason that has nothing to do with erasure. Refuse to guess.
+        return _finding(
+            "B189",
+            UNKNOWN,
+            f"The cron run-log table records {len(ctx.cron_run_logs)} past execution(s), but "
+            "the cron job store could not be read — without the surviving definitions there "
+            "is no way to tell which runs belong to jobs that no longer exist.",
+            "Fix the cron job store (~/.openclaw/cron/jobs.json or the state SQLite "
+            "cron_jobs table) so it is valid and owner-readable, then re-run the audit.",
+        )
+    if ctx.cron_store_shadowed:
+        # A legacy jobs.json shadowing the live SQLite table is not a SUBSET of the truth —
+        # it is a DIFFERENT set. A run-logged job can be missing from the stale file while
+        # alive in the table (a false orphan), and a job can linger in the stale file after
+        # being deleted from the table (which would mask a real erasure). Neither direction
+        # is sound, so no verdict is available, not even PASS.
+        return _finding(
+            "B189",
+            UNKNOWN,
+            f"The cron run-log table records {len(ctx.cron_run_logs)} past execution(s), but "
+            "the job definitions were read from a legacy ~/.openclaw/cron/jobs.json while "
+            "the state SQLite cron_jobs table also holds rows — so the definitions read are "
+            "not the ones the runtime actually uses. Comparing the execution trail against "
+            "the wrong set could both invent erased jobs and hide real ones, so this check "
+            "declines to guess.",
+            "If ~/.openclaw/cron/jobs.json is a leftover from an older OpenClaw that no "
+            "longer reads it, move it aside so the audit reads the live SQLite cron_jobs "
+            "table instead, then re-run the audit.",
+        )
+
+    live = {j.get("id") for j in ctx.cron_jobs if j.get("id")}
+    orphan_runs = [r for r in ctx.cron_run_logs if r.get("job_id") and r.get("job_id") not in live]
+    if not orphan_runs:
+        return _finding(
+            "B189",
+            PASS,
+            f"All {len(ctx.cron_run_logs)} cron run-log entr(ies) belong to jobs that still "
+            "exist — no scheduled job ran and then erased its own definition.",
+            "Keep reviewing new scheduled jobs before they run unattended; a one-shot job "
+            "that deletes itself after running leaves only this run log behind.",
+            pass_confidence="verified",
+        )
+
+    if ctx.cron_jobs_truncated:
+        # Deliberately checked AFTER the no-orphan PASS above, not before it. Truncation
+        # makes the definitions read a strict SUBSET of the real set, and the two directions
+        # are not symmetric: "every run-logged job was found" stays true no matter how many
+        # unread definitions exist (more definitions can only shrink the orphan set), so
+        # that PASS is sound. The reverse is not — an apparent orphan is exactly what a job
+        # sitting past the unordered row cap looks like, and the run log is sampled by
+        # recency while the job read is not, so the newest jobs are the likeliest to be
+        # missing. Claiming self-erasure there would be a false tampering signal.
+        return _finding(
+            "B189",
+            UNKNOWN,
+            f"The cron run-log table records {len(ctx.cron_run_logs)} past execution(s) that "
+            "include job id(s) with no definition in what was read — but the job-definition "
+            "read hit its row cap, so definitions past the cap were never seen. Those job "
+            "id(s) may simply be among the ones not read, so this check declines to report "
+            "them as erased.",
+            "Reduce the number of scheduled jobs so the whole store can be read, or review "
+            "the execution trail directly with `--analyze-trajectory`.",
+        )
+
+    orphan_ids = sorted({r["job_id"] for r in orphan_runs})
+    # The pivot: a run's session_id names the session transcript the erased job executed
+    # under. Cross-reference the trajectory sidecars already on disk so the advisory points
+    # at a session the user can actually still read, rather than a bare opaque id.
+    sessions = sorted({r.get("session_id") for r in orphan_runs if r.get("session_id")})
+    try:
+        on_disk = {
+            p.name[: -len(".trajectory.jsonl")]
+            for p in _trajectory.find_trajectory_files(ctx.home)
+            if p.name.endswith(".trajectory.jsonl")
+        }
+    except (OSError, ValueError):
+        on_disk = set()
+    readable = [s for s in sessions if s in on_disk]
+
+    ev = [
+        f"cron job '{jid}': {sum(1 for r in orphan_runs if r['job_id'] == jid)} run(s) "
+        "recorded, no surviving job definition"
+        for jid in orphan_ids[:10]
+    ]
+    if len(orphan_ids) > 10:
+        ev.append(f"(+{len(orphan_ids) - 10} more erased job id(s))")
+    for s in readable[:10]:
+        ev.append(f"pivot: session transcript '{s}' is still on disk — review it directly")
+    for s in [s for s in sessions if s not in on_disk][:10]:
+        ev.append(f"pivot: session '{s}' referenced by an erased job's run log (no transcript on disk)")
+
+    pivot_note = (
+        f" {len(readable)} of these session(s) still have a transcript on disk."
+        if readable else ""
+    )
+    return _finding(
+        "B189",
+        WARN,
+        f"{len(orphan_runs)} cron run-log entr(ies) across {len(orphan_ids)} job id(s) "
+        "record executions of jobs that no longer exist. This is EXPECTED on any box that "
+        "uses one-shot scheduling — `at`-schedule jobs default to deleteAfterRun and are "
+        "removed after a successful run — so it is advisory context, not evidence of "
+        f"tampering.{pivot_note} The run log does not retain the job's original payload, so "
+        "what the job instructed the agent to do is only recoverable from its session.",
+        "If you did not schedule these, review the sessions they ran under with "
+        "`--analyze-trajectory`. A prompt-injected agent can schedule its own self-erasing "
+        "job (deleteAfterRun is exposed as a cron-tool option), which leaves exactly this "
+        "trace and nothing else.",
+        ev,
     )
 
 

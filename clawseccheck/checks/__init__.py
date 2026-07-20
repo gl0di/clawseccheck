@@ -152,6 +152,7 @@ from ._shared import (_allow_from_is_present, _effective_group_allow_from, _is_w
 from ._egress import (
     _EXT_SKILL_HINTS,
     _USER_CONTENT_HOSTS,
+    _ancestors_allow_other_access,
     _other_can_reach_read,
     _weak_allowlist_entries,
     check_browser_ssrf,
@@ -161,6 +162,9 @@ from ._egress import (
     check_config_audit_log,
     check_config_health_integrity,
     check_data_atrest,
+    check_state_db_atrest,
+    check_debug_proxy_capture,
+    _other_can_reach_write,
     check_discovery_mdns_mode,
     check_egress,
     check_egress_inventory,
@@ -301,6 +305,7 @@ from ._lifecycle import (
     check_clawhub_registry_provenance,
     check_codex_project_trust,
     check_cron_job_content,
+    check_cron_run_log_orphans,
     check_cron_scheduler,
     check_declared_skill_reconciliation,
     check_exec_approvals_grants,
@@ -1135,6 +1140,8 @@ CHECKS = [
     check_autonomy,
     check_subagents,
     check_data_atrest,
+    check_state_db_atrest,  # B188 — state DB device keys/auth tokens readable at rest (B-293)
+    check_debug_proxy_capture,  # B190 — debug-proxy env cluster + captured traffic on disk (B-295)
     check_bootstrap_write_protection,
     check_self_modification,
     check_skill_workshop_autonomy,  # B175 — skills.workshop autonomous authoring + approvalPolicy=auto
@@ -1177,6 +1184,7 @@ CHECKS = [
     check_hook_policy_bypass,
     check_cron_scheduler,
     check_cron_job_content,  # B168 — cron job store payload.message/trigger.script scan (B-231)
+    check_cron_run_log_orphans,  # B189 — cron run log without a surviving job definition (B-294)
     check_exec_approvals_grants,  # B172 — standing exec-approvals.json allow-always grant inventory (B-236)
     # Content-security ring — single source of truth (also consumed by vet_skill).
     # SKILL_CONTENT_RING is defined just above; changing it updates both the full audit

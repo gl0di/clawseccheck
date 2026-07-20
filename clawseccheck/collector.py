@@ -125,6 +125,12 @@ _MAX_CONFIG_BYTES = 5_000_000
 _MAX_CRON_BYTES = _MAX_CONFIG_BYTES
 _MAX_CRON_JOBS = 200
 
+# B-294: the cron RUN-LOG table (cron_run_logs) is append-per-run and pruned only by
+# OpenClaw's own pruneCronRunLogRows, so a long-lived box can hold many thousands of rows.
+# Bounded the same way as the job store above -- the consuming check only needs enough rows
+# to establish WHICH job_ids have an execution trail, not the full history.
+_MAX_CRON_RUN_LOGS = 500
+
 # B-236 (B172): the standing exec-approvals store (~/.openclaw/exec-approvals.json) is
 # read-only and size/entry-capped the same way as the cron store above.
 _MAX_EXEC_APPROVALS_BYTES = _MAX_CONFIG_BYTES
@@ -150,6 +156,117 @@ def _cap_name(name: str) -> str:
     if len(name) <= _UNTRUSTED_NAME_CAP:
         return name
     return name[:_UNTRUSTED_NAME_CAP] + "...(truncated)"
+
+
+# ---------------------------------------------------------------------------------------
+# W-DB2 round-3: DOMAIN-SCOPED limit hits.
+#
+# ``ctx.limit_hits`` was one undifferentiated bucket that ~50 unrelated collectors wrote
+# into, while consumers asked it a question it could not answer: "was MY scan truncated?"
+# B13 (installed-skill safety, HIGH + scored) treated ANY non-empty bucket as proof that
+# the SKILL scan was incomplete, so a cap hit in a completely unrelated collector turned a
+# genuine skill-scan PASS into a HIGH UNKNOWN whose detail text was simply false. Measured
+# on a benign home (one clean skill, one benign daily cron job): 499 run-log rows -> B13
+# PASS; 500 rows -> B13 UNKNOWN "Skill scanning was truncated ... coverage is incomplete",
+# with the skill scan having completed in full both times.
+#
+# The fix is to tag each entry with the SCAN it truncated, so a consumer can filter to its
+# own domain. ``LimitHit`` is a ``str`` subclass, so every existing consumer that treats
+# the bucket as ``list[str]`` (substring tests, ``"; ".join(...)``, JSON/SARIF dumps,
+# monitor's regex parse) keeps working byte-for-byte with no change.
+LIMIT_DOMAIN_SKILL = "skill"          # installed-skill discovery/content scan  (B13)
+LIMIT_DOMAIN_CRON = "cron"            # cron job store + execution trail        (B168/B189)
+LIMIT_DOMAIN_PLUGIN = "plugin"        # installed-plugin trust index
+LIMIT_DOMAIN_APPROVALS = "approvals"  # exec-approvals store
+LIMIT_DOMAIN_ENV = "env"              # dotenv / systemd EnvironmentFile
+LIMIT_DOMAIN_CONFIG = "config"        # openclaw.json itself
+LIMIT_DOMAIN_BOOTSTRAP = "bootstrap"  # AGENTS.md / SOUL.md & friends
+
+LIMIT_DOMAINS = (
+    LIMIT_DOMAIN_SKILL,
+    LIMIT_DOMAIN_CRON,
+    LIMIT_DOMAIN_PLUGIN,
+    LIMIT_DOMAIN_APPROVALS,
+    LIMIT_DOMAIN_ENV,
+    LIMIT_DOMAIN_CONFIG,
+    LIMIT_DOMAIN_BOOTSTRAP,
+)
+
+
+class LimitHit(str):
+    """A ``limit_hits`` entry that also remembers WHICH scan it truncated.
+
+    Deliberately a ``str`` subclass, not a dataclass: the bucket has many consumers
+    (report/SARIF/dossier/monitor and several tests) that treat it as ``list[str]``, and
+    all of them must keep working unchanged. ``.domain`` is purely additive — a consumer
+    that does not care never sees it, and one that does reads it via ``limit_hits_for``.
+
+    (No ``__slots__``: CPython forbids a non-empty ``__slots__`` on a ``str`` subclass.)
+    """
+
+    domain: str
+
+    def __new__(cls, message: str, domain: str) -> "LimitHit":
+        obj = super().__new__(cls, message)
+        obj.domain = domain
+        return obj
+
+
+def note_limit(sink, domain: str, message: str) -> None:
+    """Append a DOMAIN-TAGGED limit-hit to *sink* (a ``ctx.limit_hits``-shaped list).
+
+    Every ``limit_hits`` writer in the package goes through here; ``tests/
+    test_limit_hit_domains.py`` fails the build if a bare ``limit_hits.append(...)``
+    reappears, so an untagged writer cannot silently re-contaminate a consumer.
+    """
+    sink.append(LimitHit(message, domain))
+
+
+def limit_hits_for(ctx, *domains: str) -> list[str]:
+    """The limit hits that truncated one of *domains* — i.e. "was MY scan truncated?".
+
+    UNTAGGED entries are INCLUDED, deliberately. A plain ``str`` in the bucket carries no
+    evidence about which scan it belongs to, and Golden Rule #4 says an unknown must not be
+    resolved into a convenient answer: dropping it would turn "we cannot tell whether your
+    scan was complete" into a clean PASS. Including it is the conservative direction (at
+    worst an over-broad UNKNOWN, never a fake PASS), and it keeps hand-built test contexts
+    that assign a plain ``list[str]`` behaving exactly as they did before.
+    """
+    wanted = set(domains)
+    return [
+        h for h in (getattr(ctx, "limit_hits", None) or [])
+        if getattr(h, "domain", None) is None or getattr(h, "domain") in wanted
+    ]
+
+
+class _ScopedLimitSink:
+    """A ``limit_hits``-shaped view that stamps a fixed domain on everything appended.
+
+    ``skilldiscovery`` is a LEAF (it imports nothing from the package, by §3's dependency
+    flow) so it cannot call ``note_limit`` itself. Rather than push the tag into the leaf
+    or leave its one writer untagged, the collector hands it a pre-scoped sink. Only the
+    operations that module and ``_config_workspace_dirs`` actually use are implemented —
+    ``append`` and the ``in``/iterate/len trio — so a wrong assumption fails loudly instead
+    of silently writing an untagged entry.
+    """
+
+    __slots__ = ("_backing", "_domain")
+
+    def __init__(self, backing: list, domain: str) -> None:
+        self._backing = backing
+        self._domain = domain
+
+    def append(self, message: str) -> None:
+        note_limit(self._backing, self._domain, message)
+
+    def __contains__(self, message: object) -> bool:
+        return message in self._backing
+
+    def __iter__(self):
+        return iter(self._backing)
+
+    def __len__(self) -> int:
+        return len(self._backing)
 
 # F-087: padding-anomaly evasion signal. When a file is sliced by the text-scan cap,
 # the discarded tail is sampled (bounded — never re-reads gigabytes) and measured for
@@ -235,6 +352,51 @@ class Context:
     cron_jobs: list = field(default_factory=list)
     cron_found: bool = False        # a cron store (JSON or SQLite) was found and read
     cron_parse_error: bool = False  # a cron store was found but could not be parsed/read
+    # B-294 (DISK-3): a cron store was found and read successfully but yielded ZERO job
+    # definitions. Distinct from `not cron_found` (no store at all) and from a populated
+    # store. Before this flag existed, an EMPTY cron_jobs table was indistinguishable from
+    # a CLEAN one, so B168 emitted PASS with pass_confidence="verified" over a store it had
+    # never actually seen a single row of.
+    cron_store_empty: bool = False
+    # B-294 follow-up: the job-definition set that was read is INCOMPLETE, so "this job id
+    # has no definition" cannot be concluded from it. Two distinct causes, both silent
+    # before these flags existed:
+    #   cron_jobs_truncated  — the read hit the _MAX_CRON_JOBS row cap, so definitions past
+    #                          the cap were never seen. The SQLite branch has no ORDER BY,
+    #                          so which jobs get dropped is storage order, not recency,
+    #                          while the run-log read takes the MOST RECENT rows — the two
+    #                          sets are sampled on different axes and cannot be differenced.
+    #   cron_store_shadowed  — a legacy ~/.openclaw/cron/jobs.json exists and was used as
+    #                          the definition source, but the SQLite cron_jobs table also
+    #                          holds rows. In the shipped dist that file is only a store-key
+    #                          identity (loadCronJobsStoreWithConfigJobs ->
+    #                          cronStoreKey(path.resolve(storePath)), store-ScQ9SjOe.js:710)
+    #                          and the rows themselves live in SQLite (replaceCronRows,
+    #                          store-ScQ9SjOe.js:647). Nothing in the dist ever unlinks
+    #                          jobs.json, so an upgraded install keeps a stale one forever
+    #                          and reading it yields definitions the runtime does not use.
+    #                          Counted PER PARTITION (store_key), matching the runtime's own
+    #                          WHERE store_key = ? (store-ScQ9SjOe.js:643-645): rows filed
+    #                          under a DIFFERENT cron.store are not a shadow of this file.
+    cron_jobs_truncated: bool = False
+    cron_store_shadowed: bool = False
+    # B-294: the cron EXECUTION trail (cron_run_logs in ~/.openclaw/state/openclaw.sqlite),
+    # which deliberately OUTLIVES the job definition — one-shot (`kind:"at"`) jobs default
+    # to deleteAfterRun TRUE, cron_run_logs has no foreign key to cron_jobs, and the only
+    # cron_jobs delete in the dist (replaceCronRows) never touches cron_run_logs. Each entry
+    # is a plain dict: job_id, status, session_id, session_key, run_id, run_at_ms, ts.
+    # NOTE: the run record carries no copy of the job's original payload.message, so this is
+    # a PIVOT (what ran, when, under which session) — never the erased job's content.
+    cron_run_logs: list = field(default_factory=list)
+    cron_run_logs_found: bool = False        # the cron_run_logs table was present and read
+    cron_run_logs_parse_error: bool = False  # table present but could not be read
+    # B-295 (DISK-4): debug-proxy traffic-capture METADATA from the same state DB. Row
+    # COUNTS only -- capture_events.headers_json holds bearer tokens and .data_text holds
+    # request bodies, so no captured content is ever read (§8). See _collect_capture_state.
+    capture_tables_found: bool = False       # capture_events table present and counted
+    capture_parse_error: bool = False        # present but could not be read
+    capture_event_rows: int = 0              # captured request/response flows on disk
+    capture_blob_rows: int = 0               # captured bodies on disk
     # B-236 (B172): standing exec-approvals.json grants, one dict per agent present in
     # the store's `agents` map: {agent_id, security, ask, allow_always_count}. Populated
     # regardless of whether allow_always_count is 0 -- the consuming check filters.
@@ -481,7 +643,10 @@ def decompress_and_classify(
         classification, format_name = classify_bytes(file_bytes, len(file_bytes))
     except Exception as e:
         if ctx is not None:
-            ctx.limit_hits.append(f"Classification failed for {file_relpath}: {e}")
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                f"Classification failed for {file_relpath}: {e}",
+            )
             ctx.file_manifest[file_relpath] = "binary-strings"
         return [(file_relpath, file_bytes, "BINARY", None)]
 
@@ -490,7 +655,10 @@ def decompress_and_classify(
         
     if depth > 3:
         if ctx is not None:
-            ctx.limit_hits.append(f"Depth limit hit (>3) at {file_relpath}")
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                f"Depth limit hit (>3) at {file_relpath}",
+            )
             ctx.file_manifest[file_relpath] = "capped(depth)"
         return [(file_relpath, file_bytes, classification, format_name)]
         
@@ -507,7 +675,10 @@ def decompress_and_classify(
                 namelist = zf.namelist()
                 if len(namelist) + archive_stats["total_files_count"] > _ARCHIVE_FILE_LIMIT:
                     if ctx is not None:
-                        ctx.limit_hits.append(f"Max files limit hit (>500) in {file_relpath}")
+                        note_limit(
+                            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                            f"Max files limit hit (>500) in {file_relpath}",
+                        )
                         ctx.file_manifest[file_relpath] = "capped(files)"
                     return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -532,8 +703,9 @@ def decompress_and_classify(
 
                         if member_info.file_size > _ARCHIVE_MAX_FILE_BYTES:
                             if ctx is not None:
-                                ctx.limit_hits.append(
-                                    f"Max file decompressed size hit (>200,000) for {member_disp} in {file_relpath}"
+                                note_limit(
+                                    ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                                    f"Max file decompressed size hit (>200,000) for {member_disp} in {file_relpath}",
                                 )
                                 ctx.file_manifest[f"{file_relpath}::{member_disp}"] = "capped(size)"
                             continue
@@ -545,7 +717,10 @@ def decompress_and_classify(
 
                     if truncated:
                         if ctx is not None:
-                            ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member_disp} in {file_relpath}")
+                            note_limit(
+                                ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                                f"Max file decompressed size hit (>200,000) for {member_disp} in {file_relpath}",
+                            )
                             ctx.file_manifest[f"{file_relpath}::{member_disp}"] = "capped(size)"
                         continue
 
@@ -554,7 +729,10 @@ def decompress_and_classify(
 
                     if archive_stats["cumulative_decompressed_size"] > _ARCHIVE_MAX_TOTAL_BYTES:
                         if ctx is not None:
-                            ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
+                            note_limit(
+                                ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                                f"Max cumulative size hit (>20MB) in {file_relpath}",
+                            )
                             ctx.file_manifest[file_relpath] = "capped(size)"
                         return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -562,7 +740,10 @@ def decompress_and_classify(
                         ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
                         if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
                             if ctx is not None:
-                                ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                                note_limit(
+                                    ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                                    f"Max expansion ratio hit (>100x) in {file_relpath}",
+                                )
                                 ctx.file_manifest[file_relpath] = "capped(ratio)"
                             return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -574,7 +755,10 @@ def decompress_and_classify(
                     ctx.file_manifest[file_relpath] = "decoded"
         except Exception as e:
             if ctx is not None:
-                ctx.limit_hits.append(f"ZIP decompression failed in {file_relpath}: {e}")
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                    f"ZIP decompression failed in {file_relpath}: {e}",
+                )
                 ctx.file_manifest[file_relpath] = "binary-strings"
             return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -585,7 +769,10 @@ def decompress_and_classify(
                 members = tf.getmembers()
                 if len(members) + archive_stats["total_files_count"] > _ARCHIVE_FILE_LIMIT:
                     if ctx is not None:
-                        ctx.limit_hits.append(f"Max files limit hit (>500) in {file_relpath}")
+                        note_limit(
+                            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                            f"Max files limit hit (>500) in {file_relpath}",
+                        )
                         ctx.file_manifest[file_relpath] = "capped(files)"
                     return [(file_relpath, file_bytes, classification, format_name)]
                     
@@ -615,7 +802,10 @@ def decompress_and_classify(
                     try:
                         if member.size > _ARCHIVE_MAX_FILE_BYTES:
                             if ctx is not None:
-                                ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member_disp} in {file_relpath}")
+                                note_limit(
+                                    ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                                    f"Max file decompressed size hit (>200,000) for {member_disp} in {file_relpath}",
+                                )
                                 ctx.file_manifest[f"{file_relpath}::{member_disp}"] = "capped(size)"
                             continue
 
@@ -628,7 +818,10 @@ def decompress_and_classify(
 
                     if len(member_bytes) > _ARCHIVE_MAX_FILE_BYTES:
                         if ctx is not None:
-                            ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) for {member_disp} in {file_relpath}")
+                            note_limit(
+                                ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                                f"Max file decompressed size hit (>200,000) for {member_disp} in {file_relpath}",
+                            )
                             ctx.file_manifest[f"{file_relpath}::{member_disp}"] = "capped(size)"
                         continue
                         
@@ -637,7 +830,10 @@ def decompress_and_classify(
                     
                     if archive_stats["cumulative_decompressed_size"] > _ARCHIVE_MAX_TOTAL_BYTES:
                         if ctx is not None:
-                            ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
+                            note_limit(
+                                ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                                f"Max cumulative size hit (>20MB) in {file_relpath}",
+                            )
                             ctx.file_manifest[file_relpath] = "capped(size)"
                         return [(file_relpath, file_bytes, classification, format_name)]
                         
@@ -645,7 +841,10 @@ def decompress_and_classify(
                         ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
                         if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
                             if ctx is not None:
-                                ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                                note_limit(
+                                    ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                                    f"Max expansion ratio hit (>100x) in {file_relpath}",
+                                )
                                 ctx.file_manifest[file_relpath] = "capped(ratio)"
                             return [(file_relpath, file_bytes, classification, format_name)]
                             
@@ -656,7 +855,10 @@ def decompress_and_classify(
                     ctx.file_manifest[file_relpath] = "decoded"
         except Exception as e:
             if ctx is not None:
-                ctx.limit_hits.append(f"tar decompression failed in {file_relpath}: {e}")
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                    f"tar decompression failed in {file_relpath}: {e}",
+                )
                 ctx.file_manifest[file_relpath] = "binary-strings"
             return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -668,7 +870,10 @@ def decompress_and_classify(
 
             if truncated or len(member_bytes) > _ARCHIVE_MAX_FILE_BYTES:
                 if ctx is not None:
-                    ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) in {file_relpath}")
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                        f"Max file decompressed size hit (>200,000) in {file_relpath}",
+                    )
                     ctx.file_manifest[file_relpath] = "capped(size)"
                 return [(file_relpath, file_bytes, classification, format_name)]
                 
@@ -677,7 +882,10 @@ def decompress_and_classify(
             
             if archive_stats["cumulative_decompressed_size"] > _ARCHIVE_MAX_TOTAL_BYTES:
                 if ctx is not None:
-                    ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                        f"Max cumulative size hit (>20MB) in {file_relpath}",
+                    )
                     ctx.file_manifest[file_relpath] = "capped(size)"
                 return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -685,7 +893,10 @@ def decompress_and_classify(
                 ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
                 if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
                     if ctx is not None:
-                        ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                        note_limit(
+                            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                            f"Max expansion ratio hit (>100x) in {file_relpath}",
+                        )
                         ctx.file_manifest[file_relpath] = "capped(ratio)"
                     return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -696,7 +907,10 @@ def decompress_and_classify(
                 ctx.file_manifest[file_relpath] = "decoded"
         except Exception as e:
             if ctx is not None:
-                ctx.limit_hits.append(f"gzip decompression failed in {file_relpath}: {e}")
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                    f"gzip decompression failed in {file_relpath}: {e}",
+                )
                 ctx.file_manifest[file_relpath] = "binary-strings"
             return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -708,7 +922,10 @@ def decompress_and_classify(
 
             if truncated or len(member_bytes) > _ARCHIVE_MAX_FILE_BYTES:
                 if ctx is not None:
-                    ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) in {file_relpath}")
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                        f"Max file decompressed size hit (>200,000) in {file_relpath}",
+                    )
                     ctx.file_manifest[file_relpath] = "capped(size)"
                 return [(file_relpath, file_bytes, classification, format_name)]
                 
@@ -717,7 +934,10 @@ def decompress_and_classify(
             
             if archive_stats["cumulative_decompressed_size"] > _ARCHIVE_MAX_TOTAL_BYTES:
                 if ctx is not None:
-                    ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                        f"Max cumulative size hit (>20MB) in {file_relpath}",
+                    )
                     ctx.file_manifest[file_relpath] = "capped(size)"
                 return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -725,7 +945,10 @@ def decompress_and_classify(
                 ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
                 if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
                     if ctx is not None:
-                        ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                        note_limit(
+                            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                            f"Max expansion ratio hit (>100x) in {file_relpath}",
+                        )
                         ctx.file_manifest[file_relpath] = "capped(ratio)"
                     return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -736,7 +959,10 @@ def decompress_and_classify(
                 ctx.file_manifest[file_relpath] = "decoded"
         except Exception as e:
             if ctx is not None:
-                ctx.limit_hits.append(f"bz2 decompression failed in {file_relpath}: {e}")
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                    f"bz2 decompression failed in {file_relpath}: {e}",
+                )
                 ctx.file_manifest[file_relpath] = "binary-strings"
             return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -748,7 +974,10 @@ def decompress_and_classify(
 
             if truncated or len(member_bytes) > _ARCHIVE_MAX_FILE_BYTES:
                 if ctx is not None:
-                    ctx.limit_hits.append(f"Max file decompressed size hit (>200,000) in {file_relpath}")
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                        f"Max file decompressed size hit (>200,000) in {file_relpath}",
+                    )
                     ctx.file_manifest[file_relpath] = "capped(size)"
                 return [(file_relpath, file_bytes, classification, format_name)]
                 
@@ -757,7 +986,10 @@ def decompress_and_classify(
             
             if archive_stats["cumulative_decompressed_size"] > _ARCHIVE_MAX_TOTAL_BYTES:
                 if ctx is not None:
-                    ctx.limit_hits.append(f"Max cumulative size hit (>20MB) in {file_relpath}")
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                        f"Max cumulative size hit (>20MB) in {file_relpath}",
+                    )
                     ctx.file_manifest[file_relpath] = "capped(size)"
                 return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -765,7 +997,10 @@ def decompress_and_classify(
                 ratio = archive_stats["cumulative_decompressed_size"] / compressed_size
                 if ratio > _ARCHIVE_MAX_EXPANSION_RATIO:
                     if ctx is not None:
-                        ctx.limit_hits.append(f"Max expansion ratio hit (>100x) in {file_relpath}")
+                        note_limit(
+                            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                            f"Max expansion ratio hit (>100x) in {file_relpath}",
+                        )
                         ctx.file_manifest[file_relpath] = "capped(ratio)"
                     return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -776,7 +1011,10 @@ def decompress_and_classify(
                 ctx.file_manifest[file_relpath] = "decoded"
         except Exception as e:
             if ctx is not None:
-                ctx.limit_hits.append(f"xz decompression failed in {file_relpath}: {e}")
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                    f"xz decompression failed in {file_relpath}: {e}",
+                )
                 ctx.file_manifest[file_relpath] = "binary-strings"
             return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -850,13 +1088,19 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
         if is_archive:
             if st_size > 10 * 1024 * 1024:
                 if ctx is not None:
-                    ctx.limit_hits.append(f"Compressed size of archive {f.name} exceeds 10MB")
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                        f"Compressed size of archive {f.name} exceeds 10MB",
+                    )
                     ctx.file_manifest[relpath] = "capped(size)"
                 continue
         else:
             if st_size > _MAX_FILE_BYTES:
                 if ctx is not None:
-                    ctx.limit_hits.append(f"File {f.name} size exceeds {_MAX_FILE_BYTES} bytes")
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                        f"File {f.name} size exceeds {_MAX_FILE_BYTES} bytes",
+                    )
                     ctx.file_manifest[relpath] = "capped(size)"
                 continue
 
@@ -991,10 +1235,12 @@ def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
     # B-074: silent truncation reads as "fully covered" and lets a payload padded past the
     # cap escape. Record the cap hit so check_installed_skills surfaces UNKNOWN, not PASS.
     if truncated and ctx is not None:
-        ctx.limit_hits.append(
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
             f"text scan of skill '{skill_dir.name}' hit the "
             f"{_MAX_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap — "
-            "content beyond the cap was NOT scanned")
+            "content beyond the cap was NOT scanned",
+        )
 
     return "\n".join(parts)
 
@@ -1122,9 +1368,10 @@ def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str
             raise ValueError("cells is not a list")
     except (ValueError, KeyError, TypeError):
         if ctx is not None:
-            ctx.limit_hits.append(
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_SKILL,
                 f"notebook in skill '{skill_name}' could not be parsed — its code cells "
-                "were NOT analyzed (AST_UNANALYZABLE)"
+                "were NOT analyzed (AST_UNANALYZABLE)",
             )
         return None
     parts: list[str] = []
@@ -1175,10 +1422,12 @@ def read_skill_python(skill_dir: Path, ctx: Context | None = None) -> list[tuple
     # B-074: record when Python collection was capped so the AST/taint layer's blind spot
     # (unscanned .py beyond the cap) surfaces as UNKNOWN rather than a clean PASS.
     if truncated and ctx is not None:
-        ctx.limit_hits.append(
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
             f"Python scan of skill '{skill_dir.name}' hit the "
             f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap — "
-            ".py content beyond the cap was NOT analyzed")
+            ".py content beyond the cap was NOT analyzed",
+        )
 
     return out
 
@@ -1208,10 +1457,12 @@ def read_skill_shell(skill_dir: Path, ctx: Context | None = None) -> list[tuple[
     # B-074: record when shell collection was capped so a padded shell payload beyond the
     # cap surfaces as UNKNOWN rather than a clean PASS (mirrors read_skill_python).
     if truncated and ctx is not None:
-        ctx.limit_hits.append(
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
             f"shell scan of skill '{skill_dir.name}' hit the "
             f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap — "
-            "shell content beyond the cap was NOT scanned")
+            "shell content beyond the cap was NOT scanned",
+        )
 
     return out
 
@@ -1241,10 +1492,12 @@ def read_skill_js(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str
     # B-074: record when JS collection was capped so a padded JS payload beyond the cap
     # surfaces as UNKNOWN rather than a clean PASS (mirrors read_skill_python/read_skill_shell).
     if truncated and ctx is not None:
-        ctx.limit_hits.append(
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
             f"js scan of skill '{skill_dir.name}' hit the "
             f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap — "
-            "js content beyond the cap was NOT scanned")
+            "js content beyond the cap was NOT scanned",
+        )
 
     return out
 
@@ -1315,7 +1568,10 @@ def _config_workspace_dirs(
                     "the scoped audit"
                 )
                 if msg not in limit_hits:
-                    limit_hits.append(msg)
+                    note_limit(
+                        limit_hits, LIMIT_DOMAIN_SKILL,
+                        msg,
+                    )
         out.append(resolved)
     return out
 
@@ -1402,7 +1658,11 @@ def _iter_skill_dirs_guarded(base: Path, allow_symlink: bool, ctx: Context):
     UNKNOWN rather than a clean PASS over a scan that never finished.
     """
     it = _iter_discovered_skill_dirs(
-        base, allow_symlink_entries=allow_symlink, limit_hits=ctx.limit_hits
+        base,
+        allow_symlink_entries=allow_symlink,
+        # skilldiscovery is a leaf and cannot import note_limit; hand it a pre-scoped sink
+        # so its _MAX_DIRS cap hit lands tagged like every other skill-coverage limit.
+        limit_hits=_ScopedLimitSink(ctx.limit_hits, LIMIT_DOMAIN_SKILL),
     )
     while True:
         try:
@@ -1410,9 +1670,10 @@ def _iter_skill_dirs_guarded(base: Path, allow_symlink: bool, ctx: Context):
         except StopIteration:
             return
         except OSError as exc:
-            ctx.limit_hits.append(
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_SKILL,
                 f"skill discovery under '{base}' stopped early ({exc.__class__.__name__}) "
-                "— skills beyond that point were NOT scanned"
+                "— skills beyond that point were NOT scanned",
             )
             return
         yield item
@@ -1534,10 +1795,11 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     # UNKNOWN instead of reporting a clean PASS over a scan that never reached the skills
     # beyond the cap — the existing B-074 discipline, which this cap alone was bypassing.
     if ctx.skills_capped_count:
-        ctx.limit_hits.append(
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
             f"installed-skill collection hit the {_MAX_SKILLS}-skill cap — "
             f"{ctx.skills_capped_count} further skill director"
-            f"{'y was' if ctx.skills_capped_count == 1 else 'ies were'} NOT read"
+            f"{'y was' if ctx.skills_capped_count == 1 else 'ies were'} NOT read",
         )
 
 
@@ -1610,7 +1872,14 @@ def _collect_cron(home: Path, ctx: Context) -> None:
 
     Both branches resolve candidate files through ``safeio.walk_dir_safely`` — symlinks
     and path-escapes are skipped, matching every other collector read.
+
+    B-294: a store that is present but holds ZERO jobs now sets ``ctx.cron_store_empty``.
+    That case used to be indistinguishable from a clean populated store, so B168 answered
+    PASS/``pass_confidence="verified"`` having scanned nothing. The execution trail is read
+    separately by ``_collect_cron_run_logs`` (called first, so it runs for the legacy-JSON
+    branch too — the run logs live in SQLite regardless of which store holds the jobs).
     """
+    _collect_cron_run_logs(home, ctx)
     cron_dir = home / "cron"
     json_candidates = walk_dir_safely(cron_dir, max_files=50) if cron_dir.is_dir() else []
     jobs_json = next((p for p in json_candidates if p.name == "jobs.json"), None)
@@ -1619,10 +1888,11 @@ def _collect_cron(home: Path, ctx: Context) -> None:
             with open(jobs_json, "rb") as fp:
                 raw, truncated = _read_with_limit(fp, _MAX_CRON_BYTES)
             if truncated:
-                ctx.limit_hits.append(
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_CRON,
                     f"cron store '{jobs_json}' exceeded the "
                     f"{_MAX_CRON_BYTES // 1_000_000}MB cap — content beyond the cap "
-                    "was NOT scanned"
+                    "was NOT scanned",
                 )
             store = json.loads(raw.decode("utf-8", errors="replace"))
             jobs = store.get("jobs") if isinstance(store, dict) else None
@@ -1644,10 +1914,15 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                     "payload_message": payload.get("message"),
                 })
             if len(jobs) > _MAX_CRON_JOBS:
-                ctx.limit_hits.append(
+                ctx.cron_jobs_truncated = True
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_CRON,
                     f"cron store '{jobs_json}' has {len(jobs)} jobs — only the first "
-                    f"{_MAX_CRON_JOBS} were scanned"
+                    f"{_MAX_CRON_JOBS} were scanned",
                 )
+            ctx.cron_store_empty = not ctx.cron_jobs  # B-294: read, but nothing to scan
+            _flag_shadowed_cron_store(home, ctx, jobs_json)
+            _flag_cron_store_config_mismatch(ctx, jobs_json)
         except (OSError, ValueError) as exc:
             ctx.errors.append(f"could not parse {jobs_json}: {exc}")
             ctx.cron_found = True
@@ -1667,12 +1942,34 @@ def _collect_cron(home: Path, ctx: Context) -> None:
             cur = conn.execute(
                 "SELECT job_id, name, enabled, delete_after_run, trigger_script, "
                 "payload_kind, payload_message FROM cron_jobs LIMIT ?",
-                (_MAX_CRON_JOBS,),
+                # W-DB2 round-3 off-by-one fix: ask for ONE MORE row than the cap and use
+                # its presence as the truncation probe. `LIMIT n` + `len(rows) >= n` cannot
+                # tell a store holding exactly n jobs (a COMPLETE read, nothing dropped)
+                # from one holding n+1, so exactly 200 jobs was reported truncated: the
+                # unread-remainder guard below then suppressed a genuine B189 orphan WARN
+                # and manufactured a limit_hits entry claiming rows were "NOT read" when
+                # every row had been read. The probe row is discarded (`rows[:cap]`), so
+                # the scanned set is still capped at _MAX_CRON_JOBS.
+                (_MAX_CRON_JOBS + 1,),
             )
             rows = cur.fetchall()
         finally:
             conn.close()
         ctx.cron_found = True
+        if len(rows) > _MAX_CRON_JOBS:
+            rows = rows[:_MAX_CRON_JOBS]
+            # Asymmetric-cap guard. This SELECT has no ORDER BY, so the rows that survive the
+            # cap are whichever ones SQLite returns first (storage order), while
+            # _collect_cron_run_logs takes the MOST RECENT runs. Differencing two sets
+            # sampled on different axes invents "orphans". Mirrors the run-log reader's own
+            # probe below, and the JSON branch's limit_hits, which this branch
+            # previously lacked entirely — making the truncation invisible.
+            ctx.cron_jobs_truncated = True
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_CRON,
+                f"cron_jobs table in '{db_path}' returned the {_MAX_CRON_JOBS}-row cap "
+                "— further job definitions were NOT read",
+            )
         for job_id, name, enabled, delete_after_run, trigger_script, payload_kind, payload_message in rows:
             ctx.cron_jobs.append({
                 "id": job_id,
@@ -1683,6 +1980,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                 "payload_kind": payload_kind,
                 "payload_message": payload_message,
             })
+        ctx.cron_store_empty = not ctx.cron_jobs  # B-294: read, but nothing to scan
     except sqlite3.Error as exc:
         # A state DB that exists but has no cron_jobs table yet (a fresh install where
         # cron was never touched) is not a corrupt store -- treat like "not found" so the
@@ -1691,6 +1989,282 @@ def _collect_cron(home: Path, ctx: Context) -> None:
             ctx.errors.append(f"could not read cron_jobs from {db_path}: {exc}")
             ctx.cron_found = True
             ctx.cron_parse_error = True
+
+
+def _cron_store_key_candidates(jobs_json: Path) -> list:
+    """Return the ``cron_jobs.store_key`` spellings that denote the audited store file.
+
+    The runtime's partition key is ``cronStoreKey(storePath) { return path.resolve(storePath); }``
+    (key-BBZ40bDq.js:5-7) — an identity resolve, so the key is just the absolute store path.
+
+    Two spellings are returned because Node's ``path.resolve`` is **purely lexical**
+    (normalize + absolutize, no filesystem access) while Python's ``Path.resolve`` also
+    follows symlinks. They diverge whenever the OpenClaw home is reached through a
+    symlinked parent — a dotfiles checkout or a mounted volume. Binding only the
+    symlink-resolved spelling would therefore miss the runtime's actual key on exactly
+    those installs and silently stop detecting shadowing, so both are matched.
+    ``os.path.abspath`` is the faithful Node analogue; ``Path.resolve`` is the fallback
+    for the reverse case (the key was written from an already-resolved path).
+    """
+    spellings = [os.path.abspath(str(jobs_json))]
+    try:
+        resolved = str(jobs_json.resolve())
+    except OSError:  # unresolvable path -- the lexical spelling still stands
+        resolved = ""
+    if resolved and resolved not in spellings:
+        spellings.append(resolved)
+    return spellings
+
+
+def _flag_cron_store_config_mismatch(ctx: Context, jobs_json: Path) -> None:
+    """Set ``ctx.cron_store_shadowed`` when ``cron.store`` points somewhere this collector
+    never reads.
+
+    W-DB2 round-4 scoped ``_flag_shadowed_cron_store``'s SQLite count to the DEFAULT
+    ``<home>/cron/jobs.json`` path's own ``store_key`` candidates, to stop unrelated rows
+    filed under a genuinely different store from manufacturing a false shadow. That fix
+    exposed a worse gap: ``_collect_cron`` ALWAYS reads the default ``jobs.json`` when one
+    exists and never once looks at ``cron.store`` (``string().optional()``,
+    zod-schema-O9ml_nmo.js:1221; description schema-DRyO1XBt.js:986). A host with an
+    explicit ``cron.store`` pointing elsewhere, plus a stale default ``jobs.json`` left over
+    from before that setting was added, gets scanned on the WRONG file entirely — with the
+    scoped shadow check now correctly reporting "no rows shadowed" for the default path,
+    because the runtime's actual jobs live under a store_key this function never queried.
+    The result was a "verified" PASS over a job payload never read.
+
+    This is deliberately blunt rather than clever: when ``cron.store`` resolves to a path
+    that differs from the one just scanned, this collector has NOT read the store the
+    runtime actually uses, full stop -- no SQLite lookup can rescue that, because the
+    configured store might not even be SQLite-backed. Flag it unconditionally.
+    """
+    configured = dig(ctx.config, "cron.store")
+    if not isinstance(configured, str) or not configured.strip():
+        return
+    configured_abs = os.path.abspath(os.path.expanduser(configured))
+    scanned_abs = os.path.abspath(str(jobs_json))
+    if configured_abs == scanned_abs:
+        return
+    ctx.cron_store_shadowed = True
+    note_limit(
+        ctx.limit_hits, LIMIT_DOMAIN_CRON,
+        f"cron.store is configured to '{configured}', but the store actually scanned was "
+        f"'{jobs_json}' — the configured store was NOT read",
+    )
+
+
+def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None:
+    """Set ``ctx.cron_store_shadowed`` when the legacy ``~/.openclaw/cron/jobs.json`` was
+    used as the job-definition source but the SQLite ``cron_jobs`` table ALSO holds rows.
+
+    ``_collect_cron`` prefers the JSON store and returns before it ever opens SQLite, which
+    is correct for a genuinely legacy install but wrong for an upgraded one. In the shipped
+    dist the job rows live in SQLite — ``loadCronJobsStoreWithConfigJobs`` resolves the
+    store path only to derive a key (``cronStoreKey(path.resolve(storePath))``,
+    store-ScQ9SjOe.js:710) and then reads ``loadCronRows`` from the database; writes go
+    through ``replaceCronRows`` (store-ScQ9SjOe.js:647). Grepped the dist's cron modules
+    (store-ScQ9SjOe.js, run-log-DIhrTrSU.js, key-BBZ40bDq.js) for unlink/rm/writeFile: there
+    are none, so nothing ever removes a stale jobs.json. An install that predates the SQLite
+    migration therefore keeps a file that the runtime no longer reads, and differencing run
+    logs against it makes live jobs look erased.
+
+    COUNT ONLY — no job content is read here, so this cannot contradict or silently replace
+    what B168 scanned out of the JSON file. Read-only, symlink-safe, never raises: any
+    sqlite3 error (including a state DB predating the table) simply leaves the flag False.
+
+    W-DB2 round-4: the count is SCOPED TO THE AUDITED PARTITION. ``cron_jobs`` is
+    partitioned by ``store_key`` (``store_key TEXT NOT NULL``,
+    openclaw-state-db-DzSsA9Ji.js:1421-1422) and the runtime reads exactly one partition —
+    ``loadCronRows`` filters ``WHERE store_key = ?`` (store-ScQ9SjOe.js:643-645). An
+    unscoped ``COUNT(*)`` was therefore blind to WHICH store the rows belonged to. A config
+    that sets an explicit ``cron.store`` (a documented key — schema-DRyO1XBt.js:986) parks
+    its rows under a different key, and those rows are NOT what this jobs.json resolves to:
+    for the audited path ``loadCronJobsStoreWithConfigJobs`` loads zero rows and returns an
+    empty store (store-ScQ9SjOe.js:709-723). Counting them declared a shadow that does not
+    exist and emitted a limit_hit asserting rows "were NOT read" that the runtime would
+    never have read for this store either.
+
+    UNATTRIBUTABLE ROWS ARE COUNTED, deliberately — the conservative direction. A row whose
+    ``store_key`` is NULL/blank, or a table whose schema predates the column entirely,
+    cannot be assigned to a partition; since it still MIGHT be the row the runtime loads,
+    dropping it would trade a false positive for a false negative (a real shadow going
+    unflagged, which is the failure mode this function exists to prevent). Only rows
+    positively attributed to a DIFFERENT store are excluded.
+    """
+    state_dir = home / "state"
+    candidates = walk_dir_safely(state_dir, max_files=100) if state_dir.is_dir() else []
+    db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        return
+    keys = _cron_store_key_candidates(jobs_json)
+    placeholders = ",".join("?" * len(keys))
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA query_only = 1")
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM cron_jobs WHERE store_key IN "
+                    f"({placeholders}) OR store_key IS NULL OR TRIM(store_key) = ''",
+                    keys,
+                ).fetchone()
+            except sqlite3.OperationalError as exc:
+                if "no such column" not in str(exc).lower():
+                    raise
+                # Schema predates the store_key partition column: NO row can be attributed,
+                # so count them all rather than let the whole table vanish from the count.
+                row = conn.execute("SELECT COUNT(*) FROM cron_jobs").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return  # no table / unreadable -> nothing proven, leave the flag False
+    if row and row[0]:
+        ctx.cron_store_shadowed = True
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_CRON,
+            f"legacy cron store '{jobs_json}' was used for job definitions, but the "
+            f"cron_jobs table in '{db_path}' holds {row[0]} row(s) for that same store "
+            f"path which were NOT read",
+        )
+
+
+def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
+    """B-294 (DISK-3): read-only collection of the cron EXECUTION trail
+    (``cron_run_logs`` in ~/.openclaw/state/openclaw.sqlite) into ``ctx.cron_run_logs``.
+
+    Grounded against the installed dist (openclaw-state-db-DzSsA9Ji.js:
+    ``CREATE TABLE IF NOT EXISTS cron_run_logs`` — columns store_key, job_id, seq, ts,
+    status, error, summary, diagnostics_summary, delivery_status, delivery_error,
+    delivered, session_id, session_key, run_id, run_at_ms, duration_ms, next_run_at_ms,
+    model, provider, total_tokens, entry_json, created_at; PK (store_key, job_id, seq)).
+    Written by ``appendCronRunLog`` (server-cron-Cwg2hJro.js), pruned by
+    ``pruneCronRunLogRows`` (run-log-DIhrTrSU.js).
+
+    WHY this table matters and the job definitions are not enough: the execution trail
+    deliberately OUTLIVES the definition. One-shot (``schedule.kind === "at"``) jobs default
+    to ``deleteAfterRun`` TRUE (jobs-qB_gTO89.js:834, normalize-BMkddmz2.js:409), the runner
+    deletes the row after a SUCCESSFUL run (server-cron-Cwg2hJro.js:1340), ``deleteAfterRun``
+    is exposed to the AGENT ITSELF as a schedulable option (cron-tool-C9qaFGtt.js:495), and
+    ``cron_run_logs`` has NO foreign key to ``cron_jobs`` — the only cron_jobs delete in the
+    dist (``replaceCronRows``, store-ScQ9SjOe.js:648) never touches it. So a job that was
+    added, ran, and self-erased leaves no definition for B168 to scan, but its run trail
+    survives here.
+
+    DELIBERATELY NOT read: ``entry_json``. It is ``JSON.stringify(entry)`` of the RUN
+    RECORD (jobId/status/summary/session/model/timing — run-log-DIhrTrSU.js:97
+    ``bindCronRunLogRow``), NOT a copy of the job's original ``payload.message``.
+    Content-scanning it for the erased directive would be unreliable, so this collector
+    takes only the structural/pivot columns: which job ran, when, and under which session.
+
+    Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
+    ``_collect_plugin_trust`` uses on this exact database. A missing DB or a state DB that
+    predates the table leaves ``cron_run_logs_found`` False — UNKNOWN downstream, never a
+    fake PASS (Golden Rule #4).
+    """
+    state_dir = home / "state"
+    sqlite_candidates = walk_dir_safely(state_dir, max_files=100) if state_dir.is_dir() else []
+    db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        return  # no state DB -> cron_run_logs_found stays False (UNKNOWN, not a fake PASS)
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA query_only = 1")
+            cur = conn.execute(
+                "SELECT job_id, status, session_id, session_key, run_id, run_at_ms, ts "
+                "FROM cron_run_logs ORDER BY ts DESC LIMIT ?",
+                # Same off-by-one fix as the cron_jobs read above: one extra row is the
+                # truncation probe, so a table holding EXACTLY the cap is not reported as
+                # having had "older run history NOT read" when all of it was read.
+                (_MAX_CRON_RUN_LOGS + 1,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        # A state DB predating the run-log table is not a corrupt store -- same honest
+        # UNKNOWN as "not found" (mirrors _collect_cron / _collect_plugin_trust).
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(f"could not read cron_run_logs from {db_path}: {exc}")
+            ctx.cron_run_logs_found = True
+            ctx.cron_run_logs_parse_error = True
+        return
+
+    ctx.cron_run_logs_found = True
+    run_logs_truncated = len(rows) > _MAX_CRON_RUN_LOGS
+    rows = rows[:_MAX_CRON_RUN_LOGS]  # discard the probe row; the scanned set stays capped
+    for job_id, status, session_id, session_key, run_id, run_at_ms, ts in rows:
+        ctx.cron_run_logs.append({
+            "job_id": job_id,
+            "status": status,
+            "session_id": session_id,
+            "session_key": session_key,
+            "run_id": run_id,
+            "run_at_ms": run_at_ms,
+            "ts": ts,
+        })
+    if run_logs_truncated:
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_CRON,
+            f"cron run-log table in '{db_path}' returned the {_MAX_CRON_RUN_LOGS}-row cap "
+            "— older run history was NOT read",
+        )
+
+
+def _collect_capture_state(home: Path, ctx: Context) -> None:
+    """B-295 (DISK-4): read-only METADATA about OpenClaw's debug-proxy traffic capture,
+    stored in the shared state database (~/.openclaw/state/openclaw.sqlite).
+
+    Grounded against the installed dist (openclaw-state-db-DzSsA9Ji.js, verbatim
+    ``CREATE TABLE IF NOT EXISTS``): ``capture_events`` (id, session_id, ts, source_scope,
+    source_process, protocol, direction, kind, flow_id, method, host, path, status,
+    close_code, content_type, headers_json, data_text, data_blob_id, data_sha256,
+    error_text, meta_json), ``capture_blobs`` (blob_id, content_type, encoding, size_bytes,
+    sha256, data, created_at) and ``capture_sessions``. ``env-DNgUBPBb.js`` marks the legacy
+    ``state/debug-proxy/capture.sqlite`` path ``@deprecated Capture storage now lives in the
+    shared state database``, confirming these rows land in the shared DB.
+
+    COUNTS ONLY — deliberately. ``headers_json`` carries bearer tokens and ``data_text``
+    carries request bodies, so §8 makes reading them a disclosure hazard, and flagging the
+    hosts a developer legitimately captured (provider APIs, ClawHub) would be a false
+    "exfil" signal. This collector therefore reads ``COUNT(*)`` and nothing else: no host,
+    no header, no body, no blob ever leaves the database. That is enough to answer the
+    question the check asks — "was your agent's traffic recorded to disk in plaintext, and
+    how much" — without reading a single captured byte.
+
+    Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
+    ``_collect_plugin_trust`` and ``_collect_cron_run_logs`` use on this exact database.
+    Absent DB or absent tables leave ``capture_tables_found`` False -> UNKNOWN downstream.
+    """
+    state_dir = home / "state"
+    sqlite_candidates = walk_dir_safely(state_dir, max_files=100) if state_dir.is_dir() else []
+    db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        return  # no state DB -> capture_tables_found stays False (UNKNOWN, not a fake PASS)
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA query_only = 1")
+            events = conn.execute("SELECT COUNT(*) FROM capture_events").fetchone()[0]
+            try:
+                blobs = conn.execute("SELECT COUNT(*) FROM capture_blobs").fetchone()[0]
+            except sqlite3.Error:
+                blobs = 0
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        # A state DB predating the capture tables is not corrupt -- same honest UNKNOWN as
+        # "not found" (mirrors _collect_cron / _collect_plugin_trust).
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(f"could not read capture_events from {db_path}: {exc}")
+            ctx.capture_tables_found = True
+            ctx.capture_parse_error = True
+        return
+
+    ctx.capture_tables_found = True
+    ctx.capture_event_rows = int(events or 0)
+    ctx.capture_blob_rows = int(blobs or 0)
 
 
 def _collect_exec_approvals(home: Path, ctx: Context) -> None:
@@ -1733,10 +2307,11 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
         with open(target, "rb") as fp:
             raw, truncated = _read_with_limit(fp, _MAX_EXEC_APPROVALS_BYTES)
         if truncated:
-            ctx.limit_hits.append(
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_APPROVALS,
                 f"exec-approvals store '{target}' exceeded the "
                 f"{_MAX_EXEC_APPROVALS_BYTES // 1_000_000}MB cap — content beyond the "
-                "cap was NOT scanned"
+                "cap was NOT scanned",
             )
         store = json.loads(raw.decode("utf-8", errors="replace"))
         if not isinstance(store, dict):
@@ -1793,8 +2368,14 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
     The same state database also has ``auth_profile_stores``/``auth_profile_state`` tables
     (columns: store_key, store_json/state_json, updated_at) that plausibly hold live MCP
     OAuth credentials — this collector deliberately reads ONLY installed_plugin_index and
-    never touches those tables; openclaw.sqlite itself should stay 0600 regardless (B11
-    already covers general config/state-file permissions).
+    never touches those tables; openclaw.sqlite itself should stay 0600 regardless.
+
+    B-293 corrected a factually WRONG claim that stood here: this comment used to assert
+    that "B11 already covers general config/state-file permissions". It does not. B11 reads
+    only ``ctx.config_mode``, which collector sets from ``cfg_path.stat()`` — openclaw.json's
+    mode ALONE. Nothing stat'ed the state database until B188
+    (``checks/_egress.py::check_state_db_atrest``), which is now the check that covers this
+    file's at-rest permissions.
 
     Opened READ-ONLY via the ``file:...?mode=ro`` URI plus ``PRAGMA query_only = 1`` — this
     collector never writes to the shared state database. Reuses the exact
@@ -1841,10 +2422,11 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
 
     raw = row[0]
     if len(raw) > _MAX_PLUGIN_TRUST_BYTES:
-        ctx.limit_hits.append(
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
             f"installed_plugin_index.install_records_json in {db_path} exceeded the "
             f"{_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap — content beyond the cap was "
-            "NOT scanned"
+            "NOT scanned",
         )
         raw = raw[:_MAX_PLUGIN_TRUST_BYTES]
 
@@ -1881,9 +2463,10 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             if isinstance(rec.get("clawhubTrustStale"), bool) else None,
         })
     if len(installs) > _MAX_PLUGIN_TRUST_RECORDS:
-        ctx.limit_hits.append(
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
             f"installed_plugin_index in {db_path} has {len(installs)} install record(s) — "
-            f"only the first {_MAX_PLUGIN_TRUST_RECORDS} were scanned"
+            f"only the first {_MAX_PLUGIN_TRUST_RECORDS} were scanned",
         )
 
 
@@ -2268,9 +2851,10 @@ def _collect_global_dotenv(home: Path, ctx: Context) -> None:
         ctx.dotenv_found = True
         ctx.dotenv_files.append(str(path))
         if truncated:
-            ctx.limit_hits.append(
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_ENV,
                 f"dotenv file '{path}' exceeded the {_MAX_DOTENV_BYTES // 1000}KB cap — "
-                "content beyond the cap was NOT scanned"
+                "content beyond the cap was NOT scanned",
             )
         for key, value in _parse_dotenv(raw.decode("utf-8", errors="replace")).items():
             if key in ctx.dotenv_values:
@@ -2487,9 +3071,10 @@ def _read_environment_file(spec: str, unit_path: Path, home: Path, ctx: Context)
         ctx.errors.append(f"could not read {candidate}: {exc}")
         return
     if truncated:
-        ctx.limit_hits.append(
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_ENV,
             f"EnvironmentFile '{candidate}' exceeded the {_MAX_UNIT_BYTES // 1000}KB cap — "
-            "content beyond the cap was NOT scanned"
+            "content beyond the cap was NOT scanned",
         )
     for key, value in _parse_environment_file(raw.decode("utf-8", errors="replace")):
         if key not in ctx.unit_env_values and len(ctx.unit_env_values) >= _MAX_UNIT_ENV_ENTRIES:
@@ -2532,9 +3117,10 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
             continue
         text = raw.decode("utf-8", errors="replace")
         if truncated:
-            ctx.limit_hits.append(
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_ENV,
                 f"systemd unit '{unit_path.name}' exceeded the "
-                f"{_MAX_UNIT_BYTES // 1000}KB cap — content beyond the cap was NOT scanned"
+                f"{_MAX_UNIT_BYTES // 1000}KB cap — content beyond the cap was NOT scanned",
             )
 
         exec_start = ""
@@ -2670,7 +3256,10 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
             message = str(exc)
             ctx.errors.append(f"could not parse {cfg_path}: {message}")
             if "cap" in message or "exceeds" in message:
-                ctx.limit_hits.append(message)
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_CONFIG,
+                    message,
+                )
         else:
             ctx.config = parsed
             try:
@@ -2727,10 +3316,12 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
                     raw, truncated = _read_with_limit(fp, _MAX_FILE_BYTES)
                 ctx.bootstrap[key] = raw.decode("utf-8", errors="replace")
                 if truncated:
-                    ctx.limit_hits.append(
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_BOOTSTRAP,
                         f"bootstrap file '{key}' exceeded the "
                         f"{_MAX_FILE_BYTES // 1000}KB cap — content beyond the cap "
-                        "was NOT scanned")
+                        "was NOT scanned",
+                    )
             except OSError as exc:
                 ctx.errors.append(f"could not read {f}: {exc}")
 
@@ -2741,6 +3332,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     _collect_cron(home, ctx)
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)
+    _collect_capture_state(home, ctx)  # B-295: debug-proxy capture row counts (metadata only)
     _read_installed_skills(home, ctx)
     return ctx
 

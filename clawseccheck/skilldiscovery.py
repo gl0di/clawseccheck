@@ -62,7 +62,9 @@ def iter_discovered_skill_dirs(
     base: Path,
     *,
     allow_symlink_entries: bool,
-    limit_hits: list[str],
+    # Any object with ``.append(str)``. The collector passes a domain-scoped sink so this
+    # leaf's cap hit is tagged ``skill`` without this module importing the collector.
+    limit_hits,
 ):
     """Yield ``(display_path, resolved_dir)`` for grouped layouts up to six levels."""
     try:

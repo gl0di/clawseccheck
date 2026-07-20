@@ -2005,6 +2005,68 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="mcp",
     ),
+    # B190 (B-295, DISK-4): the OPENCLAW_DEBUG_PROXY_* env cluster + on-disk traffic-capture
+    # rows. NARROWED deliberately: the cache-trace FILE half of DISK-4 is ALREADY covered by
+    # B164 (logdiscovery finds the sink with and without diagnostics.cacheTrace.filePath;
+    # logscan content-scans it) and is NOT re-filed here. What is genuinely uncovered is the
+    # debug-proxy subsystem, which has NO config field at all -- enablement is env-only
+    # (env-DNgUBPBb.js: isTruthy(OPENCLAW_DEBUG_PROXY_ENABLED)) -- and whose rows live in
+    # SQLite tables that logdiscovery's file-path sink model structurally cannot reach.
+    # scored=False, WARN-only, never FAIL: a developer legitimately running the debug proxy
+    # captures benign traffic, and flagging those hosts as "exfil" would be a false FAIL.
+    # Counts only, never content: headers_json holds bearer tokens and data_text holds
+    # request bodies (§8). Never PASS -- a shell export and OPENCLAW_DEBUG_PROXY_DB_PATH both
+    # leave no on-disk trace, so absence of evidence is UNKNOWN, not an all-clear.
+    CheckMeta(
+        "B190",
+        "Debug traffic-capture proxy enabled, redirected, or holding captured traffic",
+        MEDIUM,
+        "advisory",
+        "Data at Rest / Egress Interception",
+        scored=False,
+        confidence="HIGH",
+        surface="secrets",
+    ),
+    # B188 (B-293, DISK-2): at-rest permissions on the shared state SQLite database, which
+    # holds device_identities.private_key_pem, device_auth_tokens.token,
+    # device_bootstrap_tokens.token, web_push_vapid_keys.private_key, apns_registrations.token
+    # and auth_profile_stores.store_json (all verified as real CREATE TABLE statements in the
+    # dist's OPENCLAW_STATE_SCHEMA_SQL). No existing permission check stat'ed it: B19 covers
+    # workspace memory/logs + F-120 transcripts, B11 reads only openclaw.json's mode, B182
+    # enumerates only ClawHub CLI token stores. Path-aware via _other_can_reach_read -- a 0644
+    # DB sealed inside a 0700 home is the routine umask-022 outcome and must NOT fire (the
+    # naive mode-bit check was tested and DOES false-positive there). Conventional at-rest
+    # file-permission check only: the database is never opened, so no secret is read.
+    CheckMeta(
+        "B188",
+        "State database with device keys and auth tokens is readable by other users",
+        HIGH,
+        "hardening",
+        "Data at Rest / Credential Exposure",
+        scored=True,
+        confidence="HIGH",
+        surface="secrets",
+    ),
+    # B189 (B-294, DISK-3): cron execution trail (cron_run_logs) whose job definition no
+    # longer exists. scored=False and WARN-capable only, never FAIL: self-erasure is the
+    # PRODUCT DEFAULT (one-shot `at` jobs default to deleteAfterRun TRUE and are deleted
+    # after a successful run; cron_run_logs has no FK to cron_jobs), so an orphaned run log
+    # is the normal steady state on any box using one-shot scheduling and a FAIL would
+    # false-positive on essentially every real user. Advisory context plus the
+    # session_id/run_id pivot into the trajectory records already mined by
+    # --analyze-trajectory. NARROWS DISK-3: the erased job's original payload is NOT
+    # recoverable from this table (entry_json is the RUN record, not the job payload).
+    CheckMeta(
+        "B189",
+        "Cron job executed and erased its own definition (run log without a job)",
+        MEDIUM,
+        "advisory",
+        "Scheduled Task Integrity",
+        scored=False,
+        confidence="HIGH",
+        # Same surface as B168, the cron job-store check this one pairs with.
+        surface="hooks",
+    ),
     # B192 (B-282, ENV-6): documented break-glass env toggles left on in a persistent
     # dotenv file. scored=False, WARN-capable only — OpenClaw's own docs instruct users to
     # set OPENCLAW_ALLOW_INSECURE_PRIVATE_WS in some setups, so a FAIL would punish

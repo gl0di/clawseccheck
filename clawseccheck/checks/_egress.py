@@ -1078,6 +1078,433 @@ def check_data_atrest(ctx: Context) -> Finding:
     )
 
 
+def _other_can_reach_write(home: Path, target: Path) -> bool:
+    """True when a NON-owner can BOTH traverse every directory from *home* down to *target*
+    AND write *target*. The write-bit twin of ``_other_can_reach_read`` above, sharing its
+    path-awareness: a loose mode sealed inside a 0o700 home is unreachable and therefore not
+    an exposure. Group-write counts only when the owning group is KNOWN to have members
+    beyond the owner (UPG-safe — same rule as ``_lifecycle._writable_by_others``, which is
+    the precedent this mirrors; kept local to avoid a cross-topic import, per CLAUDE.md §3).
+    POSIX stat-only; never reads content; never raises."""
+    try:
+        rel = target.relative_to(home)
+    except ValueError:
+        return False
+    chain: list[Path] = [home]
+    cur = home
+    for part in rel.parts[:-1]:
+        cur = cur / part
+        chain.append(cur)
+    world_ok = True
+    group_ok = True
+    for d in chain:
+        try:
+            st = d.stat()
+        except OSError:
+            return False
+        m = st.st_mode
+        world_ok = world_ok and bool(m & 0o001)
+        grp_other = _shared._group_has_other_members(st.st_gid, st.st_uid)
+        group_ok = group_ok and bool(m & 0o010) and (grp_other is True)
+        if not world_ok and not group_ok:
+            return False
+    try:
+        tst = target.stat()
+    except OSError:
+        return False
+    tm = tst.st_mode
+    if world_ok and (tm & 0o002):
+        return True
+    grp_other_t = _shared._group_has_other_members(tst.st_gid, tst.st_uid)
+    return bool(group_ok and (tm & 0o020) and (grp_other_t is True))
+
+
+def _ancestors_allow_other_access(home: Path, stop: "Path | None" = None) -> bool:
+    """True when the directory chain ABOVE *home* still lets some non-owner traverse down
+    INTO it. Walks from ``home``'s parent upward to *stop* (exclusive) or the filesystem
+    root.
+
+    WHY THIS EXISTS, AND WHY IT IS NOT INSIDE ``_other_can_reach_read``: those two twins
+    deliberately begin at *home* and model reachability WITHIN the audited tree. That is a
+    documented approximation which B19 has shipped with, and widening the shared helpers
+    would silently change B19's verdicts as well. B188 needs the stronger guarantee because
+    it is the only caller that escalates the answer to a HIGH, scored FAIL, so it must be
+    able to PROVE the file is reachable before asserting exposure. On a distro that ships
+    $HOME at 0700 (the Fedora/RHEL/Arch default) a 0755 ~/.openclaw with a 0644 database is
+    NOT reachable by anyone, and claiming otherwise is a false positive.
+
+    Traversal is modelled per directory as "o+x, OR g+x with a group KNOWN to have members
+    beyond the owner". The two legs are OR-ed per directory rather than tracked as two
+    separate whole-chain legs (the rule ``_other_can_reach_read`` uses below ``home``)
+    because a real non-owner mixes them freely: they cross a root-owned 0755 ``/`` by its
+    o+x bit and a 0750 shared-group directory by its g+x bit. Requiring one single leg to
+    hold for the entire chain up to ``/`` would report "unreachable" for genuinely reachable
+    files.
+
+    Conservative on ignorance: an ancestor that cannot be stat'ed returns False ("cannot
+    prove reachable"), which suppresses a FAIL rather than inventing one — Golden Rule #4.
+
+    *stop* bounds the walk. Production passes nothing, so the walk runs to the real
+    filesystem root; it exists so a test can pin this function against a directory chain it
+    fully controls, because pytest's own tmp root is 0700 and would otherwise dominate every
+    fixture chain. Symlinks are resolved so the walk follows the REAL parent chain.
+    """
+    try:
+        cur = home.resolve()
+    except (OSError, ValueError, RuntimeError):
+        cur = home
+    stop_resolved = None
+    if stop is not None:
+        try:
+            stop_resolved = stop.resolve()
+        except (OSError, ValueError, RuntimeError):
+            stop_resolved = stop
+    for parent in cur.parents:
+        if stop_resolved is not None and parent == stop_resolved:
+            break
+        try:
+            st = parent.stat()
+        except OSError:
+            return False  # cannot prove reachability -> do not assert exposure
+        m = st.st_mode
+        if m & 0o001:
+            continue  # world-traversable
+        if (m & 0o010) and _shared._group_has_other_members(st.st_gid, st.st_uid) is True:
+            continue  # traversable by a known-shared group
+        return False
+    return True
+
+
+# B-293 (DISK-2): the shared state SQLite DB and its WAL/SHM siblings. Grounded against the
+# installed dist (openclaw-state-db-DzSsA9Ji.js: resolveOpenClawStateSqliteDir ->
+# <stateDir>/state/openclaw.sqlite) and against the real file. The -wal sibling matters as
+# much as the DB: it holds recently written rows that have not yet been checkpointed in.
+_B188_DB_NAMES = ("openclaw.sqlite", "openclaw.sqlite-wal", "openclaw.sqlite-shm")
+
+
+def check_state_db_atrest(ctx: Context) -> Finding:
+    """B188 (B-293, DISK-2) — the shared state SQLite database's at-rest permissions.
+
+    ~/.openclaw/state/openclaw.sqlite stores raw secrets at rest. Verified as real
+    ``CREATE TABLE`` statements in the dist's OPENCLAW_STATE_SCHEMA_SQL
+    (openclaw-state-db-DzSsA9Ji.js): ``device_identities.private_key_pem`` (:711/715),
+    ``device_auth_tokens.token`` (:723), ``web_push_vapid_keys.private_key`` (:878/881),
+    plus ``device_bootstrap_tokens.token``, ``apns_registrations.token`` and
+    ``auth_profile_stores.store_json``. A backup/rsync/umask slip that leaves the file
+    group- or world-readable lets another local account read a paired device's private key
+    and forge control-plane auth — and before this check, EVERY ClawSecCheck permission
+    check passed over it, because none of them stat'ed the state DB. B19 above covers
+    workspace memory/logs, bare *.log files and F-120 transcripts/backups; ``state/`` was
+    absent from every leg. B11 reads only ``ctx.config_mode``, i.e. openclaw.json's mode
+    alone. B182 is the closest precedent but enumerates only ClawHub CLI token stores.
+
+    SCOPE HONESTY — this is a conventional at-rest FILE-PERMISSION check, closable by a
+    static ``stat()``. It is NOT runtime modelling, and it does NOT mine the state DB: the
+    database is never opened here, so no secret is ever read, echoed or redacted (§8).
+    Mining the DB's behavioural tables is a separate, larger question and is not what this
+    check does.
+
+    SEVERITY HONESTY — the dominant reachability gate (the parent directory's mode) IS
+    partially watched by OpenClaw's own audit when the native fold-in runs
+    (``fs.state_dir.perms_readable``, audit-UjVvFwCi.js:477-489), and OpenClaw creates the
+    chain at 0700 itself. So the strongest justification for this check is defence-in-depth
+    plus grade participation, not an unguarded hole. Two real gaps remain: native resolves
+    ``params.stateDir`` to ``~/.openclaw`` (the ROOT), so it checks the parent gate and never
+    the ``state/`` subdir or the DB file itself; and it misses x-without-r chains — a 0711
+    ``~/.openclaw`` is traversable but not readable, so native stays silent while a 0644
+    ``openclaw.sqlite`` at a known fixed filename is fully readable by any local user.
+    Native findings are also excluded from the score, and native is ``status=skipped``
+    outright on some installs.
+
+    REACHABILITY IS PROVEN, NOT ASSUMED. Loose mode bits inside ~/.openclaw are only an
+    exposure if a non-owner can traverse down to them, and that depends on the directory
+    chain ABOVE ~/.openclaw too — a 0700 $HOME (the Fedora/RHEL/Arch default) seals
+    everything beneath it. ``_other_can_reach_read`` deliberately starts at ``home`` and
+    cannot see that, so this check adds ``_ancestors_allow_other_access`` and requires BOTH
+    before it will assert a FAIL or WARN. Reaching a genuine exposure therefore also implies
+    OpenClaw's own hardening did not apply: ``ensureOpenClawStatePermissions``
+    (openclaw-state-db-DzSsA9Ji.js:1827) best-effort chmods ``state/`` to 0700
+    (OPENCLAW_STATE_DIR_MODE = 448, :1811) and every ``openclaw.sqlite*`` file to 0600
+    (OPENCLAW_STATE_FILE_MODE = 384, :1812) on each open — which narrows the real-world
+    shape to restore-before-first-start, or a filesystem where chmod does not apply
+    (CIFS/exFAT/DrvFs), for which the dist has an explicit "skipped permission hardening"
+    warn path (:1825). On such a mount the `chmod` remediation is itself a no-op, so the
+    FAIL's fix text says so.
+
+    FAIL    — the DB (or a -wal/-shm sibling) is reachable AND readable by another user,
+              with the whole directory chain (above and below ~/.openclaw) permitting it.
+    WARN    — ``state/`` is reachable and writable by another user: they cannot read the
+              secrets, but they can swap the database under the agent (mirrors B182's
+              ``swappable`` branch).
+    UNKNOWN — no state DB present, or non-POSIX (NTFS ACLs make st_mode meaningless).
+    PASS    — present and not reachable-and-readable by others. Loose in-tree modes sealed
+              by a restrictive parent directory PASS with a distinct message that names the
+              seal, rather than silently reading like a clean 0600 install.
+    """
+    if not _shared._is_posix():
+        return _finding(
+            "B188",
+            UNKNOWN,
+            "On Windows, file security uses NTFS ACLs, not POSIX mode bits — ClawSecCheck "
+            "can't read those read-only (no extra tools), so the state database's at-rest "
+            "permissions are UNKNOWN, never a false PASS.",
+            "Check the ACLs yourself: `icacls %USERPROFILE%\\.openclaw\\state\\"
+            "openclaw.sqlite` should not grant read to Users / Everyone / Authenticated "
+            "Users.",
+        )
+
+    state_dir = ctx.home / "state"
+    present: list[Path] = []
+    for name in _B188_DB_NAMES:
+        p = state_dir / name
+        try:
+            if p.is_file() and not p.is_symlink():
+                present.append(p)
+        except OSError:
+            continue
+    if not present:
+        return _finding(
+            "B188",
+            UNKNOWN,
+            "No state database found at ~/.openclaw/state/openclaw.sqlite — cannot assess "
+            "its at-rest permissions.",
+            "If this install does use the state database, ensure it is readable by the "
+            "audit so a future run can check its permissions.",
+        )
+
+    # Path-aware on purpose. A 0644 database sealed inside a 0700 home is the routine
+    # umask-022 outcome and is NOT exploitable — flagging it would be exactly the false WARN
+    # F-120 already solved for transcripts, so this reuses `_other_can_reach_read` rather
+    # than testing mode bits in isolation. Empirically: db=0644 inside home=0700 -> a naive
+    # mode check FIRES while _other_can_reach_read is False (correctly silent); db=0644
+    # inside home=0755 -> both fire (genuinely exposed).
+    exposed: list[str] = []
+    for p in present:
+        if _other_can_reach_read(ctx.home, p):
+            try:
+                mode = p.stat().st_mode & 0o777
+            except OSError:
+                continue
+            exposed.append(f"state/{p.name} (mode {oct(mode)[-3:]}) is readable by other users")
+
+    # `_other_can_reach_read` stops at ctx.home, so on its own it would call a 0644 database
+    # under a 0755 ~/.openclaw "exposed" even when $HOME above it is 0700 and denies o+x to
+    # every non-owner. That is a false positive, and B188 is a HIGH scored FAIL, so it must
+    # prove the whole chain before asserting it.
+    ancestors_open = _ancestors_allow_other_access(ctx.home)
+    writable_dir = _other_can_reach_write(ctx.home, state_dir)
+
+    if exposed and ancestors_open:
+        return _finding(
+            "B188",
+            FAIL,
+            "The OpenClaw state database holds device private keys, device/bootstrap auth "
+            "tokens and web-push VAPID private keys at rest, and another local user can "
+            "reach and read it: " + "; ".join(exposed) + ". Anyone who can read this file "
+            "can impersonate a paired device and forge control-plane authentication.",
+            "Run `chmod 600 ~/.openclaw/state/openclaw.sqlite*` and `chmod 700 "
+            "~/.openclaw/state ~/.openclaw`. Then rotate what was exposed: re-pair any "
+            "paired devices and re-issue bootstrap tokens, since a copy taken while the "
+            "file was readable stays valid. If the state directory lives on a filesystem "
+            "that does not implement POSIX modes (CIFS/exFAT/DrvFs), chmod silently does "
+            "nothing there — OpenClaw hits the same wall and logs 'skipped permission "
+            "hardening' — so move the state directory onto a POSIX filesystem instead.",
+            evidence=exposed,
+        )
+
+    # Swap vector: the secrets stay unreadable, but a writable state/ lets another user
+    # replace the database wholesale under the running agent.
+    if writable_dir and ancestors_open:
+        try:
+            dmode = oct(state_dir.stat().st_mode & 0o777)[-3:]
+        except OSError:
+            dmode = "?"
+        return _finding(
+            "B188",
+            WARN,
+            f"The state database itself is not readable by other users, but its directory "
+            f"~/.openclaw/state (mode {dmode}) is writable by another local user — they "
+            "cannot read the stored device keys and auth tokens, but they can replace the "
+            "database under the running agent.",
+            "Run `chmod 700 ~/.openclaw/state` so only the owner can add, remove or replace "
+            "files there.",
+            evidence=[f"state/ (mode {dmode}) is writable by other users"],
+        )
+
+    names = ", ".join(f"state/{p.name}" for p in present)
+    if (exposed or writable_dir) and not ancestors_open:
+        # Loose modes inside ~/.openclaw, but a directory above it (typically $HOME at 0700)
+        # denies traversal to every non-owner, so nothing here is actually reachable. Not a
+        # finding — but say so plainly, because the seal is one `chmod 755 ~` away from gone.
+        return _finding(
+            "B188",
+            PASS,
+            f"The state database and its siblings ({names}) carry loose permissions inside "
+            "~/.openclaw, but a directory above ~/.openclaw denies access to other users, "
+            "so they are not reachable and the device keys and auth tokens are not exposed "
+            "at rest.",
+            "No exposure today, but the only thing sealing these files is the parent "
+            "directory. Tighten them at the source too: `chmod 600 "
+            "~/.openclaw/state/openclaw.sqlite*` and `chmod 700 ~/.openclaw/state "
+            "~/.openclaw`, so loosening your home directory later cannot expose them.",
+            pass_confidence="verified",
+        )
+    return _finding(
+        "B188",
+        PASS,
+        f"The state database and its siblings ({names}) are not reachable and readable by "
+        "other users, so the device private keys, auth tokens and VAPID keys stored in them "
+        "are not exposed at rest.",
+        "Keep ~/.openclaw and ~/.openclaw/state at chmod 700 and the database files at 600.",
+        pass_confidence="verified",
+    )
+
+
+# B-295 (DISK-4): the debug-proxy env cluster. Names and truthy semantics grounded verbatim
+# in the installed dist (env-DNgUBPBb.js, src/proxy-capture/env.ts):
+#   isTruthy(v) === (v === "1" || v === "true" || v === "yes" || v === "on")
+#   resolveDebugProxySettings(): enabled = isTruthy(env.OPENCLAW_DEBUG_PROXY_ENABLED),
+#   required = isTruthy(env.OPENCLAW_DEBUG_PROXY_REQUIRE), proxyUrl = env.OPENCLAW_DEBUG_
+#   PROXY_URL?.trim(), dbPath/blobDir/certDir = env override or the default under stateDir.
+# collector.is_truthy_env_value mirrors isTruthy exactly (same four-value set).
+_B190_TRUTHY_VARS = (
+    (
+        "OPENCLAW_DEBUG_PROXY_ENABLED",
+        "turns on traffic capture — every request and response the agent makes is written "
+        "to the state database, including Authorization headers and request bodies",
+    ),
+    (
+        "OPENCLAW_DEBUG_PROXY_REQUIRE",
+        "makes the debug proxy mandatory, so the agent will route through it or fail",
+    ),
+)
+_B190_VALUE_VARS = (
+    (
+        "OPENCLAW_DEBUG_PROXY_URL",
+        "routes the agent's traffic through this proxy — whoever operates it sees every "
+        "request the agent makes, which is a man-in-the-middle position over all agent "
+        "traffic",
+    ),
+    (
+        "OPENCLAW_DEBUG_PROXY_DB_PATH",
+        "redirects captured traffic to a different database file",
+    ),
+    (
+        "OPENCLAW_DEBUG_PROXY_BLOB_DIR",
+        "redirects captured request/response bodies to a different directory",
+    ),
+)
+
+
+def check_debug_proxy_capture(ctx: Context) -> Finding:
+    """B190 (B-295, DISK-4) — the OPENCLAW_DEBUG_PROXY_* cluster and on-disk traffic capture.
+
+    SCOPE, STATED EXACTLY — this check is deliberately NARROWED, because the original
+    DISK-4 claim double-counted work B164 already does.
+
+    ALREADY COVERED BY B164, AND NOT REPEATED HERE: the ``cache-trace.jsonl`` FILE sink.
+    ``logdiscovery.py`` discovers it both from ``diagnostics.cacheTrace.filePath`` and from
+    the conventional ``logs/cache-trace.jsonl`` (deliberately NOT gated on ``enabled``, so a
+    trace left by a since-disabled session is still found), and ``logscan.py`` content-scans
+    it with the vetted ``_EXFIL_RE`` / ``_KNOWN_EXFIL_HOST_RE`` / ``SECRET_PATTERNS`` /
+    ``_CRED_RE`` detectors. So "exfil destinations and leaked auth headers sitting locally
+    and unexamined" is FALSE for the cache-trace file — that is exactly what B164 mines.
+    This check never re-scans it.
+
+    WHAT IS GENUINELY UNCOVERED, and what this check adds: OpenClaw's debug-proxy capture is
+    a DIFFERENT subsystem, and it is enabled SOLELY by environment variable — there is no
+    config field for it anywhere in the dist. B155 covers ``proxy.*`` / ``OPENCLAW_PROXY_URL``,
+    a different subsystem, and explicitly concedes the env var it cannot see. Its rows land
+    in SQLite tables, and ``logdiscovery``'s sink model is file-paths-only, so the E-044
+    log-hunt substrate structurally cannot reach them.
+
+    WHAT THIS CHECK STILL DOES NOT DO — say it plainly: it does NOT mine the captured
+    traffic. ``capture_events.headers_json`` holds bearer tokens and ``.data_text`` holds
+    request bodies; reading them is a §8 disclosure hazard, and flagging the hosts a
+    developer legitimately captured (provider APIs, ClawHub) would be a false "exfil"
+    signal — the exact false positive this check must not create. The collector therefore
+    takes ``COUNT(*)`` and nothing else. Content-mining ``capture_events``/``capture_blobs``
+    remains unbuilt. This check answers "was your traffic recorded to disk, and how much",
+    never "what was in it".
+
+    WARN    — capture is observably on or has already run: a truthy enablement variable, a
+              proxy/redirect URL, or rows already in the capture tables. Advisory and
+              ``scored=False``: a developer legitimately running the debug proxy is a real
+              and benign case, so this must never FAIL or move the grade.
+    UNKNOWN — no evidence found. Never PASS: enablement is env-only, a shell export leaves
+              no on-disk trace (the same process boundary B192 documents), and
+              ``OPENCLAW_DEBUG_PROXY_DB_PATH`` can point the capture at a database this
+              check never counts. Zero rows here is therefore NOT proof capture is off, and
+              this check never claims it is.
+    """
+    from ..collector import dotenv_override, is_truthy_env_value  # noqa: PLC0415
+
+    hits: list[str] = []
+    for name, what in _B190_TRUTHY_VARS:
+        raw, source = dotenv_override(ctx, name)
+        if raw is not None and is_truthy_env_value(raw):
+            hits.append(f"{name} is on ({source}) — it {what}")
+    for name, what in _B190_VALUE_VARS:
+        raw, source = dotenv_override(ctx, name)
+        if isinstance(raw, str) and raw.strip():
+            # The VALUE is deliberately not echoed: a proxy URL can embed credentials
+            # (http://user:pass@host). Naming the variable and its source is enough.
+            hits.append(f"{name} is set ({source}) — it {what}")
+
+    rows = ctx.capture_event_rows if ctx.capture_tables_found else 0
+    blobs = ctx.capture_blob_rows if ctx.capture_tables_found else 0
+    if rows:
+        hits.append(
+            f"the state database already holds {rows} captured request/response flow(s)"
+            + (f" and {blobs} captured body/bodies" if blobs else "")
+            + " — this traffic is on disk in plaintext, including any Authorization headers "
+            "and request bodies it contained"
+        )
+
+    if hits:
+        return _finding(
+            "B190",
+            WARN,
+            "OpenClaw's debug traffic-capture proxy is enabled, redirected, or has already "
+            "recorded traffic: " + "; ".join(hits) + ". This is a legitimate debugging "
+            "feature, but while it is on, every request the agent makes — including the "
+            "credentials it sends to model providers and MCP servers — is written to local "
+            "storage in plaintext, and a proxy URL puts whoever runs that proxy in a "
+            "man-in-the-middle position over all agent traffic.",
+            "If you are not actively debugging, unset the OPENCLAW_DEBUG_PROXY_* variables "
+            "(check ~/.openclaw/.env and ~/.config/openclaw/gateway.env) and delete the "
+            "captured rows, then rotate any credential that was in flight while capture was "
+            "on. If you are debugging, confirm you set the proxy URL yourself — a value you "
+            "did not set is an interception of all agent traffic.",
+            evidence=hits,
+        )
+
+    if not ctx.capture_tables_found:
+        return _finding(
+            "B190",
+            UNKNOWN,
+            "No capture tables were found in the state database, and no OPENCLAW_DEBUG_"
+            "PROXY_* variable was found in the persistent dotenv files — but debug-proxy "
+            "capture has NO config field and is enabled by environment variable alone, so "
+            "its state cannot be confirmed from disk.",
+            "No action needed if you do not use the debug proxy. To rule it out on a "
+            "running agent, check its process environment for OPENCLAW_DEBUG_PROXY_ENABLED.",
+        )
+
+    return _finding(
+        "B190",
+        UNKNOWN,
+        "The capture tables exist but hold no rows, and no OPENCLAW_DEBUG_PROXY_* variable "
+        "was found in the persistent dotenv files. That is NOT an all-clear: capture is "
+        "enabled by environment variable only (no config field exists), a variable exported "
+        "in the shell that launched the agent leaves no on-disk trace, and "
+        "OPENCLAW_DEBUG_PROXY_DB_PATH can point the capture at a database this check never "
+        "counted.",
+        "No action needed if you do not use the debug proxy. To rule it out on a running "
+        "agent, check its process environment for OPENCLAW_DEBUG_PROXY_ENABLED.",
+    )
+
+
 def check_discovery_mdns_mode(ctx: Context) -> Finding:
     """B73 — mDNS full advertisement on non-loopback gateway bind.
 
