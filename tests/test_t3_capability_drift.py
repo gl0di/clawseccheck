@@ -207,7 +207,12 @@ def test_unknown_when_profile_grants_without_toplevel_allow(tmp_path):
     """C-135 (architect-confirmed): OpenClaw's schema forbids allow+alsoAllow and recommends
     'profile + alsoAllow'. In that shape the profile ('coding') grants high-blast core tools
     (exec/code_execution/sessions_send) and there is NO tools.allow layer. T3 must report
-    UNKNOWN (profile grant is unenumerable), never WARN on a profile-granted verb."""
+    UNKNOWN (profile grant is unenumerable), never WARN on a profile-granted verb.
+
+    B-301 note: this is the ONE profile for which that rationale holds. `coding` really does
+    carry exec/code_execution/sessions_send (~40 tools). `minimal` and `messaging` do NOT —
+    see the B-301 section below, which adds the missing coverage for them.
+    """
     _write_traj(tmp_path, ["exec", "code_execution", "sessions_send"])
     ctx = _ctx(tmp_path, profile="coding", also_allow=["notion__search_pages"])
     assert check_capability_drift(ctx).status == UNKNOWN
@@ -277,3 +282,145 @@ def test_render_marks_unknown_t3_not_as_pass(tmp_path):
     out = render_behavioral_analysis(_ctx(tmp_path), ascii_only=True)
     assert "[?] T3" in out
     assert "[ok] T3" not in out
+
+
+# ---------------------------------------------------------------------------
+# B-301 — BEHAV-5 coverage honesty.
+#
+# Two defects, both verified end-to-end against the real check fn (not traced):
+#
+#   1. THE CLOSED LOOP. T3's own remediation text has always said "or attest the exact
+#      tool inventory with --attest". But `has_allow_bound` was computed ONLY from
+#      `tools.allow`, so on a profile-only config the attestation was parsed, reached
+#      T3 in `literals`, and changed nothing: the operator followed the tool's advice,
+#      re-ran, and got the byte-identical UNKNOWN forever.
+#
+#   2. A FACTUALLY FALSE UNKNOWN TEXT. It asserted the grant is governed by
+#      "'tools.profile' (or the default profile), whose tool set can't be enumerated".
+#      Both halves are wrong, measured against the installed OpenClaw dist:
+#        - tool-catalog-C8xbUFNe.js `resolveCoreToolProfilePolicy(profile)` opens with
+#          `if (!profile) return;` — an ABSENT profile resolves NO policy, so there is
+#          no "default profile" tool set at all.
+#        - `CORE_TOOL_PROFILES` IS a static enumerable table. `minimal` grants exactly
+#          ["session_status"] (zero high-blast); `messaging` grants message /
+#          session_status / sessions_history / sessions_list / sessions_send (no exec,
+#          code_execution, write, apply_patch or cron). The old "the profile
+#          legitimately grants exec / code_execution / sessions_send" claim is true
+#          only for `coding` and `full`.
+#
+# HONEST LABELLING: fix 1 CLOSES the closed loop, fix 2 CLOSES the false text. BEHAV-5
+# overall is only NARROWED — a profile-only config with no attestation is still UNKNOWN,
+# deliberately (enumerating the profile table is version-fragile and would false-WARN on
+# the additive channels T3 does not read).
+# ---------------------------------------------------------------------------
+
+def test_b301_attested_inventory_bounds_the_grant_and_drift_is_reported(tmp_path):
+    """THE HEADLINE FIX. No tools.allow + an attested inventory + a proven verb outside
+    it -> WARN. Before B-301 this returned UNKNOWN with identical text and identical
+    advice no matter how many times the operator re-attested."""
+    _write_traj(tmp_path, ["exec"])
+    ctx = _ctx(tmp_path, profile="coding", attested=["read", "web_search", "message"])
+    f = check_capability_drift(ctx)
+    assert f.status == WARN, "the --attest escape hatch is still a closed loop"
+    assert "exec" in f.detail
+
+
+def test_b301_attested_inventory_covering_the_proven_verb_passes(tmp_path):
+    """CLEAN counterpart: attest the verb you actually use and T3 goes green, so the
+    remediation the fix text advertises now has a reachable success state."""
+    _write_traj(tmp_path, ["exec"])
+    ctx = _ctx(tmp_path, profile="coding", attested=["read", "exec"])
+    assert check_capability_drift(ctx).status == PASS
+
+
+def test_b301_empty_attestation_does_not_bound_the_grant(tmp_path):
+    """An attestation with no usable tool name asserts nothing, so it must not
+    manufacture a bound (which would WARN on every profile-granted verb)."""
+    _write_traj(tmp_path, ["exec"])
+    for attested in ([], ["", "   "], [None, 17]):
+        ctx = _ctx(tmp_path, profile="coding", attested=attested)
+        assert check_capability_drift(ctx).status == UNKNOWN, attested
+
+
+def test_b301_attestation_of_only_class_grant_tokens_is_unknown(tmp_path):
+    """A class-grant token can't be enumerated, so an attestation made only of them
+    routes to the unbounded-UNKNOWN branch rather than becoming a false bound."""
+    _write_traj(tmp_path, ["exec"])
+    for token in ("bundle-mcp", "group:plugins", "*", "slack__*"):
+        ctx = _ctx(tmp_path, profile="coding", attested=[token])
+        assert check_capability_drift(ctx).status == UNKNOWN, token
+
+
+def test_b301_absent_profile_is_unknown_and_that_is_correct(tmp_path):
+    """CLEAN + deliberately-inert: with no tools.allow, no attestation AND no
+    tools.profile there is no bound in existence to exceed.
+
+    Grounded in dist tool-catalog-C8xbUFNe.js `resolveCoreToolProfilePolicy(profile)`,
+    whose first statement is `if (!profile) return;` — an absent profile resolves to no
+    policy at all. UNKNOWN here is CORRECT and unfixable, not a coverage gap; pinned so a
+    later 'improvement' can't turn it into a guess."""
+    _write_traj(tmp_path, ["exec"])
+    f = check_capability_drift(_ctx(tmp_path))
+    assert f.status == UNKNOWN
+    assert "no 'tools.profile' either" in f.detail
+
+
+def test_b301_unknown_text_does_not_claim_minimal_profile_grants_high_blast(tmp_path):
+    """THE TEXT FIX. `minimal` grants exactly ["session_status"] in the installed dist —
+    zero high-blast tools — so the UNKNOWN must not tell the operator the profile
+    legitimately grants exec / code_execution / sessions_send."""
+    _write_traj(tmp_path, ["exec"])
+    f = check_capability_drift(_ctx(tmp_path, profile="minimal"))
+    assert f.status == UNKNOWN
+    assert "minimal" in f.detail, "the text should name the profile actually in force"
+    lowered = f.detail.lower()
+    for claim in ("grants high-blast", "code_execution", "sessions_send"):
+        assert claim.lower() not in lowered, (
+            f"UNKNOWN text still claims profile 'minimal' grants {claim!r}")
+    # And it must not assert the table is unenumerable — it is enumerable; we choose
+    # not to enumerate it. Honest labelling.
+    assert "can't be enumerated" not in lowered
+    assert "does not enumerate" in lowered
+
+
+def test_b301_messaging_profile_coverage(tmp_path):
+    """NEW COVERAGE. `messaging` grants sessions_send but NOT exec/code_execution, so the
+    old blanket justification was wrong here too. Behaviour is still UNKNOWN (we do not
+    enumerate the table) — this pins the status AND the corrected wording."""
+    _write_traj(tmp_path, ["exec"])
+    f = check_capability_drift(_ctx(tmp_path, profile="messaging"))
+    assert f.status == UNKNOWN
+    assert "messaging" in f.detail
+    assert "code_execution" not in f.detail
+
+
+def test_b301_additive_agent_channel_does_not_produce_drift(tmp_path):
+    """FP GUARD for any future profile-enumeration work. T3 reads only top-level
+    `tools.*`, but its proven set is home-wide, so a verb granted through an additive
+    channel it never reads (here `agents.list[].tools.alsoAllow`) must NOT be reported as
+    drift. With no top-level bound the answer stays UNKNOWN."""
+    _write_traj(tmp_path, ["exec"])
+    ctx = Context(home=tmp_path)
+    ctx.config = {
+        "tools": {"profile": "messaging"},
+        "agents": {"list": [{"name": "worker", "tools": {"alsoAllow": ["exec"]}}]},
+    }
+    assert check_capability_drift(ctx).status == UNKNOWN
+
+
+def test_b301_toplevel_allow_still_wins_without_attestation(tmp_path):
+    """REGRESSION GUARD: the pre-existing tools.allow path is untouched by B-301."""
+    _write_traj(tmp_path, ["exec"])
+    assert check_capability_drift(_ctx(tmp_path, allow=["exec"])).status == PASS
+    assert check_capability_drift(_ctx(tmp_path, allow=["read"])).status == WARN
+
+
+def test_b301_t3_stays_unscored(tmp_path):
+    """Owner decision (I-025): T1/T2/T3 remain scored=False permanently. B-301 changes
+    T3's reach, and must not let it touch the A-F grade."""
+    from clawseccheck.behavioral import analyze
+
+    _write_traj(tmp_path, ["exec"])
+    ctx = _ctx(tmp_path, profile="coding", attested=["read"])
+    for f in analyze(ctx)["findings"]:
+        assert getattr(f, "scored", False) is False, f"{f.id} became scored"

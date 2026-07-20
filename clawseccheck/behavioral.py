@@ -360,6 +360,15 @@ def check_outcome_anomaly(groups: dict[str, list[dict]]) -> object:
 # T3 — runtime capability drift (F-123): a HIGH-BLAST verb PROVEN in the trajectory
 # log that is NOT in the declared (tools.allow / tools.alsoAllow / gateway.tools.allow)
 # ∪ attested set. Class-grant tokens (globs / group: / bundle-) make it UNKNOWN, not WARN.
+#
+# COVERAGE LIMIT (B-301, honest labelling): T3 can only assert drift when an ENUMERABLE
+# upper bound exists — a non-empty `tools.allow`, or (since B-301) a non-empty attested
+# tool inventory. OpenClaw's schema forbids allow+alsoAllow and RECOMMENDS profile+alsoAllow,
+# so the common real-world shape carries NO `tools.allow` and T3 answers UNKNOWN there.
+# Measured on the fixture corpus at the time of writing: 9 of 326 configs set a non-empty
+# `tools.allow`; 231 set a profile. B-301 NARROWED this (an --attest inventory now bounds
+# the grant, closing the "attest → same UNKNOWN forever" loop) but did NOT close it:
+# profile-only configs without an attestation remain UNKNOWN by design.
 # Complements B84: B84 fires on proven-high-blast + UNGATED posture (declared or not);
 # T3 fires on proven-high-blast + UNDECLARED (gated or not). WARN-only, scored=False,
 # --behavioral only — never audit()/CHECKS/A-F. The HIGH-BLAST gate is load-bearing:
@@ -411,16 +420,28 @@ def _t3_declared(ctx) -> tuple[set, bool, bool]:
     tools.alsoAllow + gateway.tools.allow UNION the attested inventory.
     ``unbounded`` — True when any class-grant token (glob / group / bundle / sentinel) is
     present, so the surface can't be enumerated.
-    ``has_allow_bound`` — True when the TOP-LEVEL ``tools.allow`` is a present, non-empty
-    list. That is the ONLY channel establishing an ENUMERABLE RESTRICTIVE upper bound: a
-    non-empty allow-list denies anything it doesn't match, so a proven verb is necessarily
-    within it. When it is ABSENT the base grant is ``tools.profile`` (explicit or the default),
-    an unenumerable set that legitimately grants high-blast core tools (exec / code_execution /
-    sessions_send) — so drift can't be asserted (C-135: OpenClaw's schema forbids allow+alsoAllow
-    and RECOMMENDS profile+alsoAllow, where there is no allow layer at all). alsoAllow /
-    gateway.tools.allow / attestation only ADD to the declared set — they never bound it, so
-    they don't gate. The profile can only NARROW (AND-intersection) a present allow-list, so it
-    can't add false drift when a bound exists. Mirrors B84's construction (_capability.py:347-361)."""
+    ``has_allow_bound`` — True when an ENUMERABLE RESTRICTIVE upper bound on the grant
+    exists. TWO channels establish one:
+
+    1. A present, non-empty top-level ``tools.allow``: an allow-list denies anything it
+       doesn't match, so a proven verb is necessarily within it.
+    2. B-301: a non-empty ATTESTED ``tools`` inventory contributing at least one literal
+       verb. ``attest.template()`` asks the operator to "List your REAL tool/verb names
+       exactly as you can invoke them" — that IS a complete inventory, asserted by the
+       operator. Honouring it here is what closes T3's closed loop: the UNKNOWN branch
+       below has always advised "or attest the exact tool inventory with --attest", the
+       attestation was already parsed into ``literals``, and yet ``has_allow_bound``
+       could not be set by it — so an operator who followed the tool's own remediation
+       re-ran and got the identical UNKNOWN forever. FP exposure is minimal: nothing is
+       inferred, the operator explicitly asserted completeness.
+
+    ``tools.alsoAllow`` / ``gateway.tools.allow`` only ADD to the declared set — they never
+    bound it, so they don't gate. The profile can only NARROW (AND-intersection) a present
+    bound, so it can't add false drift when one exists. Mirrors B84's construction
+    (_capability.py:347-361).
+
+    When NEITHER channel is present the base grant is ``tools.profile``, which this module
+    deliberately does not enumerate — see check_capability_drift's UNKNOWN branch."""
     cfg = getattr(ctx, "config", None) or {}
     allow = dig(cfg, "tools.allow")
     has_allow_bound = isinstance(allow, list) and len(allow) > 0
@@ -435,20 +456,34 @@ def _t3_declared(ctx) -> tuple[set, bool, bool]:
         if isinstance(v, list):
             raw += v
     reported = (getattr(ctx, "attestation", None) or {}).get("tools")
-    if isinstance(reported, list):
-        raw += reported
+    attested: list = reported if isinstance(reported, list) else []
     literals: set = set()
     unbounded = False
-    for t in raw:
-        if not isinstance(t, (str, bytes)):
-            continue
-        s = (t.decode("utf-8", "replace") if isinstance(t, bytes) else t).strip()
-        if not s:
-            continue
-        if _t3_is_class_grant(s):
-            unbounded = True
-            continue
-        literals.add(_t3_canon(s))
+
+    def _absorb(tokens) -> int:
+        """Fold *tokens* into `literals`/`unbounded`; return the literal count added."""
+        nonlocal unbounded
+        added = 0
+        for t in tokens:
+            if not isinstance(t, (str, bytes)):
+                continue
+            s = (t.decode("utf-8", "replace") if isinstance(t, bytes) else t).strip()
+            if not s:
+                continue
+            if _t3_is_class_grant(s):
+                unbounded = True
+                continue
+            literals.add(_t3_canon(s))
+            added += 1
+        return added
+
+    _absorb(raw)
+    # B-301: an attested inventory bounds the grant only if it actually yields a literal
+    # verb. An attestation of pure class-grant tokens sets `unbounded` instead (the
+    # unbounded branch answers UNKNOWN), and one of pure junk bounds nothing at all — so
+    # the "no interpretable tool name" branch keeps naming a real condition.
+    if _absorb(attested):
+        has_allow_bound = True
     return literals, unbounded, has_allow_bound
 
 
@@ -481,21 +516,60 @@ def check_capability_drift(ctx) -> object:
         )
     declared, unbounded, has_allow_bound = _t3_declared(ctx)
     if not has_allow_bound:
-        # No explicit top-level `tools.allow` to bound the grant. Then the base grant is the
-        # tools.profile (explicit or the DEFAULT profile) — an unenumerable set that
-        # legitimately grants high-blast core tools (exec / code_execution / sessions_send).
-        # OpenClaw's schema even FORBIDS allow+alsoAllow and recommends `profile + alsoAllow`,
-        # where there is no allow layer at all, so a proven profile-granted verb would
-        # spuriously "drift". §4: report UNKNOWN when state genuinely can't be determined.
+        # Neither an explicit top-level `tools.allow` nor an attested inventory bounds the
+        # grant, so the base grant is `tools.profile`. OpenClaw's schema FORBIDS
+        # allow+alsoAllow and RECOMMENDS `profile + alsoAllow` (dist
+        # zod-schema.agent-runtime-C02vY4RT.js, addAllowAlsoAllowConflictIssue), so this is
+        # the COMMON shape, not an edge case — T3 is UNKNOWN on most real configs, including
+        # profile-only ones. §4: report UNKNOWN when state genuinely can't be determined.
+        #
+        # B-301 corrected two FALSE claims this branch used to make:
+        #
+        # (a) "or the DEFAULT profile" — there is no default profile. Dist
+        #     tool-catalog-C8xbUFNe.js `resolveCoreToolProfilePolicy(profile)` opens with
+        #     `if (!profile) return;`, so an ABSENT `tools.profile` resolves to NO policy at
+        #     all. With no bound in existence, UNKNOWN is correct and unfixable there.
+        #
+        # (b) "the profile ... legitimately grants high-blast core tools (exec /
+        #     code_execution / sessions_send)" — false. `CORE_TOOL_PROFILES` is a STATIC,
+        #     enumerable table; measured against the installed dist, `minimal` grants
+        #     exactly ["session_status"] (ZERO high-blast) and `messaging` grants
+        #     [message, session_status, sessions_history, sessions_list, sessions_send]
+        #     (sessions_send only — no exec / code_execution / write / apply_patch / cron).
+        #     Only `coding` (~40 tools) and `full` (["*"]) match the old claim.
+        #
+        # HONEST LABELLING: the accurate statement is that clawseccheck does not enumerate
+        # the profile table, NOT that it cannot be enumerated. Enumerating it was considered
+        # and deliberately NOT done: the table is version-fragile (it is keyed off
+        # CORE_TOOL_DEFINITIONS, which moves between OpenClaw releases), it would need its
+        # own grounded-manifest entries under GR#4, and a naive version would false-WARN —
+        # T3 reads only top-level `tools.*` while its proven set is home-wide, so additive
+        # channels it never reads (agents.list[].tools.*, tools.byProvider, tools.toolsBySender,
+        # tools.subagents.tools.allow, tools.sandbox.tools, plugins.allow) would each look
+        # like drift. So this NARROWS BEHAV-5; it does not close it.
+        profile = dig(getattr(ctx, "config", None) or {}, "tools.profile")
+        if isinstance(profile, str) and profile.strip():
+            detail = (
+                f"No enumerable upper bound on the tool grant — no 'tools.allow' and no "
+                f"attested inventory, so the grant is governed by tools.profile "
+                f"'{profile.strip()}'. clawseccheck does not enumerate OpenClaw's built-in "
+                f"profile table (it is version-specific), so a proven verb can't be shown "
+                f"UNDECLARED against it."
+            )
+        else:
+            detail = (
+                "No enumerable upper bound on the tool grant — no 'tools.allow', no attested "
+                "inventory, and no 'tools.profile' either. OpenClaw resolves no profile policy "
+                "at all when the field is absent, so there is no restriction a proven verb "
+                "could be shown to exceed."
+            )
         return _finding(
             "T3",
             UNKNOWN,
-            "No explicit 'tools.allow' upper bound — the tool grant is governed by "
-            "'tools.profile' (or the default profile), whose tool set can't be enumerated from "
-            "config, so a proven verb can't be shown UNDECLARED (an absent allow-list is not a "
-            "restriction a proven verb could exceed).",
-            "For drift detection, pin the high-blast tools you intend to grant as explicit "
-            "verb names in 'tools.allow' (or attest the exact tool inventory with --attest).",
+            detail,
+            "For drift detection, attest the exact tool inventory with --attest (a non-empty "
+            "attested tool list is now itself treated as the upper bound), or pin the "
+            "high-blast tools you intend to grant as explicit verb names in 'tools.allow'.",
         )
     if unbounded:
         # tools.allow is present but grants a whole class (a glob '<server>__*', a 'group:...'
@@ -509,7 +583,8 @@ def check_capability_drift(ctx) -> object:
             "'group:...' or 'bundle-...' bundle) — the granted surface can't be enumerated, "
             "so a proven verb can't be shown UNDECLARED without false positives.",
             "For drift detection, pin the high-blast tools you intend to grant as explicit "
-            "verb names in 'tools.allow' (or attest the exact tool inventory with --attest).",
+            "verb names in 'tools.allow' (a class-grant token in an --attest inventory is "
+            "read the same way, so replace those with literal verb names too).",
         )
     if not declared:
         # tools.allow was a non-empty list but carried no interpretable string verb (e.g. all

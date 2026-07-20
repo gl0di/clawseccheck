@@ -69,14 +69,25 @@ def _credential_rotation_list(findings) -> list[str]:
     return list(b41.evidence) if b41 is not None and b41.evidence else []
 
 
-def build_incident(ctx, findings, score, *, when: str | None = None) -> dict:
+def build_incident(ctx, findings, score, *, when: str | None = None,
+                   events: str | Path | None = None) -> dict:
     """Build the evidence-pack dict from an already-audited Context. Pure aside
-    from the trajectory-file/event-log reads reused above — no writes, no network."""
+    from the trajectory-file/event-log reads reused above — no writes, no network.
+
+    *events* is the monitor journal to harvest, i.e. the CLI's ``--events``. B-277:
+    this used to be hardcoded to ``DEFAULT_EVENTS``, so ``--incident --events X``
+    silently reported the DEFAULT journal's contents instead of X's. On a host that
+    monitors several agents that is worse than an empty list: the pack's ``sbom``
+    described the agent named by ``--home`` while ``monitor_events`` described a
+    different one, and nothing in the pack disclosed the mismatch. ``None`` keeps
+    the documented default so library callers are unaffected.
+    """
     from . import __version__  # noqa: PLC0415 (avoid import-order coupling)
     from .report import _finding_to_dict  # noqa: PLC0415
 
     if when is None:
         when = datetime.now().isoformat(timespec="seconds")
+    events_path = DEFAULT_EVENTS if events is None else events
 
     return {
         # C-241: a machine-readable tool identifier (matches the CLI binary/package
@@ -96,11 +107,17 @@ def build_incident(ctx, findings, score, *, when: str | None = None) -> dict:
         "sbom": build_sbom(ctx),
         "trajectory_hashes": _trajectory_hash_entries(ctx.home),
         "credential_rotation_list": _credential_rotation_list(findings),
-        "monitor_events": load_events(DEFAULT_EVENTS),
+        "monitor_events": load_events(events_path),
+        # B-277: provenance. An evidence pack that quotes a journal must say WHICH
+        # journal, or a reader cannot tell an empty history from the wrong host's
+        # history. Recorded verbatim (an operator-supplied local path, never a
+        # secret) and always present, even when the read came up empty.
+        "monitor_events_source": str(events_path),
     }
 
 
-def render_incident(ctx, findings, score, *, when: str | None = None) -> str:
+def render_incident(ctx, findings, score, *, when: str | None = None,
+                    events: str | Path | None = None) -> str:
     """Return the evidence pack as a stably-ordered JSON string."""
-    payload = build_incident(ctx, findings, score, when=when)
+    payload = build_incident(ctx, findings, score, when=when, events=events)
     return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)

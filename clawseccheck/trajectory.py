@@ -10,12 +10,18 @@ This module extracts the SET of tool verbs the agent actually invoked (``data.na
 so a check can report *proven* — log-observed, not self-reported — tool use. It is the
 log-observed upgrade to the attestation self-report path.
 
+It also reads ``type == "context.compiled"`` records, whose ``data.tools[]`` carries the
+tool DEFINITIONS OpenClaw actually sent to the model — see
+``read_compiled_tool_descriptions`` (F-133/B185).
+
 Security (§8): this reads the user's own logs, which may contain secrets. It reads ONLY
-``data.name`` (the tool identity, not a secret), the version marker, and the top-level
+``data.name`` (the tool identity, not a secret), the version marker, the top-level
 ``sessionKey``'s ORIGIN KIND (see ``parse_session_origin`` — never the peer id it
-embeds) — it NEVER reads ``data.arguments``, ``data.output``, ``data.result`` or
-``data.contentItems`` (the sensitive call/return payloads). Stdlib-only, read-only,
-no network.
+embeds), and the named ``data.tools[]`` sub-fields listed in
+``read_compiled_tool_descriptions`` — it NEVER reads ``data.arguments``,
+``data.output``, ``data.result``, ``data.contentItems`` (the sensitive call/return
+payloads) nor ``context.compiled``'s ``systemPrompt``/``prompt``/``messages`` siblings
+(the user's own conversation). Stdlib-only, read-only, no network.
 """
 from __future__ import annotations
 
@@ -199,6 +205,218 @@ def read_proven_tools(
 # Event types read_events() understands. Every other `type` value is skipped —
 # never guessed at (§4: no fabricated facts about an ungrounded event shape).
 _EVENT_TYPES = ("tool.call", "tool.result", "prompt.submitted")
+
+
+# ---------------------------------------------------------------------------
+# F-133 / B185 — the tool DEFINITIONS OpenClaw actually sent to the model.
+# ---------------------------------------------------------------------------
+#
+# GROUNDING (installed dist, verified first-hand — not the recon doc, which is silent
+# on this event):
+#   * `selection-JInn13lc.js:14035` — trajectoryRecorder.recordEvent("context.compiled",
+#     {systemPrompt, prompt, messages, tools: toTrajectoryToolDefinitions(...), ...}),
+#     plus `providerVisibleTools` at :14040 when `toolSearch.compacted`.
+#   * `run-attempt-CXZNKJ6y.js:5228` — recordCodexTrajectoryContext, the SECOND emission
+#     path (Codex harness), same event type and same `tools` shape. Both are covered.
+#   * `toTrajectoryToolDefinitions` (selection:752, run-attempt:5272) returns
+#     {name, description, parameters}. `description` is copied VERBATIM — only
+#     `parameters`/`inputSchema` goes through a sanitizer. So whatever text a tool
+#     provider put in a description is on disk, unmodified.
+#   * The MCP leg is complete in the dist: `client.listTools()`
+#     (agent-bundle-mcp-runtime--G82BMQs.js:881) populates the catalog, and
+#     agent-bundle-mcp-materialize-D9l-gQ5S.js:164 builds the agentTool with
+#     `description: tool.description || tool.fallbackDescription`, pushed at :180 into
+#     the array that becomes `effectiveTools` and then `context.compiled`.
+#   * Recording is ON BY DEFAULT: selection:765
+#     `if (!(parseBooleanValue(env.OPENCLAW_TRAJECTORY) ?? true)) return null;`
+#
+# WHY A DEDICATED READER instead of widening logscan's line cap: every real
+# `context.compiled` line measured on a live host is 40–61 KB (n=268; min 40492,
+# median 40854, max 60874), all far over logscan's `_MAX_LINE_LEN = 8000`, so today
+# they are skipped outright. Raising that cap would push tens of KB of
+# attacker-influenced text through the full regex battery — the exact ReDoS/DoS
+# surface C-214 and B-192 exist to prevent. The sound fix is field-scoped extraction
+# under its own bounds, which is what this is.
+#
+# §8: this reader extracts ONLY `data.tools[]` / `data.providerVisibleTools[]` and,
+# within each entry, only `name`, `description`, and the parameter `description` /
+# `default` strings under `parameters.properties`. The sibling `systemPrompt`,
+# `prompt` and `messages` fields are the user's own conversation and bootstrap text —
+# they are NEVER read, returned, or emitted. Honest limit: a whole-line `json.loads`
+# does transiently materialize the siblings while parsing (as `trajaudit.py` already
+# does for `data.arguments` under the Dave-ratified C-158 exception); the guarantee
+# here is that nothing outside `tools[]` is ever read out of the parsed record or
+# reaches a caller. `tests/test_b185_compiled_tool_poisoning.py` pins that property
+# with sibling text that WOULD trip the detectors if it leaked.
+_COMPILED_EVENT_TYPE = "context.compiled"
+
+# The two `context.compiled` fields carrying tool definitions (dist cites above).
+_COMPILED_TOOL_FIELDS = ("tools", "providerVisibleTools")
+
+# DoS bounds (B-192's OOM lesson: bound the parse, not just the walk). Real events
+# measured 40–61 KB with <=20 tools and a <=4.1 KB longest description, so these caps
+# sit far above legitimate traffic and only bite on a padded/hostile line.
+_MAX_COMPILED_LINE_LEN = 1_000_000
+_MAX_TOOLS_PER_EVENT = 200
+_MAX_TOOL_DEFS = 2_000
+_MAX_DESC_CHARS = 20_000
+_MAX_PARAMS_PER_TOOL = 100
+
+
+def _bounded_text(value, limit: int = _MAX_DESC_CHARS) -> str:
+    """Return *value* as a string truncated to *limit* chars (non-strings -> "")."""
+    if not isinstance(value, str):
+        return ""
+    return value[:limit]
+
+
+def _compiled_tool_entry(tool, field: str) -> dict | None:
+    """Project one trajectory tool definition onto the §8-allowed named fields.
+
+    Returns ``{name, description, params, field}`` where ``params`` is a list of
+    ``(param_name, description, default)`` triples read from ``parameters.properties``
+    — the trajectory's spelling of what C-038's TP3 leg calls ``inputSchema.properties``
+    (dist `toTrajectoryToolDefinitions` renames the key on the way to disk). Returns
+    ``None`` for a malformed entry — never a guess.
+    """
+    if not isinstance(tool, dict):
+        return None
+    name = tool.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    params: list[tuple[str, str, str]] = []
+    parameters = tool.get("parameters")
+    if isinstance(parameters, dict):
+        props = parameters.get("properties")
+        if isinstance(props, dict):
+            for param_name, param_def in list(props.items())[:_MAX_PARAMS_PER_TOOL]:
+                if not isinstance(param_def, dict):
+                    continue
+                params.append((
+                    str(param_name)[:200],
+                    _bounded_text(param_def.get("description")),
+                    _bounded_text(param_def.get("default")),
+                ))
+    return {
+        "name": name.strip()[:200],
+        "description": _bounded_text(tool.get("description")),
+        "params": params,
+        "field": field,
+    }
+
+
+def read_compiled_tool_descriptions(
+    home: Path,
+    *,
+    max_files: int = _MAX_FILES,
+    max_bytes_per_file: int = _MAX_BYTES_PER_FILE,
+    explicit_path: str | None = None,
+) -> tuple[list[dict], dict]:
+    """Return ``(tool_defs, meta)`` — the tool definitions actually sent to the model.
+
+    Reads ``type == "context.compiled"`` records from the trajectory sidecars under
+    *home* and returns the DEDUPLICATED tool definitions found in ``data.tools[]`` and
+    ``data.providerVisibleTools[]``. Each entry is
+    ``{name, description, params, field}`` as built by ``_compiled_tool_entry``.
+    Deduplication is by full content, so the 4,925 definitions a real host records
+    collapse to the ~20 distinct ones actually in play.
+
+    This is POST-HOC FORENSIC evidence: it reports what WAS sent to the model in
+    sessions that already ran. It cannot pre-clear a live MCP server, and a server that
+    served a clean description on the recorded runs can serve a poisoned one later.
+
+    ``meta`` reports ``present`` (any trajectory file found), ``files_scanned``,
+    ``events`` (``context.compiled`` records parsed), ``unknown_version``, and
+    ``truncated`` (a per-file byte cap, an oversized line, or a per-scan definition cap
+    was hit — the extracted set is then incomplete, so a clean verdict on it must not
+    read as confidently complete).
+
+    §8: only the named sub-fields above are read. ``systemPrompt``, ``prompt`` and
+    ``messages`` — the user's own conversation — are never read or returned.
+    """
+    tool_defs: list[dict] = []
+    meta = {
+        "present": False, "files_scanned": 0, "events": 0,
+        "unknown_version": False, "truncated": False,
+        "files_total": 0, "files_capped": False,
+    }
+
+    if explicit_path:
+        p = Path(explicit_path).expanduser()
+        files = [p] if p.is_file() else []
+        meta["files_total"] = len(files)
+    else:
+        stats: dict = {}
+        files = find_trajectory_files(home, max_files=max_files, stats=stats)
+        meta["files_total"] = stats.get("files_total", 0)
+        meta["files_capped"] = stats.get("files_capped", False)
+    if not files:
+        return tool_defs, meta
+    meta["present"] = True
+
+    seen: set[tuple] = set()
+    for path in files:
+        try:
+            read = 0
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    read += len(line)
+                    if read > max_bytes_per_file:
+                        meta["truncated"] = True
+                        break
+                    # Cheap pre-filter: never JSON-parse the many other event types.
+                    if f'"{_COMPILED_EVENT_TYPE}"' not in line:
+                        continue
+                    # Bound the parse itself (B-192): a padded line is skipped and
+                    # DISCLOSED, never silently dropped and never parsed.
+                    if len(line) > _MAX_COMPILED_LINE_LEN:
+                        meta["truncated"] = True
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get("traceSchema") != _TRACE_SCHEMA:
+                        continue
+                    if rec.get("schemaVersion") != _SCHEMA_VERSION:
+                        meta["unknown_version"] = True
+                        continue
+                    if rec.get("type") != _COMPILED_EVENT_TYPE:
+                        continue
+                    data = rec.get("data")
+                    if not isinstance(data, dict):
+                        continue
+                    meta["events"] += 1
+                    # §8: ONLY the tool-definition fields are touched. The sibling
+                    # systemPrompt / prompt / messages keys are never referenced.
+                    for field in _COMPILED_TOOL_FIELDS:
+                        tools = data.get(field)
+                        if not isinstance(tools, list):
+                            continue
+                        if len(tools) > _MAX_TOOLS_PER_EVENT:
+                            meta["truncated"] = True
+                        for tool in tools[:_MAX_TOOLS_PER_EVENT]:
+                            entry = _compiled_tool_entry(tool, field)
+                            if entry is None:
+                                continue
+                            key = (
+                                entry["name"], entry["description"],
+                                tuple(entry["params"]), entry["field"],
+                            )
+                            if key in seen:
+                                continue
+                            if len(tool_defs) >= _MAX_TOOL_DEFS:
+                                meta["truncated"] = True
+                                break
+                            seen.add(key)
+                            tool_defs.append(entry)
+        except OSError:
+            continue
+        meta["files_scanned"] += 1
+
+    return tool_defs, meta
 
 
 # ---------------------------------------------------------------------------

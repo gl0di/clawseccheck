@@ -41,6 +41,7 @@ def test_build_incident_has_expected_top_level_keys(tmp_path):
     assert set(payload.keys()) == {
         "tool", "version", "purpose", "generated_at", "score", "findings",
         "sbom", "trajectory_hashes", "credential_rotation_list", "monitor_events",
+        "monitor_events_source",  # B-277 provenance
     }
     assert payload["tool"] == "clawseccheck"
     assert payload["generated_at"] == "2026-07-04T00:00:00"
@@ -193,6 +194,120 @@ def test_monitor_events_empty_when_no_event_journal(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     payload = build_incident(ctx, [], _score(), when="2026-07-04T00:00:00")
     assert payload["monitor_events"] == []
+
+
+# --------------------------------------------------------------------------- B-277
+# `--incident` accepted `--events PATH` and silently harvested the DEFAULT journal
+# instead. A flag that is accepted and ignored is worse than one that errors: on a
+# host monitoring several agents the pack's `sbom` described the agent named by
+# `--home` while `monitor_events` described whichever agent last wrote the default
+# journal, and no field in the pack disclosed which file had actually been read.
+
+def _event_line(message: str, severity: str = "CRITICAL") -> str:
+    return json.dumps({"ts": "2026-07-20T10:00:00", "severity": severity,
+                       "message": message}) + "\n"
+
+
+def test_explicit_events_path_is_honored(tmp_path, monkeypatch):
+    """CLEAN: the named journal is the one that gets read."""
+    named = tmp_path / "named.jsonl"
+    named.write_text(_event_line("NEW skill installed: 'evil-jp'"), encoding="utf-8")
+    # Point the default somewhere empty so a pass cannot come from the default path.
+    monkeypatch.setattr("clawseccheck.incident.DEFAULT_EVENTS", str(tmp_path / "absent.jsonl"))
+
+    payload = build_incident(_ctx(tmp_path), [], _score(),
+                             when="2026-07-04T00:00:00", events=str(named))
+
+    assert [e["message"] for e in payload["monitor_events"]] == [
+        "NEW skill installed: 'evil-jp'"]
+    assert payload["monitor_events_source"] == str(named)
+
+
+def test_explicit_events_path_is_not_substituted_by_the_default_journal(tmp_path, monkeypatch):
+    """BAD-state repro: a POPULATED default journal must not shadow the named one.
+
+    Pre-fix this returned agent B's events while the operator asked for agent A's —
+    the substitution case, which is strictly worse than the empty-list case because
+    the pack looks complete.
+    """
+    agent_a = tmp_path / "agent_a.jsonl"
+    agent_a.write_text(_event_line("AGENT-A alert"), encoding="utf-8")
+    agent_b_default = tmp_path / "agent_b_default.jsonl"
+    agent_b_default.write_text(_event_line("AGENT-B skill 'evil-b' installed"), encoding="utf-8")
+    monkeypatch.setattr("clawseccheck.incident.DEFAULT_EVENTS", str(agent_b_default))
+
+    payload = build_incident(_ctx(tmp_path), [], _score(),
+                             when="2026-07-04T00:00:00", events=str(agent_a))
+
+    messages = [e["message"] for e in payload["monitor_events"]]
+    assert messages == ["AGENT-A alert"]
+    assert not any("AGENT-B" in m for m in messages), (
+        "the default journal leaked into a pack that named a different --events file")
+    assert payload["monitor_events_source"] == str(agent_a)
+
+
+def test_events_none_falls_back_to_the_default_journal(tmp_path, monkeypatch):
+    """The documented default is preserved for library callers that pass nothing."""
+    default = tmp_path / "default.jsonl"
+    default.write_text(_event_line("from the default journal"), encoding="utf-8")
+    monkeypatch.setattr("clawseccheck.incident.DEFAULT_EVENTS", str(default))
+
+    payload = build_incident(_ctx(tmp_path), [], _score(), when="2026-07-04T00:00:00")
+
+    assert [e["message"] for e in payload["monitor_events"]] == ["from the default journal"]
+    assert payload["monitor_events_source"] == str(default)
+
+
+def test_monitor_events_source_is_recorded_even_when_the_journal_is_absent(tmp_path):
+    """Provenance is unconditional: an empty history and the wrong host's history
+    must never be indistinguishable."""
+    absent = tmp_path / "absent.jsonl"
+    payload = build_incident(_ctx(tmp_path), [], _score(),
+                             when="2026-07-04T00:00:00", events=str(absent))
+    assert payload["monitor_events"] == []
+    assert payload["monitor_events_source"] == str(absent)
+
+
+def test_render_incident_threads_events_through(tmp_path, monkeypatch):
+    """render_incident is the CLI's entry point — the kwarg must survive it."""
+    named = tmp_path / "named.jsonl"
+    named.write_text(_event_line("rendered from the named journal"), encoding="utf-8")
+    monkeypatch.setattr("clawseccheck.incident.DEFAULT_EVENTS", str(tmp_path / "absent.jsonl"))
+
+    payload = json.loads(render_incident(_ctx(tmp_path), [], _score(),
+                                         when="2026-07-04T00:00:00", events=str(named)))
+
+    assert [e["message"] for e in payload["monitor_events"]] == [
+        "rendered from the named journal"]
+    assert payload["monitor_events_source"] == str(named)
+
+
+def test_cli_incident_honors_events_flag(tmp_path, monkeypatch, capsys):
+    """End-to-end through main(): the plumbing gap was in cli.py, not just incident.py."""
+    named = tmp_path / "named.jsonl"
+    named.write_text(_event_line("NEW skill installed: 'evil-jp'"), encoding="utf-8")
+    monkeypatch.setattr("clawseccheck.incident.DEFAULT_EVENTS", str(tmp_path / "absent.jsonl"))
+
+    rc = main(["--incident", "--home", str(tmp_path), "--events", str(named),
+               "--history", str(tmp_path / "h.jsonl")])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [e["message"] for e in payload["monitor_events"]] == [
+        "NEW skill installed: 'evil-jp'"]
+    assert payload["monitor_events_source"] == str(named)
+
+
+def test_events_is_not_announced_as_a_dropped_flag_for_incident(tmp_path, capsys):
+    """--events is now genuinely consumed by --incident, so _flag_coherence_notes
+    must not enrol it in the 'has no effect' list (the alternative fix, not taken)."""
+    named = tmp_path / "named.jsonl"
+    named.write_text(_event_line("consumed"), encoding="utf-8")
+
+    main(["--incident", "--home", str(tmp_path), "--events", str(named),
+          "--history", str(tmp_path / "h.jsonl")])
+
+    assert "--events" not in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------- CLI

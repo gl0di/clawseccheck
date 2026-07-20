@@ -255,12 +255,27 @@ def _run_vet_mcp(target, args, ascii_only: bool) -> int:
 
 # Primary modes in the EXACT precedence order main() resolves them below.
 # kind "opt" → active when the value is not None; "bool" → active when truthy.
+#
+# B-276: this list used to be hand-ordered and had drifted from _main()'s real
+# cascade in 27 pairs — so _flag_coherence_notes named the WRONG winner. The worst
+# case was `--monitor --judge-packet`: stderr said "--judge-packet ignored (running
+# --monitor)" while _main() actually ran --judge-packet at :1048 (before --monitor at
+# :1074), printed the judge packet, and never advanced the monitor baseline. The note
+# accused the mode that had in fact won. Detection was deferred, not destroyed (the
+# baseline never advanced, so a later monitor-only run still fires), but three
+# consecutive combined runs each returned rc=0, wrote nothing, and repeated the lie.
+#
+# The order below is now the order tests/test_mode_drift_guard.py extracts from
+# _main()'s top-level `if` cascade, and that test asserts EQUALITY, not membership.
+# Reordering this list changes only which mode the stderr note NAMES — dispatch has
+# always been decided by _main()'s cascade and is untouched.
 _PRIMARY_MODES = [
-    ("menu", "--menu", "bool"),
-    ("functions", "--functions", "bool"),
+    ("purge", "--purge", "bool"),
     ("verify_self", "--verify-self", "bool"),
     ("verify_history", "--verify-history", "bool"),
-    ("purge", "--purge", "bool"),
+    ("vet_plan", "--vet-plan", "opt"),
+    ("menu", "--menu", "bool"),
+    ("functions", "--functions", "bool"),
     ("vet", "--vet", "opt"),
     ("vet_skill", "--vet-skill", "opt"),
     ("vet_plugin", "--vet-plugin", "opt"),
@@ -268,7 +283,6 @@ _PRIMARY_MODES = [
     ("vet_mcp", "--vet-mcp", "opt"),
     ("vet_source", "--vet-source", "opt"),
     ("advise", "--advise", "opt"),
-    ("vet_plan", "--vet-plan", "opt"),
     ("canary", "--canary", "bool"),
     ("redteam", "--redteam", "bool"),
     ("dryrun", "--dryrun", "bool"),
@@ -285,14 +299,14 @@ _PRIMARY_MODES = [
     ("percentile", "--percentile", "bool"),
     ("next", "--next", "bool"),
     ("dashboard", "--dashboard", "bool"),
+    ("dashboard_findings", "--dashboard-findings", "bool"),
     ("sbom", "--sbom", "bool"),
     ("incident", "--incident", "bool"),
-    ("analyze_trajectory", "--analyze-trajectory", "opt"),
-    ("behavioral", "--behavioral", "opt"),
-    ("dashboard_findings", "--dashboard-findings", "bool"),
-    ("monitor", "--monitor", "bool"),
     ("judge_packet", "--judge-packet", "bool"),
     ("judged", "--judged", "opt"),
+    ("analyze_trajectory", "--analyze-trajectory", "opt"),
+    ("behavioral", "--behavioral", "opt"),
+    ("monitor", "--monitor", "bool"),
 ]
 
 # Which tracked global modifiers each primary mode actually honors. The default
@@ -307,11 +321,21 @@ _MODE_HONORS = {
     "advise": frozenset({"json"}),
 }
 
-# Primary modes that run AFTER the --attest block in main()'s cascade: their findings
-# come from audit(attestation=...), so --attest is genuinely consumed there, not ignored.
+# Primary modes that run AFTER the --attest block in main()'s cascade: their ctx and
+# findings come from audit(attestation=...), so --attest is genuinely consumed there,
+# not ignored. This is exactly the tail of _PRIMARY_MODES from "risk_paths" onward —
+# every mode dispatched below the audit() call at _main():~960 — and
+# tests/test_mode_drift_guard.py derives that tail from the AST and asserts equality,
+# so the set cannot drift from the cascade again.
+#
+# B-301 (adjacent): "behavioral" was missing here, so `--behavioral --attest f.json`
+# printed "note: --attest has no effect with --behavioral" — false in the opposite
+# direction, since T3 reads ctx.attestation. "sbom", "incident", "judge_packet",
+# "judged" and "analyze_trajectory" were missing for the same reason.
 _ATTEST_CONSUMERS = frozenset({
     "risk_paths", "badge", "html", "sarif", "trend", "percentile",
-    "next", "dashboard", "dashboard_findings", "monitor",
+    "next", "dashboard", "dashboard_findings", "sbom", "incident",
+    "judge_packet", "judged", "analyze_trajectory", "behavioral", "monitor",
 })
 
 
@@ -519,7 +543,8 @@ def _main(argv=None) -> int:
     p.add_argument("--state", default=DEFAULT_STATE, metavar="PATH",
                    help=f"snapshot file for --monitor (default: {DEFAULT_STATE})")
     p.add_argument("--events", default=DEFAULT_EVENTS, metavar="PATH",
-                   help=f"Agent Watch event journal (default: {DEFAULT_EVENTS})")
+                   help=f"Agent Watch event journal, read by --watch-log/--incident and "
+                        f"written by --monitor (default: {DEFAULT_EVENTS})")
     p.add_argument("--watch-log", action="store_true",
                    help="print the Agent Watch event journal (timeline of what changed)")
     p.add_argument("--vet", metavar="TARGET",
@@ -548,7 +573,8 @@ def _main(argv=None) -> int:
     p.add_argument("--incident", action="store_true",
                    help="print a local, read-only incident-response evidence pack: findings "
                         "snapshot, skill/MCP hashes (--sbom), trajectory-sidecar hashes, the "
-                        "credential rotation list, and monitor event history — never rotates "
+                        "credential rotation list, and monitor event history from --events "
+                        "(recorded in the pack as monitor_events_source) — never rotates "
                         "or deletes anything itself")
     p.add_argument("--analyze-trajectory", nargs="?", const="", default=None, metavar="PATH",
                    dest="analyze_trajectory",
@@ -1042,7 +1068,10 @@ def _main(argv=None) -> int:
         return 0
 
     if args.incident:
-        _emit(render_incident(ctx, findings, score))
+        # B-277: --events was accepted and silently dropped here, so the pack
+        # harvested the DEFAULT journal no matter what the operator named. Threaded
+        # like --watch-log (:~915) and --monitor (:~1078) already do.
+        _emit(render_incident(ctx, findings, score, events=args.events))
         return 0
 
     if args.judge_packet:
