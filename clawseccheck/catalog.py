@@ -1968,10 +1968,47 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="secrets",
     ),
+    # B185 (F-133, RT-1): poisoned tool descriptions in what OpenClaw ACTUALLY SENT to
+    # the model. OpenClaw records the compiled tool definitions into the trajectory
+    # sidecar as a `context.compiled` event with `data.tools[] = {name, description,
+    # parameters}`, and `description` is copied VERBATIM (only `parameters` is
+    # sanitized) — dist selection-JInn13lc.js:752/14035 and run-attempt-CXZNKJ6y.js:5228
+    # (the Codex path; both are read). The chain from a live MCP server's listTools()
+    # into that field is complete in the dist, so a description poisoned by a live
+    # server is already on disk and needs no network call to inspect. Nothing read it
+    # before: `context.compiled` had zero occurrences anywhere in this repo, and every
+    # "tools" reader (C-038, B64, monitor's tool_sigs) reads CONFIG, which no real
+    # config populates.
+    #
+    # HONEST SCOPE — this is a POST-HOC FORENSIC detector. It proves what WAS delivered
+    # to the model in sessions that already ran. It does NOT pre-clear a live MCP
+    # server, and a server that serves a clean description on the recorded runs can
+    # serve a poisoned one later. It converts "a poisoned live tool description is
+    # structurally undetectable offline" into "detectable after the fact from local
+    # evidence" — a real narrowing, not a closure of pre-use vetting.
+    #
+    # FAIL is anchored on ENCODING/EXFIL evidence (hidden comment, data-URI, base64
+    # shell payload, parameter injection/exfil URL), never on imperative phrasing: real
+    # descriptions are dense imperative prose, and keying on verbs would reproduce the
+    # B-202 defensive-comment residual on a new surface. A bare instruction-override
+    # keyword stays WARN. Absent trajectory -> UNKNOWN, never PASS (E-052/B-251
+    # lying-PASS class). scored=False on the B84/B85 precedent: the verdict depends on
+    # whether session logs exist and how long they are retained, not on the owner's
+    # posture.
+    CheckMeta(
+        "B185",
+        "Poisoned tool description in what OpenClaw actually sent to the model",
+        HIGH,
+        "advisory",
+        "Prompt Injection / Tool Poisoning",
+        scored=False,
+        confidence="HIGH",
+        surface="mcp",
+    ),
     # B192 (B-282, ENV-6): documented break-glass env toggles left on in a persistent
     # dotenv file. scored=False, WARN-capable only — OpenClaw's own docs instruct users to
     # set OPENCLAW_ALLOW_INSECURE_PRIVATE_WS in some setups, so a FAIL would punish
-    # following the vendor manual. IDs B185-B191 are reserved by other in-flight work.
+    # following the vendor manual. IDs B187-B191 are reserved by other in-flight work.
     CheckMeta(
         "B192",
         "Break-glass environment toggle left enabled in a global dotenv file",
@@ -2248,6 +2285,7 @@ AST_MAP = {
     "B181": ("AST02",),  # installed skill modified after install = supply-chain tamper on an auto-loaded artifact (cf. B5/B78/B86)
     "B182": ("AST02",),  # exposed ClawHub publish token = supply-chain pivot into every install (cf. B1/B41)
     "B184": ("AST02",),  # skills installed from a redirected registry = supply-chain compromise at the source (cf. B135/B177/B181)
+    "B185": ("AST04", "AST05"),  # poisoned tool description delivered to the model = insecure metadata carrying untrusted external instructions (cf. B62/B64)
     "B186": ("AST02",),  # relocated bundled skills/hooks root = supply-chain code-load root the scanners never enumerated (cf. B184)
     "B193": ("AST02",),  # gateway secret inlined in the service unit = credential exposure on the persistence surface (cf. B182)
 }
@@ -2367,6 +2405,7 @@ OWASP_MAP = {
     "B181": ("LLM03",),  # installed skill modified after install = Supply Chain
     "B182": ("LLM02", "LLM03"),  # exposed ClawHub publish token = Sensitive Information Disclosure + Supply Chain
     "B184": ("LLM03",),  # skills installed from a redirected registry = Supply Chain
+    "B185": ("LLM01",),  # poisoned tool description already delivered to the model = Prompt Injection
     "B186": ("LLM03",),  # relocated bundled skills/hooks code-load root = Supply Chain
     "B193": ("LLM02",),  # gateway secret inlined in the service unit = Sensitive Information Disclosure
 }

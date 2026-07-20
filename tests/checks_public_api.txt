@@ -103,6 +103,7 @@ _mcp_servers
 _mcp_value_looks_secret
 _negation_context
 _negation_governs_trigger
+_norm_group_policy
 _open_channels
 _open_wildcard_group_channels
 _other_can_reach_read
@@ -144,6 +145,7 @@ check_clawhub_registry_provenance
 check_clawhub_token_store
 check_clickfix_setup_section
 check_codex_project_trust
+check_compiled_tool_poisoning
 check_conditional_sleeper_trigger
 check_config_audit_log
 check_config_health_integrity

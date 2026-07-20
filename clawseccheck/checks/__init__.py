@@ -689,6 +689,7 @@ from ._mcp import (
     check_plugin_clawhub_trust,
     check_plugin_permission_mode,
     check_codex_plugin_hooks,
+    check_compiled_tool_poisoning,
     check_orphaned_plugin_caches,
     vet_mcp,
     vet_plugin,
@@ -833,6 +834,23 @@ def _has_cred_exfil(blob: str) -> bool:
 #          When absent → no signal (not a false PASS, not a fabricated finding).
 #          In practice, since no current fleet config embeds "tools" inline, these
 #          legs produce no output on real configs and zero false-positive FAILs.
+#
+#   CORRECTED 2026-07-20 (F-133/B185) — the premise above is STALE. The reasoning
+#   "tool metadata comes from the live server handshake, which we never perform
+#   offline" was sound when written, but it is now false as a statement about our
+#   EVIDENCE: OpenClaw records the tool definitions it actually sent to the model into
+#   the trajectory sidecar as a `context.compiled` event, with `description` copied
+#   VERBATIM (dist selection-JInn13lc.js:752/14035, run-attempt-CXZNKJ6y.js:5228). A
+#   description poisoned by a LIVE MCP server is therefore already on the user's disk
+#   and is readable with no network call at all.
+#
+#   What stays true: TP1/TP3 as written here still see only inline config, and still
+#   produce no output on real configs. What changed: that is no longer the whole
+#   picture, and it must not be read as "poisoned live tool descriptions are
+#   undetectable offline". `check_compiled_tool_poisoning` (B185, in checks/_mcp.py)
+#   covers the runtime surface by reading `context.compiled`. It is strictly POST HOC
+#   — it proves what WAS delivered in sessions that already ran, and can never
+#   pre-clear a live MCP server.
 # ---------------------------------------------------------------------------
 
 # TP2: mixed-script / RTL-override / invisible chars in identifiers (suspicious).
@@ -1209,6 +1227,17 @@ CHECKS = [
     check_plugin_clawhub_trust,  # B177 — OpenClaw's own persisted per-plugin ClawHub trust verdict (B-240)
     check_bundled_root_override,  # B186 — bundled skills/hooks code-load root relocated by env override (B-289, ENV-3)
     check_unit_embedded_gateway_secret,  # B193 — gateway credential inlined in a systemd user unit (B-290, ENV-4)
+    # B185 (F-133) — poisoned tool descriptions in what OpenClaw ACTUALLY SENT to the
+    # model, recovered post-hoc from the trajectory's `context.compiled` event.
+    #
+    # Deliberately NOT in SKILL_CONTENT_RING despite scanning injection-shaped text.
+    # The ring is the per-skill content-security unit that `--vet` runs against a
+    # CANDIDATE SKILL DIRECTORY (`vet_skill` builds `Context(home=<the skill dir>)`).
+    # This check reads the audit HOME's session logs, so in a vet context it would glob
+    # a skill directory for trajectory sidecars, find none, and return UNKNOWN on every
+    # vetted skill — a category error that adds no signal to a pre-install verdict. It
+    # belongs to the full audit only, the same reasoning B105 records for itself.
+    check_compiled_tool_poisoning,  # B185 — poisoned tool description already delivered to the model (F-133, RT-1)
 ]
 
 
