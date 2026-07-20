@@ -144,6 +144,9 @@ from ._host import (
 from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has_remote, _mcp_servers, _mcp_url_is_local, _read_jsonl_tail, correlation_indicators, _CORR_INDICATOR_CAP,)
 from ._shared import (_MCP_DATA_CAP_RE, _MCP_FS_PKG_RE, _MCP_BROAD_FS_ROOTS, _mcp_fs_root_is_broad, _mcp_sensitive_reason, _mcp_leg_contributions,)
 from ._shared import (_MCP_INTAKE_CAP_RE, _mcp_intake_reason,)
+# B-297: the wildcard-group ingress predicate — risk.py's ingress leg reaches it only
+# through this aggregator (CLAUDE.md §3.1-a), never by importing a topic module.
+from ._shared import (_allow_from_is_present, _effective_group_allow_from, _is_wildcard_allow_entry, _open_wildcard_group_channels, _resolved_channel_nodes, _wildcard_group_gap, _wildcard_group_is_reachable,)
 from ._egress import (
     _EXT_SKILL_HINTS,
     _USER_CONTENT_HOSTS,
@@ -234,8 +237,11 @@ from ._config import (
     _trusted_proxies_ok,
     _NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS,
     _is_native_unconditional_critical_check_id,
+    _ENV6_TOGGLES,
+    check_audit_target_divergence,
     check_audit_suppressions,
     check_control_plane_mutation,
+    check_env_breakglass_toggles,
     check_controlui_origins,
     check_credential_blast_radius,
     check_dangerous_overrides,
@@ -1170,6 +1176,10 @@ CHECKS = [
     check_gateway_rate_limit,
     check_subagent_spawn_limits,
     check_cachetrace_redaction,
+    # B-281/B-282 (ENV-1/ENV-6): is the audited file the one the agent loads, and is a
+    # break-glass toggle left on in a file OpenClaw loads at startup. Both WARN-only.
+    check_audit_target_divergence,
+    check_env_breakglass_toggles,
     check_webfetch_redirects,
     check_incident_readiness,
     check_log_threat_hunt,  # B164 — content-scan the agent's own log corpus (F-124/E-044)

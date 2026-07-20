@@ -1880,6 +1880,36 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="secrets",
     ),
+    # B183 (B-281, ENV-1): the audited config file may not be the one the agent loads.
+    # scored=False and WARN-capable only — a divergence means "this report may describe
+    # the wrong subject", which is a reason to re-run, not a proven misconfiguration.
+    CheckMeta(
+        "B183",
+        "Audited config file differs from the one OpenClaw resolves",
+        MEDIUM,
+        "hardening",
+        "Config Integrity",
+        scored=False,
+        # "monitoring" is the assurance surface B77/B78 already use for config-integrity
+        # questions ("is what this report says about the config trustworthy"), which is
+        # exactly what a target divergence puts in doubt.
+        surface="monitoring",
+    ),
+    # B192 (B-282, ENV-6): documented break-glass env toggles left on in a persistent
+    # dotenv file. scored=False, WARN-capable only — OpenClaw's own docs instruct users to
+    # set OPENCLAW_ALLOW_INSECURE_PRIVATE_WS in some setups, so a FAIL would punish
+    # following the vendor manual. IDs B184-B191 are reserved by other in-flight work.
+    CheckMeta(
+        "B192",
+        "Break-glass environment toggle left enabled in a global dotenv file",
+        MEDIUM,
+        "hardening",
+        "Config Integrity",
+        scored=False,
+        # The dominant toggle (OPENCLAW_ALLOW_INSECURE_PRIVATE_WS) relaxes gateway
+        # transport security, the same surface as B11's TLS check.
+        surface="gateway",
+    ),
     # B177 (B-240): OpenClaw's OWN persisted per-plugin ClawHub trust verdict
     # (installed_plugin_index.install_records_json.<pluginId>.clawhubTrustDisposition, in
     # the shared state SQLite DB ~/.openclaw/state/openclaw.sqlite) was never read (grep
@@ -1914,11 +1944,36 @@ CATALOG: list[CheckMeta] = [
     # ingress/sensitive/egress role is classified by VERB NAME (a heuristic, MEDIUM
     # confidence), not by the untouched payload content.
     #
-    # T1: behavioral trifecta — an ingress-verb, then a sensitive-verb, then an
-    # egress-verb, in that order, within one thread. Mirrors A1's static
-    # ingress/sensitive/egress leg model (INPUT_TOOL_HINTS/SENSITIVE_TOOL_HINTS/
-    # OUTBOUND_TOOL_HINTS, checks/_shared.py) applied to observed runtime order instead
-    # of declared config — proof-by-log of the same pattern A1 flags by capability.
+    # T1: behavioral trifecta — an ingress leg, then a sensitive-verb, then an
+    # egress-verb, in that order, within one thread, applied to observed runtime order
+    # instead of declared config.
+    #
+    # T1 IS NOT A MIRROR OF A1, AND MUST NOT BE CITED AS COVERING A1'S GROUND (B-299).
+    # This comment used to claim it was ("proof-by-log of the same pattern A1 flags by
+    # capability"). Both legs diverge, in opposite directions:
+    #  * INGRESS is now WIDER than a verb-name match but still NARROWER than A1's. B-298
+    #    added the channel-origin leg (`EXTERNAL_ORIGIN_KINDS`), restoring a narrowed
+    #    stand-in for A1's `_untrusted_input_channels`, which T1 originally dropped. It
+    #    arms only group/channel origins — a DM-delivered injection still does not arm it
+    #    (see behavioral.py's own B-298 honest-labelling note for why arming `direct`
+    #    reproduces a measured false positive).
+    #  * SENSITIVE is strictly NARROWER than A1's. T1 uses the local `_T_SENSITIVE_HINTS`
+    #    (behavioral.py), which drops the filesystem terms A1's shared
+    #    `SENSITIVE_TOOL_HINTS` carries. That drop is the C-170 false-positive fix and is
+    #    CORRECT at this per-verb grain — restoring the fs terms was retried and rejected
+    #    because `web_search -> list_files -> slack_send`, an entirely mundane combo,
+    #    fires. But it has a consequence worth stating plainly: measured against the 35
+    #    core tool names read out of the installed OpenClaw dist
+    #    (`AGENT_RESERVED_TOOL_NAMES` in src/agents/embedded-agent-runner/
+    #    tool-name-allowlist.ts, plus the tool `name:` registrations in the agent/openclaw
+    #    tool modules), `_classify_verb_role` yields ingress=2, egress=3, sensitive=0.
+    #    ZERO core verbs can satisfy the middle leg, so on a core-tools-only agent T1
+    #    cannot fire at all and its PASS is vacuous. T1 has real recall only where MCP or
+    #    plugin verbs supply the sensitive leg (`db_query`, `vault_read`, `secrets_get`,
+    #    `supabase_select` all classify sensitive).
+    # The runtime credential-path signal that DOES work on a core-tools agent lives in
+    # trajaudit.py (`--analyze-trajectory`, B-299 Part A), not here: it needs
+    # `data.arguments`, which this module's §8 metadata-only contract forbids.
     CheckMeta(
         "T1",
         "Behavioral trifecta (observed ingress -> sensitive -> egress verb sequence)",

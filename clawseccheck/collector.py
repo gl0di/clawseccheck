@@ -9,6 +9,7 @@ import math
 import hashlib
 import io
 import json
+import os
 import sqlite3
 import zipfile
 import tarfile
@@ -39,6 +40,34 @@ BOOTSTRAP_FILES = [
 ]
 
 WORKSPACE_DIRS = ["workspace-home", "workspace-work", "workspace"]
+
+# ---------------------------------------------------------------------------
+# B-281 (ENV-1): the audit target is a RESOLVED path, not a hardcoded filename.
+#
+# Grounded against the installed dist (~/.npm-global/lib/node_modules/openclaw/dist),
+# not the recon doc:
+#   paths-BMBAvkNf.js:18-21   CONFIG_FILENAME / LEGACY_CONFIG_FILENAMES /
+#                             LEGACY_STATE_DIRNAMES / NEW_STATE_DIRNAME
+#   paths-BMBAvkNf.js:112-116 resolveCanonicalConfigPath  — OPENCLAW_CONFIG_PATH first
+#   paths-BMBAvkNf.js:136-152 resolveConfigPath           — the 4-branch ladder
+#   paths-BMBAvkNf.js:175-190 resolveDefaultConfigCandidates
+#   paths-BMBAvkNf.js:44-62   resolveStateDir             — OPENCLAW_STATE_DIR, then
+#                             ~/.openclaw, then an EXISTING ~/.clawdbot, else ~/.openclaw
+#   home-dir-CJKEsOtx.js:34-58 resolveRawHomeDir/resolveRequiredHomeDir — OPENCLAW_HOME
+#                             beats HOME/USERPROFILE; "", "undefined" and "null" are
+#                             rejected as unset (normalize$1, :13-17)
+OPENCLAW_CONFIG_FILENAME = "openclaw.json"
+# Historical name from the clawdbot era. `resolveConfigPath` prefers an EXISTING legacy
+# file over the canonical one, so a migrated user can have OpenClaw reading a file this
+# tool would never have opened — with no environment variable set at all.
+OPENCLAW_LEGACY_CONFIG_FILENAMES = ("clawdbot.json",)
+OPENCLAW_NEW_STATE_DIRNAME = ".openclaw"
+OPENCLAW_LEGACY_STATE_DIRNAMES = (".clawdbot",)
+
+# The three variables that can point OpenClaw at a different config file than the one we
+# audit. Read-only, by NAME only — values are paths, never secrets, but they are still
+# routed through the report's normal path handling and never logged raw.
+OPENCLAW_PATH_ENV_VARS = ("OPENCLAW_CONFIG_PATH", "OPENCLAW_HOME", "OPENCLAW_STATE_DIR")
 
 # Where OpenClaw discovers installed skills (we read their CONTENT, never run them).
 SKILL_DIRS = ["skills", "workspace/skills", "workspace-home/skills",
@@ -167,6 +196,19 @@ class Context:
     config_mode: int | None = None                  # octal perms of openclaw.json, or None
     config_found: bool = False                       # openclaw.json present (vs non-OpenClaw setup)
     config_parse_error: bool = False                 # openclaw.json present but unparseable (B-166)
+    # B-281 (ENV-1): the config file this audit ACTUALLY read (or, when absent, the
+    # canonical path it looked for). Every verdict in the report describes this file and
+    # only this file, so it is reported verbatim rather than left implicit behind a bare
+    # `config_found` bool. May be a legacy `clawdbot.json` — see resolve_config_in_home.
+    config_path: "Path | None" = None
+    # B-282 (ENV-2/ENV-6): keys parsed from the two GLOBAL runtime dotenv files, with
+    # first-wins precedence already applied. `dotenv_sources` maps key -> the file it came
+    # from, for evidence. NEVER includes the workspace .env, whose OPENCLAW_* keys the
+    # product provably discards (see _collect_global_dotenv).
+    dotenv_values: dict = field(default_factory=dict)
+    dotenv_sources: dict = field(default_factory=dict)
+    dotenv_files: list = field(default_factory=list)  # global dotenv files found and read
+    dotenv_found: bool = False                        # at least one global dotenv exists
     native: object = None                           # NativeResult from openclaw security audit
     host: object = None                             # hostwatch.detect() result; set by audit(include_host=True)
     include_host: bool = False                      # host-filesystem scanning enabled (audit(include_host=True) / not --no-host)
@@ -1779,14 +1821,426 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
         )
 
 
+def _env_str(env: "dict[str, str]", name: str) -> "str | None":
+    """A trimmed env value, or None when OpenClaw would treat it as unset.
+
+    Mirrors ``normalize$1`` (home-dir-CJKEsOtx.js:13-17): empty/whitespace-only and the
+    literal strings ``"undefined"`` / ``"null"`` are unset. The path vars additionally go
+    through ``?.trim()`` at every dist call site, so trimming here is not an extra
+    liberty — it is what the product does.
+    """
+    raw = env.get(name)
+    if not isinstance(raw, str):
+        return None
+    trimmed = raw.strip()
+    if not trimmed or trimmed in ("undefined", "null"):
+        return None
+    return trimmed
+
+
+def _expand_user_path(raw: str, home_dir: Path) -> Path:
+    """Mirror ``resolveUserPath`` → ``resolveHomeRelativePath`` (paths-BMBAvkNf.js:68-73).
+
+    A leading ``~`` expands against the EFFECTIVE home (which OPENCLAW_HOME may itself
+    have moved), not against the OS home — which is why *home_dir* is passed in rather
+    than calling ``Path.expanduser()``. Relative paths are resolved against the process
+    cwd exactly as ``path.resolve`` does.
+    """
+    if raw == "~" or raw.startswith("~/") or raw.startswith("~\\"):
+        return Path(str(home_dir) + raw[1:])
+    return Path(raw)
+
+
+def openclaw_effective_home(env: "dict[str, str] | None" = None) -> Path:
+    """The home directory OpenClaw would resolve — ``resolveRequiredHomeDir``.
+
+    Order (home-dir-CJKEsOtx.js:31-58): ``OPENCLAW_HOME`` (with a leading ``~`` expanded
+    against the OS home), then ``HOME``, then ``USERPROFILE``, then ``os.homedir()``.
+    Termux's ``PREFIX``/``ANDROID_DATA`` branch is deliberately NOT mirrored: it only
+    fires on Android under com.termux, and guessing at it would be a fabricated fact.
+    """
+    env = os.environ if env is None else env
+    os_home = _env_str(env, "HOME") or _env_str(env, "USERPROFILE")
+    os_home_path = Path(os_home) if os_home else Path.home()
+    explicit = _env_str(env, "OPENCLAW_HOME")
+    if explicit is None:
+        return os_home_path
+    return _expand_user_path(explicit, os_home_path)
+
+
+def openclaw_state_dir(env: "dict[str, str] | None" = None,
+                       home_dir: "Path | None" = None) -> Path:
+    """Mirror ``resolveStateDir`` (paths-BMBAvkNf.js:44-62).
+
+    ``OPENCLAW_STATE_DIR`` wins; otherwise ``~/.openclaw`` when it exists, else an
+    EXISTING legacy ``~/.clawdbot``, else ``~/.openclaw``. The existence probes are the
+    product's own (``fs.existsSync``), so mirroring them is required for fidelity — they
+    are read-only stats on the auditing user's own home.
+    """
+    env = os.environ if env is None else env
+    home_dir = openclaw_effective_home(env) if home_dir is None else home_dir
+    override = _env_str(env, "OPENCLAW_STATE_DIR")
+    if override is not None:
+        return _expand_user_path(override, home_dir)
+    new_dir = home_dir / OPENCLAW_NEW_STATE_DIRNAME
+    try:
+        if new_dir.exists():
+            return new_dir
+        for legacy in OPENCLAW_LEGACY_STATE_DIRNAMES:
+            legacy_dir = home_dir / legacy
+            if legacy_dir.exists():
+                return legacy_dir
+    except OSError:
+        pass
+    return new_dir
+
+
+def resolve_config_in_home(home: Path) -> "tuple[Path, bool]":
+    """The config file OpenClaw would read *inside this specific home dir*.
+
+    Returns ``(path, found)``. ``openclaw.json`` wins when present; otherwise an existing
+    legacy ``clawdbot.json`` is preferred, mirroring the "prefer an existing candidate"
+    half of ``resolveConfigPath`` (paths-BMBAvkNf.js:141-147). When neither exists the
+    canonical name is returned with ``found=False`` so the caller's error message names
+    the file a user would actually create.
+
+    This is deliberately ENV-FREE and confined to *home*: it is the hermetic half of the
+    resolver, safe to run under ``--home``/fixture scans, and it can never retarget the
+    audit somewhere the caller did not ask for. The environment-driven half is reported
+    by ``resolve_product_config_path`` and never silently followed.
+    """
+    canonical = home / OPENCLAW_CONFIG_FILENAME
+    try:
+        if canonical.is_file():
+            return canonical, True
+        for name in OPENCLAW_LEGACY_CONFIG_FILENAMES:
+            legacy = home / name
+            if legacy.is_file():
+                return legacy, True
+    except OSError:
+        pass
+    return canonical, False
+
+
+def resolve_product_config_path(env: "dict[str, str] | None" = None) -> "tuple[Path | None, str]":
+    """The config path the INSTALLED OpenClaw would read, given *env*.
+
+    Faithful mirror of ``resolveConfigPath`` (paths-BMBAvkNf.js:136-152) plus the
+    ``resolveConfigPathCandidate``/``resolveDefaultConfigCandidates`` fallback it defers
+    to (:118-133, :175-190). Returns ``(path, reason)`` where *reason* names the branch
+    that decided, for evidence. ``(None, reason)`` when it cannot be determined.
+
+    This function READS the process environment. It never changes what is audited — the
+    caller compares it against the audited path and reports a divergence. Silently
+    retargeting the scan on an environment variable would mean the printed grade
+    described a subject the user never named, which is a worse failure than the one this
+    exists to catch.
+    """
+    env = os.environ if env is None else env
+    try:
+        home_dir = openclaw_effective_home(env)
+    except (OSError, RuntimeError):
+        return None, "the effective home directory could not be resolved"
+
+    override = _env_str(env, "OPENCLAW_CONFIG_PATH")
+    if override is not None:
+        return _expand_user_path(override, home_dir), "OPENCLAW_CONFIG_PATH is set"
+
+    state_override = _env_str(env, "OPENCLAW_STATE_DIR")
+    state_dir = openclaw_state_dir(env, home_dir)
+
+    # Prefer an existing candidate under the state dir (canonical, then legacy names).
+    for name in (OPENCLAW_CONFIG_FILENAME,) + OPENCLAW_LEGACY_CONFIG_FILENAMES:
+        cand = state_dir / name
+        try:
+            if cand.exists():
+                if name != OPENCLAW_CONFIG_FILENAME:
+                    return cand, f"a legacy {name} exists in the resolved state directory"
+                if state_override is not None:
+                    return cand, "OPENCLAW_STATE_DIR is set"
+                return cand, "the default state directory"
+        except OSError:
+            continue
+
+    if state_override is not None:
+        return state_dir / OPENCLAW_CONFIG_FILENAME, "OPENCLAW_STATE_DIR is set"
+
+    # stateDir == defaultStateDir here (we resolved both the same way), so the dist falls
+    # through to resolveConfigPathCandidate → resolveDefaultConfigCandidates.
+    for base in (home_dir / OPENCLAW_NEW_STATE_DIRNAME,) + tuple(
+        home_dir / d for d in OPENCLAW_LEGACY_STATE_DIRNAMES
+    ):
+        for name in (OPENCLAW_CONFIG_FILENAME,) + OPENCLAW_LEGACY_CONFIG_FILENAMES:
+            cand = base / name
+            try:
+                if cand.exists():
+                    return cand, "an existing default config candidate"
+            except OSError:
+                continue
+    return state_dir / OPENCLAW_CONFIG_FILENAME, "the canonical default path"
+
+
+def audits_default_state_dir(home: Path, env: "dict[str, str] | None" = None) -> bool:
+    """True when *home* is the state dir a bare, env-free ``openclaw`` would use.
+
+    This is the hermeticity gate for B183. It is an audited-home-IDENTITY test, not argv
+    sniffing — the same doctrine as ``_b182_audits_this_users_own_home`` — so it behaves
+    identically whether the user typed ``--home ~/.openclaw`` or typed nothing.
+
+    It is deliberately STRICTER than B182's predicate: it requires the exact default
+    directory rather than any ``~/.openclaw*`` sibling. Auditing ``~/.openclaw-work`` is
+    an explicit act of targeting one profile, and a divergence warning there would be
+    telling the user something they already know — the spurious-finding case the task
+    brief calls out. Under a fixture scan this is False, so B183 reports UNKNOWN and can
+    never manufacture an environment-driven finding (Golden Rule #5).
+
+    The reference default is computed with the OPENCLAW_* path variables STRIPPED. That
+    is not a detail: computing it from the live environment would let the very variable
+    that causes a divergence decide that no divergence can be reported. Setting
+    ``OPENCLAW_STATE_DIR`` (what ``openclaw --profile`` does) moves the "default", so
+    ``~/.openclaw`` stops matching it and the check falls silent on the single most
+    likely shape of the bug it exists to catch. Caught by
+    ``test_b183_warns_on_a_state_dir_profile``. The question here is only "is this home
+    the canonical one for this OS user", which the OS home answers on its own.
+
+    The CANONICAL ``~/.openclaw`` also opens the gate, even when it does not exist. It is
+    the CLI's ``--home`` default, so landing there is not an act of targeting anything —
+    typing nothing produces it. Requiring an exact match against the resolved state dir
+    instead would go silent on the env-free migration case: a user with only
+    ``~/.clawdbot`` gets a bare run pointed at a non-existent ``~/.openclaw`` while the
+    agent happily reads ``~/.clawdbot/clawdbot.json``, which is precisely the divergence
+    worth reporting. Found by an adversarial probe, pinned by
+    ``test_b183_warns_on_a_legacy_state_dir_with_no_env_set``.
+    """
+    env = os.environ if env is None else env
+    env_free = {k: v for k, v in env.items() if k not in OPENCLAW_PATH_ENV_VARS}
+    try:
+        audited = home.resolve()
+        candidates = {
+            openclaw_state_dir(env_free).resolve(),
+            (openclaw_effective_home(env_free) / OPENCLAW_NEW_STATE_DIRNAME).resolve(),
+        }
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return audited in candidates
+
+
+def audits_this_users_own_home(home: Path) -> bool:
+    """True when *home* is one of THIS user's own OpenClaw profile directories.
+
+    The looser sibling of ``audits_default_state_dir``: it admits ``~/.openclaw-work``
+    and friends, because for a *process environment* read the question is only "does this
+    process's env describe the audited home at all". Mirrors the predicate B182 has used
+    since B-241 (``checks/_lifecycle.py``), which delegates here so there is one
+    definition rather than two that can drift.
+    """
+    try:
+        user_home = Path.home().resolve()
+        audited = home.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return audited.parent == user_home and audited.name.startswith(OPENCLAW_NEW_STATE_DIRNAME)
+
+
+# ---------------------------------------------------------------------------
+# B-282 (ENV-2/ENV-6): the two GLOBAL runtime dotenv files.
+#
+# Grounded against dotenv-global-mWLbBl_z.js:85-111 (loadGlobalRuntimeDotEnvFiles) and
+# utils-CRO4LGEB.js:61-71 (resolveConfigDir). EXACTLY two files are loaded into
+# process.env:
+#     <configDir>/.env                   (configDir defaults to ~/.openclaw)
+#     ~/.config/openclaw/gateway.env     (skipped when OPENCLAW_STATE_DIR moves the
+#                                         state env away from its default — :90/:98)
+#
+# The WORKSPACE .env is NOT one of them and must never be read as one. loadDotEnv
+# (dotenv-eb21SB3p.js:218-223) passes the workspace file through an entryFilter of
+# `!shouldBlockWorkspaceDotEnvKey`, and BLOCKED_WORKSPACE_DOTENV_PREFIXES
+# (:177-185) contains the literal "OPENCLAW_" — so EVERY OPENCLAW_* key in a workspace
+# .env is dropped before it can reach process.env. OPENCLAW_CACHE_TRACE is additionally
+# in BLOCKED_WORKSPACE_DOTENV_KEYS (:128). The global loader, by contrast, is called with
+# NO entryFilter (:222), so every OPENCLAW_* key in the two files above is admitted.
+#
+# DO NOT "widen" this to the workspace .env. It would be a guaranteed false positive on a
+# key the product provably discards.
+_MAX_DOTENV_BYTES = 256_000
+_MAX_DOTENV_ENTRIES = 500
+
+# parseBooleanValue's token sets, verbatim (boolean-CrriykWV.js:3-16). Anything outside
+# BOTH sets is ambiguous and returns None, which lets the config value stand — the same
+# `?? config?.enabled` fall-through the dist performs. No heuristic guessing.
+_DOTENV_TRUTHY = frozenset({"true", "1", "yes", "on"})
+_DOTENV_FALSY = frozenset({"false", "0", "no", "off"})
+
+# env-CKdem44B.js:46-55 isTruthyEnvValue — a DIFFERENT predicate from parseBooleanValue:
+# binary rather than tri-state (no falsy set; anything unrecognised is simply false).
+# OPENCLAW_LOAD_SHELL_ENV uses this one (shell-env-DaE9Xx3-.js:200-202). Collapsing the
+# two would misreport both.
+_ENV_TRUTHY_BINARY = frozenset({"1", "on", "true", "yes"})
+
+
+def parse_boolean_value(raw: "str | None") -> "bool | None":
+    """Mirror ``parseBooleanValue`` (boolean-CrriykWV.js:22-30) — tri-state.
+
+    None means "ambiguous or unset", i.e. the config value survives.
+    """
+    if not isinstance(raw, str):
+        return None
+    token = raw.strip().lower()
+    if token in _DOTENV_TRUTHY:
+        return True
+    if token in _DOTENV_FALSY:
+        return False
+    return None
+
+
+def is_truthy_env_value(raw: "str | None") -> bool:
+    """Mirror ``isTruthyEnvValue`` (env-CKdem44B.js:46-55) — binary, no falsy set."""
+    if not isinstance(raw, str):
+        return False
+    return raw.strip().lower() in _ENV_TRUTHY_BINARY
+
+
+def _parse_dotenv(text: str) -> "dict[str, str]":
+    """A conservative subset of dotenv's parser, for KEY=VALUE lines only.
+
+    OpenClaw uses the npm ``dotenv`` package (dotenv-global-mWLbBl_z.js:8,22), whose full
+    grammar includes multi-line quoted values and escape handling. This mirrors the
+    unambiguous majority case — ``KEY=value``, optional ``export`` prefix, ``#`` comments,
+    matched single/double quotes on one line — and simply DOES NOT REPORT anything it
+    cannot parse. Under-reading a key yields an UNKNOWN or a silent PASS (a false
+    negative); mis-parsing one would yield a false WARN. Only the former is acceptable.
+
+    Keys are admitted on the same portable-identifier rule the product applies via
+    ``normalizeEnvVarKey(raw, {portable: true})`` (host-env-security-CWC2ZCy4.js:414-419).
+    """
+    out: "dict[str, str]" = {}
+    for line in text.splitlines():
+        if len(out) >= _MAX_DOTENV_ENTRIES:
+            break
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        # PORTABLE_ENV_VAR_KEY: a POSIX-portable identifier. A key the product would
+        # reject is not a key the product will honour, so it is not evidence.
+        if not key or not (key[0].isalpha() or key[0] == "_"):
+            continue
+        if not all(c.isalnum() or c == "_" for c in key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        elif "#" in value:
+            # An unquoted inline comment. dotenv strips it; keep the same behaviour so a
+            # trailing note cannot make a falsy value look ambiguous.
+            value = value.split("#", 1)[0].strip()
+        out[key] = value
+    return out
+
+
+def global_dotenv_paths(home: Path, env: "dict[str, str] | None" = None) -> "list[Path]":
+    """The two global runtime dotenv files, expressed relative to the AUDITED home.
+
+    ``home/.env`` is the ``<configDir>/.env`` slot and ``home.parent/.config/openclaw/
+    gateway.env`` is the gateway slot — ``home.parent`` is ``~`` for a real OpenClaw home,
+    the same idiom B150/B182 use to reach ``~/.config``. Deriving both from *home* rather
+    than from ``os.environ`` keeps fixture and ``--home`` scans hermetic: the auditor's own
+    environment can never steer which files a scan reads.
+
+    The gateway file is skipped exactly when the dist skips it — an explicitly non-default
+    ``OPENCLAW_STATE_DIR`` (dotenv-global-mWLbBl_z.js:90,98) — and only when the audited
+    home is this user's own, since otherwise the process env says nothing about it.
+    """
+    env = os.environ if env is None else env
+    paths = [home / ".env"]
+    skip_gateway = False
+    if audits_this_users_own_home(home):
+        state_override = _env_str(env, "OPENCLAW_STATE_DIR")
+        if state_override is not None:
+            try:
+                default_state_env = (
+                    openclaw_effective_home(env) / OPENCLAW_NEW_STATE_DIRNAME / ".env"
+                )
+                skip_gateway = (
+                    _expand_user_path(state_override, openclaw_effective_home(env)) / ".env"
+                ).resolve() != default_state_env.resolve()
+            except (OSError, ValueError, RuntimeError):
+                skip_gateway = False
+    if not skip_gateway:
+        paths.append(home.parent / ".config" / "openclaw" / "gateway.env")
+    return paths
+
+
+def _collect_global_dotenv(home: Path, ctx: Context) -> None:
+    """Read the two global dotenv files into ``ctx.dotenv_values`` (B-282).
+
+    First-wins across files, mirroring ``loadParsedDotEnvFiles``
+    (dotenv-global-mWLbBl_z.js:39-72): the first file to define a key is the one that
+    applies, and a key already present in ``process.env`` blocks the file value entirely
+    (``preExistingKeys.has(key)`` :44-46, ``process.env[key] === void 0`` :66).
+
+    That precedence is why an observed override is reported as WARN, never FAIL: the file
+    value applies on the NEXT agent start, and only if nothing already exported that key.
+
+    Symlinked dotenv files are read like any other collector target only when they are
+    real files; a symlink is skipped, matching ``_collect_exec_approvals``.
+    """
+    for path in global_dotenv_paths(home):
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            with open(path, "rb") as fp:
+                raw, truncated = _read_with_limit(fp, _MAX_DOTENV_BYTES)
+        except OSError as exc:
+            ctx.errors.append(f"could not read {path}: {exc}")
+            continue
+        ctx.dotenv_found = True
+        ctx.dotenv_files.append(str(path))
+        if truncated:
+            ctx.limit_hits.append(
+                f"dotenv file '{path}' exceeded the {_MAX_DOTENV_BYTES // 1000}KB cap — "
+                "content beyond the cap was NOT scanned"
+            )
+        for key, value in _parse_dotenv(raw.decode("utf-8", errors="replace")).items():
+            if key in ctx.dotenv_values:
+                continue  # first-wins
+            ctx.dotenv_values[key] = value
+            ctx.dotenv_sources[key] = str(path)
+
+
+def dotenv_override(ctx: Context, key: str) -> "tuple[str | None, str | None]":
+    """The observed value of *key* and where it came from, or ``(None, None)``.
+
+    The hermetic on-disk files are authoritative. The live process environment is only
+    consulted when the audited home is this user's own (``audits_this_users_own_home``) —
+    under a fixture or ``--home`` scan the auditor's environment describes a different
+    subject entirely, and letting it steer a verdict would be exactly the
+    environment-driven false positive Golden Rule #5 forbids.
+    """
+    value = ctx.dotenv_values.get(key)
+    if value is not None:
+        return value, ctx.dotenv_sources.get(key)
+    if audits_this_users_own_home(ctx.home):
+        raw = os.environ.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw, "the current process environment"
+    return None, None
+
+
 def collect(home: Path | str = "~/.openclaw") -> Context:
     home = Path(home).expanduser()
     ctx = Context(home=home)
 
-    cfg_path = home / "openclaw.json"
-    ctx.config_found = cfg_path.is_file()
+    cfg_path, cfg_found = resolve_config_in_home(home)
+    ctx.config_path = cfg_path
+    ctx.config_found = cfg_found
     parsed_ok = False
-    if cfg_path.is_file():
+    if cfg_found:
         try:
             parsed = _load_openclaw_config(cfg_path, root_byte_limit=_MAX_CONFIG_BYTES)
         except (OSError, _ConfigLoadError, RecursionError) as exc:
@@ -1857,6 +2311,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
             except OSError as exc:
                 ctx.errors.append(f"could not read {f}: {exc}")
 
+    _collect_global_dotenv(home, ctx)
     _collect_cron(home, ctx)
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)

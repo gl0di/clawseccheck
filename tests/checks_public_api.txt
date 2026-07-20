@@ -48,6 +48,7 @@ _SOURCE_KNOWN_BAD
 _agent_config_write_hits
 _agent_is_powerful
 _agent_legs
+_allow_from_is_present
 _b135_is_pending_security
 _b135_reasons_are_inconclusive
 _b135_records_adverse_security
@@ -69,6 +70,7 @@ _check_unicode_obfuscation
 _defensive_context
 _defensive_section
 _dep_names_in_skill
+_effective_group_allow_from
 _enabled_tools
 _external_input_channels
 _fence_ranges
@@ -84,6 +86,7 @@ _install_entry_findings
 _install_host_is_public_ip
 _is_code_example
 _is_posix
+_is_wildcard_allow_entry
 _levenshtein
 _local_sink_exfil_hits
 _mcp_fs_root_is_broad
@@ -97,12 +100,14 @@ _mcp_value_looks_secret
 _negation_context
 _negation_governs_trigger
 _open_channels
+_open_wildcard_group_channels
 _other_can_reach_read
 _parse_source_target
 _parse_version
 _peragent_sandbox_evidence
 _read_jsonl_tail
 _reassembly
+_resolved_channel_nodes
 _runtime_fetch_matches
 _secret_paths
 _skill_declared_tools
@@ -115,6 +120,8 @@ _vet_mcp_least_privilege
 _vet_mcp_tool_poisoning
 _web_fetch_enabled
 _whole_text_is_defensive
+_wildcard_group_gap
+_wildcard_group_is_reachable
 check_agent_separation
 check_agent_snooping
 check_approval_bypass

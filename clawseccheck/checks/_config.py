@@ -5,6 +5,7 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 """
 from __future__ import annotations
 import ipaddress
+import os
 import re
 from pathlib import Path
 from .. import attest as _attest
@@ -2423,4 +2424,229 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
         "risk detected).",
         "Keep gateway.auth.trustedProxy.requiredHeaders/allowUsers and/or "
         "gateway.trustedProxies configured, or bind the gateway to loopback.",
+    )
+
+
+def check_audit_target_divergence(ctx: Context) -> Finding:
+    """B183 — the running agent may be reading a DIFFERENT config file than the one audited.
+
+    B-281 (ENV-1). Every other check in this catalog describes ``ctx.config_path``. That is
+    only useful if the agent is running that same file. OpenClaw's own resolver
+    (``resolveConfigPath``, dist/paths-BMBAvkNf.js:136-152) consults
+    ``OPENCLAW_CONFIG_PATH`` first and unconditionally, reaches a different home through
+    ``OPENCLAW_HOME`` (home-dir-CJKEsOtx.js:34-42), and follows ``OPENCLAW_STATE_DIR`` —
+    which is exactly what ``openclaw --profile <name>`` sets. It also prefers an EXISTING
+    legacy ``clawdbot.json`` over the canonical name, so the target can move with no
+    environment variable set at all.
+
+    Left unreported, a stale hardened ``~/.openclaw/openclaw.json`` scores A while the live
+    agent runs a wide-open profile — a lying PASS across the whole catalog at once, the same
+    family as the E-052 phantom-path findings.
+
+    WARN    — the path the product would resolve differs (by ``realpath``) from the audited
+              one. Both paths are named.
+    PASS    — the two resolve to the same file.
+    UNKNOWN — the audited home is not this machine's default state directory (a fixture or
+              ``--home`` scan), or the resolution could not be completed.
+
+    Never FAIL: a divergence is a signal to re-point the audit, not a proven
+    misconfiguration — the other file may be perfectly hardened.
+
+    Three deliberate constraints, each of which would otherwise produce a spurious finding:
+
+    * **``realpath`` comparison, not presence.** ``OPENCLAW_CONFIG_PATH`` explicitly set to
+      the file we already audit, or reaching it through a symlink, is NOT a divergence. A
+      naive "the variable is set → warn" would fire on a correct setup.
+    * **Gated on the default state directory** (``audits_default_state_dir``). Under
+      ``--home``/fixtures the user deliberately targeted a file and a warning would be
+      noise; it also keeps the auditor's own environment from steering a fixture scan.
+    * **A shell export in an ALREADY-RUNNING agent leaves no on-disk trace and is not
+      observable from here.** That is a process boundary. So the quiet result is reported
+      honestly and never as an affirmative all-clear beyond what was actually checked.
+    """
+    from ..collector import (  # noqa: PLC0415
+        audits_default_state_dir,
+        resolve_product_config_path,
+    )
+
+    audited = ctx.config_path
+    if audited is None:
+        return _finding(
+            "B183",
+            UNKNOWN,
+            "The audited config path was not recorded, so it cannot be compared against "
+            "the path OpenClaw itself would resolve.",
+            "Re-run the audit with a current build of this skill.",
+        )
+
+    if not audits_default_state_dir(ctx.home):
+        return _finding(
+            "B183",
+            UNKNOWN,
+            f"This scan targets {audited} explicitly, which is not this machine's default "
+            "OpenClaw state directory, so it cannot be compared against the path the "
+            "running agent would resolve — the environment of this process describes a "
+            "different subject.",
+            "Run the audit with no --home argument to have it check whether the agent's "
+            "own config resolution points somewhere else.",
+        )
+
+    product, reason = resolve_product_config_path()
+    if product is None:
+        return _finding(
+            "B183",
+            UNKNOWN,
+            f"OpenClaw's own config path could not be resolved ({reason}), so it cannot be "
+            f"confirmed that the agent reads the audited file {audited}.",
+            "Check that HOME (or OPENCLAW_HOME) is set to a real directory, then re-run.",
+        )
+
+    try:
+        same = os.path.realpath(str(audited)) == os.path.realpath(str(product))
+    except (OSError, ValueError):
+        same = str(audited) == str(product)
+
+    if not same:
+        return _finding(
+            "B183",
+            WARN,
+            "The audited config file is NOT the one OpenClaw would load. Every other "
+            f"finding in this report describes {audited}, but the agent resolves "
+            f"{product} ({reason}) — so a clean grade here says nothing about the "
+            "configuration the agent is actually running.",
+            f"Re-run the audit against the live target: clawseccheck --home "
+            f"{product.parent}. If the audited file is the intended one instead, unset "
+            "OPENCLAW_CONFIG_PATH / OPENCLAW_HOME / OPENCLAW_STATE_DIR (these are what "
+            "`openclaw --profile` sets) so the agent and the audit agree.",
+            evidence=[f"audited: {audited}", f"OpenClaw resolves: {product}"],
+        )
+
+    return _finding(
+        "B183",
+        PASS,
+        f"The audited config file ({audited}) is the same file OpenClaw's own resolver "
+        "selects from this environment, so the rest of this report describes the "
+        "configuration the agent loads on its next start.",
+        "Keep OPENCLAW_CONFIG_PATH / OPENCLAW_HOME / OPENCLAW_STATE_DIR unset, or re-run "
+        "the audit with --home pointed at the profile you actually run.",
+        evidence=[f"audited: {audited}", f"resolved via {reason}"],
+    )
+
+
+# B-282 (ENV-6): break-glass environment toggles that relax a security control.
+#
+# Each entry is (variable, predicate, what it does) and each was grounded in the installed
+# dist individually — the three toggles use THREE DIFFERENT truthiness rules and collapsing
+# them into one would misreport at least two:
+#
+#   OPENCLAW_ALLOW_INSECURE_PRIVATE_WS  strict `=== "1"` (connection-details-BBobR8Xp.js:27)
+#   OPENCLAW_LOAD_SHELL_ENV             isTruthyEnvValue {1,on,true,yes}
+#                                       (shell-env-DaE9Xx3-.js:200-202 → env-CKdem44B.js:46)
+#
+# DELIBERATELY EXCLUDED, both would be false positives:
+#
+#   OPENCLAW_SHOW_SECRETS — its sense is INVERTED. status.scan-Bm3xXn8C.js:34 reads
+#     `showSecrets: process.env.OPENCLAW_SHOW_SECRETS?.trim() !== "0"`, so display is ON by
+#     default and the ONLY value that changes anything is "0", which HARDENS the `openclaw
+#     status` output. Flagging this variable as "set" would warn about a setting identical
+#     to the default, and warn hardest at the exact moment the user had improved matters.
+#   OPENCLAW_CLI_CONTAINER_BYPASS — not a sandbox escape but the CLI's container-DELEGATION
+#     recursion guard, injected by OpenClaw itself when exec'ing into the container
+#     (startup-trace-Bc2ebu8Y.js:176-177). Its set state is the normal condition inside any
+#     containerized install, so a check on it would fire on every correct deployment.
+_ENV6_TOGGLES = (
+    (
+        "OPENCLAW_ALLOW_INSECURE_PRIVATE_WS",
+        lambda v: v.strip() == "1",
+        "lets the gateway accept a plaintext ws:// URL to a non-loopback address, so "
+        "gateway credentials and chat traffic cross the network unencrypted",
+    ),
+    (
+        "OPENCLAW_LOAD_SHELL_ENV",
+        None,  # is_truthy_env_value; bound at call time to keep this table a leaf
+        "makes the agent run your login shell to fill in credential variables that are "
+        "missing from its own config, widening where its secrets can come from",
+    ),
+)
+
+
+def check_env_breakglass_toggles(ctx: Context) -> Finding:
+    """B192 — a break-glass environment toggle relaxes a security control.
+
+    B-282 (ENV-6). Read from the two GLOBAL runtime dotenv files OpenClaw loads into
+    ``process.env`` (``~/.openclaw/.env`` and ``~/.config/openclaw/gateway.env`` —
+    dist/dotenv-global-mWLbBl_z.js:85-111), and from this process's own environment only
+    when the audited home is this user's own.
+
+    WARN    — a toggle is observably on. Never FAIL: both are DOCUMENTED break-glass
+              switches. ``OPENCLAW_ALLOW_INSECURE_PRIVATE_WS`` is sanctioned in OpenClaw's
+              own gateway security docs for trusted private networks and its plugin docs
+              instruct users to set it. A FAIL would punish following the vendor's manual.
+    PASS    — a global dotenv file exists and none of the toggles are on in it.
+    UNKNOWN — no global dotenv file exists AND the audited home is not this user's own, so
+              there is nothing to have read.
+
+    **Scope, stated exactly.** A variable exported in the shell that launched an
+    already-running agent leaves no on-disk trace and is not detectable from here — that
+    is a process boundary. The two global dotenv files cover the *persistent* delivery
+    paths, which are also the ones that survive a restart and therefore the ones an
+    attacker or a compromised agent would use; a shell export dies with the shell. The
+    residual is a false NEGATIVE, never a false positive. Accordingly this check never
+    claims "no toggle is set" — only that none was found in the persistent locations.
+    """
+    from ..collector import dotenv_override, is_truthy_env_value  # noqa: PLC0415
+
+    hits: "list[str]" = []
+    for name, strict, what in _ENV6_TOGGLES:
+        raw, source = dotenv_override(ctx, name)
+        if raw is None:
+            continue
+        on = strict(raw) if strict is not None else is_truthy_env_value(raw)
+        if on:
+            hits.append(f"{name} is on ({source}) — it {what}")
+
+    if hits:
+        return _finding(
+            "B192",
+            WARN,
+            "A break-glass environment toggle is switched on in a file OpenClaw loads at "
+            "startup: " + "; ".join(hits) + ". These are legitimate escape hatches, but "
+            "each one disables a protection that is on by default, and a value written to "
+            "a dotenv file persists across restarts.",
+            "Remove the variable from the dotenv file once the situation that needed it "
+            "is over, so the protection returns on the next agent start. If it is needed "
+            "permanently, record why — a persistent break-glass is a standing exception, "
+            "not a default.",
+            evidence=hits,
+        )
+
+    if ctx.dotenv_found:
+        return _finding(
+            "B192",
+            PASS,
+            "No break-glass environment toggle is switched on in the global dotenv files "
+            "OpenClaw loads at startup (" + ", ".join(ctx.dotenv_files) + ").",
+            "Keep OPENCLAW_ALLOW_INSECURE_PRIVATE_WS and OPENCLAW_LOAD_SHELL_ENV out of "
+            "the global dotenv files except while actively working around a problem.",
+        )
+
+    from ..collector import audits_this_users_own_home  # noqa: PLC0415
+
+    if audits_this_users_own_home(ctx.home):
+        return _finding(
+            "B192",
+            PASS,
+            "No global dotenv file is present and no break-glass environment toggle is "
+            "set in this process's environment.",
+            "Keep it that way outside of active debugging.",
+        )
+
+    return _finding(
+        "B192",
+        UNKNOWN,
+        "No global dotenv file was found for the audited home, and this process's "
+        "environment describes a different subject, so it cannot be determined whether a "
+        "break-glass toggle is set for the agent that runs this configuration.",
+        "Run the audit on the machine and account the agent runs as, with no --home "
+        "argument, to have the persistent toggle locations checked.",
     )

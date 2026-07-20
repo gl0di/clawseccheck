@@ -308,13 +308,16 @@ def _writable_identity_files(ctx: Context) -> list[str]:
     # (running as the agent) could rewrite tool grants, widen tools.exec.mode, or delete the
     # approval gate: strictly worse than the read exposure B1/B11 already flag. Write bit only
     # (a merely group-READABLE config is B1/B11's concern). (F-121)
-    cfg_path = ctx.home / "openclaw.json"
+    # B-281: the audited config file, not a second hardcode of "openclaw.json". A user
+    # migrated from clawdbot can be running a `clawdbot.json` that the old literal never
+    # stat()ed, so a world-writable config sailed through this check unseen.
+    cfg_path = ctx.config_path or (ctx.home / "openclaw.json")
     try:
         cst = cfg_path.stat()
     except OSError:
         cst = None
     if cst is not None and _writable_by_others(cst):
-        writable.append(f"openclaw.json (mode {oct(cst.st_mode & 0o777)[-3:]})")
+        writable.append(f"{cfg_path.name} (mode {oct(cst.st_mode & 0o777)[-3:]})")
 
     return writable
 
@@ -3208,13 +3211,14 @@ def _b182_audits_this_users_own_home(ctx: Context) -> bool:
     The gate mirrors the collector's `_read_installed_skills` (B-161), which reaches
     ``~/.agents/skills`` on exactly the same condition and for exactly the same reason:
     "fixture/custom --home scans must remain hermetic and never absorb unrelated skills".
+
+    B-281 moved the body to ``collector.audits_this_users_own_home`` so the B-282 dotenv
+    reader shares ONE definition of this predicate rather than growing a second copy that
+    can drift. Behaviour is unchanged; this remains the name the B182 code path uses.
     """
-    try:
-        user_home = Path.home().resolve()
-        audited = ctx.home.resolve()
-    except (OSError, ValueError, RuntimeError):
-        return False
-    return audited.parent == user_home and audited.name.startswith(".openclaw")
+    from ..collector import audits_this_users_own_home  # noqa: PLC0415
+
+    return audits_this_users_own_home(ctx.home)
 
 
 def _b182_candidate_stores(ctx: Context) -> "list[Path]":

@@ -529,6 +529,87 @@ def _b82_undeterminable(path: str, value: object, expected: str) -> Finding:
     )
 
 
+def _b82_env_override(ctx: Context) -> "Finding | None":
+    """B-282: reconcile B82's config read against the OPENCLAW_CACHE_TRACE override.
+
+    Returns a Finding that REPLACES the config-derived PASS, or None to let it stand.
+
+    ``resolveCacheTraceConfig`` (dist/selection-JInn13lc.js:1047-1055) computes::
+
+        enabled = parseBooleanValue(env.OPENCLAW_CACHE_TRACE) ?? config?.enabled ?? false
+
+    so the environment genuinely WINS over the config. Before B-282, B82 read only the
+    config and therefore stated affirmatively that transcripts "are not being appended to
+    disk" while OpenClaw was appending them on every turn — a lying PASS of exactly the
+    class B-262 was filed for. The override has an on-disk, hermetic witness, so this is
+    observable rather than the unobservable state the old docstring assumed.
+
+    Verdicts:
+
+    * override parses truthy → **WARN**. Not FAIL: the value in a dotenv file applies only
+      on the next agent start and only if nothing already exported the key
+      (first-wins, dotenv-global-mWLbBl_z.js:44-46,66).
+    * override parses falsy → **None**; the config PASS is affirmed and strengthened.
+    * override is present but unparseable → **None**. ``parseBooleanValue`` returns
+      undefined for an ambiguous token and the ``??`` chain falls through to the config,
+      so the config verdict is the correct one. No heuristic guessing.
+    * nothing observed, a global dotenv exists, and the audited home is not this user's own
+      → **UNKNOWN** rather than an affirmative all-clear (Golden Rule #4).
+
+    A variable exported in the shell of an already-running agent leaves no on-disk trace
+    and is not detectable here — a process boundary, not something a wider read could fix.
+    The residual is a false negative, so it cannot trip Golden Rule #5.
+    """
+    from ..collector import (  # noqa: PLC0415
+        audits_this_users_own_home,
+        dotenv_override,
+        parse_boolean_value,
+    )
+
+    raw, source = dotenv_override(ctx, "OPENCLAW_CACHE_TRACE")
+    if raw is not None:
+        parsed = parse_boolean_value(raw)
+        if parsed is True:
+            sink, _ = dotenv_override(ctx, "OPENCLAW_CACHE_TRACE_FILE")
+            where = (
+                f"OPENCLAW_CACHE_TRACE_FILE={sink}" if sink
+                else "$OPENCLAW_STATE_DIR/logs/cache-trace.jsonl (the default sink)"
+            )
+            return _finding(
+                "B82",
+                WARN,
+                "Cache-trace diagnostics are switched on by the environment, overriding "
+                "the config. OPENCLAW_CACHE_TRACE is set in a file OpenClaw loads at "
+                "startup, and the environment takes precedence over "
+                "diagnostics.cacheTrace.enabled — so every agent turn appends its prompt, "
+                "system prompt and full message payloads to a JSONL file on disk, "
+                "whatever the config says.",
+                "Remove OPENCLAW_CACHE_TRACE from the dotenv file (or set it to 0) so the "
+                "config's setting is the one that applies. The config alone cannot turn "
+                "this off while the variable is set.",
+                evidence=[
+                    f"OPENCLAW_CACHE_TRACE={raw!r} in {source}",
+                    f"transcripts written to {where}",
+                ],
+            )
+        # Falsy or ambiguous: the config verdict stands (`?? config?.enabled`).
+        return None
+
+    if ctx.dotenv_found and not audits_this_users_own_home(ctx.home):
+        return _finding(
+            "B82",
+            UNKNOWN,
+            "The config does not switch cache-trace diagnostics on, but this audit cannot "
+            "confirm the running agent agrees: OPENCLAW_CACHE_TRACE overrides the config, "
+            "the audited home is not this user's own, and the global dotenv files present "
+            "here do not settle the question either way.",
+            "Run the audit on the machine and account the agent runs as, with no --home "
+            "argument, so the environment that actually applies can be read.",
+            evidence=[f"global dotenv present: {', '.join(ctx.dotenv_files)}"],
+        )
+    return None
+
+
 def check_cachetrace_redaction(ctx: Context) -> Finding:
     """B82 — cache-trace diagnostics persist full turn transcripts to disk.
 
@@ -576,15 +657,24 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
               actually running. Note the schema uses ``.optional()`` and contains zero
               ``.nullable()``, so an explicit ``null`` is malformed here, not "unset".
 
-    On "unset" being PASS rather than UNKNOWN: the ``OPENCLAW_CACHE_TRACE`` env var
-    overrides the config, and no config audit can observe it — but it overrides an
-    explicit ``enabled:false`` exactly as it overrides an absent key, so that uncertainty
-    cannot distinguish the two. Treating "unset" as UNKNOWN on those grounds would mean
-    B82 could never legitimately PASS at all. Unset is therefore reported as PASS on the
-    documented default, with the env-var caveat named in the remediation, matching the
-    house rule that a valid config declaring nothing dangerous PASSes (the invariant
+    On "unset" being PASS rather than UNKNOWN: it overrides an explicit ``enabled:false``
+    exactly as it overrides an absent key, so the environment cannot distinguish the two.
+    Treating "unset" as UNKNOWN on those grounds would mean B82 could never legitimately
+    PASS at all. Unset is therefore reported as PASS on the documented default, matching
+    the house rule that a valid config declaring nothing dangerous PASSes (the invariant
     tests/test_b228_unknown_on_parse_error.py pins across every ``_config_unreadable``
     guarded check).
+
+    **B-282 correction.** This docstring previously claimed "no config audit can observe"
+    the ``OPENCLAW_CACHE_TRACE`` override and reasoned from there. That was wrong, and the
+    wrong premise produced a lying PASS: the override has an on-disk, hermetic witness in
+    the two global dotenv files OpenClaw loads into ``process.env`` at startup, and this
+    tool runs on the same host. Both PASS branches now go through ``_b82_env_override``
+    first, and both sentences were softened from the affirmative "transcripts are not
+    being appended to disk" to the claim actually supported by the evidence — that no
+    override was found where OpenClaw would load one. What remains unobservable is only a
+    shell export into an already-running process, which is a process boundary and a false
+    NEGATIVE, never a false positive.
 
     Known limitation, deliberately not branched on: setting ``includeMessages`` /
     ``includePrompt`` / ``includeSystem`` all to ``false`` narrows an enabled trace to
@@ -611,25 +701,31 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
             return _b82_undeterminable(
                 "diagnostics.cacheTrace", trace_cfg, "a JSON object"
             )
+    override = _b82_env_override(ctx)
     if not isinstance(trace_cfg, dict) or "enabled" not in trace_cfg:
+        if override is not None:
+            return override
         return _finding(
             "B82",
             PASS,
             "Cache-trace diagnostics are not switched on in the config "
-            "(diagnostics.cacheTrace.enabled is unset and defaults to false), so no "
-            "per-turn transcript sink is configured.",
+            "(diagnostics.cacheTrace.enabled is unset and defaults to false), and no "
+            "OPENCLAW_CACHE_TRACE override was found in the files OpenClaw loads at "
+            "startup.",
             "Pin diagnostics.cacheTrace.enabled to false so the intent is explicit and "
             "auditable, and keep the OPENCLAW_CACHE_TRACE environment variable unset — "
             "it overrides the config at runtime.",
         )
     enabled = trace_cfg.get("enabled")
     if enabled is False:
+        if override is not None:
+            return override
         return _finding(
             "B82",
             PASS,
             "Cache-trace diagnostics are explicitly disabled "
-            "(diagnostics.cacheTrace.enabled=false), so per-turn prompt and message "
-            "transcripts are not being appended to disk.",
+            "(diagnostics.cacheTrace.enabled=false), and no OPENCLAW_CACHE_TRACE "
+            "override was found in the files OpenClaw loads at startup.",
             "Leave diagnostics.cacheTrace.enabled at false. Note that the "
             "OPENCLAW_CACHE_TRACE environment variable overrides this setting at "
             "runtime, so keep it unset outside debugging sessions.",
