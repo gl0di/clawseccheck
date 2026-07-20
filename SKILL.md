@@ -53,6 +53,9 @@ It runs a **read-only** local script that inspects the user's own agent. **Full 
   state — never a secret value). Reads only, no subprocess, no network
 - credential-store path-existence inventory: checks whether `.env`, SSH key dirs, keychain/keyring
   directories, and browser cookie stores **exist** near the agent home (never reads their contents)
+- the ClawHub CLI's own plaintext token-store config (outside the OpenClaw home) — opened to check
+  whether a `token` field is present and the file's permissions; the token *value* itself is never
+  read into a report, logged, or placed in evidence (B182)
 - permissions of memory/log paths
 
 It makes **no network calls of its own**
@@ -94,7 +97,10 @@ It checks, among other things:
   when every sampled turn carries `approval_policy=never` (advisory, `scored=False`),
 - **credential surface inventory** (`report.py`): checks whether credential-store paths
   (`.env`, SSH dirs, keychain/keyring, browser cookies) exist near the agent home — path
-  existence only, contents are never read.
+  existence only, contents are never read,
+- **B182 — ClawHub CLI token store:** opens the ClawHub CLI's own plaintext token-store config
+  (outside the OpenClaw home) to check whether a `token` field is present and the file's
+  permissions — the token value itself is never read into a report, logged, or placed in evidence.
 
 If a finding looks like real malware in an installed skill, tell the user plainly, advise them
 to remove that skill and rotate any secrets it could reach, and **never run** the payload.
