@@ -112,7 +112,7 @@ def test_read_only_no_writes(tmp_path):
 def test_a1_paired_channel_counts_as_untrusted_input(tmp_path):
     """paired Telegram raises the untrusted-input leg (B-032)."""
     (tmp_path / "openclaw.json").write_text(
-        '{"channels": {"telegram": {"dmPolicy": "paired"}}}'
+        '{"channels": {"telegram": {"dmPolicy": "pairing"}}}'
     )
     (tmp_path / "openclaw.json").chmod(0o600)
     f = _by_id(audit(tmp_path)[1])["A1"]

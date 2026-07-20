@@ -99,7 +99,7 @@ def test_b46_allowlist_channel_with_elevated_warns():
 
 def test_b46_paired_channel_with_elevated_warns():
     cfg = {
-        "channels": {"tg": {"dmPolicy": "paired"}},  # paired is still external ingress
+        "channels": {"tg": {"dmPolicy": "pairing"}},  # pairing is still external ingress
         "tools": {"allow": ["send_email"], "elevated": {"allowFrom": ["owner-111"]}},
         "agents": {"subagents": {"maxConcurrent": 4}},
     }

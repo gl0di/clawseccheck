@@ -1021,7 +1021,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B68 - apply_patch workspace-only restriction disabled
+### B68 - File tools (fs / apply_patch) workspace-only confinement disabled
 
 - Severity: MEDIUM
 - Block: hardening
@@ -1029,7 +1029,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: HIGH
 - OWASP: LLM06 Excessive Agency
-- What it checks: apply_patch workspace-only restriction disabled
+- What it checks: File tools (fs / apply_patch) workspace-only confinement disabled
 - Remediation:
   - none
 

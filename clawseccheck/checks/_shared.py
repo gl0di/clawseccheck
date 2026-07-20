@@ -462,7 +462,93 @@ def _channels(cfg: dict) -> dict:
 # "owner" / "owner-only" / absent / "ask" (per-message approval) are intentionally excluded.
 # _open_channels() uses only "open" for B2 ("anyone can command"); _external_input_channels()
 # uses the full set for trifecta / blast-radius / ingress-path checks (B-032 fix).
-_UNTRUSTED_INPUT_POLICIES = frozenset({"open", "allowlist", "paired"})
+#
+# B-283 (a): this set previously read {"open", "allowlist", "paired"}. "paired" is NOT an
+# OpenClaw policy value — grounded against the installed dist, DmPolicySchema is
+# _enum(["open","pairing","allowlist"]) (channel-PR3XHV0V.js:84-88) and every bare "paired"
+# literal in the dist is a DEVICE-pairing status or a provider-catalog order, never a
+# dm/groupPolicy value (`grep 'dmPolicy === "paired"'` returns nothing). So the only member
+# that could ever match was the one that never occurs, while "pairing" — which is the
+# DEFAULT (`DmPolicySchema.optional().default("pairing")` at 6+ schema sites, plus ~15
+# runtime `?? "pairing"` fallbacks) — evaluated as NOT untrusted input. That is a lying PASS
+# on the most common real-world ingress path. Fixed: "paired" dropped as dead, "pairing"
+# added.
+#
+# GROUNDING CORRECTION (C-135 review, B-283): the justification originally written here for
+# ADDING "pairing" claimed "senders self-enrol" and "dm-policy-shared-BaGKWQzz.js never
+# returns block" — both checked against the dist and found false, so replaced with what
+# actually holds. (1) Pairing is NOT self-enrolment: admission requires an explicit owner
+# action, `openclaw pairing approve <channel> <code>` ("Approve a pairing code and allow
+# that sender", pairing-cli-C7VdpD0e.js:123) — a sender only sends a *request*; nothing
+# admits it unattended. (2) The resolver DOES return block for an unapproved pairing sender:
+# message-access-DucCKzfO.js:163-164 — `if (dmPolicy === "pairing" && event.mayPair) return
+# block("dm_policy_pairing_required")`, then a final `return
+# block(dmPolicy === "pairing" ? "event_pairing_not_allowed" : ...)` — both via the local
+# `block()` at lines 138-144, whose `senderGate` carries `effect: "block-dispatch"`. The
+# justification that actually holds: a sender who HAS completed pairing resolves through
+# dm-policy-shared-BaGKWQzz.js:92 — `isSenderAllowed(effectiveAllowFrom) ? allow(...,
+# DM_POLICY_ALLOWLISTED, ...) : ...` — to the exact same decision and reasonCode
+# (`dm_policy_allowlisted`) that a `dmPolicy=="allowlist"` match produces; the modern
+# resolver in message-access-DucCKzfO.js:152-160 agrees (`pairingStore.match.matched` also
+# yields `reasonCode: "dm_policy_allowlisted"`). OpenClaw itself classifies a paired sender
+# identically to an allow-listed one, and "allowlist" was already a member of this set —
+# that is reason enough for "pairing" to join it, independent of the retracted claims above.
+#
+# Why the GR#4 schema-grounding guard could not catch this: both layers ground dig() PATHS.
+# These helpers read raw node.get("dmPolicy") and compare VALUE LITERALS, which no guard
+# grounds. The same shape can hide in any value-literal comparison.
+#
+# NOT closed here (deliberately out of scope, see B-283): an ABSENT dmPolicy still reads as
+# "no untrusted ingress" even though the product default is "pairing". Treating absent as
+# pairing would flip nearly every enabled-channel config to untrusted-ingress and could
+# cascade into A1 grade changes; it needs its own C-135 pass and remains a separate task.
+_UNTRUSTED_INPUT_POLICIES = frozenset({"open", "allowlist", "pairing"})
+
+
+def _norm_group_policy(channel_name, value):
+    """Normalize a raw ``groupPolicy`` literal to the value OpenClaw resolves it to.
+
+    B-283 (a): Feishu's own ``GroupPolicySchema`` is
+    ``union([_enum(["open","allowlist","disabled"]), literal("allowall").transform(() => "open")])``
+    (channel-PR3XHV0V.js:89-93), and ``normalizeFeishuGroupPolicy`` does the same
+    (policy-hydoYQvK.js:55-57). So a Feishu config written as ``groupPolicy: "allowall"``
+    runs as ``"open"`` — the single most permissive setting.
+
+    FEISHU SCOPE ONLY (GROUNDING CORRECTION, C-135 review). This was originally channel-
+    agnostic — every ``== "open"`` / policy-set membership test in this package normalized
+    every channel's groupPolicy the same way. Checked against the dist, that is wrong:
+    Feishu is the ONLY channel schema in the installed dist that accepts the ``"allowall"``
+    literal. LINE defines its own separate ``GroupPolicySchema`` as a bare
+    ``_enum(["open","allowlist","disabled"])`` with no ``"allowall"`` member
+    (reply-payload-transform-Ce9ZfUxA.js:19-23), and Telegram/Discord/Slack/Signal/Matrix/
+    Nextcloud-Talk/Zalo/Zalouser all import the shared "core" ``GroupPolicySchema``, itself
+    ``_enum(["open","disabled","allowlist"])`` with no ``"allowall"`` member
+    (zod-schema.core-DviqqtPj.js:424-428). Both REJECT ``"allowall"`` — a config with e.g.
+    ``channels.telegram.groupPolicy: "allowall"`` fails OpenClaw's own schema validation and
+    so cannot be a config a running instance actually loaded. Normalizing it channel-
+    agnostically meant this package could score a CRITICAL FAIL against a value zod would
+    refuse to load — a fabricated schema fact in its own right, not just a wrong comment.
+    Callers now pass the channel key; this function transforms the literal only when
+    ``channel_name == "feishu"``. Every other channel's raw ``"allowall"`` (an already-
+    invalid value there) passes through unchanged, same as any other unmodeled string.
+
+    dmPolicy is untouched regardless of channel: ``allowall`` is not a member of
+    ``DmPolicySchema`` on any channel checked, and Feishu's own ``normalizeFeishuDmPolicy``
+    (policy-hydoYQvK.js:52-54) maps any unrecognised dmPolicy — including a stray
+    ``"allowall"`` — to ``"pairing"``, NOT to ``"open"``. Normalizing dmPolicy="allowall" to
+    "open" would therefore overstate the exposure of an already-invalid config.
+
+    GROUNDING CORRECTION (item 4): a prior version of this docstring claimed the dmPolicy
+    gap "is not a silent PASS" because "pairing" is in ``_UNTRUSTED_INPUT_POLICIES``. Checked
+    against this package's own code, that is wrong: dmPolicy is never normalized anywhere,
+    so an unrecognised dmPolicy literal (``"allowall"`` or any other unmodeled string) is
+    compared as-is against ``_UNTRUSTED_INPUT_POLICIES`` and against ``"open"``, matches
+    neither, and resolves as a silent PASS in this package's own output — indistinguishable
+    from a genuinely-restrictive policy. That gap is real, applies to every unmodeled
+    dmPolicy string (not just "allowall"), and is out of scope for this fix, which only
+    corrects the groupPolicy alias.
+    """
+    return "open" if channel_name == "feishu" and value == "allowall" else value
 
 
 def _open_channels(cfg: dict) -> list[str]:
@@ -481,7 +567,8 @@ def _open_channels(cfg: dict) -> list[str]:
         nodes = [c] + list((c.get("accounts") or {}).values())
         for node in nodes:
             if isinstance(node, dict) and (
-                node.get("dmPolicy") == "open" or node.get("groupPolicy") == "open"
+                node.get("dmPolicy") == "open"
+                or _norm_group_policy(name, node.get("groupPolicy")) == "open"
             ):
                 out.append(name)
                 break
@@ -491,14 +578,16 @@ def _open_channels(cfg: dict) -> list[str]:
 def _external_input_channels(cfg: dict) -> list[str]:
     """Channels that admit external (non-owner) senders regardless of how restricted.
 
-    Includes open, allowlist, and paired modes — all of which carry untrusted content
+    Includes open, allowlist, and pairing modes — all of which carry untrusted content
     that could be crafted by (or injected into) the sender. Used for the trifecta
-    'untrusted input' leg and credential / ingress-path checks (B-032).
+    'untrusted input' leg and credential / ingress-path checks (B-032). ``groupPolicy``
+    is normalized first so a Feishu channel's ``"allowall"`` alias counts as ``"open"``
+    (B-283; Feishu-scoped — see ``_norm_group_policy``).
     """
     out = []
     for name, c in _channels(cfg).items():
         # B-041: skip enabled:false channels (a disabled channel admits no external
-        # input), matching _untrusted_input_channels. A disabled allowlist/paired channel
+        # input), matching _untrusted_input_channels. A disabled allowlist/pairing channel
         # otherwise drove §5 hard-FAIL false positives (B39) and spurious WARNs (B41/B46).
         if not isinstance(c, dict) or c.get("enabled") is False:
             continue
@@ -506,7 +595,8 @@ def _external_input_channels(cfg: dict) -> list[str]:
         for node in nodes:
             if isinstance(node, dict) and (
                 node.get("dmPolicy") in _UNTRUSTED_INPUT_POLICIES
-                or node.get("groupPolicy") in _UNTRUSTED_INPUT_POLICIES
+                or _norm_group_policy(name, node.get("groupPolicy"))
+                in _UNTRUSTED_INPUT_POLICIES
             ):
                 out.append(name)
                 break
@@ -642,14 +732,15 @@ def _active_channels(cfg: dict) -> dict:
 def _untrusted_input_channels(cfg: dict) -> list[str]:
     """Enabled channels that can receive non-owner (untrusted) input.
 
-    Same untrusted-policy allowlist as _external_input_channels (dmPolicy/groupPolicy
-    in _UNTRUSTED_INPUT_POLICIES = open/allowlist/paired), but additionally excludes
-    channels explicitly disabled (`enabled: False`) — a disabled channel ingests
-    nothing. An absent or restrictive groupPolicy (e.g. "ask" per-message approval,
-    or "owner") is deliberately NOT treated as untrusted, consistent with the leg
-    doctrine at _UNTRUSTED_INPUT_POLICIES: a groups-present denylist would FAIL a safe
-    owner-approved group bot ("ask") — a §5 false positive — so we key off the
-    untrusted-policy allowlist only.
+    Same untrusted-policy allowlist as _external_input_channels (dmPolicy/groupPolicy in
+    _UNTRUSTED_INPUT_POLICIES = open/allowlist/pairing, with a Feishu channel's groupPolicy
+    normalized so its "allowall" alias counts as "open" — B-283, Feishu-scoped, see
+    _norm_group_policy), but additionally excludes channels explicitly disabled
+    (`enabled: False`) — a disabled channel ingests nothing. An absent or restrictive
+    groupPolicy (e.g. "ask" per-message approval, or "owner") is deliberately NOT treated
+    as untrusted, consistent with the leg doctrine at _UNTRUSTED_INPUT_POLICIES: a
+    groups-present denylist would FAIL a safe owner-approved group bot ("ask") — a §5
+    false positive — so we key off the untrusted-policy allowlist only.
     """
     out = []
     for name, c in _channels(cfg).items():
@@ -661,8 +752,74 @@ def _untrusted_input_channels(cfg: dict) -> list[str]:
                 continue
             if (
                 node.get("dmPolicy") in _UNTRUSTED_INPUT_POLICIES
-                or node.get("groupPolicy") in _UNTRUSTED_INPUT_POLICIES
+                or _norm_group_policy(name, node.get("groupPolicy"))
+                in _UNTRUSTED_INPUT_POLICIES
             ):
+                out.append(name)
+                break
+    return out
+
+
+def _channels_with_context_visibility_all(cfg: dict) -> list[str]:
+    """Channel names whose effective ``contextVisibility`` resolves to ``"all"``.
+
+    B-283 (c): the dist resolver's own doc comment reads *"Resolves supplemental context
+    visibility using explicit, account, channel, default precedence"*
+    (context-visibility-BVlvSMUZ.js:8-13):
+
+        resolveAccountEntry(channelConfig?.accounts, accountId)?.contextVisibility
+          ?? channelConfig?.contextVisibility
+          ?? resolveDefaultContextVisibility(params.cfg)
+          ?? "all"
+
+    B26 and risk.py's mirror previously resolved channel -> default -> "all" and never
+    descended ``accounts``, so ``channels.<p>.accounts.<id>.contextVisibility: "all"`` on a
+    channel whose channel-level value was ``"allowlist"`` produced a PASS that was
+    byte-indistinguishable from a genuinely-safe config. Per-account ``contextVisibility``
+    is in the shipped schema for six providers (Telegram / Discord / Slack / Signal /
+    iMessage / MSTeams), enum {all, allowlist, allowlist_quote}.
+
+    A channel is reported when ANY node resolves to "all". Both directions are correct:
+      * account overrides to "all" over an "allowlist" channel  -> reported (the override
+        is what actually runs for that account);
+      * ONE account overrides to "allowlist" on an "all" channel -> still reported, because
+        accounts WITHOUT an override keep resolving to the channel value.
+
+    This is not a heuristic: it fires only where the owner explicitly wrote the unsafe
+    enum value, so it cannot manufacture a false positive. Same accounts-descent idiom as
+    _open_channels / _external_input_channels / _untrusted_input_channels above; the
+    project already paid for this bug shape once (B-058, see _agents.py).
+    """
+    channels = cfg.get("channels")
+    if not isinstance(channels, dict):
+        return []
+    # Read via dig() so the path stays registered with the GR#4 schema-grounding guard
+    # (tests/test_schema_grounding.py greps dig() call sites); an equivalent .get() chain
+    # would silently drop channels.defaults.contextVisibility from the grounded manifest.
+    global_default = dig(cfg, "channels.defaults.contextVisibility")
+    out: list[str] = []
+    for name, c in channels.items():
+        # "defaults" holds defaults; it is not a channel.
+        if name == "defaults" or not isinstance(c, dict):
+            continue
+        channel_value = c.get("contextVisibility")
+        accounts = c.get("accounts")
+        # isinstance guard, not the `or {}` idiom used by the older accounts walkers above:
+        # a non-dict `accounts` (e.g. a bare string) is truthy, so `or {}` does not catch it
+        # and .values() raises. Those older sites share that latent crash on a malformed
+        # config; it is pre-existing and filed separately rather than widened into here.
+        account_nodes = list(accounts.values()) if isinstance(accounts, dict) else []
+        # [c] first so a channel with no accounts still resolves at channel scope.
+        for node in [c] + account_nodes:
+            if not isinstance(node, dict):
+                continue
+            # node is `c` itself for the channel-scope pass, which collapses this to
+            # channel -> default -> "all"; for an account node it is the full
+            # account -> channel -> default -> "all" precedence the dist implements.
+            effective = (
+                node.get("contextVisibility") or channel_value or global_default or "all"
+            )
+            if effective == "all":
                 out.append(name)
                 break
     return out

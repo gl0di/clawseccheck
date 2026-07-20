@@ -28,6 +28,7 @@ from ._shared import (
     _TIER_NAME,
     _agent_legs,
     _channels,
+    _channels_with_context_visibility_all,
     _config_unreadable,
     _enabled_tools,
     _external_input_channels,
@@ -851,6 +852,10 @@ def check_tool_output_trust(ctx: Context) -> Finding:
 def check_untrusted_context(ctx: Context) -> Finding:
     """B26 — Untrusted-context exposure via channels.contextVisibility.
 
+    Effective visibility resolves account -> channel -> channels.defaults -> "all",
+    mirroring the dist resolver (B-283 (c)); a per-account override is authoritative
+    for that account.
+
     PASS    — all configured channels' effective contextVisibility is in
               ('allowlist', 'allowlist_quote').
     WARN    — at least one channel's effective value is 'all' (the insecure default),
@@ -876,14 +881,13 @@ def check_untrusted_context(ctx: Context) -> Finding:
             "before enabling any channel.",
         )
 
-    global_default = dig(cfg, "channels.defaults.contextVisibility")
-
-    affected: list[str] = []
-    for provider, provider_cfg in providers.items():
-        # Per-channel value takes priority; fall back to global default; then "all".
-        effective = provider_cfg.get("contextVisibility") or global_default or "all"
-        if effective == "all":
-            affected.append(provider)
+    # B-283 (c): resolution is account -> channel -> channels.defaults -> "all", matching
+    # the dist resolver (context-visibility-BVlvSMUZ.js:8-13). This previously read only
+    # channel -> default, so a per-account override to "all" on an "allowlist" channel was
+    # a lying PASS. The shared helper is the single source of truth for this precedence;
+    # risk.py mirrors it deliberately (see _channels_with_visibility_all there) — both had
+    # to move together or RISK-15/RISK-18 would stay blind. Same bug shape as B-058.
+    affected: list[str] = _channels_with_context_visibility_all(cfg)
 
     if affected:
         return _finding(

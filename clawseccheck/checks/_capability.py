@@ -469,36 +469,219 @@ def check_effective_tools(ctx: Context) -> Finding:
     )
 
 
+def _b68_fs_workspace_only_scopes(cfg: dict) -> list[tuple[str, object]]:
+    """Every ``tools.fs.workspaceOnly`` value in the config, with its config path.
+
+    B-283 (b): the field is wired at TWO scopes and a per-agent value overrides the
+    global one — ``context.tools?.fs?.workspaceOnly ?? cfg.tools?.fs?.workspaceOnly``
+    (audit.nondeep.runtime-C3y1Q5Fi.js:589). Reading only one scope would miss either a
+    per-agent opt-out under a hardened global, or a global opt-out under agents that do
+    not override it. Grounded: ``ToolFsSchema`` is referenced from ``ToolsSchema``
+    (global ``tools.fs``) and ``AgentToolsSchema`` (``agents.list[].tools.fs``) —
+    zod-schema.agent-runtime-C02vY4RT.js:413/542/747, with agents.list from
+    zod-schema-O9ml_nmo.js:306-308.
+
+    Returns the global scope first, then one entry per agent that sets the field.
+    Unset scopes are omitted entirely so callers can distinguish "absent" from "false".
+    """
+    scopes: list[tuple[str, object]] = []
+    global_val = dig(cfg, "tools.fs.workspaceOnly")
+    if global_val is not None:
+        scopes.append(("tools.fs.workspaceOnly", global_val))
+    agents = dig(cfg, "agents.list")
+    if isinstance(agents, list):
+        for idx, agent in enumerate(agents):
+            if not isinstance(agent, dict):
+                continue
+            val = dig(agent, "tools.fs.workspaceOnly")
+            if val is not None:
+                label = agent.get("name") or agent.get("id") or idx
+                scopes.append((f"agents.list[{label}].tools.fs.workspaceOnly", val))
+    return scopes
+
+
+# The filesystem tool family tools.fs.workspaceOnly governs, verbatim from OpenClaw's own
+# composite predicate: `["read","write","edit","apply_patch"].filter(isToolAllowedByPolicies)`
+# (audit.nondeep.runtime-C3y1Q5Fi.js:583-588).
+_B68_FS_TOOLS = ("read", "write", "edit", "apply_patch")
+
+
+def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
+    """Which filesystem tools config GRANTS, and whether that is knowable at all.
+
+    B-283 (b). Returns ``(granted, enumerable)``. ``enumerable`` is False when the config
+    declares neither an explicit tool allowlist nor a profile — the grants then depend on
+    OpenClaw's runtime defaults, which static config cannot resolve, so the caller must
+    report UNKNOWN rather than guess (GR#4: never assert a capability the config does not
+    declare).
+
+    Deliberately conservative in both directions: an explicit allowlist is authoritative
+    (only the fs tools actually listed count, minus anything denied), and a profile is
+    only read as granting fs tools when it is one of the powerful profiles the package
+    already recognises — so a "minimal"/"readonly"/"chat" profile yields no grant and
+    cannot produce a WARN.
+    """
+    allow_a = dig(cfg, "tools.allow")
+    allow_b = dig(cfg, "gateway.tools.allow")
+    deny = dig(cfg, "tools.deny")
+    denied = {str(t).strip().lower() for t in deny} if isinstance(deny, list) else set()
+    # "group:fs" denies the whole family (see check at _capability.py:430).
+    if "group:fs" in denied:
+        return [], True
+
+    listed: list[str] = []
+    for v in (allow_a, allow_b):
+        if isinstance(v, list):
+            listed.extend(str(t).strip().lower() for t in v)
+
+    if listed:
+        if "group:fs" in listed:
+            return [t for t in _B68_FS_TOOLS if t not in denied], True
+        granted = [t for t in _B68_FS_TOOLS if t in listed and t not in denied]
+        return granted, True
+
+    profile = dig(cfg, "tools.profile")
+    if profile is not None:
+        if _profile_is_powerful(profile):
+            return [t for t in _B68_FS_TOOLS if t not in denied], True
+        return [], True
+
+    # No allowlist and no profile: grants come from runtime defaults we cannot see.
+    return [], False
+
+
 def check_exec_applypatch_workspace(ctx: Context) -> Finding:
-    """B68 — apply_patch workspace-only restriction.
+    """B68 — filesystem workspace-only confinement (apply_patch + the fs tool family).
 
     Grounded (docs.openclaw.ai/tools/exec): tools.exec.applyPatch.workspaceOnly (bool,
     default true). When false, apply_patch may write or delete files outside the workspace
     root, expanding the write blast radius.
 
-    PASS — field is true or unset (safe default).
-    WARN — field is explicitly false.
+    B-283 (b) widened this from ONE sibling of a pair to both. ``tools.fs.workspaceOnly``
+    governs the whole fs read/write/edit/apply_patch family — *"Restrict filesystem tools
+    (read/write/edit/apply_patch) to the workspace directory (default: false)"*
+    (schema-DRyO1XBt.js:556) — so ``applyPatch.workspaceOnly: true`` could pass here while
+    fs stayed wide open over ``~/.ssh`` / ``~/.openclaw`` / ``/etc``. It was read nowhere in
+    the package before this change.
+
+    THE DEFAULT IS FALSE, so a bare ``workspaceOnly !== true -> finding`` would fire on
+    nearly every real config and flag a product default as a failure — a grade-wrecking
+    blanket WARN, exactly the noise GR#5 exists to prevent. Instead this uses OpenClaw's
+    OWN composite predicate (audit.nondeep.runtime-C3y1Q5Fi.js:590)::
+
+        fsUnguarded = fsTools.length > 0 && sandboxMode !== "all" && fsWorkspaceOnly !== true
+
+    i.e. unconfined fs only matters when fs tools are actually GRANTED and the sandbox is
+    not containing them. Every ingredient was already read by ClawSecCheck.
+
+    Stays WARN-capable only (CheckMeta scored=False) — advisory, never moves the grade,
+    never FAIL.
+
+    PASS    — apply_patch confined, and fs is either workspace-confined, sandboxed
+              (``agents.defaults.sandbox.mode == "all"``), or has no granted fs tools.
+    WARN    — either sibling is explicitly ``false`` (OpenClaw's own dangerous-flag list,
+              dangerous-config-flags-current-CrOoyQT2.js:48), or the composite predicate
+              holds with the field merely absent.
+    UNKNOWN — fs tool grants are not enumerable from config (no tools.allow /
+              gateway.tools.allow and no tools.profile) and neither sibling is explicitly
+              false, so the composite predicate genuinely cannot be evaluated.
+
+    NARROWS, does not close: this reasons over STATIC config only. Per-agent
+    ``tools.allow``/``deny``/``profile`` overrides and group/sender-scoped tool policies
+    can still grant fs tools to an agent this check reads as tool-less, and OpenClaw
+    resolves the effective set at runtime. A config that declares no tool surface at all
+    is reported UNKNOWN rather than guessed at.
     """
     unreadable = _config_unreadable("B68", ctx)
     if unreadable is not None:
         return unreadable
     cfg = ctx.config
+    evidence: list[str] = []
+
     val = dig(cfg, "tools.exec.applyPatch.workspaceOnly")
     if val is False:
+        evidence.append(
+            "tools.exec.applyPatch.workspaceOnly=false (workspace restriction disabled)"
+        )
+
+    fs_scopes = _b68_fs_workspace_only_scopes(cfg)
+    # An explicit `false` at ANY scope is what OpenClaw itself enumerates as a dangerous
+    # config flag — report it regardless of the composite predicate, because the owner
+    # actively opted out of a confinement control.
+    explicit_off = [(path, v) for path, v in fs_scopes if v is False]
+    for path, _v in explicit_off:
+        evidence.append(f"{path}=false (filesystem tools not confined to the workspace)")
+
+    if evidence:
         return _finding(
             "B68",
             WARN,
-            "tools.exec.applyPatch.workspaceOnly is false — apply_patch may write or delete "
-            "files outside the workspace root, expanding the write blast radius.",
-            "Set tools.exec.applyPatch.workspaceOnly to true so apply_patch is restricted "
-            "to the workspace directory.",
-            evidence=["tools.exec.applyPatch.workspaceOnly=false (workspace restriction disabled)"],
+            "Filesystem workspace confinement is explicitly disabled ("
+            + ", ".join(e.split(" ", 1)[0] for e in evidence)
+            + ") — file tools may read, write or delete outside the workspace root, "
+            "expanding the blast radius to paths such as ~/.ssh and ~/.openclaw.",
+            "Set tools.exec.applyPatch.workspaceOnly and tools.fs.workspaceOnly to true "
+            "so file tools are restricted to the workspace directory.",
+            evidence=evidence,
         )
+
+    # Composite predicate: only meaningful when fs tools are actually reachable.
+    #
+    # Only the GLOBAL scope being true clears the whole config. A per-agent `true` under an
+    # absent global confines that one agent while every agent without an override keeps the
+    # product default (false) — so it is deliberately NOT treated as a blanket PASS. The
+    # inverse (global true, one agent opting out with false) is already reported above,
+    # because per-agent overrides global: `context.tools?.fs?.workspaceOnly ??
+    # cfg.tools?.fs?.workspaceOnly` (audit.nondeep.runtime-C3y1Q5Fi.js:589).
+    confined_globally = dig(cfg, "tools.fs.workspaceOnly") is True
+    sandbox_mode = dig(cfg, "agents.defaults.sandbox.mode")
+    if sandbox_mode == "all" or confined_globally:
+        return _finding(
+            "B68",
+            PASS,
+            "File tools are confined — workspaceOnly is set or the sandbox contains all "
+            "agents (agents.defaults.sandbox.mode='all').",
+            "Keep tools.exec.applyPatch.workspaceOnly and tools.fs.workspaceOnly true.",
+        )
+
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    if not enumerable:
+        return _finding(
+            "B68",
+            UNKNOWN,
+            "tools.fs.workspaceOnly is not set and filesystem tool grants are not "
+            "enumerable from config (no tools.allow / gateway.tools.allow and no "
+            "tools.profile), so workspace confinement cannot be assessed. The OpenClaw "
+            "default for tools.fs.workspaceOnly is false (unconfined).",
+            "Declare tools.allow (or tools.profile) explicitly so tool grants are "
+            "auditable, and set tools.fs.workspaceOnly to true.",
+        )
+
+    if granted:
+        return _finding(
+            "B68",
+            WARN,
+            "Filesystem tools are granted "
+            f"({', '.join(granted)}), the sandbox does not contain all agents "
+            f"(agents.defaults.sandbox.mode={sandbox_mode!r}), and "
+            "tools.fs.workspaceOnly is unset — its default is false, so file tools may "
+            "read, write or delete anywhere the agent process can reach.",
+            "Set tools.fs.workspaceOnly to true, or set agents.defaults.sandbox.mode to "
+            "'all' so filesystem access is contained.",
+            evidence=[
+                "tools.fs.workspaceOnly unset (OpenClaw default: false)",
+                f"filesystem tools granted: {', '.join(granted)}",
+                f"agents.defaults.sandbox.mode={sandbox_mode!r} (not 'all')",
+            ],
+        )
+
     return _finding(
         "B68",
         PASS,
-        "apply_patch is restricted to the workspace (workspaceOnly=true or default).",
-        "Keep tools.exec.applyPatch.workspaceOnly set to true.",
+        "apply_patch is restricted to the workspace and no filesystem tool is granted "
+        "that could escape it.",
+        "Keep tools.exec.applyPatch.workspaceOnly set to true, and set "
+        "tools.fs.workspaceOnly to true before granting filesystem tools.",
     )
 
 

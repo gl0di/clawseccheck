@@ -4,7 +4,7 @@ The capability graph (emitted in --json output) and A1's Lethal-Trifecta verdict
 must agree on which channels supply untrusted external input.  Before the B-041
 fix, ``_capability_graph()`` used ``_open_channels()`` (dmPolicy="open" only)
 while ``check_trifecta`` (A1) used ``_external_input_channels()``
-(dmPolicy in {"open","allowlist","paired"}).  That mismatch produced an
+(dmPolicy in {"open","allowlist","pairing"}).  That mismatch produced an
 internally-contradictory output: "trifecta 3/3 active" alongside the capability
 graph input node showing ``tools=[]`` / ``can_egress=false``.
 
@@ -56,7 +56,7 @@ def _a1(doc: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Fixture configs
 #
-# _ALLOWLIST_CFG / _PAIRED_CFG: channels with dmPolicy ∈ {"allowlist","paired"}
+# _ALLOWLIST_CFG / _PAIRED_CFG: channels with dmPolicy ∈ {"allowlist","pairing"}
 #   — not "open", so _open_channels() returns [] while
 #     _external_input_channels() returns ["slack"] / ["teams"].
 #   Tools: db_query (matches SENSITIVE_TOOL_HINTS via "db"),
@@ -75,7 +75,7 @@ _ALLOWLIST_CFG = {
 }
 
 _PAIRED_CFG = {
-    "channels": {"teams": {"dmPolicy": "paired"}},
+    "channels": {"teams": {"dmPolicy": "pairing"}},
     "tools": {"allow": ["db_query", "http_post"]},
 }
 

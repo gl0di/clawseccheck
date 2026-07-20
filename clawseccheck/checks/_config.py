@@ -52,6 +52,7 @@ from ._shared import (
     _hint,
     _is_secret_reference,
     _mcp_leg_contributions,
+    _norm_group_policy,
     _open_channels,
     _perms_loose,
     _plugins,
@@ -1096,7 +1097,13 @@ def _b171_open_channels(cfg: dict) -> list[str]:
             dm_open = node.get("dmPolicy") == "open" and not _b171_scoped_list(
                 node.get("allowFrom")
             )
-            group_open = node.get("groupPolicy") == "open" and not (
+            # B-283 (a): normalize a Feishu channel's "allowall" alias, which Feishu's
+            # GroupPolicySchema transforms to "open" (channel-PR3XHV0V.js:89-93) — without
+            # this a Feishu channel written as groupPolicy:"allowall" ran wide open but
+            # read as unrecognised. Feishu-scoped only: every other channel schema in the
+            # dist rejects "allowall" outright, so it cannot appear on them in a config
+            # that actually loaded — see _norm_group_policy's docstring for the grounding.
+            group_open = _norm_group_policy(name, node.get("groupPolicy")) == "open" and not (
                 _b171_scoped_list(node.get("groupAllowFrom"))
                 or _b171_scoped_list(node.get("allowFrom"))
             )
@@ -1148,7 +1155,7 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
         with-no-gate condition (still unauthenticated, narrower blast radius).
     WARN — a privileged command (incl. ``debug``) is enabled with no
         ownerAllowFrom/allowFrom configured, on a channel that is NOT open (allowlist/
-        paired/pairing/disabled still constrains who reaches the command layer, but no
+        pairing/disabled still constrains who reaches the command layer, but no
         owner-scoped allowlist narrows it further — see docs/research §18); or
         ``commands.useAccessGroups`` is explicitly ``false`` alongside an enabled
         privileged command.

@@ -98,6 +98,7 @@ tools.alsoAllow
 tools.deny
 tools.elevated.allowFrom
 tools.exec.applyPatch.workspaceOnly
+tools.fs.workspaceOnly
 tools.exec.ask
 tools.exec.host
 tools.exec.mode
@@ -134,3 +135,4 @@ relative:sandbox.docker.dangerouslyAllowReservedContainerTargets
 relative:subagents.allowAgents
 relative:tools.allow
 relative:tools.deny
+relative:tools.fs.workspaceOnly

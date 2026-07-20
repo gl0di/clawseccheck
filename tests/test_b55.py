@@ -105,7 +105,7 @@ def test_b55_allowlist_channel_does_not_escalate_to_fail(tmp_path):
 def test_b55_paired_channel_does_not_escalate_to_fail(tmp_path):
     home = _write_config(
         tmp_path,
-        '{"channels": {"telegram": {"dmPolicy": "paired"}},'
+        '{"channels": {"telegram": {"dmPolicy": "pairing"}},'
         ' "tools": {"allow": ["fs_write"]}}',
     )
     assert _b55(home).status == WARN

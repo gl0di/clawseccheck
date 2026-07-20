@@ -50,10 +50,33 @@ def test_b68_false_warns():
 
 
 def test_b68_true_passes():
+    # B-283 (b) widened B68 from the applyPatch sibling alone to the whole fs family, so
+    # the config must declare a tool surface for the fs leg to be determinate — a bare
+    # applyPatch:true with no tools.allow/tools.profile is now (honestly) UNKNOWN, pinned
+    # by test_b68_fs_grants_unenumerable_unknown below. "minimal" grants no fs tool, which
+    # isolates the applyPatch leg this test is about.
+    f = check_exec_applypatch_workspace(
+        _ctx(
+            {
+                "tools": {
+                    "profile": "minimal",
+                    "exec": {"applyPatch": {"workspaceOnly": True}},
+                }
+            }
+        )
+    )
+    assert f.status == PASS
+
+
+def test_b68_fs_grants_unenumerable_unknown():
+    # No tools.allow / gateway.tools.allow and no tools.profile: fs grants come from
+    # OpenClaw's runtime defaults, which static config cannot resolve. tools.fs.workspaceOnly
+    # defaults to FALSE, so claiming PASS here would be a fake clean verdict (GR#4).
     f = check_exec_applypatch_workspace(
         _ctx({"tools": {"exec": {"applyPatch": {"workspaceOnly": True}}}})
     )
-    assert f.status == PASS
+    assert f.status == UNKNOWN
+    assert "not" in f.detail and "enumerable" in f.detail
 
 
 def test_b68_unset_passes():

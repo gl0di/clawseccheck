@@ -1051,9 +1051,12 @@ CATALOG: list[CheckMeta] = [
     # B68–B73 (v1.20.0): advisory WARN-only config-fact checks. scored=False so they
     # never move the A–F grade. Each fires only on the explicit dangerous value;
     # default/absent → UNKNOWN or PASS (zero false-positive FAILs on real configs).
+    # B-283 (b): retitled — the check now reads BOTH tools.exec.applyPatch.workspaceOnly
+    # AND tools.fs.workspaceOnly (the sibling that governs the whole fs tool family), so
+    # the old apply_patch-only title no longer describes what it covers.
     CheckMeta(
         "B68",
-        "apply_patch workspace-only restriction disabled",
+        "File tools (fs / apply_patch) workspace-only confinement disabled",
         MEDIUM,
         "hardening",
         "Least Privilege / Filesystem Write",

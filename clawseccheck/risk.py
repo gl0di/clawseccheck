@@ -103,7 +103,19 @@ def _open_channel_labels(cfg: dict) -> list[str]:
             parts = []
             if node.get("dmPolicy") == "open":
                 parts.append("open DM")
-            if node.get("groupPolicy") == "open":
+            # B-283 (a), GROUNDING CORRECTION (C-135 review): Feishu's GroupPolicySchema
+            # maps the "allowall" alias onto "open" (channel-PR3XHV0V.js:89-93) — canonical
+            # helper is _norm_group_policy in checks/_shared.py; inlined here to keep
+            # risk.py free of a non-aggregator import (see CLAUDE.md §3.1-a). Feishu-scoped
+            # ONLY: every other channel schema checked in the dist (LINE
+            # reply-payload-transform-Ce9ZfUxA.js:19-23; the "core" schema shared by
+            # Telegram/Discord/Slack/Signal/Matrix/Nextcloud-Talk/Zalo,
+            # zod-schema.core-DviqqtPj.js:424-428) rejects "allowall" outright, so it
+            # cannot appear on those channels in a config that actually loaded — treating
+            # it as "open" there would label a schema-impossible value as an open group.
+            if node.get("groupPolicy") == "open" or (
+                name == "feishu" and node.get("groupPolicy") == "allowall"
+            ):
                 parts.append("open group")
             if parts:
                 labels.append(f"{name} ({', '.join(parts)})")
@@ -114,9 +126,18 @@ def _open_channel_labels(cfg: dict) -> list[str]:
 def _channels_with_visibility_all(cfg: dict) -> list[str]:
     """Channel names where effective contextVisibility is 'all' (untrusted input exposed).
 
-    Mirrors B26's effective-visibility logic: per-channel value takes precedence, then
-    channels.defaults.contextVisibility, then the OpenClaw default of 'all'. Returns []
-    when no channels are configured (zero-FP on empty/absent channels key).
+    Mirrors B26's effective-visibility logic: per-ACCOUNT value first, then the per-channel
+    value, then channels.defaults.contextVisibility, then the OpenClaw default of 'all' —
+    the precedence the dist resolver documents and implements
+    (context-visibility-BVlvSMUZ.js:8-13). Returns [] when no channels are configured
+    (zero-FP on empty/absent channels key).
+
+    B-283 (c): the accounts descent was missing here AND in B26. Because RISK-15 keys off
+    B26's status and RISK-18 calls this helper directly, fixing only one site would have
+    left one of the two chains blind — they had to move together. The canonical
+    implementation is _channels_with_context_visibility_all in checks/_shared.py; this is a
+    deliberate mirror (risk.py imports only via the checks aggregator, CLAUDE.md §3.1-a),
+    so the two must be kept in step — tests/test_b283_shallow_reads.py pins them equal.
     """
     channels = cfg.get("channels")
     if not isinstance(channels, dict):
@@ -131,9 +152,20 @@ def _channels_with_visibility_all(cfg: dict) -> list[str]:
     for name, c in channels.items():
         if name == "defaults" or not isinstance(c, dict):
             continue
-        effective = c.get("contextVisibility") or global_default or "all"
-        if effective == "all":
-            result.append(name)
+        channel_value = c.get("contextVisibility")
+        accounts = c.get("accounts")
+        # isinstance guard rather than `or {}` — a non-dict `accounts` is truthy and would
+        # raise on .values(); mirrors _channels_with_context_visibility_all in
+        # checks/_shared.py.
+        for node in [c] + (list(accounts.values()) if isinstance(accounts, dict) else []):
+            if not isinstance(node, dict):
+                continue
+            effective = (
+                node.get("contextVisibility") or channel_value or global_default or "all"
+            )
+            if effective == "all":
+                result.append(name)
+                break
     return result
 
 
@@ -187,8 +219,10 @@ def _host_reaching_bind(cfg: dict) -> str | None:
 def _has_untrusted_ingress(tools: list[str], cfg: dict) -> bool:
     """True when there is at least one vector for untrusted content to reach the agent.
 
-    Uses _external_input_channels (open + allowlist + paired) rather than _open_channels
-    (open only) so that restricted-but-external channels are correctly counted as ingress.
+    Uses _external_input_channels (open + allowlist + pairing, with a Feishu channel's
+    groupPolicy "allowall" alias normalized to "open" — B-283, Feishu-scoped) rather than
+    _open_channels (open only) so that restricted-but-external channels are correctly
+    counted as ingress.
     """
     return bool(_external_input_channels(cfg)) or _hint(tools, INPUT_TOOL_HINTS)
 

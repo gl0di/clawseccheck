@@ -288,14 +288,14 @@ def test_b39_main_scope_account_nested_allowlist_fails():
 def test_b39_main_scope_account_nested_paired_fails():
     cfg = {
         "session": {"dmScope": "main"},
-        "channels": {"telegram": {"accounts": {"m": {"dmPolicy": "paired"}}}},
+        "channels": {"telegram": {"accounts": {"m": {"dmPolicy": "pairing"}}}},
     }
     assert check_session_visibility(_ctx(cfg)).status == FAIL
 
 
 def test_b39_main_scope_paired_channel_fails():
     # paired = external (non-owner) ingress, now counted alongside open/allowlist
-    cfg = {"session": {"dmScope": "main"}, "channels": {"tg": {"dmPolicy": "paired"}}}
+    cfg = {"session": {"dmScope": "main"}, "channels": {"tg": {"dmPolicy": "pairing"}}}
     assert check_session_visibility(_ctx(cfg)).status == FAIL
 
 

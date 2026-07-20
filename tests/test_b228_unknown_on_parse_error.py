@@ -146,6 +146,16 @@ class TestRegressionGuardIsInert:
         assert ctx.config_parse_error is False
         assert check_secrets(ctx).status == PASS
 
+    # B-283 (b): B68 grew a genuine UNKNOWN branch. On "{}" it can no longer honestly say
+    # PASS — tools.fs.workspaceOnly defaults to FALSE (schema-DRyO1XBt.js:556), and with
+    # neither tools.allow nor tools.profile declared the fs tool grants come from runtime
+    # defaults that static config cannot resolve. Claiming PASS there would be exactly the
+    # fake clean verdict CLAUDE.md GR#4 forbids. The B-228 guard is still proven inert for
+    # it below by asserting the UNKNOWN came from B68's OWN logic and not from
+    # _config_unreadable() — a strictly stronger check than the old status-only assert.
+    _GUARD_DETAIL = "openclaw.json present but unparseable/unreadable"
+    _OWN_UNKNOWN_ON_EMPTY_CONFIG = {"check_exec_applypatch_workspace"}
+
     def test_readable_config_other_guarded_checks_still_pass(self, tmp_path):
         # A valid, fully-parsed "{}" config declares nothing dangerous, so every guarded
         # check's own (pre-existing, unchanged) logic legitimately PASSes — the guard
@@ -159,6 +169,17 @@ class TestRegressionGuardIsInert:
         assert ctx.config_parse_error is False
         for check_fn in GUARDED_CHECKS:
             finding = check_fn(ctx)
+            # The guard must never be the source of the verdict on a readable config.
+            assert self._GUARD_DETAIL not in finding.detail, (
+                f"{check_fn.__name__} returned the B-228 guard's UNKNOWN on a valid, "
+                f"parsed config — the guard must be inert here"
+            )
+            if check_fn.__name__ in self._OWN_UNKNOWN_ON_EMPTY_CONFIG:
+                assert finding.status == UNKNOWN, (
+                    f"{check_fn.__name__} is registered as returning its own UNKNOWN on "
+                    f"an empty config but returned {finding.status!r}"
+                )
+                continue
             assert finding.status == PASS, (
                 f"{check_fn.__name__} returned {finding.status!r} (expected PASS) on a "
                 f"valid, parsed empty config — the B-228 guard must be inert here"

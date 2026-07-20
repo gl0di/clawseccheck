@@ -301,7 +301,7 @@ def test_bash_enabled_no_gate_allowlist_channel_warns_not_fails():
 def test_debug_only_enabled_no_gate_paired_channel_warns():
     cfg = {
         "commands": {"debug": True},
-        "channels": {"whatsapp": {"enabled": True, "dmPolicy": "paired"}},
+        "channels": {"whatsapp": {"enabled": True, "dmPolicy": "pairing"}},
     }
     r = check_privileged_commands_exposure(_ctx(cfg))
     assert r.status == WARN
