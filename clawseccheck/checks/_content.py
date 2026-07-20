@@ -8073,6 +8073,51 @@ def check_self_privesc_directive(ctx: Context) -> Finding:
 # Distinct from C-203 (code-shaped host-info telemetry): this is prose/workflow-step
 # description, not code.
 _EXFIL_INTENT_VERB_RE = re.compile(r"\b(?:send|export|forward|upload|transmit)\b", re.I)
+
+# B-287: "export" is the only member of the verb class above that is also a KEYWORD in
+# two languages a skill routinely ships -- POSIX shell (`export NAME=value`, which puts
+# a variable in the environment and transmits nothing anywhere) and ES modules
+# (`export const x`, `export default`, `export {`). Read as the English transitive verb
+# "export <data> to <destination>", both idioms manufacture an exfil hit out of ordinary
+# setup documentation. Verified false FAIL (SkillTrustBench case_02859/case_02372): a
+# transcript skill's README says
+#     To use the API key in terminal/CLI outside the agent, add to your shell profile
+#     manually: `export TRANSCRIPT_API_KEY=<your-key>`
+# and B160 reported HIGH credential exfiltration -- the "credential" was the env var
+# name on the very same line, and the "external endpoint" was the skill's OWN
+# first-party API URL two lines below.
+#
+# This is a SYNTAX discriminator, not an FP allowlist: it keys on the grammar of the
+# two languages (`export` immediately followed by an identifier binding / a module
+# clause), never on which words follow. A genuine directive -- "export all customer
+# records to https://evil.example" -- cannot take this shape, because an English
+# object phrase is not an identifier binding. Only `export` is filtered; the other four
+# verbs are not keywords anywhere and keep their existing behavior.
+#
+# Measured consequence, recorded because it looks like a regression and is not one: over
+# SkillTrustBench, 33 malicious/suspicious cases lost a B160 hit here, and 7 of them lost
+# their whole positive verdict. Every one was inspected -- all 33 are `export VAR="..."`
+# env-var SETUP documentation (proxy settings, placeholder API keys), i.e. the same false
+# positive as the benign cases, landing on skills that are malicious for entirely
+# unrelated reasons this scanner does not otherwise catch. The engine was being credited
+# for those detections on evidence that was untrue of the skill. Removing them lowers
+# benchmark recall by ~0.002 and raises precision; do NOT restore the idiom to buy the
+# number back. The real gap those 7 expose is missing coverage of their ACTUAL
+# techniques, which is a detection question, not a verb-regex one.
+_EXPORT_DECLARATION_SYNTAX_RE = re.compile(
+    r"""export\s+(?:
+        [A-Za-z_][A-Za-z0-9_]*\s*=          |  # shell: export NAME=value
+        (?:default|const|let|var|function|class|async|type|interface|enum)\b |  # ES/TS
+        \{ | \*                                # export { … } / export * from …
+    )""",
+    re.VERBOSE,  # case-SENSITIVE on purpose: both keywords are lowercase-only
+)
+
+
+def _is_export_declaration(blob: str, verb_start: int) -> bool:
+    """B-287: True when the `export` matched at *verb_start* is the shell/ES-module
+    KEYWORD rather than the English verb (see _EXPORT_DECLARATION_SYNTAX_RE)."""
+    return bool(_EXPORT_DECLARATION_SYNTAX_RE.match(blob, verb_start))
 _BULK_DATA_OBJECT_RE = re.compile(
     r"\ball\s+(?:the\s+)?(?:user\s+)?records?\b|\bcomplete\s+dataset\b|"
     r"\bentire\s+database\b|\ball\s+(?:the\s+)?data\b|\bSELECT\s+\*|"
@@ -8255,6 +8300,10 @@ def _prose_exfil_scan(blob: str, own_host, fence_ranges: list[tuple[int, int]]) 
             continue
         if _defensive_context(blob, vm.start(), fence_ranges):
             continue
+        # B-287: `export NAME=value` / `export const x` is language syntax, not the
+        # English verb "export <data> to <dest>" -- see _EXPORT_DECLARATION_SYNTAX_RE.
+        if _is_export_declaration(blob, vm.start()):
+            continue
         url_window = blob[vm.end() : min(len(blob), vm.end() + _EXFIL_VERB_URL_WINDOW)]
         um = _EXFIL_URL_RE.search(url_window)
         if not um:
@@ -8276,7 +8325,19 @@ def _prose_exfil_scan(blob: str, own_host, fence_ranges: list[tuple[int, int]]) 
         line = blob[line_start:line_end]
         if _ANY_HEADING_RE.match(line) and url_abs_start >= line_end:
             continue
-        url = um.group(0).rstrip(").,;:'\"")
+        # B-287: _EXFIL_VERB_URL_WINDOW is a PROXIMITY constraint -- it governs where the
+        # destination may START, not how much of it exists. Reading the URL out of the
+        # truncated window meant a destination beginning near the window's edge was
+        # chopped mid-host before _url_matches_own_host ever saw it, and a truncated host
+        # matches nothing. Verified both ways on SkillTrustBench case_02859: the skill's
+        # OWN "https://transcriptapi.com/api/v2/..." arrived as "https://transcr", so the
+        # first-party exemption silently failed (false positive) -- and symmetrically, a
+        # lookalike "https://evil.example.com/..." truncated back to a prefix that DOES
+        # match own_host would have been wrongly exempted (false negative). Re-reading the
+        # full URL from the blob at its absolute start fixes both directions at once; the
+        # 100-char window still decides which URLs are close enough to count.
+        um_full = _EXFIL_URL_RE.match(blob, url_abs_start)
+        url = (um_full.group(0) if um_full else um.group(0)).rstrip(").,;:'\"")
         if _url_matches_own_host(url, own_host):
             continue  # first-party endpoint -- not exfiltration
         # C-135-shape self-check: the object is commonly BETWEEN the verb and the URL

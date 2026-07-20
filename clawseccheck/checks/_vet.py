@@ -848,6 +848,122 @@ def _pos_in_test_fixture_file(
     return False
 
 
+# B-287: the ±_PERSIST_WINDOW proximity search used to run over the RAW concatenated
+# blob, so it happily paired an agent-context filename in one skill file with an
+# unrelated write verb in the NEXT one — the two are adjacent in the blob only because
+# _read_skill_text glued them together. Verified false FAIL (SkillTrustBench case_02842):
+# a test file ending in `with open(path, "w") as f: f.write("{corrupt")` sits ~150 chars
+# before the injected `# file: CLAUDE.md` header, so B13 reported "writes to
+# agent-context file 'CLAUDE.md'" for a skill that never writes CLAUDE.md at all.
+#
+# Both fixes below key on DOCUMENT STRUCTURE as the collector defines it, never on
+# author-controlled spacing:
+#   * a filename occurrence inside the injected `# file: <name>` header line is a
+#     COLLECTOR ARTIFACT, not skill content — it can never be a write, so skip it;
+#   * the write verb must live in the SAME file section as the filename.
+# Neither can hide a real attack in practice: a write statement (`open("CLAUDE.md","w")`,
+# `cat >> CLAUDE.md`) is atomic — its verb and its target are always in one file.
+#
+# ACCEPTED RESIDUAL (this NARROWS, it does not close). The `# file:` marker is plain
+# text the collector injects, not an authenticated boundary — the same forgeability the
+# C-135 note above _TEST_FIXTURE_BASENAME_RE already records. An attacker who separates
+# the target filename from the write verb and forges a header between them
+# (`t = "CLAUDE.md"` / `# file: x.md` / `open(t, "w")`) evades the clamp. That costs one
+# contrived shape; it buys removal of a false-FAIL class that fires on ordinary
+# multi-file skills, where the concatenation order alone decides the verdict. The shell
+# form of that same indirection stays covered by _var_indirected_agent_file_hit. Do not
+# "fix" this with another proximity heuristic — a real fix needs the collector to hand
+# checks a per-file structure instead of one glued blob.
+def _manifest_section_span(
+    blob: str, pos: int, header_matches: list[re.Match[str]] | None = None
+) -> tuple[int, int] | None:
+    """Return the (start, end) body span of the `# file: <name>` section containing
+    *pos*, or None when *pos* is inside an injected header LINE (i.e. between sections).
+
+    When the blob carries no `# file:` headers at all — a hand-built blob in a test, or
+    a single-file target — the whole blob is treated as one section, so callers keep
+    their pre-B-287 behavior instead of silently suppressing every hit.
+    """
+    matches = header_matches if header_matches is not None else _manifest_header_matches(blob)
+    if not matches:
+        return (0, len(blob))
+    for m in matches:
+        if m.start("body") <= pos < m.end("body"):
+            return (m.start("body"), m.end("body"))
+    return None
+
+
+# B-287: a shell redirect whose target path is rooted in a THROWAWAY temp directory is
+# not agent-config persistence — nothing survives the process, let alone a session.
+# Verified false FAIL (SkillTrustBench case_00420): a skill's own `tests/smoke.sh` does
+# `TMP_DIR="$(mktemp -d)"` ... `cat > "$TMP_DIR/openclaw.json"` to build a throwaway
+# fixture config, and B13 read it as the skill rewriting the user's real agent config.
+# (The existing _pos_in_test_fixture_file guard does not cover it: _read_skill_text
+# keeps only the BASENAME, and `smoke.sh` matches no test-file naming convention.)
+#
+# Grounded on the assignment's SEMANTICS, not on the variable's NAME: a var counts as a
+# temp root only when the blob assigns it exactly ONCE and that assignment is a
+# `mktemp -d`. Requiring a single assignment closes the obvious reassignment bypass
+# (`T=$(mktemp -d); T=~/.claude; cat > "$T/CLAUDE.md"`).
+#
+# Self-C-135 (this change's own adversarial pass) found two bypasses in the first cut,
+# both now closed and pinned by tests:
+#   * the conventional temp-var NAMES were honoured unconditionally, so simply calling
+#     the variable TMP and pointing it at the real config (`TMP="$HOME/.claude"`) bought
+#     a free exemption. They now count only when the blob NEVER assigns them — i.e. the
+#     value is genuinely inherited from the environment, which is the only reading under
+#     which the name means anything.
+#   * a literal temp prefix could traverse straight back out (`> /tmp/../root/.claude/
+#     CLAUDE.md`). Any prefix containing a `..` segment is now rejected outright; a
+#     genuine sandbox write has no reason to climb out of the sandbox.
+# `/tmp`, `/var/tmp` and `/private/tmp` are literal roots; TMPDIR is POSIX, TMP/TEMP/
+# TEMPDIR are the common non-POSIX spellings.
+_MKTEMP_ASSIGN_RE = re.compile(
+    r"""\b(?P<var>[A-Za-z_][A-Za-z0-9_]*)=      # VAR=
+        (?P<val>["']?\$\(\s*mktemp\b[^)]*\)["']?  # $(mktemp -d)
+              |["']?`\s*mktemp\b[^`]*`["']?)      # `mktemp -d`
+    """,
+    re.VERBOSE,
+)
+_ANY_ASSIGN_RE_TMPL = r"\b{var}=(?!=)"
+_LITERAL_TMP_ROOT_RE = re.compile(r"^[\"']?(?:/private)?/(?:var/)?tmp/", re.I)
+_TMP_VAR_ROOT_RE = re.compile(r"^[\"']?\$\{?(?P<var>[A-Za-z_][A-Za-z0-9_]*)\}?/")
+_PARENT_TRAVERSAL_RE = re.compile(r"(?:^|/)\.\.(?:/|$)")
+_CONVENTIONAL_TMP_VARS = frozenset({"TMPDIR", "TEMPDIR", "TMP", "TEMP"})
+
+
+def _redirect_target_is_throwaway(blob: str, fname_start: int) -> bool:
+    """B-287: True when the shell-redirect path prefix immediately before the filename
+    at *fname_start* is rooted in a throwaway temp directory (see the comment above
+    _MKTEMP_ASSIGN_RE). Only consulted for the redirect leg — the Python/pathlib leg's
+    pytest `tmp_path` idiom is already covered by _pos_in_test_fixture_file.
+    """
+    prefix_start = max(0, fname_start - _REDIR_PREFIX_WINDOW)
+    prefix = _HTML_TAG_RE.sub(" ", blob[prefix_start:fname_start])
+    m = _REDIR_TO_FILE_PREFIX_RE.search(prefix)
+    if not m:
+        return False
+    # The path portion of the redirect, i.e. everything after the '>'/'>>' glyph.
+    path_prefix = m.group(0).lstrip(">").lstrip()
+    if _PARENT_TRAVERSAL_RE.search(path_prefix):
+        return False  # climbs back out of the sandbox — prove nothing about the target
+    if _LITERAL_TMP_ROOT_RE.match(path_prefix):
+        return True
+    vm = _TMP_VAR_ROOT_RE.match(path_prefix)
+    if not vm:
+        return False
+    var = vm.group("var")
+    assigns = re.findall(_ANY_ASSIGN_RE_TMPL.format(var=re.escape(var)), blob)
+    if not assigns:
+        # Never assigned in this skill: the value comes from the environment, so a
+        # conventional temp-dir name is all the evidence available — and all that is
+        # needed, since the skill cannot have pointed it anywhere.
+        return var.upper() in _CONVENTIONAL_TMP_VARS
+    if len(assigns) != 1:
+        return False  # reassigned — cannot prove it still holds a temp dir
+    return any(am.group("var") == var for am in _MKTEMP_ASSIGN_RE.finditer(blob))
+
+
 def _agent_config_write_hits(
     name: str, blob: str, fence_ranges: list[tuple[int, int]]
 ) -> list[tuple[str, str]]:
@@ -862,21 +978,49 @@ def _agent_config_write_hits(
     B-193: now returns the filename alongside the evidence string so the caller can
     check whether the skill's OWN declared purpose targets that exact file
     (_skill_declares_config_target) before deciding severity.
+
+    B-287: three false-FAIL classes suppressed, each keyed on structure/semantics —
+    (1) the filename or verb sitting in a DIFFERENT collector-injected file section
+    (_manifest_section_span), (2) the whole hit sitting inside the skill's own test
+    fixture (_pos_in_test_fixture_file — the same guard five sibling detectors in this
+    module already apply, simply never wired up here), and (3) a redirect whose target
+    is a throwaway temp dir (_redirect_target_is_throwaway).
+
+    B-287 NARROWS this detector's false-FAIL rate; it does not make it exact. Known
+    remaining over-fire, reproduced and deliberately left alone: a skill whose declared
+    job IS managing agent-context files, writing them into its own DATA directory rather
+    than the live location (SkillTrustBench case_05268, a personality switcher writing
+    `$WORKSPACE/personalities/<name>/SOUL.md`). Suppressing it needs a notion of "the
+    path the agent actually loads", and for CLAUDE.md/AGENTS.md that is genuinely
+    ambiguous — nested per-directory context files ARE loaded — so a location rule here
+    would trade this WARN-grade nuisance for a real false negative. Left as-is pending a
+    grounded per-agent context-path model, NOT another regex round.
     """
     hits: list[tuple[str, str]] = []
     seen_skills: set[str] = set()
+    _headers = _manifest_header_matches(blob)
     for m in _AGENT_CONTEXT_FILES_RE.finditer(blob):
         if _is_code_example(blob, m.start(), fence_ranges):
             continue
+        span = _manifest_section_span(blob, m.start(), _headers)
+        if span is None:
+            continue  # the injected "# file: <name>" header itself — not skill content
+        if _pos_in_test_fixture_file(blob, m.start(), _headers):
+            continue  # the skill's own test fixture, not a live write
         fname = m.group(0)
-        win_start = max(0, m.start() - _PERSIST_WINDOW)
-        win_end = min(len(blob), m.end() + _PERSIST_WINDOW)
+        # B-287: clamp the proximity window to the filename's own file section so a
+        # verb from an adjacent file can never pair with it.
+        win_start = max(span[0], m.start() - _PERSIST_WINDOW)
+        win_end = min(span[1], m.end() + _PERSIST_WINDOW)
         window = _HTML_TAG_RE.sub(" ", blob[win_start:win_end])  # B-085: drop inline tag '>'
         # B-198: a real shell redirect targeting THIS filename — checked separately
         # from the general write-verb window since it must be bound immediately
         # before the filename (not merely co-located), else a markdown arrow/
         # blockquote/fd-dup/redirect-to-another-path anywhere nearby would count.
-        if _PERSIST_WRITE_VERB_RE.search(window) or _redirect_targets_file(blob, m.start()):
+        redirects = _redirect_targets_file(blob, m.start())
+        if redirects and _redirect_target_is_throwaway(blob, m.start()):
+            redirects = False
+        if _PERSIST_WRITE_VERB_RE.search(window) or redirects:
             key = name
             if key not in seen_skills:
                 seen_skills.add(key)
@@ -901,15 +1045,26 @@ def _var_indirected_agent_file_hit(
     variable that was assigned an agent-context filename literal, rather than to the
     filename directly (see the C-218 comment above _VAR_ASSIGN_AGENT_FILE_RE). Only
     consulted when the direct scan in _agent_config_write_hits found nothing, mirroring
-    that function's own one-hit-per-skill discipline."""
+    that function's own one-hit-per-skill discipline.
+
+    B-287: mirrors _agent_config_write_hits' new guards too — a `VAR=<agent-file>`
+    assignment inside the skill's own test fixture, or a redirect into a throwaway temp
+    dir, is not agent-config persistence."""
+    _headers = _manifest_header_matches(blob)
     for vm in _VAR_ASSIGN_AGENT_FILE_RE.finditer(blob):
         if _is_code_example(blob, vm.start(), fence_ranges):
+            continue
+        if _pos_in_test_fixture_file(blob, vm.start(), _headers):
             continue
         var, fname = vm.group("var"), vm.group("fname")
         for rm in _VAR_REF_RE.finditer(blob):
             if rm.group(1) != var or _is_code_example(blob, rm.start(), fence_ranges):
                 continue
-            if _redirect_targets_file(blob, rm.start()):
+            if _pos_in_test_fixture_file(blob, rm.start(), _headers):
+                continue
+            if _redirect_targets_file(blob, rm.start()) and not _redirect_target_is_throwaway(
+                blob, rm.start()
+            ):
                 return (
                     f"{name}: agent-config persistence: writes to agent-context file "
                     f"'{fname}' via ${{{var}}} indirection",
@@ -1072,8 +1227,16 @@ def _authkey_persistence_hits(
 # B-193: verbs a skill's own SKILL.md frontmatter would plausibly use to describe
 # ITSELF as a tool that manages a specific config file — a self-declaration check, not
 # a bare allowlist: it still requires the exact target filename to appear near the verb.
+#
+# B-287: every other alternative here already carries a `\w*` stem wildcard so it
+# matches whatever conjugation the author used (`manag\w*` -> manages/managing), but
+# the `set up` alternative pinned the bare literal "set", so the extremely ordinary
+# third-person frontmatter phrasing "Sets up MEMORY.md" was missed while "Set up
+# MEMORY.md" matched. Giving "set" the same stem wildcard the siblings have makes the
+# alternation internally consistent; it is not a widening of the verb SET, which was
+# always intended to cover this word's normal forms.
 _CONFIG_DECLARE_VERB_RE = re.compile(
-    r"\b(?:configur\w*|customi[sz]\w*|set\s*-?\s*up\w*|manag\w*|edit\w*|updat\w*|"
+    r"\b(?:configur\w*|customi[sz]\w*|set\w*\s*-?\s*up\w*|manag\w*|edit\w*|updat\w*|"
     r"writ\w*|generat\w*)\b",
     re.I,
 )
