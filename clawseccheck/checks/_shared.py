@@ -6,6 +6,7 @@ layer-1 modules (catalog/collector/...) and stdlib — never on a topic module.
 Moved verbatim from the former single-file checks.py; no logic changes.
 """
 from __future__ import annotations
+import ipaddress
 import os
 import re
 from pathlib import Path
@@ -159,7 +160,85 @@ def _file_readable_by_others(path: Path) -> "str | None":
     return None
 
 
-LOOPBACK = {"127.0.0.1", "localhost", "::1", "", "loopback", "local"}
+def _loopback_ip(host) -> bool:
+    """True when ``host`` is an IP LITERAL that resolves to loopback, else False.
+
+    Mirrors the vendor's ``isLoopbackIpAddress`` (ip-BvvIlSgO.js:1104-1108) exactly:
+    parse the literal, fold an IPv4-mapped IPv6 address down to its IPv4 form
+    (``normalizeIpv4MappedAddress``, ip-BvvIlSgO.js:1048-1052), then ask whether the
+    result is in the loopback range. So the whole of ``127.0.0.0/8`` counts, not just
+    ``127.0.0.1`` — which matters on real hosts, not just in theory: Debian/Ubuntu map
+    the machine's own hostname to ``127.0.1.1`` in ``/etc/hosts`` and systemd-resolved
+    listens on ``127.0.0.53``.
+
+    PYTHON 3.9 vs 3.12 — why the unmapping is written out instead of leaning on
+    ``.is_loopback`` alone. ``IPv6Address.is_loopback`` DISAGREES across the versions
+    this project supports, verified on both interpreters:
+
+        ipaddress.ip_address("::ffff:127.0.0.1").is_loopback
+            3.9.25  -> True    (the 3.9 property delegates: `ipv4_mapped = self.ipv4_mapped;
+                                if ipv4_mapped is not None: return ipv4_mapped.is_loopback`)
+            3.12.3  -> False   (the 3.12 property is just `return self._ip == 1`)
+
+    Folding through ``.ipv4_mapped`` FIRST — which exists and behaves identically on
+    both — makes the verdict byte-identical on 3.9 and 3.12. Relying on the bare
+    property would have made an IPv4-mapped loopback bind read as local on the CI floor
+    and as remote on a modern interpreter: the same config, two answers.
+
+    Non-literals (``localhost``, a profile-enum name, "") return False here; they are
+    handled by the literal members of :data:`LOOPBACK`. Non-canonical forms
+    (``127.1``, ``127.0.0.01``) raise in ``ipaddress`` on both interpreters checked
+    (3.9.25 / 3.12.3) and so return False, which matches the vendor — its
+    ``isLoopbackIpAddress`` also parses canonical literals only
+    (``parseCanonicalIpAddress``) — and errs toward "not proven local".
+
+    One bounded caveat, stated rather than silently assumed: ``ipaddress`` only began
+    REJECTING leading-zero octets partway through the 3.9 series, so on a 3.9 older
+    than the CI floor a literal like ``127.0.0.01`` would parse and read as loopback.
+    That direction is a false NEGATIVE on an ambiguous literal nobody writes in a bind,
+    not a false positive, and :func:`_canonical_ipv4` (which gates the ``custom``
+    branch) hand-rolls the canonical check precisely to avoid depending on that.
+    """
+    if not isinstance(host, str) or not host:
+        return False
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return bool((mapped if mapped is not None else addr).is_loopback)
+
+
+class _LoopbackHostSet(frozenset):
+    """The literal local-host names PLUS any IP literal that is genuinely loopback.
+
+    Why membership is overridden rather than the set being enumerated: ``LOOPBACK`` is
+    read at eleven call sites across three modules (gateway bind in ``check_gateway``,
+    ``check_tls``, ``check_gateway_rate_limit``, ``check_trustedproxy_loopback``,
+    ``check_control_plane_mutation``, ``check_discovery_mdns_mode``,
+    ``_gateway_remote_exposure_reason``/RISK-20; URL hosts in ``check_outbound_proxy``,
+    ``check_provider_baseurl``, ``_mcp_url_is_local``), and every one of them asks the
+    same question in the same words — ``host in LOOPBACK``. An exact-match set answered
+    that question wrongly for all of ``127.0.0.0/8`` except ``127.0.0.1``, and the two
+    URL call sites had each independently patched around it with a local
+    ``host.startswith("127.")``, while the gateway call sites had not — so the same
+    address got opposite verdicts depending on which check looked at it. Fixing the
+    predicate at the single point every caller already funnels through removes that
+    class of drift instead of asking eleven call sites, and every future one, to
+    remember a helper.
+
+    ``0.0.0.0`` / ``::`` are deliberately NOT members and are not reachable through
+    :func:`_loopback_ip` either: for a gateway bind they mean "every interface", the
+    opposite of local (see :data:`EXPOSED_BINDS`).
+    """
+
+    __slots__ = ()
+
+    def __contains__(self, item) -> bool:
+        return frozenset.__contains__(self, item) or _loopback_ip(item)
+
+
+LOOPBACK = _LoopbackHostSet({"127.0.0.1", "localhost", "::1", "", "loopback", "local"})
 
 
 EXPOSED_BINDS = {"0.0.0.0", "::", "all", "public", "*"}
@@ -1739,4 +1818,239 @@ def _skill_frontmatter_block(blob: str) -> str | None:
     m = _FM_BLOCK_BARE_RE.match(blob)
     if m:
         return m.group("fm")
+    return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# B-288: the root-`hooks` SESSION-KEY / AGENT-ROUTING policy family.
+#
+# B179 inventories the hooks ENABLE toggles (hooks.enabled, hooks.internal.*) and
+# stopped there. The security-critical siblings under the SAME root `hooks` object —
+# who may choose a session key, which prefixes are acceptable, and which agent ids a
+# hook request may route to — were read by nothing in the package (grep: 0 hits for
+# all four before this change), so a setup that had opened hook ingress to arbitrary
+# session keys looked identical to one that had scoped it.
+#
+# Grounded against the installed dist (openclaw 2026.7.1), not the recon doc:
+#   zod-schema-O9ml_nmo.js:1294-1306 — root `hooks` is `.strict()` and declares
+#     defaultSessionKey / allowRequestSessionKey / allowedSessionKeyPrefixes /
+#     allowedAgentIds (all optional).
+#   audit.nondeep.runtime-C3y1Q5Fi.js:631-703 — collectHooksHardeningFindings, the
+#     product's own audit of exactly this family. Every predicate below is a
+#     transcription of the one used there, which is what makes agreement with the
+#     vendor's verdict structural rather than a coincidence of tuning.
+#   hooks-Bjrm8pWp.js:343-362, 493-527 — the ENFORCEMENT side: the same fields become
+#     `sessionPolicy` / `agentPolicy` and actually gate a request-supplied sessionKey.
+#
+# NOT covered here, deliberately: `plugins.entries.*.hooks.allowPromptInjection` and
+# `.allowConversationAccess` (zod-schema-O9ml_nmo.js:789-795). Those are PLUGIN-ENTRY
+# scoped, not root-`hooks` fields — root `hooks` being `.strict()`, a config setting
+# them at the root would be rejected by schema validation outright. They are a real and
+# separately-uncovered surface, and they belong to a different task with the correct
+# path; nothing below should be read as covering them.
+
+def _hooks_allowed_session_key_prefixes(cfg: dict) -> list[str]:
+    """The configured non-blank hook session-key prefixes (empty list when unset).
+
+    Mirrors audit.nondeep.runtime-C3y1Q5Fi.js:672 — a non-array is an empty policy,
+    and blank entries are trimmed away rather than counted as a restriction.
+    """
+    raw = dig(cfg, "hooks.allowedSessionKeyPrefixes")
+    if not isinstance(raw, list):
+        return []
+    return [p.strip() for p in raw if isinstance(p, str) and p.strip()]
+
+
+def _hooks_agent_ids_unrestricted(cfg: dict) -> bool:
+    """True when hook requests may route to ANY configured agent id.
+
+    Transcribes resolveAllowedAgentIds (hooks-policy-Tc4l1nSI.js:4-18), whose contract
+    is "returns undefined when all agents are allowed": a non-array is unrestricted, and
+    so is any list containing a literal ``*``. An explicit list — INCLUDING the empty
+    list, which denies hook agent routing outright — is restricted.
+
+    Note this is true in the DEFAULT state (the field simply unset), which is exactly
+    why it is reported as inventory evidence and only escalates inside RISK-20, under
+    remote gateway exposure. Standalone it would fire on every hooks-enabled config.
+    """
+    raw = dig(cfg, "hooks.allowedAgentIds")
+    if not isinstance(raw, list):
+        return True
+    return any(isinstance(e, str) and e.strip() == "*" for e in raw)
+
+
+def _hooks_session_key_exposures(cfg: dict) -> list[tuple[str, str]]:
+    """(kind, evidence-sentence) pairs for the root-`hooks` session-key policy family.
+
+    Returns ``[]`` unless ``hooks.enabled`` is exactly ``True``. That gate is not a
+    tuning choice: collectHooksHardeningFindings opens with
+    ``if (cfg.hooks?.enabled !== true) return findings;``
+    (audit.nondeep.runtime-C3y1Q5Fi.js:633), because none of these fields has any
+    effect until the hooks endpoint is actually serving. It is also what keeps this
+    family false-positive-free on a config that merely carries a dormant `hooks` block.
+
+    ``kind`` values are the product's own checkId suffixes, so a reader can line an
+    evidence line up against `openclaw security audit --json` output directly.
+    """
+    if dig(cfg, "hooks.enabled") is not True:
+        return []
+    out: list[tuple[str, str]] = []
+
+    default_key = dig(cfg, "hooks.defaultSessionKey")
+    if not (isinstance(default_key, str) and default_key.strip()):
+        out.append((
+            "default_session_key_unset",
+            "hooks.defaultSessionKey — not configured, so hook agent runs without an "
+            "explicit sessionKey land in generated per-request keys rather than one "
+            "known, reviewable session",
+        ))
+
+    if _hooks_agent_ids_unrestricted(cfg):
+        out.append((
+            "allowed_agent_ids_unrestricted",
+            "hooks.allowedAgentIds — unset or contains '*', so an authenticated hook "
+            "caller may route to ANY configured agent id, including the default agent "
+            "when agentId is omitted",
+        ))
+
+    if dig(cfg, "hooks.allowRequestSessionKey") is True:
+        out.append((
+            "request_session_key_enabled",
+            "hooks.allowRequestSessionKey — enabled, so /hooks/agent callers choose "
+            "their own session key; hook token holders are effectively full-trust",
+        ))
+        if not _hooks_allowed_session_key_prefixes(cfg):
+            out.append((
+                "request_session_key_prefixes_missing",
+                "hooks.allowedSessionKeyPrefixes — unset or empty while "
+                "allowRequestSessionKey is on, so request payloads can target "
+                "arbitrary session-key shapes (cross-session write)",
+            ))
+    return out
+
+
+_CANONICAL_IPV4_RE = re.compile(r"\A(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\Z", re.ASCII)
+
+
+def _canonical_ipv4(value) -> str | None:
+    """The value as a canonical dotted-decimal IPv4 string, else None.
+
+    Mirrors the dist's ``isCanonicalDottedDecimalIPv4`` (ip-BvvIlSgO.js:1083-1089) —
+    four decimal octets, each 0-255, no leading zeros — which is exactly the predicate
+    ``gateway.bind=custom`` validation applies to ``gateway.customBindHost``
+    (server-runtime-config-r5ejxORO.js:42).
+
+    Written out rather than delegated to ``ipaddress`` on purpose: that module's
+    tolerance for leading-zero octets changed *inside* the 3.9 series, and a security
+    predicate must not silently mean different things on two supported interpreters
+    (CLAUDE.md §6.1 — 3.9 can change a verdict, not just crash).
+    """
+    s = str(value or "").strip()
+    m = _CANONICAL_IPV4_RE.match(s)
+    if not m:
+        return None
+    for octet in m.groups():
+        if len(octet) > 1 and octet[0] == "0":
+            return None
+        if int(octet) > 255:
+            return None
+    return s
+
+
+def _gateway_remote_exposure_reason(cfg: dict) -> str | None:
+    """Label for a gateway PROVEN reachable beyond loopback, else None.
+
+    Ground truth here is the vendor's RESOLVER — ``resolveGatewayBindHost``
+    (net-BOKtNTf8.js:135-160), the function that actually decides the socket — and NOT
+    the vendor's audit helper ``isGatewayRemotelyExposed``
+    (audit.nondeep.runtime-C3y1Q5Fi.js:279-283), which collapses every profile that is
+    not the literal ``"loopback"`` into "remote". Being faithful to the vendor's AUDIT
+    is not the same as being correct, and this helper deliberately diverges from it on
+    the two profiles where the resolver disagrees with it.
+
+    Per-profile, quoting the resolver:
+
+    * ``loopback`` → ``127.0.0.1`` (net:137-140). Local. Also the effective default
+      when ``gateway.bind`` is absent on a non-container host
+      (``defaultGatewayBindMode``, net:174-178).
+    * ``lan`` → ``return "0.0.0.0"``, unconditional (net:147). Remote.
+    * ``tailnet`` → the primary tailnet IPv4 when Tailscale is up, loopback only when
+      it is down (net:141-146). Reported remote: binding a tailnet address IS reachable
+      off-host, and whether Tailscale is up is not a fact a config file carries.
+    * ``custom`` → ``gateway.customBindHost``, when that is a valid IPv4 the host can
+      bind (net:148-153). The DISCRIMINATOR is therefore that field, not the profile
+      name — a ``customBindHost`` of ``127.0.0.1`` is a loopback bind. The vendor says
+      so itself: ``validateGatewayTailscaleBind`` accepts ``bind=custom`` with a
+      loopback ``customBindHost`` as satisfying "must resolve to loopback"
+      (io-By0s-a_s.js:3876). Loopback is the whole ``127.0.0.0/8`` range there
+      (``isLoopbackIpAddress`` → ``range() === "loopback"``, ip-BvvIlSgO.js:1104-1108),
+      so ``127.0.0.53`` counts too.
+    * ``auto`` → ``0.0.0.0`` inside a container, ``127.0.0.1`` otherwise
+      (net:154-158, documented at net:130). Not knowable from a config file → None.
+
+    WHY ``auto`` RETURNS None RATHER THAN A REMOTE LABEL. ``auto`` is not an exotic
+    setting — it is the third option ``openclaw configure`` offers, labelled
+    "Auto (Loopback → LAN)" (configure.commands-DNA_7NSl.js:487-490) — and on a
+    bare-metal or VM host it resolves to loopback. Asserting "reachable beyond
+    loopback" there is a confident wrong answer. The tempting fix, detecting
+    containerhood from the auditing process, is one the vendor explicitly warns
+    against: "Use this only in gateway startup codepaths that execute in the same
+    environment as the eventual bind decision. Host-side diagnostics should keep their
+    own explicit defaults instead of inferring from the caller process"
+    (net-BOKtNTf8.js:167-170). A static config reader is precisely such a host-side
+    diagnostic, so it stays static and claims no proof.
+
+    HONEST LABELLING — the residual false negative this knowingly accepts. On a
+    CONTAINER host ``bind=auto`` genuinely is ``0.0.0.0``, and this helper will not say
+    so, so RISK-20 will not chain there. That is a deliberate trade of one unprovable
+    escalation for a class of confident false positives, and it does not hide the
+    underlying posture: the hook-policy evidence stays visible unconditionally as B179
+    inventory either way. The same reasoning covers ``custom`` with an absent or
+    non-IPv4 ``customBindHost`` — as written that config is refused at startup outright
+    (server-runtime-config-r5ejxORO.js:40-42), so there is nothing serving to escalate,
+    while a ``--host`` CLI override could still make it serve somewhere this reader
+    cannot see. No proof either way, so no claim either way.
+
+    Universality (CLAUDE.md §2.6 — never hardcode one shape where the schema allows
+    variants): ``gateway.bind`` is the profile ENUM in the current schema
+    (zod-schema-O9ml_nmo.js:1341-1347), but configs in the wild still carry the older
+    host:port form (``fixtures/home_safe`` does). Every value that is not one of the
+    two profiles handled specially above falls through to ``parse_bind_host`` +
+    ``LOOPBACK``, which reads both shapes with one predicate: the enum literals
+    ``loopback``/``local`` are already LOOPBACK members, so a loopback host:port is
+    still correctly read as local instead of being mistaken for a remote profile name.
+    That fall-through is the DOMINANT shape in practice (259 of ~300 ``bind`` values in
+    ``fixtures/`` use host:port), and it applies the same whole-``127.0.0.0/8`` loopback
+    test as the ``custom`` branch — see :class:`_LoopbackHostSet`. It has to: a user who
+    binds the gateway to their own hostname on any Debian-family distro gets
+    ``127.0.1.1`` from ``/etc/hosts``, which is a loopback bind and must not be reported
+    as reachable off-host.
+    """
+    raw = dig(cfg, "gateway.bind", "")
+    profile = str(raw or "").strip().lower()
+
+    if profile == "custom":
+        # The profile NAME proves nothing; customBindHost is the address actually bound.
+        # _canonical_ipv4 keeps the vendor's gate (io-By0s-a_s.js:3876 accepts the bind
+        # only when customBindHost is a canonical dotted IPv4); LOOPBACK then applies the
+        # SAME loopback predicate the host:port branch below uses. One predicate, both
+        # branches — reading two different loopback tests in one function is how the
+        # 127.0.0.0/8 gap survived here in the first place.
+        host = _canonical_ipv4(dig(cfg, "gateway.customBindHost"))
+        if host is not None and host not in LOOPBACK:
+            # Name the FIELD that makes it remote, not the profile: the report should
+            # say why, and `gateway.bind=custom` on its own says nothing (that is the
+            # very confusion this helper exists to undo).
+            return f"gateway.customBindHost={host}"
+    elif profile != "auto":
+        bind_host = parse_bind_host(raw)
+        if bind_host not in LOOPBACK:
+            return f"gateway.bind={bind_host}"
+
+    # Tailscale serve/funnel publishes the gateway regardless of how it binds — indeed
+    # the product REQUIRES a loopback bind in that mode (io-By0s-a_s.js:3870-3880), so
+    # this leg must be reachable even when the bind itself read as local or unproven.
+    mode = dig(cfg, "gateway.tailscale.mode")
+    if mode in ("serve", "funnel"):
+        return f"gateway.tailscale.mode={mode}"
     return None

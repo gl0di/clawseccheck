@@ -15,6 +15,7 @@ CHECKS
 EXPOSED_BINDS
 Finding
 INPUT_TOOL_HINTS
+LOOPBACK
 OUTBOUND_TOOL_HINTS
 PASS
 SECRET_KEY_RE
@@ -38,6 +39,7 @@ _JSONL_SCAN_CAP
 _KNOWN_ADVISORIES
 _KNOWN_EXFIL_HOST_RE
 _KNOWN_NAMES
+_LoopbackHostSet
 _MCP_BROAD_FS_ROOTS
 _MCP_CONN_STRING_CREDENTIAL_RE
 _MCP_DATA_CAP_RE
@@ -71,6 +73,7 @@ _b62_extract_declaration
 _b62_surprising_families
 _b63_scan
 _blank_fences
+_canonical_ipv4
 _check_unicode_obfuscation
 _defensive_context
 _defensive_section
@@ -82,9 +85,13 @@ _fence_ranges
 _finding
 _fm_metadata_obj_multiline
 _frontmatter_name
+_gateway_remote_exposure_reason
 _has_approval_gate
 _has_cred_exfil_outside_fence
 _hint
+_hooks_agent_ids_unrestricted
+_hooks_allowed_session_key_prefixes
+_hooks_session_key_exposures
 _host_finding
 _in_fence
 _install_entry_findings
@@ -94,6 +101,7 @@ _is_posix
 _is_wildcard_allow_entry
 _levenshtein
 _local_sink_exfil_hits
+_loopback_ip
 _mcp_fs_root_is_broad
 _mcp_has_remote
 _mcp_intake_reason

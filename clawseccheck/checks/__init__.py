@@ -79,8 +79,17 @@ from ._shared import (
     _is_posix,
     _perms_loose,
     LOOPBACK,
+    _LoopbackHostSet,
+    _loopback_ip,
     EXPOSED_BINDS,
     parse_bind_host,
+    # B-288: root-`hooks` session-key/agent-routing policy family + the gateway
+    # remote-exposure label RISK-20 composes it with.
+    _canonical_ipv4,
+    _gateway_remote_exposure_reason,
+    _hooks_agent_ids_unrestricted,
+    _hooks_allowed_session_key_prefixes,
+    _hooks_session_key_exposures,
     SECRET_KEY_RE,
     SECRET_PATTERNS,
     _CRED_RE,

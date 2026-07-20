@@ -61,6 +61,7 @@ gateway.controlUi.allowInsecureAuth
 gateway.controlUi.allowedOrigins
 gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback
 gateway.controlUi.dangerouslyDisableDeviceAuth
+gateway.customBindHost
 gateway.host
 gateway.nodes.allowCommands
 gateway.nodes.denyCommands
@@ -70,6 +71,10 @@ gateway.tls.enabled
 gateway.token
 gateway.tools.allow
 gateway.trustedProxies
+hooks.allowRequestSessionKey
+hooks.allowedAgentIds
+hooks.allowedSessionKeyPrefixes
+hooks.defaultSessionKey
 hooks.enabled
 hooks.gmail.allowUnsafeExternalContent
 hooks.internal.enabled

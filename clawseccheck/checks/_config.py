@@ -52,6 +52,7 @@ from ._shared import (
     _external_input_channels,
     _finding,
     _hint,
+    _hooks_session_key_exposures,
     _is_secret_reference,
     _mcp_leg_contributions,
     _norm_group_policy,
@@ -1654,6 +1655,22 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
     directories OpenClaw searches for internal hook MODULES at startup — a startup
     arbitrary-module-load / persistence surface, not merely an enable flag.
 
+    B-288 widened the inventory from the ENABLE toggles to the root-`hooks`
+    SESSION-KEY / AGENT-ROUTING policy family — `hooks.defaultSessionKey`,
+    `hooks.allowRequestSessionKey`, `hooks.allowedSessionKeyPrefixes`,
+    `hooks.allowedAgentIds` — which nothing in the package read before (grep: 0 hits
+    each). See `_hooks_session_key_exposures` in `checks/_shared.py` for the dist
+    grounding. Those lines are evidence only: they can never change this check's
+    status, because they are gated on the same `hooks.enabled is True` that has
+    already made the finding WARN.
+
+    HONEST SCOPE. This covers the ROOT `hooks` object only. The plugin-scoped
+    `plugins.entries.*.hooks.allowPromptInjection` / `.allowConversationAccess`
+    (zod-schema-O9ml_nmo.js:789-795) are a DIFFERENT surface at a different path and
+    remain uncovered — a separate task. Standalone this check also stays advisory: the
+    escalation to a scored, FAIL-capable verdict happens only in RISK-20, which joins
+    this posture with remote gateway exposure.
+
     WARN    — any of hooks.enabled, hooks.internal.enabled, an enabled
               hooks.internal.entries[] item, a hooks.internal.installs[] record, or a
               non-blank hooks.internal.load.extraDirs entry is configured (see evidence).
@@ -1719,6 +1736,22 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
                     "hooks.internal.load.extraDirs — additional startup module-load "
                     f"director{plural} searched for internal hooks: {shown}{more}"
                 )
+
+    # B-288: the SESSION-KEY / AGENT-ROUTING policy siblings under the same root
+    # `hooks` object (defaultSessionKey, allowRequestSessionKey,
+    # allowedSessionKeyPrefixes, allowedAgentIds). Deliberately OUTSIDE the
+    # `internal_enabled is not False` block above — these govern the inbound webhook
+    # endpoint, not internal-hook module loading, so an explicitly disabled
+    # hooks.internal must not hide them.
+    #
+    # This cannot change B179's STATUS, only enrich its evidence:
+    # _hooks_session_key_exposures returns [] unless `hooks.enabled is True`, and that
+    # same condition has already appended the "hooks.enabled" evidence line above — so
+    # every config these lines can reach was WARN before this change too. That is what
+    # makes the extension free of any new false-positive surface, and it is pinned by
+    # tests/test_b288_hooks_session_key.py::test_b179_status_never_changes_*.
+    for _kind, _line in _hooks_session_key_exposures(cfg):
+        evidence.append(_line)
 
     if not evidence:
         return _finding(

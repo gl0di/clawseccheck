@@ -1,0 +1,58 @@
+{
+  "_comment": "B-288 clean: gateway IS remotely reachable (bind=lan) but every root-hooks session-key/agent-routing field is scoped, so RISK-20 must stay silent. hooks.token is deliberately omitted: B1 flags any truthy hooks.token without a SecretRef exemption, which would put an unrelated FAIL on a clean_* fixture. Do not add one. A real RUNNING config also carries hooks.token (hooks-Bjrm8pWp.js:332-334 throws 'hooks.enabled requires hooks.token'); it is omitted here ONLY because B1 flags any truthy hooks.token with no SecretRef exemption, unlike the product's own audit which skips env refs via looksLikeEnvRef (audit.nondeep.runtime-C3y1Q5Fi.js:623). That B1 gap is pre-existing and filed separately, not part of B-288.",
+  "gateway": {
+    "bind": "lan",
+    "auth": {
+      "mode": "token",
+      "token": "${GATEWAY_AUTH_TOKEN_FROM_ENV}"
+    },
+    "tailscale": {
+      "mode": "off"
+    }
+  },
+  "hooks": {
+    "enabled": true,
+    "path": "/hooks",
+    "defaultSessionKey": "hook:ingress",
+    "allowRequestSessionKey": true,
+    "allowedSessionKeyPrefixes": [
+      "hook:"
+    ],
+    "allowedAgentIds": [
+      "hooks",
+      "main"
+    ]
+  },
+  "tools": {
+    "profile": "minimal",
+    "exec": {
+      "mode": "ask"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "mode": "non-main"
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "dmPolicy": "allowlist",
+      "groupPolicy": "allowlist",
+      "groupAllowFrom": [
+        "owner-123"
+      ],
+      "contextVisibility": "allowlist"
+    }
+  },
+  "logging": {
+    "redactSensitive": "tools",
+    "audit": true
+  },
+  "models": {
+    "main": {
+      "provider": "local-llama"
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "_comment": "B-288 bad (agent-routing arm): allowedAgentIds contains '*' so hook requests may reach any agent. Exposure comes from tailscale funnel, NOT bind, which exercises the second half of the dist's isGatewayRemotelyExposed. allowRequestSessionKey is absent so ONLY the agent-routing arm can fire. hooks.token omitted so the fixture's only notable output is the chain (see the clean fixtures' note on B1). A real RUNNING config also carries hooks.token (hooks-Bjrm8pWp.js:332-334 throws 'hooks.enabled requires hooks.token'); it is omitted here ONLY because B1 flags any truthy hooks.token with no SecretRef exemption, unlike the product's own audit which skips env refs via looksLikeEnvRef (audit.nondeep.runtime-C3y1Q5Fi.js:623). That B1 gap is pre-existing and filed separately, not part of B-288.",
+  "gateway": {
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": "${GATEWAY_AUTH_TOKEN_FROM_ENV}"
+    },
+    "tailscale": {
+      "mode": "funnel"
+    }
+  },
+  "hooks": {
+    "enabled": true,
+    "path": "/hooks",
+    "defaultSessionKey": "hook:ingress",
+    "allowedSessionKeyPrefixes": [
+      "hook:"
+    ],
+    "allowedAgentIds": [
+      "hooks",
+      "*"
+    ]
+  },
+  "tools": {
+    "profile": "minimal",
+    "exec": {
+      "mode": "ask"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "mode": "non-main"
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "dmPolicy": "allowlist",
+      "groupPolicy": "allowlist",
+      "groupAllowFrom": [
+        "owner-123"
+      ],
+      "contextVisibility": "allowlist"
+    }
+  },
+  "logging": {
+    "redactSensitive": "tools",
+    "audit": true
+  },
+  "models": {
+    "main": {
+      "provider": "local-llama"
+    }
+  }
+}

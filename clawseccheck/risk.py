@@ -30,8 +30,10 @@ from .checks import (
     _b62_extract_declaration,
     _enabled_tools,
     _external_input_channels,
+    _gateway_remote_exposure_reason,
     _has_approval_gate,
     _hint,
+    _hooks_session_key_exposures,
     _open_wildcard_group_channels,
     _reassembly,
     _resolved_channel_nodes,
@@ -1103,6 +1105,147 @@ def _rule_skill_composition_trust_transfer(ctx: Context) -> RiskPath | None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# B-288 / RISK-20 — hook session-key + agent-routing policy under REMOTE exposure
+# ──────────────────────────────────────────────────────────────────────────────
+# The two exposure kinds that are worth ESCALATING rather than merely inventorying,
+# mapped to the plain-language chain step each contributes. Both are drawn from
+# `_hooks_session_key_exposures` (checks/_shared.py), which transcribes the product's
+# own collectHooksHardeningFindings.
+#
+# The product re-rates THREE checkIds from "warn" to "critical" when
+# `isGatewayRemotelyExposed(cfg)` holds — `hooks.allowed_agent_ids_unrestricted`
+# (audit.nondeep.runtime-C3y1Q5Fi.js:682), `hooks.request_session_key_enabled` (:689)
+# and `hooks.request_session_key_prefixes_missing` (:696), each written
+# `severity: remoteExposure ? "critical" : "warn"`. These arms are a deliberate SUBSET
+# of those three, not a transcription of them: taking the vendor's escalation CONDITION
+# is what keeps this chain aligned with `openclaw security audit`, but the choice of
+# which findings deserve a chain is ours.
+#
+# So `request_session_key_enabled` is dropped even though the product does escalate it:
+# on its own it is the OWNER'S DECISION to accept caller-chosen keys — dangerous only
+# when unconstrained, which is precisely what `request_session_key_prefixes_missing`
+# already reports, and `_hooks_session_key_exposures` only ever emits the latter
+# alongside the former. Keeping both would double-count one posture in one chain.
+# `default_session_key_unset` is not an arm either, and there the product agrees: it
+# rates plain "warn" at every exposure level (:675-680), never escalating.
+_R20_ARMS = {
+    "request_session_key_prefixes_missing": (
+        "request payloads may target arbitrary session keys "
+        "(allowRequestSessionKey on, allowedSessionKeyPrefixes empty)"
+    ),
+    "allowed_agent_ids_unrestricted": (
+        "hook requests may route to any configured agent "
+        "(allowedAgentIds unset or '*')"
+    ),
+}
+
+
+def _rule_hooks_session_key_takeover(ctx: Context, cfg: dict) -> RiskPath | None:
+    """HIGH (RISK-20, B-288): remotely-reachable hook ingress with an unconstrained
+    session-key or agent-routing policy.
+
+    Fires only on positive evidence for every link:
+
+    1. ``hooks.enabled`` is exactly ``True`` — the inbound webhook endpoint is actually
+       serving. (Enforced inside ``_hooks_session_key_exposures``, which returns ``[]``
+       otherwise, mirroring the product's own early return.)
+    2. at least one of ``_R20_ARMS`` holds — the session-key or agent-routing policy is
+       unconstrained;
+    3. the gateway is PROVABLY reachable beyond loopback
+       (``_gateway_remote_exposure_reason``) — proven from the config alone, not
+       assumed from a profile name. ``gateway.bind=auto`` resolves to ``0.0.0.0`` only
+       inside a container and to loopback otherwise, and ``gateway.bind=custom``
+       resolves to whatever ``gateway.customBindHost`` says; neither is remote by
+       virtue of not being the string "loopback". See that helper's docstring for the
+       resolver grounding and for the residual false negative it accepts.
+
+    WHY A CHAIN AND NOT A STANDALONE FAIL. Leg 2 is true in the DEFAULT state:
+    ``allowedAgentIds`` unset means "any agent", so a standalone FAIL on it would fire on
+    every hooks-enabled config with no owner misconfiguration whatever — a textbook
+    Golden-Rule-#5 false positive. It is the JOIN with remote reachability that the
+    product itself treats as critical, and that join is this module's job. The static
+    halves stay visible unconditionally as B179 evidence.
+
+    SEVERITY — HIGH, deliberately one notch below the vendor's "critical", and this is
+    the one place we knowingly diverge. `hooks.enabled` cannot be served without a token:
+    hooks-Bjrm8pWp.js:333-334 throws ``"hooks.enabled requires hooks.token"`` outright. So
+    what this chain describes is BLAST-RADIUS AMPLIFICATION FOR A HOOK-TOKEN HOLDER — a
+    principal who can already reach the endpoint gains cross-session write and arbitrary
+    agent routing — not an unauthenticated takeover. Reserving CRITICAL for chains that
+    need no credential keeps the tier meaningful. The token's own strength is B1/B179
+    territory and is not re-litigated here.
+
+    KNOWN NARROW RESIDUAL (C-135, and deliberately not "fixed"). Leg 1 uses the product
+    audit's own gate, ``hooks.enabled === true`` (audit.nondeep.runtime-C3y1Q5Fi.js:633).
+    The dist also has a STRICTER "hooks are actually live" predicate — ``enabled === true
+    && Boolean(normalizeOptionalString(cfg.hooks.token))`` (audit-UjVvFwCi.js:389) —
+    because hook resolution throws ``"hooks.enabled requires hooks.token"`` outright when
+    the token is missing (hooks-Bjrm8pWp.js:332-334). So a config with ``hooks.enabled:
+    true`` and NO ``hooks.token`` fires this chain while serving nothing. That is not a
+    benign false positive worth narrowing the rule for: such a config does not start at
+    all, so it is a broken config rather than a working one being maligned, and adopting
+    the stricter leg would instead let a real, serving setup go unreported the moment its
+    token moved somewhere this reader cannot see. Pinned by
+    tests/test_b288_hooks_session_key.py::test_known_residual_enabled_without_token.
+
+    HONEST LABELLING — what this does NOT claim. It does not claim the endpoint has been
+    reached, nor that any cross-session write has occurred: every leg is config posture,
+    and this module reads no hook request log (OpenClaw keeps none we could ground
+    against). Read it as "the ingredients for cross-session takeover are all present and
+    remotely reachable", not as evidence of compromise. Silence is likewise not an
+    all-clear for hook exposure generally — it means these three specific legs did not
+    all hold. It also covers the ROOT ``hooks`` object only; the plugin-scoped
+    ``plugins.entries.*.hooks.*`` capability grants are a different surface at a
+    different path and are not read by this rule or by anything else in the package yet.
+    """
+    kinds = {kind for kind, _ in _hooks_session_key_exposures(cfg)}
+    arms = [label for kind, label in _R20_ARMS.items() if kind in kinds]
+    if not arms:
+        return None
+    exposure = _gateway_remote_exposure_reason(cfg)
+    if exposure is None:
+        return None
+
+    # Deterministic order: _R20_ARMS is a literal dict, so iteration follows source
+    # order, not config key order — the report must not depend on how the user's JSON
+    # happened to be written.
+    detail = "; ".join(arms)
+    return RiskPath(
+        id="RISK-20",
+        severity=HIGH,
+        title="Remotely reachable hook ingress with an unconstrained session-key policy",
+        chain=[
+            f"gateway reachable beyond loopback ({exposure})",
+            "hooks.enabled — inbound /hooks/agent endpoint serving",
+            detail,
+        ],
+        why=(
+            f"The gateway is reachable beyond loopback ({exposure}) and the inbound hook "
+            f"endpoint is enabled, while its session/agent policy is unconstrained: "
+            f"{detail}. A caller holding the hook token can therefore write into session "
+            "keys it was never meant to touch — placing content into another session's "
+            "history, where the agent reads it as trusted prior context — and/or route "
+            "its request to any configured agent, including the default one. OpenClaw's "
+            "own audit rates each of these critical under exactly this remote-exposure "
+            "condition; ClawSecCheck reports it one notch lower because the endpoint "
+            "still requires hooks.token, so this is blast-radius amplification for a "
+            "token holder rather than an unauthenticated takeover. It is not evidence "
+            "that the endpoint has been reached: every link here is config posture."
+        ),
+        fix=(
+            "Constrain the hook policy rather than the network path, since the point of "
+            "hooks is to be reachable. Set hooks.allowedSessionKeyPrefixes to a narrow "
+            "prefix (for example [\"hook:\"]) so request-supplied keys cannot escape "
+            "their own namespace — or set hooks.allowRequestSessionKey=false and let "
+            "hooks.defaultSessionKey decide the session. Set hooks.allowedAgentIds to an "
+            "explicit allowlist of the agents hooks may drive (or [] to deny hook agent "
+            "routing entirely). If the gateway does not need to be remotely reachable, "
+            "setting gateway.bind to the loopback profile closes the chain instead."
+        ),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # F-135 / RISK-21 — the first chain that joins CONFIG POSTURE with the LOG
 # ──────────────────────────────────────────────────────────────────────────────
 # Until now this engine took only static findings, and the log-observed half of the
@@ -1405,6 +1548,10 @@ def risk_paths(ctx: Context, findings: list[Finding],
         candidates.append(path)
 
     path = _rule_skill_composition_trust_transfer(ctx)
+    if path:
+        candidates.append(path)
+
+    path = _rule_hooks_session_key_takeover(ctx, cfg)
     if path:
         candidates.append(path)
 
