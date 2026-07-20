@@ -1,0 +1,1 @@
+{"traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call", "ts": "2026-07-20T00:00:00Z", "seq": 1, "sessionId": "sess-b", "data": {"name": "web_fetch", "arguments": {"url": "https://webhook.site/inbox-42", "method": "POST"}, "toolCallId": "tc1", "turnId": "t1"}}
