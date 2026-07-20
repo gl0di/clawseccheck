@@ -16,9 +16,17 @@ from ..catalog import (
     Finding,
 )
 from ..collector import (
-    _OWN_SKILL_NAMES,
     Context,
     dig,
+)
+# Pure re-exports (B-265): these three moved DOWN into collector.py so Layer-1 skill
+# discovery can share one self-identity oracle with vet_skill. They stay importable from
+# here — `checks/_vet.py` and the aggregator both do `from ._shared import _is_own_source`
+# (§3.1-a: no name that is importable today may stop being importable).
+from ..collector import (  # noqa: F401
+    _OWN_ENGINE_MARKERS,
+    _OWN_SKILL_NAMES,
+    _is_own_source,
 )
 
 
@@ -727,40 +735,12 @@ def _is_public_ip(ip: str) -> bool:
     return True
 
 
-# Distinctive symbols that only ClawSecCheck's own signature engine (the checks/
-# package) contains. Used to recognise our own source so --vet doesn't flag the
-# scanner's embedded attack signatures + red-team payloads as malware.
-_OWN_ENGINE_MARKERS = ("def check_installed_skills", "def vet_skill", "_SKILL_CRIT")
-
-
-def _is_own_source(p: Path) -> bool:
-    """True if `p` is ClawSecCheck's own source tree (repo root, install dir, or the
-    package dir itself). A security auditor necessarily ships attack signatures and
-    red-team payloads as *data*, so a naive malware scan of its own source self-flags.
-
-    Recognition is by structure (package layout) AND distinctive engine symbols — not
-    by name alone — so a look-alike skill that merely calls itself "clawseccheck" is
-    still scanned normally and cannot use the name to dodge detection.
-    """
-    # The engine is the checks/ package (current) or a legacy single-file checks.py.
-    # Read every engine source so the markers are found regardless of which topic module
-    # the I-022 split scattered them into.
-    if (p / "clawseccheck" / "checks").is_dir():  # repo root / install dir (package)
-        sources = sorted((p / "clawseccheck" / "checks").glob("*.py"))
-    elif (p / "clawseccheck" / "checks.py").is_file():  # repo root / install dir (legacy)
-        sources = [p / "clawseccheck" / "checks.py"]
-    elif p.name.lower() in _OWN_SKILL_NAMES and (p / "checks").is_dir():  # package dir
-        sources = sorted((p / "checks").glob("*.py"))
-    elif p.name.lower() in _OWN_SKILL_NAMES and (p / "checks.py").is_file():  # package dir (legacy)
-        sources = [p / "checks.py"]
-    else:
-        return False
-    try:
-        head = "\n".join(s.read_text(encoding="utf-8", errors="replace") for s in sources)
-    except OSError:
-        return False
-    return all(m in head for m in _OWN_ENGINE_MARKERS)
-
+# `_OWN_ENGINE_MARKERS` / `_is_own_source` used to be DEFINED here. B-265 relocated them
+# down into `collector.py` (Layer 1) so skill *discovery* can use the same content-verified
+# self-identity oracle that `vet_skill` uses — the Layer-1 collector may not import this
+# Layer-2 module, and the basename-only skip it had instead was a free rename cloak. They
+# are re-imported at the top of this file exactly as `_OWN_SKILL_NAMES`/`Context`/`dig`
+# already are, so `from ._shared import _is_own_source` keeps working unchanged.
 
 # Destructive / outbound tool name hints (same set as OUTBOUND_TOOL_HINTS above).
 _DESTRUCTIVE_HINTS = OUTBOUND_TOOL_HINTS

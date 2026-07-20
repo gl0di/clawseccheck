@@ -42,7 +42,17 @@ WORKSPACE_DIRS = ["workspace-home", "workspace-work", "workspace"]
 # Where OpenClaw discovers installed skills (we read their CONTENT, never run them).
 SKILL_DIRS = ["skills", "workspace/skills", "workspace-home/skills",
               "workspace-work/skills", ".agents/skills"]
-_OWN_SKILL_NAMES = {"clawseccheck", "clawshield"}
+# B-265: the ONLY own-skill directory name we still recognise. "clawshield" was a dead
+# legacy namespace (renamed away in v0.16.0) that protected nothing and handed an attacker
+# a free cloak. Note this set is never a self-exclusion decision on its own — it only
+# selects which *shape* of `_is_own_source` layout check applies; the engine markers below
+# are what actually grant the exclusion.
+_OWN_SKILL_NAMES = {"clawseccheck"}
+
+# Distinctive symbols that only ClawSecCheck's own signature engine (the checks/ package)
+# contains. Used to recognise our own source so neither --vet nor the installed-skill audit
+# flags the scanner's embedded attack signatures + red-team payloads as malware.
+_OWN_ENGINE_MARKERS = ("def check_installed_skills", "def vet_skill", "_SKILL_CRIT")
 _MAX_SKILLS = 300
 # B-144 follow-up: raised 60_000 -> 200_000 -> 1_000_000, all three caps kept in lock-
 # step. _MAX_FILE_BYTES must move WITH _MAX_BYTES_PER_SKILL, not independently — a
@@ -1119,6 +1129,69 @@ def _config_workspace_dirs(
     return out
 
 
+def _is_own_source(p: Path) -> bool:
+    """True if `p` is ClawSecCheck's own source tree (repo root, install dir, or the
+    package dir itself). A security auditor necessarily ships attack signatures and
+    red-team payloads as *data*, so a naive malware scan of its own source self-flags.
+
+    Recognition is by structure (package layout) AND distinctive engine symbols — not
+    by name alone — so a look-alike skill that merely calls itself "clawseccheck" is
+    still scanned normally and cannot use the name to dodge detection.
+
+    B-265: this is the single self-identity oracle for BOTH surfaces. It used to be
+    reachable only from `vet_skill` (it lived in `checks/_shared.py`, a Layer-2 module
+    the Layer-1 collector must not import), while skill *discovery* self-excluded on the
+    bare directory basename. That let `mv evil-skill clawshield` erase a skill from
+    `ctx.installed_skills` — and therefore from the whole audit and from --monitor —
+    with no frontmatter edit, while --vet pointed at the same bytes still said
+    "F (DANGEROUS)". Moving it down here (the same precedent as `_OWN_SKILL_NAMES`,
+    already collector-resident) keeps the import direction legal and makes the two
+    surfaces agree. `checks/_shared.py` re-imports it, so `vet_skill`'s behaviour and
+    the `clawseccheck.checks` aggregator re-export (§3.1-a) are unchanged.
+
+    HONEST SCOPE — this CLOSES the rename-only cloak but does not make self-exclusion
+    unforgeable: an attacker who copies our actual engine sources (all of
+    `_OWN_ENGINE_MARKERS` present, in a `checks/` package laid out like ours) alongside
+    a payload would still be excluded. That residual is strictly narrower than the old
+    one — it costs the attacker shipping our whole engine rather than one `mv` — and it
+    is bounded further by `check_installed_skills` being only one of the surfaces that
+    sees a skill. Making exclusion tamper-proof needs a signed/attested identity, not a
+    content heuristic; tracked separately, not solvable inside a static string test.
+
+    C-135 residual, accepted deliberately: an own install that ships the DOCS but not the
+    engine (a hand-made partial copy — `SKILL.md` + `README.md` + `docs/` under a
+    `clawseccheck/` dir with no `clawseccheck/checks/`) is no longer excluded, so the
+    audit scans our own prose, which necessarily quotes attack payloads, and self-flags.
+    Not a shipped shape: both documented installs put the engine on disk (ClawHub installs
+    the whole tree — pyproject `packages` includes `clawseccheck.checks` — and the pipx
+    route creates no skill dir at all), and a docs-only copy has no working console script.
+    Verified against the real `~/.openclaw` install, which recognises correctly. Left
+    unmitigated on purpose: every candidate fix keys on copyable doc content, which is
+    exactly the forgeable-identity mistake this change exists to remove. Failing closed
+    (scan what we cannot verify) is the safe direction; the old behaviour here was a
+    lying PASS that let a payload hide behind a copy of our README. Pinned by
+    `tests/test_b265_ownname_content_exclusion.py::test_docs_only_own_install_is_scanned`.
+    """
+    # The engine is the checks/ package (current) or a legacy single-file checks.py.
+    # Read every engine source so the markers are found regardless of which topic module
+    # the I-022 split scattered them into.
+    if (p / "clawseccheck" / "checks").is_dir():  # repo root / install dir (package)
+        sources = sorted((p / "clawseccheck" / "checks").glob("*.py"))
+    elif (p / "clawseccheck" / "checks.py").is_file():  # repo root / install dir (legacy)
+        sources = [p / "clawseccheck" / "checks.py"]
+    elif p.name.lower() in _OWN_SKILL_NAMES and (p / "checks").is_dir():  # package dir
+        sources = sorted((p / "checks").glob("*.py"))
+    elif p.name.lower() in _OWN_SKILL_NAMES and (p / "checks.py").is_file():  # package dir (legacy)
+        sources = [p / "checks.py"]
+    else:
+        return False
+    try:
+        head = "\n".join(s.read_text(encoding="utf-8", errors="replace") for s in sources)
+    except OSError:
+        return False
+    return all(m in head for m in _OWN_ENGINE_MARKERS)
+
+
 def _read_installed_skills(home: Path, ctx: Context) -> None:
     seen: set[str] = set()
     # (base_dir, allow_symlink_entries). The hardcoded roots refuse symlinked skill dirs —
@@ -1167,7 +1240,11 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         ):
             if len(ctx.installed_skills) >= _MAX_SKILLS:
                 return
-            if sd.name.lower() in _OWN_SKILL_NAMES:
+            # B-265: self-exclusion is CONTENT-verified, never basename-verified. Test the
+            # resolved `target` (the real bytes), not `sd` — a symlinked plugin-skills entry
+            # must be judged by what it points at. A malicious skill renamed to an own-skill
+            # name now enters the inventory and is audited like any other.
+            if _is_own_source(target):
                 continue
             key = sd.name
             if key in seen:
