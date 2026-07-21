@@ -118,15 +118,31 @@ def _b21_has_trust_boundary(text: str) -> bool:
 
 # ---------- B18: subagent delegation ----------
 def _has_subagents(cfg: dict) -> bool:
-    """True if any subagent delegation is configured."""
+    """True if any subagent delegation is configured.
+
+    B-296 round 2: also recognizes the real, schema-grounded PER-AGENT
+    path ``agents.list[i].subagents`` being present and truthy for ANY entry — not
+    only a list with more than one agent. Grounded on ``AgentEntrySchema`` (installed
+    dist ``zod-schema.agent-runtime-C02vY4RT.js:658-711``):
+    ``subagents: object({delegationMode, allowAgents, model, thinking,
+    requireAgentId}).strict().optional()`` is a per-entry field, independent of how
+    many other agents exist in the list. This module's own ``check_subagents_allow_agents``
+    (B72) already reads this identical field (``dig(agent, "subagents.allowAgents")``)
+    for a *single*-agent list, so the two checks must not disagree about whether
+    delegation is declared.
+    """
     if dig(cfg, "agents.subagents"):
         return True
     if dig(cfg, "agents.defaults.subagents"):
         return True
     agent_list = dig(cfg, "agents.list")
-    if isinstance(agent_list, list) and len(agent_list) > 1:
-        # Multiple agents in the list implies subagent delegation
-        return True
+    if isinstance(agent_list, list):
+        if len(agent_list) > 1:
+            # Multiple agents in the list implies subagent delegation
+            return True
+        for agent in agent_list:
+            if isinstance(agent, dict) and dig(agent, "subagents"):
+                return True
     return False
 
 
@@ -671,11 +687,97 @@ def check_subagent_spawn_limits(ctx: Context) -> Finding:
     )
 
 
+def _disk_subagent_disclosure(ctx: Context) -> "Finding | None":
+    """B-296 (DISK-5 increment 1): disk-grounded B18 disclosure for when config says NO
+    subagent delegation exists but ``subagent_runs`` (the OpenClaw state DB's subagent-spawn
+    registry — see ``collector._collect_subagent_runs``) proves spawns actually happened.
+
+    Returns ``None`` when there is nothing to disclose (no rows, or the collector could not
+    reliably parse any — see ``ctx.subagent_runs_parse_error``); the caller then falls
+    through to B18's ordinary config-derived UNKNOWN, unchanged.
+
+    DISCLOSURE ONLY, never FAIL — WARN is the ceiling here, deliberately, per CLAUDE.md
+    Golden Rule #5 and this task's own traps: a spawn into an out-of-tree ``workspace_dir``,
+    or with a fallback ``model``, is completely normal and a FAIL-shaped predicate on either
+    shape would be a false positive on real fleets. Nothing about the recorded fields (model/
+    agent_dir/workspace_dir/spawn_mode/outcome) is judged here — they are surfaced as-is.
+
+    NARROWS, does not close: this reads recorded activity, never a durable audit trail.
+    ``subagent_runs`` rows are pruned well before they could serve as forensic history (the
+    default is ~60 minutes after the run was SPAWNED/REGISTERED, not after it completes —
+    ``archiveAtMs = now + archiveAfterMs`` is computed once at registration time
+    (``subagent-registry-DexSZ4w1.js:2238-2240``, and again at steer-restart/replace,
+    ``:2156-2158``) and never recomputed at completion, so a long-running subagent's
+    retention window can already be nearly spent by the time it finishes; see the
+    collector's own docstring and ``docs/research/openclaw-schema-recon.md`` §28), so a
+    populated table proves RECENT (or explicitly ``cleanup:"keep"``) activity — never "this
+    is every subagent ever spawned", and an EMPTY table is never proof no subagent has ever
+    run (retention, not absence).
+
+    The subagent's own delegated ``task`` text is deliberately never echoed into evidence
+    here (§8 — it is free-form content the agent was asked to act on, potentially sensitive);
+    the collector caps it defensively too, but this check does not surface it at all.
+
+    Guarded on ``ctx.config_parse_error``: when openclaw.json itself could not be read, the
+    collector falls back to ``ctx.config = {}``, which makes ``_has_subagents`` look False
+    for a reason that has NOTHING to do with subagent delegation — "config declares no
+    delegation" would be a fabricated claim about content nobody actually read (GR#4). In
+    that case this returns ``None`` too, same as "nothing to disclose", and B18 falls back to
+    its ordinary (also config-derived, equally silent on this point) UNKNOWN.
+    """
+    if ctx.config_parse_error:
+        return None
+    if not ctx.subagent_runs_found or ctx.subagent_runs_parse_error or not ctx.subagent_runs:
+        return None
+
+    n = len(ctx.subagent_runs)
+    shown = ctx.subagent_runs[:5]
+    ev = []
+    for run in shown:
+        outcome = run.get("outcome")
+        outcome_status = outcome.get("status") if isinstance(outcome, dict) else None
+        ev.append(
+            f"{run.get('child_session_key') or '?'}: "
+            f"model={run.get('model') or '?'}, "
+            f"agent_dir={run.get('agent_dir') or '?'}, "
+            f"workspace_dir={run.get('workspace_dir') or '?'}, "
+            f"spawn_mode={run.get('spawn_mode') or '?'}, "
+            f"outcome={outcome_status or 'not recorded (may still be running)'}"
+        )
+    more = n - len(shown)
+    if more > 0:
+        ev.append(f"...and {more} more spawn(s) not shown")
+
+    return _finding(
+        "B18",
+        WARN,
+        "Config declares no subagent delegation, but the OpenClaw state database's "
+        f"subagent_runs table records {n} spawn(s) that actually ran — config and disk "
+        "disagree. This is a disclosure, not proof of an active misconfiguration: these "
+        "rows are pruned well before they could serve as durable forensic history (recorded "
+        "spawns are typically pruned within about an hour of being SPAWNED, not of "
+        "completing — a long-running spawn's retention window can already be nearly gone "
+        "by the time it finishes; sooner still for session-mode runs), so this may reflect "
+        "delegation that has since been removed "
+        "from config rather than a hidden capability that is still live.",
+        "If subagent delegation is intentional, declare it explicitly under "
+        "agents.subagents / agents.defaults.subagents / agents.list so the normal "
+        "approval-gate check (this same B18) applies to it going forward. If it is not "
+        "intentional, use the child_session_key values below to find out what spawned "
+        "these runs before assuming the capability is gone — it may simply be unrecorded "
+        "by config, not absent.",
+        evidence=ev,
+    )
+
+
 def check_subagents(ctx: Context) -> Finding:
     """Subagents can inherit elevated/exec tools without human approval."""
     cfg = ctx.config
 
     if not _has_subagents(cfg):
+        disk_finding = _disk_subagent_disclosure(ctx)
+        if disk_finding is not None:
+            return disk_finding
         return _finding("B18", UNKNOWN, "No subagent delegation configured.", "—")
 
     tools = _enabled_tools(cfg)
