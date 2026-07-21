@@ -4,7 +4,10 @@ Exposed as the `clawseccheck` console script (see pyproject.toml), as `python -m
 and via the bundled skill entrypoint `python3 {baseDir}/audit.py`.
 
 Read-only with respect to OpenClaw config.
-Writes local ~/.clawseccheck score history by default unless --no-history/--trend/--monitor.
+Writes local ~/.clawseccheck score history by default; opt out with --no-history.
+C-251: --trend and --monitor are NOT suppressors of that write — they are the two modes
+that record a history point unconditionally, as part of their own job, so --no-history
+has no effect on them (see _flag_coherence_notes / the --no-history --help text).
 No network. Pure stdlib. Cross-platform.
 """
 from __future__ import annotations
@@ -48,7 +51,7 @@ from .report import (
 from .adjudication import render_judge_packet_json, render_judged_json
 from .dossier import build_profile
 from .ansi import should_color, strip_ansi
-from .monitor import DEFAULT_EVENTS, DEFAULT_STATE
+from .monitor import DEFAULT_EVENTS, DEFAULT_STATE, verify_chain
 from .tamperscore import tamper_subgrade
 from .redteam import make_suite, render_suite
 from .dryrun import make_scenarios, render_dryrun
@@ -273,6 +276,7 @@ _PRIMARY_MODES = [
     ("purge", "--purge", "bool"),
     ("verify_self", "--verify-self", "bool"),
     ("verify_history", "--verify-history", "bool"),
+    ("verify_events", "--verify-events", "bool"),
     ("vet_plan", "--vet-plan", "opt"),
     ("menu", "--menu", "bool"),
     ("functions", "--functions", "bool"),
@@ -644,9 +648,15 @@ def _main(argv=None) -> int:
     p.add_argument("--history", default=DEFAULT_HISTORY, metavar="PATH",
                    help=f"path for trend history file (default: {DEFAULT_HISTORY})")
     p.add_argument("--no-history", action="store_true",
-                   help="do not record this run to the local score history (default: record)")
+                   help="do not record this run to the local score history (default: record) "
+                        "— has no effect under --trend/--monitor, which always record one "
+                        "regardless (a stderr note says so if combined)")
     p.add_argument("--verify-history", action="store_true",
                    help="verify the score history file's tamper-evident hash-chain and exit")
+    p.add_argument("--verify-events", action="store_true",
+                   help="verify the Agent Watch event journal's (--events) tamper-evident "
+                        "hash-chain and exit — same check as --verify-history, run against "
+                        "--events instead of --history")
     p.add_argument("--purge", action="store_true",
                    help="delete ClawSecCheck's local store (history/events/state/coverage "
                         "files + their lock sidecars) and exit — confirmation-gated unless "
@@ -744,6 +754,19 @@ def _main(argv=None) -> int:
             _emit(f"History chain OK ({args.history}): {msg}")
             return 0
         _emit(f"History chain BROKEN ({args.history}): {msg}")
+        return 1
+
+    if args.verify_events:
+        # C-250(c): --verify-history --history <events-path> already verified an events
+        # journal correctly (verify_chain() is the same entry-agnostic algorithm for both
+        # journals — see history.verify()'s own docstring), but its output always said
+        # "History chain" regardless of which journal was actually named. This is the
+        # discoverable, correctly-worded entry point --events users were missing.
+        ok, msg = verify_chain(args.events)
+        if ok:
+            _emit(f"Events chain OK ({args.events}): {msg}")
+            return 0
+        _emit(f"Events chain BROKEN ({args.events}): {msg}")
         return 1
 
     if getattr(args, "vet_plan", None):

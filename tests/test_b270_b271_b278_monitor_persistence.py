@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from clawseccheck import diff, record_events
+from clawseccheck.catalog import FAIL, PASS
 from clawseccheck.cli import main
 from clawseccheck.monitor import (
     BASELINE_ABSENT, BASELINE_CORRUPT, BASELINE_OK, load_state, read_baseline,
@@ -267,6 +268,108 @@ def test_a_wrong_typed_dimension_costs_only_itself():
     curr = {"score": 90, "grade": "A", "skills": {}, "bootstrap": {}, "checks": {},
             "gateway_bind": "0.0.0.0"}
     assert any("Gateway bind changed" in m for _, m in diff(prev, curr))
+
+
+# ---------------------------------------------------------------------------
+# B-304 — a corrupted dimension must not fabricate drift against a REAL other side
+#
+# `test_diff_skips_a_wrong_typed_dimension_instead_of_crashing` above proves no crash,
+# but its `curr` is always the shared `good` dict, which carries an EMPTY "skills" /
+# "bootstrap" / "checks" too — so `cs.keys() - ps.keys()` was always `{} - {}` and the
+# tests could never observe what happens when the *other* side is genuinely populated.
+# That is exactly the realistic shape: `curr` is always freshly computed by this run's
+# own `snapshot()` and is never hand-edited — only a saved, previously-written `prev`
+# can be corrupted. These tests use a real, non-empty `curr` to close that gap.
+# ---------------------------------------------------------------------------
+
+_FABRICATION_MARKERS_B304 = (
+    "NEW skill installed", "New bootstrap file appeared", "Now FAILING",
+    "was removed", "no longer being read",
+)
+
+
+@pytest.mark.parametrize("junk", [[1, 2], "a string", None, 42, True])
+def test_corrupted_skills_does_not_fabricate_new_skill_installed(junk):
+    """Measured before this fix: `"skills": ["not", "a", "dict"]` on prev reported the
+    one real, unchanged, already-installed skill as `NEW skill installed ... this is
+    when malware lands` — a CRITICAL false alarm on every run against an untouched
+    fleet, for as long as the corrupted field was never overwritten."""
+    prev = {"score": 90, "grade": "A", "skills": junk, "bootstrap": {}, "checks": {}}
+    curr = {"score": 90, "grade": "A",
+            "skills": {"my-skill": {"hash": "abc", "caps": ["net"], "tree": "t1"}},
+            "bootstrap": {}, "checks": {}}
+    alerts = diff(prev, curr)
+    assert not any(m for _, m in alerts if any(mk in m for mk in _FABRICATION_MARKERS_B304)), alerts
+
+
+@pytest.mark.parametrize("junk", [[1, 2], "a string", None, 42, True])
+def test_corrupted_bootstrap_does_not_fabricate_new_file_appeared(junk):
+    """Measured before this fix: a corrupted `bootstrap` on prev reported every REAL
+    current bootstrap file as `New bootstrap file appeared`, even though none of them
+    had actually just appeared."""
+    prev = {"score": 90, "grade": "A", "skills": {}, "bootstrap": junk, "checks": {}}
+    curr = {"score": 90, "grade": "A", "skills": {},
+            "bootstrap": {"workspace-home/SOUL.md": "hash1"}, "checks": {}}
+    alerts = diff(prev, curr)
+    assert not any(m for _, m in alerts if any(mk in m for mk in _FABRICATION_MARKERS_B304)), alerts
+
+
+@pytest.mark.parametrize("junk", [[1, 2], "a string", None, 42, True])
+def test_corrupted_checks_does_not_fabricate_now_failing(junk):
+    """Measured before this fix: a corrupted `checks` on prev reported every check that
+    is CURRENTLY failing as `Now FAILING`, including catalog-CRITICAL ids, as if the
+    failure were a fresh transition this run actually witnessed."""
+    prev = {"score": 49, "grade": "F", "skills": {}, "bootstrap": {}, "checks": junk}
+    curr = {"score": 49, "grade": "F", "skills": {}, "bootstrap": {},
+            "checks": {"A1": FAIL}}
+    alerts = diff(prev, curr)
+    assert not any(m for _, m in alerts if any(mk in m for mk in _FABRICATION_MARKERS_B304)), alerts
+
+
+def test_real_skill_bootstrap_checks_drift_still_detected_when_both_sides_valid():
+    """The B-304 guard must cost nothing when neither side is corrupted — real drift in
+    all three dimensions at once is still reported, through the same real function."""
+    prev = {"score": 90, "grade": "A",
+            "skills": {"old-skill": {"hash": "h1", "tree": "t1"}},
+            "bootstrap": {"workspace-home/SOUL.md": "hash1"},
+            "checks": {"A1": PASS}}
+    curr = {"score": 49, "grade": "F",
+            "skills": {"old-skill": {"hash": "h1", "tree": "t1"},
+                       "new-skill": {"hash": "h2", "tree": "t2"}},
+            "bootstrap": {"workspace-home/SOUL.md": "hash2"},
+            "checks": {"A1": FAIL}}
+    msgs = " ".join(m for _, m in diff(prev, curr))
+    assert "NEW skill installed" in msgs and "new-skill" in msgs
+    assert "SOUL.md changed" in msgs
+    assert "Now FAILING" in msgs
+
+
+def test_monitor_cli_self_heals_a_corrupted_bootstrap_field(tmp_path, capsys):
+    """End to end through the real CLI, not just diff(): a state.json that is a
+    well-formed JSON *object* (so `read_baseline` reports it BASELINE_OK, not
+    BASELINE_CORRUPT — this is the one-field corruption B-304 is actually about, not a
+    wholly unusable snapshot) whose 'bootstrap' field is corrupted must not crash, must
+    not fabricate a 'New bootstrap file appeared' claim, and the corruption must not be
+    laundered forward silently: the next saved baseline carries a real dict, so the run
+    right after this one is a normal, unremarkable comparison."""
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({
+        "version": 2, "score": 90, "grade": "A",
+        "skills": {}, "bootstrap": ["not", "a", "dict"], "checks": {},
+    }), encoding="utf-8")
+    rc = _run(tmp_path, state=state)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "New bootstrap file appeared" not in out
+    # Not reported as a corrupt/unusable BASELINE either — this is a narrower, one-field
+    # gap than the whole-snapshot BASELINE_CORRUPT case tested above, and diff() already
+    # self-heals it silently, the same idiom every other dimension guard in this module
+    # uses (see _dim / _both_dims docstrings).
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert isinstance(saved["bootstrap"], dict)          # self-healed, not carried forward
+    rc2 = _run(tmp_path, state=state)                    # the following run is unremarkable
+    assert rc2 == 0
+    assert "New bootstrap file appeared" not in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------

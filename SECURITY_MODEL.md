@@ -93,6 +93,11 @@ introduced:
   `sanitize_url_host_only()` *before* entering the snapshot, so a credential in a URL's
   userinfo or query string is stripped rather than persisted (B-105).
 
+  **`state.json` itself is unauthenticated** — no chain, no signature, unlike
+  `history.jsonl`/`events.jsonl` (see "Audit trail" below for the full limit and its
+  consequences: anyone who can write it can forge a baseline, and `--monitor` re-baselines
+  against it silently).
+
   `--trend` writes no state file — it appends a score-history line and reads
   `history.jsonl` back.
 - The tool runs with whatever OS permissions the invoking user has. It does not
@@ -192,29 +197,83 @@ before it belongs in code.
 ## Audit trail — tamper-evident local history
 
 The local score history (`~/.clawseccheck/history.jsonl`, written by default; opt out
-with `--no-history`) is **tamper-evident via a hash chain**. Each entry carries a
-`chain_hash` field: `sha256(prev_chain_hash + canonical_json(entry_without_chain_hash))`
-(`history.py`, sharing the same scheme `monitor.py`'s event journal uses). Editing,
-reordering, or deleting a historical entry breaks the chain from that point forward.
-Verify the chain with:
+with `--no-history`) and the `--monitor` event journal (`~/.clawseccheck/events.jsonl`,
+timeline viewed with `--watch-log`) are both **tamper-evident via a hash chain**. Each
+entry carries a `chain_hash` field: `sha256(prev_chain_hash +
+canonical_json(entry_without_chain_hash))` (`history.py` and `monitor.py` share the same
+scheme). Editing, reordering, or deleting a historical entry breaks the chain from that
+point forward. Verify either chain with:
 
 ```bash
-clawseccheck --verify-history
+clawseccheck --verify-history            # ~/.clawseccheck/history.jsonl
+clawseccheck --verify-events             # ~/.clawseccheck/events.jsonl (correctly named —
+                                          # --verify-history --history <events-path> runs
+                                          # the identical check but always said "History
+                                          # chain", regardless of which journal it was
+                                          # actually given; --verify-events names it right)
 ```
 
-An absent, empty, or legacy pre-chain file (entries with no `chain_hash` field at all)
-verifies as `OK` for backward compatibility; the first entry whose recomputed hash does
-not match its stored `chain_hash` reports exactly where the chain broke.
+**C-250: the OK verdict is now per-entry, not whole-file.** An absent or empty file still
+verifies as a bare `OK`. A file that carries LEGACY entries (no `chain_hash` field at all —
+graceful backward compatibility) — whether every entry is legacy or only some are, in a
+journal mixing old and new format — verifies `True` but the message now discloses exactly
+how many entries were not chain-verified, e.g. `OK (2 entries not chain-verified (legacy,
+no chain_hash))`, rather than an undifferentiated bare `OK` that reads identically to a
+fully chain-verified file. The same disclosure applies to a tail-truncated / unparseable
+line (a plausible crash-mid-write artifact: `OK (1 unparseable line skipped)`) and to an
+unknown-future-`_schema` entry (`OK (1 unknown-schema entry present)`, pre-existing). The
+first entry whose recomputed hash does not match its stored `chain_hash` still reports
+exactly where the chain broke (`False, "broken at entry N"`).
 
 **What the chain does and does not defend.** It is a plain SHA-256 chain, not a keyed
 (HMAC) or externally-anchored one, so it detects *accidental corruption* and *naive edits*
 (editing/reordering/deleting an entry breaks it) — not a knowledgeable attacker who already
 has write access to the file, who can simply recompute the whole chain forward after
-tampering. The chain is therefore a drift/tamper-*evidence* aid, **not** a substitute for
-filesystem permissions on `~/.clawseccheck/`: anyone who can write that file already runs as
-your user and could edit history, patch the engine, or read anything you can. This is the
-same honest boundary as `--verify-self` (it does not defend against an adversary who also
+tampering, truncate the tail, or delete the file outright (all three verify "clean"). The
+chain is therefore a drift/tamper-*evidence* aid, **not** a substitute for filesystem
+permissions on `~/.clawseccheck/`: anyone who can write that file already runs as your
+user and could edit history, patch the engine, or read anything you can. This is the same
+honest boundary as `--verify-self` (it does not defend against an adversary who also
 patches the verifier).
+
+**The drift BASELINE is a different file, and is NOT chained.** `--monitor`'s comparison
+snapshot (`~/.clawseccheck/state.json` — see "Trust boundaries" above for what it holds)
+carries no `chain_hash` and no signature at all, unlike `history.jsonl`/`events.jsonl`.
+Anyone who can write that file can forge a baseline, and the next `--monitor` run
+re-baselines against whatever it finds there, silently — a compromise that predates a
+forged baseline is never reported as drift. `read_baseline()` (`monitor.py`) validates
+*shape* (a present, non-empty JSON object) so a corrupted/truncated file is reported as a
+lost baseline rather than mistaken for a first run or silently crashing the run — it does
+not, and structurally cannot, validate *provenance*.
+
+**Concurrency locking is POSIX-only.** The advisory lock (`locking.journal_lock`) that
+keeps two racing appends from both reading the same "last" `chain_hash` is a `flock`
+(`fcntl`) on a sidecar file. Without `fcntl` — most notably **Windows**, which this
+project does advertise support for (`pyproject.toml` lists "OS Independent"; see the
+POSIX-only local-store-hardening caveat in [USAGE.md](docs/USAGE.md)) — locking degrades
+to a documented no-op (`locking.py`'s own module docstring) and two writers racing the
+journal at the same instant can genuinely interleave. `--verify-history`/`--verify-events`
+then reports `BROKEN` — a **false accusation of tampering** caused by lost serialization,
+not an attacker. Treat a `BROKEN` verdict on a platform/setup where concurrent writers are
+plausible (two scheduled jobs, a heartbeat racing a manual run) as inconclusive, not proof
+of compromise, until corroborated another way.
+
+**`--home` is not hermetic.** OpenClaw's own config loader applies no home-check to
+`agents.defaults.workspace` (or a per-agent `agents.list[].workspace` override), so an
+absolute path there is followed even when it resolves OUTSIDE the `--home` directory named
+on the command line — by design (rejecting it would be a false-negative skip, not a safety
+win; see `collector._config_workspace_dirs`). A test/staging `--home` can therefore still
+read the real workspace if the config says so — `--home` scopes where ClawSecCheck STARTS
+looking, not a sandbox boundary it enforces.
+
+**`--monitor` writes three files, and redirecting two of them is not isolation.**
+`--state`/`--events` confine the drift baseline and event journal, but `--history`
+defaults independently to `~/.clawseccheck/history.jsonl` regardless — a sandboxed or
+automated run that redirects only `--state`/`--events` still appends a real-looking row to
+the live score history. Each history row's `home` field is currently always `null` (no
+call site populates it with the audited path — `history.record`'s `home` parameter is
+real, but nothing passes it), so such a row is not distinguishable after the fact from a
+genuine one. Redirect `--history` too, or set `--no-history`, to fully isolate a run.
 
 ## A note for other security scanners auditing ClawSecCheck's own source
 

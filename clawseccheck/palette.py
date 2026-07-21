@@ -131,6 +131,8 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "SHA-256 of the engine source — a tamper check"),
         PaletteEntry("Verify history", 'verify history', "--verify-history",
                      "check the score history's hash-chain hasn't been tampered with"),
+        PaletteEntry("Verify events", 'verify events', "--verify-events",
+                     "same check, run against the Agent Watch event journal instead"),
     )),
     PaletteCategory("Maintenance", DESTRUCTIVE, (
         PaletteEntry("Purge local data", 'purge', "--purge",

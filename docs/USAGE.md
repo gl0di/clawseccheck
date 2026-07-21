@@ -130,7 +130,7 @@ skill itself uses, see [`SKILL.md`](../SKILL.md#natural-language-to-tool-quick-m
 | "What's actually installed — skills, MCP servers, versions?" | Exports a local bill-of-materials (skills, MCP servers, hashes, declared/unpinned dependencies) as JSON. | `--sbom` |
 | "I think I've been compromised — help me preserve evidence" | Bundles a findings snapshot, skill/MCP hashes, trajectory-log hashes, and a credential rotation list into one local JSON file — a preservation aid, never rotates or deletes anything itself. | `--incident` |
 | "Did a suspicious skill's instruction actually run?" | Post-hoc correlation: checks whether the credential/exfil/secret-path indicators an installed skill names show up in real `tool.call` arguments in your OpenClaw trajectory sidecars — "acted on" vs "present but not acted on". Reads args in memory only; never echoes them. | `--analyze-trajectory` |
-| "What did my agent actually DO, not just what it could do?" | Reconstructs observed tool-call sequences from your OpenClaw trajectory sidecars and flags a proven-by-log ingress→sensitive→egress verb order, or a repeated-failure-then-success pattern on a sensitive-data call. Metadata-only — verb identity and sequencing, never call/return payloads. WARN-only, never scored. | `--behavioral` |
+| "What did my agent actually DO, not just what it could do?" | Reconstructs observed tool-call sequences from your OpenClaw trajectory sidecars and flags a proven-by-log ingress→sensitive→egress verb order, or a repeated-failure-then-success pattern on a sensitive-data call. Also reads OpenClaw's OWN runtime `audit_events` trail (a separate, metadata-only record: `tool_name` alone, no argv/command/path/host) for a runtime tool-block, an evasive/malformed tool name, or a session your trajectory sidecar no longer has (it was disabled or rotated out while `audit_events` still retained it). Metadata-only throughout — verb identity and sequencing, never call/return payloads. WARN-only, never scored. | `--behavioral` |
 | "Gate my CI on this" | Machine-readable output plus a non-zero exit when the score drops below a bar or an unsuppressed FAIL exists — wire straight into a pipeline. | `--json` · `--sarif results.sarif` · `--fail-under 70` · `--exit-code` |
 
 ## What it checks
@@ -367,6 +367,69 @@ Schedule it via OpenClaw's heartbeat or cron; when an alert fires, have your age
 It stores one small snapshot at `~/.clawseccheck/state.json`. (Scheduled re-audit + drift
 detection — not a real-time runtime IDS; that heavier model is intentionally out of scope.)
 
+Verify the event journal's own tamper-evident chain by name (not the score-history one) with:
+
+```bash
+clawseccheck --verify-events                       # checks the default ~/.clawseccheck/events.jsonl
+clawseccheck --verify-events --events PATH         # or a specific journal
+```
+
+### Known limits of `--monitor` (read before relying on it)
+
+These are inherent boundaries of a **local, file-based, scheduled** drift detector — not bugs to
+be fixed, and not a substitute for host-level file-integrity monitoring or a real-time runtime
+IDS. Disclosed here so they are a known trade-off, not a surprise:
+
+- **`state.json` is unauthenticated.** Unlike `history.jsonl`/`events.jsonl` (hash-chained — see
+  "Audit trail" in [SECURITY_MODEL.md](../SECURITY_MODEL.md)), the drift baseline
+  (`~/.clawseccheck/state.json`) carries no chain and no signature. Anyone with write access to
+  that file (i.e. anyone who already runs as you) can forge a baseline, and the next `--monitor`
+  run re-baselines against whatever it finds there, silently — a compromise that predates a
+  forged baseline is never reported as drift.
+- **The events chain only catches naive edits.** A knowledgeable attacker who already has write
+  access can recompute the whole chain forward after tampering, truncate the tail, or delete the
+  file outright — all three verify "clean". See "What the chain does and does not defend" in
+  [SECURITY_MODEL.md](../SECURITY_MODEL.md).
+- **Concurrency locking is POSIX-only.** `journal_lock` (the append-time serialization that keeps
+  two racing writers from both reading the same "last" hash) takes a `flock`/`fcntl` sidecar
+  lock; without `fcntl` — most notably **Windows**, which this project does advertise support for
+  (see the Windows caveat above) — it degrades to a no-op. Two writers racing the journal at the
+  same instant can then genuinely interleave, and `--verify-history`/`--verify-events` reports
+  `BROKEN` — a **false accusation of tampering** caused by lost serialization, not an attacker.
+- **`--home` is not hermetic.** An absolute `agents.defaults.workspace` (or a per-agent
+  `agents.list[].workspace` override) is followed even when it resolves OUTSIDE the `--home`
+  directory you pointed ClawSecCheck at — by design (OpenClaw's own loader has no home-check, so
+  rejecting it would be a false-negative skip, not a safety win). A test/staging `--home` can
+  therefore still read your real workspace if the config says so.
+- **`--monitor` writes THREE files, and `--state`/`--events` alone do not isolate a run.**
+  `--history` defaults independently to `~/.clawseccheck/history.jsonl` even when `--state`/
+  `--events` are redirected elsewhere — redirect all three, or a sandboxed/test/CI run still
+  appends a real-looking row to your live history. Each history row's `home` field is currently
+  always `null` (no call site populates it with the audited path), so a foreign-home row is not
+  distinguishable from a genuine one after the fact.
+- Also worth knowing: `--state`/`--events`/`--history`'s containing directory is created `0700`
+  (owner-only) the first time any of them is written (`safeio.secure_dir`) — a silent side effect
+  outside the target file itself, with no message printed, from a tool that otherwise promises
+  read-only.
+
+**A cron recipe.** `--monitor` has no exit-code channel by design (severity is advisory, not
+pass/fail — a MEDIUM alert and a CRITICAL one both `return 0`), so wire your own gate off
+`events.jsonl` instead of the exit code:
+
+```bash
+#!/bin/sh
+# rc=1 only when a NEW CRITICAL event was journaled since the last time this ran.
+EVENTS=~/.clawseccheck/events.jsonl
+MARK=~/.clawseccheck/.cron-last-count
+clawseccheck --monitor >/dev/null 2>&1
+prev=$(cat "$MARK" 2>/dev/null || echo 0)
+curr=$(wc -l < "$EVENTS" 2>/dev/null || echo 0)
+echo "$curr" > "$MARK"
+[ "$curr" -gt "$prev" ] || exit 0
+tail -n "+$((prev + 1))" "$EVENTS" | grep -q '"level": "CRITICAL"' && exit 1
+exit 0
+```
+
 ## Highest-risk paths
 
 Beyond individual checks, ClawSecCheck runs a **risk engine** that looks for dangerous
@@ -541,6 +604,12 @@ Removing the `clawseccheck` package/skill itself is a separate, normal uninstall
 `pip uninstall clawseccheck` or removing the skill directory) — `--purge` only clears the local
 data store.
 
+That fixed four-name list is deliberate (never a glob), but it means a stray `.<name>.<random>.tmp`
+sidecar — left behind only if the process is killed (e.g. `SIGKILL`) between writing the temp file
+and the atomic rename that replaces the real one — is not one of the four and is not removed by
+`--purge`. It is inert (never read back by anything) and rare; `rm ~/.clawseccheck/.*.tmp` clears
+it by hand if you ever see one.
+
 ## Baseline (accepting findings)
 
 Reviewed a finding and decided it's acceptable? Add it to `~/.openclaw/.clawseccheckignore` —
@@ -608,14 +677,35 @@ hard false positives on real configs.
   what the scanner recognized, not that nothing is wrong.
 - **Does not replace runtime red-teaming.** Static configuration analysis is a starting
   point, not a substitute for adversarial testing against a running agent.
+- **Does not mine what your agent has already logged, by default.** The default report
+  scores your *configuration*; it doesn't check whether a trifecta is already sitting in
+  your OpenClaw trajectory sidecar. `--behavioral` (proven-by-log verb-sequence trifecta /
+  outcome anomaly / capability drift, plus a runtime-block / evasive-tool-name / trajectory-
+  divergence signal read from OpenClaw's own `audit_events` table) and `--analyze-trajectory`
+  (skill-indicator correlation against real tool-call arguments) are the two modes that do —
+  the default report's scope note now points at both, alongside the live-test modes below.
 - **The active self-tests and attestation are a self-report protocol, not an
-  independently-verified check.** `--canary` / `--redteam` / `--dryrun` / `--self-test`
-  emit deterministic test material for your agent to run and grade, and `--ask` / `--attest`
-  ask your agent to declare its own capabilities — because the tool stays local and makes no
-  network calls (it cannot spin up and observe an independent agent process). An
-  already-compromised or jailbroken agent could therefore report `RESISTANT` or a benign
-  capability set dishonestly. Treat these results as the subject grading its own homework,
-  corroborated against the observable config/logs — not as proof.
+  independently-verified check — with one narrow, partial exception.** `--redteam` /
+  `--dryrun` / `--self-test` emit deterministic test material for your agent to run and
+  grade, and `--ask` / `--attest` ask your agent to declare its own capabilities — because
+  the tool stays local and makes no network calls (it cannot spin up and observe an
+  independent agent process). An already-compromised or jailbroken agent could therefore
+  report `RESISTANT` or a benign capability set dishonestly, and for `--redteam`/`--dryrun`/
+  `--attest` there is still no local artifact that could contradict a dishonest self-report
+  at all. **`--canary`/`--multiturn` now get partial corroboration:** `--analyze-trajectory`
+  cross-checks a claimed run against your OpenClaw trajectory log, in two legs of very
+  different strength. The "did it run" leg is solid — it looks for ClawSecCheck's own
+  namespaced token in a submitted prompt, which is hard to false-positive since that
+  namespace is ours alone. The "was the verdict honest" leg is best-effort only — it looks
+  for the same token in the agent's own reply, excluding the (common) case where the agent
+  simply *showed you the render* rather than complying with it, but a sufficiently evasive
+  reply can still slip past that exclusion, so this leg never fails anything and stays
+  outside the A-F score. Neither leg makes the tool render a RESISTANT/VULNERABLE verdict
+  itself — that is still spoken by the host LLM in chat — and the coverage ledger these
+  flags write to still only attests that the flag was invoked, never that the test executed
+  or what it concluded. Treat every one of these results as the subject grading its own
+  homework, now partially corroborated against the observable trajectory log where noted
+  above — not as independent proof.
 - **May produce false positives and false negatives.** Evidence-gating keeps noise low,
   but heuristics can miss novel attack patterns and can misread edge-case configurations.
 - **Read scope is bounded:** config, bootstrap markdown, installed-skill text, OpenClaw log

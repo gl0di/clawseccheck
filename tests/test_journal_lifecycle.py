@@ -82,17 +82,29 @@ def test_rotation_prunes_and_rechains(tmp_path: Path) -> None:
     _rotate_journal(journal, max_lines=SMALL_MAX, keep=SMALL_KEEP)
 
     lines = [ln for ln in journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    assert len(lines) == SMALL_KEEP
+    # C-250: +1 for the retention-marker entry rotation now prepends (see below) —
+    # the survivor COUNT is unchanged, disclosure is additive.
+    assert len(lines) == SMALL_KEEP + 1
 
     # Chain must verify OK post-rotation (the #1 regression: naive truncation
-    # would break it since old chain_hash values point at deleted history).
+    # would break it since old chain_hash values point at deleted history). The
+    # retention marker is itself a fully valid, fully chained entry (see below), so
+    # this stays a bare "OK" — nothing about it is unknown-schema or unchained.
     ok, msg = verify_chain(journal)
     assert ok is True, f"chain broken after rotation: {msg}"
     assert msg == "OK"
 
-    # Tail preserved: the newest `keep` entries survive.
     entries = [json.loads(ln) for ln in lines]
-    kept_messages = [e["message"] for e in entries]
+
+    # C-250: the retention marker is always the new OLDEST survivor, and discloses
+    # exactly how many real entries this rotation evicted.
+    marker = entries[0]
+    assert marker["retention_pruned"] == total - SMALL_KEEP
+    assert f"{total - SMALL_KEEP}" in marker["message"]
+    assert "pruned by retention" in marker["message"]
+
+    # Tail preserved: the newest `keep` REAL entries survive, right after the marker.
+    kept_messages = [e["message"] for e in entries[1:]]
     expected_tail = [f"event-{i}" for i in range(total - SMALL_KEEP, total)]
     assert kept_messages == expected_tail
 
@@ -104,7 +116,7 @@ def test_rotation_preserves_schema(tmp_path: Path) -> None:
     _rotate_journal(journal, max_lines=SMALL_MAX, keep=SMALL_KEEP)
 
     lines = [ln for ln in journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    assert len(lines) == SMALL_KEEP
+    assert len(lines) == SMALL_KEEP + 1  # C-250: +1 for the retention marker
 
     prev_hash = ""
     for ln in lines:
@@ -124,13 +136,19 @@ def test_history_rotation_rechains(tmp_path: Path) -> None:
     _rotate_journal(history, max_lines=SMALL_MAX, keep=SMALL_KEEP)
 
     lines = [ln for ln in history.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    assert len(lines) == SMALL_KEEP
+    # C-250: the SAME retention marker _rotate_journal writes for events.jsonl is
+    # written here too (it is the one function backing both journals) — +1 raw line.
+    assert len(lines) == SMALL_KEEP + 1
 
     ok, msg = history_verify(str(history))
     assert ok is True, f"history chain broken after rotation: {msg}"
     assert msg == "OK"
 
     rows = history_load(str(history))
+    # C-250: history.load()'s own {"date": obj["date"], ...} KeyError guard already
+    # skips a row with no 'date'/'score'/'grade' — the marker (ts/level/message
+    # only) is silently and harmlessly excluded here, so the trend's own row count
+    # is UNCHANGED by this fix; only the raw on-disk line count above gained the +1.
     assert len(rows) == SMALL_KEEP
     # newest entries retained (tail preserved) — scores are the loop index i
     expected_scores = list(range(total - SMALL_KEEP, total))
@@ -181,13 +199,16 @@ def test_record_events_triggers_rotation_via_real_default_cap(tmp_path: Path) ->
     record_events([("INFO", "final-alert")], path=journal, when="2026-01-01T00:00:00")
 
     lines = [ln for ln in journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    assert len(lines) == monitor._JOURNAL_KEEP
+    assert len(lines) == monitor._JOURNAL_KEEP + 1  # C-250: +1 for the retention marker
 
     ok, msg = verify_chain(journal)
     assert ok is True, f"chain broken after live rotation: {msg}"
 
     events = load_events(journal)
     assert events[-1]["message"] == "final-alert"
+    # 5001 entries existed the instant rotation triggered (the seeded MAX_LINES + the
+    # one new append that pushed it over); keep=4000 survive, so 1001 were pruned.
+    assert events[0]["retention_pruned"] == monitor._JOURNAL_MAX_LINES + 1 - monitor._JOURNAL_KEEP
 
 
 # ---------------------------------------------------------------------------

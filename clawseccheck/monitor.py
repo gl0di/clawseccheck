@@ -89,7 +89,7 @@ def _chain_hash(prev_hash: str, entry: dict) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _iter_jsonl(p: Path):
+def _iter_jsonl(p: Path, *, skipped: "list | None" = None):
     """Stream-parse a JSONL file, yielding one dict per well-formed non-blank line.
 
     C-164: iterates the open file object line-by-line (never
@@ -102,6 +102,15 @@ def _iter_jsonl(p: Path):
     crash-mid-write artifact — degrades that one line to unparseable-JSON
     (skipped, same as any other malformed line) instead of raising
     ``UnicodeDecodeError`` and permanently wedging every future invocation.
+
+    C-250: when *skipped* (a list) is given, every non-blank line that could NOT be
+    turned into a usable entry (a JSON-decode error, or valid JSON that isn't a dict —
+    e.g. a tail-truncated final line from a write that died mid-append) is appended to
+    it verbatim. Without this, ``verify_chain`` had no way to tell "the chain is clean
+    because the file holds nothing else" apart from "the chain is clean over what could
+    be parsed, and a trailing line was silently and invisibly dropped" — both rendered
+    the identical bare ``OK``. Same opt-in out-param idiom ``_snapshot_memory_files``'s
+    ``capped`` already uses: a caller that does not ask for it sees no behaviour change.
     """
     with p.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -111,9 +120,13 @@ def _iter_jsonl(p: Path):
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
+                if skipped is not None:
+                    skipped.append(line)
                 continue
             if isinstance(entry, dict):
                 yield entry
+            elif skipped is not None:
+                skipped.append(line)
 
 
 def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
@@ -124,14 +137,20 @@ def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
     - all entries lack a 'chain_hash' field (legacy graceful mode), or
     - every 'chain_hash' field matches the recomputed value.
 
-    When the chain is intact but the file carries N entries whose '_schema' the
-    loaders skip (unknown future major, or a malformed but honestly-chained value),
-    returns (True, "OK (N unknown-schema entr{y,ies} present)") instead of a bare
-    "OK". Those lines are hidden-but-present: authenticated and physically on disk,
-    yet invisible to load_events()/history.load(). Surfacing the count lets an
-    operator who diffs on-disk line-count against loaded-row-count see the gap
-    rather than trust a silent "OK" (C-167). Still (True, …) — this is honesty about
-    a pre-existing "write access breaks tamper-evidence" boundary, not a new break.
+    C-250: a bare "OK" used to also cover two OTHER gaps that C-167 had already fixed for
+    unknown-schema entries but left asymmetric here — a mixed/legacy journal (some or all
+    entries carry no 'chain_hash' at all) and a tail-truncated / partial-last-line journal
+    (a write that died mid-append, so the final line is not valid JSON) both verified
+    identically to a fully clean, fully chain-verified file. Three independent counts are
+    now folded into the same disclosure parenthetical, in this order when more than one
+    applies: unknown-schema entries (C-167), entries present but not chain-verified
+    (legacy, no 'chain_hash' field — reconciles SECURITY_MODEL.md's "whole-file legacy
+    carve-out" description with what this always did per-entry: a JOURNAL MIXING legacy
+    and chained entries discloses only the legacy COUNT, not "the whole file is legacy"),
+    and unparseable lines skipped entirely (see `_iter_jsonl`'s `skipped` out-param) — so
+    "OK (1 unknown-schema entry present)" (the pre-existing wording, unchanged when it is
+    the only note) can now read "OK (1 unknown-schema entry present; 2 entries not
+    chain-verified (legacy, no chain_hash); 1 unparseable line skipped)".
 
     Returns (False, "broken at entry N") on the first mismatch.
     Never raises — any IO/parse error causes (True, "OK") (graceful).
@@ -145,12 +164,14 @@ def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
     try:
         if not p.is_file():
             return True, "OK"
-        entries = list(_iter_jsonl(p))
+        _skipped: "list[str]" = []
+        entries = list(_iter_jsonl(p, skipped=_skipped))
     except OSError:
         return True, "OK"
 
     prev_hash = ""
     unknown_schema = 0
+    unchained = 0
     for idx, entry in enumerate(entries):
         # Count lines the loaders would skip (C-167): present + authenticated here,
         # but hidden from load_events()/history.load() by the unknown-schema policy.
@@ -159,7 +180,9 @@ def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
 
         stored = entry.get("chain_hash")
         if stored is None:
-            # Legacy entry — skip chain verification for this entry, carry prev_hash
+            # Legacy entry — skip chain verification for this entry, carry prev_hash.
+            # C-250: counted, not just silently tolerated — see the docstring above.
+            unchained += 1
             continue
 
         # Recompute over the entry *without* the chain_hash field
@@ -169,9 +192,18 @@ def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
             return False, f"broken at entry {idx}"
         prev_hash = stored
 
+    notes = []
     if unknown_schema:
         noun = "entry" if unknown_schema == 1 else "entries"
-        return True, f"OK ({unknown_schema} unknown-schema {noun} present)"
+        notes.append(f"{unknown_schema} unknown-schema {noun} present")
+    if unchained:
+        noun = "entry" if unchained == 1 else "entries"
+        notes.append(f"{unchained} {noun} not chain-verified (legacy, no chain_hash)")
+    if _skipped:
+        noun = "line" if len(_skipped) == 1 else "lines"
+        notes.append(f"{len(_skipped)} unparseable {noun} skipped")
+    if notes:
+        return True, "OK (" + "; ".join(notes) + ")"
     return True, "OK"
 
 
@@ -191,6 +223,29 @@ def _rotate_journal(p: Path, max_lines: int = _JOURNAL_MAX_LINES,
     itself is not tamper-evident across the rotation boundary (an attacker with
     write access to the file could rotate-and-forge), only within a generation.
 
+    C-250: rotation used to evict up to ``max_lines - keep`` entries (1002 by
+    default) with no trace whatsoever — ``render_events`` then printed an
+    authoritative-sounding "{keep} recorded change event(s)" starting silently
+    mid-history, with nothing on screen to say a prefix of the real history was
+    ever cut. A synthetic RETENTION-MARKER entry is now prepended as the new oldest
+    survivor, chained like any other (it participates in re-genesis normally), so
+    the disclosure travels WITH the file — a copy, a later ``load_events``, or
+    ``render_events`` all see it without re-deriving anything. Distinguished by the
+    ``retention_pruned`` key (an int, the count evicted THIS rotation); shaped with
+    ``ts``/``level``/``message`` like a normal events.jsonl entry so it renders as an
+    ordinary line with no report.py special-casing needed, and shaped WITHOUT
+    ``date``/``score``/``grade`` so ``history.load()``'s existing
+    ``{"date": obj["date"], ...}`` KeyError guard skips it silently and harmlessly
+    when this same function backs history.jsonl (see ``history.record``) — a
+    marker meant for a human reading the events journal must not corrupt the trend
+    line's own row shape.
+
+    A marker only discloses the rotation that PRODUCED it: on a later rotation, an
+    older marker can itself age out of the ``keep`` window like any other entry, at
+    which point the loss it recorded ages out with it. That is the same bounded,
+    local-file honesty this module cannot promise past a rotation boundary anywhere
+    else (see the re-genesis note above) — not a new gap.
+
     Must be called from inside the caller's ``journal_lock`` critical section
     (immediately after an append) — it does not take the lock itself.
     Never raises: any OSError during read/rewrite is swallowed, leaving the
@@ -203,10 +258,23 @@ def _rotate_journal(p: Path, max_lines: int = _JOURNAL_MAX_LINES,
         if len(entries) <= max_lines:
             return  # no-op — file untouched, byte-identical
 
+        pruned = len(entries) - keep
         survivors = entries[-keep:]
+        from datetime import datetime  # noqa: PLC0415 (local — see record_events)
+        when = datetime.now().isoformat(timespec="seconds")
+        noun = "entry" if pruned == 1 else "entries"
+        marker = {
+            "ts": when,
+            "level": "INFO",
+            "message": (f"{pruned} older {noun} were pruned by retention at {when} "
+                        f"(retention cap: newest {keep} of {max_lines} kept)."),
+            "_schema": SCHEMA_VERSION,
+            "retention_pruned": pruned,
+        }
+
         prev_hash = ""
         rechained: list[str] = []
-        for entry in survivors:
+        for entry in [marker, *survivors]:
             base = {k: v for k, v in entry.items() if k != "chain_hash"}
             ch = _chain_hash(prev_hash, base)
             rechained.append(json.dumps({**base, "chain_hash": ch}))
@@ -1587,7 +1655,21 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
         toks = re.split(r"[.\-+]", s)
         return tuple((0, int(t)) if t.isdigit() else (1, t) for t in toks)
 
-    ps, cs = _dim(prev, "skills"), _dim(curr, "skills")
+    # B-304: `_both_dims` — not `_dim` on each side independently — because comparing a
+    # genuinely populated `cs` against a `ps` that only LOOKS empty (a corrupted/hand-
+    # edited `skills` field coerced to {} by `_dim`) fabricated a CRITICAL "NEW skill
+    # installed ... this is when malware lands" for every already-installed, unchanged
+    # skill. Measured first-hand: a state.json holding `"skills": ["not", "a", "dict"]`
+    # (well-formed JSON, so `read_baseline` reports it BASELINE_OK, not BASELINE_CORRUPT —
+    # the top-level payload IS a usable dict, only this one field is not) reported every
+    # real skill on disk as newly installed. `mcp`/`mcp_detail`/`channels`/`host` already
+    # use this same guard for exactly this reason (their own docstring: "comparing a real
+    # side against a coerced {} would report every live entry as newly appeared"); this
+    # extends it to `skills` so a corrupted dimension costs one silent, self-healing run
+    # (the next save_state() overwrites it with a real dict) rather than a false malware
+    # alarm on every installed skill.
+    _skills_pair = _both_dims(prev, curr, "skills")
+    ps, cs = _skills_pair if _skills_pair is not None else ({}, {})
     # B-268: the skills truncation frontier on each side (see snapshot()). `ctx.installed_
     # skills` is capped at _MAX_SKILLS and its fill order is filename order — attacker-
     # controlled — so a flood of early-sorting skill dirs evicts real ones from the view.
@@ -1697,7 +1779,13 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
             "cap is not a security decision. Reduce the number of installed skills to "
             "restore full coverage."))
 
-    pb, cb = _dim(prev, "bootstrap"), _dim(curr, "bootstrap")
+    # B-304: same `_both_dims` reasoning as `skills` immediately above — a corrupted
+    # `bootstrap` field on one side must not make every file on the OTHER, real side read
+    # as "New bootstrap file appeared". `_dim` on each side independently used to do
+    # exactly that (measured: `"bootstrap": "a string"` on prev reported every current
+    # bootstrap file as newly appeared).
+    _bootstrap_pair = _both_dims(prev, curr, "bootstrap")
+    pb, cb = _bootstrap_pair if _bootstrap_pair is not None else ({}, {})
     for name in sorted(pb.keys() & cb.keys()):
         if pb[name] != cb[name]:
             alerts.append(("HIGH", f"{name} changed since last check — possible prompt / memory "
@@ -1806,7 +1894,13 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                     "nothing got worse. Review the check-level alerts in this run.",
                 ))
 
-    pc, cc = _dim(prev, "checks"), _dim(curr, "checks")
+    # B-304: same `_both_dims` reasoning again — a corrupted `checks` field on prev must
+    # not make every currently-FAILing check read as "Now FAILING" (a claim of a fresh
+    # transition this run cannot actually see). `_dim` on each side independently used to
+    # do exactly that (measured: `"checks": None` on prev reported every real FAIL,
+    # including CRITICAL ones, as "Now FAILING" against a config that never changed).
+    _checks_pair = _both_dims(prev, curr, "checks")
+    pc, cc = _checks_pair if _checks_pair is not None else ({}, {})
     for cid, status in cc.items():
         if status == FAIL and pc.get(cid) != FAIL:
             # B-269: a check that read UNKNOWN only because the PREVIOUS run could not

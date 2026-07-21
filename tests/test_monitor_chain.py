@@ -113,7 +113,14 @@ def test_chain_broken(tmp_path: Path) -> None:
 
 
 def test_chain_legacy(tmp_path: Path) -> None:
-    """Old entries without chain_hash are accepted gracefully (no error)."""
+    """Old entries without chain_hash are accepted gracefully (no error).
+
+    C-250: this used to be a bare "OK" — indistinguishable from a fully
+    chain-verified file. It now discloses the count of entries that were present
+    but NOT actually chain-verified, symmetric with how an unknown-schema entry
+    was already disclosed (C-167). Still (True, ...) — legacy entries are still
+    accepted gracefully; only the message stopped hiding that fact.
+    """
     journal = tmp_path / "events.jsonl"
     legacy = [
         {"ts": "2025-01-01T00:00:00", "level": "HIGH", "message": "old alert 1"},
@@ -123,7 +130,7 @@ def test_chain_legacy(tmp_path: Path) -> None:
 
     ok, msg = verify_chain(journal)
     assert ok is True
-    assert msg == "OK"
+    assert msg == "OK (2 entries not chain-verified (legacy, no chain_hash))"
 
 
 def test_chain_empty(tmp_path: Path) -> None:
@@ -146,7 +153,12 @@ def test_chain_absent_file(tmp_path: Path) -> None:
 
 
 def test_chain_legacy_then_new(tmp_path: Path) -> None:
-    """Legacy entries followed by new chained entries are verified correctly."""
+    """Legacy entries followed by new chained entries are verified correctly.
+
+    C-250: the one legacy entry is disclosed by count, same as test_chain_legacy —
+    a MIXED journal names how many of its entries are unverified, not "the whole
+    file is legacy" (SECURITY_MODEL.md's per-entry reconciliation).
+    """
     journal = tmp_path / "events.jsonl"
     # Write two legacy entries directly
     legacy = [
@@ -159,4 +171,4 @@ def test_chain_legacy_then_new(tmp_path: Path) -> None:
 
     ok, msg = verify_chain(journal)
     assert ok is True
-    assert msg == "OK"
+    assert msg == "OK (1 entry not chain-verified (legacy, no chain_hash))"

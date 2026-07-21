@@ -272,6 +272,10 @@ def test_verify_ok_on_empty_file(tmp_path):
 
 
 def test_verify_ok_on_legacy_entries_without_chain_hash(tmp_path):
+    """C-250: a bare "OK" here used to be indistinguishable from a fully
+    chain-verified file — the count of un-chain-verified legacy entries is now
+    disclosed, symmetric with how an unknown-_schema entry was already disclosed
+    (C-167). Still (True, ...): legacy entries are still accepted gracefully."""
     path = tmp_path / "history.jsonl"
     path.write_text(
         '{"date":"2026-06-15","score":72,"grade":"C"}\n'
@@ -280,7 +284,7 @@ def test_verify_ok_on_legacy_entries_without_chain_hash(tmp_path):
     )
     ok, msg = verify(str(path))
     assert ok is True
-    assert msg == "OK"
+    assert msg == "OK (2 entries not chain-verified (legacy, no chain_hash))"
 
 
 def test_verify_detects_tampered_entry(tmp_path):
@@ -495,7 +499,9 @@ def test_verify_ok_on_mixed_legacy_and_new_format_file(tmp_path):
     record(_score(81, "B"), path=str(path), when="2026-06-17", source="audit")
     ok, msg = verify(str(path))
     assert ok is True
-    assert msg == "OK"
+    # C-250: the one legacy entry is now disclosed by count rather than folded
+    # invisibly into a bare "OK" (see test_verify_ok_on_legacy_entries_without_chain_hash).
+    assert msg == "OK (1 entry not chain-verified (legacy, no chain_hash))"
 
     rows = load(str(path))
     assert len(rows) == 3
