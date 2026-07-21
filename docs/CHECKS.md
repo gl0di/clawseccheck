@@ -1903,6 +1903,18 @@ Advisory checks are recorded for coverage but are not scored.
 
 ## Advisory checks
 
+### B187 - Non-bundled plugin declares the agentToolResultMiddleware tool-result-interception contract
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Supply Chain / Plugin Capability Disclosure
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain, LLM05 Improper Output Handling
+- What it checks: Non-bundled plugin declares the agentToolResultMiddleware tool-result-interception contract
+- Remediation:
+  - none
+
 ### T1 - Behavioral trifecta (observed ingress -> sensitive -> egress verb sequence)
 
 - Severity: MEDIUM
@@ -1936,6 +1948,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: MEDIUM
 - OWASP: LLM06 Excessive Agency
 - What it checks: Runtime capability drift (proven high-blast verb never declared)
+- Remediation:
+  - none
+
+### B191 - OpenClaw's runtime audit_events trail — coverage, policy-blocked tools, and evasive tool names
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Incident Response / Runtime Audit Trail (behavioral)
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: OpenClaw's runtime audit_events trail — coverage, policy-blocked tools, and evasive tool names
 - Remediation:
   - none
 
