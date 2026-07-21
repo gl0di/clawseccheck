@@ -19,7 +19,7 @@ from clawseccheck.behavioral import (
     group_events_by_thread,
     render_behavioral_analysis,
 )
-from clawseccheck.catalog import PASS, WARN
+from clawseccheck.catalog import PASS, UNKNOWN, WARN
 from clawseccheck.collector import Context
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -70,6 +70,87 @@ def test_classify_routine_filesystem_verb_is_not_sensitive():
     web-search-then-list-files-then-slack-post workflow into a false trifecta."""
     assert _classify_verb_role("list_files") is None
     assert _classify_verb_role("read_files") is None
+
+
+def test_classify_sensitive_verb_not_shadowed_by_egress_post_substring():
+    """B-285/LOG-1 live-FN fix: 'postgres_query' contains the bare 'post' EGRESS hint
+    (attest.py's _VERB_CLASSES, meant for HTTP POST/publish-style verbs) as a substring
+    of 'postgres'. Checking egress before the sensitive hints misclassified this genuine
+    DB-read verb as egress, silently erasing the sensitive leg of a real trifecta.
+    Sensitive hints must be checked first (see _classify_verb_role's own docstring)."""
+    assert _classify_verb_role("postgres_query") == "sensitive"
+    assert _classify_verb_role("query_postgres_db") == "sensitive"
+    assert _classify_verb_role("supabase_select") == "sensitive"
+
+
+def test_classify_egress_verb_not_swallowed_by_sensitive_noun_substring():
+    """B-285 ROUND 2 (C-135 finding): the round-1 fix above (checking sensitive hints
+    before egress) closed 'postgres_query' but broke its mirror image — a REAL egress
+    verb whose name ALSO happens to contain a sensitive-hint substring must still
+    classify as egress, not sensitive. 'export_credentials' is genuinely named for the
+    export ACTION ("export" is a whole token and one of attest.py's own EGRESS hints);
+    "credential" is a coincidental noun sharing the same verb name, not the verb's
+    action. Contrast with 'query_vault' (no egress action token at all — correctly
+    stays 'sensitive', unaffected by this fix either way) and 'postgres_query' above
+    (no token is exactly 'post', so the round-1 fix is untouched by this one)."""
+    assert _classify_verb_role("export_credentials") == "egress"
+    assert _classify_verb_role("query_vault") == "sensitive"
+    assert _classify_verb_role("postgres_query") == "sensitive"
+
+
+def test_t1_warns_on_export_credentials_trifecta():
+    """B-285 ROUND 2 regression, full end-to-end shape from the C-135 report: a
+    synthetic thread ingress (web_fetch) -> sensitive (query_vault) -> egress
+    (export_credentials) is a textbook trifecta and must WARN. The naive round-1
+    reorder made this silently PASS because 'export_credentials' reclassified from
+    egress to sensitive, erasing the egress leg."""
+    groups = {
+        "th1": [
+            {"type": "tool.call", "name": "web_fetch", "seq": 1},
+            {"type": "tool.call", "name": "query_vault", "seq": 2},
+            {"type": "tool.call", "name": "export_credentials", "seq": 3},
+        ]
+    }
+    f = check_behavioral_trifecta(groups)
+    assert f.status == WARN
+    assert "th1" in f.evidence
+
+
+def test_classify_sensitive_verb_not_swallowed_by_egress_noun_token():
+    """B-285 ROUND 3 (C-135 finding): round 2's egress-action check matched ANY whole
+    token in the verb name, not just the ACTING one. 'get_webhook_secret' and
+    'get_share_link_credentials' both contain an egress hint word ('webhook', 'share')
+    as a genuine whole token — but that word is a NOUN the verb acts on/about, not the
+    verb's own action, which sits in the FIRST token ('get'). Anchoring the egress-action
+    check to the first token only (not 'any token') is what tells these apart from a verb
+    genuinely NAMED for the action, like 'export_credentials' or 'dispatch_vault_key'."""
+    assert _classify_verb_role("get_webhook_secret") == "sensitive"
+    assert _classify_verb_role("get_share_link_credentials") == "sensitive"
+    # Contrast: the action word occupies the FIRST token here, so it IS the verb's own
+    # action, not a noun describing its target — these correctly stay egress.
+    assert _classify_verb_role("dispatch_vault_key") == "egress"
+    assert _classify_verb_role("publish_db_snapshot") == "egress"
+    # Round 1 and round 2's own fixes, unaffected by the first-token narrowing.
+    assert _classify_verb_role("export_credentials") == "egress"
+    assert _classify_verb_role("postgres_query") == "sensitive"
+
+
+def test_t1_warns_on_get_webhook_secret_trifecta():
+    """B-285 ROUND 3 regression, full end-to-end shape from the C-135 report: a
+    synthetic thread ingress (web_fetch) -> sensitive (get_webhook_secret) -> egress
+    (send_email) is a textbook trifecta and must WARN. Round 2's any-token egress check
+    made this silently PASS because 'get_webhook_secret' reclassified from sensitive to
+    egress on the 'webhook' token, so the trifecta never saw a distinct sensitive leg."""
+    groups = {
+        "th1": [
+            {"type": "tool.call", "name": "web_fetch", "seq": 1},
+            {"type": "tool.call", "name": "get_webhook_secret", "seq": 2},
+            {"type": "tool.call", "name": "send_email", "seq": 3},
+        ]
+    }
+    f = check_behavioral_trifecta(groups)
+    assert f.status == WARN
+    assert "th1" in f.evidence
 
 
 # ---------------------------------------------------------------------------
@@ -370,10 +451,14 @@ def test_traj_outcome_anomaly_fixture_warns():
 
 def test_traj_no_sidecar_fixture_present_false():
     """No trajectory sidecar at all — UNKNOWN-shaped (present=False), not a false PASS
-    dressed up as a real assessment."""
+    dressed up as a real assessment. B191 (F-134) still runs even here — it reads a
+    SEPARATE store (audit_events), and on a bare Context (no collect()) that store was
+    never read either, so it degrades to its own honest UNKNOWN rather than vanishing."""
     r = analyze(_ctx(FIXTURES / "traj_no_sidecar"))
     assert r["present"] is False
-    assert r["findings"] == []
+    assert len(r["findings"]) == 1
+    assert r["findings"][0].id == "B191"
+    assert r["findings"][0].status == UNKNOWN
 
 
 def test_render_behavioral_analysis_no_sidecar_message():

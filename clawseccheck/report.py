@@ -1102,7 +1102,11 @@ def render_report(findings: list[Finding], score: ScoreResult,
         "This score reflects your configuration. It does not test live"
         " prompt-injection resistance or do a deep MCP supply-chain vet —"
         " run `--canary` / `--redteam` / `--dryrun` (live injection) and"
-        " `--vet-mcp` (deep MCP) for those."
+        " `--vet-mcp` (deep MCP) for those. It also doesn't mine what your agent has"
+        " already logged — run `--behavioral` (proven-by-log verb-sequence trifecta /"
+        " outcome anomaly / capability drift) or `--analyze-trajectory` (skill-indicator"
+        " correlation) to check whether a trifecta is already recorded in your"
+        " trajectory sidecar."
     )
     # Capability-vs-behavior honesty (F-038): a static audit bounds what the agent CAN do,
     # not what it DOES at runtime. OpenClaw core ships no runtime egress/taint gate, so a
@@ -1509,7 +1513,17 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
 
 
 def render_events(events, ascii_only: bool = False) -> str:
-    """Render the Agent Watch event journal (timeline of what changed when)."""
+    """Render the Agent Watch event journal (timeline of what changed when).
+
+    C-250: the header used to print "{len(events)} recorded change event(s)" with no
+    hint that ``monitor._rotate_journal`` may have already evicted up to 1002 older
+    entries — an authoritative-sounding total that silently started mid-history. When
+    the oldest entry is a retention marker (``retention_pruned`` key — always the
+    OLDEST surviving entry, since rotation prepends it fresh each time it triggers —
+    see ``_rotate_journal``), it is pulled out of the generic per-line loop and folded
+    into the header itself instead of rendered as one more anonymous [i] line a reader
+    can scroll past without registering what it means.
+    """
     # Same severity vocabulary as render_monitor — a journal entry written at LOW must not
     # lose its glyph on the way into the permanent record.
     mark = {"CRITICAL": "[X]", "HIGH": "[!]", "MEDIUM": "[~]", "LOW": "[-]", "INFO": "[i]"} \
@@ -1518,9 +1532,18 @@ def render_events(events, ascii_only: bool = False) -> str:
     if not events:
         out = "Agent Watch journal\n" + "=" * 30 + "\n\nNo recorded change events yet.\n"
         return _asciify(out) if ascii_only else out
-    lines = ["Agent Watch journal", "=" * 30,
-             f"{len(events)} recorded change event(s) (most recent last):", ""]
-    for e in events:
+
+    pruned_note = None
+    body = events
+    if isinstance(events[0], dict) and "retention_pruned" in events[0]:
+        pruned_note = events[0]
+        body = events[1:]
+
+    header = f"showing {len(body)} event(s) (most recent last)"
+    if pruned_note is not None:
+        header += f" — {_sanitize(str(pruned_note.get('message', '')))}"
+    lines = ["Agent Watch journal", "=" * 30, header + ":", ""]
+    for e in body:
         ts = str(e.get("ts", "?"))
         lvl = str(e.get("level", "INFO"))
         msg = _sanitize(str(e.get("message", "")))

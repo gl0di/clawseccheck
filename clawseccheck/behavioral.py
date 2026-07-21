@@ -23,11 +23,12 @@ A-F score — only through `--behavioral`, mirroring `--analyze-trajectory`'s ow
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from . import attest
 from .catalog import PASS, UNKNOWN, WARN
-from .checks import INPUT_TOOL_HINTS, _finding
+from .checks import INPUT_TOOL_HINTS, _finding, check_audit_trail_signals
 from .collector import dig
 from .trajectory import EXTERNAL_ORIGIN_KINDS, read_events, read_proven_tools
 
@@ -55,13 +56,62 @@ from .trajectory import EXTERNAL_ORIGIN_KINDS, read_events, read_proven_tools
 #    narrowing it there would weaken A1, a change out of this check's scope).
 _T_SENSITIVE_HINTS = ("db", "sql", "postgres", "supabase", "secret", "credential", "vault")
 
+# B-285 ROUND 2 (C-135 finding): naively checking `_T_SENSITIVE_HINTS` before egress
+# (the round-1 fix above) closed the `postgres_query` false negative but opened its
+# mirror image — a REAL egress/exfil verb whose name ALSO happens to contain a
+# sensitive-hint substring (`export_credentials`: "export" IS the action, "credential"
+# is a coincidental noun sharing the same name) got swallowed into "sensitive" and the
+# egress leg silently vanished from the trifecta. Reordering the same two bare `in`
+# substring checks can't discriminate the two shapes: both `postgres_query` and
+# `export_credentials` are, to a substring test, identically "a sensitive-hint substring
+# is present" — whichever check runs first always wins for BOTH verbs, so no ordering
+# of these two substring checks alone can get both right.
+#
+# The two verbs differ once you look at word BOUNDARIES instead of substrings:
+# "postgres" is a single token that merely happens to START WITH the 4 letters "post"
+# (attest.py's EGRESS hint) — a coincidental prefix, not the verb's actual action.
+# "export" in "export_credentials" is a WHOLE token that IS one of attest.py's own
+# EGRESS hints outright — the verb is genuinely named for the export action, not
+# incidentally shaped like one. So: before either substring check, look for an EGRESS
+# hint that exact-matches an ENTIRE underscore/namespace-delimited token (never a bare
+# substring) — this fires for "export_credentials" (token "export") but not
+# "postgres_query" (no token is exactly "post"), closing both the round-1 and the
+# round-2 regression without adding a third heuristic layer on top of the existing
+# substring checks; see `_classify_verb_role`'s own docstring for the full three-tier
+# order this produces.
+_EGRESS_ACTION_TOKENS = frozenset({
+    "send", "forward", "reply", "post", "publish", "webhook", "upload",
+    "share", "tweet", "broadcast", "dispatch", "export",
+})
+# ^ the single-word (no-underscore) entries of attest.py's own EGRESS hint tuple
+# (_VERB_CLASSES) — deliberately not re-listing the already-compound hints there
+# (http_post, email_send, notify_external, schedule_message, page_post, page_photo,
+# page_video, page_profile, send_message_from_page, messenger_send): each of those is
+# itself built from one of these atomic words (or is a rarer compound not implicated in
+# this collision), so token-matching this smaller set still catches the common compound
+# forms too — e.g. "email_send" tokenizes to ["email", "send"] and "send" is here.
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _verb_tokens(n: str) -> list[str]:
+    """Lowercased alnum tokens, split on underscore/dot/namespace separators — used for
+    the EXACT-token match above, so a hint that coincidentally appears as a SUBSTRING of
+    one token ("post" inside "postgres") can never satisfy a check that is only meant to
+    match a hint occupying a WHOLE token/action-word on its own."""
+    return _TOKEN_RE.findall(n)
+
 # The check ids this module owns. They are CATALOGUED like every other check, but they
 # never run in a default `audit()` — only under `--behavioral`. That distinction is not
 # otherwise derivable (`scored=False` is shared with 68 ordinary checks), so this tuple is
 # the single source of truth for it, and `tests/test_doc_facts.py` subtracts it from the
 # catalog to pin the "N security checks" figure the README advertises. Without it the badge
-# counts three checks a default run never executes.
-BEHAVIORAL_CHECK_IDS = ("T1", "T2", "T3")
+# counts three checks a default run never executes. B191 (F-134, DISK-1) joined this
+# tuple even though it isn't T-prefixed: its function lives in checks/_host.py (the §3.1
+# owning module for the topic), but it is invoked ONLY from this module's analyze() —
+# never registered in checks/__init__.py's CHECKS list — so it is exactly as absent from
+# a default audit() as T1-T3 are.
+BEHAVIORAL_CHECK_IDS = ("T1", "T2", "T3", "B191")
 
 # B-249 (accepted, documented limitation — NOT a bug to "fix" by reading arguments):
 # a GET-based exfil beacon that carries stolen data as a base64/high-entropy URL param on
@@ -86,23 +136,83 @@ BEHAVIORAL_CHECK_IDS = ("T1", "T2", "T3")
 # sink with a base64-encoded param to a known drop host on a later line. See
 # tests/test_behavioral.py's B-249 regression for a test-pinned confirmation that T1
 # stays silent on exactly this shape, and B164's own tests for the corroborated catch.
+#
+# B-285/LOG-1 (order fix, live FN): `attest.classify_verb()`'s EGRESS class carries a
+# bare "post" hint (meant for HTTP POST/publish-style verbs — see attest.py's
+# `_VERB_CLASSES`). Checking egress before the sensitive hints meant "post" matched
+# INSIDE "postgres" first, so a genuine DB-read verb like "postgres_query" classified as
+# egress instead of sensitive — the sensitive leg of a real trifecta silently vanished.
+# Fixed by checking the sensitive hints FIRST. This is safe against the C-170 shadow
+# above: no `_T_SENSITIVE_HINTS` term is a substring of any `INPUT_TOOL_HINTS` term (or
+# vice versa), so moving sensitive ahead of ingress cannot resurrect that bug — only the
+# egress-vs-ingress order (still egress-before-ingress, below) matters for it.
+#
+# B-285 ROUND 2 (C-135 finding, see `_EGRESS_ACTION_TOKENS` above for the full
+# reasoning): checking sensitive hints unconditionally FIRST fixed `postgres_query` but
+# broke `export_credentials` — a genuine egress verb ("export") whose name also
+# contains a sensitive noun ("credential") got swallowed into "sensitive" and the
+# egress leg vanished. Fixed by adding an egress-action check ahead of even the
+# sensitive-hint check.
+#
+# B-285 ROUND 3 (C-135 finding): round 2's egress-action check matched ANY whole token
+# in the verb name, not just the ACTING one — "get_webhook_secret", "get_share_link_
+# credentials", "dispatch_vault_key" and "publish_db_snapshot" all contain an egress
+# hint word as a genuine whole token ("webhook", "share", "dispatch", "publish"), so
+# round 2 classified all four as egress, silently erasing the sensitive leg for verbs
+# that are actually reading/naming a secret ("get_webhook_secret" GETS a secret; it does
+# not perform a webhook egress action). The reported collisions share one structural
+# trait the earlier two rounds didn't use: in this codebase's own `verb_noun[_noun...]`
+# naming convention (already the load-bearing assumption behind every other hint check
+# here), the ACTION lives in the FIRST token — "export" in "export_credentials", "send"
+# in "send_email", "get" in "get_webhook_secret". A hint word sitting in a LATER token is
+# a NOUN the action is performed on/about, never the action itself. So the egress-action
+# check is now anchored to the first token only, not "any token" — "export_credentials"
+# (first token "export") still classifies egress; "get_webhook_secret"/"get_share_link_
+# credentials" (first token "get", not an egress word) now fall through to the
+# sensitive-hint check below, where "secret"/"credential" correctly resolve them as
+# sensitive; "dispatch_vault_key"/"publish_db_snapshot" (first token IS the egress word)
+# still resolve as egress, which is the semantically correct reading — the verb's own
+# name says it dispatches/publishes something, not merely that it mentions a vault or a
+# database. This does not reopen round 1: "postgres_query"'s first token is "postgres",
+# not "post" (no token there is ever exactly "post"), so it was never caught by the
+# whole-token check in round 2 either — round 3 only narrows WHERE in the name the token
+# check looks, it does not widen or loosen the token-vs-substring distinction round 2
+# already established.
 def _classify_verb_role(name: str | None) -> str | None:
-    """Classify one tool verb as "ingress" / "sensitive" / "egress" / None.
+    """Classify one tool verb as "sensitive" / "egress" / "ingress" / None.
 
-    Order matters (see the C-170 note above): egress is checked FIRST via
-    `attest.classify_verb()` so an egress action verb is never shadowed by an
-    ingress product-name hint; only then ingress (`INPUT_TOOL_HINTS`, shared with
-    A1); only then the tightened local sensitive-data hint set.
+    Order matters, three times over:
+
+    1. (B-285 rounds 2-3) An egress action word occupying the FIRST token of the verb
+       name (`_EGRESS_ACTION_TOKENS`) is checked first, ahead of even the sensitive
+       hints — a verb genuinely NAMED for an egress action ("export_credentials") must
+       classify as egress even though a later token is a sensitive-hint substring
+       ("credential"). Restricted to the first token (not "any token", round 2's bug) so
+       a hint word appearing only as a NOUN further into the name — "get_webhook_secret"
+       — does not get misread as the verb's own action.
+    2. (B-285 round 1) The tightened local sensitive-data hint set is checked next —
+       `attest.classify_verb()`'s broad EGRESS hint "post" is also a bare substring of
+       "postgres", so checking egress first (via bare substring) misclassified a genuine
+       sensitive DB verb as egress and erased it from the trifecta's sensitive leg
+       entirely.
+    3. (C-170) Only once both of the above are ruled out is egress checked again, via
+       `attest.classify_verb()`'s broader substring match, and STILL before ingress
+       (`INPUT_TOOL_HINTS`, shared with A1) — so an egress action verb
+       ('gmail_send'/'send_email') is never shadowed by an ingress product-name hint
+       ('gmail'/'email').
     """
     if not name:
         return None
     n = name.lower()
+    tokens = _verb_tokens(n)
+    if tokens and tokens[0] in _EGRESS_ACTION_TOKENS:
+        return "egress"
+    if any(h in n for h in _T_SENSITIVE_HINTS):
+        return "sensitive"
     if attest.classify_verb(n) in ("EGRESS", "EXEC"):
         return "egress"
     if any(h in n for h in INPUT_TOOL_HINTS):
         return "ingress"
-    if any(h in n for h in _T_SENSITIVE_HINTS):
-        return "sensitive"
     return None
 
 
@@ -625,8 +735,73 @@ def check_capability_drift(ctx) -> object:
     )
 
 
+# ---------------------------------------------------------------------------
+# B191 (F-134, DISK-1) corroboration source — audit_events × trajectory session
+# divergence. `collector._collect_audit_events` already did the SQLite read (Layer 1);
+# this is the Layer-3 "source" §3.1 assigns to this module: it reuses the trajectory
+# `events` this module's own `analyze()` already read for T1/T2/T3 (no second file scan)
+# and joins the two sources on `session_id` — see `check_audit_trail_signals` in
+# checks/_host.py for the consumer and the full WARN/PASS/UNKNOWN contract.
+# ---------------------------------------------------------------------------
+
+def _audit_event_sessions(ctx) -> "frozenset[str]":
+    """Distinct non-null ``session_id`` values observed in ``ctx.audit_events`` (F-134).
+
+    ``session_id`` is the ONLY audit_events column used for cross-source correlation. It
+    is the same top-level identifier `trajectory.read_events()` already exposes, and that
+    module's own docstring calls it "not sensitive — a session identifier". `session_key`
+    is deliberately NOT used here even though `audit_events` carries it too: its peer-id
+    segment is real PII (see `trajectory.parse_session_origin`'s docstring), and this
+    module's own §8 contract never returns one. `run_id` and `tool_call_id` have no
+    equivalent field in `read_events()`'s output to join against — and `tool_call_id` is
+    additionally stored as a `sha256:`-prefixed HASH on the audit_events side
+    (`auditToolCallId`, server-runtime-subscriptions-OlWMLbPY.js:177-178), with no
+    matching hash computed on the trajectory side, so it cannot be joined here either.
+    """
+    out = set()
+    for row in getattr(ctx, "audit_events", None) or ():
+        sid = row.get("session_id")
+        if isinstance(sid, str) and sid.strip():
+            out.add(sid.strip())
+    return frozenset(out)
+
+
+def audit_trail_divergence(ctx, events: list[dict]) -> "frozenset[str]":
+    """B191 corroboration source: ``audit_events`` sessions with NO matching trajectory
+    record among *events* (already read by this module's own ``analyze()``).
+
+    Real value: this is non-empty exactly when the trajectory source is disabled
+    (``OPENCLAW_TRAJECTORY=0``) or has rotated a session out past its ``_MAX_FILES`` (60)
+    cap, while ``audit_events`` — a DIFFERENT, independently-bounded store (a documented
+    30-day / 100,000-row retention, not a 60-*file* cap) — still retains it.
+
+    An EMPTY result is deliberately not read as "the two sources fully agree": it only
+    means every session id ``audit_events`` has seen also has at least one trajectory
+    record among *events*. It says nothing about whether the CONTENT of those sessions
+    matches (this function never reads call arguments/results either — §8).
+    """
+    audit_sessions = _audit_event_sessions(ctx)
+    if not audit_sessions:
+        return frozenset()
+    traj_sessions = {
+        e.get("sessionId") for e in events
+        if isinstance(e.get("sessionId"), str) and e.get("sessionId").strip()
+    }
+    return frozenset(audit_sessions - traj_sessions)
+
+
 def analyze(ctx, *, explicit_path: str | None = None) -> dict:
-    """Run the v1 behavioral detectors (T1, T2) and return a result dict."""
+    """Run the v1 behavioral detectors (T1, T2, T3) plus the B191 audit-trail signal, and
+    return a result dict.
+
+    B191 (F-134, DISK-1) is DELIBERATELY NOT GATED on trajectory presence the way T1/T2/T3
+    are: `audit_events` is a separate, independently-bounded store, and detecting "audit_
+    events has sessions the trajectory source doesn't" is exactly this check's reason to
+    exist — gating it on `meta["present"]` would silence it in precisely the scenario it
+    exists to catch (trajectory disabled via OPENCLAW_TRAJECTORY=0, or simply never having
+    run). So it always runs, using whatever `events` were actually read (empty when no
+    sidecar exists — which correctly makes every audit_events session "divergent").
+    """
     home = getattr(ctx, "home", None)
     events, meta = read_events(home, explicit_path=explicit_path)
     result = {
@@ -640,7 +815,13 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         "thread_count": 0,
         "findings": [],
     }
+    b191 = check_audit_trail_signals(
+        ctx,
+        divergent_sessions=audit_trail_divergence(ctx, events),
+        trajectory_compared=True,
+    )
     if not meta["present"]:
+        result["findings"] = [b191]
         return result
 
     groups = group_events_by_thread(events)
@@ -649,6 +830,7 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         check_behavioral_trifecta(groups),
         check_outcome_anomaly(groups),
         check_capability_drift(ctx),
+        b191,
     ]
     return result
 
@@ -662,32 +844,37 @@ def render_behavioral_analysis(ctx, *, explicit_path: str | None = None, ascii_o
     lines = ["Behavioral trajectory audit (post-hoc, read-only, metadata-only)"]
 
     if not r["present"]:
+        # B191 (F-134) still runs below even here — it reads a SEPARATE store
+        # (audit_events) and this is exactly the scenario it exists to catch (trajectory
+        # disabled/absent while that store may still hold sessions). Only T1/T2/T3 need
+        # the trajectory sidecar itself, so only their "nothing to analyze" note is
+        # unconditional here.
         lines.append(f"  {q} No trajectory sidecars found "
-                     "(agents/*/sessions/*.trajectory.jsonl). Nothing to analyze — run on a "
-                     "host where an OpenClaw agent has produced session trajectories.")
-        return "\n".join(lines)
-
-    lines.append(
-        f"  scanned {r['files_scanned']} trajectory file(s), {r['event_count']} event(s) "
-        f"across {r['thread_count']} thread(s)/turn(s)."
-    )
-    if r["unknown_version"]:
-        lines.append(f"  {q} Some records used an unrecognised trajectory schema version — "
-                     "results are INCOMPLETE (treat as UNKNOWN, not authoritative).")
-    if r["truncated"]:
-        lines.append(f"  {q} A trajectory file exceeded the per-file scan cap — the "
-                     "unscanned remainder was never analyzed. Results are INCOMPLETE "
-                     "(treat as UNKNOWN, not authoritative).")
-    if r["files_capped"]:
-        # B-245: the per-BYTE cap above (C-180) was already disclosed; the per-FILE
-        # cap silently dropped the oldest sessions with no note at all. Mirror the
-        # same "INCOMPLETE, not authoritative" caveat so a clean T1/T2/T3 verdict
-        # never reads as "your whole history is clean" when it wasn't all examined.
+                     "(agents/*/sessions/*.trajectory.jsonl). T1/T2/T3 have nothing to "
+                     "analyze — run on a host where an OpenClaw agent has produced "
+                     "session trajectories.")
+    else:
         lines.append(
-            f"  {q} Scanned the {r['files_scanned']} most recent of {r['files_total']} "
-            "trajectory file(s) — the oldest session(s) were not analyzed. Results are "
-            "INCOMPLETE (treat as UNKNOWN, not authoritative)."
+            f"  scanned {r['files_scanned']} trajectory file(s), {r['event_count']} event(s) "
+            f"across {r['thread_count']} thread(s)/turn(s)."
         )
+        if r["unknown_version"]:
+            lines.append(f"  {q} Some records used an unrecognised trajectory schema version — "
+                         "results are INCOMPLETE (treat as UNKNOWN, not authoritative).")
+        if r["truncated"]:
+            lines.append(f"  {q} A trajectory file exceeded the per-file scan cap — the "
+                         "unscanned remainder was never analyzed. Results are INCOMPLETE "
+                         "(treat as UNKNOWN, not authoritative).")
+        if r["files_capped"]:
+            # B-245: the per-BYTE cap above (C-180) was already disclosed; the per-FILE
+            # cap silently dropped the oldest sessions with no note at all. Mirror the
+            # same "INCOMPLETE, not authoritative" caveat so a clean T1/T2/T3 verdict
+            # never reads as "your whole history is clean" when it wasn't all examined.
+            lines.append(
+                f"  {q} Scanned the {r['files_scanned']} most recent of {r['files_total']} "
+                "trajectory file(s) — the oldest session(s) were not analyzed. Results are "
+                "INCOMPLETE (treat as UNKNOWN, not authoritative)."
+            )
 
     any_warn = False
     for f in r["findings"]:

@@ -60,7 +60,44 @@ from .scanbudget import audit_budget_exceeded
 from .textnorm import normalize_for_scan
 
 _MAX_BYTES_PER_FILE = 2 * 1024 * 1024  # ~2 MiB per-file read cap (DoS guard)
-_MAX_LINE_LEN = 8000  # a line longer than this is skipped, never regex-matched
+_MAX_LINE_LEN = 8000  # a line longer than this gets WINDOWED (see _OVERSIZED_WINDOW_CHARS
+# below), never fully regex-matched. DO NOT RAISE THIS: it is the DoS/ReDoS bound the
+# B-192 OOM lesson and C-214 exist to enforce (a real 225,191-char trajectory line has
+# been observed on the real fleet) — the fix here is to stop SKIPPING an oversized line
+# outright, not to widen how much of it gets regex-matched.
+
+# B-285/LOG-1: measured on the real fleet (73 trajectory files, 3,896 lines, 33.8 MB),
+# 769 lines (86.8% of the corpus BY VOLUME) exceeded _MAX_LINE_LEN and were skipped with
+# ZERO regex matching — the largest tool outputs (a fetched page, an MCP dump) are
+# exactly where an indirect-injection payload lives, and they were exactly what got
+# dropped. Instead of skipping, scan a BOUNDED window at each end of the line: the first
+# and last _OVERSIZED_WINDOW_CHARS characters, via two independent calls to the SAME
+# `_scan_line_content` every ordinary line already goes through — never the full
+# battery over the whole line. Total chars actually regex-scanned per oversized line is
+# therefore capped at 2 * _OVERSIZED_WINDOW_CHARS <= _MAX_LINE_LEN, i.e. never MORE than
+# the per-line regex-cost budget an ordinary max-length line already costs today — this
+# is why windowing does not reopen the DoS bound the cap exists for. A payload is only
+# guaranteed to be caught when it is FULLY CONTAINED within one of the two windows
+# (line[:W] or line[-W:]); this leaves TWO gaps, not one — (a) a payload placed entirely
+# outside both windows (i.e. in the unscanned span between them), and (b) a payload that
+# STRADDLES a window's edge (starts inside a window but extends past it, so the window
+# slice cuts the match string in half and the regex never sees the full pattern in
+# either call) — the second gap can bite even a few characters into an otherwise-covered
+# line, not just "the middle" of a huge one. Both are an honest, documented limitation,
+# not a defect (see scan_log_file's truncation note, which now describes both gaps
+# rather than naming only the first) — and it is DELIBERATELY not the fix for RT-1/F-133
+# (a field-scoped `context.compiled` reader): windowing bounds cost, it does not make
+# full-battery scanning of a 60KB+ line safe.
+#
+# Window size measured, not guessed: at window=4000 (half of _MAX_LINE_LEN), the real
+# fleet's `check_log_threat_hunt` (B164) wall-clock over all 73 trajectory sinks rose
+# from ~7.6s (before this fix) to ~13-14s — uncomfortably close to `scanbudget`'s
+# per-check hard budget (`DEFAULT_CHECK_BUDGET_S`, 15s: a check that exceeds it gets
+# SIGALRM-interrupted mid-scan and degrades to UNKNOWN, losing the very coverage this
+# fix adds). 3000 gives a comfortable margin (~10.6s measured, ~30%+ headroom) while
+# losing only 1 of 46 real-fleet corroborated sinks versus window=4000 — a good trade,
+# not a guess (see the task's real-fleet re-measurement for the full window-size sweep).
+_OVERSIZED_WINDOW_CHARS = 3000  # first 3000 + last 3000 chars
 _MAX_SAMPLES_PER_CLASS = 5
 
 # Trajectory schema anchors (mirrors trajectory.py's own grounded constants — recon §9.1).
@@ -86,6 +123,15 @@ class LogScanResult:
     bytes_scanned: int = 0
     timed_out: bool = False
     skill_ioc_hits: dict = field(default_factory=dict)  # normalized-tok -> count (C-221)
+    # B-285/LOG-1: quantified oversized-line disclosure (see _OVERSIZED_WINDOW_CHARS
+    # above). `truncated` alone used to be the only signal, and it fired for two very
+    # different reasons (the per-file byte cap, and a per-line skip) with no way to tell
+    # which, or how much was actually affected — `byte_cap_truncated` disambiguates the
+    # former; these three fields quantify the latter.
+    byte_cap_truncated: bool = False  # this file's per-file byte cap (not a line) fired
+    oversized_lines: int = 0  # count of lines that exceeded _MAX_LINE_LEN
+    oversized_line_chars: int = 0  # total char length of those oversized lines
+    unscanned_middle_chars: int = 0  # chars between the two windows, never regex-scanned
 
 
 # C-135 (2026-07-15, real-fleet sanity pass against ~/.openclaw): a trajectory JSONL
@@ -193,6 +239,35 @@ def _decodes_to_printable_blob(token: str) -> bool:
     return False
 
 
+# B-285/LOG-1 perf finding: `_SECRET_PATH_RE` (checks/_shared.py) is
+# `[\w./~+-]*(?:secret|token|credential|password|api[_-]?key)[\w./~+-]*` — its two
+# UNBOUNDED `[\w./~+-]*` quantifiers straddling a fixed alternation make it O(n^2) on any
+# text with no matching keyword (measured: ~0.45s on 4000 word-characters, ~1.9s on
+# 8000). That cost was already latent at the ordinary `_MAX_LINE_LEN` cap, but this
+# module never had a reason to exercise it on OVERSIZED lines before — they were
+# skipped outright. Once oversized lines are windowed instead (see
+# `_OVERSIZED_WINDOW_CHARS`), this module calls `_scan_line_content` on hundreds of
+# large windows per real trajectory corpus, and paying an O(n^2) regex on each one
+# measurably pushed a real-fleet scan (73 files) from ~7.6s to ~16s — over the
+# per-check hard budget (`scanbudget.DEFAULT_CHECK_BUDGET_S`, 15s). Fixing the shared
+# regex itself is out of this task's scope (checks/_shared.py, consumed by other
+# checks too — a change there needs its own C-135 pass). Instead: `_SECRET_PATH_RE` can
+# ONLY ever match when one of its five keyword alternatives is literally present, so a
+# cheap substring pre-check that finds NONE of them proves no match is possible and
+# skips the expensive regex entirely — a pure fast-path, never a behavior change.
+_SECRET_PATH_KEYWORDS = ("secret", "token", "credential", "password", "apikey", "api_key", "api-key")
+
+
+def _maybe_secret_path_match(line: str):
+    """`_SECRET_PATH_RE.search(line)`, but skip the (O(n^2)-worst-case) regex call
+    entirely when a cheap substring pre-check proves it cannot match — see the note
+    above `_SECRET_PATH_KEYWORDS`."""
+    low = line.lower()
+    if not any(kw in low for kw in _SECRET_PATH_KEYWORDS):
+        return None
+    return _SECRET_PATH_RE.search(line)
+
+
 def _scan_line_content(
     result: LogScanResult, line: str, *, is_trajectory: bool = False, cred_seen_before: bool = False
 ) -> bool:
@@ -284,7 +359,7 @@ def _scan_line_content(
     # OTHER consumer of these same regexes in this codebase already requires a same-line
     # AND pairing (never a bare hit) precisely to avoid that noise; this class keeps that
     # same, already-proven-low-FP discipline instead of a strictly-worse bare-hit reading.
-    cred_m = _CRED_RE.search(line) or _SECRET_PATH_RE.search(line)
+    cred_m = _CRED_RE.search(line) or _maybe_secret_path_match(line)
     if cred_m and exfil_m:
         lo, hi = min(cred_m.start(), exfil_m.start()), max(cred_m.end(), exfil_m.end())
         _add_sample(result, "env_compromise_ioc", _windowed(line, lo, hi))
@@ -411,6 +486,7 @@ def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None) -> Lo
                 line_bytes = len(raw_line.encode("utf-8", errors="replace"))
                 if result.bytes_scanned + line_bytes > _MAX_BYTES_PER_FILE:
                     result.truncated = True
+                    result.byte_cap_truncated = True
                     break
                 result.bytes_scanned += line_bytes
 
@@ -421,6 +497,8 @@ def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None) -> Lo
                 line = raw_line.rstrip("\n")
                 if len(line) > _MAX_LINE_LEN:
                     result.truncated = True
+                    result.oversized_lines += 1
+                    result.oversized_line_chars += len(line)
                     # C-135 (2026-07-15, real-fleet sanity pass): a legitimate tool.result
                     # record (e.g. a large file read or web-fetch output) routinely exceeds
                     # _MAX_LINE_LEN and lands here — completely normal, not an attack. If
@@ -430,10 +508,32 @@ def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None) -> Lo
                     # record in the file (confirmed against a real trajectory: every large
                     # tool.result produced a spurious "seq gap"). Reset both so continuity
                     # checking cleanly resumes from the next record instead of blaming a
-                    # skip on tampering.
+                    # skip on tampering. This module deliberately still does NOT parse an
+                    # oversized line as a trajectory record (classes 3/5, _scan_trajectory_
+                    # record): that's a metadata-only JSON read, not the content-scan
+                    # coverage gap this fix targets, and is explicitly RT-1/F-133's
+                    # scope (a field-scoped `context.compiled` reader), not this one.
                     if is_trajectory:
                         last_seq, last_ts = None, None
-                    continue  # pathological line — never regex-matched
+
+                    # B-285/LOG-1: windowed content scan (classes 1/2/4/6) instead of a
+                    # bare skip — see _OVERSIZED_WINDOW_CHARS above for why this is safe.
+                    # Two independent calls (head, then tail) through the SAME per-line
+                    # scanner every ordinary line uses; never the full line in one call.
+                    head = line[:_OVERSIZED_WINDOW_CHARS]
+                    tail = line[-_OVERSIZED_WINDOW_CHARS:]
+                    result.unscanned_middle_chars += (
+                        len(line) - len(head) - len(tail)
+                    )
+                    cred_head = _scan_line_content(
+                        result, head, is_trajectory=is_trajectory, cred_seen_before=cred_seen
+                    )
+                    cred_tail = _scan_line_content(
+                        result, tail, is_trajectory=is_trajectory,
+                        cred_seen_before=cred_seen or cred_head,
+                    )
+                    cred_seen = cred_seen or cred_head or cred_tail
+                    continue  # the MIDDLE of the line is still never regex-matched
                 if not line.strip():
                     continue
 
@@ -452,3 +552,70 @@ def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None) -> Lo
         pass
 
     return result
+
+
+def _fmt_chars(n: int) -> str:
+    """Human-scale a char count for a disclosure string (chars ~= bytes for the ASCII-
+    heavy tool-output text this fires on; never claims exactness beyond that)."""
+    if n >= 1024 * 1024:
+        return f"~{n / (1024 * 1024):.1f} MB"
+    if n >= 1024:
+        return f"~{n / 1024:.1f} KB"
+    return f"{n} chars"
+
+
+def summarize_truncation(results) -> str:
+    """Build a quantified truncation-disclosure suffix (leading with a space) from a
+    list of per-sink :class:`LogScanResult` objects, or ``""`` when nothing was
+    truncated at all.
+
+    B-285/LOG-1: B164 (``check_log_threat_hunt``) and B180
+    (``check_memory_reconsumption_injection``) both used to append the exact same
+    generic "Some file(s) hit the scan's byte/line cap — results may be incomplete"
+    sentence regardless of how much was actually skipped. That's kept as the honest
+    fallback for the (now separately tracked) per-file BYTE cap, which this module
+    still cannot quantify further (a file stops being read entirely, so there's no
+    "how much of THIS line" figure to give) — but the oversized-LINE case is now fully
+    quantified: how many lines, how much volume, and how much of that volume the
+    first/last-window scan still could not reach (see ``_OVERSIZED_WINDOW_CHARS``).
+    This intentionally does NOT claim the coverage gap is closed: a payload is only
+    guaranteed to be caught when FULLY CONTAINED within one of the two windows — one
+    placed outside both windows entirely, OR one that merely STRADDLES a window's edge
+    (starts inside a window but extends past it, splitting the match across the window
+    boundary), is still missed either way. Earlier wording here said only "in the
+    middle" of the line, which described the first gap but not the second — a boundary-
+    straddling payload only a few characters into an otherwise-scanned window is missed
+    for the same reason, not because it sits anywhere near the line's midpoint (C-135
+    adversarial finding). This disclosure now names both gaps rather than reading as
+    blanket "results may be incomplete" noise a reader can't act on.
+
+    Lives here (not duplicated in each check module) so the two consumers can never
+    drift to different wording for the same underlying counters.
+    """
+    oversized_lines = sum(r.oversized_lines for r in results)
+    oversized_chars = sum(r.oversized_line_chars for r in results)
+    unscanned_chars = sum(r.unscanned_middle_chars for r in results)
+    any_byte_capped = any(r.byte_cap_truncated for r in results)
+    any_timed_out = any(r.timed_out for r in results)
+
+    parts = []
+    if oversized_lines:
+        parts.append(
+            f"{oversized_lines} line(s) totalling {_fmt_chars(oversized_chars)} exceeded "
+            f"the {_MAX_LINE_LEN}-char scan cap; each was scanned in bounded first/last "
+            f"{_OVERSIZED_WINDOW_CHARS}-char windows only, leaving "
+            f"{_fmt_chars(unscanned_chars)} outside those windows entirely unscanned "
+            "(a payload placed outside the first/last windows, or one straddling a "
+            "window's edge, would not be detected either way)."
+        )
+    if any_byte_capped:
+        parts.append(
+            "Some file(s) also hit the scan's per-file byte cap — results may be "
+            "incomplete."
+            if oversized_lines
+            else "Some file(s) hit the scan's per-file byte cap — results may be "
+            "incomplete."
+        )
+    if any_timed_out:
+        parts.append("Some file(s) hit the per-file scan timeout — results may be incomplete.")
+    return (" " + " ".join(parts)) if parts else ""
