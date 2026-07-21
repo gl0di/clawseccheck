@@ -1794,7 +1794,7 @@ def check_memory_reconsumption_injection(ctx: Context) -> Finding:
     # `checks/__init__.py` before it finishes defining this very function. Same reason
     # `check_log_threat_hunt` (B164, checks/_egress.py) imports it lazily too.
     from ..logdiscovery import discover_log_sinks  # noqa: PLC0415
-    from ..logscan import scan_log_file  # noqa: PLC0415
+    from ..logscan import scan_log_file, summarize_truncation  # noqa: PLC0415
     from ..scanbudget import audit_deadline  # noqa: PLC0415
 
     memory_sinks = [s for s in discover_log_sinks(ctx) if s.kind == "memory"]
@@ -1810,16 +1810,14 @@ def check_memory_reconsumption_injection(ctx: Context) -> Finding:
 
     corroborated: dict[str, set] = {}
     all_samples: list[str] = []
+    all_results: list = []
     any_scanned = False
-    any_truncated = False
-    any_timed_out = False
     isolated_hits = 0
 
     for sink in memory_sinks:
         deadline = audit_deadline(_B180_PER_FILE_BUDGET_S)
         result = scan_log_file(sink, deadline)
-        any_truncated = any_truncated or result.truncated
-        any_timed_out = any_timed_out or result.timed_out
+        all_results.append(result)
         if result.bytes_scanned == 0:
             continue
         any_scanned = True
@@ -1848,11 +1846,9 @@ def check_memory_reconsumption_injection(ctx: Context) -> Finding:
             "Ensure the agent's memory files are readable by the auditing user.",
         )
 
-    note = ""
-    if any_truncated:
-        note += " Some file(s) hit the scan's byte/line cap — results may be incomplete."
-    if any_timed_out:
-        note += " Some file(s) hit the per-file scan timeout — results may be incomplete."
+    # B-285/LOG-1: shared, quantified truncation disclosure — see
+    # logscan.summarize_truncation's docstring (same helper B164 now uses).
+    note = summarize_truncation(all_results)
 
     if corroborated:
         n_sinks = len(corroborated)

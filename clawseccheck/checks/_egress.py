@@ -1850,7 +1850,7 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     # logdiscovery.py has no such dependency, but is imported the same way for symmetry.
     from ..logdiscovery import discover_log_sinks  # noqa: PLC0415
     from ..logsafe import redact  # noqa: PLC0415
-    from ..logscan import scan_log_file  # noqa: PLC0415
+    from ..logscan import scan_log_file, summarize_truncation  # noqa: PLC0415
     from ..scanbudget import audit_deadline  # noqa: PLC0415
 
     sinks = discover_log_sinks(ctx)
@@ -1874,16 +1874,14 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
 
     corroborated: dict[str, set] = {}
     all_samples: list[str] = []
+    all_results: list = []
     any_scanned = False
-    any_truncated = False
-    any_timed_out = False
     isolated_hits = 0
 
     for sink in sinks:
         deadline = audit_deadline(_LOG_HUNT_PER_FILE_BUDGET_S)
         result = scan_log_file(sink, deadline, skill_iocs)
-        any_truncated = any_truncated or result.truncated
-        any_timed_out = any_timed_out or result.timed_out
+        all_results.append(result)
         if result.bytes_scanned == 0:
             continue
         any_scanned = True
@@ -1937,11 +1935,10 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
             "Ensure the agent's log/transcript files are readable by the auditing user.",
         )
 
-    note = ""
-    if any_truncated:
-        note += " Some file(s) hit the scan's byte/line cap — results may be incomplete."
-    if any_timed_out:
-        note += " Some file(s) hit the per-file scan timeout — results may be incomplete."
+    # B-285/LOG-1: a single, quantified truncation disclosure shared with B180 — see
+    # logscan.summarize_truncation's docstring for why this replaced the old generic
+    # "results may be incomplete" wording.
+    note = summarize_truncation(all_results)
 
     if corroborated:
         n_sinks = len(corroborated)

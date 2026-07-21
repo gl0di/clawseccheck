@@ -233,6 +233,21 @@ class TestScopeNote:
         out = render_report(findings, score)
         assert "--vet-mcp" in out
 
+    def test_scope_note_mentions_behavioral(self):
+        """B-285/LOG-1: the scope note now also points at the two log-mining modes
+        (previously recommended nowhere) that surface a trifecta already recorded in
+        the user's own trajectory sidecar."""
+        findings = _mixed_findings()
+        score = compute(findings)
+        out = render_report(findings, score)
+        assert "--behavioral" in out
+
+    def test_scope_note_mentions_analyze_trajectory(self):
+        findings = _mixed_findings()
+        score = compute(findings)
+        out = render_report(findings, score)
+        assert "--analyze-trajectory" in out
+
     def test_scope_note_appears_on_clean_report(self):
         """The scope note must appear even when there are no issues."""
         score = _score(score=100, grade="A", capped=False, raw_score=100)

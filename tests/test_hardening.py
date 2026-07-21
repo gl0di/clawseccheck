@@ -73,7 +73,10 @@ def test_report_sanitizes_untrusted_finding_text():
 # run_all()/audit()/the A-F score — they assess a runtime tool-call sequence, not
 # config-driven "declared" state. Still cataloged (CheckMeta + docs/CHECKS.md) for
 # consistent finding metadata/reporting, same as any other check ID.
-_MODE_SCOPED_EXEMPT = {"T1", "T2", "T3"}
+# B191 (F-134, DISK-1) joins them for the identical reason: its function lives in
+# checks/_host.py but is invoked ONLY from behavioral.analyze(), never registered in
+# checks/__init__.py's CHECKS list — see BEHAVIORAL_CHECK_IDS in behavioral.py.
+_MODE_SCOPED_EXEMPT = {"T1", "T2", "T3", "B191"}
 
 
 # ---- C3 registered + no dangling catalog entries ----
