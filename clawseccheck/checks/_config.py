@@ -23,6 +23,7 @@ from ..collector import (
     SKILL_DIRS,
     Context,
     dig,
+    env_evidence_readable,
     persistent_env_evidence,
 )
 from ..safeio import walk_dir_safely
@@ -857,6 +858,34 @@ def _gateway_env_credential(ctx: Context) -> "tuple[str | None, str | None]":
         if value is not None and value.strip():
             return value, source or "an environment file"
     return None, None
+
+
+def _gateway_config_token(cfg: dict, auth_mode) -> "tuple[str | None, bool]":
+    """The config-supplied gateway credential OpenClaw derives ``auth.mode`` from.
+
+    B-312: `resolveGatewayAuth` derives `mode="token"` from `gateway.auth.token` /
+    `gateway.token` whenever `authConfig.mode` is falsy (auth-resolve-NyPBrh8F.js:34-42),
+    read config-FIRST (:23-24) ahead of any environment variable. This is the single
+    source of truth for that derivation — B2 (`check_gateway`) and B80
+    (`check_gateway_rate_limit`) both call it so they can never disagree about what
+    counts as an authenticated config-token gateway (B-310 round 2 / C-135).
+
+    Returns ``(token, strong)``: ``token`` is the stripped credential, or ``None`` when
+    absent OR when ``auth_mode`` is not ``None`` (an explicit mode means OpenClaw is not
+    deriving the mode from mere token presence — the caller already has ``auth_mode``
+    directly). ``strong`` is whether the credential meets the same >=24-char bar as the
+    env leg and as B2's own token-length clause (`hasSharedSecret` accepts ANY non-empty
+    value — no minimum length exists in the dist — so only length is a signal; the value
+    itself must never reach a message, evidence entry, fix string, or log, §8).
+    """
+    token = dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token")
+    token = (
+        token.strip()
+        if auth_mode is None and isinstance(token, str) and token.strip()
+        else None
+    )
+    strong = token is not None and len(token) >= 24
+    return token, strong
 
 
 def check_credential_blast_radius(ctx: Context) -> Finding:
@@ -1819,13 +1848,17 @@ def check_gateway(ctx: Context) -> Finding:
         # server-runtime-config-r5ejxORO.js:78 refuses the non-loopback bind outright.
         # An explicit mode=none is a decision, not an omission.
         #
-        # NOT softened either: a config-supplied `gateway.auth.token` with no `mode`,
-        # which the dist also treats as authenticated. That is a real adjacent
-        # false-positive FAIL, but it is a config-only path with no env component, so it
-        # is out of ENV-4's scope and left for separate triage rather than widened into
-        # here on the way past.
+        # B-312: a config-supplied `gateway.auth.token` with no `auth.mode` is the SAME
+        # shape as the env case above — resolveGatewayAuth derives mode="token" from the
+        # credential itself when authConfig.mode is falsy (auth-resolve-NyPBrh8F.js:34-42),
+        # and the credential is read config-FIRST (:23-24). So when a config token exists,
+        # it is what OpenClaw actually authenticates with, and the env variables below are
+        # only ever consulted when no config token exists (mirrors the dist's own
+        # precedence). Left OUT of ENV-4/B-290 deliberately (config-only, no env
+        # component); closed here with its own triage.
+        _cfg_token, _cfg_token_strong = _gateway_config_token(cfg, auth)
         _env_cred, _env_cred_src = (
-            _gateway_env_credential(ctx) if auth is None else (None, None)
+            _gateway_env_credential(ctx) if auth is None and _cfg_token is None else (None, None)
         )
         # C-135 (independent adversarial pass on B-290): presence alone is NOT enough to
         # clear this FAIL, and softening on truthiness made the scanner lie. The bind guard
@@ -1845,9 +1878,34 @@ def check_gateway(ctx: Context) -> Finding:
         # weaker than the vendor's audit on a CRITICAL check is not a defensible position.
         #
         # Only the LENGTH of the credential is read. The value never reaches evidence, a
-        # message, a fix string, or a log (§8).
+        # message, a fix string, or a log (§8). The same bar applies to the config-token
+        # leg (B-312) for the identical reason — a sub-24-char config token binds and
+        # listens exactly like a sub-24-char env token.
         _env_cred_strong = _env_cred is not None and len(_env_cred.strip()) >= 24
-        if _env_cred is not None and _env_cred_strong:
+        if _cfg_token is not None and _cfg_token_strong:
+            soft_ev.append(
+                f"gateway.bind={bind} is non-loopback and the config sets no "
+                f"gateway.auth.mode, but gateway.auth.token is set — OpenClaw derives "
+                "auth.mode from it, so the gateway is authenticated. Reported as "
+                "disclosure, not exposure"
+            )
+            fixes.append(
+                "No action required if the config-supplied gateway token with no "
+                "explicit gateway.auth.mode is intentional. Setting gateway.auth.mode "
+                "explicitly makes the posture readable from the config alone"
+            )
+        elif _cfg_token is not None:
+            ev.append(
+                f"gateway.bind={bind} is non-loopback and the only gateway credential is "
+                "a config-supplied gateway.auth.token shorter than 24 chars — OpenClaw "
+                "binds and listens on it, so the gateway is world-reachable behind a "
+                "guessable secret"
+            )
+            fixes.append(
+                "Replace the config-supplied gateway token with one of at least 24 "
+                "characters, or bind the gateway to loopback"
+            )
+        elif _env_cred is not None and _env_cred_strong:
             soft_ev.append(
                 f"gateway.bind={bind} is non-loopback and the config sets no "
                 f"gateway.auth.mode, but a gateway credential is supplied by the "
@@ -1982,15 +2040,97 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
     reachable beyond loopback with no rate limiting lets an attacker brute-force the
     credential.
 
-    PASS — auth is not token/password, OR the bind is loopback, OR gateway.auth.rateLimit
-           is configured.
-    WARN — token/password auth AND non-loopback bind AND no gateway.auth.rateLimit.
+    PASS    — auth is not token/password (explicit config, AND, when config sets no
+              explicit auth.mode, config-token- AND environment-derived), OR the bind
+              is loopback, OR gateway.auth.rateLimit is configured.
+    WARN    — token/password auth (explicit-config-, config-token-, or
+              environment-derived) AND non-loopback bind AND no gateway.auth.rateLimit.
+    UNKNOWN — config sets no explicit auth.mode, no config-supplied token authenticates
+              either, and no persistent artifact (systemd unit or global dotenv) was
+              readable to check for an environment-supplied credential, on a
+              non-loopback bind — cannot tell whether the gateway is genuinely
+              unauthenticated or env-authenticated, so this must not default to a
+              fabricated PASS.
+
+    B-310: this check used to read ONLY `gateway.auth.mode` from config, so a gateway
+    authenticated by an environment-supplied credential (OPENCLAW_GATEWAY_TOKEN/
+    _PASSWORD, resolved the same way B2/B-290 grounds — auth-resolve-NyPBrh8F.js:34-42,
+    credential read at credentials-DesN22Ui.js:30-42) silently PASSed as "does not rely
+    on a brute-forceable secret" without ever assessing rate limiting — the exact
+    config-only blindness B-290 fixed for B2.
+
+    B-312 gap (round 2, C-135): B-310's fix above stopped at the ENV leg and never
+    re-derived `mode` from a config-supplied `gateway.auth.token` / `gateway.token` the
+    way B2's own B-312 fix does — so a config-token-authenticated gateway (auth.mode
+    absent, token >=24 chars) still fell all the way through to the same "does not rely
+    on a brute-forceable secret" PASS as a genuinely unauthenticated one, even though B2
+    correctly WARNs that identical config as authenticated-but-disclosed. Closed by
+    sharing `_gateway_config_token` with B2 (config-first, mirroring the dist's own
+    precedence, auth-resolve-NyPBrh8F.js:23-24) so the two checks cannot independently
+    drift on what "authenticated by config" means — this docstring previously claimed
+    parity with B2 while that config-token leg was still missing; it is genuine now.
+
+    Same >=24-char strength bar as B2 (2a2f8af), for the identical reason:
+    `hasSharedSecret` (server-runtime-config-r5ejxORO.js:66,78) accepts ANY non-empty
+    credential, so a sub-bar config OR env value is not genuine auth — it is B2's
+    exposed/guessable-secret FAIL, not this check's "authenticated-but-unthrottled"
+    concern, and is treated the same as no credential at all here. Only the
+    credential's LENGTH is read; the value never reaches evidence, detail, fix, or a
+    log (§8).
     """
     unreadable = _config_unreadable("B80", ctx)
     if unreadable is not None:
         return unreadable
     cfg = ctx.config
+    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    # Loopback is checked before mode/credential resolution: a loopback bind is not
+    # exposed to remote brute-force regardless of auth mode, so it must never need an
+    # env-credential read to resolve — that would manufacture a spurious UNKNOWN on the
+    # common, already-safe case.
+    if bind_host in LOOPBACK:
+        return _finding(
+            "B80",
+            PASS,
+            "Gateway is bound to loopback, so the auth endpoint is not exposed to remote "
+            "brute-force.",
+            "Keep the gateway on loopback, or add gateway.auth.rateLimit before exposing it.",
+        )
     mode = dig(cfg, "gateway.auth.mode")
+    cred_src = None
+    if mode is None:
+        # B-312 parity: config wins over environment (config-first, identical to B2)
+        # — a config-supplied token is only ever superseded by looking at the
+        # environment when NO config token exists at all.
+        _cfg_token, _cfg_token_strong = _gateway_config_token(cfg, mode)
+        if _cfg_token is not None and _cfg_token_strong:
+            mode = "token"
+            cred_src = "a config-supplied gateway.auth.token"
+        elif _cfg_token is None:
+            _env_cred, _env_cred_src = _gateway_env_credential(ctx)
+            if _env_cred is not None and len(_env_cred.strip()) >= 24:
+                mode = "token"
+                cred_src = f"an environment-supplied credential ({_env_cred_src})"
+            elif _env_cred is None and not env_evidence_readable(ctx):
+                return _finding(
+                    "B80",
+                    UNKNOWN,
+                    "gateway.auth.mode is not set in config, the bind is non-loopback, and no "
+                    "systemd user unit or global dotenv file was readable to check for an "
+                    "environment-supplied gateway credential — cannot determine whether the "
+                    "auth endpoint is brute-forceable.",
+                    "Run the audit where it can read the OpenClaw systemd user unit and "
+                    "global dotenv files, or set gateway.auth.mode explicitly.",
+                )
+            # else: env evidence was readable and carried nothing usable (absent, or a
+            # sub-24-char value not treated as authenticating) -> mode stays None,
+            # falls through to the ordinary "not token/password" PASS below, exactly as
+            # before B-310 for a truly-unauthenticated gateway.
+        # else: a config token IS present but below the 24-char bar. B2 already FAILs
+        # this as an exposed/guessable-secret gateway (config-first — the environment is
+        # never consulted, matching B2/B-312 exactly); it is not this check's
+        # "authenticated-but-unthrottled" concern, so it is treated the same as no
+        # credential at all here (mirrors the weak-env-credential leg above). mode stays
+        # None, falls through to the ordinary PASS below.
     if mode not in ("token", "password"):
         return _finding(
             "B80",
@@ -2000,15 +2140,6 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
             "If you enable token/password gateway auth on an exposed bind, configure "
             "gateway.auth.rateLimit to throttle credential guessing.",
         )
-    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
-    if bind_host in LOOPBACK:
-        return _finding(
-            "B80",
-            PASS,
-            "Gateway is bound to loopback, so the auth endpoint is not exposed to remote "
-            "brute-force.",
-            "Keep the gateway on loopback, or add gateway.auth.rateLimit before exposing it.",
-        )
     if dig(cfg, "gateway.auth.rateLimit"):
         return _finding(
             "B80",
@@ -2016,6 +2147,17 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
             "Gateway auth has rate limiting configured (gateway.auth.rateLimit).",
             "Keep gateway.auth.rateLimit aligned with the exposure of the gateway.",
         )
+    evidence = (
+        [f"gateway.auth.mode={mode!r}"]
+        if cred_src is None
+        else [
+            f"gateway.auth.mode is not set in config, but {cred_src} authenticates the "
+            "gateway"
+        ]
+    ) + [
+        f"gateway.bind host={bind_host!r} (non-loopback)",
+        "gateway.auth.rateLimit is not set",
+    ]
     return _finding(
         "B80",
         WARN,
@@ -2023,11 +2165,7 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
         "gateway.auth.rateLimit — the auth endpoint can be brute-forced.",
         "Configure gateway.auth.rateLimit (max attempts / window) to throttle credential "
         "guessing, or bind the gateway to loopback.",
-        evidence=[
-            f"gateway.auth.mode={mode!r}",
-            f"gateway.bind host={bind_host!r} (non-loopback)",
-            "gateway.auth.rateLimit is not set",
-        ],
+        evidence=evidence,
     )
 
 

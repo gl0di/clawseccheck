@@ -272,29 +272,33 @@ def test_b41_config_token_evidence_is_unchanged(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Known residual, deliberately OUT OF SCOPE for ENV-4 — pinned so it cannot drift
+# Residual CLOSED by B-312 — see tests/test_b312_config_token_without_mode.py
 # ---------------------------------------------------------------------------
 
-def test_known_residual_config_token_without_mode_still_fails(tmp_path):
-    """PINS A KNOWN FALSE-POSITIVE FAIL THAT THIS CHANGE DOES NOT FIX.
+def test_residual_config_token_without_mode_now_closed_by_b312(tmp_path):
+    """FORMERLY a pinned known-false-positive FAIL; CLOSED by B-312.
 
     `gateway.auth.token` set with NO `gateway.auth.mode` is the same shape as the env
     case: resolveGatewayAuth finds `authConfig.mode` falsy and derives mode="token" from
     the credential (auth-resolve-NyPBrh8F.js:34-42), and the credential comes config-FIRST
-    (:23-24). So this gateway is authenticated and B2's FAIL is wrong.
+    (:23-24). So this gateway is authenticated and the old FAIL was wrong.
 
-    It is NOT fixed here because it is a config-only path with no environment component —
-    outside ENV-4's scope — and widening a CRITICAL check's softening beyond the reviewed
-    grounding is exactly what this campaign forbids. It is filed for separate triage with
-    its own C-135 pass.
+    B-290 (ENV-4) deliberately left this out of scope — config-only, no environment
+    component, and widening a CRITICAL check's softening beyond the reviewed grounding is
+    exactly what this campaign forbids without its own review. B-312 gave it that review
+    and closed it, reusing the identical >=24-char strength bar the env leg already uses
+    (2a2f8af) — see tests/test_b312_config_token_without_mode.py for the full boundary
+    coverage (strong/weak/absent/mode=none/precedence-over-env/leak-probe).
 
-    This test pins TODAY's (wrong) behaviour so the residual stays visible. Whoever fixes
-    it MUST update this test deliberately — that is the point.
+    This test is intentionally updated (not left pinned to the old FAIL) — that update IS
+    the point B-312's task spec called out: whoever fixes the residual must touch this
+    test deliberately, not by accident.
     """
     cfg = {"gateway": {"bind": "0.0.0.0", "auth": {"token": "a" * 40}}}
     f = check_gateway(collect(_home(tmp_path, cfg)))
-    assert f.status == FAIL
-    assert "exposed with auth.mode=None" in f.detail
+    assert f.status == WARN
+    assert "gateway.auth.token is set" in f.detail
+    assert "the gateway is authenticated" in f.detail
 
 
 def test_override_root_that_cannot_be_walked_does_not_crash_the_audit(tmp_path):
