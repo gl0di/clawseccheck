@@ -143,6 +143,7 @@ check_approval_bypass
 check_attestation_mismatch
 check_audit_log
 check_audit_suppressions
+check_audit_trail_signals
 check_autonomy
 check_bootstrap_injection
 check_bootstrap_write_protection

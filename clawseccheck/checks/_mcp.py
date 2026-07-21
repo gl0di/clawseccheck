@@ -2338,6 +2338,112 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     )
 
 
+# ---------- B187 (B-292, RT-2): non-bundled plugin holds agentToolResultMiddleware ----------
+def check_plugin_tool_result_middleware(ctx: Context) -> Finding:
+    """B187 (B-292, RT-2) — a NON-BUNDLED installed plugin declares the
+    ``agentToolResultMiddleware`` contract.
+
+    OpenClaw exposes a plugin contract, ``agentToolResultMiddleware``, whose registered
+    handlers are invoked to transform tool results at runtime (dist:
+    ``agent-tool-result-middleware-loader-BsZPH_qG.js`` —
+    ``loadAgentToolResultMiddlewaresForRuntime`` / ``listAgentToolResultMiddlewares``). A
+    plugin holding this contract can append to, or rewrite, ANY tool output before it
+    reaches the model — including rewriting a security tool's FAIL into a PASS — a runtime
+    interception point strictly more powerful than a single poisoned MCP server. Read from
+    ``ctx.plugin_index_records`` (``collector._collect_plugin_trust``, which reads the
+    ``installed_plugin_index.plugins_json`` column — see that function's docstring for the
+    full grounded citation, including the two attack narratives ``contributions.providers``
+    baseURL and ``commandAliases`` hijack-target that this same column CANNOT support and
+    are deliberately not attempted here).
+
+    This is a capability DISCLOSURE, never a malice claim: WHICH plugin holds the contract,
+    its origin, and its enabled state are statically decidable from the persisted index;
+    WHAT the handler's code actually does with a tool result is not — that would require
+    reading and understanding arbitrary third-party JS, which this check does not attempt.
+
+    Gated on ``origin != "bundled"`` — this is the load-bearing guard, not a nicety. On a
+    stock OpenClaw install, 67 of 69 plugins ship with the dist itself (``origin:
+    "bundled"``) and 47 of those 69 already contribute at least one contract of some kind;
+    an ungated "a plugin declares this contract" would WARN on every clean machine (Golden
+    Rule #5). Bundled plugins are OpenClaw's own shipped code, audited upstream, not a
+    third-party supply-chain surface this check exists to cover.
+
+    WARN    — at least one installed plugin with ``origin`` other than ``"bundled"``
+              declares ``agentToolResultMiddleware`` in its ``contributions.contracts``.
+    UNKNOWN — the shared state database, the installed_plugin_index row, or the
+              ``plugins_json`` column is absent, locked, or unreadable/unparseable.
+    PASS    — the index was read and no non-bundled installed plugin declares this
+              contract (this is the overwhelming common case — see the docstring above).
+
+    Never FAIL: whether a plugin holding this contract is actually malicious is not
+    statically decidable from the persisted index (epic doc §4 item 3), so this check
+    never asserts malice — only that the interception capability itself is present and
+    worth a human look.
+    """
+    if not ctx.plugin_index_found:
+        return _finding(
+            "B187",
+            UNKNOWN,
+            "No persisted installed_plugin_index.plugins_json found in "
+            "~/.openclaw/state/openclaw.sqlite (the state database, the plugin index "
+            "row, or the plugins_json column is absent) — cannot determine whether any "
+            "installed plugin declares the agentToolResultMiddleware contract.",
+            "If plugins are installed, ensure ~/.openclaw/state/openclaw.sqlite is "
+            "present and owner-readable so a future audit can surface which plugins "
+            "hold runtime tool-result-interception contracts.",
+        )
+    if ctx.plugin_index_parse_error:
+        return _finding(
+            "B187",
+            UNKNOWN,
+            "installed_plugin_index.plugins_json was found in "
+            "~/.openclaw/state/openclaw.sqlite but could not be read or parsed (locked "
+            "or corrupt) — cannot determine whether any installed plugin declares the "
+            "agentToolResultMiddleware contract.",
+            "Ensure ~/.openclaw/state/openclaw.sqlite is not held open exclusively by "
+            "another process and is a valid SQLite database, then re-run the audit.",
+        )
+
+    hits: list = []
+    for rec in ctx.plugin_index_records:
+        if rec.get("origin") == "bundled":
+            continue  # GR#5: bundled plugins ship with the dist -- not a third-party surface
+        contracts = rec.get("contracts") or {}
+        if "agentToolResultMiddleware" not in contracts:
+            continue
+        pid = rec.get("plugin_id")
+        origin = rec.get("origin") or "unknown"
+        enabled = rec.get("enabled")
+        enabled_txt = "enabled" if enabled else ("disabled" if enabled is False else "enabled state unknown")
+        hits.append(f"{pid} (origin={origin}, {enabled_txt})")
+
+    if hits:
+        ev = hits[:6]
+        extra = f" (+{len(hits) - 6} more)" if len(hits) > 6 else ""
+        return _finding(
+            "B187",
+            WARN,
+            "Non-bundled installed plugin(s) declare the agentToolResultMiddleware "
+            "contract, which lets their own code rewrite EVERY tool result before it "
+            f"reaches the model: {'; '.join(ev)}{extra}.",
+            "This is a capability disclosure, not proof of malice — what the handler "
+            "actually does with a tool result cannot be determined from the persisted "
+            "plugin index. Review the plugin's source before continuing to trust it "
+            "with this level of interception, especially for a plugin whose FAIL/PASS "
+            "output you rely on elsewhere.",
+            evidence=ev,
+        )
+
+    return _finding(
+        "B187",
+        PASS,
+        "No non-bundled installed plugin declares the agentToolResultMiddleware "
+        "contract in the persisted plugin index.",
+        "No action needed. Re-run after installing or updating plugins so a newly "
+        "registered contract is picked up.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # B185 (F-133) — post-hoc detection of poisoned tool descriptions that were
 # ACTUALLY SENT TO THE MODEL, recovered from the trajectory's context.compiled event.

@@ -5,6 +5,7 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 """
 from __future__ import annotations
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from .. import trajectory as _trajectory
 from ..catalog import (
@@ -663,12 +664,37 @@ def check_systemd_persistence(ctx: Context) -> Finding:
 #    only bypass needs VITEST (:32-34). Flagging it would be a false positive on the
 #    product's own internal uses (bundled-ClxzUaje.js:145, dist/plugin-sdk/qa-runner-*).
 #
-# 2. There is NO affirmative PASS. A variable exported into an interactive shell just
-#    before launching the agent leaves no artifact on disk, so "we found no override in the
-#    files we can read" is not "no override is set". That state is UNKNOWN. Reading the
-#    auditor's own os.environ instead would be worse than silence: the gateway runs under
-#    systemd with its OWN environment, so this process's environment describes a different
-#    process, and a PASS built on it would be a lying PASS.
+# 2. C-262 (round 2): PASS exists, but only with an explicit, permanent confidence cap.
+#    Round 1 made every "found nothing" outcome UNKNOWN, on the reasoning that a variable
+#    exported into an interactive shell just before launching the agent leaves no artifact
+#    on disk, so "we found no override in the files we can read" is not "no override is
+#    set". That reasoning is still correct — it is WHY this can never reach
+#    pass_confidence="verified" — but applying it uniformly made an unconditional UNKNOWN
+#    the permanent state of every clean host, including ones where a systemd unit or global
+#    dotenv genuinely WAS read and genuinely carries no override. An UNKNOWN that can never
+#    clear regardless of what the audit reads stops functioning as a signal. Two considered
+#    resolutions, and why (b) was picked over (a):
+#      (a) route it to the borderline-adjudication band (adjudication.py) instead, dropping
+#          it from the plain-report/A-F view. REJECTED: every unsuppressed UNKNOWN already
+#          reaches build_judge_packet() today with zero code change (adjudication.py's
+#          source (a)), so this would additionally require inventing a NEW "suppress from
+#          the main report but still adjudicate" mechanism with no precedent anywhere else
+#          in report.py/dossier.py/sarif.py — a bigger, riskier change than the defect
+#          warrants, for a check that is already scored=False and therefore already outside
+#          the grade either way.
+#      (b) PICKED: when at least one persistent artifact was actually read
+#          (env_evidence_readable(ctx)) and it carries no override, return PASS with
+#          pass_confidence="no_signal" — the same idiom B191 (this file) and B168
+#          (checks/_lifecycle.py) already use for "we looked, found nothing, but our view is
+#          known-incomplete." It differs from THEIR "no_signal" only in WHY the view is
+#          incomplete: theirs is a sampling/retention cap that a fuller read could someday
+#          clear to "verified"; B186's gap is the ambient-shell channel, which no persistent
+#          read can EVER clear — so this finding can reach PASS but can never reach
+#          pass_confidence="verified". That distinction is stated in the finding text itself
+#          so it is never mistaken for a fully-verified clean bill of health.
+#    When NOTHING persistent was even present to read (no unit, no dotenv), there is no
+#    evidence to build even a capped PASS on — that state stays UNKNOWN, matching how B191
+#    keeps "no audit_events table at all" as UNKNOWN rather than PASS.
 #
 # 3. The task this check came from proposed two extra rules that were tried and RETRACTED:
 #    (a) "downgrade to informational when the override resolves INSIDE the openclaw package
@@ -692,24 +718,42 @@ def check_bundled_root_override(ctx: Context) -> Finding:
     WARN    — an override is observed. The agent loads and executes code from a root
               outside its install tree; legitimate for a source-checkout developer, which
               is why this is disclosure rather than an accusation.
-    UNKNOWN — no override found in any persistent artifact. Deliberately never PASS: the
-              ambient-shell delivery path leaves nothing to read (see the note above).
+    PASS    — no override found, AND at least one persistent artifact (an OpenClaw-related
+              systemd unit or a global runtime dotenv file) was actually read to reach that
+              conclusion. Always carries ``pass_confidence="no_signal"`` (see C-262 in the
+              comment above this function) — never "verified": the ambient-shell delivery
+              channel leaves nothing on disk for ANY read to see, no matter how complete.
+    UNKNOWN — no persistent artifact was even present to read (no systemd unit, no global
+              dotenv). There is no evidence to build a PASS on at all.
     """
     overrides = bundled_root_overrides(ctx)
     if not overrides:
         if env_evidence_readable(ctx):
             where = "the systemd user unit(s) and global dotenv file(s) that were readable"
-        else:
-            where = (
-                "no systemd user unit or global dotenv file was present to read"
+            return _finding(
+                "B186",
+                PASS,
+                "No OPENCLAW_BUNDLED_SKILLS_DIR / OPENCLAW_BUNDLED_HOOKS_DIR relocation was "
+                f"found in {where}. This PASS carries reduced confidence (pass_confidence="
+                "\"no_signal\") on purpose and can never reach full confidence: either "
+                "variable can also be exported into the interactive shell that launches the "
+                "agent, which leaves no artifact on disk for any local, read-only audit to "
+                "see, however complete its read of persistent files is.",
+                "No action needed if you never set these variables. If the agent is "
+                "launched from a wrapper script or shell profile, check there too — "
+                "OpenClaw honours both unconditionally and will load skills/hooks from "
+                "wherever they point, and that channel is invisible to this check.",
+                pass_confidence="no_signal",
             )
+        where = "no systemd user unit or global dotenv file was present to read"
         return _finding(
             "B186",
             UNKNOWN,
             "No OPENCLAW_BUNDLED_SKILLS_DIR / OPENCLAW_BUNDLED_HOOKS_DIR relocation was "
-            f"found ({where}). This is reported as UNKNOWN rather than PASS on purpose: "
-            "either variable can also be exported into the shell that launches the agent, "
-            "which leaves no artifact on disk for a local audit to read.",
+            f"found ({where}) — but nothing persistent was present to read, so there is no "
+            "evidence to build even a reduced-confidence PASS on. Either variable can also "
+            "be exported into the shell that launches the agent, which leaves no artifact "
+            "on disk for a local audit to read.",
             "If you never set these variables, nothing is needed. If the agent is launched "
             "from a wrapper script or shell profile, check there too — OpenClaw honours "
             "both unconditionally and will load skills/hooks from wherever they point.",
@@ -718,10 +762,18 @@ def check_bundled_root_override(ctx: Context) -> Finding:
     evidence: list[str] = []
     replaceable: list[str] = []
     for var, kind, value, source in overrides:
-        try:
-            resolved = Path(value).expanduser()
-        except (OSError, ValueError, RuntimeError):
-            resolved = Path(value)
+        # B-311: report the LITERAL override value — do not expanduser() it. systemd's
+        # Environment=/EnvironmentFile= parsing is not a shell (no `~` expansion), and the
+        # dist reads the value verbatim: resolveBundledSkillsDir / resolveBundledHooksDir
+        # both do `process.env.X?.trim(); if (override) return override;`
+        # (bundled-dir-BQFrcRIS.js:22-24, workspace-zj1TEEka.js:54-56) — no expansion, no
+        # existence check. A `~`-prefixed override is therefore resolved by OpenClaw
+        # relative to whatever the launching process's cwd happens to be, never to $HOME.
+        # Expanding it here would report a directory OpenClaw does not actually load from
+        # — wrong on a disclosure-only check whose entire value is telling the truth about
+        # where the code-load root points. The scan below still runs against the literal
+        # value; the only thing this changes is what gets PRINTED.
+        resolved = Path(value)
         state = "exists" if resolved.is_dir() else "does not currently exist"
         evidence.append(f"{var}={resolved} ({kind} root, {state}) via {source}")
         why = _dir_replaceable_by_others(resolved)
@@ -868,4 +920,223 @@ def check_unit_embedded_gateway_secret(ctx: Context) -> Finding:
         "EnvironmentFile= readable only by your account.",
         evidence=private,
         confidence="HIGH",
+    )
+
+
+# ---------------------------------------------------------------------------------------
+# F-134 (DISK-1, B191): OpenClaw's OWN runtime audit trail (``audit_events`` in the shared
+# state SQLite database). ``collector._collect_audit_events`` reads it into
+# ``ctx.audit_events`` (+ coverage counters) — see that collector's docstring for the full
+# grounding and the GR#5 hard blocker this check is scoped around.
+#
+# OPT-IN, --behavioral ONLY (matching the T1/T2/T3 precedent in behavioral.py): this
+# function is never added to CHECKS and never runs as part of a default audit()/A-F grade.
+# It is invoked exclusively from ``behavioral.analyze()`` (see ``BEHAVIORAL_CHECK_IDS`` in
+# behavioral.py), which also supplies ``divergent_sessions`` — see the parameter docstring
+# below for why that argument lives there and not here.
+# ---------------------------------------------------------------------------------------
+
+def _fmt_epoch_ms(ms: int) -> str:
+    """UTC calendar date for an epoch-millisecond ``occurred_at`` value (audit_events)."""
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date().isoformat()
+
+
+def check_audit_trail_signals(
+    ctx: Context,
+    *,
+    divergent_sessions: frozenset = frozenset(),
+    trajectory_compared: bool = False,
+) -> Finding:
+    """B191 (F-134, DISK-1) — OpenClaw's OWN runtime audit trail: coverage, plus two
+    narrow, near-zero-FP runtime signals nothing else in ClawSecCheck sees.
+
+    THREE THINGS, ONE FINDING:
+
+    1. COVERAGE / OBSERVABILITY — is ``audit_events`` present, readable, and how far back
+       does it reach? This alone answers a question no other check does: whether
+       OpenClaw's own durable, metadata-only tool-execution record exists, and how much
+       history it holds (bounded by its own documented 30-day / 100,000-row retention,
+       pruned on every insert — see the collector's docstring).
+    2. DIVERGENCE — the ``--behavioral`` corroboration source. ``divergent_sessions`` /
+       ``trajectory_compared`` are supplied by ``behavioral.analyze()``, which already
+       reads the trajectory sidecar for T1/T2/T3 and can therefore compare, at zero extra
+       file I/O, the session ids ``audit_events`` has seen against the ones the
+       trajectory source actually recorded (both expose a plain ``session_id`` — see
+       ``behavioral._audit_event_sessions``/``audit_trail_divergence`` for why that field,
+       and not ``session_key``, is the join key). A non-empty result means
+       ``audit_events`` retains a session the trajectory source does not — the trajectory
+       sidecar may be disabled (``OPENCLAW_TRAJECTORY=0``), relocated, or have rotated
+       that session out past its own 60-file cap, while this INDEPENDENT, differently
+       -bounded store still has it. This function never reads the trajectory sidecar
+       itself; it only reports what its caller already computed.
+    3. TWO NARROW SIGNALS:
+       - ``status=='blocked'`` and ``error_code=='tool_blocked'`` — the policy engine
+         actually DENIED a tool at runtime (``projectToolExecutionEventToAudit``,
+         server-runtime-subscriptions-OlWMLbPY.js:~299-327). No other check or mode sees
+         this anywhere — it is a runtime enforcement event, not a config posture.
+       - ``tool_name=='unknown'`` — the literal sentinel OpenClaw's own ``auditToolName``
+         writes when a tool-call name fails its OWN syntax check
+         (``isAllowedToolCallName``, tool-call-shared-BoRDqDVC.js:23-29: not a string,
+         over 64 chars, or outside ``^[A-Za-z0-9_:.-]+$``) — i.e. a tool call reached
+         execution with a name so malformed OpenClaw's own audit layer could not record
+         it. A well-formed ``mcp__server__tool`` name is stored verbatim (with a null
+         allowlist that function is a pure syntax check, not a lookup); only a genuinely
+         evasive/malformed name collapses to this sentinel. Zero such rows on the real
+         box this was grounded against.
+
+    HARD GR#5 BLOCKER (see the collector's docstring in full): ``audit_events`` stores
+    ``tool_name`` alone — no argv, no command, no path, no host. This function therefore
+    NEVER builds a volumetric or tool-name-presence rule; the two signals above are the
+    only ``tool_name``-adjacent conditions it evaluates, and both are near-zero-FP by
+    construction (a benign config never legitimately has a blocked tool call or a
+    malformed tool name reach execution).
+
+    WARN    — any of: a blocked-tool row, an evasive/malformed tool name, or a
+              caller-supplied session divergence. Always advisory (``scored=False``) —
+              each of the three has a legitimate benign story this check cannot rule out
+              (a deliberately tightened policy; a third-party MCP tool name that still
+              slipped past an older OpenClaw's syntax gate; trajectory tracing turned off
+              on purpose).
+    PASS    — ``audit_events`` present, readable, non-empty, and none of the three
+              signals fired in the sampled window. ``pass_confidence`` is ``"verified"``
+              when the sample covered the whole table, or ``"no_signal"`` when
+              ``ctx.audit_events_truncated`` is True (see C-135 round-2 note below) — the
+              same ``"verified"``/``"no_signal"`` split B168 already uses
+              (``checks/_lifecycle.py``).
+    UNKNOWN — no state DB, no ``audit_events`` table, the table present but unreadable, or
+              present but currently empty (pruning can empty it, so "no rows" is not
+              evidence nothing ran — same reasoning as B189's ``cron_run_logs``).
+
+    C-135 ROUND-2 FIX (F-134/B191, DISK-1) — ABSENCE-IMPLIES-CLEAN ASYMMETRY. The row
+    SAMPLE (``ctx.audit_events``) is capped at ``_MAX_AUDIT_EVENTS``, most-recent-first
+    (see the collector's docstring). When ``ctx.audit_events_truncated`` is True, a
+    genuine blocked-tool-call or evasive-name row older than the cap is invisible to the
+    ``hits`` scan below — it was evicted before this function ever saw it — yet the PASS
+    used to carry undiminished ``confidence="HIGH"`` regardless of how much of the table
+    was actually sampled. Reproduced: one genuine ``blocked``/``tool_blocked`` row followed
+    by 1200 ordinary rows -> PASS/HIGH/no caveat, the blocked row silently evicted from the
+    window. Fixed the same way B168 handles ``cron_store_shadowed``
+    (``checks/_lifecycle.py``): only the "nothing found" verdict degrades
+    (``pass_confidence="no_signal"``) when the scanned set is known-incomplete — a hit that
+    DID fire within the sampled window (the ``hits`` branch above) is unaffected by
+    truncation and keeps its full-confidence WARN, since that finding is real regardless of
+    what else may sit outside the window. This does not close DISK-1's "prove nothing
+    outside the cap happened" gap — it correctly reports that the gap exists rather than
+    reporting a clean bill of health the sample never actually earned.
+    """
+    if not ctx.audit_events_found:
+        return _finding(
+            "B191",
+            UNKNOWN,
+            "No audit_events table found (the state SQLite database, or its audit_events "
+            "table, is absent) — OpenClaw's own runtime audit trail could not be read.",
+            "No action needed if this OpenClaw install predates the audit_events table. "
+            "Keep ~/.openclaw/state/openclaw.sqlite owner-readable so a future audit can "
+            "read this trail.",
+        )
+    if ctx.audit_events_parse_error:
+        return _finding(
+            "B191",
+            UNKNOWN,
+            "The audit_events table was found but could not be read.",
+            "Ensure ~/.openclaw/state/openclaw.sqlite is owner-readable and not locked by "
+            "a running agent, then re-run the audit.",
+        )
+    if ctx.audit_events_total_rows == 0:
+        return _finding(
+            "B191",
+            UNKNOWN,
+            "The audit_events table is present but currently empty. This table is pruned "
+            "on every insert (a documented 30-day / 100,000-row retention), so an empty "
+            "table is not evidence that no tool ever ran — it may simply have nothing "
+            "left in the retention window.",
+            "No action needed. Re-run once the agent has been active, if a runtime audit "
+            "signal is wanted.",
+        )
+
+    blocked = [
+        r for r in ctx.audit_events
+        if r.get("status") == "blocked" and r.get("error_code") == "tool_blocked"
+    ]
+    evasive = [r for r in ctx.audit_events if r.get("tool_name") == "unknown"]
+
+    hits: list[str] = []
+    evidence: list[str] = []
+    if blocked:
+        hits.append(
+            f"{len(blocked)} tool call(s) were BLOCKED by the policy engine at runtime "
+            "(status='blocked', error_code='tool_blocked')"
+        )
+        evidence += [
+            f"blocked: {r.get('action') or 'tool.action'} run_id={r.get('run_id')}"
+            + (f" session_id={r.get('session_id')}" if r.get("session_id") else "")
+            for r in blocked[:6]
+        ]
+    if evasive:
+        hits.append(
+            f"{len(evasive)} tool call(s) reached execution with a tool name OpenClaw's "
+            "own audit layer could not record (tool_name='unknown' — malformed or "
+            "over-length)"
+        )
+        evidence += [
+            f"evasive name: run_id={r.get('run_id')}"
+            + (f" session_id={r.get('session_id')}" if r.get("session_id") else "")
+            for r in evasive[:6]
+        ]
+    if trajectory_compared and divergent_sessions:
+        hits.append(
+            f"{len(divergent_sessions)} session id(s) recorded in audit_events have no "
+            "matching trajectory sidecar record"
+        )
+        evidence += [f"divergent session_id: {s}" for s in sorted(divergent_sessions)[:6]]
+
+    if hits:
+        return _finding(
+            "B191",
+            WARN,
+            "OpenClaw's own runtime audit trail (audit_events) shows: " + "; ".join(hits)
+            + ". Each of these has a legitimate benign explanation (a tightened policy, "
+            "an unusual but real tool name, trajectory tracing turned off on purpose), so "
+            "this is advisory, not proof of compromise.",
+            "Review the named run_id(s)/session_id(s) directly in "
+            "~/.openclaw/state/openclaw.sqlite (audit_events table) and, for a session "
+            "divergence, confirm whether OPENCLAW_TRAJECTORY was intentionally disabled "
+            "or the trajectory sidecar has simply rotated past its 60-file cap.",
+            evidence=evidence,
+        )
+
+    span = ""
+    if ctx.audit_events_oldest_ms is not None and ctx.audit_events_newest_ms is not None:
+        span = (
+            f", spanning {_fmt_epoch_ms(ctx.audit_events_oldest_ms)} to "
+            f"{_fmt_epoch_ms(ctx.audit_events_newest_ms)}"
+        )
+    clean_signals = ["no blocked tool call", "no evasive tool name"]
+    if trajectory_compared:
+        clean_signals.append("no session divergence from the trajectory sidecar")
+    # C-135 round 2 (F-134/B191): "none of the three signals fired" is a claim about the
+    # SAMPLED window, and ctx.audit_events_truncated means that window is not the whole
+    # table (see the docstring above). Only the ABSENCE-implies-clean verdict weakens here
+    # — a hit found INSIDE the window (the `hits` branch above) already returned and is
+    # untouched by this.
+    if ctx.audit_events_truncated:
+        caveat = (
+            f" The signal-detection sample was capped at the {len(ctx.audit_events)} most "
+            f"recent of {ctx.audit_events_total_rows} total row(s) — a genuine blocked-"
+            "tool-call or evasive tool name older than that cap would NOT have been seen "
+            "by this scan."
+        )
+        pass_confidence = "no_signal"
+    else:
+        caveat = ""
+        pass_confidence = "verified"
+    return _finding(
+        "B191",
+        PASS,
+        f"OpenClaw's runtime audit trail (audit_events) is present and readable: "
+        f"{ctx.audit_events_total_rows} row(s){span}. "
+        + ", ".join(clean_signals) + " observed in the sampled window." + caveat,
+        "No action needed. This table is pruned by OpenClaw itself (30 days / 100,000 "
+        "rows), so its coverage will always be partial on a long-lived install.",
+        pass_confidence=pass_confidence,
     )

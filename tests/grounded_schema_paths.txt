@@ -138,6 +138,7 @@ relative:openclaw.user-invocable
 relative:sandbox.docker.dangerouslyAllowContainerNamespaceJoin
 relative:sandbox.docker.dangerouslyAllowExternalBindSources
 relative:sandbox.docker.dangerouslyAllowReservedContainerTargets
+relative:subagents
 relative:subagents.allowAgents
 relative:tools.allow
 relative:tools.deny

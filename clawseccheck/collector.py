@@ -143,6 +143,38 @@ _MAX_EXEC_APPROVALS_AGENTS = 200
 _MAX_PLUGIN_TRUST_BYTES = _MAX_CONFIG_BYTES
 _MAX_PLUGIN_TRUST_RECORDS = 500
 
+# B-292 (RT-2): the SIBLING installed_plugin_index.plugins_json column, on the exact same
+# row and read over the exact same read-only connection as install_records_json above (both
+# columns are declared TEXT NOT NULL in the one CREATE TABLE that defines this table --
+# openclaw-state-db-DzSsA9Ji.js:995-1008 -- so there is no schema version where the table
+# exists but this column does not). Unlike install_records_json (a dict keyed by pluginId),
+# plugins_json is a JSON ARRAY -- one full index record per installed plugin -- so it gets
+# its own byte/record cap rather than reusing _MAX_PLUGIN_TRUST_RECORDS.
+_MAX_PLUGIN_INDEX_BYTES = _MAX_CONFIG_BYTES
+_MAX_PLUGIN_INDEX_RECORDS = 500
+
+# B-296 (DISK-5 increment 1): the subagent-spawn registry (``subagent_runs`` in the same
+# shared state SQLite DB) is read-only and row-capped the same way as the stores above. This
+# is a DISCLOSURE surface (prove N spawns ran despite config silence), not a forensic dump,
+# so the cap stays modest — enough to name a handful of examples without holding an unbounded
+# number of ``task``/``outcome_json`` blobs in memory.
+_MAX_SUBAGENT_RUNS = 50
+# A subagent's own delegated task text is free-form and may be long (or, worst case, carry
+# arbitrary/sensitive content it was asked to act on) — cap it defensively at read time. The
+# disclosure check (checks/_agents.py) never echoes this field into evidence text anyway
+# (see its docstring), but the collector caps it independently so nothing downstream can
+# accidentally hold or print an unbounded blob.
+_MAX_SUBAGENT_TASK_CHARS = 500
+
+# F-134 (DISK-1, B191): OpenClaw's OWN runtime audit trail (``audit_events`` in the shared
+# state SQLite DB) is bounded on the WRITE side by the shipped runtime itself — pruned to a
+# 30-day / 100,000-row retention window on every insert (audit-event-store-D1P32Q4Y.js:6-7,
+# 52-57: AUDIT_EVENT_RETENTION_MS / AUDIT_EVENT_MAX_ROWS) — but this collector still bounds
+# its OWN read the same way every other sqlite reader in this module does, so a long-lived,
+# very active box can't feed an unbounded row set into a check. The real box this was
+# grounded against holds 502 rows total, comfortably under this cap.
+_MAX_AUDIT_EVENTS = 1000
+
 # B-111: an archive member name is attacker-controlled and NOT OS-length-limited (unlike a
 # real filesystem path) — a crafted zip/tar entry can carry a multi-KB name. It flows
 # uncapped into ctx.limit_hits / ctx.path_traversal_violations / ctx.file_manifest keys,
@@ -181,6 +213,8 @@ LIMIT_DOMAIN_APPROVALS = "approvals"  # exec-approvals store
 LIMIT_DOMAIN_ENV = "env"              # dotenv / systemd EnvironmentFile
 LIMIT_DOMAIN_CONFIG = "config"        # openclaw.json itself
 LIMIT_DOMAIN_BOOTSTRAP = "bootstrap"  # AGENTS.md / SOUL.md & friends
+LIMIT_DOMAIN_AGENTS = "agents"        # subagent_runs disk-disclosure (B-296 / B18)
+LIMIT_DOMAIN_AUDIT = "audit"          # audit_events runtime trail (F-134 / B191)
 
 LIMIT_DOMAINS = (
     LIMIT_DOMAIN_SKILL,
@@ -190,6 +224,8 @@ LIMIT_DOMAINS = (
     LIMIT_DOMAIN_ENV,
     LIMIT_DOMAIN_CONFIG,
     LIMIT_DOMAIN_BOOTSTRAP,
+    LIMIT_DOMAIN_AGENTS,
+    LIMIT_DOMAIN_AUDIT,
 )
 
 
@@ -267,6 +303,52 @@ class _ScopedLimitSink:
 
     def __len__(self) -> int:
         return len(self._backing)
+
+
+# B-303: a non-traversable directory (most commonly the whole audited home, e.g. an
+# operator's ``chmod 000 ~/.openclaw``) makes ANY bare ``is_dir()``/``is_file()``/
+# ``is_symlink()`` on an entry beneath it raise an uncaught ``PermissionError`` — stat()
+# needs execute/search permission on every ancestor directory, not just on the target
+# itself. Several pre-checks in this module ran that stat before any try/except existed
+# to catch it, so the ONE bad directory took the WHOLE audit down with a traceback
+# instead of producing a report. These three helpers are the single place that absorbs
+# that class of failure: a permission problem is reported exactly like "this path does
+# not exist", which is not a new behaviour invented for this bug — every caller below
+# already treats "not found" as the trigger for its own honest UNKNOWN (Golden Rule #4;
+# e.g. ``ctx.cron_found`` / ``ctx.installed_skills`` / ``ctx.bootstrap`` staying empty is
+# documented, in each collector, to degrade its consuming check to UNKNOWN rather than a
+# fake PASS). Recording the OSError in ``ctx.errors`` (when a Context is available) keeps
+# that degrade from being silent, matching how every other permission failure in this
+# module is surfaced.
+def _safe_is_dir(p: Path, ctx: Context | None = None, what: str | None = None) -> bool:
+    """``Path.is_dir()`` that answers False instead of raising on a permission error."""
+    try:
+        return p.is_dir()
+    except OSError as exc:
+        if ctx is not None:
+            ctx.errors.append(f"could not check {what or p}: {exc}")
+        return False
+
+
+def _safe_is_file(p: Path, ctx: Context | None = None, what: str | None = None) -> bool:
+    """``Path.is_file()`` sibling of ``_safe_is_dir`` — see its docstring (B-303)."""
+    try:
+        return p.is_file()
+    except OSError as exc:
+        if ctx is not None:
+            ctx.errors.append(f"could not check {what or p}: {exc}")
+        return False
+
+
+def _safe_is_symlink(p: Path, ctx: Context | None = None, what: str | None = None) -> bool:
+    """``Path.is_symlink()`` sibling of ``_safe_is_dir`` — see its docstring (B-303)."""
+    try:
+        return p.is_symlink()
+    except OSError as exc:
+        if ctx is not None:
+            ctx.errors.append(f"could not check {what or p}: {exc}")
+        return False
+
 
 # F-087: padding-anomaly evasion signal. When a file is sliced by the text-scan cap,
 # the discarded tail is sampled (bounded — never re-reads gigabytes) and measured for
@@ -412,6 +494,48 @@ class Context:
     plugin_trust_records: list = field(default_factory=list)
     plugin_trust_found: bool = False        # installed_plugin_index row present and read
     plugin_trust_parse_error: bool = False  # present but could not be read/parsed (locked/corrupt)
+    # B-292 (RT-2): the SIBLING installed_plugin_index.plugins_json column (same row, same
+    # read-only connection _collect_plugin_trust already opens for plugin_trust_records
+    # above). Each entry is one installed plugin's full index record: {plugin_id, origin
+    # ("bundled" | "global" | ... -- OpenClaw's own provenance tag, NOT a trust verdict),
+    # enabled, manifest_path, manifest_hash, root_dir, source, contracts (dict: OpenClaw
+    # plugin-contract name -> list[str] of registered ids under that contract, e.g.
+    # {"agentToolResultMiddleware": [...]})}. This is an INVENTORY OF NAMES, never a
+    # behavior spec -- see checks/_mcp.py::check_plugin_tool_result_middleware for the full
+    # grounding, the mass-false-positive trap (67 of 69 plugins on a stock install are
+    # origin="bundled"), and the two attack narratives this column explicitly CANNOT
+    # support (custom baseURL, command-alias hijack target).
+    plugin_index_records: list = field(default_factory=list)
+    plugin_index_found: bool = False        # installed_plugin_index.plugins_json present and read
+    plugin_index_parse_error: bool = False  # present but could not be read/parsed (locked/corrupt)
+    # B-296 (DISK-5 increment 1): rows from the subagent-spawn registry (``subagent_runs`` in
+    # the shared state SQLite DB), most-recent first. Each entry is a plain dict:
+    # child_session_key, model, agent_dir, workspace_dir, spawn_mode, run_timeout_seconds,
+    # task (capped, see _MAX_SUBAGENT_TASK_CHARS), outcome (parsed outcome_json dict, or None
+    # when the run has not ended / no outcome was recorded yet), ended_reason, created_at.
+    # DISCLOSURE ONLY — see checks/_agents.py::_disk_subagent_disclosure for the consumer;
+    # there is deliberately no FAIL-capable predicate anywhere over this data (CLAUDE.md GR#5,
+    # the task's own out-of-tree-workspace_dir / model-fallback traps).
+    subagent_runs: list = field(default_factory=list)
+    subagent_runs_found: bool = False        # state DB + subagent_runs table present and read
+    subagent_runs_parse_error: bool = False  # present but no row could be reliably parsed
+    # F-134 (DISK-1, B191): rows from OpenClaw's OWN runtime audit trail (``audit_events`` in
+    # the shared state SQLite DB), most-recent first. Each entry is a plain dict: kind,
+    # action, status, error_code, actor_type, actor_id, agent_id, session_key, session_id,
+    # run_id, tool_call_id, tool_name, occurred_at. GR#5: the table stores ONLY those
+    # columns — no argv, no command string, no file path, no target host — so this is a
+    # metadata-only observability source, never content evidence. See checks/_host.py::
+    # check_audit_trail_signals (B191) for the consumer.
+    audit_events: list = field(default_factory=list)
+    audit_events_found: bool = False        # state DB + audit_events table present and read
+    audit_events_parse_error: bool = False  # present but could not be read
+    audit_events_truncated: bool = False     # the row-sample read hit the _MAX_AUDIT_EVENTS cap
+    # Coverage stats over the FULL table (COUNT(*)/MIN/MAX(occurred_at)), independent of the
+    # row-sample cap above — "how far back does this reach" must not be limited by how many
+    # rows the signal-detection sample happened to keep.
+    audit_events_total_rows: int = 0
+    audit_events_oldest_ms: int | None = None
+    audit_events_newest_ms: int | None = None
     installed_skills: dict = field(default_factory=dict)  # skill name -> concatenated text
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
     installed_skill_shell: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .sh/.bash
@@ -1622,13 +1746,22 @@ def _is_own_source(p: Path) -> bool:
     # The engine is the checks/ package (current) or a legacy single-file checks.py.
     # Read every engine source so the markers are found regardless of which topic module
     # the I-022 split scattered them into.
-    if (p / "clawseccheck" / "checks").is_dir():  # repo root / install dir (package)
-        sources = sorted((p / "clawseccheck" / "checks").glob("*.py"))
-    elif (p / "clawseccheck" / "checks.py").is_file():  # repo root / install dir (legacy)
+    # B-303: every is_dir()/is_file()/glob() below goes through the _safe_* helpers (or a
+    # try/except) — a non-traversable *p* (e.g. an ancestor chmod 000) must answer "not
+    # our own source", never crash the whole audit with an uncaught PermissionError.
+    if _safe_is_dir(p / "clawseccheck" / "checks"):  # repo root / install dir (package)
+        try:
+            sources = sorted((p / "clawseccheck" / "checks").glob("*.py"))
+        except OSError:
+            return False
+    elif _safe_is_file(p / "clawseccheck" / "checks.py"):  # repo root / install dir (legacy)
         sources = [p / "clawseccheck" / "checks.py"]
-    elif p.name.lower() in _OWN_SKILL_NAMES and (p / "checks").is_dir():  # package dir
-        sources = sorted((p / "checks").glob("*.py"))
-    elif p.name.lower() in _OWN_SKILL_NAMES and (p / "checks.py").is_file():  # package dir (legacy)
+    elif p.name.lower() in _OWN_SKILL_NAMES and _safe_is_dir(p / "checks"):  # package dir
+        try:
+            sources = sorted((p / "checks").glob("*.py"))
+        except OSError:
+            return False
+    elif p.name.lower() in _OWN_SKILL_NAMES and _safe_is_file(p / "checks.py"):  # package dir (legacy)
         sources = [p / "checks.py"]
     else:
         return False
@@ -1723,14 +1856,18 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
             _override = Path(_value).expanduser()
         except (OSError, ValueError, RuntimeError):
             continue
-        if _override.is_dir():
+        if _safe_is_dir(_override, ctx, what=f"bundled skills root '{_override}'"):
             roots.append((_override, False))
     plugin_skills = home / "plugin-skills"
-    if plugin_skills.is_dir():
+    if _safe_is_dir(plugin_skills, ctx, what=f"'{plugin_skills}'"):
         roots.append((plugin_skills, True))
     seen_roots: set[Path] = set()
     for base, allow_symlink in roots:
-        if not base.is_dir():
+        # B-303: a load root that exists but is not traversable (most commonly the whole
+        # home, e.g. chmod 000) must be skipped like a root that does not exist at all —
+        # ctx.installed_skills then simply stays emptier, which check_installed_skills
+        # (B13) already degrades to UNKNOWN for, never a crash or a fake clean PASS.
+        if not _safe_is_dir(base, ctx, what=f"skill root '{base}'"):
             continue
         try:
             base_key = base.resolve()
@@ -1881,7 +2018,10 @@ def _collect_cron(home: Path, ctx: Context) -> None:
     """
     _collect_cron_run_logs(home, ctx)
     cron_dir = home / "cron"
-    json_candidates = walk_dir_safely(cron_dir, max_files=50) if cron_dir.is_dir() else []
+    json_candidates = (
+        walk_dir_safely(cron_dir, max_files=50)
+        if _safe_is_dir(cron_dir, ctx, what=f"'{cron_dir}'") else []
+    )
     jobs_json = next((p for p in json_candidates if p.name == "jobs.json"), None)
     if jobs_json is not None:
         try:
@@ -1931,7 +2071,10 @@ def _collect_cron(home: Path, ctx: Context) -> None:
 
     # No legacy JSON store -- fall back to the SQLite-backed cron_jobs table.
     state_dir = home / "state"
-    sqlite_candidates = walk_dir_safely(state_dir, max_files=100) if state_dir.is_dir() else []
+    sqlite_candidates = (
+        walk_dir_safely(state_dir, max_files=100)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
     if db_path is None:
         return  # neither store present -> cron_found stays False (UNKNOWN, not a fake PASS)
@@ -2091,7 +2234,10 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
     positively attributed to a DIFFERENT store are excluded.
     """
     state_dir = home / "state"
-    candidates = walk_dir_safely(state_dir, max_files=100) if state_dir.is_dir() else []
+    candidates = (
+        walk_dir_safely(state_dir, max_files=100)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
     if db_path is None:
         return
@@ -2161,7 +2307,10 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
     fake PASS (Golden Rule #4).
     """
     state_dir = home / "state"
-    sqlite_candidates = walk_dir_safely(state_dir, max_files=100) if state_dir.is_dir() else []
+    sqlite_candidates = (
+        walk_dir_safely(state_dir, max_files=100)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
     if db_path is None:
         return  # no state DB -> cron_run_logs_found stays False (UNKNOWN, not a fake PASS)
@@ -2237,7 +2386,10 @@ def _collect_capture_state(home: Path, ctx: Context) -> None:
     Absent DB or absent tables leave ``capture_tables_found`` False -> UNKNOWN downstream.
     """
     state_dir = home / "state"
-    sqlite_candidates = walk_dir_safely(state_dir, max_files=100) if state_dir.is_dir() else []
+    sqlite_candidates = (
+        walk_dir_safely(state_dir, max_files=100)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
     if db_path is None:
         return  # no state DB -> capture_tables_found stays False (UNKNOWN, not a fake PASS)
@@ -2301,7 +2453,15 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
     check reports UNKNOWN, never a fake PASS (Golden Rule #4, the B-228 pattern).
     """
     target = home / "exec-approvals.json"
-    if target.is_symlink() or not target.is_file():
+    try:
+        skip = target.is_symlink() or not target.is_file()
+    except OSError as exc:
+        # B-303: same class of exposure as _safe_is_dir/_safe_is_file — a non-traversable
+        # ancestor (typically the whole home) must degrade this to "not found" (->
+        # ctx.exec_approvals_found stays False -> UNKNOWN downstream), never crash.
+        ctx.errors.append(f"could not check '{target}': {exc}")
+        skip = True
+    if skip:
         return
     try:
         with open(target, "rb") as fp:
@@ -2345,25 +2505,51 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
 
 
 def _collect_plugin_trust(home: Path, ctx: Context) -> None:
-    """B-240 (B177): read-only collection of OpenClaw's OWN persisted per-plugin ClawHub
-    trust verdict into ``ctx.plugin_trust_records``.
+    """B-240 (B177) + B-292 (RT-2): read-only collection of the SINGLE persisted
+    ``installed_plugin_index`` row into TWO independent ``ctx`` fields, one per column:
+    ``ctx.plugin_trust_records`` (OpenClaw's own ClawHub trust verdict) and
+    ``ctx.plugin_index_records`` (the full per-plugin index record — origin/enabled/
+    contracts). Both columns live on the exact same row and are read over the exact same
+    read-only connection (there is no reason to open the state DB twice) but via TWO
+    separate ``SELECT`` statements, one per column — see the independence note below.
 
     Grounded against the installed dist: OpenClaw persists a single-row
     ``installed_plugin_index`` table (primary key ``index_key = 'installed-plugin-index'``)
     in the shared state SQLite database, resolved to
     ``~/.openclaw/state/openclaw.sqlite`` (openclaw-state-db-DzSsA9Ji.js:
     resolveOpenClawStateSqlitePath -> <stateDir>/state/openclaw.sqlite; confirmed against
-    the real file: SQLite 3.x, table present). Its ``install_records_json`` column is a
-    JSON object keyed by pluginId (installed-plugin-index-store-CWgFGnm0.js:
-    readPersistedInstalledPluginIndexFromSqlite); each install record MAY carry
-    ``clawhubTrustDisposition`` ("clean" | "review-recommended" | "review-required" |
-    "blocked" — types.openclaw-CXjMEWAQ.d.ts:1308), ``clawhubTrustScanStatus``,
-    ``clawhubTrustModerationState``, ``clawhubTrustReasons`` (string[]),
-    ``clawhubTrustPending``, ``clawhubTrustStale`` (installed-plugin-index-records-
-    C_n191FN.js: CLAWHUB_TRUST_INSTALL_RECORD_FIELDS) — OpenClaw's own ClawHub malware-
-    scan/moderation verdict for that install, computed at install/refresh time
-    (clawhub-install-trust-DdnykQnp.js) and never previously read by ClawSecCheck (grep
-    for "clawhubTrust"/"openclaw.sqlite" across clawseccheck/ was zero hits before this).
+    the real file: SQLite 3.x, table present). The table's ``CREATE TABLE`` statement
+    (openclaw-state-db-DzSsA9Ji.js:995-1008) declares BOTH ``install_records_json`` and
+    ``plugins_json`` ``TEXT NOT NULL`` in the one statement that defines this table — there
+    is no schema version where the table exists but either column is absent or NULL.
+
+    ``install_records_json`` (B177) is a JSON object keyed by pluginId
+    (installed-plugin-index-store-CWgFGnm0.js: readPersistedInstalledPluginIndexFromSqlite);
+    each install record MAY carry ``clawhubTrustDisposition`` ("clean" |
+    "review-recommended" | "review-required" | "blocked" — types.openclaw-CXjMEWAQ.d.ts:
+    1308), ``clawhubTrustScanStatus``, ``clawhubTrustModerationState``,
+    ``clawhubTrustReasons`` (string[]), ``clawhubTrustPending``, ``clawhubTrustStale``
+    (installed-plugin-index-records-C_n191FN.js: CLAWHUB_TRUST_INSTALL_RECORD_FIELDS) —
+    OpenClaw's own ClawHub malware-scan/moderation verdict for that install, computed at
+    install/refresh time (clawhub-install-trust-DdnykQnp.js).
+
+    ``plugins_json`` (B-292 / RT-2) is a JSON ARRAY — one full index record per installed
+    plugin, built by ``buildInstalledPluginIndexRecords``/``buildContributionInfo``
+    (installed-plugin-index-N4jxqS0-.js:1241-1256, :1330-1390): each record carries
+    ``pluginId``, ``origin`` ("bundled" | "global" | ... — provenance, NOT a trust verdict),
+    ``enabled``, ``manifestPath``, ``manifestHash``, ``rootDir``, ``source``, and
+    ``contributions.contracts`` — a dict of OpenClaw plugin-contract name (e.g.
+    ``agentToolResultMiddleware``) -> ``normalizeSortedUniqueStringEntries(values)`` (a
+    sorted, deduplicated array of plain strings; :1241). This is an INVENTORY OF NAMES that
+    the plugin registered, never a behavior spec, and two narrower readings of it are
+    explicitly refuted by the same normalization: ``contributions.providers`` carries no
+    ``baseURL`` field at all (channels/providers/modelCatalogProviders are all normalized to
+    bare string ids — B178 already covers the real provider-baseURL surface, which lives in
+    config, not here), and ``commandAliases`` is normalized to
+    ``alias.name`` ONLY (:1254) — the mapping TARGET is stripped before persistence, so this
+    column can show that an alias name exists and never what it invokes. See
+    ``checks/_mcp.py::check_plugin_tool_result_middleware`` for the consuming check and the
+    mass-false-positive trap (67 of 69 plugins on a stock install are ``origin: "bundled"``).
 
     The same state database also has ``auth_profile_stores``/``auth_profile_state`` tables
     (columns: store_key, store_json/state_json, updated_at) that plausibly hold live MCP
@@ -2382,91 +2568,489 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
     ``walk_dir_safely(state_dir)`` + filename-match pattern ``_collect_cron`` already uses
     for the same file (symlink-safe, path-escape-safe).
 
-    ``ctx.plugin_trust_found`` stays False when the state DB, the table, or the index row
-    is absent — a consuming check reports UNKNOWN, never a fake PASS (Golden Rule #4).
-    ``ctx.plugin_trust_parse_error`` is set when the DB/table/row exist but the column
-    could not be read or parsed (locked DB, corrupt file, malformed JSON) — also surfaced
-    as UNKNOWN downstream, never a crash.
+    ``ctx.plugin_trust_found`` / ``ctx.plugin_index_found`` stay False when the state DB,
+    the table, or the index row is absent — a consuming check reports UNKNOWN, never a fake
+    PASS (Golden Rule #4). ``ctx.plugin_trust_parse_error`` / ``ctx.plugin_index_parse_error``
+    are set when the DB/table/row exist but that column could not be read or parsed (locked
+    DB, corrupt file, malformed JSON) — also surfaced as UNKNOWN downstream, never a crash.
+    Each column's found/parse-error pair is independent: a corrupt ``plugins_json`` cell,
+    OR the ``plugins_json`` column being entirely absent from the table (an unexpected
+    schema shape, not one any known OpenClaw version ships, but not ruled out for a
+    hand-modified or pre-existing older table), does not blind the ``install_records_json``
+    (B177) reader, and vice versa. This is enforced by issuing the two columns' ``SELECT``s
+    separately (each in its own ``try``/``except sqlite3.Error``) rather than one combined
+    query — a combined query previously meant one column's "no such column" error failed
+    the query as a whole and incorrectly flipped BOTH ``*_found`` flags (B-292/RT-2 round 2).
     """
     state_dir = home / "state"
-    sqlite_candidates = walk_dir_safely(state_dir, max_files=100) if state_dir.is_dir() else []
+    sqlite_candidates = (
+        walk_dir_safely(state_dir, max_files=100)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
     if db_path is None:
-        return  # no state DB -> plugin_trust_found stays False (UNKNOWN, not a fake PASS)
+        return  # no state DB -> both *_found stay False (UNKNOWN, not a fake PASS)
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        # Cannot even open the file as a database -- a shared root cause (not sqlite,
+        # unreadable, etc.), so both columns genuinely are unreadable together here.
+        ctx.errors.append(f"could not open {db_path}: {exc}")
+        ctx.plugin_trust_found = True
+        ctx.plugin_trust_parse_error = True
+        ctx.plugin_index_found = True
+        ctx.plugin_index_parse_error = True
+        return
+
+    try:
+        try:
+            conn.execute("PRAGMA query_only = 1")
+        except sqlite3.Error as exc:
+            # C-135 round-2 residual (RT-2): this PRAGMA used to share one try/except with
+            # the connect() call above; the two-SELECT split (see the note below) left it
+            # uncovered, so a PRAGMA-level failure would crash the whole audit uncaught
+            # instead of degrading to UNKNOWN. No real config was found to trigger this
+            # (garbage-bytes files and an active writer lock both still let the PRAGMA
+            # succeed), but it costs nothing to guard: same shared-root-cause handling as
+            # the connect() failure above, since a PRAGMA failure here means the same
+            # thing -- the database is unusable for both columns, not just one.
+            ctx.errors.append(f"could not set query_only on {db_path}: {exc}")
+            ctx.plugin_trust_found = True
+            ctx.plugin_trust_parse_error = True
+            ctx.plugin_index_found = True
+            ctx.plugin_index_parse_error = True
+            return
+
+        # ---- install_records_json (B177): its OWN SELECT, independent of plugins_json.
+        # B-292/RT-2 fix: a merged single-query read let a schema shape missing ONE
+        # column (e.g. "no such column: plugins_json") take down BOTH *_found flags,
+        # contradicting this function's own independence claim below. Two separate
+        # SELECTs mean a column-absence error (or a genuine per-column read failure)
+        # is attributed to that column's ctx fields only -- never its sibling's.
+        try:
+            trust_row = conn.execute(
+                "SELECT install_records_json FROM installed_plugin_index "
+                "WHERE index_key = 'installed-plugin-index'"
+            ).fetchone()
+        except sqlite3.Error as exc:
+            trust_row = None
+            # "no such table" (state DB predates the plugin index entirely) is the same
+            # honest UNKNOWN as "not found" (mirrors _collect_cron's carve-out) -- not a
+            # parse error. Any other error, including "no such column", IS a genuine read
+            # failure for THIS column only.
+            if "no such table" not in str(exc).lower():
+                ctx.errors.append(
+                    "could not read installed_plugin_index.install_records_json from "
+                    f"{db_path}: {exc}"
+                )
+                ctx.plugin_trust_found = True
+                ctx.plugin_trust_parse_error = True
+
+        # ---- plugins_json (B-292 / RT-2): its OWN SELECT, independent of the above ----
+        try:
+            index_row = conn.execute(
+                "SELECT plugins_json FROM installed_plugin_index "
+                "WHERE index_key = 'installed-plugin-index'"
+            ).fetchone()
+        except sqlite3.Error as exc:
+            index_row = None
+            if "no such table" not in str(exc).lower():
+                ctx.errors.append(
+                    f"could not read installed_plugin_index.plugins_json from {db_path}: {exc}"
+                )
+                ctx.plugin_index_found = True
+                ctx.plugin_index_parse_error = True
+    finally:
+        conn.close()
+
+    trust_raw = trust_row[0] if trust_row is not None else None
+    index_raw = index_row[0] if index_row is not None else None
+
+    # ---- install_records_json (B177: OpenClaw's own ClawHub trust verdict) ----
+    if trust_raw is not None:
+        raw = trust_raw
+        if len(raw) > _MAX_PLUGIN_TRUST_BYTES:
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                f"installed_plugin_index.install_records_json in {db_path} exceeded the "
+                f"{_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap — content beyond the cap was "
+                "NOT scanned",
+            )
+            raw = raw[:_MAX_PLUGIN_TRUST_BYTES]
+
+        try:
+            installs = json.loads(raw)
+        except ValueError as exc:
+            ctx.errors.append(f"could not parse install_records_json in {db_path}: {exc}")
+            ctx.plugin_trust_found = True
+            ctx.plugin_trust_parse_error = True
+            installs = None
+        if installs is not None and not isinstance(installs, dict):
+            ctx.plugin_trust_found = True
+            ctx.plugin_trust_parse_error = True
+            installs = None
+
+        if installs is not None:
+            ctx.plugin_trust_found = True
+            for plugin_id, rec in list(installs.items())[:_MAX_PLUGIN_TRUST_RECORDS]:
+                if not isinstance(rec, dict):
+                    continue
+                disposition = rec.get("clawhubTrustDisposition")
+                reasons = rec.get("clawhubTrustReasons")
+                ctx.plugin_trust_records.append({
+                    "plugin_id": plugin_id if isinstance(plugin_id, str) else str(plugin_id),
+                    "disposition": disposition if isinstance(disposition, str) else None,
+                    "scan_status": rec.get("clawhubTrustScanStatus")
+                    if isinstance(rec.get("clawhubTrustScanStatus"), str) else None,
+                    "moderation_state": rec.get("clawhubTrustModerationState")
+                    if isinstance(rec.get("clawhubTrustModerationState"), str) else None,
+                    "reasons": [r for r in reasons if isinstance(r, str)]
+                    if isinstance(reasons, list) else [],
+                    "pending": rec.get("clawhubTrustPending")
+                    if isinstance(rec.get("clawhubTrustPending"), bool) else None,
+                    "stale": rec.get("clawhubTrustStale")
+                    if isinstance(rec.get("clawhubTrustStale"), bool) else None,
+                })
+            if len(installs) > _MAX_PLUGIN_TRUST_RECORDS:
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                    f"installed_plugin_index in {db_path} has {len(installs)} install "
+                    f"record(s) — only the first {_MAX_PLUGIN_TRUST_RECORDS} were scanned",
+                )
+
+    # ---- plugins_json (B-292 / RT-2: full per-plugin index record) ----
+    if index_raw is not None:
+        raw2 = index_raw
+        if len(raw2) > _MAX_PLUGIN_INDEX_BYTES:
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                f"installed_plugin_index.plugins_json in {db_path} exceeded the "
+                f"{_MAX_PLUGIN_INDEX_BYTES // 1_000_000}MB cap — content beyond the cap "
+                "was NOT scanned",
+            )
+            raw2 = raw2[:_MAX_PLUGIN_INDEX_BYTES]
+
+        try:
+            plugins = json.loads(raw2)
+        except ValueError as exc:
+            ctx.errors.append(f"could not parse plugins_json in {db_path}: {exc}")
+            ctx.plugin_index_found = True
+            ctx.plugin_index_parse_error = True
+            plugins = None
+        if plugins is not None and not isinstance(plugins, list):
+            ctx.plugin_index_found = True
+            ctx.plugin_index_parse_error = True
+            plugins = None
+
+        if plugins is not None:
+            ctx.plugin_index_found = True
+            for rec in plugins[:_MAX_PLUGIN_INDEX_RECORDS]:
+                if not isinstance(rec, dict):
+                    continue
+                plugin_id = rec.get("pluginId")
+                origin = rec.get("origin")
+                enabled = rec.get("enabled")
+                contributions = rec.get("contributions")
+                contracts_raw = (
+                    contributions.get("contracts")
+                    if isinstance(contributions, dict) else None
+                )
+                contracts: dict = {}
+                if isinstance(contracts_raw, dict):
+                    for key, values in contracts_raw.items():
+                        if isinstance(key, str) and isinstance(values, list):
+                            contracts[key] = [v for v in values if isinstance(v, str)]
+                ctx.plugin_index_records.append({
+                    "plugin_id": plugin_id if isinstance(plugin_id, str) else str(plugin_id),
+                    "origin": origin if isinstance(origin, str) else None,
+                    "enabled": enabled if isinstance(enabled, bool) else None,
+                    "manifest_path": rec.get("manifestPath")
+                    if isinstance(rec.get("manifestPath"), str) else None,
+                    "root_dir": rec.get("rootDir")
+                    if isinstance(rec.get("rootDir"), str) else None,
+                    "source": rec.get("source")
+                    if isinstance(rec.get("source"), str) else None,
+                    "contracts": contracts,
+                })
+            if len(plugins) > _MAX_PLUGIN_INDEX_RECORDS:
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                    f"installed_plugin_index.plugins_json in {db_path} has "
+                    f"{len(plugins)} plugin record(s) — only the first "
+                    f"{_MAX_PLUGIN_INDEX_RECORDS} were scanned",
+                )
+
+
+def _parse_subagent_outcome(raw) -> "tuple[dict | None, bool]":
+    """Best-effort parse of one ``subagent_runs.outcome_json`` cell.
+
+    Returns ``(outcome, ok)``. ``ok`` is False ONLY when *raw* is a non-empty string that
+    failed to parse as JSON — a genuinely unexpected cell shape. A NULL/blank cell (the run
+    has not ended yet, or no outcome was ever recorded) is ``(None, True)``: that is normal,
+    not corruption, and must not be confused with a parse failure by the caller (which
+    invalidates the whole row's disclosure — see ``_collect_subagent_runs``). A value that
+    parses but is not a JSON object (bare ``null``/number/string) is also ``(None, True)``:
+    syntactically valid, just no outcome fields to surface.
+    """
+    if raw is None:
+        return None, True
+    if not isinstance(raw, str) or not raw.strip():
+        return None, True
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None, False
+    if isinstance(parsed, dict):
+        return parsed, True
+    return None, True
+
+
+def _collect_subagent_runs(home: Path, ctx: Context) -> None:
+    """B-296 (DISK-5 increment 1): read-only collection of the OpenClaw subagent-spawn
+    registry (``subagent_runs`` in ``~/.openclaw/state/openclaw.sqlite``) into
+    ``ctx.subagent_runs``.
+
+    Grounded against the installed dist (``subagent-registry-state-CP7kKu69.js``,
+    ``openclaw-state-db-DzSsA9Ji.js`` — verbatim ``CREATE TABLE IF NOT EXISTS subagent_runs``,
+    PK ``run_id``): columns ``run_id, child_session_key, controller_session_key,
+    requester_session_key, requester_display_key, requester_origin_json, task, task_name,
+    cleanup, label, model, agent_dir, workspace_dir, run_timeout_seconds, spawn_mode,
+    created_at, started_at, ..., outcome_json, archive_at_ms, cleanup_completed_at,
+    cleanup_handled, ..., ended_reason, ...``. See ``docs/research/openclaw-schema-recon.md``
+    §28 for the full insert/retention grounding; the two facts that shape this collector:
+
+    INSERT SEMANTICS (population was UNPROVEN at filing time — GR#4 required grounding
+    before shipping): a row is written SYNCHRONOUSLY at spawn time, before the subagent does
+    any work. ``subagent-registry-DexSZ4w1.js`` (the register path): ``params.runs.set(runId,
+    entry)`` followed immediately by ``params.persistOrThrow()`` (-> ``saveSubagentRegistryToSqlite``
+    -> an upsert into ``subagent_runs`` keyed on ``run_id``), with the newly-set entry rolled
+    back on a persist failure. So a row proves a spawn was REGISTERED — not necessarily that
+    it ran to completion; ``outcome_json`` is what distinguishes the two (absent/null while
+    the run is still in flight).
+
+    RETENTION IS SHORT — do not imply durable forensic history. The same module's periodic
+    sweep deletes a completed run's row via the whole-snapshot
+    ``deleteFrom("subagent_runs").where("run_id","not in", runIds)`` replace once
+    ``archiveAtMs`` (``now + agents.defaults.subagents.archiveAfterMinutes`` — default 60
+    MINUTES after the run was SPAWNED/REGISTERED (``resolveArchiveAfterMs``), NEVER
+    recomputed at completion — a long-running run's window can already be nearly spent
+    by the time it ends) has passed, or ~5 minutes after
+    cleanup completes for session-mode runs with no ``archiveAtMs`` at all
+    (``SESSION_RUN_TTL_MS = 5 * 60_000``). The one documented exception: a run registered
+    with ``cleanup:"keep"`` (non-session spawn mode) gets NO ``archiveAtMs`` and the sweep
+    skips it outright — kept until something else (e.g. the owning session's own lifecycle)
+    removes it. So: a populated table proves RECENT (or explicitly kept) activity, never a
+    complete history of every subagent ever spawned.
+
+    WAL LAG: opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same
+    pattern every other reader of this database uses. A reader connection sees the last
+    COMMITTED snapshot, including anything already committed into the WAL file (SQLite
+    readers do not require a checkpoint) — so this never needs special WAL handling, but a
+    row committed a moment after this connection opened is legitimately invisible. That is
+    read-consistency, not absence: the caller (``checks/_agents.py``) must never treat
+    ``rows == 0`` as proof no subagent has ever run, only as "none observed in this snapshot".
+
+    ``ctx.subagent_runs_found`` stays False when the state DB or the table itself is absent
+    (a fresh/pre-subagent install) — the consuming check reports UNKNOWN, never a fake PASS
+    (Golden Rule #4). ``ctx.subagent_runs_parse_error`` is set only when NOT ONE row could be
+    reliably parsed (every ``outcome_json`` cell present failed to decode as JSON) — a row
+    whose outcome merely parses to "no outcome yet" is not an error and is kept; a run mixed
+    with some good and some bad rows keeps the good ones (matches the tolerant per-record
+    style ``_collect_plugin_trust`` already uses, rather than letting one corrupt cell blind
+    the whole disclosure to otherwise-trustworthy sibling rows).
+    """
+    state_dir = home / "state"
+    sqlite_candidates = (
+        walk_dir_safely(state_dir, max_files=100)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        return  # no state DB -> subagent_runs_found stays False (UNKNOWN, not a fake PASS)
 
     try:
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
             cur = conn.execute(
-                "SELECT install_records_json FROM installed_plugin_index "
-                "WHERE index_key = 'installed-plugin-index'"
+                "SELECT child_session_key, model, agent_dir, workspace_dir, spawn_mode, "
+                "run_timeout_seconds, task, outcome_json, ended_reason, created_at "
+                "FROM subagent_runs ORDER BY created_at DESC LIMIT ?",
+                # Same off-by-one truncation probe every other capped SELECT here uses: one
+                # extra row is requested purely to detect "more exist", then discarded.
+                (_MAX_SUBAGENT_RUNS + 1,),
             )
-            row = cur.fetchone()
+            rows = cur.fetchall()
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        # A state DB that exists but predates the plugin index (no such table) is not a
-        # corrupt store -- same honest UNKNOWN as "not found", not a parse error (mirrors
-        # _collect_cron's identical "no such table" carve-out).
+        # A state DB predating the subagent registry table is not a corrupt store -- same
+        # honest UNKNOWN as "not found" (mirrors _collect_cron/_collect_plugin_trust).
         if "no such table" not in str(exc).lower():
-            ctx.errors.append(
-                f"could not read installed_plugin_index from {db_path}: {exc}"
-            )
-            ctx.plugin_trust_found = True
-            ctx.plugin_trust_parse_error = True
+            ctx.errors.append(f"could not read subagent_runs from {db_path}: {exc}")
+            ctx.subagent_runs_found = True
+            ctx.subagent_runs_parse_error = True
         return
 
-    if row is None or row[0] is None:
-        return  # DB + table present, but no index row persisted yet -> stays UNKNOWN
+    ctx.subagent_runs_found = True
+    truncated = len(rows) > _MAX_SUBAGENT_RUNS
+    rows = rows[:_MAX_SUBAGENT_RUNS]  # discard the probe row; scanned set stays capped
 
-    raw = row[0]
-    if len(raw) > _MAX_PLUGIN_TRUST_BYTES:
+    good: list[dict] = []
+    bad_count = 0
+    for (child_session_key, model, agent_dir, workspace_dir, spawn_mode,
+         run_timeout_seconds, task, outcome_json, ended_reason, created_at) in rows:
+        outcome, ok = _parse_subagent_outcome(outcome_json)
+        if not ok:
+            bad_count += 1
+            continue
+        task_text = task if isinstance(task, str) else None
+        if task_text is not None and len(task_text) > _MAX_SUBAGENT_TASK_CHARS:
+            task_text = task_text[:_MAX_SUBAGENT_TASK_CHARS] + "...(truncated)"
+        good.append({
+            "child_session_key": child_session_key,
+            "model": model,
+            "agent_dir": agent_dir,
+            "workspace_dir": workspace_dir,
+            "spawn_mode": spawn_mode,
+            "run_timeout_seconds": run_timeout_seconds,
+            "task": task_text,
+            "outcome": outcome,
+            "ended_reason": ended_reason,
+            "created_at": created_at,
+        })
+
+    if not good and bad_count:
+        # Every row's outcome_json was unparseable -- nothing here can be asserted reliably
+        # (GR#4: no fabricated facts). Fall back to the honest UNKNOWN, matching the "table
+        # absent" branch, rather than surface a disclosure built on undecodable data.
+        ctx.subagent_runs_parse_error = True
+        return
+
+    ctx.subagent_runs = good
+    if truncated:
         note_limit(
-            ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
-            f"installed_plugin_index.install_records_json in {db_path} exceeded the "
-            f"{_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap — content beyond the cap was "
-            "NOT scanned",
+            ctx.limit_hits, LIMIT_DOMAIN_AGENTS,
+            f"subagent_runs table in '{db_path}' returned the {_MAX_SUBAGENT_RUNS}-row cap "
+            "— older spawns were NOT read",
         )
-        raw = raw[:_MAX_PLUGIN_TRUST_BYTES]
+
+
+def _collect_audit_events(home: Path, ctx: Context) -> None:
+    """F-134 (DISK-1, B191): read-only collection of OpenClaw's OWN runtime audit trail
+    (``audit_events`` in the shared state SQLite database) into ``ctx.audit_events``.
+
+    Grounded against the installed dist, verbatim ``CREATE TABLE IF NOT EXISTS audit_events``
+    (``openclaw-state-db-DzSsA9Ji.js:509-527``): ``sequence, event_id, source_id,
+    source_sequence, occurred_at, kind, action, status, error_code, actor_type, actor_id,
+    agent_id, session_key, session_id, run_id, tool_call_id, tool_name``. Written by
+    ``recordAuditEvent`` (``audit-event-store-D1P32Q4Y.js:60``), fed by
+    ``projectToolExecutionEventToAudit`` / ``projectAgentEvent``
+    (``server-runtime-subscriptions-OlWMLbPY.js``). ``grep -rn "audit_events"`` across this
+    package was zero hits before this collector.
+
+    GR#5 HARD BLOCKER — read this before adding a new consumer of ``ctx.audit_events``.
+    The table stores ``tool_name`` alone: there is no argv, no command string, no file
+    path, no target host anywhere in the schema (verified column-by-column above). A
+    benign ``bash`` build step and exfiltration-staging ``bash`` are the SAME row shape.
+    Nothing downstream may build a volumetric or tool-name-presence rule ("bash ran N
+    times") from this data — that would false-FAIL essentially every real config,
+    including a benign one (measured on the real box: 344 of 502 rows are plain ``bash``).
+    This collector only ever feeds the two narrow, near-zero-FP signals ``status=='blocked'``
+    /``error_code=='tool_blocked'`` and ``tool_name=='unknown'``, plus a session-id
+    corroboration join — see ``checks/_host.py::check_audit_trail_signals``.
+
+    RETENTION IS DOCUMENTED, not "uncapped": ``AUDIT_EVENT_RETENTION_MS`` (30 days) and
+    ``AUDIT_EVENT_MAX_ROWS`` (100,000) are pruned on every insert
+    (``audit-event-store-D1P32Q4Y.js:6-7,52-57``) — an explicit, knowable bound, unlike the
+    trajectory sidecar's *silent* ``_MAX_FILES`` (60) file-count drop (``trajectory.py``).
+    That asymmetry is the whole point of reading this table at all: it can outlive a
+    disabled or rotated-out trajectory source for the SAME sessions (F-134's corroboration
+    use — see ``behavioral.py``).
+
+    ``ctx.audit_events_total_rows``/``_oldest_ms``/``_newest_ms`` are read over the FULL
+    table (cheap aggregate query, index-backed — ``idx_audit_events_time``) independent of
+    the row-sample cap below, so "how far back does this reach" is never limited by how
+    many rows the signal-detection sample kept. The row SAMPLE (``ctx.audit_events``,
+    capped at ``_MAX_AUDIT_EVENTS``, most-recent-first) is what the two narrow signals and
+    the session-id corroboration read.
+
+    Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
+    every other reader of this database uses. Absent DB or absent table leaves
+    ``audit_events_found`` False — UNKNOWN downstream, never a fake PASS (Golden Rule #4).
+    An empty table (pruned down to nothing, or a fresh install) is NOT the same as absent:
+    it is recorded distinctly via ``audit_events_total_rows == 0`` so a consumer can tell
+    "never read" apart from "read, and currently empty".
+    """
+    state_dir = home / "state"
+    sqlite_candidates = (
+        walk_dir_safely(state_dir, max_files=100)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        return  # no state DB -> audit_events_found stays False (UNKNOWN, not a fake PASS)
 
     try:
-        installs = json.loads(raw)
-    except ValueError as exc:
-        ctx.errors.append(f"could not parse install_records_json in {db_path}: {exc}")
-        ctx.plugin_trust_found = True
-        ctx.plugin_trust_parse_error = True
-        return
-    if not isinstance(installs, dict):
-        ctx.plugin_trust_found = True
-        ctx.plugin_trust_parse_error = True
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA query_only = 1")
+            agg_row = conn.execute(
+                "SELECT COUNT(*), MIN(occurred_at), MAX(occurred_at) FROM audit_events"
+            ).fetchone()
+            cur = conn.execute(
+                "SELECT kind, action, status, error_code, actor_type, actor_id, agent_id, "
+                "session_key, session_id, run_id, tool_call_id, tool_name, occurred_at "
+                "FROM audit_events ORDER BY sequence DESC LIMIT ?",
+                # Same off-by-one truncation probe every other capped SELECT here uses: one
+                # extra row is requested purely to detect "more exist", then discarded.
+                (_MAX_AUDIT_EVENTS + 1,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        # A state DB predating the audit_events table is not a corrupt store -- same
+        # honest UNKNOWN as "not found" (mirrors _collect_cron_run_logs/_collect_subagent_runs).
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(f"could not read audit_events from {db_path}: {exc}")
+            ctx.audit_events_found = True
+            ctx.audit_events_parse_error = True
         return
 
-    ctx.plugin_trust_found = True
-    for plugin_id, rec in list(installs.items())[:_MAX_PLUGIN_TRUST_RECORDS]:
-        if not isinstance(rec, dict):
-            continue
-        disposition = rec.get("clawhubTrustDisposition")
-        reasons = rec.get("clawhubTrustReasons")
-        ctx.plugin_trust_records.append({
-            "plugin_id": plugin_id if isinstance(plugin_id, str) else str(plugin_id),
-            "disposition": disposition if isinstance(disposition, str) else None,
-            "scan_status": rec.get("clawhubTrustScanStatus")
-            if isinstance(rec.get("clawhubTrustScanStatus"), str) else None,
-            "moderation_state": rec.get("clawhubTrustModerationState")
-            if isinstance(rec.get("clawhubTrustModerationState"), str) else None,
-            "reasons": [r for r in reasons if isinstance(r, str)]
-            if isinstance(reasons, list) else [],
-            "pending": rec.get("clawhubTrustPending")
-            if isinstance(rec.get("clawhubTrustPending"), bool) else None,
-            "stale": rec.get("clawhubTrustStale")
-            if isinstance(rec.get("clawhubTrustStale"), bool) else None,
+    ctx.audit_events_found = True
+    total, oldest_ms, newest_ms = agg_row if agg_row else (0, None, None)
+    ctx.audit_events_total_rows = int(total or 0)
+    ctx.audit_events_oldest_ms = int(oldest_ms) if oldest_ms is not None else None
+    ctx.audit_events_newest_ms = int(newest_ms) if newest_ms is not None else None
+
+    truncated = len(rows) > _MAX_AUDIT_EVENTS
+    rows = rows[:_MAX_AUDIT_EVENTS]  # discard the probe row; the scanned sample stays capped
+    for (kind, action, status, error_code, actor_type, actor_id, agent_id, session_key,
+         session_id, run_id, tool_call_id, tool_name, occurred_at) in rows:
+        ctx.audit_events.append({
+            "kind": kind,
+            "action": action,
+            "status": status,
+            "error_code": error_code,
+            "actor_type": actor_type,
+            "actor_id": actor_id,
+            "agent_id": agent_id,
+            "session_key": session_key,
+            "session_id": session_id,
+            "run_id": run_id,
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "occurred_at": occurred_at,
         })
-    if len(installs) > _MAX_PLUGIN_TRUST_RECORDS:
+    if truncated:
+        ctx.audit_events_truncated = True
         note_limit(
-            ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
-            f"installed_plugin_index in {db_path} has {len(installs)} install record(s) — "
-            f"only the first {_MAX_PLUGIN_TRUST_RECORDS} were scanned",
+            ctx.limit_hits, LIMIT_DOMAIN_AUDIT,
+            f"audit_events table in '{db_path}' returned the {_MAX_AUDIT_EVENTS}-row cap — "
+            "older audit rows were NOT read (the coverage stats above are exact; the row "
+            "sample used for signal detection is not)",
         )
 
 
@@ -3095,7 +3679,17 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
     say UNKNOWN instead of inventing a clean PASS.
     """
     units_dir = systemd_user_unit_dir(home)
-    if not units_dir.is_dir():
+    try:
+        units_dir_is_dir = units_dir.is_dir()
+    except OSError as exc:
+        # B-303: an ancestor (e.g. a non-traversable home) can make even this existence
+        # check raise. Distinct from "not installed" — record it the same way an
+        # unreadable directory listing already is below, so a consuming check says
+        # UNKNOWN instead of the false "not installed" a silent return would imply.
+        ctx.errors.append(f"could not check {units_dir}: {exc}")
+        ctx.unit_env_unreadable = True
+        return
+    if not units_dir_is_dir:
         return
     try:
         unit_files = sorted(
@@ -3292,11 +3886,39 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     for _cw in _config_workspace_dirs(home, ctx.config, limit_hits=ctx.limit_hits):
         _ws_dirs.append((_cw.name or "workspace", _cw))
     for _ws, wdir in _ws_dirs:
-        if not wdir.is_dir():
+        # B-303: wdir == home for the first entry, so a non-traversable *home* (e.g.
+        # `chmod 000 ~/.openclaw`) used to raise an uncaught PermissionError right here
+        # (or, for home itself, one line down on the first bootstrap filename) and take
+        # the WHOLE audit down. A directory this process cannot even stat is reported the
+        # same way a directory that does not exist already is — skipped, with a
+        # bootstrap-domain limit hit recording WHY, so check_installed_skills'/the
+        # bootstrap checks' existing "ctx.bootstrap empty -> UNKNOWN" fallback fires
+        # honestly instead of the process crashing.
+        try:
+            wdir_is_dir = wdir.is_dir()
+        except OSError as exc:
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_BOOTSTRAP,
+                f"could not check workspace dir '{wdir}' ({exc.__class__.__name__}) — "
+                "bootstrap files there were NOT scanned",
+            )
+            ctx.errors.append(f"could not check {wdir}: {exc}")
+            continue
+        if not wdir_is_dir:
             continue
         for name in BOOTSTRAP_FILES:
             f = wdir / name
-            if not f.is_file():
+            try:
+                f_is_file = f.is_file()
+            except OSError as exc:
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_BOOTSTRAP,
+                    f"could not check '{f}' ({exc.__class__.__name__}) — this bootstrap "
+                    "file was NOT scanned",
+                )
+                ctx.errors.append(f"could not check {f}: {exc}")
+                continue
+            if not f_is_file:
                 continue
             try:
                 real = f.resolve()
@@ -3333,6 +3955,8 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)
     _collect_capture_state(home, ctx)  # B-295: debug-proxy capture row counts (metadata only)
+    _collect_subagent_runs(home, ctx)  # B-296: subagent-spawn registry disclosure for B18
+    _collect_audit_events(home, ctx)   # F-134 (DISK-1): runtime audit_events trail, --behavioral only
     _read_installed_skills(home, ctx)
     return ctx
 

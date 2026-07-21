@@ -150,6 +150,8 @@ from ._host import (
     check_systemd_persistence,
     check_bundled_root_override,
     check_unit_embedded_gateway_secret,
+    check_audit_trail_signals,
+    _fmt_epoch_ms,
 )
 
 from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has_remote, _mcp_servers, _mcp_url_is_local, _read_jsonl_tail, correlation_indicators, _CORR_INDICATOR_CAP,)
@@ -192,6 +194,7 @@ from ._agents import (
     _DELEGATION_TIER,
     _WEB_FETCH_SKILL_HINTS,
     _b21_has_trust_boundary,
+    _disk_subagent_disclosure,
     _has_subagents,
     _reassembly,
     check_agent_separation,
@@ -702,6 +705,7 @@ from ._mcp import (
     check_plugin_app_server_command,
     check_plugin_clawhub_trust,
     check_plugin_permission_mode,
+    check_plugin_tool_result_middleware,
     check_codex_plugin_hooks,
     check_compiled_tool_poisoning,
     check_orphaned_plugin_caches,
@@ -1242,8 +1246,14 @@ CHECKS = [
     check_install_policy_gate,  # B174 — security.installPolicy.* gate + exec-hook escape flags (B-238)
     check_hooks_enable_toggles,  # B179 — hooks.enabled / hooks.internal(.load.extraDirs) enable-toggle inventory (B-250)
     check_plugin_clawhub_trust,  # B177 — OpenClaw's own persisted per-plugin ClawHub trust verdict (B-240)
+    check_plugin_tool_result_middleware,  # B187 — non-bundled plugin declares agentToolResultMiddleware (B-292, RT-2)
     check_bundled_root_override,  # B186 — bundled skills/hooks code-load root relocated by env override (B-289, ENV-3)
     check_unit_embedded_gateway_secret,  # B193 — gateway credential inlined in a systemd user unit (B-290, ENV-4)
+    # B191 (F-134, DISK-1) is DELIBERATELY NOT REGISTERED HERE. It is cataloged in
+    # catalog.py and its function lives in checks/_host.py (§3.1 owning-module map), but
+    # it runs ONLY under `--behavioral` (behavioral.analyze() calls check_audit_trail_
+    # signals directly) — matching the T1/T2/T3 precedent, not a default audit()/CHECKS
+    # entry. See BEHAVIORAL_CHECK_IDS in behavioral.py.
     # B185 (F-133) — poisoned tool descriptions in what OpenClaw ACTUALLY SENT to the
     # model, recovered post-hoc from the trajectory's `context.compiled` event.
     #

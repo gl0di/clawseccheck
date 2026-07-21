@@ -1924,12 +1924,15 @@ CATALOG: list[CheckMeta] = [
     # npm-owned install tree this needs no privileged write at all: one extra
     # `Environment=` line in the user's systemd unit, or one line in a global dotenv file.
     #
-    # scored=False on purpose. The near-universal state is UNKNOWN (no override observed),
-    # which is out of the denominator either way; the state that DOES occur benignly is
-    # WARN, for a source-checkout developer who relocated the root deliberately — scoring
-    # it would dock the grade of a setup that is working as its owner intended. The FAIL
-    # branch (target directory writable by other local accounts) still surfaces in the
-    # report and trips --exit-code; it just does not distort the score.
+    # scored=False on purpose. The near-universal state is a reduced-confidence PASS or
+    # UNKNOWN (C-262: no override observed — see the comment above check_bundled_root_
+    # override for why that split is PASS/pass_confidence="no_signal" when a persistent
+    # artifact was read, UNKNOWN when nothing was even present to read), which is out of
+    # the denominator either way; the state that DOES occur benignly is WARN, for a
+    # source-checkout developer who relocated the root deliberately — scoring it would dock
+    # the grade of a setup that is working as its owner intended. The FAIL branch (target
+    # directory writable by other local accounts) still surfaces in the report and trips
+    # --exit-code; it just does not distort the score.
     #
     # HIGH, not CRITICAL: what is proven is an unenumerated code-load root, not that
     # hostile code is in it. OPENCLAW_BUNDLED_PLUGINS_DIR is deliberately NOT covered —
@@ -1956,8 +1959,8 @@ CATALOG: list[CheckMeta] = [
     # FAIL branch is reserved for the case where the privilege is real and checkable —
     # the unit file is readable by another local account — mirroring B182.
     #
-    # ID note: B185 and B187-B191 are reserved by other in-flight work; B193 is the next
-    # free identifier above the reserved range.
+    # ID note: B185, B187 (landed via B-292/RT-2), and B188-B191 were reserved by other
+    # in-flight work; B193 is the next free identifier above the reserved range.
     CheckMeta(
         "B193",
         "Gateway credential embedded in plaintext in a systemd user unit",
@@ -2070,7 +2073,8 @@ CATALOG: list[CheckMeta] = [
     # B192 (B-282, ENV-6): documented break-glass env toggles left on in a persistent
     # dotenv file. scored=False, WARN-capable only — OpenClaw's own docs instruct users to
     # set OPENCLAW_ALLOW_INSECURE_PRIVATE_WS in some setups, so a FAIL would punish
-    # following the vendor manual. IDs B187-B191 are reserved by other in-flight work.
+    # following the vendor manual. IDs B188-B191 are reserved by other in-flight work
+    # (B187 landed via B-292/RT-2, defined further below next to B177).
     CheckMeta(
         "B192",
         "Break-glass environment toggle left enabled in a global dotenv file",
@@ -2104,6 +2108,53 @@ CATALOG: list[CheckMeta] = [
         "hardening",
         "Supply Chain / Third-Party Trust Verdict",
         scored=True,
+        confidence="HIGH",
+        surface="mcp",
+    ),
+    # B187 (B-292, RT-2): a NON-BUNDLED installed plugin declares the
+    # agentToolResultMiddleware contract in the sibling installed_plugin_index.plugins_json
+    # column (same state DB, same row as B177 above) -- a runtime interception point that
+    # lets the plugin's own code rewrite EVERY tool result before it reaches the model
+    # (append instructions, or rewrite a security tool's FAIL into a PASS), strictly more
+    # powerful than a single poisoned MCP server. Grounded against the installed dist
+    # (agent-tool-result-middleware-loader-BsZPH_qG.js: loadAgentToolResultMiddlewaresFor
+    # Runtime / listAgentToolResultMiddlewares; installed-plugin-index-N4jxqS0-.js:1241-1256
+    # buildContributionInfo, which normalizes contracts to sorted-unique STRING ids only).
+    #
+    # DISCLOSURE ONLY, never a FAIL asserting malice: WHICH plugin holds the contract, its
+    # origin, and its enabled state are statically decidable; WHAT the handler actually does
+    # with a tool result is not (epic doc §4 item 3). scored=False, WARN-capable only.
+    #
+    # The mass-false-positive trap this check exists to avoid: 67 of 69 plugins on a stock
+    # OpenClaw install are `origin: "bundled"` (shipped inside the dist itself), and 47 of
+    # those 69 already contribute at least one contract of SOME kind -- "a plugin registers
+    # a contract" would fire on every clean machine. The check gates on `origin !=
+    # "bundled"`, which on a real 69-plugin box narrows to exactly 2 plugins (the only two
+    # actually worth naming), both already declared in `plugins.entries` and already covered
+    # by B57/B167/B152/B177 for their OTHER surfaces. Expected net-new yield on a stock box
+    # is ~zero findings; that is expected and correct for a disclosure check, not evidence
+    # the check does nothing -- a THIRD-PARTY plugin that later adds this contract is
+    # exactly what it exists to catch.
+    #
+    # Two attack narratives from the same recon are DELIBERATELY NOT implemented here
+    # because the persisted schema cannot support them (see collector.py's
+    # _collect_plugin_trust docstring for the exact normalization citations):
+    # `contributions.providers` carries no baseURL field at all (B178 already covers the
+    # real provider-baseURL surface, in config, not this column), and `commandAliases` is
+    # normalized to the alias NAME only -- the mapping TARGET is stripped before persistence,
+    # so a hijacked-alias claim is unprovable from this data. This column is an inventory of
+    # names, not a spec; no amount of check effort recovers a capability spec from it.
+    #
+    # UNKNOWN when the state DB, the index row, or the plugins_json column is absent,
+    # locked, or unparseable (Golden Rule #4) -- never a fake PASS. Read-only
+    # (file:...?mode=ro + PRAGMA query_only=1), never writes to the shared state DB.
+    CheckMeta(
+        "B187",
+        "Non-bundled plugin declares the agentToolResultMiddleware tool-result-interception contract",
+        MEDIUM,
+        "advisory",
+        "Supply Chain / Plugin Capability Disclosure",
+        scored=False,
         confidence="HIGH",
         surface="mcp",
     ),
@@ -2186,6 +2237,53 @@ CATALOG: list[CheckMeta] = [
         "Excessive Agency (behavioral)",
         scored=False,
         confidence="MEDIUM",
+        surface="monitoring",
+    ),
+    # B191 (F-134, DISK-1): OpenClaw's OWN runtime audit trail (`audit_events` in the
+    # shared state SQLite DB — grep for "audit_events" across this package was ZERO hits
+    # before this). `collector._collect_audit_events` reads it; `checks/_host.py::
+    # check_audit_trail_signals` is the consumer. Full grounding lives on those two
+    # docstrings; this comment states the HONEST SCOPE and why it is cataloged here, next
+    # to T1/T2/T3, rather than among the scored B-ids above.
+    #
+    # HARD GR#5 BLOCKER — read before touching this check. The table stores `tool_name`
+    # ALONE: no argv, no command string, no file path, no target host anywhere in the
+    # schema. A benign `bash` build step and exfiltration-staging `bash` are the SAME row
+    # shape (measured on the real box: 344 of 502 rows are plain `bash`). This check
+    # therefore NEVER builds a volumetric or tool-name-presence rule — that would
+    # false-FAIL essentially every real config, including a completely benign one. It is
+    # NOT filed as an "undeclared MCP tool diff" either: that would duplicate T3's own
+    # semantic and hit the exact same wall T3 already answers with UNKNOWN (a config with
+    # empty `mcp.servers`/`mcpServers` has every built-in tool "undeclared" by
+    # construction — that would FAIL 4/4 tools of a benign config).
+    #
+    # WHAT IT ACTUALLY SHIPS — three things, one finding: (1) a coverage/observability
+    # signal (is the table present, readable, how far back does it reach); (2) a
+    # `--behavioral` corroboration source keyed on `session_id` (the field both this table
+    # and the trajectory sidecar carry in the clear), whose real value is detecting
+    # DIVERGENCE — `audit_events` still holding a session the trajectory source no longer
+    # does, because `OPENCLAW_TRAJECTORY=0` disabled it or it rotated that session out past
+    # its own 60-file cap while this independently-bounded (30-day / 100,000-row) store did
+    # not; (3) exactly two narrow, near-zero-FP signals: `status=='blocked'` /
+    # `error_code=='tool_blocked'` (the policy engine denied a tool at RUNTIME — no other
+    # check or mode sees this) and `tool_name=='unknown'` (OpenClaw's own audit layer could
+    # not even record the tool's name — an evasive/malformed identity reached execution).
+    #
+    # HONEST LABELLING — this NARROWS DISK-1's "prove what the agent did" aspiration; it
+    # does not close it. The schema bounds what is provable, not this check's effort: a
+    # tool-name-only record can name WHICH tool ran and WHEN, never WHAT it was told to do
+    # or WHERE it reached. Opt-in runtime layer, `scored=False`, WARN-only — matching the
+    # `--behavioral` precedent (never `audit()`/CHECKS/the A-F grade), not a new scored
+    # B*/C* static check. See `BEHAVIORAL_CHECK_IDS` in behavioral.py.
+    CheckMeta(
+        "B191",
+        "OpenClaw's runtime audit_events trail — coverage, policy-blocked tools, and "
+        "evasive tool names",
+        MEDIUM,
+        "advisory",
+        "Incident Response / Runtime Audit Trail (behavioral)",
+        scored=False,
+        confidence="HIGH",
         surface="monitoring",
     ),
 ]
@@ -2349,6 +2447,7 @@ AST_MAP = {
     "B184": ("AST02",),  # skills installed from a redirected registry = supply-chain compromise at the source (cf. B135/B177/B181)
     "B185": ("AST04", "AST05"),  # poisoned tool description delivered to the model = insecure metadata carrying untrusted external instructions (cf. B62/B64)
     "B186": ("AST02",),  # relocated bundled skills/hooks root = supply-chain code-load root the scanners never enumerated (cf. B184)
+    "B187": ("AST02",),  # non-bundled plugin declares agentToolResultMiddleware = supply-chain interception capability disclosure (cf. B151/B152/B177)
     "B193": ("AST02",),  # gateway secret inlined in the service unit = credential exposure on the persistence surface (cf. B182)
 }
 
@@ -2469,6 +2568,7 @@ OWASP_MAP = {
     "B184": ("LLM03",),  # skills installed from a redirected registry = Supply Chain
     "B185": ("LLM01",),  # poisoned tool description already delivered to the model = Prompt Injection
     "B186": ("LLM03",),  # relocated bundled skills/hooks code-load root = Supply Chain
+    "B187": ("LLM03", "LLM05"),  # non-bundled plugin declares agentToolResultMiddleware = Supply Chain + Improper Output Handling
     "B193": ("LLM02",),  # gateway secret inlined in the service unit = Sensitive Information Disclosure
 }
 

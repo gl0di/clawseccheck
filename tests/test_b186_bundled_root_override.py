@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from clawseccheck.catalog import BY_ID, FAIL, UNKNOWN, WARN
+from clawseccheck.catalog import BY_ID, FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_bundled_root_override
 from clawseccheck.collector import collect
 
@@ -49,44 +49,56 @@ def _home(root: Path, *, unit_lines: str = "", dotenv: str = "", units: bool = T
 
 
 # ---------------------------------------------------------------------------
-# The clean paths — and specifically, that none of them is an affirmative PASS
+# C-262: the clean paths — a reduced-confidence PASS when a persistent artifact was
+# actually read, UNKNOWN only when nothing persistent was even present to read.
 # ---------------------------------------------------------------------------
 
-def test_no_override_anywhere_is_unknown_not_pass(tmp_path):
-    """No override observed must NOT be reported as PASS.
+def test_no_override_with_readable_env_is_reduced_confidence_pass(tmp_path):
+    """No override, but a real OpenClaw unit WAS read: PASS, never full confidence.
 
-    The variable can also be exported into the shell that launches the agent, which
-    leaves nothing on disk. Claiming PASS would be claiming knowledge the audit does not
-    have — a lying PASS is worse than an honest UNKNOWN.
+    C-262 (round 2): round 1 made every "found nothing" outcome UNKNOWN forever, even
+    when a persistent artifact genuinely was read and genuinely carries no override.
+    That made B186 a permanent, unclearable UNKNOWN on every clean host. The ambient-shell
+    channel (a variable exported into the shell that launches the agent, never touching
+    disk) is still unobservable — which is why this can never claim full confidence — but
+    "we read what we could and it is clean" is worth more than an unconditional UNKNOWN,
+    so it is PASS with pass_confidence="no_signal": the same idiom B191 (this module) and
+    B168 (checks/_lifecycle.py) already use for "looked, found nothing, view incomplete."
     """
     f = check_bundled_root_override(collect(_home(tmp_path)))
-    assert f.status == UNKNOWN
-    assert f.status != "PASS"
-    # The reason must be stated, not implied.
+    assert f.status == PASS
+    assert f.pass_confidence == "no_signal"
+    assert f.pass_confidence != "verified"
+    # The residual must be stated, not implied.
     assert "shell" in f.detail.lower()
 
 
-def test_no_units_and_no_dotenv_is_still_unknown(tmp_path):
+def test_no_units_and_no_dotenv_is_unknown_not_pass(tmp_path):
+    """Nothing persistent was even present to read: stays UNKNOWN, not a bare-evidence PASS."""
     f = check_bundled_root_override(collect(_home(tmp_path, units=False)))
     assert f.status == UNKNOWN
+    assert f.status != "PASS"
 
 
-def test_clean_fixture_with_ordinary_unit_env_is_unknown():
+def test_clean_fixture_with_ordinary_unit_env_is_reduced_confidence_pass():
     """A real-shaped unit carrying several OPENCLAW_* vars, none of them a relocation."""
     home = FIXTURES / "clean_b186_no_bundled_override" / "openclaw_home"
     f = check_bundled_root_override(collect(home))
-    assert f.status == UNKNOWN
+    assert f.status == PASS
+    assert f.pass_confidence == "no_signal"
 
 
 def test_empty_override_value_is_not_an_override(tmp_path):
     """`process.env.X?.trim()` falsy means the dist falls through to normal resolution.
 
-    An empty assignment is not a relocation and must not be reported as one.
+    An empty assignment is not a relocation and must not be reported as one; since the
+    unit carrying it WAS read, this reaches the reduced-confidence PASS, not UNKNOWN.
     """
     f = check_bundled_root_override(
         collect(_home(tmp_path, unit_lines=f"Environment={SKILLS_VAR}=\n"))
     )
-    assert f.status == UNKNOWN
+    assert f.status == PASS
+    assert f.pass_confidence == "no_signal"
 
 
 # ---------------------------------------------------------------------------
@@ -251,17 +263,26 @@ def test_plugins_variable_never_fires(tmp_path):
     f = check_bundled_root_override(
         collect(_home(tmp_path, unit_lines=f"Environment={PLUGINS_VAR}={target}\n"))
     )
-    assert f.status == UNKNOWN
+    # PLUGINS_VAR is ignored, so `overrides` is empty; the unit WAS read (it carries the
+    # ignored var), so this reaches the reduced-confidence PASS, not a bare-evidence UNKNOWN.
+    assert f.status == PASS
+    assert f.pass_confidence == "no_signal"
 
 
 def test_plugins_variable_fixture_is_clean():
     home = FIXTURES / "clean_b186_plugins_var_ignored" / "openclaw_home"
     f = check_bundled_root_override(collect(home))
-    assert f.status == UNKNOWN
+    assert f.status == PASS
+    assert f.pass_confidence == "no_signal"
 
 
 def test_non_openclaw_unit_is_not_read(tmp_path):
-    """A relocation in someone else's unit is not this agent's environment."""
+    """A relocation in someone else's unit is not this agent's environment.
+
+    That unit is NOT OpenClaw-related, so it never sets unit_env_found; combined with
+    units=False (no OpenClaw unit either) and no dotenv, env_evidence_readable is False —
+    nothing persistent was read, so this stays UNKNOWN, not a bare-evidence PASS.
+    """
     target = tmp_path / "relocated"
     target.mkdir()
     unit_dir = tmp_path / ".config" / "systemd" / "user"
@@ -312,13 +333,67 @@ def test_hooks_root_is_not_treated_as_a_skill_root(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# B-311: the reported path is the LITERAL override value — no expanduser().
+#
+# systemd's Environment=/EnvironmentFile= parsing is not a shell (no `~` expansion), and
+# the dist reads the value verbatim: resolveBundledSkillsDir / resolveBundledHooksDir both
+# do `process.env.X?.trim(); if (override) return override;` (bundled-dir-BQFrcRIS.js:
+# 22-24, workspace-zj1TEEka.js:54-56) — no expansion, no existence check. A `~`-prefixed
+# override is therefore resolved by OpenClaw relative to the launching process's OWN cwd,
+# never to $HOME. Reporting an expanduser()'d path here names a directory OpenClaw never
+# actually loads from.
+# ---------------------------------------------------------------------------
+
+def test_tilde_override_is_reported_literally_not_expanded(tmp_path):
+    """A `~`-prefixed override must be reported verbatim, not expanded to $HOME."""
+    f = check_bundled_root_override(
+        collect(_home(tmp_path, unit_lines=f"Environment={SKILLS_VAR}=~/foo\n"))
+    )
+    assert f.status == WARN
+    joined = " ".join(f.evidence)
+    assert "~/foo" in joined
+    # The auditor's own expanded home directory must NOT appear — that would be reporting
+    # a path OpenClaw itself never resolves to.
+    assert str(Path.home()) not in joined
+
+
+def test_absolute_path_override_is_unaffected_by_the_b311_fix(tmp_path):
+    """An absolute-path override (the common case) is reported exactly as before."""
+    target = tmp_path / "relocated"
+    target.mkdir()
+    f = check_bundled_root_override(
+        collect(_home(tmp_path, unit_lines=f"Environment={SKILLS_VAR}={target}\n"))
+    )
+    assert f.status == WARN
+    assert str(target) in " ".join(f.evidence)
+
+
+def test_tilde_override_scan_coverage_is_at_least_as_wide_as_before(tmp_path):
+    """The SCAN still runs against the literal value — only the printed path changed.
+
+    Constructing `Path("~/foo")` and stat()-ing it does not expand `~` either, so a
+    relatively-rooted override is still evaluated for the world-writable escalation; this
+    pins that the B-311 fix does not narrow detection, only corrects what gets displayed.
+    """
+    home = _home(tmp_path, unit_lines=f"Environment={SKILLS_VAR}=~/foo\n")
+    ctx = collect(home)
+    f = check_bundled_root_override(ctx)
+    # A non-existent relative/tilde target cannot be proven world-writable (stat() fails,
+    # _dir_replaceable_by_others returns None) — same as it would for any other
+    # non-existent path pre- or post-fix. The important invariant is that this is still
+    # WARN (an override IS observed), not silently dropped to UNKNOWN.
+    assert f.status == WARN
+
+
+# ---------------------------------------------------------------------------
 # Catalog wiring
 # ---------------------------------------------------------------------------
 
 def test_b186_is_catalogued_and_unscored():
     meta = BY_ID["B186"]
     assert meta.severity == "HIGH"
-    # Deliberately out of the score: the near-universal state is UNKNOWN, and the state
-    # that occurs benignly is WARN (a source-checkout developer). Scoring it would dock a
-    # setup that is working as its owner intended.
+    # Deliberately out of the score (C-262): the near-universal state is a reduced-
+    # confidence PASS or UNKNOWN, and the state that occurs benignly is WARN (a
+    # source-checkout developer). Scoring it would dock a setup that is working as its
+    # owner intended.
     assert meta.scored is False
