@@ -394,20 +394,20 @@ def test_e2e_same_clean_config_capped_once_trajectory_proves_the_indicator_acted
 
 # ---------------------------------------------------------------------------
 # 5b. RETRACTED exception — end-to-end regression that NO exfil_evidence shape, of any
-#     host/verb qualification tried across four C-135 rounds, can cap any more. Every
-#     fixture below is compared against the same `clean_i025_b164_baseline` and must
-#     audit byte-for-byte identically to it (same score/grade, never capped) — the
-#     fixture set doubles as the historical record of what was once (wrongly) thought
-#     cap-eligible.
+#     host/verb qualification tried across four C-135 rounds, can cap any more. Each
+#     fixture below plants a trajectory/log sidecar `clean_i025_b164_baseline` does not
+#     have, so it is not a valid score/grade comparator here (it exists only to prove
+#     the *absence* of a trajectory sidecar reports UNKNOWN, not a cap — see the test
+#     above). What's asserted here is narrower and still exact: never capped, and B164
+#     itself never escalates past WARN — the fixture set doubles as the historical
+#     record of what was once (wrongly) thought cap-eligible.
 # ---------------------------------------------------------------------------
 
-def _assert_b164_warns_but_never_caps(fixture_name: str, *, base_score) -> None:
+def _assert_b164_warns_but_never_caps(fixture_name: str) -> None:
     _, findings, score = audit(FIXTURES / fixture_name)
     assert [f.id for f in findings if f.status == FAIL] == []
     assert score.runtime_capped is False, f"{fixture_name} must never cap (RETRACTED)"
     assert score.runtime_cap_reason is None
-    assert score.score == base_score.score, f"{fixture_name} must grade identically to baseline"
-    assert score.grade == base_score.grade
     b164 = next(f for f in findings if f.id == "B164")
     assert b164.status == WARN, f"{fixture_name}: exfil_evidence WARN behavior is unaffected"
 
@@ -416,9 +416,8 @@ def test_e2e_no_exfil_evidence_shape_caps_a_clean_config():
     """Every host/verb shape tried across C-135 follow-ups #1-#4 — an attacker-
     exclusive OOB host, a dual-use dev host, the agent's own first-party API traffic
     (log line and trajectory record), a bare host mention with no transport verb — now
-    audits identically to the baseline: WARN, never capped."""
-    _, _, base_score = audit(FIXTURES / "clean_i025_b164_baseline")
-
+    audits WARN, never capped, regardless of what else its trajectory/log sidecar
+    happens to make assessable."""
     for fixture_name in (
         "clean_i025_b164_oast_no_cap",  # attacker-exclusive OOB host (was cap-eligible under #4)
         "clean_i025_b164_dualuse_host_no_cap",  # dual-use dev host (ngrok)
@@ -427,7 +426,7 @@ def test_e2e_no_exfil_evidence_shape_caps_a_clean_config():
         "clean_i025_b164_host_mention_no_verb_no_cap",  # known host, no transport verb
         "clean_i025_b164_residual_no_cap",  # B-249 cross-line residual
     ):
-        _assert_b164_warns_but_never_caps(fixture_name, base_score=base_score)
+        _assert_b164_warns_but_never_caps(fixture_name)
 
 
 def test_e2e_no_trajectory_data_at_all_is_unknown_not_a_cap_or_implied_pass():

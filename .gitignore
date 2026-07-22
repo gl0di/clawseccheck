@@ -20,4 +20,9 @@ CLAUDE.local.md
 .continue/
 .copilot/
 
+# Except: fixture content that deliberately plants an agent-context file to test
+# detection of it (e.g. B-287's cross-file scan-boundary fixture). This is test
+# data, not real agent config, and must be tracked for the fixture to be complete.
+!fixtures/**/CLAUDE.md
+
 *.egg-info/
