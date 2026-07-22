@@ -51,7 +51,11 @@ from .report import (
     surfaced_despite_suppression,
 )
 from .adjudication import (
-    render_ignore_proposals_json, render_judge_packet_json, render_judged_json,
+    escalate_vet_output,
+    render_ignore_proposals_json,
+    render_judge_packet_json,
+    render_judged_json,
+    render_vet_judge_packet_json,
 )
 from .baseline import append_entries, is_fingerprint
 from .dossier import build_profile
@@ -705,6 +709,16 @@ def _main(argv=None) -> int:
     p.add_argument("--emit-manifest", action="store_true", dest="emit_manifest",
                    help="print a proposed permission manifest (YAML-shaped) derived from "
                         "static effect analysis; use with --vet/--vet-skill on a single skill")
+    p.add_argument("--vet-judge-packet", action="store_true", dest="vet_judge_packet",
+                   help="use with --vet/--vet-skill/--vet-plugin: print the vetted "
+                        "target's own borderline findings as JSON for a host-agent judge "
+                        "— never changes the vet verdict")
+    p.add_argument("--vet-judged", metavar="PATH", dest="vet_judged",
+                   help="use with --vet/--vet-skill/--vet-plugin: feed back a host-agent "
+                        "judge panel's verdicts for a prior --vet-judge-packet — the judge "
+                        "may only ESCALATE a finding (never lower one) since this is "
+                        "untrusted third-party content, not the user's own config; "
+                        "use '-' to read from stdin")
     p.add_argument("--canary", action="store_true",
                    help="active prompt-injection canary self-test")
     p.add_argument("--redteam", action="store_true",
@@ -932,11 +946,37 @@ def _main(argv=None) -> int:
             "note: --emit-manifest requires --vet/--vet-skill on a single skill; ignored",
             file=sys.stderr,
         )
+    if (args.vet_judge_packet or args.vet_judged) and not (
+        _vet_route and _vet_route[0] in ("skill", "plugin")
+    ):
+        print(
+            "note: --vet-judge-packet/--vet-judged require --vet/--vet-skill/--vet-plugin "
+            "on a single skill or plugin; ignored",
+            file=sys.stderr,
+        )
 
     if _vet_route and _vet_route[0] in ("skill", "plugin"):
         vet_kind, vet_path = _vet_route
         vet_target = Path(vet_path).expanduser()
         f = vet_skill(vet_path) if vet_kind == "skill" else vet_plugin(vet_path)
+        # C-254: use with --vet/--vet-skill/--vet-plugin only (checked above) — a
+        # distinct stdout artifact, same pattern as --emit-manifest below.
+        if args.vet_judge_packet:
+            _emit(render_vet_judge_packet_json(f, target=vet_path, version=__version__))
+            return 0
+        if args.vet_judged:
+            if args.vet_judged == "-":
+                verdicts_raw = sys.stdin.read()
+            else:
+                try:
+                    verdicts_raw = Path(args.vet_judged).expanduser().read_text(encoding="utf-8")
+                except OSError:
+                    verdicts_raw = ""
+            # Escalate-only: rebuild f's ring_findings so a borderline finding can only
+            # rank higher, never lower, than the deterministic engine already ranked it
+            # (adjudication._escalated_status). build_profile below is UNCHANGED —
+            # it re-derives overall_status/score/grade from this pool the normal way.
+            f = escalate_vet_output(f, verdicts_raw)
         profile = build_profile(f, vet_path, vet_kind)
         # rc: overall FAIL/WARN → 1 (dangerous/suspicious target);
         # UNKNOWN + target absent (not found / path unusable) → 1;

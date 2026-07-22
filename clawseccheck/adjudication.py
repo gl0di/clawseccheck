@@ -39,9 +39,10 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace as dc_replace
 
 from .baseline import fingerprint
-from .catalog import UNKNOWN, WARN
+from .catalog import FAIL, UNKNOWN, WARN
 from .logsafe import redact
 from .sar import build_sars
 from .skillast import analyze_env_auth_kwarg_exfil, analyze_python
@@ -512,3 +513,124 @@ def render_ignore_proposals_json(findings, *, verdicts_raw: str, version: str) -
         ),
     }
     return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+
+
+# --------------------------------------------------------------------------- --vet-judge-packet / --vet-judged (C-254)
+
+# C-254 -- "escalate-only on untrusted third-party content (--vet)." Authority here
+# is scoped by CONTENT PROVENANCE, not direction (the organising principle behind
+# both C-253 and this module): a --vet target is untrusted third-party content, so
+# a judge reviewing it may only ESCALATE a finding's status, never lower it. This
+# is the OPPOSITE rule from C-253's noise-remover above, which may only suppress --
+# deliberately: the two are not the same mechanism with a direction flag toggled.
+# On untrusted content the attacker's goal is "say it's clean," so a judge that is
+# structurally incapable of downgrading buys a successful prompt injection against
+# it nothing -- the worst it can achieve is a verdict at least as severe as the
+# deterministic engine already produced.
+#
+# Escalation is monotonic BY CONSTRUCTION (_escalated_status), not by convention:
+# the only two possible transitions are UNKNOWN -> WARN (a "SUSPICIOUS" verdict)
+# and {UNKNOWN, WARN} -> FAIL (a "DANGEROUS" verdict) -- there is no code path that
+# ever returns a status ranked below the finding's current one, for ANY verdict
+# value including a malformed/adversarial one (which falls through to "no change").
+
+_ESCALATION_TARGET = {"SUSPICIOUS": WARN, "DANGEROUS": FAIL}
+
+
+def _escalated_status(current_status: str, verdict: str | None) -> str | None:
+    """None when nothing should change; otherwise the new status, which is
+    always higher-or-equal to *current_status*. *current_status* is always
+    UNKNOWN or WARN here (the _is_borderline population this is only ever
+    called against): a "SUSPICIOUS" verdict escalates an UNKNOWN to WARN but is
+    a no-op on an already-WARN finding (WARN is already that rank -- nothing to
+    raise); a "DANGEROUS" verdict always escalates to FAIL, the ceiling. "SAFE",
+    an unrecognized verdict, or no submitted verdict at all changes nothing.
+    """
+    target = _ESCALATION_TARGET.get(verdict)
+    if target is None:
+        return None
+    if target == WARN and current_status != UNKNOWN:
+        return None
+    return target
+
+
+def _vet_pool(engine_output) -> list:
+    """Flatten a vet engine's return into a single finding pool, the same way
+    dossier._normalize_pool does (kept independent rather than importing
+    dossier's private helper -- see module note): vet_mcp returns a list
+    already; vet_skill/vet_plugin return one primary Finding carrying
+    ``.ring_findings`` -- crucially, for a single-signal vet the ENTIRE result
+    often rides on the primary alone (``.ring_findings`` empty), so a judge
+    packet built from ``.ring_findings`` alone would miss it. Both must be
+    considered.
+    """
+    if isinstance(engine_output, list):
+        return list(engine_output)
+    return [engine_output, *getattr(engine_output, "ring_findings", [])]
+
+
+def build_vet_judge_packet(engine_output) -> list[dict]:
+    """--vet-judge-packet: the borderline band of a SINGLE vet target's own
+    findings (``vet_skill``/``vet_plugin``'s primary Finding plus its
+    ``.ring_findings``) -- same shape and ``_is_borderline`` predicate as
+    build_judge_packet, but scoped to one target's own findings rather than the
+    user's full audit. Does not include the B62/recovered-taint/env-auth-kwarg
+    sources build_judge_packet adds for the full-audit case -- those read
+    ``ctx.installed_skill_py`` across every installed skill, not one vet target.
+    """
+    return [_item_from_finding(f) for f in _vet_pool(engine_output) if _is_borderline(f)]
+
+
+def render_vet_judge_packet_json(engine_output, *, target: str, version: str) -> str:
+    """Return the standalone ``--vet-judge-packet`` JSON artifact as a string."""
+    payload = {
+        "tool": "clawseccheck",
+        "version": version,
+        "target": target,
+        "judgePacket": build_vet_judge_packet(engine_output),
+    }
+    return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+
+
+def _escalate_finding(f, verdicts_map: dict):
+    """Return *f* unchanged, or a NEW copy (``dataclasses.replace``) with its
+    status escalated per ``_escalated_status``. Nothing is mutated in place.
+    The escalation is attributed in ``detail`` so a reader can tell a judge,
+    not the deterministic engine, raised it.
+    """
+    if not _is_borderline(f):
+        return f
+    entry = verdicts_map.get((f.id, _target_from_evidence(f)))
+    verdict = entry.get("verdict") if entry else None
+    new_status = _escalated_status(f.status, verdict)
+    if new_status is None:
+        return f
+    return dc_replace(
+        f, status=new_status,
+        detail=f"[escalated by host-agent judge: {verdict}] {f.detail}",
+    )
+
+
+def escalate_vet_output(engine_output, verdicts_raw: str):
+    """``--vet-judged``: return a NEW engine_output, same shape as *engine_output*
+    (one primary Finding with ``.ring_findings``, or a list), with every
+    ``_is_borderline`` entry -- primary INCLUDED, not just ring_findings, since a
+    single-signal vet's entire result is often the primary alone -- escalated per
+    ``_escalate_finding``. ``build_profile`` is then re-run UNCHANGED on this
+    output; it re-derives ``overall_status``/``score``/``grade`` from the pool the
+    NORMAL way. This function invents no new axis-rollup logic of its own; it
+    only ever hands ``build_profile`` a pool where a finding can rank higher,
+    never lower, than the deterministic engine already ranked it.
+
+    ``verdicts_raw`` is parsed exactly like ``--judged``'s (2 MB bound, defensive
+    against malformed/wrong-shaped/garbage input -- see ``_parse_verdicts``).
+    """
+    verdicts_map = _parse_verdicts(verdicts_raw)
+    if isinstance(engine_output, list):
+        return [_escalate_finding(f, verdicts_map) for f in engine_output]
+    escalated_primary = _escalate_finding(engine_output, verdicts_map)
+    escalated_ring = [
+        _escalate_finding(f, verdicts_map)
+        for f in getattr(engine_output, "ring_findings", [])
+    ]
+    return dc_replace(escalated_primary, ring_findings=escalated_ring)

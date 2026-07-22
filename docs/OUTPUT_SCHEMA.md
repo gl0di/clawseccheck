@@ -46,7 +46,7 @@ versioning §6 in `CLAUDE.md`).
 | `config_symlink_escapes_home` | `bool` | yes | `true` when `openclaw.json` is a symlink whose target leaves its config directory AND that target is a readable regular file owned by the auditing user — a benign dotfiles layout (stow/chezmoi/yadm/bare-git). The collector follows it and audits the real bytes, so this is NOT a blind config: `config_parse_error` stays `false` and the run is never `config_blind_capped` for this reason. Lets a consumer distinguish a safely-relocated config from a genuinely dark one. `false` on every normal (non-symlinked, or in-directory-symlinked) run. |
 | `config_parse_reason` | `string \| null` | yes | Short diagnostic for why `config_parse_error` is `true` (the raw loader message), OR a note that a dotfiles-style symlink was safely followed when `config_symlink_escapes_home` is `true`. `null` when the config parsed cleanly with no relocation. Never contains a secret or file-content value. |
 | `errors` | `array[str]` | yes | Human-readable collection/parse messages (e.g. the `openclaw.json` parse error). Empty array on a clean run. |
-| `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §16. |
+| `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §17. |
 | `scan_receipt` | `str` | yes | Deterministic content-integrity hash over all findings, formatted `"sha256:<64-hex-chars>"`. Same findings set (any order) always yields the same receipt; a changed finding set changes it. Not a security signature — a drift/tamper-evidence checksum for the scan output itself. |
 
 ### Skeleton
@@ -802,7 +802,58 @@ risk. This is an accepted, disclosed limitation, not a claim that the risk is go
 
 ---
 
-## 15. Stability Policy
+## 15. `--vet-judge-packet` / `--vet-judged` Output (C-254)
+
+The same judge-panel idea as `--judge-packet`/`--judged` (§12/§13), scoped to a
+SINGLE `--vet`/`--vet-skill`/`--vet-plugin` target instead of the user's full audit.
+**The authority rule is the opposite of `--propose-ignore` (§14), deliberately**:
+a `--vet` target is untrusted third-party content, so the judge may only
+**escalate** a finding's status (raise it), never lower it. Authority here is
+scoped by CONTENT PROVENANCE, not by direction — see §14's own note for why that
+split, not a single "judge with a direction flag," is the actual security property.
+
+`--vet-judge-packet` takes no argument; use alongside `--vet TARGET` (or
+`--vet-skill`/`--vet-plugin PATH`). Read-only. `--vet-judged PATH` (or `-` for
+stdin) feeds back the verdicts, same schema and same defensive/bounded parsing as
+`--judged` (§13's input contract — 2 MB bound, malformed/wrong-shaped/garbage input
+degrades to "no change," never a crash).
+
+**Structural guarantee:** only findings already offered via `--vet-judge-packet`
+(unsuppressed `UNKNOWN`, or `WARN` in the documented false-negative-prone set) are
+ever candidates. A `SAFE` verdict, an unrecognized verdict, or no verdict at all
+changes nothing. A `SUSPICIOUS` verdict raises an `UNKNOWN` finding to `WARN` (a
+no-op if it was already `WARN` — nothing to raise). A `DANGEROUS` verdict always
+raises the finding to `FAIL`, the ceiling. There is no code path that returns a
+lower-ranked status than the finding already had, for any input.
+
+### Envelope fields (`--vet-judge-packet`)
+
+| Field | Type | Description |
+|---|---|---|
+| `tool` | `str` | Always `"clawseccheck"`. |
+| `version` | `str` | Tool version string. |
+| `target` | `str` | The vetted target path, as given to `--vet`/`--vet-skill`/`--vet-plugin`. |
+| `judgePacket` | `array[JudgePacketItem]` | Same item shape as §12. May be an empty array. |
+
+`--vet-judged`'s output is the standard `--vet` JSON (§11) with any escalated
+finding's `status` raised and its `detail` prefixed
+`"[escalated by host-agent judge: <verdict>] "` so a reader can tell a judge, not
+the deterministic engine, raised it — `overall_status`/`overall_grade`/`score` are
+then re-derived from that pool the same way a plain `--vet` run always derives
+them (no separate rollup logic; `build_profile` is unchanged).
+
+**This gains no new authority over what `--vet` already computes** — it can only
+ever raise a finding that was already borderline (`UNKNOWN`/documented-FN-prone
+`WARN`) to a status the deterministic engine's OWN severity scale already defines;
+it can never invent a new check or a new signal. **Residual, stated plainly:** if
+the host agent generating the verdicts is itself compromised, the worst it can do
+is submit a verdict that changes nothing (the escalate-only structure gives it no
+way to make the target look SAFER) — the downside is bounded to "no escalation
+happened," never "a hidden real problem."
+
+---
+
+## 16. Stability Policy
 
 ### Frozen (breaking change requires major version bump)
 
@@ -837,7 +888,7 @@ risk. This is an accepted, disclosed limitation, not a claim that the risk is go
 
 ---
 
-## 16. `inventory` Object (F-131 — Inventory by Subject, Phase 1)
+## 17. `inventory` Object (F-131 — Inventory by Subject, Phase 1)
 
 Owner-facing regrouping of the SAME `findings` (§2) above by the entities an owner
 actually owns — System, Agents, Skills, MCP servers, Channels — instead of the 7

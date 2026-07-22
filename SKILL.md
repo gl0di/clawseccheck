@@ -260,6 +260,31 @@ automatically on every audit (same spirit as the ⚡ live tests in Section 6).
    visible to `--monitor`) but do not eliminate the risk; this is not presented as a
    solved problem.
 
+### Judge-panel fan-out for `--vet` targets (escalate-only)
+
+`--vet-judge-packet` (see `docs/OUTPUT_SCHEMA.md` §15) is the same idea as
+`--judge-packet` above, scoped to ONE `--vet`/`--vet-skill`/`--vet-plugin` target
+instead of the user's full audit. **The authority rule flips here, deliberately.**
+`--vet` inspects untrusted third-party content, not the user's own config — so the
+panel may only **escalate** a finding (raise its status), never lower one. This is
+the organising principle behind this whole epic: authority is scoped by CONTENT
+PROVENANCE, not by direction. Do not reuse the noise-remover flow above against a
+`--vet` target — the two use opposite rules for a reason: on untrusted content the
+attacker's goal is "say it's clean," so a judge that structurally cannot downgrade
+makes a successful injection against it worthless.
+
+1. Run `--vet TARGET --vet-judge-packet` (or `--vet-skill`/`--vet-plugin`) and parse
+   its `judgePacket` array — same 3-lens panel and majority-vote process as above.
+2. Feed the collected verdicts back with `--vet TARGET --vet-judged verdicts.json`
+   (same target flags, `-` for stdin) to render the combined vet output.
+3. A `SAFE` verdict changes nothing — the vet verdict/grade stay byte-identical to a
+   plain `--vet` run. A `SUSPICIOUS`/`DANGEROUS` verdict can raise a finding's status
+   (never lower it), which the escalated finding's `detail` field discloses
+   (`"[escalated by host-agent judge: ...]"`) so the reader can always tell a judge,
+   not the deterministic engine, raised it.
+4. Present this as a distinct **"Judge-escalated"** panel finding, same
+   advisory-but-separate framing as the audit-path second opinion.
+
 ---
 
 ## Guided conversational flow
