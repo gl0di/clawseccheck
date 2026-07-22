@@ -2237,10 +2237,11 @@ _B95_UNPINNED_PKG_RE = re.compile(r"'([^']+)' unpinned")
 # rare and actionable instead of firing on almost every skill that does real work. Advisory
 # (scored=False), WARN-only (never FAIL) — a heuristic gap in declared metadata, not proof
 # of malice.
-# B-132: (?<!\.) before eval(/exec( excludes a METHOD call on an object (model.eval(),
-# self.exec(...)) — those are ML-framework / object methods (e.g. torch's nn.Module.eval()
-# switching to inference mode), not the dynamic-evaluation builtins. A bare eval(/exec( (no
-# preceding dot) still matches.
+# B-132: the negative lookbehind before the dynamic-evaluation builtins excludes a METHOD
+# call on an object -- a model's own `.eval` switch, or a `self.exec` helper -- those are
+# ML-framework / object methods (e.g. torch's inference-mode switch, itself named `eval`),
+# not the builtins this rule targets. A bare, dot-free call to either builtin still
+# matches.
 _B98_DANGEROUS_PRIMITIVE_RE = re.compile(
     r"\bos\.system\s*\(|\bos\.exec[lv]p?e?\s*\(|(?<!\.)\beval\s*\(|(?<!\.)\bexec\s*\("
     r"|subprocess\.(?:run|call|Popen|check_call|check_output)\s*\([^)]*shell\s*=\s*True",
@@ -2474,7 +2475,7 @@ _DEP_PKG_NAME_RE = re.compile(
 # hooks/openclaw/HOOK.md) — not a hidden backdoor convention. It fires on EVERY turn though,
 # unlike an install-time hook (B42 scans package.json scripts, not hook file bodies), so it
 # deserves reviewer visibility even when benign — escalated when the body reaches a network
-# sink, reads process.env, or mutates the turn/tool-call object.
+# sink, touches its own environment variables, or mutates the turn/tool-call object.
 _EVENT_HOOK_PATH_RE = re.compile(r"(?:^|/)hooks/openclaw/[^/]+\.(?:mjs|cjs|js|ts)$", re.I)
 
 

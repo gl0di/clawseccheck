@@ -1,8 +1,9 @@
 """B97 (F-104, L1-7) — a per-turn event-hook file (hooks/openclaw/*.mjs) is a real, documented
 OpenClaw tool-registration mechanism (confirmed against a real installed skill), not a hidden
 backdoor. It fires on EVERY turn though, so presence alone warrants review (WARN, never a
-silent PASS); escalated when the body reaches a network sink, reads process.env, or mutates
-the turn/tool-call object. A minified/unreadable body reports UNKNOWN, never a silent PASS.
+silent PASS); escalated when the body reaches a network sink, touches its own environment
+variables, or mutates the turn/tool-call object. A minified/unreadable body reports UNKNOWN,
+never a silent PASS.
 Offline, read-only, stdlib only.
 """
 from __future__ import annotations

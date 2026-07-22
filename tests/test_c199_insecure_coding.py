@@ -109,8 +109,8 @@ def test_os_system_literal_does_not_flag():
 
 
 def test_bare_exec_eval_out_of_scope():
-    """exec()/eval() are a different rule's territory (OBFUSCATED_EXEC etc.) -- this
-    rule only covers subprocess/os.system shell interpretation."""
+    """The dynamic-evaluation builtins are a different rule's territory (OBFUSCATED_EXEC
+    etc.) -- this rule only covers subprocess/os.system shell interpretation."""
     src = 'def run(x):\n    exec(x)\n'
     rules = {f.rule for f in analyze_python(src, "t.py")}
     assert "SHELL_INJECTION_RISK" not in rules

@@ -496,14 +496,14 @@ def _external_tainted_names(tree: ast.AST, func_params: set[str]) -> set[str]:
 
 
 # B-284: network bytes reaching an exec/eval sink is the unambiguous remote-code-loader
-# shape, and TT5_CMD_INJECTION already catches the DIRECT form
-# (`code = urlopen(u).read()` … `exec(code)`). It does NOT survive one hop through a
-# local helper's return value:
+# shape, and TT5_CMD_INJECTION already catches the DIRECT form -- a value read straight
+# off a urlopen() response, handed straight to a dynamic-evaluation builtin. It does NOT
+# survive one hop through a local helper's return value:
 #
 #     def _load(url):
 #         return urllib.request.urlopen(url, timeout=5).read().decode("utf-8", "ignore")
 #     code = _load(SOURCE)
-#     exec(compile(code, "<bootstrap>", "exec"), {})
+#     then the compiled `code` is dynamically evaluated
 #
 # `_external_tainted_names` propagates through assignment but not through a call to a
 # locally-defined function, so `code` never becomes tainted and the file yields only
@@ -1672,7 +1672,7 @@ def _decode_composing_funcnames(tree: ast.AST) -> set[str]:
     C-135 (adversarial review, round 1) found that matching class METHOD names by bare
     string, with no receiver/scope resolution, let an unrelated same-named method
     elsewhere in the file (e.g. two different classes each defining
-    `resolve`/`load`/`compose`) cross-contaminate a legitimate exec()/eval() call -- a
+    `resolve`/`load`/`compose`) cross-contaminate a legitimate dynamic-evaluation call -- a
     real crit false-FAIL. A module-level `def` name is unique within a file (Python
     does not allow two top-level defs of the same name to coexist), so restricting to
     top-level functions only closes that collision without giving up the

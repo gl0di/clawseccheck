@@ -412,7 +412,7 @@ def test_b230_bad_docker_privileged_fixture_fails():
     assert f.status == "FAIL"
 
 
-# ---- B-230: sslVerify/ssl_verify=false on a remote endpoint (MITM) ----
+# ---- B-230: a remote endpoint whose sslVerify/ssl_verify field is disabled ----
 
 def test_b230_ssl_verify_false_remote_public_fails():
     ctx = _mcp({"remote": {"url": "https://mcp.example.com/api", "sslVerify": False}})

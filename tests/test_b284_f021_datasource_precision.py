@@ -14,8 +14,9 @@ an evasion (pinned below).
 
 Narrowing F-021 would on its own have opened a real false negative: a remote-code loader
 whose only B13 signal was F-021 firing by ACCIDENT. That gap is closed properly in
-skillast.py by REMOTE_CODE_LOAD -- network bytes reaching exec()/eval() through one hop
-of a local helper's return value, the form TT5_CMD_INJECTION does not reach. Both halves
+skillast.py by REMOTE_CODE_LOAD -- network bytes reaching a dynamic-evaluation builtin
+through one hop of a local helper's return value, the form TT5_CMD_INJECTION does not
+reach. Both halves
 are tested here so neither can regress without the other noticing.
 
 Offline, read-only, stdlib only.

@@ -1442,14 +1442,15 @@ def _mcp_server_risks(name: str, spec: dict) -> tuple[list[str], list[str]]:
                 "with no allowedHosts restriction"
             )
 
-    # ---- B-230: sslVerify/ssl_verify=false on a remote endpoint (MITM) ----
+    # ---- B-230: a remote endpoint whose sslVerify/ssl_verify field is disabled (possible
+    #      person-in-the-middle exposure) ----
     # Real MCP field (dist types.openclaw d.ts): "HTTP TLS verification, disabled only
     # for explicitly trusted private endpoints" (sslVerify; ssl_verify is its documented
     # alias). So this fires ONLY when the endpoint is remote (non-loopback, per
     # _mcp_url_is_local) AND not already recognizable as that blessed "explicitly trusted
     # private endpoint": a private/RFC-1918/link-local host (_MCP_META_IP_RE), or any
     # allowedHosts restriction configured at all, both suppress the finding — a genuinely
-    # private/allowlisted sslVerify=false endpoint must stay clean (C-135).
+    # private/allowlisted endpoint with verification disabled must stay clean (C-135).
     ssl_verify = spec.get("sslVerify", spec.get("ssl_verify"))
     if ssl_verify is False and isinstance(url, str) and url.strip() and not _mcp_url_is_local(url):
         ssl_host = (urlparse(url.strip()).hostname or "").lower()
