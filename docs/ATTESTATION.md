@@ -1,5 +1,11 @@
 # Attestation Guide
 
+> Looking for pre-install attestation of a THIRD-PARTY skill (not your own
+> agent setup)? That's a separate, escalate-only mechanism — see
+> `--vet-judge-packet`/`--vet-judged` in `docs/OUTPUT_SCHEMA.md` §15/§16 and
+> SKILL.md's "Judge-panel fan-out for `--vet` targets" section. This guide
+> covers `--attest`, the whole-agent self-report described below.
+
 ## What attestation is
 
 ClawSecCheck reads your OpenClaw config and bootstrap files.  That read-only

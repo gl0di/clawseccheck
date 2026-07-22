@@ -134,6 +134,13 @@ score. To confirm what is suppressed, use `--show-suppressed` again.
 > please also open an issue at <https://github.com/gl0di/clawseccheck/issues> with the
 > output of `clawseccheck --json` (it redacts secret *values* — only key names and paths
 > appear) and your OpenClaw version. That helps improve the grounding for everyone.
+>
+> **Automating this with a host-agent judge.** If your host agent (the AI assistant
+> running ClawSecCheck) can review the borderline findings itself, `--propose-ignore`
+> can propose exactly these `.clawseccheckignore` entries for it — see SKILL.md's
+> "Judge-panel fan-out" section and `docs/OUTPUT_SCHEMA.md` §14. It still writes
+> nothing on its own: applying a proposal is a separate, confirmation-gated step
+> (`--apply-ignore-proposals`), and a score-capping finding is never hidden by it.
 
 ---
 

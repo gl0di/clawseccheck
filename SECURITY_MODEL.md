@@ -325,6 +325,24 @@ reviewer can check every clause below directly against the cited module:
   (`logsafe.py`).
 - It does **not** modify the OpenClaw configuration, bootstrap files, or installed
   skills it reads (see "Forbidden behavior" above).
+- **What "reads sensitive local environment and token-related artifacts" actually
+  means** (C-253/254/255 judge epic; addressing a question a reviewer has
+  reasonably asked): checks that reference "environment variables" analyze a
+  scanned SKILL's own source code for env-var USAGE PATTERNS (e.g. does a skill
+  read an env var and pass it to a network call?) — never ClawSecCheck's own
+  process environment, and never a variable's VALUE, only whether the pattern
+  exists in the skill's text. Credential-store checks inventory PATH EXISTENCE
+  only (see "Secrets and data handling" above) — a filename, never a file's
+  contents. Nothing under either surface is ever transmitted (Golden Rule #1,
+  zero network).
+- The `--propose-ignore`/`--vet-judge-packet`/`--vet-judged` judge cycle (C-253/
+  254/255) does not change any of the above: it is a HOST-AGENT capability —
+  the user's own AI assistant reads a redacted data packet (or, for pre-install
+  attestation, the skill's own prose) and submits a verdict back. ClawSecCheck's
+  own engine never calls an LLM, never reaches the network, and never executes
+  anything read from a skill to FORM that packet — it only assembles already-
+  redacted findings data. See `docs/OUTPUT_SCHEMA.md` §14-§16 for exactly what
+  crosses that boundary.
 
 **On machine-readability of this declaration:** OpenClaw's own skill manifest format
 (`SKILL.md`'s `metadata.openclaw` block) currently exposes only three keys — `emoji`,
