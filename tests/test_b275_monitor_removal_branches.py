@@ -311,7 +311,30 @@ def test_symlink_alias_cleanup_is_silent(tmp_path):
     for n in _BOOT:
         assert (real / n).is_file(), "the real files must still be on disk, unmodified"
 
-    assert diff(before, after) == [], diff(before, after)
+    the_diff = diff(before, after)
+    if the_diff:
+        import os
+        import stat as stat_mod
+        print("=== DIAGNOSTIC (temporary, CLAWSECCHECK CI repro) ===")
+        print("uid/gid:", os.getuid(), os.getgid())
+        for p in (home, real, wsh, home / "openclaw.json"):
+            try:
+                st = p.stat()
+                print(p, "mode", oct(stat_mod.S_IMODE(st.st_mode)), "isdir", p.is_dir())
+            except OSError as exc:
+                print(p, "stat failed:", exc)
+        print("before.bootstrap keys:", sorted(before["bootstrap"].keys()))
+        print("after.bootstrap keys:", sorted(after["bootstrap"].keys()))
+        print("before.checks[B20]:", before["checks"].get("B20"))
+        print("after.checks[B20]:", after["checks"].get("B20"))
+        ctx2, findings2, _ = audit(home)
+        print("re-audit ctx.bootstrap keys:", sorted(ctx2.bootstrap.keys()))
+        print("re-audit ctx.limit_hits:", ctx2.limit_hits)
+        print("re-audit ctx.errors:", ctx2.errors)
+        b20 = next((f for f in findings2 if f.id == "B20"), None)
+        print("re-audit B20:", b20.status if b20 else None, getattr(b20, "detail", None))
+        print("=== END DIAGNOSTIC ===")
+    assert the_diff == [], the_diff
 
 
 def test_workspace_rename_is_silent(tmp_path):
