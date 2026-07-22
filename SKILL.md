@@ -275,6 +275,12 @@ makes a successful injection against it worthless.
 
 1. Run `--vet TARGET --vet-judge-packet` (or `--vet-skill`/`--vet-plugin`) and parse
    its `judgePacket` array — same 3-lens panel and majority-vote process as above.
+   **Copy the packet's `targetFingerprint` field verbatim into the verdicts JSON
+   you build in the next step** — it binds the verdicts to THIS specific target.
+   Omitting it, or reusing an old verdicts file from a different vet run, makes
+   every verdict in the file rejected outright (C-135: this closes a confirmed gap
+   where two different targets sharing a bare name — two fixtures, or two bundled
+   plugin skills — could otherwise have one's verdicts silently escalate the other).
 2. Feed the collected verdicts back with `--vet TARGET --vet-judged verdicts.json`
    (same target flags, `-` for stdin) to render the combined vet output.
 3. A `SAFE` verdict changes nothing — the vet verdict/grade stay byte-identical to a

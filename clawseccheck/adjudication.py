@@ -37,6 +37,7 @@ Stdlib only. No network, no subprocess, no writes.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import replace as dc_replace
@@ -585,6 +586,56 @@ def _vet_target_name(target: str) -> str:
     return Path(target).name or target
 
 
+# C-135 (2026-07-22): every packet/verdicts item is matched by (finding_id,
+# target) where target is only ever a bare NAME (_vet_target_name /
+# _target_from_evidence) -- cheap and colliding by construction. An independent
+# adversarial review confirmed this is exploitable two ways: (1) two DIFFERENT
+# vet targets that happen to share a bare name (two shipped fixtures, or two
+# bundled skills inside one plugin) can receive the SAME verdict; (2) a
+# verdicts file correctly produced for one target can be replayed, unmodified,
+# against a LATER, unrelated run whose target happens to share that same bare
+# name -- there was no binding between a verdicts file and the specific run it
+# was produced for. _vet_run_fingerprint binds the whole verdicts file to the
+# CURRENT run's resolved target path; escalate_vet_output refuses (degrades to
+# "no verdicts submitted," never partial-applies) any verdicts file whose own
+# echoed fingerprint doesn't match. This does not require the host agent to
+# understand a new protocol step beyond "copy the packet's targetFingerprint
+# field into your verdicts JSON" (SKILL.md documents this).
+def _vet_run_fingerprint(target: str) -> str:
+    """Stable fingerprint binding a judge-packet/verdicts cycle to THIS specific
+    vet invocation's resolved target path -- not just its bare basename, which
+    two different targets can share. Deliberately path-based, not content-based:
+    it defends against cross-target misattribution (the confirmed exploit),
+    not against the target's own content changing between packet and verdicts
+    within one flow, which this feature was never meant to detect anyway (a
+    static scanner only ever describes one moment-in-time state).
+    """
+    try:
+        resolved = str(Path(target).expanduser().resolve())
+    except OSError:
+        resolved = str(target)
+    return hashlib.sha256(resolved.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _verdicts_fingerprint_matches(verdicts_raw, expected_fingerprint: str) -> bool:
+    """True iff *verdicts_raw*'s own top-level ``targetFingerprint`` equals
+    *expected_fingerprint*. Fails CLOSED (returns False, meaning "reject") on
+    anything defensive parsing already guards against -- oversized input,
+    malformed JSON, a non-object root, or a missing/wrong-typed field -- so a
+    verdicts file with no fingerprint at all is rejected the same as a
+    mismatched one, never silently accepted.
+    """
+    if not isinstance(verdicts_raw, str) or len(verdicts_raw.encode("utf-8", "surrogatepass")) > _MAX_VERDICTS_BYTES:
+        return False
+    try:
+        data = json.loads(verdicts_raw)
+    except ValueError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    return data.get("targetFingerprint") == expected_fingerprint
+
+
 def build_vet_judge_packet(engine_output, target: str) -> list[dict]:
     """--vet-judge-packet: the borderline band of a SINGLE vet target's own
     findings (``vet_skill``/``vet_plugin``'s primary Finding plus its
@@ -605,11 +656,19 @@ def build_vet_judge_packet(engine_output, target: str) -> list[dict]:
 
 
 def render_vet_judge_packet_json(engine_output, *, target: str, version: str) -> str:
-    """Return the standalone ``--vet-judge-packet`` JSON artifact as a string."""
+    """Return the standalone ``--vet-judge-packet`` JSON artifact as a string.
+
+    ``targetFingerprint`` (C-135, 2026-07-22) binds this packet to THIS
+    specific vet invocation -- copy it verbatim into the verdicts JSON's own
+    top-level ``targetFingerprint`` field before feeding it to
+    ``--vet-judged``, or every verdict in the file is rejected (see
+    ``_verdicts_fingerprint_matches``).
+    """
     payload = {
         "tool": "clawseccheck",
         "version": version,
         "target": target,
+        "targetFingerprint": _vet_run_fingerprint(target),
         "judgePacket": build_vet_judge_packet(engine_output, target),
     }
     return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
@@ -648,9 +707,17 @@ def escalate_vet_output(engine_output, verdicts_raw: str, *, target: str):
     the deterministic engine already ranked it.
 
     ``verdicts_raw`` is parsed exactly like ``--judged``'s (2 MB bound, defensive
-    against malformed/wrong-shaped/garbage input -- see ``_parse_verdicts``).
+    against malformed/wrong-shaped/garbage input -- see ``_parse_verdicts``), PLUS
+    a mandatory ``targetFingerprint`` check (C-135, 2026-07-22): a verdicts file
+    whose fingerprint doesn't match THIS run's target is treated as if no
+    verdicts were submitted at all -- degrade, never partial-apply -- closing a
+    confirmed cross-target misattribution (two targets sharing a bare name, or a
+    stale verdicts file replayed against a later, unrelated run).
     """
-    verdicts_map = _parse_verdicts(verdicts_raw)
+    if _verdicts_fingerprint_matches(verdicts_raw, _vet_run_fingerprint(target)):
+        verdicts_map = _parse_verdicts(verdicts_raw)
+    else:
+        verdicts_map = {}
     new_attest_findings = _vet_attest_new_findings(_vet_target_name(target), verdicts_map)
     if isinstance(engine_output, list):
         return [_escalate_finding(f, verdicts_map) for f in engine_output] + new_attest_findings
@@ -659,7 +726,16 @@ def escalate_vet_output(engine_output, verdicts_raw: str, *, target: str):
         _escalate_finding(f, verdicts_map)
         for f in getattr(engine_output, "ring_findings", [])
     ] + new_attest_findings
-    return dc_replace(escalated_primary, ring_findings=escalated_ring)
+    result = dc_replace(escalated_primary, ring_findings=escalated_ring)
+    # C-135: dataclasses.replace only reconstructs DECLARED fields -- vet_skill/
+    # vet_plugin attach `.ctx` as a bare instance attribute (not a Finding field),
+    # so both the replace above and _escalate_finding's own replace silently drop
+    # it. build_profile reads engine_output.ctx to decide PASS-vs-UNKNOWN for the
+    # connections/persistence axes, so losing it corrupted that axis-level
+    # assessment on EVERY --vet-judged call, even a pure no-op one with no
+    # matching verdicts at all. Propagate it explicitly.
+    result.ctx = getattr(engine_output, "ctx", None)
+    return result
 
 
 # --------------------------------------------------------------------------- pre-install prose attestation (C-255)

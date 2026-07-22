@@ -833,6 +833,7 @@ lower-ranked status than the finding already had, for any input.
 | `tool` | `str` | Always `"clawseccheck"`. |
 | `version` | `str` | Tool version string. |
 | `target` | `str` | The vetted target path, as given to `--vet`/`--vet-skill`/`--vet-plugin`. |
+| `targetFingerprint` | `str` | Binds this packet to THIS specific vet invocation (see below) — copy it verbatim into the verdicts JSON's own `targetFingerprint` field. |
 | `judgePacket` | `array[JudgePacketItem]` | Same item shape as §12. May be an empty array. |
 
 `--vet-judged`'s output is the standard `--vet` JSON (§11) with any escalated
@@ -841,6 +842,22 @@ finding's `status` raised and its `detail` prefixed
 the deterministic engine, raised it — `overall_status`/`overall_grade`/`score` are
 then re-derived from that pool the same way a plain `--vet` run always derives
 them (no separate rollup logic; `build_profile` is unchanged).
+
+**`targetFingerprint` is mandatory (C-135, 2026-07-22).** An independent
+adversarial review confirmed that matching verdicts purely by `(finding_id,
+target)` — where `target` is only ever a bare name — let a verdicts file
+correctly produced for ONE target silently escalate a DIFFERENT one that
+happened to share that bare name (two shipped fixtures with the same
+directory name, two bundled skills inside one plugin, or a stale verdicts
+file replayed against a later, unrelated run). `--vet-judged` now computes a
+fingerprint of the CURRENT run's resolved target path and compares it against
+the verdicts JSON's own top-level `targetFingerprint`; a missing or mismatched
+fingerprint means the **entire verdicts file is rejected** — degrades to "no
+verdicts submitted," never a partial or best-effort match. The fingerprint is
+path-based, not content-based: it defends against cross-target
+misattribution, not against the target's own content changing between the
+packet and the verdicts within one flow, which this feature was never meant
+to detect (a static scanner only ever describes one moment-in-time state).
 
 **This gains no new authority over what `--vet` already computes** — it can only
 ever raise a finding that was already borderline (`UNKNOWN`/documented-FN-prone

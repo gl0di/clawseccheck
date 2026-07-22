@@ -271,6 +271,25 @@ def vet_plugin(path: str | Path) -> Finding:
         except Exception:  # noqa: BLE001 — a dispatched engine must never break the vet
             warns.append(f"bundled skill {sd.name!r} could not be vetted")
             continue
+        # C-135 (2026-07-22): disambiguate this bundled skill's OWN evidence entries
+        # by its plugin-relative path, not just its bare directory name — two bundled
+        # skills sharing a basename (e.g. skills/a/tool, skills/b/tool) would otherwise
+        # produce IDENTICAL evidence-line prefixes ("tool: ..."). adjudication.py's
+        # judge-packet/--vet-judged matching keys on exactly that prefix
+        # (_target_from_evidence), so without this a verdict meant for one bundled
+        # skill could silently escalate a DIFFERENT one sharing the same bare name.
+        # vet_skill's own evidence convention prefixes each line with sd.name (its
+        # `name = p.name`), so replacing just that leading segment is safe and exact.
+        try:
+            rel_label = str(sd.resolve().relative_to(root_res))
+        except (OSError, ValueError):
+            rel_label = sd.name
+        if rel_label != sd.name:
+            bare_prefix = f"{sd.name}: "
+            sf.evidence = [
+                f"{rel_label}: {e[len(bare_prefix):]}" if e.startswith(bare_prefix) else e
+                for e in (sf.evidence or [])
+            ]
         sf.detail = f"[bundled skill {sd.name!r}] {sf.detail}"
         subs.append(sf)
 
