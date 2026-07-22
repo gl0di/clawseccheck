@@ -3,6 +3,49 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.55.0] — 2026-07-22
+
+Closes four detection-precision false positives an independent adversarial review found
+behind the previous release's own workflow, and retracts a grade-cap mechanism rather
+than keep narrowing it once three separate reviews showed it can't be made sound.
+
+### Fixed
+- **A forged `# file:` header could suppress three independent content-security checks
+  (B61/B74/B156) at once**, hiding a live prompt-injection/exfiltration payload behind
+  what looked like an unrelated source-code comment. The structural source/prose segment
+  classifier now also closes an invisible-character-smuggling variant of the same bypass.
+- **A benign self-warning skill could escalate from WARN to FAIL** when its one
+  prohibition named the guarded action with two fetch-class verbs. Closing that opened a
+  narrower bypass (a passive URL reference followed by a pronoun); the fix for *that* in
+  turn opened three new false positives on ordinary guardrail prose ("open the bundled
+  rules and load them"). Nine rounds of adversarial review found no closed vocabulary
+  separates the benign and malicious shapes, so the pronoun-based arm is retracted rather
+  than patched again — the narrow attack it targeted now reports WARN, not a silent PASS.
+- **B61 could convict a literal string as a file exfiltration.** curl/wget only reads a
+  file when its payload value is `@`-prefixed; a flag carrying the same path as a plain
+  string was flagged identically to a real transport read. A curl-semantic classifier now
+  tells "file" from "literal" apart.
+- **The config-blind grade cap fired on a safe config it merely couldn't read.** A
+  dotfiles-style symlink whose target legitimately lives outside `~/.openclaw` was
+  indistinguishable from a genuinely corrupt config, so a valid config got capped as
+  unreadable. The loader now separates "unreadable" from "readable but symlink-escaped."
+- Two fixtures were missing the blank lines markdownlint requires around headings —
+  caught by the wider release gate, not the everyday pytest+ruff habit.
+
+### Changed
+- **The B164 `exfil_evidence` grade cap is retracted.** Three independent adversarial
+  reviews confirmed no attacker-exclusive host list can gate it soundly: this tool's own
+  audience — security-conscious operators — legitimately sends secrets to the exact
+  out-of-band/canary infrastructure (interactsh/oast, Burp Collaborator, Canarytokens) a
+  real attacker would also use, so the benign and malicious cases are byte-identical on
+  the log line that would gate it. `exfil_evidence` now stays WARN-only, same-line or
+  cross-line, permanently; a trajectory-indicator match is the sole remaining runtime
+  signal that can cap a grade.
+- An escalation rule that promoted a finding to FAIL once three checks corroborated it was
+  reverted: three adversarial rounds each found a structurally distinct false positive,
+  which reads as an unsound rule rather than one narrow edge case.
+- Restamped the advertised counts (8,037 → 8,373 tests; 376 → 385 test files).
+
 ## [3.54.0] — 2026-07-20
 
 Extends the audit to the ClawHub supply chain — where a skill came from and whether it
