@@ -67,6 +67,10 @@ _PALETTE: tuple[PaletteCategory, ...] = (
         PaletteEntry("Judge packet", 'judge packet', "--judge-packet",
                      "borderline findings (unknowns, FN-prone warns, dropped taint) as "
                      "JSON for a host-agent second opinion — never changes the grade"),
+        PaletteEntry("Propose ignore entries", 'propose ignore', "--propose-ignore",
+                     "feed back a judge panel's verdicts for a prior --judge-packet: "
+                     "prints PROPOSED (not applied) .clawseccheckignore entries for "
+                     "findings verdicted SAFE — see --apply-ignore-proposals to apply"),
         PaletteEntry("Trajectory analysis", 'analyze trajectory', "--analyze-trajectory",
                      "post-hoc: did a skill's instruction get acted on at runtime? "
                      "correlates skill indicators against tool.call args"),
@@ -160,8 +164,12 @@ _POWER_FLAGS = "--json, --fail-under, --exit-code, --home, --seed, --no-host"
 #   --judged → an internal continuation flag: it consumes a judge panel's verdicts
 #              JSON (produced by the SKILL.md "Judge-panel fan-out" flow, itself
 #              triggered from --judge-packet), not something a user says on its own.
+#   --apply-ignore-proposals (C-253) → same shape as --judged: an internal
+#              continuation flag consuming a --propose-ignore output, not something
+#              a user reaches for without having run --propose-ignore first.
 EXEMPT_FROM_PALETTE: frozenset[str] = frozenset(
-    {"--menu", "--functions", "--dashboard", "--dashboard-findings", "--judged"})
+    {"--menu", "--functions", "--dashboard", "--dashboard-findings", "--judged",
+     "--apply-ignore-proposals"})
 
 
 def grounded_flags() -> set[str]:

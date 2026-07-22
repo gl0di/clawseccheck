@@ -56,3 +56,31 @@ def apply(findings, ignore: set[str]) -> None:
     for f in findings:
         if f.id in ignore or fingerprint(f) in ignore:
             f.suppressed = True
+
+
+def append_entries(home: Path | str, entries, *, comment: str | None = None) -> int:
+    """Append *entries* to ``<home>/.clawseccheckignore``, creating it if absent.
+
+    Used by ``--apply-ignore-proposals`` (C-253): the caller has already run its
+    own confirmation gate, so this function performs the write unconditionally.
+    Entries already present (exact-string match against ``load_ignore``) are
+    skipped so a repeated apply cannot grow the file with duplicates. *comment*,
+    if given, is written as one ``#``-prefixed line ahead of the new entries so
+    a reader can see WHERE a suppression line came from — this does not change
+    matching (``apply`` above ignores blank/comment lines) or any of the
+    existing safety properties: a suppressed score-capping CRITICAL/HIGH FAIL
+    or a ``SENSITIVE_SUPPRESSED_IDS`` id still surfaces regardless of how the
+    entry got into this file (see ``report.surfaced_despite_suppression``), and
+    any change to this file is still visible to ``--monitor`` (``ignore_hash``).
+    Returns the number of entries actually written (0 if none were new).
+    """
+    p = Path(home).expanduser() / ".clawseccheckignore"
+    existing = load_ignore(home)
+    new_entries = [e for e in entries if e and e not in existing]
+    if not new_entries:
+        return 0
+    lines = [f"# {comment}"] if comment else []
+    lines.extend(new_entries)
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return len(new_entries)

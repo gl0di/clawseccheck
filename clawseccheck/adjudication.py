@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import re
 
+from .baseline import fingerprint
 from .catalog import UNKNOWN, WARN
 from .logsafe import redact
 from .sar import build_sars
@@ -281,6 +282,19 @@ def _b62_items(ctx) -> list[dict]:
 
 # --------------------------------------------------------------------------- public API
 
+def _is_borderline(f) -> bool:
+    """True for an unsuppressed finding the judge packet offers to the host agent:
+    every UNKNOWN, plus WARN results with a documented false-negative-prone history
+    (_FN_PRONE_WARN_IDS). Factored out so build_ignore_proposals (C-253) can only
+    ever consider exactly the same population build_judge_packet already showed the
+    judge — it must never propose suppressing a finding the judge never saw, and by
+    construction (UNKNOWN/WARN only) it can never even reach a FAIL-status finding.
+    """
+    return not getattr(f, "suppressed", False) and (
+        f.status == UNKNOWN or (f.status == WARN and f.id in _FN_PRONE_WARN_IDS)
+    )
+
+
 def build_judge_packet(ctx, findings) -> list[dict]:
     """Assemble the judge packet from a completed audit() pass.
 
@@ -291,13 +305,7 @@ def build_judge_packet(ctx, findings) -> list[dict]:
     Finding's status/severity/score. Deterministic: same inputs always sort to
     the same output order, regardless of dict-iteration order upstream.
     """
-    items: list[dict] = []
-
-    for f in findings or []:
-        if getattr(f, "suppressed", False):
-            continue
-        if f.status == UNKNOWN or (f.status == WARN and f.id in _FN_PRONE_WARN_IDS):
-            items.append(_item_from_finding(f))
+    items: list[dict] = [_item_from_finding(f) for f in (findings or []) if _is_borderline(f)]
 
     items.extend(_b62_items(ctx))
     items.extend(_recover_dropped_taint(ctx))
@@ -421,3 +429,71 @@ def render_judged_json(ctx, findings, score, *, verdicts_raw: str, risk=None) ->
     base = json.loads(render_json(findings, score, risk=risk, ctx=ctx))
     base["secondOpinion"] = _second_opinion(ctx, findings, _parse_verdicts(verdicts_raw))
     return json.dumps(base, ensure_ascii=True, indent=2)
+
+
+# --------------------------------------------------------------------------- --propose-ignore (C-253)
+
+# C-253 -- "judge as noise-remover on the user's OWN config." This does NOT gain any
+# new suppression authority: it only ever proposes entries for findings that were
+# already offered to the judge via build_judge_packet (_is_borderline), i.e. UNKNOWN
+# or FN-prone-WARN only -- a FAIL-status finding (the only kind that can cap the
+# score) can never be selected here, structurally, regardless of what a verdicts
+# file claims. And even for a proposal that IS applied, baseline.py's existing
+# suppression + report.surfaced_despite_suppression split already guarantees a
+# score-capping CRITICAL/HIGH FAIL or a SENSITIVE_SUPPRESSED_IDS id (e.g. WARN-status
+# B13) is still surfaced -- this module adds no new bypass of that rule. Nothing is
+# EVER written here: --propose-ignore only renders JSON; the separate, confirmation-
+# gated --apply-ignore-proposals (cli.py) is the only path that writes, and even that
+# can only write exactly what was already proposed.
+
+
+def build_ignore_proposals(findings, verdicts_map: dict) -> list[dict]:
+    """One entry per borderline finding the judge panel verdicted SAFE.
+
+    *verdicts_map* is the same ``{(finding_id, target): {"verdict": ..., "votes":
+    ...}}`` shape ``_parse_verdicts`` returns for ``--judged`` -- this is the same
+    verdicts file, read the same way; a SAFE verdict here is treated as "this
+    finding is benign in context, propose suppressing it" rather than merely
+    annotated. Only ``_is_borderline`` findings are ever considered (see module
+    note above). Deterministic ordering, same convention as build_judge_packet.
+    """
+    proposals: list[dict] = []
+    for f in findings or []:
+        if not _is_borderline(f):
+            continue
+        target = _target_from_evidence(f)
+        entry = verdicts_map.get((f.id, target))
+        if entry is None or entry.get("verdict") != "SAFE":
+            continue
+        proposals.append({
+            "entry": fingerprint(f),
+            "finding_id": f.id,
+            "target": target,
+            "votes": entry.get("votes"),
+        })
+    proposals.sort(key=lambda d: (d["finding_id"], d["target"]))
+    return proposals
+
+
+def render_ignore_proposals_json(findings, *, verdicts_raw: str, version: str) -> str:
+    """Return the standalone ``--propose-ignore`` JSON artifact as a string.
+
+    Read-only: this function never touches disk. Applying a proposal is a
+    separate, confirmation-gated step (``--apply-ignore-proposals``, cli.py).
+    """
+    proposals = build_ignore_proposals(findings, _parse_verdicts(verdicts_raw))
+    payload = {
+        "tool": "clawseccheck",
+        "version": version,
+        "proposedIgnoreEntries": proposals,
+        "note": (
+            "PROPOSED ONLY -- nothing was written by this command. A score-capping "
+            "CRITICAL/HIGH FAIL or a sensitive check id is never hidden by these "
+            "entries even once applied (see report.surfaced_despite_suppression), "
+            "and any applied entry changes .clawseccheckignore, which --monitor "
+            "already flags as drift. Review each line, then either add it to "
+            ".clawseccheckignore yourself or re-run with --apply-ignore-proposals "
+            "against this output saved to a file."
+        ),
+    }
+    return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)

@@ -243,6 +243,22 @@ automatically on every audit (same spirit as the ⚡ live tests in Section 6).
    with `--judged` to render the combined report. This extends the "Verdicts are
    advisory narration only" rule above: a judge panel can re-rank or annotate a finding
    the engine already reported, but it can never raise or lower the A–F grade.
+7. **Optional, only on the user's OWN config, only if they ask to reduce noise:** the
+   same verdicts JSON can instead be fed to `--propose-ignore` (C-253), which prints
+   PROPOSED `.clawseccheckignore` entries for items the panel verdicted SAFE — never
+   applied by that command itself. Only suggest this when the user explicitly wants
+   fewer findings to review, never as a default step. Applying a proposal is a
+   **separate, human-confirmed** command (`--apply-ignore-proposals`, or `--yes` for
+   scripted use) — always show the exact entries before running it, the same way
+   `--purge` is presented. This gains no new authority over what `.clawseccheckignore`
+   already does: a score-capping CRITICAL/HIGH FAIL (or a sensitive id) still appears
+   in the report even if suppressed, and every applied entry changes
+   `.clawseccheckignore`, which `--monitor` already flags as drift. **Residual, stated
+   plainly:** if the host agent running this panel is itself compromised or
+   prompt-injected, it could rubber-stamp a real finding as SAFE — the mitigations
+   above bound the damage (the capping FAIL still surfaces, the change is still
+   visible to `--monitor`) but do not eliminate the risk; this is not presented as a
+   solved problem.
 
 ---
 

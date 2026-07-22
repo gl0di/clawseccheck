@@ -13,9 +13,11 @@ No network. Pure stdlib. Cross-platform.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import secrets
 import sys
+from datetime import date
 from pathlib import Path
 
 from . import (
@@ -48,7 +50,10 @@ from .report import (
     render_vet_plan,
     surfaced_despite_suppression,
 )
-from .adjudication import render_judge_packet_json, render_judged_json
+from .adjudication import (
+    render_ignore_proposals_json, render_judge_packet_json, render_judged_json,
+)
+from .baseline import append_entries
 from .dossier import build_profile
 from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE, verify_chain
@@ -274,6 +279,7 @@ def _run_vet_mcp(target, args, ascii_only: bool) -> int:
 # always been decided by _main()'s cascade and is untouched.
 _PRIMARY_MODES = [
     ("purge", "--purge", "bool"),
+    ("apply_ignore_proposals", "--apply-ignore-proposals", "opt"),
     ("verify_self", "--verify-self", "bool"),
     ("verify_history", "--verify-history", "bool"),
     ("verify_events", "--verify-events", "bool"),
@@ -308,6 +314,7 @@ _PRIMARY_MODES = [
     ("incident", "--incident", "bool"),
     ("judge_packet", "--judge-packet", "bool"),
     ("judged", "--judged", "opt"),
+    ("propose_ignore", "--propose-ignore", "opt"),
     ("analyze_trajectory", "--analyze-trajectory", "opt"),
     ("behavioral", "--behavioral", "opt"),
     ("monitor", "--monitor", "bool"),
@@ -339,7 +346,8 @@ _MODE_HONORS = {
 _ATTEST_CONSUMERS = frozenset({
     "risk_paths", "badge", "html", "sarif", "trend", "percentile",
     "next", "dashboard", "dashboard_findings", "sbom", "incident",
-    "judge_packet", "judged", "analyze_trajectory", "behavioral", "monitor",
+    "judge_packet", "judged", "propose_ignore", "analyze_trajectory",
+    "behavioral", "monitor",
 })
 
 
@@ -493,6 +501,75 @@ def _run_purge(args) -> int:
             _emit(f"(could not delete {p}: {exc})")
 
     _emit(f"Purged {deleted} file(s) from {store_dir}.")
+    return 0
+
+
+# --- --apply-ignore-proposals: opt-in, confirmation-gated (C-253) --------------
+
+def _confirm_apply_ignore(entries: "list[str]", ignore_path: Path) -> "tuple[bool, bool]":
+    """Same (proceed, eof) contract as _confirm_purge — kept separate so tests can
+    monkeypatch either confirmation independently."""
+    _emit(f"The following entries will be appended to {ignore_path}:")
+    for e in entries:
+        _emit(f"  {e}")
+    try:
+        answer = input("Apply these judge-proposed suppressions? [y/N]: ")
+    except EOFError:
+        return False, True
+    return answer.strip().lower() in ("y", "yes"), False
+
+
+def _run_apply_ignore_proposals(args) -> int:
+    """Apply a --propose-ignore output (opt-in, confirmation-gated, C-253).
+
+    Reads the exact JSON --propose-ignore rendered and appends each proposal's
+    ``entry`` fingerprint to <home>/.clawseccheckignore via baseline.append_entries.
+    Never invents an entry beyond what that file already listed — this step can
+    only mutate the SAME suppression mechanism baseline.py already implements, and
+    every existing safety property (a suppressed score-capping CRITICAL/HIGH FAIL or
+    a SENSITIVE_SUPPRESSED_IDS id still surfaces; any .clawseccheckignore change is
+    still flagged by --monitor) is untouched by this being the write's origin.
+    """
+    try:
+        raw = Path(args.apply_ignore_proposals).expanduser().read_text(encoding="utf-8")
+    except OSError as exc:
+        _emit(f"clawseccheck: could not read proposals file ({type(exc).__name__}).")
+        return 1
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        _emit("clawseccheck: proposals file is not valid JSON.")
+        return 1
+    proposals = data.get("proposedIgnoreEntries") if isinstance(data, dict) else None
+    if not isinstance(proposals, list):
+        _emit("clawseccheck: proposals file has no 'proposedIgnoreEntries' list — nothing to apply.")
+        return 1
+    entries = [
+        p["entry"].strip() for p in proposals
+        if isinstance(p, dict) and isinstance(p.get("entry"), str) and p["entry"].strip()
+    ]
+    if not entries:
+        _emit("Nothing to apply — no proposed entries in that file.")
+        return 0
+
+    ignore_path = Path(args.home).expanduser() / ".clawseccheckignore"
+    if not args.yes:
+        proceed, eof = _confirm_apply_ignore(entries, ignore_path)
+        if not proceed:
+            if eof:
+                _emit("Apply aborted — no confirmation input available (not a tty / EOF).")
+                return 1
+            _emit("Apply aborted — no entries were written.")
+            return 0
+    else:
+        _emit(f"The following entries will be appended to {ignore_path}:")
+        for e in entries:
+            _emit(f"  {e}")
+
+    written = append_entries(
+        args.home, entries, comment=f"judge-proposed, applied {date.today().isoformat()}"
+    )
+    _emit(f"Applied {written} judge-proposed suppression(s) to {ignore_path}.")
     return 0
 
 
@@ -661,9 +738,14 @@ def _main(argv=None) -> int:
                    help="delete ClawSecCheck's local store (history/events/state/coverage "
                         "files + their lock sidecars) and exit — confirmation-gated unless "
                         "--yes is also given; nothing else is touched")
+    p.add_argument("--apply-ignore-proposals", metavar="PATH", dest="apply_ignore_proposals",
+                   help="apply a --propose-ignore output: append its proposed entries to "
+                        "<home>/.clawseccheckignore — confirmation-gated unless --yes is also "
+                        "given; never invents entries beyond what that file already proposed")
     p.add_argument("--yes", action="store_true",
-                   help="skip the interactive confirmation prompt for --purge (for scripted "
-                        "uninstall); has no effect without --purge")
+                   help="skip the interactive confirmation prompt for --purge or "
+                        "--apply-ignore-proposals (for scripted use); has no effect without "
+                        "one of those two")
     p.add_argument("--no-update-notice", action="store_true",
                    help="suppress the offline 'your build may be stale' reminder "
                         "(also suppressible via CLAWSECCHECK_NO_UPDATE_NOTICE=1; offline, never a network call)")
@@ -691,6 +773,11 @@ def _main(argv=None) -> int:
                    help="feed back a host-agent judge panel's verdicts JSON for a prior "
                         "--judge-packet; renders the audit's UNCHANGED grade/findings plus "
                         "an advisory secondOpinion panel — use '-' to read from stdin")
+    p.add_argument("--propose-ignore", metavar="PATH", dest="propose_ignore",
+                   help="feed back a host-agent judge panel's verdicts JSON for a prior "
+                        "--judge-packet; prints PROPOSED (not applied) .clawseccheckignore "
+                        "entries for findings verdicted SAFE — use '-' to read from stdin, "
+                        "then --apply-ignore-proposals to actually write them")
     p.add_argument("--verbose", action="store_true",
                    help="emit INFO-level log breadcrumbs to stderr")
     p.add_argument("--debug", action="store_true",
@@ -723,6 +810,11 @@ def _main(argv=None) -> int:
         # Dispatched FIRST, before any audit()/history-record call-site below, so
         # purge can never race its own uninstall by writing a fresh history point.
         return _run_purge(args)
+
+    if args.apply_ignore_proposals:
+        # C-253: like --purge, this only touches its own known file (.clawseccheckignore
+        # under --home) and needs no audit() pass, so it is dispatched here too.
+        return _run_apply_ignore_proposals(args)
 
     if args.verify_self:
         combined, per_file = package_digest()
@@ -1110,6 +1202,17 @@ def _main(argv=None) -> int:
             except OSError:
                 verdicts_raw = ""
         _emit(render_judged_json(ctx, findings, score, verdicts_raw=verdicts_raw))
+        return 0
+
+    if args.propose_ignore:
+        if args.propose_ignore == "-":
+            verdicts_raw = sys.stdin.read()
+        else:
+            try:
+                verdicts_raw = Path(args.propose_ignore).expanduser().read_text(encoding="utf-8")
+            except OSError:
+                verdicts_raw = ""
+        _emit(render_ignore_proposals_json(findings, verdicts_raw=verdicts_raw, version=__version__))
         return 0
 
     if args.analyze_trajectory is not None:

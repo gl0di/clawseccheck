@@ -46,7 +46,7 @@ versioning §6 in `CLAUDE.md`).
 | `config_symlink_escapes_home` | `bool` | yes | `true` when `openclaw.json` is a symlink whose target leaves its config directory AND that target is a readable regular file owned by the auditing user — a benign dotfiles layout (stow/chezmoi/yadm/bare-git). The collector follows it and audits the real bytes, so this is NOT a blind config: `config_parse_error` stays `false` and the run is never `config_blind_capped` for this reason. Lets a consumer distinguish a safely-relocated config from a genuinely dark one. `false` on every normal (non-symlinked, or in-directory-symlinked) run. |
 | `config_parse_reason` | `string \| null` | yes | Short diagnostic for why `config_parse_error` is `true` (the raw loader message), OR a note that a dotfiles-style symlink was safely followed when `config_symlink_escapes_home` is `true`. `null` when the config parsed cleanly with no relocation. Never contains a secret or file-content value. |
 | `errors` | `array[str]` | yes | Human-readable collection/parse messages (e.g. the `openclaw.json` parse error). Empty array on a clean run. |
-| `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §15. |
+| `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §16. |
 | `scan_receipt` | `str` | yes | Deterministic content-integrity hash over all findings, formatted `"sha256:<64-hex-chars>"`. Same findings set (any order) always yields the same receipt; a changed finding set changes it. Not a security signature — a drift/tamper-evidence checksum for the scan output itself. |
 
 ### Skeleton
@@ -722,7 +722,75 @@ absent, it renders `"judge: DANGEROUS"`.
 
 ---
 
-## 14. Stability Policy
+## 14. `--propose-ignore` / `--apply-ignore-proposals` Output (C-253)
+
+`--propose-ignore` consumes the same host-agent judge panel verdicts JSON as
+`--judged` (§13, same `(finding_id, target)` matching, same 2 MB bound and defensive
+parsing) for a prior `--judge-packet` run (§12), but instead of annotating a finding
+it proposes suppressing it: items the panel verdicted `"SAFE"` become PROPOSED
+`.clawseccheckignore` entries. **Read-only** — this command never writes to disk.
+Takes the verdicts JSON via `--propose-ignore PATH`, or `--propose-ignore -` to read
+it from stdin.
+
+**Structural guarantee:** only findings already offered to the judge via
+`--judge-packet` (unsuppressed `UNKNOWN`, or `WARN` in the documented
+false-negative-prone set) are ever candidates — a `FAIL`-status finding (the only
+kind that can cap the score) can never be selected here, regardless of what a
+verdicts file claims for it.
+
+### Envelope fields
+
+| Field | Type | Description |
+|---|---|---|
+| `tool` | `str` | Always `"clawseccheck"`. |
+| `version` | `str` | Tool version string. |
+| `proposedIgnoreEntries` | `array[IgnoreProposalItem]` | The proposals. May be an empty array. |
+| `note` | `str` | Plain-language reminder that nothing was written and how to apply. |
+
+### IgnoreProposalItem fields
+
+| Field | Type | Description |
+|---|---|---|
+| `entry` | `str` | The exact `.clawseccheckignore` line (`<id>:<fingerprint>`) — the same fingerprint `baseline.py` matches against. |
+| `finding_id` | `str` | Check id (e.g. `"B13"`). |
+| `target` | `str` | Same as the originating `judgePacket` item's `target`. |
+| `votes` | `object \| null` | Vote breakdown if the verdicts file supplied one, else `null`. |
+
+```json
+{
+  "tool": "clawseccheck",
+  "version": "3.55.0",
+  "proposedIgnoreEntries": [
+    {"entry": "B13:ab12cd34", "finding_id": "B13", "target": "skillx", "votes": {"SAFE": 3}}
+  ],
+  "note": "PROPOSED ONLY -- nothing was written by this command. ..."
+}
+```
+
+`--apply-ignore-proposals PATH` reads exactly that JSON and appends each `entry` to
+`<home>/.clawseccheckignore`, creating the file if absent. It is **opt-in and
+confirmation-gated** the same way `--purge` is: it prints the exact lines and asks
+for `[y/N]` unless `--yes` is also given; an unanswerable prompt (no tty / EOF)
+aborts loudly (exit 1), never silently proceeds. It never invents an entry beyond
+what the proposals file already listed, and already-present entries are skipped
+(repeated applies do not grow the file with duplicates).
+
+**This gains no new suppression authority.** A suppressed score-capping
+`CRITICAL`/`HIGH` `FAIL`, or a sensitive check id (`B1`, `B2`, `B13`, `B20`), still
+surfaces regardless of how the suppressing line got into `.clawseccheckignore` (see
+`surfaced_despite_suppression`, §2), and any change to that file — including one made
+this way — is still flagged by `--monitor` as drift (`ignore_hash`, §1).
+
+**Residual, stated plainly (not solved away):** if the host agent generating the
+verdicts JSON is itself compromised or prompt-injected, it could propose (and, if
+also given `--yes` or talked past the confirmation prompt, apply) a suppression for
+a real finding. The mitigations above bound the damage — a capping FAIL still
+surfaces, the file change is still visible to `--monitor` — but do not eliminate the
+risk. This is an accepted, disclosed limitation, not a claim that the risk is gone.
+
+---
+
+## 15. Stability Policy
 
 ### Frozen (breaking change requires major version bump)
 
@@ -757,7 +825,7 @@ absent, it renders `"judge: DANGEROUS"`.
 
 ---
 
-## 15. `inventory` Object (F-131 — Inventory by Subject, Phase 1)
+## 16. `inventory` Object (F-131 — Inventory by Subject, Phase 1)
 
 Owner-facing regrouping of the SAME `findings` (§2) above by the entities an owner
 actually owns — System, Agents, Skills, MCP servers, Channels — instead of the 7
