@@ -65,8 +65,10 @@ uploaded** — none of it touches your OpenClaw setup, only ClawSecCheck's own s
 audit history under `~/.clawseccheck/` (owner-only — opt out with `--no-history`), any report files
 you explicitly request via a flag (`--save`, `--badge`, `--html`, `--sarif`, `--monitor`, `--trend`,
 `--log`), and a small freshness ledger (`~/.clawseccheck/coverage.json`) recording when you last ran
-an opt-in active self-test (`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`). Every file
-it writes is deletable in one step with `--purge`. Scoping flags at a glance: `--no-history` (skip
+an opt-in active self-test (`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`). `--purge`
+deletes its four known store files (history/events/state/coverage) plus their lock siblings in one
+step; a crash-artifact `.tmp` sibling, if one is ever left behind, is not touched by `--purge` and
+needs a manual `rm`. Scoping flags at a glance: `--no-history` (skip
 local history), `--no-host` (skip the host-recon bullet above), `--no-native` (skip the one external
 command below). Pure Python standard library, no dependencies.
 
@@ -287,7 +289,7 @@ rest on demand. The number, the phrase, or a tap all select an item; free phrasi
 | 2 Check before install | `--vet <path>` (autodetects skill · plugin · MCP spec; `--vet-skill` / `--vet-plugin` force an engine) · `--vet-mcp [name]` (configured MCP) · `--vet-source <slug\|url>` (before anything is even downloaded) | Supply-chain check on something you're about to trust. See vet flow in Step 5. |
 | 3 Report & history | default report · `--save <path>` · `--trend` · `--badge <path>` | Show or save the last result, the score trend, or a shareable badge. |
 | 4 Menu | `--functions` (Screen 12 — the full palette) | Saying "menu" / "functions" / "more" expands the complete capability list — run `python3 {baseDir}/audit.py --functions` (or present its output). Every capability appears as a speakable prompt grounded to its real flag (verify, what-changed, html, sarif, percentile, risk-paths, the vet family, the ⚡ live tests, …), so there's no wall of raw flags. (`--menu` itself renders *this* Welcome screen; the palette is one level deeper.) |
-| "private" modifier | Add `--no-history` to any mode | "1 private" = Check everything + `--no-history`. Nothing written to `~/.clawseccheck/`. |
+| "private" modifier | Add `--no-history` to any mode | "1 private" = Check everything + `--no-history`. Nothing written to `~/.clawseccheck/` for the audit/vet/self-test modes — but `--monitor` and `--trend` always write their own state regardless of `--no-history`; it is not a suppressor for those two. |
 | "update" | Offline notice + agent check | ClawSecCheck never phones home. On "update" the **host agent** checks ClawHub for a newer version and, if there is one, offers `openclaw skills update clawseccheck` — the tool itself stays offline. |
 
 After the user chooses (or says "check" / "go"), proceed to Step 2.
@@ -712,7 +714,10 @@ Boundary: this is introspection only. **Never perform a side-effectful action to
 First, tell the user in plain language what will happen:
 > "I'll take a snapshot of your current setup. Next time I run, I'll tell you only what changed.
 > A few small files under ~/.clawseccheck/ are written locally — the snapshot (state.json), a
-> change journal (events.jsonl), and one score-history line (history.jsonl). Nothing leaves your machine."
+> change journal (events.jsonl), and one score-history line (history.jsonl). Nothing leaves your
+> machine. Two honest limits: the snapshot itself isn't tamper-proof (a local writer could forge
+> it), and the change journal only catches naive edits, not a deliberate rewrite — see
+> SECURITY_MODEL.md for the full picture."
 
 Wait for the user to confirm. Only then run:
 
