@@ -70,6 +70,13 @@ _AXIS_BY_ID: dict[str, str | None] = {
     "SOURCE-VET": "danger",  # reputation gate is a pure danger/identity verdict
     "PLUGIN-VET": None,  # container aggregate — decomposed into its sub-findings
     "MCP-VET": None,  # multi-reason verdict — routed per-reason via axis_reasons
+    # C-255: pre-install prose-attestation findings (adjudication.py) — a declared-
+    # purpose mismatch, an injected/manipulative instruction, or an attempt to talk
+    # the reviewing agent into trusting the skill are all manipulation/override
+    # concerns, the same category AST05 (behavior) already covers.
+    "ATTEST-PROSE-MISMATCH": "behavior",
+    "ATTEST-PROSE-INJECTION": "behavior",
+    "ATTEST-PROSE-SOCIAL-ENG": "behavior",
 }
 
 # Step 2: AST class → axis (the grounded default; ast_for() at catalog.py).

@@ -285,6 +285,23 @@ makes a successful injection against it worthless.
 4. Present this as a distinct **"Judge-escalated"** panel finding, same
    advisory-but-separate framing as the audit-path second opinion.
 
+**Pre-install prose attestation (C-255).** The SAME `--vet-judge-packet` output
+always ALSO carries three fixed questions — `ATTEST-PROSE-MISMATCH`,
+`ATTEST-PROSE-INJECTION`, `ATTEST-PROSE-SOCIAL-ENG` — regardless of whether the
+deterministic engine flagged anything at all. This answers a measured gap, not a
+hunch: 97.32% of malicious cases the engine only ever caught at WARN had ZERO
+FAIL-capable signal, because the attack was described in the skill's prose, not
+shipped as code — a static regex engine cannot read intent out of prose. **To
+answer these three, actually read the skill's own SKILL.md/README/instructions
+yourself** (not just this packet's redacted evidence) before submitting a
+verdict — that is the entire point of this extension. Feed the verdicts back
+through the SAME `--vet-judged` flag as above. **The safety ceiling that makes
+this acceptable to ship:** unlike an escalated deterministic finding (which can
+reach FAIL), these three ids have zero independent signal behind them — a pure
+self-report — so even a `DANGEROUS` verdict here only ever produces a `WARN`,
+never a capping `FAIL`. A compromised or hallucinating judge cannot single-
+handedly fail an install on prose-reading alone.
+
 ---
 
 ## Guided conversational flow

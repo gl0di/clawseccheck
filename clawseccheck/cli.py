@@ -976,7 +976,7 @@ def _main(argv=None) -> int:
             # rank higher, never lower, than the deterministic engine already ranked it
             # (adjudication._escalated_status). build_profile below is UNCHANGED —
             # it re-derives overall_status/score/grade from this pool the normal way.
-            f = escalate_vet_output(f, verdicts_raw)
+            f = escalate_vet_output(f, verdicts_raw, target=vet_path)
         profile = build_profile(f, vet_path, vet_kind)
         # rc: overall FAIL/WARN → 1 (dangerous/suspicious target);
         # UNKNOWN + target absent (not found / path unusable) → 1;

@@ -46,7 +46,7 @@ versioning §6 in `CLAUDE.md`).
 | `config_symlink_escapes_home` | `bool` | yes | `true` when `openclaw.json` is a symlink whose target leaves its config directory AND that target is a readable regular file owned by the auditing user — a benign dotfiles layout (stow/chezmoi/yadm/bare-git). The collector follows it and audits the real bytes, so this is NOT a blind config: `config_parse_error` stays `false` and the run is never `config_blind_capped` for this reason. Lets a consumer distinguish a safely-relocated config from a genuinely dark one. `false` on every normal (non-symlinked, or in-directory-symlinked) run. |
 | `config_parse_reason` | `string \| null` | yes | Short diagnostic for why `config_parse_error` is `true` (the raw loader message), OR a note that a dotfiles-style symlink was safely followed when `config_symlink_escapes_home` is `true`. `null` when the config parsed cleanly with no relocation. Never contains a secret or file-content value. |
 | `errors` | `array[str]` | yes | Human-readable collection/parse messages (e.g. the `openclaw.json` parse error). Empty array on a clean run. |
-| `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §17. |
+| `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §18. |
 | `scan_receipt` | `str` | yes | Deterministic content-integrity hash over all findings, formatted `"sha256:<64-hex-chars>"`. Same findings set (any order) always yields the same receipt; a changed finding set changes it. Not a security signature — a drift/tamper-evidence checksum for the scan output itself. |
 
 ### Skeleton
@@ -853,7 +853,63 @@ happened," never "a hidden real problem."
 
 ---
 
-## 16. Stability Policy
+## 16. Pre-Install Prose Attestation (C-255)
+
+The SAME `--vet-judge-packet`/`--vet-judged` cycle (§15) ALSO always carries three
+FIXED questions, regardless of whether the deterministic engine flagged anything at
+all: `ATTEST-PROSE-MISMATCH`, `ATTEST-PROSE-INJECTION`, `ATTEST-PROSE-SOCIAL-ENG`.
+This answers a measured gap, not a hunch: 97.32% of malicious cases the engine only
+ever caught at `WARN` had ZERO `FAIL`-capable signal, because the attack was
+described in the skill's prose rather than shipped as code. Answering these three
+requires actually reading the skill's own SKILL.md/README/instructions — a
+capability ClawSecCheck itself does not have (stdlib-only, no LLM); the host agent
+supplies it.
+
+**Landed alongside C-254's mechanism, not in `attest.py`**, despite the epic's
+original framing — grounding against the real code showed the packet/verdicts/
+escalate-only cycle already built for C-254 is the right home; `attest.py` is a
+structurally different whole-agent self-report mechanism (see `--attest`, unrelated
+to a per-vet-target packet).
+
+**The safety ceiling — the load-bearing difference from C-254's escalation:**
+C-254 raises an EXISTING finding that already has independent deterministic
+corroboration (a real regex/AST signal). These three ids have NONE — pure
+self-report. So even a `DANGEROUS` verdict here only ever produces a `WARN`-status
+finding, **never `FAIL`, never score-capping**. A `SAFE` verdict, an unrecognized
+verdict, or no verdict at all produces **no finding at all** (not even a
+manufactured `PASS`) — these ids can only ever ADD caution, never subtract it and
+never add a point to the vet score.
+
+### JudgePacketItem additions
+
+The three fixed items appear in `--vet-judge-packet`'s `judgePacket` array (§15)
+with `engine_disposition: "UNKNOWN"` and `redacted_evidence: "(no deterministic
+signal -- read the skill's own prose to answer)"` — always present, unlike every
+other item in that array.
+
+### New findings in `--vet-judged`'s output
+
+A `SUSPICIOUS`/`DANGEROUS` verdict on one of the three ids adds a NEW Finding (not
+an escalation of an existing one) to the standard `--vet` JSON's `findings` array:
+
+| Field | Value |
+|---|---|
+| `status` | Always `WARN` — never `FAIL`, regardless of verdict. |
+| `severity` | `MEDIUM`. |
+| `confidence` | `ATTESTED` — the same ceiling `attest.py`'s self-report findings (B43/B44/B45/B84) already use. |
+| `scored` | `false` — advisory, matching every other self-report-derived finding. |
+| `detail` | Prefixed `"[host-agent pre-install attestation, verdict <verdict>]"`. |
+
+**Residual, stated plainly:** if the host agent's pre-install read is itself
+compromised, hallucinating, or talked into a false verdict by the skill's own
+prose, the worst it can do is add a `WARN` that was not warranted, or fail to add
+one that was — it can never fail an install by itself, and a `SAFE` verdict can
+never suppress or soften a REAL deterministic finding (C-254's escalate-only rule
+is unaffected by this extension). This is an accepted, disclosed limitation.
+
+---
+
+## 17. Stability Policy
 
 ### Frozen (breaking change requires major version bump)
 
@@ -888,7 +944,7 @@ happened," never "a hidden real problem."
 
 ---
 
-## 17. `inventory` Object (F-131 — Inventory by Subject, Phase 1)
+## 18. `inventory` Object (F-131 — Inventory by Subject, Phase 1)
 
 Owner-facing regrouping of the SAME `findings` (§2) above by the entities an owner
 actually owns — System, Agents, Skills, MCP servers, Channels — instead of the 7
