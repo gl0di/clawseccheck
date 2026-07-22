@@ -84,6 +84,24 @@ def surfaced_despite_suppression(f: Finding) -> bool:
         or f.id in SENSITIVE_SUPPRESSED_IDS
     )
 
+def _runtime_cap_phrase(reason: str | None) -> str:
+    """Plain-English rendering of scoring's stable ``runtime_cap_reason`` label.
+
+    ``_runtime_cap_signal`` (scoring.py) returns a stable, testable label — the
+    trajaudit-indicator match is the only remaining cap source (a same-line
+    exfil_evidence cap was tried and RETRACTED, C-135 8th round, Dave's 2026-07-22
+    ruling — see logscan.py's retraction note) — and its docstring is explicit that
+    the label is never rendered as-is: report.py owns the owner-facing sentence.
+    Dumping the raw label would leak an internal check id into owner prose, which
+    `test_brand_consistency` forbids. An unrecognized label degrades to a neutral
+    phrase, never a raw id.
+    """
+    r = reason or ""
+    if "trajaudit" in r or "indicator" in r:
+        return "a trajectory-indicator match"
+    return "a corroborated runtime signal"
+
+
 _SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}
 # Within a family: FAIL/WARN (the actionable items) before PASS/UNKNOWN (context).
 _STATUS_ORDER = {FAIL: 0, WARN: 1, UNKNOWN: 2, PASS: 3}
@@ -1035,8 +1053,45 @@ def render_report(findings: list[Finding], score: ScoreResult,
     lines = [head, "=" * 44,
              f"Score: {score.score}/100   Grade: {grade_disp}",
              _score_bar(score.score, score.grade, ascii_only=ascii_only, color=color)]
-    if score.capped:
-        lines.append(f"(capped from {score.raw_score} - open {score.cap_severity or 'CRITICAL'} finding)")
+    # B-306 (C-135 follow-up #3, 2026-07-21): gate on the three GRANULAR cap signals, not
+    # `score.capped` alone. `score.capped` means "score != raw_score" — deliberately FALSE
+    # in scoring.py's `total == 0` branch (raw_score and score are both hardcoded 0 there;
+    # there is no positive raw value for the cap to have reduced FROM), yet
+    # `config_blind_capped`/`runtime_capped` can still be True in that exact branch (see
+    # scoring.ScoreResult field docs and docs/OUTPUT_SCHEMA.md's documented "can be true
+    # alongside capped: false" carve-out for JSON consumers). Relying on `score.capped`
+    # alone silently dropped this whole explanation in precisely the scenario B-306 exists
+    # to make loud — this is a rendering-gate fix, not a scoring.py semantics change, so the
+    # JSON contract/docs above stay exactly as documented.
+    if score.capped or score.config_blind_capped or score.runtime_capped:
+        if score.config_blind_capped:
+            # B-306 (C-135 follow-up): takes display priority over cap_severity/runtime —
+            # when more than one signal fires, this names every one that did so the reader
+            # never loses a co-occurring reason (the `total == 0` branch above is the only
+            # place config-blind and a corroborated runtime signal can both be True at
+            # once; the ordinary severity-cap path keeps them mutually exclusive because
+            # CONFIG_BLIND_CAP <= RUNTIME_SIGNAL_CAP always wins first).
+            _extra = []
+            if score.cap_severity:
+                _extra.append(f"an open {score.cap_severity} finding")
+            if score.runtime_capped:
+                _extra.append(
+                    f"a corroborated runtime signal ({_runtime_cap_phrase(score.runtime_cap_reason)})"
+                )
+            _also = f"; also {', '.join(_extra)}" if _extra else ""
+            lines.append(
+                f"(capped from {score.raw_score} - openclaw.json unreadable/unparseable"
+                f" this run: cannot rule out a CRITICAL condition{_also})"
+            )
+        elif score.cap_severity:
+            lines.append(f"(capped from {score.raw_score} - open {score.cap_severity} finding)")
+        else:
+            # I-025/B-309: no scored FAIL drove this cap — only a corroborated runtime
+            # signal can, and only as a cap (never an ordinary scored point).
+            lines.append(
+                f"(capped from {score.raw_score} - corroborated runtime signal: "
+                f"{_runtime_cap_phrase(score.runtime_cap_reason)})"
+            )
 
     # B-281 (ENV-1): name the file this grade actually describes. OpenClaw resolves its
     # config through OPENCLAW_CONFIG_PATH / OPENCLAW_HOME / OPENCLAW_STATE_DIR (what
@@ -1047,6 +1102,20 @@ def render_report(findings: list[Finding], score: ScoreResult,
     _audited_path = getattr(ctx, "config_path", None) if ctx is not None else None
     if _audited_path is not None:
         lines.append(f"Audited config: {_audited_path}")
+
+    # B-306 safe-symlink split: openclaw.json is a symlink whose target leaves ~/.openclaw,
+    # and that target is a readable regular file the user owns — a benign dotfiles layout
+    # (stow/chezmoi/yadm/bare-git). The collector followed it and audited the real bytes, so
+    # the grade above is a real verdict, NOT a config-blind F cap. Surface it as an INFO
+    # note (never a FAIL) so the reader knows the audited file physically lives outside the
+    # config dir. Presentation-only: never touches score/grade.
+    if getattr(ctx, "config_symlink_escapes_home", False):
+        note_icon = "[i]" if ascii_only else "ℹ️ "
+        lines.append(
+            f"{note_icon} Your openclaw.json symlinks outside ~/.openclaw; its target is a"
+            " readable regular file you own, so it was followed and audited normally"
+            " (not treated as an unreadable config)."
+        )
 
     # C-166: loud caution line when only a small slice of the catalog could be assessed —
     # a high grade over a thin slice can otherwise read as a full clean bill of health.
@@ -1119,6 +1188,39 @@ def render_report(findings: list[Finding], score: ScoreResult,
         " grade means \"not statically lethal-capable\", not \"runtime-proof\". Use the live"
         " tests above to probe actual resistance."
     )
+    # I-025/B-309: the ONE exception to "this grade never reflects runtime behaviour"
+    # above. Honest labelling, exhaustive per Dave's 2026-07-22 ruling: a trajaudit-
+    # style skill/bootstrap indicator match (--analyze-trajectory) MAY CAP this grade —
+    # never raise it, never earn/cost an ordinary scored point. Every OTHER runtime-
+    # consuming signal (T1/T2/T3 under --behavioral, B83, B84, B85, B180, and every
+    # B164 corroboration including exfil_evidence, same-line or cross-line) still
+    # cannot move this grade at all, in either direction — see
+    # tests/test_i025_runtime_cap.py for the pinned enumeration. (B164's exfil_evidence
+    # class was briefly cap-eligible under Dave's original 2026-07-20 ruling; retracted
+    # after four C-135 rounds proved no sound host/verb gate exists for this tool's own
+    # audience — see logscan.py's retraction note.)
+    lines.append(
+        "Runtime exception (I-025): a trajectory-indicator match MAY CAP this grade"
+        " (never raise it) — every other runtime-observed signal still cannot move the"
+        " grade at all."
+    )
+    if score.runtime_capped:
+        lines.append(
+            f"  This run's grade WAS capped by that exception: "
+            f"{_runtime_cap_phrase(score.runtime_cap_reason)}."
+        )
+    # B-306 (C-135 follow-up): openclaw.json itself went dark this run (present but
+    # unparseable, or unreadable) — every config-derived check (A1/B41/B1/B11/...)
+    # correctly degraded to UNKNOWN rather than a fabricated verdict, but that alone lets
+    # the grade RISE (fewer FAILs to cap it) even though the audit saw strictly less, not
+    # more. This line only ever appears alongside the cap already applied above.
+    if score.config_blind_capped:
+        lines.append(
+            "Config visibility (B-306): openclaw.json could not be read/parsed this run, so"
+            " this grade was hard-capped rather than let a config-derived check's honest"
+            " UNKNOWN quietly raise it. Fix openclaw.json (valid JSON, owner-readable) and"
+            " re-run for a real verdict."
+        )
     # C-216 (PASS-semantics doctrine): a clean/high-grade result confirms detection didn't
     # recognize anything, not that nothing is wrong -- distinct from the static-vs-runtime
     # line above (which is about WHAT is checked); this is about what a clean VERDICT
@@ -2037,6 +2139,13 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         "capped": score.capped,
         "raw_score": score.raw_score,
         "cap_severity": score.cap_severity,
+        # I-025/B-309: whether a corroborated runtime signal (never a config-static
+        # finding) drove this cap, and which — see scoring.RUNTIME_SIGNAL_CAP.
+        "runtime_capped": score.runtime_capped,
+        "runtime_cap_reason": score.runtime_cap_reason,
+        # B-306 (C-135 follow-up): true when openclaw.json was unreadable/unparseable
+        # this run and that alone hard-capped the grade — see scoring.CONFIG_BLIND_CAP.
+        "config_blind_capped": score.config_blind_capped,
         "assessable": bool(score.assessable),
         "trifecta": _trifecta_ratio(findings),
         "findings": [
@@ -2075,7 +2184,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     from .coverage import coverage as _coverage  # noqa: PLC0415
     from .scoring import project as _project  # noqa: PLC0415
     payload["coverage"] = _coverage(findings)
-    payload["projection"] = _project(findings)
+    payload["projection"] = _project(findings, ctx)
     # B-166: config read/parse state is machine-visible. A broken openclaw.json must not
     # read as a silent all-clear — config_parse_error is a clean gating boolean and errors
     # carries the human-readable parse message(s) that were previously only in the text run.
@@ -2086,6 +2195,12 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     _audited = getattr(ctx, "config_path", None) if ctx is not None else None
     payload["audited_config_path"] = str(_audited) if _audited is not None else None
     payload["config_parse_error"] = bool(getattr(ctx, "config_parse_error", False)) if ctx is not None else False
+    # B-306 safe-symlink split: machine-visible so a JSON consumer can tell a benign
+    # dotfiles relocation (config followed + audited) from a genuinely dark config. The
+    # reason string is a plain diagnostic, never a secret/path value.
+    payload["config_symlink_escapes_home"] = bool(getattr(ctx, "config_symlink_escapes_home", False)) if ctx is not None else False
+    _cfg_reason = getattr(ctx, "config_parse_reason", None) if ctx is not None else None
+    payload["config_parse_reason"] = _sanitize(_cfg_reason) if _cfg_reason else None
     payload["errors"] = [_sanitize(e) for e in getattr(ctx, "errors", [])] if ctx is not None else []
     # F-131 Phase 1: "Inventory by subject" — additive top-level key (design §4.6).
     # Presentation-only: never alters score/grade/findings above; empty/UNKNOWN-shaped
@@ -2199,10 +2314,41 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
         for sev, n in sev_counts.items() if n)
     summary_html = f'<div class="summary">{summary_chips}</div>' if summary_chips else ""
 
-    if score.capped:
-        sev_str = "CRITICAL" if score.failed_critical else "HIGH"
+    # B-306 (C-135 follow-up #3, 2026-07-21): gate on the granular cap signals, not
+    # `score.capped` alone — see the matching comment in render_report for why
+    # `score.capped` can be False here while `config_blind_capped`/`runtime_capped` are
+    # True (scoring.py's `total == 0` branch). Rendering-gate fix only; scoring.py's
+    # documented JSON contract is unchanged. `getattr(..., default)` (not direct attribute
+    # access) on the three fields this task newly reads unconditionally: some tests build
+    # a minimal duck-typed ScoreResult stand-in that predates these fields, and the OLD
+    # code never touched them because `score.capped and ...` short-circuited past them —
+    # preserve that tolerance instead of demanding every caller supply every field.
+    _cfg_blind = getattr(score, "config_blind_capped", False)
+    _rt_capped = getattr(score, "runtime_capped", False)
+    _rt_reason = getattr(score, "runtime_cap_reason", None)
+    if _cfg_blind:
+        # B-306 (C-135 follow-up): display priority over cap_severity/runtime — see
+        # render_report for why more than one signal can co-occur only in that branch.
+        _extra = []
+        if score.cap_severity:
+            _extra.append(f'an open {esc(score.cap_severity)} finding')
+        if _rt_capped:
+            _extra.append(
+                f'a corroborated runtime signal ({esc(_runtime_cap_phrase(_rt_reason))})'
+            )
+        _also = f'; also {", ".join(_extra)}' if _extra else ''
         capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
-                       f'from {score.raw_score} (open {sev_str} finding)</p>')
+                       f'from {score.raw_score} (openclaw.json unreadable/unparseable this run: '
+                       f'cannot rule out a CRITICAL condition{_also})</p>')
+    elif score.capped and score.cap_severity:
+        capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
+                       f'from {score.raw_score} (open {esc(score.cap_severity)} finding)</p>')
+    elif score.capped or _rt_capped:
+        # I-025/B-309: no scored FAIL drove this cap — only a corroborated runtime signal
+        # can, and only as a cap (never an ordinary scored point).
+        _reason = esc(_runtime_cap_phrase(_rt_reason))
+        capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
+                       f'from {score.raw_score} (corroborated runtime signal: {_reason})</p>')
     else:
         capped_html = ""
 

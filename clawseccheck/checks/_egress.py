@@ -1840,8 +1840,24 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
             confidence hits are counted and reported, never WARNed on individually.
     UNKNOWN — no log/transcript sinks found, or none were readable/non-empty.
     Never FAIL — a content heuristic over an attacker-influenced corpus must never hard-
-    fail the audit (Golden Rule #5); this check is advisory (scored=False) precisely so a
-    false hit can never move the A-F grade.
+    fail the audit (Golden Rule #5); this check stays advisory (scored=False) — it never
+    earns or costs an ordinary scored point, exactly as before.
+
+    I-025/B-309 (Dave's 2026-07-20 ruling) originally carved out an exception to "can
+    never move the A-F grade" for a same-line exfil_evidence hit anchored to a known
+    drop-host. Across four C-135 rounds the drop-host gate was narrowed repeatedly (a
+    named host, then an independent transport verb, then an attacker-exclusive
+    OOB/canary set) trying to make that exception sound — and THREE independent
+    adversarial reviews of the final attempt converged that it cannot be: this tool's
+    own audience (security-conscious operators) legitimately sends secrets to the exact
+    OOB/canary infrastructure (interactsh/oast, Burp Collaborator, dnslog,
+    Canarytokens) a real attacker would also use, so the benign and malicious cases are
+    byte-identical on a single log line. Dave's 2026-07-22 ruling RETRACTED the
+    exception entirely (see logscan.py's retraction note above ``_scan_line_content``):
+    B164 no longer carries any exfil_evidence-derived cap signal at all — every B164
+    corroboration, including exfil_evidence (same-line or cross-line), is WARN-only,
+    permanently. See ``scoring.RUNTIME_SIGNAL_CAP`` / ``scoring._runtime_cap_signal``:
+    the trajaudit-indicator match is the only remaining I-025/B-309 cap source.
     """
     # Lazy import: logscan.py (a Layer-1 leaf) itself imports from the checks aggregator
     # (`from .checks import ...`) to reuse the engine's vetted indicator regexes — the
@@ -1946,7 +1962,7 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         detail = "; ".join(f"{sink}: {', '.join(sorted(classes))}" for sink, classes in shown)
         if n_sinks > 5:
             detail += f" (+{n_sinks - 5} more sink(s))"
-        return _finding(
+        finding = _finding(
             "B164",
             WARN,
             f"Corroborated threat signal(s) in {n_sinks} log sink(s): {detail}.{note}",
@@ -1955,6 +1971,7 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
             "indicator could expose, and investigate how it reached the log.",
             evidence=all_samples[:20],
         )
+        return finding
 
     detail = f"{len(sinks)} log/transcript sink(s) scanned; no corroborated threat signal."
     if isolated_hits:

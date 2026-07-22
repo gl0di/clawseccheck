@@ -1264,11 +1264,15 @@ def _rule_hooks_session_key_takeover(ctx: Context, cfg: dict) -> RiskPath | None
 #
 # ADVISORY, and structurally so. RiskPaths are outside the A–F score by construction:
 # cli.py computes `score = audit(...)` BEFORE calling `risk_paths(...)`, and scoring.py
-# does not import this module. That matters more here than for the static chains,
-# because of the owner's 2026-07-20 ruling that only an ARGUMENTS-corroborated runtime
-# signal may ever affect the grade, and only as a cap. This rule is metadata-only — it
-# reads a verb NAME and a session-key ORIGIN KIND, never a call's arguments — so it must
-# not move the grade, and it cannot. `tests/test_risk21_*.py` pins that.
+# does not import this module (it lazily imports `trajaudit` instead — see
+# scoring._runtime_cap_signal). That matters more here than for the static chains,
+# because of the owner's I-025 ruling (implemented in B-309): only an ARGUMENTS-
+# corroborated runtime signal may ever affect the grade, and only as a cap —
+# exhaustively, a trajaudit-style indicator match, nothing else. This rule is
+# metadata-only — it reads a verb NAME and a session-key ORIGIN KIND, never a call's
+# arguments — so it is NOT the eligible signal and must not move the grade, and it
+# cannot. `tests/test_risk21_*.py` pins that; `tests/test_i025_runtime_cap.py` pins
+# the eligible-signal enumeration this rule is deliberately absent from.
 #
 # §8: the only strings that can escape are the bounded origin kind, the channel id and
 # the tool verb names. The `sessionKey`'s peer-id segment is real PII (a live host's key

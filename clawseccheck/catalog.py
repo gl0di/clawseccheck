@@ -981,10 +981,17 @@ CATALOG: list[CheckMeta] = [
     # clawseccheck/logdiscovery.py + logscan.py. Quiet-by-default (base-rate discipline,
     # §5.1 of the design doc): WARN only when >=2 signal classes co-occur in one sink, or
     # a single class with inherent same-line/perm corroboration fires (exfil_evidence is
-    # already secret+exfil-host paired; secrets_at_rest also needs a world-readable sink).
-    # Isolated single-class hits are suppressed to a quiet report hint, never a WARN.
-    # Advisory (scored=False) — a content heuristic over an attacker-influenced corpus
-    # must never move the A-F grade (Golden Rule #5). Never FAILs.
+    # already secret+exfil-host paired on the same line, OR — per B-249 — a
+    # credential-path read earlier in the sink followed by an encoded drop-host beacon
+    # later; secrets_at_rest also needs a world-readable sink). Isolated single-class
+    # hits are suppressed to a quiet report hint, never a WARN.
+    # Advisory (scored=False) and Never FAILs (Golden Rule #5). Dave's original
+    # 2026-07-20 ruling briefly made a same-line exfil_evidence WARN eligible to CAP the
+    # A-F grade; that exception was RETRACTED (Dave's 2026-07-22 ruling, C-135 8th
+    # round — see logscan.py's retraction note above `_scan_line_content`'s Class 2
+    # comment) as unsound for this tool's own audience. B164 is WARN-only, permanently;
+    # `scoring._runtime_cap_signal`'s only remaining cap source is the trajaudit
+    # indicator match.
     CheckMeta(
         "B164",
         "Threats surfaced in agent logs (content scan)",
@@ -2721,3 +2728,19 @@ class Finding:
     # right per-axis severity. Shape: {axis: [[status, reason], ...]}. Empty for every other
     # producer; not part of the frozen public JSON shape (internal to dossier bucketing).
     axis_reasons: dict = field(default_factory=dict)
+    # C-256 (evidence-accumulation prerequisite, docs/design/severity-separability.md):
+    # check_installed_skills (B13) reaches its verdict through a first-match-wins chain
+    # over ~20 named evidence buckets (crit/high/parse-error/.../warns_squat) — only the
+    # highest-ranked NON-EMPTY bucket's evidence ever becomes this Finding's own
+    # severity/status/detail/fix; every other bucket that also fired was previously
+    # discarded with no trace. corroborating_buckets names those OTHER buckets (never
+    # the winning one), in the chain's own priority order, restricted to whatever the
+    # chain had already computed by the time it returned (so populating this field can
+    # never force new work the chain would otherwise have skipped, e.g. the typosquat
+    # scan when a crit/high bucket already won). Retention only — it is never consulted
+    # by check_installed_skills itself to pick severity/status, so this cannot change
+    # the verdict, only what accompanies it. Empty for every producer except
+    # check_installed_skills; not part of the frozen public JSON shape (same footprint
+    # as ring_findings/axis_reasons above — internal bookkeeping for a future
+    # corroborating-check FAIL rule, not rendered by report.py/sarif.py).
+    corroborating_buckets: list[str] = field(default_factory=list)

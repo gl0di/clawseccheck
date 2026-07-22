@@ -29,7 +29,7 @@ from .skilldiscovery import (
     config_plugin_load_paths as _config_plugin_load_paths,
     iter_discovered_skill_dirs as _iter_discovered_skill_dirs,
 )
-from .textnorm import obfuscation_signals
+from .textnorm import normalize_for_scan, obfuscation_signals
 
 # Bootstrap / prompt files injected into the system prompt as "trusted context".
 # The native `openclaw security audit` does not inspect these files; checks
@@ -395,6 +395,19 @@ class Context:
     config_mode: int | None = None                  # octal perms of openclaw.json, or None
     config_found: bool = False                       # openclaw.json present (vs non-OpenClaw setup)
     config_parse_error: bool = False                 # openclaw.json present but unparseable (B-166)
+    # B-306 safe-symlink split: WHY config_parse_error is (or was) considered — the raw
+    # loader message for a genuine-blind config, or a note that a dotfiles-style symlink
+    # was safely followed. Distinguishes the two states config_parse_error conflates so a
+    # readable-but-relocated config is never mistaken for a dark one. None when the config
+    # parsed cleanly with no relocation.
+    config_parse_reason: "str | None" = None
+    # B-306 safe-symlink split: True when openclaw.json is a symlink whose target leaves
+    # its config directory AND that target is a readable regular file owned by the auditing
+    # user (a benign stow/chezmoi/yadm/bare-git dotfiles layout). The collector follows it
+    # and audits the real bytes; this flag exempts the run from CONFIG_BLIND_CAP and drives
+    # the report's "symlinks outside ~/.openclaw" note. NEVER set for corrupt/unreadable
+    # bytes — those stay genuine-blind (config_parse_error True, cap intact).
+    config_symlink_escapes_home: bool = False
     # B-281 (ENV-1): the config file this audit ACTUALLY read (or, when absent, the
     # canonical path it looked for). Every verdict in the report describes this file and
     # only this file, so it is reported verbatim rather than left implicit behind a bare
@@ -1314,6 +1327,91 @@ def _skill_scan_priority(item: dict) -> tuple[int, str]:
     return (tier, relpath)
 
 
+# B-305 follow-up (C-135 adversarial finding, round 2): this function injects a
+# "# file: <name>\n" section header ahead of every concatenated file's content
+# (used below). checks/_shared.py's `_MANIFEST_HEADER_RE` reads that literal shape
+# to recover per-file section boundaries, and checks/_content.py's
+# `_pos_in_source_code_section` trusts each boundary it finds to EXEMPT everything
+# up to the next header from the natural-language-directive ring (an unfenced
+# `.py`/`.sh` file is source code, never a live instruction). The bug: this
+# function concatenates each file's RAW, attacker-controlled bytes verbatim, with
+# no escaping of a "# file:"-shaped line the file's own content already contains —
+# so a single-file skill can write its own "# file: notes.py" line inside e.g. its
+# SKILL.md body and, once concatenated, that forged line is byte-for-byte
+# indistinguishable from a header THIS function actually inserted. From blob text
+# alone there is no lexical property that tells the two apart (a keyword/regex
+# patch at the consuming end would be the exact whack-a-mole this project's
+# CLAUDE.md warns against — and provably unsound here, since real and forged
+# headers are identical strings). The only sound fix is structural: make the
+# header un-forgeable by construction. Since THIS function is the sole place that
+# ever legitimately writes a "# file: <name>" line, escaping every confusable line
+# already present in a file's OWN text — before concatenation — guarantees every
+# such line surviving in the assembled blob is one this function itself inserted.
+#
+# ROUND 2 (the C-135 reviewer broke round 1): round 1 matched the literal ASCII
+# prefix "# file:" against the RAW, pre-normalization line. But every consuming
+# check runs `normalize_for_scan()` on the assembled blob BEFORE `_MANIFEST_
+# HEADER_RE.finditer()` — and `normalize_for_scan` strips invisible/bidi
+# characters (and folds Tag-block "ASCII smuggling" runs, and confusable
+# homoglyphs) as its very first steps. So a line that does NOT literally start
+# with "# file:" in raw form (e.g. a zero-width space, or an entirely
+# Tag-block-encoded "# file: evil.py" run that is *invisible* until decoded) can
+# still normalize to a real header at scan time, reopening the exact bypass the
+# round-1 fix targeted. The fix is again structural, not a wider keyword list:
+# escape a RAW line whenever its *normalized* form — the exact text the
+# consuming regex actually matches against — starts with the header prefix,
+# regardless of which raw characters (literal, invisible, or Tag-encoded)
+# produce that normalized shape. Escaping still only ever prepends one literal
+# backslash to the RAW line (leaving every original character, visible or
+# invisible, in place) so: (a) the line stays fully scannable by every content
+# check, and (b) B58's own `obfuscation_signals()` — which reads the RAW text
+# for zero-width/bidi/Tag-run evidence — is completely unaffected; only the
+# header-matching prefix is defeated, nothing is stripped or hidden from any
+# other detector.
+_MANIFEST_HEADER_PREFIX = "# file:"
+
+
+def _escape_embedded_header_lines(text: str) -> str:
+    """Neutralize any line in *text* that would be shaped like the '# file:
+    <name>' section header `_read_skill_text` injects ONCE IT IS NORMALIZED
+    the same way every consuming check normalizes the assembled blob before
+    matching `_MANIFEST_HEADER_RE` against it (B-305/C-135 — see the comment
+    above for why raw-text-only matching is unsound).
+
+    Decides per RAW line using `normalize_for_scan(line)` — the identical
+    de-obfuscation pass (invisible/bidi strip, Tag-block fold, confusable fold)
+    every consuming check already applies — so a line can never look
+    header-shaped at scan time without also looking header-shaped here. When a
+    line's normalized form starts with the header prefix, a literal backslash
+    is prepended to the RAW line (its original characters — including any
+    invisible/confusable/Tag-block ones — are left completely untouched), which
+    survives normalization (backslash passes through every step unchanged) and
+    moves the *normalized* line's first character off '#', so
+    `_MANIFEST_HEADER_RE` can no longer match there.
+
+    `normalize_for_scan` only ever substitutes or deletes individual code
+    points — it never inserts, deletes, or reorders the U+000A line-terminator
+    itself — so a raw line and its normalized counterpart are always at the
+    same line index; if that invariant is ever violated (e.g. a future
+    textnorm.py change), this degrades to a plain literal-prefix check on the
+    raw line rather than risk misaligned per-line indexing.
+    """
+    raw_lines = text.split("\n")
+    normalized = normalize_for_scan(text)
+    norm_lines = normalized.split("\n")
+    if len(norm_lines) != len(raw_lines):
+        return "\n".join(
+            ("\\" + line) if line.startswith(_MANIFEST_HEADER_PREFIX) else line
+            for line in raw_lines
+        )
+    changed = False
+    for i, norm_line in enumerate(norm_lines):
+        if norm_line.startswith(_MANIFEST_HEADER_PREFIX):
+            raw_lines[i] = "\\" + raw_lines[i]
+            changed = True
+    return "\n".join(raw_lines) if changed else text
+
+
 def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
     """Concatenate the text/code files of one installed skill (capped, read-only).
 
@@ -1323,6 +1421,10 @@ def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
     can no longer push a genuinely higher-signal file out of the scan budget just
     by sorting first alphabetically. Does not mutate collect_skill_files's own
     (cached) ordering — only this local copy.
+
+    B-305/C-135: every file's own text is escaped (`_escape_embedded_header_lines`)
+    before the real header is prepended, so a file cannot forge a "# file: <name>"
+    boundary of its own — see that function's docstring.
     """
     collected = sorted(collect_skill_files(skill_dir, ctx), key=_skill_scan_priority)
     parts = []
@@ -1352,7 +1454,8 @@ def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
             ):
                 ctx.padding_anomalies.append(skill_dir.name)
         chunk = text[:budget]
-        parts.append(f"# file: {Path(item['relpath']).name}\n{chunk}")
+        safe_chunk = _escape_embedded_header_lines(chunk)
+        parts.append(f"# file: {Path(item['relpath']).name}\n{safe_chunk}")
         total += len(chunk)
         file_count += 1
 
@@ -3835,6 +3938,82 @@ def bundled_root_overrides(ctx: Context) -> "list[tuple[str, str, str, str]]":
     return out
 
 
+# B-306 safe-symlink split: the exact substring the config loader emits when it declines
+# to FOLLOW a top-level openclaw.json symlink whose resolved target leaves the config dir
+# (configloader.load_openclaw_config). Used only to ROUTE to the structural gate below —
+# never as the decision itself, so wording is not load-bearing and this can't regress into
+# the keyword-widening pattern the project avoids.
+_CONFIG_SYMLINK_ESCAPE_MARKER = "symlink escapes its config directory"
+
+
+def _recover_escaped_config_symlink(
+    ctx: Context, cfg_path: Path, message: str
+) -> "tuple[dict, int | None] | None":
+    """Safely follow a dotfiles-style openclaw.json symlink the loader declined.
+
+    ``configloader.load_openclaw_config`` refuses to FOLLOW a top-level config symlink
+    whose resolved target leaves the config directory, purely for its own read-safety.
+    That refusal is right for the loader, but it collapses a perfectly READABLE, SAFE
+    config into ``ctx.config_parse_error`` -> B-306 ``CONFIG_BLIND_CAP`` -> a false F on
+    the very common dotfiles layout (stow/chezmoi/yadm/bare-git symlink openclaw.json out
+    to a version-controlled repo).
+
+    ``ctx.config_parse_error`` conflates two states that must be told apart by STRUCTURE,
+    never by any text/keyword match:
+
+      * corrupt / truncated / genuinely unreadable bytes -> truly blind; the cap is
+        correct; this helper returns ``None`` and the caller keeps that behavior.
+      * a readable REGULAR file the tool merely DECLINED to follow, owned by the auditing
+        user -> NOT blind; follow it here and audit the real bytes.
+
+    Returns ``(parsed_config, config_mode)`` on a safe follow (recording the reason on
+    *ctx* for the report), else ``None`` so the caller keeps the genuine config-blind path
+    (cap intact).
+    """
+    if _CONFIG_SYMLINK_ESCAPE_MARKER not in message:
+        return None
+    # Structural gate #1: the top-level config path must itself be a symlink. Only the
+    # symlink-escape branch of the loader emits the marker for a symlinked top-level
+    # config; a regular-file top level whose $include escaped is (a) not a symlink here and
+    # (b) would re-raise on the retry below anyway. So this both routes precisely and cannot
+    # be spoofed by attacker-controlled text inside a $include path string.
+    try:
+        if not os.path.islink(cfg_path):
+            return None
+        target = cfg_path.resolve(strict=True)
+    except (OSError, ValueError, RuntimeError):
+        return None
+    # Structural gate #2: the resolved target is a REGULAR file (not a dir/device/fifo/
+    # socket) that the auditing user OWNS. Anything else stays genuine-blind.
+    try:
+        if not os.path.isfile(target):
+            return None
+        if os.stat(target).st_uid != os.geteuid():
+            return None
+    except (OSError, AttributeError):
+        # No stat/geteuid (e.g. non-POSIX) or an unreadable target -> stay conservative.
+        return None
+    # Structural gate #3: the bytes must actually load. Re-load against the RESOLVED
+    # target, whose own parent is now the config dir, so the loader's within-roots guard is
+    # satisfied and $include resolution roots at the dotfiles repo (the correct trust root
+    # for a dotfiles-managed config). Any failure here == genuinely unreadable -> None ->
+    # genuine-blind cap preserved.
+    try:
+        parsed = _load_openclaw_config(target, root_byte_limit=_MAX_CONFIG_BYTES)
+    except (OSError, _ConfigLoadError, RecursionError):
+        return None
+    try:
+        mode = target.stat().st_mode & 0o777
+    except OSError:
+        mode = None
+    ctx.config_symlink_escapes_home = True
+    ctx.config_parse_reason = (
+        "openclaw.json is a symlink whose target leaves its config directory; the target"
+        " is a readable regular file you own, so it was followed and audited"
+    )
+    return parsed, mode
+
+
 def collect(home: Path | str = "~/.openclaw") -> Context:
     home = Path(home).expanduser()
     ctx = Context(home=home)
@@ -3848,12 +4027,24 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
             parsed = _load_openclaw_config(cfg_path, root_byte_limit=_MAX_CONFIG_BYTES)
         except (OSError, _ConfigLoadError, RecursionError) as exc:
             message = str(exc)
-            ctx.errors.append(f"could not parse {cfg_path}: {message}")
-            if "cap" in message or "exceeds" in message:
-                note_limit(
-                    ctx.limit_hits, LIMIT_DOMAIN_CONFIG,
-                    message,
-                )
+            # B-306 safe-symlink recovery: a dotfiles-style openclaw.json symlink whose
+            # target leaves the config dir is NOT a dark config when that target is a
+            # readable regular file the user owns — follow it and audit the real bytes
+            # instead of hard-capping to F. Returns None for genuinely corrupt/unreadable
+            # bytes, which fall through to the unchanged genuine-blind path below.
+            recovered = _recover_escaped_config_symlink(ctx, cfg_path, message)
+            if recovered is not None:
+                parsed, ctx.config_mode = recovered
+                ctx.config = parsed
+                parsed_ok = True
+            else:
+                ctx.errors.append(f"could not parse {cfg_path}: {message}")
+                ctx.config_parse_reason = message
+                if "cap" in message or "exceeds" in message:
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_CONFIG,
+                        message,
+                    )
         else:
             ctx.config = parsed
             try:
@@ -3936,7 +4127,17 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
                 # ctx.bootstrap surface UNKNOWN instead of scanning a clipped file.
                 with open(f, "rb") as fp:
                     raw, truncated = _read_with_limit(fp, _MAX_FILE_BYTES)
-                ctx.bootstrap[key] = raw.decode("utf-8", errors="replace")
+                # B-305/C-135 (round 2, Finding 2): unlike ctx.installed_skills,
+                # NO "# file: <name>" section header is ever legitimately inserted
+                # into bootstrap text — `bootstrap_blob` just joins raw file
+                # contents with "\n" — so a header-shaped line found here can only
+                # ever be attacker-forged. Escaping is therefore always safe
+                # (never neutralizes a genuine header, because there is none), and
+                # closes the same `_pos_in_source_code_section` bypass for this
+                # ingestion path that `_read_skill_text` closes for skills.
+                ctx.bootstrap[key] = _escape_embedded_header_lines(
+                    raw.decode("utf-8", errors="replace")
+                )
                 if truncated:
                     note_limit(
                         ctx.limit_hits, LIMIT_DOMAIN_BOOTSTRAP,

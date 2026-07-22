@@ -55,6 +55,7 @@ from ._shared import (
     _hint,
     _is_public_ip,
     _mcp_servers,
+    _mcp_tool_texts,
     _skill_frontmatter_block,
     _web_fetch_enabled,
 )
@@ -314,6 +315,13 @@ _B61_WGET_PAYLOAD_FLAG_RE = re.compile(
     r"(?:^|[\s;&|(\[\"'`,])--(?:post-file|post-data|body-file|body-data)\b"
 )
 
+# The bare `--?flagname` inside a payload-flag match (the two regexes above capture a
+# leading delimiter char too). The delimiter set never contains `-`, and each match ends at
+# the flag's own `\b`, so the flag name is the trailing `--?[A-Za-z][A-Za-z-]*` — used by
+# `_b61_flag_binds_file_read` to apply curl/wget's per-flag file-read semantics (an `@`
+# marker vs. a literal string value). See B-307 / `_b61_flag_binds_file_read`.
+_B61_PAYLOAD_FLAG_NAME_RE = re.compile(r"--?[A-Za-z][A-Za-z-]*$")
+
 # `cat <secret> | curl ...` — here the payload arrives on stdin, so it PRECEDES the
 # transport instead of following it, and no flag scan starting at `curl` can see it.
 #
@@ -527,25 +535,46 @@ def _b61_transport_receives_payload(window: str) -> bool:
 # from FAIL to WARN. It is restored as a call-shaped alternative: `path.join(` is a method
 # call and never prose, so it needs no case gate, and `/path/to/image.jpg` still cannot
 # match it.
-_B61_READ_VERB_RE = re.compile(
-    r"\b(?:cat|less|head|tail|grep|jq|open|read|load|import|require|fetch|curl|wget|"
+#
+# B-307 (C-135 second follow-up): the two bare transports (`curl`/`wget`) are factored out
+# into their own source string so `check_agent_snooping` can weigh them DIFFERENTLY from a
+# genuine reader. A `cat`/`grep`/`jq`/`path.join(`/`Path(` next to a foreign path is strong
+# on its own; a bare `curl`/`wget` is not, because it may merely be SENDING the path text as
+# a literal string value (`-d '{"p":"~/.claude/mcp.json"}'`) rather than reading the file —
+# the literal-string-payload false FAIL. `_B61_READ_VERB_NONTRANSPORT_RE` is the reader set
+# WITHOUT the transports (used to tell "some genuine reader is present" from "only a bare
+# transport is present"); `_B61_READ_VERB_RE` keeps its exact historical meaning (readers
+# INCLUDING the transports) for every other caller. Splitting the transports to their own
+# leading alternatives is matching-equivalent to the old inline `curl|wget` — both are
+# `\bcurl\b`/`\bwget\b`, and alternation order does not change a boolean `.search()`.
+_B61_READ_VERB_NONTRANSPORT_SRC = (
+    r"\b(?:cat|less|head|tail|grep|jq|open|read|load|import|require|fetch|"
     r"requests?\.get|requests?\.post|subprocess|os\.popen)\b"
     r"|\bpath\.(?:join|resolve|normalize|basename|dirname)\s*\("
-    r"|(?-i:\bpathlib\b|\bPath\s*[(.])",
+    r"|(?-i:\bpathlib\b|\bPath\s*[(.])"
+)
+_B61_READ_VERB_NONTRANSPORT_RE = re.compile(_B61_READ_VERB_NONTRANSPORT_SRC, re.I)
+_B61_READ_VERB_RE = re.compile(
+    r"\bcurl\b|\bwget\b|" + _B61_READ_VERB_NONTRANSPORT_SRC,
     re.I,
 )
 
 
 # Window in characters around the config-path match to search for a verb.
 #
-# KNOWN RESIDUAL, OUT OF SCOPE for the B-286 C-135 r3 segmenter work (`_b61_command_
-# segment` / `_b61_looks_like_invocation`): a transport pushed far enough past this bound
-# by intervening text — e.g. a fourth `-H` header before the payload flag — evades
-# detection entirely, with no break character or quoting involved at all. Widening this
-# window is a scored-output change with its own false-positive cost (a wider window drags
-# in more unrelated prose per match) and needs its own C-135 pass; it must not be
-# smuggled into an unrelated change. Pinned by
-# `tests/test_b286r3_b61_segmenter.py::test_b61_window_bypass_is_an_accepted_residual`.
+# This fixed width is only a proximity HEURISTIC, and on its own it was
+# a bypass — enough intervening text (e.g. a fourth curl `-H` header before the payload
+# flag) pushes the transport clean out of the window, with no break character or quoting
+# involved at all. Widening THIS constant was considered and rejected: it is a scored-output
+# change that would drag more unrelated prose into the BARE read-verb/exfil-sink search
+# below — for a genuinely foreign (non-`.openclaw`) path, that search alone is enough to
+# convict, with no invocation-shape gate behind it — which is exactly the false-positive
+# cost four rounds of B-286 spent paying down. `_b61_window` itself (and this constant) are
+# therefore UNCHANGED. Instead `_b61_path_is_transport_argument` below asks a narrower,
+# fully-verified question — does a genuine curl/wget INVOCATION (proven the same way
+# `_b61_transport_receives_payload` already proves one, not a bare mention) actually receive
+# THIS path as data, however far apart the two sit — and is added as an extra corroborator
+# alongside the existing window search, not by enlarging what the bare-word search sees.
 _B61_WINDOW = 120
 
 # ASCII word char — deliberately NOT `\w`, which under Python's str semantics also covers
@@ -576,6 +605,340 @@ def _b61_window(norm: str, m: "re.Match[str]") -> str:
         while end > m.end() and w(norm[end - 1]):
             end -= 1
     return norm[start:end]
+
+
+# Safety valve bounding how far `_b61_path_is_transport_argument`
+# searches backward for a candidate curl/wget invocation. NOT a second `_B61_WINDOW` — a
+# candidate only counts when the quote/continuation-aware walk PROVES its own command
+# reaches the match AND it is independently verified as a genuine invocation carrying a
+# payload flag (the exact test `_b61_transport_receives_payload` already applies) — this cap
+# only guards the search itself against a single pathological unbroken line, it does not by
+# itself corroborate anything. Sized generously above any realistic wrapped-command padding
+# (a handful of headers is a few hundred characters) while staying far short of a real
+# skill's per-file size cap (`collector._MAX_BYTES_PER_SKILL`, 1MB); real command/statement
+# boundaries (`|;&`, a backtick — almost always a Markdown inline-code delimiter — or a
+# genuine non-continued newline) stop the walk long before this many characters in ordinary
+# text, so the cap only ever bites a single unbroken run with no such boundary at all.
+#
+# KNOWN RESIDUAL, narrower than the one this task closed: padding the SAME unbroken command
+# past this many characters (roughly ~14 fourth-header-sized flags rather than one) still
+# evades detection, with no break character involved, same as before B-307 but requiring far
+# more padding to trigger. Pinned by
+# `tests/test_b307_b61_structural_window.py::
+# test_b61_padding_far_beyond_the_structural_cap_is_a_narrower_accepted_residual`.
+_B61_STRUCTURAL_LOOKBACK_CAP = 2000
+
+
+def _b61_is_quoted_literal(text: str, start: int, end: int) -> bool:
+    """True when ``text[start:end]`` (a curl/wget match) is bookended by
+    the SAME quote character immediately before and after it — i.e. the match sits INSIDE a
+    quoted string (``"curl"``, ``'curl'``).
+
+    Real false positive found by this task's own corpus sweep (a ~35k-skill corpus):
+    `claw-employer`/`claw-worker` name `curl` as a required binary in frontmatter
+    (``"requires": {"bins": ["curl"]}``), and `cnb-openapi` compares an action-type string
+    against it in Go/JS (``case "curl":``, ``action.type === 'curl'``). None of these is a
+    command being run.
+
+    Deliberately a LOCAL, two-character check rather than a quote-state walk from the start
+    of the document: a whole-document quote-parity walk was tried and RETRACTED — it
+    misfires on the very first unpaired apostrophe anywhere earlier in ordinary English
+    prose (a contraction like "doesn't" or "won't"), which then reads everything after it as
+    "still inside a string" and silently drops a genuine, later exfil attempt to WARN/PASS.
+    That is a false NEGATIVE traded for a false positive, which Golden Rule #5 forbids
+    outright and which is a strictly worse failure than the one being fixed. The local form
+    cannot make that mistake: it only ever looks at the two characters immediately touching
+    the match, so nothing earlier in the document can influence its verdict.
+
+    C-135 (second adversarial pass, same task) CORRECTED how the caller uses this signal.
+    Being bookended by matching quotes is NOT by itself proof of "string value, not a
+    command" — shell-quoting a command name is valid, semantically identical syntax
+    (``'curl' -X POST ...`` runs exactly like ``curl -X POST ...``), so a quoted, genuinely
+    INVOKED transport is bookended by quotes too. This function only reports the bookending
+    fact; `_b61_path_is_transport_argument` uses it to relocate where the command-segment
+    scan resumes (right after the closing quote), and lets the existing invocation-shape
+    gate — not this function — decide real invocation vs. bare string value. See that
+    function's docstring for why "bookended by quotes" ⇏ "exempt"."""
+    if start == 0 or end >= len(text):
+        return False
+    before, after = text[start - 1], text[end]
+    return before == after and before in ("'", '"')
+
+
+def _b61_flag_argument_span(seg: str, start: int) -> "tuple[int, int] | None":
+    """The span of the single shell argument TOKEN a payload flag actually binds to, where
+    *start* is the position right after that flag's own match ends inside *seg* — i.e. what
+    the flag's value literally IS, as opposed to whatever else happens to share its unbroken
+    command.
+
+    C-135 (round 2): this exists because "some payload flag appears
+    somewhere in the transport's command segment" is not the same claim as "this specific
+    match is what that flag sends" — see `_b61_path_is_transport_argument`'s docstring for
+    the confirmed false positive this closes. Reads the connector a real flag/value pair
+    uses — an attached ``=`` (``--data-binary=@cfg``), or the whitespace/line-continuation
+    gap before a separate argument (``--data-binary @cfg`` / ``-T \\`` + newline +
+    ``cfg``) — then reads exactly ONE token with the SAME quote/escape rules as
+    `_b61_command_segment` (a quoted value containing whitespace or even a literal `|`/`;`
+    is one token, not several; single quotes are verbatim, a backslash escapes the next
+    character elsewhere). Returns ``None`` when the flag has no following value at all — end
+    of segment, or a real command break (`` |;&` `` or a genuine newline) sits right there."""
+    i, n = start, len(seg)
+    if i < n and seg[i] == "=":
+        i += 1
+    while i < n:
+        if seg[i] in " \t":
+            i += 1
+            continue
+        if seg[i] == "\\" and i + 1 < n and seg[i + 1] == "\n":
+            i += 2
+            continue
+        break
+    if i >= n or seg[i] == "\n" or seg[i] in "|;&`":
+        return None
+    tok_start = i
+    quote = None
+    while i < n:
+        ch = seg[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if quote == '"':
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if ch in " \t\n" or ch in "|;&`":
+            break
+        i += 1
+    return (tok_start, i)
+
+
+def _b61_flag_binds_file_read(flag: str, token: str, path_off: int) -> bool:
+    """True when the payload *flag*, bound to the shell argument *token*, makes curl/wget
+    actually READ A FILE whose name covers *path_off* (the offset WITHIN *token* where the
+    config-path match begins) — as opposed to sending *token* as a literal string that merely
+    happens to contain the path text.
+
+    B-307 (C-135 follow-up): `_b61_flag_argument_span` proves *which* token a
+    payload flag binds to, but binding a token is NOT the same as reading the file it names.
+    curl/wget read a file from a DATA flag ONLY via an ``@`` marker — ``-d @f`` / ``--data @f``
+    / ``--data-binary @f`` / ``--data-urlencode name@f`` / ``--json @f`` / ``-F name=@f`` (wget
+    ``--post-file`` / ``--body-file`` take a bare filename) — or via a bare-filename UPLOAD flag
+    (``-T`` / ``--upload-file``). WITHOUT that marker the value is a literal string sent
+    verbatim: a JSON body that quotes a foreign config path
+    (``-d '{"note":"…~/.claude/mcp.json…"}'``) POSTs the user's own text, it does not
+    exfiltrate the file, so it must NOT convict via this corroborator (it falls through to the
+    pre-existing foreign-path WARN branch).
+
+    Deliberately curl-semantic, not a lexical/keyword tweak (Golden Rule #5): the distinction
+    is the actual data-shape curl acts on, so a real ``@``-file read still FAILs (no recall
+    loss) while a literal-string body no longer FPs. Edge cases mirror curl exactly —
+    ``--data-raw`` / ``--form-string`` (and wget ``--post-data`` / ``--body-data``) NEVER honor
+    ``@`` (their value is always literal); ``-F`` honors the marker only as the FIRST char of
+    the content part right after ``=`` (``name=@f`` / ``name=<f`` read; ``name=value``, or an
+    ``@`` anywhere else in the value, does not); ``--data-urlencode`` reads only when an ``@``
+    precedes any ``=`` (``@f`` / ``name@f`` read; ``=content`` / ``name=content`` are literal)."""
+    f = flag.lstrip("-").lower()
+    # Bare-filename UPLOAD flags: the whole (unquoted) value token IS the filename read.
+    if f in ("t", "upload-file", "post-file", "body-file"):
+        return True
+    # Flags whose value is ALWAYS a literal string — curl/wget never interpret `@` here.
+    if f in ("data-raw", "form-string", "post-data", "body-data"):
+        return False
+    # `@`-honoring DATA flags. The shell strips a surrounding quote before curl sees `@`, so
+    # skip one leading quote char; then locate the file-marker per each flag's own rule and
+    # require the path match to fall in the filename part (at/after the char after the marker).
+    val_off = 1 if token[:1] in ("'", '"') else 0
+    val = token[val_off:]
+    if f in ("d", "data", "data-binary", "data-ascii", "json"):
+        # File read iff the value begins with `@`; the filename is everything after it.
+        return val.startswith("@") and path_off >= val_off + 1
+    if f == "data-urlencode":
+        # curl splits on the FIRST of `=` or `@`: an `@` reached before any `=` marks a file
+        # (`@file` / `name@file`); a leading/earlier `=` makes it literal content.
+        eq, at = val.find("="), val.find("@")
+        if at != -1 and (eq == -1 or at < eq):
+            return path_off >= val_off + at + 1
+        return False
+    if f in ("f", "form"):
+        # curl `-F name=@file` / `name=<file` read a file; the marker must be the FIRST char
+        # of the content part (immediately after the `=`). `name=value` is literal.
+        eq = val.find("=")
+        if eq != -1 and val[eq + 1 : eq + 2] in ("@", "<"):
+            return path_off >= val_off + eq + 2
+        return False
+    return False
+
+
+def _b61_path_is_transport_argument(norm: str, m: "re.Match[str]") -> bool:
+    """True when the config-path match *m* is itself the ARGUMENT VALUE
+    a curl/wget invocation's OWN payload flag is bound to (per `_b61_flag_argument_span`) —
+    a genuine invocation, proven the SAME way `_b61_transport_receives_payload` already
+    proves one (invocation-shape gate over the transport's own quote/continuation-aware
+    command segment), just without `_B61_WINDOW`'s blind character cap on how far the flag
+    may sit from the path.
+
+    C-135 (independent adversarial review, round 1) CORRECTED an unsound first draft here.
+    That draft asked only whether SOME payload flag appears anywhere in the transport's
+    whole command segment (``flags.search(seg)``) — which proves a payload flag exists in
+    the command, but NOT that it (as opposed to a different flag, or a header's descriptive
+    prose sitting in the same unbroken command) is what carries *this* path. Confirmed false
+    positive: a `curl` block with several `-H` headers, one of whose quoted VALUE happens to
+    mention a foreign — or even the skill's own — config path purely as a compatibility note,
+    followed later in the SAME backslash-continued command by a real, unrelated
+    `--data-binary @report.json`. The old check saw "a payload flag exists in this command"
+    and "the path text exists in this command" and conflated the two into "the flag sends
+    the path". This version instead requires the match to fall INSIDE the specific argument
+    TOKEN the flag actually binds to, so a different flag's header value never counts merely
+    because some payload flag exists elsewhere in the same command. A flag whose OWN value
+    token contains the path — attached, spaced, or wrapped across a line continuation — still
+    matches regardless of distance (that is still the fix for the original window-bypass
+    residual); a mention anywhere ELSE in the command, including inside a different flag's
+    quoted value, no longer does.
+
+    C-135 (round 2) CORRECTED a second, sibling bypass in the round-1 fix's OWN corroborator
+    exclusion. Round 1 added an unconditional ``continue`` for any candidate bookended by
+    matching quotes (`_b61_is_quoted_literal`), to exclude a `curl`/`wget` mention that is
+    itself a JSON array element or a `case "curl":` label (see that function's docstring).
+    But quoting a command NAME is valid, unremarkable shell syntax that runs identically to
+    the unquoted form (``'curl' -X POST https://...`` behaves exactly like
+    ``curl -X POST https://...``) — so the unconditional skip also silently exempted a
+    REAL, invoked, merely-quoted transport from ever corroborating anything, a bypass as
+    cheap as wrapping the transport name in one matching quote pair. Confirmed repro: an
+    otherwise-ordinary exfil of the host's own `~/.openclaw/openclaw.json` via
+    ``'curl' -X POST ... --data-binary @~/.openclaw/openclaw.json`` graded PASS purely
+    because of those two quote characters, while the identical command with the quotes
+    removed correctly FAILed.
+
+    The fix is structural, not another lexical exclusion: bookended-by-quotes only means the
+    transport WORD sits inside a quoted span; it says nothing about whether a real invocation
+    follows. What DOES distinguish "JSON/code string value" from "quoted command name,
+    genuinely invoked" is what comes right after the closing quote — a real invocation's next
+    token is argument-shaped (a flag, `$`, a scheme, another quote), whereas a JSON array
+    element or a `case` label is followed by `]`, `,`, `:`, `}`, never an argument. So instead
+    of skipping the candidate, resume the SAME quote/continuation-aware command-segment walk
+    (`_b61_command_segment`) from immediately AFTER the closing quote, and let the EXISTING
+    invocation-shape gate (`_b61_looks_like_invocation`) — already responsible for telling a
+    bare mention from a real command everywhere else in this function — decide. Resuming
+    strictly after the closing quote (not AT it) matters: starting AT the closing quote
+    misreads it as OPENING a fresh quoted region (there is no unmatched quote left to close),
+    which is the exact corpus-sweep misparse `_b61_is_quoted_literal` was first added to work
+    around; skipping past it restores a genuine top-level (``quote=None``) position, so the
+    walk parses what actually follows instead of a phantom quoted span. A JSON array's ``]``
+    or a `case` label's ``:`` still fails the invocation-shape gate exactly as before (no
+    regression on the round-1 fixtures); a real ``-X``/`$VAR`/scheme/quote right after the
+    closing quote now passes it, closing the quoting bypass without widening any word list.
+
+    B-307 (C-135 follow-up) CORRECTED a false positive in the round-1/2 fix
+    itself: binding a token is not the same as reading its file. The earlier version convicted
+    whenever the path fell inside the flag's OWN argument token, identically for an
+    ``@``-marked file read and for a literal string value that merely quotes the path. A
+    benign skill that POSTs the user's typed text —
+    ``-d '{"body":"…add support for the ~/.claude/mcp.json layout…"}'`` — was graded FAIL,
+    exactly like a real ``--data-binary @~/.claude/mcp.json`` exfil, because the config path
+    sat inside the JSON string literal `-d` binds. The fix is structural, not lexical:
+    `_b61_flag_binds_file_read` requires the bound token to be an ACTUAL curl/wget file read
+    (an ``@`` marker on a data flag, or a bare-filename upload flag), so a literal-string
+    payload no longer convicts (it falls through to the pre-existing foreign-path WARN
+    branch) while every real ``@``-file exfil still FAILs. See that helper's docstring for the
+    per-flag curl semantics (``--data-raw``/``--form-string`` never honor ``@``; ``-F``
+    honors it only right after ``=``).
+    """
+    return _b61_classify_transport_path(norm, m) == "file"
+
+
+def _b61_classify_transport_path(norm: str, m: "re.Match[str]") -> "str | None":
+    """B-307 (C-135 second follow-up): the shared walk behind BOTH
+    `_b61_path_is_transport_argument` (does a transport actually READ this path as a file)
+    and `_b61_path_is_literal_transport_string` (does a transport send this path as a proven
+    LITERAL string). Classifies how — if at all — a curl/wget invocation's OWN payload flag
+    binds the config-path match *m*:
+
+    * ``"file"``    — the path falls inside a payload flag's bound token AND that flag makes
+                      curl/wget genuinely READ the file it names (an ``@``-marked data value,
+                      or a bare-filename upload flag). Real file-read exfil.
+    * ``"literal"`` — the path falls inside a payload flag's bound token, but the flag sends
+                      that token as a LITERAL STRING (no ``@``/file-read marker): a JSON body
+                      or query value that merely quotes the path text, not a file read
+                      (``-d '{"note":"…/mcp.json…"}'``).
+    * ``None``      — the path is not the bound argument of ANY transport payload flag here
+                      (a bare mention, a string that is never invoked, a command that ends
+                      before reaching the match, or a decoy in a different flag's value).
+
+    ``"file"`` DOMINATES: if any transport binding reads the file, that is the verdict even
+    when a different, literal binding of the same path text also exists — so
+    `_b61_path_is_transport_argument` keeps its exact prior "True iff some binding is a real
+    file read" semantics (`== "file"`), and the literal classification is purely additive.
+    Same quote/continuation-aware machinery, structural lookback cap, and per-flag curl
+    semantics as before — see `_b61_path_is_transport_argument`'s docstring for the confirmed
+    round-1/2/3 false positives that machinery closes and why each guard is structural."""
+    saw_literal = False
+    lookback_from = max(0, m.start() - _B61_STRUCTURAL_LOOKBACK_CAP)
+    for vm in _B61_BARE_TRANSPORT_RE.finditer(norm, lookback_from, m.start()):
+        seg_start = vm.end()
+        if _b61_is_quoted_literal(norm, vm.start(), seg_start):
+            # Bookended by a matching quote (e.g. `"curl"`, `'curl'`). That alone doesn't
+            # tell "JSON/code string value" apart from "quoted command name, genuinely
+            # invoked" — resume the command-segment walk right after the closing quote
+            # (not at it) and let the invocation-shape gate below make that call instead.
+            seg_start += 1
+        seg = _b61_command_segment(norm, seg_start)
+        if seg_start + len(seg) <= m.start():
+            continue  # this transport's own command ends before reaching the match
+        if not _b61_looks_like_invocation(seg):
+            continue  # a bare mention or a string literal, never actually invoked
+        flags = (
+            _B61_CURL_PAYLOAD_FLAG_RE
+            if vm.group(0).lower() == "curl"
+            else _B61_WGET_PAYLOAD_FLAG_RE
+        )
+        rel_start, rel_end = m.start() - seg_start, m.end() - seg_start
+        for fm in flags.finditer(seg):
+            span = _b61_flag_argument_span(seg, fm.end())
+            if span is None or not (span[0] <= rel_start and rel_end <= span[1]):
+                continue
+            # B-307 (C-135 follow-up): the match falls inside THIS flag's own
+            # bound token, but that only convicts as a file read if the flag actually READS
+            # THE FILE — an `@`-marked data value or a bare-filename upload flag — not when
+            # the token is a literal string that merely quotes the path
+            # (`-d '{"note":"…/mcp.json…"}'`), which is classified "literal" instead.
+            fn = _B61_PAYLOAD_FLAG_NAME_RE.search(fm.group(0))
+            if fn is None:
+                continue
+            if _b61_flag_binds_file_read(
+                fn.group(0), seg[span[0] : span[1]], rel_start - span[0]
+            ):
+                return "file"
+            saw_literal = True
+    return "literal" if saw_literal else None
+
+
+def _b61_path_is_literal_transport_string(norm: str, m: "re.Match[str]") -> bool:
+    """B-307 (C-135 second follow-up): True when the config-path match *m* is PROVEN to be a
+    curl/wget payload flag's LITERAL STRING argument — sent verbatim as data, not read from
+    the file it names (see `_b61_classify_transport_path`'s ``"literal"`` class).
+
+    Used ONLY as a VETO in `check_agent_snooping`, never to convict. The problem it closes:
+    a bare `curl`/`wget` counts as both a read-verb and an exfil-sink in the coarse proximity
+    window, so ANY foreign-config path within `_B61_WINDOW` of the word ``curl`` FAILs — even
+    when that curl provably carries the path as a literal JSON body (the reviewer's
+    ``curl … -d '{"body":"… ~/.claude/mcp.json …"}'`` short spelling). When the ONLY window
+    corroborator is a bare transport AND this helper proves the path is that transport's
+    literal string, the transport is not evidence of a file read, so the mention drops to
+    WARN. This is a STRICT subset of "path bound to a payload flag" for which
+    `_b61_path_is_transport_argument` is simultaneously False — the two are mutually
+    exclusive (``"file"`` vs ``"literal"``), so vetoing on a proven literal can never hide a
+    proven file read (that still returns ``"file"`` → transport_arg True → FAIL)."""
+    return _b61_classify_transport_path(norm, m) == "literal"
 
 
 def _b61_sink_revokes_selfconfig(window: str) -> bool:
@@ -3325,7 +3688,14 @@ def _b64_classify(blob: str, pos: int, end: int, fence_ranges, comment_ranges) -
     A phrase hidden inside an HTML comment is a hidden-channel concern owned by B58
     (obfuscation / hidden injection), not B64 — B64 covers overrides in the live instruction
     text. Delegating comment bodies to B58 avoids double-flagging a defensive skill that
-    quotes the attack inside a comment, while B58 still catches a genuinely hidden one."""
+    quotes the attack inside a comment, while B58 still catches a genuinely hidden one.
+
+    B-305: a phrase inside an unfenced .py/.sh/.bash/.zsh/.ps1 `# file:` section is also a
+    "skip" — the same NL-directive-applied-to-program-text category error the rest of the
+    ring guards via `_defensive_context` (B64 uses its own fence-aware `_is_code_example`
+    gate instead, so this criterion is added here explicitly rather than shared)."""
+    if _pos_in_source_code_section(blob, pos):
+        return "skip"
     if any(s <= pos < e for s, e in comment_ranges):
         return "skip"
     # A live actionable/exfil sink in the phrase's OWN sentence makes it a real directive →
@@ -4038,11 +4408,21 @@ def _decode_codepoint(raw: str) -> str:
         return ""
 
 
-def _defensive_context(blob, pos, fence_ranges, *, use_fence=True):
+def _defensive_context(blob, pos, fence_ranges, *, use_fence=True, header_matches=None):
     """Shared guard: True when the match at *pos* sits in defensive documentation
     rather than a live instruction.
 
     Criteria (any is sufficient):
+    - B-305: *pos* falls inside an unfenced .py/.sh/.bash/.zsh/.ps1 `# file:` section
+      (`_pos_in_source_code_section`) — this function's callers are, without
+      exception, natural-language directive/prose detectors (B61/B63/B65/B156/B159/
+      B160/B161/B163/B170 — grep the callers before adding a new one here), and an NL
+      directive regex was never meant to read program text: an ordinary function name,
+      comment, or string literal that merely CONTAINS the same words a live directive
+      would use is not evidence of one. This criterion is therefore safe to apply
+      unconditionally, IN THIS FUNCTION. Do NOT fold it into `_is_code_example` — that
+      gate is also used by non-NL checks (B59/B64/B66/B74/B165/C074) where a real
+      secret or attack payload embedded literally in .py/.sh source must still fire.
     - *use_fence* is True and the position is inside a fenced code example AND
       narrowly negated nearby (_negation_context) — a bare fence is NOT enough
       on its own (B-094: a live instruction hidden in a ```fence``` with no
@@ -4059,7 +4439,14 @@ def _defensive_context(blob, pos, fence_ranges, *, use_fence=True):
       Mitigations, Security, Threat Model, ...) AND a broad negation sits in
       the same lookback window (B-095: a bare defensive heading is NOT enough
       on its own — see _defensive_section).
+
+    *header_matches*: optional precomputed ``list(_MANIFEST_HEADER_RE.finditer(blob))``,
+    forwarded to `_pos_in_source_code_section` — see that function's docstring for why
+    a caller iterating many matches over the SAME blob should pass this instead of
+    leaving it to rescan fresh every call.
     """
+    if _pos_in_source_code_section(blob, pos, header_matches):
+        return True
     if use_fence and _in_fence(pos, fence_ranges) and _negation_context(blob, pos):
         return True
     # B-098: a broad negation dampens only when it grammatically GOVERNS the trigger
@@ -4215,6 +4602,73 @@ def _fence_ranges(blob: str) -> list[tuple[int, int]]:
         ranges.append((m.start(), cm.end()))
         pos = cm.end() + 1
     return ranges
+
+
+# B-305: extensions whose grammar is INTERPRETED SOURCE CODE, never natural-language
+# prose. Deliberately narrow -- exactly the interpreter/shell scripting languages the
+# defect report names (Python + shell variants + PowerShell), not JS/Go/Rust/etc: those
+# would need their own real-fleet false-positive measurement before joining this set,
+# and a narrower set only ever under-suppresses (stays on the safe/conservative side of
+# Golden Rule #5), never over-suppresses. A separate constant from collector.py's
+# `_HIGH_PRIORITY_SCAN_EXTS` (scan-order priority) on purpose: the two lists answer
+# different questions, and coupling them would make one silently drift for the other's
+# reason.
+_SOURCE_CODE_EXTS = frozenset({"py", "sh", "bash", "zsh", "ps1"})
+
+
+def _file_ext(name: str) -> str:
+    """Lowercase extension (no leading dot) of a `# file: <name>` header's basename.
+
+    Tolerates the `outer.zip::inner.py` archive-chaining form collector.py's
+    decompress_and_classify produces for a nested archive (B-201) — only the innermost
+    name's extension counts. Returns "" for an extension-less name.
+    """
+    base = name.strip().rsplit("::", 1)[-1]
+    if "." not in base:
+        return ""
+    return base.rsplit(".", 1)[-1].lower()
+
+
+def _pos_in_source_code_section(
+    blob: str, pos: int, header_matches: list | None = None
+) -> bool:
+    """True when *pos* falls inside a `# file: <name>` section whose extension marks it
+    as interpreted SOURCE CODE (.py/.sh/.bash/.zsh/.ps1) — never inside a prose section
+    (SKILL.md, README, other docs, JSON/YAML config, ...) and never for a blob that
+    carries no `# file:` headers at all.
+
+    B-305: the natural-language directive regexes across this content-security ring
+    were written to read PROSE — a SKILL.md/README/bootstrap file addressing the agent
+    directly. Applied to unfenced program text, an ordinary function name, comment, or
+    string literal that merely MENTIONS the same verb/path a live directive would use
+    reads as one — a category error, not a real false-positive PATTERN to patch one
+    regex at a time (that approach doesn't scale, and this task's own provenance —
+    three C-135 rounds burned on a single pattern, B-202, before it was retracted as
+    unsound — is the concrete lesson). The durable, structural fix routes only PROSE
+    sections to the NL-directive ring: classify the SEGMENT a position came from, using
+    the collector's own `# file:` section boundary (`_MANIFEST_HEADER_RE`, the same
+    structure B-287/B-193 already key their own per-file scoping on), and treat a
+    position inside a named .py/.sh/.bash/.zsh/.ps1 section as never a live NL
+    instruction.
+
+    Conservative default: a blob with no `# file:` headers (a hand-built test blob, or a
+    lone-file target) treats every position as prose — unchanged pre-B-305 behavior.
+    Genuinely malicious CODE in a .py/.sh file is untouched by this change; it is the
+    code-analysis path's job (skillast.py's AST/shell analyzers), not this NL ring's.
+
+    *header_matches*: pass a precomputed ``list(_MANIFEST_HEADER_RE.finditer(blob))``
+    when calling this many times over the SAME blob to avoid a fresh O(len(blob))
+    rescan per call (mirrors `_vet.py`'s `_manifest_header_matches`/`header_matches`
+    precedent, the same class of hot-loop cost that measured 107s pre-fix there).
+    Defaults to scanning fresh, matching this function's single-call callers.
+    """
+    matches = (
+        header_matches if header_matches is not None else _MANIFEST_HEADER_RE.finditer(blob)
+    )
+    for m in matches:
+        if m.start("body") <= pos < m.end("body"):
+            return _file_ext(m.group("name")) in _SOURCE_CODE_EXTS
+    return False
 
 
 def _fm_metadata_obj(fm: str) -> dict:
@@ -5147,6 +5601,19 @@ def check_agent_snooping(ctx: Context) -> Finding:
     for skill_name, blob in ctx.installed_skills.items():
         norm = normalize_for_scan(blob)
         fr = _fence_ranges(norm)
+        # C-135 follow-up: track the WORST verdict seen for this
+        # skill instead of stopping at the FIRST resolved match. An earlier,
+        # uncorroborated path mention (e.g. a "we don't touch ~/.codex" compatibility
+        # note) used to `break` the loop on its own WARN, before ever reaching a later,
+        # genuine exfil of a DIFFERENT foreign path further down the same file —
+        # position in the file, not severity, decided the verdict.
+        # `_b61_path_is_transport_argument`'s own lookback only searches BACKWARD from
+        # a match, so it can never reach forward past an early `break` to find the real
+        # invocation. Only a FAIL is the strongest possible signal this check can find
+        # for a skill (nothing scans worse), so only a FAIL short-circuits the scan; a
+        # WARN keeps looking for a stronger, later signal.
+        skill_fail: "str | None" = None
+        skill_warn: "str | None" = None
         for m in _B61_CONFIG_PATH_RE.finditer(norm):
             if _defensive_context(norm, m.start(), fr, use_fence=False):
                 continue
@@ -5162,7 +5629,51 @@ def check_agent_snooping(ctx: Context) -> Finding:
                 if seg and seg.group(0).split(".")[0].lower() == skill_name.lower():
                     continue
             window = _b61_window(norm, m)
-            if _B61_READ_VERB_RE.search(window) or _B61_EXFIL_SINK_RE.search(window):
+            # A curl/wget invocation proven to carry THIS path as data,
+            # however far away it sits (bounded only by _B61_STRUCTURAL_LOOKBACK_CAP) — the
+            # window-bypass fix. See _b61_path_is_transport_argument's docstring for why this
+            # is a narrower, fully-verified corroborator rather than a wider bare-word window.
+            transport_arg = _b61_path_is_transport_argument(norm, m)
+            # B-307 (C-135 second follow-up): scope the literal-string veto to FOREIGN paths.
+            # A bare `curl`/`wget` counts in BOTH `_B61_READ_VERB_RE` and `_B61_EXFIL_SINK_RE`,
+            # so the coarse window search alone convicts any foreign path within `_B61_WINDOW`
+            # of the word "curl" — even when that curl provably carries the path as a LITERAL
+            # string body (`-d '{"body":"… ~/.claude/mcp.json …"}'`), which reads no file. The
+            # first fix only OR'd in `transport_arg` (correctly False for a literal), so it
+            # could add a FAIL but never remove one, and closed the FP only in the far-apart
+            # window-bypass spelling, not the common one-line one.
+            #
+            # A genuinely-foreign path has no self-config nuance layer: the coarse gate is the
+            # ENTIRE decision, so a bare-transport word alone (no invocation shape behind it)
+            # convicts. The structural close: for a foreign path, a bare transport corroborates
+            # ONLY when it is NOT a proven literal-string carrier of THIS exact path; a genuine
+            # reader (`cat`/`grep`/`jq`/`path.join(`/`Path(`), a hard/code sink, or a real
+            # transport file-read (`transport_arg`) still convicts unchanged, so recall is
+            # untouched and only the proven-literal case (mutually exclusive with a proven file
+            # read) drops to WARN. The host's OWN `~/.openclaw` tree is left byte-identical:
+            # its B-178 skip + `_b61_sink_revokes_selfconfig` layer already weighs a bare
+            # transport (destination, payload-flow) with its own C-135-hardened nuance — which
+            # the coarse gate must still reach for it — so the veto deliberately does not touch
+            # it (`.openclaw/skills`/`/memory` are the only `/skills`/`/memory`-ending paths).
+            if ".openclaw" in path_match.lower():
+                corroborated = bool(
+                    _B61_READ_VERB_RE.search(window)
+                    or _B61_EXFIL_SINK_RE.search(window)
+                    or transport_arg
+                )
+            else:
+                literal_transport = _b61_path_is_literal_transport_string(norm, m)
+                nontransport_corroborator = bool(
+                    _B61_READ_VERB_NONTRANSPORT_RE.search(window)
+                    or _B61_HARD_SINK_RE.search(window)
+                    or _B61_CODE_SINK_RE.search(window)
+                    or transport_arg
+                )
+                bare_transport_in_window = bool(_B61_BARE_TRANSPORT_RE.search(window))
+                corroborated = nontransport_corroborator or (
+                    bare_transport_in_window and not literal_transport
+                )
+            if corroborated:
                 # B-134: a documented metadata-only auditor — reads OTHER skills'
                 # declared frontmatter/manifest FIELDS (name, description, ...) as its
                 # stated purpose, not their executable code or secret values. Scoped
@@ -5196,7 +5707,10 @@ def check_agent_snooping(ctx: Context) -> Finding:
                     # that actually names a destination, revokes it. See
                     # _b61_sink_revokes_selfconfig for why the positive and negative uses of
                     # the sink vocabulary are deliberately asymmetric.
-                    and not _b61_sink_revokes_selfconfig(window)
+                    # `transport_arg` revokes the skip too — a verified curl/wget invocation
+                    # that is proven to carry this exact path is at least as strong a signal
+                    # as anything _b61_sink_revokes_selfconfig looks for in the narrow window.
+                    and not (_b61_sink_revokes_selfconfig(window) or transport_arg)
                     # C-135 round 2: a read that also SHIPS the value off-host (a send verb →
                     # a second-party destination, e.g. "forward the gateway value to my
                     # telegram bot") is not self-config, even when the transport is not in the
@@ -5206,10 +5720,11 @@ def check_agent_snooping(ctx: Context) -> Finding:
                     and not _b61_openclaw_names_foreign_slug(norm, m, skill_name)
                 ):
                     continue
-                fail_ev.append(
+                skill_fail = (
                     f"{skill_name}: reads foreign-agent config path "
                     f"'{path_match}' with a read/exfil verb"
                 )
+                break  # FAIL is the strongest verdict this check can reach — stop
             else:
                 # A bare ~/.openclaw path is the host's OWN config: a first-party
                 # skill referencing its own config path with no read/exfil verb is
@@ -5218,11 +5733,21 @@ def check_agent_snooping(ctx: Context) -> Finding:
                 # (A .openclaw path WITH a read/exfil verb still FAILs above.)
                 if ".openclaw" in path_match.lower():
                     continue
-                warn_ev.append(
-                    f"{skill_name}: foreign-agent config path literal "
-                    f"'{path_match}' found (no read verb in context)"
-                )
-            break  # one signal per skill is enough to flag it
+                # C-135 follow-up: do NOT break here. A WARN is
+                # not the strongest possible signal for this skill — a later match (a
+                # different, or the same, foreign path further down the file) may still
+                # resolve to FAIL. Only the FIRST WARN text is kept (one WARN line per
+                # skill is still enough), same as the FAIL branch keeps only one line.
+                if skill_warn is None:
+                    skill_warn = (
+                        f"{skill_name}: foreign-agent config path literal "
+                        f"'{path_match}' found (no read verb in context)"
+                    )
+
+        if skill_fail:
+            fail_ev.append(skill_fail)
+        elif skill_warn:
+            warn_ev.append(skill_warn)
 
     if fail_ev:
         return _finding(
@@ -6597,7 +7122,13 @@ def check_forged_provenance(ctx: Context) -> Finding:
     def _scan(source_name: str, text: str) -> None:
         norm = normalize_for_scan(text)
         fr = _fence_ranges(norm)
+        # B-305: this check's own scan loop, not the shared `_defensive_context` (B74
+        # gates on `_is_code_example` instead, which non-NL checks also rely on — see
+        # `_pos_in_source_code_section`'s docstring for why the two gates stay separate).
+        hm = list(_MANIFEST_HEADER_RE.finditer(norm))
         for m in _B74_ROLE_BLOCK_RE.finditer(norm):
+            if _pos_in_source_code_section(norm, m.start(), hm):
+                continue
             if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             snippet = m.group().strip()
@@ -6612,6 +7143,8 @@ def check_forged_provenance(ctx: Context) -> Finding:
             # genuine forged block always carries a directive, which the FAIL branch above
             # catches. So a bare marker is now silent (no grade-affecting over-fire).
         for m in _B74_FALSE_PROVENANCE_RE.finditer(norm):
+            if _pos_in_source_code_section(norm, m.start(), hm):
+                continue
             if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             snippet = m.group().strip()
@@ -6627,15 +7160,11 @@ def check_forged_provenance(ctx: Context) -> Finding:
         _scan(label, excerpt)
     for skill_name, blob in ctx.installed_skills.items():
         _scan(skill_name, blob)
-    for sname, spec in servers.items():
-        tools = spec.get("tools")
-        if isinstance(tools, list):
-            for tool in tools:
-                if isinstance(tool, dict):
-                    tool_name = str(tool.get("name", "<unnamed>"))
-                    desc = str(tool.get("description", ""))
-                    if desc:
-                        _scan(f"mcp:{sname}/{tool_name}", desc)
+    # B-305/C-135 round 2: read tool descriptions through the shared, escaping
+    # accessor (_mcp_tool_texts) instead of walking `servers` here directly — a raw
+    # `tool.get("description")` would be scanned unescaped, the exact Finding-2 gap.
+    for source_name, desc in _mcp_tool_texts(ctx.config):
+        _scan(source_name, desc)
 
     if fail_ev:
         ev_summary = "; ".join(fail_ev[:4])
@@ -7032,15 +7561,9 @@ def check_instruction_hierarchy_override(ctx: Context) -> Finding:
     for skill_name, blob in ctx.installed_skills.items():
         add_hits(skill_name, blob)
 
-    for sname, spec in servers.items():
-        tools = spec.get("tools")
-        if isinstance(tools, list):
-            for tool in tools:
-                if isinstance(tool, dict):
-                    tool_name = str(tool.get("name", "<unnamed>"))
-                    desc = str(tool.get("description", ""))
-                    if desc:
-                        add_hits(f"mcp:{sname}/{tool_name}", desc)
+    # B-305/C-135 round 2: same shared, escaping accessor as B74 above.
+    for source_name, desc in _mcp_tool_texts(ctx.config):
+        add_hits(source_name, desc)
 
     if fail_ev:
         ev_summary = "; ".join(fail_ev[:4])

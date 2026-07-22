@@ -132,6 +132,25 @@ class LogScanResult:
     oversized_lines: int = 0  # count of lines that exceeded _MAX_LINE_LEN
     oversized_line_chars: int = 0  # total char length of those oversized lines
     unscanned_middle_chars: int = 0  # chars between the two windows, never regex-scanned
+    # I-025/B-309 (RETRACTED, C-135 8th round, Dave's 2026-07-22 ruling): this project
+    # tried, across four rounds (follow-ups #1-#4), to make the same-line
+    # SECRET_PATTERNS + _EXFIL_RE pairing above ("exfil_evidence") sound enough to CAP
+    # the A-F grade — first by requiring a named drop-host, then an independent
+    # transport verb, then narrowing to an "attacker-exclusive" OOB/canary host set.
+    # THREE independent adversarial reviews of the final attempt converged: no
+    # enumerable host set is both narrow enough to exclude dual-use developer tooling
+    # (ngrok/pastebin/webhook.site) and broad enough to still catch real exfiltration,
+    # because this tool's OWN AUDIENCE (security-conscious operators) legitimately
+    # sends secrets to the exact OOB/canary infrastructure (interactsh/oast, Burp
+    # Collaborator, dnslog, Canarytokens) a real attacker would also use — the two are
+    # byte-identical on a single log line; only intent/provenance differs, which a
+    # regex cannot recover. See `_scan_line_content`'s Class 2 comment (just above the
+    # retraction note) for the full history. This field, and the CAP-eligibility
+    # machinery that read it (`Finding.exfil_evidence_signal`, `scoring.py`'s B164
+    # arm), are removed — the same-line pairing still corroborates a WARN exactly as
+    # it always has, via the unchanged `counts["exfil_evidence"]` key; it simply can
+    # never additionally CAP the grade. The trajaudit-indicator signal is the only
+    # remaining CAP-eligible source for I-025/B-309.
 
 
 # C-135 (2026-07-15, real-fleet sanity pass against ~/.openclaw): a trajectory JSONL
@@ -209,16 +228,22 @@ def _decodes_to_printable_blob(token: str) -> bool:
     printable. The ratio here is measured over the full raw decoded bytes.
 
     Known accepted residual (documented, not chased further — WARN-only/scored=False,
-    never grade-affecting, Golden Rule #5 is about FAIL): a genuinely base64-encoded
-    ENGLISH-TEXT value in an otherwise-ordinary param (e.g. a webhook "sig=" test value)
-    decodes to printable text just like a real exfiltrated secret does — the two are
-    structurally identical once encoded, and no static content-shape test can tell them
-    apart without semantic judgment of what the value actually is. Narrowing further by
-    param name (an allowlist of "safe" names like sig/token/auth) was considered and
-    rejected: it is guessable/evadable by a real attacker and is exactly the kind of
-    additional narrow special case the project's C-135 history shows does not converge
-    (checks/_content.py's own retraction note; delete/simplify, don't keep stacking
-    conditions).
+    Golden Rule #5 is about FAIL): a genuinely base64-encoded ENGLISH-TEXT value in an
+    otherwise-ordinary param (e.g. a webhook "sig=" test value) decodes to printable text
+    just like a real exfiltrated secret does — the two are structurally identical once
+    encoded, and no static content-shape test can tell them apart without semantic
+    judgment of what the value actually is. Narrowing further by param name (an allowlist
+    of "safe" names like sig/token/auth) was considered and rejected: it is
+    guessable/evadable by a real attacker and is exactly the kind of additional narrow
+    special case the project's C-135 history shows does not converge (checks/_content.py's
+    own retraction note; delete/simplify, don't keep stacking conditions).
+
+    I-025/B-309 tried, for a time, to make B164's exfil_evidence class eligible to CAP
+    the A-F grade, which would have promoted this residual into a live false-positive
+    grade CAP too. That whole CAP mechanism was RETRACTED as unsound for reasons
+    independent of this residual (C-135 8th round, Dave's 2026-07-22 ruling — see the
+    retraction note above `_scan_line_content`'s Class 2 comment), so the sentence
+    above is simply true: this residual is WARN-only, unconditionally.
     """
     for urlsafe in (False, True):
         try:
@@ -268,6 +293,36 @@ def _maybe_secret_path_match(line: str):
     return _SECRET_PATH_RE.search(line)
 
 
+# I-025/B-309, C-135 8th ROUND (RETRACTED, 2026-07-21/22): follow-ups #2/#3/#4 above tried
+# progressively narrower host/verb gates (a named drop-host, then an independent transport
+# verb, then an attacker-exclusive OOB/canary host set) to make the same-line
+# `exfil_evidence` pairing sound enough to CAP the A-F grade. THREE independent
+# adversarial (C-135) reviews of the #4 fix converged on the same conclusion: no
+# enumerable host set is both (a) narrow enough to exclude dual-use developer tooling
+# (ngrok/transfer.sh/pastebin/webhook.site — follow-up #4's own motivating FP) and (b)
+# broad enough to still catch real exfiltration, because THIS TOOL'S OWN AUDIENCE
+# (security-conscious OpenClaw operators) legitimately sends secrets to the exact
+# "attacker-exclusive" OOB/canary infrastructure follow-up #4 chose (interactsh/oast,
+# Burp Collaborator, dnslog, Canarytokens) as part of routine, authorized security
+# testing — a pentester posting a token to their OWN oast.pro collector, or a
+# blue-teamer generating a Canarytoken with a real API key, is byte-identical on a
+# single log line to a real attacker exfiltrating that same secret to that same class
+# of host. The FP and the FN are the same defect: the only discriminator is
+# INTENT/PROVENANCE, which a stdlib regex over one log line cannot recover — reproduced
+# end-to-end and confirmed unfixable by any host-list edit (see Dave's 2026-07-22
+# ruling and PULSE task history for the full three-review writeup).
+#
+# Dave's ruling (2026-07-22): demote this ENTIRE same-line arm to WARN-only, permanently
+# — it can no longer CAP the grade at all. The bare same-line SECRET_PATTERNS + _EXFIL_RE
+# pairing just below still corroborates a WARN exactly as it always has (unchanged); only
+# the CAP-eligible counter this arm used to feed (`exfil_evidence_same_line_hits`,
+# `Finding.exfil_evidence_signal`) is removed, along with `_EXFIL_TRANSPORT_VERB_RE` and
+# `_CAP_ELIGIBLE_EXFIL_HOST_RE` (both existed ONLY to gate that counter). See
+# scoring.py's `_runtime_cap_signal` (trajaudit-indicator match is now the ONLY B164-
+# adjacent signal that may CAP), and tests/test_i025_runtime_cap.py's regression pinning
+# that no same-line log shape — including an attacker-exclusive OOB host — can cap.
+
+
 def _scan_line_content(
     result: LogScanResult, line: str, *, is_trajectory: bool = False, cred_seen_before: bool = False
 ) -> bool:
@@ -304,7 +359,21 @@ def _scan_line_content(
 
     # Class 2 — exfil_evidence: a secret pattern AND an exfil-transport/host token on the
     # SAME line (mirrors checks/__init__.py's own same-line `_has_cred_exfil` rule — the
-    # established low-FP shape for this exact regex pair throughout the codebase).
+    # established low-FP shape for THAT rule's own domain, skill-authored markdown/code
+    # prose). WARN-only: bumps the shared `counts["exfil_evidence"]` key on a bare
+    # secret-shaped literal paired with any dual-use transport verb (curl/wget/POST/
+    # base64/…), same as always.
+    #
+    # I-025/B-309 tried, across four rounds, to make a narrower version of this same
+    # pairing eligible to CAP the A-F grade (a named drop-host, then an independent
+    # transport verb, then an attacker-exclusive OOB/canary host set) — RETRACTED (C-135
+    # 8th round, Dave's 2026-07-22 ruling): this tool's own audience legitimately sends
+    # secrets to the exact OOB/canary infrastructure the final attempt chose as
+    # "attacker-exclusive," so the false-positive and the true-positive are
+    # byte-identical on one log line; no enumerable host set discriminates them. See the
+    # retraction note above this function for the full history. This class is WARN-only,
+    # permanently — see `scoring.py`'s `_runtime_cap_signal` for the (now
+    # trajaudit-indicator-only) CAP source.
     secret_m = next((m for m in (p.search(line) for p in SECRET_PATTERNS) if m), None)
     exfil_m = _EXFIL_RE.search(line)
     if secret_m and exfil_m:
@@ -339,6 +408,12 @@ def _scan_line_content(
     # overwhelmingly printable bytes (`_decodes_to_printable_blob` — see its docstring for
     # why this, unlike the character-class shape, is a genuine encoding test, and for the
     # one documented residual it does not close).
+    #
+    # This arm's own documented residual (a benign base64-ENGLISH-TEXT `sig=`-style
+    # value, indistinguishable by content shape from a real exfiltrated secret) is
+    # WARN-only, as is the same-line arm above (see its retraction note) — nothing in
+    # this module can CAP the A-F grade any more; only the trajaudit-indicator signal
+    # can (scoring.py's `_runtime_cap_signal`).
     if cred_seen_before:
         host_m = _KNOWN_EXFIL_HOST_RE.search(line)
         blob_m = _B64_BLOB_RE.search(line) or _B64URL_BLOB_RE.search(line)

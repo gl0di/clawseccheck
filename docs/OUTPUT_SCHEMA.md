@@ -26,8 +26,11 @@ versioning §6 in `CLAUDE.md`).
 | `grade` | `str` | yes | Letter grade: `"A"`, `"B"`, `"C"`, `"D"`, or `"F"`. |
 | `capped` | `bool` | yes | `true` if the score was capped below `raw_score` (e.g. Lethal Trifecta triggered). |
 | `raw_score` | `int` | yes | Score before any cap is applied. Equals `score` when `capped` is `false`. |
-| `cap_severity` | `str \| null` | yes | Severity that drove the score cap (`"CRITICAL"`, `"HIGH"`, …), or `null` when nothing capped the score. When `capped` is `true` this names *why*; `null` is the norm when `capped` is `false`. |
-| `assessable` | `bool` | yes | `false` for the distinct "N/A / nothing scorable" state (empty / all-UNKNOWN / all-advisory config) — lets a consumer tell a real `F` apart from a not-assessable `"N/A"` config. `true` for every normal audit. |
+| `cap_severity` | `str \| null` | yes | Severity that drove the score cap (`"CRITICAL"`, `"HIGH"`, …), or `null` when no *scored* FAIL capped the score. `null` alongside `capped: true` means a runtime signal (see `runtime_capped`) drove the cap instead, not a scored FAIL. |
+| `runtime_capped` | `bool` | yes | `true` when a corroborated *runtime* signal — never a config-static finding — capped the score (I-025). The one eligible signal is a trajaudit-style skill/bootstrap indicator match (`--analyze-trajectory`). It never earns or costs an ordinary scored point — this is a hard cap only, applied after any severity-driven cap above. Every runtime-consuming check (`B83`, `B84`, `B85`, `B164`, `B180`, and the `--behavioral`-only `T1`/`T2`/`T3`) can never move the grade any other way, and this stays `false` for all of them. (`B164`'s `exfil_evidence` class was briefly cap-eligible on its same-line arm under an earlier ruling; retracted after four independent adversarial reviews found no sound host/verb gate exists for this tool's own audience — `exfil_evidence` is WARN-only, permanently, same-line or cross-line.) Same "`true` alongside `capped: false`" nuance as `config_blind_capped` applies when nothing else was scorable this run either — see that row. |
+| `runtime_cap_reason` | `str \| null` | yes | Stable label for the eligible runtime signal that fired, e.g. `"trajaudit indicator match"`. `null` when `runtime_capped` is `false`. |
+| `config_blind_capped` | `bool` | yes | `true` when `openclaw.json` was present but unparseable/unreadable this run (see `config_parse_error` below) and that alone hard-capped the score at the same ceiling a proven CRITICAL FAIL gets (B-306). Without this cap, a config-derived check correctly degrading FAIL/WARN to UNKNOWN (because it could no longer read the config) could otherwise let the grade rise even though the audit saw strictly less evidence, not more. Composes with `cap_severity`/`runtime_capped` — whichever cap is tightest wins; this one takes reporting priority when it is the binding one. **Can be `true` alongside `capped: false`**: when nothing else was scorable this run either (`score`/`raw_score` both `0`), there is nothing for the cap to numerically reduce, but a blind config is still real signal — B-306's follow-up fix (C-135, 2026-07-21) forces `grade: "F"`/`assessable: true` here instead of silently falling back to the neutral `"N/A"` this combination used to produce. |
+| `assessable` | `bool` | yes | `false` for the distinct "N/A / nothing scorable" state (empty / all-UNKNOWN / all-advisory config, and neither `config_blind_capped` nor `runtime_capped` fired) — lets a consumer tell a real `F` apart from a not-assessable `"N/A"` config. `true` for every normal audit, **and also** when nothing else was scorable but `config_parse_error`/a corroborated runtime signal fired: B-306 forces a real `grade: "F"` (`score: 0`) in that case rather than falling back to the neutral `"N/A"` — a blind config or corroborated runtime evidence is real, alarming signal, never "nothing known". |
 | `trifecta` | `str` | yes | Lethal Trifecta sub-score expressed as `"<n>/3"` (e.g. `"2/3"`). `"?/3"` means check A1 did not run. |
 | `findings` | `array[Finding]` | yes | All check results. See §2. |
 | `next_actions` | `array[NextAction]` | yes | Prioritised remediation suggestions. See §3. |
@@ -40,6 +43,8 @@ versioning §6 in `CLAUDE.md`).
 | `config_found` | `bool` | yes | `true` when an `openclaw.json` was present at the scanned home (vs a non-OpenClaw setup). |
 | `audited_config_path` | `string \| null` | yes | Absolute path of the config file this run actually read — every finding in the payload describes this file and only this file. May be a legacy `clawdbot.json`, which OpenClaw's resolver prefers when it exists. When `config_found` is `false` this still names the canonical path that was looked for. Compare it against check `B183`, which reports whether OpenClaw's own resolver (`OPENCLAW_CONFIG_PATH` / `OPENCLAW_HOME` / `OPENCLAW_STATE_DIR`) selects a different file. `null` only when no context was supplied to the renderer. |
 | `config_parse_error` | `bool` | yes | `true` when `openclaw.json` was present but could not be parsed into a config object (syntax error, size-cap truncation, or a non-object top level). A gating consumer should treat `true` as "scan incomplete", not a clean result — the run is UNKNOWN-heavy. A valid empty `{}` config is `false`. |
+| `config_symlink_escapes_home` | `bool` | yes | `true` when `openclaw.json` is a symlink whose target leaves its config directory AND that target is a readable regular file owned by the auditing user — a benign dotfiles layout (stow/chezmoi/yadm/bare-git). The collector follows it and audits the real bytes, so this is NOT a blind config: `config_parse_error` stays `false` and the run is never `config_blind_capped` for this reason. Lets a consumer distinguish a safely-relocated config from a genuinely dark one. `false` on every normal (non-symlinked, or in-directory-symlinked) run. |
+| `config_parse_reason` | `string \| null` | yes | Short diagnostic for why `config_parse_error` is `true` (the raw loader message), OR a note that a dotfiles-style symlink was safely followed when `config_symlink_escapes_home` is `true`. `null` when the config parsed cleanly with no relocation. Never contains a secret or file-content value. |
 | `errors` | `array[str]` | yes | Human-readable collection/parse messages (e.g. the `openclaw.json` parse error). Empty array on a clean run. |
 | `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §15. |
 | `scan_receipt` | `str` | yes | Deterministic content-integrity hash over all findings, formatted `"sha256:<64-hex-chars>"`. Same findings set (any order) always yields the same receipt; a changed finding set changes it. Not a security signature — a drift/tamper-evidence checksum for the scan output itself. |
@@ -53,6 +58,9 @@ versioning §6 in `CLAUDE.md`).
   "capped": false,
   "raw_score": 74,
   "cap_severity": null,
+  "runtime_capped": false,
+  "runtime_cap_reason": null,
+  "config_blind_capped": false,
   "assessable": true,
   "trifecta": "1/3",
   "findings": [ ... ],
@@ -66,6 +74,8 @@ versioning §6 in `CLAUDE.md`).
   "config_found": true,
   "audited_config_path": "/home/you/.openclaw/openclaw.json",
   "config_parse_error": false,
+  "config_symlink_escapes_home": false,
+  "config_parse_reason": null,
   "errors": [],
   "inventory": {
     "system": { "status": "FAIL", "findings": ["B2"] },

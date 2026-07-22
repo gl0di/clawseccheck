@@ -29,6 +29,26 @@ _TIGHT_FIXTURE_PATHS = {
     # has no state DB at all, so B188 returns UNKNOWN on all of them).
     "clean_b188_state_db/state": 0o700,
     "clean_b188_state_db/state/openclaw.sqlite": 0o600,
+    # CLAWSECCHECK-B-309 C-135 follow-up: this fixture's whole point is B164's
+    # exfil_evidence WARN firing off a `logs/app.log` sink, isolated from B19 (data
+    # at-rest) noise — an umask-dependent group/world-readable logs/ dir would add an
+    # unrelated scored B19 WARN and make the score comparison against
+    # clean_i025_b164_baseline non-deterministic across checkout umasks.
+    "clean_i025_b164_residual_no_cap/logs": 0o700,
+    "clean_i025_b164_residual_no_cap/logs/app.log": 0o600,
+    # CLAWSECCHECK-B-309 C-135 FOLLOW-UP #2: same reason as the residual fixture above —
+    # this fixture's whole point is B164's exfil_evidence WARN firing (but NOT cap-
+    # eligible) off a `logs/app.log` sink, isolated from B19 noise so the score
+    # comparison against clean_i025_b164_baseline stays deterministic across umasks.
+    "clean_i025_b164_own_api_log_no_cap/logs": 0o700,
+    "clean_i025_b164_own_api_log_no_cap/logs/app.log": 0o600,
+    # CLAWSECCHECK-B-309 C-135 FOLLOW-UP #3: same reason as the two fixtures above —
+    # this fixture's whole point is B164's exfil_evidence WARN firing (but NOT cap-
+    # eligible, since the line names a known host with no independent transport verb)
+    # off a `logs/app.log` sink, isolated from B19 noise so the score comparison
+    # against clean_i025_b164_baseline stays deterministic across umasks.
+    "clean_i025_b164_host_mention_no_verb_no_cap/logs": 0o700,
+    "clean_i025_b164_host_mention_no_verb_no_cap/logs/app.log": 0o600,
 }
 
 

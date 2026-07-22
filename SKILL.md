@@ -489,6 +489,10 @@ to do next. The user should confirm before acting on them.
    A static audit bounds what your agent *can* do, not how it *behaves* at runtime —
    OpenClaw core has no runtime egress/taint gate, so a clean Lethal Trifecta here isn't
    a runtime guarantee; a high grade means "not statically lethal-capable", not "runtime-proof".
+   One exception: a corroborated runtime signal (a trajaudit indicator match) can CAP
+   this grade, never raise it — everything else runtime-observed (--behavioral's
+   T1/T2/T3, and every B164 signal including exfil_evidence, included) still cannot
+   move it either way.
    History: ~/.clawseccheck/ (--no-history to skip).
 ```
 

@@ -33,7 +33,14 @@ B-299 widens the INDICATOR SOURCE without widening that boundary:
 B-299 HONEST LABELLING — this NARROWS two gaps, it does not close either:
 
 * Both new signals are ADVISORY OBSERVATIONS in this unscored, opt-in renderer. Neither
-  emits a Finding, neither has a confidence tier, and neither can move the A-F grade.
+  emits a Finding, neither has a confidence tier, and this module never renders a
+  verdict that moves the A-F grade. I-025/B-309 (Dave's 2026-07-20 ruling) is a
+  narrow, later exception at the SCORING layer, not here: `grade_cap_signal` (below)
+  lets `scoring.compute` apply a hard CAP — never an ordinary scored point — when Part
+  B (bootstrap_hits) or the original C-158 `hits` fire, because both are
+  arguments-corroborated against a token the user's own file already names. Part A
+  (`cred_arg_hits`) stays excluded from that cap — see `grade_cap_signal`'s own
+  docstring for why its evidentiary bar is too weak to ever move a grade.
 * Part A does NOT make behavioral T1 work. T1 still cannot fire on a core-tools agent
   (`_T_SENSITIVE_HINTS` matches no OpenClaw core verb — see the T1 note in catalog.py),
   and `_T_SENSITIVE_HINTS` was deliberately NOT widened to fix that: restoring the
@@ -434,6 +441,47 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     for (fam, verb), count in sorted(cred_counts.items()):
         result["cred_arg_hits"].append({"family": fam, "verb": verb, "count": count})
     return result
+
+
+# ---------------------------------------------------------------------------
+# I-025/B-309 — cap-only runtime signal (Dave's 2026-07-20 ruling).
+# ---------------------------------------------------------------------------
+
+
+def grade_cap_signal(ctx) -> dict:
+    """Whether THIS module's own indicator-match observations are eligible to CAP (never
+    otherwise affect) the A-F grade, per Dave's 2026-07-20 ruling: "only an ARGUMENTS-
+    CORROBORATED signal may ever affect the grade, and only as a grade CAP."
+
+    Eligible, exhaustively: ``hits`` (a skill-named indicator seen in runtime tool-call
+    arguments) and ``bootstrap_hits`` (the same correlation for a bootstrap/memory-named
+    indicator, B-299 Part B) — both membership-test an indicator the user's OWN file
+    already names against REAL runtime arguments, which is exactly the "arguments-
+    corroborated" bar the ruling sets.
+
+    ``cred_arg_hits`` (B-299 Part A) is DELIBERATELY EXCLUDED. It has no known-bad
+    indicator to corroborate against at all — it is a bare `_CRED_RE` credential-family
+    match, and that module's own docstring documents a "KNOWN LOOSE ARM" (the
+    browser-Cookies alternative can match an ordinary `.../cookies-policy` page next to
+    the word "chrome") that a real fleet was measured to trigger zero times but that
+    remains reachable by construction. Golden Rule #5 (zero false-positive FAILs) sets
+    too weak an evidentiary bar for a signal that can cap a grade to accept that residual
+    risk — see the module docstring's own "ACCESS, not exfiltration" framing for
+    ``cred_arg_hits``. Promoting it would need its own C-135 pass first; this task's did
+    not cover it, so it stays excluded.
+
+    Returns ``{"present": bool, "hit": bool, "count": int}``:
+      * ``present=False`` — no trajectory sidecar found at all. UNKNOWN, not a cap, and
+        NOT an implied all-clear either (the caller must not read this as a clean PASS).
+      * ``present=True, hit=False`` — trajectory data was scanned and neither eligible
+        class fired. No cap.
+      * ``present=True, hit=True`` — at least one skill- or bootstrap-named indicator was
+        observed in actual tool-call arguments. The caller MAY cap the grade
+        (``scoring.compute`` is the only caller that does).
+    """
+    r = analyze(ctx)
+    count = len(r["hits"]) + len(r["bootstrap_hits"])
+    return {"present": r["present"], "hit": count > 0, "count": count}
 
 
 # ---------------------------------------------------------------------------

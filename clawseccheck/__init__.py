@@ -54,6 +54,11 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     `attestation` (the agent's self-report; see attest.py) enriches the audit: when
     omitted, the attestation checks (B43/B44) report UNKNOWN and the score is
     unchanged. Passed straight through to ctx so the engine stays deterministic.
+
+    I-025/B-309: the returned ScoreResult may be capped — never given an ordinary
+    scored point — by a corroborated runtime signal (a trajaudit-style skill/bootstrap
+    indicator match; see scoring._runtime_cap_signal). Every runtime-consuming check
+    (B83, B84, B85, B164, B180, T1/T2/T3) stays unable to move the grade any other way.
     """
     ctx = collect(home)
     ctx.include_host = include_host
@@ -64,7 +69,11 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     findings = run_all(ctx)
     ignore = _baseline.load_ignore(home)
     _baseline.apply(findings, ignore)
-    score = compute(findings)
+    # I-025/B-309: pass ctx so scoring.compute can also see a trajaudit-style indicator
+    # match (needs ctx.installed_skills/bootstrap/home) alongside the B164 exfil_evidence
+    # signal it already reads off `findings` alone — see scoring.py's cap-only runtime
+    # path. Both stay cap-only; neither becomes an ordinary scored point.
+    score = compute(findings, ctx)
     if include_native:
         ctx.native = run_native_audit(native_bin, native_timeout)
     return ctx, findings, score

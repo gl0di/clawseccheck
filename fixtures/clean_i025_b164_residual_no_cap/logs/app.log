@@ -1,0 +1,2 @@
+2026-07-21T09:00:00Z INFO agent: reading ~/.aws/credentials to configure the AWS CLI profile for the deploy step
+2026-07-21T09:05:12Z INFO agent: posting test webhook to https://abc123.ngrok-free.app/hooks?sig=VGhpcyBpcyBhIHBlcmZlY3RseSBvcmRpbmFyeSB3ZWJob29rIHNpZ25hdHVyZSB0ZXN0IHBheWxvYWQgZm9yIFFB

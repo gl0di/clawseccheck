@@ -20,6 +20,10 @@ from ..collector import (
     Context,
     dig,
 )
+# _escape_embedded_header_lines lives in collector.py (the sole legitimate emitter of
+# the "# file: <name>" header convention) — reused here so MCP tool descriptions get
+# the identical defense (B-305/C-135 round 2, Finding 2 — see _mcp_tool_texts below).
+from ..collector import _escape_embedded_header_lines  # noqa: F401
 # Pure re-exports (B-265): these three moved DOWN into collector.py so Layer-1 skill
 # discovery can share one self-identity oracle with vet_skill. They stay importable from
 # here — `checks/_vet.py` and the aggregator both do `from ._shared import _is_own_source`
@@ -1363,6 +1367,39 @@ def _mcp_servers(cfg: dict) -> dict:
     for name in _plugins(cfg):
         if "mcp" in str(name).lower():
             out.setdefault(name, {})
+    return out
+
+
+def _mcp_tool_texts(cfg: dict) -> list[tuple[str, str]]:
+    """Return ``[(source_name, description), ...]`` for every MCP tool's
+    `description` field across every configured server, with any embedded
+    '# file: <name>' header-shaped line neutralized.
+
+    B-305/C-135 (round 2, Finding 2): a tool `description` is externally-supplied
+    text (the MCP server itself controls it) fed to the identical NL-directive
+    scanning pipeline as bootstrap files and skill content (`_MANIFEST_HEADER_RE` /
+    `_pos_in_source_code_section`, both keyed on the collector's "# file: <name>"
+    convention) -- so it needs the identical defense `_read_skill_text` gives skill
+    files and bootstrap collection gives bootstrap files. No such header is ever
+    legitimately present in a tool description, so escaping here is unconditionally
+    safe. Centralized here -- the one place every tool-description-scanning check
+    (B64, B74) should read tool text from -- instead of duplicated in each check's
+    own MCP-walking loop, where a future third scanner could easily forget it.
+    """
+    out: list[tuple[str, str]] = []
+    for sname, spec in _mcp_servers(cfg).items():
+        tools = spec.get("tools") if isinstance(spec, dict) else None
+        if not isinstance(tools, list):
+            continue
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            tool_name = str(tool.get("name", "<unnamed>"))
+            desc = str(tool.get("description", ""))
+            if desc:
+                out.append(
+                    (f"mcp:{sname}/{tool_name}", _escape_embedded_header_lines(desc))
+                )
     return out
 
 

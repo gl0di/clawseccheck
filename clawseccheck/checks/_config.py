@@ -981,6 +981,20 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
             evidence,
         )
 
+    # B-306: `has_credentials`/`reachable` are not equally config-dependent.
+    # `has_env_gateway_token` (above) is read from a PERSISTENT, config-INDEPENDENT
+    # artifact (a systemd unit or global dotenv file — see _gateway_env_credential), so a
+    # real credential can still be legitimately found even when openclaw.json itself is
+    # unparseable/unreadable. `reachable`, however, is derived entirely from
+    # ctx.config (_external_input_channels/_enabled_tools/tools.elevated.allowFrom) and
+    # therefore collapses to False whenever ctx.config == {} — so the "not reachable" PASS
+    # below is not actually known on a blind config, only assumed. Guarded here, right
+    # before that PASS: the `reachable` WARN above needs no guard of its own because
+    # `reachable` can never be True with ctx.config == {} in the first place.
+    unreadable = _config_unreadable("B41", ctx)
+    if unreadable is not None:
+        return unreadable
+
     detail = (
         f"{n} credential profile(s) present; no untrusted-ingress + outbound path "
         "makes them broadly reachable."
@@ -2612,6 +2626,23 @@ def check_tls(ctx: Context) -> Finding:
 
 
 def check_trifecta(ctx: Context) -> Finding:
+    # B-306: openclaw.json present but unparseable/unreadable (config_parse_error, B-166)
+    # collapses ctx.config to {} — every dig(cfg, ...) lookup inside _trifecta_legs then
+    # defaults to "absent", so the untrusted-input and outbound-action legs (100%
+    # config-derived) read as OFF even when the real config has them ON. Guarded at the
+    # top, before computing legs at all: unlike B1/B11 (whose independent, non-config
+    # signal is a COMPLETE, self-sufficient basis for their own FAIL/WARN), the one
+    # non-config contributor mixed into _trifecta_legs — `(ctx.home / "credentials")
+    # .is_dir()`, feeding only the "sensitive data" leg — can never by itself clear the
+    # >=3-legs FAIL threshold or satisfy the thin-surface WARN branch below (which keys on
+    # the untrusted-input/outbound legs, not sensitive data). So guarding here cannot mask
+    # an independently-provable verdict; it only stops a confidently-worded WARN/PASS from
+    # being computed off a config the audit never actually saw. Measured impact on a real
+    # blind run: A1 read WARN instead of its true FAIL, inflating the overall grade from
+    # F/49 to C/79 — a lying two-grade improvement on the flagship CRITICAL check.
+    unreadable = _config_unreadable("A1", ctx)
+    if unreadable is not None:
+        return unreadable
     legs = _trifecta_legs(ctx)
     active = [k for k, v in legs.items() if v]
     detail = f"Active legs {len(active)}/3: {', '.join(active) or 'none'}. Rule: keep ≤2 of 3."

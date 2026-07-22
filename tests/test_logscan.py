@@ -91,6 +91,45 @@ def test_class2_exfil_evidence_needs_secret_and_exfil_host_same_line(tmp_path):
     assert result.counts.get("exfil_evidence", 0) == 1
 
 
+def test_class2_fires_identically_regardless_of_host_shape(tmp_path):
+    """I-025/B-309 once made this class's same-line arm eligible to CAP the A-F grade,
+    gated on progressively narrower host/verb requirements across four C-135 rounds
+    (follow-ups #1-#4: any named drop-host, then an independent transport verb, then an
+    "attacker-exclusive" OOB/canary host set). THREE independent adversarial reviews of
+    the final attempt proved no sound gate exists — this tool's own audience
+    (security-conscious operators) legitimately sends secrets to the exact
+    "attacker-exclusive" infrastructure (interactsh/oast, Burp Collaborator) the last
+    attempt chose, so the benign and malicious cases are byte-identical on one line.
+    Dave's 2026-07-22 ruling RETRACTED the cap-eligibility machinery entirely (see this
+    module's retraction note above `_scan_line_content`'s Class 2 comment) —
+    ``LogScanResult`` no longer HAS a same-line-only counter at all. WARN behavior for
+    the exfil_evidence class is completely unaffected: it fires identically regardless
+    of which kind of host is named (an attacker-exclusive OOB host, a dual-use dev tool,
+    the agent's own first-party API provider, or no named host at all), as long as a
+    secret-shaped literal and an exfil-transport signal share a line."""
+    cases = [
+        "password=abcdefgh12 was uploaded via curl to https://c6t3n9abcd1234.oast.pro/x\n",
+        "secret=abcdefgh12 was exfiltrated via curl to https://a1b2.interactsh.com/beacon\n",
+        f"DEBUG httpclient: POST https://api.anthropic.com/v1/messages "
+        f"Authorization: Bearer sk-ant-{'a' * 30}\n",
+        "switched webhook debug endpoint to https://webhook.site/9f8b7a6c; "
+        "unrelated note: rotate ci_token=abcdefgh12 next sprint\n",
+        "shared the trace at https://pastebin.com/abc123, meanwhile secret=abcdefgh12 needs rotating\n",
+        "apikey=abcdefgh12 via curl to https://team-abc.ngrok-free.app/hook\n",
+    ]
+    for line in cases:
+        sink = _write(tmp_path, "a.log", line)
+        result = logscan.scan_log_file(sink, None)
+        assert result.counts.get("exfil_evidence", 0) == 1, line
+
+
+def test_logscanresult_has_no_same_line_cap_counter(tmp_path):
+    """The retracted cap-eligibility counter is fully removed, not merely defaulted to
+    0 — a stray reference anywhere in the codebase would be a real bug."""
+    result = logscan.scan_log_file(_write(tmp_path, "a.log", "x\n"), None)
+    assert not hasattr(result, "exfil_evidence_same_line_hits")
+
+
 def test_class2_silent_when_secret_without_exfil_host(tmp_path):
     line = "password=abcdefgh12 stored locally\n"
     sink = _write(tmp_path, "a.log", line)
@@ -246,9 +285,9 @@ def test_class2_documented_residual_base64_english_phrase_in_sig_param(tmp_path)
     decodes to printable text exactly like a real exfiltrated secret would — the two are
     structurally identical once encoded, so no static content-shape test can separate
     them without semantic judgment. This is pinned deliberately, not silently: this class
-    is WARN-only/advisory (`scored=False`, never FAIL — Golden Rule #5 is about FAIL), so
-    this residual can never move the grade. If this assertion ever needs to flip to
-    "silent", that is a deliberate, documented tightening, not an accidental one."""
+    is WARN-only/advisory (`scored=False`, never FAIL — Golden Rule #5 is about FAIL, and
+    nothing in this module can CAP the grade any more either — see the retraction note
+    above `_scan_line_content`'s Class 2 comment)."""
     sig_blob = "ZmFrZXNpZ25hdHVyZXZhbHVlZm9ydGVzdGluZ29ubHlYWVo"  # b64("fakesignature...")
     text = "auth token is picked up from ~/.npmrc, nothing to change\n" + (
         f"GET https://spare-brave-oxide-nine.trycloudflare.com/hook?sig={sig_blob} HTTP/1.1\n"

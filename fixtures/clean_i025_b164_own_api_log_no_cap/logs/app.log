@@ -1,0 +1,2 @@
+2026-07-21T09:12:03Z DEBUG httpclient: POST https://api.anthropic.com/v1/messages apikey=abcdefgh12
+2026-07-21T09:12:04Z INFO agent: response received, 200 OK, tokens=452
