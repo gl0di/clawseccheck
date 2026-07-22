@@ -3,6 +3,58 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.56.0] — 2026-07-22
+
+The LLM-judge epic: three opt-in, host-agent-driven capabilities that let the
+user's own AI assistant reduce noise on their own config and raise (never
+lower) a verdict on untrusted third-party content — plus the security fixes
+an independent adversarial review found in the new mechanism before release.
+
+### Added
+- `--propose-ignore` / `--apply-ignore-proposals`: feed a host-agent judge
+  panel's verdicts for a prior `--judge-packet` back, and it proposes
+  `.clawseccheckignore` entries for findings verdicted SAFE. Read-only by
+  itself; applying is a separate, confirmation-gated step. Gains no new
+  suppression authority — a score-capping FAIL or sensitive id still surfaces
+  regardless of how a suppression entry got into the file, and any change is
+  still flagged by `--monitor`.
+- `--vet-judge-packet` / `--vet-judged`: the same judge-panel idea scoped to a
+  single `--vet`/`--vet-skill`/`--vet-plugin` target. On untrusted third-party
+  content the judge may only **escalate** a finding, never lower one —
+  authority is scoped by content provenance, not direction, so a successful
+  prompt injection against the judge buys an attacker nothing.
+- Pre-install prose attestation: three fixed questions
+  (`ATTEST-PROSE-MISMATCH`, `ATTEST-PROSE-INJECTION`, `ATTEST-PROSE-SOCIAL-ENG`)
+  always offered in the vet judge packet, answering a measured gap — 97.32% of
+  malicious cases the engine only ever caught at WARN had zero FAIL-capable
+  signal, because the attack was described in prose rather than shipped as
+  code. Capped at WARN, never a capping FAIL, since these carry no independent
+  deterministic signal.
+
+### Fixed
+- `--apply-ignore-proposals` now refuses any proposal `entry` not shaped like a
+  genuine fingerprint, so a tampered proposals file can't smuggle in a bare
+  check id and suppress it file-wide.
+- A finding aggregating hits across multiple skills is no longer offered by
+  `--propose-ignore` — a SAFE verdict scoped to one target could otherwise
+  silently suppress the whole aggregate, hiding other, unreviewed skills.
+- `baseline.append_entries` now writes via the project's symlink-safe I/O
+  helper instead of a plain `open()`.
+- `--vet-judged`/pre-install attestation verdicts are now bound to a
+  `targetFingerprint` of the resolved target path. Without it, a verdicts file
+  correctly produced for one target could silently escalate a *different*
+  target sharing a bare name — two shipped fixtures, two bundled skills inside
+  one plugin, or a stale file replayed against a later run. A missing or
+  mismatched fingerprint now rejects the whole verdicts file.
+- Two bundled skills inside one plugin sharing a directory basename now get
+  distinct judge-packet targets (`vet_plugin`'s dispatch previously only
+  disambiguated the disclosed `detail`, not the `evidence` the judge-matching
+  keys on).
+- `--vet-judged` no longer silently drops a vetted Finding's `.ctx` attribute
+  (a bare, non-dataclass-field attribute `dataclasses.replace` doesn't
+  preserve), which was corrupting the connections/persistence axis assessment
+  on every call, even a pure no-op with no matching verdicts.
+
 ## [3.55.0] — 2026-07-22
 
 Closes four detection-precision false positives an independent adversarial review found
