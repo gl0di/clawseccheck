@@ -30,17 +30,32 @@ Covers:
   alert fires -- this feature adds no new authority beyond what the existing
   suppression + drift-detection machinery already provides.
 
+C-135 (2026-07-22, independent adversarial review) additions:
+- A finding with more than one evidence entry (an aggregate spanning multiple
+  skills, e.g. B100/B65/.../B156's real shape) is never proposed -- a SAFE
+  verdict scoped to one target cannot safely suppress the whole aggregate,
+  which would silently hide OTHER, unreviewed skills' evidence too.
+- --apply-ignore-proposals refuses any "entry" not shaped like a real
+  fingerprint() output (rejects a bare "B1"/"B2"/"B20" a tampered, not
+  genuinely --propose-ignore-produced, proposals file could carry) --
+  baseline.is_fingerprint() is the single source of that shape check.
+- baseline.append_entries() writes via safeio.secure_append_text (symlink-safe,
+  O_NOFOLLOW) rather than a plain open(); a symlinked .clawseccheckignore
+  raises OSError instead of writing through it, and cli.py surfaces that as a
+  clear error rather than a crash or a silent no-op.
+
 All tests are offline, read-only except where explicitly exercising a write
 path, stdlib-only.
 """
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
 from clawseccheck.adjudication import build_ignore_proposals, render_ignore_proposals_json
-from clawseccheck.baseline import append_entries, fingerprint, load_ignore
+from clawseccheck.baseline import append_entries, fingerprint, is_fingerprint, load_ignore
 from clawseccheck.catalog import CRITICAL, FAIL, HIGH, MEDIUM, PASS, UNKNOWN, WARN, Finding
 from clawseccheck.monitor import diff, snapshot
 from clawseccheck.report import surfaced_despite_suppression
@@ -118,6 +133,34 @@ def test_proposal_entry_matches_baseline_fingerprint_exactly():
     # And that fingerprint is exactly what baseline.apply() would match against
     # a .clawseccheckignore line -- confirmed indirectly via the CLI round-trip
     # tests below, not re-derived here.
+
+
+def test_multi_target_aggregate_finding_is_never_proposed():
+    """C-135: a Finding aggregating hits across multiple skills (>1 evidence
+    entry -- B100/B65/etc.'s real shape) must never be proposed, even with a
+    SAFE verdict for its first target, because suppressing it would silence
+    every OTHER bundled skill's evidence too, on a verdict that only ever
+    covered the first one.
+    """
+    f = Finding("B100", "t", MEDIUM, WARN, "combined detail for skillA and skillB",
+                "fix", "fw", evidence=["skillA: clickfix pattern", "skillB: clickfix pattern"])
+    proposals = build_ignore_proposals([f], _safe_map(("B100", "skillA")))
+    assert proposals == []
+
+
+def test_single_target_finding_is_still_proposed():
+    """Sanity check that the >1-evidence guard doesn't over-broaden: a
+    single-skill finding (the common case) is unaffected."""
+    f = Finding("B100", "t", MEDIUM, WARN, "single skill detail", "fix", "fw",
+                evidence=["skillA: clickfix pattern"])
+    proposals = build_ignore_proposals([f], _safe_map(("B100", "skillA")))
+    assert len(proposals) == 1
+
+
+def test_zero_evidence_finding_is_still_proposed():
+    f = Finding("C99", "t", MEDIUM, UNKNOWN, "unknown detail", "fix it", "fw", evidence=[])
+    proposals = build_ignore_proposals([f], _safe_map(("C99", "C99")))
+    assert len(proposals) == 1
 
 
 def test_deterministic_ordering():
@@ -427,3 +470,99 @@ def test_cli_apply_ignore_proposals_empty_list_is_a_noop(tmp_path, capsys):
     rc = main(["--home", str(tmp_path), "--apply-ignore-proposals", str(empty)])
     assert rc == 0
     assert not (tmp_path / ".clawseccheckignore").exists()
+
+
+# ---------------------------------------------------------------------------
+# C-135: is_fingerprint() shape guard
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("entry", ["B10:d326cc57", "C99:00000000", "RISK-03:abcdef12"])
+def test_is_fingerprint_accepts_real_shapes(entry):
+    assert is_fingerprint(entry) is True
+
+
+@pytest.mark.parametrize("entry", [
+    "B1", "B2", "B20", "B13",           # bare check ids -- the exact injection risk
+    "B10:", "B10", ":d326cc57",         # missing half
+    "B10:D326CC57",                    # uppercase hex -- fingerprint() always lowercases
+    "B10:d326cc5",                     # 7 hex chars, not 8
+    "B10:d326cc571",                   # 9 hex chars, not 8
+    "B10:d326cc5g",                    # non-hex trailing char
+    "", None, 42, ["B10:d326cc57"],
+])
+def test_is_fingerprint_rejects_bare_ids_and_garbage(entry):
+    assert is_fingerprint(entry) is False
+
+
+def test_cli_apply_ignore_proposals_rejects_bare_id_injection(tmp_path, capsys):
+    """C-135: a tampered proposals file with a bare "B20" entry (not something a
+    genuine --propose-ignore run could ever produce) must be refused, not
+    silently applied via apply()'s bare-id match."""
+    from clawseccheck.cli import main
+
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    tampered = tmp_path / "tampered.json"
+    tampered.write_text(json.dumps({"proposedIgnoreEntries": [{"entry": "B20"}]}), encoding="utf-8")
+
+    rc = main(["--home", str(tmp_path), "--apply-ignore-proposals", str(tampered), "--yes"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "not shaped like a real fingerprint" in out
+    assert "B20" in out
+    assert not (tmp_path / ".clawseccheckignore").exists()
+
+
+def test_cli_apply_ignore_proposals_rejects_bare_id_but_applies_valid_siblings(tmp_path):
+    """A mixed file (one tampered bare-id entry alongside a genuine fingerprint)
+    applies only the valid one -- rejection of one entry must not sink the rest."""
+    from clawseccheck.cli import main
+
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    mixed = tmp_path / "mixed.json"
+    mixed.write_text(json.dumps({"proposedIgnoreEntries": [
+        {"entry": "B20"},
+        {"entry": "C99:d326cc57"},
+    ]}), encoding="utf-8")
+
+    rc = main(["--home", str(tmp_path), "--apply-ignore-proposals", str(mixed), "--yes"])
+    assert rc == 0
+    ignore = load_ignore(tmp_path)
+    assert ignore == {"C99:d326cc57"}
+
+
+# ---------------------------------------------------------------------------
+# C-135: symlink-safe write
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(os.name == "nt", reason="O_NOFOLLOW symlink refusal is POSIX-only (C-160)")
+def test_append_entries_refuses_a_symlinked_ignore_file(tmp_path):
+    outside = tmp_path.parent / f"outside-{tmp_path.name}.clawseccheckignore"
+    outside.write_text("", encoding="utf-8")
+    try:
+        (tmp_path / ".clawseccheckignore").symlink_to(outside)
+        with pytest.raises(OSError):
+            append_entries(tmp_path, ["B10:d326cc57"])
+        assert "B10:d326cc57" not in outside.read_text(encoding="utf-8")
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="O_NOFOLLOW symlink refusal is POSIX-only (C-160)")
+def test_cli_apply_ignore_proposals_symlinked_ignore_file_errors_cleanly(tmp_path, capsys):
+    from clawseccheck.cli import main
+
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    outside = tmp_path.parent / f"outside2-{tmp_path.name}.clawseccheckignore"
+    outside.write_text("", encoding="utf-8")
+    try:
+        (tmp_path / ".clawseccheckignore").symlink_to(outside)
+        proposal = tmp_path / "proposal.json"
+        proposal.write_text(json.dumps({"proposedIgnoreEntries": [{"entry": "C99:d326cc57"}]}),
+                             encoding="utf-8")
+        rc = main(["--home", str(tmp_path), "--apply-ignore-proposals", str(proposal), "--yes"])
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "could not write" in out
+        assert "C99:d326cc57" not in outside.read_text(encoding="utf-8")
+    finally:
+        outside.unlink(missing_ok=True)

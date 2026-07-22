@@ -736,7 +736,19 @@ it from stdin.
 `--judge-packet` (unsuppressed `UNKNOWN`, or `WARN` in the documented
 false-negative-prone set) are ever candidates — a `FAIL`-status finding (the only
 kind that can cap the score) can never be selected here, regardless of what a
-verdicts file claims for it.
+verdicts file claims for it. A finding aggregating more than one target (e.g. a
+`WARN` that names several skills in one `Finding`) is also never proposed: a
+`SAFE` verdict scoped to one target cannot safely suppress the whole aggregate
+without silently hiding the OTHER, unreviewed targets bundled into the same
+fingerprint (C-135, 2026-07-22).
+
+`--apply-ignore-proposals` only ever writes an `entry` shaped like a genuine
+`fingerprint()` output (`<id>:<8 lowercase hex chars>`) — a bare check id (e.g.
+`"B1"`, `"B20"`) in a proposals file that did not genuinely come from
+`--propose-ignore` is refused and named on stderr/stdout, never silently applied
+(C-135, 2026-07-22): this command's whole premise is "only ever what
+`--propose-ignore` already offered," and a bare id would instead suppress that
+check file-wide via `.clawseccheckignore`'s separate bare-id form.
 
 ### Envelope fields
 

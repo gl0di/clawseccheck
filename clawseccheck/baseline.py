@@ -14,7 +14,24 @@ suppress a chain derived from it (see B-154).
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
+
+from .safeio import secure_append_text
+
+# The exact shape fingerprint() produces: <id>:<8 lowercase hex chars>. Used by
+# --apply-ignore-proposals (C-253, C-135 2026-07-22) to refuse a proposals-file
+# "entry" that isn't actually a fingerprint -- e.g. a bare "B1"/"B2"/"B20" smuggled
+# into a hand-crafted (not genuinely --propose-ignore-produced) proposals file,
+# which would otherwise suppress that id file-wide via the bare-id match apply()
+# already supports, on a file whose whole point is "only ever what a real
+# --propose-ignore run already offered."
+FINGERPRINT_RE = re.compile(r"^[A-Za-z0-9_-]+:[0-9a-f]{8}$")
+
+
+def is_fingerprint(entry: str) -> bool:
+    """True when *entry* has fingerprint()'s exact ``<id>:<8-hex>`` shape."""
+    return isinstance(entry, str) and bool(FINGERPRINT_RE.match(entry))
 
 
 def fingerprint(finding) -> str:
@@ -81,6 +98,8 @@ def append_entries(home: Path | str, entries, *, comment: str | None = None) -> 
         return 0
     lines = [f"# {comment}"] if comment else []
     lines.extend(new_entries)
-    with open(p, "a", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
+    # C-135 (2026-07-22): symlink-safe append (O_NOFOLLOW under the hood) — this is
+    # the one write path in this module, so it gets the same protection secure_write_text
+    # already gives every other local-store writer in the package.
+    secure_append_text(p, "\n".join(lines) + "\n")
     return len(new_entries)

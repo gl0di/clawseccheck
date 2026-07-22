@@ -456,10 +456,25 @@ def build_ignore_proposals(findings, verdicts_map: dict) -> list[dict]:
     finding is benign in context, propose suppressing it" rather than merely
     annotated. Only ``_is_borderline`` findings are ever considered (see module
     note above). Deterministic ordering, same convention as build_judge_packet.
+
+    C-135 (2026-07-22): several _FN_PRONE_WARN_IDS checks (B100, B65, B66, B99,
+    B90, B102, B154, B156, ...) emit ONE Finding aggregating a hit per installed
+    skill -- one evidence entry per skill, but a SINGLE fingerprint over the whole
+    Finding.detail. _target_from_evidence only ever surfaces the FIRST evidence
+    entry's name, so a judge reviewing "target A" cannot see, and cannot scope its
+    verdict to exclude, skills B/C/... bundled into the same Finding. Proposing a
+    suppression there would suppress the WHOLE aggregate -- every bundled skill,
+    not just the one reviewed -- on a verdict that only ever covered one of them.
+    A finding with more than one evidence entry is therefore never proposed here;
+    baseline.py's suppression granularity (one fingerprint per Finding) cannot
+    safely represent "safe for this target only" in that shape, and offering an
+    entry anyway would silently widen what a "SAFE" verdict actually covers.
     """
     proposals: list[dict] = []
     for f in findings or []:
         if not _is_borderline(f):
+            continue
+        if len(f.evidence or []) > 1:
             continue
         target = _target_from_evidence(f)
         entry = verdicts_map.get((f.id, target))

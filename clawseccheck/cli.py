@@ -53,7 +53,7 @@ from .report import (
 from .adjudication import (
     render_ignore_proposals_json, render_judge_packet_json, render_judged_json,
 )
-from .baseline import append_entries
+from .baseline import append_entries, is_fingerprint
 from .dossier import build_profile
 from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE, verify_chain
@@ -544,10 +544,30 @@ def _run_apply_ignore_proposals(args) -> int:
     if not isinstance(proposals, list):
         _emit("clawseccheck: proposals file has no 'proposedIgnoreEntries' list — nothing to apply.")
         return 1
-    entries = [
-        p["entry"].strip() for p in proposals
-        if isinstance(p, dict) and isinstance(p.get("entry"), str) and p["entry"].strip()
-    ]
+    # C-135 (2026-07-22): only ever apply something SHAPED like a real fingerprint()
+    # output. A hand-crafted (not genuinely --propose-ignore-produced) proposals file
+    # could otherwise carry a bare "entry": "B1"/"B2"/"B20" and suppress that id
+    # file-wide via apply()'s bare-id match — exactly what this command's whole
+    # premise ("only ever what --propose-ignore already offered") is meant to rule
+    # out. A non-fingerprint entry is skipped and named, never silently dropped.
+    entries: list = []
+    rejected: list = []
+    for p in proposals:
+        if not (isinstance(p, dict) and isinstance(p.get("entry"), str)):
+            continue
+        candidate = p["entry"].strip()
+        if not candidate:
+            continue
+        if is_fingerprint(candidate):
+            entries.append(candidate)
+        else:
+            rejected.append(candidate)
+    if rejected:
+        _emit(
+            "clawseccheck: ignoring "
+            f"{len(rejected)} proposal entr{'y' if len(rejected) == 1 else 'ies'} not "
+            f"shaped like a real fingerprint (refusing to apply): {', '.join(rejected)}"
+        )
     if not entries:
         _emit("Nothing to apply — no proposed entries in that file.")
         return 0
@@ -566,9 +586,16 @@ def _run_apply_ignore_proposals(args) -> int:
         for e in entries:
             _emit(f"  {e}")
 
-    written = append_entries(
-        args.home, entries, comment=f"judge-proposed, applied {date.today().isoformat()}"
-    )
+    try:
+        written = append_entries(
+            args.home, entries, comment=f"judge-proposed, applied {date.today().isoformat()}"
+        )
+    except OSError as exc:
+        # C-135: append_entries writes via safeio.secure_append_text, which refuses
+        # to follow a symlinked .clawseccheckignore (OSError/ELOOP) rather than
+        # writing through it — surface that plainly instead of a generic crash.
+        _emit(f"clawseccheck: could not write {ignore_path} ({type(exc).__name__}); nothing applied.")
+        return 1
     _emit(f"Applied {written} judge-proposed suppression(s) to {ignore_path}.")
     return 0
 
