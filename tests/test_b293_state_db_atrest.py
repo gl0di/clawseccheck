@@ -140,9 +140,15 @@ def test_c135_group_only_versus_world_readable_boundary(tmp_path, reachable_ance
     loose tree. That is fixed and pinned by ``test_parent_chain_seals_a_loose_tree``.
     """
     # Group-only, user-private group: NOT reachable by anyone else -> must not FAIL.
-    assert check_state_db_atrest(
-        _home(tmp_path / "grouponly", home_mode=0o770, state_mode=0o770, db_mode=0o660)
-    ).status != FAIL
+    # Linux's useradd gives every user a private group (UPG) containing only that user, so
+    # pytest's tmp tree is group-private there. macOS has no UPG convention -- the default
+    # primary group is the shared "staff" (gid 20), which genuinely has other members, so
+    # the same 0770/0660 shape is a REAL exposure there and check_state_db_atrest correctly
+    # escalates it. This half of the boundary is a Linux-UPG assumption, not a check bug.
+    if sys.platform != "darwin":
+        assert check_state_db_atrest(
+            _home(tmp_path / "grouponly", home_mode=0o770, state_mode=0o770, db_mode=0o660)
+        ).status != FAIL
     # World-readable: 0o664 grants read to *other*, not just group -> genuine exposure.
     assert check_state_db_atrest(
         _home(tmp_path / "worldread", home_mode=0o775, state_mode=0o775, db_mode=0o664)
@@ -321,6 +327,12 @@ def test_ancestor_gate_closed_by_a_single_0700_parent(tmp_path):
     assert _ancestors_allow_other_access(chain, stop=tmp_path) is False
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="assumes Linux UPG (private per-user group); macOS's default primary group "
+    "('staff', gid 20) genuinely has other members, so the gate correctly returns True "
+    "there instead — a real platform difference in group semantics, not a check bug",
+)
 def test_ancestor_gate_group_traversable_parent_is_not_assumed_shared(tmp_path):
     """A g+x parent counts only when the owning group is KNOWN to have members beyond the
     owner. Under pytest the tmp tree is owned by the user's own private group, so 0710 must

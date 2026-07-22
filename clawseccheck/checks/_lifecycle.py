@@ -691,7 +691,23 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
     # Scan the OpenClaw home ROOT ("") as well as each workspace dir. The root is
     # included so a bootstrap/memory file living OUTSIDE the three workspace dir names
     # (a common real layout) is no longer invisible — §6: never hardcode one shape.
+    #
+    # B-161 parity (C-135, CI-only symlink-cleanup regression): this check used to build
+    # `scan_dirs` from ONLY the home root and the three hardcoded WORKSPACE_DIRS names,
+    # while the collector's own bootstrap gathering (collector.py's B-161) ALSO scans any
+    # `agents.defaults.workspace` / `agents.list[].workspace` the config declares. A
+    # bootstrap file living exclusively under such a custom workspace was therefore
+    # invisible to THIS check specifically — reachable in `ctx.bootstrap`, but not on this
+    # check's own re-scan — so it reported "no workspace bootstrap files found" (UNKNOWN)
+    # even though the collector had found and read them. Using the same helper keeps the
+    # two scans in sync.
+    from ..collector import _config_workspace_dirs
+
     scan_dirs = [("", ctx.home)] + [(ws, ctx.home / ws) for ws in WORKSPACE_DIRS]
+    scan_dirs += [
+        (cw.name or "workspace", cw)
+        for cw in _config_workspace_dirs(ctx.home, ctx.config)
+    ]
     for ws, ws_dir in scan_dirs:
         if not ws_dir.is_dir():
             continue
