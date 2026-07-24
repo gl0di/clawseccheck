@@ -87,6 +87,30 @@ RUNTIME_SIGNAL_CAP = FAIL_CAPS[HIGH]
 #     passes a blind ctx is unaffected).
 CONFIG_BLIND_CAP = FAIL_CAPS[CRITICAL]
 
+# B-313: a check that crashed or timed out (`checks/__init__.py`'s `_check_error_finding`
+# / `_check_budget_finding`, ``Finding.id`` prefixed ``"ERR:"``) is degraded to one
+# ``scored=False`` UNKNOWN finding so a single bad check cannot sink the whole audit
+# (B-101). That half is correct — but before this cap, `total == 0`'s `f.scored` filter
+# also made the degraded check's own would-be FAIL, and the severity cap it would have
+# imposed, silently vanish: crashing/timing out the 8 checks that owned a config's
+# baseline FAILs measured F/49 -> B/88 with zero user-facing disclosure (repro in the
+# task). That is the exact evasion primitive B-101 exists to prevent, one layer up, and
+# a worse "hiding evidence improves the grade" case than CONFIG_BLIND_CAP's — there the
+# WHOLE config went dark; here the engine itself lost visibility into specific checks.
+#
+# Mirrors CONFIG_BLIND_CAP's own reasoning, applied at check-granularity instead of
+# config-granularity: any single degraded check could have been the one CRITICAL check
+# that would have FAILed (this is precisely the shape an attacker crafting a
+# crash-inducing skill/config would pick — the check it's most afraid of), so the sound,
+# worst-case (not average-case) assumption is "cannot rule out a CRITICAL", same as
+# Golden Rule #4 applied one layer up. Deliberately NOT scaled down to a milder ceiling
+# for "just one" degraded check and NOT scaled UP for "many" — severity is unknowable
+# per degraded check (the wrapper only ever has the crashing function object, not a
+# reliable function->catalog-id mapping), so inventing a graduated scale would be a
+# guess dressed as precision. A cap-only signal, same shape as CONFIG_BLIND_CAP/
+# RUNTIME_SIGNAL_CAP: never touches `earned`/`total`, only ever lowers the ceiling.
+DEGRADED_CHECK_CAP = FAIL_CAPS[CRITICAL]
+
 
 def grade_for(score: int) -> str:
     for threshold, letter in GRADES:
@@ -125,6 +149,29 @@ class ScoreResult:
     # CRITICAL FAIL that is NOT itself config-derived already forced <=49 — the config-
     # blind cap is real but non-binding in that case).
     config_blind_capped: bool = False
+    # B-313: True only when DEGRADED_CHECK_CAP actually bound (lower than whatever the
+    # severity/config-blind/runtime caps above already produced) — same "only-when-
+    # actually-binding" discipline as `config_blind_capped`/`runtime_capped`. Distinct
+    # from `degraded_count`: a run can have degraded checks (count > 0) while this stays
+    # False because a tighter cap (e.g. a genuine CRITICAL FAIL) already applied.
+    degraded_capped: bool = False
+    # B-313: how many checks crashed or timed out this run (0 when none did), regardless
+    # of whether the cap above actually bound. The report banner uses this directly so
+    # "N checks did not run" is disclosed even when a tighter cap already explains the
+    # grade — the reader still needs to know coverage was incomplete.
+    degraded_count: int = 0
+
+
+def _degraded_signal(findings: list[Finding]) -> tuple[bool, int]:
+    """B-313: count checks degraded to an ``ERR:``-prefixed UNKNOWN this run.
+
+    Structural fact (a stable id prefix `_check_error_finding`/`_check_budget_finding`
+    already use, checks/__init__.py), never a text/keyword match over finding content —
+    cannot regress into the keyword-widening pattern this project has already learned
+    to avoid. Returns ``(hit, count)``.
+    """
+    count = sum(1 for f in findings if f.id.startswith("ERR:"))
+    return (count > 0, count)
 
 
 def _runtime_cap_signal(findings: list[Finding], ctx) -> tuple[bool, str | None]:
@@ -226,24 +273,26 @@ def compute(findings: list[Finding], ctx=None) -> ScoreResult:
         and not getattr(ctx, "config_symlink_escapes_home", False)
     )
     runtime_hit, runtime_reason = _runtime_cap_signal(findings, ctx)
+    degraded_hit, degraded_count = _degraded_signal(findings)
 
     if total == 0:
-        if not config_blind and not runtime_hit:
+        if not config_blind and not runtime_hit and not degraded_hit:
             # Nothing measurable and no cap signal fired either — the honest "not
             # assessable" result (B-014), completely unchanged from before B-306.
             return ScoreResult(0, "N/A", False, 0, 0, 0, assessable=False)
-        # B-306 (C-135 follow-up #2): nothing else scored this run, BUT a blind config
-        # (ctx.config_parse_error) or a corroborated runtime signal (trajaudit) fired.
-        # Those are real, structural facts, never a guess — exactly what
-        # CONFIG_BLIND_CAP/RUNTIME_SIGNAL_CAP already treat as "cannot rule out a
-        # CRITICAL/HIGH" one severity-cap tier up when *something else* is scored too.
-        # Falling back to a neutral "N/A" here would be the identical lying-clean bypass
-        # reached through the OTHER short-circuit — the exact defect this task closes.
-        # The result mirrors what a single scored FAIL of that severity, with nothing
-        # else measured, already produces via the ordinary path below (a lone FAIL
-        # contributes 0 earned weight against its own nonzero total -> raw 0 -> grade F)
-        # — not a new invented number, and `capped` stays False because there is no raw
-        # value above 0 for this run to have been reduced FROM.
+        # B-306 (C-135 follow-up #2) / B-313: nothing else scored this run, BUT a blind
+        # config (ctx.config_parse_error), a corroborated runtime signal (trajaudit), or
+        # a degraded check (crash/timeout) fired. Those are real, structural facts, never
+        # a guess — exactly what CONFIG_BLIND_CAP/RUNTIME_SIGNAL_CAP/DEGRADED_CHECK_CAP
+        # already treat as "cannot rule out a CRITICAL/HIGH" one severity-cap tier up
+        # when *something else* is scored too. Falling back to a neutral "N/A" here would
+        # be the identical lying-clean bypass reached through the OTHER short-circuit —
+        # the exact defect this task closes. The result mirrors what a single scored FAIL
+        # of that severity, with nothing else measured, already produces via the ordinary
+        # path below (a lone FAIL contributes 0 earned weight against its own nonzero
+        # total -> raw 0 -> grade F) — not a new invented number, and `capped` stays
+        # False because there is no raw value above 0 for this run to have been reduced
+        # FROM.
         return ScoreResult(
             score=0,
             grade=grade_for(0),
@@ -258,6 +307,8 @@ def compute(findings: list[Finding], ctx=None) -> ScoreResult:
             runtime_capped=runtime_hit,
             runtime_cap_reason=runtime_reason if runtime_hit else None,
             config_blind_capped=config_blind,
+            degraded_capped=degraded_hit,
+            degraded_count=degraded_count,
         )
 
     earned = 0.0
@@ -297,6 +348,18 @@ def compute(findings: list[Finding], ctx=None) -> ScoreResult:
         score = min(score, CONFIG_BLIND_CAP)
         config_blind_capped = score < pre_blind_score
 
+    # B-313 — cap-only degraded-check signal, applied right after the config-blind cap
+    # (same value, same "structural fact, never a guess" justification) and before the
+    # runtime cap below, so all cap-only signals compose left-to-right, tightest wins —
+    # identical discipline to config_blind_capped immediately above. `degraded_hit`/
+    # `degraded_count` were already computed above (before the `total == 0` check) —
+    # reused here unchanged, never re-scanned a second time.
+    degraded_capped = False
+    if degraded_hit:
+        pre_degraded_score = score
+        score = min(score, DEGRADED_CHECK_CAP)
+        degraded_capped = score < pre_degraded_score
+
     # I-025/B-309 — cap-only runtime signal, applied AFTER the severity caps above and
     # never touching `earned`/`total`: neither eligible producer's Finding is `scored`,
     # so this is a wholly separate path, exactly as the ruling requires ("does not
@@ -325,6 +388,8 @@ def compute(findings: list[Finding], ctx=None) -> ScoreResult:
         runtime_capped=runtime_capped,
         runtime_cap_reason=runtime_reason if runtime_capped else None,
         config_blind_capped=config_blind_capped,
+        degraded_capped=degraded_capped,
+        degraded_count=degraded_count,
     )
 
 
@@ -335,6 +400,13 @@ def assessment_coverage(findings: list[Finding]) -> dict:
     suppressed/non-scoreable status), except it does NOT drop UNKNOWN —
     UNKNOWN is exactly what this measures. Pure, no I/O.
 
+    B-313: a degraded (``ERR:``-prefixed) finding is ``scored=False`` (B-101 — it must
+    never earn/cost an ordinary scored point) but is included here anyway and counted
+    toward ``unknown``, same as any other UNKNOWN. Before this, `assessment_coverage`'s
+    own `f.scored` filter made a crashed/timed-out check invisible to the ONE metric
+    meant to answer "how much of the catalog could we actually assess" — the same
+    fail-open blind spot DEGRADED_CHECK_CAP closes for the grade itself, one layer down.
+
     Returns a dict:
         {"scored_total": int, "assessable": int, "unknown": int,
          "assessable_frac": float, "unknown_frac": float}
@@ -344,7 +416,8 @@ def assessment_coverage(findings: list[Finding]) -> dict:
     """
     in_scope = [
         f for f in findings
-        if f.scored and f.status != "SKILL_ARCHIVE_PATH_TRAVERSAL"
+        if (f.scored or f.id.startswith("ERR:"))
+        and f.status != "SKILL_ARCHIVE_PATH_TRAVERSAL"
         and not getattr(f, "suppressed", False)
     ]
     scored_total = len(in_scope)

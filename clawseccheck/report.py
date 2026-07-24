@@ -1050,30 +1050,50 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # Mascot + wordmark: header line only, once (design-system Foundations);
     # --ascii drops the mascot and folds the separator (brand.header()).
     head = brand.header(subtitle="OpenClaw Security Audit", ascii_only=ascii_only)
-    lines = [head, "=" * 44,
-             f"Score: {score.score}/100   Grade: {grade_disp}",
-             _score_bar(score.score, score.grade, ascii_only=ascii_only, color=color)]
-    # B-306 (C-135 follow-up #3, 2026-07-21): gate on the three GRANULAR cap signals, not
+    lines = [head, "=" * 44]
+    # B-313: disclosed ABOVE the grade, unconditionally whenever any check degraded this
+    # run (crashed or timed out) — regardless of whether DEGRADED_CHECK_CAP ended up
+    # strictly "binding" (a tighter cap, e.g. a genuine CRITICAL FAIL, may already apply).
+    # The reader still needs to know coverage was incomplete even when the number on
+    # screen would have been just as bad anyway; getattr/default tolerates the older
+    # duck-typed ScoreResult stand-ins some tests build (same tolerance B-306 established
+    # for config_blind_capped/runtime_capped below).
+    _degraded_n = getattr(score, "degraded_count", 0)
+    if _degraded_n:
+        warn_icon = "[!]" if ascii_only else "⚠️ "
+        _plural = "check" if _degraded_n == 1 else "checks"
+        lines.append(
+            f"{warn_icon}{_degraded_n} {_plural} did not run (crashed or timed out) —"
+            " this grade is incomplete. Re-run with --debug to see why, or on a quieter"
+            " machine if it was a timeout."
+        )
+    lines.append(f"Score: {score.score}/100   Grade: {grade_disp}")
+    lines.append(_score_bar(score.score, score.grade, ascii_only=ascii_only, color=color))
+    # B-306 (C-135 follow-up #3, 2026-07-21): gate on the GRANULAR cap signals, not
     # `score.capped` alone. `score.capped` means "score != raw_score" — deliberately FALSE
     # in scoring.py's `total == 0` branch (raw_score and score are both hardcoded 0 there;
     # there is no positive raw value for the cap to have reduced FROM), yet
-    # `config_blind_capped`/`runtime_capped` can still be True in that exact branch (see
-    # scoring.ScoreResult field docs and docs/OUTPUT_SCHEMA.md's documented "can be true
-    # alongside capped: false" carve-out for JSON consumers). Relying on `score.capped`
-    # alone silently dropped this whole explanation in precisely the scenario B-306 exists
-    # to make loud — this is a rendering-gate fix, not a scoring.py semantics change, so the
-    # JSON contract/docs above stay exactly as documented.
-    if score.capped or score.config_blind_capped or score.runtime_capped:
+    # `config_blind_capped`/`runtime_capped`/`degraded_capped` (B-313) can still be True in
+    # that exact branch (see scoring.ScoreResult field docs and docs/OUTPUT_SCHEMA.md's
+    # documented "can be true alongside capped: false" carve-out for JSON consumers).
+    # Relying on `score.capped` alone silently dropped this whole explanation in precisely
+    # the scenario B-306 exists to make loud — this is a rendering-gate fix, not a
+    # scoring.py semantics change, so the JSON contract/docs above stay exactly as
+    # documented.
+    _degraded_capped = getattr(score, "degraded_capped", False)
+    if score.capped or score.config_blind_capped or score.runtime_capped or _degraded_capped:
         if score.config_blind_capped:
-            # B-306 (C-135 follow-up): takes display priority over cap_severity/runtime —
-            # when more than one signal fires, this names every one that did so the reader
-            # never loses a co-occurring reason (the `total == 0` branch above is the only
-            # place config-blind and a corroborated runtime signal can both be True at
-            # once; the ordinary severity-cap path keeps them mutually exclusive because
-            # CONFIG_BLIND_CAP <= RUNTIME_SIGNAL_CAP always wins first).
+            # B-306 (C-135 follow-up): takes display priority over cap_severity/runtime/
+            # degraded — when more than one signal fires, this names every one that did
+            # so the reader never loses a co-occurring reason (the `total == 0` branch
+            # above is the only place more than one of these can be True at once; the
+            # ordinary severity-cap path keeps them mutually exclusive because
+            # CONFIG_BLIND_CAP/DEGRADED_CHECK_CAP <= RUNTIME_SIGNAL_CAP always wins first).
             _extra = []
             if score.cap_severity:
                 _extra.append(f"an open {score.cap_severity} finding")
+            if _degraded_capped or _degraded_n:
+                _extra.append(f"{_degraded_n} degraded check(s)")
             if score.runtime_capped:
                 _extra.append(
                     f"a corroborated runtime signal ({_runtime_cap_phrase(score.runtime_cap_reason)})"
@@ -1082,6 +1102,14 @@ def render_report(findings: list[Finding], score: ScoreResult,
             lines.append(
                 f"(capped from {score.raw_score} - openclaw.json unreadable/unparseable"
                 f" this run: cannot rule out a CRITICAL condition{_also})"
+            )
+        elif _degraded_capped:
+            # B-313: no config-blind signal, but at least one check crashed/timed out and
+            # that alone drove the cap — same "cannot rule out a CRITICAL" reasoning,
+            # applied at check-granularity (see DEGRADED_CHECK_CAP's docstring).
+            lines.append(
+                f"(capped from {score.raw_score} - {_degraded_n} check(s) crashed or timed"
+                " out this run: cannot rule out a CRITICAL condition)"
             )
         elif score.cap_severity:
             lines.append(f"(capped from {score.raw_score} - open {score.cap_severity} finding)")
@@ -2146,6 +2174,11 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         # B-306 (C-135 follow-up): true when openclaw.json was unreadable/unparseable
         # this run and that alone hard-capped the grade — see scoring.CONFIG_BLIND_CAP.
         "config_blind_capped": score.config_blind_capped,
+        # B-313: true when a crashed/timed-out check alone hard-capped the grade — see
+        # scoring.DEGRADED_CHECK_CAP. `degraded_count` is unconditional (checks did/didn't
+        # run this many times) even when this bool is False because a tighter cap won.
+        "degraded_capped": getattr(score, "degraded_capped", False),
+        "degraded_count": getattr(score, "degraded_count", 0),
         "assessable": bool(score.assessable),
         "trifecta": _trifecta_ratio(findings),
         "findings": [
@@ -2326,12 +2359,26 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
     _cfg_blind = getattr(score, "config_blind_capped", False)
     _rt_capped = getattr(score, "runtime_capped", False)
     _rt_reason = getattr(score, "runtime_cap_reason", None)
+    # B-313: same "unconditional, above the grade" disclosure as render_report's text
+    # banner — a degraded check count is shown whenever it's nonzero, independent of
+    # whether it ended up strictly binding the cap (see _degraded_capped below).
+    _degraded_n = getattr(score, "degraded_count", 0)
+    _degraded_capped = getattr(score, "degraded_capped", False)
+    degraded_html = ""
+    if _degraded_n:
+        _plural = "check" if _degraded_n == 1 else "checks"
+        degraded_html = (
+            f'<p class="degraded"><strong>⚠️ Incomplete:</strong> {_degraded_n} {_plural}'
+            ' did not run (crashed or timed out) — this grade is incomplete.</p>'
+        )
     if _cfg_blind:
-        # B-306 (C-135 follow-up): display priority over cap_severity/runtime — see
-        # render_report for why more than one signal can co-occur only in that branch.
+        # B-306 (C-135 follow-up): display priority over cap_severity/runtime/degraded —
+        # see render_report for why more than one signal can co-occur only in that branch.
         _extra = []
         if score.cap_severity:
             _extra.append(f'an open {esc(score.cap_severity)} finding')
+        if _degraded_capped or _degraded_n:
+            _extra.append(f'{_degraded_n} degraded check(s)')
         if _rt_capped:
             _extra.append(
                 f'a corroborated runtime signal ({esc(_runtime_cap_phrase(_rt_reason))})'
@@ -2340,6 +2387,12 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
         capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
                        f'from {score.raw_score} (openclaw.json unreadable/unparseable this run: '
                        f'cannot rule out a CRITICAL condition{_also})</p>')
+    elif _degraded_capped:
+        # B-313: no config-blind signal, but at least one check crashed/timed out and
+        # that alone drove the cap.
+        capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
+                       f'from {score.raw_score} ({_degraded_n} check(s) crashed or timed out '
+                       f'this run: cannot rule out a CRITICAL condition)</p>')
     elif score.capped and score.cap_severity:
         capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
                        f'from {score.raw_score} (open {esc(score.cap_severity)} finding)</p>')
@@ -2351,6 +2404,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
                        f'from {score.raw_score} (corroborated runtime signal: {_reason})</p>')
     else:
         capped_html = ""
+    capped_html = degraded_html + capped_html
 
     pct = max(0, min(100, int(score.score)))
 

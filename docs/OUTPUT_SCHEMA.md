@@ -44,6 +44,8 @@ versioning §6 in `CLAUDE.md`).
 | `audited_config_path` | `string \| null` | yes | Absolute path of the config file this run actually read — every finding in the payload describes this file and only this file. May be a legacy `clawdbot.json`, which OpenClaw's resolver prefers when it exists. When `config_found` is `false` this still names the canonical path that was looked for. Compare it against check `B183`, which reports whether OpenClaw's own resolver (`OPENCLAW_CONFIG_PATH` / `OPENCLAW_HOME` / `OPENCLAW_STATE_DIR`) selects a different file. `null` only when no context was supplied to the renderer. |
 | `config_parse_error` | `bool` | yes | `true` when `openclaw.json` was present but could not be parsed into a config object (syntax error, size-cap truncation, or a non-object top level). A gating consumer should treat `true` as "scan incomplete", not a clean result — the run is UNKNOWN-heavy. A valid empty `{}` config is `false`. |
 | `config_symlink_escapes_home` | `bool` | yes | `true` when `openclaw.json` is a symlink whose target leaves its config directory AND that target is a readable regular file owned by the auditing user — a benign dotfiles layout (stow/chezmoi/yadm/bare-git). The collector follows it and audits the real bytes, so this is NOT a blind config: `config_parse_error` stays `false` and the run is never `config_blind_capped` for this reason. Lets a consumer distinguish a safely-relocated config from a genuinely dark one. `false` on every normal (non-symlinked, or in-directory-symlinked) run. |
+| `degraded_capped` | `bool` | yes | `true` when a check that crashed or timed out this run (`Finding.id` prefixed `"ERR:"`) alone hard-capped the score at the same ceiling a proven CRITICAL FAIL gets (B-313). Same shape as `config_blind_capped` but at check-granularity instead of config-granularity: a degraded check's own would-be verdict is unknowable, so the sound worst-case assumption is "cannot rule out a CRITICAL". Composes with `cap_severity`/`runtime_capped`/`config_blind_capped` — whichever cap is tightest wins; only `true` when THIS cap was the one that actually lowered the score below what the other caps already produced. |
+| `degraded_count` | `int` | yes | How many checks crashed or timed out this run (`0` when none did) — unconditional, independent of whether `degraded_capped` ended up strictly binding. A consumer should treat any nonzero value as "this grade is incomplete", even when a tighter cap already explains the number on screen. |
 | `config_parse_reason` | `string \| null` | yes | Short diagnostic for why `config_parse_error` is `true` (the raw loader message), OR a note that a dotfiles-style symlink was safely followed when `config_symlink_escapes_home` is `true`. `null` when the config parsed cleanly with no relocation. Never contains a secret or file-content value. |
 | `errors` | `array[str]` | yes | Human-readable collection/parse messages (e.g. the `openclaw.json` parse error). Empty array on a clean run. |
 | `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §18. |
@@ -61,6 +63,8 @@ versioning §6 in `CLAUDE.md`).
   "runtime_capped": false,
   "runtime_cap_reason": null,
   "config_blind_capped": false,
+  "degraded_capped": false,
+  "degraded_count": 0,
   "assessable": true,
   "trifecta": "1/3",
   "findings": [ ... ],
