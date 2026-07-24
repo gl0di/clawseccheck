@@ -6,6 +6,7 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 from __future__ import annotations
 import ipaddress
 import os
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -1814,6 +1815,19 @@ def check_webfetch_redirects(ctx: Context) -> Finding:
 # world-readable, checked here via the same B19 perm-check helper above).
 _LOG_HUNT_PER_FILE_BUDGET_S = 3.0
 
+# B-314: a CUMULATIVE ceiling across ALL sinks combined, checked once per sink before
+# spending that sink's own _LOG_HUNT_PER_FILE_BUDGET_S. Before this, N sinks each capped
+# individually at 3.0s could still multiply past this check's fair share of the 15s
+# per-check hard timeout (DEFAULT_CHECK_BUDGET_S) with no shared ceiling between them —
+# measured on a real config: ~4 large sinks each spending close to their full per-file
+# allowance summed to 11.6s/15s (89% of budget, effectively no headroom before the next
+# check in CHECKS risked degrading to UNKNOWN via the audit-wide cooperative deadline).
+# Kept comfortably under the DoD's <=5s/check target so this one check can never itself
+# threaten the shared per-check timeout. A sink skipped once this fires is disclosed via
+# `_skipped_for_time` below (never silently dropped — Golden Rule #4), same honesty
+# discipline `summarize_truncation` already applies to an oversized file/line.
+_LOG_HUNT_CHECK_BUDGET_S = 4.5
+
 
 def _log_hunt_corroborated(nonzero_classes: set, world_readable: bool) -> bool:
     """True when a sink's nonzero signal classes clear the quiet-by-default WARN bar."""
@@ -1893,9 +1907,26 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     all_results: list = []
     any_scanned = False
     isolated_hits = 0
+    skipped_for_time = 0
+
+    # B-314: the cumulative ceiling starts once, before the loop — not re-armed per sink
+    # (that would defeat the point; see _LOG_HUNT_CHECK_BUDGET_S's docstring).
+    check_deadline = audit_deadline(_LOG_HUNT_CHECK_BUDGET_S)
 
     for sink in sinks:
-        deadline = audit_deadline(_LOG_HUNT_PER_FILE_BUDGET_S)
+        remaining = None if check_deadline is None else check_deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            skipped_for_time += 1
+            continue
+        # B-314: this sink's own deadline is capped at whichever is TIGHTER — its usual
+        # per-file allowance, or however much of the cumulative check budget is left — so
+        # the last sink before the cumulative deadline can't still spend a full fresh
+        # 3.0s and blow past it (a naive "check-then-always-give-3.0s" loop still let the
+        # total overshoot by up to one sink's worth).
+        per_sink_budget = _LOG_HUNT_PER_FILE_BUDGET_S
+        if remaining is not None:
+            per_sink_budget = min(per_sink_budget, remaining)
+        deadline = audit_deadline(per_sink_budget)
         result = scan_log_file(sink, deadline, skill_iocs)
         all_results.append(result)
         if result.bytes_scanned == 0:
@@ -1955,6 +1986,14 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     # logscan.summarize_truncation's docstring for why this replaced the old generic
     # "results may be incomplete" wording.
     note = summarize_truncation(all_results)
+    # B-314: same honesty discipline for a sink skipped by the cumulative check-level
+    # deadline (_LOG_HUNT_CHECK_BUDGET_S) — never silently omitted from the count.
+    if skipped_for_time:
+        plural = "sink" if skipped_for_time == 1 else "sinks"
+        note += (
+            f" {skipped_for_time} log/transcript {plural} not scanned (check time budget "
+            "reached) — re-run to include them."
+        )
 
     if corroborated:
         n_sinks = len(corroborated)
@@ -1973,7 +2012,10 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         )
         return finding
 
-    detail = f"{len(sinks)} log/transcript sink(s) scanned; no corroborated threat signal."
+    detail = (
+        f"{len(sinks) - skipped_for_time} log/transcript sink(s) scanned; "
+        "no corroborated threat signal."
+    )
     if isolated_hits:
         detail += (
             f" {isolated_hits} low-confidence signal(s) suppressed (isolated, not corroborated)."
