@@ -157,6 +157,137 @@ _KNOWN_ADVISORIES: list[tuple[str, tuple[int, ...], str, str]] = [
         "2026.2.14",
         "Browser upload path traversal via Playwright setInputFiles",
     ),
+    # ---- ClawRadar sweep 2026-07-22 — all fetch-confirmed directly against their
+    # own advisory page; version-only, no config-field surface.
+    (
+        "GHSA-gv46-4xfq-jv58",
+        (2026, 2, 13),
+        "2026.2.14",
+        "Gateway node.invoke RCE: unsanitized approval fields bypass exec-approval "
+        "gating for system.run (CVE-2026-28466)",
+    ),
+    (
+        "GHSA-pv58-549p-qh99",
+        (2026, 2, 13),
+        "2026.2.14",
+        "Unauthenticated discovery-beacon TXT records trusted for routing/TLS "
+        "pinning, enabling LAN redirect + Gateway credential theft (CVE-2026-26327)",
+    ),
+    (
+        "CVE-2026-32045",
+        (2026, 2, 20),
+        "2026.2.21",
+        "Tokenless Tailscale auth meant for the Control UI websocket also applied "
+        "to HTTP gateway routes (GHSA-hff7-ccv5-52f8)",
+    ),
+    (
+        "CVE-2026-32013",
+        (2026, 2, 24),
+        "2026.2.25",
+        "Symlink traversal in agents.files.get/set allows reads/writes outside "
+        "the agent workspace",
+    ),
+    (
+        "GHSA-6rmx-gvvg-vh6j",
+        (2026, 3, 2),
+        "2026.3.7",
+        "Webhook handler counted auth failures before validating HTTP method, "
+        "enabling an auth-failure-budget lockout DoS",
+    ),
+    (
+        "GHSA-5jvj-hxmh-6h6j",
+        (2026, 3, 24),
+        "2026.3.25",
+        "Gateway HTTP /sessions/:sessionKey/history skipped the operator.read "
+        "scope enforced by the equivalent WebSocket endpoint (CVE-2026-35657)",
+    ),
+    (
+        "CVE-2026-43584",
+        (2026, 4, 9),
+        "2026.4.10",
+        "Exec environment policy denylist missed VIMINIT/EXINIT/LUA_INIT/"
+        "HOSTALIASES interpreter-startup variables",
+    ),
+    (
+        "GHSA-8372-7vhw-cm6q",
+        (2026, 4, 13),
+        "2026.4.14",
+        "sourceConfig/runtimeConfig alias fields bypassed gateway secret "
+        "redaction (CVE-2026-43528)",
+    ),
+    (
+        "GHSA-v8cx-933x-r976",
+        (2026, 4, 24),
+        "2026.4.25",
+        "Fake package roots could influence memory-core artifact loading "
+        "(CVE-2026-53813)",
+    ),
+    (
+        "GHSA-jvm4-4j77-39p6",
+        (2026, 4, 27),
+        "2026.4.29",
+        "QQBot streaming command could mutate config without an explicit "
+        "allowFrom entry",
+    ),
+    (
+        "GHSA-w4v6-g3wm-w36c",
+        (2026, 4, 28),
+        "2026.4.29",
+        "QQBot admin commands could skip DM-only and allowFrom policy checks",
+    ),
+    (
+        "GHSA-xr4f-mjxj-w6w5",
+        (2026, 5, 3),
+        "2026.5.4",
+        "Non-owner chat senders could issue device-pairing bootstrap codes",
+    ),
+    (
+        "GHSA-w5ww-7chg-mxcq",
+        (2026, 5, 5),
+        "2026.5.6",
+        "Telegram interactive callbacks could skip commands.allowFrom",
+    ),
+    (
+        "GHSA-77q5-rr5v-x43q",
+        (2026, 5, 6),
+        "2026.5.7",
+        "Trusted retry endpoint checks could match a hostname prefix instead of "
+        "the exact trusted host",
+    ),
+    (
+        "GHSA-j472-gf56-x589",
+        (2026, 5, 7),
+        "2026.5.12",
+        "PowerShell encoded-command aliases could miss exec allowlist checks",
+    ),
+    (
+        "CVE-2026-53810",
+        (2026, 5, 17),
+        "2026.5.18",
+        "Marketplace runtime extension metadata could redirect loading toward "
+        "unscanned package payloads (GHSA-v6r2-jh58-xx6w)",
+    ),
+    (
+        "GHSA-3c6j-hq33-3jv4",
+        (2026, 5, 17),
+        "2026.5.18",
+        "Paired nodes could forge exec lifecycle events without system.run "
+        "provenance (CVE-2026-53816)",
+    ),
+    (
+        "CVE-2026-62218",
+        (2026, 5, 26),
+        "2026.5.27",
+        "device.pair.approve let lower-trust callers bypass role-management "
+        "checks",
+    ),
+    (
+        "CVE-2026-62195",
+        (2026, 6, 5),
+        "2026.6.6",
+        "MCP loopback feature let lower-trust callers execute owner-only tools "
+        "via configured input paths",
+    ),
 ]
 
 
