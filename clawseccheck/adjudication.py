@@ -42,6 +42,7 @@ import json
 import re
 from dataclasses import replace as dc_replace
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .baseline import fingerprint
 from .catalog import ATTESTED, FAIL, MEDIUM, UNKNOWN, WARN, Finding
@@ -202,7 +203,144 @@ def _evidence_locations(f) -> str:
     return f"{n} evidence entr{'y' if n == 1 else 'ies'} in the full report (not reproduced here)"
 
 
+_URL_IN_EVIDENCE_RE = re.compile(r"https?://[^\s)>\]\"']+", re.I)
+# LDH ("letter-digit-hyphen") hostname shape: dot-separated labels, each 1-63 chars,
+# alnum first/last char, hyphens only in the middle. Deliberately the SAME charset a
+# real DNS hostname is limited to -- no scheme, userinfo, port, path, query, fragment,
+# whitespace, or punctuation outside '-' and '.' can ever survive this match.
+_LDH_HOST_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+# C-135 (independent adversarial review, 2026-07-24): the DNS protocol ceiling (253)
+# is not the right bound here. Each label can independently reach 63 chars (its own
+# DNS limit, enforced by _LDH_HOST_RE above), and several such labels chained by dots
+# comfortably spell a fluent multi-clause imperative directive within 253 chars total
+# -- confirmed with a live repro against this exact validator: a 231-char hostname
+# built from four ~50-60-char hyphenated "clauses" passed every gate intact. The
+# The LDH-charset argument ("no spaces, so it can't read as prose") holds for a SHORT
+# phrase (the design intent -- a plausible real hostname like
+# "ignore-all-previous-instructions.example.com", ~46 chars) but not for an essay
+# chained across labels. 100 is comfortably above every realistic real-world FQDN
+# (deep corporate subdomains like "prod-api.us-east-1.reports.example.com" are well
+# under it) while cutting the attacker's payload budget roughly in half -- not a
+# complete fix (a single ~90-char clause still fits), but it meaningfully shrinks the
+# multi-clause-essay capacity the review demonstrated, and stays maximally permissive
+# of real destination hosts, which is this field's actual job.
+_MAX_HOST_LEN = 100
+
+
+def _safe_destination_host(f) -> str | None:
+    """C-284: at most ONE engine-extracted network destination hostname from *f*'s raw
+    evidence -- never copied from prose, never more than a hostname.
+
+    F-113's redaction (`_evidence_locations` above) strips content-ring evidence down to
+    a bare `(relpath:lineno)` location because the matched skill text itself can be a
+    live jailbreak directive aimed at the judge -- correct, and this function does NOT
+    reopen that hole: it never returns anything from `f.evidence` verbatim, only a
+    hostname that survived a strict URL parse PLUS an LDH charset/length gate.
+
+    Why the LDH gate is a meaningful defense, not eliminated entirely by keeping it: a
+    hostname that passes `_LDH_HOST_RE` cannot contain whitespace, quotes, or any
+    punctuation besides '-' and '.', so a SHORT phrase-shaped label
+    ("ignore-all-previous-instructions.example.com", ~46 chars) is kept deliberately --
+    it is a syntactically valid, DNS-resolvable hostname, delivered inside a JSON field
+    explicitly named `destination_host`, not as free text a judge would read as
+    conversational input. **This is bounded, not absolute** (C-135, 2026-07-24): several
+    long hyphenated labels chained by dots can still spell a fluent multi-clause
+    directive within the length cap -- `_MAX_HOST_LEN` exists specifically to bound how
+    much of that a single hostname can carry, not to claim the charset restriction alone
+    makes arbitrary-length content safe. Golden Rule #4 discipline: reducing to eTLD+1
+    was considered and rejected -- there is no public-suffix list in stdlib, and a
+    hand-rolled one rots; the length-capped full hostname is the honest choice, and it
+    is also strictly MORE useful for the judge's actual job (checking a first-party
+    allowlist needs the real host, not a truncated one).
+
+    Anything that fails validation is DROPPED entirely, never truncated into the
+    packet — an unparseable/oversized/non-LDH "hostname" carries no information a judge
+    can act on safely, so silence is the correct answer, not a mangled fragment.
+    """
+    for e in (f.evidence or []):
+        m = _URL_IN_EVIDENCE_RE.search(e)
+        if not m:
+            continue
+        try:
+            host = urlparse(m.group(0)).hostname
+        except ValueError:
+            continue
+        if not host:
+            continue
+        host = host.lower()
+        if not host.isascii():
+            try:
+                host = host.encode("idna").decode("ascii")
+            except (UnicodeError, ValueError):
+                continue
+        if len(host) > _MAX_HOST_LEN:
+            continue
+        if not _LDH_HOST_RE.match(host):
+            continue
+        return host
+    return None
+
+
+# --------------------------------------------------------------------------- C-285: corroboration
+
+def _corroboration_groups(findings) -> dict:
+    """C-285: map ``target -> sorted distinct check ids`` of every unsuppressed WARN/FAIL
+    finding sharing that target, across the FULL finding list passed in (not just the
+    items that end up in the packet).
+
+    C-252 (docs/design/severity-separability.md §5.1, measured on SkillTrustBench 5520)
+    found this is the single strongest signal separating malicious from benign in this
+    engine's own output -- monotonic and reaching purity: 1 distinct check firing on a
+    subject -> 70.5% malicious share, 2 -> 84.6%, 3 -> 93.3%, 4+ -> 100.0%. It also found
+    `Finding.confidence` is NOT the useful knob (a per-check constant; check identity
+    separates 31.5 points against confidence's 8.2). The judge packet built one finding
+    at a time had no way to see this at all.
+
+    Scope decision (recorded here, not guessed): grouped by TARGET -- this module's
+    existing `_target_from_evidence` field every packet item already carries -- not by
+    file. C-252's own unit of measurement is one SkillTrustBench "case" per subject
+    (one skill/target), not per file within a multi-file skill, so target-scope is what
+    was actually measured, not an invented finer/coarser grouping.
+
+    Only WARN/FAIL findings count as "firing": PASS is not corroborating evidence of
+    anything, and UNKNOWN means "could not determine" -- neither is the signal C-252
+    measured. Suppressed findings are excluded (an ignored finding is not live evidence
+    for a judge). A finding whose OWN status is WARN/FAIL therefore naturally includes
+    its own id in its target's group (it fired); a finding whose own status is UNKNOWN
+    (most packet items) naturally does NOT include its own id -- its corroboration
+    reflects purely how much OTHER live signal exists for the same target, which is
+    exactly the useful context for an otherwise-uncorroborated UNKNOWN.
+    """
+    groups: dict[str, set] = {}
+    for f in findings or []:
+        if f.status not in (WARN, FAIL):
+            continue
+        if getattr(f, "suppressed", False):
+            continue
+        groups.setdefault(_target_from_evidence(f), set()).add(f.id)
+    return {target: sorted(ids) for target, ids in groups.items()}
+
+
+def _attach_corroboration(items: list[dict], findings) -> list[dict]:
+    """Add a `corroboration` field to every packet item, computed from *findings*.
+
+    Never a verdict, never a threshold -- SKILL.md's panel guidance is explicit that
+    this is context for the judge to weigh, not a rule the engine already owns (a
+    `count >= 3 therefore DANGEROUS` policy baked into the panel would duplicate a
+    decision this engine deliberately leaves to the judge, and this module's own
+    escalate-only/never-lower authority model already governs what a verdict can do).
+    """
+    groups = _corroboration_groups(findings)
+    for item in items:
+        ids = groups.get(item["target"], [])
+        item["corroboration"] = {"count": len(ids), "check_ids": ids, "scope": "target"}
+    return items
+
+
 def _item_from_finding(f) -> dict:
+    host = _safe_destination_host(f)
     return {
         "finding_id": f.id,
         "target": _target_from_evidence(f),
@@ -210,6 +348,10 @@ def _item_from_finding(f) -> dict:
         "engine_disposition": f.status,
         "question": _question_for(f.id),
         "verdict_schema": _VERDICT_SCHEMA,
+        # C-284: engine-authored, never copied from prose — see _safe_destination_host.
+        # Always present (empty when no destination could be safely extracted) so a
+        # consumer never needs to branch on the key's existence.
+        "safe_facts": {"destination_host": host} if host else {},
     }
 
 
@@ -314,6 +456,7 @@ def build_judge_packet(ctx, findings) -> list[dict]:
     items.extend(_recover_dropped_taint(ctx))
     items.extend(_env_auth_kwarg_items(ctx))
 
+    items = _attach_corroboration(items, findings)
     items.sort(key=lambda d: (d["finding_id"], d["target"], d["redacted_evidence"]))
     return items
 
@@ -650,9 +793,10 @@ def build_vet_judge_packet(engine_output, target: str) -> list[dict]:
     here which only appears when the deterministic engine already flagged
     something.
     """
-    items = [_item_from_finding(f) for f in _vet_pool(engine_output) if _is_borderline(f)]
+    pool = _vet_pool(engine_output)
+    items = [_item_from_finding(f) for f in pool if _is_borderline(f)]
     items.extend(_vet_attest_packet_items(_vet_target_name(target)))
-    return items
+    return _attach_corroboration(items, pool)
 
 
 def render_vet_judge_packet_json(engine_output, *, target: str, version: str) -> str:

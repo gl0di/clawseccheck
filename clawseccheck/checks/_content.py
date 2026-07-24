@@ -6002,9 +6002,20 @@ def check_clickfix_setup_section(ctx: Context) -> Finding:
             if _clickfix_trusted_installer(m.group(0)):
                 continue  # curated first-party installer host (B-118) — not ClickFix
             heading = (_nearest_heading(blob, m.start()) or "").strip("# \n")
+            # C-284/C-135 (2026-07-24): the matched command's own URL was previously
+            # never included here, so adjudication.py's safe_facts.destination_host
+            # extractor — built specifically because a judge panel leaned SAFE on a
+            # real B100 case partly for lack of the actual fetch URL — could never
+            # actually reach it for a real B100 finding. Appending the URL here does
+            # not change what a human reader sees beyond this fuller quote (evidence
+            # is still routed through logsafe.redact()/adjudication.py's own
+            # location-only redaction before it reaches a judge); it only makes the
+            # URL available to that already-validated, already-length-capped extractor.
+            url_m = _URL_IN_CMD_RE.search(m.group(0))
+            url_suffix = f" ({url_m.group(0)})" if url_m else ""
             warns.append(
                 f"{name}: '{heading}' section instructs pasting a remote-fetch command "
-                "into a terminal (ClickFix pattern)"
+                f"into a terminal (ClickFix pattern){url_suffix}"
             )
             break  # one finding per skill is enough
 

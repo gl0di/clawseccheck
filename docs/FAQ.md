@@ -404,6 +404,29 @@ for self-checking purposes, and verify it from the outside instead.
 
 ---
 
+## Why is there no `--llm` mode?
+
+Some peer scanners offer an opt-in flag that sends skill content to an LLM vendor
+(OpenAI/Anthropic/Bedrock/Gemini/Ollama) for a deeper read than static rules can give.
+ClawSecCheck deliberately doesn't — not because the idea is bad, but because of what this
+tool is *for*: it audits `~/.openclaw/` for agents that might leak the user's own data to
+a third party, and Golden Rule #1 (`CLAUDE.md` §2) is zero network, zero telemetry. A
+scanner that shipped the contents of that same directory to a model vendor to do the
+auditing would be the exact thing it exists to catch.
+
+Instead, the engine (stdlib-only, zero network) emits an already-redacted
+`--judge-packet`/`--vet-judge-packet` artifact, and **your own host agent** — whatever
+model and policy you already trust and already run locally — reads it and judges. No API
+key, no per-scan network call, no raw skill content leaves your machine through this
+engine, under any flag. The trade-off is real and stated honestly, not hidden: a
+standalone static-only comparison currently favors a peer that DOES put an LLM inside the
+tool (1.78x more recall at matched precision), and this topology only works with a host
+agent attached — it cannot run standalone in a script with nothing else present. See
+[`docs/design/judge-topology.md`](design/judge-topology.md) for the full comparison,
+including the exact numbers and where they came from.
+
+---
+
 *For more detail on any individual check, see [`docs/CHECKS.md`](CHECKS.md).*
 *To report a false positive or false negative, open an issue at
 <https://github.com/gl0di/clawseccheck/issues> with `clawseccheck --json` output (secrets
