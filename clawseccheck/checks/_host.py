@@ -781,6 +781,15 @@ def check_bundled_root_override(ctx: Context) -> Finding:
             replaceable.append(f"{var} target {resolved} is {why}")
 
     if replaceable:
+        # B-315: CheckMeta stays scored=False (catalog.py's own precedent — the WARN
+        # branch is a source-checkout developer's deliberate relocation, and scoring it
+        # would dock a setup that is working as its owner intended). But this FAIL
+        # branch (target dir writable by other local accounts) is the one real,
+        # deterministic escalation — narrowly scoped on purpose (see
+        # tests/test_b186_bundled_root_override.py's explicit discussion of the
+        # alternative "/tmp-rooted" escalation it deliberately did NOT implement). Dave's
+        # ruling requires an unscored check to never FAIL, and this narrow, well-reasoned
+        # FAIL should carry real grade weight. scored=True overrides just this Finding.
         return _finding(
             "B186",
             FAIL,
@@ -795,6 +804,7 @@ def check_bundled_root_override(ctx: Context) -> Finding:
             "has been an executable-code root for the agent.",
             evidence=evidence + replaceable,
             confidence="HIGH",
+            scored=True,
         )
 
     return _finding(
@@ -893,6 +903,15 @@ def check_unit_embedded_gateway_secret(ctx: Context) -> Finding:
         )
 
     if exposed:
+        # B-315: CheckMeta stays scored=False (catalog.py's own precedent — OpenClaw
+        # rates its own finding "recommended", and an owner-only inlined credential
+        # ["private"] is hygiene, not an active exposure, so WARN/PASS must stay out of
+        # scoring). But this FAIL branch (unit file readable by another local account)
+        # is the one real, checkable escalation, calibrated against OpenClaw's own
+        # service audit (see this file's module docstring / the vendor's
+        # auditGatewayToken) and mirroring B182's precedent. Dave's ruling requires an
+        # unscored check to never FAIL, and this narrow, well-calibrated FAIL should
+        # carry real grade weight. scored=True overrides just this Finding.
         return _finding(
             "B193",
             FAIL,
@@ -905,6 +924,7 @@ def check_unit_embedded_gateway_secret(ctx: Context) -> Finding:
             "EnvironmentFile= that only your account can read (chmod 0600).",
             evidence=exposed,
             confidence="HIGH",
+            scored=True,
         )
 
     return _finding(

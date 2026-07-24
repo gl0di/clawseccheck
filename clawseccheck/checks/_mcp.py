@@ -3218,6 +3218,15 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
 
     if fails:
         ev = [_obf_clip(r) for r in sorted(set(fails))[:5]]
+        # B-315: CheckMeta stays scored=False (catalog.py's own precedent — B84/B85 —
+        # for why: the verdict depends on whether trajectory logs happen to exist and
+        # for how long, not on the owner's posture, so WARN/PASS/UNKNOWN must stay out
+        # of scoring). But this FAIL branch is HIGH confidence, deterministic (reads
+        # what OpenClaw actually delivered to the model), and already carries five
+        # rounds of C-135 adversarial review (tests/test_b185_compiled_tool_poisoning.py
+        # "ROUND 2..5") with zero FAILs across the accumulated benign corpora — Dave's
+        # ruling requires an unscored check to never FAIL, and a FAIL this well-vetted
+        # should carry real grade weight. scored=True overrides just this Finding.
         return _finding(
             "B185",
             FAIL,
@@ -3229,6 +3238,7 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             "and rotate any credential the affected sessions could reach. Re-run this "
             "audit after the next session to confirm the delivered description changed.",
             evidence=ev,
+            scored=True,
         )
     if warns:
         ev = [_obf_clip(r) for r in sorted(set(warns))[:5]]

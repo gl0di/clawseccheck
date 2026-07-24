@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 from clawseccheck import attest, audit
-from clawseccheck.catalog import ATTESTED, FAIL, HIGH, PASS, UNKNOWN, WARN
+from clawseccheck.catalog import ATTESTED, HIGH, PASS, UNKNOWN, WARN
 from clawseccheck.checks import (
     _host_finding,
     check_attestation_mismatch,
@@ -61,9 +61,11 @@ def test_b43_flags_a_lone_exec_tool():
     # Regression for the field gap: an agent holding only Bash must NOT be PASS.
     warn = check_capability_blast_radius(_ctx(attestation={"tools": ["Bash"]}))
     assert warn.status == WARN and any("EXEC" in e for e in warn.evidence)
-    fail = check_capability_blast_radius(_ctx(attestation={
+    # B-315: the ungated-escalation branch was downgraded FAIL->WARN (B43 is
+    # confidence=ATTESTED — an unscored, self-report-derived check must never FAIL).
+    ungated = check_capability_blast_radius(_ctx(attestation={
         "tools": ["Bash"], "untrusted_to_action": "ungated"}))
-    assert fail.status == FAIL
+    assert ungated.status == WARN
 
 
 def test_b43_real_session_toolset_warns():
@@ -215,6 +217,9 @@ def test_approval_bypass_actors():
 
 
 # --------------------------------------------------------------- B43 verdicts
+# B-315: B43's "high-blast-radius + ungated" branch was downgraded FAIL->WARN — B43 is
+# confidence=ATTESTED (the verdict is the audited agent's OWN self-report), so a grade
+# cap the subject can talk itself into is unsound. An unscored check must never FAIL.
 def test_b43_unknown_when_no_readable_verbs():
     # Regression: a list with no string entries must be UNKNOWN, not a false PASS.
     for junk in ([1, 2, 3], [{"k": "v"}], [["nested"]]):
@@ -243,11 +248,11 @@ def test_b43_warn_high_blast_but_gated():
     assert any("EGRESS" in e for e in f.evidence)
 
 
-def test_b43_fail_high_blast_and_ungated():
+def test_b43_warns_high_blast_and_ungated():
     att = {"tools": ["search", "send_email", "create_filter"],
            "untrusted_to_action": "ungated"}
     f = check_capability_blast_radius(_ctx(attestation=att))
-    assert f.status == FAIL
+    assert f.status == WARN  # B-315: was FAIL
     assert any("MAILBOX_CONFIG" in e for e in f.evidence)
 
 
@@ -257,14 +262,14 @@ def test_b43_warn_when_a_gate_is_auto_without_bypass_signal():
     assert f.status == WARN
 
 
-def test_b43_fail_when_a_gate_is_auto_with_runtime_sleeper_bypass():
+def test_b43_warns_when_a_gate_is_auto_with_runtime_sleeper_bypass():
     att = {
         "tools": ["delete_forever"],
         "approval_gates": {"write": "auto"},
         "approval_bypass_actors": ["sleeper"],
     }
     f = check_capability_blast_radius(_ctx(attestation=att))
-    assert f.status == FAIL
+    assert f.status == WARN  # B-315: was FAIL
     assert any("approval bypass actor(s):" in e for e in f.evidence)
 
 
@@ -279,10 +284,10 @@ def test_b43_warn_when_a_gate_is_auto_with_unknown_bypass_actor():
     assert not any("approval bypass actor(s):" in e for e in f.evidence)
 
 
-def test_b43_fail_when_a_gate_is_auto_with_cron_or_heartbeat_bypass():
+def test_b43_warns_when_a_gate_is_auto_with_cron_or_heartbeat_bypass():
     att = {"tools": ["delete_forever"], "approval_gates": {"write": "auto"}}
     f = check_capability_blast_radius(_ctx(config={"cron": "daily"}, attestation=att))
-    assert f.status == FAIL
+    assert f.status == WARN  # B-315: was FAIL
     assert any("approval bypass actor(s):" in e for e in f.evidence)
 
 

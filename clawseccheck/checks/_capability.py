@@ -12,7 +12,6 @@ from .. import attest as _attest
 from .. import trajectory as _trajectory
 from ..catalog import (
     BY_ID,
-    FAIL,
     PASS,
     UNKNOWN,
     WARN,
@@ -274,9 +273,14 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
     if bypass_actors or _attest.is_ungated(att):
         if bypass_actors:
             evidence.append(f"approval bypass actor(s): {', '.join(sorted(set(bypass_actors)))}")
+        # B-315: was FAIL. B43 is confidence=ATTESTED and scored=False — the whole
+        # verdict is derived from the audited agent's OWN self-report (ctx.attestation),
+        # not a config fact. A grade cap the subject can talk itself into (or out of) is
+        # unsound, so an unscored check must not FAIL (Dave's ruling: scored=False caps
+        # at WARN). Downgraded to WARN; still names the exact same evidence.
         return _finding(
             "B43",
-            FAIL,
+            WARN,
             f"The agent holds high-blast-radius verbs ({label}) AND a side-effect "
             "can fire without human approval — a single injected instruction can "
             "reach exfil / destruction / a persistent forwarding rule.",
@@ -822,9 +826,14 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
             ev.append(
                 "open-ingress bypasses exec-style approval and can still drive write-capable tools"
             )
+        # B-315: was FAIL. B55 is scored=False by design — its catalog comment already
+        # says the write/least-privilege dimension this fires on is duplicated by the
+        # SCORED checks B3/B22/B31, so capping the grade here would double-count the
+        # same risk under a second check id. An unscored check must not FAIL (Dave's
+        # ruling: scored=False caps at WARN). Downgraded to WARN; same evidence.
         return _finding(
             "B55",
-            FAIL,
+            WARN,
             f"Broad filesystem-write capability ({label}) is reachable by untrusted "
             f"senders without write-specific scoping, so untrusted input can drive arbitrary "
             f"file writes (tamper / persistence).",

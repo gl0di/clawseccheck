@@ -2744,9 +2744,16 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
         trusted_proxies_ok = _trusted_proxies_ok(dig(cfg, "gateway.trustedProxies"))
         if not required_headers and not allow_users and not trusted_proxies_ok:
             user_header = dig(cfg, "gateway.auth.trustedProxy.userHeader") or "x-forwarded-user"
+            # B-315: was FAIL. B70 belongs to the B68-B73 block, whose catalog comment
+            # documents the group as "WARN-only ... zero false-positive FAILs on real
+            # configs" — this branch was the sole violator of that documented intent
+            # (and this exact loopback/private-network predicate is the one CLAUDE.md
+            # §6.1 records as version-dependent across Python 3.9/3.12). An unscored
+            # check must not FAIL (Dave's ruling: scored=False caps at WARN); downgrading
+            # also restores the block comment's original claim. Same evidence.
             return _finding(
                 "B70",
-                FAIL,
+                WARN,
                 f"gateway.auth.mode=trusted-proxy is bound to a non-loopback address "
                 f"(bind host={bind_host!r}) with no requiredHeaders/allowUsers/"
                 f"trustedProxies configured — the {user_header!r} identity header is "

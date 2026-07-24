@@ -329,7 +329,7 @@ clawseccheck --attest -       # reads attestation JSON from stdin
 
 | Check | What it assesses with attestation |
 |---|---|
-| B43 | Classifies each tool verb by blast-radius (EXEC, MAILBOX_CONFIG, DESTRUCTIVE, EGRESS, REVERSIBLE); fails when a high-blast verb fires without an approval gate |
+| B43 | Classifies each tool verb by blast-radius (EXEC, MAILBOX_CONFIG, DESTRUCTIVE, EGRESS, REVERSIBLE); warns when a high-blast verb fires without an approval gate (never FAILs — the verdict is the agent's own self-report) |
 | B44 | Cross-checks the self-report against config `tools.allow`; flags verbs the config grants that the agent omitted (drift / blind spot) |
 | B45 | Checks whether any single agent in the roster holds all three Lethal Trifecta legs simultaneously |
 | B47 | Walks the delegation graph to detect cross-agent trifecta reassembly (confused-deputy pattern) |
