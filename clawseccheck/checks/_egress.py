@@ -393,6 +393,89 @@ def check_browser_extra_args(ctx: Context) -> Finding:
     )
 
 
+# ---------- B196 corroboration: is the sink pointed at a browser OpenClaw does not own? ----------
+# The two drivers below hand the agent a browser process OpenClaw did NOT launch -- the
+# operator's own, already-signed-in one. Grounded in the installed dist:
+#   * zod-schema-O9ml_nmo.js:1120-1131 -- browser.profiles.<name>.driver is a four-way
+#     union, "openclaw" | "clawd" | "existing-session" | "extension". The first two are
+#     OpenClaw's own managed Chrome; only these two attach to a foreign browser.
+#   * cdp-reachability-policy-BLdT5iz3.js:11-30 getBrowserProfileCapabilities() resolves
+#     "existing-session" to mode "local-existing-session" (usesChromeMcp: true) and
+#     "extension" to mode "local-extension" -- both explicitly local-attach modes.
+#   * The vendor's own field docs say WHICH browser that is: docs/tools/browser.md:324 --
+#     `driver: "extension"` "drives your signed-in Chrome through the OpenClaw Chrome
+#     extension"; schema-DRyO1XBt.js:279 -- an existing-session `userDataDir` targets
+#     "Brave, Edge, Chromium, or non-default Chrome profiles", i.e. a real user profile.
+#   * config-DpWXcVmn.js:391-410 -- OpenClaw SYNTHESIZES a `user` profile (driver
+#     "existing-session", attachOnly true) and a `chrome` profile (driver "extension") at
+#     resolve time whenever the operator's file does not define them. Those synthesized
+#     profiles live only in the resolved runtime config, never in the openclaw.json this
+#     check reads, and stay dormant until a tool call selects them. So an explicit
+#     `driver` written in the operator's OWN file is a rare, deliberate, hand-written
+#     signal -- never the vendor default. B322 rests on the identical distinction, and
+#     that is exactly why this corroborator does not fire on an ordinary browser config.
+#   * config-DpWXcVmn.js:589 -- for the managed "openclaw" driver the effective
+#     attach-only flag is `profile.attachOnly ?? resolved.attachOnly`, so a top-level
+#     browser.attachOnly is inherited by any profile that does not override it. Combined
+#     with a non-loopback cdpUrl that is the "externally managed remote CDP provider"
+#     shape the vendor documents at schema-DRyO1XBt.js:273 -- again a browser OpenClaw
+#     neither launched nor owns.
+_UNOWNED_SESSION_DRIVERS = ("existing-session", "extension")
+
+
+def _browser_unowned_session_evidence(browser: dict) -> list[str]:
+    """Evidence lines for every operator-written signal that the browser tool drives a
+    session OpenClaw did not launch. Empty list == no such signal (the ordinary
+    managed-Chrome config), which is what keeps this off the fleet-wide false-FAIL path.
+
+    Reads ONLY keys the operator actually wrote; never OpenClaw's synthesized default
+    profiles (see the grounding note above). Deliberate v1 scope limit, stated rather
+    than hidden: when `browser.profiles` is written but omits "openclaw",
+    ensureDefaultProfile() synthesizes that profile from the top-level cdpUrl/cdpPort --
+    the top-level attach-only pair is therefore only evaluated when no profiles block
+    exists at all, so that synthesized-profile corner is a known false negative, never a
+    false positive.
+    """
+    ev: list[str] = []
+    profiles = browser.get("profiles")
+    profiles = profiles if isinstance(profiles, dict) else {}
+    top_attach_only = browser.get("attachOnly") is True
+    top_cdp_url = browser.get("cdpUrl")
+
+    for name, spec in sorted(profiles.items(), key=lambda kv: str(kv[0])):
+        if not isinstance(spec, dict):
+            continue
+        driver = spec.get("driver")
+        if driver in _UNOWNED_SESSION_DRIVERS:
+            ev.append(
+                f"browser.profiles.{name}.driver={driver!r} — this profile attaches to a "
+                "browser OpenClaw did not launch (the operator's own, already-signed-in "
+                "session), so the evaluate sink runs inside it"
+            )
+            continue
+        attach_only = spec.get("attachOnly")
+        if not isinstance(attach_only, bool):
+            attach_only = top_attach_only
+        cdp_url = spec.get("cdpUrl")
+        if not (isinstance(cdp_url, str) and cdp_url.strip()):
+            cdp_url = top_cdp_url
+        if attach_only and _cdp_url_classify(cdp_url) == "remote":
+            ev.append(
+                f"browser.profiles.{name} is attach-only against "
+                f"cdpUrl={_cdp_url_display(cdp_url)} (non-loopback) — OpenClaw attaches "
+                "to an externally managed browser on another host instead of launching "
+                "its own, so the evaluate sink runs inside that foreign browser"
+            )
+    if not profiles and top_attach_only and _cdp_url_classify(top_cdp_url) == "remote":
+        ev.append(
+            f"browser.attachOnly=true with browser.cdpUrl={_cdp_url_display(top_cdp_url)} "
+            "(non-loopback) — OpenClaw attaches to an externally managed browser on "
+            "another host instead of launching its own, so the evaluate sink runs inside "
+            "that foreign browser"
+        )
+    return ev
+
+
 def check_browser_evaluate_enabled(ctx: Context) -> Finding:
     """B196 — browser.evaluateEnabled arbitrary-JS sink (E-060 item 3).
 
@@ -412,18 +495,37 @@ def check_browser_evaluate_enabled(ctx: Context) -> Finding:
     the incentive to write your configuration down explicitly, and left the common case
     (nobody writes the key) on the lenient rung.
 
-    WARN    — the sink is ON: evaluateEnabled is absent (vendor default true), OR
-              explicitly true, OR set to any other non-`false` value (which cannot be
-              confirmed disabled). One bar for one effective state.
-              WARN and not FAIL because this is the documented vendor default of a
-              documented feature (act:evaluate / wait --fn): a HIGH FAIL here would cap
-              the grade of essentially every browser-tool user for shipping defaults,
-              and it would double-count the reachability leg that B38 already grades
-              (ssrfPolicy.hostnameAllowlist / dangerouslyAllowPrivateNetwork). This
-              also matches B38's own treatment of a permissive-by-default open state as
-              WARN. The sink-plus-reachability combination is the risk engine's job.
+    FAIL    — the sink is ON **and** the config points the browser tool at a session
+              OpenClaw does not launch or own: a hand-written
+              browser.profiles.*.driver of "existing-session"/"extension", or an
+              attach-only profile against a non-loopback cdpUrl (see
+              _browser_unowned_session_evidence and its grounding note). Arbitrary JS
+              then executes inside the operator's real, already-signed-in browser, so
+              one injected page reaches every cookie and live session in it.
+    WARN    — the sink is ON with no such corroboration: evaluateEnabled is absent
+              (vendor default true), OR explicitly true, OR set to any other non-`false`
+              value (which cannot be confirmed disabled).
     PASS    — evaluateEnabled is explicitly false (the only state that closes the sink).
     UNKNOWN — no browser config at all (the browser tool is not in use).
+
+    WHY THE FAIL IS CORROBORATED RATHER THAN UNCONDITIONAL. Sink-ON alone is the
+    documented vendor default of a documented feature (act:evaluate / wait --fn), so an
+    unconditional HIGH FAIL would cap the grade of essentially every browser-tool user
+    for shipping defaults -- the same two-grade swing on an unchanged machine that the
+    effective-state fix above exists to remove, just pointing the other way. The
+    corroborators are chosen to be the opposite of that: each is an explicit,
+    rare, hand-written key with no vendor-default spelling in the operator's own file,
+    and each is orthogonal to the reachability leg B38 grades
+    (ssrfPolicy.hostnameAllowlist / dangerouslyAllowPrivateNetwork), so this neither
+    fires on ordinary configs nor double-counts B38.
+
+    NOT DELEGATED TO THE RISK ENGINE. An earlier revision of this docstring justified a
+    flat WARN by saying the sink-plus-reachability combination was "the risk engine's
+    job". No RISK rule reads B196 or evaluateEnabled at all -- both browser chains
+    (RISK-03 _rule_browser_ssrf_secrets, RISK-15 _rule_injection_browser_ssrf) gate
+    solely on _browser_ssrf(), which is B38-FAIL-or-dangerouslyAllowPrivateNetwork and
+    never consults the sink. That hand-off did not exist, so the escalation is graded
+    here, where the evidence is.
     """
     browser = ctx.config.get("browser")
     if not isinstance(browser, dict):
@@ -453,6 +555,32 @@ def check_browser_evaluate_enabled(ctx: Context) -> Finding:
     else:
         spelling = (
             "browser.evaluateEnabled is set to a value that is not the boolean false"
+        )
+
+    # The corroboration is read the same way for every spelling, so absent and explicit
+    # `true` still land on one bar at BOTH levels -- the effective-state fix survives.
+    unowned = _browser_unowned_session_evidence(browser)
+    if unowned:
+        return _finding(
+            "B196",
+            FAIL,
+            f"{spelling} — the browser's arbitrary-JS evaluate sink is ON, and this "
+            "config points the browser tool at a session OpenClaw does not launch or "
+            "own (see evidence). Content on any page the agent visits can therefore "
+            "execute arbitrary JavaScript inside the operator's real, already-signed-in "
+            "browser, reaching every cookie and live session in it (browser-tool "
+            "prompt-injection → account takeover). OpenClaw applies no extra evaluate "
+            "restriction to those drivers: evaluateEnabled is resolved once, globally, "
+            "and is the only gate — its vendor default is true, so an absent key and an "
+            "explicit true are the same runtime state and only an explicit false "
+            "disables it.",
+            "Set browser.evaluateEnabled=false — OpenClaw's own field documentation "
+            "says to keep it disabled unless a workflow needs evaluate semantics beyond "
+            "snapshots/navigation. If a workflow genuinely requires page-JS evaluation, "
+            "do not point it at a signed-in session: give the agent a dedicated managed "
+            "profile (driver \"openclaw\") instead, and pair the sink with a tight "
+            "browser.ssrfPolicy.hostnameAllowlist (B38) to limit which pages reach it.",
+            evidence=unowned[:6],
         )
 
     return _finding(
