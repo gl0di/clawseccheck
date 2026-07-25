@@ -1925,6 +1925,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B324 - env.shellEnv.enabled — agent-startup login-shell environment import
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Config Integrity
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: env.shellEnv.enabled — agent-startup login-shell environment import
+- Remediation:
+  - none
+
 ### B177 - OpenClaw's own persisted ClawHub trust verdict for an installed plugin
 
 - Severity: HIGH

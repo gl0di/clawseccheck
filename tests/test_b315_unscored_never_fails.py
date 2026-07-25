@@ -93,8 +93,8 @@ def test_catalog_scored_false_ids_match_the_audited_set():
     author sees this file when they touch the set. Not exhaustive re-derivation of the
     architect audit — the corpus test above is what actually enforces the invariant."""
     unscored = {c.id for c in BY_ID.values() if not c.scored}
-    assert {"B43", "B55", "B70", "B185", "B186", "B193"} <= unscored
-    assert len(unscored) == 78
+    assert {"B43", "B55", "B70", "B185", "B186", "B193", "B324"} <= unscored
+    assert len(unscored) == 79
 
 
 # ── Targeted: the three downgrades (FAIL -> WARN, CheckMeta unchanged) ────────────────

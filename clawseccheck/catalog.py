@@ -2124,6 +2124,21 @@ CATALOG: list[CheckMeta] = [
         # transport security, the same surface as B11's TLS check.
         surface="gateway",
     ),
+    # B324 (E-060 item 7): the CONFIG-KEY half of the same OR condition B192 checks the
+    # OPENCLAW_LOAD_SHELL_ENV env-var half of (shouldEnableShellEnvFallback(env) ||
+    # cfg.env?.shellEnv?.enabled === true). scored=False, WARN-capable only, same
+    # rationale as B192 -- OpenClaw's own field description calls this a legitimate,
+    # commonly-wanted feature, so a FAIL would punish an intentional developer-machine
+    # posture.
+    CheckMeta(
+        "B324",
+        "env.shellEnv.enabled — agent-startup login-shell environment import",
+        MEDIUM,
+        "hardening",
+        "Config Integrity",
+        scored=False,
+        surface="tools",
+    ),
     # B177 (B-240): OpenClaw's OWN persisted per-plugin ClawHub trust verdict
     # (installed_plugin_index.install_records_json.<pluginId>.clawhubTrustDisposition, in
     # the shared state SQLite DB ~/.openclaw/state/openclaw.sqlite) was never read (grep

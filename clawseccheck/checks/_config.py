@@ -3016,3 +3016,68 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
         "Run the audit on the machine and account the agent runs as, with no --home "
         "argument, to have the persistent toggle locations checked.",
     )
+
+
+def check_shell_env_fallback(ctx: Context) -> Finding:
+    """B324 — env.shellEnv.enabled (E-060 item 7): agent-startup login-shell import.
+
+    The CONFIG-KEY half of the same OR condition B192 already checks the ENV-VAR half
+    of: OpenClaw enables its shell-env fallback when EITHER the
+    ``OPENCLAW_LOAD_SHELL_ENV`` dotenv toggle is on (B192) OR
+    ``env.shellEnv.enabled === true`` in openclaw.json (this check) — grounded directly
+    against the dist: ``call-Bj6Erfmh.js:101`` / ``io-By0s-a_s.js:5268``:
+    ``shouldEnableShellEnvFallback(env) || cfg.env?.shellEnv?.enabled === true``. When
+    on, OpenClaw loads environment variables from the user's login shell at agent
+    startup, so ``~/.bashrc``/``~/.zshrc`` content becomes agent-startup input — a
+    persistence foothold or a PATH-hijack planted there becomes an agent-startup
+    vector, not only an interactive-shell one.
+
+    WARN-only, never FAIL: OpenClaw's own field description calls this a legitimate,
+    commonly-wanted feature ("Keep this enabled when you depend on profile-defined
+    secrets or PATH customizations" — schema-DRyO1XBt.js:91), mirroring B192's own
+    break-glass framing for the sibling toggle.
+
+    Scope, stated exactly: ``shouldEnableShellEnvFallback()`` also fires from the
+    ``OPENCLAW_LOAD_SHELL_ENV`` runtime environment variable (B192's surface, not
+    config) — a static config audit cannot observe that path, so this check's absence
+    of a finding here does NOT mean shell-env loading is off, only that the openclaw.json
+    key itself does not request it. That residual is a false NEGATIVE (already covered
+    by B192 for the env-var path), never a false positive this check would introduce.
+
+    WARN    — env.shellEnv.enabled == true.
+    PASS    — env.shellEnv.enabled is absent or false.
+    UNKNOWN — no config found at all, or present but unparseable/unreadable.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B324",
+            UNKNOWN,
+            "No openclaw.json found -- env.shellEnv.enabled cannot be assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B324", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    enabled = dig(ctx.config, "env.shellEnv.enabled")
+    if enabled is True:
+        return _finding(
+            "B324",
+            WARN,
+            "env.shellEnv.enabled=true — OpenClaw loads environment variables from "
+            "the user's login shell (~/.bashrc, ~/.zshrc, …) at agent startup, so "
+            "shell rc file content becomes agent-startup input.",
+            "Confirm this is needed (e.g. profile-defined secrets or PATH "
+            "customizations the agent depends on); disable it in a locked-down "
+            "service environment with explicit env management instead.",
+        )
+
+    return _finding(
+        "B324",
+        PASS,
+        "env.shellEnv.enabled is absent or false — openclaw.json does not request "
+        "login-shell environment import at startup (the OPENCLAW_LOAD_SHELL_ENV "
+        "env-var path is checked separately by B192).",
+        "Keep it that way unless a specific workflow depends on profile-defined "
+        "secrets or PATH customizations from the login shell.",
+    )

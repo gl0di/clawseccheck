@@ -262,6 +262,7 @@ from ._config import (
     check_audit_suppressions,
     check_control_plane_mutation,
     check_env_breakglass_toggles,
+    check_shell_env_fallback,
     check_controlui_origins,
     check_credential_blast_radius,
     check_dangerous_overrides,
@@ -1229,6 +1230,7 @@ CHECKS = [
     # break-glass toggle left on in a file OpenClaw loads at startup. Both WARN-only.
     check_audit_target_divergence,
     check_env_breakglass_toggles,
+    check_shell_env_fallback,  # B324 — env.shellEnv.enabled agent-startup shell import (E-060 item 7)
     check_webfetch_redirects,
     check_incident_readiness,
     check_log_threat_hunt,  # B164 — content-scan the agent's own log corpus (F-124/E-044)

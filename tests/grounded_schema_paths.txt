@@ -46,6 +46,7 @@ cron
 cron.store
 diagnostics.cacheTrace.filePath
 discovery.mdns.mode
+env.shellEnv.enabled
 gateway.allowRealIpFallback
 gateway.auth.mode
 gateway.auth.password
