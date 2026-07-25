@@ -589,8 +589,18 @@ def _vet_mcp_least_privilege(name: str, spec: dict) -> tuple[list[str], list[str
 
 
 # TP1: hidden instructions in tool descriptions — keyword boosts signal danger.
+# B-333 (2026-07-25): `IGNORE\s+PREVIOUS` required strict adjacency, so the single most
+# common phrasing of the attack -- "Ignore ALL previous instructions" -- slipped through
+# while the sibling `OVERRIDE\s+(?:ALL\s+)?INSTRUCTIONS?` alternative already tolerated
+# the same inserted "ALL". That was an inconsistency inside one regex, not a deliberate
+# narrowing, so the tolerance is mirrored here: `IGNORE\s+(?:ALL\s+)?PREVIOUS` matches
+# with or without an inserted "ALL" (any case -- re.I). It still requires PREVIOUS to
+# directly follow (the optional ALL aside) -- "ignore" and "previous" appearing
+# separately, unrelated to each other, in the same text (e.g. "ignore case sensitivity
+# ... see the previous section for setup instructions") does NOT match. See
+# test_c038_tp1_clean_scattered_keywords_no_finding for the anti-regression guard.
 _C038_HIDDEN_INSTR_RE = re.compile(
-    r"(?:SYSTEM\s*:|IGNORE\s+PREVIOUS|OVERRIDE\s+(?:ALL\s+)?INSTRUCTIONS?|"
+    r"(?:SYSTEM\s*:|IGNORE\s+(?:ALL\s+)?PREVIOUS|OVERRIDE\s+(?:ALL\s+)?INSTRUCTIONS?|"
     r"<\|im_start\|>\s*system)",
     re.I,
 )
@@ -649,6 +659,37 @@ def _vet_mcp_tool_poisoning(name: str, spec: dict) -> tuple[list[str], list[str]
         tool_name = str(tool.get("name", "<unnamed>"))
         description = str(tool.get("description", ""))
         norm_desc = normalize_for_scan(description)
+
+        # TP1z: the mere presence of a hidden encoding channel is itself a signal,
+        # independent of what the normalized text decodes to (B-333, 2026-07-25).
+        # `normalize_for_scan()` above correctly EXPANDS a Tag-block-smuggled payload
+        # before every regex leg below runs, but until now nothing on this path ever
+        # asked WHETHER expansion happened -- so a payload that expands to text missing
+        # every `_C038_HIDDEN_INSTR_RE` keyword (no "SYSTEM:"/"IGNORE PREVIOUS"/
+        # "OVERRIDE INSTRUCTIONS" phrasing -- e.g. a bare exfil directive) passed
+        # silently even though a genuinely invisible channel smuggled it in.
+        #
+        # Deliberately narrowed to the three signals that ARE a hidden channel --
+        # zero-width/invisible characters, bidi-override controls, Unicode Tag-block
+        # characters -- and excludes `obfuscation_signals()`'s fourth category,
+        # "confusable characters folded to ASCII": that one fires on ordinary
+        # Cyrillic/Greek prose (plain Russian text routinely uses а/е/о/р/с/х, all of
+        # which are in the confusables table -- verified against real sentences, not
+        # asserted), so escalating it here would FAIL any non-English tool description.
+        # That is a real false-FAIL class (CLAUDE.md Golden Rule #5), not a hidden
+        # channel -- TP2 above already treats it as WARN-only on the server *name* for
+        # the same reason, and this leg does not even go that far. See
+        # test_c038_tp1_cyrillic_prose_description_not_flagged_as_hidden_channel.
+        hidden_channel_signals = [
+            s for s in obfuscation_signals(description)
+            if s != "confusable characters folded to ASCII"
+        ]
+        if hidden_channel_signals:
+            dangerous.append(
+                f"{name}/{tool_name}: tool description contains a hidden encoding "
+                f"channel ({'; '.join(hidden_channel_signals)}) — content is concealed "
+                "from a human reader regardless of what it decodes to"
+            )
 
         # TP1a: HTML/markdown comment hiding in description.
         if _C038_COMMENT_RE.search(description):
