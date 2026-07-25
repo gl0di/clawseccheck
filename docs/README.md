@@ -20,6 +20,17 @@ Reading order depends on who you are:
 4. [../SECURITY_MODEL.md](../SECURITY_MODEL.md) — ClawSecCheck's own capability
    surface, least-privilege posture, and self-defense
 
+## I want the reasoning behind a design decision
+
+Analysis and decision records. They change no code and are not a reference —
+read one when you want to know *why* something is the way it is.
+
+1. [design/severity-separability.md](design/severity-separability.md) — why
+   FAIL-only recall is roughly half a static peer's, measured on
+   SkillTrustBench, and what the recommendation costs
+2. [design/judge-topology.md](design/judge-topology.md) — why the LLM judge
+   lives in the host agent and never inside the scanner
+
 ## I want to integrate it
 
 1. [OUTPUT_SCHEMA.md](OUTPUT_SCHEMA.md) — the frozen `--json` / SARIF contract

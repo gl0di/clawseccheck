@@ -23,9 +23,6 @@ checks everything it claims to, and a finding you suppressed stays suppressed.
 - A time budget on the vet paths. A skill at the legal size cap could previously scan
   without any ceiling; the sweep and each target are now bounded, and a target that hit
   the ceiling is named as partially scanned rather than counted as safe.
-- `scripts/fleet_fp_gate.py` — records the FAIL set your own installed fleet produces
-  and blocks a change that adds a new one. It compares FAIL sets rather than scores, so
-  adding passing checks cannot mask a regression.
 
 ### Fixed
 - **Suppressions no longer expire on their own.** A `.clawseccheckignore` entry keys on a

@@ -64,6 +64,22 @@ A single CRITICAL FAIL (for example B1 — plaintext secrets, or B2 — open gat
 no auth) locks the score at or below 49, which is always an F, regardless of how well
 everything else scores.
 
+**Three more caps fire with no FAIL finding at all.** If you are hunting the report for a
+CRITICAL that explains your F and cannot find one, it is one of these. They are caps only:
+they never add or remove a scored point, they just lower the ceiling.
+
+| Signal | Score capped at | Grade ceiling | What the report says |
+|---|---|---|---|
+| A check **crashed or timed out** | 49 | F | `N check(s) crashed or timed out this run: cannot rule out a CRITICAL condition`, plus a `N checks did not run` banner above the score |
+| `openclaw.json` is present but **unreadable / unparseable** | 49 | F | `openclaw.json unreadable/unparseable this run: cannot rule out a CRITICAL condition` |
+| A **corroborated runtime signal** in your own trajectory log | 79 | C | `corroborated runtime signal: …` |
+
+The reasoning is the same in all three cases, and it is deliberate: the audit lost
+visibility into something, and the honest assumption about an unexamined check is
+worst-case, not average-case. Otherwise "make the scanner blind" would be the cheapest way
+to improve a grade. Fix the underlying visibility problem — a quieter machine or `--debug`
+for a timeout, valid JSON for an unparseable config — and the cap lifts on the next run.
+
 **What to look at first:**
 
 1. Re-read the FAIL findings in the report, most urgent first — each names exactly what
@@ -81,6 +97,8 @@ everything else scores.
 - Installed third-party skill flagged as suspicious or dangerous by the malware scan (**B13**).
 - Control-plane tools (config, cron, gateway) reachable over the HTTP gateway (**B32**).
 - A `dangerously*` sandbox escape flag is enabled (**B48**).
+- **No FAIL at all** — a check crashed or timed out, or `openclaw.json` could not be
+  parsed. See the cap table above; the report names which one it was.
 
 After fixing the underlying issue, re-run `clawseccheck` to see the new score.
 

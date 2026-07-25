@@ -107,7 +107,7 @@ Shared by `--json` and `--vet` mode.
 | `detail` | `str` | Explanation of the finding (sanitised). |
 | `fix` | `str` | Short remediation hint (sanitised). |
 | `framework` | `str` | Threat-framework reference, e.g. `"OWASP LLM01"`. |
-| `confidence` | `str` | `"HIGH"`, `"MEDIUM"`, or `"LOW"`. |
+| `confidence` | `str` | `"HIGH"`, `"MEDIUM"`, `"LOW"`, or `"ATTESTED"`. `"ATTESTED"` sits *below* `"LOW"`: the finding rests on the audited agent's own self-report (`--attest`) or on a host-agent prose verdict (`--vet-judged`), not on a config fact, so it is weaker evidence — the agent could be compromised or prompt-injected. Carried by B43, B44, B45, B47, B75, B76, B84 and by every `ATTEST-PROSE-*` finding (§16). All are `scored: false` except B76, which is scored. Orthogonal to `severity` and `status`: an `"ATTESTED"` finding still carries an ordinary severity and can still be a FAIL. |
 | `pass_confidence` | `str \| null` | For PASS findings only: `"verified"` (evidence-based pass), `"no_signal"` (check found nothing but couldn't confirm safety), or `null` (FAIL/WARN/UNKNOWN — not applicable). |
 | `scored` | `bool` | `false` for advisory findings excluded from the weighted score (they still appear in the report but don't move the grade); `true` for findings that count toward the score. Lets a JSON consumer reproduce the human report's "N to fix vs M warn" arithmetic, which excludes advisory items. |
 | `suppressed` | `bool` | `true` if the finding was suppressed by the user's baseline. |
@@ -484,7 +484,7 @@ corresponding checks always appear in `rules`.
 | `ruleId` | `str` | yes | Check identifier. |
 | `level` | `str` | yes | `"error"` for `FAIL`, `"warning"` for `WARN`. |
 | `message.text` | `str` | yes | Finding detail text (sanitised). |
-| `properties.confidence` | `str` | yes | `"HIGH"`, `"MEDIUM"`, or `"LOW"`. |
+| `properties.confidence` | `str` | yes | `"HIGH"`, `"MEDIUM"`, `"LOW"`, or `"ATTESTED"` — the same four values the `--json` `confidence` field carries (see above). |
 | `properties.evidence` | `array[str]` | yes | Supporting evidence (may be empty array). |
 | `fixes` | `array[Fix]` | only when remediation exists | Paste-ready remediation steps. |
 

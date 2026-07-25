@@ -1162,7 +1162,7 @@ def _main(argv=None) -> int:
                    help="print the deterministic chat Dashboard card (grade + FIX FIRST "
                         "projection + framed findings, Sections 1-3) and exit")
     p.add_argument("--dashboard-findings", action="store_true",
-                   help="print only the framed Section-3 Findings block for the chat Dashboard "
+                   help="print only the framed Section-2 Findings block for the chat Dashboard "
                         "(FAIL/WARN, high-confidence, grouped by family) and exit")
     p.add_argument("--risk-paths", action="store_true",
                    help="print only the highest-risk capability chains and exit")
@@ -1782,7 +1782,7 @@ def _main(argv=None) -> int:
         sweep_budget_s = DEFAULT_VET_ALL_BUDGET_S
         if args.quiet:
             # C-110: --full --quiet — the appended self-test material + per-server
-            # vet-mcp detail are what push --full to ~490 lines; collapse each to a
+            # vet-mcp detail are what push --full to ~700 lines; collapse each to a
             # single honest summary line (the concise report above is unchanged).
             # The self-test harnesses emit generated adversarial *scenarios* for the
             # agent to run — there is no PASS/score the tool computes, so the summary
@@ -1925,10 +1925,13 @@ def _main(argv=None) -> int:
         #
         # F-149: sweep_has_fail joins the disjunction on exactly the terms vm_has_fail
         # already sits on — FAIL-only. A SUSPICIOUS (WARN) skill does not redden the
-        # gate, and neither does an incomplete sweep: --exit-code's documented contract
-        # is "exit 1 if any unsuppressed FAIL finding exists", and flipping it on
-        # truncation would silently redden every CI gate that passes today. An
+        # gate, and neither does an incomplete sweep: the contract this gate keeps is
+        # "a FAIL verdict from any of the four sources below, plus an unreadable
+        # config" — an ABSENT verdict is not a FAIL, and flipping the gate on
+        # truncation would silently redden every CI run that passes today. An
         # incomplete sweep is reported honestly in its printed section instead.
+        # docs/USAGE.md ("CI / automation") and references/cli-flags.md state all four
+        # sources; keep them in step with this disjunction if a fifth is ever added.
         if (has_fail or vm_has_fail or sweep_has_fail
                 or getattr(ctx, "config_parse_error", False)):
             return 1
