@@ -948,9 +948,10 @@ python3 {baseDir}/audit.py --judge-packet
 
 A separate JSON artifact (`docs/OUTPUT_SCHEMA.md` §12), not part of `--json` — a list of
 borderline findings (UNKNOWN checks, FN-prone WARNs, dropped taint signals) already
-stripped of raw skill source, each phrased as one plain-language yes/no question for you
-(the host agent) to answer. It can run to hundreds of lines of JSON for a config with many
-findings.
+stripped of raw skill source, each phrased as one plain-language question for you
+(the host agent) to answer with a `SAFE` / `SUSPICIOUS` / `DANGEROUS` verdict plus a
+reason — exactly the contract each item's own `verdict_schema` field declares. It can run
+to hundreds of lines of JSON for a config with many findings.
 
 **Channel-aware delivery — never paste the raw JSON into chat, and never drop it because
 it's large:**

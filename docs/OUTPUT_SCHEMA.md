@@ -643,8 +643,8 @@ Sources folded into the packet:
 | `target` | `str` | Skill/file name the item concerns (redacted if secret-shaped), or the `finding_id` when no target could be derived. |
 | `redacted_evidence` | `str` | Human-readable evidence summary (fully redacted — no raw secrets or skill source). |
 | `engine_disposition` | `str` | The underlying status: `"WARN"` or `"UNKNOWN"` (this artifact never carries `PASS`/`FAIL` items). |
-| `question` | `str` | Plain-language yes/no attestation question for the host agent. |
-| `verdict_schema` | `object` | Fixed answer contract: `{"answer": ["yes", "no"], "reason": "free text"}`. |
+| `question` | `str` | Plain-language attestation question for the host agent, ending in the same answer tail the `verdict_schema` beside it declares (`[SAFE / SUSPICIOUS / DANGEROUS + reason]`). |
+| `verdict_schema` | `object` | Fixed answer contract: `{"verdict": ["SAFE", "SUSPICIOUS", "DANGEROUS"], "reason": "free text"}` — exactly the entry shape §13's input contract requires, so a verdicts file written straight from this field is accepted as-is by `--judged` / `--propose-ignore` / `--vet-judged`. (Through v3.56.0 this field wrongly advertised `{"answer": ["yes", "no"], ...}`, which every consumer rejected; `yes`/`no` cannot express the SUSPICIOUS-vs-DANGEROUS distinction the `--vet-judged` escalation ladder depends on, so the packet was corrected to the parser's vocabulary rather than the reverse.) |
 | `safe_facts` | `object` | C-284: engine-extracted structured facts, never copied from prose. Today carries at most one key, `destination_host` (`str`, absent when none) — the hostname of the first URL found in the finding's raw evidence, reduced to bare `[a-z0-9-]`+`.` (no scheme/userinfo/port/path/query/fragment) and length-capped at 100 chars (C-135, 2026-07-24: the DNS protocol's 253-char ceiling was too permissive — several long hyphenated labels chained by dots can still spell a multi-clause directive within it; 100 stays comfortably above any realistic real-world hostname while shrinking that payload budget); anything that fails that shape check is dropped, never truncated. `{}` when no destination could be safely extracted. This exists because `redacted_evidence` deliberately strips content-ring findings down to a location suffix (the matched prose can itself be a jailbreak directive aimed at the judge) — `safe_facts` restores just enough for the judge to check a first-party-endpoint allowlist without reopening that redaction. |
 | `corroboration` | `object` | C-285: `{"count": int, "check_ids": [str, ...], "scope": "target"}` — engine-authored, ids-only (no titles/details/evidence/paths). `count`/`check_ids` are the distinct unsuppressed WARN/FAIL check ids sharing this item's own `target` field, across the FULL findings list (not just other packet items); `check_ids` naturally includes this item's own id when its own status is WARN/FAIL, and naturally omits it when the item itself is UNKNOWN (most packet items) — in that case the field reflects purely how much OTHER live signal exists for the same target. `scope: "target"` matches C-252's own measurement unit (`docs/design/severity-separability.md` §5.1: one SkillTrustBench case per subject, not per file) — a lone WARN and a WARN sitting alongside three others on the same target used to be presented identically; C-252 found the co-occurrence count is the strongest signal separating malicious from benign in this engine's own output (monotonic, reaching 100% purity at 4+ distinct checks), stronger than `Finding.confidence`. **Context, not a verdict** — this field never implies a threshold (`count >= N` is not a rule the packet enforces or suggests); `SKILL.md`'s panel guidance says so explicitly. |
 
@@ -660,8 +660,8 @@ Sources folded into the packet:
       "target": "report_uploader",
       "redacted_evidence": "report_uploader: file-read contents flow into requests.post (indirect flow) — data exfiltration risk (uploader.py:8)",
       "engine_disposition": "UNKNOWN",
-      "question": "This skill reads a file and the contents appear to flow into a network call, with no independent credential signal nearby (so the engine did not escalate it). Is this an intended upload/sync to a trusted destination? [yes/no + reason]",
-      "verdict_schema": {"answer": ["yes", "no"], "reason": "free text"},
+      "question": "This skill reads a file and the contents appear to flow into a network call, with no independent credential signal nearby (so the engine did not escalate it). Is this an intended upload/sync to a trusted destination? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
+      "verdict_schema": {"verdict": ["SAFE", "SUSPICIOUS", "DANGEROUS"], "reason": "free text"},
       "safe_facts": {"destination_host": "reports.example.com"},
       "corroboration": {"count": 2, "check_ids": ["B65", "TT4_FILE_NET"], "scope": "target"}
     }
@@ -710,6 +710,16 @@ non-object root, a non-array `verdicts` field, a non-object entry, or an entry w
 `SUSPICIOUS` / `DANGEROUS` is each simply dropped (that entry, or the whole parse) —
 `--judged` never raises or crashes on bad input; the affected item(s) just render as
 not-yet-reviewed.
+
+Dropping is not silent, though. When a **non-empty** payload yields **zero** usable
+entries, a `note:` line naming the reason (`0 of N submitted entries were usable`,
+`it is not valid JSON`, `it has no top-level "verdicts" array`, a `--vet-judged`
+`targetFingerprint` mismatch, …) is written to **stderr** — never stdout, which
+carries the JSON artifact. This applies to all three consumers of the verdicts file
+(`--judged`, `--propose-ignore`, `--vet-judged`), which share one parser. An
+explicitly empty `"verdicts": []`, an empty payload, or an unreadable `--judged PATH`
+stays quiet: those genuinely are "no verdicts submitted", and the diagnostic exists
+precisely to tell that case apart from "everything you submitted was rejected".
 
 ```json
 {
