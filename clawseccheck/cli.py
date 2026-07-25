@@ -57,6 +57,7 @@ from .adjudication import (
     render_judged_json,
     render_vet_judge_packet_json,
 )
+from .scanbudget import DEFAULT_VET_ALL_BUDGET_S, budget_deadline, budget_exceeded
 from .baseline import append_entries, is_fingerprint
 from .dossier import build_profile
 from .ansi import should_color, strip_ansi
@@ -125,7 +126,11 @@ _VET_ICON_UNI: dict[str, str] = {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅",
 _VET_VERDICT: dict[str, str] = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS": "NO KNOWN ISSUE", "UNKNOWN": "UNKNOWN"}
 
 
-def vet_all(home_dir: Path, ascii_only: bool = False) -> int:
+def vet_all(
+    home_dir: Path,
+    ascii_only: bool = False,
+    sweep_budget_s: float = DEFAULT_VET_ALL_BUDGET_S,
+) -> int:
     """Vet every installed skill discovered under any of collector.SKILL_DIRS.
 
     Mirrors the real OpenClaw skill-discovery locations the full audit engine
@@ -136,6 +141,17 @@ def vet_all(home_dir: Path, ascii_only: bool = False) -> int:
     resolved path, runs vet_skill on each, prints per-skill verdicts and an
     aggregate summary table, then returns 0 if all findings are PASS/UNKNOWN,
     or 1 if any WARN/FAIL.
+
+    F-148: bounded by a whole-sweep wall-clock budget (``sweep_budget_s``,
+    default DEFAULT_VET_ALL_BUDGET_S). Cost here is driven by content
+    hostility, not skill count or size, so an unbounded sweep over a large or
+    hostile fleet (up to collector._MAX_SKILLS) could run for the better part
+    of an hour with no way to interrupt it short of Ctrl-C. Once the deadline
+    passes, remaining targets are simply never vetted — but per Golden Rule #4
+    (report UNKNOWN with the reason, never a silent skip or a guessed PASS)
+    they are still named in the output, carried into the aggregate table with
+    an explicit "not scanned" state, kept out of the "safe" tally, and force a
+    non-zero return code (see the reasoning at the return statement below).
     """
     skill_paths: list[Path] = []
     seen: set[Path] = set()
@@ -170,17 +186,44 @@ def vet_all(home_dir: Path, ascii_only: bool = False) -> int:
         _emit(f"No skills found under {dirs_str}")
         return 0
 
-    _ASCII = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}
-    _UNI = {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔"}
+    _ASCII = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]", "SKIPPED": "[-]"}
+    _UNI = {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔", "SKIPPED": "⏭️"}
     _VERDICT = {
         "FAIL": "DANGEROUS", "WARN": "SUSPICIOUS",
         "PASS": "looks like no known issue", "UNKNOWN": "could not assess",
+        "SKIPPED": "not scanned (budget exceeded)",
     }
 
     results: list[tuple[str, str, int]] = []  # (name, status, evidence_count)
     worst = "PASS"
+    truncated = False  # F-148: True once the sweep budget cut the run short
 
-    for skill_dir in skill_paths:
+    # F-148: a monotonic deadline for the WHOLE sweep, checked before every target
+    # (including the first) — never mid-target, so a target already underway always
+    # finishes rather than being interrupted part-way through.
+    deadline = budget_deadline(sweep_budget_s)
+
+    for idx, skill_dir in enumerate(skill_paths):
+        if budget_exceeded(deadline):
+            truncated = True
+            remaining = skill_paths[idx:]
+            bullet = "*" if ascii_only else "•"
+            _emit("")
+            _emit(
+                f"(sweep budget of {sweep_budget_s:g}s exceeded — "
+                f"{len(remaining)} skill(s) NOT scanned; listed below, not counted as safe)"
+            )
+            for skipped_dir in remaining[:12]:
+                _emit(f"  {bullet} {_sanitize(skipped_dir.name)}")
+            if len(remaining) > 12:
+                _emit(f"  {bullet} (+{len(remaining) - 12} more)")
+            # Every skipped target still gets its own row in the aggregate table
+            # below, even the ones elided from the printed list above (no silent
+            # caps on the machine-checkable summary, only on the narrative print).
+            for skipped_dir in remaining:
+                results.append((skipped_dir.name, "SKIPPED", 0))
+            break
+
         skill_name = skill_dir.name
         _emit(f"\n=== {_sanitize(skill_name)} ===")
         try:
@@ -217,19 +260,43 @@ def vet_all(home_dir: Path, ascii_only: bool = False) -> int:
     _emit("=" * 50)
     _emit("Aggregate summary:")
     col_w = max(len(r[0]) for r in results) + 2
-    verdict_w = max(len(v) for v in _VERDICT.values()) + 1
+    # F-148: sized off the verdicts actually present this run (not the static dict),
+    # so a clean, non-truncated sweep keeps today's exact column width — the wider
+    # "not scanned (budget exceeded)" label only widens the table when it is used.
+    verdict_w = max(len(_VERDICT[r[1]]) for r in results) + 1
     _emit(f"  {'Skill':<{col_w}} {'Verdict':<{verdict_w}} Evidence items")
     _emit(f"  {'-' * col_w} {'-' * verdict_w} --------------")
     for name, status, ev_count in results:
         icon = _ASCII[status] if ascii_only else _UNI[status]
         _emit(f"  {name:<{col_w}} {icon} {_VERDICT[status]:<{verdict_w}} {ev_count}")
 
-    total = len(results)
-    fails = sum(1 for _, s, _ in results if s == "FAIL")
-    warns = sum(1 for _, s, _ in results if s == "WARN")
+    # F-148: unscanned targets get their own tally bucket — folding them into
+    # "safe" (as `total - fails - warns` would, since they are neither FAIL nor
+    # WARN) is exactly the reassuring-but-false number Golden Rule #4 forbids.
+    scanned = [r for r in results if r[1] != "SKIPPED"]
+    skipped_n = len(results) - len(scanned)
+    total = len(scanned)
+    fails = sum(1 for _, s, _ in scanned if s == "FAIL")
+    warns = sum(1 for _, s, _ in scanned if s == "WARN")
     safe = total - fails - warns
-    _emit(f"\n  {total} skill(s) checked | {safe} safe | {warns} suspicious | {fails} dangerous")
+    tally = f"\n  {total} skill(s) checked | {safe} safe | {warns} suspicious | {fails} dangerous"
+    if skipped_n:
+        tally += f" | {skipped_n} not scanned (budget exceeded)"
+    _emit(tally)
 
+    # F-148 return-code decision: a truncated sweep must NOT return the same 0 a
+    # fully-clean sweep would. 0 asserts "checked everything, found nothing" — but
+    # a truncated sweep never looked at the unscanned skills, so it has no basis
+    # for that claim; returning 0 here would be exactly the guessed-PASS Golden
+    # Rule #4 forbids, just moved from a per-check status to the process exit code.
+    # This is independent of `worst` among the skills that WERE scanned: even an
+    # all-clean scanned subset does not make the incomplete sweep as a whole "PASS".
+    # (No third exit code: this file's vet paths are all binary 0/1 — see e.g.
+    # _run_vet_mcp below — so "incomplete" reuses 1, the same code already used for
+    # "found something to act on"; a caller must inspect the printed/JSON output,
+    # not the bare exit code, to tell "dangerous" from "incomplete" apart.)
+    if truncated:
+        return 1
     return 0 if worst in ("PASS", "UNKNOWN") else 1
 
 

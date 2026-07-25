@@ -574,6 +574,18 @@ embedded-MCP `MCP-VET`), which bucket onto the axes; the `PLUGIN-VET` container 
 itself an axis. `--vet-source` returns a single `SOURCE-VET` finding on the `danger` axis
 (never `PASS` — an identity check cannot prove unseen code safe).
 
+A further synthetic id, `VET-COVERAGE`, can appear in `findings[]` when the content-
+security ring's own per-target scan budget runs out before every ring check has run —
+part of the target went unassessed, not assessed clean. It is always `"UNKNOWN"` /
+`"HIGH"` / `scored: false`, and — like `SOURCE-VET`/`PLUGIN-VET`/`MCP-VET` above —
+carries no `CheckMeta` in the CATALOG, so a consumer that resolves finding ids through
+the catalog will not find an entry for it. Its `detail` always contains the substring
+`"coverage is incomplete"`; that wording is load-bearing — it is what caps the `danger`
+axis (and therefore `grade`) below what the checks that did complete would otherwise
+earn. Read a `VET-COVERAGE` `UNKNOWN` as "this scan is partial," never as a clean
+result — it appears on the `--vet`/`--vet-skill` path, and the same gap can also
+surface as a reason string in a full audit's per-skill inventory (§18).
+
 ### Skeleton
 
 ```json

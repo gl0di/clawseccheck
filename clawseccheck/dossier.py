@@ -68,6 +68,13 @@ _AXIS_BY_ID: dict[str, str | None] = {
     "B62": "build",  # capability over-grant = a build-quality / least-privilege defect
     "B59": "connections",  # markdown-image data-exfil = outbound channel
     "SOURCE-VET": "danger",  # reputation gate is a pure danger/identity verdict
+    # F-148: the content ring was cut short by the scan budget, so part of the skill was
+    # never assessed. Mapped to danger deliberately — the ring feeds several axes, but
+    # danger is the only one carrying a coverage-gap lever (_danger_coverage_gap /
+    # _COVERAGE_GAP_DANGER_CAP), and under-reporting an unscanned skill is the failure
+    # this exists to prevent. Unmapped, it would land in `unmapped`, which is cosmetic
+    # and never reaches _grade_profile — a truncated scan would keep grading A.
+    "VET-COVERAGE": "danger",
     "PLUGIN-VET": None,  # container aggregate — decomposed into its sub-findings
     "MCP-VET": None,  # multi-reason verdict — routed per-reason via axis_reasons
     # C-255: pre-install prose-attestation findings (adjudication.py) — a declared-

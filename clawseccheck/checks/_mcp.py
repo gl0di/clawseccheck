@@ -27,6 +27,12 @@ from ..collector import (
     dig,
 )
 from ..configloader import loads_json5
+from ..scanbudget import (
+    DEFAULT_VET_TARGET_BUDGET_S,
+    ScanBudgetExceeded,
+    cpu_deadline,
+    cpu_exceeded,
+)
 from ..textnorm import (
     normalize_for_scan,
     obfuscation_signals,
@@ -106,7 +112,9 @@ def _plugin_finding(severity, status, detail, fix, ev=None) -> Finding:
     )
 
 
-def vet_plugin(path: str | Path) -> Finding:
+def vet_plugin(
+    path: str | Path, target_budget_s: float = DEFAULT_VET_TARGET_BUDGET_S
+) -> Finding:
     """Vet an OpenClaw plugin BEFORE installing it (container-dispatcher).
 
     Plugin-specific checks (manifest sanity, npm lifecycle scripts, dependency
@@ -118,6 +126,33 @@ def vet_plugin(path: str | Path) -> Finding:
     warn-level signals) — a JS signal raises the verdict to WARN so it is never a silent
     PASS (B-165). That pass is lexical, not a full runtime analysis (the residual D2 limit);
     the coverage note still says so, and it never forces a FAIL on its own.
+
+    F-148: cost here is driven by INPUT SIZE, not content hostility — a benign target at
+    the legal per-skill byte cap can cost far more than a small hostile one (see the
+    calibration note on scanbudget.DEFAULT_VET_TARGET_BUDGET_S) — so the expensive
+    stages — bundled-skill dispatch, the tree sweep, and the lexical JS/TS pass — are
+    bounded by *target_budget_s* (default DEFAULT_VET_TARGET_BUDGET_S). The bound is
+    CPU time (cpu_deadline/cpu_exceeded), not wall-clock: that keeps the budget from
+    being spent waiting on I/O, but it is a secondary reason, not a defence against
+    machine load — CPU time inflates under contention almost identically to wall-clock
+    (measured ~2.6x under a 24x-oversubscribed box). What actually keeps a verdict from
+    depending on load is the ceiling's headroom over the measured benign worst case
+    (see scanbudget.py), not the choice of clock.
+
+    Enforcement is a single cooperative deadline, checked between loop iterations —
+    deliberately no hard per-call timer. A SIGALRM-based one (check_deadline) is not
+    re-entrant, and this dispatch can already run nested inside another armed itimer
+    (report.py's per-skill frame during a full audit); a nested arm's disarm-on-exit
+    would silently delete the outer deadline instead of bounding this call — the same
+    hazard checks/_vet.py's own content-ring loop documents for exactly this call site.
+    So this file relies solely on the cooperative CPU ceiling, same as that loop.
+
+    If the budget is exhausted mid-scan, remaining bundled skills and/or swept files
+    are skipped, the fact is recorded as a coverage note, and a synthetic VET-COVERAGE
+    finding is folded into the result (same id/convention vet_skill's own content-ring
+    truncation uses) so the risk dossier's danger axis — and therefore the process exit
+    code — reflect it too: a budget-truncated vet is never indistinguishable from a
+    clean one, on screen or in the return code.
     """
     import json as _json
 
@@ -240,6 +275,13 @@ def vet_plugin(path: str | Path) -> Finding:
             f"install spec is a bare package name ({npm_spec}) — resolves to latest at install time"
         )
 
+    # F-148: one per-target CPU deadline shared by every expensive stage below (bundled-
+    # skill dispatch, tree sweep, lexical JS/TS pass). budget_hit is sticky once tripped —
+    # later stages short-circuit too, and the verdict floor below ensures it is never
+    # silently dropped into a clean PASS.
+    deadline = cpu_deadline(target_budget_s)
+    budget_hit = False
+
     # -- bundled skills -> vet_skill (the plugin-skills auto-load surface, recon §11.1)
     skill_dirs: list[Path] = []
     try:
@@ -266,8 +308,21 @@ def vet_plugin(path: str | Path) -> Finding:
                 kids = [c for c in sorted(d.iterdir()) if c.is_dir() and not c.is_symlink()]
                 skill_dirs.extend(kids if kids else [d])
     for sd in skill_dirs:
+        if cpu_exceeded(deadline):
+            budget_hit = True
+            break
+        # F-148: ScanBudgetExceeded is a plain Exception subclass — it must be caught
+        # BEFORE the generic `except Exception` below, or the deadline firing mid-vet
+        # would be swallowed as "this skill could not be vetted" and the loop would
+        # keep going as if nothing had happened (C-175). No per-call hard timer is armed
+        # around this dispatch (see the docstring) — vet_skill's own content-ring loop
+        # can raise ScanBudgetExceeded cooperatively on its own (skillast.py's internal
+        # sink-count cap), which is what this catches.
         try:
             sf = vet_skill(sd)
+        except ScanBudgetExceeded:
+            budget_hit = True
+            break
         except Exception:  # noqa: BLE001 — a dispatched engine must never break the vet
             warns.append(f"bundled skill {sd.name!r} could not be vetted")
             continue
@@ -297,18 +352,26 @@ def vet_plugin(path: str | Path) -> Finding:
     #    MCP specs and native-executable stowaways outside the dispatched skill dirs
     truncated = False
     swept: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
-        dirnames[:] = sorted(d for d in dirnames if d not in _PLUGIN_SKIP_DIRS)
-        for fn in sorted(filenames):
-            fp = Path(dirpath) / fn
-            if fp.is_symlink():
-                continue
-            swept.append(fp)
-            if len(swept) >= _PLUGIN_FILE_CAP:
-                truncated = True
+    if cpu_exceeded(deadline):
+        budget_hit = True
+    else:
+        for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+            # F-148: a pathologically wide/deep (but still-legal, non-symlink) tree can
+            # make the walk itself slow well before _PLUGIN_FILE_CAP is reached.
+            if cpu_exceeded(deadline):
+                budget_hit = True
                 break
-        if truncated:
-            break
+            dirnames[:] = sorted(d for d in dirnames if d not in _PLUGIN_SKIP_DIRS)
+            for fn in sorted(filenames):
+                fp = Path(dirpath) / fn
+                if fp.is_symlink():
+                    continue
+                swept.append(fp)
+                if len(swept) >= _PLUGIN_FILE_CAP:
+                    truncated = True
+                    break
+            if truncated:
+                break
     if truncated:
         notes.append(
             f"scan hit the {_PLUGIN_FILE_CAP}-file cap — files beyond the cap were NOT scanned"
@@ -318,6 +381,9 @@ def vet_plugin(path: str | Path) -> Finding:
         return any(sd in fp.parents for sd in skill_dirs)
 
     for fp in swept:
+        if cpu_exceeded(deadline):
+            budget_hit = True
+            break
         if _under_skills(fp):
             continue  # bundled-skill content already dispatched to vet_skill above
         if fp.suffix == ".json" and fp.name not in _PLUGIN_MCP_SKIP:
@@ -333,8 +399,15 @@ def vet_plugin(path: str | Path) -> Finding:
                     else dig(data, "mcp.servers")
                 )
             if isinstance(servers, dict) and servers:
+                # F-148: same ScanBudgetExceeded-before-Exception ordering as the
+                # bundled-skill dispatch above (C-175) — a deadline firing inside
+                # vet_mcp must not be recorded as "this spec had no findings". No
+                # per-call hard timer here either — see the docstring.
                 try:
                     mcp_findings = vet_mcp(fp)
+                except ScanBudgetExceeded:
+                    budget_hit = True
+                    break
                 except Exception:  # noqa: BLE001 — a dispatched engine must never break the vet
                     mcp_findings = []
                 for mf in mcp_findings:
@@ -363,19 +436,45 @@ def vet_plugin(path: str | Path) -> Finding:
                     src = None
                 if src is not None:
                     rel = fp.relative_to(root)
-                    for af in analyze_javascript(src, str(rel)):
-                        js_signals.append(f"runtime JS/TS: {af.reason} ({rel}:{af.lineno})")
+                    # F-148: the lexical pass is bounded on input via _PLUGIN_JS_MAX_BYTES
+                    # above and on iteration by the cooperative deadline check at the top
+                    # of this loop; no per-call hard timer is armed here (see the
+                    # docstring). analyze_javascript can still raise ScanBudgetExceeded
+                    # cooperatively on its own (skillast.py's internal sink-count cap) —
+                    # that is what this catches. No generic `except Exception` is added
+                    # here (there wasn't one before this change).
+                    try:
+                        for af in analyze_javascript(src, str(rel)):
+                            js_signals.append(
+                                f"runtime JS/TS: {af.reason} ({rel}:{af.lineno})"
+                            )
+                    except ScanBudgetExceeded:
+                        budget_hit = True
+                        break
             else:
                 notes.append(
                     f"coverage: runtime JS/TS '{fp.relative_to(root)}' exceeds the "
                     f"{_PLUGIN_JS_MAX_BYTES // 1_000_000}MB scan cap — not lexically scanned"
                 )
 
+    # F-148: honest degradation — never let a budget-truncated scan read as a clean
+    # PASS. Recorded as a coverage note (so it always reaches `evidence` below,
+    # regardless of the final status) and folded into the same UNKNOWN floor as a
+    # capped sweep (`truncated`).
+    if budget_hit:
+        notes.append(
+            f"scan exhausted its {target_budget_s:g}s per-target time budget — one or "
+            "more bundled skills, embedded MCP specs, or runtime JS/TS files were NOT "
+            "scanned; treat this plugin as unverified, not clean"
+        )
+
     # -- verdict: same merge rank as the skill vet; UNKNOWN floor on a capped sweep
     sub_rank = max((_VET_MERGE_RANK.get(f.status, 0) for f in subs), default=0)
     # B-165: js_signals raise the floor to WARN (2), never FAIL — a lexical false-positive
     # on a minified bundle must not force a FAIL.
-    rank = max(sub_rank, 2 if (warns or js_signals) else 0, 1 if truncated else 0)
+    # F-148: budget_hit joins `truncated` at the same UNKNOWN floor — either way the
+    # sweep is incomplete, so a clean run (rank 0) can never be reported.
+    rank = max(sub_rank, 2 if (warns or js_signals) else 0, 1 if (truncated or budget_hit) else 0)
     status = _VET_RANK_STATUS[rank]
 
     n_mcp = sum(1 for f in subs if f.id == "MCP-VET")

@@ -32,6 +32,36 @@ from collections.abc import Iterator
 DEFAULT_CHECK_BUDGET_S = 15.0
 DEFAULT_AUDIT_BUDGET_S = 120.0
 
+# F-148: the same idea for the vet paths, which run the content ring outside ``run_all`` and
+# were therefore unbounded.
+#
+# CALIBRATION — measured, and the measurement matters more than the number. Ring cost is
+# driven by INPUT SIZE, super-linearly, NOT by how hostile the content is:
+#
+#     10KB 0.03s · 50KB 0.20s · 100KB 0.52s · 250KB 2.80s · 500KB 10.62s · 1MB 41.23s   (CPU)
+#
+# ``collector._MAX_BYTES_PER_SKILL`` is 1_000_000, so a perfectly BENIGN skill at the legal
+# size cap already costs ~41 s, with up to another megabyte of Python source on its own axis.
+# Across the 201 real scanned targets in fixtures/ the median is 3 ms and p99 is 30 ms; the
+# real hostile `clawstealth` costs 7.93 s — i.e. LESS than a large benign skill. An earlier
+# 60 s ceiling was calibrated on the claim that a 6.6 MB benign skill cost 0.22 s; that was an
+# artifact — the skill was ClawSecCheck's own source, which `_is_own_source` short-circuits
+# before scanning anything (0.01 s). At 60 s the ceiling sat ~1.5x over a legal benign skill,
+# so a large-but-harmless skill would have been reported as unscanned; that is the false
+# positive this scanner may not have (§2, Golden Rule #5).
+#
+# 300 s is ~7x the benign worst case idle. Headroom is what prevents the false positive, so
+# it has to survive a loaded machine too: measured, load inflates the cost ~2.6x (and inflates
+# CPU time just as much as wall — see cpu_deadline), which still leaves ~2.8x. Below roughly
+# 120 s the margin stops covering that, so do not lower this without re-measuring.
+DEFAULT_VET_TARGET_BUDGET_S = 300.0
+
+# The sweep ceiling stays WALL-CLOCK on purpose: it exists so a user is not left staring at a
+# hung terminal, and "how long have I waited" is wall time by definition. It is safe to keep
+# load-sensitive because it never moves a verdict — it only marks the targets it did not reach
+# as explicitly not-scanned.
+DEFAULT_VET_ALL_BUDGET_S = 600.0
+
 
 class ScanBudgetExceeded(Exception):
     """Raised inside a check when its per-check wall-clock budget is exhausted."""
@@ -86,3 +116,42 @@ def audit_deadline(audit_budget_s: float) -> float | None:
 def audit_budget_exceeded(deadline: float | None) -> bool:
     """True once the whole-audit ``deadline`` (from :func:`audit_deadline`) has passed."""
     return deadline is not None and time.monotonic() >= deadline
+
+
+# F-148: the deadline pair above is not audit-specific — it is a plain monotonic clock the
+# vet paths reuse to bound one target and a whole ``--vet-all`` sweep. Aliased rather than
+# re-implemented so there is one cooperative-cap implementation, and named neutrally so a
+# vet-side call site does not read as if it were capping an audit.
+budget_deadline = audit_deadline
+budget_exceeded = audit_budget_exceeded
+
+
+def cpu_deadline(budget_s: float) -> float | None:
+    """Return a CPU-time deadline for one scan, or None to disable the cap.
+
+    Measures this process's own CPU rather than elapsed time, so the budget is not spent
+    while blocked on I/O. That is the honest, modest reason to prefer it here; the ring is
+    pure regex/AST work over content already in memory, so CPU is the closer proxy for "how
+    much scanning has this target actually had".
+
+    It is NOT a defence against machine load, and the docstring says so because the obvious
+    assumption is wrong. Measured on an 8-core box, the same benign ~250KB skill through the
+    real ring, idle versus 24 competing busy processes:
+
+        idle            wall 0.49s   cpu 0.49s
+        under 24x load  wall 1.29s   cpu 1.27s     (2.6x wall, 2.60x CPU)
+
+    CPU time inflates essentially identically — cache contention and frequency scaling make
+    the same instructions cost more CPU-seconds. What keeps load from deciding a verdict is
+    HEADROOM, not the choice of clock: see the calibration note on
+    ``DEFAULT_VET_TARGET_BUDGET_S``, where the ceiling sits ~7x over the benign worst case
+    idle and still ~2.8x after that measured inflation.
+    """
+    if budget_s and budget_s > 0:
+        return time.process_time() + budget_s
+    return None
+
+
+def cpu_exceeded(deadline: float | None) -> bool:
+    """True once the CPU-time ``deadline`` (from :func:`cpu_deadline`) has passed."""
+    return deadline is not None and time.process_time() >= deadline
