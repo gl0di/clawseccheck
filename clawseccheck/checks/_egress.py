@@ -249,6 +249,21 @@ _EXTRA_ARGS_WARN_FLAGS = {
 }
 
 
+# B-331: OpenClaw ALWAYS launches its managed Chrome with
+# `--remote-debugging-port=${profile.cdpPort}` (chrome-DDq_K3xu.js:1662-1689,
+# buildOpenClawChromeLaunchArgs) -- CDP is how OpenClaw drives the browser at all -- and NO
+# dist file anywhere sets `--remote-debugging-address`, so Chrome's default loopback bind
+# applies and OpenClaw's own cdpUrlForPort() is `http://127.0.0.1:${cdpPort}`
+# (chrome-DDq_K3xu.js:1659). Two consequences, both grounded in that one fact:
+#   * A loopback-bound operator flag (--remote-debugging-address=127.0.0.1 and friends)
+#     changes NOTHING -- it restates the default already in force, which is the defensive
+#     thing to write down. It therefore costs no score and produces no evidence line. The
+#     previous WARN also mis-attributed causation: it told the operator their flag "opens
+#     an unauthenticated ... debug port on loopback" when OpenClaw's own always-present
+#     --remote-debugging-port opened it, so removing the flag could not have closed it.
+#   * A NON-loopback operator flag is a real, well-grounded FAIL for exactly the same
+#     reason: the port is always there, so moving its bind off-host genuinely exposes an
+#     unauthenticated CDP endpoint. That half is kept.
 def _remote_debug_host_is_loopback(value: str) -> bool:
     """True when *value* (a --remote-debugging-address argument value) is loopback or
     "localhost" -- accounting for an IPv4 host:port suffix, a bracketed IPv6 [::1]:port
@@ -283,10 +298,11 @@ def check_browser_extra_args(ctx: Context) -> Finding:
               --remote-debugging-address is bound to a non-loopback address (0.0.0.0,
               ::, or any host _remote_debug_host_is_loopback() doesn't recognize) --
               an unauthenticated CDP debug port reachable off-host.
-    WARN    — a flag in _EXTRA_ARGS_WARN_FLAGS is present, OR
-              --remote-debugging-address is loopback-bound (still an unauthenticated
-              local debug port, but not remotely reachable).
-    PASS    — extraArgs is absent/empty, or contains no matched flag.
+    WARN    — a flag in _EXTRA_ARGS_WARN_FLAGS is present.
+    PASS    — extraArgs is absent/empty, or contains no matched flag. A loopback-bound
+              --remote-debugging-address lands here: it restates the bind OpenClaw's own
+              launch already uses, so it is a no-op and costs no score (B-331 -- see the
+              grounding note above _remote_debug_host_is_loopback).
     UNKNOWN — no browser config (not applicable).
 
     Flag matching is case-insensitive (Chromium's own base::CommandLine lowercases
@@ -325,17 +341,20 @@ def check_browser_extra_args(ctx: Context) -> Finding:
             fail_ev.append(f"browser.extraArgs has {flag!r} — {_EXTRA_ARGS_FAIL_FLAGS[flag_lower]}")
             continue
         if flag_lower == "--remote-debugging-address":
+            # No address after the '=' (or a bare switch): nothing was rebound, so this
+            # cannot be evidence that the debug port moved off loopback. Not a FAIL.
+            if not value.strip():
+                continue
+            # Loopback-bound: a no-op that restates OpenClaw's own default bind. Costs
+            # nothing and produces no evidence line (B-331).
             if _remote_debug_host_is_loopback(value):
-                warn_ev.append(
-                    f"browser.extraArgs has {arg!r} — opens an unauthenticated Chrome "
-                    "DevTools Protocol debug port on loopback"
-                )
-            else:
-                fail_ev.append(
-                    f"browser.extraArgs has {arg!r} — binds the Chrome DevTools "
-                    "Protocol debug port to a non-loopback address, reachable "
-                    "off-host with no authentication"
-                )
+                continue
+            fail_ev.append(
+                f"browser.extraArgs has {arg!r} — moves the Chrome DevTools Protocol "
+                "debug port that OpenClaw itself opens on every managed browser launch "
+                "(--remote-debugging-port) off loopback to a non-loopback address, "
+                "making it reachable off-host with no authentication"
+            )
             continue
         if flag_lower in _EXTRA_ARGS_WARN_FLAGS:
             warn_ev.append(f"browser.extraArgs has {flag!r} — {_EXTRA_ARGS_WARN_FLAGS[flag_lower]}")
@@ -346,9 +365,11 @@ def check_browser_extra_args(ctx: Context) -> Finding:
             FAIL,
             f"browser.extraArgs contains {len(fail_ev)} dangerous Chrome launch "
             "flag(s) — see evidence.",
-            "Remove the dangerous flag(s) from browser.extraArgs; if remote "
-            "debugging is required, bind --remote-debugging-address to 127.0.0.1 "
-            "explicitly rather than leaving it unbound or open to all interfaces.",
+            "Remove the dangerous flag(s) from browser.extraArgs. For "
+            "--remote-debugging-address, dropping the flag entirely is the safe "
+            "choice: OpenClaw already supplies --remote-debugging-port on every "
+            "managed browser launch and Chrome binds that port to loopback by "
+            "default, so no address flag is needed to keep it local.",
             evidence=(fail_ev + warn_ev)[:6],
         )
     if warn_ev:
@@ -357,8 +378,8 @@ def check_browser_extra_args(ctx: Context) -> Finding:
             WARN,
             f"browser.extraArgs contains {len(warn_ev)} flag(s) with a real but "
             "lower-certainty risk — see evidence.",
-            "Review the flagged entries; confirm any --proxy-server target is "
-            "trusted and keep --remote-debugging-address loopback-bound.",
+            "Review the flagged entries; confirm any proxy target or PAC URL is "
+            "trusted, and prefer removing the flag if the proxy is not required.",
             evidence=warn_ev[:6],
         )
     return _finding(
@@ -376,16 +397,32 @@ def check_browser_evaluate_enabled(ctx: Context) -> Finding:
     """B196 — browser.evaluateEnabled arbitrary-JS sink (E-060 item 3).
 
     OpenClaw defaults this to true when the key is absent (grounded:
-    dist/config-DpWXcVmn.js:441 `cfg?.evaluateEnabled ?? true`, enforced at
+    dist/config-DpWXcVmn.js:441 `cfg?.evaluateEnabled ?? true`, the defaults table
+    dist/config-D9HgDUPt.js:103 `"browser.evaluateEnabled": true`, and the same
+    `?? true` resolution in dist/sandbox-DtTssSMH.js:394,1299; enforced at
     dist/routes-VNv3nd0n.js:1274) -- every page the browser tool visits becomes an
     arbitrary-JS execution sink reachable from content injected into that page.
 
-    FAIL    — evaluateEnabled is explicitly true (a deliberate opt-in to the sink).
-    WARN    — evaluateEnabled is absent — the vendor default is permissive (true),
-              but the operator never made an explicit choice; mirrors B38's own
-              absent-hostnameAllowlist treatment (open-by-default state is WARN,
-              not FAIL, in this module).
-    PASS    — evaluateEnabled is explicitly false.
+    EFFECTIVE-STATE GRADING (B-331). This check grades what the machine DOES, never
+    which keys the operator happened to type. Because the vendor default is true, an
+    ABSENT key and an explicit `true` are byte-for-byte the same runtime exposure, so
+    they MUST reach the same status. They previously did not (absent -> WARN, explicit
+    true -> FAIL), which made the grade gameable by a no-op edit -- deleting the line
+    moved a config two letter grades with nothing changing on the machine -- inverted
+    the incentive to write your configuration down explicitly, and left the common case
+    (nobody writes the key) on the lenient rung.
+
+    WARN    — the sink is ON: evaluateEnabled is absent (vendor default true), OR
+              explicitly true, OR set to any other non-`false` value (which cannot be
+              confirmed disabled). One bar for one effective state.
+              WARN and not FAIL because this is the documented vendor default of a
+              documented feature (act:evaluate / wait --fn): a HIGH FAIL here would cap
+              the grade of essentially every browser-tool user for shipping defaults,
+              and it would double-count the reachability leg that B38 already grades
+              (ssrfPolicy.hostnameAllowlist / dangerouslyAllowPrivateNetwork). This
+              also matches B38's own treatment of a permissive-by-default open state as
+              WARN. The sink-plus-reachability combination is the risk engine's job.
+    PASS    — evaluateEnabled is explicitly false (the only state that closes the sink).
     UNKNOWN — no browser config at all (the browser tool is not in use).
     """
     browser = ctx.config.get("browser")
@@ -410,25 +447,27 @@ def check_browser_evaluate_enabled(ctx: Context) -> Finding:
         )
 
     if evaluate_enabled is True:
-        return _finding(
-            "B196",
-            FAIL,
-            "browser.evaluateEnabled=true — every page the agent's browser tool "
-            "visits is an arbitrary-JS execution sink, reachable from content "
-            "injected into that page (browser-tool prompt-injection → code-exec).",
-            "Set browser.evaluateEnabled=false unless a specific workflow genuinely "
-            "requires page-JS evaluation; if it does, pair it with a tight "
-            "ssrfPolicy.hostnameAllowlist (B38) to limit which pages can reach the sink.",
+        spelling = "browser.evaluateEnabled=true"
+    elif "evaluateEnabled" not in browser:
+        spelling = "browser.evaluateEnabled is not set"
+    else:
+        spelling = (
+            "browser.evaluateEnabled is set to a value that is not the boolean false"
         )
 
     return _finding(
         "B196",
         WARN,
-        "browser.evaluateEnabled is not set — OpenClaw defaults this to true, so "
-        "every page the agent's browser tool visits is an arbitrary-JS execution "
-        "sink by default unless explicitly disabled.",
+        f"{spelling} — the browser's arbitrary-JS evaluate sink is ON, so every page "
+        "the agent's browser tool visits is an arbitrary-JS execution sink reachable "
+        "from content injected into that page (browser-tool prompt-injection → "
+        "code-exec). OpenClaw's vendor default for this key is true, so leaving it out "
+        "does not turn the sink off — an absent key and an explicit true are the same "
+        "runtime state, and only an explicit false disables it.",
         "Set browser.evaluateEnabled=false explicitly unless a specific workflow "
-        "genuinely requires page-JS evaluation.",
+        "genuinely requires page-JS evaluation (act:evaluate / wait --fn); if it does, "
+        "pair it with a tight browser.ssrfPolicy.hostnameAllowlist (B38) to limit which "
+        "pages can reach the sink.",
     )
 
 
