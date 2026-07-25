@@ -17,6 +17,7 @@ import json
 import os
 import secrets
 import sys
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
@@ -61,6 +62,7 @@ from .scanbudget import (
     DEFAULT_VET_ALL_BUDGET_S, ScanBudgetExceeded, budget_deadline, budget_exceeded,
 )
 from .baseline import append_entries, is_fingerprint
+from .catalog import Finding
 from .dossier import build_profile
 from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE, verify_chain
@@ -127,6 +129,32 @@ _VET_ICON_ASCII: dict[str, str] = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]",
 _VET_ICON_UNI: dict[str, str] = {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔"}
 _VET_VERDICT: dict[str, str] = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS": "NO KNOWN ISSUE", "UNKNOWN": "UNKNOWN"}
 
+# Installed-skill SWEEP vocabulary (F-149) — deliberately SEPARATE names, not a
+# widening of the three vet-mcp dicts above. The sweep needs two states vet-mcp has
+# no concept of:
+#   "SKIPPED"   = the sweep-wide deadline was hit before this target was ever reached
+#                 at all ("never looked at").
+#   "TRUNCATED" = this target's OWN per-target budget cut ITS scan short, so it never
+#                 becomes a clean verdict either ("looked at, but not all the way").
+# Two distinct rows on purpose. They must NOT be folded into _VET_ICON_ASCII /
+# _VET_ICON_UNI / _VET_VERDICT: those three are the vet-mcp vocabulary and are pinned
+# to exactly {FAIL, WARN, PASS, UNKNOWN} by tests/test_c106_exit_code.py, so widening
+# them would silently change what every vet-mcp consumer is promised.
+_SWEEP_ICON_ASCII: dict[str, str] = {
+    "FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]",
+    "SKIPPED": "[-]", "TRUNCATED": "[~]",
+}
+_SWEEP_ICON_UNI: dict[str, str] = {
+    "FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔",
+    "SKIPPED": "⏭️", "TRUNCATED": "⏳",
+}
+_SWEEP_VERDICT: dict[str, str] = {
+    "FAIL": "DANGEROUS", "WARN": "SUSPICIOUS",
+    "PASS": "looks like no known issue", "UNKNOWN": "could not assess",
+    "SKIPPED": "not scanned (budget exceeded)",
+    "TRUNCATED": "partially scanned — coverage incomplete",
+}
+
 # The wording every producer of an incomplete scan uses in its finding detail —
 # load-bearing elsewhere too (dossier.py's _danger_coverage_gap matches the same
 # substring). Named here rather than re-literalled at each call site.
@@ -161,11 +189,93 @@ def _vet_coverage_incomplete(f) -> bool:
     )
 
 
-def vet_all(
+@dataclass
+class SkillSweep:
+    """The outcome of one installed-skill sweep, with no rendering baked in.
+
+    F-149: the sweep now has three consumers — the ``--vet-all`` narrative, the
+    ``--full`` SKILL SWEEP section, and the one-line ``--full --quiet`` summary —
+    and vetting a fleet is the most expensive thing this tool does. Separating the
+    result from its rendering is what lets all three read one run, and (the reason
+    it is a hard requirement rather than a tidiness preference) what makes
+    ``has_fail`` provably identical on the quiet and verbose ``--full`` branches
+    instead of two hand-written tallies that can disagree.
+
+    ``rows`` holds ``(sanitized name, row status, evidence count)`` for every target
+    the sweep accounted for — including the ones it never scanned, which carry the
+    SKIPPED/TRUNCATED states from ``_SWEEP_VERDICT`` rather than being dropped.
+    ``findings`` carries the primary :class:`~clawseccheck.catalog.Finding` for each
+    target that produced one, so a later consumer never has to re-vet to get at the
+    evidence.
+    """
+
+    home_dir: Path
+    checked_dirs: list[Path] = field(default_factory=list)
+    rows: list[tuple[str, str, int]] = field(default_factory=list)
+    findings: list[tuple[str, Finding]] = field(default_factory=list)
+    truncated: bool = False
+    worst: str = "PASS"
+    budget_s: float = 0.0
+
+    @property
+    def no_roots(self) -> bool:
+        """True when the home has no skills directory at all (nothing to sweep)."""
+        return not self.checked_dirs
+
+    @property
+    def no_targets(self) -> bool:
+        """True when no installed skill was found (with or without a skills root)."""
+        return not self.rows
+
+    @property
+    def has_fail(self) -> bool:
+        """FAIL-only, mirroring vm_has_fail's semantics for ``--exit-code``.
+
+        A WARN (SUSPICIOUS) skill deliberately does NOT trip this — the same
+        FAIL-only rule tests/test_c106_exit_code.py pins for a WARN MCP server.
+        Neither do SKIPPED/TRUNCATED rows: an incomplete sweep is reported as
+        incomplete (``complete`` below, and its own printed section), never by
+        reddening a CI gate that would otherwise be green. The honest signal for
+        "we did not look at everything" is the section, not the exit code.
+        """
+        return any(status == "FAIL" for _name, status, _ev in self.rows)
+
+    @property
+    def complete(self) -> bool:
+        """False when any target was skipped or only partially scanned."""
+        return not self.truncated
+
+    def counts(self) -> dict[str, int]:
+        """Tally buckets. Unscanned targets get their OWN buckets and are kept out
+        of ``safe`` — folding them in (as ``total - fails - warns`` would, since
+        they are neither FAIL nor WARN) is exactly the reassuring-but-false number
+        Golden Rule #4 forbids."""
+        scanned = [r for r in self.rows if r[1] != "SKIPPED"]
+        truncated_n = sum(1 for _n, s, _e in scanned if s == "TRUNCATED")
+        fails = sum(1 for _n, s, _e in scanned if s == "FAIL")
+        warns = sum(1 for _n, s, _e in scanned if s == "WARN")
+        total = len(scanned)
+        return {
+            "total": total,
+            "fails": fails,
+            "warns": warns,
+            "truncated": truncated_n,
+            "skipped": len(self.rows) - total,
+            "safe": total - fails - warns - truncated_n,
+        }
+
+    def not_scanned(self) -> list[str]:
+        """Every target this sweep cannot vouch for, named. No silent caps here —
+        the narrative print may elide with "(+N more)", this may not."""
+        return [n for n, s, _e in self.rows if s in ("SKIPPED", "TRUNCATED")]
+
+
+def sweep_installed_skills(
     home_dir: Path,
     ascii_only: bool = False,
     sweep_budget_s: float = DEFAULT_VET_ALL_BUDGET_S,
-) -> int:
+    narrate: bool = True,
+) -> SkillSweep:
     """Vet every installed skill discovered under any of collector.SKILL_DIRS.
 
     Mirrors the real OpenClaw skill-discovery locations the full audit engine
@@ -173,9 +283,14 @@ def vet_all(
     workspace-work/skills/, .agents/skills/ — see collector.SKILL_DIRS), not
     just the single legacy home_dir/skills/ path (B-147). Finds all
     subdirectories across those roots that contain a SKILL.md file, dedups by
-    resolved path, runs vet_skill on each, prints per-skill verdicts and an
-    aggregate summary table, then returns 0 if all findings are PASS/UNKNOWN,
-    or 1 if any WARN/FAIL.
+    resolved path and runs vet_skill on each.
+
+    With ``narrate`` (the default) it prints the per-skill verdict blocks as it
+    goes — progress feedback matters on a sweep that can run for minutes — and
+    with ``narrate=False`` it is completely silent, which is what the one-line
+    ``--full --quiet`` summary needs. Either way it returns the same
+    :class:`SkillSweep`; the aggregate table and the return code are the caller's
+    job (see :func:`_sweep_summary_lines` and :func:`vet_all`).
 
     F-148: bounded by a whole-sweep wall-clock budget (``sweep_budget_s``,
     default DEFAULT_VET_ALL_BUDGET_S). Cost here is driven by content
@@ -186,7 +301,8 @@ def vet_all(
     (report UNKNOWN with the reason, never a silent skip or a guessed PASS)
     they are still named in the output, carried into the aggregate table with
     an explicit "not scanned" state, kept out of the "safe" tally, and force a
-    non-zero return code (see the reasoning at the return statement below).
+    non-zero return code from ``--vet-all`` (see the reasoning on
+    :func:`vet_all`'s return statement).
 
     F-148 follow-up (post-adversarial-review): a SECOND, per-target budget also
     applies inside ``vet_skill`` itself (``checks/_vet.py:_run_content_ring``'s own
@@ -228,39 +344,25 @@ def vet_all(
                 seen.add(resolved)
                 skill_paths.append(entry)
         except PermissionError as exc:
-            _emit(f"(could not read skills directory {skills_dir}: {exc})")
+            if narrate:
+                _emit(f"(could not read skills directory {skills_dir}: {exc})")
             continue
 
+    sweep = SkillSweep(home_dir=home_dir, checked_dirs=checked_dirs,
+                       budget_s=sweep_budget_s)
+
     if not checked_dirs:
-        _emit(f"No skills directory found under {home_dir}")
-        return 0
+        if narrate:
+            _emit(f"No skills directory found under {home_dir}")
+        return sweep
 
     if not skill_paths:
-        dirs_str = ", ".join(str(d) for d in checked_dirs)
-        _emit(f"No skills found under {dirs_str}")
-        return 0
+        if narrate:
+            dirs_str = ", ".join(str(d) for d in checked_dirs)
+            _emit(f"No skills found under {dirs_str}")
+        return sweep
 
-    # "SKIPPED" = the sweep-wide deadline (above) was hit before this target was ever
-    # reached at all. "TRUNCATED" = this target's OWN per-target budget (inside
-    # vet_skill itself) cut ITS scan short, so it never becomes a clean verdict either
-    # — see _vet_coverage_incomplete below. Two distinct rows on purpose: one is "never
-    # looked at", the other is "looked at, but not fully".
-    _ASCII = {
-        "FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]",
-        "SKIPPED": "[-]", "TRUNCATED": "[~]",
-    }
-    _UNI = {
-        "FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔",
-        "SKIPPED": "⏭️", "TRUNCATED": "⏳",
-    }
-    _VERDICT = {
-        "FAIL": "DANGEROUS", "WARN": "SUSPICIOUS",
-        "PASS": "looks like no known issue", "UNKNOWN": "could not assess",
-        "SKIPPED": "not scanned (budget exceeded)",
-        "TRUNCATED": "partially scanned — coverage incomplete",
-    }
-
-    results: list[tuple[str, str, int]] = []  # (name, status, evidence_count)
+    results = sweep.rows  # (sanitized name, status, evidence_count)
     worst = "PASS"
     truncated = False  # F-148: True once the sweep budget cut the run short
 
@@ -273,25 +375,32 @@ def vet_all(
         if budget_exceeded(deadline):
             truncated = True
             remaining = skill_paths[idx:]
-            bullet = "*" if ascii_only else "•"
-            _emit("")
-            _emit(
-                f"(sweep budget of {sweep_budget_s:g}s exceeded — "
-                f"{len(remaining)} skill(s) NOT scanned; listed below, not counted as safe)"
-            )
-            for skipped_dir in remaining[:12]:
-                _emit(f"  {bullet} {_sanitize(skipped_dir.name)}")
-            if len(remaining) > 12:
-                _emit(f"  {bullet} (+{len(remaining) - 12} more)")
+            if narrate:
+                bullet = "*" if ascii_only else "•"
+                _emit("")
+                _emit(
+                    f"(sweep budget of {sweep_budget_s:g}s exceeded — "
+                    f"{len(remaining)} skill(s) NOT scanned; listed below, not counted as safe)"
+                )
+                for skipped_dir in remaining[:12]:
+                    _emit(f"  {bullet} {_sanitize(skipped_dir.name)}")
+                if len(remaining) > 12:
+                    _emit(f"  {bullet} (+{len(remaining) - 12} more)")
             # Every skipped target still gets its own row in the aggregate table
             # below, even the ones elided from the printed list above (no silent
             # caps on the machine-checkable summary, only on the narrative print).
             for skipped_dir in remaining:
-                results.append((skipped_dir.name, "SKIPPED", 0))
+                results.append((_sanitize(skipped_dir.name), "SKIPPED", 0))
             break
 
-        skill_name = skill_dir.name
-        _emit(f"\n=== {_sanitize(skill_name)} ===")
+        # C8: the skill NAME is attacker-controlled (it is a directory name inside
+        # an untrusted, third-party install), so it is sanitized ONCE here and the
+        # sanitized form is what both the narrative and the aggregate table use —
+        # sanitizing only at print time let a raw name reach the table and set its
+        # column width.
+        skill_name = _sanitize(skill_dir.name)
+        if narrate:
+            _emit(f"\n=== {skill_name} ===")
         try:
             f = vet_skill(str(skill_dir))
         except ScanBudgetExceeded:
@@ -305,15 +414,17 @@ def vet_all(
             # plain PASS/UNKNOWN — currently reads as "safe" in the tally below. Treat
             # it exactly like the finding-shaped per-target truncation just below:
             # named, excluded from "safe", and it forces a non-zero return.
-            _emit(
-                f"  (scan of {_sanitize(skill_name)} ended early — only partially "
-                "scanned; not counted as safe)"
-            )
+            if narrate:
+                _emit(
+                    f"  (scan of {skill_name} ended early — only partially "
+                    "scanned; not counted as safe)"
+                )
             results.append((skill_name, "TRUNCATED", 0))
             truncated = True
             continue
         except Exception as exc:  # noqa: BLE001
-            _emit(f"  (error vetting {_sanitize(skill_name)}: {_sanitize(str(exc))})")
+            if narrate:
+                _emit(f"  (error vetting {skill_name}: {_sanitize(str(exc))})")
             results.append((skill_name, "UNKNOWN", 0))
             continue
 
@@ -322,9 +433,9 @@ def vet_all(
         elif f.status == "WARN" and worst != "FAIL":
             worst = "WARN"
 
-        icon = _ASCII[f.status] if ascii_only else _UNI[f.status]
+        icon = _SWEEP_ICON_ASCII[f.status] if ascii_only else _SWEEP_ICON_UNI[f.status]
         lines = [
-            f"{icon} '{_sanitize(skill_name)}': {_VERDICT[f.status]} [{f.severity}]",
+            f"{icon} '{skill_name}': {_SWEEP_VERDICT[f.status]} [{f.severity}]",
             f"    {_sanitize(f.detail)}",
         ]
         if f.evidence:
@@ -356,24 +467,41 @@ def vet_all(
             truncated = True
             if row_status not in ("FAIL", "WARN"):
                 row_status = "TRUNCATED"
-        _emit("\n".join(lines))
+        if narrate:
+            _emit("\n".join(lines))
 
         results.append((skill_name, row_status, len(f.evidence) if f.evidence else 0))
+        sweep.findings.append((skill_name, f))
 
-    # Aggregate summary table
-    _emit("")
-    _emit("=" * 50)
-    _emit("Aggregate summary:")
+    sweep.truncated = truncated
+    sweep.worst = worst
+    return sweep
+
+
+def _sweep_summary_lines(sweep: SkillSweep, ascii_only: bool = False) -> list[str]:
+    """The aggregate summary table + tally for a finished sweep.
+
+    Returned as lines rather than printed so the identical table can be emitted by
+    ``--vet-all`` and by ``--full``'s SKILL SWEEP section. Empty when the sweep had
+    no targets — the caller has already said so in plain words, and ``max()`` over
+    no rows would raise.
+    """
+    results = sweep.rows
+    if not results:
+        return []
+    icons = _SWEEP_ICON_ASCII if ascii_only else _SWEEP_ICON_UNI
+    lines = ["", "=" * 50, "Aggregate summary:"]
     col_w = max(len(r[0]) for r in results) + 2
     # F-148: sized off the verdicts actually present this run (not the static dict),
     # so a clean, non-truncated sweep keeps today's exact column width — the wider
     # "not scanned (budget exceeded)" label only widens the table when it is used.
-    verdict_w = max(len(_VERDICT[r[1]]) for r in results) + 1
-    _emit(f"  {'Skill':<{col_w}} {'Verdict':<{verdict_w}} Evidence items")
-    _emit(f"  {'-' * col_w} {'-' * verdict_w} --------------")
+    verdict_w = max(len(_SWEEP_VERDICT[r[1]]) for r in results) + 1
+    lines.append(f"  {'Skill':<{col_w}} {'Verdict':<{verdict_w}} Evidence items")
+    lines.append(f"  {'-' * col_w} {'-' * verdict_w} --------------")
     for name, status, ev_count in results:
-        icon = _ASCII[status] if ascii_only else _UNI[status]
-        _emit(f"  {name:<{col_w}} {icon} {_VERDICT[status]:<{verdict_w}} {ev_count}")
+        lines.append(
+            f"  {name:<{col_w}} {icons[status]} {_SWEEP_VERDICT[status]:<{verdict_w}} {ev_count}"
+        )
 
     # F-148: unscanned targets get their own tally bucket — folding them into
     # "safe" (as `total - fails - warns` would, since they are neither FAIL nor
@@ -382,19 +510,64 @@ def vet_all(
     # problem (it is neither FAIL nor WARN either) and gets the same treatment —
     # it stays in "skill(s) checked" (it WAS attempted, unlike a SKIPPED row) but
     # is subtracted out of "safe" via its own named bucket.
-    scanned = [r for r in results if r[1] != "SKIPPED"]
-    skipped_n = len(results) - len(scanned)
-    truncated_n = sum(1 for _, s, _ in scanned if s == "TRUNCATED")
-    total = len(scanned)
-    fails = sum(1 for _, s, _ in scanned if s == "FAIL")
-    warns = sum(1 for _, s, _ in scanned if s == "WARN")
-    safe = total - fails - warns - truncated_n
-    tally = f"\n  {total} skill(s) checked | {safe} safe | {warns} suspicious | {fails} dangerous"
-    if truncated_n:
-        tally += f" | {truncated_n} partially scanned"
-    if skipped_n:
-        tally += f" | {skipped_n} not scanned (budget exceeded)"
-    _emit(tally)
+    c = sweep.counts()
+    tally = (f"\n  {c['total']} skill(s) checked | {c['safe']} safe | "
+             f"{c['warns']} suspicious | {c['fails']} dangerous")
+    if c["truncated"]:
+        tally += f" | {c['truncated']} partially scanned"
+    if c["skipped"]:
+        tally += f" | {c['skipped']} not scanned (budget exceeded)"
+    lines.append(tally)
+    return lines
+
+
+def _sweep_quiet_line(sweep: SkillSweep) -> str:
+    """One honest line for ``--full --quiet`` — the same collapse --quiet already
+    applies to the self-test and vet-mcp sections.
+
+    It never claims more than the sweep actually did: an incomplete sweep says so
+    on the same line, so a reader who only ever sees this line cannot mistake a
+    partial sweep for a clean one.
+    """
+    if sweep.no_roots:
+        return f"SKILL SWEEP: no skills directory found under {_sanitize(str(sweep.home_dir))}."
+    if sweep.no_targets:
+        dirs_str = ", ".join(_sanitize(str(d)) for d in sweep.checked_dirs)
+        return f"SKILL SWEEP: no installed skills found under {dirs_str}."
+    c = sweep.counts()
+    line = (f"SKILL SWEEP: {c['total']} installed skill(s) vetted — "
+            f"{c['fails']} dangerous, {c['warns']} suspicious, {c['safe']} no known issue")
+    if c["truncated"]:
+        line += f", {c['truncated']} partially scanned"
+    if c["skipped"]:
+        line += f", {c['skipped']} not scanned (budget exceeded)"
+    line += "."
+    dangerous = [n for n, s, _e in sweep.rows if s == "FAIL"]
+    if dangerous:
+        named = ", ".join(dangerous[:3])
+        if len(dangerous) > 3:
+            named += f", +{len(dangerous) - 3} more"
+        line += f" Dangerous: {named}."
+    return line + " Full detail: --vet-all."
+
+
+def vet_all(
+    home_dir: Path,
+    ascii_only: bool = False,
+    sweep_budget_s: float = DEFAULT_VET_ALL_BUDGET_S,
+) -> int:
+    """``--vet-all``: sweep every installed skill and render the result.
+
+    Thin shell over :func:`sweep_installed_skills` (which owns the discovery, the
+    budget and the per-target verdicts) plus :func:`_sweep_summary_lines`. Returns
+    0 if every finding is PASS/UNKNOWN and nothing was left unscanned, else 1.
+    """
+    sweep = sweep_installed_skills(home_dir, ascii_only=ascii_only,
+                                   sweep_budget_s=sweep_budget_s, narrate=True)
+    if sweep.no_targets:
+        return 0
+    for line in _sweep_summary_lines(sweep, ascii_only=ascii_only):
+        _emit(line)
 
     # F-148 return-code decision: a truncated sweep must NOT return the same 0 a
     # fully-clean sweep would. 0 asserts "checked everything, found nothing" — but
@@ -408,13 +581,18 @@ def vet_all(
     # "found something to act on"; a caller must inspect the printed/JSON output,
     # not the bare exit code, to tell "dangerous" from "incomplete" apart.)
     #
-    # `truncated` is now also set the moment ANY single target comes back TRUNCATED
+    # `truncated` is set the moment ANY single target comes back TRUNCATED
     # (per-target budget, either the ScanBudgetExceeded catch or
-    # _vet_coverage_incomplete above) — same "no basis to claim PASS" reasoning,
-    # just scoped to one skill instead of the whole sweep.
-    if truncated:
+    # _vet_coverage_incomplete) — same "no basis to claim PASS" reasoning, just
+    # scoped to one skill instead of the whole sweep.
+    #
+    # NOTE this rc rule is the STANDALONE sweep's own verdict. Under --full the rc
+    # belongs to the audit, so the sweep contributes FAIL-only there (SkillSweep
+    # .has_fail) and truncation is reported by the printed section instead — see
+    # the --exit-code tail at the end of _main().
+    if sweep.truncated:
         return 1
-    return 0 if worst in ("PASS", "UNKNOWN") else 1
+    return 0 if sweep.worst in ("PASS", "UNKNOWN") else 1
 
 
 def _run_vet_mcp(target, args, ascii_only: bool) -> int:
@@ -1592,8 +1770,16 @@ def _main(argv=None) -> int:
     _emit(body)
 
     vm_has_fail = False
+    sweep_has_fail = False
     if args.full and not args.json and not args.card:
         seed = args.seed if args.seed is not None else secrets.token_hex(8)
+        # F-149: the installed-skill sweep runs under the same wall-clock ceiling
+        # --vet-all uses. Cost is driven by content hostility, not skill count, so a
+        # hostile fleet is what this bounds. Kept as the phase default rather than a
+        # new flag, following the precedent that vet_all()'s sweep_budget_s is a
+        # Python parameter the CLI deliberately does not expose.
+        sweep_home = Path(args.home).expanduser()
+        sweep_budget_s = DEFAULT_VET_ALL_BUDGET_S
         if args.quiet:
             # C-110: --full --quiet — the appended self-test material + per-server
             # vet-mcp detail are what push --full to ~490 lines; collapse each to a
@@ -1624,6 +1810,16 @@ def _main(argv=None) -> int:
                     _summary += f", {_vc['UNKNOWN']} UNKNOWN"
                 _emit(_summary + ". Full detail: --vet-mcp.")
             _record_run("vet_mcp", args)
+            # F-149: the installed-skill sweep, collapsed the same way. narrate=False
+            # keeps the sweep completely silent; the single line below is the whole
+            # section. sweep.has_fail is read from the SAME SkillSweep object the
+            # verbose branch reads, so --exit-code cannot diverge between the two.
+            sweep = sweep_installed_skills(
+                sweep_home, ascii_only=ascii_only,
+                sweep_budget_s=sweep_budget_s, narrate=False)
+            _emit(_sweep_quiet_line(sweep))
+            sweep_has_fail = sweep.has_fail
+            _record_run("vet", args)
         else:
             # --- Self-test section (canary + red-team + dry-run) ---
             _emit("")
@@ -1660,6 +1856,40 @@ def _main(argv=None) -> int:
                     _emit(f"    fix: {_sanitize(vmf.fix)}")
                     _emit("")
             _record_run("vet_mcp", args)
+            # --- installed-skill sweep section (F-149) ---
+            # Appended LAST on purpose. Everything above it — the report body, the
+            # SELF-TEST section, the VET-MCP section — keeps the byte-for-byte shape
+            # and order it has always had; a new section inserted higher up would
+            # break the report-body prefix --full --quiet is compared against.
+            #
+            # What this adds on top of the audit, since the audit already inspects
+            # skill content (the surface="skills" checks plus the shared content
+            # ring): the audit answers "is anything wrong across this fleet", as
+            # findings attributed to the HOME. The sweep answers "which skill, and
+            # how bad is THAT skill" — one merged verdict per installed skill, from
+            # the vet engine, which builds its own Context per target precisely
+            # because a skill is untrusted third-party content and must not share
+            # the audit's. So the unit of the answer differs, and that unit is what
+            # an owner acts on: you uninstall a skill, not a finding.
+            #
+            # Visibility only: these verdicts are deliberately NOT folded into the
+            # audit score or grade. Changing a scoring rule is a separate, explicit
+            # decision — it is not something a new section gets to do as a side
+            # effect. The one place the sweep does reach the outside world is
+            # --exit-code, FAIL-only, exactly as the vet-mcp section already does.
+            _emit("")
+            _emit("=" * 60)
+            _emit("CLAWSECCHECK SKILL SWEEP")
+            _emit("=" * 60)
+            _emit("Per-skill verdict for every installed skill. Not folded into the "
+                  "score or grade above; per-skill dossier: --vet <path>.")
+            sweep = sweep_installed_skills(
+                sweep_home, ascii_only=ascii_only,
+                sweep_budget_s=sweep_budget_s, narrate=True)
+            for _sweep_line in _sweep_summary_lines(sweep, ascii_only=ascii_only):
+                _emit(_sweep_line)
+            sweep_has_fail = sweep.has_fail
+            _record_run("vet", args)
 
     _save_failed = False
     if args.save:
@@ -1692,7 +1922,15 @@ def _main(argv=None) -> int:
         )
         # B-166: a present-but-unparseable openclaw.json produces only UNKNOWN/WARN, so a
         # FAIL-only gate would stay green on a broken config. Trip on it explicitly.
-        if has_fail or vm_has_fail or getattr(ctx, "config_parse_error", False):
+        #
+        # F-149: sweep_has_fail joins the disjunction on exactly the terms vm_has_fail
+        # already sits on — FAIL-only. A SUSPICIOUS (WARN) skill does not redden the
+        # gate, and neither does an incomplete sweep: --exit-code's documented contract
+        # is "exit 1 if any unsuppressed FAIL finding exists", and flipping it on
+        # truncation would silently redden every CI gate that passes today. An
+        # incomplete sweep is reported honestly in its printed section instead.
+        if (has_fail or vm_has_fail or sweep_has_fail
+                or getattr(ctx, "config_parse_error", False)):
             return 1
 
     return 0
