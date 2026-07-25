@@ -3,6 +3,65 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.57.0] — 2026-07-25
+
+Honesty under load: the audit now tells you when it could not finish, `--full` actually
+checks everything it claims to, and a finding you suppressed stays suppressed.
+
+### Added
+- `--full` sweeps every installed skill through the vet engine and reports the result
+  after the MCP section. It previously claimed to check everything while never running
+  the skill engine at all. A truncated sweep is reported as truncated and never moves
+  the exit code — only a real FAIL does.
+- Ten new checks covering OpenClaw config surfaces that had none: browser executable and
+  profile overrides, live-profile and remote-CDP attachment, `browser.evaluateEnabled`,
+  Chrome launch flags, `secrets.providers` exec sources, marketplace feeds, the `env`
+  passthrough, `env.shellEnv.enabled`, embedded-agent project settings policy, and
+  writable `safeBinTrustedDirs`.
+- Nineteen further advisories in the known-vulnerable version gate, each confirmed
+  against its published record rather than inferred.
+- A time budget on the vet paths. A skill at the legal size cap could previously scan
+  without any ceiling; the sweep and each target are now bounded, and a target that hit
+  the ceiling is named as partially scanned rather than counted as safe.
+- `scripts/fleet_fp_gate.py` — records the FAIL set your own installed fleet produces
+  and blocks a change that adds a new one. It compares FAIL sets rather than scores, so
+  adding passing checks cannot mask a regression.
+
+### Fixed
+- **Suppressions no longer expire on their own.** A `.clawseccheckignore` entry keys on a
+  finding's fingerprint, and six checks put values in that fingerprint which changed
+  without your config changing: one embedded a clock-derived age, so its suppression
+  broke roughly every two hours, and five embedded an absolute path, so moving a skill
+  broke them. The information you need is still shown; it no longer decides identity.
+- A crashed or timed-out check no longer improves your grade. The grade is now capped
+  when the engine could not complete a check, instead of silently scoring it as passed.
+- Six checks could emit a FAIL that never reached the score, so a HIGH failure could
+  coexist with a clean grade.
+- The version gate reports every advisory that applies to your version, not just the
+  oldest one. Following its advice used to leave you exposed to the rest.
+- Browser checks grade the state your configuration actually produces rather than the
+  way it is spelled, so a no-op edit can no longer improve the result.
+- The judge packet declares the answer format its own parser accepts; conformant replies
+  were previously discarded in silence. The attestation question now uses the same
+  vocabulary as every reader of its answer.
+- `--vet-all` names all skill roots it discovers, and `--vet` no longer discards a
+  verdict the engine had already reached when a scan budget expired.
+- Hidden-channel detection in MCP tool definitions now keys on evidence an attacker
+  cannot choose freely, closing an evasion that cost one visible character.
+- The `--json` contract documents the two values `computed_risk` actually emits.
+
+### Changed
+- `SKILL.md` is 29% smaller. The Step 5 flow branches and the isolation protocol moved
+  to `docs/FLOW_CHOICES.md` and `docs/ISOLATION.md`, loaded on demand — the manifest is
+  read into the agent's context on every invocation, so its size is a standing cost.
+
+### Performance
+- A large audit spends noticeably less time in Unicode normalization and trajectory
+  analysis: pure-ASCII input skips normalization entirely, two translation passes were
+  merged, large blobs are normalized once, and the trajectory scan is no longer repeated
+  for each consumer. Three content-ring checks that spent most of their budget on
+  re-scanning were bounded.
+
 ## [3.56.0] — 2026-07-22
 
 The LLM-judge epic: three opt-in, host-agent-driven capabilities that let the
