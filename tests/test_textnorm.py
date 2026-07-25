@@ -4,10 +4,19 @@ Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
-
+import random
+import unicodedata
+from unittest import mock
 
 from clawseccheck.textnorm import (
+    _CONFUSABLES,
+    _INVISIBLE_RE,
+    _NORM_MEMO,
+    _NORM_MEMO_MIN_CHARS,
+    _TAG_TABLE,
     _nfkc_ascii_fold_changed,
+    _norm_memo_clear,
+    _normalize_uncached,
     normalize_for_scan,
     obfuscation_signals,
 )
@@ -362,3 +371,173 @@ def test_bare_tag_run_not_flag_anchored_still_flagged():
     text = _tag_encode("secret") + chr(0xE007F)
     signals = obfuscation_signals(text)
     assert "Unicode Tag-block characters found" in signals
+
+
+# ---------------------------------------------------------------------------
+# The merged single-pass `.translate(_NORM_TABLE)` normalize_for_scan now uses
+# must be byte-identical to the OLD sequential two-pass form
+# (.translate(_TAG_BLOCK_TABLE) then .translate(_CONFUSABLES_TABLE)). The
+# reference below reconstructs those two OLD tables independently (not by
+# reusing _NORM_TABLE) so this test doesn't just re-assert the new code's own claim.
+# ---------------------------------------------------------------------------
+
+_OLD_TAG_BLOCK_TABLE = str.maketrans(_TAG_TABLE)
+_OLD_CONFUSABLES_TABLE = str.maketrans(_CONFUSABLES)
+
+
+def _old_two_pass_normalize(text: str) -> str:
+    """Ground truth: the pre-A2 sequential-translate implementation of
+    normalize_for_scan's steps 3+4."""
+    stripped = _INVISIBLE_RE.sub("", text)
+    nfkc = unicodedata.normalize("NFKC", stripped)
+    tag_decoded = nfkc.translate(_OLD_TAG_BLOCK_TABLE)
+    return tag_decoded.translate(_OLD_CONFUSABLES_TABLE)
+
+
+def _a2_fuzz_pool() -> list[str]:
+    """Mixed pool: ASCII printables, ALL confusables, invisibles (U+200B/U+202E/
+    U+FEFF), the WHOLE Tag block (U+E0000-E007F), Hebrew (U+05D0), the flag-emoji
+    base (U+1F3F4), fullwidth A (U+FF21), and the right single quote (U+2019)."""
+    pool = list(
+        " \t\nabcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?"
+    )
+    pool.extend(chr(cp) for cp in _CONFUSABLES)
+    pool.extend([chr(0x200B), chr(0x202E), chr(0xFEFF)])
+    pool.extend(chr(cp) for cp in range(0xE0000, 0xE007F + 1))
+    pool.append(chr(0x05D0))  # Hebrew alef
+    pool.append(chr(0x1F3F4))  # regional-flag black-flag base
+    pool.append(chr(0xFF21))  # fullwidth A
+    pool.append(chr(0x2019))  # right single quotation mark
+    return pool
+
+
+def test_a2_merged_table_matches_old_two_pass_seeded_fuzz():
+    """20k-string seeded fuzz: normalize_for_scan (merged _NORM_TABLE, single
+    .translate pass) == the old two-pass sequential .translate reference, across
+    the mixed pool above. Deterministic seed -- a failure is reproducible."""
+    pool = _a2_fuzz_pool()
+    rnd = random.Random(20290)
+    mismatches = []
+    for _ in range(20_000):
+        n = rnd.randint(0, 12)
+        s = "".join(rnd.choice(pool) for _ in range(n))
+        old = _old_two_pass_normalize(s)
+        new_ = normalize_for_scan(s)
+        if old != new_:
+            mismatches.append((s, old, new_))
+    assert not mismatches, f"{len(mismatches)} mismatch(es); first: {mismatches[0]!r}"
+
+
+# ---------------------------------------------------------------------------
+# ASCII fast-path + content-keyed memo wrapping _normalize_uncached. Every
+# test here clears the module-level memo first/last so it can't leak state
+# into (or pick up state from) any other test.
+# ---------------------------------------------------------------------------
+
+def test_a3_normalize_for_scan_matches_uncached_seeded_fuzz_with_repeats():
+    """5k-string seeded fuzz over the same mixed pool as the A2 fuzz test: the
+    fast-path/memo-wrapped normalize_for_scan must always agree with the real work
+    in _normalize_uncached, including on a REPEATED call for the same string (short
+    strings here stay under the memo threshold, so this exercises the fast-path /
+    direct-delegate branches; the large-blob memo path is covered by the dedicated
+    tests below)."""
+    _norm_memo_clear()
+    pool = _a2_fuzz_pool()
+    rnd = random.Random(20291)
+    mismatches = []
+    for _ in range(5_000):
+        n = rnd.randint(0, 20)
+        s = "".join(rnd.choice(pool) for _ in range(n))
+        expected = _normalize_uncached(s)
+        first = normalize_for_scan(s)
+        second = normalize_for_scan(s)
+        if first != expected or second != expected:
+            mismatches.append((s, expected, first, second))
+    _norm_memo_clear()
+    assert not mismatches, f"{len(mismatches)} mismatch(es); first: {mismatches[0]!r}"
+
+
+def _large_non_ascii_blob() -> str:
+    """A blob well over _NORM_MEMO_MIN_CHARS (65_536) AND non-ASCII (so the fast-path
+    does not short-circuit before the memo is ever reached)."""
+    blob = ("café " * 20_000) + "\U0001f600"
+    assert not blob.isascii()
+    assert len(blob) >= _NORM_MEMO_MIN_CHARS
+    return blob
+
+
+def test_a3_large_non_ascii_blob_matches_uncached_and_gets_memoized():
+    _norm_memo_clear()
+    blob = _large_non_ascii_blob()
+    expected = _normalize_uncached(blob)
+    for _ in range(5):
+        assert normalize_for_scan(blob) == expected
+    assert blob in _NORM_MEMO
+    assert _NORM_MEMO[blob] == expected
+    _norm_memo_clear()
+
+
+def test_a3_normalize_uncached_called_exactly_once_across_repeated_calls():
+    """Call-counter: _normalize_uncached must run exactly ONCE across N repeated
+    normalize_for_scan calls on the SAME large non-ASCII blob -- the memo, not
+    re-computation, must serve calls 2..N."""
+    _norm_memo_clear()
+    blob = _large_non_ascii_blob()
+    with mock.patch(
+        "clawseccheck.textnorm._normalize_uncached", wraps=_normalize_uncached
+    ) as spy:
+        first = normalize_for_scan(blob)
+        for _ in range(9):
+            assert normalize_for_scan(blob) == first
+    assert spy.call_count == 1, f"expected exactly 1 call, got {spy.call_count}"
+    _norm_memo_clear()
+
+
+def test_a3_ascii_blob_over_threshold_bypasses_memo_via_fast_path():
+    """An ASCII blob larger than _NORM_MEMO_MIN_CHARS must NOT enter _NORM_MEMO --
+    the ASCII fast-path returns before the length/memo check is ever reached."""
+    _norm_memo_clear()
+    blob = "x" * 70_000
+    assert blob.isascii()
+    assert len(blob) > _NORM_MEMO_MIN_CHARS
+    result = normalize_for_scan(blob)
+    assert result == blob
+    assert result is blob  # same object -- no copy, per the fast-path's contract
+    assert len(_NORM_MEMO) == 0
+    _norm_memo_clear()
+
+
+def test_a3_short_non_ascii_blob_under_threshold_not_memoized():
+    """A non-ASCII blob under _NORM_MEMO_MIN_CHARS -- 8000 chars, matching
+    logscan._MAX_LINE_LEN exactly, the real-world case this threshold structurally
+    excludes without any logscan.py call-site change -- must not enter the memo."""
+    _norm_memo_clear()
+    blob = "café " * 1600  # 5 chars * 1600 == 8000, and non-ASCII (é)
+    assert len(blob) == 8000
+    assert not blob.isascii()
+    assert len(blob) < _NORM_MEMO_MIN_CHARS
+    result = normalize_for_scan(blob)
+    assert result == _normalize_uncached(blob)
+    assert len(_NORM_MEMO) == 0
+    _norm_memo_clear()
+
+
+def test_a3_memo_admits_until_budget_then_stops_admitting_new_entries(monkeypatch):
+    """Admit-until-full, no eviction: once the (shrunk, for test speed) budget is
+    exhausted, a NEW distinct blob is still computed correctly but not retained,
+    while an ALREADY-admitted blob is never evicted to make room."""
+    import clawseccheck.textnorm as textnorm_mod
+
+    _norm_memo_clear()
+    # Room for exactly one ~66_000-char blob under the shrunk budget.
+    monkeypatch.setattr(textnorm_mod, "_NORM_MEMO_MAX_CHARS", 70_000)
+    first_blob = "é" * 66_000
+    second_blob = "ü" * 66_000
+    r1 = normalize_for_scan(first_blob)
+    assert first_blob in _NORM_MEMO
+    r2 = normalize_for_scan(second_blob)  # would blow the shrunk budget
+    assert second_blob not in _NORM_MEMO
+    assert first_blob in _NORM_MEMO  # untouched -- no eviction
+    assert r1 == _normalize_uncached(first_blob)
+    assert r2 == _normalize_uncached(second_blob)
+    _norm_memo_clear()

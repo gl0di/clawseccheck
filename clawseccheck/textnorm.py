@@ -115,7 +115,39 @@ _TAG_TABLE: dict[int, str] = {
     )
     for cp in range(_TAG_BLOCK_LO, _TAG_BLOCK_HI + 1)
 }
-_TAG_BLOCK_TABLE = str.maketrans(_TAG_TABLE)
+
+# ---------------------------------------------------------------------------
+# Merge the Tag-block fold table and the confusables table into ONE translate
+# table, so normalize_for_scan does a single `.translate` pass instead of two
+# (str.translate is a hot spot on large blobs -- merging the tables removes an
+# entire full-string pass with no change in output).
+#
+# Semantically identical to the old sequential `.translate(_TAG_BLOCK_TABLE)`
+# then `.translate(_CONFUSABLES_TABLE)`:
+#   1. Key domains are disjoint: _TAG_TABLE keys are U+E0000-E007F; _CONFUSABLES
+#      keys are U+03xx/U+04xx (`set(_TAG_TABLE) & set(_CONFUSABLES) == set()`).
+#   2. Sequential-vs-merged application differs only if the SECOND table is
+#      non-identity somewhere in the first table's OUTPUT range. _TAG_TABLE's
+#      output is exactly ASCII 0x20-0x7E plus deletions; _CONFUSABLES is the
+#      identity on the whole of ASCII -- its minimum key is U+03B1 (0x3B1),
+#      i.e. `all(k >= 128 for k in _CONFUSABLES)`. So applying _CONFUSABLES
+#      after the Tag fold can never touch what the Tag fold just produced,
+#      which is exactly what a single merged-table pass also guarantees.
+# Verified further by a 20k-string seeded fuzz (old two-pass vs merged
+# .translate) in tests/test_textnorm.py.
+#
+# `{**a, **b}` rather than `a | b` -- dict-merge `|` exists since 3.9, but the
+# unpack form is unambiguous about "no keys collide" at a glance.
+_NORM_TABLE = str.maketrans({**_TAG_TABLE, **_CONFUSABLES})
+
+# Hebrew block guard (U+0590-U+05FF), extended to _NORM_TABLE -- the table
+# actually applied by normalize_for_scan now that A2 merged the two passes --
+# so the invariant belongs here too, not just on the raw _CONFUSABLES dict
+# above. No code point in this range may ever be a translate key, or RTL /
+# Hebrew bootstrap files would be silently corrupted.
+assert all(0x0590 > cp or cp > 0x05FF for cp in _NORM_TABLE), (
+    "textnorm._NORM_TABLE must never include Hebrew block U+0590–05FF"
+)
 
 _TAG_RUN_RE = re.compile("[\U000e0000-\U000e007f]+")
 
@@ -228,27 +260,120 @@ def _is_zwj_between_emoji(chars: list[str], idx: int) -> bool:
     )
 
 
-def normalize_for_scan(text: str) -> str:
-    """Return a de-obfuscated copy of *text* suitable for pattern matching.
+# ---------------------------------------------------------------------------
+# Module-level, content-keyed memo for normalize_for_scan on large blobs. The
+# same multi-megabyte skill/bootstrap blobs get re-normalized call after call
+# across the many checks that each independently normalize the same content
+# (plus a per-skill content-security ring that re-scans those same blobs
+# again), so the total characters normalized in a run can run many times over
+# the actual size of the corpus being scanned.
+#
+# Keyed by the STRING ITSELF, never by id(). CPython can and does reuse a
+# freed string's memory address for an unrelated object; keying by id() would
+# let a later, different blob silently inherit an earlier blob's cached
+# normalization -- in a security scanner that is a live mine, not a
+# performance trade-off. A plain dict already compares/hashes str keys by
+# content, so this is the natural, not the clever, choice.
+#
+# _NORM_MEMO_MIN_CHARS: below this, the memo lookup/insert overhead (hashing
+# the whole string) is not worth it -- measured: caching everything (no
+# threshold) or a 4 KiB threshold both cost MORE wall-clock than a 64 KiB
+# threshold, because thousands of small entries buy nothing (the win lives
+# entirely in a handful of megabyte-scale blobs) while still paying full
+# hashing cost on every call. This value also structurally excludes
+# logscan.py's per-line scanning path: logscan._MAX_LINE_LEN caps every line
+# it hands to normalize_for_scan at 8000 chars, well under this threshold, so
+# that hot per-line path never touches the memo at all -- no call-site change
+# needed there.
+#
+# _NORM_MEMO_MAX_CHARS: total retained-character BUDGET across every admitted
+# entry (not a per-string cap) -- a hard ceiling on how much normalized text
+# this process holds onto for its lifetime. Real-config measurement: ~4.1 MB
+# retained across 5 entries at the 64 KiB threshold.
+_NORM_MEMO_MIN_CHARS = 65_536
+_NORM_MEMO_MAX_CHARS = 64_000_000
+
+# Admit-until-full, NO eviction -- deliberate, not a missing feature. Every
+# check walks ctx.installed_skills / ctx.bootstrap in the same order, so a
+# FIFO/LRU cache filled to capacity would evict exactly the entry the very
+# next check needs, converging to ~0% hit rate on a large corpus. Admit-until-
+# full instead degrades gracefully (the first K blobs encountered stay fast;
+# anything beyond the budget is simply computed at today's cost, same as
+# having no memo) and gives a one-number memory ceiling.
+_NORM_MEMO: dict[str, str] = {}
+_NORM_MEMO_CHARS = 0
+
+
+def _norm_memo_clear() -> None:
+    """Reset the module-level normalize_for_scan memo. Test-only: lets tests start
+    from a clean slate instead of leaking cached blobs across test cases (the memo
+    is otherwise process-lifetime by design -- see _NORM_MEMO above)."""
+    global _NORM_MEMO_CHARS
+    _NORM_MEMO.clear()
+    _NORM_MEMO_CHARS = 0
+
+
+def _normalize_uncached(text: str) -> str:
+    """Do the actual de-obfuscation work for *text* -- see normalize_for_scan (the
+    public entry point) for the ASCII fast-path and content-keyed memo wrapped
+    around this.
 
     Steps (in order):
       1. Strip invisible / bidi-control characters
          (U+200B–200D, U+FEFF, U+202A–202E, U+2060, U+2066–2069, U+00AD).
       2. NFKC normalization (collapses fullwidth, ligatures, etc.).
-      3. Unicode Tag-block (U+E0000–E007F) fold/strip: printable Tag chars decode to
-         their ASCII mirror (revealing an ASCII-smuggled payload); non-printable Tag
-         code points are stripped. NFKC does not touch this block (see *_TAG_TABLE*),
-         so it is handled explicitly here (B-232).
-      4. Confusable folding: Cyrillic/Greek lookalikes → ASCII via
-         *_CONFUSABLES* (see module-level dict).
+      3. Unicode Tag-block (U+E0000–E007F) fold/strip AND confusable folding
+         (Cyrillic/Greek lookalikes → ASCII), applied together in a single
+         `.translate(_NORM_TABLE)` pass (see *_NORM_TABLE* for why merging the
+         two translate tables into one is safe). Printable Tag chars decode
+         to their ASCII mirror (revealing an ASCII-smuggled payload);
+         non-printable Tag code points are stripped. NFKC does not touch the
+         Tag block (see *_TAG_TABLE*), so it is handled explicitly here
+         (B-232).
 
     Read-only and lossy by design: the original *text* is never mutated.
-    Hebrew characters (U+0590–05FF) are explicitly excluded from step 4.
+    Hebrew characters (U+0590–05FF) are explicitly excluded from confusable
+    folding (see the assert next to *_NORM_TABLE*).
     """
     stripped = _INVISIBLE_RE.sub("", text)
     nfkc = unicodedata.normalize("NFKC", stripped)
-    tag_decoded = nfkc.translate(_TAG_BLOCK_TABLE)
-    return tag_decoded.translate(_CONFUSABLES_TABLE)
+    return nfkc.translate(_NORM_TABLE)
+
+
+def normalize_for_scan(text: str) -> str:
+    """Return a de-obfuscated copy of *text* suitable for pattern matching.
+
+    Two optimizations wrap the real work, done in *_normalize_uncached* -- see
+    its docstring for the actual steps:
+
+      - ASCII fast-path: every step of *_normalize_uncached* is the identity
+        transform on a pure-ASCII string (``_INVISIBLE_RE``'s lowest target is
+        U+00AD; ASCII is NFKC-stable; every ``_NORM_TABLE`` key is >= U+03B1) --
+        proven exhaustively over all 128 code points, not sampled. So a pure-
+        ASCII *text* is returned AS-IS: same object, no copy (safe -- Python
+        `str` is immutable, and every caller only uses the result for offsets
+        within itself).
+      - Content-keyed memo: blobs of at least *_NORM_MEMO_MIN_CHARS* are looked
+        up / stored in *_NORM_MEMO* by their own content (see that module-level
+        comment for why -- never by `id()`) up to the *_NORM_MEMO_MAX_CHARS*
+        retained-character budget, admit-until-full with no eviction. A short
+        non-ASCII string, or any ASCII string (caught by the fast-path first),
+        never touches the memo. Call `_norm_memo_clear()` to reset it.
+    """
+    if text.isascii():
+        return text
+    n = len(text)
+    if n < _NORM_MEMO_MIN_CHARS:
+        return _normalize_uncached(text)
+    cached = _NORM_MEMO.get(text)
+    if cached is not None:
+        return cached
+    result = _normalize_uncached(text)
+    global _NORM_MEMO_CHARS
+    if _NORM_MEMO_CHARS + n <= _NORM_MEMO_MAX_CHARS:
+        _NORM_MEMO[text] = result
+        _NORM_MEMO_CHARS += n
+    return result
 
 
 def _has_suspicious_zero_width(text: str, zero_width_re: "re.Pattern[str]") -> bool:

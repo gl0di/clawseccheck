@@ -45,6 +45,7 @@ from clawseccheck.checks import (
 from clawseccheck.collector import Context, collect
 from clawseccheck.logdiscovery import LogSink
 from clawseccheck.scanbudget import DEFAULT_CHECK_BUDGET_S
+from clawseccheck.textnorm import _norm_memo_clear, _normalize_uncached, normalize_for_scan
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 _BUDGET_HALF = DEFAULT_CHECK_BUDGET_S * 0.5
@@ -106,6 +107,40 @@ def _large_ctx(words: list[str], seed: int) -> Context:
     return ctx
 
 
+# A non-ASCII suffix injected into every blob below. `_large_ctx` above is PURE
+# ASCII, on which the textnorm ASCII fast-path / merged-translate-table
+# optimizations are nearly invisible (measured: pure-ASCII corpus 1.32s -> 1.09s,
+# 1.2x; the same corpus with this suffix on every blob: 2.29s -> 1.33s, 1.7x) --
+# CPython's own str.translate/NFKC ASCII fast path already covers pure-ASCII text,
+# so a perf test built only from `_large_ctx` would pin nothing about the
+# optimizations this file exists to guard. ONE non-ASCII character is enough to
+# knock a blob out of that fast path for its ENTIRE length, which is exactly the
+# real-world shape (a skill's SKILL.md is 99%+ ASCII prose plus a stray emoji or
+# accented word) the textnorm optimizations target.
+_NON_ASCII_SUFFIX = " — café \U0001f600"
+
+
+def _large_ctx_non_ascii(words: list[str], seed: int) -> Context:
+    """Same shape/spirit as `_large_ctx`, with `_NON_ASCII_SUFFIX` appended to every
+    blob so the corpus actually exercises the non-ASCII normalize_for_scan path --
+    AND blobs sized well above `_NORM_MEMO_MIN_CHARS` (65_536 chars) so this actually
+    reaches the content-keyed memo, not just the (separate) ASCII fast-path bypass.
+    Fewer entries than `_large_ctx` (20 skills, not 60) to keep runtime reasonable at
+    this larger per-blob size."""
+    rnd = random.Random(seed)
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.config = {}
+    ctx.bootstrap = {
+        "SOUL.md": _gen_blob(words, 12000, rnd) + _NON_ASCII_SUFFIX,
+        "AGENTS.md": _gen_blob(words, 12000, rnd) + _NON_ASCII_SUFFIX,
+    }
+    ctx.installed_skills = {
+        f"skill_{i}": _gen_blob(words, 12000, rnd) + _NON_ASCII_SUFFIX
+        for i in range(20)
+    }
+    return ctx
+
+
 class TestLargeSyntheticCorpusRegression:
     """Regression guard for the O(anchors x len(blob)) pattern itself — a much larger,
     anchor-dense corpus than any shipped fixture, so a future change reintroducing a
@@ -129,6 +164,58 @@ class TestLargeSyntheticCorpusRegression:
         check_prose_bulk_exfil(ctx)
         dt = time.perf_counter() - t0
         assert dt < 3.0, f"check_prose_bulk_exfil took {dt:.2f}s — regression?"
+
+
+class TestTextnormFastPathAndMemoRegression:
+    """textnorm.normalize_for_scan gained two optimizations: an ASCII fast-path (a
+    pure-ASCII blob returns immediately, no NFKC/translate work at all) and a
+    content-keyed memo for large non-ASCII blobs (repeated calls on the SAME blob --
+    which real checks/_content.py call sites do constantly, each independently
+    normalizing the same skill/bootstrap content -- pay the real cost only once).
+
+    `_large_ctx` above is pure ASCII, on which both optimizations are nearly
+    invisible; every blob here carries `_NON_ASCII_SUFFIX` so this test actually
+    exercises the slow non-ASCII `.translate`/NFKC path they target, and repeats
+    each blob 5x to exercise memo reuse the way multiple independent call sites do.
+
+    Baseline here is `_normalize_uncached` -- the real normalization work with
+    NEITHER optimization applied (no fast-path short-circuit, no memo) -- called
+    the same number of times, so this isolates what the wrapper in
+    `normalize_for_scan` buys on top of the already-merged translate table (A2).
+    Measured on the corpus below (22 blobs of ~68K chars each, all non-ASCII, 5
+    repeats -- sized above `_NORM_MEMO_MIN_CHARS` so the memo actually engages):
+    baseline ~1.14s, optimized via normalize_for_scan's memo ~0.27s (~4.3x).
+    Generous ceiling below pins "memo reuse meaningfully faster", not the exact
+    ratio (CI hardware varies).
+    """
+
+    def test_repeated_normalize_on_non_ascii_corpus_is_fast_via_memo(self):
+        ctx = _large_ctx_non_ascii(_B65_WORDS, seed=99)
+        blobs = list(ctx.bootstrap.values()) + list(ctx.installed_skills.values())
+        assert blobs and any(not b.isascii() for b in blobs), (
+            "fixture setup bug -- this test pins nothing without a non-ASCII blob"
+        )
+
+        _norm_memo_clear()
+        t0 = time.perf_counter()
+        for _ in range(5):
+            for b in blobs:
+                _normalize_uncached(b)
+        baseline_dt = time.perf_counter() - t0
+
+        _norm_memo_clear()
+        t0 = time.perf_counter()
+        for _ in range(5):
+            for b in blobs:
+                normalize_for_scan(b)
+        optimized_dt = time.perf_counter() - t0
+        _norm_memo_clear()
+
+        assert optimized_dt < baseline_dt * 0.5, (
+            f"expected memo reuse to cut repeated-normalization time by at least "
+            f"~2x on a non-ASCII corpus: baseline={baseline_dt:.3f}s "
+            f"optimized={optimized_dt:.3f}s -- memo regression?"
+        )
 
 
 class TestLogThreatHuntCumulativeBudget:
