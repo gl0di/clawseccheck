@@ -26,6 +26,14 @@ Reading order depends on who you are:
 2. [USAGE.md — CI / automation](USAGE.md#ci--automation) — exit codes,
    `--fail-under`, SARIF upload
 
+## I am the agent running this skill
+
+These are loaded on demand from [SKILL.md](../SKILL.md), not read front to back.
+They live outside it so its always-in-context body stays small.
+
+1. [FLOW_CHOICES.md](FLOW_CHOICES.md) — the Step 5 branch protocols
+2. [ISOLATION.md](ISOLATION.md) — the context firewall for untrusted content
+
 ## I want to contribute
 
 1. [CONTRIBUTING.md](https://github.com/gl0di/clawseccheck/blob/main/CONTRIBUTING.md) — ground rules, dev setup, PR flow
