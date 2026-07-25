@@ -14,6 +14,7 @@ import html
 import json
 import re
 import tempfile
+import time
 from pathlib import Path
 
 from . import brand
@@ -734,7 +735,12 @@ def _skill_inventory(ctx) -> list[dict]:
     hard wall-clock cap (POSIX) plus a cooperative whole-loop cap. Once either is
     exhausted, remaining skills report UNKNOWN with an explicit reason -- never a false
     "clean" (design §4.4 / §5.5)."""
-    from .checks import _run_content_ring, _VET_MERGE_RANK, check_installed_skills  # noqa: PLC0415
+    from .checks import (  # noqa: PLC0415
+        _run_content_ring,
+        _VET_MERGE_RANK,
+        check_installed_skills,
+        coverage_gap_finding,
+    )
     from .collector import Context  # noqa: PLC0415
     from .scanbudget import (  # noqa: PLC0415
         DEFAULT_CHECK_BUDGET_S, ScanBudgetExceeded, audit_budget_exceeded, audit_deadline,
@@ -765,10 +771,22 @@ def _skill_inventory(ctx) -> list[dict]:
         skill_ctx.installed_skill_py = {name: py_map.get(name, [])}
         skill_ctx.installed_skill_shell = {name: sh_map.get(name, [])}
         skill_ctx.installed_skill_js = {name: js_map.get(name, [])}
+        # base and ring are budgeted SEPARATELY, and that split is the whole point.
+        # Sharing one try meant a deadline firing inside the ring abandoned the block and
+        # discarded the verdict `base` had ALREADY produced: measured on a real hostile
+        # skill, a genuine DANGEROUS verdict was replaced by "per-skill scan budget
+        # exhausted". Reachability was ordinary — any skill vendoring a dependency pushes
+        # base+ring past 15 s. Now a truncated ring costs the ring's OWN coverage and
+        # never the base verdict. It does still lose ring findings produced before the
+        # deadline fired — the exception unwinds the list the ring was building — so the
+        # claim is "the base verdict survives", not "nothing is lost". The two deadlines
+        # run in sequence, never nested, and the second gets only what the first left, so
+        # the per-skill ceiling stays ~15 s total rather than 15 s each (exactly, where
+        # the POSIX hard timer is available; cooperatively elsewhere).
+        _started = time.monotonic()
         try:
             with check_deadline(DEFAULT_CHECK_BUDGET_S):
                 base = check_installed_skills(skill_ctx)
-                ring = _run_content_ring(skill_ctx)
         except ScanBudgetExceeded:
             out.append({
                 "name": name, "verdict": _VET_VERDICT[UNKNOWN], "status": UNKNOWN,
@@ -781,7 +799,34 @@ def _skill_inventory(ctx) -> list[dict]:
                 "reasons": ["could not be assessed"],
             })
             continue
+
+        ring: list = []
+        ring_left = DEFAULT_CHECK_BUDGET_S - (time.monotonic() - _started)
+        # The gap reason is carried, not assumed. Three different things can cut the ring
+        # short here and they are not interchangeable: telling a user "the scan budget was
+        # exhausted" when a check actually crashed is a fabricated cause, and this codebase
+        # has shipped that class of untruth before.
+        ring_gap: str | None = None
+        if ring_left <= 0:
+            ring_gap = ("content-ring coverage is incomplete: the per-skill scan budget "
+                        "was spent before the content-security ring could start")
+        else:
+            try:
+                with check_deadline(ring_left):
+                    ring = _run_content_ring(skill_ctx)
+            except ScanBudgetExceeded:
+                # Deliberately NOT re-raised: this frame owns the deadline, and the honest
+                # answer is "keep the base verdict, disclose what we missed" — not "throw
+                # the base verdict away too".
+                ring_gap = ("content-ring coverage is incomplete: the per-skill scan "
+                            "budget was exhausted before every content-security check "
+                            "had run")
+            except Exception:  # noqa: BLE001 — the ring must never break the audit
+                ring_gap = ("content-ring coverage is incomplete: a content-security "
+                            "check failed before the ring completed")
         pool = [base, *ring]
+        if ring_gap:
+            pool.append(coverage_gap_finding(ring_gap))
         primary = max(pool, key=lambda fx: _VET_MERGE_RANK.get(fx.status, 0))
         reasons: list[str] = []
         for fx in pool:

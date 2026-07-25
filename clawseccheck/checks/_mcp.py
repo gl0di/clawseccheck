@@ -61,6 +61,7 @@ from ._vet import (
     _VET_MERGE_RANK,
     _decoded_payloads,
     _locate_plugin_root,
+    coverage_gap_finding,
     vet_skill,
 )
 
@@ -149,11 +150,24 @@ def vet_plugin(
     So this file relies solely on the cooperative CPU ceiling, same as that loop.
 
     If the budget is exhausted mid-scan, remaining bundled skills and/or swept files
-    are skipped, the fact is recorded as a coverage note, and a synthetic VET-COVERAGE
-    finding is folded into the result (same id/convention vet_skill's own content-ring
-    truncation uses) so the risk dossier's danger axis — and therefore the process exit
-    code — reflect it too: a budget-truncated vet is never indistinguishable from a
-    clean one, on screen or in the return code.
+    are skipped, the fact is recorded as a coverage note (in this Finding's own
+    `evidence`, always), and a synthetic VET-COVERAGE finding is folded into `subs` —
+    reusing checks/_vet.py's own `coverage_gap_finding()` verbatim, so it is the exact
+    same id/status/severity/scored convention vet_skill's own content-ring truncation
+    uses. That finding rides the normal sub-finding path into this Finding's
+    `ring_findings`, which is how dossier.build_profile()'s `_normalize_pool()` sees it;
+    `_AXIS_BY_ID` maps id "VET-COVERAGE" to the danger axis unconditionally, and
+    dossier._danger_coverage_gap() matches its detail's "coverage is incomplete"
+    substring regardless of `ctx` — so a budget-truncated plugin vet floors the danger
+    axis to (at worst) UNKNOWN-with-a-coverage-gap, which build_profile()'s existing
+    B-092 handling then caps to overall WARN (never a fabricated PASS/A). cli.py's own
+    --vet-plugin exit-code mapping (unchanged, unowned by this file) already treats a
+    WARN/FAIL `overall_status` as rc=1, so that WARN floor is what makes the process
+    exit code reflect the incomplete scan too: a budget-truncated vet is never
+    indistinguishable from a clean one, on screen or in the return code. This routing
+    is specific to a *budget* exhaustion (`budget_hit`); the separate `_PLUGIN_FILE_CAP`
+    sweep-truncation path (`truncated`) still only downgrades the verdict floor and
+    adds a coverage note — it does not (yet) emit its own VET-COVERAGE finding.
     """
     import json as _json
 
@@ -467,6 +481,20 @@ def vet_plugin(
             f"scan exhausted its {target_budget_s:g}s per-target time budget — one or "
             "more bundled skills, embedded MCP specs, or runtime JS/TS files were NOT "
             "scanned; treat this plugin as unverified, not clean"
+        )
+        # Docstring contract: fold in the same synthetic VET-COVERAGE finding
+        # vet_skill's own content-ring truncation uses (checks/_vet.py's
+        # coverage_gap_finding / _run_content_ring), so a budget-truncated plugin
+        # rides the normal sub-finding path into `ring_findings` and reaches the
+        # risk dossier's danger axis (dossier._AXIS_BY_ID["VET-COVERAGE"] == "danger"),
+        # instead of the truncation only ever showing up as a cosmetic note.
+        subs.append(
+            coverage_gap_finding(
+                f"plugin scan coverage is incomplete: the scan ended early (the "
+                f"{target_budget_s:g}s per-target CPU budget, or a dispatched engine "
+                "hitting its own limit) before one or more bundled "
+                "skills, embedded MCP specs, or runtime JS/TS files could be swept"
+            )
         )
 
     # -- verdict: same merge rank as the skill vet; UNKNOWN floor on a capped sweep

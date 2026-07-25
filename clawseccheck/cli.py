@@ -57,7 +57,9 @@ from .adjudication import (
     render_judged_json,
     render_vet_judge_packet_json,
 )
-from .scanbudget import DEFAULT_VET_ALL_BUDGET_S, budget_deadline, budget_exceeded
+from .scanbudget import (
+    DEFAULT_VET_ALL_BUDGET_S, ScanBudgetExceeded, budget_deadline, budget_exceeded,
+)
 from .baseline import append_entries, is_fingerprint
 from .dossier import build_profile
 from .ansi import should_color, strip_ansi
@@ -125,6 +127,39 @@ _VET_ICON_ASCII: dict[str, str] = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]",
 _VET_ICON_UNI: dict[str, str] = {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔"}
 _VET_VERDICT: dict[str, str] = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS": "NO KNOWN ISSUE", "UNKNOWN": "UNKNOWN"}
 
+# The wording every producer of an incomplete scan uses in its finding detail —
+# load-bearing elsewhere too (dossier.py's _danger_coverage_gap matches the same
+# substring). Named here rather than re-literalled at each call site.
+_VET_COVERAGE_GAP_SUBSTRING = "coverage is incomplete"
+
+
+def _vet_coverage_incomplete(f) -> bool:
+    """True when a ``vet_skill()`` result `f` did not inspect all of its target.
+
+    Detects the CONDITION, not one cause of it, and the distinction matters: several
+    unrelated limits produce a coverage gap — the per-target scan budget inside
+    ``checks/_vet.py:_run_content_ring``, and the collector's own size/file caps that
+    ``check_installed_skills`` reports the same way (a 1.5 MB benign skill hits the
+    1000KB/500-file cap without going anywhere near a time budget). An earlier version
+    of this helper claimed to detect the budget specifically and then printed "this
+    skill's own scan budget was exceeded" over a size-cap finding that said, one line
+    above, that it had hit the file cap — a self-contradicting report and a fabricated
+    cause. Callers must therefore describe the STATE ("partially scanned") and let the
+    finding itself carry the reason.
+
+    Mirrors dossier.py's ``_danger_coverage_gap`` detection: the signal is an UNKNOWN
+    finding whose ``.detail`` contains the literal substring "coverage is incomplete".
+    It can either BE the primary finding `f`, or ride along on ``f.ring_findings`` when
+    a worse WARN/FAIL outranked it as primary (``checks/_vet.py:vet_skill``'s
+    ``_VET_MERGE_RANK``) — so both must be checked, or a partially scanned target that
+    also tripped a real WARN/FAIL would read as an ordinary, complete result.
+    """
+    pool = [f, *getattr(f, "ring_findings", [])]
+    return any(
+        fx.status == "UNKNOWN" and _VET_COVERAGE_GAP_SUBSTRING in (fx.detail or "")
+        for fx in pool
+    )
+
 
 def vet_all(
     home_dir: Path,
@@ -152,6 +187,23 @@ def vet_all(
     they are still named in the output, carried into the aggregate table with
     an explicit "not scanned" state, kept out of the "safe" tally, and force a
     non-zero return code (see the reasoning at the return statement below).
+
+    F-148 follow-up (post-adversarial-review): a SECOND, per-target budget also
+    applies inside ``vet_skill`` itself (``checks/_vet.py:_run_content_ring``'s own
+    CPU ceiling, distinct from the sweep-wide wall-clock one above). A skill whose
+    OWN scan is cut short comes back one of two ways, and both are handled the same
+    as the sweep-level "not scanned" case — named, excluded from "safe", non-zero
+    return — never silently folded into a clean verdict:
+
+    * ``vet_skill`` returns normally with a synthetic ``VET-COVERAGE`` UNKNOWN
+      finding (as the primary result, or riding along on ``.ring_findings`` when a
+      worse WARN/FAIL outranked it) whose ``.detail`` contains the literal substring
+      "coverage is incomplete" — see :func:`_vet_coverage_incomplete`.
+    * ``vet_skill`` raises :class:`~clawseccheck.scanbudget.ScanBudgetExceeded`
+      directly (the per-target CPU deadline fired between ring checks and was not
+      caught into a finding). This must never fall into a bare ``except Exception``
+      — that plain-Exception subclass would otherwise read as a generic vetting
+      error and, worse, get bucketed the same way a clean result would.
     """
     skill_paths: list[Path] = []
     seen: set[Path] = set()
@@ -186,12 +238,24 @@ def vet_all(
         _emit(f"No skills found under {dirs_str}")
         return 0
 
-    _ASCII = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]", "SKIPPED": "[-]"}
-    _UNI = {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔", "SKIPPED": "⏭️"}
+    # "SKIPPED" = the sweep-wide deadline (above) was hit before this target was ever
+    # reached at all. "TRUNCATED" = this target's OWN per-target budget (inside
+    # vet_skill itself) cut ITS scan short, so it never becomes a clean verdict either
+    # — see _vet_coverage_incomplete below. Two distinct rows on purpose: one is "never
+    # looked at", the other is "looked at, but not fully".
+    _ASCII = {
+        "FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]",
+        "SKIPPED": "[-]", "TRUNCATED": "[~]",
+    }
+    _UNI = {
+        "FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔",
+        "SKIPPED": "⏭️", "TRUNCATED": "⏳",
+    }
     _VERDICT = {
         "FAIL": "DANGEROUS", "WARN": "SUSPICIOUS",
         "PASS": "looks like no known issue", "UNKNOWN": "could not assess",
         "SKIPPED": "not scanned (budget exceeded)",
+        "TRUNCATED": "partially scanned — coverage incomplete",
     }
 
     results: list[tuple[str, str, int]] = []  # (name, status, evidence_count)
@@ -228,6 +292,24 @@ def vet_all(
         _emit(f"\n=== {_sanitize(skill_name)} ===")
         try:
             f = vet_skill(str(skill_dir))
+        except ScanBudgetExceeded:
+            # Adversarial-review blocker: _run_content_ring deliberately RE-RAISES
+            # ScanBudgetExceeded past vet_skill (see checks/_vet.py) so the caller that
+            # owns the per-target deadline can report it honestly instead of it being
+            # swallowed into a false clean verdict. It MUST be caught here, BEFORE the
+            # bare `except Exception` below — ScanBudgetExceeded is a plain Exception
+            # subclass, and that bare handler would otherwise catch it, print it as a
+            # generic "(error vetting …)" row, and bucket it UNKNOWN, which — same as a
+            # plain PASS/UNKNOWN — currently reads as "safe" in the tally below. Treat
+            # it exactly like the finding-shaped per-target truncation just below:
+            # named, excluded from "safe", and it forces a non-zero return.
+            _emit(
+                f"  (scan of {_sanitize(skill_name)} ended early — only partially "
+                "scanned; not counted as safe)"
+            )
+            results.append((skill_name, "TRUNCATED", 0))
+            truncated = True
+            continue
         except Exception as exc:  # noqa: BLE001
             _emit(f"  (error vetting {_sanitize(skill_name)}: {_sanitize(str(exc))})")
             results.append((skill_name, "UNKNOWN", 0))
@@ -251,9 +333,30 @@ def vet_all(
             if len(f.evidence) > 12:
                 lines.append(f"      {bullet} (+{len(f.evidence) - 12} more)")
         lines.append(f"    {_sanitize(f.fix)}")
+
+        # Adversarial-review blocker: vet_skill()'s OWN per-target CPU ceiling
+        # (checks/_vet.py:_run_content_ring, distinct from this sweep's wall-clock
+        # one) can cut a single skill's scan short without raising — it comes back
+        # as an ordinary-looking Finding carrying a synthetic VET-COVERAGE UNKNOWN
+        # (as the primary result, or on .ring_findings when a worse WARN/FAIL
+        # outranked it). Left alone, a PASS/UNKNOWN verdict like that folds into the
+        # "safe" tally below exactly like a real clean result. Bucket those as
+        # TRUNCATED instead. A real FAIL/WARN found before the budget ran out stays
+        # FAIL/WARN — it is already excluded from "safe" and demoting it would bury
+        # a genuine danger signal — but the truncation is still noted in the
+        # per-skill output and still forces the sweep to a non-zero return.
+        row_status = f.status
+        if _vet_coverage_incomplete(f):
+            lines.append(
+                "    (this skill was only PARTIALLY scanned — coverage is "
+                "incomplete; not counted as safe)"
+            )
+            truncated = True
+            if row_status not in ("FAIL", "WARN"):
+                row_status = "TRUNCATED"
         _emit("\n".join(lines))
 
-        results.append((skill_name, f.status, len(f.evidence) if f.evidence else 0))
+        results.append((skill_name, row_status, len(f.evidence) if f.evidence else 0))
 
     # Aggregate summary table
     _emit("")
@@ -273,13 +376,20 @@ def vet_all(
     # F-148: unscanned targets get their own tally bucket — folding them into
     # "safe" (as `total - fails - warns` would, since they are neither FAIL nor
     # WARN) is exactly the reassuring-but-false number Golden Rule #4 forbids.
+    # Adversarial-review blocker: a per-target TRUNCATED row is the same shape of
+    # problem (it is neither FAIL nor WARN either) and gets the same treatment —
+    # it stays in "skill(s) checked" (it WAS attempted, unlike a SKIPPED row) but
+    # is subtracted out of "safe" via its own named bucket.
     scanned = [r for r in results if r[1] != "SKIPPED"]
     skipped_n = len(results) - len(scanned)
+    truncated_n = sum(1 for _, s, _ in scanned if s == "TRUNCATED")
     total = len(scanned)
     fails = sum(1 for _, s, _ in scanned if s == "FAIL")
     warns = sum(1 for _, s, _ in scanned if s == "WARN")
-    safe = total - fails - warns
+    safe = total - fails - warns - truncated_n
     tally = f"\n  {total} skill(s) checked | {safe} safe | {warns} suspicious | {fails} dangerous"
+    if truncated_n:
+        tally += f" | {truncated_n} partially scanned"
     if skipped_n:
         tally += f" | {skipped_n} not scanned (budget exceeded)"
     _emit(tally)
@@ -295,6 +405,11 @@ def vet_all(
     # _run_vet_mcp below — so "incomplete" reuses 1, the same code already used for
     # "found something to act on"; a caller must inspect the printed/JSON output,
     # not the bare exit code, to tell "dangerous" from "incomplete" apart.)
+    #
+    # `truncated` is now also set the moment ANY single target comes back TRUNCATED
+    # (per-target budget, either the ScanBudgetExceeded catch or
+    # _vet_coverage_incomplete above) — same "no basis to claim PASS" reasoning,
+    # just scoped to one skill instead of the whole sweep.
     if truncated:
         return 1
     return 0 if worst in ("PASS", "UNKNOWN") else 1

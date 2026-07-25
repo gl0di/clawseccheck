@@ -3958,36 +3958,47 @@ def _run_content_ring(
         )
         # Recorded on ctx where every other truncation in this engine records it …
         note_limit(ctx.limit_hits, LIMIT_DOMAIN_SKILL, gap)
-        # … AND emitted as a finding, because ctx.limit_hits alone never reaches the user
-        # on a vet path: no vet renderer reads it, and `_danger_coverage_gap` needs an
-        # UNKNOWN *finding* in the danger bucket. Measured before this line existed, a
-        # benign skill whose ring was cut short graded A/100 while the same skill fully
-        # scanned graded B/83 — i.e. hitting the ceiling BOUGHT a cleaner verdict. The
-        # wording is load-bearing: "coverage is incomplete" is the substring
-        # `dossier._danger_coverage_gap` matches on.
-        # Built directly rather than via _custom(): like SOURCE-VET / PLUGIN-VET / MCP-VET
-        # this is a synthetic vet-only verdict id with no CheckMeta, and _custom() resolves
-        # its id through BY_ID. Keeping it out of CATALOG is deliberate — it is not a check,
-        # and adding it would move len(CATALOG) and redden every shipped check-count claim.
-        out.append(
-            Finding(
-                "VET-COVERAGE",
-                "Content-ring coverage",
-                HIGH,
-                UNKNOWN,
-                gap,
-                # Both halves of the previous wording were unactionable: there is no CLI flag
-                # or env var that raises the budget, and re-running spends the same budget on
-                # the same content for the same result. This says what the reader can act on,
-                # matching how check_installed_skills phrases its own coverage-gap fix.
-                "Part of this skill was never inspected, so this is not a clean verdict. "
-                "Scan cost is driven by content size — review the skill's largest files by "
-                "hand before trusting it.",
-                "Skill Trust",
-                False,
-            )
-        )
+        # … AND emitted as a finding (see coverage_gap_finding for why ctx alone is not
+        # enough).
+        out.append(coverage_gap_finding(gap))
     return out
+
+
+def coverage_gap_finding(detail: str) -> Finding:
+    """The synthetic verdict that says "part of this target was never inspected".
+
+    Shared so every producer of a truncated scan says it the same way — the ring's own
+    cooperative ceiling here, and `report.py`'s per-skill inventory when an outer hard
+    deadline cuts the ring short.
+
+    `ctx.limit_hits` alone does not reach the user on a vet path: no vet renderer reads
+    it, and `dossier._danger_coverage_gap` needs an UNKNOWN *finding* in the danger
+    bucket. Measured before this existed, a benign skill whose ring was cut short graded
+    A/100 while the same skill fully scanned graded B/83 — hitting the ceiling BOUGHT a
+    cleaner verdict. The `"coverage is incomplete"` wording in *detail* is load-bearing:
+    it is the substring `dossier._danger_coverage_gap` matches on.
+
+    Built directly rather than via `_custom()`: like SOURCE-VET / PLUGIN-VET / MCP-VET
+    this is a synthetic vet-only verdict id with no CheckMeta, and `_custom()` resolves
+    its id through BY_ID. Keeping it out of CATALOG is deliberate — it is not a check,
+    and adding it would move `len(CATALOG)` and redden every shipped check-count claim.
+    """
+    return Finding(
+        "VET-COVERAGE",
+        "Content-ring coverage",
+        HIGH,
+        UNKNOWN,
+        detail,
+        # An earlier wording told the reader to "raise the budget" or re-run — neither is
+        # actionable: no CLI flag or env var exposes the budget, and a re-run spends the
+        # same budget on the same content for the same result. This says what they can
+        # act on, matching how check_installed_skills phrases its own coverage-gap fix.
+        "Part of this skill was never inspected, so this is not a clean verdict. "
+        "Scan cost is driven by content size — review the skill's largest files by "
+        "hand before trusting it.",
+        "Skill Trust",
+        False,
+    )
 
 
 def vet_skill(path: str | Path) -> Finding:

@@ -668,6 +668,7 @@ from ._vet import (
     _parse_source_target,
     _powershell_encoded_payloads,
     _run_content_ring,
+    coverage_gap_finding,
     _runtime_fetch_matches,
     _skill_own_host,
     _skill_tool_overgrant,

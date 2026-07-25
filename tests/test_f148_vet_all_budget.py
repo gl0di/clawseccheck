@@ -1,9 +1,9 @@
 """F-148: --vet-all has a whole-sweep wall-clock ceiling.
 
-Cost is driven by content hostility, not skill count/size (a single hostile
-skill measured 11.04s of an 11.1s two-skill sweep), so an unbounded sweep over
-a large/hostile fleet (up to collector._MAX_SKILLS = 300) had no bound and no
-way to interrupt it short of Ctrl-C. ``vet_all(..., sweep_budget_s=...)`` now
+Cost tracks input SIZE super-linearly (1 MB of benign content measures ~41s of
+CPU, more than the hostile test fixture), so an unbounded sweep over a large
+fleet (up to collector._MAX_SKILLS = 300) had no bound and no way to interrupt
+it short of Ctrl-C. ``vet_all(..., sweep_budget_s=...)`` now
 stops scanning further targets once the sweep deadline passes.
 
 Per Golden Rule #4 (report UNKNOWN with the reason, never a silent skip or a
@@ -169,3 +169,65 @@ def test_vet_all_budget_exhausted_lists_many_skipped_names_with_overflow_count(t
     assert "0 skill(s) checked | 0 safe | 0 suspicious | 0 dangerous" in out
     assert "15 not scanned (budget exceeded)" in out
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# per-target truncation: a skill that was only PARTIALLY scanned is not "safe"
+# ---------------------------------------------------------------------------
+
+
+def _coverage_gap_finding():
+    """What vet_skill returns when a target's own per-target budget cut it short."""
+    from clawseccheck.catalog import Finding
+
+    return Finding(
+        "VET-COVERAGE", "Content-ring coverage", "HIGH", "UNKNOWN",
+        "content-ring coverage is incomplete: the per-target CPU scan budget was exhausted",
+        "Review the skill's largest files by hand.", "Skill Trust", False,
+    )
+
+
+def test_partially_scanned_skill_is_not_counted_safe_and_exits_nonzero(
+    tmp_path, capsys, monkeypatch
+):
+    """A per-target budget cut is NOT the sweep-level cut, and was missed by it.
+
+    The sweep finished and reached every target, so nothing is "not scanned" — but one
+    target was only partially inspected. Folding that into "safe" and returning 0 tells
+    the user the fleet is clean when part of it was never looked at.
+    """
+    _make_skill(tmp_path, "alpha")
+    _make_skill(tmp_path, "beta")
+    monkeypatch.setattr(cli, "vet_skill", lambda p: _coverage_gap_finding())
+
+    rc = cli.vet_all(tmp_path, ascii_only=True)
+    out = capsys.readouterr().out
+
+    assert rc != 0, "a sweep that only partially scanned its targets returned success"
+    assert "0 safe" in out, f"a partially-scanned skill was counted safe:\n{out}"
+    assert "partially scanned" in out
+
+
+def test_scan_budget_exceeded_from_vet_skill_is_not_swallowed_as_safe(
+    tmp_path, capsys, monkeypatch
+):
+    """ScanBudgetExceeded is a plain Exception subclass.
+
+    vet_all's bare `except Exception` would catch it, print a generic error row and let
+    the skill land in the clean bucket -- the exact false "nothing found" the budget work
+    exists to prevent.
+    """
+    from clawseccheck.scanbudget import ScanBudgetExceeded
+
+    _make_skill(tmp_path, "alpha")
+
+    def _boom(_p):
+        raise ScanBudgetExceeded
+
+    monkeypatch.setattr(cli, "vet_skill", _boom)
+
+    rc = cli.vet_all(tmp_path, ascii_only=True)
+    out = capsys.readouterr().out
+
+    assert rc != 0, "a deadline was swallowed into a successful sweep"
+    assert "0 safe" in out, f"a timed-out skill was counted safe:\n{out}"

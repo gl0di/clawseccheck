@@ -280,6 +280,7 @@ check_version
 check_webfetch_redirects
 check_wildcard_group_ingress
 correlation_indicators
+coverage_gap_finding
 detect_vet_type
 dig
 normalize_for_scan
