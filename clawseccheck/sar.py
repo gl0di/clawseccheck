@@ -21,7 +21,10 @@ and contains:
       }
     ],
     "computed_risk":    <str>    "high" (any network/exec/cred) or "medium",
-    "question":         <str>    plain-language attestation question for the host agent
+    "question":         <str>    plain-language attestation question for the host agent,
+                                  ending "[SAFE / SUSPICIOUS / DANGEROUS + reason]" --
+                                  the same answer vocabulary adjudication.py's judge
+                                  packet uses (B-334)
   }
 
 Trust model:
@@ -40,6 +43,28 @@ from .logsafe import redact
 
 # --------------------------------------------------------------------------- constants
 _B62_HIGH_SURPRISE = frozenset({"network", "exec", "cred"})
+
+# The three verdict values a host agent may answer this module's question with,
+# severity-ascending. SINGLE source of truth for the answer tail every question this
+# module builds ends with (_ANSWER_TAIL, right below).
+#
+# B-334: adjudication.py's judge packet borrows this module's B62 question verbatim
+# (via _b62_items -> build_sars), so before this fix the two modules independently
+# hardcoded two DIFFERENT tails -- this module's own "--json" artifact still said
+# "[yes/no + reason]" (the pre-B-330 form) while adjudication.py's packet advertised
+# "[SAFE / SUSPICIOUS / DANGEROUS + reason]" and had to patch this module's tail at
+# the packet boundary with a one-off restating shim to avoid shipping a self-
+# contradictory item. Decision (per the B-334 spec): the "--json" SAR artifact shares
+# the judge vocabulary rather than keeping a deliberately separate yes/no shape --
+# there is no dedicated parser for SAR answers (unlike --judged's _parse_verdicts), so
+# nothing consumes "yes/no" specifically, and keeping this module's own tail
+# independently phrased only ever recreated the exact cross-module drift the B-330
+# fix was designed to make structurally impossible. adjudication.py now imports
+# _VERDICT_VALUES from here instead of keeping its own copy, so both modules'
+# question text can no longer say two different things -- and the boundary shim in
+# adjudication.py is gone because there is nothing left for it to restate.
+_VERDICT_VALUES = ("SAFE", "SUSPICIOUS", "DANGEROUS")
+_ANSWER_TAIL = "[" + " / ".join(_VERDICT_VALUES) + " + reason]"
 
 # Regex to extract `description:` value from a SKILL.md frontmatter blob.
 _DESC_RE = re.compile(
@@ -89,7 +114,7 @@ def _build_question(skill_name: str, declared_purpose: str, surprising: frozense
     return (
         f"The skill '{skill_name}' is {purpose_clause} but has reachable "
         f"{cap_list} capabilities that were not expected for that category. "
-        f"Is this intentional? [yes/no + reason]"
+        f"Is this intentional? {_ANSWER_TAIL}"
     )
 
 

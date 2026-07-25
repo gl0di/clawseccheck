@@ -311,7 +311,7 @@ One entry per skill flagged by check B62.
 | `capability_set` | `array[str]` | All capability families detected in the skill's code. |
 | `mismatches` | `array[MismatchItem]` | Capabilities that are surprising for the declared category. |
 | `computed_risk` | `str` | Risk level computed from the mismatch set: `"CRITICAL"`, `"HIGH"`, `"MEDIUM"`, or `"LOW"`. |
-| `question` | `str` | Natural-language attestation question for the host operator. |
+| `question` | `str` | Natural-language attestation question for the host operator, ending in the same answer tail as a §12/§13 judge-packet item (`[SAFE / SUSPICIOUS / DANGEROUS + reason]`) — this array shares that vocabulary rather than a separate yes/no shape (B-334; through v3.56.0 this field ended `[yes/no + reason]`, inconsistent with the rest of the tool). There is no dedicated parser for a standalone `intentAttestationRequests` answer; when this item's `skill`/mismatch also appears in a `--judge-packet` (§12), it is the SAME question text, so a verdict submitted per §13's contract is accepted either way. |
 
 ### MismatchItem fields
 

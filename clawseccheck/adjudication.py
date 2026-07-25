@@ -48,37 +48,38 @@ from urllib.parse import urlparse
 from .baseline import fingerprint
 from .catalog import ATTESTED, FAIL, MEDIUM, UNKNOWN, WARN, Finding
 from .logsafe import redact
-from .sar import build_sars
+from .sar import _VERDICT_VALUES, build_sars
 from .skillast import analyze_env_auth_kwarg_exfil, analyze_python
 
 # --------------------------------------------------------------------------- constants
 
-# The three verdict values a submitted entry may carry, severity-ascending. SINGLE
-# source of truth for BOTH halves of the judge cycle: the contract every packet item
-# advertises (_VERDICT_SCHEMA, right below) and the guard every submitted entry must
-# pass (_VALID_VERDICTS, further down). B-330: those two were written independently
-# and drifted -- the packet advertised {"answer": ["yes", "no"]} while _parse_verdicts
-# only ever accepted {"verdict": "SAFE"|"SUSPICIOUS"|"DANGEROUS"}, so a judge that
-# followed the packet's own declared schema had 100% of its verdicts silently dropped
-# by every consumer (--judged, --propose-ignore, --vet-judged). Deriving both names
-# from this one tuple makes that particular drift structurally impossible.
+# The three verdict values a submitted entry may carry, severity-ascending. Imported
+# from sar.py (not redeclared here) so the whole judge cycle -- what a packet item
+# declares (_VERDICT_SCHEMA, right below), what a submitted entry must match to be
+# accepted (_VALID_VERDICTS, further down), AND the question text sar.py itself emits
+# (this module borrows it verbatim in _b62_items) -- all trace back to ONE tuple.
+#
+# B-330 found the first half of this drift: the packet advertised
+# {"answer": ["yes", "no"]} while _parse_verdicts only ever accepted
+# {"verdict": "SAFE"|"SUSPICIOUS"|"DANGEROUS"}, so a judge that followed the packet's
+# own declared schema had 100% of its verdicts silently dropped by every consumer
+# (--judged, --propose-ignore, --vet-judged). That fix derived _VERDICT_SCHEMA and
+# _VALID_VERDICTS from one LOCAL tuple, plus a one-off _restate_answer_tail() shim to
+# patch sar.py's still-legacy "[yes/no + reason]" tail at this module's packet
+# boundary. B-334 found the shim was itself just deferred drift risk -- sar.py's own
+# "--json" artifact stayed self-inconsistent with the rest of the tool. Importing the
+# tuple from sar.py instead closes that gap structurally: there is now exactly one
+# place either module could drift from, and the shim is gone because there is nothing
+# left to restate.
 #
 # Adopting "yes"/"no" as the wire vocabulary instead was considered and rejected: it
 # cannot express the SUSPICIOUS-vs-DANGEROUS distinction _ESCALATION_TARGET depends
 # on, so it would silently collapse the escalation ladder to a single rung.
-_VERDICT_VALUES = ("SAFE", "SUSPICIOUS", "DANGEROUS")
 
 # The schema every packet item's "verdict_schema" field carries — a fixed
 # contract the host agent's answer must conform to, and exactly the shape
 # _parse_verdicts accepts.
 _VERDICT_SCHEMA = {"verdict": list(_VERDICT_VALUES), "reason": "free text"}
-
-# The answer tail every question ends with, phrased in the SAME vocabulary
-# _VERDICT_SCHEMA declares so the prose and the machine-readable contract can never
-# tell a judge two different things. _restate_answer_tail rewrites the legacy
-# yes/no tail on question text this module borrows from another module (sar.py).
-_VERDICT_ANSWER_TAIL = "[SAFE / SUSPICIOUS / DANGEROUS + reason]"
-_LEGACY_YES_NO_TAIL = "[yes/no + reason]"
 
 # WARN-grade check ids with a documented false-negative-prone history: each is a
 # dual-use signal deliberately down-ranked from FAIL to WARN so a legitimate skill
@@ -163,19 +164,6 @@ _RULE_QUESTIONS = {
 
 
 # --------------------------------------------------------------------------- helpers
-
-def _restate_answer_tail(question: str) -> str:
-    """Restate a legacy ``[yes/no + reason]`` answer tail in the vocabulary this
-    packet's ``verdict_schema`` actually declares.
-
-    Only needed for question text this module borrows from ANOTHER module: sar.py
-    builds the B62 capability-mismatch question for its own SAR artifact, which has
-    its own consumers, so its tail is rewritten here at the packet boundary rather
-    than changed at the source. Every question this module owns already carries
-    _VERDICT_ANSWER_TAIL literally, so this is a no-op on those.
-    """
-    return question.replace(_LEGACY_YES_NO_TAIL, _VERDICT_ANSWER_TAIL)
-
 
 def _question_for(finding_id: str) -> str:
     """Plain-language attestation question for a finding id or ASTFinding rule.
@@ -446,21 +434,20 @@ def _env_auth_kwarg_items(ctx) -> list[dict]:
 
 def _b62_items(ctx) -> list[dict]:
     """Thin adapter over sar.build_sars(ctx): one packet item per B62
-    capability-intent mismatch. build_sars already redacts every string field.
+    capability-intent mismatch. build_sars already redacts every string field AND
+    (B-334) already ends its question in this module's own answer vocabulary --
+    both derive from the same sar._VERDICT_VALUES tuple this module imports above --
+    so unlike before B-334 there is nothing left to restate at this boundary.
     """
     items: list[dict] = []
     for sar in build_sars(ctx):
         mismatch_evidence = "; ".join(m["evidence"] for m in sar["mismatches"])
-        # B-330: sar.py phrases its question with the legacy yes/no tail for its own
-        # artifact; restate it here so this packet never advertises two contradictory
-        # answer contracts on the same item.
-        question = _restate_answer_tail(sar["question"])
         items.append({
             "finding_id": "B62",
             "target": sar["skill"],
-            "redacted_evidence": redact(mismatch_evidence) if mismatch_evidence else question,
+            "redacted_evidence": redact(mismatch_evidence) if mismatch_evidence else sar["question"],
             "engine_disposition": WARN,
-            "question": question,
+            "question": sar["question"],
             "verdict_schema": _VERDICT_SCHEMA,
         })
     return items

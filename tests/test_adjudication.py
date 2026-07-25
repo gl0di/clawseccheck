@@ -1162,8 +1162,9 @@ def test_round_trip_consumer_vet_judged_applies_every_declared_answer():
 
 def test_no_packet_question_still_asks_for_a_yes_no_answer():
     """The prose half: a question tail must not contradict the machine-readable
-    contract next to it. Covers the sar.py-sourced B62 question too, whose legacy
-    tail is restated at the packet boundary."""
+    contract next to it. Covers the sar.py-sourced B62 question too: B-334 made
+    sar.py itself emit the shared vocabulary (it imports the same _VERDICT_VALUES
+    tuple this module does), so there is no boundary restating left to cover."""
     packet = build_judge_packet(_ctx_all_packet_sources(), _mixed_findings())
     assert packet
     for item in packet:
@@ -1182,6 +1183,144 @@ def test_vet_attest_questions_use_the_declared_verdict_vocabulary():
         for value in item["verdict_schema"]["verdict"]:
             assert value in item["question"]
         assert "yes/no" not in item["question"]
+
+
+# ---------------------------------------------------------------------------
+# B-334: sar.py's OWN emitted question (both as it flows into the judge packet via
+# _b62_items, AND as it stands alone in the "--json" intentAttestationRequests
+# array, which carries no "verdict_schema" dict at all -- see docs/OUTPUT_SCHEMA.md
+# §7) must not advertise a "[yes/no + reason]" tail while every parser that ever
+# consumes an answer to it only accepts SAFE/SUSPICIOUS/DANGEROUS.
+#
+# These round-trip tests deliberately answer by reading ONLY the question's own
+# trailing bracket -- never the sibling "verdict_schema" dict -- because the
+# standalone SAR array has no such dict; the prose tail is the ONLY declared
+# contract a reader of THAT artifact ever sees. That is a strictly harder bar than
+# the B-330 tests above (which read verdict_schema), and it is the bar the bug
+# actually failed: before this fix, an agent that trusted only the prose would
+# have answered "yes"/"no" and been silently dropped by every consumer.
+# ---------------------------------------------------------------------------
+
+def _extract_tail_vocabulary(question: str) -> list[str]:
+    """Mimic a host agent that reads ONLY a question's own trailing bracket -- not
+    a separate machine-readable schema field -- to learn what values it may answer
+    with. Returns the bracket's slash-separated tokens, stripped, in the order the
+    question declares them.
+    """
+    import re
+    m = re.search(r"\[([^\]]+?)\s*\+\s*reason\]", question)
+    assert m, f"question has no bracketed '[... + reason]' answer tail: {question!r}"
+    return [tok.strip() for tok in m.group(1).split("/")]
+
+
+def test_b62_question_tail_matches_the_standalone_sar_artifact_verbatim():
+    """The two artifacts that carry this question -- the judge packet's B62 item
+    (_b62_items) and the standalone "--json" intentAttestationRequests entry
+    (sar.build_sars) -- must be the SAME string, not independently phrased copies
+    that could drift apart again. (Before B-334 they were: sar.py said
+    "[yes/no + reason]", the judge packet restated it to the SAFE/SUSPICIOUS/
+    DANGEROUS form at the packet boundary.)
+    """
+    from clawseccheck.sar import build_sars
+
+    ctx = _ctx_b62_mismatch()
+    standalone = build_sars(ctx)
+    assert len(standalone) == 1
+
+    packet = build_judge_packet(ctx, [])
+    b62_item = next(i for i in packet if i["finding_id"] == "B62")
+
+    assert standalone[0]["question"] == b62_item["question"]
+
+
+def test_b62_verdict_answered_via_its_own_question_tail_survives_parse_verdicts():
+    """Consumer: the shared parser (_parse_verdicts), used by --judged,
+    --propose-ignore and --vet-judged alike. Answer the B62/sar-sourced item
+    strictly by reading its OWN question prose -- not verdict_schema."""
+    from clawseccheck.adjudication import _parse_verdicts
+
+    packet = build_judge_packet(_ctx_b62_mismatch(), [])
+    b62_item = next(i for i in packet if i["finding_id"] == "B62")
+
+    verdict = _extract_tail_vocabulary(b62_item["question"])[-1]  # worst case: DANGEROUS
+    payload = {"verdicts": [{
+        "finding_id": b62_item["finding_id"],
+        "target": b62_item["target"],
+        "verdict": verdict,
+        "reason": "answered strictly per the question's own tail",
+    }]}
+
+    parsed = _parse_verdicts(json.dumps(payload))
+    assert parsed == {(b62_item["finding_id"], b62_item["target"]): {
+        "verdict": verdict, "votes": None,
+    }}, "a verdict answered per the B62 question's own declared tail was dropped"
+
+
+def test_b62_verdict_answered_via_its_own_question_tail_reaches_judged_second_opinion():
+    """Consumer: --judged (render_judged_json / _second_opinion) -- the only real
+    consumer that reads a submitted verdict back out for THIS specific
+    (finding_id="B62", target=<skill>) key (--propose-ignore and --vet-judged do
+    not: build_ignore_proposals only ever considers real Finding objects from the
+    findings list, and build_vet_judge_packet's own docstring says it excludes the
+    B62/audit-wide sources build_judge_packet adds)."""
+    ctx = _ctx_b62_mismatch()
+    findings: list = []
+    score = compute(findings)
+    packet = build_judge_packet(ctx, findings)
+    b62_item = next(i for i in packet if i["finding_id"] == "B62")
+
+    verdict = _extract_tail_vocabulary(b62_item["question"])[-1]
+    payload = {"verdicts": [{
+        "finding_id": b62_item["finding_id"], "target": b62_item["target"],
+        "verdict": verdict, "reason": "answered strictly per the question's own tail",
+    }]}
+
+    judged = json.loads(render_judged_json(ctx, findings, score,
+                                           verdicts_raw=json.dumps(payload)))
+    row = next(r for r in judged["secondOpinion"] if r["finding_id"] == "B62")
+    assert row["judge_verdict"] == verdict, (
+        "a verdict answered per the B62 question's own declared tail never reached "
+        "--judged's secondOpinion panel"
+    )
+
+
+def test_b62_prose_tail_round_trip_guards_are_not_vacuous_when_sar_tail_reverts(monkeypatch):
+    """Non-vacuous proof for the two round-trip tests above: revert sar.py's OWN
+    answer tail to the pre-B-334 "[yes/no + reason]" form (monkeypatched for this
+    test only -- the file on disk is never touched) and show both consumers now
+    silently drop the exact same style of answer. This is the failure mode B-334
+    fixes; a test that could not detect it proves nothing.
+    """
+    import clawseccheck.sar as sar_module
+    from clawseccheck.adjudication import _parse_verdicts
+
+    monkeypatch.setattr(sar_module, "_ANSWER_TAIL", "[yes/no + reason]")
+
+    ctx = _ctx_b62_mismatch()
+    findings: list = []
+    packet = build_judge_packet(ctx, findings)
+    b62_item = next(i for i in packet if i["finding_id"] == "B62")
+    assert "yes/no" in b62_item["question"], "monkeypatch did not actually revert the tail"
+
+    verdict = _extract_tail_vocabulary(b62_item["question"])[-1]  # "no", per the legacy tail
+    payload = {"verdicts": [{
+        "finding_id": b62_item["finding_id"], "target": b62_item["target"],
+        "verdict": verdict, "reason": "answered per the (reverted) question tail",
+    }]}
+
+    # Consumer 1: the shared parser rejects it outright.
+    assert _parse_verdicts(json.dumps(payload)) == {}, (
+        "expected the legacy yes/no tail's answer to be rejected by _parse_verdicts"
+    )
+
+    # Consumer 2: --judged never sees it either -- still "not yet reviewed."
+    score = compute(findings)
+    judged = json.loads(render_judged_json(ctx, findings, score,
+                                           verdicts_raw=json.dumps(payload)))
+    row = next(r for r in judged["secondOpinion"] if r["finding_id"] == "B62")
+    assert row["judge_verdict"] is None, (
+        "expected the legacy-tail verdict to be silently dropped from secondOpinion"
+    )
 
 
 # ---------------------------------------------------------------------------
