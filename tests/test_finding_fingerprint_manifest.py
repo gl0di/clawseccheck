@@ -23,26 +23,33 @@ byte-for-byte unchanged. A part-B change that needs to reword a ``detail`` strin
 deliberate, separately-announced wording release (see ``baseline.py``'s own module
 docstring) -- never a silent side effect of adding/reading ``Finding.not_applicable``.
 
-ENVIRONMENT-DERIVED SPANS ARE CANONICALIZED FIRST (see ``_canonical_detail``). A handful
-of details legitimately quote the scanned path, and one quotes a wall-clock-derived age.
-Neither is a function of the audited config's *content*, so neither can be pinned as a
-literal: the raw fingerprint of such a finding differs between two checkouts of this
-repo, and -- for the clock -- between two runs of the same checkout hours apart. Those
-two spans are folded to fixed tokens before hashing, and ONLY those two;
-``test_canonicalization_fires_and_is_otherwise_identity`` proves the fold is both
-non-vacuous and exactly minimal, and ``test_no_finding_detail_is_clock_dependent`` /
-``test_no_finding_detail_leaks_a_machine_specific_path`` prove nothing else varies with
-the environment. Everything outside those tokens is still pinned byte-for-byte.
+THE ENVIRONMENT-DERIVED SPANS ARE GONE, AND ``_canonical_detail`` IS NOW A TRIPWIRE FOR
+THEIR RETURN. This guard originally shipped with a narrow fold: six ids quoted something
+that is not a function of the audited config's *content* -- five quoted the absolute scan
+root, and B176 quoted a ``time.time()``-derived age -- so their raw fingerprints differed
+between two checkouts of this repo and, for the clock, between two runs of the same
+checkout hours apart. They were folded to fixed tokens before hashing so the manifest
+could be pinned at all.
 
-    KNOWN DEFECT this canonicalization is papering over, not fixing: B176
-    (``clawseccheck/checks/_lifecycle.py``) embeds ``lastSeenAgeDays=<N.N>d``, computed
-    from ``time.time()``, directly in its ``detail``. Rounded to 0.1 day, that means a
-    real user's ``B176:<hash>`` suppression self-orphans roughly every 2.4 hours on a
-    completely unchanged config -- exactly the silent un-suppression this file's opening
-    paragraph describes, with no wording change involved at all. The age belongs in
-    ``evidence=`` (which is not hashed), not in ``detail``. Fixing that check is a
-    separate, announced change; when it lands, drop ``B176`` from ``_ENV_DERIVED_IDS``
-    and regenerate.
+That fold papered over a live user-facing defect rather than fixing it: the exact same
+variance that made the manifest unpinnable also self-orphaned real users'
+``.clawseccheckignore`` fingerprint suppressions -- B176's roughly every 2.4 hours on a
+completely unchanged config, and the five path ids' the moment a workspace moved -- with
+no wording change involved at all, which is why the guard above could never have caught
+it. B-348/B-349 fixed all six at the source (the age moved to ``evidence=``, which is not
+hashed; paths are rendered relative to the audited home, whose absolute form the report
+header already prints once). ``tests/test_b348_b349_fingerprint_stability.py`` pins the
+property directly, per id.
+
+So ``_ENV_DERIVED_IDS`` is now EMPTY and the fold is expected to be pure identity over
+the whole corpus -- which means this manifest pins the real, unmodified
+``baseline.fingerprint()`` values, i.e. the exact strings a user's ``.clawseccheckignore``
+holds. The fold machinery is kept only as a detector:
+``test_no_detail_is_environment_derived`` fails, naming the id, if any check starts baking
+the checkout path or the wall clock into its detail again, and
+``test_no_finding_detail_is_clock_dependent`` /
+``test_no_finding_detail_leaks_a_machine_specific_path`` prove nothing else varies with the
+environment. Everything is pinned byte-for-byte.
 
 Regenerate ONLY for such a deliberate, announced change, from the repo root:
     PYTHONPATH=. python3 tests/test_finding_fingerprint_manifest.py --write
@@ -107,17 +114,20 @@ CORPUS = _corpus_targets()
 
 
 # ---------------------------------------------------------------------------------------
-# Canonicalization of the two environment-derived spans (see the module docstring).
-# Deliberately narrow: a broad "scrub anything that looks like a path or a number" rewrite
-# would blunt the very wording drift this file exists to catch.
+# The environment-derived-span DETECTOR (see the module docstring). Since B-348/B-349 this
+# is expected to be pure identity over the whole corpus; it is retained because it is what
+# NAMES the offending id if one of those two channels ever reopens. Deliberately narrow: a
+# broad "scrub anything that looks like a path or a number" rewrite would blunt the very
+# wording drift this file exists to catch.
 # ---------------------------------------------------------------------------------------
 
 _ROOT_TOKEN = "<REPO_ROOT>"
 
-# B176 (clawseccheck/checks/_lifecycle.py). The ONLY `time.time()` read anywhere in the
-# package outside the scan budget's monotonic deadlines, so this one pattern covers every
-# clock-derived span the check engine can emit today; the clock test below re-proves that
-# empirically over the whole corpus rather than trusting this comment.
+# B176 (clawseccheck/checks/_lifecycle.py) used to embed this. `time.time()` there is still
+# the ONLY wall-clock read anywhere in the package outside the scan budget's monotonic
+# deadlines, so this one pattern covers every clock-derived span the check engine can emit
+# today; the clock test below re-proves that empirically over the whole corpus rather than
+# trusting this comment.
 _AGE_TOKEN = "lastSeenAgeDays=<AGE>"
 _AGE_RE = re.compile(r"lastSeenAgeDays=\d+(?:\.\d+)?d")
 
@@ -129,14 +139,18 @@ _ROOT_FORMS = sorted(
 )
 
 # Every check id whose detail contains one of the spans above, on at least one fixture.
-# Pinned so a NEW check that bakes the environment into its detail cannot be silently
-# absorbed by the canonicalizer -- it has to be looked at and named here first.
-_ENV_DERIVED_IDS = {"B158", "B176", "B183", "B184", "B186", "B192"}
+# EMPTY since B-348/B-349 fixed the last of them (B158/B176/B183/B184/B186/B192), which is
+# what lets this manifest pin real, unmodified baseline.fingerprint() values. Kept as an
+# explicit set rather than deleted so a NEW check that bakes the environment into its
+# detail cannot be silently absorbed by the fold -- it has to be looked at and named here
+# first, and the right answer is almost always to move that span into evidence= (not
+# hashed) or render it relative to the audited home, never to add it here.
+_ENV_DERIVED_IDS: "set[str]" = set()
 
 
 def _canonical_detail(detail: str) -> str:
-    """*detail* with this checkout's root and B176's wall-clock age folded to fixed
-    tokens. Identity for every other detail string (asserted below)."""
+    """*detail* with this checkout's root and B176's former wall-clock age folded to fixed
+    tokens. Expected to be identity for EVERY detail string today (asserted below)."""
     out = detail
     for form in _ROOT_FORMS:
         out = out.replace(form, _ROOT_TOKEN)
@@ -379,17 +393,20 @@ def test_diagnostic_names_only_the_removed_finding(monkeypatch):
 
 
 # ---------------------------------------------------------------------------------------
-# The canonicalization must be non-vacuous, exactly minimal, and sufficient. Without
-# these three the manifest is either pinned to one machine at one instant (unusable in
-# CI, in a worktree, or two hours later) or quietly blunted into pinning nothing.
+# No detail may be environment-derived, and the fold must therefore be sufficient AND
+# vacuous. Without these three the manifest is either pinned to one machine at one instant
+# (unusable in CI, in a worktree, or two hours later) or quietly blunted into pinning
+# nothing.
 # ---------------------------------------------------------------------------------------
 
-def test_canonicalization_fires_and_is_otherwise_identity():
-    """Non-vacuity + minimality, over the whole corpus.
+def test_no_detail_is_environment_derived():
+    """The fold is pure identity over the whole corpus, so this manifest pins REAL
+    ``baseline.fingerprint()`` values -- the exact strings a user's
+    ``.clawseccheckignore`` holds.
 
-    Every detail the canonicalizer leaves alone must fingerprint to the byte-identical
-    value a real ``.clawseccheckignore`` keys on -- i.e. the fold buys checkout/clock
-    independence for a named handful of ids and changes nothing else.
+    Since B-348/B-349 there is no id left whose detail quotes the checkout path or the
+    wall clock, so ``_ENV_DERIVED_IDS`` is empty and every detail must survive the fold
+    unchanged. A failure here names the id that reopened one of those two channels.
     """
     rewritten: set[str] = set()
     untouched = 0
@@ -404,26 +421,28 @@ def test_canonicalization_fires_and_is_otherwise_identity():
                     f"{f.id} is untouched by _canonical_detail yet its pinned "
                     "fingerprint differs from the real baseline.fingerprint()"
                 )
-    assert untouched > 10_000, "expected the fold to be identity for the vast majority"
+    assert untouched > 10_000, "expected the corpus audit to produce far more findings"
     assert rewritten == _ENV_DERIVED_IDS, (
         f"the set of checks whose Finding.detail embeds the environment moved: "
         f"newly environment-derived {sorted(rewritten - _ENV_DERIVED_IDS)}, no longer "
         f"environment-derived {sorted(_ENV_DERIVED_IDS - rewritten)}. A NEW id here "
         "means a check started baking the checkout path or the wall clock into its "
-        "detail, which self-orphans real users' fingerprint suppressions -- prefer "
-        "moving that span into evidence= (not hashed). A REMOVED id means someone "
-        "fixed one: drop it from _ENV_DERIVED_IDS and regenerate the manifest."
+        "detail, which self-orphans real users' fingerprint suppressions -- fix the "
+        "check (move that span into evidence=, which is not hashed, or render the path "
+        "relative to the audited home), do NOT add the id here. A REMOVED id means "
+        "someone fixed one: drop it from _ENV_DERIVED_IDS and regenerate the manifest."
     )
 
 
 def test_no_finding_detail_is_clock_dependent():
-    """Sufficiency of the age fold: re-audit the whole corpus with the wall clock frozen
-    45 days ahead and require every canonicalized fingerprint to be unchanged.
+    """Re-audit the whole corpus with the wall clock frozen 45 days ahead and require
+    every fingerprint to be unchanged.
 
     Patching ``time.time`` is exhaustive for the check engine: it is the only wall-clock
     read in the package outside ``scanbudget``'s ``time.monotonic()`` deadlines, and no
     module under ``clawseccheck/checks/`` calls ``datetime.now()``/``date.today()``.
-    Without the fold this fails on B176 for three fixtures; with it, on none.
+    Before B-348 this failed on B176 for three fixtures unless the age was folded away;
+    now it passes with the fold doing nothing, because no detail reads the clock at all.
     """
     committed = _load_manifest()
     frozen = time.time() + 45 * 86_400

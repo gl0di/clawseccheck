@@ -68,6 +68,29 @@ from ._shared import (
 )
 
 
+def _detail_path(value, home) -> str:
+    """Render *value* for a ``Finding.detail``: relative to the audited home when it lies
+    inside it, with a single ``..`` segment when it lies under the home's parent (the
+    ``~`` slot of a real OpenClaw home, where ``.config/...`` lives). Anything else is
+    returned unchanged. A composite string that merely *starts* with such a path is
+    rewritten the same way, so a source label like ``<unit> (Environment=)`` still works.
+
+    ``baseline.fingerprint()`` hashes ``Finding.detail``, and a user's
+    ``.clawseccheckignore`` keys a per-finding suppression on that hash — so an absolute
+    scan-root path baked into a detail silently orphans that suppression the moment the
+    workspace or the scanned skill moves, and it leaks the reporter's directory layout
+    into any report they share. The audited root is printed once in the report header
+    instead. A path the CONFIG itself declares in absolute form is deliberately left
+    verbatim: that string is a function of the audited subject, so it belongs in the
+    finding's identity (and in the text, since it is what the owner has to go fix).
+    """
+    text = str(value)
+    for base, prefix in ((str(home), ""), (str(Path(home).parent), ".." + os.sep)):
+        if base and base != os.sep and text.startswith(base + os.sep):
+            return prefix + text[len(base) + 1:]
+    return text
+
+
 CLOUD_PROVIDERS = (
     "openai",
     "anthropic",
@@ -2845,16 +2868,25 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
             "Re-run the audit with a current build of this skill.",
         )
 
+    # B-349: every branch below names the audited file RELATIVE to the audited home, and
+    # keeps the absolute form in `evidence=` / the fix text. The report header already
+    # prints the absolute audited path once ("Audited config: ..."), so nothing is lost —
+    # but an absolute path inside `detail` is hashed by `baseline.fingerprint()`, which
+    # made a fingerprint suppression for this finding die the moment the profile moved,
+    # and put the reporter's home layout into every shared report.
+    audited_rel = _detail_path(audited, ctx.home)
+
     if not audits_default_state_dir(ctx.home):
         return _finding(
             "B183",
             UNKNOWN,
-            f"This scan targets {audited} explicitly, which is not this machine's default "
-            "OpenClaw state directory, so it cannot be compared against the path the "
-            "running agent would resolve — the environment of this process describes a "
-            "different subject.",
+            f"This scan targets {audited_rel} under an explicitly chosen home, which is "
+            "not this machine's default OpenClaw state directory, so it cannot be "
+            "compared against the path the running agent would resolve — the environment "
+            "of this process describes a different subject.",
             "Run the audit with no --home argument to have it check whether the agent's "
             "own config resolution points somewhere else.",
+            evidence=[f"audited: {audited}"],
         )
 
     product, reason = resolve_product_config_path()
@@ -2863,8 +2895,9 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
             "B183",
             UNKNOWN,
             f"OpenClaw's own config path could not be resolved ({reason}), so it cannot be "
-            f"confirmed that the agent reads the audited file {audited}.",
+            f"confirmed that the agent reads the audited file {audited_rel}.",
             "Check that HOME (or OPENCLAW_HOME) is set to a real directory, then re-run.",
+            evidence=[f"audited: {audited}"],
         )
 
     try:
@@ -2877,9 +2910,10 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
             "B183",
             WARN,
             "The audited config file is NOT the one OpenClaw would load. Every other "
-            f"finding in this report describes {audited}, but the agent resolves "
-            f"{product} ({reason}) — so a clean grade here says nothing about the "
-            "configuration the agent is actually running.",
+            f"finding in this report describes {audited_rel} under the audited home, but "
+            f"the agent resolves a different file ({reason}) — so a clean grade here says "
+            "nothing about the configuration the agent is actually running. Both paths "
+            "are named in full in this finding's evidence and in the fix below.",
             f"Re-run the audit against the live target: clawseccheck --home "
             f"{product.parent}. If the audited file is the intended one instead, unset "
             "OPENCLAW_CONFIG_PATH / OPENCLAW_HOME / OPENCLAW_STATE_DIR (these are what "
@@ -2890,7 +2924,7 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
     return _finding(
         "B183",
         PASS,
-        f"The audited config file ({audited}) is the same file OpenClaw's own resolver "
+        f"The audited config file ({audited_rel}) is the same file OpenClaw's own resolver "
         "selects from this environment, so the rest of this report describes the "
         "configuration the agent loads on its next start.",
         "Keep OPENCLAW_CONFIG_PATH / OPENCLAW_HOME / OPENCLAW_STATE_DIR unset, or re-run "
@@ -2969,7 +3003,7 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
             continue
         on = strict(raw) if strict is not None else is_truthy_env_value(raw)
         if on:
-            hits.append(f"{name} is on ({source}) — it {what}")
+            hits.append(f"{name} is on ({_detail_path(source, ctx.home)}) — it {what}")
 
     if hits:
         return _finding(
@@ -2991,7 +3025,9 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
             "B192",
             PASS,
             "No break-glass environment toggle is switched on in the global dotenv files "
-            "OpenClaw loads at startup (" + ", ".join(ctx.dotenv_files) + ").",
+            "OpenClaw loads at startup ("
+            + ", ".join(_detail_path(p, ctx.home) for p in ctx.dotenv_files)
+            + ").",
             "Keep OPENCLAW_ALLOW_INSECURE_PRIVATE_WS and OPENCLAW_LOAD_SHELL_ENV out of "
             "the global dotenv files except while actively working around a problem.",
         )

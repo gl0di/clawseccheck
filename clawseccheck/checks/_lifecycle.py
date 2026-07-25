@@ -57,6 +57,29 @@ from ._shared import (
 )
 
 
+def _detail_path(value, home) -> str:
+    """Render *value* for a ``Finding.detail``: relative to the audited home when it lies
+    inside it, with a single ``..`` segment when it lies under the home's parent (the
+    ``~`` slot of a real OpenClaw home, where ``.config/...`` lives). Anything else is
+    returned unchanged. A composite string that merely *starts* with such a path is
+    rewritten the same way, so a source label like ``<unit> (Environment=)`` still works.
+
+    ``baseline.fingerprint()`` hashes ``Finding.detail``, and a user's
+    ``.clawseccheckignore`` keys a per-finding suppression on that hash — so an absolute
+    scan-root path baked into a detail silently orphans that suppression the moment the
+    workspace or the scanned skill moves, and it leaks the reporter's directory layout
+    into any report they share. The audited root is printed once in the report header
+    instead. A path the CONFIG itself declares in absolute form is deliberately left
+    verbatim: that string is a function of the audited subject, so it belongs in the
+    finding's identity (and in the text, since it is what the owner has to go fix).
+    """
+    text = str(value)
+    for base, prefix in ((str(home), ""), (str(Path(home).parent), ".." + os.sep)):
+        if base and base != os.sep and text.startswith(base + os.sep):
+            return prefix + text[len(base) + 1:]
+    return text
+
+
 # ---------- B23: approval-bypass directives in bootstrap ----------
 # Matches explicit directives that tell the agent to skip human confirmation.
 # Patterns are deliberately narrow to avoid matching benign text:
@@ -3040,6 +3063,15 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
     from ..logsafe import redact as _redact  # noqa: PLC0415
 
     now_ms = _time.time() * 1000.0
+    # B-348: two parallel lists on purpose. `high_scope` is what the WARN detail quotes and
+    # is therefore what `baseline.fingerprint()` hashes, so nothing derived from the wall
+    # clock may enter it: `lastSeenAgeDays` is recomputed on every run, so embedding it made
+    # a user's `.clawseccheckignore` fingerprint suppression for this exact finding
+    # self-orphan roughly every 2.4 hours on a completely unchanged config — the finding
+    # silently reappeared as if newly discovered. `high_scope_ev` keeps the age and goes to
+    # `evidence=`, which is not hashed and IS rendered under the finding (report.py prints
+    # up to 12 evidence lines for a WARN), so the reader still sees how stale each device is.
+    high_scope: list[str] = []
     high_scope_ev: list[str] = []
     for key, entry in data.items():
         if not isinstance(entry, dict):
@@ -3072,12 +3104,9 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
         if isinstance(last_seen, (int, float)) and last_seen > 0:
             age_days = max(0.0, (now_ms - last_seen) / 86_400_000.0)
             age_desc = f"{age_days:.1f}d"
-        high_scope_ev.append(
-            _redact(
-                f"deviceId={device_id} platform={platform} scopes={granted} "
-                f"lastSeenAgeDays={age_desc}"
-            )
-        )
+        base = f"deviceId={device_id} platform={platform} scopes={granted}"
+        high_scope.append(_redact(base))
+        high_scope_ev.append(_redact(f"{base} lastSeenAgeDays={age_desc}"))
 
     if not high_scope_ev:
         return _finding(
@@ -3088,8 +3117,8 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
             "Continue reviewing paired devices periodically.",
         )
 
-    detail = "; ".join(high_scope_ev[:6]) + (
-        f" (+{len(high_scope_ev) - 6} more)" if len(high_scope_ev) > 6 else ""
+    detail = "; ".join(high_scope[:6]) + (
+        f" (+{len(high_scope) - 6} more)" if len(high_scope) > 6 else ""
     )
     return _finding(
         "B176",
@@ -3919,7 +3948,9 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
             if verdict:
                 observed_canonical += 1
             else:
-                env_bad.append(f"{name}={raw!r} ({origin}) repoints {what}")
+                env_bad.append(
+                    f"{name}={raw!r} ({_detail_path(origin, ctx.home)}) repoints {what}"
+                )
             # The dist's ladder is first-non-empty-wins, so a set variable makes the rest of
             # its own pair unreachable. Reporting the shadowed one too would be a finding
             # about a value the product never reads.
@@ -4293,7 +4324,9 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
             except OSError:
                 present = False
             if not present:
-                missing.append(f"{label}: '{d}' declared but not present on disk")
+                missing.append(
+                    f"{label}: '{_detail_path(d, ctx.home)}' declared but not present on disk"
+                )
 
     seen: set = set()
     for rel in [""] + list(WORKSPACE_DIRS):
@@ -4321,7 +4354,8 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
             if gone and str(p) not in seen:
                 seen.add(str(p))
                 missing.append(
-                    f".clawhub/lock.json: skill '{slug}' skillFile dir gone ({p.parent})"
+                    f".clawhub/lock.json: skill '{slug}' skillFile dir gone "
+                    f"({_detail_path(p.parent, ctx.home)})"
                 )
 
     if not missing:
