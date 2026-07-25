@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from dataclasses import replace as dc_replace
 from pathlib import Path
 from urllib.parse import urlparse
@@ -52,9 +53,32 @@ from .skillast import analyze_env_auth_kwarg_exfil, analyze_python
 
 # --------------------------------------------------------------------------- constants
 
+# The three verdict values a submitted entry may carry, severity-ascending. SINGLE
+# source of truth for BOTH halves of the judge cycle: the contract every packet item
+# advertises (_VERDICT_SCHEMA, right below) and the guard every submitted entry must
+# pass (_VALID_VERDICTS, further down). B-330: those two were written independently
+# and drifted -- the packet advertised {"answer": ["yes", "no"]} while _parse_verdicts
+# only ever accepted {"verdict": "SAFE"|"SUSPICIOUS"|"DANGEROUS"}, so a judge that
+# followed the packet's own declared schema had 100% of its verdicts silently dropped
+# by every consumer (--judged, --propose-ignore, --vet-judged). Deriving both names
+# from this one tuple makes that particular drift structurally impossible.
+#
+# Adopting "yes"/"no" as the wire vocabulary instead was considered and rejected: it
+# cannot express the SUSPICIOUS-vs-DANGEROUS distinction _ESCALATION_TARGET depends
+# on, so it would silently collapse the escalation ladder to a single rung.
+_VERDICT_VALUES = ("SAFE", "SUSPICIOUS", "DANGEROUS")
+
 # The schema every packet item's "verdict_schema" field carries — a fixed
-# contract the host agent's answer must conform to.
-_VERDICT_SCHEMA = {"answer": ["yes", "no"], "reason": "free text"}
+# contract the host agent's answer must conform to, and exactly the shape
+# _parse_verdicts accepts.
+_VERDICT_SCHEMA = {"verdict": list(_VERDICT_VALUES), "reason": "free text"}
+
+# The answer tail every question ends with, phrased in the SAME vocabulary
+# _VERDICT_SCHEMA declares so the prose and the machine-readable contract can never
+# tell a judge two different things. _restate_answer_tail rewrites the legacy
+# yes/no tail on question text this module borrows from another module (sar.py).
+_VERDICT_ANSWER_TAIL = "[SAFE / SUSPICIOUS / DANGEROUS + reason]"
+_LEGACY_YES_NO_TAIL = "[yes/no + reason]"
 
 # WARN-grade check ids with a documented false-negative-prone history: each is a
 # dual-use signal deliberately down-ranked from FAIL to WARN so a legitimate skill
@@ -81,34 +105,34 @@ _ID_QUESTIONS = {
            "(a possible secret/env value reaching a network call, a time-bomb / "
            "environment-gated sink, a soft content signal, or a bare notify-host "
            "post). Did you configure this skill to behave this way, and do you "
-           "trust the destination? [yes/no + reason]",
+           "trust the destination? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B100": "A setup/install section instructs pasting a remote-fetch command "
             "into a terminal (ClickFix pattern). Did you write or vet this "
-            "installer yourself? [yes/no + reason]",
+            "installer yourself? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B65": "A conditional 'if the user asks for X, then do Y' sleeper-trigger "
            "pattern was found. Is this hidden conditional behavior something "
-           "you intended? [yes/no + reason]",
+           "you intended? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B66": "A persona/role-override instruction (e.g. 'pretend you are ...') "
            "was found. Is this deliberate, and could it weaken the assistant's "
-           "policy hierarchy? [yes/no + reason]",
+           "policy hierarchy? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B99": "A shipped .pth file or sitecustomize/usercustomize module auto-runs "
            "on every Python interpreter start, not just on import. Is this "
-           "auto-execution genuinely required? [yes/no + reason]",
+           "auto-execution genuinely required? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B90": "A base64 payload only reassembles into a runnable command when "
            "string fragments split across this skill's files are joined. Is "
            "this a legitimate embedded asset, not a scanner-evasion payload? "
-           "[yes/no + reason]",
+           "[SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B102": "A base64 payload only reassembles into a runnable command when "
             "two file sections are joined at their boundary. Is this a "
             "legitimate embedded asset, not a scanner-evasion payload? "
-            "[yes/no + reason]",
+            "[SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B154": "A plaintext (non-base64) command reassembles from string literals "
             "split across this skill's files. Is this a legitimate pattern, "
-            "not a scanner-evasion payload? [yes/no + reason]",
+            "not a scanner-evasion payload? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B156": "A secret (token / credential / api_key) appears to be sent to an "
             "external or second-party destination with no secrecy, override, "
             "or trigger framing. Is that destination one you trust with this "
-            "secret? [yes/no + reason]",
+            "secret? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
 }
 
 # Plain-language attestation questions, keyed by the recovered ASTFinding rule.
@@ -117,28 +141,41 @@ _RULE_QUESTIONS = {
                     "into a network call, with no independent credential "
                     "signal nearby (so the engine did not escalate it). Is "
                     "this an intended upload/sync to a trusted destination? "
-                    "[yes/no + reason]",
+                    "[SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "TT_SSRF": "An externally-controlled value appears to flow into a "
                "network-fetch URL in this skill. Is the destination bounded "
                "to a trusted host, or could this reach an unexpected / "
-               "internal endpoint? [yes/no + reason]",
+               "internal endpoint? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "TT5_ARG_INJECTION": "External input appears to flow into a subprocess "
                          "call as a non-program argument (argument, not "
                          "command, injection). Are the arguments safely "
-                         "bounded? [yes/no + reason]",
+                         "bounded? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "DANGEROUS_SINK": "This skill calls a shell/exec-family sink directly, "
                       "with no independent credential/exfil signal nearby. Is "
                       "this expected of the skill's declared purpose? "
-                      "[yes/no + reason]",
+                      "[SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "ENV_AUTH_KWARG_EXFIL": "An environment-variable or agent-config secret is placed "
                             "in an auth-shaped keyword (headers/auth/cert) of a network "
                             "call — the normal way a skill authenticates to its own API, "
                             "but this destination was never independently reviewed. Do "
-                            "you recognize and trust this destination? [yes/no + reason]",
+                            "you recognize and trust this destination? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
 }
 
 
 # --------------------------------------------------------------------------- helpers
+
+def _restate_answer_tail(question: str) -> str:
+    """Restate a legacy ``[yes/no + reason]`` answer tail in the vocabulary this
+    packet's ``verdict_schema`` actually declares.
+
+    Only needed for question text this module borrows from ANOTHER module: sar.py
+    builds the B62 capability-mismatch question for its own SAR artifact, which has
+    its own consumers, so its tail is rewritten here at the packet boundary rather
+    than changed at the source. Every question this module owns already carries
+    _VERDICT_ANSWER_TAIL literally, so this is a no-op on those.
+    """
+    return question.replace(_LEGACY_YES_NO_TAIL, _VERDICT_ANSWER_TAIL)
+
 
 def _question_for(finding_id: str) -> str:
     """Plain-language attestation question for a finding id or ASTFinding rule.
@@ -157,7 +194,7 @@ def _question_for(finding_id: str) -> str:
         q = (
             f"Check {finding_id} could not be automatically resolved. Review "
             "this item in the full report and confirm whether it is expected "
-            "and trusted. [yes/no + reason]"
+            "and trusted. [SAFE / SUSPICIOUS / DANGEROUS + reason]"
         )
     return redact(q)
 
@@ -414,12 +451,16 @@ def _b62_items(ctx) -> list[dict]:
     items: list[dict] = []
     for sar in build_sars(ctx):
         mismatch_evidence = "; ".join(m["evidence"] for m in sar["mismatches"])
+        # B-330: sar.py phrases its question with the legacy yes/no tail for its own
+        # artifact; restate it here so this packet never advertises two contradictory
+        # answer contracts on the same item.
+        question = _restate_answer_tail(sar["question"])
         items.append({
             "finding_id": "B62",
             "target": sar["skill"],
-            "redacted_evidence": redact(mismatch_evidence) if mismatch_evidence else sar["question"],
+            "redacted_evidence": redact(mismatch_evidence) if mismatch_evidence else question,
             "engine_disposition": WARN,
-            "question": sar["question"],
+            "question": question,
             "verdict_schema": _VERDICT_SCHEMA,
         })
     return items
@@ -478,13 +519,65 @@ def render_judge_packet_json(ctx, findings, *, version: str) -> str:
 # panel's output for one audit's borderline band.
 _MAX_VERDICTS_BYTES = 2_000_000
 
-_VALID_VERDICTS = frozenset({"SAFE", "SUSPICIOUS", "DANGEROUS"})
+# Derived from the SAME tuple the packet advertises (see _VERDICT_VALUES) so the
+# contract shown to the judge and the guard applied to its answer can never drift.
+_VALID_VERDICTS = frozenset(_VERDICT_VALUES)
 
 _PRIORITY_BY_VERDICT = {
     "DANGEROUS": "treat as high priority",
     "SUSPICIOUS": "worth a closer look",
     "SAFE": "likely benign",
 }
+
+# What a usable verdicts entry looks like, restated for a human whose file just got
+# dropped. Deliberately points at the packet's own machine-readable field rather than
+# re-describing it in a second place that could itself drift.
+_VERDICT_CONTRACT_HINT = (
+    'each entry needs "finding_id" (string), "target" (string) and "verdict" '
+    "(one of " + " / ".join(_VERDICT_VALUES) + ") — exactly the packet item's own "
+    '"verdict_schema" field'
+)
+
+
+def _note(message: str) -> None:
+    """Emit a user-visible ``note:`` line — the same channel and prefix cli.py already
+    uses for flag-coherence notes.
+
+    Always stderr, never stdout: every consumer of this module renders a JSON
+    artifact to stdout, and a diagnostic must never corrupt it. Carries no
+    caller-supplied data (fixed text plus integer counts), so there is nothing here
+    for redact() to mask.
+    """
+    print(f"note: {message}", file=sys.stderr)
+
+
+def _payload_carries_content(raw) -> bool:
+    """True when a verdicts payload actually contained something.
+
+    An empty/whitespace-only string is the "nothing was submitted" case (cli.py also
+    passes ``""`` when the path could not be read), which must stay silent — the
+    diagnostic below exists to separate "0 of N applied" from "no verdicts
+    submitted", so firing it on a genuinely empty payload would defeat its purpose.
+    """
+    if isinstance(raw, str):
+        return bool(raw.strip())
+    return bool(raw)
+
+
+def _note_nothing_applied(raw, reason: str, *, hint: str = _VERDICT_CONTRACT_HINT) -> None:
+    """B-330: loudly report a NON-EMPTY verdicts payload that yielded zero usable
+    entries.
+
+    The defensive parse below never raises, which is right for untrusted input — but
+    silently returning ``{}`` made a wholly-rejected file indistinguishable from "no
+    verdicts submitted": every item still rendered "not yet reviewed by a judge" and
+    nothing anywhere said 0 of N had been applied. That is exactly how the packet's
+    own contract could contradict its parser for a whole release without anyone
+    noticing. Reporting is all this does — the parse result is unchanged.
+    """
+    if not _payload_carries_content(raw):
+        return
+    _note(f"verdicts payload produced no usable entries — {reason}. Nothing was applied; {hint}.")
 
 
 def _parse_verdicts(raw: str) -> dict:
@@ -495,17 +588,28 @@ def _parse_verdicts(raw: str) -> dict:
     shape, or an unrecognized verdict value each just drop that entry (or the
     whole parse) rather than error -- this data is advisory-only and must
     never be able to crash or otherwise perturb the audit itself.
+
+    B-330: dropping is no longer SILENT. Whenever a non-empty payload yields zero
+    usable entries, a ``note:`` line goes to stderr (never stdout, which carries the
+    JSON artifact). This is the single funnel all three consumers use -- ``--judged``,
+    ``--propose-ignore`` and ``--vet-judged`` -- so the diagnostic cannot be wired up
+    for one of them and forgotten for the others.
     """
     if not isinstance(raw, str) or len(raw.encode("utf-8", "surrogatepass")) > _MAX_VERDICTS_BYTES:
+        _note_nothing_applied(
+            raw, f"it is not text, or exceeds the {_MAX_VERDICTS_BYTES} byte bound")
         return {}
     try:
         data = json.loads(raw)
     except ValueError:
+        _note_nothing_applied(raw, "it is not valid JSON")
         return {}
     if not isinstance(data, dict):
+        _note_nothing_applied(raw, "its top-level value is not a JSON object")
         return {}
     entries = data.get("verdicts")
     if not isinstance(entries, list):
+        _note_nothing_applied(raw, 'it has no top-level "verdicts" array')
         return {}
     out: dict = {}
     for entry in entries:
@@ -517,6 +621,10 @@ def _parse_verdicts(raw: str) -> dict:
             continue
         votes = entry.get("votes")
         out[(fid, target)] = {"verdict": verdict, "votes": votes if isinstance(votes, dict) else None}
+    # An explicitly empty "verdicts": [] IS "no verdicts submitted" -- say nothing.
+    # Entries that were submitted and all rejected is the case worth shouting about.
+    if entries and not out:
+        _note_nothing_applied(raw, f"0 of {len(entries)} submitted entries were usable")
     return out
 
 
@@ -861,6 +969,15 @@ def escalate_vet_output(engine_output, verdicts_raw: str, *, target: str):
     if _verdicts_fingerprint_matches(verdicts_raw, _vet_run_fingerprint(target)):
         verdicts_map = _parse_verdicts(verdicts_raw)
     else:
+        # B-330: this rejection bypasses _parse_verdicts entirely, so it needs its own
+        # diagnostic -- a whole verdicts file discarded on a fingerprint mismatch was
+        # the most silent degrade of all.
+        _note_nothing_applied(
+            verdicts_raw,
+            'its top-level "targetFingerprint" is missing or does not match this run',
+            hint='copy the packet\'s own "targetFingerprint" value verbatim into the '
+                 "verdicts JSON",
+        )
         verdicts_map = {}
     new_attest_findings = _vet_attest_new_findings(_vet_target_name(target), verdicts_map)
     if isinstance(engine_output, list):

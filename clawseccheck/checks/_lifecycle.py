@@ -1888,10 +1888,24 @@ def check_secrets_provider_exec(ctx: Context) -> Finding:
     )
 
 
+# B-332: cap on how many matched advisory ids are surfaced in evidence/detail. The
+# table has grown past what fits comfortably in one line; a "showing N of M" note
+# makes truncation explicit instead of silently dropping ids. Matches the `[:20]`
+# precedent used elsewhere in this module for enumerable evidence lists.
+_B33_EVIDENCE_CAP = 20
+
+
 def check_known_vulns(ctx: Context) -> Finding:
     """B33 — Known-vulnerable OpenClaw version gate.
 
-    FAIL    — installed version <= a known-advisory's max_vulnerable_version_tuple.
+    FAIL    — installed version <= one or more known advisories' max_vulnerable_version_tuple.
+              Reports EVERY matching advisory (B-332) — not just the first row in table
+              order — and the `fix` targets the HIGHEST fixed_version across all matches,
+              since that is the only version that actually clears the finding. Returning on
+              the first match handed a far-behind user the OLDEST advisory's fixed version
+              as remediation: a version still vulnerable to every later advisory in the
+              table, turning the fix into a multi-step upgrade treadmill instead of a single
+              correct jump.
     PASS    — installed version is past all known advisory fixes.
     UNKNOWN — meta.lastTouchedVersion is missing or cannot be parsed.
     """
@@ -1917,22 +1931,43 @@ def check_known_vulns(ctx: Context) -> Finding:
             "and keep OpenClaw current.",
         )
 
-    for ghsa_id, max_vuln, fixed_ver, desc in _KNOWN_ADVISORIES:
-        if parsed <= max_vuln:
-            return _finding(
-                "B33",
-                FAIL,
-                f"OpenClaw {raw_ver} is affected by {ghsa_id}: {desc}. "
-                f"Versions <= {'.'.join(str(x) for x in max_vuln)} are vulnerable.",
-                f"Upgrade OpenClaw to >= {fixed_ver} to remediate {ghsa_id}.",
-                evidence=[ghsa_id],
-            )
+    # Collect EVERY matching row (table order is oldest-first, so this is already a
+    # deterministic, stable ordering across runs) rather than returning on the first.
+    matched = [row for row in _KNOWN_ADVISORIES if parsed <= row[1]]
+    if not matched:
+        return _finding(
+            "B33",
+            PASS,
+            f"OpenClaw {raw_ver} is at or past all known-advisory fixes.",
+            "Keep OpenClaw updated and re-check after new advisories are published.",
+        )
 
+    matched_ids = [ghsa_id for ghsa_id, _max_vuln, _fixed_ver, _desc in matched]
+    # The only version that actually clears the finding is the HIGHEST fixed_version
+    # across every matched advisory — a lower fixed_version leaves later advisories open.
+    highest_fixed_ver = max(
+        (fixed_ver for _ghsa_id, _max_vuln, fixed_ver, _desc in matched),
+        key=lambda v: _parse_version(v) or (),
+    )
+
+    n_total = len(matched_ids)
+    if n_total > _B33_EVIDENCE_CAP:
+        shown_ids = matched_ids[:_B33_EVIDENCE_CAP]
+        truncation_note = f" (showing {_B33_EVIDENCE_CAP} of {n_total})"
+    else:
+        shown_ids = matched_ids
+        truncation_note = ""
+
+    advisory_word = "advisory" if n_total == 1 else "advisories"
     return _finding(
         "B33",
-        PASS,
-        f"OpenClaw {raw_ver} is at or past all known-advisory fixes.",
-        "Keep OpenClaw updated and re-check after new advisories are published.",
+        FAIL,
+        f"OpenClaw {raw_ver} is affected by {n_total} known {advisory_word}: "
+        f"{', '.join(shown_ids)}{truncation_note}.",
+        f"Upgrade OpenClaw to >= {highest_fixed_ver} to remediate "
+        f"{'this advisory' if n_total == 1 else f'all {n_total} matched advisories'} "
+        "in a single upgrade.",
+        evidence=shown_ids,
     )
 
 

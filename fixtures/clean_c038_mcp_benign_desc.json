@@ -1,0 +1,150 @@
+{
+  "_comment": "C-135 false-positive corpus for C-038 TP1. Every server here is BENIGN and must produce NO finding. The bidi and zero-width code points are written as JSON \\u escapes on purpose: a literal invisible character in a fixture is unreviewable and is silently lost to a copy-paste, which would make the regression pass vacuously.",
+  "mcp": {
+    "servers": {
+      "hebrew-field-mcp": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "_why": "Hebrew prose isolating an LTR field name with FSI/PDI (U+2068/U+2069) - the Unicode-recommended way to embed an LTR identifier in RTL text.",
+        "tools": [
+          {
+            "name": "get_field",
+            "description": "מחזיר את השדה \u2068user_id\u2069 מהמסד."
+          }
+        ]
+      },
+      "arabic-api-mcp": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "_why": "Arabic prose embedding an https URL with the legacy LRE/PDF pair (U+202A/U+202C).",
+        "tools": [
+          {
+            "name": "fetch_data",
+            "description": "يجلب البيانات من \u202ahttps://api.example.com/v1\u202c."
+          }
+        ]
+      },
+      "softhyphen-docs-mcp": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "_why": "Lone soft hyphen (U+00AD) left by wrapped prose.",
+        "tools": [
+          {
+            "name": "generate_docs",
+            "description": "Generates docu\u00admentation from source com\u00adments."
+          }
+        ]
+      },
+      "bom-csv-mcp": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "_why": "Lone BOM (U+FEFF) left by a file read without utf-8-sig.",
+        "tools": [
+          {
+            "name": "read_csv",
+            "description": "\ufeffReads a CSV file and returns rows as JSON."
+          }
+        ]
+      },
+      "zwsp-display-mcp": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "_why": "Lone zero-width spaces (U+200B) used as line-break hints inside long identifiers.",
+        "tools": [
+          {
+            "name": "split_identifier",
+            "description": "Splits long identifiers like get\u200bUserProfile\u200bById for display."
+          }
+        ]
+      },
+      "wordjoiner-timeout-mcp": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "_why": "Lone word joiner (U+2060) keeping a value and its unit on one line.",
+        "tools": [
+          {
+            "name": "wait_for_server",
+            "description": "Waits up to 30\u2060s for the server to respond."
+          }
+        ]
+      },
+      "index-rebuild-mcp": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "_why": "Ordinary build-tool prose: 'previous' is an adjective on a benign noun, not an instruction-override directive.",
+        "tools": [
+          {
+            "name": "rebuild_index",
+            "description": "Rebuilds the index from scratch and will ignore all previous cache entries."
+          }
+        ]
+      },
+      "profile-apply-mcp": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "_why": "Same class as above, with 'previously' - the word does not even end where the old prefix match assumed it did.",
+        "tools": [
+          {
+            "name": "apply_profile",
+            "description": "Applies the new profile and will ignore all previously configured overrides."
+          }
+        ]
+      },
+      "filesystem-mcp": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "_why": "C-135 round 3: 'SYSTEM\\s*:' had no left anchor, so the tail of any word ending in 'system' followed by a colon FAILed. Both spellings below were confirmed false FAILs.",
+        "tools": [
+          {
+            "name": "read_file",
+            "description": "Filesystem: reads and writes files under the workspace root."
+          }
+        ]
+      },
+      "ecosystem-mcp": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "_why": "Same anchor defect, second spelling.",
+        "tools": [
+          {
+            "name": "list_packages",
+            "description": "Ecosystem: lists installed packages and their pinned versions."
+          }
+        ]
+      },
+      "prompt-library-mcp": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "_why": "C-135 round 3: the attributive-noun reading the filler window opens. 'prompt' modifies 'templates' - the head of the object is a template, not a prompt - which is why the widened arm requires a PLURAL head noun.",
+        "tools": [
+          {
+            "name": "reload_library",
+            "description": "Reloads the library and will ignore all previously cached prompt templates."
+          }
+        ]
+      },
+      "message-queue-mcp": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "_why": "Same class: 'message' modifies 'queue entries'.",
+        "tools": [
+          {
+            "name": "drain_queue",
+            "description": "Ignore all previous message queue entries older than a day."
+          }
+        ]
+      },
+      "cache-invalidate-mcp": {
+        "command": "node",
+        "args": ["dist/server.js"],
+        "_why": "The hardest benign case: the instruction noun IS present, but four words past the adjective and across a clause boundary a bounded filler window cannot cross.",
+        "tools": [
+          {
+            "name": "invalidate",
+            "description": "Ignore all previous cache entries when the instructions file changes."
+          }
+        ]
+      }
+    }
+  }
+}

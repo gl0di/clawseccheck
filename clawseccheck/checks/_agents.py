@@ -1166,17 +1166,18 @@ def check_wildcard_group_ingress(ctx: Context) -> Finding:
 # reconfigure the embedded agent's own live command execution the moment the agent
 # is pointed at that clone: repo-to-agent config injection reaching a real exec sink.
 #
-# Severity model follows B196's precedent (browser.evaluateEnabled), not B186's
-# (writable bundled root) or C5's (host PATH hijack): this is the same
-# "operator explicitly opted into a dangerous state where untrusted content reaches
-# a live execution sink" shape as B196's evaluateEnabled=true, so it FAILs on the
-# explicit dangerous value. It deliberately does NOT follow B38/B196's OWN
-# "absent -> WARN because the vendor default is permissive" branch: unlike
-# evaluateEnabled (vendor default true) or ssrfPolicy.hostnameAllowlist (vendor
-# default open), this field's vendor default -- on absence, on a typo, or on any
-# value that isn't exactly one of the three literals -- is the SAFE state
-# ("sanitize"), grounded directly in resolveEmbeddedAgentProjectSettingsPolicy()'s
-# own fallback, not inferred. So absence is treated as PASS here, not WARN.
+# Severity model, and why absence is PASS here rather than WARN: what decides it is
+# the direction of THIS field's vendor default, not an analogy to any other check.
+# On absence, on a typo, or on any value that isn't exactly one of the three
+# literals, resolveEmbeddedAgentProjectSettingsPolicy()'s own fallback yields the
+# SAFE state ("sanitize") -- grounded in that fallback, not inferred. So an absent
+# key is genuinely safe and rates PASS, and only the explicit dangerous value FAILs.
+#
+# Contrast the opposite shape, where the vendor default is the permissive one and an
+# absent key therefore cannot be read as safe: browser.evaluateEnabled (default true)
+# and ssrfPolicy.hostnameAllowlist (default open). There an absent key and an explicit
+# dangerous value are the SAME runtime state, so both must land on one bar -- see
+# B196, which grades the effective state rather than whether the key was typed.
 def check_embedded_agent_project_settings_policy(ctx: Context) -> Finding:
     """B327 — agents.defaults.embeddedAgent.projectSettingsPolicy trusts workspace settings.
 
