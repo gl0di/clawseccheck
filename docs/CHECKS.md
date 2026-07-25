@@ -381,6 +381,30 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - config: `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork` = `false` - block private-network requests from the browser tool
 
+### B195 - browser.extraArgs dangerous Chrome launch flags
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Browser / SSRF
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: browser.extraArgs dangerous Chrome launch flags
+- Remediation:
+  - config: `browser.extraArgs` - remove --disable-web-security / --load-extension / a non-loopback --remote-debugging-address / unreviewed --proxy-server
+
+### B196 - browser.evaluateEnabled arbitrary-JS sink
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Browser / SSRF
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: browser.evaluateEnabled arbitrary-JS sink
+- Remediation:
+  - config: `browser.evaluateEnabled` = `false` - disable the browser's arbitrary-JS evaluate sink unless a workflow genuinely requires it
+
 ### B155 - Outbound proxy hardening (credential leak / TLS-verify / SSRF-guard bypass)
 
 - Severity: HIGH
@@ -490,6 +514,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: LLM03 Supply Chain
 - What it checks: security.installPolicy.* operator gate + exec-hook escape flags
+- Remediation:
+  - none
+
+### B194 - secrets.providers.* exec-source escape flags (allowInsecurePath/allowSymlinkCommand)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain / Install Policy
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: secrets.providers.* exec-source escape flags (allowInsecurePath/allowSymlinkCommand)
 - Remediation:
   - none
 

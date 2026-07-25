@@ -350,6 +350,24 @@ CATALOG: list[CheckMeta] = [
         "Browser / SSRF",
         surface="sessions",
     ),
+    # B195/B196 (E-060 items 2/3): browser.extraArgs and browser.evaluateEnabled are
+    # both untouched by B38, which only reads browser.ssrfPolicy.*/browser.noSandbox.
+    CheckMeta(
+        "B195",
+        "browser.extraArgs dangerous Chrome launch flags",
+        HIGH,
+        "hardening",
+        "Browser / SSRF",
+        surface="sessions",
+    ),
+    CheckMeta(
+        "B196",
+        "browser.evaluateEnabled arbitrary-JS sink",
+        HIGH,
+        "hardening",
+        "Browser / SSRF",
+        surface="sessions",
+    ),
     CheckMeta(
         "B155",
         "Outbound proxy hardening (credential leak / TLS-verify / SSRF-guard bypass)",
@@ -453,6 +471,19 @@ CATALOG: list[CheckMeta] = [
         "Supply Chain / Install Policy",
         confidence="HIGH",
         surface="skills",
+    ),
+    # B194 (E-060 item 1): secrets.providers.<name> source:"exec" -- a distinct config
+    # subtree from B174's security.installPolicy.exec. This command runs on every
+    # secret RESOLVE, not just install/update, with the resolved credential in hand.
+    # Mirrors B174's allowInsecurePath/allowSymlinkCommand/trustedDirs/passEnv logic.
+    CheckMeta(
+        "B194",
+        "secrets.providers.* exec-source escape flags (allowInsecurePath/allowSymlinkCommand)",
+        HIGH,
+        "hardening",
+        "Supply Chain / Install Policy",
+        confidence="HIGH",
+        surface="secrets",
     ),
     # Attestation layer (v0.26.0) — enriched by the agent's self-report (--attest).
     # ATTESTED confidence: weaker than a config fact; advisory (not scored) so the
@@ -2343,6 +2374,7 @@ AST_MAP = {
     "B24": ("AST02",),
     "B42": ("AST02",),
     "B174": ("AST02",),
+    "B194": ("AST02",),
     "C5": ("AST02",),
     "C047": ("AST02",),
     "B3": ("AST03",),
@@ -2404,6 +2436,8 @@ AST_MAP = {
     "B57": ("AST02", "AST03"),
     # Orphan-check fills (coverage-map P3): each mirrors a named sibling's AST class.
     "B38": ("AST06",),  # headless browser without OS sandbox = Weak Isolation (cf. B4)
+    "B195": ("AST06",),  # extraArgs disables same-origin/loads extensions = Weak Isolation
+    "B196": ("AST06",),  # arbitrary-JS eval sink reachable from page content = Weak Isolation
     "B73": ("AST06",),  # mDNS full advertise on non-loopback exposes the agent (cf. B70)
     "B74": ("AST05",),  # forged role/provenance = untrusted external instructions (cf. B64)
     "B76": ("AST03",),  # MCP tool-inheritance bypass = over-privileged reach (cf. B75)
@@ -2500,6 +2534,7 @@ OWASP_MAP = {
     "B41": ("LLM02", "LLM06"),
     "B42": ("LLM03",),
     "B174": ("LLM03",),
+    "B194": ("LLM03",),
     "B43": ("LLM06",),
     "B44": ("LLM06",),
     "B45": ("LLM06",),
@@ -2673,6 +2708,26 @@ REMEDIATION = {
                 "path": "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork",
                 "set": False,
                 "note": "block private-network requests from the browser tool",
+            }
+        ]
+    },
+    "B195": {
+        "config": [
+            {
+                "path": "browser.extraArgs",
+                "set": None,
+                "note": "remove --disable-web-security / --load-extension / a "
+                "non-loopback --remote-debugging-address / unreviewed --proxy-server",
+            }
+        ]
+    },
+    "B196": {
+        "config": [
+            {
+                "path": "browser.evaluateEnabled",
+                "set": False,
+                "note": "disable the browser's arbitrary-JS evaluate sink unless a "
+                "workflow genuinely requires it",
             }
         ]
     },

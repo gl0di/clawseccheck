@@ -1765,6 +1765,129 @@ def check_install_policy_gate(ctx: Context) -> Finding:
     )
 
 
+def check_secrets_provider_exec(ctx: Context) -> Finding:
+    """B194 — secrets.providers.<name> with source:"exec" escape flags (E-060 item 1).
+
+    A distinct config subtree from B174's security.installPolicy.exec: this command
+    runs on every secret RESOLVE (not just install/update), with the resolved
+    credential in hand once it returns. Mirrors B174's allowInsecurePath/
+    allowSymlinkCommand/trustedDirs/passEnv logic against secrets.providers.* instead.
+
+    FAIL    — an exec-source provider has allowInsecurePath=true with no trustedDirs.
+    WARN    — allowInsecurePath=true scoped by trustedDirs; or allowSymlinkCommand=true
+              alone; or a secret-shaped name in passEnv.
+    PASS    — exec-source provider(s) configured with none of the above escape flags.
+    UNKNOWN — no secrets.providers block, or no provider uses source:"exec".
+    """
+    unreadable = _config_unreadable("B194", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    providers = dig(ctx.config, "secrets.providers")
+    if not isinstance(providers, dict) or not providers:
+        return _finding(
+            "B194",
+            UNKNOWN,
+            "No secrets.providers configured -- nothing to assess for exec-source "
+            "command execution on secret resolve.",
+            "If you configure a secrets.providers.<name> with source:\"exec\", scope "
+            "it with a non-empty trustedDirs and avoid allowInsecurePath/"
+            "allowSymlinkCommand.",
+        )
+
+    # The schema also has a source:"exec" + pluginIntegration variant with no `command`
+    # field at all (a different, plugin-owned execution path) -- only the bare
+    # command-based shape has the writable-path/symlink escape surface this check models.
+    exec_providers = {
+        name: spec
+        for name, spec in providers.items()
+        if isinstance(spec, dict) and spec.get("source") == "exec" and "command" in spec
+    }
+    if not exec_providers:
+        return _finding(
+            "B194",
+            UNKNOWN,
+            "secrets.providers configured but none use a command-based "
+            "source:\"exec\" -- nothing to assess for exec-source command execution.",
+            "—",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+    for name, spec in exec_providers.items():
+        insecure_path = spec.get("allowInsecurePath") is True
+        symlink_command = spec.get("allowSymlinkCommand") is True
+        trusted_dirs = spec.get("trustedDirs")
+        has_trusted_dirs = isinstance(trusted_dirs, list) and any(
+            isinstance(d, str) and d.strip() for d in trusted_dirs
+        )
+
+        if insecure_path and not has_trusted_dirs:
+            fail_ev.append(
+                f"secrets.providers.{name}.allowInsecurePath=true with no trustedDirs "
+                "-- any filesystem path is accepted with zero verification, and this "
+                "command runs on every secret resolve"
+            )
+        elif insecure_path:
+            warn_ev.append(
+                f"secrets.providers.{name}.allowInsecurePath=true skips the exec "
+                "command's own permission/ownership checks, scoped only by trustedDirs"
+            )
+        if symlink_command:
+            warn_ev.append(
+                f"secrets.providers.{name}.allowSymlinkCommand=true lets the exec "
+                "target be a symlink (the resolved target's own permissions are what "
+                "actually runs)"
+            )
+
+        pass_env = spec.get("passEnv")
+        if isinstance(pass_env, list):
+            secret_names = [
+                str(k) for k in pass_env if isinstance(k, str) and SECRET_KEY_RE.search(k)
+            ]
+            if secret_names:
+                warn_ev.append(
+                    f"secrets.providers.{name}.passEnv forwards secret-shaped host env "
+                    "var name(s): " + ", ".join(secret_names[:6])
+                )
+
+    if fail_ev:
+        ev = fail_ev + warn_ev
+        return _finding(
+            "B194",
+            FAIL,
+            f"{len(exec_providers)} secrets provider(s) use a command-based "
+            f"source:\"exec\"; {len(fail_ev)} have an unrestrained allowInsecurePath "
+            "escape -- see evidence.",
+            "Remove allowInsecurePath (or set it to false) on the named provider(s), "
+            "or scope it with a non-empty trustedDirs naming only directories you have "
+            "independently verified are trusted -- this command runs on every secret "
+            "resolve, not just install time.",
+            evidence=ev[:6],
+        )
+    if warn_ev:
+        return _finding(
+            "B194",
+            WARN,
+            f"{len(exec_providers)} secrets provider(s) use a command-based "
+            "source:\"exec\" with a narrowed escape flag or secret-shaped passEnv "
+            "forwarding -- see evidence.",
+            "Confirm every trustedDirs entry is non-writable by other users; avoid "
+            "allowSymlinkCommand; forward only the specific env vars the exec command "
+            "actually needs.",
+            evidence=warn_ev[:6],
+        )
+    return _finding(
+        "B194",
+        PASS,
+        f"{len(exec_providers)} secrets provider(s) use a command-based "
+        "source:\"exec\" with no unrestrained allowInsecurePath escape, "
+        "allowSymlinkCommand, or secret-shaped passEnv forwarding detected.",
+        "Keep exec-source secret provider commands owner-only and re-review "
+        "trustedDirs whenever the provider configuration changes.",
+    )
+
+
 def check_known_vulns(ctx: Context) -> Finding:
     """B33 — Known-vulnerable OpenClaw version gate.
 

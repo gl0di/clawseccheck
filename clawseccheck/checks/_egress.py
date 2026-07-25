@@ -207,6 +207,230 @@ def check_browser_ssrf(ctx: Context) -> Finding:
     )
 
 
+# B195 (E-060 item 2): flags matched by exact pre-'=' token, never substring -- e.g.
+# "--proxy-server-bypass-list" must not match "--proxy-server" (C-135 guidance). Matched
+# case-INsensitively: Chromium's base::CommandLine lowercases every switch name during
+# its own parsing (base::ToLowerASCII()), so "--DISABLE-WEB-SECURITY" is functionally
+# identical to "--disable-web-security" to real Chrome -- confirmed via a live C-135
+# adversarial pass (2026-07-25) that also found OpenClaw's own chromeArgName() helper
+# (chrome-DDq_K3xu.js:156-158) already lowercases before its internal proxy-arg checks,
+# corroborating the same behaviour from the OpenClaw side. Dict keys stay lowercase
+# canonical; the *reported* evidence still quotes the flag as the operator wrote it.
+_EXTRA_ARGS_FAIL_FLAGS = {
+    "--disable-web-security": (
+        "disables the browser's same-origin policy entirely -- any page can read "
+        "any other origin's cookies/DOM/responses"
+    ),
+    "--load-extension": (
+        "loads an arbitrary Chrome extension at launch -- an extension has broader "
+        "page/cookie/network access than the page content itself"
+    ),
+}
+# --proxy-auto-detect and --proxy-pac-url join --proxy-server in OpenClaw's own
+# PROXY_ROUTING_CHROME_ARGS set (chrome-DDq_K3xu.js:161-163, grounded via a C-135 pass,
+# 2026-07-25) -- all three flip resolveBrowserNavigationProxyMode() to
+# "explicit-browser-proxy" and all three suppress OpenClaw's own defensive
+# --no-proxy-server injection. B195 originally covered only --proxy-server.
+_EXTRA_ARGS_WARN_FLAGS = {
+    "--proxy-server": (
+        "reroutes all browser traffic through the configured proxy -- confirm the "
+        "target is trusted"
+    ),
+    "--proxy-auto-detect": (
+        "enables Chrome's automatic proxy detection (WPAD) -- on an untrusted network "
+        "WPAD can be spoofed to redirect browser traffic through an attacker proxy"
+    ),
+    "--proxy-pac-url": (
+        "points the browser at a proxy auto-config (PAC) script -- confirm the URL is "
+        "trusted, since a malicious PAC script can redirect arbitrary traffic through "
+        "an attacker-controlled proxy"
+    ),
+}
+
+
+def _remote_debug_host_is_loopback(value: str) -> bool:
+    """True when *value* (a --remote-debugging-address argument value) is loopback or
+    "localhost" -- accounting for an IPv4 host:port suffix, a bracketed IPv6 [::1]:port
+    form, and a bare full-form IPv6 loopback (0:0:0:0:0:0:0:1) -- all of which Chrome's
+    own address parser accepts and a C-135 adversarial pass (2026-07-25) found the
+    original bare `{"127.0.0.1","localhost","::1"}` set false-FAILed on."""
+    host = value.strip()
+    if host.lower() == "localhost":
+        return True
+    if host.startswith("["):
+        end = host.find("]")
+        if end != -1:
+            host = host[1:end]
+    elif host.count(":") == 1:
+        candidate, _, port = host.rpartition(":")
+        if port.isdigit():
+            host = candidate
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def check_browser_extra_args(ctx: Context) -> Finding:
+    """B195 — browser.extraArgs dangerous Chrome launch flags (E-060 item 2).
+
+    browser.extraArgs is pushed verbatim into the Chrome launch command with no
+    validation -- unlike B38's own ssrfPolicy/noSandbox keys, nothing here is
+    interpreted by OpenClaw first.
+
+    FAIL    — a flag in _EXTRA_ARGS_FAIL_FLAGS is present, OR
+              --remote-debugging-address is bound to a non-loopback address (0.0.0.0,
+              ::, or any host _remote_debug_host_is_loopback() doesn't recognize) --
+              an unauthenticated CDP debug port reachable off-host.
+    WARN    — a flag in _EXTRA_ARGS_WARN_FLAGS is present, OR
+              --remote-debugging-address is loopback-bound (still an unauthenticated
+              local debug port, but not remotely reachable).
+    PASS    — extraArgs is absent/empty, or contains no matched flag.
+    UNKNOWN — no browser config (not applicable).
+
+    Flag matching is case-insensitive (Chromium's own base::CommandLine lowercases
+    every switch name it parses); --remote-debugging-address host classification
+    normalizes an IPv4 host:port suffix and bracketed/bare IPv6 loopback forms before
+    checking .is_loopback (grounded by a C-135 pass, 2026-07-25).
+    """
+    browser = ctx.config.get("browser")
+    if not isinstance(browser, dict):
+        return _finding(
+            "B195",
+            UNKNOWN,
+            "No browser config — extraArgs not applicable.",
+            "—",
+        )
+
+    extra_args = browser.get("extraArgs")
+    if not isinstance(extra_args, list) or not extra_args:
+        return _finding(
+            "B195",
+            PASS,
+            "browser.extraArgs is absent or empty — no extra Chrome launch flags configured.",
+            "—",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+    for raw in extra_args:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        arg = raw.strip()
+        flag, _, value = arg.partition("=")
+        flag_lower = flag.lower()
+
+        if flag_lower in _EXTRA_ARGS_FAIL_FLAGS:
+            fail_ev.append(f"browser.extraArgs has {flag!r} — {_EXTRA_ARGS_FAIL_FLAGS[flag_lower]}")
+            continue
+        if flag_lower == "--remote-debugging-address":
+            if _remote_debug_host_is_loopback(value):
+                warn_ev.append(
+                    f"browser.extraArgs has {arg!r} — opens an unauthenticated Chrome "
+                    "DevTools Protocol debug port on loopback"
+                )
+            else:
+                fail_ev.append(
+                    f"browser.extraArgs has {arg!r} — binds the Chrome DevTools "
+                    "Protocol debug port to a non-loopback address, reachable "
+                    "off-host with no authentication"
+                )
+            continue
+        if flag_lower in _EXTRA_ARGS_WARN_FLAGS:
+            warn_ev.append(f"browser.extraArgs has {flag!r} — {_EXTRA_ARGS_WARN_FLAGS[flag_lower]}")
+
+    if fail_ev:
+        return _finding(
+            "B195",
+            FAIL,
+            f"browser.extraArgs contains {len(fail_ev)} dangerous Chrome launch "
+            "flag(s) — see evidence.",
+            "Remove the dangerous flag(s) from browser.extraArgs; if remote "
+            "debugging is required, bind --remote-debugging-address to 127.0.0.1 "
+            "explicitly rather than leaving it unbound or open to all interfaces.",
+            evidence=(fail_ev + warn_ev)[:6],
+        )
+    if warn_ev:
+        return _finding(
+            "B195",
+            WARN,
+            f"browser.extraArgs contains {len(warn_ev)} flag(s) with a real but "
+            "lower-certainty risk — see evidence.",
+            "Review the flagged entries; confirm any --proxy-server target is "
+            "trusted and keep --remote-debugging-address loopback-bound.",
+            evidence=warn_ev[:6],
+        )
+    return _finding(
+        "B195",
+        PASS,
+        f"browser.extraArgs is configured with {len(extra_args)} flag(s), none "
+        "matching a known-dangerous pattern.",
+        "Keep browser.extraArgs free of --disable-web-security, --load-extension, "
+        "a non-loopback --remote-debugging-address, and unreviewed --proxy-server "
+        "entries.",
+    )
+
+
+def check_browser_evaluate_enabled(ctx: Context) -> Finding:
+    """B196 — browser.evaluateEnabled arbitrary-JS sink (E-060 item 3).
+
+    OpenClaw defaults this to true when the key is absent (grounded:
+    dist/config-DpWXcVmn.js:441 `cfg?.evaluateEnabled ?? true`, enforced at
+    dist/routes-VNv3nd0n.js:1274) -- every page the browser tool visits becomes an
+    arbitrary-JS execution sink reachable from content injected into that page.
+
+    FAIL    — evaluateEnabled is explicitly true (a deliberate opt-in to the sink).
+    WARN    — evaluateEnabled is absent — the vendor default is permissive (true),
+              but the operator never made an explicit choice; mirrors B38's own
+              absent-hostnameAllowlist treatment (open-by-default state is WARN,
+              not FAIL, in this module).
+    PASS    — evaluateEnabled is explicitly false.
+    UNKNOWN — no browser config at all (the browser tool is not in use).
+    """
+    browser = ctx.config.get("browser")
+    if not isinstance(browser, dict):
+        return _finding(
+            "B196",
+            UNKNOWN,
+            "No browser config — evaluateEnabled not applicable (browser tool not configured).",
+            "—",
+        )
+
+    evaluate_enabled = browser.get("evaluateEnabled")
+
+    if evaluate_enabled is False:
+        return _finding(
+            "B196",
+            PASS,
+            "browser.evaluateEnabled=false — the browser's arbitrary-JS evaluate "
+            "sink is disabled.",
+            "Keep browser.evaluateEnabled=false unless a specific workflow needs "
+            "page-JS evaluation.",
+        )
+
+    if evaluate_enabled is True:
+        return _finding(
+            "B196",
+            FAIL,
+            "browser.evaluateEnabled=true — every page the agent's browser tool "
+            "visits is an arbitrary-JS execution sink, reachable from content "
+            "injected into that page (browser-tool prompt-injection → code-exec).",
+            "Set browser.evaluateEnabled=false unless a specific workflow genuinely "
+            "requires page-JS evaluation; if it does, pair it with a tight "
+            "ssrfPolicy.hostnameAllowlist (B38) to limit which pages can reach the sink.",
+        )
+
+    return _finding(
+        "B196",
+        WARN,
+        "browser.evaluateEnabled is not set — OpenClaw defaults this to true, so "
+        "every page the agent's browser tool visits is an arbitrary-JS execution "
+        "sink by default unless explicitly disabled.",
+        "Set browser.evaluateEnabled=false explicitly unless a specific workflow "
+        "genuinely requires page-JS evaluation.",
+    )
+
+
 def check_outbound_proxy(ctx: Context) -> Finding:
     """B155 — Outbound proxy hardening (credential leak / TLS-verify / SSRF-guard bypass).
 

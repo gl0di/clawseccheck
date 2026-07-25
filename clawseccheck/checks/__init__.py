@@ -167,6 +167,8 @@ from ._egress import (
     _other_can_reach_read,
     _weak_allowlist_entries,
     check_browser_ssrf,
+    check_browser_extra_args,
+    check_browser_evaluate_enabled,
     check_outbound_proxy,
     check_provider_baseurl,
     check_cachetrace_redaction,
@@ -325,6 +327,7 @@ from ._lifecycle import (
     check_human_approval,
     check_install_policy,
     check_install_policy_gate,
+    check_secrets_provider_exec,
     check_known_vulns,
     check_memory_poisoning,
     check_memory_reconsumption_injection,
@@ -1249,6 +1252,9 @@ CHECKS = [
     check_plugin_tool_result_middleware,  # B187 — non-bundled plugin declares agentToolResultMiddleware (B-292, RT-2)
     check_bundled_root_override,  # B186 — bundled skills/hooks code-load root relocated by env override (B-289, ENV-3)
     check_unit_embedded_gateway_secret,  # B193 — gateway credential inlined in a systemd user unit (B-290, ENV-4)
+    check_secrets_provider_exec,  # B194 — secrets.providers.* exec-source escape flags (E-060 item 1)
+    check_browser_extra_args,  # B195 — browser.extraArgs dangerous Chrome launch flags (E-060 item 2)
+    check_browser_evaluate_enabled,  # B196 — browser.evaluateEnabled arbitrary-JS sink (E-060 item 3)
     # B191 (F-134, DISK-1) is DELIBERATELY NOT REGISTERED HERE. It is cataloged in
     # catalog.py and its function lives in checks/_host.py (§3.1 owning-module map), but
     # it runs ONLY under `--behavioral` (behavioral.analyze() calls check_audit_trail_
