@@ -673,7 +673,8 @@ def _main(argv=None) -> int:
                    help="pre-download reputation gate: vet the identity of a source (IOC / typosquat / "
                         "host heuristics) BEFORE fetching anything — zero network, bundled catalogs")
     p.add_argument("--vet-all", "--recursive", action="store_true", dest="vet_all",
-                   help="vet every installed skill under ~/.openclaw/skills/* (one verdict per skill + aggregate)")
+                   help="vet every installed skill across all discovered skill roots "
+                        "(~/.openclaw/skills, workspace/skills, …) — one verdict per skill + aggregate")
     p.add_argument("--advise", metavar="PATH", dest="advise",
                    help="INSTALL / CAUTION / DO-NOT-INSTALL recommendation for a quarantined "
                         "skill or plugin (dir autodetected same as --vet), with reasons + a "
