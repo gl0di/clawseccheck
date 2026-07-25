@@ -3081,3 +3081,191 @@ def check_shell_env_fallback(ctx: Context) -> Finding:
         "Keep it that way unless a specific workflow depends on profile-defined "
         "secrets or PATH customizations from the login shell.",
     )
+
+
+_B323_ENV_VAR_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def _b323_parse_env_token_at(value: str, index: int) -> "tuple[str, int] | None":
+    """Faithful port of OpenClaw's ``parseEnvTokenAt``
+    (``env-substitution-CATXLg7n.js:32-58``).
+
+    Returns ``("escaped", end)`` for a ``$${NAME}`` token, ``("substitution", end)``
+    for a ``${NAME}`` token, or ``None`` if *index* isn't the start of either --
+    including the case where ``NAME`` doesn't match OpenClaw's own
+    ``ENV_VAR_NAME_PATTERN`` (``/^[A-Z_][A-Z0-9_]*$/``, all-caps only) or the ``}``
+    is missing. *end* is the index of the closing ``}``.
+    """
+    if index >= len(value) or value[index] != "$":
+        return None
+    nxt = value[index + 1] if index + 1 < len(value) else ""
+    after_next = value[index + 2] if index + 2 < len(value) else ""
+    if nxt == "$" and after_next == "{":
+        start = index + 3
+        end = value.find("}", start)
+        if end != -1:
+            name = value[start:end]
+            if _B323_ENV_VAR_NAME_RE.match(name):
+                return ("escaped", end)
+    if nxt == "{":
+        start = index + 2
+        end = value.find("}", start)
+        if end != -1:
+            name = value[start:end]
+            if _B323_ENV_VAR_NAME_RE.match(name):
+                return ("substitution", end)
+    return None
+
+
+def _b323_contains_env_var_reference(value: str) -> bool:
+    """Faithful port of OpenClaw's ``containsEnvVarReference()``
+    (``env-substitution-CATXLg7n.js:102-112``).
+
+    Only an unescaped ``${ALL_CAPS_NAME}`` counts as a real, filtered reference.
+    An escaped ``$${NAME}`` token, or a ``${...}``-shaped token whose name is not
+    all-caps (lowercase/mixed-case, digit-leading, etc.) or is missing its closing
+    ``}``, does NOT count -- OpenClaw's own ``isConfigRuntimeEnvVarAllowed()`` does
+    not block those values; it applies them verbatim (literal ``$`` characters and
+    all) to the runtime environment. A naive ``"${" in value`` substring test
+    conflates these two cases and was found (C-135 adversarial pass) to silently
+    miss a config-declared literal PATH override that OpenClaw actually applies,
+    whenever the token merely *looks* like a substitution (e.g.
+    ``${systemRoot}:/opt/evil/bin`` -- mixed-case name, not a real reference, but
+    the naive check skipped it as if it were one).
+    """
+    if "$" not in value:
+        return False
+    i = 0
+    n = len(value)
+    while i < n:
+        if value[i] != "$":
+            i += 1
+            continue
+        token = _b323_parse_env_token_at(value, i)
+        if token is not None:
+            kind, end = token
+            if kind == "escaped":
+                i = end + 1
+                continue
+            if kind == "substitution":
+                return True
+        i += 1
+    return False
+
+
+def _b323_is_literal_path_override(key: object, value: object) -> bool:
+    """True if *key* normalizes to PATH and *value* is a literal, non-empty string.
+
+    "Literal" excludes a value containing a genuine, unresolved ``${ALL_CAPS}``
+    substitution reference -- see ``_b323_contains_env_var_reference()`` for the
+    faithful port of OpenClaw's own ``containsEnvVarReference()``
+    (``env-substitution-CATXLg7n.js:102-112``): OpenClaw itself never applies such a
+    value, so flagging it here would be a false positive on a config that merely
+    references another variable indirectly. A value that merely *contains* the
+    substring ``${`` without forming a real reference (wrong case, bad name, no
+    closing brace, or an escaped ``$${...}``) is NOT excluded -- OpenClaw applies
+    it verbatim, so it must still be flagged.
+    """
+    if not isinstance(key, str) or key.strip().upper() != "PATH":
+        return False
+    if not isinstance(value, str) or not value.strip():
+        return False
+    return not _b323_contains_env_var_reference(value)
+
+
+def check_env_vars_path_override(ctx: Context) -> Finding:
+    """B323 — env.vars.PATH / env.<KEY> catchall: an explicit PATH override.
+
+    Narrowed on grounding from the epic's original framing ("report any env.vars /
+    env.<KEY> catchall key OpenClaw's own blocklist doesn't already block"). Two
+    catchall shapes reach the process environment identically —
+    ``config-env-vars-DlUfO5Q_.js:43-59`` ``collectConfigEnvVarsByTarget()`` reads
+    ``env.vars.<KEY>`` (a Zod ``record(string(), string())``,
+    ``zod-schema-O9ml_nmo.js:1004``) AND any other ``env.<KEY>`` sibling except
+    ``shellEnv``/``vars`` (a Zod ``.catchall(string())`` on the ``env`` object itself,
+    ``zod-schema-O9ml_nmo.js:1005``) — and both funnel through the same
+    ``isBlockedConfigEnvVar()`` gate (``config-env-vars-DlUfO5Q_.js:36-38``), which
+    unions ``isDangerousHostEnvVarName()`` + ``isDangerousHostEnvOverrideVarName()``
+    (``host-env-security-CWC2ZCy4.js:5-316``, ~254 explicit keys + 7 prefixes + 1
+    regex — NODE_OPTIONS/PYTHONPATH/BASH_ENV/GIT_EXTERNAL_DIFF/RUSTC_WRAPPER/
+    SSLKEYLOGFILE/EDITOR/HOME/AWS_*/GH_TOKEN/etc.). That blocklist is comprehensive
+    enough that a check flagging every *other* residual key would false-WARN on the
+    feature's own legitimate purpose (arbitrary app/API-key vars) — a Golden Rule #5
+    violation. The one concrete, groundable gap is ``PATH`` itself: it does not
+    appear anywhere in ``blockedEverywhereKeys``/``blockedOverrideOnlyKeys``
+    (host-env-security-CWC2ZCy4.js:5-316) — the file's only literal ``"PATH"`` match
+    is inside ``sanitizeHostEnvOverridesWithDiagnostics()`` (:497), a *different*,
+    host-exec-override subsystem this config path never reaches.
+
+    WARN-only, never FAIL: whether a config-declared PATH has any effect depends on a
+    runtime fact this static auditor cannot observe. ``applyConfigEnvVars()``
+    (``config-env-vars-DlUfO5Q_.js:~118-152``) never overwrites a key that already
+    holds a non-empty value in the environment it is applied against, and every
+    grounded live call site (``pre-bootstrap-8G8HyMEQ.js:195,332``,
+    ``io-By0s-a_s.js:5267`` ``finalizeLoadedRuntimeConfig``,
+    ``call-Bj6Erfmh.js:79`` ``resolveGatewayDispatchEnvVars``) defaults to
+    ``process.env``, which always carries a non-empty ``PATH`` in a realistic launch
+    — so this is closer to C5's own "declared trust expansion, real-world
+    exploitability uncertain" WARN precedent (host-filesystem PATH/install-dir
+    hijacking) than to B186's narrow-and-deterministic writable-root FAIL. A value
+    containing an unresolved ``${...}`` substitution token is skipped, mirroring
+    ``containsEnvVarReference()`` (``env-substitution-CATXLg7n.js:102-112``) — the
+    config is referencing another variable indirectly, not hardcoding a literal path.
+
+    WARN    — ``env.vars.PATH`` or the ``env.<KEY>`` catchall sets a literal
+              (non-``${...}``) non-empty string value for a key that normalizes
+              (case-insensitively) to ``PATH``.
+    PASS    — no such entry.
+    UNKNOWN — no openclaw.json found, or present but unparseable/unreadable.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B323",
+            UNKNOWN,
+            "No openclaw.json found -- env.vars.PATH / env.<KEY> catchall PATH override "
+            "cannot be assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B323", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    env_cfg = ctx.config.get("env") if isinstance(ctx.config, dict) else None
+    hits: "list[str]" = []
+    if isinstance(env_cfg, dict):
+        vars_block = env_cfg.get("vars")
+        if isinstance(vars_block, dict):
+            for key, value in vars_block.items():
+                if _b323_is_literal_path_override(key, value):
+                    hits.append(f"env.vars.{key}={value!r}")
+        for key, value in env_cfg.items():
+            if key in ("shellEnv", "vars"):
+                continue
+            if _b323_is_literal_path_override(key, value):
+                hits.append(f"env.{key}={value!r}")
+
+    if hits:
+        return _finding(
+            "B323",
+            WARN,
+            "openclaw.json explicitly sets PATH via the env.vars / env.<KEY> catchall "
+            "mechanism (" + "; ".join(hits) + "). OpenClaw's own config-env-var "
+            "blocklist covers ~254 dangerous keys/prefixes but does not include PATH "
+            "itself, so this value is not filtered the way NODE_OPTIONS/PYTHONPATH/"
+            "BASH_ENV and similar keys are.",
+            "Confirm this is intentional. In practice it is usually inert -- OpenClaw "
+            "never overwrites an env var that already holds a non-empty value at the "
+            "point this is applied, and every normal launch already has a non-empty "
+            "PATH -- but a launcher that starts the agent with an empty or unset PATH "
+            "would let this value take effect unfiltered. Remove it unless there is a "
+            "specific, documented reason to override the agent's PATH.",
+            evidence=hits,
+        )
+
+    return _finding(
+        "B323",
+        PASS,
+        "No env.vars.PATH or env.<KEY> catchall PATH entry found in openclaw.json.",
+        "Keep it that way; if PATH customization is genuinely needed, prefer scoping "
+        "it narrowly (e.g. a per-tool wrapper) and reviewing it periodically.",
+    )

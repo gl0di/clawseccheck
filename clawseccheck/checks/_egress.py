@@ -6,6 +6,7 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 from __future__ import annotations
 import ipaddress
 import os
+import socket
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -2252,4 +2253,465 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         "No action needed. Isolated/low-confidence signals are intentionally not WARNed "
         "on individually (base-rate discipline) — see the Log Threat Report section for "
         "the suppressed count.",
+    )
+
+
+# ---------- B321: browser.executablePath / profiles.*.{executablePath,mcpCommand} ----------
+# Grounded directly against the installed dist (E-060 batch, 2026-07-25):
+#   resolveBrowserExecutableForPlatform (chrome.executables-DP_XzlNl.js:626-640) accepts
+#   a configured executablePath with only an fs.existsSync() gate -- no signature/
+#   identity check -- then launchOpenClawChrome (chrome-DDq_K3xu.js:1754-1802) spawns it
+#   directly: spawn(preparedSpawn.command, preparedSpawn.args, {...}). Whoever can
+#   overwrite that file, or replace it inside its directory, controls what OpenClaw
+#   actually launches. profile.executablePath falls back to browser.executablePath
+#   (chrome-DDq_K3xu.js:1649-1654 resolveBrowserExecutable).
+#
+#   Deliberately NOT implemented: an "executablePath looks outside the expected Chrome/
+#   Chromium install locations" heuristic. detectDefaultChromiumExecutable's own
+#   candidate lists (chrome.executables-DP_XzlNl.js:132-224) already show real installs
+#   vary enormously across distros/OSes (snap, Nix store, portable Chromium, custom
+#   prefixes are all legitimate) -- an unusual-location heuristic would be a Golden-Rule-
+#   #5 false-positive-FAIL waiting to happen. The writable-path signal below is the
+#   substitute: same real threat (a swappable binary), far lower false-positive risk.
+#
+#   Deliberately NOT implemented: resolving each profile's driver/attachOnly chain to
+#   suppress a FAIL on an executablePath that is schema-valid but currently inert (e.g.
+#   an existing-session profile, which never reaches spawn()). Skipping that refinement
+#   is a documented v1 choice, not an oversight: the writable-path signal is still true
+#   and worth surfacing even for a presently-inert field, since the profile could be
+#   reconfigured to a locally-launching driver later, and the check never claims the
+#   binary WILL launch -- only that it is configured and, if it does launch, is not
+#   tamper-proof.
+def check_browser_executable_path(ctx: Context) -> Finding:
+    """B321 — browser.executablePath / browser.profiles.*.{executablePath,mcpCommand}.
+
+    Two distinct sub-signals share this one check ID:
+
+    (A) executablePath (top-level and per-profile) — see the module comment above for
+        the grounding. FAIL-capable: a configured, existing path that is writable by
+        another local account is a real, narrow, deterministic escalation, closely
+        analogous to B186's writable-relocated-code-root precedent
+        (checks/_host.py check_bundled_root_override).
+    (B) profiles.<name>.mcpCommand (existing-session driver only) overrides the
+        subprocess binary OpenClaw hands the Chrome DevTools MCP session to —
+        normalizeChromeMcpOptions (chrome-mcp-BZM3Tb7R.js:174-183) passes it through
+        with zero validation of any kind (no trustedDirs-style scoping, no existence
+        check). The vendor default is itself an unpinned `npx -y
+        chrome-devtools-mcp@latest` (DEFAULT_CHROME_MCP_COMMAND/
+        DEFAULT_CHROME_MCP_PACKAGE_ARGS, chrome-mcp-BZM3Tb7R.js:35-36) — so an explicit,
+        non-default mcpCommand is at least as plausibly a *hardening* move (pinning a
+        known binary instead of trusting an unpinned npx auto-install) as a downgrade.
+        WARN-only, and `scored=False` on that specific branch (this check's CheckMeta
+        otherwise stays scored — see the FAIL branch above), mirroring B192/B324's
+        precedent for a legitimate, commonly-wanted customization a FAIL would punish.
+
+    FAIL    — a configured executablePath (top-level or any profile's) exists on disk
+              and either the file itself or its containing directory is group/world-
+              writable (non-sticky) by another local account
+              (checks/_shared._dir_replaceable_by_others on both the file and its
+              parent — the file-writable case lets another account overwrite the binary
+              in place; the parent-writable case lets another account replace the
+              directory entry, e.g. via rename/symlink, even if the file's own mode is
+              tight). Requires host-filesystem scanning; see UNKNOWN below when it is
+              off.
+    WARN    — an existing-session profile's mcpCommand is set to a non-default value
+              (scored=False on this branch — see (B) above).
+    PASS    — at least one executablePath was configured, host-scanned, and none is
+              writable by another account; no mcpCommand override found.
+    UNKNOWN — no browser config at all; OR browser is configured but neither an
+              executablePath (top-level or per-profile) nor an existing-session
+              mcpCommand override is set anywhere — nothing to assess; OR an
+              executablePath is configured but host-filesystem scanning is disabled
+              (ctx.include_host is False / --no-host) — mirrors C5's own --no-host gate
+              (checks/_capability.py check_path_safety): writability cannot be assessed
+              without stat()-ing the real path, and this check does not fall back to
+              reporting the independent mcpCommand signal alone in that specific run to
+              keep the "assessment incomplete" verdict unambiguous — a subsequent run
+              without --no-host (the CLI default) evaluates both signals normally.
+    """
+    browser = ctx.config.get("browser")
+    if not isinstance(browser, dict):
+        return _finding(
+            "B321",
+            UNKNOWN,
+            "No browser config — executablePath / mcpCommand not applicable.",
+            "—",
+        )
+
+    candidates: list[tuple[str, str]] = []
+    top_level_exe = browser.get("executablePath")
+    if isinstance(top_level_exe, str) and top_level_exe.strip():
+        candidates.append(("browser.executablePath", top_level_exe.strip()))
+
+    profiles = browser.get("profiles") if isinstance(browser.get("profiles"), dict) else {}
+    mcp_warn_ev: list[str] = []
+    for name, spec in profiles.items():
+        if not isinstance(spec, dict):
+            continue
+        exe = spec.get("executablePath")
+        if isinstance(exe, str) and exe.strip():
+            candidates.append((f"browser.profiles.{name}.executablePath", exe.strip()))
+        if spec.get("driver") == "existing-session":
+            mcp_cmd = spec.get("mcpCommand")
+            if isinstance(mcp_cmd, str) and mcp_cmd.strip() and mcp_cmd.strip() != "npx":
+                mcp_warn_ev.append(
+                    f"browser.profiles.{name}.mcpCommand={mcp_cmd.strip()!r} overrides "
+                    "the vendor default (npx -y chrome-devtools-mcp@latest) — OpenClaw "
+                    "does not validate this command/path before spawning it"
+                )
+
+    if not candidates and not mcp_warn_ev:
+        return _finding(
+            "B321",
+            UNKNOWN,
+            "browser is configured but no executablePath (top-level or per-profile) "
+            "and no existing-session mcpCommand override is set — nothing to assess.",
+            "—",
+        )
+
+    if candidates and not getattr(ctx, "include_host", False):
+        plural = "y" if len(candidates) == 1 else "ies"
+        return _finding(
+            "B321",
+            UNKNOWN,
+            f"{len(candidates)} configured executablePath entr{plural} found but "
+            "host-filesystem scanning is disabled (--no-host) — cannot assess whether "
+            "the target is writable by another local account.",
+            "Re-run without --no-host to assess executablePath writability.",
+        )
+
+    fail_ev: list[str] = []
+    for label, raw_path in candidates:
+        p = Path(raw_path).expanduser()
+        try:
+            found = p.exists()
+        except OSError:
+            found = False
+        if not found:
+            # Matches B186's own precedent: a configured-but-nonexistent path is
+            # silently not a finding here — OpenClaw's own exists() check surfaces a
+            # clear runtime error at launch time; that is a functionality issue, not a
+            # security one.
+            continue
+        why_file = _shared._dir_replaceable_by_others(p)
+        if why_file:
+            fail_ev.append(
+                f"{label}={p} is {why_file} — another local account can overwrite "
+                "this binary in place"
+            )
+        # C-135 regression (found in adversarial review, 2026-07-25): p.parent is
+        # purely syntactic (string-based) and does NOT follow a symlink chain, but
+        # p.stat() (inside _dir_replaceable_by_others(p) above, and inside p.exists())
+        # DOES follow symlinks -- so a configured executablePath that is itself a
+        # symlink (a common real-world install shape: distro packages, Nix profiles,
+        # asdf/mise shims, Playwright/Puppeteer browser caches) was checked against
+        # the SYMLINK's own containing directory, never against the resolved target
+        # file's real containing directory. A symlink sitting in a tight 0755
+        # directory but pointing at a binary inside a world-writable directory
+        # (e.g. a shared/cache dir on a multi-user host) passed this check with no
+        # evidence at all, even though any local account could replace the real
+        # binary the symlink resolves to. Path.resolve() follows the full chain (every
+        # intermediate component, not just the last hop); its parent is checked in
+        # addition to -- not instead of -- the original p.parent, since a writable
+        # symlink location is a real, independent replace vector too (an attacker
+        # could repoint the symlink itself, no target write access needed).
+        parents_to_check = {p.parent}
+        try:
+            real_p = p.resolve()
+        except (OSError, RuntimeError):
+            real_p = p
+        if real_p != p:
+            parents_to_check.add(real_p.parent)
+        for parent in sorted(parents_to_check, key=str):
+            why_parent = _shared._dir_replaceable_by_others(parent)
+            if why_parent:
+                via = " (via a symlink target)" if parent != p.parent else ""
+                fail_ev.append(
+                    f"{label}={p} — containing directory {parent} is {why_parent}"
+                    f"{via} — another local account can replace this binary"
+                )
+
+    if fail_ev:
+        return _finding(
+            "B321",
+            FAIL,
+            f"{len(fail_ev)} configured browser executable path(s) are writable by "
+            "another local account — see evidence.",
+            "Move the browser executable to a directory only its owner can write to "
+            "(0755/0700 with an owner-only-writable parent), or point "
+            "browser.executablePath at the OS-managed Chrome/Chromium install instead.",
+            evidence=(fail_ev + mcp_warn_ev)[:6],
+        )
+
+    if mcp_warn_ev:
+        return _finding(
+            "B321",
+            WARN,
+            f"{len(mcp_warn_ev)} existing-session browser profile(s) override the "
+            "Chrome DevTools MCP command from the vendor default — see evidence.",
+            "Confirm the configured mcpCommand points to a binary you trust; OpenClaw "
+            "does not validate it before spawning.",
+            evidence=mcp_warn_ev[:6],
+            scored=False,
+        )
+
+    return _finding(
+        "B321",
+        PASS,
+        f"{len(candidates)} configured browser executable path(s) checked — none "
+        "writable by another local account.",
+        "Keep browser.executablePath (and any per-profile override) pointed at a "
+        "directory only its owner can write to.",
+    )
+
+
+# ---------- B322: browser.profiles.*.{cdpUrl,userDataDir,driver:"existing-session"} ----------
+def _cdp_url_classify(url) -> str:
+    """Classify a browser.profiles.<name>.cdpUrl value: "loopback", "remote", or
+    "unparseable". A non-string/empty value classifies as "loopback" -- OpenClaw's own
+    normalizeExistingSessionCdpUrl (config-DpWXcVmn.js:323-343) defaults
+    cdpIsLoopback=True when the value is absent, and this check never FAILs on garbage
+    input (Golden Rule #5).
+
+    Mirrors OpenClaw's own isLoopbackHost (net-BOKtNTf8.js:219-224), which explicitly
+    treats 0.0.0.0 and :: as NOT loopback ("every interface", not local) -- the same
+    semantics this module's own LOOPBACK/_loopback_ip (checks/_shared.py) already
+    assume elsewhere (check_outbound_proxy, _mcp_url_is_local), so no cross-check drift.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return "loopback"
+    try:
+        parsed = urlparse(url.strip())
+        host = (parsed.hostname or "").lower()
+    except Exception:
+        return "unparseable"
+    if not host:
+        return "unparseable"
+    if host in LOOPBACK:
+        return "loopback"
+    # C-135 regression (found in adversarial review, 2026-07-25): OpenClaw's own
+    # cdpUrl normalization (normalizeExistingSessionCdpUrl, config-DpWXcVmn.js:326-342)
+    # parses the operator's string with JS `new URL()`, whose WHATWG host parser
+    # canonicalizes legacy/non-canonical numeric IPv4 forms -- shorthand ("127.1"),
+    # octal-looking ("0177.0.0.1"), zero-padded ("127.000.000.001"), and bare
+    # decimal/hex 32-bit values ("2130706433" / "0x7f000001") -- to their dotted-quad
+    # equivalent BEFORE storing cdpHost/cdpIsLoopback or re-serializing cdpUrl via
+    # `parsed.toString()` for the chrome-devtools-mcp handoff. Verified against Node's
+    # `new URL()` directly: all five forms above resolve to "127.0.0.1". So a config
+    # written as cdpUrl="http://127.1:9222" dials genuine loopback in the real
+    # product, but Python's stdlib `ipaddress` module (which backs LOOPBACK/
+    # _loopback_ip) deliberately rejects every one of those forms as non-canonical --
+    # without this fallback they all misclassified as "remote", producing a FAIL on a
+    # config that is not, in fact, remote (Golden Rule #5).
+    #
+    # socket.inet_aton() implements the same legacy BSD numeric-host parsing WHATWG's
+    # algorithm was modeled on (spot-checked against Node's output for the forms
+    # above -- identical results); used ONLY to re-test a host the strict path above
+    # already failed to place in LOOPBACK. If the canonicalized result is NOT
+    # loopback (a real routable address written in an unusual base), or inet_aton
+    # itself rejects the string (the common case: an ordinary DNS hostname), this
+    # deliberately falls through to "remote" unchanged -- so an actual remote host
+    # (a plain hostname, or a canonical dotted-quad public IP) is never reclassified
+    # away from "remote" by this fallback; it only ever *adds* a loopback verdict,
+    # never removes one.
+    try:
+        canonical = socket.inet_ntoa(socket.inet_aton(host))
+    except (OSError, UnicodeError):
+        pass
+    else:
+        if canonical in LOOPBACK:
+            return "loopback"
+    return "remote"
+
+
+def _cdp_url_display(url) -> str:
+    """scheme://host[:port] only -- never the full URL. OpenClaw's own redactCdpUrl
+    (browser-config-DCrASvM0.js:56-68) strips embedded username/password before any
+    diagnostic display, confirming OpenClaw itself treats cdpUrl as potentially
+    credential-bearing; this check goes further and drops the path/query too."""
+    try:
+        parsed = urlparse(str(url).strip())
+        host = parsed.hostname or "?"
+        port = f":{parsed.port}" if parsed.port else ""
+        scheme = parsed.scheme or "?"
+        return f"{scheme}://{host}{port}"
+    except Exception:
+        return "<unparseable>"
+
+
+def check_browser_existing_session_profile(ctx: Context) -> Finding:
+    """B322 — browser.profiles.*.{cdpUrl,userDataDir,driver:"existing-session"}.
+
+    driver:"existing-session" switches OpenClaw from launching its own managed Chrome to
+    spawning a third-party `chrome-devtools-mcp` subprocess (vendor default `npx -y
+    chrome-devtools-mcp@latest`, chrome-mcp-BZM3Tb7R.js:35-36) and handing it cdpUrl /
+    userDataDir as raw CLI args (chrome-mcp-BZM3Tb7R.js normalizeChromeMcpOptions /
+    buildChromeMcpConnectionArgs — confirmed against the installed dist). Two distinct
+    concerns live under this one check ID:
+
+    * userDataDir pointed at a real (non-dedicated) browser profile directory would hand
+      the agent live cookies/sessions from that profile — but OpenClaw's own field docs
+      frame userDataDir as normal usage for "Brave, Edge, Chromium, or non-default
+      Chrome profiles", and "is this the user's real daily-driver profile or a
+      dedicated automation profile" is not answerable from a bare path string without
+      an unsound heuristic (the two look identical on disk) — so userDataDir is
+      disclosed as WARN-tier context only, never a FAIL discriminator, and never used to
+      suppress or escalate the cdpUrl verdict below.
+    * cdpUrl is the FAIL discriminator: getBrowserProfileCapabilities()
+      (cdp-reachability-policy-BLdT5iz3.js:9-19) hardcodes isRemote:false for every
+      driver:"existing-session" profile; resolveCdpReachabilityPolicy() (same file,
+      :17-19) only requires an ssrfPolicy.hostnameAllowlist match when
+      capabilities.isRemote is true — so the allowlist requirement that would gate a
+      genuinely remote managed-Chrome ("openclaw" driver) connection never triggers for
+      an existing-session profile's cdpUrl, confirmed by direct dist read. That cdpUrl
+      is then handed to the third-party chrome-devtools-mcp subprocess as a raw CLI arg
+      (--wsEndpoint / --browserUrl) with no further OpenClaw-side loopback check at that
+      hand-off.
+
+    Scope, stated exactly (v1 — deliberately deferred, not an oversight): only
+    browser.profiles.<name>.cdpUrl is evaluated. The legacy top-level browser.cdpUrl ->
+    existing-session-default-profile migration path
+    (config-DpWXcVmn.js:426-437,479 applyLegacyCdpUrlToExistingSessionDefaultProfile —
+    fires only when browser.cdpUrl is a ws(s):// URL AND the resolved default profile is
+    driver:"existing-session" AND that profile has no cdpUrl of its own) is not
+    evaluated here; a profile relying solely on that legacy migration path is invisible
+    to this check.
+
+    "In effect" driver resolution: a profile counts as driver:"existing-session" when
+    either (a) browser.profiles.<name>.driver is explicitly "existing-session" — a real,
+    operator-written signal, since OpenClaw lets a tool call select any named profile at
+    runtime, not only the resolved default, so an explicitly-declared existing-session
+    profile is a latent activation regardless of browser.defaultProfile
+    (resolveProfile, config-DpWXcVmn.js:512-557) — or (b) browser.defaultProfile is
+    explicitly "user" and browser.profiles does not itself redefine "user" with another
+    driver. OpenClaw auto-creates a built-in driver:"existing-session", attachOnly:true
+    profile named "user" whenever the operator's config does not override it
+    (ensureDefaultUserBrowserProfile, config-DpWXcVmn.js:391-400) — but that built-in
+    profile stays dormant unless explicitly selected. The bare, never-selected existence
+    of the built-in profile is deliberately NOT flagged on its own — every browser
+    config would otherwise WARN, which would not be a real signal (see the module
+    docstring's own note on this default-dormant channel).
+
+    FAIL    — an in-effect existing-session profile's cdpUrl resolves to a non-loopback
+              host (`scored=True` override on this branch — this check's CheckMeta is
+              otherwise unscored, mirroring B186's own narrow-FAIL-override precedent:
+              the WARN/PASS states here are a legitimate, working-as-intended feature,
+              but this one deterministic escalation should still carry real grade
+              weight).
+    WARN    — an in-effect existing-session profile's cdpUrl is absent, loopback, or
+              unparseable (ambiguous classification defaults to WARN, never FAIL/
+              UNKNOWN, per this project's own precedent); and/or userDataDir is set on
+              an in-effect profile (disclosed context, not a downgrade on its own).
+    PASS    — browser is configured but no profile has an in-effect driver of
+              "existing-session".
+    UNKNOWN — no openclaw.json found; openclaw.json present but unparseable/unreadable;
+              or no browser config at all.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B322",
+            UNKNOWN,
+            "No openclaw.json found — browser existing-session profile exposure "
+            "cannot be assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B322", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    browser = ctx.config.get("browser")
+    if not isinstance(browser, dict):
+        return _finding(
+            "B322",
+            UNKNOWN,
+            "No browser config — existing-session profile exposure not applicable.",
+            "—",
+        )
+
+    profiles_cfg = browser.get("profiles") if isinstance(browser.get("profiles"), dict) else {}
+    in_effect: dict = {}
+    for name, spec in profiles_cfg.items():
+        if isinstance(spec, dict) and spec.get("driver") == "existing-session":
+            in_effect[name] = spec
+    default_profile = browser.get("defaultProfile")
+    if default_profile == "user" and "user" not in profiles_cfg:
+        in_effect.setdefault("user", {})
+
+    if not in_effect:
+        return _finding(
+            "B322",
+            PASS,
+            "browser is configured but no profile has an in-effect driver of "
+            "\"existing-session\" — this agent launches its own managed Chrome rather "
+            "than attaching to an existing browser session.",
+            "—",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+    for name, spec in in_effect.items():
+        cdp_url = spec.get("cdpUrl")
+        classification = _cdp_url_classify(cdp_url)
+        if classification == "remote":
+            fail_ev.append(
+                f"browser.profiles.{name} (driver=existing-session) cdpUrl="
+                f"{_cdp_url_display(cdp_url)} is not loopback — OpenClaw's own SSRF "
+                "hostname-allowlist requirement never applies to an existing-session "
+                "profile (getBrowserProfileCapabilities hardcodes isRemote=false for "
+                "this driver), so this URL reaches the chrome-devtools-mcp subprocess "
+                "with no OpenClaw-side loopback/allowlist enforcement"
+            )
+        elif classification == "unparseable":
+            warn_ev.append(
+                f"browser.profiles.{name} (driver=existing-session) cdpUrl is set but "
+                "not a parseable URL — could not classify as loopback or remote"
+            )
+        elif cdp_url:
+            warn_ev.append(
+                f"browser.profiles.{name} (driver=existing-session) attaches via "
+                f"cdpUrl={_cdp_url_display(cdp_url)} (loopback)"
+            )
+        else:
+            warn_ev.append(
+                f"browser.profiles.{name} (driver=existing-session) has no cdpUrl set "
+                "— auto-detects a locally running Chrome with remote debugging enabled"
+            )
+        user_data_dir = spec.get("userDataDir")
+        if isinstance(user_data_dir, str) and user_data_dir.strip():
+            warn_ev.append(
+                f"browser.profiles.{name}.userDataDir={user_data_dir.strip()!r} — the "
+                "agent attaches to whatever browser profile lives at this path; "
+                "confirm it is a dedicated automation profile, not a real "
+                "daily-driver profile with live cookies/sessions"
+            )
+
+    if fail_ev:
+        return _finding(
+            "B322",
+            FAIL,
+            f"{len(fail_ev)} existing-session browser profile(s) attach to a "
+            "non-loopback Chrome DevTools Protocol endpoint — see evidence.",
+            "Point cdpUrl at a loopback address (127.0.0.1 / localhost), or tunnel the "
+            "remote endpoint over SSH/VPN and connect to the local tunnel end instead "
+            "of the raw remote host.",
+            evidence=(fail_ev + warn_ev)[:6],
+            scored=True,
+        )
+
+    return _finding(
+        "B322",
+        WARN,
+        f"{len(in_effect)} browser profile(s) use driver=\"existing-session\" — see "
+        "evidence.",
+        "This is a legitimate feature (attaching to a real, already-signed-in Chrome "
+        "session) but review each profile: confirm cdpUrl is loopback-only, and "
+        "userDataDir points at a profile you intend the agent to have live access to.",
+        evidence=warn_ev[:6],
+        # B-315/B186 precedent: forced here rather than left to inherit CheckMeta.scored
+        # so this branch stays unscored regardless of how the catalog entry is wired --
+        # this is a legitimate, commonly-wanted feature (attaching to an already-
+        # signed-in browser), and a FAIL-free WARN here should never dock the grade. The
+        # FAIL branch above overrides the other way (scored=True) for the one narrow,
+        # deterministic escalation that should carry real weight.
+        scored=False,
     )

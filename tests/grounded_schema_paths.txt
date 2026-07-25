@@ -13,6 +13,7 @@
 # `agents.list`). Keep each section sorted independently.
 #
 # --- read off the OpenClaw config ROOT ---------------------------------------------
+agents.defaults.embeddedAgent.projectSettingsPolicy
 agents.defaults.heartbeat
 agents.defaults.model
 agents.defaults.sandbox.docker.binds
@@ -87,6 +88,8 @@ hooks.token
 lastTouchedVersion
 logging.file
 logging.redactSensitive
+marketplaces.feeds
+marketplaces.sources
 meta.lastTouchedVersion
 models.providers
 plugins.allow
@@ -110,6 +113,8 @@ tools.fs.workspaceOnly
 tools.exec.ask
 tools.exec.host
 tools.exec.mode
+tools.exec.safeBinTrustedDirs
+tools.exec.safeBins
 tools.exec.security
 tools.exec.strictInlineEval
 tools.mcp

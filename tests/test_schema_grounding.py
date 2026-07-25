@@ -775,8 +775,14 @@ def _is_grounded(path: str, recon_paths: set[str]) -> bool:
     if path in recon_paths:
         return True
     for recon_p in recon_paths:
-        # 1. Match paths ending in * (wildcard)
-        if recon_p.endswith("*"):
+        # 1. Match paths ending in * (wildcard). A bare "*" harvested from the recon doc
+        # (e.g. prose quoting a config VALUE that is literally the string "*", not a
+        # path — found live at recon §"NC allowFrom wildcard" prose, 2026-07-25) has an
+        # EMPTY prefix, and an empty-prefix regex ("^.*$") matches every possible path —
+        # vacuously "grounding" anything, the exact class of guard-defeating bug
+        # test_proven_phantom_paths_are_never_grounded exists to catch for phantoms. A
+        # real wildcard entry always has a non-empty dotted-path prefix; require one.
+        if recon_p.endswith("*") and len(recon_p) > 1:
             prefix = recon_p[:-1]
             escaped_prefix = re.escape(prefix)
             reg_pattern = "^" + escaped_prefix.replace(r"\[\]", r"\[\d*\]") + ".*$"
@@ -856,6 +862,24 @@ def test_proven_phantom_paths_are_never_grounded():
     assert not _is_grounded("logging.cacheTrace.enabled", recon_paths)
     # ... and the namespaced form cannot sneak past by prefixing
     assert not _is_grounded(RELATIVE_PREFIX + "logging.cacheTrace.filePath", recon_paths)
+
+
+def test_bare_star_token_does_not_vacuously_ground_every_path():
+    """2026-07-25 live find: prose quoting a config VALUE that is literally the string
+    "*" (e.g. "...and so is any list containing a literal `*`", describing an allowFrom
+    wildcard) gets harvested by _parse_recon_paths() as a bare "*" token. Before the
+    len(recon_p) > 1 guard, `_is_grounded()`'s wildcard branch computed an EMPTY prefix
+    for it and built the regex "^.*$" — which matches literally any string — so a single
+    stray backtick-quoted asterisk anywhere in the recon doc silently "grounded" every
+    manifest path in the file, defeating the entire anti-fabrication guard this module
+    exists to be. Reproduces the real doc's exact shape (a legitimate non-wildcard path
+    alongside the bare "*" prose artifact) rather than an isolated synthetic case."""
+    recon_paths = {"tools.elevated.allowFrom", "*"}
+    assert not _is_grounded("some.totally.fabricated.path.that.was.never.grounded", recon_paths)
+    assert not _is_grounded("marketplaces.feeds", recon_paths)
+    # a REAL wildcard entry (non-empty prefix) must still work
+    recon_paths_real_wildcard = {"agents.list[].sandbox.docker.*"}
+    assert _is_grounded("agents.list[].sandbox.docker.network", recon_paths_real_wildcard)
 
 
 def test_proven_phantom_egress_paths_are_never_grounded():

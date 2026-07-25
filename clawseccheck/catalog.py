@@ -368,6 +368,82 @@ CATALOG: list[CheckMeta] = [
         "Browser / SSRF",
         surface="sessions",
     ),
+    # E-060 parallel-workflow batch (2026-07-25): B321/B322/B323/B325/B327/B328 grounded,
+    # implemented, and independently C-135-adversarially reviewed against the installed
+    # OpenClaw dist. B329 (cron.webhook/cron.webhookToken) was deferred, NOT shipped --
+    # the epic's own threat framing ("inbound trigger, weak token = remote job exec") was
+    # found to be backwards against the real dist: cron.webhookToken authenticates an
+    # OUTBOUND notification POST OpenClaw itself sends (server-cron-Cwg2hJro.js:3983-4046),
+    # not an inbound gate, and cron.webhook is a deprecated `openclaw doctor --fix`
+    # migration-only field with no runtime listener anywhere in the dist. Shipping a check
+    # under the original framing would itself be a fabricated-severity Golden Rule #4
+    # violation. If revisited, retarget at hooks.enabled + a weak/absent hooks.token
+    # instead (config-schema.d.ts:4257-4292) -- a genuinely separate, real inbound-HTTP-
+    # trigger surface never independently verified this session.
+    CheckMeta(
+        "B321",
+        "browser.executablePath / profiles.*.executablePath / mcpCommand",
+        HIGH,
+        "hardening",
+        "Browser / SSRF",
+        confidence="HIGH",
+        surface="sessions",
+    ),
+    # B322: block="advisory"/scored=False at the CheckMeta level (the WARN/PASS states are
+    # a legitimate, working-as-intended feature -- attaching to an already-signed-in
+    # Chrome session), but its FAIL branch (a non-loopback cdpUrl, where OpenClaw's own
+    # SSRF hostname-allowlist requirement never applies for this driver) carries a
+    # per-finding scored=True override, mirroring B186's narrow-FAIL-override precedent
+    # (B-315): the deterministic escalation still caps the grade even though the CheckMeta
+    # stays unscored for its own WARN/PASS states.
+    CheckMeta(
+        "B322",
+        "browser.profiles.*.userDataDir / cdpUrl / driver:\"existing-session\"",
+        HIGH,
+        "advisory",
+        "Browser / SSRF",
+        scored=False,
+        confidence="HIGH",
+        surface="sessions",
+    ),
+    CheckMeta(
+        "B323",
+        "env.vars.PATH / env.<KEY> catchall PATH override",
+        MEDIUM,
+        "hardening",
+        "Config Integrity",
+        scored=False,
+        confidence="HIGH",
+        surface="tools",
+    ),
+    CheckMeta(
+        "B325",
+        "marketplaces.feeds points at a non-canonical registry",
+        MEDIUM,
+        "hardening",
+        "Supply Chain / Install Policy",
+        scored=False,
+        confidence="HIGH",
+        surface="skills",
+    ),
+    CheckMeta(
+        "B327",
+        "agents.defaults.embeddedAgent.projectSettingsPolicy trusts workspace settings",
+        HIGH,
+        "hardening",
+        "Untrusted↔Trusted separation",
+        confidence="HIGH",
+        surface="agents",
+    ),
+    CheckMeta(
+        "B328",
+        "tools.exec.safeBinTrustedDirs writable-dir promotion",
+        HIGH,
+        "hardening",
+        "Supply Chain / Install Policy",
+        confidence="HIGH",
+        surface="tools",
+    ),
     CheckMeta(
         "B155",
         "Outbound proxy hardening (credential leak / TLS-verify / SSRF-guard bypass)",

@@ -1132,3 +1132,141 @@ def check_wildcard_group_ingress(ctx: Context) -> Finding:
         "No configured channel has an unrestricted wildcard ('*') group entry.",
         "Keep any wildcard group entry paired with an allowFrom restriction.",
     )
+
+
+# ---------- B327: embedded-agent project-settings trust policy ----------
+# Grounded against the installed OpenClaw dist (2026-07-25). The single real config
+# path is "agents.defaults.embeddedAgent.projectSettingsPolicy" -- NOT a per-agent
+# "agents.*.embeddedAgent..." glob as originally framed: agents.list[].embeddedAgent
+# is a separately-declared, .strict() Zod schema (AgentEntryEmbeddedAgentConfigSchema,
+# zod-schema.agent-runtime-C02vY4RT.js:58) that only recognizes "executionContract";
+# projectSettingsPolicy is not a legal key there at all. The schema itself is a
+# 3-literal union, "trusted" | "sanitize" | "ignore" (zod-schema-O9ml_nmo.js:108-114;
+# types.openclaw-CXjMEWAQ.d.ts:298-309), consumed in exactly one place:
+# resolveEmbeddedAgentProjectSettingsPolicy() (attempt.model-diagnostic-events-
+# CfZQM0hs.js:191-195), which reads the config path with strict equality against the
+# three literals and falls back to DEFAULT_EMBEDDED_AGENT_PROJECT_SETTINGS_POLICY =
+# "sanitize" for anything else -- absence, a typo, or a non-string value all resolve
+# to the same safe default, never to "trusted". buildEmbeddedAgentSettingsSnapshot()
+# (:197-200) then branches on the resolved policy: "ignore" drops the workspace's own
+# .openclaw/settings.json entirely; "sanitize" applies it after stripping exactly
+# SANITIZED_PROJECT_AGENT_KEYS = ["shellPath", "shellCommandPrefix"] (:92-100);
+# "trusted" applies it verbatim, no stripping. Those two keys are not cosmetic: the
+# embedded-agent session reads them back via SettingsManager.getShellCommandPrefix()/
+# getShellPath() at two sinks -- buildRuntime() wires them into the bash tool
+# definition (sessions-D8qGY7uC.js:11067-11078), and executeBash() prepends the
+# prefix, verbatim, to the literal text of every bash command the embedded agent
+# runs for the rest of the session, and can redirect which shell binary runs it
+# (sessions-D8qGY7uC.js:11198-11206: `const resolvedCommand = prefix ? \`${prefix}\n
+# ${command}\` : command;`). The workspace file is loaded from the run's actual
+# working directory (createPreparedEmbeddedAgentSettingsManager({cwd: effectiveCwd,
+# ...}), selection-JInn13lc.js:12499-12505 -- confirmed as a mainline session-prep
+# call site, not an opt-in one), so a freshly cloned, attacker-authored repo can ship
+# its own ".openclaw/settings.json" and -- only under policy "trusted" -- have it
+# reconfigure the embedded agent's own live command execution the moment the agent
+# is pointed at that clone: repo-to-agent config injection reaching a real exec sink.
+#
+# Severity model follows B196's precedent (browser.evaluateEnabled), not B186's
+# (writable bundled root) or C5's (host PATH hijack): this is the same
+# "operator explicitly opted into a dangerous state where untrusted content reaches
+# a live execution sink" shape as B196's evaluateEnabled=true, so it FAILs on the
+# explicit dangerous value. It deliberately does NOT follow B38/B196's OWN
+# "absent -> WARN because the vendor default is permissive" branch: unlike
+# evaluateEnabled (vendor default true) or ssrfPolicy.hostnameAllowlist (vendor
+# default open), this field's vendor default -- on absence, on a typo, or on any
+# value that isn't exactly one of the three literals -- is the SAFE state
+# ("sanitize"), grounded directly in resolveEmbeddedAgentProjectSettingsPolicy()'s
+# own fallback, not inferred. So absence is treated as PASS here, not WARN.
+def check_embedded_agent_project_settings_policy(ctx: Context) -> Finding:
+    """B327 — agents.defaults.embeddedAgent.projectSettingsPolicy trusts workspace settings.
+
+    When set to "trusted", OpenClaw applies a workspace's own
+    ``.openclaw/settings.json`` to the embedded agent with no stripping. Two of its
+    keys, ``shellPath`` and ``shellCommandPrefix``, feed straight into the embedded
+    agent's bash tool: ``shellCommandPrefix`` is prepended, verbatim, to every bash
+    command the agent runs for the rest of the session, and ``shellPath`` swaps which
+    shell binary executes it. Because the workspace file is read from the session's
+    actual working directory, a hostile cloned repo that ships its own
+    ``.openclaw/settings.json`` can use this to inject a command prefix or hijack the
+    shell binary the moment the embedded agent is pointed at that clone — repo-to-
+    agent config injection reaching a real command-execution sink.
+
+    FAIL    — projectSettingsPolicy is explicitly "trusted".
+    PASS    — projectSettingsPolicy is explicitly "sanitize" or "ignore" (both
+              categorically block the shellPath/shellCommandPrefix vector), OR the key
+              is absent, OR it holds any other/unrecognized value — OpenClaw's own
+              resolver falls back to "sanitize" (its safe default) in every one of
+              those cases, so none of them warrant a WARN the way an absent
+              *permissive*-default field would (contrast B38/B196).
+    UNKNOWN — no openclaw.json found at all, or found but unparseable/unreadable.
+
+    Scope, stated exactly: this is a pure config-value check (no filesystem stat()),
+    so it does not need the ``ctx.include_host`` gate that a live directory-writability
+    check would.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B327",
+            UNKNOWN,
+            "No openclaw.json found -- agents.defaults.embeddedAgent."
+            "projectSettingsPolicy cannot be assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B327", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    policy = dig(ctx.config, "agents.defaults.embeddedAgent.projectSettingsPolicy")
+
+    if policy == "trusted":
+        return _finding(
+            "B327",
+            FAIL,
+            "agents.defaults.embeddedAgent.projectSettingsPolicy=\"trusted\" -- a "
+            "workspace's own .openclaw/settings.json (e.g. from a freshly cloned, "
+            "potentially hostile repo) is applied to the embedded agent as-is, with "
+            "no stripping. Its shellPath and shellCommandPrefix keys feed straight "
+            "into the embedded agent's bash tool: shellCommandPrefix is prepended, "
+            "verbatim, to every bash command the agent runs for the rest of the "
+            "session, and shellPath swaps which shell binary executes it. A hostile "
+            "repo's committed settings.json becomes a repo-to-agent command-"
+            "injection vector on clone.",
+            "Set agents.defaults.embeddedAgent.projectSettingsPolicy to \"sanitize\" "
+            "(OpenClaw's own default -- strips shellPath/shellCommandPrefix but still "
+            "applies the rest of a workspace's settings) or \"ignore\" (drops "
+            "workspace-local settings entirely) unless every workspace the embedded "
+            "agent will ever open is fully trusted.",
+        )
+
+    if policy in ("sanitize", "ignore"):
+        stripped = (
+            "shellPath/shellCommandPrefix are stripped before the rest is applied"
+            if policy == "sanitize"
+            else "workspace-local settings are not applied at all"
+        )
+        return _finding(
+            "B327",
+            PASS,
+            f"agents.defaults.embeddedAgent.projectSettingsPolicy={policy!r} -- "
+            f"{stripped}, so a hostile workspace's .openclaw/settings.json cannot "
+            "redirect the embedded agent's shell.",
+            "Keep projectSettingsPolicy at \"sanitize\" or \"ignore\" unless every "
+            "workspace the embedded agent will ever open is fully trusted.",
+        )
+
+    note = (
+        f" (set to the unrecognized value {policy!r}, which OpenClaw's own resolver "
+        "treats the same as absent)"
+        if policy is not None
+        else ""
+    )
+    return _finding(
+        "B327",
+        PASS,
+        "agents.defaults.embeddedAgent.projectSettingsPolicy is absent" + note + " "
+        "-- OpenClaw falls back to its own safe default, \"sanitize\", which strips "
+        "shellPath/shellCommandPrefix from a workspace's .openclaw/settings.json "
+        "before applying it.",
+        "No action needed; set projectSettingsPolicy=\"sanitize\" explicitly if you "
+        "want this documented rather than implicit.",
+    )

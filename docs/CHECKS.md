@@ -405,6 +405,82 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - config: `browser.evaluateEnabled` = `false` - disable the browser's arbitrary-JS evaluate sink unless a workflow genuinely requires it
 
+### B321 - browser.executablePath / profiles.*.executablePath / mcpCommand
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Browser / SSRF
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: browser.executablePath / profiles.*.executablePath / mcpCommand
+- Remediation:
+  - none
+
+## Advisory checks
+
+### B322 - browser.profiles.*.userDataDir / cdpUrl / driver:"existing-session"
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Browser / SSRF
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: browser.profiles.*.userDataDir / cdpUrl / driver:"existing-session"
+- Remediation:
+  - none
+
+## Hardening checks
+
+### B323 - env.vars.PATH / env.<KEY> catchall PATH override
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Config Integrity
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: env.vars.PATH / env.<KEY> catchall PATH override
+- Remediation:
+  - none
+
+### B325 - marketplaces.feeds points at a non-canonical registry
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Supply Chain / Install Policy
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: marketplaces.feeds points at a non-canonical registry
+- Remediation:
+  - none
+
+### B327 - agents.defaults.embeddedAgent.projectSettingsPolicy trusts workspace settings
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Untrusted↔Trusted separation
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: agents.defaults.embeddedAgent.projectSettingsPolicy trusts workspace settings
+- Remediation:
+  - none
+
+### B328 - tools.exec.safeBinTrustedDirs writable-dir promotion
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain / Install Policy
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: tools.exec.safeBinTrustedDirs writable-dir promotion
+- Remediation:
+  - none
+
 ### B155 - Outbound proxy hardening (credential leak / TLS-verify / SSRF-guard bypass)
 
 - Severity: HIGH
