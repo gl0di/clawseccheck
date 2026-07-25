@@ -600,6 +600,22 @@ class Context:
     skills_capped_count: int = 0
     skills_frontier_partial: bool = False
 
+    # C-289 (A1): per-scan memo for `trajaudit.analyze(ctx)` — five call sites
+    # (`scoring.compute` x3 via `project`, `audit()` itself, both reading through
+    # `grade_cap_signal`) do the exact same trajectory-sidecar I/O against the exact
+    # same, unmutated `ctx` within one audit run. Deliberately last: has a default, so
+    # no positional `Context(...)` constructor call anywhere in the package/tests shifts
+    # position; `repr=False`/`compare=False` keep `__repr__`/`__eq__` byte-identical to
+    # before this field existed. Not a `functools.lru_cache`/`WeakKeyDictionary` on
+    # `analyze` itself: `Context` is an unfrozen, `eq=True` dataclass, so
+    # `__hash__ is None` and both would raise `TypeError`. `trajaudit.analyze` reads this
+    # via `getattr(ctx, "_trajaudit_cache", None)` and skips caching entirely when it is
+    # absent, so a duck-typed stub `ctx` in a test keeps working unchanged. A fresh
+    # `Context` (e.g. report.py's per-skill blast-radius re-scan) always gets a fresh,
+    # empty dict — nothing here can leak a cached result across two different `Context`
+    # objects.
+    _trajaudit_cache: dict = field(default_factory=dict, repr=False, compare=False)
+
     @property
     def bootstrap_blob(self) -> str:
         return "\n".join(self.bootstrap.values())
