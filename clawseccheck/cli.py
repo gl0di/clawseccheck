@@ -200,10 +200,12 @@ def vet_all(
       worse WARN/FAIL outranked it) whose ``.detail`` contains the literal substring
       "coverage is incomplete" — see :func:`_vet_coverage_incomplete`.
     * ``vet_skill`` raises :class:`~clawseccheck.scanbudget.ScanBudgetExceeded`
-      directly (the per-target CPU deadline fired between ring checks and was not
-      caught into a finding). This must never fall into a bare ``except Exception``
-      — that plain-Exception subclass would otherwise read as a generic vetting
-      error and, worse, get bucketed the same way a clean result would.
+      instead of returning. Note this is NOT only the per-target CPU deadline:
+      ``skillast`` also raises it cooperatively for its own reached-sinks cap, which
+      is not a clock at all. Either way the target was not fully inspected, which is
+      all this caller needs to know — and it must never fall into a bare
+      ``except Exception``, since that plain-Exception subclass would otherwise read
+      as a generic vetting error and get bucketed the way a clean result would.
     """
     skill_paths: list[Path] = []
     seen: set[Path] = set()
