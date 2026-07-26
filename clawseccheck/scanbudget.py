@@ -9,7 +9,9 @@ Two enforcement layers, because the platforms differ in what is even possible:
 * **Per-check hard timeout — POSIX main thread only.** ``signal.setitimer(SIGALRM)``
   is the only stdlib mechanism that can interrupt a check *mid-match*, even inside a
   C-level ``re`` call that never yields to Python. The vast majority of users
-  (Linux/macOS) get this. See :func:`check_deadline`.
+  (Linux/macOS) get this. See :func:`check_deadline`, which is **re-entrant**: nested
+  blocks share the one process-wide itimer through a stack of absolute deadlines, and
+  :class:`ScanBudgetExceeded` names the frame whose deadline expired.
 * **Per-audit cooperative cap — every platform.** Between checks, ``run_all`` asks
   :func:`audit_budget_exceeded` whether the whole-audit deadline has passed and, if
   so, marks the remaining checks UNKNOWN. This bounds cumulative time and is the
@@ -22,11 +24,9 @@ normal run (which finishes in well under a second).
 """
 from __future__ import annotations
 
-import contextlib
 import signal
 import threading
 import time
-from collections.abc import Iterator
 
 # Generous ceilings: a real audit is sub-second; these only catch a pathological hang.
 DEFAULT_CHECK_BUDGET_S = 15.0
@@ -64,7 +64,61 @@ DEFAULT_VET_ALL_BUDGET_S = 600.0
 
 
 class ScanBudgetExceeded(Exception):
-    """Raised inside a check when its per-check wall-clock budget is exhausted."""
+    """Raised inside a check when a wall-clock budget it is running under is exhausted.
+
+    ``owner`` says WHOSE deadline expired: the :class:`DeadlineFrame` handed out by the
+    :func:`check_deadline` block that armed it, or ``None`` for the **cooperative,
+    non-timer** raises the engine makes on its own (``skillast``'s reached-sinks cap).
+    An unattributed raise belongs to nobody; it travels out to ``run_all``, which is its
+    designated handler.
+
+    The attribution exists so a *nested* handler can tell its own expiry from an outer
+    owner's. Catching someone else's hands that owner a partial scan presented as a
+    complete one — the false-PASS class C-175 fixed. Test the owner with :func:`owned_by`
+    rather than by catching broadly.
+    """
+
+    def __init__(self, *args: object, owner: DeadlineFrame | None = None) -> None:
+        super().__init__(*args)
+        self.owner = owner
+
+
+class DeadlineFrame:
+    """Identity of one armed :func:`check_deadline` block — and its truncation flag.
+
+    Handed out by the context manager, so a caller can both name itself when catching
+    (``owned_by(exc, frame)``) and, under ``suppress_own``, ask afterwards whether its
+    block was cut short (``frame.expired``).
+    """
+
+    __slots__ = ("armed", "deadline", "delivered", "expired")
+
+    def __init__(self, deadline: float | None, armed: bool) -> None:
+        self.deadline = deadline          # absolute time.monotonic(), None when inactive
+        self.armed = armed                # False on the transparent no-op path
+        self.expired = False              # set when an expiry is attributed to this frame
+        # Internal: this frame's expiry has actually been RAISED into user code. An
+        # expired frame's deadline is permanently the earliest one on the stack, so
+        # without this it would be blamed for every later expiry too — starving every
+        # nested block and re-arming the itimer at a stale tiny slice forever. A frame's
+        # hard deadline fires ONCE; after that it has had its say.
+        self.delivered = False
+
+    def __repr__(self) -> str:                                    # pragma: no cover
+        state = "expired" if self.expired else ("armed" if self.armed else "inactive")
+        return f"<DeadlineFrame {state}>"
+
+
+def owned_by(exc: ScanBudgetExceeded, frame: DeadlineFrame | None) -> bool:
+    """True when ``exc`` is the expiry of ``frame``'s OWN deadline.
+
+    False for an outer owner's deadline and false for an unattributed
+    (``owner is None``) cooperative raise — both must keep travelling to their real
+    handler. Written as a helper because ``exc.owner is frame`` is easy to get subtly
+    wrong at a call site (``None is None`` would let any frame claim every unattributed
+    raise).
+    """
+    return frame is not None and getattr(exc, "owner", None) is frame
 
 
 def _can_hard_timeout() -> bool:
@@ -81,29 +135,365 @@ def _can_hard_timeout() -> bool:
     )
 
 
-@contextlib.contextmanager
-def check_deadline(seconds: float) -> Iterator[None]:
-    """Arm a hard per-check deadline for the duration of the ``with`` block (POSIX).
+# ── re-entrancy: one itimer, a stack of absolute deadlines ───────────────────
+#
+# A process has exactly ONE ``ITIMER_REAL``, so nesting has to be modelled rather than
+# hoped away. The state is a stack of **absolute** monotonic deadlines with the itimer
+# always pointed at the earliest one still on it. Three properties fall out of that
+# representation for free:
+#
+#   * an inner block is implicitly clamped to min(its own budget, the outer's
+#     remaining) — nobody computes the clamp, it is simply which deadline is earliest;
+#   * on exit the outer is restored at its TRUE remaining time, with the wall time spent
+#     inside the inner charged to it, because its deadline never moved;
+#   * there is no restore arithmetic, so nesting cannot accumulate drift.
+#
+# The predecessor armed the itimer on entry and called ``setitimer(ITIMER_REAL, 0)``
+# unconditionally on exit. Nesting it was therefore fail-OPEN, not merely imprecise: the
+# inner block overwrote the outer's deadline going in and *disarmed* the timer coming
+# out, so from the moment the inner returned the outer hard cap no longer existed and
+# nothing could interrupt a hung check for the rest of that run. Nothing detects that
+# after the fact either — ``signal.getitimer`` reports ``(0.0, 0.0)`` for "disarmed" and
+# for "already expired" alike.
+_STACK: list[DeadlineFrame] = []
 
-    On exit the itimer is always disarmed and the previous ``SIGALRM`` handler restored,
-    so this never leaves a pending alarm or clobbers a caller's handler. Where a hard
-    timeout is unavailable (Windows, non-main thread, or ``seconds <= 0``) this is a
-    transparent no-op and the caller relies on the cooperative per-audit cap instead.
+_UNSET = object()
+_PREV_HANDLER: object = _UNSET
+
+# Re-arming an already-passed deadline uses this floor instead of its true (negative)
+# remainder, because ``setitimer(..., 0)`` means DISARM — the exact fail-open above.
+# Measured on Linux/CPython 3.12: ``setitimer(1e-6)`` reads back as ``(0.0, 0.0)`` (it has
+# already elapsed by the time it can be read at all), whereas ``setitimer(1e-4)`` reads
+# back as ~9.8e-05, i.e. it is a real, still-pending arm. So 1e-4 is the smallest slice
+# that reliably means "armed" rather than "gone".
+_MIN_ARM_S = 1e-4
+
+
+def _arm_seconds(deadline: float, now: float) -> float:
+    """Seconds to hand ``setitimer`` for an absolute monotonic ``deadline``.
+
+    Never returns 0 or less, since that would disarm rather than fire immediately.
     """
-    if seconds <= 0 or not _can_hard_timeout():
-        yield
+    return max(deadline - now, _MIN_ARM_S)
+
+
+def _rearm() -> None:
+    """Point the itimer at the earliest deadline that has not had its say yet.
+
+    The single choke point: every state change routes its timer update through here, so
+    "an expired deadline is re-armed with a minimum positive slice, never disarmed" is one
+    property of one function rather than a claim repeated at four call sites (where the
+    predecessor's version of this guarantee was true in the nested case and false in the
+    single-frame one).
+    """
+    earliest = None
+    for frame in _STACK:                     # plain loop, not min()/a comprehension —
+        if frame.delivered:                  # see _in_bookkeeping on why no helper code
+            continue                         # objects may appear inside this module
+        if earliest is None or frame.deadline < earliest:
+            earliest = frame.deadline
+    if earliest is None:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    else:
+        signal.setitimer(signal.ITIMER_REAL, _arm_seconds(earliest, time.monotonic()))
+
+
+def _release() -> None:
+    """Outermost exit: disarm and hand the caller's ``SIGALRM`` handler back."""
+    global _PREV_HANDLER
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    previous = _PREV_HANDLER
+    _PREV_HANDLER = _UNSET
+    if previous is _UNSET:
         return
+    if previous is None:
+        # None means the prior handler was installed from C and cannot be restored from
+        # Python (in practice unreachable here). SIG_DFL is the honest guess and is safe
+        # now: the timer is disarmed.
+        previous = signal.SIG_DFL
+    # Disarming does not retract a SIGALRM the kernel has ALREADY delivered. CPython's
+    # ``signal.signal()`` clears that signal's pending "tripped" flag as part of
+    # installing the new handler (measured: 20,000 arm/disarm/restore rounds at a 200us
+    # slice delivered ZERO late calls to the restored handler), so this both restores the
+    # caller's handler and discards an expiry that arrived in the last instants of the
+    # block. Dropping it is correct: every block it could have belonged to has exited.
+    signal.signal(signal.SIGALRM, previous)
 
-    def _fire(_signum, _frame):
-        raise ScanBudgetExceeded
 
-    previous = signal.signal(signal.SIGALRM, _fire)
-    try:
-        signal.setitimer(signal.ITIMER_REAL, seconds)
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)  # disarm before restoring the handler
-        signal.signal(signal.SIGALRM, previous)
+def _blame() -> DeadlineFrame | None:
+    """The frame whose deadline this expiry belongs to, or None if none is actually due.
+
+    The itimer points at the earliest live deadline, so an expiry belongs to that frame —
+    but "is it actually due" is not redundant. A delivery can land after the frame it
+    belonged to was popped, and blaming whichever innocent frame is now earliest is worse
+    than admitting we do not know. ``delivered`` frames are excluded: their deadline is
+    permanently the earliest, so keeping their claim would blame them for every later
+    expiry and starve every nested block.
+    """
+    now = time.monotonic()
+    due = None
+    for frame in _STACK:
+        if frame.delivered:
+            continue
+        if frame.deadline - now > _MIN_ARM_S:
+            continue                          # not due yet — an early/stray delivery
+        if due is None or frame.deadline < due.deadline:
+            due = frame
+    return due
+
+
+# ── async-signal safety: never raise into this module's own bookkeeping ──────
+#
+# ``_fire`` raises at an arbitrary bytecode boundary. If it lands inside the push/pop
+# bookkeeping, that bookkeeping is abandoned half-done and the frame leaks — permanently,
+# because the stack then never empties, the caller's SIGALRM handler is never given back,
+# and every later deadline is armed at ``_MIN_ARM_S``. One leaked frame turns a whole
+# subsequent audit UNKNOWN. Two guards were tried before this one; both are recorded
+# because both look correct:
+#
+#   1. ``signal.pthread_sigmask(SIG_BLOCK, {SIGALRM})`` around the section. DOES NOT WORK.
+#      ``signal.pthread_sigmask`` is a Python-level wrapper, so CPython runs pending
+#      Python handlers at bytecode boundaries INSIDE the very call meant to protect the
+#      section — the expiry is raised straight out of the masking call, before the ``try``
+#      that would have cleaned up is even entered. Blocking at the OS level also does not
+#      un-trip a signal CPython has already flagged: the C handler only sets a flag, and
+#      the Python handler runs at the next bytecode boundary regardless.
+#   2. A module-level "in critical section" flag set on entry. Closes the INTERIOR of the
+#      section but not its entry: whatever SETS the flag can itself be interrupted first,
+#      and on the pop path that is fatal (the pop is called from a ``finally`` that will
+#      not be retried). No guard that must be ARMED IN ADVANCE can close this, because
+#      arming it is itself interruptible.
+#
+# What works is to stop arming anything and answer the question at raise time instead. A
+# Python signal handler is handed the **interrupted frame**, so ``_fire`` can ask "am I
+# about to raise into this module's own bookkeeping?" — a predicate computed when it is
+# needed, which therefore has no window at all. If the answer is yes it re-arms a minimum
+# slice and returns; the expiry arrives ~100us later, by which time the bookkeeping has
+# finished and the stack invariant holds.
+#
+# This is sound because Python handlers run only at bytecode boundaries and only on the
+# main thread (which ``_can_hard_timeout`` already requires), so there is no true
+# concurrency here — only re-entrancy, which is exactly what the frame check detects.
+#
+# The predicate walks the WHOLE ``f_back`` chain rather than testing only the innermost
+# frame. That is the difference between a guard that is right and one that is right on
+# the Python version it was written on: a lambda passed to ``min()`` and — before PEP 709
+# inlined them in 3.12 — a list comprehension each get their OWN code object, which an
+# innermost-frame-only test would not recognise as ours. Walking the chain means any such
+# helper is covered by its caller, so the set below only has to name the ENTRY POINTS.
+# (This module still avoids lambdas/comprehensions in the bookkeeping, belt and braces.)
+# Nothing in this module ever calls user code, so a protected frame on the stack always
+# means "we are inside the bookkeeping" — and while a ``with`` body runs, no frame of this
+# module is on the stack at all, so a real check never has its expiry deferred.
+_PROTECTED_CODE: frozenset = frozenset()
+
+
+def _in_bookkeeping(interrupted: object) -> bool:
+    """True when the interrupted stack has any of this module's own frames on it."""
+    frame = interrupted
+    while frame is not None:
+        if getattr(frame, "f_code", None) in _PROTECTED_CODE:
+            return True
+        frame = getattr(frame, "f_back", None)
+    return False
+
+
+def _fire(_signum: int, interrupted: object) -> None:
+    """SIGALRM handler: attribute the expiry to a frame, then raise it into the check."""
+    if _in_bookkeeping(interrupted):
+        # Deferral, not cancellation. Re-arming here rather than setting a "pending"
+        # flag for the bookkeeping to drain is deliberate: a flag has to be drained by
+        # SOMEBODY, and any code path that forgets to drain it silently loses the
+        # deadline. A re-arm needs nobody's cooperation — worst case the bookkeeping's
+        # own _rearm() overwrites it a moment later with the correct value.
+        #
+        # An EMPTY stack must disarm instead, and that asymmetry is load-bearing: the
+        # bookkeeping we could be interrupting is then _release(), which is about to hand
+        # the caller's SIGALRM handler back. Leaving a 100us arm behind would deliver an
+        # alarm to that handler — for the default action, killing the process. With no
+        # frames left there is also, by definition, no deadline worth preserving.
+        signal.setitimer(signal.ITIMER_REAL, _MIN_ARM_S if _STACK else 0)
+        return
+    owner = _blame()
+    if owner is None:
+        # Nothing is actually due: an early or late delivery. Swallow it and restore the
+        # real deadline — raising an unattributed exception here would turn a healthy
+        # check into a spurious UNKNOWN.
+        _rearm()
+        return
+    owner.expired = True
+    owner.delivered = True
+    _rearm()
+    raise ScanBudgetExceeded(owner=owner)
+
+
+def _index_of(frame: DeadlineFrame) -> int:
+    for i in range(len(_STACK) - 1, -1, -1):
+        if _STACK[i] is frame:
+            return i
+    return -1
+
+
+def _push(frame: DeadlineFrame) -> None:
+    global _PREV_HANDLER
+    if not _STACK:
+        _PREV_HANDLER = signal.signal(signal.SIGALRM, _fire)
+    _STACK.append(frame)
+    _rearm()
+
+
+def _pop(frame: DeadlineFrame) -> None:
+    """Normal block exit: drop ``frame`` and everything above it, then restore the timer.
+
+    Truncating rather than removing is the self-healing half of the design. ``with``
+    blocks nest lexically, so anything still above ``frame`` when ``frame`` exits is an
+    inner block that has already ended and leaked — and reaping it here bounds the blast
+    radius of a leak to its enclosing block instead of letting it poison the process.
+    """
+    idx = _index_of(frame)
+    if idx >= 0:
+        del _STACK[idx:]
+    if _STACK:
+        # An outer whose deadline passed while control was inside this block is re-armed
+        # with a minimum positive slice, not cancelled. Disarming here is the fail-open:
+        # it is how the outer hard cap used to disappear for good.
+        _rearm()
+    else:
+        _release()
+
+
+def _reap(frame: DeadlineFrame) -> None:
+    """Finalizer path: drop just ``frame``, wherever it sits, then restore the timer.
+
+    Deliberately NOT truncating. This runs from ``__del__``, i.e. at a moment nobody
+    chose, so "everything above me has already ended" is not something it may assume —
+    truncating from here could delete a live outer block's protection.
+    """
+    idx = _index_of(frame)
+    if idx >= 0:
+        del _STACK[idx]
+    if _STACK:
+        _rearm()
+    else:
+        _release()
+
+
+class _DeadlineBlock:
+    """The context manager :func:`check_deadline` returns. See its docstring.
+
+    Written as an explicit class rather than ``@contextlib.contextmanager`` for one
+    concrete reason: ``__enter__``/``__exit__`` then belong to THIS module, so they can
+    be named in ``_PROTECTED_CODE``. With a generator-based manager the arming happens
+    inside ``contextlib``'s ``__enter__``, whose code object is not ours, leaving a window
+    in which an expiry raised after the push but before the ``with`` block is armed skips
+    the cleanup entirely.
+    """
+
+    __slots__ = ("_closed", "_frame", "_seconds", "_suppress")
+
+    def __init__(self, seconds: float, suppress_own: bool) -> None:
+        self._seconds = seconds
+        self._suppress = suppress_own
+        self._frame: DeadlineFrame | None = None
+        self._closed = False
+
+    def __enter__(self) -> DeadlineFrame:
+        if self._frame is not None and not self._closed:
+            # Entering the SAME object twice would overwrite _frame, so the outer entry's
+            # frame could never be popped by name. Nesting is supported through separate
+            # check_deadline() calls, which is what every call site does; say so loudly
+            # rather than leaking a frame.
+            raise RuntimeError("a check_deadline() block cannot be entered re-entrantly")
+        if self._seconds <= 0 or not _can_hard_timeout():
+            self._frame = DeadlineFrame(None, armed=False)
+            self._closed = True          # nothing to undo; __del__ must stay a no-op
+            return self._frame
+        self._closed = False             # a re-used object gets a fresh, poppable frame
+        frame = DeadlineFrame(time.monotonic() + self._seconds, armed=True)
+        # Recorded BEFORE the push, so that a frame which reaches the stack is always
+        # reachable from this object — that is what makes the __del__ net total.
+        self._frame = frame
+        _push(frame)
+        return frame
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        frame = self._frame
+        if self._closed or frame is None:
+            return False
+        self._closed = True
+        _pop(frame)                      # restore the outer BEFORE deciding to suppress
+        return bool(
+            self._suppress
+            and exc_type is not None
+            and isinstance(exc, ScanBudgetExceeded)
+            and owned_by(exc, frame)
+        )
+
+    def __del__(self) -> None:
+        # Last line of defence, and the reason a leak cannot outlive the block that
+        # caused it. The interpreter's own with-statement setup/teardown has a handful of
+        # bytecodes on either side of __enter__/__exit__ that belong to the CALLER's frame
+        # and so cannot be protected by _in_bookkeeping. If an expiry lands there the
+        # block is abandoned with its frame still on the stack — but this object is then
+        # unreferenced, and CPython's refcounting finalizes it immediately, which reaps
+        # the frame. (_pop's truncation covers the same leak for nested blocks; this
+        # covers the outermost one, which has no enclosing block to reap it.)
+        try:
+            if self._closed or self._frame is None:
+                return
+            self._closed = True
+            _reap(self._frame)
+        except Exception:  # noqa: BLE001 — a finalizer must never raise
+            pass
+
+
+def check_deadline(seconds: float, *, suppress_own: bool = False) -> _DeadlineBlock:
+    """Arm a hard deadline for the duration of the ``with`` block (POSIX).
+
+    Re-entrant: a nested block is clamped to the outer's remaining time, and on exit the
+    outer is restored at its true remaining time rather than cancelled. The block hands
+    out its :class:`DeadlineFrame`, which names it as an owner::
+
+        with check_deadline(15.0) as frame:
+            ...
+        # elsewhere, inside that block:
+        except ScanBudgetExceeded as exc:
+            if owned_by(exc, frame): ...        # mine — degrade this item
+            raise                               # someone else's — must reach them
+
+    With ``suppress_own=True`` the block instead swallows its OWN expiry and returns
+    normally, leaving ``frame.expired`` True to report the truncation; an outer owner's
+    expiry and an unattributed cooperative raise still propagate untouched. That is the
+    opt-in for a loop that wants to skip an over-budget item and carry on.
+
+    A frame's deadline fires ONCE. If the block swallows its own expiry and keeps
+    working, nothing re-interrupts it — that has always been true here, and is why an
+    over-broad ``except Exception`` around a scan is a bug rather than a style choice.
+
+    At the outermost exit the itimer is disarmed and the previous ``SIGALRM`` handler
+    restored, so this never leaves a pending alarm or clobbers a caller's handler. The
+    handler is captured once, at the outermost entry, and given back once, at the
+    outermost exit — not per nesting level. Where a hard timeout is unavailable (Windows,
+    non-main thread, or ``seconds <= 0``) it is a transparent no-op — an inactive frame
+    that never becomes an owner — and the caller relies on the cooperative per-audit cap
+    instead.
+    """
+    return _DeadlineBlock(seconds, suppress_own)
+
+
+# Every function that can be on the stack while this module's state is mid-change. An
+# expiry raised into any of them abandons the bookkeeping in flight; ``_fire`` defers
+# instead. Helpers reached FROM these (and any per-version helper code object) are
+# covered by ``_in_bookkeeping``'s walk up the caller chain, so this set names entry
+# points only. ``check_deadline`` itself is absent on purpose: it constructs an object
+# and changes no state, so an expiry there is safe to take immediately.
+_PROTECTED_CODE = frozenset({
+    fn.__code__ for fn in (
+        _arm_seconds, _rearm, _release, _blame, _in_bookkeeping, _fire,
+        _index_of, _push, _pop, _reap,
+        _DeadlineBlock.__enter__, _DeadlineBlock.__exit__, _DeadlineBlock.__del__,
+    )
+})
 
 
 def audit_deadline(audit_budget_s: float) -> float | None:

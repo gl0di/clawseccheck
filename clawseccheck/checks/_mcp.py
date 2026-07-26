@@ -142,12 +142,15 @@ def vet_plugin(
     (see scanbudget.py), not the choice of clock.
 
     Enforcement is a single cooperative deadline, checked between loop iterations —
-    deliberately no hard per-call timer. A SIGALRM-based one (check_deadline) is not
-    re-entrant, and this dispatch can already run nested inside another armed itimer
-    (report.py's per-skill frame during a full audit); a nested arm's disarm-on-exit
-    would silently delete the outer deadline instead of bounding this call — the same
-    hazard checks/_vet.py's own content-ring loop documents for exactly this call site.
-    So this file relies solely on the cooperative CPU ceiling, same as that loop.
+    still no hard per-call timer, though the blocking reason is gone. A SIGALRM-based one
+    (check_deadline) used to be unusable here because it was not re-entrant and this
+    dispatch can run nested inside another armed itimer (report.py's per-skill frame
+    during a full audit), where a nested arm's unconditional disarm-on-exit deleted the
+    outer deadline instead of bounding this call. check_deadline is re-entrant now (a
+    stack of absolute deadlines; the outer is restored, not cancelled), so a hard cap here
+    is merely un-built rather than unsafe — adding one is a behaviour change owing its own
+    adversarial review. Until then this file relies solely on the cooperative CPU ceiling,
+    same as checks/_vet.py's content-ring loop.
 
     If the budget is exhausted mid-scan, remaining bundled skills and/or swept files
     are skipped, the fact is recorded as a coverage note (in this Finding's own

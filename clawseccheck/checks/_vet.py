@@ -3909,17 +3909,22 @@ def _run_content_ring(
     # reason, and NOT load-immunity: CPU time inflates under contention just as wall does
     # (measured 2.60x vs 2.6x). Headroom is what protects the verdict; see scanbudget.py.
     #
-    # COOPERATIVE ONLY, deliberately. The obvious move — wrapping each check in
-    # `check_deadline` the way run_all does — is unsound here, because this loop can already
-    # run INSIDE someone else's armed itimer: report.py:_skill_inventory arms one per skill,
-    # and vet_plugin arms one around its bundled-skill dispatch. (run_all is NOT such a
-    # frame: it arms around ring checks as members of CHECKS, which is a different call
-    # path — nothing in CHECKS reaches this function.) `check_deadline` disarms the timer
-    # in its `finally`, and a disarm is indistinguishable from an expiry, so a nested
-    # arm/disarm would not delay the outer per-skill deadline but DELETE it, silently
-    # undoing a protection C-159 added. A hard per-ring-check cap therefore needs a
-    # re-entrant `check_deadline` first; until then the cooperative ceiling below is the
-    # bound that is actually safe to add, and it is enough to stop an unbounded sweep.
+    # COOPERATIVE ONLY — still, but the reason is no longer "a hard cap here would be
+    # unsound". It used to be: this loop can run INSIDE someone else's armed itimer
+    # (report.py:_skill_inventory arms one per skill; run_all is NOT such a frame — it arms
+    # around ring checks as members of CHECKS, a different call path, and nothing in CHECKS
+    # reaches this function), and `check_deadline` disarmed the timer unconditionally in its
+    # `finally`. A disarm is indistinguishable from an expiry, so a nested arm/disarm did
+    # not delay the outer per-skill deadline but DELETED it, silently undoing a protection
+    # C-159 added. `check_deadline` is re-entrant now — a stack of absolute deadlines, an
+    # inner block clamped to the outer's remaining time, the outer restored (never
+    # cancelled) on exit — and `suppress_own=True` is the exact shape a loop like this one
+    # would want: skip the over-budget ring check, keep going, and never swallow the outer
+    # owner's signal. Wiring that up is a deliberate behaviour change (it would start
+    # cutting individual ring checks short, which changes what a --vet reports) and needs
+    # its own adversarial review, so it has not been done here. Until it is, the
+    # cooperative CPU ceiling below remains the bound, and it is enough to stop an
+    # unbounded sweep.
     deadline = cpu_deadline(target_budget_s)
     skipped: list[str] = []
     for check in SKILL_CONTENT_RING:
@@ -3933,9 +3938,11 @@ def _run_content_ring(
             # Re-raised, NOT swallowed, and caught before the catch-all below precisely so
             # it cannot be: ScanBudgetExceeded is a plain Exception subclass, so the bare
             # `except Exception` would eat a deadline belonging to an OUTER owner
-            # (report.py:_skill_inventory's per-skill frame, or vet_plugin's dispatch
-            # frame), which needs the signal to reach it so it can report that target
-            # UNKNOWN. It also carries the cooperative, non-timer raise skillast.py emits
+            # (report.py:_skill_inventory's per-skill frame), which needs the signal to
+            # reach it so it can report that target UNKNOWN — the exception now names that
+            # owner, so `scanbudget.owned_by()` is how a future handler here would tell an
+            # outer's expiry from its own instead of guessing. It also carries the
+            # cooperative, non-timer raise skillast.py emits
             # for its own reached-sinks cap, which belongs to run_all. Eating any of them
             # here hands the owner a partial scan dressed up as a complete one — the
             # false-PASS shape C-175 fixed at :3345.
