@@ -346,6 +346,18 @@ A regression alert carries the **catalog severity of the check that regressed**,
 check going FAIL is reported as CRITICAL — matching how the full audit renders the same finding —
 rather than a flat HIGH for every check.
 
+**MCP rug-pull, including a launch-spec-identical tool-description swap.** `--monitor` compares
+each MCP server's launch spec (command, args, transport, url, env key names, oauth scope) run to
+run — but a server can also keep that spec byte-identical while silently changing what it tells
+the model a tool *does* after you already approved it. When local trajectory sidecar evidence is
+available (what the host actually sent the model — see `--vet-mcp` docs on trajectory sourcing),
+`--monitor` also tracks that OBSERVED tool surface per server and alerts when a tool's description
+changed (or a new one appeared) even though the launch spec didn't move — a distinct signal from a
+launch-spec change, because it means the identical trusted process is now telling the model
+something different. This tool-surface source is entirely optional: a host with no trajectory
+evidence simply gets no such comparison (never treated as a change, and the source becoming
+available for the first time is never itself reported as drift).
+
 Two things worth knowing about how the comparison behaves:
 
 - **Drift detection is upgrade-safe for the dimensions a snapshot can predate.** The MCP,
