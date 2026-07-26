@@ -436,7 +436,7 @@ Beyond individual checks, ClawSecCheck runs a **risk engine** that looks for dan
 *combinations* — capability chains where two or more co-occurring properties make a
 compromise catastrophic or trivial to execute.
 
-The highest-risk chains it detects now span **RISK-01 through RISK-18**:
+The highest-risk chains it detects now span **RISK-01..RISK-21**:
 
 | ID | Severity | Chain |
 |----|----------|-------|
@@ -458,6 +458,9 @@ The highest-risk chains it detects now span **RISK-01 through RISK-18**:
 | RISK-16 | HIGH | RW workspace + host bind + plaintext gateway credential path → control-plane takeover |
 | RISK-17 | HIGH | Conditional sleeper trigger + scheduled execution = delayed RCE |
 | RISK-18 | HIGH | Untrusted context + cron + heartbeat = persistent autonomous foothold |
+| RISK-19 | MEDIUM | Audit/security-themed skill co-installed with an exec/network/write skill → its "looks clean" summary is borrowed as an approval signal for the high-capability one |
+| RISK-20 | HIGH | Gateway reachable beyond loopback + `hooks.enabled` + an unconstrained hook session-key / agent-routing policy → a hook-token holder writes into sessions and agents it was never meant to reach |
+| RISK-21 | MEDIUM | Open group channel + a trajectory-logged group-origin session that provably invoked a high-blast tool → an untrusted surface has demonstrably reached a dangerous primitive |
 
 Each chain fires **only when every link has positive evidence** — no chain is invented from
 absent or UNKNOWN data, so findings are evidence-gated, which keeps false positives low —
@@ -477,12 +480,31 @@ The `--risk-paths` output is also appended to the default report when any chain 
 ```bash
 python3 audit.py --sarif results.sarif      # write SARIF 2.1.0 locally (for GitHub Code Scanning upload step)
 python3 audit.py --fail-under 70            # exit 1 if score < 70 (use in CI pipelines)
-python3 audit.py --exit-code                # exit 1 if any unsuppressed FAIL finding
+python3 audit.py --exit-code                # exit 1 on any FAIL verdict (four sources — see below)
 ```
 
 The SARIF file is written to the path you choose — ClawSecCheck never uploads it anywhere.
 `--fail-under` and `--exit-code` do not change the default exit code (0) when omitted,
 preserving backward compatibility.
+
+**What `--exit-code` actually trips on.** Not only audit findings — three of the four
+sources are not findings at all, so nothing else in the report announces them:
+
+1. any **unsuppressed `FAIL` audit finding**;
+2. under `--full`, a **`FAIL` MCP server** from the appended vet-mcp section;
+3. under `--full`, a **`DANGEROUS` (`FAIL`) installed skill** from the appended skill
+   sweep;
+4. on **any** run, a present-but-**unparseable** `openclaw.json` — a broken config yields
+   only `UNKNOWN`/`WARN` findings, so a FAIL-only gate would otherwise stay green on it.
+
+Sources 2 and 3 are **FAIL-only**, exactly like source 1: a `SUSPICIOUS` (WARN) server
+or skill does not redden the gate. Neither does an **incomplete sweep** — a skill that
+was skipped or only partially scanned is reported as such in the printed section and
+excluded from the "safe" tally, but it never moves the exit code. "We did not look at
+everything" is disclosed in the section, not by failing your pipeline.
+
+Note that `--vet`'s exit code is a **separate** contract: it returns 1 on a
+`SUSPICIOUS`/`DANGEROUS` verdict (see `--vet TARGET` below), where a WARN *does* count.
 
 ## More tools
 
@@ -498,7 +520,7 @@ preserving backward compatibility.
 | Vet connected MCP servers | `clawseccheck --vet-mcp` |
 | Reputation gate before download | `clawseccheck --vet-source clawhub:some-skill` |
 | Active injection self-test | `clawseccheck --canary` · `clawseccheck --redteam` · `clawseccheck --dryrun` |
-| All-in-one (audit + self-test + vet-mcp) | `clawseccheck --full` · add `--quiet` to collapse the appended sections to one-line summaries (lighter for CI logs) |
+| All-in-one (audit + self-test + vet-mcp + skill sweep) | `clawseccheck --full` · add `--quiet` to collapse the appended sections to one-line summaries (lighter for CI logs) |
 | Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
 | Attestation template / feed it back | `clawseccheck --ask` · `clawseccheck --attest attest.json` |
 | Shareable card / SVG badge | `clawseccheck --card` · `clawseccheck --badge badge.svg` |
@@ -550,6 +572,20 @@ python3 audit.py --log audit.log            # also write log to a local file
   DANGEROUS verdict. Add `--json` for the machine-readable dossier (grade + per-axis breakdown +
   findings), or `--sarif PATH` to drop a SARIF file for CI / code scanning; exit code is `1` on
   SUSPICIOUS/DANGEROUS so `--vet … || fail` gates an install pipeline.
+  If the scan hits its own per-target budget, or a collector size/file cap, before it has
+  read everything, that is **never** reported as a clean result. The gap lands on the
+  `danger` axis — as a synthetic `VET-COVERAGE` finding when the content-ring budget runs
+  out, and as a `"coverage is incomplete"` detail otherwise — which caps the grade at
+  `C`/79 and makes the overall verdict `SUSPICIOUS`, so a partially-scanned target *does*
+  exit `1` here. (The `--full` skill sweep treats truncation the opposite way — see
+  `--full` below.)
+- **`--full`** runs the audit and then appends three extra sections: self-test scenario
+  generation, the MCP vet, and a **skill sweep** — one merged vet verdict per installed
+  skill, so the unit of the answer is the skill you would uninstall rather than a finding
+  attributed to the whole home. The sweep is **visibility only: its verdicts are not folded
+  into the audit score or grade.** Skills the sweep skipped or only partially scanned are
+  listed as such and kept out of its "safe" tally, and — unlike a single `--vet` — an
+  incomplete sweep never moves `--exit-code` (only a `DANGEROUS`/`FAIL` skill does).
 - **`--vet-plugin PATH`** vets an OpenClaw plugin (root dir, `openclaw.plugin.json`, or an
   installed wrapper project) *before* you install it: manifest sanity, npm lifecycle scripts,
   floating dependency versions, native-executable stowaways, and skills entries escaping the
@@ -625,10 +661,14 @@ B12:1a2b3c4d   # accept one specific local-model finding
 
 ## Scoring
 
-Weighted pass-rate (CRITICAL=10, HIGH=6, MEDIUM=3, LOW=1). **Honesty hard-caps:** any open
-CRITICAL caps the score at 49, any open HIGH at 79 — you can never show an "A" with a critical
-hole. Grades: A 90+ · B 80–89 · C 70–79 · D 50–69 · F <50. The shareable card shows **only the
-grade + score + trifecta ratio — never the findings** (sharing must not hand attackers your map).
+Weighted pass-rate (CRITICAL=10, HIGH=6, MEDIUM=3, LOW=1). **Honesty hard-caps:** an open FAIL
+caps the score by its severity — CRITICAL at 49, HIGH at 79, MEDIUM at 89, LOW at 94 — so you
+can never show an "A" with a critical hole. Grades: A 90+ · B 80–89 · C 70–79 · D 50–69 · F <50.
+Three further caps fire with **no FAIL finding at all** (a crashed or timed-out check, an
+unreadable config, or a corroborated runtime signal) — see
+[FAQ.md — "Why is my grade F?"](FAQ.md#why-is-my-grade-f) for the complete table.
+The shareable card shows **only the grade + score + trifecta ratio — never the findings**
+(sharing must not hand attackers your map).
 
 ## Public API & stability
 
@@ -741,7 +781,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested — so it is: 388 test files and 8,529
+A security tool should be heavily tested — so it is: 410 test files and 10,400
 tests, run in CI on **Python 3.9 and 3.12** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit

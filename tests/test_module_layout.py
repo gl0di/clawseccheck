@@ -68,6 +68,14 @@ _EXEMPT = {
                          "_shared.py can host without a checks/_<topic> -> _shared import "
                          "cycle (CLAUDE.md §3 dependency flow). A finer split is a later "
                          "cycle.",
+    "checks/_agents.py": "~1,270 lines — the multi-agent / subagent-exposure topic "
+                        "(check_agent_separation, check_untrusted_context, "
+                        "check_subagents_allow_agents, etc.). Crossed the budget with "
+                        "E-060's check_embedded_agent_project_settings_policy (B327) — "
+                        "kept in this module rather than _capability.py because the threat "
+                        "(an embedded sub-agent trusting untrusted WORKSPACE content) "
+                        "matches this module's existing threat model, not a capability/"
+                        "blast-radius one. A finer split is a later cycle.",
     "checks/__init__.py": "~1,200 lines — the aggregator (every check import + the CHECKS "
                           "list + run_all). Its length is driven directly by the NUMBER OF "
                           "CHECKS (one import line per check, by design — see §3.1-a: no "

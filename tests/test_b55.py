@@ -3,6 +3,11 @@
 B55 is advisory (scored=False): it names a broad/ungated fs-write grant and feeds
 RISK-12 (write + untrusted ingress = tamper/persistence). It must never FAIL/WARN on
 a scoped config (§5 zero-false-positive).
+
+B-315: B55's broad-reach case was downgraded FAIL->WARN — an unscored check must never
+FAIL (Dave's ruling: scored=False caps at WARN), and the catalog comment already says
+this risk is duplicated by the SCORED checks B3/B22/B31, so capping the grade here would
+double-count it under a second check id.
 """
 from pathlib import Path
 
@@ -28,11 +33,12 @@ def _write_config(tmp_path: Path, body: str) -> Path:
     return tmp_path
 
 
-# --------------------------------------------------------------------------- FAIL
-def test_broad_fs_write_fails_on_bad_fixture():
+# --------------------------------------------------------------------------- WARN (B-315: was FAIL)
+def test_broad_fs_write_warns_on_bad_fixture():
     f = _b55(FIXTURES / "bad_b55_fs_write_broad")
     assert f.id == "B55"
-    assert f.status == FAIL
+    assert f.status == WARN
+    assert f.status != FAIL  # B-315: an unscored check must never FAIL
     assert f.scored is False  # advisory — never moves the grade
     assert any("fs_write" in e for e in f.evidence)
     assert any("no approval gate" in e for e in f.evidence)
@@ -42,7 +48,7 @@ def test_bad_fixture_b55_is_not_scored_in_audit():
     """The whole audit must run and B55 must be present but advisory."""
     _, findings, _ = audit(FIXTURES / "bad_b55_fs_write_broad")
     b55 = _by_id(findings)["B55"]
-    assert b55.status == FAIL and b55.scored is False
+    assert b55.status == WARN and b55.scored is False
 
 
 # --------------------------------------------------------------------------- PASS
@@ -64,14 +70,14 @@ def test_tight_sender_allowlist_passes(tmp_path):
     assert _b55(home).status == PASS
 
 
-def test_open_channel_not_scoped_by_exec_gate_fails(tmp_path):
+def test_open_channel_not_scoped_by_exec_gate_warns(tmp_path):
     home = _write_config(
         tmp_path,
         '{"channels": {"telegram": {"dmPolicy": "open"}},'
         ' "tools": {"allow": ["fs_write"], "exec": {"mode": "ask"}}}',
     )
     f = _b55(home)
-    assert f.status == FAIL, f.detail
+    assert f.status == WARN, f.detail  # B-315: was FAIL
     assert any("open-ingress channel(s)" in e for e in f.evidence)
 
 

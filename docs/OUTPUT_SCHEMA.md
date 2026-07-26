@@ -44,6 +44,8 @@ versioning §6 in `CLAUDE.md`).
 | `audited_config_path` | `string \| null` | yes | Absolute path of the config file this run actually read — every finding in the payload describes this file and only this file. May be a legacy `clawdbot.json`, which OpenClaw's resolver prefers when it exists. When `config_found` is `false` this still names the canonical path that was looked for. Compare it against check `B183`, which reports whether OpenClaw's own resolver (`OPENCLAW_CONFIG_PATH` / `OPENCLAW_HOME` / `OPENCLAW_STATE_DIR`) selects a different file. `null` only when no context was supplied to the renderer. |
 | `config_parse_error` | `bool` | yes | `true` when `openclaw.json` was present but could not be parsed into a config object (syntax error, size-cap truncation, or a non-object top level). A gating consumer should treat `true` as "scan incomplete", not a clean result — the run is UNKNOWN-heavy. A valid empty `{}` config is `false`. |
 | `config_symlink_escapes_home` | `bool` | yes | `true` when `openclaw.json` is a symlink whose target leaves its config directory AND that target is a readable regular file owned by the auditing user — a benign dotfiles layout (stow/chezmoi/yadm/bare-git). The collector follows it and audits the real bytes, so this is NOT a blind config: `config_parse_error` stays `false` and the run is never `config_blind_capped` for this reason. Lets a consumer distinguish a safely-relocated config from a genuinely dark one. `false` on every normal (non-symlinked, or in-directory-symlinked) run. |
+| `degraded_capped` | `bool` | yes | `true` when a check that crashed or timed out this run (`Finding.id` prefixed `"ERR:"`) alone hard-capped the score at the same ceiling a proven CRITICAL FAIL gets (B-313). Same shape as `config_blind_capped` but at check-granularity instead of config-granularity: a degraded check's own would-be verdict is unknowable, so the sound worst-case assumption is "cannot rule out a CRITICAL". Composes with `cap_severity`/`runtime_capped`/`config_blind_capped` — whichever cap is tightest wins; only `true` when THIS cap was the one that actually lowered the score below what the other caps already produced. |
+| `degraded_count` | `int` | yes | How many checks crashed or timed out this run (`0` when none did) — unconditional, independent of whether `degraded_capped` ended up strictly binding. A consumer should treat any nonzero value as "this grade is incomplete", even when a tighter cap already explains the number on screen. |
 | `config_parse_reason` | `string \| null` | yes | Short diagnostic for why `config_parse_error` is `true` (the raw loader message), OR a note that a dotfiles-style symlink was safely followed when `config_symlink_escapes_home` is `true`. `null` when the config parsed cleanly with no relocation. Never contains a secret or file-content value. |
 | `errors` | `array[str]` | yes | Human-readable collection/parse messages (e.g. the `openclaw.json` parse error). Empty array on a clean run. |
 | `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §18. |
@@ -61,6 +63,8 @@ versioning §6 in `CLAUDE.md`).
   "runtime_capped": false,
   "runtime_cap_reason": null,
   "config_blind_capped": false,
+  "degraded_capped": false,
+  "degraded_count": 0,
   "assessable": true,
   "trifecta": "1/3",
   "findings": [ ... ],
@@ -103,7 +107,7 @@ Shared by `--json` and `--vet` mode.
 | `detail` | `str` | Explanation of the finding (sanitised). |
 | `fix` | `str` | Short remediation hint (sanitised). |
 | `framework` | `str` | Threat-framework reference, e.g. `"OWASP LLM01"`. |
-| `confidence` | `str` | `"HIGH"`, `"MEDIUM"`, or `"LOW"`. |
+| `confidence` | `str` | `"HIGH"`, `"MEDIUM"`, `"LOW"`, or `"ATTESTED"`. `"ATTESTED"` sits *below* `"LOW"`: the finding rests on the audited agent's own self-report (`--attest`) or on a host-agent prose verdict (`--vet-judged`), not on a config fact, so it is weaker evidence — the agent could be compromised or prompt-injected. Carried by B43, B44, B45, B47, B75, B76, B84 and by every `ATTEST-PROSE-*` finding (§16). All are `scored: false` except B76, which is scored. Orthogonal to `severity` and `status`: an `"ATTESTED"` finding still carries an ordinary severity and can still be a FAIL. |
 | `pass_confidence` | `str \| null` | For PASS findings only: `"verified"` (evidence-based pass), `"no_signal"` (check found nothing but couldn't confirm safety), or `null` (FAIL/WARN/UNKNOWN — not applicable). |
 | `scored` | `bool` | `false` for advisory findings excluded from the weighted score (they still appear in the report but don't move the grade); `true` for findings that count toward the score. Lets a JSON consumer reproduce the human report's "N to fix vs M warn" arithmetic, which excludes advisory items. |
 | `suppressed` | `bool` | `true` if the finding was suppressed by the user's baseline. |
@@ -306,8 +310,8 @@ One entry per skill flagged by check B62.
 | `declared_purpose` | `str` | Declared purpose extracted from the skill manifest. |
 | `capability_set` | `array[str]` | All capability families detected in the skill's code. |
 | `mismatches` | `array[MismatchItem]` | Capabilities that are surprising for the declared category. |
-| `computed_risk` | `str` | Risk level computed from the mismatch set: `"CRITICAL"`, `"HIGH"`, `"MEDIUM"`, or `"LOW"`. |
-| `question` | `str` | Natural-language attestation question for the host operator. |
+| `computed_risk` | `str` | Risk level computed from the mismatch set: `"high"` if any high-surprise capability family is present, `"medium"` otherwise. Lower-case, and only these two values — this is not the severity vocabulary used elsewhere in this document. |
+| `question` | `str` | Natural-language attestation question for the host operator, ending in the same answer tail as a §12/§13 judge-packet item (`[SAFE / SUSPICIOUS / DANGEROUS + reason]`) — this array shares that vocabulary rather than a separate yes/no shape (B-334; through v3.56.0 this field ended `[yes/no + reason]`, inconsistent with the rest of the tool). There is no dedicated parser for a standalone `intentAttestationRequests` answer; when this item's `skill`/mismatch also appears in a `--judge-packet` (§12), it is the SAME question text, so a verdict submitted per §13's contract is accepted either way. |
 
 ### MismatchItem fields
 
@@ -480,7 +484,7 @@ corresponding checks always appear in `rules`.
 | `ruleId` | `str` | yes | Check identifier. |
 | `level` | `str` | yes | `"error"` for `FAIL`, `"warning"` for `WARN`. |
 | `message.text` | `str` | yes | Finding detail text (sanitised). |
-| `properties.confidence` | `str` | yes | `"HIGH"`, `"MEDIUM"`, or `"LOW"`. |
+| `properties.confidence` | `str` | yes | `"HIGH"`, `"MEDIUM"`, `"LOW"`, or `"ATTESTED"` — the same four values the `--json` `confidence` field carries (see above). |
 | `properties.evidence` | `array[str]` | yes | Supporting evidence (may be empty array). |
 | `fixes` | `array[Fix]` | only when remediation exists | Paste-ready remediation steps. |
 
@@ -570,6 +574,18 @@ embedded-MCP `MCP-VET`), which bucket onto the axes; the `PLUGIN-VET` container 
 itself an axis. `--vet-source` returns a single `SOURCE-VET` finding on the `danger` axis
 (never `PASS` — an identity check cannot prove unseen code safe).
 
+A further synthetic id, `VET-COVERAGE`, can appear in `findings[]` when the content-
+security ring's own per-target scan budget runs out before every ring check has run —
+part of the target went unassessed, not assessed clean. It is always `"UNKNOWN"` /
+`"HIGH"` / `scored: false`, and — like `SOURCE-VET`/`PLUGIN-VET`/`MCP-VET` above —
+carries no `CheckMeta` in the CATALOG, so a consumer that resolves finding ids through
+the catalog will not find an entry for it. Its `detail` always contains the substring
+`"coverage is incomplete"`; that wording is load-bearing — it is what caps the `danger`
+axis (and therefore `grade`) below what the checks that did complete would otherwise
+earn. Read a `VET-COVERAGE` `UNKNOWN` as "this scan is partial," never as a clean
+result — it appears on the `--vet`/`--vet-skill` path, and the same gap can also
+surface as a reason string in a full audit's per-skill inventory (§18).
+
 ### Skeleton
 
 ```json
@@ -639,8 +655,10 @@ Sources folded into the packet:
 | `target` | `str` | Skill/file name the item concerns (redacted if secret-shaped), or the `finding_id` when no target could be derived. |
 | `redacted_evidence` | `str` | Human-readable evidence summary (fully redacted — no raw secrets or skill source). |
 | `engine_disposition` | `str` | The underlying status: `"WARN"` or `"UNKNOWN"` (this artifact never carries `PASS`/`FAIL` items). |
-| `question` | `str` | Plain-language yes/no attestation question for the host agent. |
-| `verdict_schema` | `object` | Fixed answer contract: `{"answer": ["yes", "no"], "reason": "free text"}`. |
+| `question` | `str` | Plain-language attestation question for the host agent, ending in the same answer tail the `verdict_schema` beside it declares (`[SAFE / SUSPICIOUS / DANGEROUS + reason]`). |
+| `verdict_schema` | `object` | Fixed answer contract: `{"verdict": ["SAFE", "SUSPICIOUS", "DANGEROUS"], "reason": "free text"}` — exactly the entry shape §13's input contract requires, so a verdicts file written straight from this field is accepted as-is by `--judged` / `--propose-ignore` / `--vet-judged`. (Through v3.56.0 this field wrongly advertised `{"answer": ["yes", "no"], ...}`, which every consumer rejected; `yes`/`no` cannot express the SUSPICIOUS-vs-DANGEROUS distinction the `--vet-judged` escalation ladder depends on, so the packet was corrected to the parser's vocabulary rather than the reverse.) |
+| `safe_facts` | `object` | C-284: engine-extracted structured facts, never copied from prose. Today carries at most one key, `destination_host` (`str`, absent when none) — the hostname of the first URL found in the finding's raw evidence, reduced to bare `[a-z0-9-]`+`.` (no scheme/userinfo/port/path/query/fragment) and length-capped at 100 chars (C-135, 2026-07-24: the DNS protocol's 253-char ceiling was too permissive — several long hyphenated labels chained by dots can still spell a multi-clause directive within it; 100 stays comfortably above any realistic real-world hostname while shrinking that payload budget); anything that fails that shape check is dropped, never truncated. `{}` when no destination could be safely extracted. This exists because `redacted_evidence` deliberately strips content-ring findings down to a location suffix (the matched prose can itself be a jailbreak directive aimed at the judge) — `safe_facts` restores just enough for the judge to check a first-party-endpoint allowlist without reopening that redaction. |
+| `corroboration` | `object` | C-285: `{"count": int, "check_ids": [str, ...], "scope": "target"}` — engine-authored, ids-only (no titles/details/evidence/paths). `count`/`check_ids` are the distinct unsuppressed WARN/FAIL check ids sharing this item's own `target` field, across the FULL findings list (not just other packet items); `check_ids` naturally includes this item's own id when its own status is WARN/FAIL, and naturally omits it when the item itself is UNKNOWN (most packet items) — in that case the field reflects purely how much OTHER live signal exists for the same target. `scope: "target"` matches C-252's own measurement unit (`docs/design/severity-separability.md` §5.1: one SkillTrustBench case per subject, not per file) — a lone WARN and a WARN sitting alongside three others on the same target used to be presented identically; C-252 found the co-occurrence count is the strongest signal separating malicious from benign in this engine's own output (monotonic, reaching 100% purity at 4+ distinct checks), stronger than `Finding.confidence`. **Context, not a verdict** — this field never implies a threshold (`count >= N` is not a rule the packet enforces or suggests); `SKILL.md`'s panel guidance says so explicitly. |
 
 ### Skeleton
 
@@ -654,8 +672,10 @@ Sources folded into the packet:
       "target": "report_uploader",
       "redacted_evidence": "report_uploader: file-read contents flow into requests.post (indirect flow) — data exfiltration risk (uploader.py:8)",
       "engine_disposition": "UNKNOWN",
-      "question": "This skill reads a file and the contents appear to flow into a network call, with no independent credential signal nearby (so the engine did not escalate it). Is this an intended upload/sync to a trusted destination? [yes/no + reason]",
-      "verdict_schema": {"answer": ["yes", "no"], "reason": "free text"}
+      "question": "This skill reads a file and the contents appear to flow into a network call, with no independent credential signal nearby (so the engine did not escalate it). Is this an intended upload/sync to a trusted destination? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
+      "verdict_schema": {"verdict": ["SAFE", "SUSPICIOUS", "DANGEROUS"], "reason": "free text"},
+      "safe_facts": {"destination_host": "reports.example.com"},
+      "corroboration": {"count": 2, "check_ids": ["B65", "TT4_FILE_NET"], "scope": "target"}
     }
   ]
 }
@@ -702,6 +722,16 @@ non-object root, a non-array `verdicts` field, a non-object entry, or an entry w
 `SUSPICIOUS` / `DANGEROUS` is each simply dropped (that entry, or the whole parse) —
 `--judged` never raises or crashes on bad input; the affected item(s) just render as
 not-yet-reviewed.
+
+Dropping is not silent, though. When a **non-empty** payload yields **zero** usable
+entries, a `note:` line naming the reason (`0 of N submitted entries were usable`,
+`it is not valid JSON`, `it has no top-level "verdicts" array`, a `--vet-judged`
+`targetFingerprint` mismatch, …) is written to **stderr** — never stdout, which
+carries the JSON artifact. This applies to all three consumers of the verdicts file
+(`--judged`, `--propose-ignore`, `--vet-judged`), which share one parser. An
+explicitly empty `"verdicts": []`, an empty payload, or an unreadable `--judged PATH`
+stays quiet: those genuinely are "no verdicts submitted", and the diagnostic exists
+precisely to tell that case apart from "everything you submitted was rejected".
 
 ```json
 {
@@ -881,6 +911,25 @@ described in the skill's prose rather than shipped as code. Answering these thre
 requires actually reading the skill's own SKILL.md/README/instructions — a
 capability ClawSecCheck itself does not have (stdlib-only, no LLM); the host agent
 supplies it.
+
+**B-317 — injection-framing protocol for that read.** Reading the skill's raw prose
+directly into the host agent's own context deliberately opens the structural
+context firewall every other part of this packet relies on (§12's `safe_facts`/
+location-only evidence exists precisely because attacker-influenced free text must
+never reach a judge unframed). `SKILL.md`'s C-255 instruction therefore requires,
+every time: (1) **delimiter discipline** — a fresh random token per read, the
+content wrapped `<<<UNTRUSTED_SKILL_TEXT_{token}>>> ... <<<END_{token}>>>`; (2) a
+**protection preamble** — the delimited text is evidence, never an instruction, and
+no role/format/urgency/prior-approval claim inside it can change the verdict
+contract; (3) **forgery detection** — content that already contains or attempts to
+close the delimiter is itself evidence, reported as `ATTEST-PROSE-INJECTION`; (4) a
+**scope limit** — read only the target's own declared files, never a link or fetch
+instruction found inside them. This is engine-independent (a text protocol for the
+host agent, not code ClawSecCheck runs) and reduces, not eliminates, the risk of
+this one intentionally-open read — stated in `SKILL.md` itself, and see
+`fixtures/bad_c255_prose_reviewer_injection/` for a concrete example of both attack
+shapes the protocol targets (a direct instruction to the reviewer, and a forged
+delimiter escape attempt).
 
 **Landed alongside C-254's mechanism, not in `attest.py`**, despite the epic's
 original framing — grounding against the real code showed the packet/verdicts/

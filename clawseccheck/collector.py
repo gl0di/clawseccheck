@@ -600,6 +600,22 @@ class Context:
     skills_capped_count: int = 0
     skills_frontier_partial: bool = False
 
+    # C-289 (A1): per-scan memo for `trajaudit.analyze(ctx)` — five call sites
+    # (`scoring.compute` x3 via `project`, `audit()` itself, both reading through
+    # `grade_cap_signal`) do the exact same trajectory-sidecar I/O against the exact
+    # same, unmutated `ctx` within one audit run. Deliberately last: has a default, so
+    # no positional `Context(...)` constructor call anywhere in the package/tests shifts
+    # position; `repr=False`/`compare=False` keep `__repr__`/`__eq__` byte-identical to
+    # before this field existed. Not a `functools.lru_cache`/`WeakKeyDictionary` on
+    # `analyze` itself: `Context` is an unfrozen, `eq=True` dataclass, so
+    # `__hash__ is None` and both would raise `TypeError`. `trajaudit.analyze` reads this
+    # via `getattr(ctx, "_trajaudit_cache", None)` and skips caching entirely when it is
+    # absent, so a duck-typed stub `ctx` in a test keeps working unchanged. A fresh
+    # `Context` (e.g. report.py's per-skill blast-radius re-scan) always gets a fresh,
+    # empty dict — nothing here can leak a cached result across two different `Context`
+    # objects.
+    _trajaudit_cache: dict = field(default_factory=dict, repr=False, compare=False)
+
     @property
     def bootstrap_blob(self) -> str:
         return "\n".join(self.bootstrap.values())
@@ -4014,6 +4030,46 @@ def _recover_escaped_config_symlink(
     return parsed, mode
 
 
+def _bootstrap_identity(f: Path) -> object:
+    """Return a de-duplication key that identifies the FILE, not the path spelling.
+
+    ``BOOTSTRAP_FILES`` deliberately lists two case variants of the same name
+    (``MEMORY.md`` and ``memory.md``) because on a case-SENSITIVE filesystem those are
+    two genuinely different files and an attacker may plant either. Probing both is
+    correct there.
+
+    De-duplicating those probes on ``Path.resolve()`` is not. ``resolve()`` is
+    ``posixpath.realpath`` — pure string manipulation over the path components; it
+    resolves symlinks and ``..``, but it never asks the filesystem for a name's on-disk
+    casing. On a case-INsensitive filesystem (macOS/APFS by default, Windows) both
+    probes open the *same* inode while producing two resolved strings that differ only
+    in case, so the de-dup misses and the file's content is read — and reported — twice
+    under two ``ctx.bootstrap`` keys. Findings that join their evidence over
+    ``ctx.bootstrap`` then render the same file twice, and ``bootstrap_blob`` doubles.
+
+    Keying on filesystem identity ``(st_dev, st_ino)`` instead fixes that at the source,
+    with no behaviour change where the two names really are two files: their inodes
+    differ, so both are still collected. It also collapses hardlinks, which a
+    path-string key cannot. ``stat()`` follows symlinks, matching what ``resolve()``
+    did for the symlink-back-to-root case.
+
+    Falls back to the resolved path when ``stat()`` fails or when ``st_ino`` is not
+    meaningful (some filesystems and platforms report 0), so the key is never weaker
+    than the path-based one it replaces.
+    """
+    try:
+        real = f.resolve()
+    except OSError:
+        real = f
+    try:
+        st = f.stat()
+    except OSError:
+        return real
+    if not st.st_ino:
+        return real
+    return (st.st_dev, st.st_ino)
+
+
 def collect(home: Path | str = "~/.openclaw") -> Context:
     home = Path(home).expanduser()
     ctx = Context(home=home)
@@ -4065,9 +4121,10 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     # Scan the home root first, then workspace sub-directories.  The root is
     # included so bootstrap files that live outside the three named workspace
     # dirs are not invisible (§6: never hardcode one layout).
-    # Resolved paths are tracked so a symlink from a workspace dir back to a
-    # root file is not read twice.
-    _seen_bootstrap: set[Path] = set()
+    # Filesystem identity is tracked (see _bootstrap_identity) so a symlink from a
+    # workspace dir back to a root file — or the same inode reached under two case
+    # spellings on a case-insensitive filesystem — is not read twice.
+    _seen_bootstrap: set[object] = set()
     _ws_dirs: list[tuple[str, Path]] = [("", home)]
     _ws_dirs += [(ws, home / ws) for ws in WORKSPACE_DIRS]
     # B-161: also scan any config-declared custom workspace(s) for bootstrap files, so a
@@ -4111,13 +4168,10 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
                 continue
             if not f_is_file:
                 continue
-            try:
-                real = f.resolve()
-            except OSError:
-                real = f
-            if real in _seen_bootstrap:
+            ident = _bootstrap_identity(f)
+            if ident in _seen_bootstrap:
                 continue
-            _seen_bootstrap.add(real)
+            _seen_bootstrap.add(ident)
             key = name if _ws == "" else f"{_ws}/{name}"
             try:
                 # B-103: cap the read like the skill path — a huge/padded bootstrap

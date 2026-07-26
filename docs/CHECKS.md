@@ -381,6 +381,106 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - config: `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork` = `false` - block private-network requests from the browser tool
 
+### B195 - browser.extraArgs dangerous Chrome launch flags
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Browser / SSRF
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: browser.extraArgs dangerous Chrome launch flags
+- Remediation:
+  - config: `browser.extraArgs` - remove --disable-web-security / --load-extension / a non-loopback --remote-debugging-address / unreviewed --proxy-server
+
+### B196 - browser.evaluateEnabled arbitrary-JS sink
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Browser / SSRF
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: browser.evaluateEnabled arbitrary-JS sink
+- Remediation:
+  - config: `browser.evaluateEnabled` = `false` - disable the browser's arbitrary-JS evaluate sink unless a workflow genuinely requires it
+
+### B321 - browser.executablePath / profiles.*.executablePath / mcpCommand
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Browser / SSRF
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: browser.executablePath / profiles.*.executablePath / mcpCommand
+- Remediation:
+  - none
+
+## Advisory checks
+
+### B322 - browser.profiles.*.userDataDir / cdpUrl / driver:"existing-session"
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Browser / SSRF
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: browser.profiles.*.userDataDir / cdpUrl / driver:"existing-session"
+- Remediation:
+  - none
+
+## Hardening checks
+
+### B323 - env.vars.PATH / env.<KEY> catchall PATH override
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Config Integrity
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: env.vars.PATH / env.<KEY> catchall PATH override
+- Remediation:
+  - none
+
+### B325 - marketplaces.feeds points at a non-canonical registry
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Supply Chain / Install Policy
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: marketplaces.feeds points at a non-canonical registry
+- Remediation:
+  - none
+
+### B327 - agents.defaults.embeddedAgent.projectSettingsPolicy trusts workspace settings
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Untrusted↔Trusted separation
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: agents.defaults.embeddedAgent.projectSettingsPolicy trusts workspace settings
+- Remediation:
+  - none
+
+### B328 - tools.exec.safeBinTrustedDirs writable-dir promotion
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain / Install Policy
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: tools.exec.safeBinTrustedDirs writable-dir promotion
+- Remediation:
+  - none
+
 ### B155 - Outbound proxy hardening (credential leak / TLS-verify / SSRF-guard bypass)
 
 - Severity: HIGH
@@ -490,6 +590,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: LLM03 Supply Chain
 - What it checks: security.installPolicy.* operator gate + exec-hook escape flags
+- Remediation:
+  - none
+
+### B194 - secrets.providers.* exec-source escape flags (allowInsecurePath/allowSymlinkCommand)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain / Install Policy
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: secrets.providers.* exec-source escape flags (allowInsecurePath/allowSymlinkCommand)
 - Remediation:
   - none
 
@@ -1886,6 +1998,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: none
 - What it checks: Break-glass environment toggle left enabled in a global dotenv file
+- Remediation:
+  - none
+
+### B324 - env.shellEnv.enabled — agent-startup login-shell environment import
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Config Integrity
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: env.shellEnv.enabled — agent-startup login-shell environment import
 - Remediation:
   - none
 

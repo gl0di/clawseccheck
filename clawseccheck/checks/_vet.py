@@ -29,6 +29,7 @@ from ..collector import (
     _read_skill_text,
     dig,
     limit_hits_for,
+    note_limit,
     read_skill_python,
     read_skill_shell,
     read_skill_js,
@@ -40,7 +41,12 @@ from ..skillast import (
     analyze_shell,
 )
 from ..skillast import simulate_effects as _simulate_effects
-from ..scanbudget import ScanBudgetExceeded
+from ..scanbudget import (
+    DEFAULT_VET_TARGET_BUDGET_S,
+    ScanBudgetExceeded,
+    cpu_deadline,
+    cpu_exceeded,
+)
 from ..textnorm import (
     normalize_for_scan,
 )
@@ -3870,9 +3876,19 @@ def check_installed_skills(ctx: Context) -> Finding:
 _VET_MERGE_RANK = {FAIL: 3, "SKILL_ARCHIVE_PATH_TRAVERSAL": 3, WARN: 2, UNKNOWN: 1, PASS: 0}
 
 
-def _run_content_ring(ctx: Context) -> list[Finding]:
+def _run_content_ring(
+    ctx: Context,
+    target_budget_s: float = DEFAULT_VET_TARGET_BUDGET_S,
+) -> list[Finding]:
     """Run SKILL_CONTENT_RING against `ctx` and return only the actionable (FAIL/WARN)
     findings, de-duplicated by (id, detail).
+
+    F-148: bounded by a cooperative per-target ceiling checked between checks (see the
+    comment in the body for why a hard per-check deadline cannot be nested here yet). Once
+    it is exhausted the remaining checks are skipped and the shortfall is recorded via
+    `note_limit(..., LIMIT_DOMAIN_SKILL, ...)`, so the gap is visible as data rather than
+    silently reported as a clean scan. The FAIL/WARN-only return contract below is
+    unchanged — callers read `ctx.limit_hits` for the coverage gap.
 
     PASS/UNKNOWN ring results are dropped on purpose: for a pre-install verdict they add
     no signal, and an UNKNOWN would wrongly outrank a clean PASS (flipping a safe skill to
@@ -3882,9 +3898,48 @@ def _run_content_ring(ctx: Context) -> list[Finding]:
     """
     out: list[Finding] = []
     seen: set[tuple[str, str]] = set()
+    # F-148: the ring runs OUTSIDE run_all, so until now nothing bounded it at all.
+    #
+    # Ring cost tracks INPUT SIZE super-linearly (10KB 0.03s … 500KB 10.6s … 1MB 41.2s), so a
+    # benign skill at the legal `_MAX_BYTES_PER_SKILL` cap is the expensive case — the real
+    # hostile `clawstealth` costs 7.93 s, LESS than a large benign one. The ceiling is
+    # therefore sized off benign worst case, not off hostile content, and it is generous by
+    # design: a ceiling a large harmless skill can reach is a false positive, not a safeguard.
+    # It is measured in CPU time so it is not spent waiting on I/O — but that is a secondary
+    # reason, and NOT load-immunity: CPU time inflates under contention just as wall does
+    # (measured 2.60x vs 2.6x). Headroom is what protects the verdict; see scanbudget.py.
+    #
+    # COOPERATIVE ONLY, deliberately. The obvious move — wrapping each check in
+    # `check_deadline` the way run_all does — is unsound here, because this loop can already
+    # run INSIDE someone else's armed itimer: report.py:_skill_inventory arms one per skill,
+    # and vet_plugin arms one around its bundled-skill dispatch. (run_all is NOT such a
+    # frame: it arms around ring checks as members of CHECKS, which is a different call
+    # path — nothing in CHECKS reaches this function.) `check_deadline` disarms the timer
+    # in its `finally`, and a disarm is indistinguishable from an expiry, so a nested
+    # arm/disarm would not delay the outer per-skill deadline but DELETE it, silently
+    # undoing a protection C-159 added. A hard per-ring-check cap therefore needs a
+    # re-entrant `check_deadline` first; until then the cooperative ceiling below is the
+    # bound that is actually safe to add, and it is enough to stop an unbounded sweep.
+    deadline = cpu_deadline(target_budget_s)
+    skipped: list[str] = []
     for check in SKILL_CONTENT_RING:
+        name = getattr(check, "__name__", "ring check")
+        if cpu_exceeded(deadline):
+            skipped.append(name)
+            continue
         try:
             fx = check(ctx)
+        except ScanBudgetExceeded:
+            # Re-raised, NOT swallowed, and caught before the catch-all below precisely so
+            # it cannot be: ScanBudgetExceeded is a plain Exception subclass, so the bare
+            # `except Exception` would eat a deadline belonging to an OUTER owner
+            # (report.py:_skill_inventory's per-skill frame, or vet_plugin's dispatch
+            # frame), which needs the signal to reach it so it can report that target
+            # UNKNOWN. It also carries the cooperative, non-timer raise skillast.py emits
+            # for its own reached-sinks cap, which belongs to run_all. Eating any of them
+            # here hands the owner a partial scan dressed up as a complete one — the
+            # false-PASS shape C-175 fixed at :3345.
+            raise
         except Exception:  # noqa: BLE001 — a ring check must never break --vet
             continue
         if fx.status not in (FAIL, WARN):
@@ -3894,7 +3949,56 @@ def _run_content_ring(ctx: Context) -> list[Finding]:
             continue
         seen.add(key)
         out.append(fx)
+    if skipped:
+        gap = (
+            f"content-ring coverage is incomplete: {len(skipped)} of "
+            f"{len(SKILL_CONTENT_RING)} content-security check(s) did not run — the "
+            f"{target_budget_s:g}s per-target CPU scan budget was exhausted "
+            f"({', '.join(skipped[:3])}{', …' if len(skipped) > 3 else ''})"
+        )
+        # Recorded on ctx where every other truncation in this engine records it …
+        note_limit(ctx.limit_hits, LIMIT_DOMAIN_SKILL, gap)
+        # … AND emitted as a finding (see coverage_gap_finding for why ctx alone is not
+        # enough).
+        out.append(coverage_gap_finding(gap))
     return out
+
+
+def coverage_gap_finding(detail: str) -> Finding:
+    """The synthetic verdict that says "part of this target was never inspected".
+
+    Shared so every producer of a truncated scan says it the same way — the ring's own
+    cooperative ceiling here, and `report.py`'s per-skill inventory when an outer hard
+    deadline cuts the ring short.
+
+    `ctx.limit_hits` alone does not reach the user on a vet path: no vet renderer reads
+    it, and `dossier._danger_coverage_gap` needs an UNKNOWN *finding* in the danger
+    bucket. Measured before this existed, a benign skill whose ring was cut short graded
+    A/100 while the same skill fully scanned graded B/83 — hitting the ceiling BOUGHT a
+    cleaner verdict. The `"coverage is incomplete"` wording in *detail* is load-bearing:
+    it is the substring `dossier._danger_coverage_gap` matches on.
+
+    Built directly rather than via `_custom()`: like SOURCE-VET / PLUGIN-VET / MCP-VET
+    this is a synthetic vet-only verdict id with no CheckMeta, and `_custom()` resolves
+    its id through BY_ID. Keeping it out of CATALOG is deliberate — it is not a check,
+    and adding it would move `len(CATALOG)` and redden every shipped check-count claim.
+    """
+    return Finding(
+        "VET-COVERAGE",
+        "Content-ring coverage",
+        HIGH,
+        UNKNOWN,
+        detail,
+        # An earlier wording told the reader to "raise the budget" or re-run — neither is
+        # actionable: no CLI flag or env var exposes the budget, and a re-run spends the
+        # same budget on the same content for the same result. This says what they can
+        # act on, matching how check_installed_skills phrases its own coverage-gap fix.
+        "Part of this skill was never inspected, so this is not a clean verdict. "
+        "Scan cost is driven by content size — review the skill's largest files by "
+        "hand before trusting it.",
+        "Skill Trust",
+        False,
+    )
 
 
 def vet_skill(path: str | Path) -> Finding:
@@ -3979,9 +4083,13 @@ def vet_skill(path: str | Path) -> Finding:
                 # scan hit a size/file cap), even when a ring WARN/FAIL outranks it as the
                 # primary. Otherwise build_profile loses the danger-axis coverage-gap signal
                 # and a padded skill hiding a payload past the scan cap reads a grade too
-                # high — the B-092 invariant. (_run_content_ring only ever returns FAIL/WARN,
-                # so `finding` is the sole possible UNKNOWN in the pool.)
-                or (fx is finding and fx.status == UNKNOWN
+                # high — the B-092 invariant. Generalised for F-148: carry EVERY
+                # coverage-gap UNKNOWN, not just the B13 base verdict, now that the ring
+                # can emit one of its own. Dropping the `fx is finding` restriction is a
+                # pure widening — nothing carried before stops being carried — and without
+                # it a ring WARN outranks the gap as primary, the gap is filtered out of
+                # the pool, and build_profile loses the danger-axis coverage signal.
+                or (fx.status == UNKNOWN
                     and "coverage is incomplete" in (fx.detail or ""))
             )
         ]

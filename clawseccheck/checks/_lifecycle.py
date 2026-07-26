@@ -57,6 +57,29 @@ from ._shared import (
 )
 
 
+def _detail_path(value, home) -> str:
+    """Render *value* for a ``Finding.detail``: relative to the audited home when it lies
+    inside it, with a single ``..`` segment when it lies under the home's parent (the
+    ``~`` slot of a real OpenClaw home, where ``.config/...`` lives). Anything else is
+    returned unchanged. A composite string that merely *starts* with such a path is
+    rewritten the same way, so a source label like ``<unit> (Environment=)`` still works.
+
+    ``baseline.fingerprint()`` hashes ``Finding.detail``, and a user's
+    ``.clawseccheckignore`` keys a per-finding suppression on that hash — so an absolute
+    scan-root path baked into a detail silently orphans that suppression the moment the
+    workspace or the scanned skill moves, and it leaks the reporter's directory layout
+    into any report they share. The audited root is printed once in the report header
+    instead. A path the CONFIG itself declares in absolute form is deliberately left
+    verbatim: that string is a function of the audited subject, so it belongs in the
+    finding's identity (and in the text, since it is what the owner has to go fix).
+    """
+    text = str(value)
+    for base, prefix in ((str(home), ""), (str(Path(home).parent), ".." + os.sep)):
+        if base and base != os.sep and text.startswith(base + os.sep):
+            return prefix + text[len(base) + 1:]
+    return text
+
+
 # ---------- B23: approval-bypass directives in bootstrap ----------
 # Matches explicit directives that tell the agent to skip human confirmation.
 # Patterns are deliberately narrow to avoid matching benign text:
@@ -156,6 +179,137 @@ _KNOWN_ADVISORIES: list[tuple[str, tuple[int, ...], str, str]] = [
         (2026, 2, 13),
         "2026.2.14",
         "Browser upload path traversal via Playwright setInputFiles",
+    ),
+    # ---- ClawRadar sweep 2026-07-22 — all fetch-confirmed directly against their
+    # own advisory page; version-only, no config-field surface.
+    (
+        "GHSA-gv46-4xfq-jv58",
+        (2026, 2, 13),
+        "2026.2.14",
+        "Gateway node.invoke RCE: unsanitized approval fields bypass exec-approval "
+        "gating for system.run (CVE-2026-28466)",
+    ),
+    (
+        "GHSA-pv58-549p-qh99",
+        (2026, 2, 13),
+        "2026.2.14",
+        "Unauthenticated discovery-beacon TXT records trusted for routing/TLS "
+        "pinning, enabling LAN redirect + Gateway credential theft (CVE-2026-26327)",
+    ),
+    (
+        "CVE-2026-32045",
+        (2026, 2, 20),
+        "2026.2.21",
+        "Tokenless Tailscale auth meant for the Control UI websocket also applied "
+        "to HTTP gateway routes (GHSA-hff7-ccv5-52f8)",
+    ),
+    (
+        "CVE-2026-32013",
+        (2026, 2, 24),
+        "2026.2.25",
+        "Symlink traversal in agents.files.get/set allows reads/writes outside "
+        "the agent workspace",
+    ),
+    (
+        "GHSA-6rmx-gvvg-vh6j",
+        (2026, 3, 2),
+        "2026.3.7",
+        "Webhook handler counted auth failures before validating HTTP method, "
+        "enabling an auth-failure-budget lockout DoS",
+    ),
+    (
+        "GHSA-5jvj-hxmh-6h6j",
+        (2026, 3, 24),
+        "2026.3.25",
+        "Gateway HTTP /sessions/:sessionKey/history skipped the operator.read "
+        "scope enforced by the equivalent WebSocket endpoint (CVE-2026-35657)",
+    ),
+    (
+        "CVE-2026-43584",
+        (2026, 4, 9),
+        "2026.4.10",
+        "Exec environment policy denylist missed VIMINIT/EXINIT/LUA_INIT/"
+        "HOSTALIASES interpreter-startup variables",
+    ),
+    (
+        "GHSA-8372-7vhw-cm6q",
+        (2026, 4, 13),
+        "2026.4.14",
+        "sourceConfig/runtimeConfig alias fields bypassed gateway secret "
+        "redaction (CVE-2026-43528)",
+    ),
+    (
+        "GHSA-v8cx-933x-r976",
+        (2026, 4, 24),
+        "2026.4.25",
+        "Fake package roots could influence memory-core artifact loading "
+        "(CVE-2026-53813)",
+    ),
+    (
+        "GHSA-jvm4-4j77-39p6",
+        (2026, 4, 27),
+        "2026.4.29",
+        "QQBot streaming command could mutate config without an explicit "
+        "allowFrom entry",
+    ),
+    (
+        "GHSA-w4v6-g3wm-w36c",
+        (2026, 4, 28),
+        "2026.4.29",
+        "QQBot admin commands could skip DM-only and allowFrom policy checks",
+    ),
+    (
+        "GHSA-xr4f-mjxj-w6w5",
+        (2026, 5, 3),
+        "2026.5.4",
+        "Non-owner chat senders could issue device-pairing bootstrap codes",
+    ),
+    (
+        "GHSA-w5ww-7chg-mxcq",
+        (2026, 5, 5),
+        "2026.5.6",
+        "Telegram interactive callbacks could skip commands.allowFrom",
+    ),
+    (
+        "GHSA-77q5-rr5v-x43q",
+        (2026, 5, 6),
+        "2026.5.7",
+        "Trusted retry endpoint checks could match a hostname prefix instead of "
+        "the exact trusted host",
+    ),
+    (
+        "GHSA-j472-gf56-x589",
+        (2026, 5, 7),
+        "2026.5.12",
+        "PowerShell encoded-command aliases could miss exec allowlist checks",
+    ),
+    (
+        "CVE-2026-53810",
+        (2026, 5, 17),
+        "2026.5.18",
+        "Marketplace runtime extension metadata could redirect loading toward "
+        "unscanned package payloads (GHSA-v6r2-jh58-xx6w)",
+    ),
+    (
+        "GHSA-3c6j-hq33-3jv4",
+        (2026, 5, 17),
+        "2026.5.18",
+        "Paired nodes could forge exec lifecycle events without system.run "
+        "provenance (CVE-2026-53816)",
+    ),
+    (
+        "CVE-2026-62218",
+        (2026, 5, 26),
+        "2026.5.27",
+        "device.pair.approve let lower-trust callers bypass role-management "
+        "checks",
+    ),
+    (
+        "CVE-2026-62195",
+        (2026, 6, 5),
+        "2026.6.6",
+        "MCP loopback feature let lower-trust callers execute owner-only tools "
+        "via configured input paths",
     ),
 ]
 
@@ -1634,10 +1788,147 @@ def check_install_policy_gate(ctx: Context) -> Finding:
     )
 
 
+def check_secrets_provider_exec(ctx: Context) -> Finding:
+    """B194 — secrets.providers.<name> with source:"exec" escape flags (E-060 item 1).
+
+    A distinct config subtree from B174's security.installPolicy.exec: this command
+    runs on every secret RESOLVE (not just install/update), with the resolved
+    credential in hand once it returns. Mirrors B174's allowInsecurePath/
+    allowSymlinkCommand/trustedDirs/passEnv logic against secrets.providers.* instead.
+
+    FAIL    — an exec-source provider has allowInsecurePath=true with no trustedDirs.
+    WARN    — allowInsecurePath=true scoped by trustedDirs; or allowSymlinkCommand=true
+              alone; or a secret-shaped name in passEnv.
+    PASS    — exec-source provider(s) configured with none of the above escape flags.
+    UNKNOWN — no secrets.providers block, or no provider uses source:"exec".
+    """
+    unreadable = _config_unreadable("B194", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    providers = dig(ctx.config, "secrets.providers")
+    if not isinstance(providers, dict) or not providers:
+        return _finding(
+            "B194",
+            UNKNOWN,
+            "No secrets.providers configured -- nothing to assess for exec-source "
+            "command execution on secret resolve.",
+            "If you configure a secrets.providers.<name> with source:\"exec\", scope "
+            "it with a non-empty trustedDirs and avoid allowInsecurePath/"
+            "allowSymlinkCommand.",
+        )
+
+    # The schema also has a source:"exec" + pluginIntegration variant with no `command`
+    # field at all (a different, plugin-owned execution path) -- only the bare
+    # command-based shape has the writable-path/symlink escape surface this check models.
+    exec_providers = {
+        name: spec
+        for name, spec in providers.items()
+        if isinstance(spec, dict) and spec.get("source") == "exec" and "command" in spec
+    }
+    if not exec_providers:
+        return _finding(
+            "B194",
+            UNKNOWN,
+            "secrets.providers configured but none use a command-based "
+            "source:\"exec\" -- nothing to assess for exec-source command execution.",
+            "—",
+        )
+
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+    for name, spec in exec_providers.items():
+        insecure_path = spec.get("allowInsecurePath") is True
+        symlink_command = spec.get("allowSymlinkCommand") is True
+        trusted_dirs = spec.get("trustedDirs")
+        has_trusted_dirs = isinstance(trusted_dirs, list) and any(
+            isinstance(d, str) and d.strip() for d in trusted_dirs
+        )
+
+        if insecure_path and not has_trusted_dirs:
+            fail_ev.append(
+                f"secrets.providers.{name}.allowInsecurePath=true with no trustedDirs "
+                "-- any filesystem path is accepted with zero verification, and this "
+                "command runs on every secret resolve"
+            )
+        elif insecure_path:
+            warn_ev.append(
+                f"secrets.providers.{name}.allowInsecurePath=true skips the exec "
+                "command's own permission/ownership checks, scoped only by trustedDirs"
+            )
+        if symlink_command:
+            warn_ev.append(
+                f"secrets.providers.{name}.allowSymlinkCommand=true lets the exec "
+                "target be a symlink (the resolved target's own permissions are what "
+                "actually runs)"
+            )
+
+        pass_env = spec.get("passEnv")
+        if isinstance(pass_env, list):
+            secret_names = [
+                str(k) for k in pass_env if isinstance(k, str) and SECRET_KEY_RE.search(k)
+            ]
+            if secret_names:
+                warn_ev.append(
+                    f"secrets.providers.{name}.passEnv forwards secret-shaped host env "
+                    "var name(s): " + ", ".join(secret_names[:6])
+                )
+
+    if fail_ev:
+        ev = fail_ev + warn_ev
+        return _finding(
+            "B194",
+            FAIL,
+            f"{len(exec_providers)} secrets provider(s) use a command-based "
+            f"source:\"exec\"; {len(fail_ev)} have an unrestrained allowInsecurePath "
+            "escape -- see evidence.",
+            "Remove allowInsecurePath (or set it to false) on the named provider(s), "
+            "or scope it with a non-empty trustedDirs naming only directories you have "
+            "independently verified are trusted -- this command runs on every secret "
+            "resolve, not just install time.",
+            evidence=ev[:6],
+        )
+    if warn_ev:
+        return _finding(
+            "B194",
+            WARN,
+            f"{len(exec_providers)} secrets provider(s) use a command-based "
+            "source:\"exec\" with a narrowed escape flag or secret-shaped passEnv "
+            "forwarding -- see evidence.",
+            "Confirm every trustedDirs entry is non-writable by other users; avoid "
+            "allowSymlinkCommand; forward only the specific env vars the exec command "
+            "actually needs.",
+            evidence=warn_ev[:6],
+        )
+    return _finding(
+        "B194",
+        PASS,
+        f"{len(exec_providers)} secrets provider(s) use a command-based "
+        "source:\"exec\" with no unrestrained allowInsecurePath escape, "
+        "allowSymlinkCommand, or secret-shaped passEnv forwarding detected.",
+        "Keep exec-source secret provider commands owner-only and re-review "
+        "trustedDirs whenever the provider configuration changes.",
+    )
+
+
+# B-332: cap on how many matched advisory ids are surfaced in evidence/detail. The
+# table has grown past what fits comfortably in one line; a "showing N of M" note
+# makes truncation explicit instead of silently dropping ids. Matches the `[:20]`
+# precedent used elsewhere in this module for enumerable evidence lists.
+_B33_EVIDENCE_CAP = 20
+
+
 def check_known_vulns(ctx: Context) -> Finding:
     """B33 — Known-vulnerable OpenClaw version gate.
 
-    FAIL    — installed version <= a known-advisory's max_vulnerable_version_tuple.
+    FAIL    — installed version <= one or more known advisories' max_vulnerable_version_tuple.
+              Reports EVERY matching advisory (B-332) — not just the first row in table
+              order — and the `fix` targets the HIGHEST fixed_version across all matches,
+              since that is the only version that actually clears the finding. Returning on
+              the first match handed a far-behind user the OLDEST advisory's fixed version
+              as remediation: a version still vulnerable to every later advisory in the
+              table, turning the fix into a multi-step upgrade treadmill instead of a single
+              correct jump.
     PASS    — installed version is past all known advisory fixes.
     UNKNOWN — meta.lastTouchedVersion is missing or cannot be parsed.
     """
@@ -1663,22 +1954,43 @@ def check_known_vulns(ctx: Context) -> Finding:
             "and keep OpenClaw current.",
         )
 
-    for ghsa_id, max_vuln, fixed_ver, desc in _KNOWN_ADVISORIES:
-        if parsed <= max_vuln:
-            return _finding(
-                "B33",
-                FAIL,
-                f"OpenClaw {raw_ver} is affected by {ghsa_id}: {desc}. "
-                f"Versions <= {'.'.join(str(x) for x in max_vuln)} are vulnerable.",
-                f"Upgrade OpenClaw to >= {fixed_ver} to remediate {ghsa_id}.",
-                evidence=[ghsa_id],
-            )
+    # Collect EVERY matching row (table order is oldest-first, so this is already a
+    # deterministic, stable ordering across runs) rather than returning on the first.
+    matched = [row for row in _KNOWN_ADVISORIES if parsed <= row[1]]
+    if not matched:
+        return _finding(
+            "B33",
+            PASS,
+            f"OpenClaw {raw_ver} is at or past all known-advisory fixes.",
+            "Keep OpenClaw updated and re-check after new advisories are published.",
+        )
 
+    matched_ids = [ghsa_id for ghsa_id, _max_vuln, _fixed_ver, _desc in matched]
+    # The only version that actually clears the finding is the HIGHEST fixed_version
+    # across every matched advisory — a lower fixed_version leaves later advisories open.
+    highest_fixed_ver = max(
+        (fixed_ver for _ghsa_id, _max_vuln, fixed_ver, _desc in matched),
+        key=lambda v: _parse_version(v) or (),
+    )
+
+    n_total = len(matched_ids)
+    if n_total > _B33_EVIDENCE_CAP:
+        shown_ids = matched_ids[:_B33_EVIDENCE_CAP]
+        truncation_note = f" (showing {_B33_EVIDENCE_CAP} of {n_total})"
+    else:
+        shown_ids = matched_ids
+        truncation_note = ""
+
+    advisory_word = "advisory" if n_total == 1 else "advisories"
     return _finding(
         "B33",
-        PASS,
-        f"OpenClaw {raw_ver} is at or past all known-advisory fixes.",
-        "Keep OpenClaw updated and re-check after new advisories are published.",
+        FAIL,
+        f"OpenClaw {raw_ver} is affected by {n_total} known {advisory_word}: "
+        f"{', '.join(shown_ids)}{truncation_note}.",
+        f"Upgrade OpenClaw to >= {highest_fixed_ver} to remediate "
+        f"{'this advisory' if n_total == 1 else f'all {n_total} matched advisories'} "
+        "in a single upgrade.",
+        evidence=shown_ids,
     )
 
 
@@ -2751,6 +3063,15 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
     from ..logsafe import redact as _redact  # noqa: PLC0415
 
     now_ms = _time.time() * 1000.0
+    # B-348: two parallel lists on purpose. `high_scope` is what the WARN detail quotes and
+    # is therefore what `baseline.fingerprint()` hashes, so nothing derived from the wall
+    # clock may enter it: `lastSeenAgeDays` is recomputed on every run, so embedding it made
+    # a user's `.clawseccheckignore` fingerprint suppression for this exact finding
+    # self-orphan roughly every 2.4 hours on a completely unchanged config — the finding
+    # silently reappeared as if newly discovered. `high_scope_ev` keeps the age and goes to
+    # `evidence=`, which is not hashed and IS rendered under the finding (report.py prints
+    # up to 12 evidence lines for a WARN), so the reader still sees how stale each device is.
+    high_scope: list[str] = []
     high_scope_ev: list[str] = []
     for key, entry in data.items():
         if not isinstance(entry, dict):
@@ -2783,12 +3104,9 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
         if isinstance(last_seen, (int, float)) and last_seen > 0:
             age_days = max(0.0, (now_ms - last_seen) / 86_400_000.0)
             age_desc = f"{age_days:.1f}d"
-        high_scope_ev.append(
-            _redact(
-                f"deviceId={device_id} platform={platform} scopes={granted} "
-                f"lastSeenAgeDays={age_desc}"
-            )
-        )
+        base = f"deviceId={device_id} platform={platform} scopes={granted}"
+        high_scope.append(_redact(base))
+        high_scope_ev.append(_redact(f"{base} lastSeenAgeDays={age_desc}"))
 
     if not high_scope_ev:
         return _finding(
@@ -2799,8 +3117,8 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
             "Continue reviewing paired devices periodically.",
         )
 
-    detail = "; ".join(high_scope_ev[:6]) + (
-        f" (+{len(high_scope_ev) - 6} more)" if len(high_scope_ev) > 6 else ""
+    detail = "; ".join(high_scope[:6]) + (
+        f" (+{len(high_scope) - 6} more)" if len(high_scope) > 6 else ""
     )
     return _finding(
         "B176",
@@ -3630,7 +3948,9 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
             if verdict:
                 observed_canonical += 1
             else:
-                env_bad.append(f"{name}={raw!r} ({origin}) repoints {what}")
+                env_bad.append(
+                    f"{name}={raw!r} ({_detail_path(origin, ctx.home)}) repoints {what}"
+                )
             # The dist's ladder is first-non-empty-wins, so a set variable makes the rest of
             # its own pair unreachable. Reporting the shadowed one too would be a finding
             # about a value the product never reads.
@@ -4004,7 +4324,9 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
             except OSError:
                 present = False
             if not present:
-                missing.append(f"{label}: '{d}' declared but not present on disk")
+                missing.append(
+                    f"{label}: '{_detail_path(d, ctx.home)}' declared but not present on disk"
+                )
 
     seen: set = set()
     for rel in [""] + list(WORKSPACE_DIRS):
@@ -4032,7 +4354,8 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
             if gone and str(p) not in seen:
                 seen.add(str(p))
                 missing.append(
-                    f".clawhub/lock.json: skill '{slug}' skillFile dir gone ({p.parent})"
+                    f".clawhub/lock.json: skill '{slug}' skillFile dir gone "
+                    f"({_detail_path(p.parent, ctx.home)})"
                 )
 
     if not missing:
@@ -4219,4 +4542,544 @@ def check_version(ctx: Context) -> Finding:
         f"OpenClaw config last touched by version {ver}. Known-vulnerable releases "
         "are gated by B33; this is an update-hygiene reminder, not a vulnerability claim.",
         "Keep OpenClaw updated and re-run the checks after upgrading.",
+    )
+
+
+# ---------- B325 (E-060): marketplaces.feeds points at a non-canonical registry ----------
+# marketplaces.feeds.<name>.url (config-schema.d.ts:199-213; zod-schema-O9ml_nmo.js:958-979,
+# a strict Record<string, {url: https-only string, verification?: {mode: "unsigned"}}>) is
+# OpenClaw's documented, sanctioned self-hosting extension point for its skill/plugin feed
+# (schema-DRyO1XBt.js:84-88: "deployments can add or override profiles to point OpenClaw at
+# their effective feed endpoint"). The live, grounded mechanism this check targets:
+# resolveHostedCatalogFeedSource (official-external-plugin-catalog-ph3rbXr3.js:2817-2836)
+# hostname-gates an AD-HOC `--feed-url` CLI override against
+# OFFICIAL_EXTERNAL_PLUGIN_CATALOG_FEED_HOSTNAME_ALLOWLIST=["clawhub.ai"], but a NAMED
+# CONFIG PROFILE — exactly marketplaces.feeds.<name>.url — has NO such allowlist check: any
+# https URL that passes isPlainHttpsUrl is accepted, and the resolver returns
+# hostnameAllowlist:[...default, url.hostname] — i.e. configuring a feed profile
+# demonstrably EXPANDS the trusted-fetch hostname set to whatever host the operator names.
+#
+# C-135 REACHABILITY NOTE (added during adversarial review, not in the original grounding
+# pass): resolveHostedCatalogFeedSource's *feedProfile* parameter — not just its bare
+# presence in config — decides whether a non-default-named profile is ever actually
+# fetched. Absent an explicit selection, it defaults to "clawhub-public"
+# (DEFAULT_OFFICIAL_EXTERNAL_PLUGIN_CATALOG_FEED_PROFILE,
+# official-external-plugin-catalog-ph3rbXr3.js:2752), and that parameter is wired ONLY
+# from a CLI flag (`opts.feedProfile`, plugins-cli.runtime-I7nPMOsg.js:427,475 — e.g.
+# `openclaw plugins marketplace entries --feed-profile <name>`), never read from config
+# itself. So overriding the config key literally named "clawhub-public" is live on every
+# default marketplace fetch with no extra step, while adding any OTHER profile name is
+# currently DORMANT — it becomes a trusted source only once something (an operator, or an
+# agent with exec access) explicitly runs a `--feed-profile <name>` invocation naming it.
+# Both shapes are still WARNed on identically below: a dormant declared trust expansion is
+# still worth an operator's attention (an agent with shell access could invoke the flag
+# itself), but the WARN text distinguishes "live now" from "live once selected" rather than
+# asserting the stronger claim for both — see check_marketplace_feed_provenance's own
+# WARN-branch comment for the exact wording split.
+#
+# marketplaces.sources (config-schema.d.ts:199-213; zod-schema-O9ml_nmo.js:966-979) is
+# DELIBERATELY not scored here. Its schema carries no url/registry/endpoint field at all —
+# it is used only as an allowlist of NAMES a remote feed entry's install.candidates[].
+# sourceRef may reference (official-external-plugin-catalog-ph3rbXr3.js:2837-2892), and
+# resolveFeedEntryInstallCandidate (:3210-3242) only ever resolves an npm/clawhub sourceType
+# to the hardcoded default registries — a declared custom source grants no additional
+# install-target capability beyond the always-present "public-npm"/"public-clawhub"
+# defaults. type:"git" is accepted by the schema but has zero runtime consumers wiring it
+# to any install action anywhere in the dist. This exactly matches the field's own doc text
+# (schema-DRyO1XBt.js:88): "registry and host endpoints are added when installer resolution
+# can enforce them" — not yet. So marketplaces.sources is surfaced only as supplementary
+# evidence on an already-WARNing feeds finding, never as its own verdict.
+#
+# Severity model mirrors B184 (check_clawhub_registry_provenance) almost exactly — same
+# underlying threat (which registry issues supply-chain trust), opposite temporal direction
+# (B184 = retrospective "where an install already came from"; B325 = prospective "where the
+# next install could come from"). Like B184: WARN, never FAIL — a self-hosted or enterprise
+# ClawHub mirror is a real, disclosed deployment reusing exactly the extension point
+# OpenClaw's own docs describe, and a FAIL would punish it.
+#
+# DEVIATION FROM THE ORIGINAL GROUNDING NOTE, FOUND AND FIXED DURING IMPLEMENTATION: the
+# epic's grounding pass recommended reusing B184's ``_b184_is_canonical`` verdict function
+# "verbatim" for this check too. Reusing it verbatim was tried first and is WRONG: that
+# function requires the URL to carry NO path/query/fragment to count as canonical, because
+# it was written to compare bare REGISTRY BASE URLs (e.g. "https://clawhub.ai"). A
+# marketplace FEED url legitimately carries a path — the shipped built-in default feed
+# itself is "https://clawhub.ai/v1/feeds/plugins" (DEFAULT_OFFICIAL_EXTERNAL_PLUGIN_
+# CATALOG_FEED_URL, official-external-plugin-catalog-ph3rbXr3.js:2751-2755). Reusing
+# ``_b184_is_canonical`` unmodified made this check WARN on OpenClaw's OWN default feed URL
+# — a textbook Golden-Rule-#5 false positive, caught by exercising the check against that
+# exact value before shipping, not by re-reading the grounding note. ``_b325_feed_host_is_
+# canonical`` below is therefore a SEPARATE function: same refusals for a scheme downgrade,
+# userinfo, and an explicit port (none of those ever appear on a legitimate clawhub.ai feed
+# URL, so refusing them cannot introduce a new false positive — it only closes a look-alike
+# gap, B184's own reasoning applied to what actually varies on a feed URL), but it
+# deliberately does NOT require an empty path/query/fragment the way B184's registry-base
+# check does.
+#
+# Polarity note — the OPPOSITE of B38/B196's "vendor-permissive-absent -> WARN" pattern:
+# here the vendor default when marketplaces.feeds is absent is the SAFE state (only the
+# built-in public https://clawhub.ai feed is in effect, DEFAULT_OFFICIAL_EXTERNAL_
+# PLUGIN_CATALOG_FEED_URL, official-external-plugin-catalog-ph3rbXr3.js:2751-2767) — not a
+# permissive gap — so "absent" is PASS here, not WARN.
+#
+# verification.mode is deliberately NOT keyed into severity: "unsigned" is CURRENTLY THE
+# ONLY VALID LITERAL in the schema (schema-DRyO1XBt.js:86: "signed verification is added
+# when envelope enforcement is wired" — not yet), so flagging it would be a 100%-of-the-time
+# false positive on every config that sets the field at all.
+_B325_CANONICAL_FEED_HOST = "clawhub.ai"
+
+# The one profile name OpenClaw fetches automatically with no CLI flag at all -- see the
+# C-135 REACHABILITY NOTE above for the grounding (DEFAULT_OFFICIAL_EXTERNAL_PLUGIN_
+# CATALOG_FEED_PROFILE, official-external-plugin-catalog-ph3rbXr3.js:2752).
+_B325_DEFAULT_FEED_PROFILE_NAME = "clawhub-public"
+
+
+def _b325_feed_host_is_canonical(raw, canonical_host: str) -> "bool | None":
+    """Does *raw* (a ``marketplaces.feeds.<name>.url`` value) resolve to *canonical_host*?
+
+    None when *raw* is not a usable URL string at all — the caller skips those rather
+    than counting them either way (Golden Rule #4: report UNKNOWN, not a guessed
+    verdict, when the value can't be assessed).
+
+    Deliberately narrower in scope than B184's ``_b184_is_canonical`` — see the comment
+    block above this function for why a feed url's path must NOT be required empty here
+    the way a bare registry-base url's is there. Still refuses (returns False for) a
+    scheme other than https, any userinfo, or an explicit port: none of those ever
+    appear on a legitimate clawhub.ai feed url, so refusing them closes a look-alike gap
+    without risking a new false positive. Values carrying whitespace or a control
+    character are refused outright rather than parsed, for the same reason
+    ``_b184_is_canonical`` does — pinning the verdict to a stdlib URL-normalization
+    detail that has moved across Python versions before is a real hazard in this
+    project (see that function's own docstring).
+    """
+    from urllib.parse import urlsplit  # noqa: PLC0415
+
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        return False
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return False
+    if parts.scheme.lower() != "https":
+        return False
+    if parts.username or parts.password:
+        return False
+    try:
+        if parts.port is not None:
+            return False
+    except ValueError:
+        return False
+    return (parts.hostname or "").lower() == canonical_host
+
+
+def check_marketplace_feed_provenance(ctx: Context) -> Finding:
+    """B325 (E-060) — marketplaces.feeds.<name>.url points at a non-canonical registry.
+
+    WARN    — at least one configured marketplaces.feeds profile's url resolves to a
+              hostname other than the public clawhub.ai (including a raw IP literal, a
+              non-https scheme, or a URL carrying userinfo/query/fragment). Never FAIL —
+              see the B184 precedent discussion in the comment block above this function.
+              The message text distinguishes a profile keyed literally "clawhub-public"
+              (live on every default marketplace fetch, no extra step) from any other
+              profile name (dormant until something explicitly selects it, e.g.
+              `--feed-profile <name>`) — see the "C-135 REACHABILITY NOTE" comment above
+              this function; both shapes WARN, but the wording no longer overclaims
+              immediacy for the dormant case.
+    PASS    — marketplaces.feeds is absent/empty (only the built-in public feed is in
+              effect — the safe default, not a permissive gap; see the polarity note
+              above), or every configured profile resolves to clawhub.ai.
+    UNKNOWN — no openclaw.json, config unparseable, or marketplaces.feeds is configured
+              but no profile had a url that could be assessed (missing/non-string url).
+
+    marketplaces.sources is never scored on its own (it has no url/endpoint field and no
+    runtime consumer that lets it redirect an install today — see the comment block
+    above); its configured names are added as supplementary evidence only when this
+    check already WARNs on marketplaces.feeds.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B325",
+            UNKNOWN,
+            "No openclaw.json found -- marketplaces.feeds cannot be assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B325", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    feeds = dig(ctx.config, "marketplaces.feeds")
+    if not isinstance(feeds, dict) or not feeds:
+        return _finding(
+            "B325",
+            PASS,
+            "marketplaces.feeds is not configured -- only the built-in public "
+            "https://clawhub.ai feed profile is in effect.",
+            "No action needed. If you add a custom marketplaces.feeds profile, keep "
+            "its url on https://clawhub.ai unless you deliberately run your own "
+            "self-hosted or enterprise feed mirror.",
+        )
+
+    canonical = 0
+    bad: "list[str]" = []
+    bad_default_profile = False
+    for name, spec in feeds.items():
+        if not isinstance(spec, dict):
+            continue
+        verdict = _b325_feed_host_is_canonical(spec.get("url"), _B325_CANONICAL_FEED_HOST)
+        if verdict is None:
+            continue
+        if verdict:
+            canonical += 1
+        else:
+            bad.append(f"marketplaces.feeds.{name}.url={spec.get('url')!r}")
+            if name == _B325_DEFAULT_FEED_PROFILE_NAME:
+                bad_default_profile = True
+
+    if bad:
+        sources = dig(ctx.config, "marketplaces.sources")
+        evidence = list(bad)
+        if isinstance(sources, dict) and sources:
+            evidence.append(
+                "marketplaces.sources also configured (name-allowlist only, not an "
+                "install-target endpoint): " + ", ".join(sorted(str(k) for k in sources)[:6])
+            )
+        # C-135: reachability differs by profile NAME, not just by presence -- see the
+        # "C-135 REACHABILITY NOTE" comment above this function for the full grounding.
+        if bad_default_profile:
+            reachability = (
+                'At least one overrides the "clawhub-public" profile name, which '
+                "OpenClaw fetches automatically on every default marketplace call "
+                "with no extra flag -- this is a LIVE trusted supply-chain source "
+                "right now, not just a future one."
+            )
+        else:
+            reachability = (
+                'None of these use the "clawhub-public" profile name OpenClaw '
+                "fetches by default, so each is currently DORMANT: OpenClaw expands "
+                "its trusted-fetch hostname allowlist to include a named feed "
+                "profile's host with no further vetting, but only once something "
+                "(an operator, or an agent with shell access) explicitly selects "
+                "that profile (e.g. `--feed-profile <name>`). It is still worth "
+                "reviewing now, since selecting it later requires no config change."
+            )
+        return _finding(
+            "B325",
+            WARN,
+            f"{len(bad)} marketplaces.feeds profile(s) point at a registry other than "
+            "the public https://clawhub.ai: " + "; ".join(bad) + ". " + reachability,
+            "If this is your own self-hosted or enterprise marketplace mirror, "
+            "nothing is wrong -- record that it is expected. If you did not "
+            "configure it, treat it as a supply-chain concern: find what set it "
+            "(check openclaw.json and any agent or skill able to write there) and "
+            "restore the canonical https://clawhub.ai feed.",
+            evidence=evidence[:6],
+        )
+
+    if canonical:
+        return _finding(
+            "B325",
+            PASS,
+            f"All {canonical} configured marketplaces.feeds profile(s) point at the "
+            "public https://clawhub.ai.",
+            "No action needed.",
+        )
+
+    return _finding(
+        "B325",
+        UNKNOWN,
+        "marketplaces.feeds is configured but no profile had a url that could be "
+        "assessed (missing or non-string url).",
+        "Confirm every marketplaces.feeds.<name>.url is set to a valid https URL.",
+    )
+
+
+# ---------- B328 (E-060): tools.exec.safeBinTrustedDirs writable-dir promotion ----------
+# tools.exec.safeBinTrustedDirs (config-schema.d.ts:3726, global; a structurally identical
+# but separately-consumed per-agent variant exists at agents.list.<id>.tools.exec.
+# safeBinTrustedDirs, config-schema.d.ts:1634 -- deliberately NOT checked here, mirroring
+# the existing global-only scoping precedent B55/B43/B48 already set for
+# tools.elevated.allowFrom) is a plain array of directory-path strings. Configuring it adds
+# extra directories on top of OpenClaw's own hardcoded DEFAULT_SAFE_BIN_TRUSTED_DIRS =
+# ["/bin", "/usr/bin"] (exec-safe-bin-trust-BiuDT-_9.js:429) into the live trust set used by
+# the exec-approval "safe bin" fast path.
+#
+# The exploit precondition is NOT "operator configured both safeBins and
+# safeBinTrustedDirs" -- tools.exec.safeBins ALSO defaults to a non-empty vendor list,
+# DEFAULT_SAFE_BINS = ["cut","uniq","head","tail","tr","wc"] (same file:8-14, applied by
+# resolveSafeBins whenever safeBins itself is never configured). So configuring
+# safeBinTrustedDirs alone, with safeBins left at its vendor default, is already
+# exploitable: isSafeBinUsage / resolveSegmentSatisfaction (exec-approvals-allowlist-
+# D_bloa3O.js:1018-1035, :1240-1259) treat a matching command as authorized with NO
+# allowlist match and NO human-approval prompt, and isExecutableSafeBinFile (exec-safe-bin-
+# trust-BiuDT-_9.js:476-485) only checks isFile()+X_OK -- no signature/hash/provenance
+# check, and no requirement the binary pre-existed. OpenClaw's own runtime DOES detect a
+# writable trusted dir (listWritableExplicitTrustedSafeBinDirs, same file:526-549) but only
+# LOGS about it (bash-tools-DHyGpWCr.js:3057-3073, node-cli-DSAz3X0B.js:1388-1403) -- it
+# never revokes trust or blocks execution.
+#
+# Severity model follows B186 (check_bundled_root_override) rather than C5: both are an
+# OPERATOR-NAMED, explicit, config-driven directory that gets an unconditional trust grant,
+# narrow and deterministic once the directory is known -- unlike C5's broad/speculative
+# PATH-ordering scenario nobody actually "declares". No bare "you configured this"
+# disclosure WARN for the mere presence of safeBinTrustedDirs (unlike B186's own
+# writable-vs-nonwritable split, this check goes further and skips a disclosure WARN
+# entirely for a TIGHT directory): OpenClaw's own doctor-tool hint text explicitly
+# recommends adding a directory here whenever an operator legitimately installs a custom
+# binary elsewhere, so a bare disclosure WARN would fire on ordinary, safe,
+# vendor-encouraged configurations and add noise without signal (Golden Rule #5) -- only
+# a confirmed-unsafe permission state carries a verdict, exactly like B186's own FAIL/PASS
+# split. A DIFFERENT WARN branch was added by C-135 review, though: a confirmed-unsafe
+# directory downgrades from FAIL to WARN specifically when the global tools.exec.safeBins
+# is explicitly emptied, because that provably disables the fast path this directory would
+# otherwise feed (see check_exec_safe_bin_trusted_dirs's own docstring for the full
+# grounding) -- that WARN is about a mitigated-but-not-provably-inert permission state,
+# not about mere disclosure, so it does not contradict the reasoning above.
+#
+# Reuses the shared, already-existing stat-based helper verbatim (``_shared.
+# _dir_replaceable_by_others``, sticky-aware, POSIX-only, group-membership-aware) rather
+# than reimplementing mode-bit logic -- same helper B186 already uses.
+#
+# _b328_creation_only_bypass_root() is a narrow, additional rule for exactly the three
+# well-known world-writable STICKY system temp roots OpenClaw's OWN doctor-tool heuristic
+# already hardcodes verbatim (classifyRiskySafeBinTrustedDir, audit-UjVvFwCi.js:803-874,
+# flags /tmp, /var/tmp, and homebrew/local-bin-shaped paths). _dir_replaceable_by_others()
+# exempts sticky directories on purpose (the sticky bit blocks cross-owner rename/delete of
+# an EXISTING file -- the right defense for B186's "replace the code" threat model). But
+# isExecutableSafeBinFile does not require the trusted binary to have pre-existed: a
+# freshly created, unclaimed safeBins basename (e.g. a not-yet-present /tmp/head) is
+# trusted identically to a long-present one, and the sticky bit never blocks file
+# CREATION. This is a literal-path match against exactly the three roots the vendor's own
+# audit tool names -- deliberately NOT a "/tmp-rooted" heuristic (B186's own comment block
+# explicitly tried and retracted that broader shape for a different check, because an
+# arbitrarily-deep PRIVATE 0700 subdirectory under /tmp is as safe as one under $HOME; only
+# matching the literal well-known root avoids that false positive).
+#
+# A relative entry cannot be safely stat()'d: OpenClaw resolves it via path.resolve()
+# against the AGENT PROCESS's own cwd at invocation time (exec-safe-bin-trust-BiuDT-_9.js:
+# 461-464), which this offline, read-only audit has no way to reproduce (OpenClaw's own
+# audit tool independently flags this same ambiguity, audit-UjVvFwCi.js:806). Such an
+# entry is reported as an explicit "not verified" evidence line -- neither counted toward
+# FAIL nor silently assumed safe.
+_B328_KNOWN_WORLD_WRITABLE_TEMP_ROOTS = frozenset({"/tmp", "/var/tmp", "/private/tmp"})
+
+
+def _b328_creation_only_bypass_root(path: Path) -> "str | None":
+    """Does *path* refer to the SAME filesystem object as one of the three well-known
+    sticky world-writable system temp roots OpenClaw's own doctor-tool heuristic
+    hardcodes, and is it stat-confirmed world-writable right now? Returns the reason,
+    or None. See the comment block above ``check_exec_safe_bin_trusted_dirs`` for why
+    this exists alongside (not instead of) ``_shared._dir_replaceable_by_others``.
+
+    C-135 REGRESSION FIX: the first cut of this helper compared ``str(path)`` against
+    the three root strings by literal equality (after only an ``rstrip("/")``). That is
+    trivially evadable while still landing on the exact same real directory: a symlink
+    elsewhere pointing at ``/tmp``, or a spelling POSIX/the OS treats as identical to
+    ``/tmp`` -- ``//tmp`` (POSIX leaves exactly-two-leading-slashes implementation
+    defined, but Linux/macOS both fold it to ``/tmp``), ``/tmp/../tmp``, ``/tmp/.``,
+    trailing slashes -- all resolved to the SAME inode as ``/tmp`` in testing on this
+    host, yet none of those spellings equalled the frozenset member and the check
+    silently PASSED. This matters concretely: OpenClaw's own ``normalizeTrustedDir``
+    resolves a configured entry with ``path.resolve()`` (lexical only, no symlink
+    follow) and trusts binaries found under THAT literal directory string -- so an
+    operator (or a compromised config-writer) naming any alias of ``/tmp`` in
+    ``safeBinTrustedDirs`` reproduces the exact same plant-an-unclaimed-safeBin exploit
+    this rule exists to catch. Comparing by filesystem identity (``st_dev``/``st_ino``)
+    instead of by string closes all of the above in one shot, because it asks the same
+    question the kernel would: is this the same directory, however it was spelled.
+    """
+    if not _shared._is_posix():
+        return None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if not (st.st_mode & 0o002):
+        return None
+    for root in _B328_KNOWN_WORLD_WRITABLE_TEMP_ROOTS:
+        try:
+            root_st = os.stat(root)
+        except OSError:
+            continue
+        if st.st_dev == root_st.st_dev and st.st_ino == root_st.st_ino:
+            return (
+                f"the same filesystem object as the well-known world-writable "
+                f"sticky system temp root {root} -- the sticky bit blocks "
+                "replacing an existing file there but not creating a new, "
+                "unclaimed one"
+            )
+    return None
+
+
+def check_exec_safe_bin_trusted_dirs(ctx: Context) -> Finding:
+    """B328 (E-060) — tools.exec.safeBinTrustedDirs writable-dir promotion.
+
+    FAIL    — ``include_host`` is enabled, the platform is POSIX, at least one
+              configured directory is stat-confirmed group- or world-writable by another
+              local account (via ``_shared._dir_replaceable_by_others``) or is the same
+              filesystem object as one of the three well-known sticky world-writable
+              system temp roots (see ``_b328_creation_only_bypass_root``), AND
+              ``tools.exec.safeBins`` is not explicitly emptied at the global level
+              (see the WARN branch below for when it is).
+    WARN    — the same writable-directory condition as FAIL, but the global
+              ``tools.exec.safeBins`` is explicitly configured as an empty list. C-135
+              finding: ``resolveSafeBins``/``isSafeBinUsage`` (exec-approvals-allowlist-
+              D_bloa3O.js:1010-1030) short-circuit to "never a safe-bin match" the moment
+              ``safeBins.size === 0`` -- BEFORE ``trustedSafeBinDirs`` is ever consulted
+              -- so an explicitly-emptied global safeBins makes safeBinTrustedDirs
+              currently inert for the fast path. A hard FAIL here would be a Golden-
+              Rule-#5 false positive on that config. Kept at WARN rather than silenced,
+              because a PER-AGENT ``agents.list.<id>.tools.exec.safeBins`` override (not
+              read by this check -- see the module comment block's global-only scoping
+              note) can independently re-enable the fast path for that one agent while
+              the writable directory stays configured; ``resolveExecSafeBinRuntimePolicy``
+              (exec-safe-bin-runtime-policy-BXwdBwWP.js:71) resolves per-agent safeBins
+              with ``params.local?.safeBins ?? params.global?.safeBins``, so a defined
+              (even non-empty) per-agent list wins over the emptied global one.
+    PASS    — tools.exec.safeBinTrustedDirs is absent/empty (only OpenClaw's own
+              hardcoded /bin, /usr/bin are trusted), or every configured absolute-path
+              directory is stat-confirmed NOT writable by another local account
+              (a nonexistent directory, or one whose stat() fails, is silently not a
+              finding -- matching B186's own documented convention).
+    UNKNOWN — no openclaw.json / config unparseable; or directories are configured but
+              host-filesystem scanning is disabled (--no-host); or directories are
+              configured on a non-POSIX platform.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B328",
+            UNKNOWN,
+            "No openclaw.json found -- tools.exec.safeBinTrustedDirs cannot be "
+            "assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B328", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    raw_dirs = dig(ctx.config, "tools.exec.safeBinTrustedDirs")
+    dirs = (
+        [d for d in raw_dirs if isinstance(d, str) and d.strip()]
+        if isinstance(raw_dirs, list)
+        else []
+    )
+    if not dirs:
+        return _finding(
+            "B328",
+            PASS,
+            "tools.exec.safeBinTrustedDirs is not configured -- only OpenClaw's own "
+            "hardcoded /bin and /usr/bin are trusted for the exec-approval safe-bin "
+            "fast path.",
+            "No action needed. If you add a trusted directory here, make sure it is "
+            "not group- or world-writable by another local account -- any binary "
+            "named in tools.exec.safeBins (cut/uniq/head/tail/tr/wc by default, even "
+            "with no explicit safeBins configured) placed there runs on the exec "
+            "fast path with no approval prompt.",
+        )
+
+    plural = "y" if len(dirs) == 1 else "ies"
+    if not getattr(ctx, "include_host", False):
+        return _finding(
+            "B328",
+            UNKNOWN,
+            f"tools.exec.safeBinTrustedDirs configures {len(dirs)} director{plural}, "
+            "but host-filesystem scanning is disabled (--no-host) so its write "
+            "permissions could not be assessed.",
+            "Re-run without --no-host to check whether the configured trusted "
+            "director(ies) are writable by another local account.",
+        )
+    if not _shared._is_posix():
+        return _finding(
+            "B328",
+            UNKNOWN,
+            f"tools.exec.safeBinTrustedDirs configures {len(dirs)} director{plural}, "
+            "but write-permission verification is not implemented on non-POSIX "
+            "platforms.",
+            "—",
+        )
+
+    replaceable: "list[str]" = []
+    unverified: "list[str]" = []
+    for d in dirs:
+        p = Path(d)
+        if not p.is_absolute():
+            unverified.append(
+                f"{d} is a relative path -- OpenClaw resolves it against the agent "
+                "process's own working directory at invocation time, which this "
+                "offline audit cannot reproduce; not verified"
+            )
+            continue
+        why = _shared._dir_replaceable_by_others(p)
+        if why is None:
+            why = _b328_creation_only_bypass_root(p)
+        if why:
+            replaceable.append(f"{d} is {why}")
+
+    if replaceable:
+        evidence = replaceable + unverified
+        # C-135 finding: an explicitly-emptied global safeBins list disables the
+        # ENTIRE safe-bin fast path (isSafeBinUsage short-circuits on
+        # safeBins.size===0 before ever consulting trustedSafeBinDirs), so a hard
+        # FAIL here would be a false positive on that config -- see the WARN branch
+        # in this function's docstring for the full grounding and the residual
+        # per-agent-override caveat that keeps this a WARN rather than a silent PASS.
+        raw_safe_bins = dig(ctx.config, "tools.exec.safeBins")
+        safe_bins_emptied = isinstance(raw_safe_bins, list) and len(raw_safe_bins) == 0
+        if safe_bins_emptied:
+            return _finding(
+                "B328",
+                WARN,
+                "tools.exec.safeBinTrustedDirs names a directory another local "
+                "account can write to: "
+                + "; ".join(replaceable)
+                + ". This is currently INERT for the safe-bin exec fast path because "
+                "the global tools.exec.safeBins is explicitly set to an empty list, "
+                "which disables safe-bin authorization outright (no bin name can "
+                "ever match). It stays a disclosure, not a silent PASS, because a "
+                "per-agent agents.list.<id>.tools.exec.safeBins override -- not read "
+                "by this audit -- can independently re-enable the fast path for that "
+                "one agent while this writable directory stays configured.",
+                "If tools.exec.safeBins is meant to stay empty everywhere, this "
+                "directory is currently harmless for the fast path -- confirm no "
+                "agent's tools.exec.safeBins re-enables it, or just tighten this "
+                "directory's permissions (0755 or tighter, not group- or "
+                "world-writable) to remove the risk regardless.",
+                evidence=evidence[:6],
+            )
+        return _finding(
+            "B328",
+            FAIL,
+            "tools.exec.safeBinTrustedDirs names a directory another local account "
+            "can write to: "
+            + "; ".join(replaceable)
+            + ". Any binary with a basename in tools.exec.safeBins (cut/uniq/head/"
+            "tail/tr/wc by default, even with no explicit safeBins configured) "
+            "placed or replaced there runs on the exec fast path with NO approval "
+            "prompt -- OpenClaw's own runtime detects and logs a warning about this, "
+            "but does not revoke trust or block execution.",
+            "Move the trusted directory to one only you can write (0755 or tighter, "
+            "not group- or world-writable), or remove it from "
+            "tools.exec.safeBinTrustedDirs. Then review what is currently in that "
+            "directory -- it has been an exec-approval-bypass root for the agent.",
+            evidence=evidence[:6],
+        )
+
+    verb = "is" if len(dirs) == 1 else "are"
+    detail = (
+        f"{len(dirs)} tools.exec.safeBinTrustedDirs director{plural} {verb} "
+        "configured and none are stat-confirmed writable by another local account."
+    )
+    if unverified:
+        detail += " " + "; ".join(unverified)
+    return _finding(
+        "B328",
+        PASS,
+        detail,
+        "Keep every tools.exec.safeBinTrustedDirs entry non-writable by other local "
+        "accounts, and prefer an absolute path so this audit can verify it.",
+        evidence=unverified[:6] if unverified else None,
+        pass_confidence="no_signal" if unverified and not replaceable else None,
     )

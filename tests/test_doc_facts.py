@@ -48,7 +48,15 @@ _CATALOG_SCALE = 50
 # passed a run that was supposed to go red.
 _BARE_COUNT_RE = re.compile(r"(?<![+\w])(\d{2,4})\s+(?:[a-z]+\s+)?checks\b", re.IGNORECASE)
 _OPEN_COUNT_RE = re.compile(r"(\d{2,4})\+\s*(?:security\s+)?checks\b", re.IGNORECASE)
-_RISK_RANGE_RE = re.compile(r"RISK-01\.\.RISK-(\d+)")
+# Every spelling a writer reaches for, not just the one the first stale claim happened to
+# use. Pinning `..` alone is what let "RISK-01 through RISK-18" sit in docs/USAGE.md while
+# the engine built 21 — the guard was live, the doc was stale, and the two never met. The
+# separator set is deliberately narrow (no `/`, no `,`) so enumerations like
+# "RISK-01/02/03" in THREAT_COVERAGE.md stay out; the closing `RISK-` is required so a
+# CHECKS.md heading ("### RISK-01 - Untrusted sender …") cannot match either.
+_RISK_RANGE_RE = re.compile(
+    r"RISK-01\s*(?:\.\.|through|to|[-–—])\s*RISK-(\d+)", re.IGNORECASE
+)
 
 # An "N+" claim buys slack on purpose — it should not churn the badge SVGs on every added
 # check. It must still be true, and it must not be allowed to rot indefinitely: once the
@@ -140,7 +148,7 @@ def test_threat_coverage_header_names_the_current_release():
 
 
 def test_risk_range_claims_match_the_risk_engine():
-    """"RISK-01..RISK-19" must end where risk.py actually ends."""
+    """"RISK-01..RISK-19" must end where risk.py actually ends — however it is spelled."""
     risk_src = (REPO / "clawseccheck" / "risk.py").read_text(encoding="utf-8")
     highest = max(int(n) for n in re.findall(r"RISK-(\d+)", risk_src))
     wrong = []
@@ -150,11 +158,86 @@ def test_risk_range_claims_match_the_risk_engine():
             claimed = int(m.group(1))
             if claimed != highest:
                 line = text[: m.start()].count("\n") + 1
+                # Quote the claim VERBATIM rather than restating it in the `..` spelling:
+                # a message that renames what it found sends the reader grepping for text
+                # that is not in the file.
                 wrong.append(
-                    f"{path.relative_to(REPO)}:{line} says RISK-01..RISK-{claimed:02d}, "
+                    f"{path.relative_to(REPO)}:{line} says {m.group(0)!r}, "
                     f"engine goes to RISK-{highest:02d}"
                 )
     assert not wrong, "stale RISK range claims:\n  " + "\n  ".join(wrong)
+
+
+def test_risk_range_guard_reads_every_spelling_a_writer_uses():
+    """Guard the guard: the `..`-only regex was live while a `through` claim rotted.
+
+    Pins the separator set in both directions — the four accepted spellings must match,
+    and the enumeration/heading forms that share the `RISK-01` prefix must NOT, or the
+    guard would fire on `RISK-01/02/03` and on every CHECKS.md section heading.
+    """
+    for spelling in (
+        "RISK-01..RISK-18",
+        "RISK-01 through RISK-18",
+        "RISK-01 to RISK-18",
+        "RISK-01–RISK-18",
+        "RISK-01 - RISK-18",
+    ):
+        m = _RISK_RANGE_RE.search(spelling)
+        assert m is not None, f"{spelling!r} is a range claim the guard cannot see"
+        assert m.group(1) == "18"
+    for not_a_range in (
+        "combined with RISK-01/02/03 this is also",
+        "### RISK-01 - Untrusted sender can reach host execution",
+        "RISK-01, RISK-18",
+    ):
+        assert _RISK_RANGE_RE.search(not_a_range) is None, (
+            f"{not_a_range!r} is not a range claim, but the guard reads one"
+        )
+
+
+_CHAIN_COUNT_RE = re.compile(r"(\d+) attack[- ]chain detectors")
+
+
+def test_attack_chain_count_claims_match_the_risk_engine():
+    """The bare "N attack-chain detectors" figure, not just the RISK-01..RISK-NN form.
+
+    This drifted unnoticed to 20 while the engine built 21, because the sibling test
+    above only pins the *range* spelling and nothing pinned the badge figure. It lives in
+    the README alt text and inside both stats SVGs -- a title, an aria-label and a bare
+    <text> element -- which is exactly the shape a prose grep sails past.
+    """
+    risk_src = (REPO / "clawseccheck" / "risk.py").read_text(encoding="utf-8")
+    highest = max(int(n) for n in re.findall(r"RISK-(\d+)", risk_src))
+    wrong = []
+    for path in _shipped_files():
+        text = path.read_text(encoding="utf-8")
+        for m in _CHAIN_COUNT_RE.finditer(text):
+            claimed = int(m.group(1))
+            if claimed != highest:
+                line = text[: m.start()].count("\n") + 1
+                wrong.append(
+                    f"{path.relative_to(REPO)}:{line} claims {claimed} attack-chain "
+                    f"detectors, risk.py builds {highest}"
+                )
+    assert not wrong, "stale attack-chain count claims:\n  " + "\n  ".join(wrong)
+
+
+def test_the_svg_badge_number_matches_its_own_label():
+    """The SVG carries the figure twice -- a <text class="num"> and the label beside it --
+    plus again in the title and aria-label. Fixing one and missing another is the whole
+    failure mode here, so pin that they agree."""
+    wrong = []
+    for name in ("stats-light.svg", "stats-dark.svg"):
+        path = REPO / "docs" / "assets" / name
+        svg = path.read_text(encoding="utf-8")
+        label = _CHAIN_COUNT_RE.search(svg)
+        assert label, f"{name}: no 'N attack-chain detectors' text at all"
+        # the <text class="num"> sharing the label's x position carries the same figure
+        num = re.search(r'<text class="num" x="372\.0"[^>]*>(\d+)</text>', svg)
+        assert num, f"{name}: no attack-chain number element at the expected position"
+        if num.group(1) != label.group(1):
+            wrong.append(f"{name}: badge shows {num.group(1)}, its own text says {label.group(1)}")
+    assert not wrong, "SVG badge disagrees with itself:\n  " + "\n  ".join(wrong)
 
 
 def test_changelog_is_exempt_from_the_count_pins():

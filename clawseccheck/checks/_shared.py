@@ -589,7 +589,20 @@ def _finding(
     confidence=None,
     pass_confidence=None,
     severity=None,
+    scored=None,
 ) -> Finding:
+    """*scored*: per-finding override of CheckMeta.scored, same shape as *severity*.
+
+    B-315: an unscored (CheckMeta.scored=False) check must never emit a FAIL that
+    scoring.compute() can't see — but several checks (B185/B186/B193) deliberately keep
+    their WARN/PASS branches out of scoring for reasons unrelated to FAIL (opportunistic
+    evidence presence, or protecting a benign relocated/legacy setup from being docked),
+    while their FAIL branch is a narrow, well-vetted, deterministic escalation that
+    SHOULD hard-cap the grade. Passing scored=True on just that branch lets the
+    CheckMeta stay scored=False (preserving the documented WARN/PASS non-scoring
+    behavior) while the FAIL finding itself still participates. Defaults to
+    CheckMeta.scored when omitted — every existing caller is unaffected.
+    """
     m = _meta(cid)
     return Finding(
         m.id,
@@ -599,7 +612,7 @@ def _finding(
         detail,
         fix,
         m.framework,
-        m.scored,
+        m.scored if scored is None else scored,
         evidence or [],
         confidence=confidence or m.confidence,
         pass_confidence=pass_confidence,

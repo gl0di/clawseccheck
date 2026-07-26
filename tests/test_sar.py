@@ -151,10 +151,41 @@ def test_build_sars_mismatch_question_names_capability():
     assert "network" in sar["question"]
 
 
-def test_build_sars_mismatch_question_asks_yes_no():
+def test_build_sars_mismatch_question_ends_with_verdict_vocabulary():
+    """B-334: through v3.56.0 this question ended "[yes/no + reason]" -- a tail no
+    parser in the tool actually accepted (only SAFE/SUSPICIOUS/DANGEROUS is). Pin
+    the fixed tail, and that the legacy form is gone.
+    """
     sar = build_sars(_ctx_mismatch())[0]
-    q = sar["question"].lower()
-    assert "yes" in q or "no" in q
+    assert sar["question"].endswith("[SAFE / SUSPICIOUS / DANGEROUS + reason]")
+    assert "yes/no" not in sar["question"]
+
+
+def test_build_sars_verdict_values_are_the_single_source_adjudication_imports():
+    """Structural guard: adjudication.py's judge packet imports THIS module's
+    _VERDICT_VALUES rather than keeping an independently-maintained copy, so the
+    two modules' answer vocabularies cannot drift apart again (B-334)."""
+    from clawseccheck.adjudication import _VERDICT_VALUES as adjudication_values
+    from clawseccheck.sar import _VERDICT_VALUES as sar_values
+
+    assert adjudication_values is sar_values
+    assert sar_values == ("SAFE", "SUSPICIOUS", "DANGEROUS")
+
+
+def test_build_sars_question_tail_guard_is_not_vacuous(monkeypatch):
+    """Non-vacuous proof for the two tests above: revert this module's own answer
+    tail to the pre-B-334 "[yes/no + reason]" form (monkeypatched for this test
+    only -- the file on disk is never touched) and show the same assertion that
+    passes on the fixed code now fails.
+    """
+    import clawseccheck.sar as sar_module
+
+    monkeypatch.setattr(sar_module, "_ANSWER_TAIL", "[yes/no + reason]")
+    sar = build_sars(_ctx_mismatch())[0]
+    assert sar["question"].endswith("[yes/no + reason]")
+    with pytest.raises(AssertionError):
+        assert sar["question"].endswith("[SAFE / SUSPICIOUS / DANGEROUS + reason]")
+    assert "yes/no" in sar["question"]
 
 
 # ---------------------------------------------------------------------------

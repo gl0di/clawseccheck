@@ -350,7 +350,45 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
 
     All three are advisory. This renderer is unscored and opt-in (`--analyze-trajectory`),
     so nothing here can emit a Finding or move the A-F grade.
+
+    C-289 (A1): the ``explicit_path is None`` branch (the real audit path — every one of
+    this function's 6 call sites except an explicit `--analyze-trajectory --path` re-run)
+    is memoized on ``ctx._trajaudit_cache`` for the lifetime of that one `Context` object.
+    Five call sites (three `scoring.compute` invocations via `scoring.project`, `audit()`
+    itself, both reaching here through `grade_cap_signal`) do the exact same trajectory-
+    sidecar glob/parse against the exact same, unmutated `ctx` within one audit run — the
+    cache turns that into one real scan. `explicit_path` is deliberately NEVER cached: it
+    bypasses `ctx.home` entirely (an `--analyze-trajectory --path` re-run against an
+    arbitrary file), so it must not share a cache slot with the ctx-derived result.
+
+    The cache is read via ``getattr(ctx, "_trajaudit_cache", None)`` and skipped
+    entirely when absent (``None``), so a duck-typed stub ``ctx`` without that field
+    (as some tests construct) keeps working, uncached, exactly as before this change.
+
+    Every call returns its own shallow top-level ``dict`` copy — never the cached dict
+    object itself — so a caller reassigning a top-level key (e.g. ``r["hits"] = ...``)
+    can never corrupt what the next caller in the same run sees. This is a SHALLOW copy:
+    the nested containers (`hits`/`bootstrap_hits`/`cred_arg_hits` lists, the `verbs`
+    set) are still shared by reference across calls within one cached run. That is safe
+    today because every real consumer (`grade_cap_signal`, `render_trajectory_analysis`)
+    only reads those nested containers, never mutates them in place — but a future
+    caller that does (e.g. ``r["hits"].append(...)``) would leak across callers despite
+    the top-level copy. Prefer building a new value over mutating a returned collection.
     """
+    if explicit_path is None:
+        cache = getattr(ctx, "_trajaudit_cache", None)
+        if cache is not None:
+            cached = cache.get("analyze")
+            if cached is None:
+                cached = _analyze_scan(ctx, explicit_path=None)
+                cache["analyze"] = cached
+            return dict(cached)
+    return _analyze_scan(ctx, explicit_path=explicit_path)
+
+
+def _analyze_scan(ctx, *, explicit_path: str | None = None) -> dict:
+    """The real trajectory-sidecar scan `analyze()` memoizes (C-289/A1). Never call this
+    directly outside `analyze()` — it does the full glob + per-file parse every time."""
     indicators = skill_indicators(getattr(ctx, "installed_skills", None))
     boot_indicators = bootstrap_indicators(
         getattr(ctx, "bootstrap", None),

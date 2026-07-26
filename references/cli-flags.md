@@ -13,7 +13,14 @@ kept here so the always-loaded playbook stays lean.
   (danger / build / behavior / persistence / connections) plus an A–F grade. Exit code is 1 on
   SUSPICIOUS/DANGEROUS. See `docs/OUTPUT_SCHEMA.md` §11.
 - `--fail-under N` — exit with code 1 if score is below N (useful for CI pipelines).
-- `--exit-code` — exit 1 if any unsuppressed FAIL finding exists.
+- `--exit-code` — exit 1 on a FAIL verdict from any of four sources: (1) an unsuppressed
+  `FAIL` audit finding; (2) under `--full`, a `FAIL` MCP server; (3) under `--full`, a
+  `DANGEROUS` installed skill from the skill sweep; (4) on any run, a present-but-unparseable
+  `openclaw.json` (which yields only UNKNOWN/WARN findings, so a FAIL-only gate would
+  otherwise stay green on a broken config). Sources 2 and 3 are FAIL-only — a SUSPICIOUS
+  (WARN) server or skill does not trip it, and neither does a skipped or partially-scanned
+  skill: an incomplete sweep is disclosed in its printed section, never by reddening the gate.
+  `--vet`'s exit code is a separate contract (1 on SUSPICIOUS *or* DANGEROUS).
 - `--verbose` / `--debug` / `--log PATH` — local logging with secret redaction.
 - `--no-native` — skip the built-in `openclaw security audit` (for offline / hermetic testing).
 - `--no-update-notice` — suppress the offline "your build may be stale" reminder
@@ -26,7 +33,7 @@ kept here so the always-loaded playbook stays lean.
   and B44 (self-report ⇄ config drift) at `ATTESTED` confidence. Read-only; introspection only.
 - `--watch-log` — print the Agent Watch event journal (a local timeline of what changed across
   `--monitor` runs); `--events PATH` points it at a different journal file.
-- `--dashboard-findings` — print ONLY the Section-3 Findings block for the chat Dashboard
+- `--dashboard-findings` — print ONLY the Section-2 Findings block for the chat Dashboard
   (non-suppressed FAIL/WARN, high-confidence, grouped by the 7 families, already framed in the
   open 3-sided box) and exit. Agent-facing: SKILL.md Step 3 runs this and pastes the output
   verbatim, so the family frame is deterministic instead of model-drawn. `--ascii` degrades the

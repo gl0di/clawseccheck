@@ -286,19 +286,23 @@ def test_b2_trustedproxies_ipv6_ula_passes():
     assert f.status == PASS
 
 
-def test_b70_trustedproxies_world_open_ipv4_still_fails():
+# B-315: B70 was downgraded FAIL->WARN — an unscored check (scored=False) must never
+# FAIL. Restores the B68-B73 block comment's own claim ("WARN-only ... zero
+# false-positive FAILs"), which this check was the sole violator of.
+
+def test_b70_trustedproxies_world_open_ipv4_still_warns():
     f = check_trustedproxy_loopback(_ctx(_cfg_with_trusted_proxies(["0.0.0.0/0"])))
-    assert f.status == FAIL
+    assert f.status == WARN
 
 
-def test_b70_trustedproxies_world_open_ipv6_still_fails():
+def test_b70_trustedproxies_world_open_ipv6_still_warns():
     f = check_trustedproxy_loopback(_ctx(_cfg_with_trusted_proxies(["::/0"])))
-    assert f.status == FAIL
+    assert f.status == WARN
 
 
-def test_b70_trustedproxies_over_broad_ipv4_prefix_still_fails():
+def test_b70_trustedproxies_over_broad_ipv4_prefix_still_warns():
     f = check_trustedproxy_loopback(_ctx(_cfg_with_trusted_proxies(["0.0.0.0/1"])))
-    assert f.status == FAIL
+    assert f.status == WARN
 
 
 def test_b70_trustedproxies_specific_ip_plus_blank_entry_passes():
@@ -316,18 +320,18 @@ def test_b70_trustedproxies_ipv6_ula_passes():
 # only the allowLoopback field.
 # ---------------------------------------------------------------------------
 
-def test_b70_trustedproxy_nonloopback_no_headers_fails():
+def test_b70_trustedproxy_nonloopback_no_headers_warns():
     f = check_trustedproxy_loopback(_ctx(_BAD_CFG))
-    assert f.status == FAIL
+    assert f.status == WARN  # B-315: was FAIL
     assert "x-forwarded-user" in f.detail
     assert any("trusted-proxy" in e for e in f.evidence)
 
 
-def test_b70_bad_fixture_fails():
+def test_b70_bad_fixture_warns():
     f = check_trustedproxy_loopback(
         collect(FIXTURES / "bad_b233_trustedproxy_nonloopback_no_headers")
     )
-    assert f.status == FAIL
+    assert f.status == WARN  # B-315: was FAIL
 
 
 def test_b70_trustedproxy_with_required_headers_passes():
@@ -383,7 +387,7 @@ def test_b70_clean_trustedproxies_ip_allowlist_fixture_passes():
     assert f.status == PASS
 
 
-def test_b70_trustedproxies_empty_list_still_fails():
+def test_b70_trustedproxies_empty_list_still_warns():
     cfg = {
         "gateway": {
             "bind": "0.0.0.0:8080",
@@ -392,7 +396,7 @@ def test_b70_trustedproxies_empty_list_still_fails():
         }
     }
     f = check_trustedproxy_loopback(_ctx(cfg))
-    assert f.status == FAIL
+    assert f.status == WARN  # B-315: was FAIL
 
 
 def test_b70_token_auth_without_trustedproxy_field_stays_unknown():

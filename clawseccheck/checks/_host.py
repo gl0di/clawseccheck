@@ -4,6 +4,7 @@ Carved verbatim out of the former single-file checks.py; no logic changes.
 Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 """
 from __future__ import annotations
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +35,29 @@ from ._shared import (
     _finding,
     _plugins,
 )
+
+
+def _detail_path(value, home) -> str:
+    """Render *value* for a ``Finding.detail``: relative to the audited home when it lies
+    inside it, with a single ``..`` segment when it lies under the home's parent (the
+    ``~`` slot of a real OpenClaw home, where ``.config/...`` lives). Anything else is
+    returned unchanged. A composite string that merely *starts* with such a path is
+    rewritten the same way, so a source label like ``<unit> (Environment=)`` still works.
+
+    ``baseline.fingerprint()`` hashes ``Finding.detail``, and a user's
+    ``.clawseccheckignore`` keys a per-finding suppression on that hash — so an absolute
+    scan-root path baked into a detail silently orphans that suppression the moment the
+    workspace or the scanned skill moves, and it leaks the reporter's directory layout
+    into any report they share. The audited root is printed once in the report header
+    instead. A path the CONFIG itself declares in absolute form is deliberately left
+    verbatim: that string is a function of the audited subject, so it belongs in the
+    finding's identity (and in the text, since it is what the owner has to go fix).
+    """
+    text = str(value)
+    for base, prefix in ((str(home), ""), (str(Path(home).parent), ".." + os.sep)):
+        if base and base != os.sep and text.startswith(base + os.sep):
+            return prefix + text[len(base) + 1:]
+    return text
 
 
 # Keywords that map a free-text self-reported host monitor to a host-watch class.
@@ -775,12 +799,29 @@ def check_bundled_root_override(ctx: Context) -> Finding:
         # value; the only thing this changes is what gets PRINTED.
         resolved = Path(value)
         state = "exists" if resolved.is_dir() else "does not currently exist"
-        evidence.append(f"{var}={resolved} ({kind} root, {state}) via {source}")
+        # B-349: `resolved` is the LITERAL override value and stays verbatim (it is what
+        # the owner has to go unset, and it varies only when the audited subject does).
+        # `source` is the artifact this scan happened to read it out of, so it carries the
+        # scan root — which `baseline.fingerprint()` would then hash into this finding's
+        # identity, orphaning a user's suppression the moment the home moved.
+        evidence.append(
+            f"{var}={resolved} ({kind} root, {state}) via "
+            f"{_detail_path(source, ctx.home)}"
+        )
         why = _dir_replaceable_by_others(resolved)
         if why:
             replaceable.append(f"{var} target {resolved} is {why}")
 
     if replaceable:
+        # B-315: CheckMeta stays scored=False (catalog.py's own precedent — the WARN
+        # branch is a source-checkout developer's deliberate relocation, and scoring it
+        # would dock a setup that is working as its owner intended). But this FAIL
+        # branch (target dir writable by other local accounts) is the one real,
+        # deterministic escalation — narrowly scoped on purpose (see
+        # tests/test_b186_bundled_root_override.py's explicit discussion of the
+        # alternative "/tmp-rooted" escalation it deliberately did NOT implement). Dave's
+        # ruling requires an unscored check to never FAIL, and this narrow, well-reasoned
+        # FAIL should carry real grade weight. scored=True overrides just this Finding.
         return _finding(
             "B186",
             FAIL,
@@ -795,6 +836,7 @@ def check_bundled_root_override(ctx: Context) -> Finding:
             "has been an executable-code root for the agent.",
             evidence=evidence + replaceable,
             confidence="HIGH",
+            scored=True,
         )
 
     return _finding(
@@ -893,6 +935,15 @@ def check_unit_embedded_gateway_secret(ctx: Context) -> Finding:
         )
 
     if exposed:
+        # B-315: CheckMeta stays scored=False (catalog.py's own precedent — OpenClaw
+        # rates its own finding "recommended", and an owner-only inlined credential
+        # ["private"] is hygiene, not an active exposure, so WARN/PASS must stay out of
+        # scoring). But this FAIL branch (unit file readable by another local account)
+        # is the one real, checkable escalation, calibrated against OpenClaw's own
+        # service audit (see this file's module docstring / the vendor's
+        # auditGatewayToken) and mirroring B182's precedent. Dave's ruling requires an
+        # unscored check to never FAIL, and this narrow, well-calibrated FAIL should
+        # carry real grade weight. scored=True overrides just this Finding.
         return _finding(
             "B193",
             FAIL,
@@ -905,6 +956,7 @@ def check_unit_embedded_gateway_secret(ctx: Context) -> Finding:
             "EnvironmentFile= that only your account can read (chmod 0600).",
             evidence=exposed,
             confidence="HIGH",
+            scored=True,
         )
 
     return _finding(

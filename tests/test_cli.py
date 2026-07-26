@@ -37,7 +37,7 @@ def test_cli_behavioral_explicit_path(capsys):
 
 
 def test_cli_dashboard_findings_frames_and_slices(capsys):
-    """--dashboard-findings prints only the framed Section-3 block, not the whole report."""
+    """--dashboard-findings prints only the framed Section-2 block, not the whole report."""
     rc = main(["--home", str(FIXTURES / "home_vuln"), "--no-native", "--no-history",
                "--dashboard-findings"])
     assert rc == 0

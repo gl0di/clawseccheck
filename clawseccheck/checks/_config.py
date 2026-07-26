@@ -68,6 +68,29 @@ from ._shared import (
 )
 
 
+def _detail_path(value, home) -> str:
+    """Render *value* for a ``Finding.detail``: relative to the audited home when it lies
+    inside it, with a single ``..`` segment when it lies under the home's parent (the
+    ``~`` slot of a real OpenClaw home, where ``.config/...`` lives). Anything else is
+    returned unchanged. A composite string that merely *starts* with such a path is
+    rewritten the same way, so a source label like ``<unit> (Environment=)`` still works.
+
+    ``baseline.fingerprint()`` hashes ``Finding.detail``, and a user's
+    ``.clawseccheckignore`` keys a per-finding suppression on that hash — so an absolute
+    scan-root path baked into a detail silently orphans that suppression the moment the
+    workspace or the scanned skill moves, and it leaks the reporter's directory layout
+    into any report they share. The audited root is printed once in the report header
+    instead. A path the CONFIG itself declares in absolute form is deliberately left
+    verbatim: that string is a function of the audited subject, so it belongs in the
+    finding's identity (and in the text, since it is what the owner has to go fix).
+    """
+    text = str(value)
+    for base, prefix in ((str(home), ""), (str(Path(home).parent), ".." + os.sep)):
+        if base and base != os.sep and text.startswith(base + os.sep):
+            return prefix + text[len(base) + 1:]
+    return text
+
+
 CLOUD_PROVIDERS = (
     "openai",
     "anthropic",
@@ -2744,9 +2767,16 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
         trusted_proxies_ok = _trusted_proxies_ok(dig(cfg, "gateway.trustedProxies"))
         if not required_headers and not allow_users and not trusted_proxies_ok:
             user_header = dig(cfg, "gateway.auth.trustedProxy.userHeader") or "x-forwarded-user"
+            # B-315: was FAIL. B70 belongs to the B68-B73 block, whose catalog comment
+            # documents the group as "WARN-only ... zero false-positive FAILs on real
+            # configs" — this branch was the sole violator of that documented intent
+            # (and this exact loopback/private-network predicate is the one CLAUDE.md
+            # §6.1 records as version-dependent across Python 3.9/3.12). An unscored
+            # check must not FAIL (Dave's ruling: scored=False caps at WARN); downgrading
+            # also restores the block comment's original claim. Same evidence.
             return _finding(
                 "B70",
-                FAIL,
+                WARN,
                 f"gateway.auth.mode=trusted-proxy is bound to a non-loopback address "
                 f"(bind host={bind_host!r}) with no requiredHeaders/allowUsers/"
                 f"trustedProxies configured — the {user_header!r} identity header is "
@@ -2838,16 +2868,25 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
             "Re-run the audit with a current build of this skill.",
         )
 
+    # B-349: every branch below names the audited file RELATIVE to the audited home, and
+    # keeps the absolute form in `evidence=` / the fix text. The report header already
+    # prints the absolute audited path once ("Audited config: ..."), so nothing is lost —
+    # but an absolute path inside `detail` is hashed by `baseline.fingerprint()`, which
+    # made a fingerprint suppression for this finding die the moment the profile moved,
+    # and put the reporter's home layout into every shared report.
+    audited_rel = _detail_path(audited, ctx.home)
+
     if not audits_default_state_dir(ctx.home):
         return _finding(
             "B183",
             UNKNOWN,
-            f"This scan targets {audited} explicitly, which is not this machine's default "
-            "OpenClaw state directory, so it cannot be compared against the path the "
-            "running agent would resolve — the environment of this process describes a "
-            "different subject.",
+            f"This scan targets {audited_rel} under an explicitly chosen home, which is "
+            "not this machine's default OpenClaw state directory, so it cannot be "
+            "compared against the path the running agent would resolve — the environment "
+            "of this process describes a different subject.",
             "Run the audit with no --home argument to have it check whether the agent's "
             "own config resolution points somewhere else.",
+            evidence=[f"audited: {audited}"],
         )
 
     product, reason = resolve_product_config_path()
@@ -2856,8 +2895,9 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
             "B183",
             UNKNOWN,
             f"OpenClaw's own config path could not be resolved ({reason}), so it cannot be "
-            f"confirmed that the agent reads the audited file {audited}.",
+            f"confirmed that the agent reads the audited file {audited_rel}.",
             "Check that HOME (or OPENCLAW_HOME) is set to a real directory, then re-run.",
+            evidence=[f"audited: {audited}"],
         )
 
     try:
@@ -2870,9 +2910,10 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
             "B183",
             WARN,
             "The audited config file is NOT the one OpenClaw would load. Every other "
-            f"finding in this report describes {audited}, but the agent resolves "
-            f"{product} ({reason}) — so a clean grade here says nothing about the "
-            "configuration the agent is actually running.",
+            f"finding in this report describes {audited_rel} under the audited home, but "
+            f"the agent resolves a different file ({reason}) — so a clean grade here says "
+            "nothing about the configuration the agent is actually running. Both paths "
+            "are named in full in this finding's evidence and in the fix below.",
             f"Re-run the audit against the live target: clawseccheck --home "
             f"{product.parent}. If the audited file is the intended one instead, unset "
             "OPENCLAW_CONFIG_PATH / OPENCLAW_HOME / OPENCLAW_STATE_DIR (these are what "
@@ -2883,7 +2924,7 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
     return _finding(
         "B183",
         PASS,
-        f"The audited config file ({audited}) is the same file OpenClaw's own resolver "
+        f"The audited config file ({audited_rel}) is the same file OpenClaw's own resolver "
         "selects from this environment, so the rest of this report describes the "
         "configuration the agent loads on its next start.",
         "Keep OPENCLAW_CONFIG_PATH / OPENCLAW_HOME / OPENCLAW_STATE_DIR unset, or re-run "
@@ -2962,7 +3003,7 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
             continue
         on = strict(raw) if strict is not None else is_truthy_env_value(raw)
         if on:
-            hits.append(f"{name} is on ({source}) — it {what}")
+            hits.append(f"{name} is on ({_detail_path(source, ctx.home)}) — it {what}")
 
     if hits:
         return _finding(
@@ -2984,7 +3025,9 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
             "B192",
             PASS,
             "No break-glass environment toggle is switched on in the global dotenv files "
-            "OpenClaw loads at startup (" + ", ".join(ctx.dotenv_files) + ").",
+            "OpenClaw loads at startup ("
+            + ", ".join(_detail_path(p, ctx.home) for p in ctx.dotenv_files)
+            + ").",
             "Keep OPENCLAW_ALLOW_INSECURE_PRIVATE_WS and OPENCLAW_LOAD_SHELL_ENV out of "
             "the global dotenv files except while actively working around a problem.",
         )
@@ -3008,4 +3051,257 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
         "break-glass toggle is set for the agent that runs this configuration.",
         "Run the audit on the machine and account the agent runs as, with no --home "
         "argument, to have the persistent toggle locations checked.",
+    )
+
+
+def check_shell_env_fallback(ctx: Context) -> Finding:
+    """B324 — env.shellEnv.enabled (E-060 item 7): agent-startup login-shell import.
+
+    The CONFIG-KEY half of the same OR condition B192 already checks the ENV-VAR half
+    of: OpenClaw enables its shell-env fallback when EITHER the
+    ``OPENCLAW_LOAD_SHELL_ENV`` dotenv toggle is on (B192) OR
+    ``env.shellEnv.enabled === true`` in openclaw.json (this check) — grounded directly
+    against the dist: ``call-Bj6Erfmh.js:101`` / ``io-By0s-a_s.js:5268``:
+    ``shouldEnableShellEnvFallback(env) || cfg.env?.shellEnv?.enabled === true``. When
+    on, OpenClaw loads environment variables from the user's login shell at agent
+    startup, so ``~/.bashrc``/``~/.zshrc`` content becomes agent-startup input — a
+    persistence foothold or a PATH-hijack planted there becomes an agent-startup
+    vector, not only an interactive-shell one.
+
+    WARN-only, never FAIL: OpenClaw's own field description calls this a legitimate,
+    commonly-wanted feature ("Keep this enabled when you depend on profile-defined
+    secrets or PATH customizations" — schema-DRyO1XBt.js:91), mirroring B192's own
+    break-glass framing for the sibling toggle.
+
+    Scope, stated exactly: ``shouldEnableShellEnvFallback()`` also fires from the
+    ``OPENCLAW_LOAD_SHELL_ENV`` runtime environment variable (B192's surface, not
+    config) — a static config audit cannot observe that path, so this check's absence
+    of a finding here does NOT mean shell-env loading is off, only that the openclaw.json
+    key itself does not request it. That residual is a false NEGATIVE (already covered
+    by B192 for the env-var path), never a false positive this check would introduce.
+
+    WARN    — env.shellEnv.enabled == true.
+    PASS    — env.shellEnv.enabled is absent or false.
+    UNKNOWN — no config found at all, or present but unparseable/unreadable.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B324",
+            UNKNOWN,
+            "No openclaw.json found -- env.shellEnv.enabled cannot be assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B324", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    enabled = dig(ctx.config, "env.shellEnv.enabled")
+    if enabled is True:
+        return _finding(
+            "B324",
+            WARN,
+            "env.shellEnv.enabled=true — OpenClaw loads environment variables from "
+            "the user's login shell (~/.bashrc, ~/.zshrc, …) at agent startup, so "
+            "shell rc file content becomes agent-startup input.",
+            "Confirm this is needed (e.g. profile-defined secrets or PATH "
+            "customizations the agent depends on); disable it in a locked-down "
+            "service environment with explicit env management instead.",
+        )
+
+    return _finding(
+        "B324",
+        PASS,
+        "env.shellEnv.enabled is absent or false — openclaw.json does not request "
+        "login-shell environment import at startup (the OPENCLAW_LOAD_SHELL_ENV "
+        "env-var path is checked separately by B192).",
+        "Keep it that way unless a specific workflow depends on profile-defined "
+        "secrets or PATH customizations from the login shell.",
+    )
+
+
+_B323_ENV_VAR_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def _b323_parse_env_token_at(value: str, index: int) -> "tuple[str, int] | None":
+    """Faithful port of OpenClaw's ``parseEnvTokenAt``
+    (``env-substitution-CATXLg7n.js:32-58``).
+
+    Returns ``("escaped", end)`` for a ``$${NAME}`` token, ``("substitution", end)``
+    for a ``${NAME}`` token, or ``None`` if *index* isn't the start of either --
+    including the case where ``NAME`` doesn't match OpenClaw's own
+    ``ENV_VAR_NAME_PATTERN`` (``/^[A-Z_][A-Z0-9_]*$/``, all-caps only) or the ``}``
+    is missing. *end* is the index of the closing ``}``.
+    """
+    if index >= len(value) or value[index] != "$":
+        return None
+    nxt = value[index + 1] if index + 1 < len(value) else ""
+    after_next = value[index + 2] if index + 2 < len(value) else ""
+    if nxt == "$" and after_next == "{":
+        start = index + 3
+        end = value.find("}", start)
+        if end != -1:
+            name = value[start:end]
+            if _B323_ENV_VAR_NAME_RE.match(name):
+                return ("escaped", end)
+    if nxt == "{":
+        start = index + 2
+        end = value.find("}", start)
+        if end != -1:
+            name = value[start:end]
+            if _B323_ENV_VAR_NAME_RE.match(name):
+                return ("substitution", end)
+    return None
+
+
+def _b323_contains_env_var_reference(value: str) -> bool:
+    """Faithful port of OpenClaw's ``containsEnvVarReference()``
+    (``env-substitution-CATXLg7n.js:102-112``).
+
+    Only an unescaped ``${ALL_CAPS_NAME}`` counts as a real, filtered reference.
+    An escaped ``$${NAME}`` token, or a ``${...}``-shaped token whose name is not
+    all-caps (lowercase/mixed-case, digit-leading, etc.) or is missing its closing
+    ``}``, does NOT count -- OpenClaw's own ``isConfigRuntimeEnvVarAllowed()`` does
+    not block those values; it applies them verbatim (literal ``$`` characters and
+    all) to the runtime environment. A naive ``"${" in value`` substring test
+    conflates these two cases and was found (C-135 adversarial pass) to silently
+    miss a config-declared literal PATH override that OpenClaw actually applies,
+    whenever the token merely *looks* like a substitution (e.g.
+    ``${systemRoot}:/opt/evil/bin`` -- mixed-case name, not a real reference, but
+    the naive check skipped it as if it were one).
+    """
+    if "$" not in value:
+        return False
+    i = 0
+    n = len(value)
+    while i < n:
+        if value[i] != "$":
+            i += 1
+            continue
+        token = _b323_parse_env_token_at(value, i)
+        if token is not None:
+            kind, end = token
+            if kind == "escaped":
+                i = end + 1
+                continue
+            if kind == "substitution":
+                return True
+        i += 1
+    return False
+
+
+def _b323_is_literal_path_override(key: object, value: object) -> bool:
+    """True if *key* normalizes to PATH and *value* is a literal, non-empty string.
+
+    "Literal" excludes a value containing a genuine, unresolved ``${ALL_CAPS}``
+    substitution reference -- see ``_b323_contains_env_var_reference()`` for the
+    faithful port of OpenClaw's own ``containsEnvVarReference()``
+    (``env-substitution-CATXLg7n.js:102-112``): OpenClaw itself never applies such a
+    value, so flagging it here would be a false positive on a config that merely
+    references another variable indirectly. A value that merely *contains* the
+    substring ``${`` without forming a real reference (wrong case, bad name, no
+    closing brace, or an escaped ``$${...}``) is NOT excluded -- OpenClaw applies
+    it verbatim, so it must still be flagged.
+    """
+    if not isinstance(key, str) or key.strip().upper() != "PATH":
+        return False
+    if not isinstance(value, str) or not value.strip():
+        return False
+    return not _b323_contains_env_var_reference(value)
+
+
+def check_env_vars_path_override(ctx: Context) -> Finding:
+    """B323 — env.vars.PATH / env.<KEY> catchall: an explicit PATH override.
+
+    Narrowed on grounding from the epic's original framing ("report any env.vars /
+    env.<KEY> catchall key OpenClaw's own blocklist doesn't already block"). Two
+    catchall shapes reach the process environment identically —
+    ``config-env-vars-DlUfO5Q_.js:43-59`` ``collectConfigEnvVarsByTarget()`` reads
+    ``env.vars.<KEY>`` (a Zod ``record(string(), string())``,
+    ``zod-schema-O9ml_nmo.js:1004``) AND any other ``env.<KEY>`` sibling except
+    ``shellEnv``/``vars`` (a Zod ``.catchall(string())`` on the ``env`` object itself,
+    ``zod-schema-O9ml_nmo.js:1005``) — and both funnel through the same
+    ``isBlockedConfigEnvVar()`` gate (``config-env-vars-DlUfO5Q_.js:36-38``), which
+    unions ``isDangerousHostEnvVarName()`` + ``isDangerousHostEnvOverrideVarName()``
+    (``host-env-security-CWC2ZCy4.js:5-316``, ~254 explicit keys + 7 prefixes + 1
+    regex — NODE_OPTIONS/PYTHONPATH/BASH_ENV/GIT_EXTERNAL_DIFF/RUSTC_WRAPPER/
+    SSLKEYLOGFILE/EDITOR/HOME/AWS_*/GH_TOKEN/etc.). That blocklist is comprehensive
+    enough that a check flagging every *other* residual key would false-WARN on the
+    feature's own legitimate purpose (arbitrary app/API-key vars) — a Golden Rule #5
+    violation. The one concrete, groundable gap is ``PATH`` itself: it does not
+    appear anywhere in ``blockedEverywhereKeys``/``blockedOverrideOnlyKeys``
+    (host-env-security-CWC2ZCy4.js:5-316) — the file's only literal ``"PATH"`` match
+    is inside ``sanitizeHostEnvOverridesWithDiagnostics()`` (:497), a *different*,
+    host-exec-override subsystem this config path never reaches.
+
+    WARN-only, never FAIL: whether a config-declared PATH has any effect depends on a
+    runtime fact this static auditor cannot observe. ``applyConfigEnvVars()``
+    (``config-env-vars-DlUfO5Q_.js:~118-152``) never overwrites a key that already
+    holds a non-empty value in the environment it is applied against, and every
+    grounded live call site (``pre-bootstrap-8G8HyMEQ.js:195,332``,
+    ``io-By0s-a_s.js:5267`` ``finalizeLoadedRuntimeConfig``,
+    ``call-Bj6Erfmh.js:79`` ``resolveGatewayDispatchEnvVars``) defaults to
+    ``process.env``, which always carries a non-empty ``PATH`` in a realistic launch
+    — so this is closer to C5's own "declared trust expansion, real-world
+    exploitability uncertain" WARN precedent (host-filesystem PATH/install-dir
+    hijacking) than to B186's narrow-and-deterministic writable-root FAIL. A value
+    containing an unresolved ``${...}`` substitution token is skipped, mirroring
+    ``containsEnvVarReference()`` (``env-substitution-CATXLg7n.js:102-112``) — the
+    config is referencing another variable indirectly, not hardcoding a literal path.
+
+    WARN    — ``env.vars.PATH`` or the ``env.<KEY>`` catchall sets a literal
+              (non-``${...}``) non-empty string value for a key that normalizes
+              (case-insensitively) to ``PATH``.
+    PASS    — no such entry.
+    UNKNOWN — no openclaw.json found, or present but unparseable/unreadable.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B323",
+            UNKNOWN,
+            "No openclaw.json found -- env.vars.PATH / env.<KEY> catchall PATH override "
+            "cannot be assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B323", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    env_cfg = ctx.config.get("env") if isinstance(ctx.config, dict) else None
+    hits: "list[str]" = []
+    if isinstance(env_cfg, dict):
+        vars_block = env_cfg.get("vars")
+        if isinstance(vars_block, dict):
+            for key, value in vars_block.items():
+                if _b323_is_literal_path_override(key, value):
+                    hits.append(f"env.vars.{key}={value!r}")
+        for key, value in env_cfg.items():
+            if key in ("shellEnv", "vars"):
+                continue
+            if _b323_is_literal_path_override(key, value):
+                hits.append(f"env.{key}={value!r}")
+
+    if hits:
+        return _finding(
+            "B323",
+            WARN,
+            "openclaw.json explicitly sets PATH via the env.vars / env.<KEY> catchall "
+            "mechanism (" + "; ".join(hits) + "). OpenClaw's own config-env-var "
+            "blocklist covers ~254 dangerous keys/prefixes but does not include PATH "
+            "itself, so this value is not filtered the way NODE_OPTIONS/PYTHONPATH/"
+            "BASH_ENV and similar keys are.",
+            "Confirm this is intentional. In practice it is usually inert -- OpenClaw "
+            "never overwrites an env var that already holds a non-empty value at the "
+            "point this is applied, and every normal launch already has a non-empty "
+            "PATH -- but a launcher that starts the agent with an empty or unset PATH "
+            "would let this value take effect unfiltered. Remove it unless there is a "
+            "specific, documented reason to override the agent's PATH.",
+            evidence=hits,
+        )
+
+    return _finding(
+        "B323",
+        PASS,
+        "No env.vars.PATH or env.<KEY> catchall PATH entry found in openclaw.json.",
+        "Keep it that way; if PATH customization is genuinely needed, prefer scoping "
+        "it narrowly (e.g. a per-tool wrapper) and reviewing it periodically.",
     )

@@ -3747,18 +3747,42 @@ def _b64_reported_or_quoted(blob: str, pos: int, end: int) -> bool:
     return bool(_B64_REPORT_FRAME_RE.search(seg))
 
 
-def _in_skill_frontmatter_span(blob: str, pos: int) -> bool:
+def _frontmatter_span(blob: str) -> tuple[int, int] | None:
+    """Precompute the (start, end) span of *blob*'s YAML frontmatter block, or None
+    when it has none. Split out of `_in_skill_frontmatter_span` (B-314) so a caller
+    testing many positions over the SAME blob computes this once instead of re-running
+    `_FM_BLOCK_HEADERED_RE.search(blob)` — an unanchored, worst-case O(len(blob)) scan —
+    on every call."""
+    m = _FM_BLOCK_HEADERED_RE.search(blob)
+    if m:
+        return (m.start("fm"), m.end("fm"))
+    m = _FM_BLOCK_BARE_RE.match(blob)
+    if m:
+        return (m.start("fm"), m.end("fm"))
+    return None
+
+
+_UNSET_FM_SPAN = -1
+
+
+def _in_skill_frontmatter_span(blob: str, pos: int, fm_span=_UNSET_FM_SPAN) -> bool:
     """True when *pos* falls inside the SKILL.md YAML frontmatter block (the standard
     `description: "Call when the user says: ..."` invocation-phrase idiom lives here —
     B-123). Reuses the same frontmatter-block regexes as _skill_frontmatter_block, but
-    position-aware so a mid-scan trigger match can be tested against the block's span."""
-    m = _FM_BLOCK_HEADERED_RE.search(blob)
-    if m and m.start("fm") <= pos < m.end("fm"):
-        return True
-    m = _FM_BLOCK_BARE_RE.match(blob)
-    if m and m.start("fm") <= pos < m.end("fm"):
-        return True
-    return False
+    position-aware so a mid-scan trigger match can be tested against the block's span.
+
+    *fm_span*: optional precomputed `_frontmatter_span(blob)` result — for a caller
+    iterating many positions over the SAME blob (B-314), same shape as
+    `_pos_in_source_code_section`'s *header_matches*. The sentinel default (unset, not
+    None — None is itself a valid "no frontmatter" answer) triggers a fresh per-call
+    computation, i.e. unchanged behavior when omitted.
+    """
+    if fm_span is _UNSET_FM_SPAN:
+        fm_span = _frontmatter_span(blob)
+    if fm_span is None:
+        return False
+    start, end = fm_span
+    return start <= pos < end
 
 
 def _b65_live_action_spans(
@@ -3793,6 +3817,15 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
     """Scan *text* for conditional sleeper-trigger snippets."""
     hits: list[str] = []
     inline_ranges = _inline_code_ranges(text)
+    # B-314: precompute ONCE per blob instead of once PER ANCHOR — _defensive_context's
+    # cascade (_pos_in_source_code_section, _defensive_section -> _nearest_heading)
+    # otherwise each rescan the whole text from scratch on every call, which measured as
+    # the top two hot lines profiling this check against a large synthetic corpus (a
+    # real config with many/large installed skills): O(anchors x len(text)) collapses to
+    # O(len(text)) [once] + O(anchors x small-match-count) with these precomputed.
+    header_matches = list(_MANIFEST_HEADER_RE.finditer(text))
+    heading_matches = list(_ANY_HEADING_RE.finditer(text))
+    fm_span = _frontmatter_span(text)
     # B-186: anchor over the relative if/when/once triggers AND the absolute-count / ordinal
     # triggers ("after the third message"), position-sorted so windows emit earliest-first;
     # the snippet dedup below absorbs the overlap when one phrase ("once 3 days") matches both.
@@ -3801,13 +3834,14 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         key=lambda mm: mm.start(),
     )
     for m in anchors:
-        if _defensive_context(text, m.start(), fr):
+        if _defensive_context(text, m.start(), fr, header_matches=header_matches,
+                               heading_matches=heading_matches):
             continue
         # B-123: the SKILL.md frontmatter `description:` field is the standard, disclosed
         # skill-invocation-phrase idiom ("Call when the user says: ...") — not a covert
         # trigger. Excluded here rather than by narrowing the trigger/query vocabulary so
         # a genuine covert trigger placed OUTSIDE frontmatter is unaffected.
-        if _in_skill_frontmatter_span(text, m.start()):
+        if _in_skill_frontmatter_span(text, m.start(), fm_span):
             continue
         start = max(0, m.start() - _B65_WINDOW)
         end = min(len(text), m.end() + _B65_WINDOW)
@@ -4409,7 +4443,8 @@ def _decode_codepoint(raw: str) -> str:
         return ""
 
 
-def _defensive_context(blob, pos, fence_ranges, *, use_fence=True, header_matches=None):
+def _defensive_context(blob, pos, fence_ranges, *, use_fence=True, header_matches=None,
+                        heading_matches=None):
     """Shared guard: True when the match at *pos* sits in defensive documentation
     rather than a live instruction.
 
@@ -4445,6 +4480,10 @@ def _defensive_context(blob, pos, fence_ranges, *, use_fence=True, header_matche
     forwarded to `_pos_in_source_code_section` — see that function's docstring for why
     a caller iterating many matches over the SAME blob should pass this instead of
     leaving it to rescan fresh every call.
+
+    *heading_matches*: optional precomputed ``list(_ANY_HEADING_RE.finditer(blob))``,
+    forwarded to `_defensive_section` -> `_under_defensive_heading` -> `_nearest_heading`
+    — same precompute-once-per-blob shape as *header_matches* (B-314).
     """
     if _pos_in_source_code_section(blob, pos, header_matches):
         return True
@@ -4456,17 +4495,17 @@ def _defensive_context(blob, pos, fence_ranges, *, use_fence=True, header_matche
         return True
     if _IMMEDIATE_NEGATOR_RE.search(blob[max(0, pos - 24) : pos]):
         return True
-    return _defensive_section(blob, pos)
+    return _defensive_section(blob, pos, heading_matches)
 
 
-def _defensive_section(blob: str, pos: int) -> bool:
+def _defensive_section(blob: str, pos: int, heading_matches=None) -> bool:
     """True only when the nearest preceding heading is defensive AND a broad
     negation ('never build a skill that...', "don't design...") sits in the
     lookback window before *pos*. Mirrors _whole_text_is_defensive's "heading
     alone is not enough" discipline, scoped to this position instead of the
     whole blob (B-095: a bare defensive-sounding heading is not proof the
     content under it is documentary rather than a live instruction)."""
-    if not _under_defensive_heading(blob, pos):
+    if not _under_defensive_heading(blob, pos, heading_matches):
         return False
     return _negation_governs_trigger(blob, pos)
 
@@ -5050,8 +5089,26 @@ def _levenshtein(a: str, b: str) -> int:
     return prev[n]
 
 
-def _nearest_heading(blob: str, pos: int) -> str | None:
-    """Return the text of the closest Markdown heading at or before *pos*, or None."""
+def _nearest_heading(blob: str, pos: int, heading_matches=None) -> str | None:
+    """Return the text of the closest Markdown heading at or before *pos*, or None.
+
+    *heading_matches*: optional precomputed ``list(_ANY_HEADING_RE.finditer(blob))``,
+    same shape as `_pos_in_source_code_section`'s *header_matches* — for a caller
+    iterating many positions over the SAME blob. B-314 profiling (check_conditional_
+    sleeper_trigger on a large synthetic corpus) measured the default fresh
+    ``finditer(blob, 0, pos)`` rescan as a top hot line: O(len(blob)) per call, called
+    once per anchor, made the whole check superlinear. Precomputing the heading list
+    ONCE per blob and reusing it here turns that into O(headings-before-pos) per call —
+    headings are sparse, so this is the win. Defaults to a fresh scan (unchanged
+    behavior) when omitted.
+    """
+    if heading_matches is not None:
+        last = None
+        for m in heading_matches:
+            if m.start() > pos:
+                break
+            last = m
+        return last.group(0) if last is not None else None
     last = None
     for m in _ANY_HEADING_RE.finditer(blob, 0, pos):
         last = m
@@ -5395,9 +5452,9 @@ def _try_b64_decode(token: str, *, urlsafe: bool) -> str | None:
         return None
 
 
-def _under_defensive_heading(blob: str, pos: int) -> bool:
+def _under_defensive_heading(blob: str, pos: int, heading_matches=None) -> bool:
     """True when the nearest preceding heading names a defensive/security section."""
-    heading = _nearest_heading(blob, pos)
+    heading = _nearest_heading(blob, pos, heading_matches)
     if heading is None:
         return False
     return bool(_DEFENSIVE_HEADING_RE.match(heading))
@@ -5945,9 +6002,20 @@ def check_clickfix_setup_section(ctx: Context) -> Finding:
             if _clickfix_trusted_installer(m.group(0)):
                 continue  # curated first-party installer host (B-118) — not ClickFix
             heading = (_nearest_heading(blob, m.start()) or "").strip("# \n")
+            # C-284/C-135 (2026-07-24): the matched command's own URL was previously
+            # never included here, so adjudication.py's safe_facts.destination_host
+            # extractor — built specifically because a judge panel leaned SAFE on a
+            # real B100 case partly for lack of the actual fetch URL — could never
+            # actually reach it for a real B100 finding. Appending the URL here does
+            # not change what a human reader sees beyond this fuller quote (evidence
+            # is still routed through logsafe.redact()/adjudication.py's own
+            # location-only redaction before it reaches a judge); it only makes the
+            # URL available to that already-validated, already-length-capped extractor.
+            url_m = _URL_IN_CMD_RE.search(m.group(0))
+            url_suffix = f" ({url_m.group(0)})" if url_m else ""
             warns.append(
                 f"{name}: '{heading}' section instructs pasting a remote-fetch command "
-                "into a terminal (ClickFix pattern)"
+                f"into a terminal (ClickFix pattern){url_suffix}"
             )
             break  # one finding per skill is enough
 
@@ -8815,6 +8883,12 @@ def _prose_exfil_scan(blob: str, own_host, fence_ranges: list[tuple[int, int]]) 
     object described nearby."""
     hits: list[tuple[str, bool]] = []
     last_end = -1
+    # B-314: precompute ONCE per blob instead of once per verb match — see _b65_scan's
+    # identical fix for why (_defensive_context's cascade otherwise rescans the whole
+    # blob from scratch on every call, the dominant cost profiling this check against a
+    # large synthetic corpus).
+    header_matches = list(_MANIFEST_HEADER_RE.finditer(blob))
+    heading_matches = list(_ANY_HEADING_RE.finditer(blob))
     # B-246: also scan the backup-transport verb class (mirror/synchronise/archive/
     # snapshot/replicate) — "archive all customer records to <url>" describes the
     # same bulk-exfil shape as "export all customer records to <url>", but sat
@@ -8822,7 +8896,8 @@ def _prose_exfil_scan(blob: str, own_host, fence_ranges: list[tuple[int, int]]) 
     for vm in _verb_class_matches(blob, _EXFIL_INTENT_VERB_RE, _BACKUP_TRANSPORT_VERB_RE):
         if vm.start() < last_end:
             continue
-        if _defensive_context(blob, vm.start(), fence_ranges):
+        if _defensive_context(blob, vm.start(), fence_ranges, header_matches=header_matches,
+                               heading_matches=heading_matches):
             continue
         # B-287: `export NAME=value` / `export const x` is language syntax, not the
         # English verb "export <data> to <dest>" -- see _EXPORT_DECLARATION_SYNTAX_RE.

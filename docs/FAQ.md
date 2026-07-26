@@ -64,6 +64,22 @@ A single CRITICAL FAIL (for example B1 — plaintext secrets, or B2 — open gat
 no auth) locks the score at or below 49, which is always an F, regardless of how well
 everything else scores.
 
+**Three more caps fire with no FAIL finding at all.** If you are hunting the report for a
+CRITICAL that explains your F and cannot find one, it is one of these. They are caps only:
+they never add or remove a scored point, they just lower the ceiling.
+
+| Signal | Score capped at | Grade ceiling | What the report says |
+|---|---|---|---|
+| A check **crashed or timed out** | 49 | F | `N check(s) crashed or timed out this run: cannot rule out a CRITICAL condition`, plus a `N checks did not run` banner above the score |
+| `openclaw.json` is present but **unreadable / unparseable** | 49 | F | `openclaw.json unreadable/unparseable this run: cannot rule out a CRITICAL condition` |
+| A **corroborated runtime signal** in your own trajectory log | 79 | C | `corroborated runtime signal: …` |
+
+The reasoning is the same in all three cases, and it is deliberate: the audit lost
+visibility into something, and the honest assumption about an unexamined check is
+worst-case, not average-case. Otherwise "make the scanner blind" would be the cheapest way
+to improve a grade. Fix the underlying visibility problem — a quieter machine or `--debug`
+for a timeout, valid JSON for an unparseable config — and the cap lifts on the next run.
+
 **What to look at first:**
 
 1. Re-read the FAIL findings in the report, most urgent first — each names exactly what
@@ -81,6 +97,8 @@ everything else scores.
 - Installed third-party skill flagged as suspicious or dangerous by the malware scan (**B13**).
 - Control-plane tools (config, cron, gateway) reachable over the HTTP gateway (**B32**).
 - A `dangerously*` sandbox escape flag is enabled (**B48**).
+- **No FAIL at all** — a check crashed or timed out, or `openclaw.json` could not be
+  parsed. See the cap table above; the report names which one it was.
 
 After fixing the underlying issue, re-run `clawseccheck` to see the new score.
 
@@ -329,7 +347,7 @@ clawseccheck --attest -       # reads attestation JSON from stdin
 
 | Check | What it assesses with attestation |
 |---|---|
-| B43 | Classifies each tool verb by blast-radius (EXEC, MAILBOX_CONFIG, DESTRUCTIVE, EGRESS, REVERSIBLE); fails when a high-blast verb fires without an approval gate |
+| B43 | Classifies each tool verb by blast-radius (EXEC, MAILBOX_CONFIG, DESTRUCTIVE, EGRESS, REVERSIBLE); warns when a high-blast verb fires without an approval gate (never FAILs — the verdict is the agent's own self-report) |
 | B44 | Cross-checks the self-report against config `tools.allow`; flags verbs the config grants that the agent omitted (drift / blind spot) |
 | B45 | Checks whether any single agent in the roster holds all three Lethal Trifecta legs simultaneously |
 | B47 | Walks the delegation graph to detect cross-agent trifecta reassembly (confused-deputy pattern) |
@@ -401,6 +419,29 @@ whenever you have real reason to suspect the host, not just a routine run.
 already-compromised host, at the user's own privilege level, is checking itself from
 inside the blast radius — treat an already-compromised host as fundamentally untrusted
 for self-checking purposes, and verify it from the outside instead.
+
+---
+
+## Why is there no `--llm` mode?
+
+Some peer scanners offer an opt-in flag that sends skill content to an LLM vendor
+(OpenAI/Anthropic/Bedrock/Gemini/Ollama) for a deeper read than static rules can give.
+ClawSecCheck deliberately doesn't — not because the idea is bad, but because of what this
+tool is *for*: it audits `~/.openclaw/` for agents that might leak the user's own data to
+a third party, and Golden Rule #1 (`CLAUDE.md` §2) is zero network, zero telemetry. A
+scanner that shipped the contents of that same directory to a model vendor to do the
+auditing would be the exact thing it exists to catch.
+
+Instead, the engine (stdlib-only, zero network) emits an already-redacted
+`--judge-packet`/`--vet-judge-packet` artifact, and **your own host agent** — whatever
+model and policy you already trust and already run locally — reads it and judges. No API
+key, no per-scan network call, no raw skill content leaves your machine through this
+engine, under any flag. The trade-off is real and stated honestly, not hidden: a
+standalone static-only comparison currently favors a peer that DOES put an LLM inside the
+tool (1.78x more recall at matched precision), and this topology only works with a host
+agent attached — it cannot run standalone in a script with nothing else present. See
+[`docs/design/judge-topology.md`](design/judge-topology.md) for the full comparison,
+including the exact numbers and where they came from.
 
 ---
 

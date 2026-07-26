@@ -40,20 +40,46 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from dataclasses import replace as dc_replace
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .baseline import fingerprint
 from .catalog import ATTESTED, FAIL, MEDIUM, UNKNOWN, WARN, Finding
 from .logsafe import redact
-from .sar import build_sars
+from .sar import _VERDICT_VALUES, build_sars
 from .skillast import analyze_env_auth_kwarg_exfil, analyze_python
 
 # --------------------------------------------------------------------------- constants
 
+# The three verdict values a submitted entry may carry, severity-ascending. Imported
+# from sar.py (not redeclared here) so the whole judge cycle -- what a packet item
+# declares (_VERDICT_SCHEMA, right below), what a submitted entry must match to be
+# accepted (_VALID_VERDICTS, further down), AND the question text sar.py itself emits
+# (this module borrows it verbatim in _b62_items) -- all trace back to ONE tuple.
+#
+# B-330 found the first half of this drift: the packet advertised
+# {"answer": ["yes", "no"]} while _parse_verdicts only ever accepted
+# {"verdict": "SAFE"|"SUSPICIOUS"|"DANGEROUS"}, so a judge that followed the packet's
+# own declared schema had 100% of its verdicts silently dropped by every consumer
+# (--judged, --propose-ignore, --vet-judged). That fix derived _VERDICT_SCHEMA and
+# _VALID_VERDICTS from one LOCAL tuple, plus a one-off _restate_answer_tail() shim to
+# patch sar.py's still-legacy "[yes/no + reason]" tail at this module's packet
+# boundary. B-334 found the shim was itself just deferred drift risk -- sar.py's own
+# "--json" artifact stayed self-inconsistent with the rest of the tool. Importing the
+# tuple from sar.py instead closes that gap structurally: there is now exactly one
+# place either module could drift from, and the shim is gone because there is nothing
+# left to restate.
+#
+# Adopting "yes"/"no" as the wire vocabulary instead was considered and rejected: it
+# cannot express the SUSPICIOUS-vs-DANGEROUS distinction _ESCALATION_TARGET depends
+# on, so it would silently collapse the escalation ladder to a single rung.
+
 # The schema every packet item's "verdict_schema" field carries — a fixed
-# contract the host agent's answer must conform to.
-_VERDICT_SCHEMA = {"answer": ["yes", "no"], "reason": "free text"}
+# contract the host agent's answer must conform to, and exactly the shape
+# _parse_verdicts accepts.
+_VERDICT_SCHEMA = {"verdict": list(_VERDICT_VALUES), "reason": "free text"}
 
 # WARN-grade check ids with a documented false-negative-prone history: each is a
 # dual-use signal deliberately down-ranked from FAIL to WARN so a legitimate skill
@@ -80,34 +106,34 @@ _ID_QUESTIONS = {
            "(a possible secret/env value reaching a network call, a time-bomb / "
            "environment-gated sink, a soft content signal, or a bare notify-host "
            "post). Did you configure this skill to behave this way, and do you "
-           "trust the destination? [yes/no + reason]",
+           "trust the destination? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B100": "A setup/install section instructs pasting a remote-fetch command "
             "into a terminal (ClickFix pattern). Did you write or vet this "
-            "installer yourself? [yes/no + reason]",
+            "installer yourself? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B65": "A conditional 'if the user asks for X, then do Y' sleeper-trigger "
            "pattern was found. Is this hidden conditional behavior something "
-           "you intended? [yes/no + reason]",
+           "you intended? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B66": "A persona/role-override instruction (e.g. 'pretend you are ...') "
            "was found. Is this deliberate, and could it weaken the assistant's "
-           "policy hierarchy? [yes/no + reason]",
+           "policy hierarchy? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B99": "A shipped .pth file or sitecustomize/usercustomize module auto-runs "
            "on every Python interpreter start, not just on import. Is this "
-           "auto-execution genuinely required? [yes/no + reason]",
+           "auto-execution genuinely required? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B90": "A base64 payload only reassembles into a runnable command when "
            "string fragments split across this skill's files are joined. Is "
            "this a legitimate embedded asset, not a scanner-evasion payload? "
-           "[yes/no + reason]",
+           "[SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B102": "A base64 payload only reassembles into a runnable command when "
             "two file sections are joined at their boundary. Is this a "
             "legitimate embedded asset, not a scanner-evasion payload? "
-            "[yes/no + reason]",
+            "[SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B154": "A plaintext (non-base64) command reassembles from string literals "
             "split across this skill's files. Is this a legitimate pattern, "
-            "not a scanner-evasion payload? [yes/no + reason]",
+            "not a scanner-evasion payload? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B156": "A secret (token / credential / api_key) appears to be sent to an "
             "external or second-party destination with no secrecy, override, "
             "or trigger framing. Is that destination one you trust with this "
-            "secret? [yes/no + reason]",
+            "secret? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
 }
 
 # Plain-language attestation questions, keyed by the recovered ASTFinding rule.
@@ -116,24 +142,24 @@ _RULE_QUESTIONS = {
                     "into a network call, with no independent credential "
                     "signal nearby (so the engine did not escalate it). Is "
                     "this an intended upload/sync to a trusted destination? "
-                    "[yes/no + reason]",
+                    "[SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "TT_SSRF": "An externally-controlled value appears to flow into a "
                "network-fetch URL in this skill. Is the destination bounded "
                "to a trusted host, or could this reach an unexpected / "
-               "internal endpoint? [yes/no + reason]",
+               "internal endpoint? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "TT5_ARG_INJECTION": "External input appears to flow into a subprocess "
                          "call as a non-program argument (argument, not "
                          "command, injection). Are the arguments safely "
-                         "bounded? [yes/no + reason]",
+                         "bounded? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "DANGEROUS_SINK": "This skill calls a shell/exec-family sink directly, "
                       "with no independent credential/exfil signal nearby. Is "
                       "this expected of the skill's declared purpose? "
-                      "[yes/no + reason]",
+                      "[SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "ENV_AUTH_KWARG_EXFIL": "An environment-variable or agent-config secret is placed "
                             "in an auth-shaped keyword (headers/auth/cert) of a network "
                             "call — the normal way a skill authenticates to its own API, "
                             "but this destination was never independently reviewed. Do "
-                            "you recognize and trust this destination? [yes/no + reason]",
+                            "you recognize and trust this destination? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
 }
 
 
@@ -156,7 +182,7 @@ def _question_for(finding_id: str) -> str:
         q = (
             f"Check {finding_id} could not be automatically resolved. Review "
             "this item in the full report and confirm whether it is expected "
-            "and trusted. [yes/no + reason]"
+            "and trusted. [SAFE / SUSPICIOUS / DANGEROUS + reason]"
         )
     return redact(q)
 
@@ -202,7 +228,144 @@ def _evidence_locations(f) -> str:
     return f"{n} evidence entr{'y' if n == 1 else 'ies'} in the full report (not reproduced here)"
 
 
+_URL_IN_EVIDENCE_RE = re.compile(r"https?://[^\s)>\]\"']+", re.I)
+# LDH ("letter-digit-hyphen") hostname shape: dot-separated labels, each 1-63 chars,
+# alnum first/last char, hyphens only in the middle. Deliberately the SAME charset a
+# real DNS hostname is limited to -- no scheme, userinfo, port, path, query, fragment,
+# whitespace, or punctuation outside '-' and '.' can ever survive this match.
+_LDH_HOST_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+# C-135 (independent adversarial review, 2026-07-24): the DNS protocol ceiling (253)
+# is not the right bound here. Each label can independently reach 63 chars (its own
+# DNS limit, enforced by _LDH_HOST_RE above), and several such labels chained by dots
+# comfortably spell a fluent multi-clause imperative directive within 253 chars total
+# -- confirmed with a live repro against this exact validator: a 231-char hostname
+# built from four ~50-60-char hyphenated "clauses" passed every gate intact. The
+# The LDH-charset argument ("no spaces, so it can't read as prose") holds for a SHORT
+# phrase (the design intent -- a plausible real hostname like
+# "ignore-all-previous-instructions.example.com", ~46 chars) but not for an essay
+# chained across labels. 100 is comfortably above every realistic real-world FQDN
+# (deep corporate subdomains like "prod-api.us-east-1.reports.example.com" are well
+# under it) while cutting the attacker's payload budget roughly in half -- not a
+# complete fix (a single ~90-char clause still fits), but it meaningfully shrinks the
+# multi-clause-essay capacity the review demonstrated, and stays maximally permissive
+# of real destination hosts, which is this field's actual job.
+_MAX_HOST_LEN = 100
+
+
+def _safe_destination_host(f) -> str | None:
+    """C-284: at most ONE engine-extracted network destination hostname from *f*'s raw
+    evidence -- never copied from prose, never more than a hostname.
+
+    F-113's redaction (`_evidence_locations` above) strips content-ring evidence down to
+    a bare `(relpath:lineno)` location because the matched skill text itself can be a
+    live jailbreak directive aimed at the judge -- correct, and this function does NOT
+    reopen that hole: it never returns anything from `f.evidence` verbatim, only a
+    hostname that survived a strict URL parse PLUS an LDH charset/length gate.
+
+    Why the LDH gate is a meaningful defense, not eliminated entirely by keeping it: a
+    hostname that passes `_LDH_HOST_RE` cannot contain whitespace, quotes, or any
+    punctuation besides '-' and '.', so a SHORT phrase-shaped label
+    ("ignore-all-previous-instructions.example.com", ~46 chars) is kept deliberately --
+    it is a syntactically valid, DNS-resolvable hostname, delivered inside a JSON field
+    explicitly named `destination_host`, not as free text a judge would read as
+    conversational input. **This is bounded, not absolute** (C-135, 2026-07-24): several
+    long hyphenated labels chained by dots can still spell a fluent multi-clause
+    directive within the length cap -- `_MAX_HOST_LEN` exists specifically to bound how
+    much of that a single hostname can carry, not to claim the charset restriction alone
+    makes arbitrary-length content safe. Golden Rule #4 discipline: reducing to eTLD+1
+    was considered and rejected -- there is no public-suffix list in stdlib, and a
+    hand-rolled one rots; the length-capped full hostname is the honest choice, and it
+    is also strictly MORE useful for the judge's actual job (checking a first-party
+    allowlist needs the real host, not a truncated one).
+
+    Anything that fails validation is DROPPED entirely, never truncated into the
+    packet — an unparseable/oversized/non-LDH "hostname" carries no information a judge
+    can act on safely, so silence is the correct answer, not a mangled fragment.
+    """
+    for e in (f.evidence or []):
+        m = _URL_IN_EVIDENCE_RE.search(e)
+        if not m:
+            continue
+        try:
+            host = urlparse(m.group(0)).hostname
+        except ValueError:
+            continue
+        if not host:
+            continue
+        host = host.lower()
+        if not host.isascii():
+            try:
+                host = host.encode("idna").decode("ascii")
+            except (UnicodeError, ValueError):
+                continue
+        if len(host) > _MAX_HOST_LEN:
+            continue
+        if not _LDH_HOST_RE.match(host):
+            continue
+        return host
+    return None
+
+
+# --------------------------------------------------------------------------- C-285: corroboration
+
+def _corroboration_groups(findings) -> dict:
+    """C-285: map ``target -> sorted distinct check ids`` of every unsuppressed WARN/FAIL
+    finding sharing that target, across the FULL finding list passed in (not just the
+    items that end up in the packet).
+
+    C-252 (docs/design/severity-separability.md §5.1, measured on SkillTrustBench 5520)
+    found this is the single strongest signal separating malicious from benign in this
+    engine's own output -- monotonic and reaching purity: 1 distinct check firing on a
+    subject -> 70.5% malicious share, 2 -> 84.6%, 3 -> 93.3%, 4+ -> 100.0%. It also found
+    `Finding.confidence` is NOT the useful knob (a per-check constant; check identity
+    separates 31.5 points against confidence's 8.2). The judge packet built one finding
+    at a time had no way to see this at all.
+
+    Scope decision (recorded here, not guessed): grouped by TARGET -- this module's
+    existing `_target_from_evidence` field every packet item already carries -- not by
+    file. C-252's own unit of measurement is one SkillTrustBench "case" per subject
+    (one skill/target), not per file within a multi-file skill, so target-scope is what
+    was actually measured, not an invented finer/coarser grouping.
+
+    Only WARN/FAIL findings count as "firing": PASS is not corroborating evidence of
+    anything, and UNKNOWN means "could not determine" -- neither is the signal C-252
+    measured. Suppressed findings are excluded (an ignored finding is not live evidence
+    for a judge). A finding whose OWN status is WARN/FAIL therefore naturally includes
+    its own id in its target's group (it fired); a finding whose own status is UNKNOWN
+    (most packet items) naturally does NOT include its own id -- its corroboration
+    reflects purely how much OTHER live signal exists for the same target, which is
+    exactly the useful context for an otherwise-uncorroborated UNKNOWN.
+    """
+    groups: dict[str, set] = {}
+    for f in findings or []:
+        if f.status not in (WARN, FAIL):
+            continue
+        if getattr(f, "suppressed", False):
+            continue
+        groups.setdefault(_target_from_evidence(f), set()).add(f.id)
+    return {target: sorted(ids) for target, ids in groups.items()}
+
+
+def _attach_corroboration(items: list[dict], findings) -> list[dict]:
+    """Add a `corroboration` field to every packet item, computed from *findings*.
+
+    Never a verdict, never a threshold -- SKILL.md's panel guidance is explicit that
+    this is context for the judge to weigh, not a rule the engine already owns (a
+    `count >= 3 therefore DANGEROUS` policy baked into the panel would duplicate a
+    decision this engine deliberately leaves to the judge, and this module's own
+    escalate-only/never-lower authority model already governs what a verdict can do).
+    """
+    groups = _corroboration_groups(findings)
+    for item in items:
+        ids = groups.get(item["target"], [])
+        item["corroboration"] = {"count": len(ids), "check_ids": ids, "scope": "target"}
+    return items
+
+
 def _item_from_finding(f) -> dict:
+    host = _safe_destination_host(f)
     return {
         "finding_id": f.id,
         "target": _target_from_evidence(f),
@@ -210,6 +373,10 @@ def _item_from_finding(f) -> dict:
         "engine_disposition": f.status,
         "question": _question_for(f.id),
         "verdict_schema": _VERDICT_SCHEMA,
+        # C-284: engine-authored, never copied from prose — see _safe_destination_host.
+        # Always present (empty when no destination could be safely extracted) so a
+        # consumer never needs to branch on the key's existence.
+        "safe_facts": {"destination_host": host} if host else {},
     }
 
 
@@ -267,7 +434,10 @@ def _env_auth_kwarg_items(ctx) -> list[dict]:
 
 def _b62_items(ctx) -> list[dict]:
     """Thin adapter over sar.build_sars(ctx): one packet item per B62
-    capability-intent mismatch. build_sars already redacts every string field.
+    capability-intent mismatch. build_sars already redacts every string field AND
+    (B-334) already ends its question in this module's own answer vocabulary --
+    both derive from the same sar._VERDICT_VALUES tuple this module imports above --
+    so unlike before B-334 there is nothing left to restate at this boundary.
     """
     items: list[dict] = []
     for sar in build_sars(ctx):
@@ -314,6 +484,7 @@ def build_judge_packet(ctx, findings) -> list[dict]:
     items.extend(_recover_dropped_taint(ctx))
     items.extend(_env_auth_kwarg_items(ctx))
 
+    items = _attach_corroboration(items, findings)
     items.sort(key=lambda d: (d["finding_id"], d["target"], d["redacted_evidence"]))
     return items
 
@@ -335,13 +506,65 @@ def render_judge_packet_json(ctx, findings, *, version: str) -> str:
 # panel's output for one audit's borderline band.
 _MAX_VERDICTS_BYTES = 2_000_000
 
-_VALID_VERDICTS = frozenset({"SAFE", "SUSPICIOUS", "DANGEROUS"})
+# Derived from the SAME tuple the packet advertises (see _VERDICT_VALUES) so the
+# contract shown to the judge and the guard applied to its answer can never drift.
+_VALID_VERDICTS = frozenset(_VERDICT_VALUES)
 
 _PRIORITY_BY_VERDICT = {
     "DANGEROUS": "treat as high priority",
     "SUSPICIOUS": "worth a closer look",
     "SAFE": "likely benign",
 }
+
+# What a usable verdicts entry looks like, restated for a human whose file just got
+# dropped. Deliberately points at the packet's own machine-readable field rather than
+# re-describing it in a second place that could itself drift.
+_VERDICT_CONTRACT_HINT = (
+    'each entry needs "finding_id" (string), "target" (string) and "verdict" '
+    "(one of " + " / ".join(_VERDICT_VALUES) + ") — exactly the packet item's own "
+    '"verdict_schema" field'
+)
+
+
+def _note(message: str) -> None:
+    """Emit a user-visible ``note:`` line — the same channel and prefix cli.py already
+    uses for flag-coherence notes.
+
+    Always stderr, never stdout: every consumer of this module renders a JSON
+    artifact to stdout, and a diagnostic must never corrupt it. Carries no
+    caller-supplied data (fixed text plus integer counts), so there is nothing here
+    for redact() to mask.
+    """
+    print(f"note: {message}", file=sys.stderr)
+
+
+def _payload_carries_content(raw) -> bool:
+    """True when a verdicts payload actually contained something.
+
+    An empty/whitespace-only string is the "nothing was submitted" case (cli.py also
+    passes ``""`` when the path could not be read), which must stay silent — the
+    diagnostic below exists to separate "0 of N applied" from "no verdicts
+    submitted", so firing it on a genuinely empty payload would defeat its purpose.
+    """
+    if isinstance(raw, str):
+        return bool(raw.strip())
+    return bool(raw)
+
+
+def _note_nothing_applied(raw, reason: str, *, hint: str = _VERDICT_CONTRACT_HINT) -> None:
+    """B-330: loudly report a NON-EMPTY verdicts payload that yielded zero usable
+    entries.
+
+    The defensive parse below never raises, which is right for untrusted input — but
+    silently returning ``{}`` made a wholly-rejected file indistinguishable from "no
+    verdicts submitted": every item still rendered "not yet reviewed by a judge" and
+    nothing anywhere said 0 of N had been applied. That is exactly how the packet's
+    own contract could contradict its parser for a whole release without anyone
+    noticing. Reporting is all this does — the parse result is unchanged.
+    """
+    if not _payload_carries_content(raw):
+        return
+    _note(f"verdicts payload produced no usable entries — {reason}. Nothing was applied; {hint}.")
 
 
 def _parse_verdicts(raw: str) -> dict:
@@ -352,17 +575,28 @@ def _parse_verdicts(raw: str) -> dict:
     shape, or an unrecognized verdict value each just drop that entry (or the
     whole parse) rather than error -- this data is advisory-only and must
     never be able to crash or otherwise perturb the audit itself.
+
+    B-330: dropping is no longer SILENT. Whenever a non-empty payload yields zero
+    usable entries, a ``note:`` line goes to stderr (never stdout, which carries the
+    JSON artifact). This is the single funnel all three consumers use -- ``--judged``,
+    ``--propose-ignore`` and ``--vet-judged`` -- so the diagnostic cannot be wired up
+    for one of them and forgotten for the others.
     """
     if not isinstance(raw, str) or len(raw.encode("utf-8", "surrogatepass")) > _MAX_VERDICTS_BYTES:
+        _note_nothing_applied(
+            raw, f"it is not text, or exceeds the {_MAX_VERDICTS_BYTES} byte bound")
         return {}
     try:
         data = json.loads(raw)
     except ValueError:
+        _note_nothing_applied(raw, "it is not valid JSON")
         return {}
     if not isinstance(data, dict):
+        _note_nothing_applied(raw, "its top-level value is not a JSON object")
         return {}
     entries = data.get("verdicts")
     if not isinstance(entries, list):
+        _note_nothing_applied(raw, 'it has no top-level "verdicts" array')
         return {}
     out: dict = {}
     for entry in entries:
@@ -374,6 +608,10 @@ def _parse_verdicts(raw: str) -> dict:
             continue
         votes = entry.get("votes")
         out[(fid, target)] = {"verdict": verdict, "votes": votes if isinstance(votes, dict) else None}
+    # An explicitly empty "verdicts": [] IS "no verdicts submitted" -- say nothing.
+    # Entries that were submitted and all rejected is the case worth shouting about.
+    if entries and not out:
+        _note_nothing_applied(raw, f"0 of {len(entries)} submitted entries were usable")
     return out
 
 
@@ -650,9 +888,10 @@ def build_vet_judge_packet(engine_output, target: str) -> list[dict]:
     here which only appears when the deterministic engine already flagged
     something.
     """
-    items = [_item_from_finding(f) for f in _vet_pool(engine_output) if _is_borderline(f)]
+    pool = _vet_pool(engine_output)
+    items = [_item_from_finding(f) for f in pool if _is_borderline(f)]
     items.extend(_vet_attest_packet_items(_vet_target_name(target)))
-    return items
+    return _attach_corroboration(items, pool)
 
 
 def render_vet_judge_packet_json(engine_output, *, target: str, version: str) -> str:
@@ -717,6 +956,15 @@ def escalate_vet_output(engine_output, verdicts_raw: str, *, target: str):
     if _verdicts_fingerprint_matches(verdicts_raw, _vet_run_fingerprint(target)):
         verdicts_map = _parse_verdicts(verdicts_raw)
     else:
+        # B-330: this rejection bypasses _parse_verdicts entirely, so it needs its own
+        # diagnostic -- a whole verdicts file discarded on a fingerprint mismatch was
+        # the most silent degrade of all.
+        _note_nothing_applied(
+            verdicts_raw,
+            'its top-level "targetFingerprint" is missing or does not match this run',
+            hint='copy the packet\'s own "targetFingerprint" value verbatim into the '
+                 "verdicts JSON",
+        )
         verdicts_map = {}
     new_attest_findings = _vet_attest_new_findings(_vet_target_name(target), verdicts_map)
     if isinstance(engine_output, list):

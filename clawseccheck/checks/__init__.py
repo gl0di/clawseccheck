@@ -167,6 +167,12 @@ from ._egress import (
     _other_can_reach_read,
     _weak_allowlist_entries,
     check_browser_ssrf,
+    check_browser_extra_args,
+    check_browser_evaluate_enabled,
+    check_browser_executable_path,
+    check_browser_existing_session_profile,
+    _cdp_url_classify,
+    _cdp_url_display,
     check_outbound_proxy,
     check_provider_baseurl,
     check_cachetrace_redaction,
@@ -197,6 +203,7 @@ from ._agents import (
     _disk_subagent_disclosure,
     _has_subagents,
     _reassembly,
+    check_embedded_agent_project_settings_policy,
     check_agent_separation,
     check_delegation_reassembly,
     check_multiagent_exposure,
@@ -256,10 +263,15 @@ from ._config import (
     _NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS,
     _is_native_unconditional_critical_check_id,
     _ENV6_TOGGLES,
+    _b323_parse_env_token_at,
+    _b323_contains_env_var_reference,
+    _b323_is_literal_path_override,
+    check_env_vars_path_override,
     check_audit_target_divergence,
     check_audit_suppressions,
     check_control_plane_mutation,
     check_env_breakglass_toggles,
+    check_shell_env_fallback,
     check_controlui_origins,
     check_credential_blast_radius,
     check_dangerous_overrides,
@@ -308,6 +320,10 @@ from ._lifecycle import (
     _parse_version,
     _writable_identity_files,
     _writable_skill_dirs,
+    _b325_feed_host_is_canonical,
+    _b328_creation_only_bypass_root,
+    check_marketplace_feed_provenance,
+    check_exec_safe_bin_trusted_dirs,
     check_approval_bypass,
     check_autonomy,
     check_backups,
@@ -325,6 +341,7 @@ from ._lifecycle import (
     check_human_approval,
     check_install_policy,
     check_install_policy_gate,
+    check_secrets_provider_exec,
     check_known_vulns,
     check_memory_poisoning,
     check_memory_reconsumption_injection,
@@ -651,6 +668,7 @@ from ._vet import (
     _parse_source_target,
     _powershell_encoded_payloads,
     _run_content_ring,
+    coverage_gap_finding,
     _runtime_fetch_matches,
     _skill_own_host,
     _skill_tool_overgrant,
@@ -1186,6 +1204,7 @@ CHECKS = [
     check_declared_effective_proven,
     check_agent_separation,
     check_multiagent_exposure,
+    check_embedded_agent_project_settings_policy,  # B327 — agents.defaults.embeddedAgent.projectSettingsPolicy (E-060 item 10)
     check_delegation_reassembly,
     check_dangerous_overrides,
     check_privileged_commands_exposure,  # B171 — commands.bash/config/mcp/plugins gate (B-235)
@@ -1226,6 +1245,8 @@ CHECKS = [
     # break-glass toggle left on in a file OpenClaw loads at startup. Both WARN-only.
     check_audit_target_divergence,
     check_env_breakglass_toggles,
+    check_shell_env_fallback,  # B324 — env.shellEnv.enabled agent-startup shell import (E-060 item 7)
+    check_env_vars_path_override,  # B323 — env.vars.PATH / env.<KEY> catchall PATH override (E-060 item 6)
     check_webfetch_redirects,
     check_incident_readiness,
     check_log_threat_hunt,  # B164 — content-scan the agent's own log corpus (F-124/E-044)
@@ -1249,6 +1270,13 @@ CHECKS = [
     check_plugin_tool_result_middleware,  # B187 — non-bundled plugin declares agentToolResultMiddleware (B-292, RT-2)
     check_bundled_root_override,  # B186 — bundled skills/hooks code-load root relocated by env override (B-289, ENV-3)
     check_unit_embedded_gateway_secret,  # B193 — gateway credential inlined in a systemd user unit (B-290, ENV-4)
+    check_secrets_provider_exec,  # B194 — secrets.providers.* exec-source escape flags (E-060 item 1)
+    check_browser_extra_args,  # B195 — browser.extraArgs dangerous Chrome launch flags (E-060 item 2)
+    check_browser_evaluate_enabled,  # B196 — browser.evaluateEnabled arbitrary-JS sink (E-060 item 3)
+    check_browser_executable_path,  # B321 — browser.executablePath / profiles.*.executablePath / mcpCommand (E-060 item 4)
+    check_browser_existing_session_profile,  # B322 — browser.profiles.*.userDataDir / cdpUrl / driver:"existing-session" (E-060 item 5)
+    check_marketplace_feed_provenance,  # B325 — marketplaces.feeds non-canonical registry (E-060 item 8)
+    check_exec_safe_bin_trusted_dirs,  # B328 — tools.exec.safeBinTrustedDirs writable-dir promotion (E-060 item 11)
     # B191 (F-134, DISK-1) is DELIBERATELY NOT REGISTERED HERE. It is cataloged in
     # catalog.py and its function lives in checks/_host.py (§3.1 owning-module map), but
     # it runs ONLY under `--behavioral` (behavioral.analyze() calls check_audit_trail_
