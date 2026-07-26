@@ -315,6 +315,31 @@ CATALOG: list[CheckMeta] = [
         surface="bootstrap",
     ),
     CheckMeta("B24", "MCP server hardening", HIGH, "hardening", "MCP Trust", surface="mcp"),
+    # B333 (F-143/W2.1, grounded against dist openclaw@2026.7.1-2, 2026-07-25): when
+    # OpenClaw registers an MCP tool it stores exactly {serverName, safeServerName,
+    # toolName, title, description, inputSchema, fallbackDescription} — `annotations`
+    # is NEVER stored (0 occurrences). readOnlyHint/destructiveHint/openWorldHint/
+    # idempotentHint exist only in the @modelcontextprotocol/sdk vendor .d.ts types
+    # (compile-time only); OpenClaw's runtime never reads them, so a server declaring
+    # destructiveHint:true gets zero behavioral effect — no confirmation prompt,
+    # nothing. This is a HOST LIMITATION, not server wrongdoing, hence WARN-only
+    # (never FAIL) and worded as a fact about what OpenClaw does, never "the server
+    # lied". MEDIUM/scored=True: an operator relying on these hints for a safety
+    # policy has a real, silent enforcement gap. Fires only when a raw manifest dump
+    # (source == "manifest") shows the server DID declare a hint — OpenClaw's own
+    # retained/compiled form (trajectory / probe-names) never carries annotations at
+    # all, so absence there proves nothing about what was originally declared and
+    # reports UNKNOWN rather than guessing a clean PASS (B-092).
+    CheckMeta(
+        "B333",
+        "MCP tool safety-hint annotations declared but not enforced by OpenClaw",
+        MEDIUM,
+        "hardening",
+        "MCP Trust",
+        scored=True,
+        confidence="HIGH",
+        surface="mcp",
+    ),
     CheckMeta(
         "B25", "Update / pinning hygiene", MEDIUM, "hardening", "Supply Chain", surface="skills"
     ),

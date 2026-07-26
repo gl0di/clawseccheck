@@ -1956,6 +1956,148 @@ def check_mcp(ctx: Context) -> Finding:
     )
 
 
+# B333 (F-143/W2.1): the four MCP tool safety-hint annotation keys. Grounded against dist
+# openclaw@2026.7.1-2 (2026-07-25): OpenClaw stores exactly {serverName, safeServerName,
+# toolName, title, description, inputSchema, fallbackDescription} when it registers a
+# tool -- `annotations` is never stored (0 occurrences). These four keys exist only in the
+# @modelcontextprotocol/sdk vendor .d.ts types (compile-time only); OpenClaw's runtime
+# never reads them, so a server declaring destructiveHint:true gets zero behavioral
+# effect -- no confirmation prompt, nothing.
+_B333_HINT_KEYS = frozenset(
+    {"readOnlyHint", "destructiveHint", "openWorldHint", "idempotentHint"}
+)
+
+
+def _b333_hinted_tool_names(surface: "_mcpsurface.ToolSurface") -> list[str]:
+    """Names of tools in *surface* that declare at least one B333 hint key."""
+    return [
+        t.name
+        for t in surface.tools
+        if isinstance(t.annotations, dict) and any(k in t.annotations for k in _B333_HINT_KEYS)
+    ]
+
+
+def _b333_surface_verdict(surface: "_mcpsurface.ToolSurface") -> "tuple[str, list[str]] | None":
+    """One ToolSurface's contribution to B333: ``(status, hinted tool names)``, or None.
+
+    ``source == "manifest"`` is a raw MCP server response (a config-embedded ``tools``
+    list, or a dump a user handed us) -- a hint found there was genuinely DECLARED by
+    the server, so it WARNs: OpenClaw drops it silently, with no enforcement of any
+    kind. Any other source (``"trajectory"``, ``"probe-names"``) is OpenClaw's OWN
+    retained or compiled form, which -- per the grounded fact above -- never carries
+    annotations at all, regardless of what the server originally declared. So even a
+    surface built from one of those sources that happens to carry an annotation (e.g.
+    a synthetic/test surface) proves nothing either way; reports UNKNOWN rather than
+    guessing a clean PASS (B-092) or a false WARN.
+    """
+    hinted = _b333_hinted_tool_names(surface)
+    if not hinted:
+        return None
+    if surface.source == "manifest":
+        return WARN, hinted
+    if surface.source in ("trajectory", "probe-names"):
+        return UNKNOWN, hinted
+    return None
+
+
+def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
+    """B333: MCP tool safety-hint annotations declared but not enforced by OpenClaw.
+
+    Grounded against dist openclaw@2026.7.1-2 (2026-07-25, verified 2026-07-25): when
+    OpenClaw registers an MCP tool it stores exactly {serverName, safeServerName,
+    toolName, title, description, inputSchema, fallbackDescription} -- `annotations` is
+    NEVER stored (0 occurrences in the dist). readOnlyHint/destructiveHint/openWorldHint/
+    idempotentHint exist only in the @modelcontextprotocol/sdk vendor .d.ts types
+    (compile-time only); OpenClaw's runtime code never reads them. So a server that
+    declares destructiveHint:true gets ZERO behavioral effect from OpenClaw -- no
+    confirmation prompt, nothing -- and any host policy that claims to key off these
+    hints is not enforced.
+
+    This is a HOST LIMITATION, not server wrongdoing -- the server's declaration is
+    truthful, OpenClaw simply never reads it. WARN only, never FAIL, and worded as a
+    fact about OpenClaw's behaviour, never as an accusation against the server.
+
+    Only a raw manifest-shaped tool surface (config-embedded ``mcp.servers.<name>.tools``,
+    the same ``tools/list``-shaped dicts a server itself returns) can show what a server
+    actually declared -- OpenClaw's own retained/compiled form (trajectory records, an
+    ``openclaw mcp probe --json`` dump) never carries annotations at all, so a surface
+    built from one of those sources proves nothing either way about what was originally
+    declared and is reported UNKNOWN, never guessed as clean.
+
+    WARN    -- a config-embedded tool declares readOnlyHint/destructiveHint/
+               openWorldHint/idempotentHint.
+    UNKNOWN -- no MCP servers configured, no embedded tool definitions to inspect, or
+               the only annotation evidence available came from a source (trajectory /
+               probe-names) that structurally cannot carry it.
+    PASS    -- embedded tool definitions were inspected and none declare any hint.
+    """
+    servers = _mcp_servers(ctx.config)
+    if not servers:
+        return _finding("B333", UNKNOWN, "No MCP servers configured.", "—")
+
+    warn_hits: list[str] = []
+    unknown_hits: list[str] = []
+    surfaces_seen = 0
+    for sname, spec in sorted(servers.items()):
+        tools = spec.get("tools") if isinstance(spec, dict) else None
+        surface = _mcpsurface.from_tool_defs(sname, tools)
+        if surface is None:
+            continue
+        surfaces_seen += 1
+        verdict = _b333_surface_verdict(surface)
+        if verdict is None:
+            continue
+        status, hinted = verdict
+        line = f"{sname}: {', '.join(hinted[:5])}"
+        (warn_hits if status == WARN else unknown_hits).append(line)
+
+    if warn_hits:
+        ev = warn_hits[:5]
+        return _finding(
+            "B333",
+            WARN,
+            "MCP server(s) declare readOnlyHint/destructiveHint/openWorldHint/"
+            "idempotentHint tool annotations (" + "; ".join(ev) + "), but OpenClaw does "
+            "not read destructiveHint/readOnlyHint, so any policy relying on them is not "
+            "enforced.",
+            "Do not rely on these annotations for a safety policy -- OpenClaw drops them "
+            "entirely when it registers the tool. Enforce destructive/read-only behaviour "
+            "through the server's own access controls, or via OpenClaw's own tool "
+            "allowlist, instead.",
+            evidence=ev,
+        )
+    if unknown_hits:
+        ev = unknown_hits[:5]
+        return _finding(
+            "B333",
+            UNKNOWN,
+            "Annotation-carrying tool surface(s) were only available from OpenClaw's own "
+            "retained/compiled form (" + "; ".join(ev) + "), which never carries "
+            "annotations at all -- absence there proves nothing about what the server "
+            "originally declared.",
+            "Obtain a raw tools/list dump for these servers (e.g. via an MCP inspector) "
+            "to see their actually-declared annotations.",
+            evidence=ev,
+        )
+    if surfaces_seen == 0:
+        return _finding(
+            "B333",
+            UNKNOWN,
+            "No embedded MCP tool definitions (mcp.servers.<name>.tools as a rich "
+            "tools/list, not a bare name allowlist) were found in the config, so no "
+            "annotation data is available to assess.",
+            "Provide a raw tools/list dump for these servers (e.g. via an MCP inspector "
+            "export) to check for unenforced safety-hint annotations.",
+        )
+    return _finding(
+        "B333",
+        PASS,
+        f"{surfaces_seen} MCP server(s) with embedded tool definitions declare no "
+        "readOnlyHint/destructiveHint/openWorldHint/idempotentHint annotations.",
+        "No action needed.",
+    )
+
+
 # B-159: flags that legitimately take a URL as a registry/index config value,
 # not a package spec — a URL immediately after one of these is not unpinned-
 # package evidence. `pip install --registry https://... some-pkg==1.2.3` (or
