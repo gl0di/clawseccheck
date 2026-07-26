@@ -8,7 +8,7 @@ Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 1
 of which **153 run in a default audit**; the three T-series behavioral checks plus B191
 (OpenClaw's own `audit_events` runtime trail) execute only under `--behavioral`
 total; see `docs/CHECKS.md` for the full generated list, plus the
-combinational risk engine `RISK-01..RISK-21`, the install-time vetters `--vet` (B13 plus
+combinational risk engine `RISK-01..RISK-22`, the install-time vetters `--vet` (B13 plus
 the content-security ring — `SKILL_CONTENT_RING`, run against an uninstalled skill; AST-,
 injection-, and capability-intent-aware) / `--vet-mcp`, the **attestation
 layer** (`--ask` / `--attest`, with a guided interrogation protocol so the agent self-builds

@@ -2462,3 +2462,22 @@ These paths are computed from multiple checks. They fire only when every leg is 
   the groups entry so it is not '*'). If open group access is intentional — a community
   bot, say — put the high-blast tools behind a human approval step (tools.exec.mode='ask')
   so an untrusted message cannot reach them unattended.
+
+### RISK-22 - MCP server's own tool set spans a toxic flow (input -> sensitive -> egress)
+
+- Severity: MEDIUM
+- Pattern: MEDIUM (RISK-22, F-146/W2.4): a single MCP server's own tool set holds all
+- Chain: {server}.{input_tool} (untrusted input) -> {server}.{sensitive_tool} (sensitive read) -> {server}.{egress_tool} (egress)
+- Why:
+  The MCP server '{server}' declares tools spanning all three roles of a confused-deputy
+  chain in its own tool set: an untrusted-input tool ('{input_tool}'), a sensitive-read
+  tool ('{sensitive_tool}'), and an egress tool ('{egress_tool}'). None of these tools is
+  individually dangerous, and no exploit is proven here — this is a PRECONDITION, not an
+  incident. But because all three are co-resident on one server, content read by the input
+  tool could steer the model into misusing the other two for exfiltration, without leaving
+  this server's own tool boundary.
+- Fix:
+  Review whether '{server}' genuinely needs all three roles. If not, split the server so
+  untrusted-input, sensitive-read, and egress tools are never declared by the same server,
+  or gate the sensitive-read/egress tools behind human approval (tools.exec.mode='ask') so
+  an injected instruction from the input tool cannot reach them unattended.
