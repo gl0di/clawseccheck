@@ -345,6 +345,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B331 - MCP tool-description injection surviving OpenClaw's host sanitizer
+
+- Severity: HIGH
+- Block: hardening
+- Framework: MCP Trust
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: MCP tool-description injection surviving OpenClaw's host sanitizer
+- Remediation:
+  - none
+
 ### B25 - Update / pinning hygiene
 
 - Severity: MEDIUM

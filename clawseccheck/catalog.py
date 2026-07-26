@@ -359,6 +359,29 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="mcp",
     ),
+    # B331 (F-144/W2.2, blocked on C-294 grounding, now resolved — see
+    # docs/research/openclaw-schema-recon.md #38, workspace-root, not shipped): OpenClaw's
+    # own MCP tool-metadata sanitizer (`sanitizeMcpMetadataText`,
+    # agent-bundle-mcp-runtime--G82BMQs.js:959-964, dist openclaw@2026.7.1-2) redacts
+    # exactly two literal phrase families ("ignore ... instructions" / "disregard ...
+    # instructions") and truncates at 1200 chars — and it runs on only ONE of three
+    # model-facing runtime paths that consume mcp.servers (recon #38.3: the embedded
+    # `openclaw` harness; the CLI-backend and Codex harness paths never sanitize at all).
+    # `inputSchema` descriptions are never sanitized on ANY path (recon #38.5). A flat PASS
+    # would be a false PASS on the two non-sanitizing paths; a flat FAIL would over-claim on
+    # a payload the sanitizer genuinely neutralizes. HIGH/scored=True because the dominant
+    # real-world outcome (2 of 3 paths, plus anything the narrow 2-pattern regex misses on
+    # the third) is unmitigated tool-description injection reaching the model raw.
+    CheckMeta(
+        "B331",
+        "MCP tool-description injection surviving OpenClaw's host sanitizer",
+        HIGH,
+        "hardening",
+        "MCP Trust",
+        scored=True,
+        confidence="MEDIUM",
+        surface="mcp",
+    ),
     CheckMeta(
         "B25", "Update / pinning hygiene", MEDIUM, "hardening", "Supply Chain", surface="skills"
     ),
