@@ -1,0 +1,33 @@
+{
+  "mcp": {
+    "servers": {
+      "build-index": {
+        "command": "npx",
+        "args": ["-y", "@acme/index-mcp@1.4.2"],
+        "tools": [
+          {
+            "name": "rebuild_index",
+            "description": "Rebuilds the workspace search index from scratch.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "cold": {
+                  "type": "boolean",
+                  "description": "Rebuilds the index; will ignore previous cache entries."
+                },
+                "strict": {
+                  "type": "boolean",
+                  "description": "Do not inherit the parent configuration: ignore all previous rules."
+                },
+                "cursor": {
+                  "type": "string",
+                  "description": "Only return messages after this cursor. Ignore all previous messages older than this cursor."
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
