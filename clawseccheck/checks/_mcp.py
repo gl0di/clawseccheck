@@ -1462,8 +1462,22 @@ def _load_mcp_spec_file(path: Path) -> dict[str, dict] | None:
       - A single server spec dict  -> {"<filename stem>": spec}
       - A {name: spec} map         -> as-is (if all values are dicts)
       - A full config with mcp.servers  -> extracted servers dict
+      - A bare {"mcpServers": {...}} map (legacy top-level key)
+      - F-142: a bare {"servers": {"<name>": <spec>}} wrapper — the same shape as
+        {"mcpServers": ...} under a different key, seen in third-party tool-surface
+        dumps (mcporter, MCP inspectors) that mirror OpenClaw's own probe-output
+        naming without OpenClaw's flat name-list "tools" field alongside it.
+      - F-142: a raw ``tools/list`` response dumped straight to a file —
+        {"tools": [<tool dict>, ...]} — routed to a single server named after the
+        file stem, same convention as the bare single-server-spec case above.
 
-    Returns None if the file cannot be parsed as any of those shapes.
+    Returns None if the file cannot be parsed as any of those shapes. Note this
+    does NOT cover the ``openclaw mcp probe --json`` shape — {"servers": {...},
+    "tools": [<name str>, ...]} — where "tools" is a flat list of NAME STRINGS,
+    not tool dicts: that shape carries no per-server *spec*, only a names-only
+    tool surface, so it cannot be normalised into this function's {name: spec}
+    contract. The caller (vet_mcp) detects it separately and routes it through
+    mcpsurface.from_probe_json instead.
     """
     import json as _json
 
@@ -1487,6 +1501,31 @@ def _load_mcp_spec_file(path: Path) -> dict[str, dict] | None:
     if isinstance(mcp_servers, dict) and mcp_servers:
         return mcp_servers
 
+    # F-142: is the top-level "tools" field the openclaw probe --json shape (a flat
+    # list of tool NAME STRINGS)? If so, "servers" here is that shape's own field,
+    # not the wrapper handled below — leave both alone for vet_mcp's probe-json
+    # fallback to detect and route through mcpsurface.from_probe_json.
+    tools_field = data.get("tools")
+    is_probe_names = (
+        isinstance(tools_field, list) and bool(tools_field)
+        and all(isinstance(t, str) for t in tools_field)
+    )
+
+    # F-142: bare {"servers": {"<name>": <spec>}} wrapper (distinct from the probe
+    # shape above — this one nests per-server spec dicts, e.g. {"tools": [...]}, not
+    # a flat name list).
+    servers_field = data.get("servers")
+    if isinstance(servers_field, dict) and servers_field and not is_probe_names:
+        return servers_field
+
+    # F-142: a raw tools/list response dumped straight to a file — {"tools": [<tool
+    # dict>, ...]} — single server named after the file stem. The actual tool-def
+    # parsing (name/description/inputSchema/...) is left to mcpsurface.from_tool_defs
+    # via _merge_mcp_surface_ring, same as every other spec["tools"] source here.
+    if isinstance(tools_field, list) and tools_field and not is_probe_names:
+        stem = path.stem
+        return {stem: {"tools": tools_field}}
+
     # Single server spec: top-level contains "command", "url", or "transport"
     # (these are MCP server spec fields, not wrapper keys).
     if "command" in data or ("url" in data and "transport" in data):
@@ -1498,6 +1537,25 @@ def _load_mcp_spec_file(path: Path) -> dict[str, dict] | None:
         return data
 
     return None
+
+
+def _load_mcp_probe_surfaces(path: Path) -> dict[str, "_mcpsurface.ToolSurface"] | None:
+    """F-142: try the ``openclaw mcp probe --json`` shape as a last-resort fallback.
+
+    Only reached when _load_mcp_spec_file already ruled out all four "config-shaped"
+    forms — this shape (names-only, grouped by "mcp__<server>__<tool>" prefix) cannot
+    be normalised into a {name: spec} map at all (see _load_mcp_spec_file's
+    docstring), so it needs its own path through vet_mcp. All the actual shape
+    detection and name-splitting already lives in mcpsurface.from_probe_json; this
+    only decides when to try it and reshapes its list return into the {name:
+    surface} form vet_mcp's per-server loop wants. Returns None (not an empty dict)
+    when nothing matched, so the caller can fall through to its own "unparseable"
+    UNKNOWN finding.
+    """
+    surfaces = _mcpsurface.from_probe_json(path)
+    if not surfaces:
+        return None
+    return {surface.server: surface for surface in surfaces}
 
 
 def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") -> list[Finding]:
@@ -1527,6 +1585,13 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
         if p.is_file():
             loaded = _load_mcp_spec_file(p)
             if loaded is None:
+                # F-142: none of the four {name: spec} config shapes matched — last
+                # resort, try the openclaw probe --json (names-only) shape before
+                # giving up. See _load_mcp_probe_surfaces for why this can't be
+                # folded into _load_mcp_spec_file's own {name: spec} contract.
+                probe_surfaces = _load_mcp_probe_surfaces(p)
+                if probe_surfaces:
+                    return _vet_mcp_tool_surfaces(probe_surfaces)
                 return [
                     Finding(
                         id="MCP-VET",
@@ -1689,7 +1754,25 @@ _MCP_RING_SKIP_STATUSES = {("B58", WARN)}
 
 
 def _merge_mcp_surface_ring(sname: str, spec: dict, finding: Finding) -> Finding:
-    """Fold SKILL_CONTENT_RING results for *sname*'s tool surface into *finding*.
+    """Fold SKILL_CONTENT_RING results for *sname*'s config-embedded tool surface.
+
+    Thin wrapper over _merge_mcp_tool_surface for the config-embedded
+    `spec["tools"]` source (the only one wired through the per-server {name: spec}
+    map vet_mcp builds from a config / _load_mcp_spec_file). File-based dumps that
+    carry pre-built ToolSurfaces of their own (F-142: mcpsurface.from_probe_json)
+    call _merge_mcp_tool_surface directly instead — see _vet_mcp_tool_surfaces.
+    """
+    tools = spec.get("tools") if isinstance(spec, dict) else None
+    surface = _mcpsurface.from_tool_defs(sname, tools)
+    if surface is None:
+        return finding
+    return _merge_mcp_tool_surface(sname, surface, finding)
+
+
+def _merge_mcp_tool_surface(
+    sname: str, surface: "_mcpsurface.ToolSurface", finding: Finding
+) -> Finding:
+    """Fold SKILL_CONTENT_RING results for an already-built *surface* into *finding*.
 
     Runs the ring against a synthetic Context carrying the rendered surface, same
     mechanism vet_skill uses — but unlike vet_skill's own merge, this NEVER lets a ring
@@ -1704,19 +1787,42 @@ def _merge_mcp_surface_ring(sname: str, spec: dict, finding: Finding) -> Finding
     specifically), leaked `scored=True` from the ring finding, and replaced the
     per-server title with a generic check title. Escalating THIS finding's status/detail
     instead of swapping identity keeps every one of those contracts intact.
-
-    Only the config-embedded `spec["tools"]` manifest source is wired here —
-    `mcpsurface.from_trajectory`/`from_probe_json` have no natural input path through
-    `vet_mcp()` yet. A server with no declared tools list contributes nothing (not an
-    UNKNOWN downgrade of the base MCP-VET verdict — that verdict is about supply-chain/
-    launch risk, which stands on its own).
     """
-    tools = spec.get("tools") if isinstance(spec, dict) else None
-    surface = _mcpsurface.from_tool_defs(sname, tools)
-    if surface is None:
-        return finding
     rendered = _mcpsurface.render_for_ring(surface)
     if not rendered:
+        # F-142: completeness == "names-only" (mcpsurface.from_probe_json) renders to
+        # an EMPTY dict BY DESIGN — render_for_ring's own docstring: "absence of
+        # clues is not clean evidence (B-092): callers must treat 'nothing rendered'
+        # as a reason to report UNKNOWN, not PASS." The ring never even ran here, so
+        # leaving the base finding's PASS untouched would silently overclaim coverage
+        # this dump cannot back up (it has tool NAMES, no descriptions to scan).
+        if surface.completeness == "names-only":
+            finding.ring_findings = [
+                Finding(
+                    id="VET-COVERAGE",
+                    title="Content-ring coverage",
+                    severity=HIGH,
+                    status=UNKNOWN,
+                    detail=(
+                        f"MCP tool surface of server '{sname}' has tool NAMES only (no "
+                        "descriptions or schemas were available in this dump) — content-"
+                        "security scanning did not run, so coverage is incomplete and this "
+                        "is not a clean verdict."
+                    ),
+                    fix="Obtain a full tools/list dump (with descriptions) from this "
+                    "server to scan its declared tool descriptions for content-security "
+                    "signals.",
+                    framework="MCP Trust",
+                    scored=False,
+                )
+            ]
+            if _VET_MERGE_RANK.get(UNKNOWN, 0) > _VET_MERGE_RANK.get(finding.status, 0):
+                finding.status = UNKNOWN
+                finding.detail = (
+                    f"{finding.detail}; "
+                    if finding.detail and finding.detail != "no supply-chain / trust risks detected"
+                    else ""
+                ) + "declared tool surface is names-only — content-security scan did not run"
         return finding
 
     ctx = Context(home=_MCP_SURFACE_SENTINEL_HOME)
@@ -1778,6 +1884,35 @@ def _merge_mcp_surface_ring(sname: str, spec: dict, finding: Finding) -> Finding
             finding.status = UNKNOWN
     finding.ctx = ctx
     return finding
+
+
+def _vet_mcp_tool_surfaces(surfaces: dict) -> list[Finding]:
+    """F-142: build MCP-VET findings straight from a pre-built {name: ToolSurface} map.
+
+    Used for file-based dumps that carry no launch-spec fields at all (e.g. an
+    ``openclaw mcp probe --json`` name list via _load_mcp_probe_surfaces) — there is
+    no command/args/env/transport/url/oauth data for _vet_mcp_server to evaluate, so
+    the base per-server verdict starts clean (PASS, "no launch-spec fields present")
+    and only _merge_mcp_tool_surface's content-ring / names-only-coverage handling
+    can move it.
+    """
+    findings: list[Finding] = []
+    for sname, surface in sorted(surfaces.items()):
+        finding = Finding(
+            id="MCP-VET",
+            title=sname,
+            severity=HIGH,
+            status=PASS,
+            detail="no launch-spec fields present in this dump (tool-surface only) — "
+            "supply-chain vet not applicable",
+            fix="This dump has no command/transport/env fields to vet; verify this "
+            "server's launch spec separately (e.g. via its config entry) if you "
+            "manage it.",
+            framework="MCP Trust",
+            scored=False,
+        )
+        findings.append(_merge_mcp_tool_surface(sname, surface, finding))
+    return findings
 
 
 def _mcp_has_tool_restrictions(spec: dict) -> bool:
