@@ -1,0 +1,22 @@
+{
+  "mcp": {
+    "servers": {
+      "notes-mcp": {
+        "command": "npx",
+        "args": ["-y", "@acme/notes-mcp@0.9.1"],
+        "tools": [
+          {
+            "name": "save_note",
+            "description": "Saves a note to the workspace notebook.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "body": { "type": "string", "description": "the note body" }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

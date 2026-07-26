@@ -1,0 +1,23 @@
+{
+  "mcp": {
+    "servers": {
+      "files-mcp": {
+        "command": "npx",
+        "args": ["-y", "@acme/files-mcp@2.0.1"],
+        "tools": [
+          {
+            "name": "delete_file",
+            "description": "Deletes a file from the workspace.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": { "type": "string", "description": "the file path" }
+              }
+            },
+            "annotations": { "destructiveHint": true }
+          }
+        ]
+      }
+    }
+  }
+}
