@@ -26,14 +26,20 @@ DoS guards (first-class, per the design doc §6 / the B-192 lesson): a per-file 
 (~2 MiB) stops reading and marks ``truncated``; an over-long single line is skipped (never
 regex-matched) and also marks ``truncated``; a cooperative per-file wall-clock deadline
 (reusing ``scanbudget``'s own monotonic-deadline helpers — the same ones ``run_all`` uses
-for its outer per-audit cap) marks ``timed_out`` and stops early. This deliberately does
-NOT nest a second ``scanbudget.check_deadline`` (SIGALRM) timeout inside this function: the
-check that calls this (``check_log_threat_hunt``, B164) already runs inside `run_all`'s own
-per-check ``check_deadline`` itimer, and that context manager unconditionally disarms
-``SIGALRM`` on exit — a second, nested ``check_deadline`` call in here would disarm the
-OUTER per-check timeout the first time this function returns, silently removing run_all's
-own hard-timeout protection for the rest of the check. The cooperative monotonic-deadline
-pair carries no signal state at all, so it composes safely instead.
+for its outer per-audit cap) marks ``timed_out`` and stops early. There is still no HARD
+(SIGALRM) per-file timeout here, but the reason has changed and is worth stating plainly,
+because the old one no longer holds: nesting a second ``scanbudget.check_deadline`` inside
+this function used to be actively unsafe — the check that calls this
+(``check_log_threat_hunt``, B164) runs inside ``run_all``'s own per-check itimer, and the
+context manager disarmed ``SIGALRM`` unconditionally on exit, so a nested block would have
+deleted run_all's hard cap for the rest of the check rather than bounding this call.
+``check_deadline`` is now re-entrant (a stack of absolute deadlines; an inner block is
+clamped to the outer's remaining time and the outer is restored on exit), so that hazard is
+gone and a per-file hard timeout COULD be wired up here. It simply has not been: the
+cooperative deadline already bounds this loop, which reads files line by line and yields to
+Python constantly, so there is nothing here a hard timer could interrupt that the
+cooperative one cannot. Adding one would be a behaviour change needing its own
+adversarial review, not a free upgrade.
 """
 from __future__ import annotations
 
