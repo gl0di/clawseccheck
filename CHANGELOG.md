@@ -3,6 +3,61 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.58.0] — 2026-07-26
+
+The MCP Surface Engine: five new checks and a new tool-surface model that let
+`--vet-mcp` and `--monitor` see a server's *declared tool descriptions*, not
+just its launch spec — plus three unrelated false-positive/false-negative
+fixes queued ahead of it.
+
+### Added
+- `clawseccheck/mcpsurface.py` — a new canonical `ToolSurface`/`ToolDef` model
+  that normalizes MCP tool declarations from three sources (config-embedded
+  `mcp.servers.*.tools`, OpenClaw trajectory records, and third-party
+  `tools/list`/`mcporter`/inspector dumps) into one form, tracking
+  completeness (`full` vs `names-only`) and whether the host has already
+  sanitized the text.
+- MCP tool descriptions now flow through the same content-security ring
+  `--vet` uses for skills, surfacing prompt-injection/malware signals in a
+  server's declared tools, not just its launch command.
+- `--vet-mcp FILE` accepts real `tools/list` dumps (`mcporter`, MCP
+  inspector exports) and `openclaw mcp probe --json` output, not just
+  OpenClaw config shapes.
+- **B331** — MCP tool-description injection surviving OpenClaw's own
+  metadata sanitizer: the host's regex-based redaction covers exactly two
+  literal phrase families and runs on only one of three model-facing
+  runtime paths, so a payload it doesn't (or structurally can't) neutralize
+  is reported live; genuinely-mitigated text is WARN, never a confident
+  PASS. Two rounds of independent adversarial review closed a first-cut
+  false-FAIL blast radius and an over-claim bug where prepending the one
+  redacted phrase downgraded an unmitigated attack.
+- **B332** — cross-server MCP tool-name collision, homoglyph, and
+  near-miss detection: a second server registering a tool that exactly
+  matches, is a homoglyph of, or is visually confusable with a trusted
+  server's tool name. Independent review found and closed six false-FAIL/
+  false-PASS gaps (same-server-deployed-twice, non-English generic names,
+  fullwidth/zero-width homoglyph evasion, a truncation-disclosure bug, and
+  more).
+- **B333** — MCP tool safety-hint annotations (`readOnlyHint`,
+  `destructiveHint`, …) that OpenClaw declares but never actually reads or
+  enforces at runtime.
+- **RISK-22** (advisory) — toxic-flow detection within a single MCP
+  server's own tool set: an untrusted-input tool, a sensitive-read tool,
+  and an egress tool co-resident on one server, even when each tool is
+  individually safe.
+- `--monitor` gains rug-pull detection (RP6/RP7): a server can keep its
+  approved launch spec identical while silently swapping its declared tool
+  descriptions after approval — now a distinct drift signal from an
+  ordinary launch-spec change.
+
+### Fixed
+- MCP tool-parameter-description override detection no longer false-FAILs
+  on ordinary prose.
+- `check_deadline` is now re-entrant, closing a fail-open nested-timeout
+  bug.
+- The Chrome-switch and CDP-control-port checks no longer grade vendor
+  default values as failures.
+
 ## [3.57.0] — 2026-07-25
 
 Honesty under load: the audit now tells you when it could not finish, `--full` actually
