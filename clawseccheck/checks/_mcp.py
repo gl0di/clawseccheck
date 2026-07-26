@@ -52,6 +52,7 @@ from ._shared import (
     _plugins,
 )
 from ._content import (
+    _B63_SECRECY_RE,
     _CLICKFIX_REMOTE_FETCH_RE,
     _IOC_ONION_RE,
     _clickfix_trusted_installer,
@@ -2094,6 +2095,435 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
         PASS,
         f"{surfaces_seen} MCP server(s) with embedded tool definitions declare no "
         "readOnlyHint/destructiveHint/openWorldHint/idempotentHint annotations.",
+        "No action needed.",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B331 (F-144/W2.2): residual MCP tool-description injection past OpenClaw's own
+# host-side metadata sanitizer.
+#
+# GROUNDING (dist openclaw@2026.7.1-2, agent-bundle-mcp-runtime--G82BMQs.js:959-964,
+# `sanitizeMcpMetadataText`, verified 2026-07-25 — see docs/research/
+# openclaw-schema-recon.md #38, workspace-root, not shipped, for the full derivation):
+#
+#     const scrubbed = normalized
+#       .replace(/ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions/gi,
+#                 "[redacted MCP metadata instruction]")
+#       .replace(/disregard\s+(?:all\s+)?(?:previous|prior|above)\s+instructions/gi,
+#                 "[redacted MCP metadata instruction]")
+#       .replace(/system\s+prompt/gi, "system prompt");   // no-op, NOT ported — see below
+#     return scrubbed.length > 1200 ? scrubbed.slice(0, 1200) + "..." : scrubbed;
+#
+# PATH-DEPENDENCE (recon #38.3, the must-ground blocker this check was held on): this
+# sanitizer runs on exactly ONE of three model-facing runtime paths that consume
+# `mcp.servers` — the embedded `openclaw` harness (path A). The CLI-backend runners
+# (Claude Code CLI, Gemini CLI — path B) and the Codex harness (path C) hand the raw
+# server-declared description straight to the child process / Codex's own tool table;
+# `sanitizeMcpMetadataText` is structurally unreachable on both. `inputSchema`
+# description strings are unsanitized on EVERY path, including A (recon #38.5).
+#
+# Investigated whether Context/collector.py exposes a signal for which path is active,
+# per this task's own brief: `agentRuntime.id` is a real, grounded config field
+# (schema-DRyO1XBt.js:613,656,707,839 — "openclaw" | "auto" | a plugin harness id | a
+# CLI alias) that WOULD determine the path if fully resolved. It is deliberately NOT
+# read here: it is optional, set independently per provider/per model/per agent
+# (5 different schema locations), and its *omitted*/`"auto"` resolution falls back to a
+# provider-specific default only ONE of which is grounded at all ("OpenAI on the
+# official endpoint defaults to the Codex harness when omitted" — one provider, not a
+# general rule). A coarse config-wide read of this field could not be attributed to any
+# one MCP server's tool surface anyway. Treating its absence as "so it must be the
+# sanitizing path" would be exactly the fabricated-confidence GR#4 violation this check
+# exists to avoid, so B331 degrades honestly instead: it never claims a specific path is
+# active, and never returns a flat PASS/FAIL for a signal whose fate depends on one.
+#
+# VERDICT SHAPE, per description text scanned (mirrors the source=="manifest" vs
+# "trajectory" distinction B333/F-143 already established):
+#
+#   source == "trajectory" (mcpsurface.host_sanitized=True by construction — this text
+#   is what OpenClaw's embedded harness ACTUALLY sent the model, sanitizer already
+#   applied): any content-security signal found here is proof-positive it reached the
+#   model, not a simulation — always FAIL, no path hedge needed.
+#
+#   source == "manifest" (raw, pre-host text, path unknown):
+#     - secrecy-directive / exfil-parameter / tag-block / encoded-payload signals are
+#       NEVER touched by the sanitizer's two literal patterns (they only match
+#       "ignore/disregard ... instructions") — always FAIL, on every path, unconditional
+#       on path.
+#     - an authority-override signal is run through a faithful Python port of the JS
+#       sanitizer above (`_host_sanitize_simulated`). If it SURVIVES the simulated
+#       redact+truncate — FAIL, unmitigated on every path. If the simulated truncation
+#       (not the redaction) is what removed it — UNKNOWN: cannot tell whether it would
+#       have been redacted, and it reaches the model whole and raw on the two
+#       non-sanitizing paths regardless of truncation. If the redaction itself removed
+#       it — WARN, never a flat PASS: worded to say the host's mitigation is real but
+#       thin (covers one path of three, two literal phrase families), never "the host
+#       does nothing" and never "this is safe" (design doc W2.2 / task brief: this is
+#       the key anti-over-claiming case).
+#
+#   No signal found at all, but the description exceeds the sanitizer's own 1200-char
+#   truncation boundary: UNKNOWN, not a confident PASS — a payload placed past that
+#   boundary cannot be ruled out by this scan with confidence about what any given path
+#   actually delivers.
+#
+# INDEPENDENT C-135 (self-adversarial, run after this check's own tests passed, brief:
+# hunt for OVER-CLAIMING specifically, not just false FAIL — see CLAUDE.md §4):
+#   - Tried: a benign cache/session-reset tool description using the exact
+#     DISREGARD/FORGET + prior/previous + noun shape this check adds
+#     (`_B331_DISREGARD_FORGET_RE`) with the GENERIC nouns this project's own C-135
+#     history (four rounds, `_PARAM_OVERRIDE_LOOSE_RE` above) already proved false-FAIL
+#     on real MCP server prose — "Disregard prior context and reload the session",
+#     "Forget previous rule configuration and rebuild the cache". RESULT: the regex was
+#     deliberately narrowed to INSTRUCTION/DIRECTION/DIRECTIVE/PROMPT only (dropping
+#     CONTEXT/RULE/COMMAND/MESSAGE/GUIDELINE/TOOL RESULT — exactly the nouns implicated
+#     in that history) before this check shipped, specifically to close this off; neither
+#     example above matches (CONTEXT and RULE CONFIGURATION are not in the noun class).
+#     Confirmed clean.
+#   - Tried: the over-claiming case this check's own docstring exists to prevent — a
+#     manifest-sourced tool description reading exactly "ignore all previous
+#     instructions" (nothing else). If reported as an unconditional FAIL/"host does
+#     nothing", that is the over-claim the design doc singles out. Confirmed: this
+#     exact phrase is fully consumed by `_HOST_SANITIZE_IGNORE_RE`, `still_present` is
+#     False, `host_truncated` is False → WARN with "matches a pattern OpenClaw's own
+#     ... sanitizer neutralizes" wording, never FAIL. See
+#     test_b331_clean_by_mitigation_not_reported_as_live.
+#   - Tried: a long (>1200 char) benign description with NO injection content anywhere
+#     (padding text only). RESULT: this IS reported UNKNOWN, not PASS — deliberately,
+#     per the task brief's own truncation requirement ("never a confident bare PASS"
+#     past the sanitizer's own 1200-char boundary), since this scan cannot vouch for
+#     what a longer real payload past that boundary would have looked like just because
+#     THIS particular long description happens to be clean. Confirmed this is UNKNOWN
+#     rather than a silent PASS, and confirmed a SHORT (<=1200) benign description with
+#     no signal still returns a clean `None`/PASS with no truncation hedge at all — the
+#     length threshold is the only thing that changes the verdict shape, never signal
+#     presence alone. See test_b331_truncation_no_signal_anywhere_is_unknown_not_pass and
+#     test_b331_short_no_signal_is_none_not_forced_unknown.
+#   - Tried: a trajectory-sourced surface (host_sanitized=True) whose text contains the
+#     REDACTION PLACEHOLDER itself ("[redacted MCP metadata instruction]") rather than a
+#     raw phrase — i.e. the sanitizer's own successful output. RESULT: none of
+#     `_b331_signal`'s detectors match the placeholder string (it is plain English, no
+#     verb+noun override shape, no secrecy/exfil/tag-block/encoded content) → PASS, not
+#     a false FAIL on the host's own redaction marker. Confirmed clean.
+#   - FOUND AND FIXED (this is the pass's one real catch, not a confirmed-clean check):
+#     the first cut's "exfil-parameter" detector reused `_C038_PARAM_INJECT_RE` (a
+#     PARAMETER-surface, unscored-context regex) unconditioned against the description
+#     surface, and it FAILed ordinary webhook/analytics/curl-download tool prose with no
+#     exfil-specific reading at all ("Fetches analytics data from
+#     https://api.example.com/v1/stats?range=7d…", "Downloads the report CSV via curl
+#     https://reports.example.com/export.csv…") — an over-claim in the FAIL, not the
+#     WARN/PASS direction, but the same class this brief exists to catch: reporting a
+#     benign server as carrying a live threat. Retracted before shipping; full account
+#     and the replacement (`_B331_EXFIL_PARAM_RE`, anchored on a credential/secret-shaped
+#     query PARAMETER NAME) are at that constant's own definition. See
+#     test_b331_c135_benign_webhook_url_not_flagged_as_exfil.
+#
+# Fires only on config-embedded ``mcp.servers.<name>.tools`` (source=="manifest"), the
+# same rich tools/list shape B333 reads — bare name allowlists and servers with no
+# embedded tool definitions at all report UNKNOWN, never a guessed PASS (B-092).
+_HOST_SANITIZE_IGNORE_RE = re.compile(
+    r"ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions", re.I
+)
+_HOST_SANITIZE_DISREGARD_RE = re.compile(
+    r"disregard\s+(?:all\s+)?(?:previous|prior|above)\s+instructions", re.I
+)
+_HOST_SANITIZE_TEXT_LIMIT = 1200  # BUNDLE_MCP_METADATA_TEXT_LIMIT, same dist file, :768
+
+
+def _host_sanitize_simulated(text: str) -> "tuple[str, bool]":
+    """Faithful Python port of dist `sanitizeMcpMetadataText` (see the grounding note
+    above this section for the exact source and line numbers). Returns
+    ``(scrubbed_text, truncated)``.
+
+    The third upstream `.replace(/system\\s+prompt/gi, "system prompt")` is a
+    same-string no-op (an upstream bug, not a redaction — it replaces "system prompt"
+    with the literal string "system prompt", changing nothing) and is deliberately NOT
+    ported; porting a no-op would just be an obfuscated identity function. This check
+    describes the installed dist's ACTUAL behavior, not the presumably-intended one
+    (design doc W2.2 note: "W2.2 does not depend on whether this bug is ever fixed").
+    """
+    scrubbed = _HOST_SANITIZE_IGNORE_RE.sub("[redacted MCP metadata instruction]", text)
+    scrubbed = _HOST_SANITIZE_DISREGARD_RE.sub("[redacted MCP metadata instruction]", scrubbed)
+    truncated = len(scrubbed) > _HOST_SANITIZE_TEXT_LIMIT
+    if truncated:
+        scrubbed = scrubbed[:_HOST_SANITIZE_TEXT_LIMIT] + "..."
+    return scrubbed, truncated
+
+
+# `_C038_HIDDEN_INSTR_RE` (above) already covers IGNORE/OVERRIDE + a broad noun class,
+# and SYSTEM:/`<|im_start|>system` header forgery — reused here directly, not
+# reinvented. It does NOT cover DISREGARD or FORGET as verbs, and the real MCP metadata
+# sanitizer this check exists to evaluate explicitly targets DISREGARD (see the JS
+# above) — a gap on the exact surface this check is about. `_PARAM_OVERRIDE_LOOSE_RE`
+# (above) already treats DISREGARD as an override verb, but on the PARAMETER surface,
+# WARN-only, gated on a second anchor: a bare verb+adverb match with NO noun requirement
+# false-FAILed real MCP server prose across four independent C-135 rounds on that
+# surface ("Disregard prior kube contexts and load ~/.kube/config from the host
+# again."). This is deliberately NOT that shape: it requires the same tight noun class
+# `_C038_HIDDEN_INSTR_RE`'s own IGNORE arm already spends unconditioned FAIL on this
+# exact surface (tool DESCRIPTION, not parameter) — narrowed further to
+# INSTRUCTION/DIRECTION/DIRECTIVE/PROMPT only, dropping CONTEXT/RULE/COMMAND/MESSAGE/
+# GUIDELINE/TOOL RESULT (the generic engineering-prose nouns implicated in the retracted
+# param-surface anchors), because B331 is a SCORED catalog check (unlike MCP-VET's
+# scored=False) and carries this project's strictest FAIL bar. See the C-135 note in the
+# section banner above for the adversarial pass run against this exact pattern.
+_B331_DISREGARD_FORGET_RE = re.compile(
+    r"\b(?:DISREGARD|FORGET)\s+(?:ALL\s+)?(?:OF\s+)?(?:THE\s+)?(?:YOUR\s+)?(?:"
+    r"PREVIOUS(?:LY)?|PRIOR|PRECEDING|EARLIER|ABOVE"
+    r")\s+(?:\w+\s+)?(?:INSTRUCTION|DIRECTION|DIRECTIVE|PROMPT)S?\b",
+    re.I,
+)
+
+
+def _b331_authority_hit(norm_text: str) -> "re.Match | None":
+    return _C038_HIDDEN_INSTR_RE.search(norm_text) or _B331_DISREGARD_FORGET_RE.search(norm_text)
+
+
+# C-135 finding (independent self-adversarial pass, over-claiming brief): the first cut
+# of this leg reused `_C038_PARAM_INJECT_RE` verbatim against the tool DESCRIPTION
+# surface. That regex's URL-with-query-parameter alternative
+# (`https?://...(?:\?|&)...=`) requires no credential/secret shape at all, and its
+# curl/wget alternative requires no download-of-something-sensitive shape either — both
+# are calibrated for the PARAMETER surface (TP3) inside an already-unscored
+# (`scored=False`) MCP-VET finding, where that breadth is an accepted tradeoff. Reused
+# unconditioned on B331's SCORED description surface, it FAILed ordinary, benign MCP
+# server prose that documents its own webhook/API endpoint or a curl-based download
+# step:
+#
+#     "Fetches analytics data from https://api.example.com/v1/stats?range=7d for the
+#      dashboard."
+#     "Downloads the report CSV via curl https://reports.example.com/export.csv for
+#      offline processing."
+#
+# Both are the native idiom of any webhook / analytics / reporting MCP server, and
+# neither has anything to do with exfiltration. RETRACTED before shipping. What
+# replaces it is anchored on the one thing that actually distinguishes "documents an
+# endpoint" from "smuggles data out via a parameter": the query parameter NAME itself
+# must look credential/secret-shaped (key/token/secret/password/…), not merely present.
+# The curl/wget alternative is dropped entirely — a tool description mentioning curl as
+# an implementation detail has no exfil-specific reading to anchor on, and B331 is a
+# SCORED check with the strictest FAIL bar in this project (unlike MCP-VET's
+# scored=False, where the same breadth is tolerated). Confirmed clean against both
+# examples above; still matches a real exfil-parameter shape
+# ("...collect?token=leak", "...x?api_key=stolen") — see
+# test_b331_c135_benign_webhook_url_not_flagged_as_exfil.
+_B331_EXFIL_PARAM_RE = re.compile(
+    r"https?://[^\s\"']{0,120}[?&](?:key|token|secret|password|passwd|pwd|api[_-]?key"
+    r"|credential|auth|session|cookie)[a-z0-9_-]{0,10}=",
+    re.I,
+)
+
+
+def _b331_signal(description: str) -> "tuple[str, str] | None":
+    """First content-security signal found in *description*, as ``(category, evidence)``.
+
+    Reuses existing SKILL_CONTENT_RING / C-038 poisoning detectors (design doc W2.2)
+    rather than inventing new regexes, with one narrow addition
+    (`_B331_DISREGARD_FORGET_RE`, see its own note) for the one verb gap no existing
+    detector covers on this surface. Checked in a fixed order so the reported category
+    is deterministic when a description carries more than one signal — a hidden
+    encoding channel (tag-block / data-URI / decodable base64) is checked FIRST,
+    mirroring TP1z's own rationale a few hundred lines above (`_vet_mcp_tool_poisoning`):
+    the presence of a concealment channel is itself a signal, independent of what it
+    decodes to, so it must not be shadowed by whatever plain-text category its decoded
+    payload also happens to match.
+    """
+    obf = obfuscation_signals(description)
+    if _C038_SIGNAL_TAG_BLOCK in obf:
+        return "tag-block", _C038_SIGNAL_TAG_BLOCK
+    if _C038_DATA_URI_RE.search(description):
+        return "encoded-payload", "data-URI"
+    hits = _decoded_payloads(description)
+    if hits:
+        return "encoded-payload", hits[0][:60]
+
+    norm = normalize_for_scan(description)
+    m = _b331_authority_hit(norm)
+    if m:
+        return "authority-override", m.group(0)
+    m = _B63_SECRECY_RE.search(norm)
+    if m:
+        return "secrecy-directive", m.group(0)
+    m = _B331_EXFIL_PARAM_RE.search(norm)
+    if m:
+        return "exfil-parameter", m.group(0)
+    return None
+
+
+def _b331_tool_verdict(
+    description: str, source: str, host_sanitized: bool
+) -> "tuple[str, str, str] | None":
+    """One tool description's contribution to B331: ``(status, category, detail)``, or
+    ``None`` when nothing is found. See the section banner above for the full decision
+    table this implements.
+    """
+    sig = _b331_signal(description)
+    truncation_uncertain = len(description) > _HOST_SANITIZE_TEXT_LIMIT
+
+    if sig is None:
+        if truncation_uncertain:
+            return (
+                UNKNOWN,
+                "truncation",
+                f"description is {len(description)} chars, over OpenClaw's own "
+                f"{_HOST_SANITIZE_TEXT_LIMIT}-char sanitizer truncation boundary — no "
+                "content-security signal was found, but a payload placed past that "
+                "boundary cannot be ruled out with confidence",
+            )
+        return None
+
+    category, evidence = sig
+
+    if host_sanitized:  # source == "trajectory": what the model actually received
+        return (
+            FAIL,
+            category,
+            f"{category} signal ({evidence!r}) is present in what OpenClaw actually "
+            "sent the model (a post-sanitization trajectory record) — proof this "
+            "reached the model, not a hypothetical",
+        )
+
+    if category == "authority-override":
+        scrubbed, host_truncated = _host_sanitize_simulated(description)
+        still_present = bool(_b331_authority_hit(normalize_for_scan(scrubbed)))
+        if still_present:
+            note = (
+                " (description also exceeds the host's own 1200-char sanitizer "
+                "truncation boundary; still visible in the part the host would keep)"
+                if host_truncated
+                else ""
+            )
+            return (
+                FAIL,
+                category,
+                f"{category} phrase ({evidence!r}) is not one of OpenClaw's two "
+                f"sanitized phrase families — reaches the model raw on every runtime "
+                f"path{note}",
+            )
+        if host_truncated:
+            return (
+                UNKNOWN,
+                "truncation",
+                f"{category} phrase ({evidence!r}) sits past OpenClaw's own 1200-char "
+                "sanitizer truncation boundary — cannot tell whether it would have "
+                "been redacted or was simply cut off, and it reaches the model whole "
+                "and raw on the two runtime paths that never truncate at all",
+            )
+        return (
+            WARN,
+            category,
+            f"{category} phrase ({evidence!r}) matches a pattern OpenClaw's own "
+            "embedded-harness metadata sanitizer neutralizes — but that sanitizer "
+            "runs on only one of three model-facing runtime paths, and which one is "
+            "active cannot be determined from this config, so this is not a clean "
+            "PASS either",
+        )
+
+    # secrecy-directive / exfil-parameter / tag-block / encoded-payload: never touched
+    # by the sanitizer's two literal patterns, on any path.
+    note = (
+        f" (description is {len(description)} chars, over the "
+        f"{_HOST_SANITIZE_TEXT_LIMIT}-char sanitizer truncation boundary)"
+        if truncation_uncertain
+        else ""
+    )
+    return (
+        FAIL,
+        category,
+        f"{category} signal ({evidence!r}) is not a pattern OpenClaw's metadata "
+        f"sanitizer ever touches — reaches the model raw on every runtime path{note}",
+    )
+
+
+def check_mcp_host_sanitizer_gap(ctx: Context) -> Finding:
+    """B331: MCP tool-description content-security signals surviving OpenClaw's own
+    host-side metadata sanitizer. See the section banner above `_HOST_SANITIZE_IGNORE_RE`
+    for the full grounding, path-dependence analysis, and decision table.
+    """
+    servers = _mcp_servers(ctx.config)
+    if not servers:
+        return _finding("B331", UNKNOWN, "No MCP servers configured.", "—")
+
+    fail_hits: list[str] = []
+    warn_hits: list[str] = []
+    unknown_hits: list[str] = []
+    surfaces_seen = 0
+
+    for sname, spec in sorted(servers.items()):
+        tools = spec.get("tools") if isinstance(spec, dict) else None
+        surface = _mcpsurface.from_tool_defs(sname, tools)
+        if surface is None:
+            continue
+        surfaces_seen += 1
+        for tool in surface.tools:
+            description = tool.description or ""
+            if not description:
+                continue
+            verdict = _b331_tool_verdict(description, surface.source, surface.host_sanitized)
+            if verdict is None:
+                continue
+            status, _category, detail = verdict
+            line = f"{sname}/{tool.name}: {detail}"
+            if status == FAIL:
+                fail_hits.append(line)
+            elif status == WARN:
+                warn_hits.append(line)
+            else:
+                unknown_hits.append(line)
+
+    if fail_hits:
+        ev = fail_hits[:5]
+        return _finding(
+            "B331",
+            FAIL,
+            "MCP tool description(s) carry content-security signal(s) OpenClaw's own "
+            "metadata sanitizer does not mitigate (" + "; ".join(ev) + ").",
+            "Review these servers' declared tool descriptions directly (they are "
+            "attacker-influenced input); do not rely on OpenClaw's host-side "
+            "sanitizer, which covers only two literal phrase families on one of three "
+            "runtime paths.",
+            evidence=ev,
+        )
+    if warn_hits:
+        ev = warn_hits[:5]
+        return _finding(
+            "B331",
+            WARN,
+            "MCP tool description(s) match a pattern OpenClaw's embedded-harness "
+            "metadata sanitizer neutralizes (" + "; ".join(ev) + "), but that "
+            "mitigation is thin and path-dependent.",
+            "Do not rely on OpenClaw's host-side sanitizer as a general defense — it "
+            "covers two literal phrase families on one of three model-facing runtime "
+            "paths (the embedded openclaw harness only; CLI-backend and Codex harness "
+            "paths never sanitize). Review these servers' declared tool descriptions "
+            "directly.",
+            evidence=ev,
+        )
+    if unknown_hits:
+        ev = unknown_hits[:5]
+        return _finding(
+            "B331",
+            UNKNOWN,
+            "Coverage of MCP tool description(s) is incomplete (" + "; ".join(ev) + ").",
+            "Obtain a full, untruncated tools/list dump for these servers to assess "
+            "content past OpenClaw's own sanitizer truncation boundary.",
+            evidence=ev,
+        )
+    if surfaces_seen == 0:
+        return _finding(
+            "B331",
+            UNKNOWN,
+            "No embedded MCP tool definitions (mcp.servers.<name>.tools as a rich "
+            "tools/list, not a bare name allowlist) were found in the config, so no "
+            "tool description text is available to assess.",
+            "Provide a raw tools/list dump for these servers (e.g. via an MCP "
+            "inspector export) to check for content-security signals surviving "
+            "OpenClaw's host sanitizer.",
+        )
+    return _finding(
+        "B331",
+        PASS,
+        f"{surfaces_seen} MCP server(s) with embedded tool definitions carry no "
+        "detected content-security signal in their declared tool descriptions.",
         "No action needed.",
     )
 

@@ -687,9 +687,14 @@ from ._vet import (
 
 from ._mcp import (
     _C038_COMMENT_RE,
+    _B331_DISREGARD_FORGET_RE,
+    _B331_EXFIL_PARAM_RE,
     _C038_DATA_URI_RE,
     _C038_HIDDEN_INSTR_RE,
     _C038_PARAM_INJECT_RE,
+    _HOST_SANITIZE_DISREGARD_RE,
+    _HOST_SANITIZE_IGNORE_RE,
+    _HOST_SANITIZE_TEXT_LIMIT,
     _INSTR_OVERRIDE_SRC,
     _LP_CAP_FAMILIES,
     _LP_SCOPE_READONLY_RE,
@@ -723,8 +728,12 @@ from ._mcp import (
     _VET_MCP_SCOPE_SEGMENT_SEP_RE,
     _VET_MCP_UNPINNED_PKG_RE,
     _VET_RANK_STATUS,
+    _b331_authority_hit,
+    _b331_signal,
+    _b331_tool_verdict,
     _b333_hinted_tool_names,
     _b333_surface_verdict,
+    _host_sanitize_simulated,
     _load_mcp_spec_file,
     _lp_detect_caps,
     _mcp_has_tool_restrictions,
@@ -742,6 +751,7 @@ from ._mcp import (
     check_mcp_bypass_highblast,
     check_mcp_external_endpoint,
     check_mcp_hardening,
+    check_mcp_host_sanitizer_gap,
     check_mcp_server_exfil_host_in_args,
     check_mcp_tool_inheritance,
     check_mcp_unenforced_annotations,
@@ -1192,6 +1202,7 @@ CHECKS = [
     check_mcp_external_endpoint,
     check_mcp_server_exfil_host_in_args,
     check_mcp_unenforced_annotations,  # B333 — declared MCP annotations OpenClaw never reads (F-143/W2.1)
+    check_mcp_host_sanitizer_gap,  # B331 — MCP tool-description injection past the host sanitizer (F-144/W2.2)
     check_proxy_header_forging,
     check_monitoring,
     check_autonomy,
