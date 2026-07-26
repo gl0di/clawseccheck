@@ -209,20 +209,33 @@ def check_browser_ssrf(ctx: Context) -> Finding:
 
 
 # B195 (E-060 item 2): flags matched by exact pre-'=' token, never substring -- e.g.
-# "--proxy-server-bypass-list" must not match "--proxy-server" (C-135 guidance). Matched
-# case-INsensitively: Chromium's base::CommandLine lowercases every switch name during
-# its own parsing (base::ToLowerASCII()), so "--DISABLE-WEB-SECURITY" is functionally
-# identical to "--disable-web-security" to real Chrome -- confirmed via a live C-135
-# adversarial pass (2026-07-25) that also found OpenClaw's own chromeArgName() helper
-# (chrome-DDq_K3xu.js:156-158) already lowercases before its internal proxy-arg checks,
-# corroborating the same behaviour from the OpenClaw side. Dict keys stay lowercase
-# canonical; the *reported* evidence still quotes the flag as the operator wrote it.
+# "--proxy-server-bypass-list" must not match "--proxy-server" (C-135 guidance).
+#
+# Matched case-INsensitively. C-309 (2026-07-26) corrected the reason recorded here: the
+# previous note claimed Chromium's base::CommandLine lowercases every switch name it
+# parses. That is NOT universally true -- the lowercasing in base::CommandLine lives
+# behind a Windows-only build guard (the `BUILDFLAG(IS_WIN)` path in AppendSwitchNative /
+# the switch-map insertion), so on POSIX, where OpenClaw's managed Chrome actually runs,
+# switch names are matched case-SENSITIVELY and "--DISABLE-WEB-SECURITY" is NOT
+# recognized by Chrome as "--disable-web-security". Case-insensitive matching is
+# nonetheless the right behaviour for a DETECTOR and is deliberately kept: this check
+# reports operator intent to disable a browser protection, and a scanner that only
+# recognizes the exact casing is trivially evaded by a shift key. The cost of being
+# generous here is bounded -- the worst case is reporting a flag that Chrome would have
+# ignored anyway, which is a strictly safer error than staying silent on one it honours.
+# Corroborated from the OpenClaw side independently of Chromium's own casing rule:
+# OpenClaw's chromeArgName() helper (chrome-DDq_K3xu.js:156-158) lowercases before its
+# internal proxy-arg checks, so mixed case genuinely does change OpenClaw's own
+# behaviour even where it would not change Chrome's.
+#
+# B-337: keys are the DASHLESS switch name, because the leading dashes are not part of
+# the name Chrome matches on -- see _chrome_switch_name() below.
 _EXTRA_ARGS_FAIL_FLAGS = {
-    "--disable-web-security": (
+    "disable-web-security": (
         "disables the browser's same-origin policy entirely -- any page can read "
         "any other origin's cookies/DOM/responses"
     ),
-    "--load-extension": (
+    "load-extension": (
         "loads an arbitrary Chrome extension at launch -- an extension has broader "
         "page/cookie/network access than the page content itself"
     ),
@@ -233,20 +246,81 @@ _EXTRA_ARGS_FAIL_FLAGS = {
 # "explicit-browser-proxy" and all three suppress OpenClaw's own defensive
 # --no-proxy-server injection. B195 originally covered only --proxy-server.
 _EXTRA_ARGS_WARN_FLAGS = {
-    "--proxy-server": (
+    "proxy-server": (
         "reroutes all browser traffic through the configured proxy -- confirm the "
         "target is trusted"
     ),
-    "--proxy-auto-detect": (
+    "proxy-auto-detect": (
         "enables Chrome's automatic proxy detection (WPAD) -- on an untrusted network "
         "WPAD can be spoofed to redirect browser traffic through an attacker proxy"
     ),
-    "--proxy-pac-url": (
+    "proxy-pac-url": (
         "points the browser at a proxy auto-config (PAC) script -- confirm the URL is "
         "trusted, since a malicious PAC script can redirect arbitrary traffic through "
         "an attacker-controlled proxy"
     ),
 }
+_REMOTE_DEBUG_ADDRESS_SWITCH = "remote-debugging-address"
+
+
+# B-337: a Chrome switch is spelled with ONE or TWO leading dashes, and Chrome honours
+# both identically. Chromium's base::CommandLine carries a kSwitchPrefixes table which on
+# POSIX is {"--", "-"}; GetSwitchPrefixLength() returns the length of the FIRST entry that
+# prefixes the argument, and the switch name is whatever follows it up to the '='. So
+# `-remote-allow-origins=*` reaches Chrome as exactly the same switch as
+# `--remote-allow-origins=*`, and B195's old `flag_lower == "--..."` comparison reported
+# the single-dash spelling of its own FAIL conditions as clean -- a false negative in a
+# HIGH check, and the spelling a careless copy-paste is most likely to produce.
+#
+# MEASURED, not inferred (2026-07-26, Google Chrome 150.0.7871.186, headless, local): a
+# cross-origin CDP WebSocket upgrade against the DevTools port returns 403 by default;
+# with `--remote-allow-origins=*` it returns 101, and with `-remote-allow-origins=*` --
+# one dash -- it ALSO returns 101. The single-dash spelling is honoured by real Chrome.
+#
+# The "first matching prefix" rule is why this must NOT be written as `lstrip("-")`:
+# `---remote-allow-origins=*` matches the "--" entry first, so its switch NAME is
+# `-remote-allow-origins`, which matches nothing Chrome knows. That was measured on the
+# same run: the triple-dash spelling returned 403, i.e. it changed nothing. Peeling every
+# dash would turn that inert string into a finding -- trading the false negative for a
+# false positive. Exactly one or two dashes, therefore, and nothing else.
+#
+# Grounded from the OpenClaw side too: OpenClaw's own chromeArgName()
+# (chrome-DDq_K3xu.js:156-158) is `arg.trim().split("=",1)[0]?.toLowerCase()` -- it takes
+# the pre-'=' token and lowercases it but does NOT normalize the dash prefix, so its
+# PROXY_ROUTING_CHROME_ARGS / PROXY_CONTROL_CHROME_ARGS sets (spelled with "--") do not
+# recognize a single-dash proxy arg either. That is an OpenClaw-side blind spot, not a
+# reason to copy it: OpenClaw then injects its own --no-proxy-server alongside the
+# operator's single-dash -proxy-server=..., and Chromium resolves --no-proxy-server ahead
+# of the other proxy switches, so the operator's proxy is silently not used. The config
+# does not do what they wrote -- precisely the "real but lower-certainty risk" the WARN
+# tier exists for.
+def _chrome_switch_name(arg: str, *, casefold: bool = True) -> str:
+    """Dashless switch name of a Chrome launch argument, or "" if not a switch.
+
+    "--Proxy-Server=http://x" and "-proxy-server=http://x" both yield "proxy-server";
+    "---disable-web-security", "chrome://flags" and a bare "--" yield "".
+
+    *casefold* (default True) lowercases the result, which is what a DETECTOR wants --
+    see the C-309 note above _EXTRA_ARGS_FAIL_FLAGS. Pass casefold=False when the caller
+    needs the name EXACTLY as Chrome will match it: on POSIX, Chromium's switch lookup is
+    case-SENSITIVE, so `--REMOTE-ALLOW-ORIGINS=*` is not the same switch as
+    `--remote-allow-origins=*` and does nothing. Measured on Google Chrome 150.0.7871.186
+    (cross-origin CDP WebSocket upgrade; 403 = inert, 101 = honoured), 2026-07-26:
+        --remote-allow-origins=*   -> 101      --REMOTE-ALLOW-ORIGINS=* -> 403
+        --remote-allow-origins= *  -> 101      --Remote-Allow-Origins=* -> 403
+    (the space row also shows Chrome trims the value, which is why callers strip it).
+    A rung that hard-caps a grade must key on the exact-case name; a rung that merely
+    reports intent may use the casefolded one.
+    """
+    stripped = arg.strip()
+    if stripped.startswith("--"):
+        body = stripped[2:]
+    elif stripped.startswith("-"):
+        body = stripped[1:]
+    else:
+        return ""
+    name = body.partition("=")[0]
+    return name.lower() if casefold else name
 
 
 # B-331: OpenClaw ALWAYS launches its managed Chrome with
@@ -261,18 +335,67 @@ _EXTRA_ARGS_WARN_FLAGS = {
 #     previous WARN also mis-attributed causation: it told the operator their flag "opens
 #     an unauthenticated ... debug port on loopback" when OpenClaw's own always-present
 #     --remote-debugging-port opened it, so removing the flag could not have closed it.
-#   * A NON-loopback operator flag is a real, well-grounded FAIL for exactly the same
-#     reason: the port is always there, so moving its bind off-host genuinely exposes an
-#     unauthenticated CDP endpoint. That half is kept.
-def _remote_debug_host_is_loopback(value: str) -> bool:
-    """True when *value* (a --remote-debugging-address argument value) is loopback or
-    "localhost" -- accounting for an IPv4 host:port suffix, a bracketed IPv6 [::1]:port
-    form, and a bare full-form IPv6 loopback (0:0:0:0:0:0:0:1) -- all of which Chrome's
-    own address parser accepts and a C-135 adversarial pass (2026-07-25) found the
-    original bare `{"127.0.0.1","localhost","::1"}` set false-FAILed on."""
+#   * A NON-loopback operator flag was, until B-337, treated as a FAIL on the reasoning
+#     that the port is always there so moving its bind off-host exposes it. That FAIL has
+#     been RETRACTED -- see the measurement note on _remote_debug_bind_class below.
+#
+# B-337 / C-135 (2026-07-26): --remote-debugging-address NO LONGER EXISTS IN CHROMIUM.
+# The FAIL above was a false positive -- it docked a grade for a switch modern Chrome
+# silently ignores. Chromium removed the switch in M113 as part of the same hardening
+# that made the DevTools endpoint origin-checked; the debug port now always binds
+# loopback and can only be moved by an external forwarder, never by a Chrome flag.
+# Measured directly rather than taken on faith (2026-07-26, Google Chrome
+# 150.0.7871.186, headless, local, `ss -lnt` on the listening socket):
+#     --remote-debugging-port=P                                -> 127.0.0.1:P
+#     --remote-debugging-port=P --remote-debugging-address=0.0.0.0        -> 127.0.0.1:P
+#     --remote-debugging-port=P --remote-debugging-address=192.168.31.233 -> 127.0.0.1:P
+# i.e. the bind does not move, for the "all interfaces" value OR for a real interface
+# address. Corroborated structurally: the string "remote-debugging-address" does not
+# appear anywhere in the Chrome 150 binary's switch table, while its neighbours
+# "remote-debugging-pipe", "remote-debugging-port" and "remote-allow-origins" all do.
+#
+# The flag is therefore reported at WARN, not FAIL, and the loopback spellings stay
+# silent as before. WARN rather than silence because the value still carries real
+# information -- it records an operator INTENT to expose the control port off-host, and
+# on a pre-M113 Chrome binary (which an operator can pin via browser.executablePath) it
+# would genuinely bind off-host. What it must not do is assert an off-host bind that
+# provably does not happen on any currently-supported Chrome.
+def _remote_debug_bind_class(value: str) -> str:
+    """Classify a --remote-debugging-address value: "loopback", "offhost" or "unresolved".
+
+    "loopback" -- the value names the bind Chrome uses anyway, so the flag is a no-op
+    twice over (once because it restates the default, once because M113 removed the
+    switch). Silent, costs nothing. Recognized in every spelling Chrome's own address
+    parser accepted and a C-135 pass (2026-07-25) found the original bare
+    `{"127.0.0.1","localhost","::1"}` set false-FAILed on: an IPv4 host:port suffix, a
+    bracketed IPv6 `[::1]:port`, a bare full-form IPv6 loopback (`0:0:0:0:0:0:0:1`) --
+    plus, added by B-337, the IPv4-MAPPED IPv6 form `::ffff:127.0.0.1`. Python's
+    `ipaddress` reports `is_loopback` False for the mapped form (its `_ip` is not 1), yet
+    it denotes 127.0.0.1, so it has to be unmapped before the test or a loopback-bound
+    config draws a spurious finding.
+
+    "offhost" -- the value denotes a real address that is not loopback (0.0.0.0, ::,
+    10.0.0.5, ...). Reported at WARN as an intent signal; NOT a FAIL, because the switch
+    is inert on modern Chrome (see the measurement above).
+
+    "unresolved" -- not an address literal in any form recognized here (a DNS hostname,
+    "*", a typo). Also WARN: the effective bind cannot be determined from the config, and
+    "cannot determine" inside an otherwise-applicable check is this project's WARN case.
+
+    The numeric fallback mirrors _cdp_url_classify() in this same module, for the same
+    reason and with the same one-way discipline: `socket.inet_aton` implements the legacy
+    BSD numeric-host parsing behind the shorthand/octal/hex/bare-decimal IPv4 forms
+    ("127.1", "0177.0.0.1", "127.000.000.001", "2130706433", "0x7f000001") which Python's
+    strict `ipaddress` rejects outright. Without it, `127.1` -- an ordinary way to write
+    loopback -- classified as non-loopback. It only ever ADDS a loopback verdict, never
+    removes one, so it cannot mask a genuinely off-host value.
+    """
     host = value.strip()
-    if host.lower() == "localhost":
-        return True
+    if not host:
+        return "unresolved"
+    # rstrip(".") mirrors OpenClaw's parseHostForAddressChecks (see _cdp_url_classify).
+    if host.lower().rstrip(".") == "localhost":
+        return "loopback"
     if host.startswith("["):
         end = host.find("]")
         if end != -1:
@@ -282,9 +405,23 @@ def _remote_debug_host_is_loopback(value: str) -> bool:
         if port.isdigit():
             host = candidate
     try:
-        return ipaddress.ip_address(host).is_loopback
+        ip = ipaddress.ip_address(host)
     except ValueError:
-        return False
+        pass
+    else:
+        mapped = getattr(ip, "ipv4_mapped", None)
+        return "loopback" if (mapped or ip).is_loopback else "offhost"
+    # Trailing dots are dropped on the retry, for the same reason and with the same
+    # one-way discipline as _cdp_url_classify() -- see its C-135 note. "127.0.0.1." is
+    # loopback to a browser; a hostname written FQDN-style is still rejected by
+    # inet_aton and still falls through unchanged.
+    for candidate in (host, host.rstrip(".")):
+        try:
+            canonical = socket.inet_ntoa(socket.inet_aton(candidate))
+        except (OSError, UnicodeError):
+            continue
+        return "loopback" if canonical in LOOPBACK else "offhost"
+    return "unresolved"
 
 
 def check_browser_extra_args(ctx: Context) -> Finding:
@@ -294,21 +431,25 @@ def check_browser_extra_args(ctx: Context) -> Finding:
     validation -- unlike B38's own ssrfPolicy/noSandbox keys, nothing here is
     interpreted by OpenClaw first.
 
-    FAIL    — a flag in _EXTRA_ARGS_FAIL_FLAGS is present, OR
-              --remote-debugging-address is bound to a non-loopback address (0.0.0.0,
-              ::, or any host _remote_debug_host_is_loopback() doesn't recognize) --
-              an unauthenticated CDP debug port reachable off-host.
-    WARN    — a flag in _EXTRA_ARGS_WARN_FLAGS is present.
+    FAIL    — a flag in _EXTRA_ARGS_FAIL_FLAGS is present.
+    WARN    — a flag in _EXTRA_ARGS_WARN_FLAGS is present, OR
+              --remote-debugging-address carries a value that is not loopback (B-337:
+              an intent signal, downgraded from FAIL because Chromium removed the switch
+              in M113 and modern Chrome ignores it -- see _remote_debug_bind_class).
     PASS    — extraArgs is absent/empty, or contains no matched flag. A loopback-bound
               --remote-debugging-address lands here: it restates the bind OpenClaw's own
               launch already uses, so it is a no-op and costs no score (B-331 -- see the
-              grounding note above _remote_debug_host_is_loopback).
+              grounding note above _remote_debug_bind_class).
     UNKNOWN — no browser config (not applicable).
 
-    Flag matching is case-insensitive (Chromium's own base::CommandLine lowercases
-    every switch name it parses); --remote-debugging-address host classification
-    normalizes an IPv4 host:port suffix and bracketed/bare IPv6 loopback forms before
-    checking .is_loopback (grounded by a C-135 pass, 2026-07-25).
+    Flag matching is case-insensitive (a deliberate detector choice -- see the C-309 note
+    above _EXTRA_ARGS_FAIL_FLAGS for why, and why the old "Chromium lowercases every
+    switch" justification was wrong) and accepts BOTH the one-dash and two-dash spelling
+    Chrome itself honours (B-337, see _chrome_switch_name).
+
+    NOT COVERED HERE, on purpose: --remote-allow-origins. It is an extraArgs flag, but
+    what it changes is who may reach the CDP control port, so it is graded by B330
+    alongside the rest of that surface rather than split across two checks.
     """
     browser = ctx.config.get("browser")
     if not isinstance(browser, dict):
@@ -335,29 +476,35 @@ def check_browser_extra_args(ctx: Context) -> Finding:
             continue
         arg = raw.strip()
         flag, _, value = arg.partition("=")
-        flag_lower = flag.lower()
-
-        if flag_lower in _EXTRA_ARGS_FAIL_FLAGS:
-            fail_ev.append(f"browser.extraArgs has {flag!r} — {_EXTRA_ARGS_FAIL_FLAGS[flag_lower]}")
+        switch = _chrome_switch_name(arg)
+        if not switch:
             continue
-        if flag_lower == "--remote-debugging-address":
-            # No address after the '=' (or a bare switch): nothing was rebound, so this
-            # cannot be evidence that the debug port moved off loopback. Not a FAIL.
+
+        if switch in _EXTRA_ARGS_FAIL_FLAGS:
+            fail_ev.append(f"browser.extraArgs has {flag!r} — {_EXTRA_ARGS_FAIL_FLAGS[switch]}")
+            continue
+        if switch == _REMOTE_DEBUG_ADDRESS_SWITCH:
+            # No address after the '=' (or a bare switch): nothing was named, so there is
+            # nothing to report.
             if not value.strip():
                 continue
             # Loopback-bound: a no-op that restates OpenClaw's own default bind. Costs
             # nothing and produces no evidence line (B-331).
-            if _remote_debug_host_is_loopback(value):
+            if _remote_debug_bind_class(value) == "loopback":
                 continue
-            fail_ev.append(
-                f"browser.extraArgs has {arg!r} — moves the Chrome DevTools Protocol "
-                "debug port that OpenClaw itself opens on every managed browser launch "
-                "(--remote-debugging-port) off loopback to a non-loopback address, "
-                "making it reachable off-host with no authentication"
+            warn_ev.append(
+                f"browser.extraArgs has {arg!r} — this names a non-loopback bind for the "
+                "Chrome DevTools Protocol debug port that OpenClaw itself opens on every "
+                "managed browser launch (--remote-debugging-port). Chromium REMOVED the "
+                "--remote-debugging-address switch in M113, so current Chrome ignores it "
+                "and the port stays on loopback — this is reported as a statement of "
+                "intent, and as a real exposure only if this agent is pinned to a "
+                "pre-M113 Chrome via browser.executablePath, not as a confirmed off-host "
+                "bind"
             )
             continue
-        if flag_lower in _EXTRA_ARGS_WARN_FLAGS:
-            warn_ev.append(f"browser.extraArgs has {flag!r} — {_EXTRA_ARGS_WARN_FLAGS[flag_lower]}")
+        if switch in _EXTRA_ARGS_WARN_FLAGS:
+            warn_ev.append(f"browser.extraArgs has {flag!r} — {_EXTRA_ARGS_WARN_FLAGS[switch]}")
 
     if fail_ev:
         return _finding(
@@ -365,11 +512,10 @@ def check_browser_extra_args(ctx: Context) -> Finding:
             FAIL,
             f"browser.extraArgs contains {len(fail_ev)} dangerous Chrome launch "
             "flag(s) — see evidence.",
-            "Remove the dangerous flag(s) from browser.extraArgs. For "
-            "--remote-debugging-address, dropping the flag entirely is the safe "
-            "choice: OpenClaw already supplies --remote-debugging-port on every "
-            "managed browser launch and Chrome binds that port to loopback by "
-            "default, so no address flag is needed to keep it local.",
+            "Remove the dangerous flag(s) from browser.extraArgs — neither "
+            "--disable-web-security nor --load-extension has a safe setting; if a "
+            "workflow needs one, give it a dedicated throwaway browser profile rather "
+            "than the profile the agent drives.",
             evidence=(fail_ev + warn_ev)[:6],
         )
     if warn_ev:
@@ -378,8 +524,12 @@ def check_browser_extra_args(ctx: Context) -> Finding:
             WARN,
             f"browser.extraArgs contains {len(warn_ev)} flag(s) with a real but "
             "lower-certainty risk — see evidence.",
-            "Review the flagged entries; confirm any proxy target or PAC URL is "
-            "trusted, and prefer removing the flag if the proxy is not required.",
+            "Review the flagged entries: confirm any proxy target or PAC URL is "
+            "trusted, and prefer removing the flag if the proxy is not required. Drop "
+            "any --remote-debugging-address entirely — Chromium removed that switch in "
+            "M113, so it does nothing on current Chrome, and OpenClaw already supplies "
+            "--remote-debugging-port on every managed launch with Chrome binding it to "
+            "loopback by default.",
             evidence=warn_ev[:6],
         )
     return _finding(
@@ -388,8 +538,7 @@ def check_browser_extra_args(ctx: Context) -> Finding:
         f"browser.extraArgs is configured with {len(extra_args)} flag(s), none "
         "matching a known-dangerous pattern.",
         "Keep browser.extraArgs free of --disable-web-security, --load-extension, "
-        "a non-loopback --remote-debugging-address, and unreviewed --proxy-server "
-        "entries.",
+        "and unreviewed --proxy-server entries.",
     )
 
 
@@ -2633,6 +2782,131 @@ def check_browser_executable_path(ctx: Context) -> Finding:
 
 
 # ---------- B322: browser.profiles.*.{cdpUrl,userDataDir,driver:"existing-session"} ----------
+# WHATWG "special schemes" (url.spec.whatwg.org/#special-scheme) that reach the
+# "special authority ignore slashes" state this helper models. "file" is deliberately
+# ABSENT even though the spec lists it as special: file URLs go through their own
+# parsing states (file / file slash / file host), so folding them in here would
+# mishandle a scheme the helper claims to support. OpenClaw restricts cdpUrl to
+# http/https/ws/wss anyway (normalizeExistingSessionCdpUrl, config-DpWXcVmn.js:332-337).
+_WHATWG_SPECIAL_SCHEMES = ("http", "https", "ws", "wss", "ftp")
+
+# The characters the REAL pipeline removes from each end of a cdpUrl, which is the union
+# of two steps OpenClaw actually performs: `value.trim()` (normalizeOptionalString,
+# string-coerce-DW4mBlAt.js:9) and then `new URL(value)`, whose first step strips leading
+# and trailing C0 controls or space.
+#   * C0 controls U+0000-U+001F and space -- stripped by the URL parser.
+#   * ECMAScript trim()'s WhiteSpace + LineTerminator -- NBSP, BOM, the Zs block,
+#     LS/PS -- stripped by trim().
+# Python's argument-less str.strip() is NEITHER set: it misses U+0000-U+0008,
+# U+000E-U+001F and U+FEFF (so a BOM- or NUL-prefixed cdpUrl parsed as unparseable here
+# while the product happily resolved it -- a lying PASS), and it over-strips U+0085 NEL,
+# which is in neither the C0 range nor trim()'s set. U+0085 is therefore deliberately
+# ABSENT below. Measured against the live pipeline (trim -> new URL -> isLoopbackHost).
+_URL_TRIM_CHARS = (
+    "".join(chr(c) for c in range(0x00, 0x20))          # C0 controls
+    + "   "                              # space, NBSP, OGHAM SPACE MARK
+    + "".join(chr(c) for c in range(0x2000, 0x200b))    # EN QUAD .. HAIR SPACE
+    + "    　﻿"            # LS, PS, NNBSP, MMSP, IDSP, BOM
+)
+
+
+def _whatwg_url(url) -> str:
+    """Rewrite a URL the way a browser's WHATWG parser reads it, before urlparse sees it.
+
+    C-135 false negative (found 2026-07-26, fixed here). WHATWG treats a backslash as
+    equivalent to a forward slash inside a special-scheme URL; Python's urllib does not.
+    The two therefore disagree about where the authority ENDS, and an attacker can aim
+    them at different hosts with one string:
+
+        http://10.0.0.9:9222\\@127.0.0.1
+
+    urlparse keeps the whole thing as the authority and splits userinfo on the LAST '@',
+    yielding host "127.0.0.1" -- loopback, apparently safe, and the value this module
+    would have both graded and DISPLAYED. A browser terminates the authority at the
+    backslash, yielding host "10.0.0.9" port 9222, with "@127.0.0.1" demoted to the path.
+    Verified against Node's `new URL()` (host=10.0.0.9, port=9222, path=/@127.0.0.1)
+    versus Python's urlparse (host=127.0.0.1, port=None) on 2026-07-26.
+
+    That divergence is exactly load-bearing here, because OpenClaw parses cdpUrl with
+    `new URL()` itself -- normalizeExistingSessionCdpUrl (config-DpWXcVmn.js:326-342)
+    stores `cdpHost = parsed.hostname` and `cdpIsLoopback = isLoopbackHost(cdpHost)`.
+    So the product dials 10.0.0.9 while this check called it loopback: a config that
+    should FAIL reported clean, with the report naming the decoy loopback host.
+
+    Normalizing here rather than at each call site keeps _cdp_url_classify() and
+    _cdp_url_display() on ONE parse of ONE string -- a verdict and the host it names can
+    never again come from different readings of the same value.
+
+    THE SLASH RUN IS THE WHOLE POINT, NOT JUST THE BACKSLASH (C-135, second pass). A
+    first version of this helper only rewrote backslashes to slashes, which produced the
+    right answer for the exactly-two-backslash decoy above and the wrong answer for every
+    other run length -- because WHATWG does not merely alias `\\` to `/`, it has a
+    "special authority ignore slashes" state that consumes ANY run of `/` and `\\`
+    (zero or more, in any mix) between the scheme and the authority. So `http:10.0.0.9`,
+    `http:/10.0.0.9`, `http:///10.0.0.9` and `http:/\\/\\10.0.0.9` ALL resolve to host
+    10.0.0.9 in a browser. Python's urlparse instead finds no authority at all in those,
+    reports hostname None, and this module classified them "unparseable" -- which
+    _offhost_cdp_endpoints() treats as "nothing to report", i.e. B330 returned a PASS
+    whose own text asserts "every CDP endpoint it names is loopback". A lying PASS on
+    attacker-controllable input, the same failure mode as the historical B2/B70
+    `0.0.0.0/0` bug. Reachable: the schema puts no `.url()` refinement on cdpUrl
+    (zod-schema-O9ml_nmo.js:1096) and both normalizeExistingSessionCdpUrl
+    (config-DpWXcVmn.js:323) and parseBrowserHttpUrl (browser-config-DCrASvM0.js:15)
+    call bare `new URL(value)`.
+
+    Hence: strip the whole leading slash/backslash run, then re-attach exactly `://`.
+    This stays one-directional in the same sense as the numeric fallbacks below -- it
+    cannot invent a host that is not in the string, it can only move a value from
+    "unparseable" onto the host a browser's own parser resolves it to.
+
+    TAB/CR/LF ARE REMOVED FIRST, AND THE ORDER MATTERS (C-135, third pass). WHATWG's
+    very first step is "remove all ASCII tab or newline from input", before any state
+    machine runs -- so `http:<TAB>//10.0.0.9:9222` is host 10.0.0.9 to a browser and to
+    OpenClaw's isLoopbackHost. Python's urlsplit strips those characters too (bpo-43882),
+    which is why the pre-B-337 code got this right by accident. But rebuilding the string
+    as `scheme + "://" + rest` re-emits the tab immediately after the `://`, where it
+    lands INSIDE the authority and collapses the netloc to empty -- reintroducing the
+    very lying-PASS this helper exists to close. Measured: `http:<TAB>//10.0.0.9:9222`
+    classified "remote" before B-337, "unparseable" with the rewrite and no tab removal,
+    and "remote" again once the removal is done first. So the removal is not decoration;
+    it is what makes the rebuild safe.
+
+    USERINFO IS REMOVED BEFORE urlsplit SEES THE STRING (C-135, fifth pass). Python's
+    urlsplit validates `[`/`]` against the WHOLE netloc and raises ValueError if they are
+    unbalanced there -- but WHATWG's authority state finds the LAST `@` first and only
+    ever validates brackets in what follows it. So `http://[x]@10.0.0.9:9222` is host
+    10.0.0.9 to a browser and an exception here, which _cdp_url_classify turns into
+    "unparseable" -- the same lying PASS, with the decoy simply moved left of the `@`
+    instead of right of it. Splitting userinfo off at the last `@` of the authority
+    before handing the string over closes that, and as a side effect stops
+    _cdp_url_display() from ever echoing embedded credentials (OpenClaw's own
+    redactCdpUrl strips them for the same reason).
+
+    Non-special schemes are left alone apart from the character removals (WHATWG only
+    gives backslash its authority meaning for special schemes), as is any value with no
+    scheme, which classify/display already handle as unparseable.
+    """
+    # WHATWG step 1: strip ASCII tab (0x09), LF (0x0A) and CR (0x0D) everywhere; then
+    # remove from each end exactly what trim() + the URL parser remove (_URL_TRIM_CHARS).
+    text = str(url).translate({9: None, 10: None, 13: None}).strip(_URL_TRIM_CHARS)
+    scheme, sep, rest = text.partition(":")
+    if not sep or scheme.lower() not in _WHATWG_SPECIAL_SCHEMES:
+        return text
+    rest = rest.lstrip("/\\").replace("\\", "/")
+    # The authority ends at the first "/", "?" or "#"; everything up to the LAST "@"
+    # inside it is userinfo and is discarded, exactly as WHATWG's authority state does.
+    cut = len(rest)
+    for delim in "/?#":
+        found = rest.find(delim)
+        if found != -1 and found < cut:
+            cut = found
+    authority, tail = rest[:cut], rest[cut:]
+    at = authority.rfind("@")
+    if at != -1:
+        authority = authority[at + 1:]
+    return scheme + "://" + authority + tail
+
+
 def _cdp_url_classify(url) -> str:
     """Classify a browser.profiles.<name>.cdpUrl value: "loopback", "remote", or
     "unparseable". A non-string/empty value classifies as "loopback" -- OpenClaw's own
@@ -2648,13 +2922,36 @@ def _cdp_url_classify(url) -> str:
     if not isinstance(url, str) or not url.strip():
         return "loopback"
     try:
-        parsed = urlparse(url.strip())
+        parsed = urlparse(_whatwg_url(url))
         host = (parsed.hostname or "").lower()
     except Exception:
         return "unparseable"
     if not host:
         return "unparseable"
     if host in LOOPBACK:
+        return "loopback"
+    # C-135: "localhost." is genuinely loopback to the product, while a bare
+    # set-membership test calls it remote -- a scored false FAIL on B322. Measured
+    # against the dist directly (isLoopbackHost imported live from net-BOKtNTf8.js):
+    #     isLoopbackHost("localhost.")  -> true      isLoopbackHost("127.0.0.1.")  -> false
+    #     new URL("http://localhost.:9222").hostname  -> "localhost."
+    #     new URL("http://127.0.0.1.:9222").hostname -> "127.0.0.1"
+    # So the two dotted cases are normalized by DIFFERENT layers, and only the hostname
+    # one needs handling here: OpenClaw's parseHostForAddressChecks strips trailing dots
+    # for its literal "localhost" comparison, whereas for an IP it never sees the dotted
+    # form at all because WHATWG's IPv4 parser has already dropped the empty trailing
+    # label -- at most one of them, which is why the numeric retry below only strips
+    # one trailing dot too, not an unbounded run.
+    #
+    # C-135 (2026-07-26, round 7): the full-rstrip above was measured against a single
+    # trailing dot and over-generalized to the whole LOOPBACK set, which also contains
+    # numeric forms ("127.0.0.1", "::1") that do NOT take this path -- WHATWG's IPv4
+    # parser removes AT MOST ONE trailing empty label, so "127.0.0.1.." stays remote to
+    # the product even though a full rstrip lands it back in LOOPBACK. Restricted to the
+    # literal "localhost" comparison, matching OpenClaw's own parseHostForAddressChecks
+    # (net-BOKtNTf8.js:255-258), which strips every trailing dot but ONLY for that one
+    # string equality check -- never for an IP-shaped host.
+    if host.rstrip(".") == "localhost":
         return "loopback"
     # C-135 regression (found in adversarial review, 2026-07-25): OpenClaw's own
     # cdpUrl normalization (normalizeExistingSessionCdpUrl, config-DpWXcVmn.js:326-342)
@@ -2681,11 +2978,28 @@ def _cdp_url_classify(url) -> str:
     # (a plain hostname, or a canonical dotted-quad public IP) is never reclassified
     # away from "remote" by this fallback; it only ever *adds* a loopback verdict,
     # never removes one.
-    try:
-        canonical = socket.inet_ntoa(socket.inet_aton(host))
-    except (OSError, UnicodeError):
-        pass
-    else:
+    #
+    # C-135 (2026-07-26), PRE-EXISTING false positive found by an independent adversarial
+    # differential against Node's `new URL()`: trailing dots. WHATWG's IPv4 parser drops
+    # the empty trailing label, so a browser resolves `http://127.0.0.1.:9222` to hostname
+    # "127.0.0.1" -- genuinely loopback -- while both `ipaddress` and `inet_aton` reject
+    # the dotted string, so this classified it "remote" and B322 emitted a SCORED FAIL on
+    # a loopback-only config. Note the normalization happens in the URL parser, not in
+    # OpenClaw: isLoopbackHost("127.0.0.1.") is itself false (measured), it simply never
+    # receives that form. It stays one-directional: a real hostname written FQDN-style
+    # ("example.com.") is still rejected by inet_aton and still classifies "remote", so
+    # no genuinely remote host can be reclassified as loopback by this.
+    #
+    # C-135 (round 7): only ONE trailing dot is dropped, not `rstrip`'s unbounded run --
+    # WHATWG's IPv4 parser removes at most one empty trailing label, so
+    # "127.0.0.1.." stays "remote" to the product (measured against the dist's own
+    # isLoopbackHost) even though a full rstrip would land it back in LOOPBACK.
+    one_dot_stripped = host[:-1] if host.endswith(".") else host
+    for candidate in (host, one_dot_stripped):
+        try:
+            canonical = socket.inet_ntoa(socket.inet_aton(candidate))
+        except (OSError, UnicodeError):
+            continue
         if canonical in LOOPBACK:
             return "loopback"
     return "remote"
@@ -2695,9 +3009,13 @@ def _cdp_url_display(url) -> str:
     """scheme://host[:port] only -- never the full URL. OpenClaw's own redactCdpUrl
     (browser-config-DCrASvM0.js:56-68) strips embedded username/password before any
     diagnostic display, confirming OpenClaw itself treats cdpUrl as potentially
-    credential-bearing; this check goes further and drops the path/query too."""
+    credential-bearing; this check goes further and drops the path/query too.
+
+    Parses the same _whatwg_url()-normalized string _cdp_url_classify() grades, so the
+    host shown can never disagree with the host judged (see that helper's C-135 note --
+    the un-normalized form displayed an attacker's decoy loopback host)."""
     try:
-        parsed = urlparse(str(url).strip())
+        parsed = urlparse(_whatwg_url(url))
         host = parsed.hostname or "?"
         port = f":{parsed.port}" if parsed.port else ""
         scheme = parsed.scheme or "?"
@@ -2881,4 +3199,310 @@ def check_browser_existing_session_profile(ctx: Context) -> Finding:
         # FAIL branch above overrides the other way (scored=True) for the one narrow,
         # deterministic escalation that should carry real weight.
         scored=False,
+    )
+
+
+# ---------- B330 (C-298): the unauthenticated CDP control port OpenClaw always opens ----------
+# Grounded in the installed dist, in one line: buildOpenClawChromeLaunchArgs
+# (chrome-DDq_K3xu.js:1662-1689) puts `--remote-debugging-port=${profile.cdpPort}` FIRST in
+# every managed Chrome launch, unconditionally -- the Chrome DevTools Protocol is how
+# OpenClaw drives a browser at all -- and CDP itself carries no authentication step: a
+# client that can open the endpoint can drive the browser. OpenClaw's own endpoint for that
+# port is cdpUrlForPort() = `http://127.0.0.1:${cdpPort}` (chrome-DDq_K3xu.js:1659), and NO
+# dist file anywhere passes --remote-debugging-address, so Chrome's default loopback bind
+# applies.
+#
+# THE DECISION THIS CHECK RECORDS (C-298). The unauthenticated port itself is NOT graded.
+# It is a property of the vendor's design that an operator using the browser tool cannot
+# switch off, and B-331 established that this audit grades the effective state a config
+# CHOOSES, never a condition OpenClaw created -- charging score for the port would punish
+# an operator for something they cannot fix and could not act on. So the fact is stated in
+# every branch's message, and the ordinary loopback-confined case is a real PASS.
+#
+# WHAT IS GRADED, THEN. Only what the operator chose, on two axes:
+#   * WHERE the control channel points (WARN) -- an off-host cdpUrl.
+#   * WHO may reach it from inside the browser (FAIL) -- --remote-allow-origins.
+#
+# WHY --remote-allow-origins IS THE ONE FAIL RUNG, MEASURED NOT ASSUMED. Chromium added an
+# Origin check to the DevTools WebSocket endpoint precisely so that a web page could not
+# reach a loopback CDP port through the browser the user is already running.
+# --remote-allow-origins turns that check off. Measured on Google Chrome 150.0.7871.186
+# (headless, local, raw WebSocket upgrade carrying `Origin: http://evil.example` against
+# the endpoint from /json/version), 2026-07-26:
+#     (no flag)                      -> HTTP/1.1 403 Forbidden
+#     --remote-allow-origins=*       -> HTTP/1.1 101 WebSocket Protocol Handshake
+#     -remote-allow-origins=*        -> HTTP/1.1 101 WebSocket Protocol Handshake
+#     ---remote-allow-origins=*      -> HTTP/1.1 403 Forbidden
+# The wildcard converts a refused cross-origin request into a live CDP session, so ANY
+# page the agent's browser has open can then drive that browser -- read every origin's
+# cookies and DOM, navigate it, execute JS in it. Loopback confinement does not help: the
+# request originates inside the browser, which is already on loopback. That is an
+# operator-written flag with a measured effect, so it is graded, and graded firmly.
+# (The 1-vs-3-dash rows above are also what pin _chrome_switch_name()'s prefix rule.)
+#
+# A NAMED origin list is WARN, not FAIL: it still relaxes a protection Chromium added on
+# purpose, but only to origins the operator wrote down, which is a bounded and possibly
+# deliberate trade -- not the "any page at all" hole the wildcard opens.
+#
+# WHICH RUNG THIS IS RELATIVE TO ITS NEIGHBOURS. The corroborated off-host cdpUrl rung is
+# already owned, twice over, by checks whose evidence is sharper:
+#   * B322 FAILs (scored) a driver:"existing-session" profile whose cdpUrl is non-loopback.
+#   * B196 FAILs an attach-only profile against a non-loopback cdpUrl while its evaluate
+#     sink is on.
+# A third hard cap on those same configs would be triple-counting one fact, so this check
+# stays at WARN there. What neither neighbour covers is the plain shape: the TOP-LEVEL
+# browser.cdpUrl, and a MANAGED (driver "openclaw"/absent) profile's cdpUrl. Both are
+# stated as out-of-scope in the neighbours' own docstrings, and both genuinely move the
+# unauthenticated control channel off this host -- resolveBrowserConfig stores cdpHost from
+# browser.cdpUrl's hostname (config-DpWXcVmn.js:488) and every managed profile without its
+# own cdpUrl inherits it (config-DpWXcVmn.js:516,576). That is the gap this check fills.
+# The --remote-allow-origins axis is not covered by ANY neighbour, in any spelling.
+#
+# NO DOUBLE-COUNT WITH B38 OR B195. B38 grades browser.ssrfPolicy / noSandbox -- which
+# pages the browser may REACH. B195 grades extraArgs flags that weaken the browser itself.
+# This grades who may reach the CONTROL channel. B195 deliberately does not carry
+# --remote-allow-origins (its docstring says so), so that flag is scored exactly once.
+#
+# Two CDP endpoints are deliberately excluded from the off-host evidence:
+#   * driver:"existing-session" -- B322 owns it, including the FAIL.
+#   * driver:"extension" -- resolveProfile (config-DpWXcVmn.js:523-536) hardcodes
+#     cdpHost "127.0.0.1"/cdpIsLoopback true for this driver and, when an extension relay
+#     token exists, embeds it in the cdpUrl as HTTP credentials
+#     (`http://${EXTENSION_RELAY_CDP_USER}:${encodeURIComponent(token)}@127.0.0.1:${port}`).
+#     It is the one CDP endpoint OpenClaw does authenticate, and the operator's own cdpUrl
+#     is rejected for it by the schema, so nothing they write can move it. Verified by
+#     direct dist read, not inherited from the draft that proposed the exclusion.
+_CLEARTEXT_CDP_SCHEMES = ("http", "ws")
+_CDP_ALLOW_ORIGINS_SWITCH = "remote-allow-origins"
+
+
+def _cdp_url_is_cleartext(url) -> bool:
+    """True when a CDP URL's scheme carries the control channel without TLS."""
+    try:
+        return (urlparse(_whatwg_url(url)).scheme or "").lower() in _CLEARTEXT_CDP_SCHEMES
+    except Exception:
+        return False
+
+
+def _cdp_allow_origins_findings(browser: dict) -> "tuple[list[str], list[str]]":
+    """(fail_ev, warn_ev) for --remote-allow-origins in browser.extraArgs.
+
+    Wildcard -> FAIL evidence; a named origin list -> WARN evidence; absent, or present
+    with no value at all (which allows nothing) -> neither. Accepts the one-dash spelling
+    Chrome honours, via _chrome_switch_name (B-337).
+
+    CASE IS LOAD-BEARING FOR THE FAIL RUNG ONLY (C-135, 2026-07-26). An independent
+    adversarial pass found that this check FAILed on `--REMOTE-ALLOW-ORIGINS=*`, and the
+    measurement says Chrome does not: on POSIX, Chromium's switch lookup is
+    case-sensitive, so the uppercase spelling returns 403 (origin check still enforced)
+    where the lowercase one returns 101. Hard-capping a grade for a switch that provably
+    does nothing is precisely the M113 mistake B-337 removed from B195, so the wildcard
+    FAIL now requires the exact-case name. A case-variant is still REPORTED at WARN: it
+    is operator intent, and it WOULD take effect on Windows, where Chromium lowercases
+    switch names (the same BUILDFLAG(IS_WIN) path C-309 corrected the comment about).
+    """
+    fail_ev: list[str] = []
+    warn_ev: list[str] = []
+    extra_args = browser.get("extraArgs")
+    if not isinstance(extra_args, list):
+        return fail_ev, warn_ev
+    for raw in extra_args:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        arg = raw.strip()
+        exact = _chrome_switch_name(arg, casefold=False)
+        if exact.lower() != _CDP_ALLOW_ORIGINS_SWITCH:
+            continue
+        # Exact-case == the spelling Chrome actually honours on POSIX.
+        honoured = exact == _CDP_ALLOW_ORIGINS_SWITCH
+        _, _, value = arg.partition("=")
+        origins = [o.strip() for o in value.split(",") if o.strip()]
+        if not origins:
+            continue
+        if "*" in origins and not honoured:
+            warn_ev.append(
+                f"browser.extraArgs has {arg!r} — this asks for the wildcard that would "
+                "switch off the DevTools Origin check, but Chromium's switch lookup is "
+                "case-sensitive on Linux/macOS, so as spelled it does nothing there "
+                "(measured: the uppercase form leaves a cross-origin CDP handshake at "
+                "403). It is reported rather than graded because on Windows, where "
+                "Chromium lowercases switch names, this spelling WOULD take effect"
+            )
+        elif "*" in origins:
+            fail_ev.append(
+                f"browser.extraArgs has {arg!r} — the wildcard switches OFF the Origin "
+                "check Chromium added to the DevTools endpoint, so any page the agent's "
+                "browser has open can open a CDP WebSocket to it and drive the browser: "
+                "read every origin's cookies and DOM, navigate it, and execute "
+                "JavaScript in it. Binding to loopback does not contain this — the "
+                "request comes from inside the browser, which is already on loopback"
+            )
+        else:
+            warn_ev.append(
+                f"browser.extraArgs has {arg!r} — this relaxes the Origin check on the "
+                f"unauthenticated CDP endpoint for {len(origins)} named origin(s); any "
+                "page served from one of them can drive the agent's browser through the "
+                "DevTools Protocol"
+            )
+    return fail_ev, warn_ev
+
+
+def _offhost_cdp_endpoints(browser: dict) -> list[str]:
+    """Evidence for every operator-written CDP endpoint that is not loopback-confined.
+
+    Empty list == the ordinary config, where the unauthenticated port stays on this host.
+    Reads only keys the operator actually wrote, never OpenClaw's synthesized default
+    profiles (same discipline as _browser_unowned_session_evidence).
+    """
+    ev: list[str] = []
+    top_cdp_url = browser.get("cdpUrl")
+    if _cdp_url_classify(top_cdp_url) == "remote":
+        ev.append(
+            f"browser.cdpUrl={_cdp_url_display(top_cdp_url)} is not loopback — this is "
+            "the cdpHost every managed profile without its own cdpUrl inherits, so "
+            "OpenClaw drives the browser over the network"
+            + (
+                ", and over a cleartext scheme, so the whole control channel "
+                "(page content, injected JS, cookies read back) crosses it in the clear"
+                if _cdp_url_is_cleartext(top_cdp_url)
+                else ""
+            )
+        )
+    profiles = browser.get("profiles")
+    profiles = profiles if isinstance(profiles, dict) else {}
+    for name, spec in sorted(profiles.items(), key=lambda kv: str(kv[0])):
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("driver") in _UNOWNED_SESSION_DRIVERS:
+            continue  # B322 owns existing-session; extension is loopback + token-authed
+        cdp_url = spec.get("cdpUrl")
+        if _cdp_url_classify(cdp_url) != "remote":
+            continue
+        ev.append(
+            f"browser.profiles.{name}.cdpUrl={_cdp_url_display(cdp_url)} is not "
+            "loopback — this managed profile's unauthenticated CDP control channel "
+            "leaves this host"
+            + (" over a cleartext scheme" if _cdp_url_is_cleartext(cdp_url) else "")
+        )
+    return ev
+
+
+def check_browser_cdp_control_port(ctx: Context) -> Finding:
+    """B330 — the Chrome DevTools Protocol control port is unauthenticated (C-298).
+
+    FAIL    — browser.extraArgs carries --remote-allow-origins with a `*` wildcard,
+              which measurably converts a refused cross-origin CDP handshake into a live
+              one (403 -> 101, measured on Chrome 150 — see the note above
+              _cdp_allow_origins_findings). Any page the browser has open can then drive
+              it. This is the one rung the operator both chose and can undo.
+    WARN    — the operator's own config points the CDP control channel at a non-loopback
+              endpoint (top-level browser.cdpUrl, or a managed profile's cdpUrl), and/or
+              --remote-allow-origins names specific origins. The always-unauthenticated
+              channel is then reachable beyond a local process.
+    PASS    — every CDP endpoint the config names is loopback-confined and the Origin
+              check is intact (the ordinary case), or browser.enabled is false so no
+              managed launch — and therefore no CDP port — happens at all.
+    UNKNOWN — no openclaw.json, an unparseable one, or no browser config (the browser
+              tool is not in use, so nothing launches a Chrome to debug).
+
+    The unauthenticated port itself is never graded — it is OpenClaw's design and the
+    operator has no lever on it (B-331). See the decision note above
+    _cdp_allow_origins_findings for why the off-host cdpUrl rung stops at WARN rather
+    than triple-counting B322 and B196.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B330",
+            UNKNOWN,
+            "No openclaw.json found — the browser's CDP control port cannot be assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B330", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    browser = ctx.config.get("browser")
+    if not isinstance(browser, dict):
+        return _finding(
+            "B330",
+            UNKNOWN,
+            "No browser config — the browser tool is not in use, so no managed Chrome "
+            "and no CDP control port.",
+            "—",
+        )
+
+    if browser.get("enabled") is False:
+        return _finding(
+            "B330",
+            PASS,
+            "browser.enabled=false — OpenClaw refuses browser control entirely, so it "
+            "never launches a managed Chrome and never opens the unauthenticated Chrome "
+            "DevTools Protocol port that every managed launch would otherwise open.",
+            "Keep browser.enabled=false while no workflow needs the browser tool.",
+            pass_confidence="verified",
+        )
+
+    origin_fail, origin_warn = _cdp_allow_origins_findings(browser)
+    offhost = _offhost_cdp_endpoints(browser)
+
+    if origin_fail:
+        return _finding(
+            "B330",
+            FAIL,
+            "The browser tool is in use, so OpenClaw opens a Chrome DevTools Protocol "
+            "control port on every managed launch (--remote-debugging-port, supplied "
+            "unconditionally), and CDP has no authentication step — the only thing "
+            "standing between a web page and that port is the Origin check Chromium "
+            "added to the DevTools endpoint. This config turns that check off with a "
+            "wildcard --remote-allow-origins, so any page the agent's browser has open "
+            "can open a CDP session and drive the browser: read every origin's cookies "
+            "and DOM, navigate it, execute JavaScript in it. One injected page is then "
+            "enough to take over every session in that browser.",
+            "Remove --remote-allow-origins from browser.extraArgs. OpenClaw's own CDP "
+            "client does not need it — it connects from Node, which sends no Origin "
+            "header, so the check it disables was never in OpenClaw's way. If some "
+            "other tool genuinely needs cross-origin CDP access, name that tool's exact "
+            "origin instead of the wildcard, and prefer giving it its own browser "
+            "profile rather than the one the agent drives.",
+            evidence=(origin_fail + origin_warn + offhost)[:6],
+        )
+
+    if origin_warn or offhost:
+        return _finding(
+            "B330",
+            WARN,
+            "The browser tool is in use, so OpenClaw opens a Chrome DevTools Protocol "
+            "control port on every managed launch (--remote-debugging-port, supplied "
+            "unconditionally) — and CDP has no authentication step, so whoever reaches "
+            "that port drives the agent's browser: reads its DOM and cookies, navigates "
+            "it, and executes JavaScript in it. This config does not keep that channel "
+            "confined to a local process (see evidence). The port itself is OpenClaw's "
+            "design and is not held against you; how far it reaches is your "
+            "configuration.",
+            "Point the CDP endpoint back at loopback (127.0.0.1 / localhost), or reach a "
+            "genuinely remote browser through an SSH/VPN tunnel and give OpenClaw the "
+            "local tunnel end — that restores both the authentication boundary and the "
+            "encryption the raw endpoint has neither of. Drop any --remote-allow-origins "
+            "unless a named tool needs it. If the browser tool is not needed at all, "
+            "browser.enabled=false removes the port entirely.",
+            evidence=(origin_warn + offhost)[:6],
+        )
+
+    return _finding(
+        "B330",
+        PASS,
+        "The browser tool is in use, so OpenClaw opens a Chrome DevTools Protocol "
+        "control port on every managed launch (--remote-debugging-port, supplied "
+        "unconditionally) and CDP carries no authentication — but this config keeps that "
+        "channel on this host: every CDP endpoint it names is loopback, and the Origin "
+        "check that stops a web page reaching it through the browser is intact. Worth "
+        "knowing rather than fixing: the port cannot be closed while the browser tool is "
+        "in use, so it is stated here and costs no score. What it means in practice is "
+        "that any process running on this machine can drive the agent's browser through "
+        "it, so the port is only as trustworthy as the code you let run locally.",
+        "Nothing to change in openclaw.json. Treat it as a host-level boundary: do not "
+        "run untrusted code on this machine as this user, keep the agent on a dedicated "
+        "managed profile rather than one holding live logins (B322/B196), and set "
+        "browser.enabled=false whenever the browser tool is not needed.",
+        pass_confidence="no_signal",
     )

@@ -147,6 +147,7 @@ check_audit_trail_signals
 check_autonomy
 check_bootstrap_injection
 check_bootstrap_write_protection
+check_browser_cdp_control_port
 check_browser_ssrf
 check_bundled_root_override
 check_cachetrace_redaction

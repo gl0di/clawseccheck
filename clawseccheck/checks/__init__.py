@@ -171,8 +171,14 @@ from ._egress import (
     check_browser_evaluate_enabled,
     check_browser_executable_path,
     check_browser_existing_session_profile,
+    check_browser_cdp_control_port,
     _cdp_url_classify,
     _cdp_url_display,
+    _cdp_allow_origins_findings,
+    _offhost_cdp_endpoints,
+    _chrome_switch_name,
+    _remote_debug_bind_class,
+    _whatwg_url,
     check_outbound_proxy,
     check_provider_baseurl,
     check_cachetrace_redaction,
@@ -1286,6 +1292,7 @@ CHECKS = [
     check_browser_evaluate_enabled,  # B196 — browser.evaluateEnabled arbitrary-JS sink (E-060 item 3)
     check_browser_executable_path,  # B321 — browser.executablePath / profiles.*.executablePath / mcpCommand (E-060 item 4)
     check_browser_existing_session_profile,  # B322 — browser.profiles.*.userDataDir / cdpUrl / driver:"existing-session" (E-060 item 5)
+    check_browser_cdp_control_port,  # B330 — unauthenticated CDP control port: off-host cdpUrl / --remote-allow-origins (C-298)
     check_marketplace_feed_provenance,  # B325 — marketplaces.feeds non-canonical registry (E-060 item 8)
     check_exec_safe_bin_trusted_dirs,  # B328 — tools.exec.safeBinTrustedDirs writable-dir promotion (E-060 item 11)
     # B191 (F-134, DISK-1) is DELIBERATELY NOT REGISTERED HERE. It is cataloged in

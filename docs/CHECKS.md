@@ -391,7 +391,7 @@ Advisory checks are recorded for coverage but are not scored.
 - OWASP: none
 - What it checks: browser.extraArgs dangerous Chrome launch flags
 - Remediation:
-  - config: `browser.extraArgs` - remove --disable-web-security / --load-extension / a non-loopback --remote-debugging-address / unreviewed --proxy-server
+  - config: `browser.extraArgs` - remove --disable-web-security / --load-extension / unreviewed --proxy-server
 
 ### B196 - browser.evaluateEnabled arbitrary-JS sink
 
@@ -404,6 +404,18 @@ Advisory checks are recorded for coverage but are not scored.
 - What it checks: browser.evaluateEnabled arbitrary-JS sink
 - Remediation:
   - config: `browser.evaluateEnabled` = `false` - disable the browser's arbitrary-JS evaluate sink unless a workflow genuinely requires it
+
+### B330 - browser CDP control port — unauthenticated, and how far it reaches
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Browser / SSRF
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: browser CDP control port — unauthenticated, and how far it reaches
+- Remediation:
+  - config: `browser.extraArgs` - remove --remote-allow-origins; keep browser.cdpUrl and every profile cdpUrl on loopback
 
 ### B321 - browser.executablePath / profiles.*.executablePath / mcpCommand
 

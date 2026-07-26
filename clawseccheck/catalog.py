@@ -368,6 +368,25 @@ CATALOG: list[CheckMeta] = [
         "Browser / SSRF",
         surface="sessions",
     ),
+    # B330 (C-298): the Chrome DevTools Protocol control port OpenClaw opens on every
+    # managed browser launch carries no authentication. The port itself is NOT graded --
+    # it is vendor design an operator cannot switch off, so the ordinary loopback-confined
+    # case is a genuine PASS that states the fact instead of docking a grade for it
+    # (B-331's rule: grade the state a config CHOOSES, never one OpenClaw created). What
+    # IS graded is the operator's own two levers: an off-host cdpUrl (WARN -- the
+    # corroborated cdpUrl rung stays with B322/B196 rather than being triple-counted), and
+    # a wildcard --remote-allow-origins (FAIL), which was MEASURED on Chrome 150 to turn a
+    # refused cross-origin CDP handshake into a live one. HIGH because that FAIL means any
+    # page the browser has open can drive it.
+    CheckMeta(
+        "B330",
+        "browser CDP control port — unauthenticated, and how far it reaches",
+        HIGH,
+        "hardening",
+        "Browser / SSRF",
+        confidence="HIGH",
+        surface="sessions",
+    ),
     # E-060 parallel-workflow batch (2026-07-25): B321/B322/B323/B325/B327/B328 grounded,
     # implemented, and independently C-135-adversarially reviewed against the installed
     # OpenClaw dist. B329 (cron.webhook/cron.webhookToken) was deferred, NOT shipped --
@@ -2529,6 +2548,7 @@ AST_MAP = {
     "B38": ("AST06",),  # headless browser without OS sandbox = Weak Isolation (cf. B4)
     "B195": ("AST06",),  # extraArgs disables same-origin/loads extensions = Weak Isolation
     "B196": ("AST06",),  # arbitrary-JS eval sink reachable from page content = Weak Isolation
+    "B330": ("AST06",),  # unauthenticated CDP control channel reachable off-host/cross-origin
     "B73": ("AST06",),  # mDNS full advertise on non-loopback exposes the agent (cf. B70)
     "B74": ("AST05",),  # forged role/provenance = untrusted external instructions (cf. B64)
     "B76": ("AST03",),  # MCP tool-inheritance bypass = over-privileged reach (cf. B75)
@@ -2807,8 +2827,18 @@ REMEDIATION = {
             {
                 "path": "browser.extraArgs",
                 "set": None,
-                "note": "remove --disable-web-security / --load-extension / a "
-                "non-loopback --remote-debugging-address / unreviewed --proxy-server",
+                "note": "remove --disable-web-security / --load-extension / "
+                "unreviewed --proxy-server",
+            }
+        ]
+    },
+    "B330": {
+        "config": [
+            {
+                "path": "browser.extraArgs",
+                "set": None,
+                "note": "remove --remote-allow-origins; keep browser.cdpUrl and every "
+                "profile cdpUrl on loopback",
             }
         ]
     },
