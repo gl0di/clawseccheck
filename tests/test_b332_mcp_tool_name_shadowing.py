@@ -5,12 +5,16 @@ registers a tool whose name exactly matches, is a homoglyph of, or is a near-mis
 tool a DIFFERENT, already-configured server exposes — the model routes a tool call by
 name alone, so it cannot reliably tell the two servers' same-named tools apart.
 
-FAIL    — exact collision on a rare/specific name, or a homoglyph substitution
+FAIL    — exact ASCII collision on a rare/specific name (servers not detected as
+          clones of each other), or a homoglyph/fullwidth/zero-width substitution
           (unconditional on genericness/length), between two DIFFERENT servers.
-WARN    — an edit-distance-1 near-miss between two DIFFERENT servers, on a long,
-          specific (non-generic) name.
-UNKNOWN — fewer than two MCP servers configured, or fewer than two servers have any
-          tool names available to compare.
+WARN    — an edit-distance-1 near-miss on a long, specific name; OR a non-ASCII exact
+          match (the English-only generic-name allowlist can't judge genericness in an
+          arbitrary script); OR an exact match between two servers whose FULL
+          tool-name sets look like the SAME server deployed twice.
+UNKNOWN — fewer than two MCP servers configured, fewer than two servers have any BARE
+          tool names available to compare, or the comparison hit its size cap with no
+          FAIL/WARN inside the scanned portion.
 PASS    — two or more servers' tool names were compared and none collide.
 
 Deliberately names-only: every check helper here reads only ToolDef.name, never
@@ -19,10 +23,15 @@ only pre-use tool-surface dump OpenClaw's own CLI emits) works identically to a
 config-embedded manifest (completeness="full") — see the "explicit probe-json path"
 tests below.
 
+This file also pins the fixes from a SECOND, independent C-135 pass (a separate
+reviewer on commit a32ae53 of the first cut) — H1-H6 below, mirroring the labels used
+in check_mcp_tool_name_shadowing's own in-source C-135 note.
+
 Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from clawseccheck import mcpsurface as ms
@@ -33,6 +42,7 @@ from clawseccheck.checks import (
     _b332_is_generic,
     check_mcp_tool_name_shadowing,
 )
+from clawseccheck.checks import _mcp as _mcp_mod
 from clawseccheck.collector import Context, collect
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -90,12 +100,32 @@ def test_b332_unknown_no_tool_names_available():
         )
     )
     assert f.status == UNKNOWN
-    assert "no tool names" in f.detail.lower() or "fewer than two" in f.detail.lower()
+    assert "no" in f.detail.lower() and "tool" in f.detail.lower()
 
 
 def test_b332_unknown_helper_single_surface():
     f = _b332_finding_from_surfaces([_surface("alpha", ["search"])])
     assert f.status == UNKNOWN
+
+
+def test_b332_unknown_probe_surface_with_empty_tool_part_not_counted_as_pass():
+    """H5 (independent C-135 review): a probe entry whose tool part is EMPTY after
+    namespace-stripping (e.g. a bare "mcp__beta__" name with nothing after the second
+    "__") must not silently count toward "compared across 2 servers" -- only 1 server
+    (alpha) actually contributes a usable bare name, so this is UNKNOWN, not PASS."""
+    data = {
+        "servers": {"alpha": {}, "beta": {}},
+        "tools": ["mcp__alpha__search", "mcp__beta__"],
+    }
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(data, fh)
+        path = fh.name
+    surfaces = ms.from_probe_json(path)
+    f = _b332_finding_from_surfaces(surfaces)
+    assert f.status == UNKNOWN
+    assert f.status != PASS
 
 
 # --------------------------------------------------------------------------- PASS (clean)
@@ -173,6 +203,32 @@ def test_b332_fail_homoglyph_even_on_a_generic_name():
     assert f.status == FAIL
 
 
+def test_b332_fail_fullwidth_homoglyph_on_a_generic_name():
+    """H3 (independent C-135 review): a fullwidth 's' (U+FF53) swapped into "search"
+    must FAIL too, mirroring the pinned Cyrillic-on-generic-name test above -- an
+    earlier draft only checked the curated Cyrillic/Greek table and silently PASSED
+    this."""
+    fullwidth_name = "ｓearch"  # U+FF53 FULLWIDTH LATIN SMALL LETTER S + ascii rest
+    assert fullwidth_name != "search"
+    f = _b332_finding_from_surfaces(
+        [_surface("alpha", ["search"]), _surface("beta", [fullwidth_name])]
+    )
+    assert f.status == FAIL
+
+
+def test_b332_fail_zero_width_homoglyph_on_a_generic_name():
+    """H3 (independent C-135 review): a zero-width space (U+200B) injected into
+    "search" must FAIL too -- two visually-identical names differing only by an
+    invisible character is exactly the shadowing shape this check exists to catch,
+    and an earlier draft silently PASSED it (same root cause as the fullwidth case)."""
+    zero_width_name = "sea​rch"
+    assert zero_width_name != "search"
+    f = _b332_finding_from_surfaces(
+        [_surface("alpha", ["search"]), _surface("beta", [zero_width_name])]
+    )
+    assert f.status == FAIL
+
+
 # --------------------------------------------------------------------------- FAIL (exact, rare name)
 def test_b332_fail_exact_collision_on_distinctive_name():
     f = check_mcp_tool_name_shadowing(collect(FIXTURES / "bad_b332_mcp_exact_collision"))
@@ -241,6 +297,133 @@ def test_b332_warn_via_ctx():
     assert f.status == WARN
 
 
+# --------------------------------------------------------------------------- WARN (H1: cloned server)
+def test_b332_warn_not_fail_two_instances_of_the_same_server():
+    """H1 (independent C-135 review): a VERY common benign pattern -- the SAME MCP
+    server deployed twice under different names/scope (e.g. fs-a/fs-b scoped to two
+    filesystem roots, or db-prod/db-staging pointed at two tiers of one Postgres MCP
+    server). Sharing most of a real, non-generic tool-name set must NOT FAIL -- that
+    is a category error (server identity), not a coverage gap. Downgraded to WARN
+    (a deliberate, documented, test-pinned trade -- CLAUDE.md §2.5), never silenced.
+    """
+    shared_names = [
+        "rotate_kubeconfig_secret",
+        "provision_node_pool",
+        "drain_node",
+        "cordon_node",
+        "taint_node",
+    ]
+    f = _b332_finding_from_surfaces(
+        [_surface("fs-a", shared_names), _surface("fs-b", shared_names)]
+    )
+    assert f.status != FAIL
+    assert f.status == WARN
+    assert "deployed twice" in f.detail.lower() or "same server" in f.detail.lower()
+
+
+def test_b332_clone_detection_does_not_suppress_a_genuine_single_tool_collision():
+    """The clone-pair guard (_B332_CLONE_MIN_NAMES) must not swallow the genuine
+    single-tool-collision attack shape -- a server exposing only ONE tool that happens
+    to match another server's one tool is not "an identical whole surface", it's a
+    real collision (this is exactly the bad_b332_mcp_exact_collision fixture's shape,
+    re-pinned directly against the helper)."""
+    f = _b332_finding_from_surfaces(
+        [
+            _surface("trusted-ops-mcp", ["rotate_kubeconfig_secret"]),
+            _surface("shadow-mcp", ["rotate_kubeconfig_secret"]),
+        ]
+    )
+    assert f.status == FAIL
+
+
+# --------------------------------------------------------------------------- WARN (H2: non-English generic)
+def test_b332_warn_not_fail_non_ascii_generic_name_convergence():
+    """H2 (independent C-135 review, universality/CLAUDE.md §2.6): the curated
+    generic-name allowlist is English-only by construction and cannot be translated
+    into every language without hardcoding one lexicon after another. Two RU servers
+    both exposing "поиск" ("search") is the SAME benign convergence the allowlist
+    exists to protect, in a different script -- must NOT FAIL. Downgraded to WARN
+    (reduced confidence, since this check cannot judge genericness in an arbitrary
+    script), never silently trusted as PASS."""
+    f = _b332_finding_from_surfaces(
+        [_surface("ru-alpha", ["поиск"]), _surface("ru-beta", ["поиск"])]
+    )
+    assert f.status != FAIL
+    assert f.status == WARN
+
+
+def test_b332_warn_not_fail_non_ascii_generic_name_convergence_zh():
+    f = _b332_finding_from_surfaces(
+        [_surface("zh-alpha", ["搜索文件"]), _surface("zh-beta", ["搜索文件"])]
+    )
+    assert f.status != FAIL
+
+
+# --------------------------------------------------------------------------- H4: truncation disclosure
+def test_b332_warn_discloses_truncation_when_a_hit_survives_the_cap(monkeypatch):
+    """H4 (independent C-135 review): when the pairwise (homoglyph/near-miss) scan
+    hits its size cap but a real hit still survives INSIDE the scanned portion, the
+    resulting verdict's detail must disclose that the scan was capped -- an earlier
+    draft's truncation-disclosure branch sat AFTER the FAIL/WARN branches and was
+    unreachable whenever either had already fired."""
+    monkeypatch.setattr(_mcp_mod, "_B332_MAX_TOTAL_NAMES", 2)
+    surfaces = [
+        _surface("aaa", ["provision_cluster"]),
+        _surface("bbb", ["provision_clusters"]),  # edit distance 1 from aaa's name
+        _surface("ccc", ["unrelated_specific_tool_name"]),  # pushed past the cap
+    ]
+    f = _b332_finding_from_surfaces(surfaces)
+    assert f.status == WARN
+    assert "cap" in f.detail.lower()
+
+
+def test_b332_exact_leg_is_never_truncated_by_the_pairwise_cap(monkeypatch):
+    """H4: the exact-collision leg is an O(n) hash pass and must stay uncapped even
+    when the O(n^2) pairwise cap is tiny -- a real exact collision must still FAIL."""
+    monkeypatch.setattr(_mcp_mod, "_B332_MAX_TOTAL_NAMES", 1)
+    surfaces = [
+        _surface("aaa", ["alpha_only_tool"]),
+        _surface("bbb", ["beta_only_tool"]),
+        _surface("ccc", ["rotate_kubeconfig_secret"]),
+        _surface("ddd", ["rotate_kubeconfig_secret"]),
+    ]
+    f = _b332_finding_from_surfaces(surfaces)
+    assert f.status == FAIL
+    assert any("rotate_kubeconfig_secret" in e for e in f.evidence)
+
+
+# --------------------------------------------------------------------------- H6: manifest bare names
+def test_b332_bare_tool_name_manifest_source_never_stripped():
+    """H6 (independent C-135 review): a MANIFEST tool name is already bare, never
+    OpenClaw-namespaced, so the strip must be SKIPPED for source == "manifest" even
+    when the literal name happens to look like "<server>__something"."""
+    assert (
+        _b332_bare_tool_name("alpha__deploy_production", "alpha", "manifest")
+        == "alpha__deploy_production"
+    )
+
+
+def test_b332_bare_tool_name_probe_and_trajectory_sources_stripped():
+    assert _b332_bare_tool_name("mcp__alpha__search", "alpha", "probe-names") == "search"
+    assert _b332_bare_tool_name("mcp__alpha__search", "alpha", "trajectory") == "search"
+    assert _b332_bare_tool_name("alpha__search", "alpha", "probe-names") == "search"
+
+
+def test_b332_manifest_literal_double_underscore_name_does_not_false_collide():
+    """H6 integration: server "alpha" declares a tool literally named
+    "alpha__deploy_production" (manifest source, already bare) and an UNRELATED server
+    "beta" declares a genuinely different tool "deploy_production". An earlier draft's
+    unconditional strip collapsed alpha's name down to "deploy_production" too,
+    creating a false exact collision that never existed on the wire."""
+    f = _b332_finding_from_surfaces(
+        [
+            _surface("alpha", ["alpha__deploy_production"]),
+            _surface("beta", ["deploy_production"]),
+        ]
+    )
+    assert f.status != FAIL
+
+
 # --------------------------------------------------------------------------- names-only / probe-json
 def test_b332_names_only_probe_json_exact_collision(tmp_path):
     """Explicit coverage of the check's PRIMARY use case: an `openclaw mcp probe --json`
@@ -248,8 +431,6 @@ def test_b332_names_only_probe_json_exact_collision(tmp_path):
     real cross-server exact collision, because the OpenClaw-added
     "mcp__<server>__<tool>" namespacing is stripped back to the bare tool name before
     comparison."""
-    import json
-
     probe = tmp_path / "probe.json"
     probe.write_text(
         json.dumps(
@@ -272,8 +453,6 @@ def test_b332_names_only_probe_json_exact_collision(tmp_path):
 
 def test_b332_names_only_probe_json_generic_overlap_clean(tmp_path):
     """Same names-only path, but the shared name is generic -- must not FAIL."""
-    import json
-
     probe = tmp_path / "probe.json"
     probe.write_text(
         json.dumps(
@@ -289,9 +468,9 @@ def test_b332_names_only_probe_json_generic_overlap_clean(tmp_path):
 
 
 def test_b332_bare_tool_name_strips_openclaw_namespace():
-    assert _b332_bare_tool_name("mcp__alpha__search", "alpha") == "search"
-    assert _b332_bare_tool_name("alpha__search", "alpha") == "search"
-    assert _b332_bare_tool_name("search", "alpha") == "search"  # already bare (manifest source)
+    assert _b332_bare_tool_name("mcp__alpha__search", "alpha", "probe-names") == "search"
+    assert _b332_bare_tool_name("alpha__search", "alpha", "probe-names") == "search"
+    assert _b332_bare_tool_name("search", "alpha", "manifest") == "search"  # already bare
 
 
 # --------------------------------------------------------------------------- allowlist unit coverage

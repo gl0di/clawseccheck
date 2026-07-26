@@ -36,6 +36,8 @@ from ..scanbudget import (
     cpu_exceeded,
 )
 from ..textnorm import (
+    _has_suspicious_zero_width,
+    _nfkc_ascii_fold_changed,
     confusable_in_ascii_context,
     normalize_for_scan,
     obfuscation_signals,
@@ -2150,6 +2152,17 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
 # exhaustive, and not meant to be: it only needs to cover the common convergent names
 # real MCP servers actually ship (filesystem/search/http-fetch style servers), so an
 # exact match on one of these never FAILs by itself.
+#
+# ENGLISH-ONLY BY CONSTRUCTION -- and that is a universality problem for the EXACT
+# leg on its own (CLAUDE.md §2.6, no-hardcoding-a-single-shape): two RU servers both
+# exposing `поиск` ("search") or two ZH servers both exposing `搜索文件` ("search
+# files") are the SAME benign convergence this allowlist exists to protect, in a
+# different script, and this allowlist can never cover every language without
+# hardcoding one language lexicon after another. The fix is NOT a bigger allowlist:
+# _b332_collisions below routes a non-ASCII exact match to WARN rather than FAIL
+# regardless of allowlist membership -- a language-neutral fallback (§2.6: found and
+# fixed by an independent C-135 pass, H2 below) that never needs to know what any
+# given non-Latin word means.
 _B332_GENERIC_TOOL_NAMES = frozenset(
     {
         "search", "read", "write", "list", "get", "set", "fetch", "query", "execute",
@@ -2178,34 +2191,115 @@ _B332_MIN_WARN_LEN = 8
 # Bound on the O(n^2) cross-server homoglyph/near-miss pairwise comparison (Bounded
 # doctrine, design doc §6) — independent of mcpsurface's own per-server/per-tool caps,
 # which bound a single server's contribution, not the TOTAL distinct-name set this
-# check compares across every configured server. Exceeding it does not fail the scan;
-# it truncates the pairwise legs and is disclosed (never a silent confident PASS,
-# B-092), while the O(n) exact-collision leg (a plain hash-by-name pass) still covers
-# every name seen.
+# check compares across every configured server. Applies ONLY to the two O(n^2) legs
+# (homoglyph/near-miss) — the exact-collision leg is a plain hash-by-name pass, O(n),
+# and stays UNCAPPED so it genuinely covers every name seen (H4, independent C-135
+# review: an earlier draft capped the exact leg here too while its own comment
+# claimed otherwise -- fixed by moving the cap to only the pairwise loop below).
 _B332_MAX_TOTAL_NAMES = 300
+
+# H1 (independent C-135 review): two servers whose FULL bare tool-name sets are
+# identical or near-identical are almost certainly the SAME server deployed TWICE
+# under a different name/scope -- an `fs-a`/`fs-b` pair scoped to two different
+# filesystem roots, or `db-prod`/`db-staging` pointed at two tiers of the SAME
+# Postgres MCP server, are both common, entirely benign real-world patterns. Sharing
+# 8-10 non-generic tool names is then a category error to treat as N independent
+# exact collisions, not a coverage gap -- no allowlist widening fixes it, because the
+# names genuinely ARE specific, just duplicated across the same server's two
+# instances. _B332_CLONE_JACCARD is the similarity threshold (Jaccard index of the
+# two full name SETS) at/above which a pair is treated as one server-deployed-twice;
+# _B332_CLONE_MIN_NAMES guards against a trivial 1-2-tool overlap being "identical"
+# by coincidence (see _b332_clone_server_pairs). This is a deliberate, documented,
+# test-pinned trade — CLAUDE.md §2.5 shape — that intentionally downgrades (to WARN,
+# never fully suppresses) an attacker who clones a trusted server's ENTIRE tool
+# surface under a second name; it never touches the homoglyph leg, which stays
+# unconditional.
+_B332_CLONE_JACCARD = 0.8
+_B332_CLONE_MIN_NAMES = 4
 
 
 def _b332_is_generic(name: str) -> bool:
     return name.strip().lower() in _B332_GENERIC_TOOL_NAMES
 
 
-def _b332_bare_tool_name(tool_name: str, server: str) -> str:
+# H3 (independent C-135 review): the SAME zero-width/invisible character class
+# textnorm.obfuscation_signals's own (function-local, not itself importable)
+# _ZERO_WIDTH_RE checks — U+200B-200D (zero-width space/ZWNJ/ZWJ), U+FEFF (BOM),
+# U+00AD (soft hyphen), U+2060 (word joiner). Mirrored here as a module-level
+# constant rather than redefined with different characters, so this check's
+# zero-width signal matches the project's one existing definition exactly.
+_B332_ZERO_WIDTH_RE = re.compile("[​-‍﻿­⁠]")
+
+
+def _b332_homoglyph_signal(name: str) -> bool:
+    """True when *name* carries ANY of three INDEPENDENT reasons it may only look
+    identical (or near-identical) to a plain-ASCII name without actually being one.
+
+    H3 (independent C-135 review): an earlier draft used ONLY
+    confusable_in_ascii_context (the curated Cyrillic/Greek lookalike table), which
+    silently PASSED both a fullwidth substitution ("read_file" vs the fullwidth
+    "ｒead_file", U+FF52) and a zero-width insertion ("read_file" vs
+    "read​_file") on a GENERIC name -- because the generic-name allowlist
+    suppressed both as ordinary exact/near-miss matches, the same way it correctly
+    suppresses a genuine "search"/"search" convergence. Each of the three signals
+    below is independently "inherently deliberate" the same way the section
+    docstring already argues for the curated-confusable case -- none has an
+    accidental typing path -- so ANY one of them, on EITHER side of a fold-equal
+    pair, is unconditionally suspicious regardless of genericness/length:
+      - confusable_in_ascii_context (textnorm.py): curated Cyrillic/Greek lookalike
+        mixed into an otherwise-Latin token.
+      - _nfkc_ascii_fold_changed (checks/_content.py, imported from textnorm via the
+        aggregator, same B93/typosquat precedent used at checks/_content.py:5334):
+        a non-ASCII Unicode PRESENTATION (fullwidth, Mathematical Alphanumeric
+        Symbols bold/italic/fraktur/...) that Unicode's own NFKC compatibility
+        decomposition folds onto plain ASCII.
+      - _has_suspicious_zero_width: an invisible character injected into the name
+        that a renderer would never show, but ``normalize_for_scan`` strips before
+        the fold comparison -- so two visually-identical names differ only by a
+        character nobody can see.
+
+    Deliberately does NOT drop the fold-equality requirement anywhere it is used --
+    only widens which characters can EARN a name the "confusable/suspicious" label.
+    Two genuine non-Latin names differing only by NFC/NFD normalization form still
+    fold equal under NFKC without tripping any of these three (neither decomposes to
+    ASCII, and there's nothing to strip), so that legitimate case is untouched.
+    """
+    return (
+        confusable_in_ascii_context(name)
+        or _nfkc_ascii_fold_changed(name)
+        or _has_suspicious_zero_width(name, _B332_ZERO_WIDTH_RE)
+    )
+
+
+def _b332_bare_tool_name(tool_name: str, server: str, source: str) -> str:
     """Strip OpenClaw's own tool-name namespacing, if present, to get the BARE name.
 
-    mcpsurface.from_tool_defs (config-embedded manifest, completeness="full") stores a
-    tool's name exactly as the server itself declared it -- bare, e.g. "search". But
-    mcpsurface.from_probe_json/from_trajectory (completeness="names-only"/"full" via
-    OpenClaw's own retained form) store the name OpenClaw itself already namespaced --
-    "mcp__<server>__<tool>", or the older bare "<server>__<tool>" form -- the SAME two
-    shapes mcpsurface._server_from_namespaced_name strips to find the SERVER; this is
-    its tool-suffix mirror. Comparing raw ToolDef.name across sources without this
-    would never find a real collision at all: two different servers' same-named tool
-    become two DIFFERENT namespaced strings ("mcp__alpha__search" vs
-    "mcp__beta__search") purely because each carries its OWN server name, even though
-    the model-meaningful tool name -- what a user or an LLM actually recognizes as "the
-    search tool" -- is identical. Never a guess: strips only the OWN server's known
-    prefix, never a fuzzy match.
+    mcpsurface.from_tool_defs (config-embedded manifest, completeness="full", i.e.
+    ``source == "manifest"``) stores a tool's name exactly as the server itself
+    declared it -- bare, e.g. "search". But mcpsurface.from_probe_json/from_trajectory
+    (completeness="names-only"/"full" via OpenClaw's own retained form) store the name
+    OpenClaw itself already namespaced -- "mcp__<server>__<tool>", or the older bare
+    "<server>__<tool>" form -- the SAME two shapes
+    mcpsurface._server_from_namespaced_name strips to find the SERVER; this is its
+    tool-suffix mirror. Comparing raw ToolDef.name across sources without this would
+    never find a real collision at all: two different servers' same-named tool become
+    two DIFFERENT namespaced strings ("mcp__alpha__search" vs "mcp__beta__search")
+    purely because each carries its OWN server name, even though the model-meaningful
+    tool name -- what a user or an LLM actually recognizes as "the search tool" -- is
+    identical. Never a guess: strips only the OWN server's known prefix, never a
+    fuzzy match.
+
+    H6 (independent C-135 review): the strip must be SKIPPED for ``source ==
+    "manifest"`` -- those names are already bare, never namespaced, so stripping
+    unconditionally over-collapses a manifest tool that HAPPENS to be literally named
+    "<server>__something" (e.g. server "alpha" declaring a tool actually called
+    "alpha__deploy_production") down to "deploy_production", which can then
+    false-collide with an unrelated server's genuinely different
+    "deploy_production" tool. Only probe-names/trajectory sources are namespaced by
+    OpenClaw itself and need the strip.
     """
+    if source == "manifest":
+        return tool_name
     for prefix in (f"mcp__{server}__", f"{server}__"):
         if tool_name.startswith(prefix):
             return tool_name[len(prefix):]
@@ -2219,7 +2313,7 @@ def _b332_unique_names(surfaces) -> list[tuple[str, str]]:
     for surface in surfaces:
         server_names: set = set()
         for tool in surface.tools:
-            n = _b332_bare_tool_name(tool.name.strip(), surface.server)
+            n = _b332_bare_tool_name(tool.name.strip(), surface.server, surface.source)
             if not n or n in server_names:
                 continue
             server_names.add(n)
@@ -2231,48 +2325,113 @@ def _b332_unique_names(surfaces) -> list[tuple[str, str]]:
     return sorted(out)
 
 
-def _b332_collisions(surfaces) -> tuple[list, list, list, bool]:
-    """Classify cross-SERVER tool-name relationships in *surfaces*.
+def _b332_clone_server_pairs(name_sets: dict) -> set:
+    """Pairs of servers whose FULL bare tool-name sets are identical or near-identical
+    (H1, independent C-135 review) -- see the constant docstrings above
+    _B332_CLONE_JACCARD for the "same server deployed twice" reasoning.
 
-    Returns ``(exact, homoglyph, near_miss, truncated)``. Each hit is
-    ``(server_a, name_a, server_b, name_b)``. Only cross-server pairs are considered —
-    two tools on the SAME server sharing/near-missing a name is a same-server naming
-    question, not a shadowing risk, and out of scope here. See the section docstring
-    above for the discriminators each leg applies.
+    Guarded by _B332_CLONE_MIN_NAMES: a server with only 1-2 known tool names makes
+    "the whole set matches" trivially true and NOT evidence of cloning (that shape is
+    exactly what fixtures/bad_b332_mcp_exact_collision covers as a genuine attack —
+    see the check's own C-135 note) -- only a broad, near-total surface match counts.
     """
-    pairs = _b332_unique_names(surfaces)
-    truncated = len(pairs) > _B332_MAX_TOTAL_NAMES
-    pairs = pairs[:_B332_MAX_TOTAL_NAMES]
+    servers = sorted(k for k, v in name_sets.items() if len(v) >= _B332_CLONE_MIN_NAMES)
+    clones: set = set()
+    for i in range(len(servers)):
+        a = name_sets[servers[i]]
+        for j in range(i + 1, len(servers)):
+            b = name_sets[servers[j]]
+            union = a | b
+            if not union:
+                continue
+            if len(a & b) / len(union) >= _B332_CLONE_JACCARD:
+                clones.add(frozenset((servers[i], servers[j])))
+    return clones
 
-    # Precompute per-name info once (avoids recomputing fold/confusable O(n) times
-    # inside the O(n^2) pairwise loop below).
+
+def _b332_collisions(pairs: list) -> dict:
+    """Classify cross-SERVER tool-name relationships in *pairs* (the SAME deduped
+    ``[(server, bare_name), ...]`` list the caller used for its UNKNOWN-vs-PASS
+    decision — H5, independent C-135 review: an earlier draft re-derived that decision
+    from RAW (pre-namespace-stripped) tool names, so a probe entry whose tool part
+    stripped away to "" (e.g. a bare "mcp__beta__" name) could count toward "compared
+    across N servers" while contributing nothing to the actual comparison below).
+
+    Returns a dict with keys "exact", "homoglyph", "near_miss", "exact_warn" (each a
+    list of ``(server_a, name_a, server_b, name_b, reason)``) and "truncated" (bool,
+    scoped to the two O(n^2) legs only — see _B332_MAX_TOTAL_NAMES). Only cross-server
+    pairs are considered — two tools on the SAME server sharing/near-missing a name is
+    a same-server naming question, not a shadowing risk, and out of scope here. See
+    the section docstring above for the discriminators each leg applies.
+    """
+    # H4: the exact-collision leg (and the clone-pair detector that feeds it) reads
+    # the FULL, UNTRUNCATED pairs list — it is an O(n) hash pass, not the O(n^2) one
+    # the cap exists for.
+    name_sets: dict = {}
+    for server, name in pairs:
+        name_sets.setdefault(server, set()).add(name)
+    clone_pairs = _b332_clone_server_pairs(name_sets)
+
+    by_name: dict = {}
+    for server, name in pairs:
+        by_name.setdefault(name, set()).add(server)
+
+    exact: list = []
+    exact_warn: list = []
+    for name in sorted(by_name):
+        servers = by_name[name]
+        if len(servers) < 2:
+            continue
+        s = sorted(servers)
+        server_a, server_b = s[0], s[1]
+        if len(name) < _B332_MIN_SPECIFIC_LEN:
+            continue
+        if not name.isascii():
+            # H2: the generic-name allowlist is English-only by construction and
+            # cannot be translated into "every language" without hardcoding one
+            # lexicon after another (CLAUDE.md §2.6). A non-ASCII exact match is
+            # therefore reported at reduced confidence (WARN, not FAIL) rather than
+            # silently trusted OR silently dropped — it may be a genuinely rare name,
+            # or it may be the exact same convergent-generic-word shape the allowlist
+            # exists to protect, just in a script this check cannot read.
+            exact_warn.append(
+                (
+                    server_a, name, server_b, name,
+                    "non-Latin-script exact match — the generic-name allowlist only "
+                    "covers English/ASCII tool names, so this is reported at reduced "
+                    "confidence rather than assumed either safe or malicious",
+                )
+            )
+            continue
+        if _b332_is_generic(name):
+            continue
+        if frozenset((server_a, server_b)) in clone_pairs:
+            exact_warn.append(
+                (
+                    server_a, name, server_b, name,
+                    f"servers '{server_a}' and '{server_b}' share a near-identical "
+                    "tool-name set — likely the SAME server deployed twice under a "
+                    "different name/scope, not two independent servers",
+                )
+            )
+            continue
+        exact.append((server_a, name, server_b, name, "exact name collision"))
+
+    # Homoglyph / near-miss: pairwise across different servers, bounded by the cap —
+    # the only two legs that cap applies to (H4).
+    truncated = len(pairs) > _B332_MAX_TOTAL_NAMES
+    pairwise_pairs = pairs[:_B332_MAX_TOTAL_NAMES]
     info = [
         {
             "server": server,
             "name": name,
             "fold": normalize_for_scan(name),
-            "confusable": confusable_in_ascii_context(name),
+            "homoglyph_signal": _b332_homoglyph_signal(name),
             "generic": _b332_is_generic(name),
         }
-        for server, name in pairs
+        for server, name in pairwise_pairs
     ]
 
-    # Exact collisions: hash-by-name, O(n) — always covers every name seen, even past
-    # the pairwise truncation cap above (the cap only bounds the O(n^2) legs below).
-    by_name: dict = {}
-    for it in info:
-        by_name.setdefault(it["name"], set()).add(it["server"])
-    exact = []
-    for name in sorted(by_name):
-        servers = by_name[name]
-        if len(servers) < 2:
-            continue
-        if _b332_is_generic(name) or len(name) < _B332_MIN_SPECIFIC_LEN:
-            continue
-        s = sorted(servers)
-        exact.append((s[0], name, s[1], name))
-
-    # Homoglyph / near-miss: pairwise across different servers, bounded by the cap.
     homoglyph: list = []
     near_miss: list = []
     n = len(info)
@@ -2282,8 +2441,10 @@ def _b332_collisions(surfaces) -> tuple[list, list, list, bool]:
             b = info[j]
             if a["server"] == b["server"] or a["name"] == b["name"]:
                 continue
-            if a["fold"] == b["fold"] and (a["confusable"] or b["confusable"]):
-                homoglyph.append((a["server"], a["name"], b["server"], b["name"]))
+            if a["fold"] == b["fold"] and (a["homoglyph_signal"] or b["homoglyph_signal"]):
+                homoglyph.append(
+                    (a["server"], a["name"], b["server"], b["name"], "homoglyph of a tool on another server")
+                )
                 continue
             if a["generic"] or b["generic"]:
                 continue
@@ -2294,9 +2455,17 @@ def _b332_collisions(surfaces) -> tuple[list, list, list, bool]:
             if abs(len(a["name"]) - len(b["name"])) > 1:
                 continue
             if _levenshtein(a["name"], b["name"]) == 1:
-                near_miss.append((a["server"], a["name"], b["server"], b["name"]))
+                near_miss.append(
+                    (a["server"], a["name"], b["server"], b["name"], "edit-distance-1 near-miss of a tool on another server")
+                )
 
-    return exact, homoglyph, near_miss, truncated
+    return {
+        "exact": exact,
+        "homoglyph": homoglyph,
+        "near_miss": near_miss,
+        "exact_warn": exact_warn,
+        "truncated": truncated,
+    }
 
 
 def _b332_finding_from_surfaces(surfaces: list) -> Finding:
@@ -2308,27 +2477,41 @@ def _b332_finding_from_surfaces(surfaces: list) -> Finding:
     (completeness="names-only", mcpsurface.from_probe_json) — this function never
     looks at ``.completeness`` because it never needs description text either way.
     """
-    servers_with_names = {s.server for s in surfaces if s.tools}
-    total_names = sum(len({t.name.strip() for t in s.tools if t.name.strip()}) for s in surfaces)
-    if len(servers_with_names) < 2 or total_names == 0:
+    pairs = _b332_unique_names(surfaces)
+    servers_with_names = sorted({server for server, _ in pairs})
+    if len(servers_with_names) < 2 or not pairs:
         return _finding(
             "B332",
             UNKNOWN,
-            "Fewer than two MCP servers have any tool names available, so cross-server "
-            "tool-name collisions cannot be compared.",
+            "Fewer than two MCP servers have any (bare, post-namespace-stripped) tool "
+            "names available, so cross-server tool-name collisions cannot be compared.",
             "Provide a tool-surface dump for two or more servers (an "
             "`openclaw mcp probe --json` run, an MCP inspector export, or a "
             "config-embedded tools list) to check for cross-server tool-name shadowing.",
         )
 
-    exact, homoglyph, near_miss, truncated = _b332_collisions(surfaces)
-    any_surface_truncated = any(s.truncated for s in surfaces)
+    result = _b332_collisions(pairs)
+    truncated = result["truncated"] or any(s.truncated for s in surfaces)
 
-    if homoglyph or exact:
-        hits = homoglyph + exact
-        ev = [f"{sa}:{na} vs {sb}:{nb}" for sa, na, sb, nb in hits[:5]]
-        kind = "a homoglyph substitution of" if homoglyph else "an exact name collision with"
-        more = f" (+{len(hits) - 5} more)" if len(hits) > 5 else ""
+    def _format(hits: list, limit: int = 5) -> tuple[list, str]:
+        ev = [f"{sa}:{na} vs {sb}:{nb} ({reason})" for sa, na, sb, nb, reason in hits[:limit]]
+        more = f" (+{len(hits) - limit} more)" if len(hits) > limit else ""
+        return ev, more
+
+    # H4: fold the truncation caveat into whichever verdict actually fires, instead of
+    # a branch after FAIL/WARN that a WARN result could never reach.
+    cap_note = (
+        " (Note: the cross-server tool-name comparison hit a size cap before "
+        "finishing, so additional collisions beyond those listed may exist unseen — "
+        "this result is not a confident clean scan.)"
+        if truncated
+        else ""
+    )
+
+    fail_hits = result["homoglyph"] + result["exact"]
+    if fail_hits:
+        ev, more = _format(fail_hits)
+        kind = "a homoglyph substitution of" if result["homoglyph"] else "an exact name collision with"
         return _finding(
             "B332",
             FAIL,
@@ -2336,27 +2519,31 @@ def _b332_finding_from_surfaces(surfaces: list) -> Finding:
             f"configured server already exposes ({'; '.join(ev)}{more}). The model "
             "routes a tool call by name alone, so it cannot reliably tell the two "
             "servers' same-named tools apart — a malicious or compromised server can "
-            "shadow a tool you already trust.",
+            f"shadow a tool you already trust.{cap_note}",
             "Rename or remove the colliding tool, or drop one of the two servers. "
             "Never trust a tool name alone to identify which server will actually "
             "handle the call.",
             evidence=ev,
         )
-    if near_miss:
-        ev = [f"{sa}:{na} vs {sb}:{nb}" for sa, na, sb, nb in near_miss[:5]]
-        more = f" (+{len(near_miss) - 5} more)" if len(near_miss) > 5 else ""
+
+    warn_hits = result["near_miss"] + result["exact_warn"]
+    if warn_hits:
+        ev, more = _format(warn_hits)
         return _finding(
             "B332",
             WARN,
-            "An MCP server exposes a tool name that is a one-edit near-miss of a "
-            f"longer, distinctive tool name a DIFFERENT configured server already "
-            f"exposes ({'; '.join(ev)}{more}). This may be an innocent naming "
-            "coincidence, but it is also the classic shadowing/typosquat shape.",
-            "Confirm both tools are intentional and independently named. If not, "
-            "rename or remove the near-miss tool.",
+            "An MCP server exposes a tool name that closely resembles, but does not "
+            "exactly/unconditionally collide with, a tool a DIFFERENT configured "
+            f"server already exposes ({'; '.join(ev)}{more}). This may be an innocent "
+            "naming coincidence, the same server deployed twice, or a non-English "
+            f"generic word — but it is also the classic shadowing/typosquat shape.{cap_note}",
+            "Confirm both tools are intentional, independently named, and (if the "
+            "servers look like duplicates) genuinely separate deployments. If not, "
+            "rename or remove the offending tool.",
             evidence=ev,
         )
-    if truncated or any_surface_truncated:
+
+    if truncated:
         return _finding(
             "B332",
             UNKNOWN,
@@ -2392,27 +2579,60 @@ def check_mcp_tool_name_shadowing(ctx: Context) -> Finding:
     to need no description text, so a names-only probe dump works identically once
     such wiring lands.
 
-    FAIL    -- exact name collision (non-generic, >= _B332_MIN_SPECIFIC_LEN chars) or a
-               homoglyph substitution (always, regardless of genericness/length) between
-               two DIFFERENT servers.
-    WARN    -- edit-distance-1 near-miss between two DIFFERENT servers, both names
-               non-generic and >= _B332_MIN_WARN_LEN chars.
-    UNKNOWN -- fewer than two MCP servers configured, or fewer than two servers have
-               any tool names available to compare.
+    FAIL    -- exact ASCII name collision (non-generic, >= _B332_MIN_SPECIFIC_LEN
+               chars, servers not detected as clones of each other) or a homoglyph/
+               fullwidth/zero-width substitution (always, regardless of genericness/
+               length) between two DIFFERENT servers.
+    WARN    -- an edit-distance-1 near-miss (non-generic, >= _B332_MIN_WARN_LEN chars);
+               OR a non-ASCII exact match (the allowlist can't judge genericness in an
+               arbitrary script); OR an exact match between two servers whose full
+               tool-name sets look like the SAME server deployed twice.
+    UNKNOWN -- fewer than two MCP servers configured, fewer than two servers have any
+               (bare) tool names available to compare, or the comparison hit its size
+               cap with no FAIL/WARN hit inside the scanned portion.
     PASS    -- two or more servers' tool names were compared and none collide.
 
-    C-135 (independent adversarial pass, done in-source rather than as a follow-up):
-    the specific brief was "two servers legitimately sharing generic instrument names
-    (search/read_file/list) must not false-FAIL". Reproduced directly —
+    C-135 (independent adversarial pass; SECOND round after an independent reviewer's
+    own pass on commit a32ae53 found real bugs in the first cut — recorded here
+    honestly rather than the original overclaim that no false FAIL/PASS existed):
+
+      - H1 (false FAIL): two instances of the SAME server (e.g. `fs-a`/`fs-b` scoped
+        to different roots) sharing 8-10 real tool names FAILed on every one of them.
+        Fixed via _b332_clone_server_pairs -- a near-total tool-name-set match between
+        two servers routes their exact matches to WARN, not FAIL.
+      - H2 (false FAIL, universality): the English-only generic-name allowlist let a
+        non-English generic-word convergence (e.g. two RU servers both exposing
+        "поиск") FAIL, the exact FP shape the allowlist exists to prevent, just
+        outside its language. Fixed: a non-ASCII exact match is always WARN, never
+        FAIL, regardless of allowlist membership.
+      - H3 (false PASS): the homoglyph leg only checked the curated Cyrillic/Greek
+        confusable table, so a fullwidth ("ｒead_file") or zero-width
+        ("read​_file") substitution on a GENERIC name silently PASSED --
+        contradicting this file's own pinned Cyrillic-on-generic test. Fixed via
+        _b332_homoglyph_signal, which ORs in _nfkc_ascii_fold_changed (fullwidth/
+        Mathematical-Alphanumeric presentations) and _has_suspicious_zero_width.
+      - H4 (disclosure bug): the exact-collision leg was silently truncated by the
+        same cap meant only for the O(n^2) legs, and the truncation-disclosure branch
+        sat unreachable after a WARN had already fired. Fixed: the exact leg now
+        reads the full untruncated pair list, and the cap note is folded into
+        whichever verdict (FAIL/WARN) actually fires.
+      - H5 (UNKNOWN-vs-PASS discipline): the "servers/names available" counters were
+        derived from RAW tool names, not the bare (post-namespace-stripped) names
+        actually compared, so an empty-after-stripping probe entry could count toward
+        "compared across 2 servers, PASS". Fixed: both the UNKNOWN gate and the
+        comparison now share one `_b332_unique_names` call.
+      - H6 (namespace over-collapse): the bare-name strip ran unconditionally, so a
+        MANIFEST tool literally named "<server>__something" (already bare, never
+        namespaced) got over-stripped and could false-collide with an unrelated
+        server's genuinely different tool. Fixed: _b332_bare_tool_name skips the
+        strip for source == "manifest".
+
+    Re-run against the original brief case after all six fixes —
     fixtures/clean_b332_mcp_generic_name_overlap.json (two servers, both expose a bare
-    "search" tool) — and confirmed PASS, not FAIL: the exact-collision leg checks
-    _b332_is_generic() BEFORE it ever looks at length, so the allowlist hit alone
-    suppresses it regardless of the 4-char specific-length floor. A second round tried
-    to break the allowlist itself from the other direction — a homoglyph swapped into a
-    GENERIC name ("read_file" vs Cyrillic "reаd_file") — and confirmed this correctly
-    still FAILs: the homoglyph leg never consults _b332_is_generic() at all, exactly as
-    designed (genericness is irrelevant to a homoglyph, which is never accidental). No
-    false FAIL or false PASS found in either direction; no retraction was needed.
+    "search" tool) — confirmed still PASS, not FAIL. A second check confirmed a
+    homoglyph swapped into a GENERIC name ("read_file" vs Cyrillic "reаd_file") still
+    correctly FAILs unconditionally (see tests/test_b332_mcp_tool_name_shadowing.py for
+    all of the above, pinned as regressions).
     """
     servers = _mcp_servers(ctx.config)
     if not servers:
