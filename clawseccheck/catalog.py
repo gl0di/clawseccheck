@@ -340,6 +340,25 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="mcp",
     ),
+    # B332 (F-145/W2.3): cross-server MCP tool-NAME collision/homoglyph/near-miss
+    # (shadowing). Names-only by design -- see checks/_mcp.py's section docstring above
+    # _B332_GENERIC_TOOL_NAMES for the full FP-trap reasoning. FAIL on an exact
+    # collision of a rare/specific name, or a homoglyph substitution (always
+    # suspicious, unconditional on genericness); WARN on an edit-distance-1 near-miss
+    # of a long, specific name; UNKNOWN with fewer than two servers or no tool names
+    # available. HIGH/scored=True: the model cannot reliably tell two same-named
+    # tools on different servers apart, so a collision is a real, silent
+    # tool-shadowing exposure, not just a hygiene nit.
+    CheckMeta(
+        "B332",
+        "Cross-server MCP tool-name collision / homoglyph / near-miss (shadowing)",
+        HIGH,
+        "hardening",
+        "MCP Trust",
+        scored=True,
+        confidence="HIGH",
+        surface="mcp",
+    ),
     CheckMeta(
         "B25", "Update / pinning hygiene", MEDIUM, "hardening", "Supply Chain", surface="skills"
     ),

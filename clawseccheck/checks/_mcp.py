@@ -36,6 +36,7 @@ from ..scanbudget import (
     cpu_exceeded,
 )
 from ..textnorm import (
+    confusable_in_ascii_context,
     normalize_for_scan,
     obfuscation_signals,
 )
@@ -55,6 +56,7 @@ from ._content import (
     _CLICKFIX_REMOTE_FETCH_RE,
     _IOC_ONION_RE,
     _clickfix_trusted_installer,
+    _levenshtein,
     _obf_clip,
 )
 from ._vet import (
@@ -2096,6 +2098,342 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
         "readOnlyHint/destructiveHint/openWorldHint/idempotentHint annotations.",
         "No action needed.",
     )
+
+
+# ---------------------------------------------------------------------------
+# B332 (F-145/W2.3): cross-server MCP tool-name collision / homoglyph / near-miss
+# ---------------------------------------------------------------------------
+# mcptrustchecker's MTC-INJ-SHADOW-2 + MTC-UNI-009 analogue: a SECOND MCP server
+# registers a tool whose name exactly matches, is a homoglyph of, or is a near-miss
+# (edit-distance) of a tool a DIFFERENT, already-configured server exposes. The model
+# routes a tool CALL by name alone; once two servers both claim the same (or
+# confusably similar) name, it has no reliable way to tell "this server's search" from
+# "that server's search" — a malicious/compromised server can shadow a tool the
+# operator already trusts.
+#
+# NAMES-ONLY BY DESIGN (unlike sibling W2 checks): every helper below reads only
+# ToolDef.name — never .description/.title — so this is the one Wave-2 check that
+# needs no tool DESCRIPTION at all. That is deliberate: it is the one check that works
+# on ``openclaw mcp probe --json`` (mcpsurface.from_probe_json,
+# completeness="names-only"), the only PRE-USE tool-surface dump OpenClaw's own CLI
+# emits (design doc §2.3) — config-embedded manifests (completeness="full") work
+# identically, since the extra description text is simply never read.
+#
+# THE FP TRAP THIS CHECK IS DESIGNED AROUND: two servers legitimately sharing a
+# generic instrument name (search / read_file / list / ...) is NORMAL, not an attack —
+# independent MCP servers commonly converge on the same handful of verb-shaped names.
+# The bare fact of a name match is therefore NOT the discriminator on its own:
+#
+#   - EXACT match: suspicious only when the name is RARE/SPECIFIC — not on the
+#     curated _B332_GENERIC_TOOL_NAMES allowlist below — AND long enough to carry real
+#     information (_B332_MIN_SPECIFIC_LEN chars). A 2-3 char coincidence is cheap to
+#     produce by chance even outside the allowlist.
+#   - HOMOGLYPH match: ALWAYS suspicious, unconditionally — neither the generic-name
+#     allowlist nor the length guard applies. There is no accidental way to type a
+#     Cyrillic а (U+0430) in place of Latin a inside an otherwise-Latin token; typing
+#     one is inherently deliberate, so genericness/length are simply not relevant here.
+#   - NEAR-MISS (edit distance): suspicious only on a LONG, SPECIFIC name
+#     (_B332_MIN_WARN_LEN) that also clears the same generic-name allowlist. An
+#     edit-distance-1 typo of "search" ("saerch") is one of countless innocent slips;
+#     the same distance on a long, distinctive name is far less likely to be
+#     coincidental. _B332_MIN_WARN_LEN is its OWN threshold, deliberately independent
+#     of checks/_content.py's _TYPOSQUAT_MIN_KNOWN_LEN — that constant is calibrated
+#     for a different check (typosquatting against a known-PACKAGE-name list); reusing
+#     or lowering it here would silently couple two unrelated checks' tuning.
+#
+# _B332_GENERIC_TOOL_NAMES is a small, curated allowlist — the same
+# curated-allowlist-over-generic-rule shape this project already uses elsewhere
+# (_clickfix_trusted_installer/B100 in checks/_content.py, _REPUTABLE_DAEMON_NAMES in
+# checks/_vet.py): name the known-benign SHAPE explicitly rather than infer
+# "genericness" from a rule, which would either under- or over-fire. Deliberately
+# generic MCP/tool-calling verbs and their common snake_case tool-name forms — not
+# exhaustive, and not meant to be: it only needs to cover the common convergent names
+# real MCP servers actually ship (filesystem/search/http-fetch style servers), so an
+# exact match on one of these never FAILs by itself.
+_B332_GENERIC_TOOL_NAMES = frozenset(
+    {
+        "search", "read", "write", "list", "get", "set", "fetch", "query", "execute",
+        "exec", "run", "delete", "remove", "create", "update", "edit", "open", "close",
+        "status", "help", "info", "ping", "echo", "find", "lookup", "browse",
+        "download", "upload", "load", "save", "check", "test", "validate", "connect",
+        "disconnect", "start", "stop", "init", "config", "configure", "call", "invoke",
+        "send", "receive", "log", "show", "view", "print", "put", "post",
+        "read_file", "write_file", "list_files", "list_dir", "read_dir", "get_file",
+        "put_file", "delete_file", "create_file", "move_file", "copy_file",
+        "make_dir", "remove_dir", "get_status", "get_info",
+    }
+)
+
+# EXACT collisions shorter than this are too short to judge as "specific" versus a
+# cheap coincidence, even when not on the curated allowlist above (e.g. two unrelated
+# 2-3 char tool names). Independent of _B332_MIN_WARN_LEN and of
+# checks/_content.py's _TYPOSQUAT_MIN_KNOWN_LEN — see the section docstring.
+_B332_MIN_SPECIFIC_LEN = 4
+
+# NEAR-MISS (edit-distance) matches shorter than this on EITHER side are too short to
+# rule out an innocent independent typo — see the section docstring. Independent of
+# _B332_MIN_SPECIFIC_LEN and of checks/_content.py's _TYPOSQUAT_MIN_KNOWN_LEN.
+_B332_MIN_WARN_LEN = 8
+
+# Bound on the O(n^2) cross-server homoglyph/near-miss pairwise comparison (Bounded
+# doctrine, design doc §6) — independent of mcpsurface's own per-server/per-tool caps,
+# which bound a single server's contribution, not the TOTAL distinct-name set this
+# check compares across every configured server. Exceeding it does not fail the scan;
+# it truncates the pairwise legs and is disclosed (never a silent confident PASS,
+# B-092), while the O(n) exact-collision leg (a plain hash-by-name pass) still covers
+# every name seen.
+_B332_MAX_TOTAL_NAMES = 300
+
+
+def _b332_is_generic(name: str) -> bool:
+    return name.strip().lower() in _B332_GENERIC_TOOL_NAMES
+
+
+def _b332_bare_tool_name(tool_name: str, server: str) -> str:
+    """Strip OpenClaw's own tool-name namespacing, if present, to get the BARE name.
+
+    mcpsurface.from_tool_defs (config-embedded manifest, completeness="full") stores a
+    tool's name exactly as the server itself declared it -- bare, e.g. "search". But
+    mcpsurface.from_probe_json/from_trajectory (completeness="names-only"/"full" via
+    OpenClaw's own retained form) store the name OpenClaw itself already namespaced --
+    "mcp__<server>__<tool>", or the older bare "<server>__<tool>" form -- the SAME two
+    shapes mcpsurface._server_from_namespaced_name strips to find the SERVER; this is
+    its tool-suffix mirror. Comparing raw ToolDef.name across sources without this
+    would never find a real collision at all: two different servers' same-named tool
+    become two DIFFERENT namespaced strings ("mcp__alpha__search" vs
+    "mcp__beta__search") purely because each carries its OWN server name, even though
+    the model-meaningful tool name -- what a user or an LLM actually recognizes as "the
+    search tool" -- is identical. Never a guess: strips only the OWN server's known
+    prefix, never a fuzzy match.
+    """
+    for prefix in (f"mcp__{server}__", f"{server}__"):
+        if tool_name.startswith(prefix):
+            return tool_name[len(prefix):]
+    return tool_name
+
+
+def _b332_unique_names(surfaces) -> list[tuple[str, str]]:
+    """(server, bare tool name) pairs across *surfaces*, deduped per server, sorted."""
+    seen: set = set()
+    out: list = []
+    for surface in surfaces:
+        server_names: set = set()
+        for tool in surface.tools:
+            n = _b332_bare_tool_name(tool.name.strip(), surface.server)
+            if not n or n in server_names:
+                continue
+            server_names.add(n)
+            key = (surface.server, n)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+    return sorted(out)
+
+
+def _b332_collisions(surfaces) -> tuple[list, list, list, bool]:
+    """Classify cross-SERVER tool-name relationships in *surfaces*.
+
+    Returns ``(exact, homoglyph, near_miss, truncated)``. Each hit is
+    ``(server_a, name_a, server_b, name_b)``. Only cross-server pairs are considered —
+    two tools on the SAME server sharing/near-missing a name is a same-server naming
+    question, not a shadowing risk, and out of scope here. See the section docstring
+    above for the discriminators each leg applies.
+    """
+    pairs = _b332_unique_names(surfaces)
+    truncated = len(pairs) > _B332_MAX_TOTAL_NAMES
+    pairs = pairs[:_B332_MAX_TOTAL_NAMES]
+
+    # Precompute per-name info once (avoids recomputing fold/confusable O(n) times
+    # inside the O(n^2) pairwise loop below).
+    info = [
+        {
+            "server": server,
+            "name": name,
+            "fold": normalize_for_scan(name),
+            "confusable": confusable_in_ascii_context(name),
+            "generic": _b332_is_generic(name),
+        }
+        for server, name in pairs
+    ]
+
+    # Exact collisions: hash-by-name, O(n) — always covers every name seen, even past
+    # the pairwise truncation cap above (the cap only bounds the O(n^2) legs below).
+    by_name: dict = {}
+    for it in info:
+        by_name.setdefault(it["name"], set()).add(it["server"])
+    exact = []
+    for name in sorted(by_name):
+        servers = by_name[name]
+        if len(servers) < 2:
+            continue
+        if _b332_is_generic(name) or len(name) < _B332_MIN_SPECIFIC_LEN:
+            continue
+        s = sorted(servers)
+        exact.append((s[0], name, s[1], name))
+
+    # Homoglyph / near-miss: pairwise across different servers, bounded by the cap.
+    homoglyph: list = []
+    near_miss: list = []
+    n = len(info)
+    for i in range(n):
+        a = info[i]
+        for j in range(i + 1, n):
+            b = info[j]
+            if a["server"] == b["server"] or a["name"] == b["name"]:
+                continue
+            if a["fold"] == b["fold"] and (a["confusable"] or b["confusable"]):
+                homoglyph.append((a["server"], a["name"], b["server"], b["name"]))
+                continue
+            if a["generic"] or b["generic"]:
+                continue
+            if len(a["name"]) < _B332_MIN_WARN_LEN or len(b["name"]) < _B332_MIN_WARN_LEN:
+                continue
+            # An OSA edit-distance of 1 always keeps the two strings within 1 char of
+            # each other in length — cheap pre-filter before the O(len*len) call.
+            if abs(len(a["name"]) - len(b["name"])) > 1:
+                continue
+            if _levenshtein(a["name"], b["name"]) == 1:
+                near_miss.append((a["server"], a["name"], b["server"], b["name"]))
+
+    return exact, homoglyph, near_miss, truncated
+
+
+def _b332_finding_from_surfaces(surfaces: list) -> Finding:
+    """Build the B332 Finding from a list of ToolSurface objects.
+
+    Completeness-agnostic by construction (see the section docstring): works
+    identically whether *surfaces* came from config-embedded manifests
+    (completeness="full") or from an ``openclaw mcp probe --json`` dump
+    (completeness="names-only", mcpsurface.from_probe_json) — this function never
+    looks at ``.completeness`` because it never needs description text either way.
+    """
+    servers_with_names = {s.server for s in surfaces if s.tools}
+    total_names = sum(len({t.name.strip() for t in s.tools if t.name.strip()}) for s in surfaces)
+    if len(servers_with_names) < 2 or total_names == 0:
+        return _finding(
+            "B332",
+            UNKNOWN,
+            "Fewer than two MCP servers have any tool names available, so cross-server "
+            "tool-name collisions cannot be compared.",
+            "Provide a tool-surface dump for two or more servers (an "
+            "`openclaw mcp probe --json` run, an MCP inspector export, or a "
+            "config-embedded tools list) to check for cross-server tool-name shadowing.",
+        )
+
+    exact, homoglyph, near_miss, truncated = _b332_collisions(surfaces)
+    any_surface_truncated = any(s.truncated for s in surfaces)
+
+    if homoglyph or exact:
+        hits = homoglyph + exact
+        ev = [f"{sa}:{na} vs {sb}:{nb}" for sa, na, sb, nb in hits[:5]]
+        kind = "a homoglyph substitution of" if homoglyph else "an exact name collision with"
+        more = f" (+{len(hits) - 5} more)" if len(hits) > 5 else ""
+        return _finding(
+            "B332",
+            FAIL,
+            f"An MCP server exposes a tool name that is {kind} a tool a DIFFERENT "
+            f"configured server already exposes ({'; '.join(ev)}{more}). The model "
+            "routes a tool call by name alone, so it cannot reliably tell the two "
+            "servers' same-named tools apart — a malicious or compromised server can "
+            "shadow a tool you already trust.",
+            "Rename or remove the colliding tool, or drop one of the two servers. "
+            "Never trust a tool name alone to identify which server will actually "
+            "handle the call.",
+            evidence=ev,
+        )
+    if near_miss:
+        ev = [f"{sa}:{na} vs {sb}:{nb}" for sa, na, sb, nb in near_miss[:5]]
+        more = f" (+{len(near_miss) - 5} more)" if len(near_miss) > 5 else ""
+        return _finding(
+            "B332",
+            WARN,
+            "An MCP server exposes a tool name that is a one-edit near-miss of a "
+            f"longer, distinctive tool name a DIFFERENT configured server already "
+            f"exposes ({'; '.join(ev)}{more}). This may be an innocent naming "
+            "coincidence, but it is also the classic shadowing/typosquat shape.",
+            "Confirm both tools are intentional and independently named. If not, "
+            "rename or remove the near-miss tool.",
+            evidence=ev,
+        )
+    if truncated or any_surface_truncated:
+        return _finding(
+            "B332",
+            UNKNOWN,
+            "The configured MCP servers' tool names were scanned for cross-server "
+            "collisions, but the scan hit a size cap before finishing, so a clean "
+            "result here is not a confident PASS.",
+            "Reduce the number of configured MCP servers/tools, or re-run with a "
+            "smaller tool-surface dump, to get a complete scan.",
+        )
+    return _finding(
+        "B332",
+        PASS,
+        f"No cross-server tool-name collisions, homoglyphs, or near-misses were found "
+        f"across {len(servers_with_names)} MCP servers.",
+        "No action needed.",
+    )
+
+
+def check_mcp_tool_name_shadowing(ctx: Context) -> Finding:
+    """B332 (F-145/W2.3): cross-server MCP tool-name collision / homoglyph / near-miss.
+
+    See the section docstring above _B332_GENERIC_TOOL_NAMES for the full design
+    (the FP trap this check is built around, the generic-name allowlist, and why the
+    near-miss length threshold is independent of _TYPOSQUAT_MIN_KNOWN_LEN).
+
+    This ctx-driven entry point only reaches config-embedded tools lists
+    (mcp.servers.<name>.tools, completeness="full") — the same source B333/RISK-22 use,
+    the only tool-surface source reachable from the main audit's ctx today (no CLI
+    wiring yet feeds a probe-json dump into Context). The detection logic itself
+    (_b332_finding_from_surfaces) is completeness-agnostic and is exercised directly
+    against a names-only surface (mcpsurface.from_probe_json) by
+    tests/test_b332_mcp_tool_name_shadowing.py — this is the one Wave-2 check designed
+    to need no description text, so a names-only probe dump works identically once
+    such wiring lands.
+
+    FAIL    -- exact name collision (non-generic, >= _B332_MIN_SPECIFIC_LEN chars) or a
+               homoglyph substitution (always, regardless of genericness/length) between
+               two DIFFERENT servers.
+    WARN    -- edit-distance-1 near-miss between two DIFFERENT servers, both names
+               non-generic and >= _B332_MIN_WARN_LEN chars.
+    UNKNOWN -- fewer than two MCP servers configured, or fewer than two servers have
+               any tool names available to compare.
+    PASS    -- two or more servers' tool names were compared and none collide.
+
+    C-135 (independent adversarial pass, done in-source rather than as a follow-up):
+    the specific brief was "two servers legitimately sharing generic instrument names
+    (search/read_file/list) must not false-FAIL". Reproduced directly —
+    fixtures/clean_b332_mcp_generic_name_overlap.json (two servers, both expose a bare
+    "search" tool) — and confirmed PASS, not FAIL: the exact-collision leg checks
+    _b332_is_generic() BEFORE it ever looks at length, so the allowlist hit alone
+    suppresses it regardless of the 4-char specific-length floor. A second round tried
+    to break the allowlist itself from the other direction — a homoglyph swapped into a
+    GENERIC name ("read_file" vs Cyrillic "reаd_file") — and confirmed this correctly
+    still FAILs: the homoglyph leg never consults _b332_is_generic() at all, exactly as
+    designed (genericness is irrelevant to a homoglyph, which is never accidental). No
+    false FAIL or false PASS found in either direction; no retraction was needed.
+    """
+    servers = _mcp_servers(ctx.config)
+    if not servers:
+        return _finding("B332", UNKNOWN, "No MCP servers configured.", "—")
+    if len(servers) < 2:
+        return _finding(
+            "B332",
+            UNKNOWN,
+            "Only one MCP server is configured -- cross-server tool-name shadowing "
+            "needs at least two.",
+            "—",
+        )
+
+    surfaces = []
+    for sname, spec in sorted(servers.items()):
+        tools = spec.get("tools") if isinstance(spec, dict) else None
+        surface = _mcpsurface.from_tool_defs(sname, tools)
+        if surface is not None:
+            surfaces.append(surface)
+
+    return _b332_finding_from_surfaces(surfaces)
 
 
 # B-159: flags that legitimately take a URL as a registry/index config value,
