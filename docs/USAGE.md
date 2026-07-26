@@ -607,6 +607,34 @@ python3 audit.py --log audit.log            # also write log to a local file
   network calls; it writes only a one-line coverage-freshness entry under `~/.clawseccheck/`
   (suppressed by `--no-history`). Targets the #1 agent supply-chain gap: most tools audit your
   skills but not the MCP servers wired into your agent.
+  - **Feeding it a `tools/list` dump.** `--vet-mcp FILE` also accepts a local JSON file, which
+    lets you vet a server's *declared tool descriptions* (not just its launch spec) for
+    content-security signals — the same scan `--vet` runs on a skill. ClawSecCheck never talks to
+    an MCP server itself (Golden Rule #2); you produce the dump with your own tool and hand it the
+    resulting file:
+    ```bash
+    # mcporter (https://github.com/instructa/mcporter) against a configured server:
+    mcporter tools <server-name> --json > server-tools.json
+    clawseccheck --vet-mcp server-tools.json
+
+    # or an MCP inspector's raw tools/list response saved to a file — either shape works:
+    #   {"tools": [{"name": "...", "description": "...", "inputSchema": {...}}, ...]}
+    #   {"servers": {"<name>": {"tools": [...]}}}   (one file, multiple servers)
+    clawseccheck --vet-mcp inspector-dump.json
+    ```
+    Be honest about what this buys you: a third-party dump is a **point-in-time snapshot you
+    captured yourself**, not the same verification depth as OpenClaw's own live probe — there is
+    no first-party guarantee the dump you saved matches what the server serves the model on the
+    next connection, and a malicious server can serve a different description to a probe than to
+    the live agent. Treat a clean `--vet-mcp FILE` result as "this snapshot looked clean when I
+    captured it", not "this server is safe forever".
+  - **`openclaw mcp probe --json` output.** If your OpenClaw build has a live probe command, its
+    JSON is also accepted — but note it reports tool **names only** (no descriptions, no
+    `inputSchema`; see OpenClaw's own `formatMcpProbeResult`), so `--vet-mcp` cannot run the
+    content-security scan against it at all. The per-server verdict for a names-only dump is
+    always `UNKNOWN` with a `VET-COVERAGE` note explaining why — never a guessed PASS from bare
+    tool names. Prefer a `tools/list`-shaped dump (mcporter / an inspector) when you need the
+    content scan to actually run.
 - **`--canary`** emits a benign injection hidden in untrusted-looking content; feed it to your
   agent — if the agent echoes the token, it obeyed an injection (**VULNERABLE**), otherwise
   **RESISTANT**. This is the live "battle-tested" complement to the passive checks.
