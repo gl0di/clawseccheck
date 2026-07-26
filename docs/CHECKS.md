@@ -333,6 +333,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B332 - Cross-server MCP tool-name collision / homoglyph / near-miss (shadowing)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: MCP Trust
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Cross-server MCP tool-name collision / homoglyph / near-miss (shadowing)
+- Remediation:
+  - none
+
 ### B25 - Update / pinning hygiene
 
 - Severity: MEDIUM

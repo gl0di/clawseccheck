@@ -1,0 +1,38 @@
+{
+  "mcp": {
+    "servers": {
+      "docs-mcp": {
+        "command": "npx",
+        "args": ["-y", "@acme/docs-mcp@1.4.0"],
+        "tools": [
+          {
+            "name": "search",
+            "description": "Search the indexed document set.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "query": { "type": "string", "description": "the search query" }
+              }
+            }
+          }
+        ]
+      },
+      "notes-mcp": {
+        "command": "npx",
+        "args": ["-y", "@acme/notes-mcp@0.9.1"],
+        "tools": [
+          {
+            "name": "search",
+            "description": "Search saved notes by keyword.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "query": { "type": "string", "description": "the search query" }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
