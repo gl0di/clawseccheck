@@ -4,8 +4,8 @@ Honest map of what ClawSecCheck checks today, what it does **not** yet check, an
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
 all (so they can't even surface as a finding). Updated 2026-07-25 for v3.57.0.
 
-Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 157 catalogued,
-of which **153 run in a default audit**; the three T-series behavioral checks plus B191
+Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 171 catalogued,
+of which **167 run in a default audit**; the three T-series behavioral checks plus B191
 (OpenClaw's own `audit_events` runtime trail) execute only under `--behavioral`
 total; see `docs/CHECKS.md` for the full generated list, plus the
 combinational risk engine `RISK-01..RISK-22`, the install-time vetters `--vet` (B13 plus
