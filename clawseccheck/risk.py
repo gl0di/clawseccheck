@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import attest as _attest
+from . import mcpsurface as _mcpsurface
 from . import trajectory as _trajectory
 from .catalog import CRITICAL, FAIL, HIGH, MEDIUM, WARN, Finding
 from .checks import (
@@ -34,6 +35,7 @@ from .checks import (
     _has_approval_gate,
     _hint,
     _hooks_session_key_exposures,
+    _mcp_servers,
     _open_wildcard_group_channels,
     _reassembly,
     _resolved_channel_nodes,
@@ -1450,6 +1452,195 @@ def _rule_open_group_proven_blast(ctx: Context, cfg: dict) -> RiskPath | None:
     )
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# F-146 / W2.4 / RISK-22 — toxic flow within a SINGLE MCP server's own tool set
+# ──────────────────────────────────────────────────────────────────────────────
+# mcptrustchecker's MTC-FLOW-* class: a server can expose all three legs of a
+# confused-deputy chain among its OWN declared tools — an untrusted-input tool, a
+# sensitive-read tool, and an egress tool — with every individual tool innocuous in
+# isolation. Untrusted content pulled in by the input tool can steer the model into
+# misusing the other two for exfiltration, without any single tool doing anything
+# wrong on its own. RISK-02 (Lethal Trifecta) already covers this shape at the
+# WHOLE-AGENT level (any tool anywhere in tools.*); this chain narrows the same three
+# roles to CO-RESIDENCE ON ONE SERVER, which RISK-02 cannot see (an agent could hold
+# all three legs spread across three separate, individually-narrow servers with none
+# of them co-resident — RISK-02 still fires there, correctly, but for a different
+# reason: whole-agent capability, not one server's own design).
+#
+# CLASSIFICATION: verb-class corroborators, not a new keyword enum (CLAUDE.md rule —
+# see reference_widening_detection_c135_segment_classifier). Reuses the SAME three
+# hint tuples RISK-02's own _has_untrusted_ingress / _has_sensitive_data /
+# _has_outbound already key tool-name classification on — INPUT_TOOL_HINTS /
+# SENSITIVE_TOOL_HINTS / OUTBOUND_TOOL_HINTS (checks/_shared.py, imported through the
+# checks aggregator per CLAUDE.md §3.1-a) — via the SAME _hint() substring matcher,
+# applied per-tool to name+title+description instead of to the agent's whole
+# enabled-tools list. No new lexicon; prior art reused, per-tool instead of per-agent.
+#
+# SOURCE: config-embedded mcp.servers.<name>.tools (the SAME parser vet_mcp's
+# ring-merge path and checks/_shared._mcp_tool_texts already read from) via
+# mcpsurface.from_tool_defs(name, spec["tools"]) — the SAME call
+# _merge_mcp_surface_ring (checks/_mcp.py) makes. This is the only tool-surface
+# source reachable from the main audit's ctx today: from_trajectory/from_probe_json
+# have no wiring into risk_paths yet. A config-embedded tools list is always
+# completeness="full" (from_tool_defs's default), because it always carries
+# name+description, never bare names — a "names-only" surface can therefore only
+# ever reach this rule through a future wiring (probe-json), not through today's
+# config path — but the completeness guard below is enforced anyway, defensively, so
+# that wiring lands safe on day one without a second change here.
+#
+# COMPLETENESS CONTRACT: fires ONLY on completeness == "full". At "names-only" there
+# is no description text to classify roles from with any confidence — a tool named
+# "fetch" could be a web-fetch (untrusted-input) or an internal cache fetch (nothing)
+# and the bare name alone cannot tell them apart. _mcp_toxic_flow_candidates keeps
+# that case a NAMED "undetermined" status, never silently folded into "clean" — see
+# its own docstring for why silence there would conflate "we didn't check" with
+# "checked, and it's clean" (this rule's explicit brief).
+#
+# HONEST LABELLING: a chain here is a PRECONDITION, not an incident — three roles
+# co-resident on one server is what makes a prompt-injection in the untrusted-input
+# leg ABLE to reach the other two, not proof that it has. Phrased as "can", never
+# "is exfiltrating" — the `why` text below says exactly that.
+_MCP_TOXIC_FLOW_ROLES = (
+    ("untrusted-input", INPUT_TOOL_HINTS),
+    ("sensitive-read", SENSITIVE_TOOL_HINTS),
+    ("egress", OUTBOUND_TOOL_HINTS),
+)
+
+
+def _mcp_tool_surfaces(cfg: dict) -> list:
+    """Build one ToolSurface per MCP server that declares an inline tool list.
+
+    Reads mcp.servers.<name>.tools via _mcp_servers (checks/_shared.py, the SAME
+    provider-shape reader vet_mcp and _mcp_tool_texts already use) and
+    mcpsurface.from_tool_defs (the SAME call vet_mcp's ring-merge path makes —
+    _merge_mcp_surface_ring in checks/_mcp.py). A server with no tools list, or an
+    unparseable one, contributes no surface (from_tool_defs already returns None for
+    that; mirrored here rather than re-validated).
+    """
+    out = []
+    for name, spec in _mcp_servers(cfg).items():
+        if not isinstance(spec, dict):
+            continue
+        surface = _mcpsurface.from_tool_defs(str(name), spec.get("tools"))
+        if surface is not None:
+            out.append(surface)
+    return out
+
+
+def _mcp_tool_roles(tool) -> set:
+    """Classify one ToolDef's role(s) from name+title+description.
+
+    Substring-matches the SAME hint tuples RISK-02 keys the whole-agent trifecta on,
+    via the SAME _hint() helper — see the section docstring above. A tool can hold
+    more than one role (e.g. a combined "fetch and forward" tool is both
+    untrusted-input and egress); that is not a bug, it just means that single tool
+    alone could satisfy two of the three legs.
+    """
+    blob = [tool.name, tool.title, tool.description]
+    roles = set()
+    for role, hints in _MCP_TOXIC_FLOW_ROLES:
+        if _hint(blob, hints):
+            roles.add(role)
+    return roles
+
+
+def _mcp_toxic_flow_candidates(cfg: dict) -> list:
+    """Per-server RISK-22 evaluation, keeping "undetermined" distinct from "clean".
+
+    Returns one dict per MCP server with an inline tool surface:
+
+      {"server": name, "status": "toxic", "roles": {role: [tool names, ...]}}
+          -- all three roles are co-resident among this server's OWN tools.
+      {"server": name, "status": "undetermined", "reason": "..."}
+          -- surface completeness is below "full" (currently unreachable from the
+             config-embedded source, kept for when a names-only source is wired in).
+      {"server": name, "status": "clean"}
+          -- completeness is "full" but fewer than three roles are present.
+
+    "undetermined" is a NAMED status, not an absence — silently treating "we could
+    not classify this surface" the same as "we classified it and found nothing"
+    would conflate "we didn't check" with "checked, and it's clean", which the
+    rule's design brief explicitly forbids. _rule_mcp_toxic_flow below only ever
+    turns a "toxic" entry into a RiskPath; "undetermined" and "clean" both yield no
+    chain, but for different, distinguishable reasons — exactly why this is a
+    separate, independently testable function rather than inlined into the rule.
+    """
+    out = []
+    for surface in _mcp_tool_surfaces(cfg):
+        if surface.completeness != "full":
+            out.append({
+                "server": surface.server,
+                "status": "undetermined",
+                "reason": (
+                    f"tool surface completeness is '{surface.completeness}' — tool "
+                    "roles cannot be classified from names alone"
+                ),
+            })
+            continue
+        roles: dict = {}
+        for tool in surface.tools:
+            for role in _mcp_tool_roles(tool):
+                roles.setdefault(role, []).append(tool.name)
+        if {"untrusted-input", "sensitive-read", "egress"} <= roles.keys():
+            out.append({"server": surface.server, "status": "toxic", "roles": roles})
+        else:
+            out.append({"server": surface.server, "status": "clean"})
+    return out
+
+
+def _rule_mcp_toxic_flow(ctx: Context, cfg: dict) -> RiskPath | None:
+    """MEDIUM (RISK-22, F-146/W2.4): a single MCP server's own tool set holds all
+    three roles of a confused-deputy chain — untrusted-input, sensitive-read, and
+    egress — co-resident on that ONE server.
+
+    See the section docstring above for the classification approach, the source
+    (config-embedded mcp.servers.<name>.tools only, always completeness="full"
+    today), and the completeness contract (silent on anything below "full").
+
+    Fires only when _mcp_toxic_flow_candidates names a server "toxic" — i.e. all
+    three roles are positively identified among that server's OWN declared tools.
+    Deterministic pick when more than one server qualifies: sorted by server name,
+    not dict iteration order (which follows the config author's key order, not a
+    property of the finding).
+    """
+    hits = [c for c in _mcp_toxic_flow_candidates(cfg) if c["status"] == "toxic"]
+    if not hits:
+        return None
+    hit = sorted(hits, key=lambda c: c["server"])[0]
+    server, roles = hit["server"], hit["roles"]
+    input_tool = sorted(roles["untrusted-input"])[0]
+    sensitive_tool = sorted(roles["sensitive-read"])[0]
+    egress_tool = sorted(roles["egress"])[0]
+    return RiskPath(
+        id="RISK-22",
+        severity=MEDIUM,
+        title="MCP server's own tool set spans a toxic flow (input -> sensitive -> egress)",
+        chain=[
+            f"{server}.{input_tool} (untrusted input)",
+            f"{server}.{sensitive_tool} (sensitive read)",
+            f"{server}.{egress_tool} (egress)",
+        ],
+        why=(
+            f"The MCP server '{server}' declares tools spanning all three roles of a "
+            "confused-deputy chain in its own tool set: an untrusted-input tool "
+            f"('{input_tool}'), a sensitive-read tool ('{sensitive_tool}'), and an "
+            f"egress tool ('{egress_tool}'). None of these tools is individually "
+            "dangerous, and no exploit is proven here — this is a PRECONDITION, not "
+            "an incident. But because all three are co-resident on one server, "
+            "content read by the input tool could steer the model into misusing the "
+            "other two for exfiltration, without leaving this server's own tool "
+            "boundary."
+        ),
+        fix=(
+            f"Review whether '{server}' genuinely needs all three roles. If not, "
+            "split the server so untrusted-input, sensitive-read, and egress tools "
+            "are never declared by the same server, or gate the sensitive-read/"
+            "egress tools behind human approval (tools.exec.mode='ask') so an "
+            "injected instruction from the input tool cannot reach them unattended."
+        ),
+    )
+
+
 def risk_paths(ctx: Context, findings: list[Finding],
                 ignore: set[str] | None = None) -> list[RiskPath]:
     """Compute dangerous capability chains from config + existing findings.
@@ -1560,6 +1751,10 @@ def risk_paths(ctx: Context, findings: list[Finding],
         candidates.append(path)
 
     path = _rule_open_group_proven_blast(ctx, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_mcp_toxic_flow(ctx, cfg)
     if path:
         candidates.append(path)
 
