@@ -10,6 +10,7 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
 from .. import attest as _attest
+from .. import mcpsurface as _mcpsurface
 from .. import trajectory as _trajectory
 from ..catalog import (
     CRITICAL,
@@ -58,6 +59,7 @@ from ._content import (
 )
 from ._vet import (
     _PLUGIN_MANIFEST,
+    _run_content_ring,
     _VET_MERGE_RANK,
     _decoded_payloads,
     _locate_plugin_root,
@@ -1632,22 +1634,150 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
                 disp = r[len(_pfx) :] if r.startswith(_pfx) else r
                 axis = _mcp_reason_axis(r) or ("danger" if reason_status == FAIL else "build")
                 axis_reasons.setdefault(axis, []).append([reason_status, disp])
-        findings.append(
-            Finding(
-                id="MCP-VET",
-                title=sname,
-                severity=HIGH,
-                status=status,
-                detail=detail,
-                fix=fix,
-                framework="MCP Trust",
-                scored=False,
-                evidence=clean,
-                axis_reasons=axis_reasons,
-            )
+        finding = Finding(
+            id="MCP-VET",
+            title=sname,
+            severity=HIGH,
+            status=status,
+            detail=detail,
+            fix=fix,
+            framework="MCP Trust",
+            scored=False,
+            evidence=clean,
+            axis_reasons=axis_reasons,
         )
+        findings.append(_merge_mcp_surface_ring(sname, spec, finding))
 
     return findings
+
+
+# F-141 (W1.1): the vetted-surface analogue of _run_content_ring's use in vet_skill —
+# deliberately NOT a real filesystem path. The MCP surface being scanned is a synthetic
+# text rendering (mcpsurface.render_for_ring), never a directory on disk, so ctx.home is
+# pointed at a path guaranteed not to exist. That keeps filesystem-walking ring members
+# (e.g. B87 check_symlink_escape, which enumerates SKILL_DIRS/WORKSPACE_DIRS under
+# ctx.home) degrading to their own UNKNOWN rather than silently scanning whatever real
+# directory happened to occupy a reused path.
+_MCP_SURFACE_SENTINEL_HOME = Path("/nonexistent/clawseccheck-mcp-surface")
+
+# B88 (check_frontmatter_hygiene) WARNs whenever a "skill" text has no SKILL.md YAML
+# frontmatter block at all -- correct for a real skill (OpenClaw's loader silently
+# drops one without it), meaningless for an MCP tool surface, which was never a
+# SKILL.md and has no such concept. Left wired in, every single MCP server would
+# WARN "no SKILL.md frontmatter block found" unconditionally (verified: a
+# single-tool, entirely benign surface reproduces it) -- pure noise, not a detected
+# signal. Every OTHER ring member that reads frontmatter treats "no frontmatter
+# found" as skip-this-entry, not a finding (B89/B103), so this is the one exclusion
+# needed, not a broader pattern.
+_MCP_RING_SKIP_IDS = frozenset({"B88"})
+
+# B58 (check_unicode_obfuscation) has two tiers: a FAIL when a decode actually reveals a
+# concealed injection directive (high-value, kept), and a WARN when it merely finds a
+# raw character-level signal (bidi controls / invisible characters) with nothing decoded
+# behind it. That WARN tier reuses textnorm.obfuscation_signals()'s coarse bidi/invisible
+# detection -- precisely the signal _C038_BIDI_ORDERING_RE/_C038_BIDI_OVERRIDE_RE above
+# were hardened NOT to reuse raw, after three C-135 rounds proving it false-WARNs on
+# legitimate RTL-script tool descriptions (Hebrew/Arabic prose, isolate-wrapped LTR field
+# names). Reproduced end-to-end here too: tests/fixtures/clean_c038_mcp_benign_desc.json
+# now WARNs via the ring even though the C038 branch it was hardened for stays clean.
+# Confirmed against the mcptrustchecker corpus (tests/data/mcptrustchecker/) that this
+# WARN tier is never the sole detector for any case there -- every corpus case B58
+# contributes to is also independently caught by the C038 base check or B64 -- so
+# dropping it costs no measured recall. B58's FAIL tier (confirmed decoded injection) is
+# untouched and still merges normally.
+_MCP_RING_SKIP_STATUSES = {("B58", WARN)}
+
+
+def _merge_mcp_surface_ring(sname: str, spec: dict, finding: Finding) -> Finding:
+    """Fold SKILL_CONTENT_RING results for *sname*'s tool surface into *finding*.
+
+    Runs the ring against a synthetic Context carrying the rendered surface, same
+    mechanism vet_skill uses — but unlike vet_skill's own merge, this NEVER lets a ring
+    finding become the returned object. vet_mcp() returns one Finding PER SERVER, and
+    every other consumer (dossier.py's MCP-VET axis routing, cli.py's --vet-mcp
+    rendering) keys off `id == "MCP-VET"` / `scored=False` / `title == sname` for every
+    one of them. An earlier version here picked `max(pool, key=...)` as vet_skill does,
+    which — independent C-135 review confirmed end-to-end — silently DROPPED the base
+    verdict outright whenever it was PASS (only FAIL/WARN/coverage-gap ride
+    `.ring_findings`, so a promoted ring WARN left no trace the server was even vetted
+    for supply-chain risk), lost `.axis_reasons` (dossier's per-axis routing for MCP-VET
+    specifically), leaked `scored=True` from the ring finding, and replaced the
+    per-server title with a generic check title. Escalating THIS finding's status/detail
+    instead of swapping identity keeps every one of those contracts intact.
+
+    Only the config-embedded `spec["tools"]` manifest source is wired here —
+    `mcpsurface.from_trajectory`/`from_probe_json` have no natural input path through
+    `vet_mcp()` yet. A server with no declared tools list contributes nothing (not an
+    UNKNOWN downgrade of the base MCP-VET verdict — that verdict is about supply-chain/
+    launch risk, which stands on its own).
+    """
+    tools = spec.get("tools") if isinstance(spec, dict) else None
+    surface = _mcpsurface.from_tool_defs(sname, tools)
+    if surface is None:
+        return finding
+    rendered = _mcpsurface.render_for_ring(surface)
+    if not rendered:
+        return finding
+
+    ctx = Context(home=_MCP_SURFACE_SENTINEL_HOME)
+    ctx.installed_skills = rendered
+    ring = [
+        fx
+        for fx in _run_content_ring(ctx)
+        if fx.id not in _MCP_RING_SKIP_IDS and (fx.id, fx.status) not in _MCP_RING_SKIP_STATUSES
+    ]
+    if not ring and not surface.truncated:
+        return finding
+
+    worst_ring_status = max(
+        (fx.status for fx in ring), key=lambda s: _VET_MERGE_RANK.get(s, 0), default=PASS
+    )
+    if _VET_MERGE_RANK.get(worst_ring_status, 0) > _VET_MERGE_RANK.get(finding.status, 0):
+        # A ring signal outranks the base supply-chain verdict -- escalate status/detail
+        # but keep every other field (id/title/scored/framework) as the base MCP-VET's
+        # own. Also routed into .axis_reasons (danger, same fallback _mcp_reason_axis
+        # already uses for an unclassified FAIL) so dossier's per-axis routing sees the
+        # escalation even when the base finding already populated OTHER axes (build,
+        # connections, ...) -- _route_axis_reasons buckets each axis independently from
+        # its own .axis_reasons entries, never from the container's overall .status, so
+        # without this the escalation would move .status but land in no axis at all.
+        worst = next(fx for fx in ring if fx.status == worst_ring_status)
+        finding.status = worst_ring_status
+        finding.detail = (
+            f"{finding.detail}; " if finding.detail and finding.detail != "no supply-chain / trust risks detected" else ""
+        ) + f"declared tool description(s) matched a content-security signal: {worst.title}"
+        finding.axis_reasons.setdefault("danger", []).append(
+            [worst_ring_status, f"content-security signal in declared tool description(s): {worst.title}"]
+        )
+        # The base .fix ("no supply-chain signals" / a launch-spec remedy) reads as
+        # stale/contradictory once .status has moved off it -- append what to actually
+        # do about the escalation rather than leaving a clean-sounding fix on a WARN/FAIL.
+        finding.fix = (
+            f"{finding.fix} Also review this server's declared tool description(s) for "
+            "content-security signals (see the accompanying finding(s) below)."
+        )
+    finding.ring_findings = list(ring)
+    if surface.truncated:
+        finding.ring_findings.append(
+            Finding(
+                id="VET-COVERAGE",
+                title="Content-ring coverage",
+                severity=HIGH,
+                status=UNKNOWN,
+                detail=(
+                    f"MCP tool surface of server '{sname}' exceeded a scan cap (too many "
+                    "declared tools or parameters) — coverage is incomplete, so this is "
+                    "not a clean verdict."
+                ),
+                fix="Review this server's full declared tool list by hand.",
+                framework="MCP Trust",
+                scored=False,
+            )
+        )
+        if finding.status == PASS:
+            finding.status = UNKNOWN
+    finding.ctx = ctx
+    return finding
 
 
 def _mcp_has_tool_restrictions(spec: dict) -> bool:
