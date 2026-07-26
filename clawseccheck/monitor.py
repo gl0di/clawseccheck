@@ -32,7 +32,16 @@ def _ignore_hash(home: Path) -> str:
         return ""
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
 
-SNAPSHOT_VERSION = 2
+# F-147 (Wave 3, rug-pull): bumped 2 -> 3 for the new OPTIONAL `mcp_detail.<server>.
+# surface_tool_sigs` key. As with the 1 -> 2 bump (see git history, v3.11.0's
+# _skill_sig str-vs-dict sniffing), this build carries no version-keyed migration
+# function — every dimension that reads a shape newer than what an old snapshot has
+# already degrades gracefully via a presence/type guard (`_both_dims`, and the
+# `surface_tool_sigs in ps and in cs` gate in `diff()`), so an old snapshot compared
+# against a new-format one simply skips the new comparison for one run rather than
+# misreading "key absent" as "new X appeared". SNAPSHOT_VERSION itself is a stamp for
+# humans/tests, not something diff() branches on.
+SNAPSHOT_VERSION = 3
 DEFAULT_STATE = "~/.clawseccheck/state.json"
 DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
 
@@ -808,6 +817,41 @@ def _extract_args_pkg(command: str, args) -> str:
     return ""
 
 
+def _tool_surface_hash(tool) -> str:
+    """F-147 (Wave 3, rug-pull): hash a mcpsurface.ToolDef's description + param
+    signature, so a description/param edit is visible even when nothing about a
+    server's own name/count changed. Params are sorted by name first so key
+    reordering in the source data never looks like a change.
+    """
+    parts = [str(getattr(tool, "description", "") or "")]
+    for p in sorted(getattr(tool, "params", None) or (),
+                     key=lambda x: str(getattr(x, "name", ""))):
+        parts.append(str(getattr(p, "name", "") or ""))
+        parts.append(str(getattr(p, "description", "") or ""))
+        parts.append(str(getattr(p, "default", "") or ""))
+        parts.append(str(getattr(p, "schema_type", "") or ""))
+    return _h("\x1f".join(parts))
+
+
+def _mcp_observed_surfaces(ctx) -> dict:
+    """F-147 (Wave 3, rug-pull): name -> mcpsurface.ToolSurface, from POST-HOC
+    trajectory evidence only (``mcpsurface.from_trajectory`` / B185's own source).
+
+    This is an OPTIONAL, best-effort source — a host with no trajectory sidecar (or
+    none carrying a ``context.compiled`` record) yields ``{}`` here, same as B185's own
+    "no evidence" case. Absence must never itself be treated as a signal by any caller:
+    see ``_mcp_detail_sig``'s ``surface_tool_sigs`` — a server present in
+    ``_mcp_servers`` but ABSENT from this dict simply gets no ``surface_tool_sigs`` key
+    at all, which is exactly the same "key absent = no-op for one run" idiom the
+    ``args_pkg`` (B-279) and channel-dimension (B-274) guards already use.
+    """
+    home = getattr(ctx, "home", None)
+    if not isinstance(home, Path):
+        return {}
+    from .mcpsurface import from_trajectory  # noqa: PLC0415 (leaf import, no cycle)
+    return {surface.server: surface for surface in from_trajectory(home)}
+
+
 def _mcp_detail_sig(ctx) -> dict:
     """name -> structured per-server snapshot for rug-pull (RP1-RP3) detection.
 
@@ -815,8 +859,20 @@ def _mcp_detail_sig(ctx) -> dict:
     oauth.scope) — confirmed real fields per recon docs §1/§4.  Env VALUES are never
     stored; only the key names are recorded (SECRET_KEY_RE keys get a ``*``-marker so
     their presence is visible but no value leaks).
+
+    F-147 (Wave 3, rug-pull): also folds in, per server, an OPTIONAL
+    ``surface_tool_sigs`` — ``{tool_name: hash(description + params)}`` observed via
+    trajectory sidecars (``_mcp_observed_surfaces``, post-hoc). This is a SEPARATE
+    dimension from ``tool_sigs`` above: ``tool_sigs`` hashes what the *config itself*
+    declares under ``mcp.servers.<name>.tools`` (rare in real configs); the trajectory
+    source is what the host has ACTUALLY observed being sent to the model, which
+    exists independently of whether the config embeds a tools list at all. It is
+    entirely optional — a server with no trajectory evidence for it simply gets no
+    ``surface_tool_sigs`` key, never a synthesized "missing" marker (see
+    ``diff()``'s RP6/RP7 block, which requires the key on BOTH sides before comparing).
     """
     from .checks import SECRET_KEY_RE, _mcp_servers  # noqa: PLC0415
+    observed_surfaces = _mcp_observed_surfaces(ctx)
     out: dict = {}
     for name, spec in (_mcp_servers(ctx.config) or {}).items():
         if not isinstance(spec, dict):
@@ -886,6 +942,18 @@ def _mcp_detail_sig(ctx) -> dict:
             "oauth_scope": oauth_scope,
             "tool_sigs": dict(sorted(tool_sigs.items())),
         }
+        # F-147 (Wave 3): OPTIONAL — only set when trajectory evidence exists for this
+        # server. Never set an empty dict / sentinel here: the key's mere PRESENCE is
+        # what diff() gates its RP6/RP7 comparison on, so a synthesized empty value
+        # would make "no evidence" indistinguishable from "observed zero tools".
+        surface = observed_surfaces.get(name)
+        if surface is not None and surface.tools:
+            surface_sigs = {
+                str(t.name): _tool_surface_hash(t)
+                for t in surface.tools if str(getattr(t, "name", "") or "").strip()
+            }
+            if surface_sigs:
+                out[name]["surface_tool_sigs"] = dict(sorted(surface_sigs.items()))
     return out
 
 
@@ -2156,6 +2224,45 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                                        f"MCP server '{name}' rug-pull RP5: tool description "
                                        f"changed for '{tool}' — re-review the server's "
                                        "declared affordances."))
+
+            # RP6/RP7 — F-147 (Wave 3): OBSERVED tool-surface drift, from trajectory
+            # evidence (mcpsurface.from_trajectory), DISTINCT from RP4/RP5 above (which
+            # read the config's own embedded `tools` spec — rarely present in real
+            # configs). This is the actual rug-pull signature the task exists to close:
+            # a server can keep a byte-identical launch spec (command/args/transport/
+            # url/env-keys all unchanged, so RP1-RP3 stay silent) while the tool
+            # descriptions it hands the model post-approval silently change.
+            #
+            # Gated on the `surface_tool_sigs` key existing on BOTH sides — same
+            # absent-key-is-a-no-op idiom as `args_pkg` (B-279) and every other
+            # optional-dimension guard in this module. This is not just upgrade
+            # safety: it is the acceptance criterion. A server for which the key is
+            # missing on EITHER side had no trajectory evidence available at that
+            # snapshot, so "the source only just became visible" must never be reread
+            # as "the surface changed" — comparing a real dict against a coerced {}
+            # would report every tool as newly appeared the moment trajectory data
+            # first showed up, which is exactly the false alarm this task forbids.
+            p_surf = ps.get("surface_tool_sigs")
+            c_surf = cs.get("surface_tool_sigs")
+            if isinstance(p_surf, dict) and isinstance(c_surf, dict):
+                for tool in sorted(set(c_surf) - set(p_surf)):
+                    alerts.append(("HIGH",
+                                   f"MCP server '{name}' rug-pull RP6: a new tool "
+                                   f"'{tool}' was observed in the tool surface actually "
+                                   "sent to the model (source: trajectory) — re-vet it."))
+                for tool in sorted(set(p_surf) & set(c_surf)):
+                    if p_surf[tool] != c_surf[tool]:
+                        alerts.append(("HIGH",
+                                       f"MCP server '{name}' rug-pull RP7: the tool "
+                                       f"surface actually sent to the model for '{tool}' "
+                                       "changed (source: trajectory) — the server's "
+                                       "declared description/parameters changed after "
+                                       "approval while its launch spec stayed identical; "
+                                       "re-review it."))
+                for tool in sorted(set(p_surf) - set(c_surf)):
+                    alerts.append(("INFO",
+                                   f"MCP server '{name}' tool '{tool}' no longer appears "
+                                   "in the observed tool surface (source: trajectory)."))
 
     _chan_pair = _both_dims(prev, curr, "channels")
     if compare_config and _chan_pair is not None:
