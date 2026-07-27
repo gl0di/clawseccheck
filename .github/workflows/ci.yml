@@ -33,7 +33,7 @@ jobs:
       - name: Lint
         run: ruff check .
       - name: Tests
-        run: python -m pytest -v
+        run: python -m pytest -q
       - name: Hunt advisory (ClawRange L2)
         run: |
           if [ -f "${{ github.workspace }}/../clawrange/hunt.py" ]; then

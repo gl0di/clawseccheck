@@ -657,59 +657,87 @@ def test_pop_truncates_a_leaked_inner_frame():
 
 
 # ── 6. adversarial signal timing ─────────────────────────────────────────────
+#
+# Runs in a SUBPROCESS, deliberately. This loop is designed to hammer the exact
+# boundary condition Defect E's fix (_release(), above) can only ever close to a
+# residual one pthread_sigmask()-syscall wide — closing it to zero would require
+# either weakening the restore contract test_handler_is_captured_once_at_
+# outermost_entry_and_restored_once_at_exit pins, or leaving a non-default handler
+# installed forever (see _release()'s own comment block). A macOS runner reproduced
+# exactly that residual after the Defect E fix landed: still crashing (uncaught
+# SIGALRM, "Alarm clock", exit 142) but far less often, and only inside this test —
+# never in 11,000+ other tests across the same runs. Isolating it means a recurrence
+# of that residual degrades this ONE test to a named, diagnosable failure instead of
+# taking down the other ~6,000 tests reported alongside it on that platform. The
+# child still asserts the exact same properties (fire rate, zero leaks) this test
+# has always pinned — subprocess isolation changes nothing about what is verified.
+_STRESS_CHILD_SRC = """
+import json
+import random
+import signal
+import time
 
-@posix_only
-def test_nested_cycles_under_adversarial_signal_timing_never_leak_a_frame():
-    """Many rapid nested enter/exit cycles at sub-millisecond budgets — the regime in
-    which the rejected predecessor leaked ~0.1% of its frames.
+import clawseccheck.scanbudget as sb
+from clawseccheck.scanbudget import ScanBudgetExceeded, check_deadline, owned_by
 
-    Budgets are drawn so that the great majority of rounds DO fire, and fire near the
-    enter/exit boundary rather than in the middle of the body, which is exactly where a
-    signal-timing race would show. Verified to be sensitive rather than vacuous: with
-    ``_PROTECTED_CODE`` emptied (the mutation the predecessor's suite survived), this
-    same loop leaks frames; unmutated it reports zero.
 
-    Deadlines are drawn as a FRACTION of this host's own measured cost for the busy
-    loop below, not a fixed microsecond constant. A fixed 30-400us range (this test's
-    original shape) assumes a roughly constant per-iteration Python cost and itimer
-    resolution across machines, which macOS CI disproved: the identical constants that
-    reliably fired on Linux only fired ~9% of the time there, starving the very signal
-    path this test exists to stress (a portability gap in the test's timing, not a
-    correctness bug — production's _release()/_push() were independently confirmed
-    fixed by the same CI run turning a process kill into this ordinary assertion).
-    Scaling to a per-host measurement keeps the same RATIO of "deadline vs. likely
-    work time" everywhere, regardless of CPU speed or itimer coarsening.
-    """
-    import random
+def _spin(n):
+    x = 0
+    for _ in range(n):
+        x += 1
 
+
+def _release_a_direct_rearm(previous):
+    # mirrors tests/test_scanbudget_reentrancy.py::_release_a_direct_rearm — a fresh
+    # subprocess can't import the test module, so this is deliberately duplicated,
+    # not shared.
+    prev_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+    try:
+        for _ in range(3):
+            signal.signal(signal.SIGALRM, signal.SIG_IGN)
+            signal.signal(signal.SIGALRM, previous)
+            if signal.SIGALRM not in signal.sigpending():
+                return
+        signal.signal(signal.SIGALRM, signal.SIG_IGN)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, prev_mask)
+
+
+def main():
     rng = random.Random(4321)
     original = signal.getsignal(signal.SIGALRM)
     rounds = 12000
     fires = 0
-    leaks: list[int] = []
-
-    def spin(n: int) -> None:
-        x = 0
-        for _ in range(n):
-            x += 1
+    leaks = []
 
     spin_hi = 6000
-    started = time.monotonic()
-    spin(spin_hi)
-    spin_cost_s = max(time.monotonic() - started, 1e-6)
+    # Warm up CPython 3.12's specializing adaptive interpreter (PEP 659) before
+    # measuring: a cold call is measurably slower than the steady-state cost the loop
+    # below actually pays, so calibrating off one cold sample skews deadlines too
+    # generous relative to real work time -- starving the fire rate. min() of several
+    # POST-warm-up samples is the standard robust estimator: scheduler noise can only
+    # inflate a sample, never push it below the true steady-state cost.
+    for _ in range(5):
+        _spin(spin_hi)
+    samples = []
+    for _ in range(7):
+        started = time.monotonic()
+        _spin(spin_hi)
+        samples.append(time.monotonic() - started)
+    spin_cost_s = max(min(samples), 1e-6)
 
     for i in range(rounds):
-        inner_frame: DeadlineFrame | None = None
+        inner_frame = None
         try:
             with check_deadline(rng.uniform(0.15, 0.6) * spin_cost_s):
                 try:
                     with check_deadline(rng.uniform(0.15, 0.6) * spin_cost_s) as inner_frame:
-                        spin(rng.randrange(0, spin_hi))
+                        _spin(rng.randrange(0, spin_hi))
                 except ScanBudgetExceeded as exc:
                     fires += 1
                     if not owned_by(exc, inner_frame):
                         raise
-                spin(rng.randrange(0, spin_hi))
+                _spin(rng.randrange(0, spin_hi))
         except ScanBudgetExceeded:
             fires += 1
         if sb._STACK:
@@ -719,11 +747,66 @@ def test_nested_cycles_under_adversarial_signal_timing_never_leak_a_frame():
             _release_a_direct_rearm(original)
             sb._PREV_HANDLER = sb._UNSET
 
+    print(json.dumps({"fires": fires, "rounds": rounds, "leaks": leaks[:10], "leak_count": len(leaks)}))
+
+
+main()
+"""
+
+
+@posix_only
+def test_nested_cycles_under_adversarial_signal_timing_never_leak_a_frame():
+    """Many rapid nested enter/exit cycles at sub-millisecond budgets — the regime in
+    which the rejected predecessor leaked ~0.1% of its frames. Runs in a subprocess;
+    see ``_STRESS_CHILD_SRC`` for why.
+
+    Budgets are drawn so that the great majority of rounds DO fire, and fire near the
+    enter/exit boundary rather than in the middle of the body, which is exactly where a
+    signal-timing race would show. Verified to be sensitive rather than vacuous: with
+    ``_PROTECTED_CODE`` emptied (the mutation the predecessor's suite survived), this
+    same loop leaks frames; unmutated it reports zero.
+
+    Deadlines are drawn as a FRACTION of this host's own measured cost for the busy
+    loop, not a fixed microsecond constant — see the child script's calibration
+    comment for why a single cold sample isn't a reliable per-host baseline either.
+    """
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _STRESS_CHILD_SRC],
+            capture_output=True, text=True, timeout=120, env=env, cwd=str(repo_root),
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(f"the child hung past its 120s budget: stdout={exc.stdout!r}")
+
+    if proc.returncode == -signal.SIGALRM:
+        pytest.fail(
+            "the child was killed by an uncaught SIGALRM — _release() handed the "
+            "disposition back with an alarm still owed by the kernel (Defect E's "
+            f"residual). stdout={proc.stdout!r} stderr={proc.stderr[-2000:]!r}"
+        )
+    assert proc.returncode == 0, (
+        f"child exited {proc.returncode}\n"
+        f"stdout={proc.stdout!r}\nstderr={proc.stderr[-2000:]!r}"
+    )
+
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    fires, rounds = result["fires"], result["rounds"]
     assert fires > rounds // 4, (
         f"only {fires} of {rounds} rounds actually hit their deadline — the loop is not "
         "exercising the signal path and proves nothing"
     )
-    assert leaks == [], f"{len(leaks)} leaked deadline frame(s) at rounds {leaks[:10]}"
+    assert result["leak_count"] == 0, (
+        f"{result['leak_count']} leaked deadline frame(s) at rounds {result['leaks']}"
+    )
 
 
 # ── 7. integration: the audit's own bound survives a nesting check ────────────
