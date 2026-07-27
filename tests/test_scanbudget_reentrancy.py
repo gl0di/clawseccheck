@@ -62,10 +62,13 @@ def _no_leaked_frame_or_alarm():
     leaked_frames = list(sb._STACK)
     leaked_alarm = signal.getitimer(signal.ITIMER_REAL)
     leaked_handler = signal.getsignal(signal.SIGALRM)
-    # repair first, assert second
+    # repair first, assert second. Uses the same discard-safe restore as _release() (see
+    # Defect E below) rather than a bare disarm-then-restore: a leaked test could leave a
+    # real alarm genuinely owed by the kernel, and handing it straight to `before` here
+    # would be this fixture's own repair path crashing the very run it's meant to protect.
     del sb._STACK[:]
     signal.setitimer(signal.ITIMER_REAL, 0)
-    signal.signal(signal.SIGALRM, before)
+    _release_a_direct_rearm(before)
     sb._PREV_HANDLER = sb._UNSET
     assert leaked_frames == [], f"leaked deadline frame(s): {leaked_frames}"
     assert leaked_alarm[0] == 0.0, f"leaked pending alarm: {leaked_alarm}"
@@ -301,10 +304,36 @@ def _guard_a_direct_rearm():
     macOS (`Alarm clock`, exit 142) — reproducible on ANY platform whenever OS signal
     delivery is slower than the disarm that follows, which is a coin flip, not a bug
     isolated to the direct-manipulation test itself. Returns the previous handler;
-    callers must disarm the real timer BEFORE restoring it (the same order
-    ``_release()`` uses), or the restore reopens the exact race this closes.
+    callers must disarm the real timer and then hand ``previous`` back through
+    :func:`_release_a_direct_rearm`, not a bare ``signal.signal(SIGALRM, previous)`` —
+    see Defect E below for why a naive restore reopens the same class of race this
+    closes, just moved to the very end of the ``finally`` block instead of the middle.
     """
     return signal.signal(signal.SIGALRM, lambda *_: None)
+
+
+def _release_a_direct_rearm(previous) -> None:
+    """Hand SIGALRM back to ``previous`` without leaking a kernel-owed alarm onto it.
+
+    Mirrors ``scanbudget._release()``'s Defect E fix: disarming a real itimer stops
+    FUTURE firings only, so if this test's own real arm already fired and the kernel
+    is holding an owed SIGALRM, a bare ``signal.signal(SIGALRM, previous)`` can hand
+    that debt straight to ``previous`` — usually ``SIG_DFL``, i.e. a process kill, at
+    the very moment this "cleanup" code runs. See the module docstring's Defect E note
+    and ``scanbudget.py``'s ``_release()`` for the full mechanism and the platform
+    difference (Linux flushes it inside the disarm syscall; macOS does not) that made
+    this reproduce in CI but never locally.
+    """
+    prev_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+    try:
+        for _ in range(3):
+            signal.signal(signal.SIGALRM, signal.SIG_IGN)
+            signal.signal(signal.SIGALRM, previous)
+            if signal.SIGALRM not in signal.sigpending():
+                return
+        signal.signal(signal.SIGALRM, signal.SIG_IGN)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, prev_mask)
 
 
 @posix_only
@@ -336,7 +365,7 @@ def test_rearm_of_an_expired_deadline_arms_a_minimum_slice_single_frame(monkeypa
         sb._rearm()
     finally:
         real_setitimer(signal.ITIMER_REAL, 0)   # disarm BEFORE restoring the handler
-        signal.signal(signal.SIGALRM, previous)
+        _release_a_direct_rearm(previous)
         del sb._STACK[:]
     assert calls, "the probe never ran — this test proves nothing"
     which, seconds = calls[-1]
@@ -366,7 +395,7 @@ def test_rearm_of_an_expired_outer_arms_a_minimum_slice_nested(monkeypatch):
         sb._rearm()
     finally:
         real_setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        _release_a_direct_rearm(previous)
         del sb._STACK[:]
     assert calls, "the probe never ran — this test proves nothing"
     which, seconds = calls[-1]
@@ -401,7 +430,7 @@ def test_min_arm_s_reads_back_as_a_pending_alarm_not_disarmed():
         )
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        _release_a_direct_rearm(previous)
 
 
 @posix_only
@@ -430,6 +459,75 @@ def test_an_expired_leaked_frame_does_not_clobber_a_later_budget():
             assert _armed() > 1.0, "a stale frame clobbered a fresh budget"
         # ...and the enclosing block reaps it on the way out (truncating pop)
     assert sb._STACK == []
+
+
+# ── 4b. Defect E: _release() must discard what the kernel still owes ──────────
+#
+# setitimer(ITIMER_REAL, 0) stops FUTURE firings; it does not retract a SIGALRM the
+# kernel has already generated. The predecessor of _release() restored the caller's
+# handler straight after disarming and relied on CPython's signal.signal() clearing its
+# own "tripped" flag — which only covers an expiry CPython's C trampoline already
+# received, not one the KERNEL still owes. That owed expiry lands afterwards, on
+# whatever disposition _release() just restored — SIG_DFL (terminate) in every real
+# clawseccheck run, since nothing else in this stdlib-only CLI ever touches SIGALRM.
+# Linux happens to flush the debt inside the disarm syscall itself (an implementation
+# property of do_setitimer, not a POSIX guarantee); macOS does not, and CI reproducibly
+# died with an uncaught "Alarm clock" (exit 142) in exactly this window, inside
+# ``test_nested_cycles_under_adversarial_signal_timing_never_leak_a_frame`` below.
+
+@posix_only
+def test_release_discards_an_alarm_the_kernel_already_owes():
+    """setitimer(0) does not retract an expiry the kernel has already generated. If
+    _release() hands the caller's handler back without discarding it, the next delivery
+    lands on that handler — for the SIG_DFL every real run has, killing the process.
+    Delivery is frozen with a mask so the race is observed, not gambled on."""
+    hits: list[int] = []
+
+    def mine(*_args):
+        hits.append(1)
+
+    original = signal.getsignal(signal.SIGALRM)
+    prev_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+    signal.signal(signal.SIGALRM, mine)
+    try:
+        block = check_deadline(5.0)
+        block.__enter__()
+        signal.setitimer(signal.ITIMER_REAL, 0.001)
+        _busy(0.03)                                       # the expiry is now OWED
+        assert signal.SIGALRM in signal.sigpending(), "setup failed: nothing is owed"
+        block.__exit__(None, None, None)                  # -> _release()
+        assert signal.SIGALRM not in signal.sigpending(), (
+            "_release() handed the handler back with an alarm still owed by the kernel"
+        )
+        assert signal.getsignal(signal.SIGALRM) is mine, "the restore contract still holds"
+        assert hits == [], "the owed alarm reached the caller's handler after all"
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, signal.SIG_IGN)
+        signal.pthread_sigmask(signal.SIG_SETMASK, prev_mask)
+        signal.signal(signal.SIGALRM, original)
+        del sb._STACK[:]
+        sb._PREV_HANDLER = sb._UNSET
+
+
+@posix_only
+def test_release_hands_the_handler_back_through_a_sig_ign_discard(monkeypatch):
+    """Mechanism-level: pins the actual sequence, so removing the SIG_IGN discard pass
+    reddens a deterministic test rather than only shifting the odds on the probabilistic
+    one above."""
+    seen: list[object] = []
+    real_signal = signal.signal
+    original = signal.getsignal(signal.SIGALRM)
+
+    def probe(sig, handler):
+        seen.append(handler)
+        return real_signal(sig, handler)
+
+    with check_deadline(5.0):
+        monkeypatch.setattr(signal, "signal", probe)   # patched INSIDE: _push's install
+    monkeypatch.undo()                                  # isn't recorded, only _release's
+    assert seen == [signal.SIG_IGN, original]
+    assert signal.getsignal(signal.SIGALRM) is original
 
 
 # ── 5. mechanism: the async-signal guard itself ──────────────────────────────
@@ -505,7 +603,7 @@ def test_fire_defers_instead_of_raising_into_the_modules_own_bookkeeping(monkeyp
         assert _armed() > 0.0, "the deferred expiry was dropped instead of re-armed"
     finally:
         real_setitimer(signal.ITIMER_REAL, 0)    # disarm BEFORE restoring the handler
-        signal.signal(signal.SIGALRM, previous)
+        _release_a_direct_rearm(previous)
         del sb._STACK[:]
 
 
@@ -602,7 +700,7 @@ def test_nested_cycles_under_adversarial_signal_timing_never_leak_a_frame():
             leaks.append(i)
             del sb._STACK[:]
             signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, original)
+            _release_a_direct_rearm(original)
             sb._PREV_HANDLER = sb._UNSET
 
     assert fires > rounds // 4, (

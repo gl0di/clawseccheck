@@ -198,9 +198,43 @@ def _rearm() -> None:
         signal.setitimer(signal.ITIMER_REAL, _arm_seconds(earliest, time.monotonic()))
 
 
+# ── handing SIGALRM back: the disarm does NOT retract what the kernel already owes ──
+#
+# Measured: block SIGALRM, arm 1ms, spin 20ms, then setitimer(ITIMER_REAL, 0) -> sigpending()
+# STILL reports SIGALRM. Disarming prevents FUTURE firings only; an expiry the kernel has
+# already generated stays owed and is delivered at the next opportunity, against whatever
+# disposition is installed AT THAT MOMENT.
+#
+# The predecessor of this function restored the caller's handler straight after the disarm
+# and relied on ``signal.signal()`` clearing the "tripped" flag. That flag is CPython's, not
+# the kernel's: it only covers an expiry CPython's C trampoline already received. One the
+# KERNEL still owes lands afterwards, on the just-restored disposition — which for every real
+# clawseccheck run is SIG_DFL, i.e. terminate. Linux happens to be immune (``do_setitimer``
+# holds the same siglock the timer callback needs, so the owed signal is flushed on the
+# return path of the disarm syscall itself): measured at 150,000 nested rounds under 12x
+# load, and again with the window widened 1000x to 2ms — zero late deliveries either way.
+# That immunity is a Linux kernel implementation property, not a POSIX guarantee, and macOS
+# CI reproducibly died with "Alarm clock" (exit 142) in exactly this window.
+#
+# The close is POSIX, not a narrower window: setting a disposition to SIG_IGN DISCARDS any
+# pending instance, blocked or not (verified). So hand back in three steps with delivery
+# blocked throughout, so the swap can never be observed half-done:
+#     block -> SIG_IGN (kernel discards the debt) -> the caller's handler -> restore the mask.
+# ``sigpending()`` then CONFIRMS the discard before unblocking. If a platform ever refuses to
+# discard, leaving SIG_IGN installed is a disclosed deviation from the restore contract and is
+# strictly better than killing the user's audit; today no known platform takes that branch.
+_ALRM_SET = frozenset({signal.SIGALRM}) if hasattr(signal, "SIGALRM") else frozenset()
+_CAN_MASK = hasattr(signal, "pthread_sigmask") and hasattr(signal, "sigpending")
+_DISCARD_PASSES = 3
+
+# Observability only: set when a platform refused to discard an owed SIGALRM and SIG_IGN was
+# left installed instead of a lethal SIG_DFL. Nothing reads it to decide anything.
+_UNRESTORED_HANDLER: object = _UNSET
+
+
 def _release() -> None:
-    """Outermost exit: disarm and hand the caller's ``SIGALRM`` handler back."""
-    global _PREV_HANDLER
+    """Outermost exit: disarm, discard what the kernel still owes, hand the handler back."""
+    global _PREV_HANDLER, _UNRESTORED_HANDLER
     signal.setitimer(signal.ITIMER_REAL, 0)
     previous = _PREV_HANDLER
     _PREV_HANDLER = _UNSET
@@ -208,16 +242,27 @@ def _release() -> None:
         return
     if previous is None:
         # None means the prior handler was installed from C and cannot be restored from
-        # Python (in practice unreachable here). SIG_DFL is the honest guess and is safe
-        # now: the timer is disarmed.
+        # Python (in practice unreachable here). SIG_DFL is the honest guess.
         previous = signal.SIG_DFL
-    # Disarming does not retract a SIGALRM the kernel has ALREADY delivered. CPython's
-    # ``signal.signal()`` clears that signal's pending "tripped" flag as part of
-    # installing the new handler (measured: 20,000 arm/disarm/restore rounds at a 200us
-    # slice delivered ZERO late calls to the restored handler), so this both restores the
-    # caller's handler and discards an expiry that arrived in the last instants of the
-    # block. Dropping it is correct: every block it could have belonged to has exited.
-    signal.signal(signal.SIGALRM, previous)
+    prev_mask = None
+    if _CAN_MASK:
+        try:
+            prev_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _ALRM_SET)
+        except (OSError, ValueError):          # pragma: no cover - defensive
+            prev_mask = None
+    try:
+        for _ in range(_DISCARD_PASSES):
+            signal.signal(signal.SIGALRM, signal.SIG_IGN)
+            signal.signal(signal.SIGALRM, previous)
+            if prev_mask is None or signal.SIGALRM not in signal.sigpending():
+                return
+        signal.signal(signal.SIGALRM, signal.SIG_IGN)
+        _UNRESTORED_HANDLER = previous
+    finally:
+        if prev_mask is not None:
+            # SIG_SETMASK, not SIG_UNBLOCK: a caller who had SIGALRM blocked for their own
+            # reasons must get their mask back exactly, not merely unblocked.
+            signal.pthread_sigmask(signal.SIG_SETMASK, prev_mask)
 
 
 def _blame() -> DeadlineFrame | None:
