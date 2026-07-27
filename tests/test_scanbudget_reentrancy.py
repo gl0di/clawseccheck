@@ -711,47 +711,63 @@ def main():
     leaks = []
 
     spin_hi = 6000
-    # Warm up CPython 3.12's specializing adaptive interpreter (PEP 659) before
-    # measuring: a cold call is measurably slower than the steady-state cost the loop
-    # below actually pays, so calibrating off a cold sample skews deadlines too
-    # generous relative to real work time -- starving the fire rate. min() of several
-    # POST-warm-up samples is the standard robust estimator: scheduler noise can only
-    # inflate a sample, never push it below the true steady-state cost. Even so, macOS
-    # CI proved this calibration alone isn't enough margin on its own -- two rounds of
-    # widening the warm-up/sample count still undercounted fires there, evidence that
-    # host-to-host and even within-host timing variance is bigger than one measurement
-    # can safely predict for 12,000 rounds. Deadlines below are therefore also skewed
-    # deliberately SHORT relative to the measured cost (a low fraction range), so the
-    # test stays sensitive even when the calibration itself is somewhat wrong.
-    for _ in range(10):
+    for _ in range(5):
         _spin(spin_hi)
     samples = []
-    for _ in range(15):
+    for _ in range(7):
         started = time.monotonic()
         _spin(spin_hi)
         samples.append(time.monotonic() - started)
     spin_cost_s = max(min(samples), 1e-6)
 
+    # Three rounds of static calibration (a cold sample; more warm-up + samples;
+    # deadlines skewed shorter) each still under- or over-fired on macOS CI, by
+    # DIFFERENT amounts and in different directions -- evidence this is time-varying
+    # noise on that runner, not a fixed bias any single upfront measurement could
+    # correct for. Reacting to OBSERVED behavior instead of predicting it sidesteps
+    # that: every `_window` rounds, check the actual local fire rate and shrink the
+    # deadline fraction if it's running cold. This converges to a healthy rate
+    # regardless of what `spin_cost_s` turns out to be worth on this host, because it
+    # is closed-loop feedback rather than an open-loop guess -- and it bottoms out
+    # safely: once shrunk far enough, every deadline floors at scanbudget._MIN_ARM_S
+    # (the same fixed 100us floor _rearm() itself uses), at which point the fire rate
+    # depends only on whether spin(0..6000) exceeds 100us, true for a solid majority
+    # of draws on any real machine.
+    scale = 1.0
+    window = 300
+    window_fires = 0
+
     for i in range(rounds):
+        lo = 0.05 * scale * spin_cost_s
+        hi = max(0.3 * scale * spin_cost_s, lo * 2, 1e-6)
         inner_frame = None
+        fired = False
         try:
-            with check_deadline(rng.uniform(0.05, 0.3) * spin_cost_s):
+            with check_deadline(rng.uniform(lo, hi)):
                 try:
-                    with check_deadline(rng.uniform(0.05, 0.3) * spin_cost_s) as inner_frame:
+                    with check_deadline(rng.uniform(lo, hi)) as inner_frame:
                         _spin(rng.randrange(0, spin_hi))
                 except ScanBudgetExceeded as exc:
                     fires += 1
+                    fired = True
                     if not owned_by(exc, inner_frame):
                         raise
                 _spin(rng.randrange(0, spin_hi))
         except ScanBudgetExceeded:
             fires += 1
+            fired = True
+        if fired:
+            window_fires += 1
         if sb._STACK:
             leaks.append(i)
             del sb._STACK[:]
             signal.setitimer(signal.ITIMER_REAL, 0)
             _release_a_direct_rearm(original)
             sb._PREV_HANDLER = sb._UNSET
+        if (i + 1) % window == 0:
+            if window_fires / window < 0.5:
+                scale *= 0.5
+            window_fires = 0
 
     print(json.dumps({"fires": fires, "rounds": rounds, "leaks": leaks[:10], "leak_count": len(leaks)}))
 
@@ -772,9 +788,12 @@ def test_nested_cycles_under_adversarial_signal_timing_never_leak_a_frame():
     ``_PROTECTED_CODE`` emptied (the mutation the predecessor's suite survived), this
     same loop leaks frames; unmutated it reports zero.
 
-    Deadlines are drawn as a FRACTION of this host's own measured cost for the busy
-    loop, not a fixed microsecond constant — see the child script's calibration
-    comment for why a single cold sample isn't a reliable per-host baseline either.
+    Deadlines are drawn as a fraction of this host's own measured cost for the busy
+    loop, adapted with closed-loop feedback rather than trusted as a one-shot
+    prediction -- see the child script's calibration comment for why: three rounds
+    of a purely static calibration each still mis-fired on macOS CI, in different
+    directions, evidence of time-varying noise no single upfront measurement can
+    correct for.
 
     Retries the child, bounded, ONLY when it is killed by SIGALRM specifically — that
     is Defect E's disclosed residual (see ``_release()``'s comment: closed to one
