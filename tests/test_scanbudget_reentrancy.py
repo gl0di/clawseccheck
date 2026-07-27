@@ -287,34 +287,121 @@ def test_suppress_own_never_eats_an_unattributed_cooperative_raise():
 
 # ── 4. the expired-deadline re-arm (Defect C: BOTH nested and single-frame) ───
 
+def _guard_a_direct_rearm():
+    """Install a no-op SIGALRM handler so a direct, unprotected ``_rearm()``/``_fire()``
+    call below can arm a REAL itimer without risking a process kill.
+
+    Every real call path only ever reaches ``_rearm()`` from inside ``_push()``'s
+    installed-``_fire`` handler. A test that pokes ``_rearm()``/``_fire()`` directly
+    skips that install, so a genuinely armed ``_MIN_ARM_S`` (100us) itimer sits with
+    whatever the ambient default is — normally ``SIG_DFL``, whose action is to
+    terminate the process. That is not theoretical: three tests in this file did
+    exactly this and were confirmed, by local reproduction with injected scheduler
+    jitter, to crash the interpreter with the identical signature CI hit on
+    macOS (`Alarm clock`, exit 142) — reproducible on ANY platform whenever OS signal
+    delivery is slower than the disarm that follows, which is a coin flip, not a bug
+    isolated to the direct-manipulation test itself. Returns the previous handler;
+    callers must disarm the real timer BEFORE restoring it (the same order
+    ``_release()`` uses), or the restore reopens the exact race this closes.
+    """
+    return signal.signal(signal.SIGALRM, lambda *_: None)
+
+
 @posix_only
-def test_rearm_of_an_expired_deadline_arms_a_minimum_slice_single_frame():
+def test_rearm_of_an_expired_deadline_arms_a_minimum_slice_single_frame(monkeypatch):
     """The outermost/non-nested case — where the predecessor's version of this
-    guarantee was simply false, because that path disarmed instead of arming."""
+    guarantee was simply false, because that path disarmed instead of arming.
+
+    Calls ``_rearm()`` directly, bypassing ``_push()`` — see ``_guard_a_direct_rearm``
+    for why that needs a no-op handler. Asserts on what ``_rearm()`` REQUESTED (via a
+    pass-through probe) rather than only on the OS readback, because the readback
+    alone is jitter-sensitive (a correctly-armed sub-millisecond alarm can already
+    read back as fired-and-cleared on a loaded runner) — see
+    ``test_min_arm_s_reads_back_as_a_pending_alarm_not_disarmed`` for the readback
+    property itself, pinned separately with retries so it isn't coupled to this
+    test's crash-safety.
+    """
     expired = DeadlineFrame(time.monotonic() - 5.0, armed=True)
     sb._STACK.append(expired)
+    calls: list[tuple] = []
+    real_setitimer = signal.setitimer
+
+    def probe(which, seconds, *rest):
+        calls.append((which, seconds))
+        return real_setitimer(which, seconds, *rest)
+
+    previous = _guard_a_direct_rearm()
+    monkeypatch.setattr(signal, "setitimer", probe)
     try:
         sb._rearm()
-        armed = _armed()
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
+        real_setitimer(signal.ITIMER_REAL, 0)   # disarm BEFORE restoring the handler
+        signal.signal(signal.SIGALRM, previous)
         del sb._STACK[:]
-    assert armed > 0.0, "an expired deadline was DISARMED — that is the fail-open"
-    assert armed <= sb._MIN_ARM_S
+    assert calls, "the probe never ran — this test proves nothing"
+    which, seconds = calls[-1]
+    assert which == signal.ITIMER_REAL
+    assert seconds > 0.0, "an expired deadline was DISARMED — that is the fail-open"
+    assert seconds <= sb._MIN_ARM_S
 
 
 @posix_only
-def test_rearm_of_an_expired_outer_arms_a_minimum_slice_nested():
+def test_rearm_of_an_expired_outer_arms_a_minimum_slice_nested(monkeypatch):
+    """See the single-frame test above for the no-op-handler + request-probe rationale:
+    this also calls ``_rearm()`` directly, unprotected by ``_push``.
+    """
     expired_outer = DeadlineFrame(time.monotonic() - 5.0, armed=True)
     live_inner = DeadlineFrame(time.monotonic() + 30.0, armed=True)
     sb._STACK.extend([expired_outer, live_inner])
+    calls: list[tuple] = []
+    real_setitimer = signal.setitimer
+
+    def probe(which, seconds, *rest):
+        calls.append((which, seconds))
+        return real_setitimer(which, seconds, *rest)
+
+    previous = _guard_a_direct_rearm()
+    monkeypatch.setattr(signal, "setitimer", probe)
     try:
         sb._rearm()
-        armed = _armed()
+    finally:
+        real_setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        del sb._STACK[:]
+    assert calls, "the probe never ran — this test proves nothing"
+    which, seconds = calls[-1]
+    assert which == signal.ITIMER_REAL
+    assert 0.0 < seconds <= sb._MIN_ARM_S
+
+
+@posix_only
+def test_min_arm_s_reads_back_as_a_pending_alarm_not_disarmed():
+    """The floor ``_rearm()`` relies on to avoid the fail-open (``scanbudget.py:164-169``):
+    an arm of exactly ``_MIN_ARM_S`` must read back as pending, not ``(0.0, 0.0)`` — the
+    same shape ``setitimer(..., 0)`` (disarm) and "already fired" both report.
+
+    Real OS jitter can occasionally let even a correctly-armed sub-millisecond alarm
+    read back as already-gone, which is exactly why the two tests above assert on the
+    REQUEST rather than the readback. This test carries the readback property instead,
+    with a no-op handler (a real alarm here must never be allowed to reach the process
+    default action) and a best-of-N retry so a single unlucky sample can't redden it —
+    it only fails if the floor reads back as disarmed on every attempt.
+    """
+    previous = _guard_a_direct_rearm()
+    try:
+        for _ in range(20):
+            signal.setitimer(signal.ITIMER_REAL, sb._MIN_ARM_S)
+            remaining = signal.getitimer(signal.ITIMER_REAL)[0]
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            if remaining > 0.0:
+                return
+        pytest.fail(
+            f"_MIN_ARM_S ({sb._MIN_ARM_S}) read back as disarmed on every one of 20 "
+            "attempts — it is no longer large enough to avoid the fail-open"
+        )
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
-        del sb._STACK[:]
-    assert 0.0 < armed <= sb._MIN_ARM_S
+        signal.signal(signal.SIGALRM, previous)
 
 
 @posix_only
@@ -386,7 +473,16 @@ def test_in_bookkeeping_sees_a_protected_caller_through_an_unprotected_frame(mon
 @posix_only
 def test_fire_defers_instead_of_raising_into_the_modules_own_bookkeeping(monkeypatch):
     """Directly: hand ``_fire`` a frame belonging to the bookkeeping and a genuinely
-    due deadline. It must record nothing and raise nothing."""
+    due deadline. It must record nothing and raise nothing.
+
+    The ``with check_deadline(5.0):`` block below has already exited by the time
+    ``sb._fire(...)`` is called, so ``_release()`` has restored SIGALRM to whatever
+    the ambient default is — this call arms a REAL ``_MIN_ARM_S`` itimer (the
+    deferral branch at ``scanbudget.py:315``, since ``_STACK`` is non-empty) with no
+    handler protecting it unless one is installed first. See
+    ``_guard_a_direct_rearm``: confirmed by local reproduction to crash the
+    interpreter with CI's exact `Alarm clock` signature otherwise.
+    """
     captured: list[object] = []
     real_setitimer = signal.setitimer
 
@@ -402,12 +498,14 @@ def test_fire_defers_instead_of_raising_into_the_modules_own_bookkeeping(monkeyp
 
     due = DeadlineFrame(time.monotonic() - 1.0, armed=True)
     sb._STACK.append(due)
+    previous = _guard_a_direct_rearm()
     try:
         sb._fire(signal.SIGALRM, captured[0])    # must NOT raise
         assert due.delivered is False, "the expiry was consumed inside the bookkeeping"
         assert _armed() > 0.0, "the deferred expiry was dropped instead of re-armed"
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
+        real_setitimer(signal.ITIMER_REAL, 0)    # disarm BEFORE restoring the handler
+        signal.signal(signal.SIGALRM, previous)
         del sb._STACK[:]
 
 
