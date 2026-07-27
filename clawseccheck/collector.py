@@ -1,7 +1,14 @@
-"""Read-only collection of OpenClaw config + bootstrap files.
+"""Read-only collection of OpenClaw config, bootstrap files, and related host artifacts.
 
-Reads ONLY: ~/.openclaw/openclaw.json and workspace bootstrap markdown files.
-No network. No writes. Pure stdlib.
+This module never writes, never makes a network call, and imports nothing beyond the
+stdlib — but "reads only config and bootstrap files" undersells its real scope, which
+every check needs to draw on. The ``LIMIT_DOMAIN_*`` constants below name every domain
+it reads from: ``~/.openclaw/openclaw.json``, workspace bootstrap markdown, installed
+skill/plugin text, the cron job store, exec-approvals state, the OpenClaw dotenv files
+and systemd ``EnvironmentFile=`` lines, subagent-run and audit-event trails. Each read
+is bounded (size caps, no execution of anything read) — see the individual
+``_collect_*`` functions and ``SECURITY_MODEL.md`` for the full, itemized capability
+surface. No network. No writes. Pure stdlib.
 """
 from __future__ import annotations
 

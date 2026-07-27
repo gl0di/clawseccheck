@@ -813,7 +813,8 @@ class TestVoiceIsCalmNotAlarmist:
 # ─────────────────────────────────────────────────────────────────────────────
 
 HTML_FOOTER_DISCLAIMER = (
-    "Generated locally by ClawSecCheck · read-only · this report never leaves your machine"
+    "Generated locally by ClawSecCheck · read-only against your OpenClaw config · "
+    "this report never leaves your machine"
 )
 
 

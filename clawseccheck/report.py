@@ -2612,7 +2612,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
         {nav_html}
         {findings_html}
 
-        <footer class="footer">Generated locally by ClawSecCheck · read-only · this report never leaves your machine</footer>
+        <footer class="footer">Generated locally by ClawSecCheck · read-only against your OpenClaw config · this report never leaves your machine</footer>
     </main>
 </body>
 </html>'''

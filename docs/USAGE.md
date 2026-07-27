@@ -3,10 +3,16 @@
 This is the full user guide: every install path, flag, recipe, and trust
 detail. The short version lives in the [README](../README.md).
 
-Everything below is **local and read-only against your OpenClaw setup** —
-nothing here ever changes your config, and the scanner itself makes no network
-calls. (When you run it through OpenClaw chat, the report text becomes part of
-your conversation and is handled by the model provider your agent already uses.)
+Everything below is **local against your OpenClaw setup**, and the scanner
+itself makes no network calls. Reading goes beyond just the config file — see
+["trust no one"](#important--trust-no-one-including-this-skill) below for the
+full read scope. Writing is narrow: nothing here changes your OpenClaw config
+itself, with exactly one named, opt-in, confirmation-gated exception
+(`--apply-ignore-proposals`, covered where it's introduced below); every other
+write goes to ClawSecCheck's own files, noted inline as each flag is
+introduced. (When you run it through OpenClaw chat, the report text becomes
+part of your conversation and is handled by the model provider your agent
+already uses.)
 
 ## Install & run
 
@@ -99,17 +105,24 @@ The recommendations are driven by your actual results — unvetted third-party s
 `--vet`; no monitoring detected surfaces `--monitor`; trifecta exposure surfaces the live
 injection tests; and so on. Every suggestion is a further **check** — never remediation.
 
-**ClawSecCheck is reports-only: it never fixes, suggests fixes, or changes your config.**
-The human report states what is wrong and why; acting on it is yours. For machine consumers,
-each finding still carries structured `"fix"`/`"remediation"` data in `--json` and SARIF —
-data for your own tooling, not something ClawSecCheck renders or offers.
+**ClawSecCheck is reports-only: it never fixes, suggests fixes, or changes your
+OpenClaw config.** The human report states what is wrong and why; acting on it
+is yours. For machine consumers, each finding still carries structured
+`"fix"`/`"remediation"` data in `--json` and SARIF — data for your own
+tooling, not something ClawSecCheck renders or offers. (The one exception to
+"never changes" anything in your OpenClaw home is `--apply-ignore-proposals`,
+which is not a fix — it only appends previously-proposed entries to
+ClawSecCheck's own suppression file there, opt-in and confirmation-gated; see
+below.)
 
 ## Recipes / common prompts
 
 Most people never type a flag — you talk to your agent, it has the skill installed, and it runs
 the right command for you. Here are ready-to-say prompts for common goals: what to tell your
 agent, what happens, and (for the CLI-minded) the underlying command. Every recipe below is
-audit/report only — nothing here ever changes your config.
+audit/report only — nothing here ever changes your OpenClaw config. A few recipes write a
+local output file ClawSecCheck itself owns (a badge, a monitor snapshot) when you ask for
+one — called out in the table.
 
 (This is the human-facing cookbook. For the full agent-facing phrase-to-flag routing table the
 skill itself uses, see [`SKILL.md`](../SKILL.md#natural-language-to-tool-quick-map).)
@@ -208,13 +221,17 @@ ClawSecCheck score (kept deterministic). Disable with `--no-native`.
 ## Trust & provenance
 
 ClawSecCheck is **open source and zero-dependency (Python stdlib only)**. Its own checks are
-**read-only and offline** — they make **no network calls** and never touch your OpenClaw config.
-**The scanner itself makes no network calls.** Full read scope:
+**read-only and offline** — they make **no network calls** and never change your OpenClaw
+config. **The scanner itself makes no network calls.** Full read scope:
 
 - `~/.openclaw/openclaw.json` and workspace bootstrap files (`SOUL.md`, `AGENTS.md`, etc.)
 - text of installed skills/plugins (Python files are AST-parsed, never executed)
 - `~/.openclaw/logs/config-audit.jsonl` and `config-health.json` (config-log checks)
 - `~/.openclaw/agents/.../sessions/*.jsonl` (approval-policy posture)
+- the cron job store, the two global OpenClaw dotenv files, and OpenClaw-related systemd
+  user-unit environment lines
+- the ClawHub CLI's own token-store path — outside the OpenClaw home — for the B182
+  credential-hygiene check
 - host OS recon for IDS/FIM/EDR/firewall: existence of their config files and binaries on
   `PATH`, the text of a few known firewall config files (`/etc/ufw/ufw.conf`,
   `/etc/nftables.conf`, macOS `com.apple.alf.plist` — read for on/off and default outbound
@@ -222,13 +239,18 @@ ClawSecCheck is **open source and zero-dependency (Python stdlib only)**. Its ow
 - credential-store path-existence inventory: whether `.env`, SSH key dirs, keychain/keyring
   directories, and browser cookie stores **exist** near the agent home — contents never read.
 
+(`collector.py`'s `LIMIT_DOMAIN_*` constants name every domain above explicitly.)
+
 The only thing it writes by default is a one-line
 entry to a **private, owner-only** local score history (`~/.clawseccheck/history.jsonl`) so you can
 track your grade over time — opt out with `--no-history`. Everything else is written only when you
 ask: a report file (`--save`), the `--monitor` snapshot and change journal
 (`~/.clawseccheck/state.json`, `events.jsonl`), a badge (`--badge`), HTML/SARIF (`--html`/`--sarif`),
-a log (`--log`), and a small freshness ledger (`~/.clawseccheck/coverage.json`) recording when you
-last ran an active self-test (`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`).
+a log (`--log`), a small freshness ledger (`~/.clawseccheck/coverage.json`) recording when you
+last ran an active self-test (`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`), and —
+the one write that lands inside the audited OpenClaw home rather than under
+`~/.clawseccheck/` — `--apply-ignore-proposals`, opt-in and confirmation-gated, appending
+previously-proposed entries to `<home>/.clawseccheckignore` (never inventing one).
 
 The **only** external command it can run is your own, fixed and read-only:
 
@@ -521,7 +543,9 @@ Note that `--vet`'s exit code is a **separate** contract: it returns 1 on a
 
 ## More tools
 
-**Quick CLI reference** (every flag is local & read-only against your config):
+**Quick CLI reference** (every flag is local — no network — and none of them
+change your OpenClaw config; some write their own local output files when you
+ask, noted below):
 
 | Need | Command |
 |---|---|
@@ -790,10 +814,13 @@ hard false positives on real configs.
 - **May produce false positives and false negatives.** Evidence-gating keeps noise low,
   but heuristics can miss novel attack patterns and can misread edge-case configurations.
 - **Read scope is bounded:** config, bootstrap markdown, installed-skill text, OpenClaw log
-  files, agent session logs, host OS recon (security-tool paths, a few firewall config files,
-  proxy env-var names, and on Windows read-only registry queries), and credential-store path
-  presence — not an exhaustive scan of your filesystem, and credential-store contents are
-  never read.
+  files, agent session logs, the cron job store, the two global OpenClaw dotenv files,
+  OpenClaw-related systemd user-unit environment lines, host OS recon (security-tool paths,
+  a few firewall config files, proxy env-var names, and on Windows read-only registry
+  queries), the ClawHub CLI's own token-store path (outside the OpenClaw home, for the
+  B182 credential-hygiene check), and credential-store path presence elsewhere — not an
+  exhaustive scan of your filesystem, and credential-store *contents* are never read.
+  `collector.py`'s `LIMIT_DOMAIN_*` constants name every domain in full.
 - **UNKNOWN is not PASS.** Unreadable files or unparseable configs are reported as
   UNKNOWN and excluded from the score, never silently marked safe.
 - **Vetting the scanner itself** (`--vet` pointed at ClawSecCheck's own source) reports

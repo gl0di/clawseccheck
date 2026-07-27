@@ -3,7 +3,10 @@
 Exposed as the `clawseccheck` console script (see pyproject.toml), as `python -m clawseccheck`,
 and via the bundled skill entrypoint `python3 {baseDir}/audit.py`.
 
-Read-only with respect to OpenClaw config.
+Read-only with respect to OpenClaw config, with exactly one named, opt-in,
+confirmation-gated exception: --apply-ignore-proposals appends previously-proposed
+entries to <home>/.clawseccheckignore (see its own --help text) and never invents one.
+No other flag writes inside the audited OpenClaw home.
 Writes local ~/.clawseccheck score history by default; opt out with --no-history.
 C-251: --trend and --monitor are NOT suppressors of that write — they are the two modes
 that record a history point unconditionally, as part of their own job, so --no-history
@@ -990,8 +993,13 @@ def main(argv=None) -> int:
 
 
 def _main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="clawseccheck",
-                                description="ClawSecCheck OpenClaw security self-audit (read-only).")
+    p = argparse.ArgumentParser(
+        prog="clawseccheck",
+        description=(
+            "ClawSecCheck OpenClaw security self-audit — read-only with respect to your "
+            "OpenClaw config; see --apply-ignore-proposals below for the one named exception."
+        ),
+    )
     p.add_argument("--version", action="version",
                    version=f"%(prog)s {__version__} ({__released__})",
                    help="print version and exit")

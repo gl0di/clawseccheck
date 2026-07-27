@@ -12,7 +12,8 @@ section and the FAQ's
 
 ## Allowed behavior
 
-ClawSecCheck is a **local, read-only** audit tool. Its permitted operations are:
+ClawSecCheck is a **local, read-only-by-default** audit tool: every default and every
+flag but one only reads and reports. Its permitted operations are:
 
 - **Read** the OpenClaw config file (`~/.openclaw/openclaw.json` or the path given
   with `--home`).
@@ -22,13 +23,26 @@ ClawSecCheck is a **local, read-only** audit tool. Its permitted operations are:
   supply-chain vetting (`--vet`, `--vet-mcp`, B13).
 - **Read** selected memory or log file metadata (path, size, permissions) to assess
   data-at-rest exposure (B19).
+- **Read**, beyond config and bootstrap markdown, a bounded set of other OpenClaw-home
+  artifacts needed for specific checks: the cron job store (JSON and, where present,
+  its SQLite tables), the two global OpenClaw dotenv files, OpenClaw-related systemd
+  user-unit `Environment=`/`EnvironmentFile=` lines, session/audit log files, and the
+  plugin trust index. Also, for the ClawHub credential-hygiene check (B182), the
+  ClawHub CLI's own token-store path **outside** the OpenClaw home. Every domain this
+  reads from is named explicitly in `collector.py`'s `LIMIT_DOMAIN_*` constants.
 - **Build findings** from parsed config values and file metadata using deterministic,
   evidence-gated logic.
 - **Print** a structured report to stdout (text, JSON, SARIF, HTML, SVG badge).
 - **Write to disk** its own state under `~/.clawseccheck/`: a one-line score-history
   entry **by default** (opt out `--no-history`), and — only when you ask —
   `--save`, `--badge`, `--html`, `--sarif`, `--monitor` state, `--log`.
-  `--purge` deletes that store. It never writes your OpenClaw config.
+  `--purge` deletes that store.
+- **Write one specific file inside the audited home, opt-in and confirmation-gated:**
+  `--apply-ignore-proposals` appends entries to `<home>/.clawseccheckignore` — and only
+  entries a prior `--propose-ignore` run already proposed; it never invents one. This
+  is the sole exception to "never writes your OpenClaw config" elsewhere in this
+  document. Every other write stays under `~/.clawseccheck/` or a path named on the
+  command line.
 - **Run one fixed, read-only subprocess** — `openclaw security audit --json` — with
   a timeout, `capture_output=True`, and no `shell=True`, only when `--no-native` is
   not set.
@@ -45,7 +59,10 @@ introduced:
 - **Network access by default.** No HTTP requests, DNS lookups, socket connections, or
   telemetry. Network access is not a planned feature.
 - **Mutating OpenClaw config.** The tool must not write to `~/.openclaw/` or any
-  agent-managed path. The name promises a *check*.
+  agent-managed path, with exactly one named, opt-in exception:
+  `--apply-ignore-proposals` (confirmation-gated) appends previously-proposed entries
+  to `<home>/.clawseccheckignore` — see "Allowed behavior" above. No other command or
+  flag may write inside the audited home. The name promises a *check*.
 - **Printing secret values.** Config values that may contain credentials, tokens, or
   other secrets must be redacted via `logsafe.redact()` before appearing in any
   output channel (text, JSON, SARIF, HTML, SVG badge, log).
@@ -109,10 +126,13 @@ This section states, explicitly, everything ClawSecCheck's own process is capabl
 doing — so a reviewer can check the claim against the code rather than take it on faith.
 
 - **Read-only by default.** The default audit path (`collector.py`) opens files for
-  reading only: `~/.openclaw/openclaw.json`, workspace bootstrap markdown, installed
+  reading only — `~/.openclaw/openclaw.json`, workspace bootstrap markdown, installed
   skill/plugin text (including archive members it decompresses in memory to classify),
-  OpenClaw log files, and agent session logs. Nothing under this path is ever opened
-  for writing.
+  OpenClaw log files, agent session logs, the cron job store, the two global OpenClaw
+  dotenv files, OpenClaw-related systemd user-unit environment lines, and (for B182,
+  outside the OpenClaw home) the ClawHub CLI's token-store path. `collector.py`'s
+  `LIMIT_DOMAIN_*` constants name every domain this path reads from. Nothing under this
+  path is ever opened for writing.
 - **Stdlib-only, zero runtime dependencies.** There is no third-party package in the
   import graph of the shipped engine — nothing to audit in a dependency tree, nothing
   that can be substituted by a poisoned transitive package.
@@ -120,18 +140,22 @@ doing — so a reviewer can check the claim against the code rather than take it
   phone-home, no update check over the wire — not for scoring, not for the staleness
   notice (which reads only the local clock and an optional local hint file), not for
   anything. If a feature could exfiltrate, it does not exist in this codebase.
-- **All writes are confined to `~/.clawseccheck/`.** The one place ClawSecCheck writes
-  by default (a one-line score-history entry; opt out with `--no-history`) and the
-  places it writes only on explicit request (`--save`, `--monitor` state/journal,
-  `--badge`, `--html`, `--sarif`, `--log`) all live under that single owner-only
-  directory tree, or an explicit path the user names on the command line. `safeio.py`
-  enforces this at the filesystem-primitive level: directories are created mode `0700`
-  at creation time (no transient world-readable window from umask) and refused if they
-  turn out to be a symlink (`secure_dir`); files are opened with `O_NOFOLLOW` so a
-  planted symlink at the target path fails the open (`ELOOP`) instead of being followed,
-  and are created mode `0600` at creation time (`secure_write_text` / `secure_append_text`).
-  A hostile local process cannot pre-plant a symlink to turn a ClawSecCheck write into an
-  arbitrary-file overwrite.
+- **Almost all writes are confined to `~/.clawseccheck/`, with one named exception.**
+  The one place ClawSecCheck writes by default (a one-line score-history entry; opt out
+  with `--no-history`) and the places it writes only on explicit request (`--save`,
+  `--monitor` state/journal, `--badge`, `--html`, `--sarif`, `--log`) all live under
+  that single owner-only directory tree, or an explicit path the user names on the
+  command line. The sole exception is `--apply-ignore-proposals`, confirmation-gated
+  and opt-in, which appends previously-proposed entries to `<home>/.clawseccheckignore`
+  inside the audited OpenClaw home — see "Allowed behavior" above; no other flag
+  writes there. `safeio.py` enforces the confinement at the filesystem-primitive level
+  for every one of these writes: directories are created mode `0700` at creation time
+  (no transient world-readable window from umask) and refused if they turn out to be a
+  symlink (`secure_dir`); files are opened with `O_NOFOLLOW` so a planted symlink at the
+  target path fails the open (`ELOOP`) instead of being followed, and are created mode
+  `0600` at creation time (`secure_write_text` / `secure_append_text`). A hostile local
+  process cannot pre-plant a symlink to turn a ClawSecCheck write into an arbitrary-file
+  overwrite.
 - **The native OpenClaw CLI call is off by default and opt-in only by omission of a flag
   — the flag turns it OFF, not on.** `audit()` accepts `include_native`, and the CLI sets
   it to `not args.no_native`: the built-in `openclaw security audit --json` subprocess
@@ -153,18 +177,24 @@ doing — so a reviewer can check the claim against the code rather than take it
 ClawSecCheck does not sit behind a sandbox or policy-engine gate that decides, at
 runtime, whether a given read is allowed. It does not need one: being a **read-only
 auditor by construction** removes the class of risk such a gate would exist to contain.
-There is no code path anywhere in the shipped engine that writes to a file it did not
-open under `~/.clawseccheck/` (or a path the user explicitly named), and no code path
-that executes content it reads (skill/plugin source is parsed with the stdlib `ast`
-module or scanned by regex/lexical passes — never imported, called, or `exec()`'d; see
-"A note for scanners auditing ClawSecCheck's own source" below). Removing the capability
-at the source is a stronger guarantee than gating it at runtime, and is verifiable by
-reading `collector.py`, `safeio.py`, and `native.py` directly.
+Other than `--apply-ignore-proposals` (see "Allowed behavior" above), there is no code
+path anywhere in the shipped engine that writes to a file it did not open under
+`~/.clawseccheck/` (or a path the user explicitly named), and no code path that
+executes content it reads (skill/plugin source is parsed with the stdlib `ast` module
+or scanned by regex/lexical passes — never imported, called, or `exec()`'d; see "A note
+for scanners auditing ClawSecCheck's own source" below). Removing the capability at the
+source is a stronger guarantee than gating it at runtime, and is verifiable by reading
+`collector.py`, `safeio.py`, and `native.py` directly.
 
-**This is a doctrine statement about the future, not a description of a shipped
-feature:** if a fix/apply capability is ever built (there is no such mode today —
-ClawSecCheck reports only, never remediates), it would have to be introduced as a
-capability wholly separate from the audit path, and it would have to be:
+**`--apply-ignore-proposals` is that one shipped exception, and it is deliberately
+narrow: it never touches the audited OpenClaw config itself** — it only appends,
+opt-in and confirmation-gated, to ClawSecCheck's own suppression bookkeeping file, and
+only entries a prior `--propose-ignore` run already proposed; it invents nothing. The
+doctrine below is about a DIFFERENT, larger category that remains unshipped: a
+capability that would fix or change the audited OpenClaw setup itself (ClawSecCheck
+reports on that setup, never remediates it). If such a capability is ever built, it
+would have to be introduced wholly separate from the audit path, and it would have to
+be:
 
 - **opt-in** — never invoked as a side effect of running an audit;
 - **confirmation-gated** — the user affirmatively approves each mutating action, not a
@@ -307,7 +337,10 @@ This is ClawSecCheck's explicit statement of its own permission/capability surfa
 reviewer can check every clause below directly against the cited module:
 
 - It does **not** write outside `~/.clawseccheck/` or a path the user names on the
-  command line (`safeio.py`, `collector.py`).
+  command line (`safeio.py`, `baseline.py`, `cli.py`), except for one named, opt-in,
+  confirmation-gated case: `--apply-ignore-proposals` appends previously-proposed
+  entries to `<home>/.clawseccheckignore` inside the audited OpenClaw home. No other
+  write reaches there. (`collector.py` performs no writes at all — it is read-only.)
 - `--purge` deletes ClawSecCheck's own store files (a fixed filename list —
   history.jsonl, events.jsonl, state.json, coverage.json + lock sidecars), never
   recursive/glob, never outside `~/.clawseccheck/`.

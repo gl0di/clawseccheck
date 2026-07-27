@@ -164,9 +164,12 @@ score. To confirm what is suppressed, use `--show-suppressed` again.
 
 ## I get permission errors — what do I do?
 
-ClawSecCheck never changes your OpenClaw config or the files it audits — it only writes
-its own score history under `~/.clawseccheck/`. Permission errors mean the *audit* cannot
-read a file it needs to inspect.
+ClawSecCheck never changes your OpenClaw config, and by default only writes its own
+score history under `~/.clawseccheck/` — a few flags write other local files when you
+ask (`--save`, `--badge`, `--html`, `--sarif`, `--monitor`), and the one exception that
+touches the audited home itself is `--apply-ignore-proposals`, opt-in and
+confirmation-gated (see above). Permission errors mean the *audit* cannot read a file
+it needs to inspect.
 
 **Most common causes and fixes:**
 

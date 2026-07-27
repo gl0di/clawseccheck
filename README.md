@@ -31,9 +31,11 @@ agent against you.**
 
 ClawSecCheck is a **security check-up for your agent**. It examines your setup,
 grades it **A–F**, and explains — in plain language, right in your chat — what
-is risky and why. It only reports: it never changes anything, needs no API key,
-and the scanner itself makes **no network calls** — no telemetry, no uploads,
-ever.
+is risky and why. It reports, it doesn't remediate: it never touches your OpenClaw
+config, needs no API key, and the scanner itself makes **no network calls** — no
+telemetry, no uploads, ever. (One narrow, opt-in exception: `--apply-ignore-proposals`
+can append entries to its own suppression file — see
+[Safe to run](#-safe-to-run) below.)
 
 ## 🚀 Start in one minute — no terminal needed
 
@@ -119,10 +121,17 @@ tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)*
 ## 🔒 Safe to run
 
 The tool that audits your agent survives an audit itself: it is **read-only**
-with respect to your OpenClaw setup (it never touches your config, skills, or
-bootstrap files), its engine is **offline by design**, and it writes only its
-own local history under `~/.clawseccheck/` — removable any time by asking your
-agent to *"purge the clawseccheck data"*.
+with respect to your OpenClaw setup, its engine is **offline by design**, and
+by default it writes only its own local history under `~/.clawseccheck/` —
+removable any time by asking your agent to *"purge the clawseccheck data"*.
+A few flags write local files only when you explicitly ask for them
+(`--save`, `--badge`, `--html`, `--sarif`, `--monitor`, `--log`) — see the
+[User guide](docs/USAGE.md) for the full list. The one exception that touches
+the audited home itself is also opt-in and confirmation-gated:
+`--apply-ignore-proposals` can append entries — never invent them — to its
+own `.clawseccheckignore` suppression file there. See the
+[security model](SECURITY_MODEL.md) for the complete, itemized capability
+surface.
 
 One honest nuance: when you use it through OpenClaw chat, the report text
 becomes part of your conversation and is handled by whatever model provider
