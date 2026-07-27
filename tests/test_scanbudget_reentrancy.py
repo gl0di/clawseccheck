@@ -667,7 +667,18 @@ def test_nested_cycles_under_adversarial_signal_timing_never_leak_a_frame():
     enter/exit boundary rather than in the middle of the body, which is exactly where a
     signal-timing race would show. Verified to be sensitive rather than vacuous: with
     ``_PROTECTED_CODE`` emptied (the mutation the predecessor's suite survived), this
-    same loop reports ~30 leaked frames per 30k rounds; unmutated it reports zero.
+    same loop leaks frames; unmutated it reports zero.
+
+    Deadlines are drawn as a FRACTION of this host's own measured cost for the busy
+    loop below, not a fixed microsecond constant. A fixed 30-400us range (this test's
+    original shape) assumes a roughly constant per-iteration Python cost and itimer
+    resolution across machines, which macOS CI disproved: the identical constants that
+    reliably fired on Linux only fired ~9% of the time there, starving the very signal
+    path this test exists to stress (a portability gap in the test's timing, not a
+    correctness bug — production's _release()/_push() were independently confirmed
+    fixed by the same CI run turning a process kill into this ordinary assertion).
+    Scaling to a per-host measurement keeps the same RATIO of "deadline vs. likely
+    work time" everywhere, regardless of CPU speed or itimer coarsening.
     """
     import random
 
@@ -682,18 +693,23 @@ def test_nested_cycles_under_adversarial_signal_timing_never_leak_a_frame():
         for _ in range(n):
             x += 1
 
+    spin_hi = 6000
+    started = time.monotonic()
+    spin(spin_hi)
+    spin_cost_s = max(time.monotonic() - started, 1e-6)
+
     for i in range(rounds):
         inner_frame: DeadlineFrame | None = None
         try:
-            with check_deadline(rng.uniform(0.00003, 0.0004)):
+            with check_deadline(rng.uniform(0.15, 0.6) * spin_cost_s):
                 try:
-                    with check_deadline(rng.uniform(0.00003, 0.0004)) as inner_frame:
-                        spin(rng.randrange(0, 6000))
+                    with check_deadline(rng.uniform(0.15, 0.6) * spin_cost_s) as inner_frame:
+                        spin(rng.randrange(0, spin_hi))
                 except ScanBudgetExceeded as exc:
                     fires += 1
                     if not owned_by(exc, inner_frame):
                         raise
-                spin(rng.randrange(0, 6000))
+                spin(rng.randrange(0, spin_hi))
         except ScanBudgetExceeded:
             fires += 1
         if sb._STACK:
