@@ -199,6 +199,30 @@ def test_clean_plugin_never_carries_a_vet_coverage_finding(tmp_path):
     assert all(r.id != "VET-COVERAGE" for r in f.ring_findings)
 
 
+def test_budget_hit_reports_the_truncation_exactly_once(tmp_path, monkeypatch):
+    # C-307: pre-fix, a budget hit stated the SAME coverage-gap fact twice in the
+    # rendered evidence — once as a plain-text note (`notes` -> evidence) and once
+    # as the synthetic VET-COVERAGE finding folded into `subs` (-> evidence via the
+    # `actionable` list). One home now: the synthetic finding. Pin the count, not
+    # just presence, on both a distinctive shared phrase and the finding-count.
+    root = _clean_plugin(tmp_path)
+    monkeypatch.setattr("clawseccheck.checks._mcp.cpu_exceeded", lambda deadline: True)
+    f = vet_plugin(root, target_budget_s=0.001)
+
+    ev_text = "\n".join(f.evidence)
+    # This exact phrase appeared in BOTH the old note and the old finding detail —
+    # a real duplication marker, not an incidental substring.
+    phrase = "bundled skills, embedded MCP specs, or runtime JS/TS files"
+    assert ev_text.count(phrase) == 1, f.evidence
+    # Same fact, different angle: the coverage information rides on exactly one
+    # evidence line (the synthetic finding's own "STATUS: detail" line), never a
+    # second free-standing note alongside it.
+    coverage_lines = [e for e in f.evidence if "coverage is incomplete" in e]
+    assert len(coverage_lines) == 1, f.evidence
+    # And it is still there at all — dedup must never mean losing the disclosure.
+    assert "coverage is incomplete" in ev_text
+
+
 def test_budget_hit_dossier_profile_never_reads_clean(tmp_path, monkeypatch):
     # This pins the bug the docstring previously overclaimed being fixed: pre-fix, a
     # budget-truncated plugin's dossier profile graded N/A/UNKNOWN — indistinguishable

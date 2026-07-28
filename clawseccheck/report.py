@@ -833,11 +833,26 @@ def _skill_inventory(ctx) -> list[dict]:
             d = _sanitize(fx.detail) if fx.detail else ""
             if d and d not in reasons:
                 reasons.append(d)
+        shown_reasons = reasons[:3]
+        # C-307: the coverage-gap reason is STICKY — a ring that produced 3+ real
+        # findings before being cut short would otherwise push it out of the [:3]
+        # window purely by pool order, silently hiding "this scan was incomplete"
+        # from the row even though the row still carries an incomplete verdict.
+        # Two distinct sources land a VET-COVERAGE finding in `pool`: this frame's
+        # own `ring_gap` (appended just above) AND one `_run_content_ring` already
+        # folded into `ring` on its OWN internal truncation (checks/_vet.py) —
+        # either way, its reason must survive the [:3] window.
+        for fx in pool:
+            if fx.id != "VET-COVERAGE" or not fx.detail:
+                continue
+            cov_reason = _sanitize(fx.detail)
+            if cov_reason not in shown_reasons:
+                shown_reasons = [*shown_reasons[:2], cov_reason]
         out.append({
             "name": name,
             "verdict": _VET_VERDICT.get(primary.status, str(primary.status)),
             "status": primary.status if primary.status in (FAIL, WARN, PASS, UNKNOWN) else UNKNOWN,
-            "reasons": reasons[:3],
+            "reasons": shown_reasons,
         })
     return out
 

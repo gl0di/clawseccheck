@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
+from clawseccheck.catalog import FAIL, HIGH, PASS, UNKNOWN, WARN, Finding
+from clawseccheck.checks import coverage_gap_finding
 from clawseccheck.collector import (
     Context,
     _read_skill_text,
@@ -101,3 +102,43 @@ def test_a_budget_exhausted_before_the_base_check_is_still_unknown(monkeypatch):
     row = _skill_inventory(_ctx_for(MALICIOUS))[0]
     assert row["status"] == UNKNOWN
     assert any("budget exhausted" in r for r in row["reasons"])
+
+
+def test_coverage_gap_reason_survives_three_earlier_ring_reasons(tmp_path, monkeypatch):
+    """C-307: the coverage-gap reason is STICKY, not dependent on list position.
+
+    `_run_content_ring`'s OWN internal truncation (checks/_vet.py) appends its
+    synthetic coverage_gap_finding LAST, after every real check result it already
+    collected -- so a ring that produced 3+ actionable findings before running out
+    of budget puts the coverage-gap reason at position 4+ in `pool`. Pre-fix, the
+    bare `reasons[:3]` truncation silently dropped it whenever that happened,
+    hiding "this scan was incomplete" from the row purely because of pool order.
+    """
+    def _fake_ring(_ctx, *_a, **_kw):
+        return [
+            Finding("B1", "check one", HIGH, WARN, "ring reason one", "fix one",
+                    "Skill Trust", True),
+            Finding("B2", "check two", HIGH, WARN, "ring reason two", "fix two",
+                    "Skill Trust", True),
+            Finding("B3", "check three", HIGH, WARN, "ring reason three", "fix three",
+                    "Skill Trust", True),
+            coverage_gap_finding(
+                "content-ring coverage is incomplete: 2 of 9 content-security "
+                "check(s) did not run"
+            ),
+        ]
+
+    monkeypatch.setattr("clawseccheck.checks._run_content_ring", _fake_ring)
+
+    ctx = Context(home=tmp_path)
+    ctx.installed_skills = {"demo": "---\nname: demo\ndescription: d\n---\n\n# Demo\n"}
+    ctx.installed_skill_py = {"demo": []}
+    ctx.installed_skill_shell = {"demo": []}
+    ctx.installed_skill_js = {"demo": []}
+    ctx.installed_skill_dirs = {"demo": tmp_path}
+
+    row = _skill_inventory(ctx)[0]
+    assert len(row["reasons"]) <= 3
+    assert any("coverage is incomplete" in r for r in row["reasons"]), (
+        f"coverage-gap reason was pushed out by earlier ring reasons: {row['reasons']}"
+    )
