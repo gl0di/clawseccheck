@@ -607,6 +607,82 @@ def test_cli_json_includes_risk_paths(capsys, tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# B-355: --judged must carry the SAME risk_paths as plain --json on the same
+# config -- cli.py used to call render_judged_json() without threading the
+# already-computed `paths` value through, so --judged silently OMITTED the
+# risk_paths key entirely (not an empty list -- absent), even though the more
+# thorough judge-panel path is supposed to be a superset of --json, never a
+# subset. Point-fix regression, mirroring test_cli_json_includes_risk_paths
+# above on the exact same RISK-01/02/03-firing config.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_cli_judged_includes_risk_paths(capsys, tmp_path):
+    cfg = tmp_path / "openclaw.json"
+    cfg.write_text(json.dumps({
+        "channels": {"telegram": {"dmPolicy": "open", "groupPolicy": "open"}},
+        "tools": {"exec": {"security": "full"}},
+        "agents": {"defaults": {"sandbox": {"mode": "off"}}},
+    }))
+    # No real verdicts file needed -- --judged degrades gracefully to "" on a
+    # missing path (see test_cli_judged_flag_missing_file_still_renders_report
+    # in tests/test_adjudication.py), which is enough to exercise the render path.
+    rc = main(["--home", str(tmp_path), "--no-native",
+               "--judged", str(tmp_path / "no-verdicts-here.json")])
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert "risk_paths" in data, "--judged silently dropped risk_paths (B-355)"
+    assert len(data["risk_paths"]) > 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# B-355 general regression guard: --judged (and every other renderer that
+# claims to wrap the standard --json payload) must never be a SUBSET of plain
+# --json on the same run. This is deliberately mechanical rather than another
+# point-fix: it does not name risk_paths specifically, so it also catches a
+# NEW instance of the same starved-argument shape through a different key
+# introduced later, without needing a new test written for it.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Keys plain --json can legitimately carry that a wrapping renderer never
+# promises to reproduce verbatim (score/grade/findings ARE promised identical
+# by test_judged_never_changes_score_grade_or_findings in test_adjudication.py;
+# this set is for structurally-derived/non-comparable fields only).
+_JSON_KEYS_NOT_REQUIRED_DOWNSTREAM: frozenset[str] = frozenset()
+
+
+def test_cli_judged_carries_every_plain_json_top_level_key(capsys, tmp_path):
+    """--judged's payload must be a superset (never a subset) of plain --json's
+    top-level keys on the same config -- the general guard for B-355's bug
+    shape, not just its one instance.
+    """
+    cfg = tmp_path / "openclaw.json"
+    cfg.write_text(json.dumps({
+        "channels": {"telegram": {"dmPolicy": "open", "groupPolicy": "open"}},
+        "tools": {"exec": {"security": "full"}},
+        "agents": {"defaults": {"sandbox": {"mode": "off"}}},
+    }))
+
+    rc = main(["--home", str(tmp_path), "--no-native", "--json"])
+    assert rc == 0
+    plain = json.loads(capsys.readouterr().out)
+
+    rc = main(["--home", str(tmp_path), "--no-native",
+               "--judged", str(tmp_path / "no-verdicts-here.json")])
+    assert rc == 0
+    judged = json.loads(capsys.readouterr().out)
+
+    missing = (set(plain) - _JSON_KEYS_NOT_REQUIRED_DOWNSTREAM) - set(judged)
+    assert not missing, (
+        f"--judged is missing key(s) {sorted(missing)} that plain --json carries "
+        "on the identical config -- the more thorough judge-panel path must "
+        "never silently return less than the plain run (B-355 shape)."
+    )
+    # And the risk_paths payload itself must actually match, not merely be present.
+    assert judged["risk_paths"] == plain["risk_paths"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Score determinism: A-F score UNCHANGED whether or not risk is passed
 # ──────────────────────────────────────────────────────────────────────────────
 
