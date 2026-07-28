@@ -41,26 +41,65 @@ DEFAULT_AUDIT_BUDGET_S = 120.0
 #     10KB 0.03s · 50KB 0.20s · 100KB 0.52s · 250KB 2.80s · 500KB 10.62s · 1MB 41.23s   (CPU)
 #
 # ``collector._MAX_BYTES_PER_SKILL`` is 1_000_000, so a perfectly BENIGN skill at the legal
-# size cap already costs ~41 s, with up to another megabyte of Python source on its own axis.
-# Across the 201 real scanned targets in fixtures/ the median is 3 ms and p99 is 30 ms; the
-# real hostile `clawstealth` costs 7.93 s — i.e. LESS than a large benign skill. An earlier
-# 60 s ceiling was calibrated on the claim that a 6.6 MB benign skill cost 0.22 s; that was an
-# artifact — the skill was ClawSecCheck's own source, which `_is_own_source` short-circuits
-# before scanning anything (0.01 s). At 60 s the ceiling sat ~1.5x over a legal benign skill,
-# so a large-but-harmless skill would have been reported as unscanned; that is the false
-# positive this scanner may not have (§2, Golden Rule #5).
+# size cap already costs ~41 s — but that single-axis figure is INCOMPLETE: a skill also has
+# its OWN independent 1 MB caps on Python (`_MAX_PY_BYTES_PER_SKILL`), shell and JS source
+# (`read_skill_shell`/`read_skill_js` reuse the same constant), plus the ~500-file cap
+# (`_MAX_FILES_PER_SKILL`) — all FOUR axes are additive on one skill, and the number above was
+# never measured against that combined worst case.
 #
-# 300 s is ~7x the benign worst case idle. Headroom is what prevents the false positive, so
-# it has to survive a loaded machine too: measured, load inflates the cost ~2.6x (and inflates
-# CPU time just as much as wall — see cpu_deadline), which still leaves ~2.8x. Below roughly
-# 120 s the margin stops covering that, so do not lower this without re-measuring.
-DEFAULT_VET_TARGET_BUDGET_S = 300.0
+# Re-measured (2026-07-28) against a single skill that legally saturates all four axes AT
+# ONCE — 500 files (the file cap) split evenly across `.py`/`.sh`/`.js`/`.md`, each axis's own
+# collector landing just over its 1 MB cap — filled with genuinely benign, zero-finding prose
+# ("these helpers are shipped with this skill", repeated; contains no destination/URL, so it
+# never trips B156 or any other ring check — confirmed empty `ring findings: []`). Plain
+# comment-line filler UNDERSHOOTS the real cost badly and must not be used to calibrate this:
+# cost tracks MATCH DENSITY against a check's own trigger regex (e.g. B156's send-verb class
+# matches the ordinary word "shipped"), not prose "naturalness" — every match then rescans the
+# WHOLE blob for its defensive/heading context, so realistic technical prose is the expensive
+# shape, not padding. `_run_content_ring` alone (the thing this constant bounds) on that
+# skill:
+#
+#     Python 3.12.3 (this box):  204.0s CPU (208.5s wall)
+#     Python 3.9.25 (uv, CI floor): 238.2s CPU (238.8s wall)  — ~1.17x slower than 3.12 here,
+#                                    NOT the ~1.05x previously observed on other workloads;
+#                                    3.9-vs-3.12 slowdown is workload-dependent — re-measure it
+#                                    per workload, don't carry a prior ratio forward.
+#
+# (`check_installed_skills`, which vet_skill/vet_all always run before the ring and which this
+# constant does NOT bound, added a further ~2.4-3.7s CPU on the same skill — small next to the
+# ring, but note it is currently unbounded on this path.)
+#
+# benign_worst_case_s = 238.2 (the higher, 3.9, CPU figure for the ring alone — use the worse
+# of the two interpreter measurements, not the average). Headroom is what prevents the false
+# positive, so it has to survive a loaded machine too: load inflates CPU time ~2.6x (measured
+# previously — see cpu_deadline; not independently re-measured this round, reused as-is).
+# Minimum ceiling that survives that: 238.2 * 2.6 = ~619.3s. 900s leaves ~1.45x margin over
+# that inflated minimum (~280.7s of absolute buffer — a larger raw
+# buffer than the previous 300s ceiling had over ITS inflated minimum of 107.1s, even though
+# the ratio-over-idle is smaller: idle content this size is simply much more expensive now
+# that it is correctly measured). Do not lower this without re-measuring on a skill built the
+# same way (all four axes + file cap, "shipped"-dense benign prose, verified zero findings).
+DEFAULT_VET_TARGET_BUDGET_S = 900.0
 
 # The sweep ceiling stays WALL-CLOCK on purpose: it exists so a user is not left staring at a
 # hung terminal, and "how long have I waited" is wall time by definition. It is safe to keep
 # load-sensitive because it never moves a verdict — it only marks the targets it did not reach
 # as explicitly not-scanned.
-DEFAULT_VET_ALL_BUDGET_S = 600.0
+#
+# Raised from 600s in lock-step with DEFAULT_VET_TARGET_BUDGET_S going 300s -> 900s (see
+# that constant's calibration comment above). Left at 600s, a single maximal-legal-benign
+# target hitting its own new 900s per-target ceiling would alone exceed the WHOLE sweep
+# budget — vet_all only checks its wall deadline BETWEEN targets, so that one target runs
+# to its own ceiling uninterrupted, and every other target in the sweep would then read as
+# "not reached" (honest, per the F-148 design — never silently marked safe — but a sweep
+# that can be starved down to one target by the FIRST large-but-harmless skill it meets
+# defeats the point of a sweep). 1800s gives room for at least one full-cost target plus
+# meaningful headroom for the rest of a real fleet, whose median per-target cost is
+# milliseconds (see the ring calibration above). A batch containing several simultaneous
+# maximal-cost targets can still exhaust even this — that is accepted: the design already
+# degrades honestly (unreached targets are reported as such, kept out of the "safe" tally,
+# non-zero exit), never as a fabricated PASS.
+DEFAULT_VET_ALL_BUDGET_S = 1800.0
 
 
 class ScanBudgetExceeded(Exception):
@@ -579,8 +618,8 @@ def cpu_deadline(budget_s: float) -> float | None:
     CPU time inflates essentially identically — cache contention and frequency scaling make
     the same instructions cost more CPU-seconds. What keeps load from deciding a verdict is
     HEADROOM, not the choice of clock: see the calibration note on
-    ``DEFAULT_VET_TARGET_BUDGET_S``, where the ceiling sits ~7x over the benign worst case
-    idle and still ~2.8x after that measured inflation.
+    ``DEFAULT_VET_TARGET_BUDGET_S``, where the ceiling still leaves ~1.45x margin (~280.7s)
+    over the benign worst case AFTER applying this same measured inflation factor.
     """
     if budget_s and budget_s > 0:
         return time.process_time() + budget_s

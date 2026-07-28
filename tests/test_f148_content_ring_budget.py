@@ -1,10 +1,14 @@
 """The content ring runs outside run_all and used to be unbounded.
 
-Cost tracks INPUT SIZE, super-linearly — measured 10KB 0.03s, 100KB 0.52s, 500KB 10.6s,
-1MB 41.2s of CPU — so the expensive case is a large BENIGN skill at the legal
-`_MAX_BYTES_PER_SKILL` cap, not a hostile one (the real hostile fixture costs 7.93s). An
-earlier ceiling was calibrated the other way round, on a 6.6 MB skill that "cost 0.22s";
-that skill was the scanner's own source, which short-circuits before scanning anything.
+Cost tracks INPUT SIZE, super-linearly — measured (single-axis, `_MAX_BYTES_PER_SKILL`
+only) 10KB 0.03s, 100KB 0.52s, 500KB 10.6s, 1MB 41.2s of CPU — so the expensive case is a
+large BENIGN skill at the legal cap, not a hostile one (the real hostile fixture costs
+7.93s). An earlier ceiling was calibrated the other way round, on a 6.6 MB skill that "cost
+0.22s"; that skill was the scanner's own source, which short-circuits before scanning
+anything. The guard test below and scanbudget.py's calibration comment re-derive the actual
+ceiling against the COMBINED worst case across all four independent per-skill axes
+(content/Python/shell/JS) plus the file-count cap, which the single-axis figures above
+never covered on their own.
 
 These pin the properties that make the ceiling honest rather than merely fast: a normal vet
 is untouched, an exhausted budget is recorded instead of silently returning a clean scan,
@@ -64,15 +68,28 @@ def _skill_ctx(tmp_path, text: str = "# Test skill\n\nDoes a thing.\n") -> Conte
 def test_target_budget_keeps_measured_headroom_over_the_benign_worst_case():
     """The ceiling must not be lowered without re-measuring — that is how it broke once.
 
-    Ring cost tracks input size super-linearly (measured: 10KB 0.03s, 500KB 10.6s, 1MB 41.2s
-    of CPU), and `collector._MAX_BYTES_PER_SKILL` is 1_000_000 — so a perfectly BENIGN skill
-    at the legal cap is the expensive case, not a hostile one (the real `clawstealth` costs
-    7.93s). An earlier 60s ceiling sat ~1.5x over that and would have reported large harmless
-    skills as unscanned. Headroom must also survive a loaded machine: measured inflation is
-    ~2.6x, and it applies to CPU time as much as to wall time.
+    The original 41.2s figure only measured ONE of the four independent
+    byte/file caps a skill saturates (`collector._MAX_BYTES_PER_SKILL`); it never accounted
+    for the Python/shell/JS axes (`_MAX_PY_BYTES_PER_SKILL`, reused for shell and JS) or the
+    ~500-file cap (`_MAX_FILES_PER_SKILL`) being additive on ONE skill. Re-measured against a
+    single skill that legally saturates all four axes AT ONCE (500 files split across
+    `.py`/`.sh`/`.js`/`.md`, each axis landing just over its own 1 MB cap), filled with
+    genuinely benign, zero-finding content — NOT plain comment-line filler, which undershoots
+    badly: ring cost tracks MATCH DENSITY against a check's own trigger regex (e.g. B156's
+    send-verb class matches the ordinary word "shipped" — realistic technical prose repeating
+    it, e.g. "these helpers are shipped with this skill", is the expensive shape, since every
+    match rescans the whole blob for defensive/heading context; verified `ring findings: []`
+    on this fixture, so it is a true benign-but-expensive case, not a detection).
+
+    `_run_content_ring` alone (what this constant bounds) on that skill: 204.0s CPU on Python
+    3.12.3, 238.2s CPU on Python 3.9.25 (the CI floor) — the 3.9 slowdown here is ~1.17x, NOT
+    the ~1.05x previously observed on other workloads, confirming that ratio does not carry
+    across workloads. Headroom must also survive a loaded machine: measured inflation is
+    ~2.6x (reused from the prior measurement, not re-verified this round), and it applies to
+    CPU time as much as to wall time.
     """
-    benign_worst_case_s = 41.2   # 1 MB of benign content, the legal per-skill cap
-    load_inflation = 2.6         # measured, 24 competing processes on an 8-core box
+    benign_worst_case_s = 238.2  # the higher (3.9) CPU figure for the ring alone, all 4 axes
+    load_inflation = 2.6         # measured previously, 24 competing processes on an 8-core box
     assert DEFAULT_VET_TARGET_BUDGET_S >= benign_worst_case_s * load_inflation, (
         "the per-target ceiling no longer clears a legal-size benign skill under load; "
         "re-measure before changing it"
