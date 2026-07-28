@@ -1,6 +1,9 @@
-"""Guard 2/2 (B0, staged BEFORE the ``Finding.not_applicable`` migration): flipping a
-finding's (future) ``not_applicable`` flag must never move the score, the grade, or the
-``project()`` what-if projection -- by construction, not by convention.
+"""Guard 2/2: flipping a finding's ``not_applicable`` flag must never move the score,
+the grade, or the ``project()`` what-if projection -- by construction, not by
+convention. Staged BEFORE the migration, this file predicted its own update: the field
+landed via F-138/B1 (plumbing only -- no emitter sets it ``True`` yet; that starts with
+F-139/B2), and per this file's own original instructions, ``test_flip_is_a_real_no_op_today``
+below was updated in the SAME change that added the field, with zero other changes here.
 
 WHY THIS IS STRUCTURAL, NOT INCIDENTAL (see ``scoring.py:249-253``): ``compute()``
 already filters its scored set on ``f.scored``, ``f.status``, ``f.suppressed``, and
@@ -13,14 +16,15 @@ read it. This file makes that "provided" load-bearing, in two layers:
 1. VALUE-LEVEL (``test_*_neutral_on_the_corpus`` below): for every fixture in the real
    corpus, ``compute(findings, ctx) == compute([flip(f) for f in findings], ctx)``, and
    the same for ``project()``/``grade_for()``. ``flip()`` is
-   ``dataclasses.replace(f, not_applicable=False)`` once the field exists; TODAY, before
-   B2 adds it, ``Finding`` has no such field and that call would raise, so ``flip()``
-   detects the field's absence and falls back to a plain ``dataclasses.replace(f)`` (a
-   structural no-op copy). That makes this assertion trivially true right now (there is
-   nothing to flip yet) -- intentionally. Once ``Finding.not_applicable`` lands, ``flip``
-   starts doing real work with ZERO changes to this test file, and the assertion becomes
-   a genuine, load-bearing proof that the new field is inert to scoring for every shape
-   in the real fixture corpus, not just whatever the implementer happened to hand-check.
+   ``dataclasses.replace(f, not_applicable=False)`` now that the field exists (before
+   F-138/B1, ``Finding`` had no such field and that call would have raised, so ``flip()``
+   fell back to a plain ``dataclasses.replace(f)`` -- a structural no-op copy; that
+   fallback is now dead code kept only so this file needed zero other changes). Every
+   finding in the real corpus already has ``not_applicable=False`` (no emitter sets it
+   yet), so this remains a genuine, load-bearing proof that flipping the field is inert
+   to scoring for every shape in the real fixture corpus -- not a vacuous no-op, since
+   ``flip()`` now performs a real ``dataclasses.replace()`` call (and re-invokes
+   ``Finding.__post_init__``) on every single finding.
 
 2. SOURCE-LEVEL (``test_not_applicable_absent_from_scoring_engine`` below): the
    identifier ``not_applicable`` must appear ZERO times in the ``FAIL_CAPS`` /
@@ -48,16 +52,17 @@ from clawseccheck.catalog import Finding
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 _SCORING_PATH = Path(__file__).resolve().parent.parent / "clawseccheck" / "scoring.py"
 
-# True once Finding.not_applicable exists (B2+); False today. See module docstring.
+# True since Finding.not_applicable landed (F-138/B1). See module docstring.
 _HAS_NOT_APPLICABLE = "not_applicable" in {f.name for f in dataclasses.fields(Finding)}
 
 
 def _flip(f: Finding) -> Finding:
-    """``dataclasses.replace(f, not_applicable=False)`` once the field exists; a plain
-    structural copy (``dataclasses.replace(f)``) today, before it does. Same call site
-    either way -- this is the one place that needs to change, if anywhere, once B2
-    lands, and even then only to flip ``True`` cases meaningfully (this file's job is
-    to prove ``False`` is a no-op, which is the neutral/default value)."""
+    """``dataclasses.replace(f, not_applicable=False)`` now that the field exists; the
+    plain structural copy (``dataclasses.replace(f)``) fallback is dead code, kept only
+    so this file needed zero other changes when F-138/B1 landed the field. This is the
+    one place that would need to change, if anywhere, once F-139/B2 starts emitting
+    ``True`` (this file's job is to prove ``False`` is a no-op, which is the
+    neutral/default value)."""
     if _HAS_NOT_APPLICABLE:
         return dataclasses.replace(f, not_applicable=False)
     return dataclasses.replace(f)
@@ -92,14 +97,15 @@ def test_corpus_is_non_empty():
     assert len(CORPUS) >= 400, "expected the full fixtures/ corpus (480+ homes)"
 
 
-def test_flip_is_a_real_no_op_today():
-    """Documents the field's current absence directly, so a reader of a red run
-    immediately knows whether B2 has landed yet without inspecting catalog.py."""
-    assert _HAS_NOT_APPLICABLE is False, (
-        "Finding.not_applicable already exists -- _flip() now performs a REAL flip, "
-        "and the corpus tests below just became load-bearing (see module docstring). "
-        "If that's expected (B2 landed), this assertion should be updated/removed as "
-        "part of that same change; if not, something added the field prematurely."
+def test_field_has_landed_and_flip_now_does_real_work():
+    """Documents the field's presence directly, so a reader of a red run immediately
+    knows whether F-138/B1 has landed without inspecting catalog.py. This is the
+    inverse of this file's original pre-migration assertion (see module docstring) --
+    updated in the same change that added the field, as that assertion instructed."""
+    assert _HAS_NOT_APPLICABLE is True, (
+        "Finding.not_applicable is missing -- either F-138/B1 was reverted, or "
+        "catalog.Finding's fields were renamed. flip() would silently fall back to a "
+        "structural no-op copy and the corpus tests below would stop being load-bearing."
     )
 
 

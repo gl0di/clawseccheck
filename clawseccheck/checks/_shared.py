@@ -19,6 +19,7 @@ from ..catalog import (
 from ..collector import (
     Context,
     dig,
+    limit_hits_for,
 )
 # _escape_embedded_header_lines lives in collector.py (the sole legitimate emitter of
 # the "# file: <name>" header convention) — reused here so MCP tool descriptions get
@@ -580,6 +581,52 @@ def _config_unreadable(cid: str, ctx: Context) -> "Finding | None":
     )
 
 
+def _surface_absent(ctx: Context, *domains: str) -> bool:
+    """True ONLY when the auditor read the locus COMPLETELY, where this surface would be.
+
+    Never a claim that the check applies — only that the read was complete. F-138/B1's
+    ``Finding.not_applicable`` exists precisely so a migrating check can compute this
+    instead of hand-writing ``True`` in each "no X configured" branch: a shortened,
+    unreadable, or absent config automatically degrades the flag back to ordinary
+    UNKNOWN through ``__post_init__``, with no per-check effort.
+
+    CRITICAL — why ``config_found`` is required, not just ``not config_parse_error``:
+    ``collector.py``'s ``ctx.config_parse_error = ctx.config_found and not parsed_ok``
+    means that on a host where ``openclaw.json`` is ENTIRELY ABSENT, ``config_parse_error``
+    is ``False`` and ``ctx.config`` is ``{}``. Every "no X configured" branch would fire,
+    and the naive predicate ``not ctx.config_parse_error`` alone would wrongly mark ~25
+    checks "not applicable" on a plain non-OpenClaw machine — the exact lying PASS this
+    field exists to prevent, and it would smear ``report.py``'s honest non-OpenClaw
+    wording. Requiring ``config_found`` closes that hole.
+
+    ``limit_hits_for(ctx, *domains)`` deliberately INCLUDES untagged limit-hit entries
+    (Golden Rule #4 — an unknown scan-completeness signal must not resolve into a
+    convenient answer) — see its own docstring. Mirrors ``dossier.py``'s
+    ``_danger_coverage_gap``, which already does this reasoning for the Danger axis.
+
+    A check whose surface lives on DISK rather than in ``openclaw.json`` (e.g. the
+    installed-skill corpus) must ALSO check :func:`_skill_corpus_complete` (or the
+    equivalent per-collector completeness flag) — config-locus completeness alone does
+    not prove a disk-read locus was complete.
+    """
+    return (
+        getattr(ctx, "config_found", False)
+        and not getattr(ctx, "config_parse_error", False)
+        and not limit_hits_for(ctx, *domains)
+    )
+
+
+def _skill_corpus_complete(ctx: Context) -> bool:
+    """True when the installed-skill discovery walk was NOT capped or left partial.
+
+    The disk-locus counterpart to :func:`_surface_absent`'s config-locus check — a check
+    concluding "no installed skill has X" needs BOTH: the frontier walk actually finished
+    (not ``skills_frontier_partial``) and nothing was skipped by the hard cap
+    (``skills_capped_count == 0``). Either alone still leaves skills this audit never saw.
+    """
+    return not ctx.skills_frontier_partial and ctx.skills_capped_count == 0
+
+
 def _finding(
     cid,
     status,
@@ -590,6 +637,7 @@ def _finding(
     pass_confidence=None,
     severity=None,
     scored=None,
+    not_applicable=False,
 ) -> Finding:
     """*scored*: per-finding override of CheckMeta.scored, same shape as *severity*.
 
@@ -602,6 +650,9 @@ def _finding(
     CheckMeta stay scored=False (preserving the documented WARN/PASS non-scoring
     behavior) while the FAIL finding itself still participates. Defaults to
     CheckMeta.scored when omitted — every existing caller is unaffected.
+
+    *not_applicable* (F-138/B1): per-branch, same shape as *scored* — see
+    Finding.not_applicable. Defaults False; every existing caller is unaffected.
     """
     m = _meta(cid)
     return Finding(
@@ -616,6 +667,7 @@ def _finding(
         evidence or [],
         confidence=confidence or m.confidence,
         pass_confidence=pass_confidence,
+        not_applicable=not_applicable,
     )
 
 
@@ -1332,8 +1384,11 @@ _JSONL_SCAN_CAP = 1_000_000  # B-104: byte budget for tailing append-only JSONL 
 _MCP_REMOTE_TRANSPORTS = ("sse", "http", "streamable-http", "streamablehttp", "websocket", "ws")
 
 
-def _custom(cid, severity, status, detail, fix, ev=None) -> Finding:
-    """Build a finding with an explicit severity (for dynamic-severity checks)."""
+def _custom(cid, severity, status, detail, fix, ev=None, not_applicable=False) -> Finding:
+    """Build a finding with an explicit severity (for dynamic-severity checks).
+
+    *not_applicable* (F-138/B1): see Finding.not_applicable / _finding()'s docstring.
+    """
     m = BY_ID[cid]
     return Finding(
         m.id,
@@ -1346,6 +1401,7 @@ def _custom(cid, severity, status, detail, fix, ev=None) -> Finding:
         m.scored,
         ev or [],
         confidence=m.confidence,
+        not_applicable=not_applicable,
     )
 
 
