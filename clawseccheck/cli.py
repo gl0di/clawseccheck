@@ -1639,7 +1639,12 @@ def _main(argv=None) -> int:
                 verdicts_raw = Path(args.judged).expanduser().read_text(encoding="utf-8")
             except OSError:
                 verdicts_raw = ""
-        _emit(render_judged_json(ctx, findings, score, verdicts_raw=verdicts_raw))
+        # B-355: `paths` (the RISK-* attack-chain data, computed above) was never
+        # threaded through, so --judged silently omitted the risk_paths key entirely
+        # (not an empty list -- absent) even though plain --json on the same run
+        # carries it. Mirror the plain --json call site below (:~1737), which already
+        # passes risk=paths.
+        _emit(render_judged_json(ctx, findings, score, verdicts_raw=verdicts_raw, risk=paths))
         return 0
 
     if args.propose_ignore:
