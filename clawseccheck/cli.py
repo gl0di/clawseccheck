@@ -501,9 +501,24 @@ def _sweep_summary_lines(sweep: SkillSweep, ascii_only: bool = False) -> list[st
     verdict_w = max(len(_SWEEP_VERDICT[r[1]]) for r in results) + 1
     lines.append(f"  {'Skill':<{col_w}} {'Verdict':<{verdict_w}} Evidence items")
     lines.append(f"  {'-' * col_w} {'-' * verdict_w} --------------")
+    # C-307: a FAIL/WARN row whose OWN scan was also truncated used to render with
+    # the finding's row state only — "this verdict is based on an incomplete scan"
+    # stayed visible in the per-skill narration above but silently dropped out of
+    # this row. `row_status` above only demotes to TRUNCATED when the finding is
+    # NOT already FAIL/WARN (a real danger signal must never be buried), so recover
+    # the fact here instead, from `sweep.findings` (populated for every completed
+    # vet) — a marker suffix, not a change to `status` itself, since that value is
+    # load-bearing for the icon lookup and `sweep.counts()`'s tally.
+    findings_by_name = dict(sweep.findings)
+    partial_marker = "[~ partial: coverage incomplete]" if ascii_only else "⏳ partial: coverage incomplete"
     for name, status, ev_count in results:
+        marker = ""
+        if status in ("FAIL", "WARN"):
+            f = findings_by_name.get(name)
+            if f is not None and _vet_coverage_incomplete(f):
+                marker = f"  {partial_marker}"
         lines.append(
-            f"  {name:<{col_w}} {icons[status]} {_SWEEP_VERDICT[status]:<{verdict_w}} {ev_count}"
+            f"  {name:<{col_w}} {icons[status]} {_SWEEP_VERDICT[status]:<{verdict_w}} {ev_count}{marker}"
         )
 
     # F-148: unscanned targets get their own tally bucket — folding them into

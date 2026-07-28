@@ -546,15 +546,14 @@ def vet_plugin(
         )
 
     # F-148: honest degradation — never let a budget-truncated scan read as a clean
-    # PASS. Recorded as a coverage note (so it always reaches `evidence` below,
-    # regardless of the final status) and folded into the same UNKNOWN floor as a
-    # capped sweep (`truncated`).
+    # PASS, and never say so twice. This used to also push a plain-text note onto
+    # `notes` (which lands in `evidence` unconditionally) alongside the synthetic
+    # finding below — a reader of the rendered evidence saw the exact same fact
+    # phrased two different ways. The synthetic VET-COVERAGE finding is the single
+    # home for it now (C-307): it is the structured path dossier/adjudication
+    # consumers key off of (see the docstring contract), so the note is folded into
+    # its `detail` instead of existing as a separate evidence line.
     if budget_hit:
-        notes.append(
-            f"scan exhausted its {target_budget_s:g}s per-target time budget — one or "
-            "more bundled skills, embedded MCP specs, or runtime JS/TS files were NOT "
-            "scanned; treat this plugin as unverified, not clean"
-        )
         # Docstring contract: fold in the same synthetic VET-COVERAGE finding
         # vet_skill's own content-ring truncation uses (checks/_vet.py's
         # coverage_gap_finding / _run_content_ring), so a budget-truncated plugin
@@ -563,10 +562,11 @@ def vet_plugin(
         # instead of the truncation only ever showing up as a cosmetic note.
         subs.append(
             coverage_gap_finding(
-                f"plugin scan coverage is incomplete: the scan ended early (the "
-                f"{target_budget_s:g}s per-target CPU budget, or a dispatched engine "
-                "hitting its own limit) before one or more bundled "
-                "skills, embedded MCP specs, or runtime JS/TS files could be swept"
+                f"plugin scan coverage is incomplete: the scan exhausted its "
+                f"{target_budget_s:g}s per-target time budget (or a dispatched engine "
+                "hit its own limit) before one or more bundled skills, embedded MCP "
+                "specs, or runtime JS/TS files could be swept — treat this plugin as "
+                "unverified, not clean"
             )
         )
 

@@ -501,3 +501,50 @@ def test_quiet_line_reports_partial_and_skipped_counts():
     line = _sweep_quiet_line(sweep)
     assert "1 partially scanned" in line
     assert "1 not scanned (budget exceeded)" in line
+
+
+def test_aggregate_table_marks_truncation_on_a_fail_row_too():
+    """C-307: a skill that was both partially scanned AND tripped a real FAIL/WARN
+    used to render in the aggregate table with the finding's row state ONLY — the
+    "this verdict is based on an incomplete scan" fact was visible in the per-skill
+    narration above the table but invisible in the row itself. `row_status` in
+    ``sweep_installed_skills`` deliberately keeps FAIL/WARN as the row status (a real
+    danger signal must never be demoted to TRUNCATED), so the table row must carry
+    BOTH facts some other way.
+    """
+    from clawseccheck.catalog import Finding
+    from clawseccheck.checks import coverage_gap_finding
+
+    danger = Finding(
+        "B99", "danger check", "CRITICAL", "FAIL",
+        "dangerous content found", "remove it", "Skill Trust", True,
+    )
+    # Mirrors vet_skill(): the coverage gap rides on ring_findings when a worse
+    # FAIL/WARN outranked it as the primary result (checks/_vet.py's merge rank).
+    danger.ring_findings = [coverage_gap_finding("content-ring coverage is incomplete: "
+                                                  "the per-target scan budget was exhausted")]
+
+    clean = Finding(
+        "B00", "clean check", "LOW", "PASS", "nothing found", "n/a", "Skill Trust", True,
+    )
+
+    sweep = SkillSweep(
+        home_dir=Path("/nonexistent"),
+        rows=[("danger-skill", "FAIL", 1), ("clean-skill", "PASS", 0)],
+        findings=[("danger-skill", danger), ("clean-skill", clean)],
+        truncated=True, worst="FAIL",
+    )
+    lines = _sweep_summary_lines(sweep)
+    danger_line = next(ln for ln in lines if "danger-skill" in ln)
+    clean_line = next(ln for ln in lines if "clean-skill" in ln)
+
+    # Both facts, same row: still DANGEROUS (the row status/icon/tally are untouched)
+    # AND flagged as a partial scan.
+    assert _SWEEP_VERDICT["FAIL"] in danger_line
+    assert "partial" in danger_line.lower()
+    # The clean, non-truncated row must NOT pick up the marker.
+    assert "partial" not in clean_line.lower()
+    # Tally logic itself is untouched by this presentation-only fix.
+    c = sweep.counts()
+    assert c["fails"] == 1
+    assert c["safe"] == 1
