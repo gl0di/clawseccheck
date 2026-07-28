@@ -24,6 +24,7 @@ from ..catalog import (
     Finding,
 )
 from ..collector import (
+    LIMIT_DOMAIN_CONFIG,
     Context,
     classify_bytes,
     dig,
@@ -53,6 +54,7 @@ from ._shared import (
     _mcp_servers,
     _mcp_url_is_local,
     _plugins,
+    _surface_absent,
 )
 from ._content import (
     _B63_SEND_VERB_RE,
@@ -1587,6 +1589,15 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
     """
     # Resolve servers to vet.
     servers: dict[str, dict] = {}
+    # F-139/B2: mirrors _surface_absent's config-locus reasoning for the standalone
+    # --vet-mcp path, which has no Context/LimitHit machinery of its own — only the
+    # "vet all servers from config at home" branch below can reach the final
+    # "if not servers:" case with a genuinely empty dict (see _load_mcp_spec_file:
+    # it returns None, never {}, so the target-is-a-file and target-is-a-name
+    # branches always short-circuit before reaching it), so only that branch sets
+    # these; both stay False everywhere else.
+    _vet_mcp_config_found = False
+    _vet_mcp_config_parse_error = False
 
     if target is not None:
         p = Path(str(target)).expanduser()
@@ -1647,10 +1658,14 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
         cfg_file = home_path / "openclaw.json"
         import json as _json
 
+        _vet_mcp_config_found = cfg_file.is_file()
         try:
             cfg = _json.loads(cfg_file.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, ValueError):
+        except OSError:
             cfg = {}
+        except ValueError:
+            cfg = {}
+            _vet_mcp_config_parse_error = _vet_mcp_config_found
         servers = _mcp_servers(cfg)
 
     if not servers:
@@ -1664,6 +1679,7 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
                 fix="Configure MCP servers under mcp.servers.<name> in openclaw.json.",
                 framework="MCP Trust",
                 scored=False,
+                not_applicable=_vet_mcp_config_found and not _vet_mcp_config_parse_error,
             )
         ]
 
@@ -1931,7 +1947,13 @@ def _mcp_has_tool_restrictions(spec: dict) -> bool:
 def check_mcp(ctx: Context) -> Finding:
     servers = _mcp_servers(ctx.config)
     if not servers:
-        return _finding("B15", UNKNOWN, "No MCP servers configured.", "—")
+        return _finding(
+            "B15",
+            UNKNOWN,
+            "No MCP servers configured.",
+            "—",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     names = ", ".join(list(servers)[:5])
     n = len(servers)
     if all(_mcp_has_tool_restrictions(spec) for spec in servers.values()):
@@ -3787,7 +3809,13 @@ def check_mcp_hardening(ctx: Context) -> Finding:
     """
     servers = _mcp_servers(ctx.config)
     if not servers:
-        return _finding("B24", UNKNOWN, "No MCP servers configured.", "—")
+        return _finding(
+            "B24",
+            UNKNOWN,
+            "No MCP servers configured.",
+            "—",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
 
     all_fails: list[str] = []
     all_warns: list[str] = []
@@ -3912,6 +3940,7 @@ def check_mcp_server_exfil_host_in_args(ctx: Context) -> Finding:
             UNKNOWN,
             "No MCP servers configured.",
             "Configure MCP servers to evaluate their command/args for known exfiltration hosts.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     fail_hits: list[str] = []
     warn_hits: list[str] = []

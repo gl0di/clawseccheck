@@ -42,6 +42,7 @@ from pathlib import Path
 import pytest
 
 from clawseccheck.adjudication import (
+    build_ignore_proposals,
     build_judge_packet,
     build_vet_judge_packet,
     render_judge_packet_json,
@@ -130,6 +131,47 @@ def test_excludes_pass_and_fail_findings():
     f_pass = Finding("B1", "t", HIGH, PASS, "pass detail", "fix", "fw")
     f_fail = Finding("B2", "t", HIGH, FAIL, "fail detail", "fix", "fw")
     assert build_judge_packet(Context(home=_HOME_FAKE), [f_pass, f_fail]) == []
+
+
+# ---------------------------------------------------------------------------
+# F-139/B2: not_applicable findings are excluded from BOTH build_judge_packet
+# and build_ignore_proposals -- _is_borderline is the single predicate both
+# consumers (and the escalation path) share, so one exclusion covers all three.
+# ---------------------------------------------------------------------------
+
+def test_excludes_not_applicable_unknown_finding_from_judge_packet():
+    f = Finding("B15", "t", MEDIUM, UNKNOWN, "no MCP servers configured", "fix it", "fw",
+                not_applicable=True)
+    assert build_judge_packet(Context(home=_HOME_FAKE), [f]) == []
+
+
+def test_not_applicable_false_unknown_finding_still_included_in_judge_packet():
+    """Control: the same shape with not_applicable=False (the ordinary/blind
+    UNKNOWN posture) must still reach the packet -- proves the exclusion above
+    is keyed on the flag, not on the finding id or detail text."""
+    f = Finding("B15", "t", MEDIUM, UNKNOWN, "no MCP servers configured", "fix it", "fw",
+                not_applicable=False)
+    packet = build_judge_packet(Context(home=_HOME_FAKE), [f])
+    assert len(packet) == 1
+    assert packet[0]["finding_id"] == "B15"
+
+
+def test_excludes_not_applicable_finding_from_ignore_proposals():
+    f = Finding("B15", "t", MEDIUM, UNKNOWN, "no MCP servers configured", "fix it", "fw",
+                not_applicable=True)
+    verdicts_map = {("B15", "B15"): {"verdict": "SAFE", "votes": None}}
+    assert build_ignore_proposals([f], verdicts_map) == []
+
+
+def test_not_applicable_false_finding_still_proposable_when_safe():
+    """Control: the ordinary (not_applicable=False) UNKNOWN finding is still a
+    valid ignore-proposal candidate -- the exclusion is specific to the flag."""
+    f = Finding("B15", "t", MEDIUM, UNKNOWN, "no MCP servers configured", "fix it", "fw",
+                not_applicable=False)
+    verdicts_map = {("B15", "B15"): {"verdict": "SAFE", "votes": None}}
+    proposals = build_ignore_proposals([f], verdicts_map)
+    assert len(proposals) == 1
+    assert proposals[0]["finding_id"] == "B15"
 
 
 def test_empty_findings_and_ctx():
