@@ -119,6 +119,7 @@ Shared by `--json` and `--vet` mode.
 | `remediation` | `object` | Paste-ready remediation. Keys: `commands` (`array[str]`) and `config` (`array[object]`). |
 | `evidence` | `array[str]` | Supporting evidence strings (sanitised; no raw secrets). May be empty. |
 | `surface` | `str` | OpenClaw surface slug this check belongs to (e.g. `"gateway"`, `"tools"`, `"bootstrap"`). `""` for findings not in the CATALOG (e.g. MCP-vet diagnostics). One of the 14 slugs in `catalog.SURFACES` or `""`. |
+| `not_applicable` | `bool` | `true` when the check determined its SURFACE does not exist on this host (e.g. no MCP servers configured at all), as opposed to the surface existing but nothing wrong being found — never true unless `status` is also `"UNKNOWN"`. `false` on every other finding, including every finding today (F-138/B1 landed the field with no emitter yet — no check sets this to `true` as of this version). Always present (unlike `blast_radius`). |
 | `blast_radius` | `object` | **Only present when `status` is `"FAIL"` and a config context is available** (always true for the real `clawseccheck --json` CLI path; absent in library calls to `render_json()` made without `ctx`). Estimated attacker gain if this finding is exploited. See below. |
 
 ### `blast_radius` object (FAIL findings only)
@@ -175,6 +176,7 @@ item describes a manual configuration step.
   },
   "evidence": ["tools.output.sanitize = false"],
   "surface": "bootstrap",
+  "not_applicable": false,
   "blast_radius": {
     "open_channels": 1,
     "has_exec": true,
@@ -1001,6 +1003,8 @@ is unaffected by this extension). This is an accepted, disclosed limitation.
 - New check IDs in `findings` or SARIF `rules`.
 - New fields inside `capability_graph` nodes or edges.
 - New fields in `intentAttestationRequests` items.
+- New optional fields on the `Finding` object (§2) — existing field names and their
+  enumerated values stay frozen (F-138/B1 added `not_applicable` this way).
 
 ### Not part of the public contract
 

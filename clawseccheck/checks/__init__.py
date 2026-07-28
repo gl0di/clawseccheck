@@ -102,6 +102,8 @@ from ._shared import (
     _meta,
     _finding,
     _config_unreadable,
+    _surface_absent,
+    _skill_corpus_complete,
     _channels,
     _UNTRUSTED_INPUT_POLICIES,
     _norm_group_policy,

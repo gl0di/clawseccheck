@@ -2987,3 +2987,20 @@ class Finding:
     # as ring_findings/axis_reasons above — internal bookkeeping for a future
     # corroborating-check FAIL rule, not rendered by report.py/sarif.py).
     corroborating_buckets: list[str] = field(default_factory=list)
+    # F-138 (B1): true when the check determined its SURFACE does not exist on this host
+    # (e.g. no MCP servers configured at all), as opposed to the surface existing but
+    # nothing wrong being found there. Default False — an unaware/legacy caller gets the
+    # ordinary UNKNOWN posture, never a silent "doesn't apply" it never proved. Only
+    # meaningful alongside status == UNKNOWN (see __post_init__ below); no emitter sets
+    # this yet (that starts with B2/F-139) — this field is plumbing only.
+    not_applicable: bool = False
+
+    def __post_init__(self):
+        # Normalizes, never raises: a Finding built with not_applicable=True at a
+        # non-UNKNOWN status (a bug in whichever caller set it) silently corrects
+        # itself rather than crashing on untrusted/legacy input. This also means
+        # dataclasses.replace() — which re-invokes __post_init__ — automatically clears
+        # a stale not_applicable when adjudication._escalate_finding() escalates
+        # UNKNOWN -> WARN, with no separate guard needed at each escalation call site.
+        if self.not_applicable and self.status != UNKNOWN:
+            self.not_applicable = False

@@ -1803,7 +1803,8 @@ def _finding_to_dict(f: Finding) -> dict:
             "ast": list(ast_for(f.id)),
             "remediation": remediation_for(f.id),
             "evidence": [_sanitize(e) for e in (f.evidence or [])],
-            "surface": _meta.surface if _meta is not None else ""}
+            "surface": _meta.surface if _meta is not None else "",
+            "not_applicable": bool(getattr(f, "not_applicable", False))}
 
 
 # Per-axis status icons for the risk dossier (5 states incl. N/A).

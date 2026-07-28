@@ -54,6 +54,12 @@ def _build_analysis_completeness(
         "checksRun": checks_run,
         "checksTotal": checks_total,
         "unknownCount": sum(1 for f in findings if f.status == UNKNOWN),
+        # F-138/B1: how many of the (still-full) unknownCount above are UNKNOWN because
+        # the check's surface doesn't exist here, vs genuinely undetermined. Additive —
+        # runs[0].properties.* is explicitly outside the frozen public contract (see
+        # docs/OUTPUT_SCHEMA.md), so unknownCount itself stays the whole count and does
+        # not shrink for whatever already consumes it.
+        "notApplicableCount": sum(1 for f in findings if getattr(f, "not_applicable", False)),
         "passCount": sum(1 for f in findings if f.status == PASS),
         "warnCount": sum(1 for f in findings if f.status == WARN),
         "failCount": sum(1 for f in findings if f.status == FAIL),
