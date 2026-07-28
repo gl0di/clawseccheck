@@ -1851,7 +1851,7 @@ def _main(argv=None) -> int:
             if len(vm_findings) == 1 and vm_findings[0].status == "UNKNOWN":
                 vmf = vm_findings[0]
                 vm_icon = "[?]" if ascii_only else "❔"
-                _emit(f"{vm_icon} {vmf.detail}")
+                _emit(f"{vm_icon} {_sanitize(vmf.detail)}")
             else:
                 vm_has_fail = any(vmf.status == "FAIL" for vmf in vm_findings)
                 for vmf in vm_findings:
