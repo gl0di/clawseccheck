@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .catalog import FAIL, UNKNOWN, WARN, Finding
+from .catalog import FAIL, WARN, Finding
 from .scoring import ScoreResult
 
 
@@ -78,11 +78,16 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
             priority=4,
         ))
 
-    # review_mcp: B15 status not UNKNOWN, or B24 status not UNKNOWN
+    # review_mcp: B15/B24 "active" means MCP surface may exist or we simply can't
+    # tell (blind pass) — silent only once not_applicable has POSITIVELY confirmed
+    # no MCP surface. B15/B24 status is ALWAYS UNKNOWN (that never changes; status
+    # is not a proxy for "is there MCP surface" — not_applicable is orthogonal to
+    # status), so the old `status != UNKNOWN` gate never fired regardless of
+    # whether MCP surface actually existed (F-139/B2 semantic-bug fix).
     b15 = idx.get("B15")
     b24 = idx.get("B24")
-    b15_active = b15 is not None and b15.status != UNKNOWN
-    b24_active = b24 is not None and b24.status != UNKNOWN
+    b15_active = b15 is not None and not getattr(b15, "not_applicable", False)
+    b24_active = b24 is not None and not getattr(b24, "not_applicable", False)
     if b15_active or b24_active:
         actions.append(Action(
             id="review_mcp",

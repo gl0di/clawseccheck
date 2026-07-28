@@ -1381,6 +1381,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 lines.append(f"│ {label_disp} — {count_text}")
                 lines.append(f"└{_rule}")
             n_unknown = 0
+            n_na = 0
             for f in members:
                 if f.status in (FAIL, WARN):
                     _render_finding(lines, f, cfg=_blast_cfg,
@@ -1391,11 +1392,20 @@ def render_report(findings: list[Finding], score: ScoreResult,
                     # UNKNOWN: tallied, not enumerated one-by-one — a wall of near-identical
                     # "not assessed" lines adds noise, not information; the honest count is
                     # what matters (nothing hidden, just not spelled out per check).
-                    n_unknown += 1
+                    # F-139/B2: split off not_applicable (surface positively confirmed
+                    # absent, e.g. no MCP servers) — the --ask/--attest advice below is
+                    # meaningless for those, so they get their own line with no advice.
+                    if getattr(f, "not_applicable", False):
+                        n_na += 1
+                    else:
+                        n_unknown += 1
             if n_unknown:
                 unk_icon = icon.get(UNKNOWN, "?")
                 lines.append(f"  {unk_icon} {n_unknown} not assessed (config can't tell) —"
                              " resolve via `--ask` then `--attest`")
+            if n_na:
+                na_icon = _AXIS_ICON_ASCII["N/A"] if ascii_only else _AXIS_ICON_UNI["N/A"]
+                lines.append(f"  {na_icon} {n_na} not applicable (no such surface in your config)")
             lines.append("")
 
     # Coverage map — "check OpenClaw the platform" framing: how many config surfaces this

@@ -198,11 +198,28 @@ class TestConditionalTriggers:
         ids = [a.id for a in suggest_actions(findings, score)]
         assert "review_mcp" in ids
 
-    def test_review_mcp_not_triggered_when_both_unknown(self):
+    def test_review_mcp_not_triggered_when_surface_confirmed_absent(self):
+        """F-139/B2: not_applicable=True means the MCP surface was POSITIVELY
+        confirmed absent (config read completely, no MCP servers in any known
+        form) -- that is the one case that stays silent."""
+        score = _make_score()
+        b15 = Finding(id="B15", title="t", severity="MEDIUM", status=UNKNOWN,
+                      detail="", fix="", framework="f", not_applicable=True)
+        b24 = Finding(id="B24", title="t", severity="MEDIUM", status=UNKNOWN,
+                      detail="", fix="", framework="f", not_applicable=True)
+        ids = [a.id for a in suggest_actions([b15, b24], score)]
+        assert "review_mcp" not in ids
+
+    def test_review_mcp_triggered_on_blind_pass_unknown(self):
+        """F-139/B2 intentional behavior change: an UNRESOLVED/blind UNKNOWN
+        (not_applicable stays False -- default posture -- because the config
+        could not be read completely) is NOT proof of MCP-surface absence, so
+        review_mcp now correctly fires where it previously stayed silent under
+        the old `status != UNKNOWN` gate."""
         score = _make_score()
         findings = self._findings_with(B15=UNKNOWN, B24=UNKNOWN)
         ids = [a.id for a in suggest_actions(findings, score)]
-        assert "review_mcp" not in ids
+        assert "review_mcp" in ids
 
     def test_review_mcp_not_triggered_when_absent(self):
         score = _make_score()

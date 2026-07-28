@@ -462,8 +462,17 @@ def _is_borderline(f) -> bool:
     ever consider exactly the same population build_judge_packet already showed the
     judge — it must never propose suppressing a finding the judge never saw, and by
     construction (UNKNOWN/WARN only) it can never even reach a FAIL-status finding.
+
+    F-139/B2: a not_applicable finding (surface positively confirmed absent, e.g.
+    "no MCP servers configured" on a config we actually read completely) is
+    excluded — there is nothing borderline/actionable for a judge to adjudicate
+    when the surface it would be judging doesn't exist. This one predicate change
+    covers build_judge_packet, build_ignore_proposals (C-253), AND the escalation
+    path (_escalate_finding exits early on `not _is_borderline(f)`) — no separate
+    not-applicable handling is needed in _escalated_status; it is structurally
+    unreachable there once _is_borderline excludes it.
     """
-    return not getattr(f, "suppressed", False) and (
+    return not getattr(f, "suppressed", False) and not getattr(f, "not_applicable", False) and (
         f.status == UNKNOWN or (f.status == WARN and f.id in _FN_PRONE_WARN_IDS)
     )
 
