@@ -623,6 +623,8 @@ python3 audit.py --log audit.log            # also write log to a local file
   into the audit score or grade.** Skills the sweep skipped or only partially scanned are
   listed as such and kept out of its "safe" tally, and — unlike a single `--vet` — an
   incomplete sweep never moves `--exit-code` (only a `DANGEROUS`/`FAIL` skill does).
+  `--full --json` carries the sweep as a structured `skill_sweep` object (self-test and
+  vet-mcp stay text-only) — see `docs/OUTPUT_SCHEMA.md` §19.
 - **`--vet-plugin PATH`** vets an OpenClaw plugin (root dir, `openclaw.plugin.json`, or an
   installed wrapper project) *before* you install it: manifest sanity, npm lifecycle scripts,
   floating dependency versions, native-executable stowaways, and skills entries escaping the

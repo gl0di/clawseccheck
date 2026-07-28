@@ -49,6 +49,7 @@ versioning §6 in `CLAUDE.md`).
 | `config_parse_reason` | `string \| null` | yes | Short diagnostic for why `config_parse_error` is `true` (the raw loader message), OR a note that a dotfiles-style symlink was safely followed when `config_symlink_escapes_home` is `true`. `null` when the config parsed cleanly with no relocation. Never contains a secret or file-content value. |
 | `errors` | `array[str]` | yes | Human-readable collection/parse messages (e.g. the `openclaw.json` parse error). Empty array on a clean run. |
 | `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §18. |
+| `skill_sweep` | `object` | only with `--full` | Per-skill vet verdict for every installed skill (the second engine, on top of the audit) — the machine-readable form of `--full`'s printed SKILL SWEEP section. Absent (key not present) on a plain `--json` run without `--full`. Visibility only — never affects `score`/`grade`. See §19. |
 | `scan_receipt` | `str` | yes | Deterministic content-integrity hash over all findings, formatted `"sha256:<64-hex-chars>"`. Same findings set (any order) always yields the same receipt; a changed finding set changes it. Not a security signature — a drift/tamper-evidence checksum for the scan output itself. |
 
 ### Skeleton
@@ -91,6 +92,8 @@ versioning §6 in `CLAUDE.md`).
   "scan_receipt": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 }
 ```
+
+`skill_sweep` is omitted from this skeleton (it appears only under `--full` — see §19).
 
 ---
 
@@ -1039,3 +1042,61 @@ possible Phase 2.
   `ctx` is unavailable), matching every other always-present top-level field.
 - The exact wording of `reasons[]` entries is **not** part of the frozen contract (same
   rule as `detail`/`fix` text elsewhere in this doc) — only the field names/types are.
+
+---
+
+## 19. `skill_sweep` Object (F-149 — installed-skill sweep under `--full --json`)
+
+`--full` runs a second engine on top of the audit: the audit's own `surface="skills"`
+checks and the shared content ring answer "is anything wrong across this fleet",
+attributed to the HOME; the sweep answers "which skill, and how bad is THAT one" — one
+merged vet verdict per installed skill (the same engine `--vet <path>` uses), which is
+the unit an owner actually acts on. The printed `--full` report has always carried this
+as its "CLAWSECCHECK SKILL SWEEP" section; `--full --json` did not carry it at all until
+this field was added — a `--json` consumer had no way to see per-skill vet verdicts.
+
+Present **only** when `--full` was given (omitted — key absent, not `null` — on a plain
+`--json` run). Visibility only, same as the printed section: never folds into the
+top-level `score`/`grade`/`findings` above.
+
+| Field | Type | Description |
+|---|---|---|
+| `checked_dirs` | `array[str]` | Every skill-root directory that exists under this home (`skills/`, `workspace/skills/`, `workspace-home/skills/`, `workspace-work/skills/`, `.agents/skills/` — see `collector.SKILL_DIRS`). Empty when none exist. |
+| `no_roots` | `bool` | `true` when no skill-root directory exists at all — nothing to sweep. |
+| `no_targets` | `bool` | `true` when at least one root exists but none contains an installed skill (a `SKILL.md`-bearing directory). |
+| `truncated` | `bool` | `true` when the whole-sweep wall-clock budget or a per-target scan budget cut the run short — at least one target in `targets` carries `"SKIPPED"` or `"TRUNCATED"`. |
+| `complete` | `bool` | `not truncated` — provided so a consumer does not have to negate the field above. |
+| `worst` | `str` | Worst verdict among scanned targets: `"PASS"`, `"WARN"`, or `"FAIL"`. Does not account for truncation — check `truncated` separately; an incomplete sweep is never claimed clean by this field alone. |
+| `counts` | `object` | `{"total": int, "fails": int, "warns": int, "truncated": int, "skipped": int, "safe": int}`. `total` excludes `"SKIPPED"` rows (attempted-but-unscanned targets are not "checked"); `safe` excludes `fails`/`warns`/`truncated` — an unscanned or partially-scanned target is never folded into `safe`. |
+| `targets` | `array[object]` | One entry per skill the sweep accounted for, **including** ones it never fully scanned: `{"name": str, "status": str, "evidence_count": int}`. `status` is one of `"PASS"`, `"WARN"`, `"FAIL"`, `"UNKNOWN"`, `"SKIPPED"` (budget exhausted before this target was reached), `"TRUNCATED"` (this target's own scan was cut short). `name` is sanitized (skill names are attacker-controlled — untrusted, third-party directory names). |
+| `not_scanned` | `array[str]` | Names of every target with `status` `"SKIPPED"` or `"TRUNCATED"` — the same list `counts.skipped + counts.truncated` sizes, spelled out. |
+
+### Skeleton
+
+```json
+{
+  "skill_sweep": {
+    "checked_dirs": ["/home/you/.openclaw/skills"],
+    "no_roots": false,
+    "no_targets": false,
+    "truncated": false,
+    "complete": true,
+    "worst": "PASS",
+    "counts": {"total": 2, "fails": 0, "warns": 0, "truncated": 0, "skipped": 0, "safe": 2},
+    "targets": [
+      {"name": "pdf-tools", "status": "PASS", "evidence_count": 0},
+      {"name": "web-search", "status": "PASS", "evidence_count": 0}
+    ],
+    "not_scanned": []
+  }
+}
+```
+
+### Notes
+
+- `--exit-code` treats a `"FAIL"` target FAIL-only, mirroring the vet-mcp rule: a
+  `"WARN"` (SUSPICIOUS) skill never trips it, and neither does truncation alone — an
+  incomplete sweep is surfaced through `truncated`/`not_scanned`, not by reddening a
+  CI gate that would otherwise be green.
+- The sweep runs silently under `--json` (no narrated output mixed into stdout) — the
+  JSON document on stdout is the complete, sole output.

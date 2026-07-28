@@ -2196,7 +2196,7 @@ def render_permission_manifest(ctx, target: str) -> str:
 
 
 def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
-                ctx=None) -> str:
+                ctx=None, skill_sweep: dict | None = None) -> str:
     actions = suggest_actions(findings, score)
     _json_cfg: dict | None = (getattr(ctx, "config", {}) or {}) if ctx is not None else None
 
@@ -2284,6 +2284,12 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     # Presentation-only: never alters score/grade/findings above; empty/UNKNOWN-shaped
     # when ctx is unavailable (build_inventory's own ctx-is-None fallback).
     payload["inventory"] = build_inventory(findings, ctx)
+    # F-149 JSON gap: present ONLY under --full (the caller passes None otherwise) —
+    # matches the printed SKILL SWEEP section, which likewise only exists under
+    # --full. Visibility only, same as the printed section: never folded into
+    # score/grade/findings above.
+    if skill_sweep is not None:
+        payload["skill_sweep"] = skill_sweep
     payload["scan_receipt"] = f"sha256:{compute_scan_receipt(findings)}"
     return json.dumps(_sanitize_tree(payload), ensure_ascii=True, indent=2)
 
