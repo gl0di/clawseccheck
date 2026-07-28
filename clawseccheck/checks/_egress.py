@@ -2907,6 +2907,14 @@ def _whatwg_url(url) -> str:
     return scheme + "://" + authority + tail
 
 
+# C-357: length gate for the IDNA/fullwidth-digit homoglyph fold in
+# _cdp_url_classify() below -- see the C-135 note at its call site for why nameprep
+# walks a whole non-ASCII label before its own length check can fire. No legitimate
+# DNS hostname exceeds 253 ASCII characters (RFC 1035); 512 is a generous ceiling that
+# only ever excludes pathological input.
+_IDNA_HOST_MAX_CHARS = 512
+
+
 def _cdp_url_classify(url) -> str:
     """Classify a browser.profiles.<name>.cdpUrl value: "loopback", "remote", or
     "unparseable". A non-string/empty value classifies as "loopback" -- OpenClaw's own
@@ -2928,6 +2936,50 @@ def _cdp_url_classify(url) -> str:
         return "unparseable"
     if not host:
         return "unparseable"
+    # C-357: non-ASCII label-separator dots (U+3002 IDEOGRAPHIC FULL STOP, U+FF0E
+    # FULLWIDTH FULL STOP, U+FF61 HALFWIDTH IDEOGRAPHIC FULL STOP) and fullwidth-digit
+    # spellings of an IPv4 literal (U+FF10-FF19) are exactly what a browser's WHATWG
+    # "domain to ASCII" host parser folds to their ASCII equivalents before
+    # isLoopbackHost ever sees the string -- so `http://127。0。0。1:9222` dials genuine
+    # loopback in the real product, an IME substituting the ideographic full-width dot
+    # for ASCII "." while a user types a URL being a realistic, non-adversarial way to
+    # produce it. Grounded against Python's stdlib `encodings.idna` codec (RFC 3490
+    # ToASCII/nameprep -- the only IDNA implementation Golden Rule #1 allows, no PyPI
+    # `idna` package): its `dots` splitter is `re.compile("[.。．｡]")`,
+    # the identical RFC 3490 S3.1 / WHATWG dot-equivalence class, and nameprep's NFKC
+    # step folds fullwidth digits the same way. Measured directly (2026-07-28):
+    #     '127。0。0。1'.encode('idna')  == b'127.0.0.1'
+    #     '１２７.0.0.1'.encode('idna') == b'127.0.0.1'
+    #     '169.254.169.254。'.encode('idna') == b'169.254.169.254.'  (a real remote
+    #         IP keeps its identity -- only the dot form changes, matching the
+    #         existing one-trailing-dot handling a few lines below)
+    #     'example.com'.encode('idna') == b'example.com'  (real hostnames untouched)
+    # ASCII-gated (idna is only invoked on a host that actually contains a non-ASCII
+    # code point) so the exhaustively-tested pure-ASCII path below -- LOOPBACK
+    # membership, "localhost", the numeric fallback -- is untouched byte-for-byte.
+    # One-way, like every other fallback in this function: a host idna cannot encode
+    # (UnicodeError -- an empty/oversized label, a bidi violation, ...) falls straight
+    # through unchanged to the existing logic below, so this can only ever ADD a
+    # loopback verdict, never remove one.
+    #
+    # C-135 adversarial pass (2026-07-28): length-gated at _IDNA_HOST_MAX_CHARS. The
+    # stdlib nameprep step walks the WHOLE label doing per-character stringprep table
+    # lookups BEFORE its own "label too long" check ever fires (that check only runs
+    # on nameprep's OUTPUT), so an attacker-controlled non-ASCII host with no dots
+    # bypasses idna's own early-exit and forces the full pass. Measured: a 5,000,000
+    # char single-label non-ASCII host (still inside the pre-existing whole-config
+    # 5 MB byte ceiling, collector._MAX_CONFIG_BYTES) took ~19s to classify -- over
+    # this project's own 15s per-check budget (scanbudget.DEFAULT_CHECK_BUDGET_S),
+    # degrading the check to UNKNOWN under that safety net rather than a lying
+    # verdict, but still a real, newly-introduced cost this fix must not impose on an
+    # ordinary scan. No legitimate DNS hostname exceeds 253 ASCII characters (RFC
+    # 1035); 512 is a generous, RFC-agnostic ceiling that only ever excludes
+    # pathological input, never a real cdpUrl host.
+    if not host.isascii() and len(host) <= _IDNA_HOST_MAX_CHARS:
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            pass
     if host in LOOPBACK:
         return "loopback"
     # C-135: "localhost." is genuinely loopback to the product, while a bare

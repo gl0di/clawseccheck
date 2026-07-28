@@ -331,3 +331,110 @@ def test_fail_takes_precedence_when_multiple_profiles(tmp_path):
     r = check_browser_existing_session_profile(collect(home))
     assert r.status == FAIL
     assert any("remote" in e for e in r.evidence)
+
+
+# ---------------------------------------------------------------------------
+# C-357 regression: IDNA/fullwidth-digit homoglyph forms of 127.0.0.1 must WARN,
+# not FAIL -- a browser's WHATWG "domain to ASCII" host parser folds non-ASCII
+# label-separator dots (U+3002/U+FF0E/U+FF61) and fullwidth digits (U+FF10-FF19)
+# to their ASCII equivalents before isLoopbackHost ever sees the host, so these
+# spellings dial genuine loopback in the real product. An IME substituting the
+# ideographic full-width dot for ASCII "." while a user types a URL is a
+# realistic, non-adversarial way to produce this -- not just a crafted string.
+# ---------------------------------------------------------------------------
+
+def test_ideographic_full_stop_loopback_cdp_url_warns_not_fails(tmp_path):
+    """U+3002 IDEOGRAPHIC FULL STOP used in place of every ASCII '.' -- measured:
+    '127。0。0。1'.encode('idna') == b'127.0.0.1'."""
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {"driver": "existing-session", "cdpUrl": "http://127。0。0。1:9222", "color": "#00AA00"}
+    }}})
+    r = check_browser_existing_session_profile(collect(home))
+    assert r.status == WARN
+    assert r.scored is False
+
+
+def test_fullwidth_full_stop_loopback_cdp_url_warns_not_fails(tmp_path):
+    """U+FF0E FULLWIDTH FULL STOP -- NFKC-normalizes straight to ASCII '.' even
+    without going through the idna codec, but exercised here via the same path."""
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {"driver": "existing-session", "cdpUrl": "http://127．0．0．1:9222", "color": "#00AA00"}
+    }}})
+    r = check_browser_existing_session_profile(collect(home))
+    assert r.status == WARN
+
+
+def test_halfwidth_ideographic_full_stop_loopback_cdp_url_warns_not_fails(tmp_path):
+    """U+FF61 HALFWIDTH IDEOGRAPHIC FULL STOP -- the fourth dot-equivalent RFC 3490
+    S3.1 / WHATWG both recognize."""
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {"driver": "existing-session", "cdpUrl": "http://127｡0｡0｡1:9222", "color": "#00AA00"}
+    }}})
+    r = check_browser_existing_session_profile(collect(home))
+    assert r.status == WARN
+
+
+def test_fullwidth_digit_loopback_cdp_url_warns_not_fails(tmp_path):
+    """Fullwidth-digit spelling of 127.0.0.1 (U+FF11 FULLWIDTH DIGIT ONE etc.), ASCII
+    dots -- measured: '１２７.0.0.1'.encode('idna') == b'127.0.0.1'."""
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {"driver": "existing-session", "cdpUrl": "http://１２７.0.0.1:9222", "color": "#00AA00"}
+    }}})
+    r = check_browser_existing_session_profile(collect(home))
+    assert r.status == WARN
+
+
+def test_fullwidth_digits_and_ideographic_dots_combined_warns_not_fails(tmp_path):
+    """Both homoglyph classes at once -- the realistic IME-produced shape."""
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {"driver": "existing-session", "cdpUrl": "http://１２７。０。０。１:9222", "color": "#00AA00"}
+    }}})
+    r = check_browser_existing_session_profile(collect(home))
+    assert r.status == WARN
+
+
+def test_idna_homoglyph_fix_is_one_directional(tmp_path):
+    """The fix must only ever ADD a loopback verdict, never remove one: a genuinely
+    remote IP written with the same dot-equivalent characters must keep failing."""
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {"driver": "existing-session", "cdpUrl": "http://203。0。113。5:9222", "color": "#00AA00"}
+    }}})
+    r = check_browser_existing_session_profile(collect(home))
+    assert r.status == FAIL
+
+
+def test_idna_unencodable_host_never_fails_open_to_loopback(tmp_path):
+    """A non-ASCII host idna cannot encode -- a single 70-char Greek-letter label,
+    measured to raise UnicodeError("label empty or too long") from the stdlib idna
+    codec -- must fall through to the existing logic on the ORIGINAL host unchanged.
+    It must not silently become "loopback"; this genuinely non-loopback, non-numeric
+    host classifies "remote" exactly as it did before this fix, so existing-session
+    still FAILs (Golden Rule #5's "never lie a config clean" cuts the other way here:
+    this must not become an accidental loopback PASS/WARN)."""
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {
+            "driver": "existing-session",
+            "cdpUrl": "http://" + "α" * 70 + ":9222",
+            "color": "#00AA00",
+        }
+    }}})
+    r = check_browser_existing_session_profile(collect(home))
+    assert r.status == FAIL
+
+
+def test_oversized_non_ascii_host_is_never_idna_processed(tmp_path):
+    """C-135 perf finding: nameprep walks a whole non-ASCII label doing per-character
+    stringprep table lookups BEFORE its own length check can fire, so an
+    attacker-controlled non-ASCII host with no dots can force expensive work. Length-
+    gated at _IDNA_HOST_MAX_CHARS (512, well above RFC 1035's 253-char DNS ceiling) --
+    a host past that gate must classify exactly as it did before this fix (remote,
+    via the plain fallthrough), never hang or get reclassified."""
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {
+            "driver": "existing-session",
+            "cdpUrl": "http://" + "α" * 600 + ":9222",
+            "color": "#00AA00",
+        }
+    }}})
+    r = check_browser_existing_session_profile(collect(home))
+    assert r.status == FAIL

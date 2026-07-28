@@ -535,6 +535,66 @@ def test_ordinary_loopback_urls_are_unaffected_by_the_normalization(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# C-357 regression: IDNA/fullwidth-digit homoglyph forms of 127.0.0.1 must PASS
+# (loopback), not WARN (offhost) -- a browser's WHATWG "domain to ASCII" host
+# parser folds non-ASCII label-separator dots (U+3002/U+FF0E/U+FF61) and
+# fullwidth digits (U+FF10-FF19) to their ASCII equivalents before isLoopbackHost
+# ever sees the host, so these spellings dial genuine loopback in the real
+# product. An IME substituting the ideographic full-width dot for ASCII "." while
+# a user types a URL is a realistic, non-adversarial way to produce this.
+# ---------------------------------------------------------------------------
+
+def test_ideographic_full_stop_loopback_cdp_url_passes(tmp_path):
+    """U+3002 IDEOGRAPHIC FULL STOP -- measured: '127。0。0。1'.encode('idna')
+    == b'127.0.0.1'."""
+    r = _browser(tmp_path, {"cdpUrl": "http://127。0。0。1:9222"})
+    assert r.status == PASS
+
+
+def test_fullwidth_full_stop_loopback_cdp_url_passes(tmp_path):
+    """U+FF0E FULLWIDTH FULL STOP."""
+    r = _browser(tmp_path, {"cdpUrl": "http://127．0．0．1:9222"})
+    assert r.status == PASS
+
+
+def test_halfwidth_ideographic_full_stop_loopback_cdp_url_passes(tmp_path):
+    """U+FF61 HALFWIDTH IDEOGRAPHIC FULL STOP -- the fourth dot-equivalent RFC 3490
+    S3.1 / WHATWG both recognize."""
+    r = _browser(tmp_path, {"cdpUrl": "http://127｡0｡0｡1:9222"})
+    assert r.status == PASS
+
+
+def test_fullwidth_digit_loopback_cdp_url_passes(tmp_path):
+    """Fullwidth-digit spelling of 127.0.0.1 (U+FF11 FULLWIDTH DIGIT ONE etc.), ASCII
+    dots -- measured: '１２７.0.0.1'.encode('idna') == b'127.0.0.1'."""
+    r = _browser(tmp_path, {"cdpUrl": "http://１２７.0.0.1:9222"})
+    assert r.status == PASS
+
+
+def test_fullwidth_digits_and_ideographic_dots_combined_passes(tmp_path):
+    """Both homoglyph classes at once -- the realistic IME-produced shape."""
+    r = _browser(tmp_path, {"cdpUrl": "http://１２７。０。０。１:9222"})
+    assert r.status == PASS
+
+
+def test_idna_homoglyph_fix_is_one_directional(tmp_path):
+    """The fix must only ever ADD a loopback verdict, never remove one: a genuinely
+    remote IP written with the same dot-equivalent characters must keep warning."""
+    r = _browser(tmp_path, {"cdpUrl": "http://203。0。113。5:9222"})
+    assert r.status == WARN
+
+
+def test_idna_unencodable_host_never_becomes_a_lying_pass(tmp_path):
+    """A non-ASCII host idna cannot encode -- a single 70-char Greek-letter label,
+    measured to raise UnicodeError("label empty or too long") from the stdlib idna
+    codec -- must fall through to the existing logic on the ORIGINAL host unchanged:
+    this genuinely non-loopback, non-numeric host classifies "remote" exactly as it
+    did before this fix, so B330 still WARNs, never a silent loopback PASS."""
+    r = _browser(tmp_path, {"cdpUrl": "http://" + "α" * 70 + ":9222"})
+    assert r.status == WARN
+
+
+# ---------------------------------------------------------------------------
 # Garbage in must never FAIL (Golden Rule #5)
 # ---------------------------------------------------------------------------
 
