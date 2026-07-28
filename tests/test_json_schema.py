@@ -27,6 +27,11 @@ VULN = str(FIXTURES / "home_vuln")
 BASE = ["--no-native", "--no-history"]
 
 _TABLE_ROW = re.compile(r"^\|\s*`([A-Za-z_]+)`\s*\|")
+# Captures the field name AND its "Always present" column (3rd cell) — F-149:
+# skill_sweep is the schema's first top-level field that is documented but only
+# conditionally emitted (only under --full), so the guard needs to tell "always"
+# from "conditional" apart instead of treating every documented name as required.
+_TABLE_ROW_WITH_PRESENCE = re.compile(r"^\|\s*`([A-Za-z_]+)`\s*\|[^|]*\|\s*([^|]*?)\s*\|")
 
 
 def _rows_between(text: str, start_marker: str, end_marker: str) -> list[str]:
@@ -53,10 +58,30 @@ def _schema_text() -> str:
 
 
 def _documented_top_level_keys() -> set[str]:
-    """Parse the '### Top-level envelope' table in §1 of docs/OUTPUT_SCHEMA.md."""
+    """Parse the '### Top-level envelope' table in §1 of docs/OUTPUT_SCHEMA.md.
+
+    Every documented name, regardless of whether it is always-present or
+    conditional — used to catch an EMITTED-BUT-UNDOCUMENTED key. Use
+    :func:`_documented_top_level_keys_always` for the always-present subset.
+    """
     text = _schema_text()
     lines = _rows_between(text, "### Top-level envelope", "### Skeleton")
     return _parse_keys(lines)
+
+
+def _documented_top_level_keys_always() -> set[str]:
+    """The subset of §1's top-level keys documented as always present ('yes' in the
+    'Always present' column) — a conditional field (e.g. F-149's `skill_sweep`,
+    'only with `--full`') is legitimately absent on a plain `--json` run and must
+    not fail the always-present presence check."""
+    text = _schema_text()
+    lines = _rows_between(text, "### Top-level envelope", "### Skeleton")
+    keys = set()
+    for line in lines:
+        m = _TABLE_ROW_WITH_PRESENCE.match(line.strip())
+        if m and m.group(2).strip().lower() == "yes":
+            keys.add(m.group(1))
+    return keys
 
 
 def _documented_finding_keys() -> set[str]:
@@ -77,16 +102,42 @@ def _real_json_payload(capsys, home: str = VULN) -> dict:
 # ---------------------------------------------------------------------------
 
 def test_top_level_keys_match_schema_doc(capsys):
-    """Real --json top-level key set must exactly match docs/OUTPUT_SCHEMA.md §1."""
-    documented = _documented_top_level_keys()
+    """Real --json top-level key set must exactly match docs/OUTPUT_SCHEMA.md §1.
+
+    Plain `--json` (no `--full`), so conditional keys documented as anything other
+    than 'yes' in the 'Always present' column (F-149's `skill_sweep`) are legitimately
+    absent — checked against the full documented set for "undocumented", and against
+    the always-present subset for "missing".
+    """
+    documented_all = _documented_top_level_keys()
+    documented_always = _documented_top_level_keys_always()
     payload = _real_json_payload(capsys)
     emitted = set(payload.keys())
 
-    undocumented = emitted - documented
-    missing = documented - emitted
+    undocumented = emitted - documented_all
+    missing = documented_always - emitted
 
     assert not undocumented and not missing, (
         "--json top-level keys drifted from docs/OUTPUT_SCHEMA.md §1 "
+        "(Top-level envelope):\n"
+        + (f"  emitted but undocumented: {sorted(undocumented)}\n" if undocumented else "")
+        + (f"  documented (always) but not emitted: {sorted(missing)}\n" if missing else "")
+        + f"\nUpdate {SCHEMA_DOC} or clawseccheck/report.py::render_json() to resync."
+    )
+
+
+def test_full_json_top_level_keys_match_schema_doc(capsys):
+    """--full --json must emit exactly the documented set, INCLUDING the conditional
+    `skill_sweep` key (F-149) — the counterpart to the plain-`--json` check above."""
+    documented_all = _documented_top_level_keys()
+    main(["--home", VULN] + BASE + ["--full", "--json"])
+    emitted = set(json.loads(capsys.readouterr().out).keys())
+
+    undocumented = emitted - documented_all
+    missing = documented_all - emitted
+
+    assert not undocumented and not missing, (
+        "--full --json top-level keys drifted from docs/OUTPUT_SCHEMA.md §1 "
         "(Top-level envelope):\n"
         + (f"  emitted but undocumented: {sorted(undocumented)}\n" if undocumented else "")
         + (f"  documented but not emitted: {sorted(missing)}\n" if missing else "")
@@ -96,15 +147,16 @@ def test_top_level_keys_match_schema_doc(capsys):
 
 def test_top_level_keys_present_on_safe_fixture_too(capsys):
     """The always-present top-level keys must also all appear on a clean fixture."""
-    documented = _documented_top_level_keys()
+    documented_always = _documented_top_level_keys_always()
     payload = _real_json_payload(capsys, home=str(FIXTURES / "home_safe"))
     emitted = set(payload.keys())
 
-    missing = documented - emitted
+    missing = documented_always - emitted
     assert not missing, (
-        f"--json (home_safe) is missing documented top-level keys: {sorted(missing)}\n"
-        f"Every key in docs/OUTPUT_SCHEMA.md §1 is declared 'yes' (always present) or "
-        f"has an explicit conditional note; home_safe should still emit all of them."
+        f"--json (home_safe) is missing documented always-present top-level keys: "
+        f"{sorted(missing)}\n"
+        f"Every key in docs/OUTPUT_SCHEMA.md §1 marked 'yes' in the 'Always present' "
+        f"column should still be emitted on home_safe."
     )
 
 

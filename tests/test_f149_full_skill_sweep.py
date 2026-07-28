@@ -119,6 +119,78 @@ def test_full_json_has_no_skill_sweep_text(capsys):
 
 
 # ---------------------------------------------------------------------------
+# F-149 JSON gap: --full --json carries the sweep as structured data
+# ---------------------------------------------------------------------------
+
+def test_full_json_carries_skill_sweep(capsys):
+    rc = main(["--home", CLEAN, "--no-native", "--no-host", "--no-history",
+               "--full", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    doc = json.loads(out)
+    sweep = doc["skill_sweep"]
+    assert sweep["worst"] == "PASS"
+    assert sweep["truncated"] is False
+    assert sweep["counts"] == {
+        "total": 2, "fails": 0, "warns": 0, "truncated": 0, "skipped": 0, "safe": 2,
+    }
+    names = {t["name"] for t in sweep["targets"]}
+    assert names == {"alpha", "beta"}
+    assert all(t["status"] == "PASS" for t in sweep["targets"])
+
+
+def test_plain_json_has_no_skill_sweep_key(capsys):
+    """Without --full, --json must not gain the key (or its cost) at all."""
+    rc = main(["--home", CLEAN, "--no-native", "--no-host", "--no-history", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "skill_sweep" not in json.loads(out)
+
+
+def test_full_json_dangerous_skill_is_named_with_evidence(capsys):
+    rc = main(["--home", DANGEROUS, "--no-native", "--no-host", "--no-history",
+               "--full", "--json"])
+    doc = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    sweep = doc["skill_sweep"]
+    assert sweep["worst"] == "FAIL"
+    fails = [t for t in sweep["targets"] if t["status"] == "FAIL"]
+    assert len(fails) == 1
+    assert fails[0]["evidence_count"] > 0
+
+
+def test_full_json_no_skills_directory_reports_it_structurally(capsys):
+    rc = main(["--home", NO_SKILLS, "--no-native", "--no-host", "--no-history",
+               "--full", "--json"])
+    doc = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    sweep = doc["skill_sweep"]
+    assert sweep["no_roots"] is True
+    assert sweep["targets"] == []
+
+
+def test_full_json_exit_code_reacts_to_dangerous_skill(capsys):
+    """The JSON gap used to hide this from --exit-code too: the whole sweep never
+    ran under --json, so sweep_has_fail stayed False no matter what the fleet held."""
+    rc = main(["--home", DANGEROUS, "--no-native", "--no-host", "--no-history",
+               "--full", "--json", "--exit-code"])
+    capsys.readouterr()
+    assert rc == 1
+
+
+def test_full_json_sweep_is_silent(capsys):
+    """JSON output must never carry the narrative prose the human --full section
+    prints — the sweep runs with narrate=False under --json."""
+    rc = main(["--home", DANGEROUS, "--no-native", "--no-host", "--no-history",
+               "--full", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # The whole payload is exactly one JSON document — any stray narrated print
+    # before/after it would break json.loads on the full captured stdout.
+    json.loads(out)
+
+
+# ---------------------------------------------------------------------------
 # clean / bad / empty rendering
 # ---------------------------------------------------------------------------
 

@@ -554,6 +554,30 @@ def _sweep_quiet_line(sweep: SkillSweep) -> str:
     return line + " Full detail: --vet-all."
 
 
+def _sweep_to_json(sweep: SkillSweep) -> dict:
+    """Machine-readable form of a finished :class:`SkillSweep`, for ``--full --json``.
+
+    Same underlying data as :func:`_sweep_summary_lines`/:func:`_sweep_quiet_line`
+    (``sweep.rows``/``sweep.counts()``), never their prose — no string here is meant
+    for a terminal. Skill names are already sanitized once, in ``sweep.rows``
+    (C8, sweep_installed_skills) — not re-sanitized here.
+    """
+    return {
+        "checked_dirs": [str(d) for d in sweep.checked_dirs],
+        "no_roots": sweep.no_roots,
+        "no_targets": sweep.no_targets,
+        "truncated": sweep.truncated,
+        "complete": sweep.complete,
+        "worst": sweep.worst,
+        "counts": sweep.counts(),
+        "targets": [
+            {"name": name, "status": status, "evidence_count": ev}
+            for name, status, ev in sweep.rows
+        ],
+        "not_scanned": sweep.not_scanned(),
+    }
+
+
 def vet_all(
     home_dir: Path,
     ascii_only: bool = False,
@@ -1738,8 +1762,27 @@ def _main(argv=None) -> int:
             return 1
         return 0
 
+    vm_has_fail = False
+    sweep_has_fail = False
     if args.json:
-        body = render_json(findings, score, risk=paths, ctx=ctx)
+        # F-149 JSON gap: --full's printed SKILL SWEEP section had no machine-readable
+        # counterpart — the whole self-test/vet-mcp/sweep block below is skipped
+        # outright for --json (it is gated on `not args.json`), so a --full --json
+        # consumer could not see per-skill vet verdicts at all. Scope stays to the
+        # sweep only (self-test/vet-mcp are a separate, pre-existing --json gap this
+        # task does not cover — see docs/OUTPUT_SCHEMA.md). Silent (narrate=False),
+        # matching the --quiet collapse: JSON output must never carry the narrative
+        # prose a human report prints.
+        full_sweep_json = None
+        if args.full:
+            sweep_home = Path(args.home).expanduser()
+            sweep = sweep_installed_skills(
+                sweep_home, ascii_only=ascii_only,
+                sweep_budget_s=DEFAULT_VET_ALL_BUDGET_S, narrate=False)
+            full_sweep_json = _sweep_to_json(sweep)
+            sweep_has_fail = sweep.has_fail
+            _record_run("vet", args)
+        body = render_json(findings, score, risk=paths, ctx=ctx, skill_sweep=full_sweep_json)
     elif args.card:
         body = render_card(score, findings, ascii_only)
     else:
@@ -1782,8 +1825,6 @@ def _main(argv=None) -> int:
 
     _emit(body)
 
-    vm_has_fail = False
-    sweep_has_fail = False
     if args.full and not args.json and not args.card:
         seed = args.seed if args.seed is not None else secrets.token_hex(8)
         # F-149: the installed-skill sweep runs under the same wall-clock ceiling
