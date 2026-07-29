@@ -153,7 +153,13 @@ item," so the second opinion draws on more than one way of reading the same evid
 
 **When to run it:** only as an extra, opt-in step after Step 3's Dashboard, when the
 user asks for a judge review / second opinion on the scan's borderline results — not
-automatically on every audit (same spirit as the ⚡ live tests in Section 6).
+automatically on every audit (same spirit as the ⚡ live tests in Section 6). This
+policy is about the **panel process** (spawning judge subagents, presenting a "Second
+opinion" block) staying opt-in — it has not changed. What HAS changed mechanically:
+Step 2's `--full` run now computes the same `judgePacket` data for free as part of its
+JSON output (F-152), so the packet itself no longer needs a separate `--judge-packet`
+invocation if you already have a `--full --json` result in hand — only step 1 above
+changes, never the "run the panel only when asked" rule.
 
 1. Run `python3 {baseDir}/audit.py --judge-packet` and parse its `judgePacket` array.
 2. For each item, spawn **3 judge subagents**, each given a distinct lens on the **same**
@@ -340,7 +346,7 @@ rest on demand. The number, the phrase, or a tap all select an item; free phrasi
 
 | Choice | Flag(s) | Notes |
 |--------|---------|-------|
-| 1 Check everything ("check" / "go") | `--full` (+ auto capability self-report, see Step 2) | Read-only audit **+** capability self-report (resolves B43/B44 inline instead of leaving them UNKNOWN for a separate "deeper" step — F-043) **+** self-test scenario generation (canary/dryrun/redteam — generates injection scenarios; it does not itself run a behavioral verdict) **+** MCP vet **+** a per-skill sweep of every installed skill (`CLAWSECCHECK SKILL SWEEP`, one merged vet verdict per skill), in one go. The sweep is **visibility only** — its verdicts are deliberately not folded into the audit score or grade. The actual ⚡ live behavioral test (VULNERABLE vs RESISTANT) is a separate, opt-in step offered after the dashboard (Section 6, item a) — not part of item 1. |
+| 1 Check everything ("check" / "go") | `--full` (+ auto capability self-report, see Step 2) | Read-only audit **+** capability self-report (resolves B43/B44 inline instead of leaving them UNKNOWN for a separate "deeper" step — F-043) **+** self-test scenario generation (canary/dryrun/redteam — generates injection scenarios; it does not itself run a behavioral verdict) **+** MCP vet **+** a per-skill sweep of every installed skill (`CLAWSECCHECK SKILL SWEEP`) **+** a per-plugin sweep of every installed plugin (`PLUGIN SWEEP`, one merged vet verdict per plugin — F-150) **+** a post-hoc behavioral/trajectory replay (`BEHAVIORAL REPLAY` — advisory, same metadata-only signals `--behavioral` produces standalone) **+** a judge packet for the borderline band (`ADJUDICATION` — the same items `--judge-packet` would produce, emitted as part of this one run rather than a separate command), in one go. The skill/plugin sweeps and the behavioral replay are **visibility only** — their verdicts are deliberately not folded into the audit score or grade; the judge packet is likewise advisory-only and never moves the grade on its own (see Step 2). **Known gap:** these appended sections currently reach only `--full`'s own stdout/`--json`, not yet the Step 3 Dashboard card — see the note in Step 3. The actual ⚡ live behavioral test (VULNERABLE vs RESISTANT) is a separate, opt-in step offered after the dashboard (Section 6, item a) — not part of item 1. |
 | 2 Check before install | `--vet <path>` (autodetects skill · plugin · MCP spec; `--vet-skill` / `--vet-plugin` force an engine) · `--vet-mcp [name]` (configured MCP) · `--vet-source <slug\|url>` (before anything is even downloaded) | Supply-chain check on something you're about to trust. See the vet flow in Step 5 → [`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md). |
 | 3 Report & history | default report · `--save <path>` · `--trend` · `--badge <path>` | Show or save the last result, the score trend, or a shareable badge. |
 | 4 Menu | `--functions` (Screen 12 — the full palette) | Saying "menu" / "functions" / "more" expands the complete capability list — run `python3 {baseDir}/audit.py --functions` (or present its output). Every capability appears as a speakable prompt grounded to its real flag (verify, what-changed, html, sarif, percentile, risk-paths, the vet family, the ⚡ live tests, …), so there's no wall of raw flags. (`--menu` itself renders *this* Welcome screen; the palette is one level deeper.) |
@@ -445,6 +451,17 @@ paste exactly what the command prints. Your own prose around the paste follows t
 plain-language rule.
 
 (`--dashboard-findings` still prints Section 2 alone, if you ever need just the findings block.)
+
+**Known gap — the plugin sweep, behavioral replay, and judge packet are not in this card yet.**
+Step 2's `--full` run also produces a per-plugin sweep, a behavioral/trajectory replay, and a judge
+packet for the borderline band (see Step 1's mode-map row) — but `--dashboard` above only ever
+renders the Section 1-2 grade-card-and-findings contract it always has, so none of that reaches the
+user through this guided flow today. Per Step 2's existing rule, `--full`'s own raw stdout stays
+internal-only, so there is currently no chat-visible surface for it at all. If the user explicitly
+asks for one of these, use the matching standalone command instead of trying to extract it from a
+`--full` run: `--vet-all` for the skill sweep (plugins have no standalone bulk-vet flag yet — vet
+them one at a time with `--vet-plugin <path>`, or point them at `--vet <path>` which autodetects),
+`--behavioral` for the replay, `--judge-packet` for the packet (all three from Step 5).
 
 **Section 2 — what the pasted findings block contains**
 
@@ -643,9 +660,9 @@ dispatcher; the full protocol behind each row is the matching `## Choice:` secti
 | "badge", "share my grade", "shareable", "certificate" | `--badge` or `--card` |
 | "HTML report", "full report" | `--html report.html` |
 | "JSON", "machine readable", "raw data" | `--json` |
-| "what did my agent actually do", "behavioral", "runtime audit", "did it really do that", "prove it happened" | `--behavioral` — post-hoc, proof-by-log tool-call sequences from the trajectory sidecar; metadata-only, WARN-only, never scored. **Always relay the output — never drop it.** |
+| "what did my agent actually do", "behavioral", "runtime audit", "did it really do that", "prove it happened" | `--behavioral` — post-hoc, proof-by-log tool-call sequences from the trajectory sidecar; metadata-only, WARN-only, never scored. **Always relay the output — never drop it.** (Also runs as part of `--full` item 1's `BEHAVIORAL REPLAY` section — but that section is currently internal-only, see Step 3's known-gap note, so a user asking for this by name should still get the standalone command.) |
 | "did a suspicious skill's instructions actually run", "was this indicator acted on" | `--analyze-trajectory` — post-hoc, correlates installed-skill indicators against real tool-call arguments. **Any `⚠ INCIDENT SIGNAL` line is a real incident finding — never drop it.** |
-| "second opinion", "judge packet", "review the borderline findings" | `--judge-packet` — JSON list of borderline findings for host-agent review; summarize item count + per-item verdicts, offer to save large output to a file, **never paste raw JSON, never drop it** |
+| "second opinion", "judge packet", "review the borderline findings" | `--judge-packet` — JSON list of borderline findings for host-agent review; summarize item count + per-item verdicts, offer to save large output to a file, **never paste raw JSON, never drop it**. (Also produced as part of `--full` item 1's `ADJUDICATION` section, and answerable in the same run with `--full --judged-bundle <file>` — see `docs/USAGE.md`.) |
 
 ---
 

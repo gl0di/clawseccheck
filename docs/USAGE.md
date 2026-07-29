@@ -529,14 +529,18 @@ sources are not findings at all, so nothing else in the report announces them:
 2. under `--full`, a **`FAIL` MCP server** from the appended vet-mcp section;
 3. under `--full`, a **`DANGEROUS` (`FAIL`) installed skill** from the appended skill
    sweep;
-4. on **any** run, a present-but-**unparseable** `openclaw.json` — a broken config yields
+4. under `--full` (and not `--fast`), a **`DANGEROUS` (`FAIL`) installed plugin** from
+   the pipeline's plugin sweep (F-150);
+5. on **any** run, a present-but-**unparseable** `openclaw.json` — a broken config yields
    only `UNKNOWN`/`WARN` findings, so a FAIL-only gate would otherwise stay green on it.
 
-Sources 2 and 3 are **FAIL-only**, exactly like source 1: a `SUSPICIOUS` (WARN) server
-or skill does not redden the gate. Neither does an **incomplete sweep** — a skill that
-was skipped or only partially scanned is reported as such in the printed section and
-excluded from the "safe" tally, but it never moves the exit code. "We did not look at
-everything" is disclosed in the section, not by failing your pipeline.
+Sources 2-4 are **FAIL-only**, exactly like source 1: a `SUSPICIOUS` (WARN) server,
+skill, or plugin does not redden the gate. Neither does an **incomplete sweep** — a
+target that was skipped or only partially scanned is reported as such in the printed
+section and excluded from the "safe" tally, but it never moves the exit code. "We did
+not look at everything" is disclosed in the section, not by failing your pipeline. The
+adjudication phase (the judge packet, and any `--judged-bundle` "second opinion") never
+trips this either — it is advisory-only by design, same as everywhere else in this tool.
 
 Note that `--vet`'s exit code is a **separate** contract: it returns 1 on a
 `SUSPICIOUS`/`DANGEROUS` verdict (see `--vet TARGET` below), where a WARN *does* count.
@@ -557,7 +561,7 @@ ask, noted below):
 | Vet connected MCP servers | `clawseccheck --vet-mcp` |
 | Reputation gate before download | `clawseccheck --vet-source clawhub:some-skill` |
 | Active injection self-test | `clawseccheck --canary` · `clawseccheck --redteam` · `clawseccheck --dryrun` |
-| All-in-one (audit + self-test + vet-mcp + skill sweep) | `clawseccheck --full` · add `--quiet` to collapse the appended sections to one-line summaries (lighter for CI logs) |
+| All-in-one (audit + self-test + vet-mcp + skill sweep + plugin sweep + behavioral replay + judge packet) | `clawseccheck --full` · add `--quiet` to collapse the appended sections to one-line summaries (lighter for CI logs) · add `--fast` to drop the deep phases entirely (CI) · `--judged-bundle PATH` to feed back verdicts |
 | Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
 | Attestation template / feed it back | `clawseccheck --ask` · `clawseccheck --attest attest.json` |
 | Shareable card / SVG badge | `clawseccheck --card` · `clawseccheck --badge badge.svg` |
@@ -616,15 +620,33 @@ python3 audit.py --log audit.log            # also write log to a local file
   `C`/79 and makes the overall verdict `SUSPICIOUS`, so a partially-scanned target *does*
   exit `1` here. (The `--full` skill sweep treats truncation the opposite way — see
   `--full` below.)
-- **`--full`** runs the audit and then appends three extra sections: self-test scenario
-  generation, the MCP vet, and a **skill sweep** — one merged vet verdict per installed
-  skill, so the unit of the answer is the skill you would uninstall rather than a finding
-  attributed to the whole home. The sweep is **visibility only: its verdicts are not folded
-  into the audit score or grade.** Skills the sweep skipped or only partially scanned are
-  listed as such and kept out of its "safe" tally, and — unlike a single `--vet` — an
-  incomplete sweep never moves `--exit-code` (only a `DANGEROUS`/`FAIL` skill does).
-  `--full --json` carries the sweep as a structured `skill_sweep` object (self-test and
-  vet-mcp stay text-only) — see `docs/OUTPUT_SCHEMA.md` §19.
+- **`--full`** runs the audit and then appends: self-test scenario generation, the MCP vet,
+  a **skill sweep**, a **plugin sweep** (F-150), a **behavioral/trajectory replay**, and an
+  **adjudication phase** (the same borderline-band judge packet `--judge-packet` produces,
+  computed for free as part of this one run — F-152). The skill and plugin sweeps each give
+  one merged vet verdict per installed skill/plugin, so the unit of the answer is the thing
+  you would uninstall rather than a finding attributed to the whole home. The sweeps and the
+  behavioral replay are **visibility only: none of their verdicts are folded into the audit
+  score or grade.** Targets a sweep skipped or only partially scanned are listed as such and
+  kept out of its "safe" tally, and — unlike a single `--vet` — an incomplete sweep never
+  moves `--exit-code` (only a `DANGEROUS`/`FAIL` target does).
+  `--full --json` carries all of it structured: `skill_sweep` (§19), `pluginSweep`, `phases`
+  (one entry per appended phase, with an honest status — `ran`/`skipped`/`not_reached`/
+  `unavailable`/`error`, never silence), `complete`, `notScanned`, `judgePacket`, and
+  `vetPackets` — see `docs/OUTPUT_SCHEMA.md` §1.
+  - **`--fast`** (only with `--full`) drops the plugin sweep, behavioral replay, and skill
+    sweep — keeping just the audit, self-test, vet-mcp, and the (free) adjudication packet —
+    for CI runs where the deep phases are too slow. This is today's pre-F-150 `--full` shape.
+  - **`--judged-bundle PATH`** (only with `--full`, `-` for stdin) feeds back one file holding
+    a host-agent judge's answers to a prior `--full --json` packet: an `attestation` object,
+    a `judged` verdicts object for your own config (advisory — never changes the score or
+    grade), and a `vetJudged` array of per-target verdicts for the swept skills/plugins
+    (escalate-only — can never downgrade a finding on untrusted content). The result is a
+    `"Second opinion (advisory)"` section and, in `--json`, a `secondOpinion` array.
+  - The whole pipeline shares one wall-clock budget (`DEFAULT_FULL_BUDGET_S`, currently
+    2000s) so a hostile fleet cannot make `--full` hang indefinitely; a phase that could not
+    start before the budget ran out reports itself `not_reached` — named, never silently
+    skipped.
 - **`--vet-plugin PATH`** vets an OpenClaw plugin (root dir, `openclaw.plugin.json`, or an
   installed wrapper project) *before* you install it: manifest sanity, npm lifecycle scripts,
   floating dependency versions, native-executable stowaways, and skills entries escaping the
