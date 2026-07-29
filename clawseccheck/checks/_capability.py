@@ -12,6 +12,7 @@ from .. import attest as _attest
 from .. import trajectory as _trajectory
 from ..catalog import (
     BY_ID,
+    FAIL,
     PASS,
     UNKNOWN,
     WARN,
@@ -845,6 +846,117 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
         evidence=[
             f"write tool granted: {label}",
             "no approval gate (tools.exec.mode is not deny/allowlist/ask/auto)",
+        ],
+    )
+
+
+# ---------- B326: agents.defaults.elevatedDefault="full" bypasses human approval ----------
+# Grounded against the installed OpenClaw dist (2026-07-28, v2026.7.1-2); full trail:
+# docs/research/openclaw-schema-recon.md §39 (workspace root, not shipped). elevatedDefault
+# is a ZodUnion of "off"|"on"|"ask"|"full" (config-schema.d.ts:985) feeding
+# bash-tools-DHyGpWCr.js:3233-3293 (via resolvedElevatedLevel, get-reply-OTG64ybi.js:1626),
+# where ONLY "full" bypasses approval outright. The trap: "on" (the stock default) LOOKS
+# safe but is approval-gated identically to "ask" -- never flagged.
+# resolveElevatedPermissions() (:1316-1391) is the ONE {enabled, allowed} object every
+# consumer shares (get-reply.js / bash-tools.js -- no separate CLI/local escape). The bypass
+# is hard-blocked when EITHER (1) tools.elevated.enabled is explicitly false, or (2) the
+# GLOBAL allowFrom has no entry reachable by resolveElevatedAllowList()/
+# isApprovedElevatedSender() (:1222-1314): an Array is required, and
+# normalizeStringEntries() JS-.trim()s each element before checking emptiness -- JS .trim()
+# != Python str.strip(), so _B326_JS_TRIM_CHARS pins the exact ECMA-262 whitespace set it
+# strips (Node v22-verified). A PER-AGENT allowFrom only RESTRICTS once the global check
+# passes (:1364-1374 returns early on a failed globalAllowed) -- only the GLOBAL leg matters.
+_B326_JS_TRIM_CHARS = "".join(chr(c) for c in (
+    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0xA0, 0xFEFF, 0x1680,
+    0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A,
+    0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
+))
+
+
+def _b326_elevated_allow_from_absent(cfg: dict) -> bool:
+    """True when the GLOBAL tools.elevated.allowFrom grants no provider a reachable sender
+    (mirrors the real resolver, not "is something configured" -- see the grounding comment
+    above): needs a dict with a list value holding an entry non-empty after stripping
+    _B326_JS_TRIM_CHARS."""
+    allow = dig(cfg, "tools.elevated.allowFrom")
+    if not isinstance(allow, dict):
+        return True
+    return not any(
+        isinstance(v, list) and any(str(x).strip(_B326_JS_TRIM_CHARS) for x in v)
+        for v in allow.values()
+    )
+
+
+def check_elevated_default_full(ctx: Context) -> Finding:
+    """B326 — agents.defaults.elevatedDefault="full" bypasses human approval by default
+    (see the grounding comment above for why "full" alone bypasses while "on"/"ask" don't).
+
+    UNKNOWN — no openclaw.json, or unparseable/unreadable.
+    PASS    — elevatedDefault is absent, "off", "on", or "ask".
+    WARN    — "full" but dormant: tools.elevated.enabled=False, OR global allowFrom has no
+              entry that could ever match a sender (blocks the bypass today; reopening the
+              gate later restores reachability).
+    FAIL    — "full" and reachable: enabled not explicitly False AND allowFrom has an entry.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B326",
+            UNKNOWN,
+            "No openclaw.json found -- agents.defaults.elevatedDefault cannot be assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B326", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    cfg = ctx.config
+    level = dig(cfg, "agents.defaults.elevatedDefault")
+
+    if level != "full":
+        level_label = repr(level) if level is not None else "absent"
+        return _finding(
+            "B326",
+            PASS,
+            f"agents.defaults.elevatedDefault is {level_label} "
+            "-- human approval is not bypassed by default (only \"full\" bypasses it; "
+            "\"on\"/\"ask\"/\"off\"/absent all keep the approval gate in place).",
+            "No action needed; keep agents.defaults.elevatedDefault at \"ask\" (or leave "
+            "it unset -- the runtime default is the equally-gated \"on\").",
+        )
+
+    enabled = dig(cfg, "tools.elevated.enabled")
+    enabled_false = enabled is False
+    allow_from_absent = _b326_elevated_allow_from_absent(cfg)
+    if enabled_false or allow_from_absent:
+        reasons = [r for r, hit in (
+            ("tools.elevated.enabled=false", enabled_false),
+            ("tools.elevated.allowFrom is absent/empty for every provider", allow_from_absent),
+        ) if hit]
+        return _finding(
+            "B326",
+            WARN,
+            "agents.defaults.elevatedDefault=\"full\" (skips human approval outright), but "
+            + " and ".join(reasons) + " -- this unconditionally blocks the bypass today, "
+            "but is not a clean bill of health: closing that gap later would restore it.",
+            "Set agents.defaults.elevatedDefault to \"ask\" so the dangerous posture is not "
+            "configured at all, rather than relying on the dormant gate to keep it inert.",
+            evidence=["agents.defaults.elevatedDefault=\"full\""] + reasons,
+        )
+
+    return _finding(
+        "B326",
+        FAIL,
+        "agents.defaults.elevatedDefault=\"full\" -- elevated tools bypass human approval "
+        "by default (tools.elevated.enabled is not explicitly false, and "
+        "tools.elevated.allowFrom grants at least one sender), unlike \"on\"/\"ask\" which "
+        "both still require approval.",
+        "Set agents.defaults.elevatedDefault to \"ask\" (or leave it unset -- the runtime "
+        "default is the equally-gated \"on\") so elevated actions still require human "
+        "approval.",
+        evidence=[
+            "agents.defaults.elevatedDefault=\"full\"",
+            f"tools.elevated.enabled={enabled!r} (not explicitly false)",
+            f"tools.elevated.allowFrom={dig(cfg, 'tools.elevated.allowFrom')!r} (reachable)",
         ],
     )
 

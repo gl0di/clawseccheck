@@ -512,6 +512,17 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="skills",
     ),
+    # B326 (E-060 follow-up): the only elevatedDefault value that
+    # skips human approval outright ("on"/"ask" are both approval-gated and behaviorally
+    # identical -- see clawseccheck/checks/_capability.py's grounding comment).
+    CheckMeta(
+        "B326",
+        'agents.defaults.elevatedDefault="full" bypasses human approval by default',
+        HIGH,
+        "hardening",
+        "Human Approval",
+        surface="tools",
+    ),
     CheckMeta(
         "B327",
         "agents.defaults.embeddedAgent.projectSettingsPolicy trusts workspace settings",

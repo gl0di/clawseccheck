@@ -239,6 +239,7 @@ from ._capability import (
     check_capability_blast_radius,
     check_declared_effective_proven,
     check_effective_tools,
+    check_elevated_default_full,
     check_exec_applypatch_workspace,
     check_exec_strict_inline_eval,
     check_fs_write_exposure,
@@ -1266,6 +1267,7 @@ CHECKS = [
     check_host_firewall,
     check_host_egress_posture,
     check_capability_blast_radius,
+    check_elevated_default_full,  # B326 — agents.defaults.elevatedDefault="full" bypasses approval
     check_attestation_mismatch,
     check_declared_effective_proven,
     check_agent_separation,

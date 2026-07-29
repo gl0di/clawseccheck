@@ -505,6 +505,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B326 - agents.defaults.elevatedDefault="full" bypasses human approval by default
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Human Approval
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: agents.defaults.elevatedDefault="full" bypasses human approval by default
+- Remediation:
+  - none
+
 ### B327 - agents.defaults.embeddedAgent.projectSettingsPolicy trusts workspace settings
 
 - Severity: HIGH
