@@ -1729,6 +1729,362 @@ def _subtree_calls_decode_composing(node: ast.AST, composing: set[str]) -> bool:
     )
 
 
+# B336: CHUNKED_FILE_EXEC — a locally-defined helper reads and joins MULTIPLE chunked/
+# part files (e.g. `_load.part1.txt`, `.part2.txt`, `.part3.txt`) at runtime, and the
+# assembled result is passed to exec()/eval() -- the "split-by-file" scanner-evasion
+# loader shape (a payload that never exists whole in any single shipped .py file).
+# WARN-only (severity "info"): see analyze_python's own crit/info convention -- this
+# never becomes FAIL on its own, and checks/_vet.py's check_installed_skills routes it
+# through an explicit continue-branch so it can never reach that function's generic
+# crit/cred-exfil fallthrough either (the actual FAIL-capability landmine this design
+# closes for).
+#
+# Three legs, all required:
+#   1. sink        -- a call to exec()/eval() (bare name, in _EXEC_NAMES).
+#   2. source+shape -- the sink's argument traces, via ONE hop through a locally-defined
+#      TOP-LEVEL helper function's own RETURN value (mirrors B-284's
+#      `_remote_returning_funcs`/`_remote_code_load_findings` one-hop pattern, source
+#      swapped from "network fetch" to "multi-file read"), to a helper that reads >=2
+#      files in a loop (accumulated via `.append()`+join or `+=`) or as 2+ unrolled
+#      direct read expressions joined into what it returns. None of the read literal
+#      paths may be a `.py`/`.pyw`/`.pyi` file -- a real multi-file Python import/build
+#      graph is structurally excluded, not just by never touching exec/eval at all.
+#   3. corroborator -- the literal file paths read share one common stem+extension,
+#      the stem ending in an explicit chunk/part marker word (`part`/`chunk`/
+#      `segment`/`piece`), differing only by a numeric index right after that marker
+#      (`_paths_are_chunked`) -- the "chunked/multi-part files" shape. A single
+#      non-chunked file, or 2+ files with unrelated names, does not corroborate and is
+#      NOT flagged (proven by a dedicated fixture). C-135 (independent review, SkillTrust
+#      Bench SC-005 pass) found the original regex required only a bare trailing digit
+#      before the extension -- no marker word at all -- so it also matched ordinary
+#      version-numbered or otherwise-numbered *independent* resource files that are not
+#      fragments of one split payload (e.g. `strings_v1.txt`/`strings_v2.txt`, a
+#      two-locale string table). Requiring an explicit marker word narrows leg 3 to the
+#      documented "chunked/part files" shape and excludes that class of false positive.
+_CHUNK_READ_ATTRS = {"read", "read_text", "read_bytes"}
+_CHUNK_NAME_RE = re.compile(
+    r"^(?P<stem>.*?(?:part|chunk|segment|piece)[._-]?)(?P<idx>\d+)(?P<ext>\.[A-Za-z0-9]+)$",
+    re.IGNORECASE,
+)
+_CHUNK_EXEMPT_EXTS = (".py", ".pyw", ".pyi")
+
+
+def _is_open_call(node: ast.AST) -> bool:
+    """True when *node* is a call to `open(...)` or `<obj>.open(...)` (e.g.
+    `pathlib.Path(p).open()`) -- either spelling of "open a file for reading" this
+    rule's shape needs to recognise."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    return (isinstance(f, ast.Name) and f.id == "open") or (
+        isinstance(f, ast.Attribute) and f.attr == "open"
+    )
+
+
+def _open_read_handle_paths(fn: ast.AST) -> dict[str, str]:
+    """Map a file-handle name -> the literal path it was opened for READING at, within
+    `fn`'s own body -- the read-side twin of `_open_path_bindings` (which tracks
+    WRITE-mode handles for B-284's staged-exec detector). Covers both
+    `with open(P) as h:` and `h = open(P)`. The literal path is "" when the open()
+    argument is not a string constant (the common chunked-loop case, where the open()
+    argument is a loop variable, not a literal) -- callers that need the literal path
+    resolve it some other way (here, from the loop's own iterable); callers that only
+    need to know WHICH names are read-handles use this dict's keys.
+    """
+    out: dict[str, str] = {}
+    for node in _scope_own_nodes(fn):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                if _is_open_call(item.context_expr) and isinstance(item.optional_vars, ast.Name):
+                    call = item.context_expr
+                    path = _literal_str(call.args[0]) if call.args else ""
+                    out[item.optional_vars.id] = path
+        elif isinstance(node, ast.Assign) and _is_open_call(node.value):
+            path = _literal_str(node.value.args[0]) if node.value.args else ""
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    out[t.id] = path
+    return out
+
+
+def _is_file_read_chain(node: ast.AST, handles: set) -> bool:
+    """True for `open(...).read()`-family chained directly, or `h.read()`-family where
+    `h` is a name in `handles` (bound by a `with open(...) as h:` / `h = open(...)` in
+    the same function scope)."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    if not (isinstance(f, ast.Attribute) and f.attr in _CHUNK_READ_ATTRS):
+        return False
+    recv = f.value
+    if isinstance(recv, ast.Name) and recv.id in handles:
+        return True
+    return _is_open_call(recv)
+
+
+def _paths_are_chunked(paths: list) -> bool:
+    """Leg 3 corroborator: True when >=2 of *paths* share one (stem, extension) pair,
+    the stem ending in an explicit chunk/part marker word, differing only by a numeric
+    index right after that marker -- e.g. `_load.part1.txt` / `.part2.txt`. An ordinary
+    numbered filename with no marker word (`strings_v1.txt` / `strings_v2.txt`) does
+    NOT corroborate -- see `_CHUNK_NAME_RE`. Any unresolved ("") path, or any path
+    ending in a Python source extension (`_CHUNK_EXEMPT_EXTS` -- a real multi-file
+    Python import/build graph), disqualifies the WHOLE set: never fabricate a leg-3
+    pass from unresolved or out-of-scope data."""
+    if len(paths) < 2:
+        return False
+    groups: dict = {}
+    for p in paths:
+        if not p:
+            return False
+        base = p.rsplit("/", 1)[-1]
+        if base.lower().endswith(_CHUNK_EXEMPT_EXTS):
+            return False
+        m = _CHUNK_NAME_RE.match(base)
+        if not m:
+            continue
+        key = (m.group("stem"), m.group("ext").lower())
+        groups.setdefault(key, set()).add(m.group("idx"))
+    return any(len(idxs) >= 2 for idxs in groups.values())
+
+
+def _resolve_iter_literal_paths(iter_node: ast.AST, tree: ast.AST, fn: ast.AST) -> list:
+    """Resolve a `for x in <iter_node>:` iterable to a list of literal path strings --
+    either an inline List/Tuple literal, or a Name bound EXACTLY ONCE to one (checked
+    in `fn`'s own scope first, then module scope -- `_single_list_bindings_local`'s
+    existing single-binding discipline, reused verbatim from its subprocess-argv use).
+    Returns [] (never fabricates a partial resolution) when the iterable isn't provably
+    one of those two shapes."""
+    target = iter_node
+    if isinstance(target, ast.Name):
+        local = _single_list_bindings_local(fn).get(target.id)
+        target = local if local is not None else _single_list_bindings_local(tree).get(target.id)
+    if isinstance(target, (ast.List, ast.Tuple)):
+        return [_literal_str(e) for e in target.elts]
+    return []
+
+
+def _chunked_read_composing_funcnames(tree: ast.AST) -> dict:
+    """Leg 2: MODULE-LEVEL function names that compose a chunked multi-file read into
+    their own RETURN value, mapped to the literal file paths they read -- the read-side
+    twin of `_decode_composing_funcnames`/`_function_composes_decode`, restricted to
+    top-level functions only for the same C-135 same-name-collision reason (a
+    module-level `def` name is unique within a file).
+
+    Two shapes, either satisfies:
+      - loop form: a `for`/`async for` loop reads >=2 files (via a handle from
+        `_open_read_handle_paths`, or `open(...).read()`-family chained directly) and
+        accumulates them (`.append()` to a list, or `+=`) into a name that flows
+        (through a small fixpoint, mirroring `_function_composes_decode`'s own
+        4-iteration bound) into the function's own `return`. The literal paths are
+        resolved from the loop's OWN iterable via `_resolve_iter_literal_paths`.
+      - unrolled form: the function's own `return` expression directly contains 2+
+        file-read-chain expressions (`a.read() + b.read()`, `"".join([a.read(),
+        b.read()])`) -- the literal paths are each read's own `open(...)` literal arg.
+
+    A function satisfying neither shape is simply absent from the returned dict --
+    this is a detection gate, not a taint-completeness guarantee (Best-effort, like the
+    rest of this module)."""
+    funcs = [
+        n
+        for n in getattr(tree, "body", [])
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    composing: dict = {}
+    for fn in funcs:
+        own_nodes = list(_scope_own_nodes(fn))
+        handle_paths = _open_read_handle_paths(fn)
+        handles = set(handle_paths)
+
+        # Find an accumulator name fed by a read-chain: `acc.append(<read-chain>)` or
+        # `acc += <read-chain>`.
+        accumulator = None
+        for node in own_nodes:
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append"
+                and isinstance(node.func.value, ast.Name)
+                and any(_is_file_read_chain(n, handles) for a in node.args for n in ast.walk(a))
+            ):
+                accumulator = node.func.value.id
+                break
+            if (
+                isinstance(node, ast.AugAssign)
+                and isinstance(node.op, ast.Add)
+                and isinstance(node.target, ast.Name)
+                and any(_is_file_read_chain(n, handles) for n in ast.walk(node.value))
+            ):
+                accumulator = node.target.id
+                break
+
+        matched = False
+        paths: list = []
+
+        if accumulator is not None:
+            tainted = {accumulator}
+            for _ in range(4):
+                changed = False
+                for node in own_nodes:
+                    if isinstance(node, ast.Assign) and (_names_in(node.value) & tainted):
+                        for t in node.targets:
+                            if isinstance(t, ast.Name) and t.id not in tainted:
+                                tainted.add(t.id)
+                                changed = True
+                if not changed:
+                    break
+            for node in own_nodes:
+                if isinstance(node, ast.Return) and node.value is not None:
+                    if _names_in(node.value) & tainted:
+                        matched = True
+                        break
+            if matched:
+                for node in own_nodes:
+                    if isinstance(node, (ast.For, ast.AsyncFor)):
+                        loop_paths = _resolve_iter_literal_paths(node.iter, tree, fn)
+                        if loop_paths:
+                            paths = loop_paths
+                            break
+
+        if not matched:
+            # Unrolled form: 2+ direct file-read-chain expressions inside the
+            # function's own return.
+            for node in own_nodes:
+                if isinstance(node, ast.Return) and node.value is not None:
+                    reads = [n for n in ast.walk(node.value) if _is_file_read_chain(n, handles)]
+                    if len(reads) >= 2:
+                        matched = True
+                        for r in reads:
+                            recv = r.func.value
+                            if isinstance(recv, ast.Name) and recv.id in handle_paths:
+                                paths.append(handle_paths[recv.id])
+                            elif _is_open_call(recv) and recv.args:
+                                paths.append(_literal_str(recv.args[0]))
+                            else:
+                                paths.append("")
+                        break
+
+        if matched:
+            composing[fn.name] = paths
+    return composing
+
+
+def _chunked_file_exec_findings(tree: ast.AST) -> list:
+    """(lineno, reason) for every exec/eval sink fed by a chunked-multi-file-read-
+    composing helper (see `_chunked_read_composing_funcnames`), gated on the leg-3
+    chunk-naming corroborator (`_paths_are_chunked`). Mirrors `_remote_code_load_
+    findings`'s taint-hop shape for the assigned-then-passed form (`src = _load();
+    exec(src)`), and additionally matches the inline form (`exec(compile(_load(), ...))`)
+    via the same bare-name-call test `_subtree_calls_decode_composing` uses -- with one
+    deliberate difference: the taint fixpoint here is SCOPE-AWARE (bucketed per owning
+    scope via `_build_toplevel_owner_map`/`_tainted_names_visible`, the same model
+    `_tainted_names` already uses for the decode->exec check), where `_remote_code_
+    load_findings` still matches tainted names as bare strings module-wide.
+
+    C-135 (independent review, SkillTrustBench SC-005 pass) found that a module-wide,
+    scope-blind fixpoint let an unrelated function elsewhere in the file -- one that
+    merely reuses the same bare identifier for its OWN local (a very common real-world
+    shape with generic names like `data`/`content`/`template`/`result`) -- have its own,
+    unrelated exec()/eval() call wrongly flagged as "fed by chunked files," even with
+    zero actual data flow between the two. composing_names (leg 2) are already
+    restricted to unique top-level def names, so there is no decode-composing-style
+    `global`/`nonlocal` indirection specific to THAT set to resolve -- but the taint a
+    hop introduces still needs to respect ordinary lexical scoping once it starts
+    propagating through further name-to-name assignments, exactly like decode taint
+    does."""
+    composing = _chunked_read_composing_funcnames(tree)
+    if not composing:
+        return []
+    composing_names = set(composing)
+
+    _toplevel_funcs = [
+        n for n in getattr(tree, "body", []) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    _toplevel_classes = [n for n in getattr(tree, "body", []) if isinstance(n, ast.ClassDef)]
+    owner_map, parent_scope = _build_toplevel_owner_map(_toplevel_funcs, _toplevel_classes)
+    shadow_cache: dict = {}
+
+    tainted: dict = {}  # owning scope node (or None = module level) -> tainted names
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    for _ in range(6):
+        changed = False
+        for a in assigns:
+            hop = any(
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Name)
+                and sub.func.id in composing_names
+                for sub in ast.walk(a.value)
+            )
+            visible = _tainted_names_visible(a, tainted, owner_map, parent_scope, shadow_cache)
+            if not (hop or (_names_in(a.value) & visible)):
+                continue
+            scope = owner_map.get(a)
+            global_names = _global_declared_names(scope, owner_map) if scope is not None else set()
+            nonlocal_names = _nonlocal_declared_names(scope, owner_map) if scope is not None else set()
+            for t in a.targets:
+                if not isinstance(t, ast.Name):
+                    continue
+                if t.id in global_names:
+                    bucket_keys = [None]
+                elif t.id in nonlocal_names:
+                    targets = _nonlocal_target_scopes(
+                        t.id, scope, parent_scope, owner_map, shadow_cache, {}
+                    )
+                    if not targets:
+                        targets = []
+                        ancestor = parent_scope.get(scope)
+                        while ancestor is not None:
+                            targets.append(ancestor)
+                            ancestor = parent_scope.get(ancestor)
+                    bucket_keys = targets
+                else:
+                    bucket_keys = [scope]
+                for key in bucket_keys:
+                    bucket = tainted.setdefault(key, set())
+                    if t.id not in bucket:
+                        bucket.add(t.id)
+                        changed = True
+        if not changed:
+            break
+
+    found: list = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if not (isinstance(f, ast.Name) and f.id in _EXEC_NAMES):
+            continue
+        visible_tainted = _tainted_names_visible(node, tainted, owner_map, parent_scope, shadow_cache)
+        any_t, _direct = _call_args_tainted(node, visible_tainted)
+        inline = any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in composing_names
+            for arg in list(node.args) + [kw.value for kw in node.keywords]
+            for n in ast.walk(arg)
+        )
+        if not (any_t or inline):
+            continue
+        if len(composing) == 1:
+            fed_paths = next(iter(composing.values()))
+        else:
+            fed_paths = []
+            for plist in composing.values():
+                for p in plist:
+                    if p not in fed_paths:
+                        fed_paths.append(p)
+        if not _paths_are_chunked(fed_paths):
+            continue
+        extra = "..." if len(fed_paths) > 3 else ""
+        found.append(
+            (
+                getattr(node, "lineno", 0),
+                f"exec()/eval() executes content assembled by reading {len(fed_paths)} "
+                f"chunked files ({', '.join(fed_paths[:3])}{extra}) — split-by-file "
+                "payload-loader shape",
+            )
+        )
+    return found
+
+
 # F-058: code-level time-bomb / sandbox-evasion. Narrow on purpose — wall-clock date
 # (datetime.now()/date.today()/utcnow) and environment presence (os.environ / os.getenv)
 # only; NOT time.time() elapsed-timeouts or sys.platform checks, which are ordinary flow.
@@ -2627,6 +2983,15 @@ def analyze_python(
                 f"({out_path}) — staged dropper shape (no literal pipe, evades a plain "
                 "curl|sh match)",
             )
+
+    # B336: CHUNKED_FILE_EXEC — a locally-defined helper reads and joins multiple
+    # chunked/part files at runtime, and the assembled result is exec()'d/eval()'d — the
+    # split-by-file scanner-evasion loader shape. info (not crit): a corroborated-but-new
+    # heuristic; checks/_vet.py's check_installed_skills routes this rule through its own
+    # explicit continue-branch, so it can never reach that function's generic crit/
+    # cred-exfil FAIL fallthrough regardless of this severity label.
+    for _cf_ln, _cf_reason in _chunked_file_exec_findings(tree):
+        add("CHUNKED_FILE_EXEC", "info", _cf_ln, _cf_reason)
 
     # B-284: remote-fetch -> exec/eval through ONE local-helper return hop, the form
     # TT5_CMD_INJECTION below does not reach. crit, like TT5: bytes downloaded at

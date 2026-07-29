@@ -2375,6 +2375,60 @@ _B66_RESET_RE = re.compile(
 _B66_WINDOW = 160
 
 
+# B-xxx (PI-001 gap): an explicit self-assigned ELEVATED/UNRESTRICTED operating-mode
+# declaration ("you are now in/a/an/the developer|admin|root|god [mode]") is not itself
+# jailbreak evidence (a benign skill can legitimately say "you are now in developer
+# mode: expect more verbose logging"). It only counts as a WARN-tier authority-override
+# signal when paired NEARBY with a clause that neutralizes a safety control or
+# pre-approves a destructive action (_B66_AUTHORITY_NEUTRALIZE_RE) — see
+# _b66_authority_override_scan. Deliberately separate from _B66_CORE_RE/_B66_RESET_RE:
+# this is a corroborated WARN-only addition, never touches the FAIL-eligible core (B66
+# has no FAIL branch at all, so this is WARN-tier by construction).
+_B66_MODE_DECLARATION_RE = re.compile(
+    r"\byou\s+are\s+now\s+(?:in\s+|the\s+|an?\s+)"
+    r"(?:developer|admin(?:istrator)?|root|god)\b(?:\s+mode)?",
+    re.IGNORECASE,
+)
+
+
+_B66_AUTHORITY_NEUTRALIZE_RE = re.compile(
+    r"\bsafety\s+(?:filters?|checks?|guardrails?|policies|controls?)\s+"
+    r"(?:are\s+|is\s+|have\s+been\s+|were\s+)?"
+    r"(?:paused|disabled|suspended|off|bypassed|removed|lifted)\b"
+    r"|\b(?:destructive|dangerous)\s+(?:commands?|actions?|operations?)\s+"
+    r"(?:as\s+|are\s+|is\s+|have\s+been\s+)?"
+    r"(?:approved|authorized|authorised|pre-?approved|allowed)\b",
+    re.IGNORECASE,
+)
+
+
+# PI-001 C-135 follow-up: the neutralize match above is a bare "destructive commands
+# ... allowed/approved" clause with no way to see a trailing qualifier. Real
+# access-grant / on-call / runbook documentation routinely writes exactly that shape
+# ("destructive commands are allowed only after a documented change ticket and a
+# second engineer's sign-off"), which is a governance gate requiring human approval —
+# the OPPOSITE of the blanket/unconditional pre-approval this check targets. When a
+# conditional/qualifier clause sits near the neutralize match, treat it as
+# human-gated, not jailbreak evidence. Kept as a plain nearby-window check (mirrors
+# the existing _B66_WINDOW proximity idiom) rather than folding into
+# `_defensive_context`, which is negation-shaped (never/must not) and does not model
+# "allowed, but only under condition X".
+_B66_CONDITIONAL_QUALIFIER_RE = re.compile(
+    r"\bonly\s+(?:after|when|if|with)\b|"
+    r"\bprovided\s+(?:that\s+)?\b|"
+    r"\bsubject\s+to\b|"
+    r"\bpending\s+(?:approval|review|sign-?off)\b|"
+    r"\brequir\w*\s+(?:a\s+|an\s+)?(?:approval|review|sign-?off)\b|"
+    r"\bwith\s+(?:a\s+|an\s+)?(?:sign-?off|approval|review|peer\s+review)\b|"
+    r"\bafter\s+(?:a\s+|an\s+)?(?:documented\s+)?"
+    r"(?:approval|review|sign-?off|change\s+ticket|ticket)\b",
+    re.IGNORECASE,
+)
+
+
+_B66_QUALIFIER_WINDOW = 80
+
+
 _B67_CHANNEL_SRC_RE = {
     "browser": re.compile(
         r"\b(browser|web[\s_-]?page|webpage|browsed?\s+content|browse[\s_-]?tool)\b", re.I
@@ -2822,6 +2876,33 @@ def _clickfix_trusted_installer(cmd: str) -> bool:
         if not any(host == h and path.startswith(pre) for h, pre in _CLICKFIX_TRUSTED_INSTALLERS):
             return False
     return True
+
+
+def _clickfix_public_ip_fetch(cmd: str) -> bool:
+    """B100 WARN-tier corroborator (SC-001/C-310): True when the matched remote-fetch
+    command's URL targets a bare, PUBLIC IPv4/IPv6 literal host — not a domain name.
+    Reuses `_install_host_is_public_ip` (B103's already-vetted public-vs-private/
+    loopback/link-local/TEST-NET classifier — IPv4 via pure integer-octet math in
+    `_is_public_ip`, IPv6 via stdlib `ipaddress` single-address properties, both stable
+    across Python 3.9-3.12) instead of a new private-IP table. A legitimate, documented
+    installer command publishes a stable domain name, never a raw IP — vendors need a
+    domain for TLS identity and because IPs churn — so a public-IP-literal fetch host
+    under an install heading is itself a strong structural ClickFix signal, standing in
+    for the 'paste this into your terminal' imperative wording `check_clickfix_setup_
+    section` otherwise requires. Only a bare IP literal qualifies; a domain name —
+    however suspicious or look-alike — does NOT, so this stays a narrow, additive
+    OR-widening of the existing WARN gate, not a new detection axis. Private/loopback/
+    link-local/reserved/TEST-NET hosts (localhost dev servers) are excluded by
+    `_install_host_is_public_ip` itself.
+    """
+    for u in _URL_IN_CMD_RE.findall(cmd):
+        try:
+            host = urlparse(u).hostname or ""
+        except ValueError:
+            continue  # fail open — this corroborator only ever ADDS a WARN path
+        if host and _install_host_is_public_ip(host):
+            return True
+    return False
 
 
 # _CRED_RE moved to checks/_shared.py (F-124/E-044 layer-fix): logscan.py (Layer 1) needs
@@ -4471,6 +4552,35 @@ def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
             continue
         # A skill DOCUMENTING / defending against the attack (under a Known-Risks / Security
         # heading) must not WARN (B-120 guard for the reset-alone firing path).
+        if _under_defensive_heading(text, m.start()):
+            continue
+        snippet = window.strip().replace("\n", " ")
+        if len(snippet) > 120:
+            snippet = snippet[:117] + "..."
+        hits.append(snippet)
+    return hits
+
+
+def _b66_authority_override_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
+    """Scan *text* for a self-assigned elevated-mode declaration corroborated by a
+    nearby safety-neutralizing / destructive-preapproval clause (PI-001 gap). Both
+    legs are required — a bare "developer mode" mention never fires alone."""
+    hits: list[str] = []
+    for m in _B66_MODE_DECLARATION_RE.finditer(text):
+        if _is_code_example(text, m.start(), fr, fence_needs_negation=True):
+            continue
+        start = max(0, m.start() - _B66_WINDOW)
+        end = min(len(text), m.end() + _B66_WINDOW)
+        window = text[start:end]
+        trigger = _B66_AUTHORITY_NEUTRALIZE_RE.search(window)
+        if not trigger:
+            continue
+        qstart = max(0, trigger.start() - _B66_QUALIFIER_WINDOW)
+        qend = min(len(window), trigger.end() + _B66_QUALIFIER_WINDOW)
+        if _B66_CONDITIONAL_QUALIFIER_RE.search(window[qstart:qend]):
+            continue
+        if _defensive_context(text, start + trigger.start(), fr):
+            continue
         if _under_defensive_heading(text, m.start()):
             continue
         snippet = window.strip().replace("\n", " ")
@@ -6431,6 +6541,11 @@ def check_clickfix_setup_section(ctx: Context) -> Finding:
     normal Markdown convention for "the command to copy" — it is exactly how a real
     ClickFix payload is presented, not a signal that it's "just a documented example."
     Fence-suppressing this check would defeat its purpose.
+
+    SC-001/C-310: a bare, PUBLIC IPv4/IPv6 literal fetch host (`_clickfix_public_ip_fetch`)
+    corroborates the pattern in place of the natural-language imperative phrase — a
+    legitimate installer publishes a domain, not a raw IP, so this OR-widens the
+    imperative gate without adding a new detection axis.
     """
     if not ctx.installed_skills:
         return _custom(
@@ -6448,7 +6563,24 @@ def check_clickfix_setup_section(ctx: Context) -> Finding:
                 continue
             window_start = max(0, m.start() - _CLICKFIX_PROXIMITY_WINDOW)
             window = blob[window_start : m.end() + _CLICKFIX_PROXIMITY_WINDOW]
-            if not _CLICKFIX_IMPERATIVE_RE.search(window):
+            imperative = _CLICKFIX_IMPERATIVE_RE.search(window)
+            ip_corroborator = _clickfix_public_ip_fetch(m.group(0))
+            if not imperative and not ip_corroborator:
+                continue
+            # C-135 follow-up (independent reviewer, 2026-07-29): unlike the
+            # imperative phrase (whose own wording already excludes cautionary/
+            # negated prose -- "do not paste this" never matches "paste ... into
+            # ... terminal"), the bare structural IP-corroborator has no such
+            # built-in filter, so a security-education skill that QUOTES a
+            # ClickFix command as a warned-against example ("...trick you into
+            # running a command such as <cmd> Do not run commands like that.")
+            # wrongly WARNed. Scoped to the corroborator-only path so the
+            # already-established imperative-gated behavior is untouched: reuse
+            # the same proximity `window` (it already spans both sides of the
+            # match, same idiom as the imperative search two lines above) and
+            # skip when a broad negation/refusal marker sits anywhere in it --
+            # nearby cautionary framing, not a live instruction.
+            if not imperative and ip_corroborator and _BROAD_NEGATION_RE.search(window):
                 continue
             if _clickfix_trusted_installer(m.group(0)):
                 continue  # curated first-party installer host (B-118) — not ClickFix
@@ -6464,9 +6596,10 @@ def check_clickfix_setup_section(ctx: Context) -> Finding:
             # URL available to that already-validated, already-length-capped extractor.
             url_m = _URL_IN_CMD_RE.search(m.group(0))
             url_suffix = f" ({url_m.group(0)})" if url_m else ""
+            reason = "ClickFix pattern" if imperative else "ClickFix pattern — bare public-IP fetch host, no domain"
             warns.append(
                 f"{name}: '{heading}' section instructs pasting a remote-fetch command "
-                f"into a terminal (ClickFix pattern){url_suffix}"
+                f"into a terminal ({reason}){url_suffix}"
             )
             break  # one finding per skill is enough
 
@@ -8697,6 +8830,8 @@ def check_persona_jailbreak(ctx: Context) -> Finding:
         fr = _fence_ranges(norm)
         for hit in _b66_scan(norm, fr):
             evidence.append(f"{fname}: persona override pattern: {hit}")
+        for hit in _b66_authority_override_scan(norm, fr):
+            evidence.append(f"{fname}: elevated-mode authority-override pattern: {hit}")
 
     # B-232 item 1: also scan bounded file-boundary excerpts so a persona-override
     # split exactly at a SOUL.md/AGENTS.md boundary is still caught (see
@@ -8705,12 +8840,16 @@ def check_persona_jailbreak(ctx: Context) -> Finding:
         fr = _fence_ranges(excerpt)
         for hit in _b66_scan(excerpt, fr):
             evidence.append(f"{label}: persona override pattern: {hit}")
+        for hit in _b66_authority_override_scan(excerpt, fr):
+            evidence.append(f"{label}: elevated-mode authority-override pattern: {hit}")
 
     for skill_name, blob in ctx.installed_skills.items():
         norm = normalize_for_scan(blob)
         fr = _fence_ranges(norm)
         for hit in _b66_scan(norm, fr):
             evidence.append(f"{skill_name}: persona override pattern: {hit}")
+        for hit in _b66_authority_override_scan(norm, fr):
+            evidence.append(f"{skill_name}: elevated-mode authority-override pattern: {hit}")
 
     if evidence:
         return _finding(
@@ -11204,5 +11343,52 @@ def check_unsafe_deserialization(ctx: Context) -> Finding:
         "execute arbitrary code from its input. Confirm the loaded file is fully trusted "
         "(bundled by the skill itself, never user- or network-supplied) or switch to a "
         "safe format (json, yaml.safe_load).",
+        hits,
+    )
+
+
+def check_chunked_file_assembly_exec(ctx: Context) -> Finding:
+    """B336 -- exec()/eval() sink fed by a locally-defined helper that reads and joins
+    MULTIPLE chunked/part files at runtime (e.g. `_load.part1.txt`, `.part2.txt`), then
+    executes the assembled result -- the split-by-file scanner-evasion loader shape.
+    Reuses skillast.py's chunked-file-read-composing detection (CHUNKED_FILE_EXEC) --
+    pure wiring, no new AST logic in this module. Advisory (scored=False, never alters
+    the static grade); WARN-only.
+    """
+    if not getattr(ctx, "installed_skills", None):
+        return _custom(
+            "B336",
+            HIGH,
+            UNKNOWN,
+            "No installed skill sources to inspect for chunked-file-assembly execution.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    hits: list[str] = []
+    for name, files in getattr(ctx, "installed_skill_py", {}).items():
+        for relpath, src in files:
+            for af in analyze_python(src, relpath):
+                if af.rule == "CHUNKED_FILE_EXEC":
+                    hits.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+    if not hits:
+        return _custom(
+            "B336",
+            HIGH,
+            PASS,
+            "No chunked-file-assembly execution: no exec()/eval() sink is fed by a helper "
+            "that reads and joins multiple chunked/part files.",
+            "Keep code loaded via a normal import; if a skill legitimately needs to load a "
+            "large generated file, keep it in a single .py file so static analysis can see it.",
+        )
+    extra = f" (+{len(hits) - 6} more)" if len(hits) > 6 else ""
+    return _custom(
+        "B336",
+        HIGH,
+        WARN,
+        "Chunked-file-assembly execution in installed skill(s): " + "; ".join(hits[:6]) + extra,
+        "A helper reads and joins multiple chunked/part files (e.g. .part1.txt, "
+        ".part2.txt) and executes the assembled result via exec()/eval() -- the "
+        "documented split-by-file scanner-evasion loader shape. Read the reassembled "
+        "content; if it is not something you deliberately embedded, treat the skill as "
+        "malicious.",
         hits,
     )

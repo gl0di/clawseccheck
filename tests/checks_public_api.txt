@@ -153,6 +153,7 @@ check_bundled_root_override
 check_cachetrace_redaction
 check_capability_blast_radius
 check_capability_intent_mismatch
+check_chunked_file_assembly_exec
 check_clawhub_registry_provenance
 check_clawhub_token_store
 check_clickfix_setup_section

@@ -1620,6 +1620,23 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # A helper reads and joins MULTIPLE chunked/part files at runtime (e.g.
+    # `_load.part1.txt`, `.part2.txt`), and the assembled result is passed to
+    # exec()/eval() — the split-by-file scanner-evasion loader shape, where the
+    # payload never exists whole in any single shipped .py file. Reuses skillast.py's
+    # CHUNKED_FILE_EXEC AST rule — pure wiring, no separate logic here. Same tier as
+    # B91 (hidden-payload assembly + scanner evasion family, cf. B90/B91). Advisory
+    # (scored=False); WARN-only.
+    CheckMeta(
+        "B336",
+        "Chunked multi-file-read assembly executed via exec()/eval() (split-by-file payload loader)",
+        HIGH,
+        "advisory",
+        "Obfuscation / Malicious Skill",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # A confusable/mixed-script character in a skill's frontmatter DESCRIPTION (the actual
     # trigger-phrase surface) can register as a distinct near-duplicate for preferential
     # routing while looking identical to a human reader. F-022 already covers the skill NAME;
@@ -2699,6 +2716,7 @@ AST_MAP = {
     "B103": ("AST02",),  # install[] plaintext/IP/onion fetch = ML supply-chain compromise (cf. B13/B95)
     "B91": ("AST01",),  # dynamic-dispatch sink obfuscation = hidden malicious code / scanner evasion (cf. B89/B90)
     "B92": ("AST02",),  # unsafe deserialization sink = RCE-from-data supply-chain tamper (cf. B86)
+    "B336": ("AST01",),  # chunked file-read assembly -> exec/eval = hidden malicious code / scanner evasion (cf. B90/B91)
     "B93": ("AST04",),  # confusable trigger description = insecure metadata / trigger-squat (cf. B88)
     "B94": ("AST02",),  # extended lifecycle hooks = supply-chain tamper on install/version/publish (cf. B42)
     "B95": ("AST02",),  # dependency confusion (unpinned + typosquat name) = supply-chain tamper (cf. B13)

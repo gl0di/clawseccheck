@@ -1555,6 +1555,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B336 - Chunked multi-file-read assembly executed via exec()/eval() (split-by-file payload loader)
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Obfuscation / Malicious Skill
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Chunked multi-file-read assembly executed via exec()/eval() (split-by-file payload loader)
+- Remediation:
+  - none
+
 ### B93 - Confusable/mixed-script characters in a skill's trigger description
 
 - Severity: MEDIUM

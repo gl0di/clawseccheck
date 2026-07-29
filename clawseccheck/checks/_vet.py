@@ -95,6 +95,7 @@ from ._content import (
     _whole_text_is_defensive,
     check_agent_snooping,
     check_capability_intent_mismatch,
+    check_chunked_file_assembly_exec,
     check_clickfix_setup_section,
     check_conditional_sleeper_trigger,
     check_config_trust_widening,
@@ -2982,6 +2983,7 @@ def check_installed_skills(ctx: Context) -> Finding:
     warns_curl_dropper: list[str] = []  # C-205: argv-list curl/wget staging a script to /tmp
     warns_shell_injection: list[str] = []  # C-199: subprocess/os.system shell-injection-prone shape
     warns_insecure_tempfile: list[str] = []  # C-199: hardcoded predictable /tmp write (CWE-377)
+    warns_chunked_file_exec: list[str] = []  # B336: chunked multi-file-read helper -> exec/eval
     warns_install_curl: list[str] = []  # F-097: down-ranked install-doc curl|bash / fetch
     warns_js: list[str] = []  # F-064: soft JS/TS signals (child_process template, dynamic require)
     warns_content: list[
@@ -3391,6 +3393,14 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if af.rule == "SHELL_INJECTION_RISK":
                     warns_shell_injection.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
                     continue
+                # B336: chunked/part-file read+join composed into exec()/eval() — the
+                # split-by-file scanner-evasion loader shape. WARN-grade only — routed
+                # here, BEFORE the generic crit/cred-exfil fallthrough below, so this
+                # rule can never become FAIL-capable regardless of its own "info"
+                # severity label or any co-occurring cred/exfil signal.
+                if af.rule == "CHUNKED_FILE_EXEC":
+                    warns_chunked_file_exec.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                    continue
                 loc = f"{relpath}:{af.lineno}"
                 if af.severity == "crit":
                     crit.append(f"{name}: {af.reason} ({loc})")
@@ -3463,6 +3473,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         "warns_timebomb": warns_timebomb,
         "warns_shell_injection": warns_shell_injection,
         "warns_insecure_tempfile": warns_insecure_tempfile,
+        "warns_chunked_file_exec": warns_chunked_file_exec,
         "warns_js": warns_js,
         "warns_content": warns_content,
         "warns_notify_host": warns_notify_host,
@@ -3651,6 +3662,32 @@ def check_installed_skills(ctx: Context) -> Finding:
             warns_curl_dropper,
             _signal_buckets,
             "warns_curl_dropper",
+        )
+
+    # B336: a locally-defined helper reads and joins multiple chunked/part files at
+    # runtime, and the assembled result is exec()'d/eval()'d — the split-by-file
+    # scanner-evasion loader shape (the payload never exists whole in any single
+    # shipped .py file). WARN-first, ranked just below the staged-dropper WARN — a
+    # confirmed chunked-loader shape is a comparably strong signal to a staged dropper.
+    if warns_chunked_file_exec:
+        extra = (
+            f" (+{len(warns_chunked_file_exec) - 6} more)"
+            if len(warns_chunked_file_exec) > 6
+            else ""
+        )
+        return _b13_verdict(
+            HIGH,
+            WARN,
+            "Possible split-by-file payload loader in installed skill(s): "
+            + "; ".join(warns_chunked_file_exec[:6])
+            + extra,
+            "A helper reads and joins multiple chunked/part files at runtime and executes "
+            "the assembled result via exec()/eval() — the documented split-by-file "
+            "scanner-evasion loader shape. Read the reassembled content; if it is not "
+            "something you deliberately embedded, treat the skill as malicious.",
+            warns_chunked_file_exec,
+            _signal_buckets,
+            "warns_chunked_file_exec",
         )
 
     # F-058: a dangerous sink gated on a wall-clock date or an environment variable — a
@@ -4663,6 +4700,7 @@ SKILL_CONTENT_RING = (
     check_cross_file_plaintext_payload,  # B154 — cross-file split PLAINTEXT payload reassembly
     check_dynamic_dispatch_obfuscation,  # B91 — dynamic-dispatch sink obfuscation (F-102)
     check_unsafe_deserialization,  # B92 — unsafe deserialization sink (F-098)
+    check_chunked_file_assembly_exec,  # B336 — chunked multi-file-read assembly -> exec/eval
     check_trigger_homoglyph,  # B93 — confusable characters in trigger description (F-103)
     check_lifecycle_hooks_extended,  # B94 — extended lifecycle hooks beyond postinstall (F-099)
     check_dependency_confusion,  # B95 — unpinned dep name resembling a well-known package (F-101)
