@@ -273,11 +273,9 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
     if bypass_actors or _attest.is_ungated(att):
         if bypass_actors:
             evidence.append(f"approval bypass actor(s): {', '.join(sorted(set(bypass_actors)))}")
-        # B-315: was FAIL. B43 is confidence=ATTESTED and scored=False — the whole
-        # verdict is derived from the audited agent's OWN self-report (ctx.attestation),
-        # not a config fact. A grade cap the subject can talk itself into (or out of) is
-        # unsound, so an unscored check must not FAIL (Dave's ruling: scored=False caps
-        # at WARN). Downgraded to WARN; still names the exact same evidence.
+        # B-315: was FAIL, downgraded to WARN. B43 is ATTESTED/scored=False — the verdict
+        # rests on the audited agent's OWN self-report, so a grade cap it could talk itself
+        # into/out of is unsound (Dave's ruling: unscored checks cap at WARN).
         return _finding(
             "B43",
             WARN,
@@ -306,14 +304,13 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
 
     B44 cross-checks two columns: what config GRANTS vs. what the agent SELF-REPORTS
     it holds. Neither proves the verb was ever actually exercised. B84 adds a third,
-    stronger-inside-the-self-report-layer column: verbs the agent has LOG/TRACE
-    evidence it ACTUALLY invoked (``proven_tools``). A proven high-blast verb fired
-    with no approval gate is the headline signal this check exists for — it is no
-    longer "the agent could" but "the agent did, ungated."
+    stronger column: verbs the agent has LOG/TRACE evidence it ACTUALLY invoked
+    (``proven_tools``). A proven high-blast verb fired with no approval gate is the
+    headline signal — no longer "the agent could" but "the agent did, ungated."
 
-    Still an agent self-report end to end (declared < effective < proven in trust,
-    but all three ultimately rest on what the agent chooses to disclose), so this
-    carries ATTESTED confidence and is advisory (not scored) like B43/B44.
+    Still an agent self-report end to end (declared < effective < proven in trust, but
+    all three rest on what the agent chooses to disclose), so this carries ATTESTED
+    confidence and is advisory (not scored) like B43/B44.
 
     PASS    — proven verbs are a subset of what's declared/effective and no proven
               high-blast verb fired without an approval gate.
@@ -561,25 +558,22 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
     default true). When false, apply_patch may write or delete files outside the workspace
     root, expanding the write blast radius.
 
-    B-283 (b) widened this from ONE sibling of a pair to both. ``tools.fs.workspaceOnly``
+    B-283 (b) widened this from ONE sibling of a pair to both: ``tools.fs.workspaceOnly``
     governs the whole fs read/write/edit/apply_patch family — *"Restrict filesystem tools
     (read/write/edit/apply_patch) to the workspace directory (default: false)"*
-    (schema-DRyO1XBt.js:556) — so ``applyPatch.workspaceOnly: true`` could pass here while
-    fs stayed wide open over ``~/.ssh`` / ``~/.openclaw`` / ``/etc``. It was read nowhere in
-    the package before this change.
+    (schema-DRyO1XBt.js:556) — so ``applyPatch.workspaceOnly: true`` alone could pass here
+    while fs stayed wide open over ``~/.ssh`` / ``~/.openclaw`` / ``/etc``.
 
     THE DEFAULT IS FALSE, so a bare ``workspaceOnly !== true -> finding`` would fire on
-    nearly every real config and flag a product default as a failure — a grade-wrecking
-    blanket WARN, exactly the noise GR#5 exists to prevent. Instead this uses OpenClaw's
-    OWN composite predicate (audit.nondeep.runtime-C3y1Q5Fi.js:590)::
+    nearly every real config — a grade-wrecking blanket WARN, exactly the noise GR#5
+    exists to prevent. Instead this uses OpenClaw's OWN composite predicate
+    (audit.nondeep.runtime-C3y1Q5Fi.js:590)::
 
         fsUnguarded = fsTools.length > 0 && sandboxMode !== "all" && fsWorkspaceOnly !== true
 
     i.e. unconfined fs only matters when fs tools are actually GRANTED and the sandbox is
-    not containing them. Every ingredient was already read by ClawSecCheck.
-
-    Stays WARN-capable only (CheckMeta scored=False) — advisory, never moves the grade,
-    never FAIL.
+    not containing them. Every ingredient was already read by ClawSecCheck. Stays
+    WARN-capable only (CheckMeta scored=False) — advisory, never moves the grade, never FAIL.
 
     PASS    — apply_patch confined, and fs is either workspace-confined, sandboxed
               (``agents.defaults.sandbox.mode == "all"``), or has no granted fs tools.
@@ -590,11 +584,11 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
               gateway.tools.allow and no tools.profile) and neither sibling is explicitly
               false, so the composite predicate genuinely cannot be evaluated.
 
-    NARROWS, does not close: this reasons over STATIC config only. Per-agent
+    NARROWS, does not close: reasons over STATIC config only. Per-agent
     ``tools.allow``/``deny``/``profile`` overrides and group/sender-scoped tool policies
     can still grant fs tools to an agent this check reads as tool-less, and OpenClaw
-    resolves the effective set at runtime. A config that declares no tool surface at all
-    is reported UNKNOWN rather than guessed at.
+    resolves the effective set at runtime; a config declaring no tool surface at all is
+    reported UNKNOWN rather than guessed at.
     """
     unreadable = _config_unreadable("B68", ctx)
     if unreadable is not None:
@@ -826,11 +820,9 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
             ev.append(
                 "open-ingress bypasses exec-style approval and can still drive write-capable tools"
             )
-        # B-315: was FAIL. B55 is scored=False by design — its catalog comment already
-        # says the write/least-privilege dimension this fires on is duplicated by the
-        # SCORED checks B3/B22/B31, so capping the grade here would double-count the
-        # same risk under a second check id. An unscored check must not FAIL (Dave's
-        # ruling: scored=False caps at WARN). Downgraded to WARN; same evidence.
+        # B-315: was FAIL, downgraded to WARN. B55 is scored=False by design — the
+        # write/least-privilege dimension it fires on is already SCORED by B3/B22/B31, so
+        # capping the grade here would double-count the same risk under a second check id.
         return _finding(
             "B55",
             WARN,
@@ -908,11 +900,11 @@ def check_path_safety(ctx: Context) -> Finding:
     binary. We check (POSIX only, stat() calls only — no file reads):
 
     1. The directory that contains the openclaw binary is group/world-writable.
-    2. Any ANCESTOR install dir above the binary (e.g. the npm package root
-       .../node_modules/openclaw) is group/world-writable — a group member could
-       replace the subtree even if the immediate bin dir is tight.
-    3. Any directory in $PATH that appears BEFORE the openclaw dir is
-       group/world-writable (a fake 'openclaw' could be found first).
+    2. Any group/world-writable ANCESTOR install dir above the binary (e.g. the npm
+       package root .../node_modules/openclaw) — a group member could replace the
+       subtree even if the immediate bin dir is tight.
+    3. Any group/world-writable $PATH dir listed BEFORE the openclaw dir (a fake
+       'openclaw' could be found there first).
 
     A sticky world-writable dir (e.g. /tmp, mode 1777) is NOT flagged: the sticky bit
     blocks cross-owner rename/delete, so it is not a replace vector. The agent may also
@@ -924,7 +916,13 @@ def check_path_safety(ctx: Context) -> Finding:
     PASS  — openclaw located and binary dir / ancestors / earlier PATH dirs are tight.
     UNKNOWN — openclaw not on PATH and no attested install dir, or non-POSIX platform.
 
-    Only stat() is called; no file contents are read.
+    F-140 — only the non-POSIX branch sets ``not_applicable``: C5's locus is the host
+    PLATFORM (not openclaw.json, so ``_surface_absent`` doesn't apply), and ``_is_posix()``
+    is itself a complete reading of it — off POSIX the group/world/sticky mode bits this
+    check models don't exist at all. The other two UNKNOWN branches stay ordinary
+    (unassessed risk, not absence): ``--no-host`` means the operator opted out, and "not on
+    PATH" is a discovery failure the fix text invites ``--attest`` to close. Full rationale
+    + the three-way test: ``tests/test_f140_not_applicable_adversarial.py``.
     """
     # C5 inspects the host filesystem (PATH dirs + install-tree perms), so it belongs to
     # the host-scanning scope. When host scanning is off (--no-host / audit(include_host=
@@ -945,6 +943,7 @@ def check_path_safety(ctx: Context) -> Finding:
             UNKNOWN,
             "PATH safety check not applicable on non-POSIX platforms.",
             "—",
+            not_applicable=True,
         )
 
     exe = shutil.which("openclaw")

@@ -20,6 +20,7 @@ from ..catalog import (
     Finding,
 )
 from ..collector import (
+    LIMIT_DOMAIN_CONFIG,
     Context,
     dig,
 )
@@ -40,6 +41,7 @@ from ._shared import (
     _mcp_servers,
     _mcp_url_is_local,
     _read_jsonl_tail,
+    _surface_absent,
     correlation_indicators,
     parse_bind_host,
 )
@@ -748,6 +750,61 @@ def check_browser_evaluate_enabled(ctx: Context) -> Finding:
     )
 
 
+# Every field the provider-request TLS object actually has, per the installed dist
+# (`ConfiguredProviderRequestTlsSchema`). `insecureSkipVerify` is the only one B155
+# JUDGES; the other five are recognized purely as proof that a real TLS transport was
+# DECLARED, so a custom-CA / SNI-override config is not mistaken for an empty stub.
+# Split by type because "declared" means something different for each: a bool is
+# substantive at either value (an explicit `false` is still a declaration), whereas a
+# string field is only substantive when non-blank.
+_B155_TLS_BOOL_FIELDS = ("insecureSkipVerify",)
+_B155_TLS_STR_FIELDS = ("ca", "cert", "key", "passphrase", "serverName")
+
+
+def _b155_tls_is_substantive(tls: dict) -> bool:
+    """True when a ``request.tls`` / ``request.proxy.tls`` object declares a real TLS
+    setting, rather than being an empty or unrecognized-shape stub.
+
+    The recognized set is the COMPLETE field list of this schema object, not a guess --
+    keeping it complete is what stops a legitimate config from being under-claimed as a
+    stub. An earlier revision recognized only ``insecureSkipVerify``, which sent a real
+    ``{serverName, ca}`` pin into the stub bucket and reported "no outbound proxy
+    configured": fail-safe (never a false PASS) but still a false negative on a declared
+    transport.
+
+    ``insecureSkipVerify: false`` DOES count -- the operator explicitly declared
+    verification on, which is an assessable, clean setting. That is deliberately different
+    from the bare ``request.allowPrivateNetwork: false`` case, which is a loose
+    request-level boolean rather than a declared transport object; see the call site.
+
+    Presence only: no value is ever read into detail/evidence, so the secret-shaped
+    ``passphrase`` field is tested for declaration and never echoed (§8).
+    """
+    if any(isinstance(tls.get(f), bool) for f in _B155_TLS_BOOL_FIELDS):
+        return True
+    return any(
+        isinstance(tls.get(f), str) and tls.get(f).strip()
+        for f in _B155_TLS_STR_FIELDS
+    )
+
+
+def _b155_proxy_is_substantive(pxy: dict) -> bool:
+    """True when a ``request.proxy`` object declares a real transport, not a stub.
+
+    Recognizes the fields this check actually reads or that the provider-request schema
+    documents for the object: a non-blank ``url``, a non-blank ``mode`` (e.g.
+    ``"explicit-proxy"``), or a nested ``tls`` object that is itself substantive. An empty
+    dict, or one carrying only keys we do not recognize, is NOT a transport -- promoting
+    it to PASS would claim we assessed something we never parsed.
+    """
+    for key in ("url", "mode"):
+        val = pxy.get(key)
+        if isinstance(val, str) and val.strip():
+            return True
+    nested = pxy.get("tls")
+    return isinstance(nested, dict) and _b155_tls_is_substantive(nested)
+
+
 def check_outbound_proxy(ctx: Context) -> Finding:
     """B155 — Outbound proxy hardening (credential leak / TLS-verify / SSRF-guard bypass).
 
@@ -763,8 +820,49 @@ def check_outbound_proxy(ctx: Context) -> Finding:
               (models.providers.*.request.proxy.tls.insecureSkipVerify or
               request.tls.insecureSkipVerify) → MITM; request.allowPrivateNetwork → SSRF;
               tools.web.fetch.useTrustedEnvProxy → bypasses the local SSRF/DNS-rebind guard.
-    PASS    — a managed proxy is configured with a clean (credential-free) URL.
+    PASS    — a managed proxy is configured with a clean (credential-free) URL, OR a
+              per-provider request.proxy/request.tls transport is configured and clean
+              with no top-level proxy.* block.
     UNKNOWN — no outbound proxy configured (the default): advisory nudge, never a FAIL.
+              F-140: sets ``not_applicable`` only when the config locus was read
+              COMPLETELY and NO proxy surface is declared — neither the top-level
+              ``proxy.*`` block nor any per-provider ``models.providers.*.request.proxy``
+              / ``.tls`` object.
+
+              Surface presence is evaluated DIRECTLY, never inferred from "the signal
+              scan found nothing". Inferring it was a real bug (caught by C-135 review):
+              a configured-and-clean per-provider proxy produced no FAIL/WARN, fell to
+              this branch, and was reported not-applicable — telling the owner the check
+              did not apply to them about a proxy they had actually configured.
+              ``allowPrivateNetwork`` and ``tools.web.fetch.useTrustedEnvProxy`` are
+              deliberately NOT treated as surface: they are booleans that only signal when
+              true, so an explicit ``false`` is the default posture, not a declared proxy.
+
+              There are THREE outcomes on this branch, not two, and the middle one is easy
+              to lose in a refactor (a second C-135 round caught it being collapsed into
+              PASS):
+
+              * nothing declared anywhere -> UNKNOWN, ``not_applicable=True``.
+              * a proxy/TLS object declared but EMPTY or carrying only unrecognized keys
+                (a stub) -> UNKNOWN, ``not_applicable=False``. Nothing was assessable, so
+                it cannot be PASS; but a proxy key WAS read, so absence was never proven
+                and claiming it would be a fabricated negative.
+              * a substantive object (see ``_b155_proxy_is_substantive`` /
+                ``_b155_tls_is_substantive``) -> PASS/WARN/FAIL as the signals dictate.
+
+              Why absence here is genuine inapplicability and not an unassessed risk:
+              every exposure B155 models is a property OF a configured proxy — a
+              credential embedded in a proxy URL, a proxy/endpoint TLS verification that
+              was switched off, an env proxy the fetch tool was told to trust. None of
+              them can exist without a proxy to carry them, so with no proxy declared
+              there is no object left to assess. The host of course still has outbound
+              traffic; judging THAT surface is a different check's job, and marking this
+              one not-applicable makes no claim about it.
+
+              Scope note: the flag rides the same branch as the existing advisory nudge
+              and does not silence it. The detail text is unchanged, so this is not a
+              claim that a managed proxy is unnecessary — only that this check's specific
+              weakening signals have no place to live on this host.
     """
     from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
     cfg = ctx.config
@@ -798,6 +896,31 @@ def check_outbound_proxy(ctx: Context) -> Finding:
 
     # WARN: per-provider TLS-verify-disable / private-network egress. FAIL: an explicit-proxy
     # url can embed credentials — same secret-leak class as the top-level proxy.proxyUrl.
+    # F-140 follow-up: the per-provider transport surface is recorded as PRESENT here,
+    # independently of whether it produced a signal below. Before this, presence was only
+    # ever inferred from `fails`/`warns` being non-empty, so a provider proxy that was
+    # configured AND CLEAN fell through to the "no outbound proxy configured" UNKNOWN --
+    # and, once F-140 landed, was reported not-applicable. That told the owner this check
+    # did not apply to them about a proxy they had actually configured, which is the exact
+    # lying-not-applicable shape the flag exists to prevent.
+    #
+    # Presence means a declared proxy/TLS OBJECT (`request.proxy` / `request.tls`), not any
+    # request-level boolean. `allowPrivateNetwork` and `tools.web.fetch.useTrustedEnvProxy`
+    # are deliberately excluded: they are only signals when true (and then they already
+    # produce a WARN above), so treating an explicit `false` -- the default posture -- as
+    # "a proxy exists here" would assert a surface nobody configured.
+    #
+    # A dict is not automatically a transport. `request.proxy: {}` (or one carrying only
+    # unrecognized keys) declares NOTHING assessable, so counting it as surface would
+    # promote a stub to "configured and clean" -- the mirror image of the bug above, and a
+    # false PASS on a HIGH scored check. It is tracked SEPARATELY as `provider_stub`:
+    # neither surface-present (nothing to assess -> no PASS) nor surface-absent (we DID
+    # read a proxy key -> no not_applicable). That third state resolves to a plain
+    # UNKNOWN, which is the honest answer for unassessable data (Golden Rule #4).
+    # Mirrors the top-level block's own guard, which likewise requires
+    # `proxy_enabled is True or has_proxy_url` before treating `proxy: {}` as real.
+    provider_surface: list[str] = []
+    provider_stub: list[str] = []
     providers = dig(cfg, "models.providers")
     if isinstance(providers, dict):
         for pid, pspec in providers.items():
@@ -807,6 +930,21 @@ def check_outbound_proxy(ctx: Context) -> Finding:
             if not isinstance(req, dict):
                 continue
             pxy = req.get("proxy")
+            if isinstance(pxy, dict):
+                if _b155_proxy_is_substantive(pxy):
+                    provider_surface.append(
+                        f"models.providers.{pid}.request.proxy is configured"
+                    )
+                else:
+                    provider_stub.append(f"models.providers.{pid}.request.proxy")
+            ptls_decl = req.get("tls")
+            if isinstance(ptls_decl, dict):
+                if _b155_tls_is_substantive(ptls_decl):
+                    provider_surface.append(
+                        f"models.providers.{pid}.request.tls is configured"
+                    )
+                else:
+                    provider_stub.append(f"models.providers.{pid}.request.tls")
             if isinstance(pxy, dict):
                 purl = pxy.get("url")
                 if isinstance(purl, str) and purl.strip():
@@ -887,12 +1025,35 @@ def check_outbound_proxy(ctx: Context) -> Finding:
             "and egress policy enforced at the proxy.",
             evidence=notes,
         )
+    # F-140 follow-up: a per-provider proxy/TLS transport with no top-level proxy.* block.
+    # Deliberately a DISTINCT detail string rather than reusing the sentence above: this
+    # host has no managed forward proxy, so claiming one "is configured" would be a
+    # different false statement. Only configs that previously landed on the UNKNOWN branch
+    # can reach here, so no existing PASS fingerprint moves.
+    if provider_surface:
+        return _finding(
+            "B155", PASS,
+            f"Per-provider outbound transport is configured ({len(provider_surface)} "
+            "setting(s)) with no credential-in-URL, TLS-verify-disable, or "
+            "SSRF-guard-bypass signals; no top-level managed proxy (proxy.*) is set.",
+            "Keep per-provider request.proxy URLs credential-free (env / secret store) and "
+            "request.tls verification on. Optional: add a top-level managed proxy "
+            "(proxy.enabled + a credential-free https:// proxy.proxyUrl) to centralize and "
+            "audit egress.",
+            evidence=provider_surface[:6] + notes,
+        )
     return _finding(
         "B155", UNKNOWN,
         "No outbound proxy configured — the agent's egress goes direct (the default). "
         "A managed proxy (proxy.*) would centralize and log egress; informational, not required.",
         "Optional: set proxy.enabled + a credential-free https:// proxy.proxyUrl to route and "
         "audit the agent's outbound traffic through a controlled egress point.",
+        # A stub proxy/TLS object means we DID read a declared proxy key and could not make
+        # anything of it. Absence was therefore not established, so the flag stays False and
+        # this reports as an ordinary unresolved UNKNOWN.
+        not_applicable=(
+            not provider_stub and _surface_absent(ctx, LIMIT_DOMAIN_CONFIG)
+        ),
     )
 
 

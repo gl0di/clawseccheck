@@ -409,10 +409,34 @@ def assessment_coverage(findings: list[Finding]) -> dict:
 
     Returns a dict:
         {"scored_total": int, "assessable": int, "unknown": int,
+         "not_applicable": int, "applicable_total": int,
          "assessable_frac": float, "unknown_frac": float}
 
     ``assessable + unknown == scored_total`` always holds. When
     ``scored_total == 0`` both fractions are ``0.0`` (nothing to divide by).
+
+    F-140 — ``not_applicable``/``applicable_total`` are a PURE ADDITION, and the
+    restraint is the point. ``unknown`` deliberately stays the FULL UNKNOWN count and is
+    NOT narrowed to exclude not-applicable findings, so ``assessable``, ``unknown``, both
+    fractions, and the ``assessable + unknown == scored_total`` invariant all keep
+    exactly the values they had before the flag existed. Every current consumer —
+    including report.py's LOW_COVERAGE_FRAC / DRIFT_UNKNOWN_FRAC bands — therefore reads
+    the same numbers as it did yesterday, and this change cannot move a grade, a cap, or
+    a drift verdict.
+
+    The two new keys exist so a caller that WANTS the sharper denominator can compute it
+    honestly: ``applicable_total`` (``scored_total - not_applicable``) is the catalog
+    slice that could ever have been assessed on THIS host, which is the right divisor for
+    a coverage percentage once a check has positively proven its surface absent. Nothing
+    in-tree divides by it yet — rebasing the bands onto it is a separate, deliberate task,
+    because doing it here would silently relax two thresholds in the same change that
+    first makes them relaxable.
+
+    Note ``not_applicable`` counts only findings that are BOTH ``UNKNOWN`` and flagged.
+    ``Finding.__post_init__`` already enforces that pairing, so the redundant status test
+    is a cheap guard against a future caller constructing the field some other way — it
+    keeps ``not_applicable <= unknown`` true by construction, which is what makes
+    ``applicable_total >= assessable`` safe to rely on.
     """
     in_scope = [
         f for f in findings
@@ -423,12 +447,18 @@ def assessment_coverage(findings: list[Finding]) -> dict:
     scored_total = len(in_scope)
     unknown = sum(1 for f in in_scope if f.status == UNKNOWN)
     assessable = scored_total - unknown
+    not_applicable = sum(
+        1 for f in in_scope
+        if f.status == UNKNOWN and getattr(f, "not_applicable", False)
+    )
 
     if scored_total == 0:
         return {
             "scored_total": 0,
             "assessable": 0,
             "unknown": 0,
+            "not_applicable": 0,
+            "applicable_total": 0,
             "assessable_frac": 0.0,
             "unknown_frac": 0.0,
         }
@@ -437,6 +467,8 @@ def assessment_coverage(findings: list[Finding]) -> dict:
         "scored_total": scored_total,
         "assessable": assessable,
         "unknown": unknown,
+        "not_applicable": not_applicable,
+        "applicable_total": scored_total - not_applicable,
         "assessable_frac": assessable / scored_total,
         "unknown_frac": unknown / scored_total,
     }

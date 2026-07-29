@@ -20,6 +20,7 @@ from ..catalog import (
 )
 from ..collector import (
     BOOTSTRAP_FILES,
+    LIMIT_DOMAIN_CONFIG,
     SKILL_DIRS,
     Context,
     dig,
@@ -62,6 +63,7 @@ from ._shared import (
     _plugins,
     _profile_is_powerful,
     _secret_paths,
+    _surface_absent,
     _trifecta_legs,
     _web_fetch_enabled,
     parse_bind_host,
@@ -689,6 +691,14 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
              control-plane tools are not explicitly denied in gateway.tools.deny.
     PASS   — control-plane tools are denied / not re-enabled.
     UNKNOWN — no gateway config present.
+              F-140: sets ``not_applicable`` only when the config locus was read
+              COMPLETELY and ``gateway`` is still not a dict. The HTTP gateway is the
+              ONLY reachability path this check models — with no gateway there is no
+              HTTP surface over which a control-plane tool could be reached, so absence
+              here is genuine inapplicability rather than an unassessed risk. The whole
+              read is ``ctx.config``, so config-locus completeness is the entire proof
+              obligation; an absent/unparseable/truncated config degrades the flag back
+              to ordinary UNKNOWN and the check keeps its blind-spot posture.
     """
     cfg = ctx.config
     gw = cfg.get("gateway")
@@ -698,6 +708,7 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
             UNKNOWN,
             "No gateway config — control-plane mutation reachability not applicable.",
             "—",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
 
     gw_tools = gw.get("tools") if isinstance(gw.get("tools"), dict) else {}

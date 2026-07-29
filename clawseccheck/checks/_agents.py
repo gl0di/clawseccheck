@@ -14,6 +14,8 @@ from ..catalog import (
     Finding,
 )
 from ..collector import (
+    LIMIT_DOMAIN_AGENTS,
+    LIMIT_DOMAIN_CONFIG,
     Context,
     dig,
 )
@@ -36,6 +38,7 @@ from ._shared import (
     _has_approval_gate,
     _hint,
     _resolved_channel_nodes,
+    _surface_absent,
     _trifecta_legs,
     _web_fetch_enabled,
     _wildcard_group_gap,
@@ -391,6 +394,15 @@ def check_multiagent_exposure(ctx: Context) -> Finding:
     PASS    — multi-agent topology present but none of the warn conditions apply, or a gate
               exists.
     UNKNOWN — no multi-agent topology (single agent; A1 already covers that case).
+              F-140: this branch sets ``not_applicable`` when — and only when — the
+              config locus was read COMPLETELY (``_surface_absent``) and still declares
+              no delegation. ``_has_subagents`` reads nothing but ``ctx.config``
+              (agents.subagents / agents.defaults.subagents / agents.list[i].subagents),
+              so config-locus completeness is the whole proof obligation here; an absent,
+              unparseable, or truncated config degrades the flag back to ordinary UNKNOWN.
+              Unlike B18 below there is no disk corroborator to wait on — B46 models a
+              purely DECLARED topology, so LIMIT_DOMAIN_AGENTS is deliberately not
+              consulted.
     """
     cfg = ctx.config
     if not _has_subagents(cfg):
@@ -400,6 +412,7 @@ def check_multiagent_exposure(ctx: Context) -> Finding:
             "No multi-agent / subagent delegation detected in config — multi-agent "
             "trifecta exposure does not apply (single-agent trifecta is covered by A1).",
             "—",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     # Untrusted ingress = open/allowlist/paired (authenticated sender != trusted
     # content), matching the trifecta input leg computed in _trifecta_legs(); an
@@ -457,6 +470,12 @@ def check_sender_identity(ctx: Context) -> Finding:
              group history injected into model context).
     PASS   — channels exist and neither dangerous flag is set.
     UNKNOWN — no channels configured (cannot assess).
+              F-140: sets ``not_applicable`` only when the config locus was read
+              COMPLETELY and ``channels`` still resolves to no LIVE channel — either the
+              key is absent entirely, or every declared channel carries
+              ``enabled: false`` (B-041), which matches no sender and therefore cannot
+              carry a sender-identity weakness. ``_channels`` reads ``ctx.config`` and
+              nothing else, so config-locus completeness is the whole proof obligation.
     """
     # B-041: assess only live channels — a channel with enabled:false matches nobody,
     # so its dangerouslyAllowNameMatching/history flags are not a live bypass (a §5
@@ -472,6 +491,7 @@ def check_sender_identity(ctx: Context) -> Finding:
             UNKNOWN,
             "No channels configured — sender identity hardening not applicable.",
             "—",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
 
     fail_ev: list[str] = []
@@ -545,6 +565,11 @@ def check_session_visibility(ctx: Context) -> Finding:
               (one session can read other sessions' transcripts).
     PASS    — dmScope is per-peer-ish AND visibility is "self" or "tree".
     UNKNOWN — no session config (not applicable).
+              F-140: sets ``not_applicable`` only when the config locus was read
+              COMPLETELY and NEITHER ``session`` NOR ``tools.sessions`` is a dict —
+              i.e. the whole session-isolation surface this check models is genuinely
+              undeclared, not merely unreadable. Both loci are plain ``ctx.config``
+              reads, so config-locus completeness is the whole proof obligation.
     """
     cfg = ctx.config
     session_cfg = cfg.get("session")
@@ -557,6 +582,7 @@ def check_session_visibility(ctx: Context) -> Finding:
             UNKNOWN,
             "No session config — session isolation not applicable.",
             "—",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
 
     dm_scope = session_cfg.get("dmScope") if isinstance(session_cfg, dict) else None
@@ -771,14 +797,46 @@ def _disk_subagent_disclosure(ctx: Context) -> "Finding | None":
 
 
 def check_subagents(ctx: Context) -> Finding:
-    """Subagents can inherit elevated/exec tools without human approval."""
+    """Subagents can inherit elevated/exec tools without human approval.
+
+    F-140 — why this check's ``not_applicable`` needs TWO loci, not one. B18 is the only
+    migrated check with a disk corroborator: B-296 layered ``_disk_subagent_disclosure``
+    on top of the config read, so "no subagent delegation" is a claim about
+    ``ctx.config`` AND about the state DB's ``subagent_runs`` registry. Config-locus
+    completeness alone would let a host whose state DB could not be parsed
+    (``subagent_runs_parse_error``) — the exact case where spawns may have happened and
+    we cannot see them — still assert proven surface absence. So the flag additionally
+    requires LIMIT_DOMAIN_AGENTS (the domain collector.py already reserves for this very
+    disclosure) to be untruncated and the registry parse to have succeeded.
+
+    Note ``subagent_runs_found=False`` is deliberately NOT disqualifying: that means the
+    state DB or the table is absent, which is the ordinary shape on a host that has never
+    run a subagent, and treating it as "unknown" would make the flag unreachable on
+    exactly the clean single-agent configs it exists to describe. What must never be
+    swallowed is a registry that EXISTS and could not be read.
+
+    Only the config-derived "no subagent delegation configured" branch is migrated. The
+    later ``UNKNOWN`` branch ("subagents configured but no elevated/exec tools detected")
+    is NOT not-applicable: the delegation surface demonstrably EXISTS there, the check
+    simply judges its risk low, and flagging it would assert absence of a surface this
+    same call just proved present.
+    """
     cfg = ctx.config
 
     if not _has_subagents(cfg):
         disk_finding = _disk_subagent_disclosure(ctx)
         if disk_finding is not None:
             return disk_finding
-        return _finding("B18", UNKNOWN, "No subagent delegation configured.", "—")
+        return _finding(
+            "B18",
+            UNKNOWN,
+            "No subagent delegation configured.",
+            "—",
+            not_applicable=(
+                _surface_absent(ctx, LIMIT_DOMAIN_CONFIG, LIMIT_DOMAIN_AGENTS)
+                and not ctx.subagent_runs_parse_error
+            ),
+        )
 
     tools = _enabled_tools(cfg)
     has_elevated = bool(dig(cfg, "tools.elevated.allowFrom"))

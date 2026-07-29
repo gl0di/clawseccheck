@@ -4111,6 +4111,15 @@ def check_plugin_permission_mode(ctx: Context) -> Finding:
     permission prompt, removing the last gate before trusted-code actions.
 
     UNKNOWN — no plugins installed (plugins.entries absent).
+              F-140: sets ``not_applicable`` only when the config locus was read
+              COMPLETELY and ``_plugins()`` still resolves to nothing in EITHER shape it
+              understands (``plugins.entries.<name>`` and the legacy bare ``plugins``
+              map). ``permissionMode`` is a per-installed-plugin field, so with no
+              installed plugin there is no object the flag could sit on. The read is
+              ``ctx.config`` only — LIMIT_DOMAIN_PLUGIN covers the separate on-disk
+              plugin trust index, which this check never consults — so
+              LIMIT_DOMAIN_CONFIG is the whole proof obligation, matching how F-139
+              wired B15/B24 for the sibling MCP-server surface.
     FAIL    — any installed plugin sets config.permissionMode == "approve-all".
     PASS    — no plugin uses approve-all.
     """
@@ -4124,6 +4133,7 @@ def check_plugin_permission_mode(ctx: Context) -> Finding:
             "modes are not applicable.",
             "When you install plugins, set each plugins.entries.<name>.config.permissionMode "
             "to 'ask' (never 'approve-all').",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     offenders = []
     for name, entry in plugins.items():
@@ -4170,6 +4180,13 @@ def check_plugin_app_server_command(ctx: Context) -> Finding:
     PASS    — no installed plugin sets appServer.command, or every match is a curated
               first-party installer.
     UNKNOWN — no plugins installed (plugins.entries absent).
+              F-140: sets ``not_applicable`` on exactly the same basis as B57 above —
+              a complete config read that still yields no installed plugin in either
+              ``_plugins()`` shape. ``appServer.command`` is nested under an installed
+              plugin entry, so with no entries there is no launch command to scan.
+              Note the PASS branch, NOT this one, is what fires when plugins exist but
+              none sets ``appServer.command``: that is a real assessment of a real
+              surface and must never be marked not-applicable.
     """
     cfg = ctx.config
     plugins = _plugins(cfg)
@@ -4181,6 +4198,7 @@ def check_plugin_app_server_command(ctx: Context) -> Finding:
             "commands are not applicable.",
             "When you install a plugin with an appServer.command override, keep it to a "
             "pinned local executable path — never a remote-fetch/pipe-to-shell one-liner.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     offenders = []
     for name, entry in plugins.items():

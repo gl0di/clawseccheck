@@ -19,6 +19,7 @@ from ..catalog import (
     Finding,
 )
 from ..collector import (
+    LIMIT_DOMAIN_CONFIG,
     Context,
     dig,
 )
@@ -54,6 +55,7 @@ from ._shared import (
     _read_jsonl_tail,
     _safe_mtime,
     _skill_frontmatter_block,
+    _surface_absent,
 )
 
 
@@ -1801,6 +1803,24 @@ def check_secrets_provider_exec(ctx: Context) -> Finding:
               alone; or a secret-shaped name in passEnv.
     PASS    — exec-source provider(s) configured with none of the above escape flags.
     UNKNOWN — no secrets.providers block, or no provider uses source:"exec".
+
+    F-140 — BOTH UNKNOWN branches are genuine surface absence, and both are migrated,
+    because they are two successive narrowings of the same single locus
+    (``secrets.providers`` in ``ctx.config``), not one real branch plus one fallback:
+
+    1. no ``secrets.providers`` block at all — nothing declares a secret provider, so no
+       command can run on secret resolve;
+    2. providers declared, but none is the command-based ``source:"exec"`` shape — the
+       schema's ``source:"exec"`` + ``pluginIntegration`` variant has no ``command``
+       field, so it carries none of the writable-path/symlink escape surface this check
+       models, and a config holding only those has no assessable object either.
+
+    Both set ``not_applicable`` only when the config locus was read COMPLETELY. The
+    earlier ``_config_unreadable`` guard already returns for a parse error, so
+    ``_surface_absent`` is not redundant here — it additionally covers ``config_found``
+    being False (openclaw.json absent entirely, where ``config_parse_error`` is False and
+    ``ctx.config`` is ``{}``, so both branches would otherwise fire on a machine nobody
+    audited) and a LIMIT_DOMAIN_CONFIG truncation.
     """
     unreadable = _config_unreadable("B194", ctx)
     if unreadable is not None:
@@ -1816,6 +1836,7 @@ def check_secrets_provider_exec(ctx: Context) -> Finding:
             "If you configure a secrets.providers.<name> with source:\"exec\", scope "
             "it with a non-empty trustedDirs and avoid allowInsecurePath/"
             "allowSymlinkCommand.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
 
     # The schema also has a source:"exec" + pluginIntegration variant with no `command`
@@ -1833,6 +1854,7 @@ def check_secrets_provider_exec(ctx: Context) -> Finding:
             "secrets.providers configured but none use a command-based "
             "source:\"exec\" -- nothing to assess for exec-source command execution.",
             "—",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
 
     fail_ev: list[str] = []
