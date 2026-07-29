@@ -481,6 +481,53 @@ def _redirect_targets_file(blob: str, fname_start: int) -> bool:
     shell `\\` line-continuation (`echo payload \\` / `  >> CLAUDE.md`) — the simple
     same-line check above used to see that line as blank and false-treat it as a bare
     blockquote. Checked as a fallback only when the same-line check already failed.
+
+    B-341 — ACCEPTED RESIDUAL, four independent rounds retracted (CLAUDE.md §2.5): a
+    whole-line bash COMMENT can contain a prose "greater than" chain of comparisons
+    that is syntactically identical to a redirect — SkillTrustBench license.sh's
+    `# Priority: ENV var > openclaw.json (python3 > node > jq fallbacks)` is
+    documenting a lookup order, not writing a file, but the pre-'>' text on that line
+    is non-empty ("# Priority: ENV var "), so the same-line check below calls it a
+    real redirect (case_02462/01124/03655/00629/04600/05386/01677/05447 in the
+    SkillTrustBench corpus — this function's FP is the reason those cases still FAIL).
+
+    Every attempt to fix this soundly was retracted by independent C-135 review:
+      - round 1: `line.lstrip().startswith("#")` on one physical line in isolation.
+        Exploitable — a `#`-looking line can actually be the still-open tail of a
+        single-quoted string spanning a literal newline from a prior line
+        (`printf 'text\\n#fake-comment' > CLAUDE.md`), with a real redirect later on
+        that same line, outside the quote.
+      - round 2: a real bash quote-STATE machine (single/double/none), blob-wide, with
+        a word-boundary guard against an apostrophe glued onto a preceding word char
+        (a contraction). Broken by a LEADING-apostrophe contraction ('cause, 'til,
+        'em) — no preceding word char to gate on — which poisoned everything AFTER IT
+        in the entire blob as "quoted, therefore inert".
+      - round 3: retracted general tracking; replaced with "a `#`-comment line
+        containing >= 2 `>` characters (an A > B > C chain) is not a redirect". Broken
+        because an attacker can pad the printf bypass's fake-comment tail with one
+        extra literal `>` to reach the >= 2 threshold and reopen the exact round-1
+        bypass.
+      - round 4: the seemingly-correct missing bash rule — inside a genuine unquoted
+        `#`-comment, bash does not scan for quotes at all, so a real per-blob lexer
+        (comment-to-EOL, multi-line single-quote, escaped double-quote) should have
+        been sound. Broken anyway: this function's `blob` is NOT pure bash source — it
+        is a flat concatenation of EVERY file in a skill, including Markdown PROSE
+        that was never bash and was never meant to be lexed as bash. A faithful bash
+        lexer fed English prose containing a MID-WORD apostrophe ("the agent's own
+        context file") correctly (per real bash rules) reads it as a quote-open — bash
+        itself would do the same if this text were actually run as a shell script —
+        and that quote then swallows a genuine redirect elsewhere in the SAME file
+        (`bad_b13_real_agent_config_write` fixture) as "quoted, therefore inert". The
+        problem was never the lexer's fidelity to bash; it's that faithful bash
+        lexing is the wrong tool for a blob that isn't reliably bash in the first
+        place. A 5th patch was not attempted (CLAUDE.md §2.5 process, agreed with the
+        orchestrator after this round).
+
+    Left as the pre-B-341 behavior: a whole-line "#"-comment gets NO special
+    treatment — see the plain same-line-prefix check below. This is deliberately the
+    ORIGINAL (pre-B-341) shape, not a partial fix; solving it soundly needs a notion
+    of "which parts of this blob are really bash source" (fence/section-aware, not a
+    lexer), which is a real per-file-type-parsing project, not a regex/lexer tweak.
     """
     prefix_start = max(0, fname_start - _REDIR_PREFIX_WINDOW)
     prefix = _HTML_TAG_RE.sub(" ", blob[prefix_start:fname_start])

