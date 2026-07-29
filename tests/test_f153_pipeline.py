@@ -188,6 +188,107 @@ def test_run_behavioral_reports_error_without_crashing(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# F-151 — render_trajectory_analysis wired into run_behavioral
+# ---------------------------------------------------------------------------
+
+def test_run_behavioral_no_trajectory_file_states_an_honest_reason():
+    """No sidecar at all -> an honest UNKNOWN-shaped reason, never silence, and the
+    grade-affecting surface (has_fail/status) is unchanged."""
+    ctx = collect(FIXTURES / "traj_no_sidecar")
+    p = pl.run_behavioral(ctx)
+    assert p.status == pl.STATUS_RAN
+    assert p.has_fail is False
+    joined = "\n".join(p.lines)
+    assert "No trajectory sidecars" in joined
+    assert "INCIDENT SIGNAL" not in joined
+
+
+def test_run_behavioral_surfaces_incident_signal():
+    """The actual regression test: a T1-style acted-on indicator must now reach
+    --full's BEHAVIORAL REPLAY section via run_behavioral, not just the standalone
+    --analyze-trajectory branch. Confirmed via `git stash` that this line is ABSENT
+    before the fix (0 occurrences) and present after."""
+    ctx = collect(FIXTURES / "traj_incident_acted")
+    p = pl.run_behavioral(ctx)
+    assert p.status == pl.STATUS_RAN
+    joined = "\n".join(p.lines)
+    assert "⚠ INCIDENT SIGNAL" in joined
+    assert "fake_secrets/db_token.txt" in joined
+    # Never a grade-affecting surface — advisory only, matching the existing
+    # behavioural block's own contract exactly.
+    assert p.has_fail is False
+
+
+def test_run_behavioral_incident_signal_never_scores_a_fail():
+    ctx = collect(FIXTURES / "traj_incident_acted")
+    p = pl.run_behavioral(ctx)
+    assert p.has_fail is False
+
+
+def test_run_behavioral_incident_signal_reflected_in_detail_and_quiet_line():
+    """--full --quiet collapses to one line per phase; the incident signal must still
+    be visible there, and in the machine-readable `detail` (--full --json)."""
+    ctx = collect(FIXTURES / "traj_incident_acted")
+    p = pl.run_behavioral(ctx)
+    assert "INCIDENT SIGNAL" in p.detail
+    assert "INCIDENT SIGNAL" in p.quiet_line
+    assert "\n" not in p.quiet_line
+
+
+def test_run_behavioral_no_incident_signal_detail_and_quiet_line_stay_generic():
+    ctx = collect(FIXTURES / "traj_present_not_acted")
+    p = pl.run_behavioral(ctx)
+    assert "INCIDENT SIGNAL" not in p.detail
+    assert "INCIDENT SIGNAL" not in p.quiet_line
+
+
+def test_run_behavioral_preserves_the_existing_behavioral_block():
+    """The pre-existing render_behavioral_analysis section must still render in full —
+    this is an ADDITIONAL block, never a replacement."""
+    ctx = collect(FIXTURES / "traj_incident_acted")
+    p = pl.run_behavioral(ctx)
+    joined = "\n".join(p.lines)
+    assert "Behavioral trajectory audit" in joined
+    assert "Trajectory incident analysis" in joined
+
+
+def test_run_behavioral_trajectory_analysis_error_keeps_the_behavioral_block(monkeypatch):
+    """A crash in the second (trajectory) renderer degrades to one honest line and
+    must not erase the first (behavioral) renderer's already-successful output."""
+    monkeypatch.setattr(pl, "render_trajectory_analysis",
+                        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("kaboom")))
+    ctx = collect(FIXTURES / "traj_incident_acted")
+    p = pl.run_behavioral(ctx)
+    assert p.status == pl.STATUS_RAN
+    assert p.has_fail is False
+    joined = "\n".join(p.lines)
+    assert "Behavioral trajectory audit" in joined
+    assert "kaboom" in joined
+
+
+def test_full_json_behavioral_phase_carries_incident_signal_in_detail(capsys):
+    """--full --json: the phase's `detail` (its only structured surface today, per
+    docs/OUTPUT_SCHEMA.md's `phases[].detail` — 'one plain-English sentence') must
+    carry the incident signal too, not just the human-readable verbose/quiet text."""
+    from clawseccheck.cli import main
+    main(["--home", str(FIXTURES / "traj_incident_acted"), "--no-native", "--no-history",
+          "--full", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    behav = next(p for p in payload["phases"] if p["name"] == pl.PHASE_BEHAVIORAL)
+    assert "INCIDENT SIGNAL" in behav["detail"]
+
+
+def test_full_quiet_behavioral_line_carries_incident_signal(capsys):
+    from clawseccheck.cli import main
+    main(["--home", str(FIXTURES / "traj_incident_acted"), "--no-native", "--no-history",
+          "--full", "--quiet"])
+    out = capsys.readouterr().out
+    behav_lines = [ln for ln in out.splitlines() if ln.startswith("BEHAVIORAL REPLAY:")]
+    assert len(behav_lines) == 1
+    assert "INCIDENT SIGNAL" in behav_lines[0]
+
+
+# ---------------------------------------------------------------------------
 # P9 — run_adjudication
 # ---------------------------------------------------------------------------
 

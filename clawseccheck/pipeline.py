@@ -61,6 +61,7 @@ from .report import _sanitize
 from .scanbudget import (
     DEFAULT_FULL_BUDGET_S, DEFAULT_VET_ALL_BUDGET_S, budget_deadline, budget_exceeded,
 )
+from .trajaudit import render_trajectory_analysis
 
 # ── phase identity ───────────────────────────────────────────────────────────
 
@@ -383,9 +384,22 @@ def run_behavioral(ctx, *, ascii_only: bool = False) -> PhaseResult:
     on that object, so a fresh ``Context`` here would silently discard it and re-pay the
     whole sidecar glob. Passing the audit's context costs zero additional I/O.
 
-    Advisory only. Behavioural findings are never folded into the score, the grade or
-    ``--exit-code`` — this phase reports ``has_fail=False`` unconditionally, which is
-    the same visibility-only contract the skill sweep's WARN rows already have.
+    F-151: this phase used to render ONLY ``behavioral.render_behavioral_analysis`` —
+    ``trajaudit.render_trajectory_analysis``, the renderer that actually produces the
+    ``⚠ INCIDENT SIGNAL`` line, was reachable only from the standalone
+    ``--analyze-trajectory`` CLI branch, never from ``--full``. It is appended here as
+    an ADDITIONAL block in this SAME phase/section — the existing behavioural block's
+    own render is untouched — reusing the identical ``ctx`` so nothing is re-collected.
+    A crash in this second renderer degrades to one honest line rather than losing the
+    whole phase: the behavioural block above already rendered successfully, and a
+    second, independent renderer's failure must not erase it.
+
+    Advisory only, both renderers. Behavioural/trajectory findings are never folded
+    into the score, the grade or ``--exit-code`` — this phase reports ``has_fail=False``
+    unconditionally, which is the same visibility-only contract the skill sweep's WARN
+    rows already have. Nothing here computes a Finding or touches ``ctx``/scoring, so
+    that invariant holds structurally, the same way the plain behavioural render above
+    always has — there is no separate cap to apply or protect.
     """
     started = time.monotonic()
     try:
@@ -401,13 +415,43 @@ def run_behavioral(ctx, *, ascii_only: bool = False) -> PhaseResult:
     # before it can reach a terminal. Sanitizing per LINE (not the whole blob) keeps the
     # renderer's own layout intact — _sanitize folds newlines to spaces.
     lines = [_sanitize(ln) for ln in rendered.splitlines()]
+
+    incident = False
+    try:
+        traj_rendered = render_trajectory_analysis(ctx, ascii_only=ascii_only)
+        lines.append("")
+        lines.extend(_sanitize(ln) for ln in traj_rendered.splitlines())
+        # Structural substring check (not a security-relevant keyword match): the
+        # renderer emits the literal phrase "INCIDENT SIGNAL" on both the unicode and
+        # --ascii-only branches (only the leading glyph differs), so this cannot miss
+        # or over-fire relative to what the lines above already say.
+        incident = "INCIDENT SIGNAL" in traj_rendered
+    except Exception as exc:  # noqa: BLE001 — see the docstring: must not lose the
+                              # behavioural block already rendered above.
+        lines.append("")
+        lines.append(_sanitize(
+            f"trajectory incident analysis could not complete ({exc}) — no trajectory "
+            "was analysed."
+        ))
+
+    if incident:
+        detail = ("trajectory replay complete — an INCIDENT SIGNAL was found in the "
+                  "trajectory incident analysis below (advisory only, never folded "
+                  "into the grade).")
+        quiet_line = ("behavioural replay complete — INCIDENT SIGNAL found (advisory). "
+                     "Full detail: --analyze-trajectory.")
+    else:
+        detail = "trajectory replay complete — advisory only, never folded into the grade."
+        quiet_line = ("behavioural replay complete (advisory). Full detail: --behavioral "
+                     "/ --analyze-trajectory.")
+
     return PhaseResult(
         name=PHASE_BEHAVIORAL,
         status=STATUS_RAN,
         elapsed_s=time.monotonic() - started,
-        detail="trajectory replay complete — advisory only, never folded into the grade.",
+        detail=detail,
         lines=lines,
-        quiet_line="behavioural replay complete (advisory). Full detail: --behavioral.",
+        quiet_line=quiet_line,
     )
 
 
