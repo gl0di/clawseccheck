@@ -1426,9 +1426,12 @@ def _check_budget_finding(chk, kind: str, seconds: float | None = None) -> Findi
 def run_all(ctx: Context, check_budget_s: float = DEFAULT_CHECK_BUDGET_S,
             audit_budget_s: float = DEFAULT_AUDIT_BUDGET_S) -> list[Finding]:
     # Per-check isolation (B-101) + wall-clock budget (C-159): a crashing OR hanging
-    # check degrades to one UNKNOWN finding instead of aborting the audit. Catch
-    # ScanBudgetExceeded before the generic Exception; catch Exception (not
-    # BaseException) so KeyboardInterrupt / SystemExit still propagate.
+    # check degrades to one UNKNOWN finding instead of aborting the audit. This is the
+    # DESIGNATED handler for a per-check deadline: ScanBudgetExceeded derives from
+    # BaseException (B-352), so it reaches here past every inner `except Exception` in
+    # the check's call graph rather than being swallowed into a lying PASS, and the
+    # generic `except Exception` below (deliberately not BaseException, so
+    # KeyboardInterrupt / SystemExit still propagate) can no longer shadow it.
     findings: list[Finding] = []
     deadline = audit_deadline(audit_budget_s)
     for chk in CHECKS:

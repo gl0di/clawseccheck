@@ -1016,9 +1016,29 @@ def main(argv=None) -> int:
     shown only under --debug. KeyboardInterrupt / SystemExit propagate untouched —
     they derive from BaseException, not Exception. Only the exception *type* is
     named, never its message, so a path or config value can't leak (§8, B-076).
+
+    ``ScanBudgetExceeded`` also derives from BaseException (B-352), so it needs its
+    own arm to stay inside that no-raw-traceback contract. Reaching here at all means
+    every designated per-check / per-target / phase handler failed to claim its own
+    deadline, which should not happen by design — but "should not happen" is not
+    "print a traceback at a user", so it degrades the same way: one line, and a
+    NON-ZERO exit, because a run cut short mid-scan produced no verdict anyone may
+    read as clean. It is reported separately from a crash rather than folded into the
+    generic message, since a truncated scan and a bug are different things to a user.
     """
     try:
         return _main(argv)
+    except ScanBudgetExceeded:
+        raw = list(sys.argv[1:] if argv is None else argv)
+        if "--debug" in raw:
+            raise
+        print(
+            "clawseccheck: the scan was cut short by its own time budget and did not "
+            "complete; no verdict from this run is reliable. Re-run with --debug for "
+            "the traceback.",
+            file=sys.stderr,
+        )
+        return 1
     except Exception as exc:  # noqa: BLE001 — a security tool must fail readably, not crash
         raw = list(sys.argv[1:] if argv is None else argv)
         if "--debug" in raw:

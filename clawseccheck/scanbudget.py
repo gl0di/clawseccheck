@@ -101,9 +101,62 @@ DEFAULT_VET_TARGET_BUDGET_S = 900.0
 # non-zero exit), never as a fabricated PASS.
 DEFAULT_VET_ALL_BUDGET_S = 1800.0
 
+# The whole ``--full`` pipeline's wall-clock ceiling: the outer budget every appended
+# phase (installed-skill sweep, installed-plugin sweep, behavioural replay, adjudication)
+# draws its own sub-budget from, via ``pipeline.sub_budget``.
+#
+# Wall-clock for the same reason the sweep ceiling is (see DEFAULT_VET_ALL_BUDGET_S): it
+# exists so a user is not left staring at a hung terminal, and "how long have I waited" is
+# wall time by definition. Like every budget in this module it never moves a verdict — an
+# unreached phase is reported as explicitly not-run, never as a clean one.
+#
+# ARITHMETIC. The outer ceiling MUST be larger than the largest phase ceiling nested
+# inside it, or the outer deadline is fiction: it would expire mid-sweep on exactly the
+# hostile fleet it exists to bound, and every later phase would read as "not reached" on
+# runs that are in fact healthy. So:
+#
+#     1800  installed-skill sweep (DEFAULT_VET_ALL_BUDGET_S, the dominant cost)
+#   +   46  real-home audit (measured)
+#   +  ~10  self-test + vet-mcp + behavioural replay + adjudication — all sub-second to
+#           low-seconds on a real home; adjudication re-runs no check at all
+#   = ~1856 -> 2000, rounded up for headroom
+#
+# RECALIBRATION NOTE, so this reads as deliberate rather than drifted: the design this
+# implements specified 900s, computed when DEFAULT_VET_ALL_BUDGET_S was 600s and
+# DEFAULT_VET_TARGET_BUDGET_S was 300s. Both have since been re-measured upward (to 1800s
+# and 900s — see their own calibration comments), which left 900s SMALLER than the sweep
+# ceiling nested inside it. The ratio is preserved rather than the literal, and the
+# constant moves in lock-step with DEFAULT_VET_ALL_BUDGET_S: raise that one, raise this
+# one, or the outer bound stops bounding anything.
+#
+# A typical real home (3 skills) costs ~65s end to end, so this never bites a normal run —
+# the same design rule the budgets above state: generous ceilings that stop pathological
+# hangs, never clip a normal run.
+DEFAULT_FULL_BUDGET_S = 2000.0
 
-class ScanBudgetExceeded(Exception):
+
+class ScanBudgetExceeded(BaseException):
     """Raised inside a check when a wall-clock budget it is running under is exhausted.
+
+    **Derives from BaseException, not Exception, and that is load-bearing** (B-352).
+    ``_fire`` raises this at an arbitrary bytecode boundary inside whatever the check
+    happens to be doing — which, deep in a real call graph, is very often inside some
+    unrelated inner ``try`` guarding a parse or a subprocess. Every one of those
+    ``except Exception`` handlers would catch the deadline, discard it, and let the
+    check return an ordinary verdict computed from a scan that was cut short: a
+    lying PASS, measured at 3.31s against a 0.3s budget. There are dozens of such
+    handlers across this package and there is no way to keep a hand-patched list of
+    them correct as the code grows — the next one added would silently reopen the
+    hole. Sitting outside the ``Exception`` hierarchy makes the whole class of bug
+    structurally impossible instead of merely currently-absent, for exactly the reason
+    ``KeyboardInterrupt`` and ``SystemExit`` do the same thing: an interruption is not
+    an error the interrupted code is entitled to handle.
+
+    The consequence is that catching it is **opt-in and explicit**: a handler must name
+    ``ScanBudgetExceeded`` (all of them already did — the designated ones are
+    ``run_all``, ``report._skill_inventory``, ``_run_content_ring``, the vet dispatch
+    sites and ``cli.main``). Do not "simplify" this back to ``Exception``;
+    ``tests/test_b352_scan_budget_unswallowable.py`` pins the base class.
 
     ``owner`` says WHOSE deadline expired: the :class:`DeadlineFrame` handed out by the
     :func:`check_deadline` block that armed it, or ``None`` for the **cooperative,
@@ -551,8 +604,10 @@ def check_deadline(seconds: float, *, suppress_own: bool = False) -> _DeadlineBl
     opt-in for a loop that wants to skip an over-budget item and carry on.
 
     A frame's deadline fires ONCE. If the block swallows its own expiry and keeps
-    working, nothing re-interrupts it — that has always been true here, and is why an
-    over-broad ``except Exception`` around a scan is a bug rather than a style choice.
+    working, nothing re-interrupts it — which is why swallowing has to be a deliberate
+    act. It is: :class:`ScanBudgetExceeded` derives from ``BaseException``, so an
+    over-broad ``except Exception`` around a scan cannot catch the deadline at all
+    (B-352), and only a handler that names the type can end up owning one.
 
     At the outermost exit the itimer is disarmed and the previous ``SIGALRM`` handler
     restored, so this never leaves a pending alarm or clobbers a caller's handler. The
