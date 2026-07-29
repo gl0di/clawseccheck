@@ -130,19 +130,23 @@ def test_full_json_top_level_keys_match_schema_doc(capsys):
     """--full --json must emit exactly the documented set, INCLUDING the conditional
     `skill_sweep` key (F-149) — the counterpart to the plain-`--json` check above.
 
-    `secondOpinion` is documented 'only with `--full --judged-bundle <file>`' — a
-    THIRD tier stricter than the plain '--full' conditional every other row here
-    uses, so it is legitimately absent from a bare `--full --json` run (no bundle
-    supplied) and is excluded from the "missing" set here. See
-    :func:`test_full_json_with_judged_bundle_emits_second_opinion` for its own
-    presence check.
+    `secondOpinion`/`vetSecondOpinion` are documented 'only with `--full
+    --judged-bundle <file>`' (`vetSecondOpinion` stricter still — only when the
+    bundle's `vetJudged` array is non-empty) — a THIRD tier stricter than the plain
+    '--full' conditional every other row here uses, so both are legitimately absent
+    from a bare `--full --json` run (no bundle supplied) and excluded from the
+    "missing" set here. See :func:`test_full_json_with_judged_bundle_emits_second_opinion`
+    for its own presence check; `vetSecondOpinion`'s own presence/shape (including the
+    escalate-only/fingerprint-binding rules) is pinned at the `pipeline.run_adjudication`
+    / `PipelineResult.to_json()` level in `tests/test_f153_pipeline.py`, not re-derived
+    through a second CLI round-trip here.
     """
     documented_all = _documented_top_level_keys()
     main(["--home", VULN] + BASE + ["--full", "--json"])
     emitted = set(json.loads(capsys.readouterr().out).keys())
 
     undocumented = emitted - documented_all
-    missing = documented_all - emitted - {"secondOpinion"}
+    missing = documented_all - emitted - {"secondOpinion", "vetSecondOpinion"}
 
     assert not undocumented and not missing, (
         "--full --json top-level keys drifted from docs/OUTPUT_SCHEMA.md §1 "

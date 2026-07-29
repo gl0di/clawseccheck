@@ -59,6 +59,7 @@ versioning §6 in `CLAUDE.md`).
 | `attestTemplate` | `object` | only with `--full` | Pre-run attestation template — the same structure produced standalone by the attestation self-report path (see `attest.py`), included here so a `--full` consumer does not need a second invocation to get it. Absent without `--full`. |
 | `pluginSweep` | `object` | only with `--full` | Per-plugin vet verdict for every installed plugin (P7), the machine-readable form of `--full`'s printed PLUGIN SWEEP section — same shape as `skill_sweep` above: `no_roots` (`bool`, the installed-plugin index itself could not be read), `no_targets` (`bool`, the index was read but names zero plugins), `complete` (`bool`), `counts` (`object`: `total`/`fails`/`warns`/`safe`/`truncated`/`skipped`), `not_scanned` (`array[str]`). Absent (key not present) when the phase did not run — e.g. `--full --fast`, or a build with no plugin-sweep implementation. Visibility only — never affects `score`/`grade`. |
 | `secondOpinion` | `array[object]` | only with `--full --judged-bundle <file>` | One row per borderline-band item, annotated with a submitted judge verdict when the bundle supplied one: `finding_id` (`str`), `target` (`str`), `engine_disposition` (`str`), `judge_verdict` (`str` or `null` — unreviewed items still appear), `annotation` (`str`, human-readable). Advisory only — annotates an existing finding, never alters `score`/`grade`/`findings`. Absent unless a judged bundle was supplied. |
+| `vetSecondOpinion` | `array[object]` | only with `--full --judged-bundle <file>` carrying a non-empty `vetJudged` array | F-152: the escalate-only counterpart to `secondOpinion` above, for the bundle's SEPARATE `vetJudged` bucket (untrusted content swept by the skill/plugin sweeps) rather than the user's own config. One row per vet-target finding that was actually ESCALATED (rows with no status change are omitted — an empty array means "verdicts were submitted, nothing escalated", not "nothing was submitted"): `finding_id` (`str`), `target` (`str`, the swept target's bare name), `engine_disposition` (`str`, the pre-escalation status), `judge_verdict` (`str`, the POST-escalation status — never a field named `verdict`, to avoid implying it echoes the submitted `SAFE`/`SUSPICIOUS`/`DANGEROUS` value verbatim), `annotation` (`str`, human-readable). Escalate-only and per-target-fingerprint-bound, exactly like the standalone `--vet-judged` path (§15) this reuses: a row's underlying finding can only ever rank higher than the deterministic engine already ranked it, never lower, and a `vetJudged` entry is matched to a target ONLY by that target's own `targetFingerprint` (C-135) — an entry whose fingerprint matches no currently swept target is dropped wholesale, never applied to a different target as a fallback. Never alters `score`/`grade`/the top-level `findings` array — those describe the user's OWN config, which a vet target's own escalated pool never touches. Absent unless the bundle's `vetJudged` array was non-empty. |
 
 ### Skeleton
 
@@ -636,6 +637,16 @@ agent to review and answer. **Read-only and purely additive**: it never re-runs 
 never changes any Finding's status/severity/score, and never contacts an LLM or the
 network itself.
 
+**`--full --json` cross-reference (F-152):** this exact packet is also embedded as the
+top-level `judgePacket` key of a `--full --json` run (§1) — no separate `--judge-packet`
+invocation is needed. Its answers travel back the same way, too: `--full
+--judged-bundle <file>` accepts a `judged` object of verdicts for THIS own-config
+packet (own-config, annotate-only — see §13's `secondOpinion` and its `--full`
+counterpart in §1). The bundle's SEPARATE `vetJudged` array answers the per-target
+`vetPackets` this same `--full --json` run also carries (§1) — the escalate-only
+sibling this packet's own authority rule does not apply to; see §15's own
+`--full`/`--judged-bundle` note below for that path.
+
 Sources folded into the packet:
 
 - every unsuppressed `UNKNOWN` finding from the audit;
@@ -910,6 +921,20 @@ the host agent generating the verdicts is itself compromised, the worst it can d
 is submit a verdict that changes nothing (the escalate-only structure gives it no
 way to make the target look SAFER) — the downside is bounded to "no escalation
 happened," never "a hidden real problem."
+
+**`--full`/`--judged-bundle` cross-reference (F-152).** The same escalate-only cycle
+now also runs INSIDE `--full`, for every target its skill/plugin sweeps already vetted
+— not just a single standalone `--vet` invocation. `--full --json` carries one
+`vetPackets` entry per swept target (§1), each with its own `targetFingerprint`,
+exactly like this section's standalone `targetFingerprint` field. Answer them together
+in one file via `--full --judged-bundle <file>`'s `vetJudged` array — one entry per
+target, each shaped `{"targetFingerprint": str, "verdicts": [...]}` (the SAME
+`verdicts` shape §13 documents) — and the result is `vetSecondOpinion` (§1): one row
+per finding that was actually escalated, rendered in `--full`'s ADJUDICATION section
+alongside the own-config second opinion. The binding, degrade-on-mismatch, and
+escalate-only rules above are unchanged and enforced per target — a `vetJudged` entry
+is matched ONLY by its own `targetFingerprint`, never by name, and a mismatch drops
+that one entry (never a fallback to a different target) rather than the whole bundle.
 
 ---
 

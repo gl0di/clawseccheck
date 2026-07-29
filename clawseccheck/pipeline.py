@@ -488,6 +488,89 @@ def _vet_packets(vet_targets, *, version: str) -> list[dict]:
     return packets
 
 
+def _vet_second_opinion(vet_targets, vet_judged: list) -> list[dict]:
+    """F-152: escalate-only second opinion for the untrusted ``vetJudged`` bucket.
+
+    The authority split from ``_vet_packets``'s own docstring holds here too, and this
+    is the function that enforces it for ``--full``: ``judged`` (the sibling bucket,
+    handled entirely by ``adjudication._second_opinion`` in :func:`run_adjudication`)
+    may only ANNOTATE the user's OWN config — it never reaches this function at all.
+    This bucket covers UNTRUSTED swept content and may only ever ESCALATE, which is
+    delegated entirely to ``adjudication.escalate_vet_output`` — the exact, already
+    fingerprint-checked, already-tested function the standalone ``--vet-judged`` CLI
+    path uses — so this wiring cannot invent a softer or looser rule than that path
+    already enforces.
+
+    **Binding is by ``targetFingerprint`` ONLY, never by name** (C-135, 2026-07-22,
+    documented at length on ``adjudication._vet_run_fingerprint``): two different vet
+    targets can share a bare name, so matching on it would let a verdicts entry meant
+    for one target apply to a different one. Each ``vet_targets`` entry's OWN
+    fingerprint is computed fresh here and looked up directly — there is no name-keyed
+    fallback path for an entry whose fingerprint matches no actual swept target to fall
+    into; it is simply never selected, i.e. rejected wholesale, exactly like a
+    fingerprint mismatch already degrades to "no verdicts submitted" in the standalone
+    path.
+
+    A malformed or hostile entry (unserializable, or one whose escalation raises) is
+    skipped — one bad target must never lose the rest, mirroring every other per-target
+    loop in this module (:func:`_vet_packets`, :func:`run_plugin_sweep`).
+    """
+    if not vet_judged:
+        return []
+    from .adjudication import (  # noqa: PLC0415 — see the module note on layering
+        _vet_pool, _vet_run_fingerprint, _vet_target_name, escalate_vet_output,
+    )
+
+    by_fingerprint: dict[str, dict] = {}
+    for entry in vet_judged:
+        fp = entry.get("targetFingerprint")
+        # First entry for a given fingerprint wins; a duplicate is simply ignored —
+        # this is advisory, untrusted input, never a crash (split_judged_bundle's own
+        # contract), and there is no ordering guarantee worth picking a "later wins"
+        # rule over for it.
+        if isinstance(fp, str) and fp and fp not in by_fingerprint:
+            by_fingerprint[fp] = entry
+
+    rows: list[dict] = []
+    for target, engine_output in vet_targets:
+        if engine_output is None:
+            continue
+        entry = by_fingerprint.get(_vet_run_fingerprint(str(target)))
+        if entry is None:
+            continue
+        try:
+            verdicts_raw = json.dumps(entry)
+        except (TypeError, ValueError):
+            continue
+        try:
+            escalated = escalate_vet_output(engine_output, verdicts_raw, target=str(target))
+        except Exception:  # noqa: BLE001 — one bad target must not lose the rest
+            continue
+        target_name = _sanitize(_vet_target_name(str(target)))
+        # escalate_vet_output preserves the ORIGINAL pool's order and length, only ever
+        # appending new pre-install-attestation findings past it (adjudication.py's own
+        # docstring) — zip() over the shorter (original) length is therefore exactly
+        # "compare each original finding against its own escalated self", never a
+        # misalignment, and it naturally excludes the appended tail from this
+        # already-existing-finding comparison.
+        before = _vet_pool(engine_output)
+        after = _vet_pool(escalated)
+        for f_before, f_after in zip(before, after):
+            if f_after.status == f_before.status:
+                continue
+            rows.append({
+                "finding_id": _sanitize(str(f_after.id)),
+                "target": target_name,
+                "engine_disposition": _sanitize(str(f_before.status)),
+                "judge_verdict": _sanitize(str(f_after.status)),
+                "annotation": _sanitize(
+                    f"engine: {f_before.status} -> escalated to {f_after.status} by "
+                    "host-agent judge (vetJudged, escalate-only)"
+                ),
+            })
+    return rows
+
+
 def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
                      bundle: dict | None = None) -> PhaseResult:
     """P9 — assemble the judge packet, and fold in a submitted bundle if there is one.
@@ -565,6 +648,46 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
         detail = (f"{len(packet) + vet_item_total} item(s) awaiting adjudication — no "
                   "verdicts submitted.")
         quiet_line = detail + " Produce the packet with: --full --json."
+
+    # F-152: vetJudged — the SECOND, structurally separate authority bucket. `judged`
+    # above may only ANNOTATE (adjudication._second_opinion never touches a Finding's
+    # status); this bucket may only ESCALATE, and only for the swept target whose OWN
+    # targetFingerprint the entry actually matches — see _vet_second_opinion's
+    # docstring for the full binding rule. Deliberately a SEPARATE code path and a
+    # SEPARATE data key from `judged`/secondOpinion above, never merged into one list:
+    # an own-config annotation and an untrusted-content escalation must never be
+    # representable as the same kind of row.
+    vet_judged = bundle.get("vetJudged") if bundle else None
+    if vet_judged:
+        try:
+            vet_second_opinion = _vet_second_opinion(vet_targets, vet_judged)
+        except Exception:  # noqa: BLE001 — an advisory panel must never break the run
+            vet_second_opinion = []
+        data["vetSecondOpinion"] = vet_second_opinion
+        data["verdictsSubmitted"] = True
+        if vet_second_opinion:
+            lines.append(
+                f"{len(vet_second_opinion)} vet-target finding(s) ESCALATED by a "
+                "submitted vetJudged verdict (escalate-only — untrusted swept content "
+                "can never downgrade a finding this way)."
+            )
+            for row in vet_second_opinion[:12]:
+                lines.append(
+                    f"  - {row['finding_id']} [{row['target']}]: "
+                    f"{row['engine_disposition']} -> {row['judge_verdict']}"
+                )
+            if len(vet_second_opinion) > 12:
+                lines.append(f"  - (+{len(vet_second_opinion) - 12} more)")
+            vet_quiet = f"{len(vet_second_opinion)} vet-target finding(s) escalated."
+        else:
+            lines.append(
+                "vetJudged verdicts were submitted, but none escalated any swept "
+                "target's finding (no targetFingerprint matched a currently swept "
+                "target, or every submitted verdict was SAFE/unrecognized)."
+            )
+            vet_quiet = "0 vet-target finding(s) escalated."
+        quiet_line = f"{quiet_line} {vet_quiet}"
+        detail = quiet_line
 
     return PhaseResult(
         name=PHASE_ADJUDICATION,
@@ -697,7 +820,8 @@ class PipelineResult:
         }
         adj = self.by_name(PHASE_ADJUDICATION)
         if adj is not None and isinstance(adj.data, dict):
-            for key in ("judgePacket", "vetPackets", "attestTemplate", "secondOpinion"):
+            for key in ("judgePacket", "vetPackets", "attestTemplate", "secondOpinion",
+                       "vetSecondOpinion"):
                 if key in adj.data:
                     payload[key] = adj.data[key]
         plugins = self.by_name(PHASE_PLUGIN_SWEEP)
