@@ -321,6 +321,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B334 - Undocumented bundled helper run under an agent-directed directive
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Prompt Injection / Undocumented Execution
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Undocumented bundled helper run under an agent-directed directive
+- Remediation:
+  - none
+
 ### B333 - MCP tool safety-hint annotations declared but not enforced by OpenClaw
 
 - Severity: MEDIUM

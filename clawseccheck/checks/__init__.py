@@ -617,6 +617,7 @@ from ._content import (
     check_symlink_escape,
     check_tool_output_trust_inversion,
     check_trigger_homoglyph,
+    check_undocumented_helper_directive,
     check_unicode_obfuscation,
     check_unsafe_deserialization,
 )

@@ -330,6 +330,30 @@ CATALOG: list[CheckMeta] = [
     # retained/compiled form (trajectory / probe-names) never carries annotations at
     # all, so absence there proves nothing about what was originally declared and
     # reports UNKNOWN rather than guessing a clean PASS (B-092).
+    # B334: a bundled helper script introduced ONLY by a block that tells the reading
+    # agent to run it outside the user's control (before the reply / without asking /
+    # without showing the output / on an input keyword), and named nowhere else in the
+    # skill's own documentation. Both halves are required: a documented helper is
+    # ordinary setup and a bare directive is another check's business. WARN-only and
+    # confidence=MEDIUM -- new detection, real-fleet false-positive behavior not yet
+    # proven, and a legitimately-needed-but-poorly-documented helper is a plausible
+    # benign source. Deliberately NOT keyed on the filename's shape: see the design
+    # comment in checks/_content.py for why an underscore-prefixed-path regex scores
+    # far better on a synthetic corpus and is nonetheless unshippable. That comment also
+    # carries the scope decided by the check's second adversarial pass: a prohibition
+    # ("never run X") is not an instance of X, a helper catalogued in the skill's own
+    # scripts/usage inventory is documented even when listed once, and a helper named
+    # with no directory component is an accepted, test-pinned residual.
+    CheckMeta(
+        "B334",
+        "Undocumented bundled helper run under an agent-directed directive",
+        MEDIUM,
+        "hardening",
+        "Prompt Injection / Undocumented Execution",
+        scored=True,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     CheckMeta(
         "B333",
         "MCP tool safety-hint annotations declared but not enforced by OpenClaw",

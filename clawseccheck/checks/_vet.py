@@ -129,6 +129,7 @@ from ._content import (
     check_symlink_escape,
     check_tool_output_trust_inversion,
     check_trigger_homoglyph,
+    check_undocumented_helper_directive,
     check_unicode_obfuscation,
     check_unsafe_deserialization,
 )
@@ -4639,6 +4640,7 @@ SKILL_CONTENT_RING = (
     check_capability_intent_mismatch,  # B62 — capability–intent mismatch
     check_silent_instruction,  # B63 — "don't tell the user"
     check_instruction_hierarchy_override,  # B64 — instruction-hierarchy override
+    check_undocumented_helper_directive,  # B334 — undocumented bundled helper + directive
     check_self_privesc_directive,  # B159 — self-privilege-escalation directive (C-207)
     check_prose_bulk_exfil,  # B160 — prose-intent bulk-data exfiltration (C-210)
     check_social_engineering_phishing,  # B163 — social-engineering / credential-phishing prose (C-209)

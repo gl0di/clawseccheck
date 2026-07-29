@@ -273,6 +273,7 @@ check_tool_output_trust
 check_tool_output_trust_inversion
 check_trigger_homoglyph
 check_trustedproxy_loopback
+check_undocumented_helper_directive
 check_unicode_obfuscation
 check_unit_embedded_gateway_secret
 check_unsafe_deserialization
