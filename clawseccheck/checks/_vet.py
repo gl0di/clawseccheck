@@ -44,8 +44,10 @@ from ..skillast import simulate_effects as _simulate_effects
 from ..scanbudget import (
     DEFAULT_VET_TARGET_BUDGET_S,
     ScanBudgetExceeded,
+    check_deadline,
     cpu_deadline,
     cpu_exceeded,
+    owned_by,
 )
 from ..textnorm import (
     normalize_for_scan,
@@ -3395,13 +3397,14 @@ def check_installed_skills(ctx: Context) -> Finding:
             # simulate_effects never raises; guard here too in case of future
             # refactors or mocking in tests.
             #
-            # C-175: ScanBudgetExceeded must NOT be swallowed here — it is a plain
-            # Exception subclass, so a bare `except Exception` catches the per-check
-            # wall-clock deadline firing mid-simulation and silently treats a
-            # truncated analysis as "nothing found", letting this check fall through
-            # to a false PASS instead of the UNKNOWN run_all's own ScanBudgetExceeded
-            # handler is meant to produce. Re-raise it before the catch-all so the
-            # budget signal reaches run_all regardless of which check triggered it.
+            # C-175: ScanBudgetExceeded must NOT be swallowed here. A bare
+            # `except Exception` catching the per-check wall-clock deadline firing
+            # mid-simulation silently treats a truncated analysis as "nothing found",
+            # letting this check fall through to a false PASS instead of the UNKNOWN
+            # run_all's own ScanBudgetExceeded handler is meant to produce. Since B-352
+            # the type derives from BaseException, so the catch-all below cannot reach
+            # it and this re-raise is belt-and-braces — kept deliberately, because it
+            # documents the requirement at the site that has to satisfy it.
             try:
                 _ep = _simulate_effects(src, relpath)
             except ScanBudgetExceeded:
@@ -3930,12 +3933,13 @@ def _run_content_ring(
     """Run SKILL_CONTENT_RING against `ctx` and return only the actionable (FAIL/WARN)
     findings, de-duplicated by (id, detail).
 
-    F-148: bounded by a cooperative per-target ceiling checked between checks (see the
-    comment in the body for why a hard per-check deadline cannot be nested here yet). Once
-    it is exhausted the remaining checks are skipped and the shortfall is recorded via
-    `note_limit(..., LIMIT_DOMAIN_SKILL, ...)`, so the gap is visible as data rather than
-    silently reported as a clean scan. The FAIL/WARN-only return contract below is
-    unchanged — callers read `ctx.limit_hits` for the coverage gap.
+    F-148: bounded by a cooperative per-target ceiling checked between checks, AND
+    (B-347) the ring's own hard wall-clock deadline armed around the whole loop — see
+    the comment in the body for both. Once either is exhausted the remaining checks are
+    skipped and the shortfall is recorded via `note_limit(..., LIMIT_DOMAIN_SKILL, ...)`,
+    so the gap is visible as data rather than silently reported as a clean scan. The
+    FAIL/WARN-only return contract below is unchanged — callers read `ctx.limit_hits` for
+    the coverage gap.
 
     PASS/UNKNOWN ring results are dropped on purpose: for a pre-install verdict they add
     no signal, and an UNKNOWN would wrongly outrank a clean PASS (flipping a safe skill to
@@ -3956,58 +3960,71 @@ def _run_content_ring(
     # reason, and NOT load-immunity: CPU time inflates under contention just as wall does
     # (measured 2.60x vs 2.6x). Headroom is what protects the verdict; see scanbudget.py.
     #
-    # COOPERATIVE ONLY — still, but the reason is no longer "a hard cap here would be
-    # unsound". It used to be: this loop can run INSIDE someone else's armed itimer
-    # (report.py:_skill_inventory arms one per skill; run_all is NOT such a frame — it arms
-    # around ring checks as members of CHECKS, a different call path, and nothing in CHECKS
-    # reaches this function), and `check_deadline` disarmed the timer unconditionally in its
-    # `finally`. A disarm is indistinguishable from an expiry, so a nested arm/disarm did
-    # not delay the outer per-skill deadline but DELETED it, silently undoing a protection
-    # C-159 added. `check_deadline` is re-entrant now — a stack of absolute deadlines, an
-    # inner block clamped to the outer's remaining time, the outer restored (never
-    # cancelled) on exit — and `suppress_own=True` is the exact shape a loop like this one
-    # would want: skip the over-budget ring check, keep going, and never swallow the outer
-    # owner's signal. Wiring that up is a deliberate behaviour change (it would start
-    # cutting individual ring checks short, which changes what a --vet reports) and needs
-    # its own adversarial review, so it has not been done here. Until it is, the
-    # cooperative CPU ceiling below remains the bound, and it is enough to stop an
-    # unbounded sweep.
+    # B-347: the loop is now ALSO wrapped in the ring's OWN hard `check_deadline` — the
+    # wiring the comment here used to defer ("needs its own adversarial review"). It is
+    # safe now because two things are both true: `check_deadline` is re-entrant (a stack
+    # of absolute deadlines; a nested block is clamped to the outer's remaining time, and
+    # the outer is restored — never cancelled — on exit, so arming our own frame here
+    # cannot delete a caller's (e.g. report.py:_skill_inventory's per-skill frame)), and
+    # every catch below is gated on `owned_by(exc, own_frame)` before it is ever treated
+    # as ours. A `ScanBudgetExceeded` reaching the `except` inside the loop is one of
+    # three things, and only the first is safe to swallow here:
+    #   1. THIS block's own deadline (`owned_by(...)` True) — the loop stops, but every
+    #      FAIL/WARN a completed check already produced this call is kept and returned,
+    #      not thrown away (the B-347 bug: the old code re-raised unconditionally here
+    #      and unwound the whole partial `out` list even when the ring itself had run to
+    #      within a hair of finishing 39 checks).
+    #   2. An OUTER owner's deadline (report.py:_skill_inventory's per-skill frame today;
+    #      a future vet_plugin dispatch frame) — `owned_by(...)` is False, and it MUST be
+    #      re-raised untouched: swallowing it here hands that owner a partial scan
+    #      dressed up as a complete one, the false-PASS-adjacent shape C-175 fixed.
+    #   3. skillast.py's unattributed, non-timer cooperative raise (owner=None, its own
+    #      reached-sinks cap) — `owned_by(...)` is False for a None owner too (never
+    #      matches any frame), so it also re-raises, exactly as before: it belongs to
+    #      nobody here and travels to its real handler.
+    # `run_all` is NOT an outer frame for this function specifically: it arms its own
+    # `check_deadline` around each member of CHECKS (a different call path, one member
+    # at a time), and nothing in CHECKS calls `_run_content_ring`.
     deadline = cpu_deadline(target_budget_s)
     skipped: list[str] = []
-    for check in SKILL_CONTENT_RING:
-        name = getattr(check, "__name__", "ring check")
-        if cpu_exceeded(deadline):
-            skipped.append(name)
-            continue
-        try:
-            fx = check(ctx)
-        except ScanBudgetExceeded:
-            # Re-raised, NOT swallowed, and caught before the catch-all below precisely so
-            # it cannot be: ScanBudgetExceeded is a plain Exception subclass, so the bare
-            # `except Exception` would eat a deadline belonging to an OUTER owner
-            # (report.py:_skill_inventory's per-skill frame), which needs the signal to
-            # reach it so it can report that target UNKNOWN — the exception now names that
-            # owner, so `scanbudget.owned_by()` is how a future handler here would tell an
-            # outer's expiry from its own instead of guessing. It also carries the
-            # cooperative, non-timer raise skillast.py emits
-            # for its own reached-sinks cap, which belongs to run_all. Eating any of them
-            # here hands the owner a partial scan dressed up as a complete one — the
-            # false-PASS shape C-175 fixed at :3345.
-            raise
-        except Exception:  # noqa: BLE001 — a ring check must never break --vet
-            continue
-        if fx.status not in (FAIL, WARN):
-            continue
-        key = (fx.id, fx.detail)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(fx)
+    own_deadline_hit = False
+    with check_deadline(target_budget_s) as own_frame:
+        for idx, check in enumerate(SKILL_CONTENT_RING):
+            name = getattr(check, "__name__", "ring check")
+            if cpu_exceeded(deadline):
+                skipped.append(name)
+                continue
+            try:
+                fx = check(ctx)
+            except ScanBudgetExceeded as exc:
+                if not owned_by(exc, own_frame):
+                    raise
+                # Our OWN hard deadline fired mid-check: this check and everything
+                # after it never got a verdict this call, so all of them count as
+                # skipped for the coverage-gap message below.
+                own_deadline_hit = True
+                skipped.extend(
+                    getattr(c, "__name__", "ring check") for c in SKILL_CONTENT_RING[idx:]
+                )
+                break
+            except Exception:  # noqa: BLE001 — a ring check must never break --vet
+                continue
+            if fx.status not in (FAIL, WARN):
+                continue
+            key = (fx.id, fx.detail)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(fx)
     if skipped:
+        reason = (
+            f"the ring's own {target_budget_s:g}s hard scan deadline fired mid-check"
+            if own_deadline_hit
+            else f"the {target_budget_s:g}s per-target CPU scan budget was exhausted"
+        )
         gap = (
             f"content-ring coverage is incomplete: {len(skipped)} of "
-            f"{len(SKILL_CONTENT_RING)} content-security check(s) did not run — the "
-            f"{target_budget_s:g}s per-target CPU scan budget was exhausted "
+            f"{len(SKILL_CONTENT_RING)} content-security check(s) did not run — {reason} "
             f"({', '.join(skipped[:3])}{', …' if len(skipped) > 3 else ''})"
         )
         # Recorded on ctx where every other truncation in this engine records it …

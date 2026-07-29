@@ -45,11 +45,28 @@ from clawseccheck.report import render_vet_dossier
 from clawseccheck.scanbudget import (
     DEFAULT_VET_TARGET_BUDGET_S,
     ScanBudgetExceeded,
+    _can_hard_timeout,
     budget_deadline,
     budget_exceeded,
+    check_deadline,
     cpu_deadline,
     cpu_exceeded,
 )
+
+POSIX = _can_hard_timeout()
+posix_only = pytest.mark.skipif(not POSIX, reason="hard timeout needs POSIX + main thread")
+
+# A budget the ring's own hard check_deadline can reliably fire within, without being
+# so short it risks firing inside __enter__ on a loaded runner (see
+# tests/test_scanbudget_reentrancy.py's module docstring: >=50ms, never 1ms).
+_OWN_DEADLINE_S = 0.2
+
+
+def _busy(seconds: float) -> None:
+    """Burn CPU for at most ``seconds`` — self-terminating, so a test can never hang."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        pass
 
 # Positive but already elapsed by the time the loop starts. 0 is NOT usable: budget_deadline
 # treats a falsy budget as "no cap" and returns None, which is the documented opt-out.
@@ -242,24 +259,104 @@ def test_clean_and_exhausted_differ(tmp_path):
     )
 
 
-def test_outer_owner_deadline_is_re_raised_not_swallowed(tmp_path, monkeypatch):
-    """A ScanBudgetExceeded from an OUTER owner must escape this loop.
+def test_unattributed_cooperative_raise_is_re_raised_not_swallowed(tmp_path, monkeypatch):
+    """skillast.py's reached-sinks cap raises ScanBudgetExceeded with no owner
+    (`owner=None`, not via check_deadline) — it belongs to nobody and must escape this
+    loop untouched, exactly like an outer owner's expiry.
 
-    Two callers arm a deadline around this ring — report.py:_skill_inventory (per skill)
-    and run_all (per check) — and both catch ScanBudgetExceeded to report that target
-    UNKNOWN. Because ScanBudgetExceeded is a plain Exception subclass, the ring's
-    `except Exception: continue` would happily eat it and hand the owner a partially
-    scanned skill dressed up as a fully scanned one. That is the false-PASS shape C-175
-    fixed inside check_installed_skills; this pins that the ring does not reintroduce it.
+    B-347: since the ring now arms its OWN check_deadline frame around this loop,
+    `owned_by(exc, own_frame)` is what has to tell "mine" from "not mine" — an
+    unattributed exception must never match a real frame (owned_by is False whenever
+    exc.owner is None, regardless of which frame it's compared against). Because
+    ScanBudgetExceeded is a plain Exception subclass, the ring's `except Exception:
+    continue` would happily eat it too and hand the caller a partially scanned skill
+    dressed up as a fully scanned one — the false-PASS shape C-175 fixed inside
+    check_installed_skills; this pins that the ring does not reintroduce it.
     """
     def _times_out(_ctx):
-        raise ScanBudgetExceeded
+        raise ScanBudgetExceeded  # owner=None, exactly skillast.py's raise shape
 
     monkeypatch.setattr(
         "clawseccheck.checks._vet.SKILL_CONTENT_RING", [_times_out], raising=True
     )
-    with pytest.raises(ScanBudgetExceeded):
+    with pytest.raises(ScanBudgetExceeded) as excinfo:
         _run_content_ring(_skill_ctx(tmp_path))
+    assert excinfo.value.owner is None
+
+
+@posix_only
+def test_outer_owner_deadline_is_re_raised_not_swallowed(tmp_path, monkeypatch):
+    """A ScanBudgetExceeded from a genuinely OUTER frame's deadline must escape this
+    loop, not be mistaken for the ring's own newly-armed one (B-347).
+
+    report.py:_skill_inventory wraps `_run_content_ring` in its own `check_deadline`
+    in production; this reproduces that shape with a REAL nested check_deadline (not a
+    hand-set `.owner`), so the exception is exactly what `_fire()` would actually
+    attribute. If the ownership gate were ever weakened to "catch any
+    ScanBudgetExceeded and treat it as mine" — i.e. dropping the `owned_by()` check —
+    the ring would swallow this outer expiry and return a partial list instead of
+    letting it reach `pytest.raises` here, so this test would go from pass to fail on
+    exactly that mutation.
+    """
+    def _hangs(_ctx):
+        _busy(5.0)  # self-terminates; the OUTER 0.08s deadline cuts it first
+        return _custom("B13", HIGH, PASS, "unreachable", "—")
+
+    monkeypatch.setattr(
+        "clawseccheck.checks._vet.SKILL_CONTENT_RING", [_hangs], raising=True
+    )
+    with pytest.raises(ScanBudgetExceeded):
+        # The ring's own deadline (5.0s) is far longer than the outer's (0.08s), so the
+        # outer's is the one that actually fires and is attributed to it.
+        with check_deadline(0.08):
+            _run_content_ring(_skill_ctx(tmp_path), target_budget_s=5.0)
+
+
+@posix_only
+def test_own_deadline_preserves_fails_found_before_it_fired(tmp_path, monkeypatch):
+    """The B-347 bug: the ring's OWN hard deadline firing mid-loop must not discard a
+    FAIL/WARN an earlier check in the SAME call already produced — and the truncation
+    must still be disclosed via a VET-COVERAGE coverage-gap finding, not silently.
+
+    Mutation-proof: if the fix regressed to re-raising unconditionally (the pre-B-347
+    behaviour), this call would raise ScanBudgetExceeded instead of returning, and the
+    assertions on `out` below would never run. If the own-deadline arming were removed
+    entirely (falling back to the old cooperative-CPU-only ceiling), `_hangs` would run
+    to its full 5s self-limit instead of being interrupted at ~0.2s, and the elapsed-time
+    assertion would fail.
+    """
+    def _real_fail(_ctx):
+        return _custom("B13", HIGH, FAIL, "planted exfiltration finding", "—")
+
+    def _hangs(_ctx):
+        _busy(5.0)  # self-terminates; the ring's own 0.2s deadline cuts it first
+        return _custom("B13", HIGH, PASS, "unreachable", "—")
+
+    monkeypatch.setattr(
+        "clawseccheck.checks._vet.SKILL_CONTENT_RING", [_real_fail, _hangs], raising=True
+    )
+    ctx = _skill_ctx(tmp_path)
+    started = time.perf_counter()
+    out = _run_content_ring(ctx, target_budget_s=_OWN_DEADLINE_S)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 3.0, "not interrupted by the ring's own deadline — it ran to the 5s self-limit"
+    fails = [f for f in out if f.status == FAIL]
+    assert len(fails) == 1
+    assert fails[0].id == "B13"
+    assert fails[0].detail == "planted exfiltration finding"
+
+    gaps = [f for f in out if f.id == "VET-COVERAGE"]
+    assert len(gaps) == 1, f"expected exactly one coverage-gap finding, got {out}"
+    assert gaps[0].status == UNKNOWN
+    assert "coverage is incomplete" in gaps[0].detail
+    assert "hard scan deadline" in gaps[0].detail, (
+        "the gap reason should name the ring's OWN deadline, not the cooperative "
+        f"CPU-budget wording: {gaps[0].detail!r}"
+    )
+    # note_limit fired on the SAME ctx the call used, not merely a finding in `out`.
+    gap_notes = [h for h in limit_hits_for(ctx, LIMIT_DOMAIN_SKILL) if "content-ring" in h]
+    assert len(gap_notes) == 1
 
 
 def test_ordinary_check_failure_is_still_contained(tmp_path, monkeypatch):
