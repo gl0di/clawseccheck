@@ -60,6 +60,23 @@ def _run(capsys, home: str, extra: list[str]) -> tuple[int, str]:
     return rc, capsys.readouterr().out
 
 
+def _skill_sweep_section(out: str) -> str:
+    """Just the SKILL SWEEP block, not everything printed after it.
+
+    F-150/F-151/F-152 append PLUGIN SWEEP / BEHAVIORAL REPLAY / ADJUDICATION
+    sections after SKILL SWEEP now, so a bare ``out.split(SECTION, 1)[1]`` picks
+    up their text too. Every section's banner (this one included) is bordered by
+    a line of 60 ``=`` both above and below its title (see ``pipeline._banner``
+    and the matching ``_emit`` calls in ``cli.py``), and skill-sweep verdict
+    lines never contain one — so splitting on ``SECTION`` first lands right
+    before SKILL SWEEP's own closing border; skip past that one, then stop at
+    the next section's opening border.
+    """
+    rest = out.split(SECTION, 1)[1]
+    _, _, body = rest.partition("=" * 60)
+    return body.split("=" * 60, 1)[0]
+
+
 def _home_with_skill(tmp_path: Path, name: str) -> Path:
     """A minimal auditable home carrying one clean installed skill."""
     (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
@@ -196,7 +213,7 @@ def test_full_json_sweep_is_silent(capsys):
 
 def test_clean_home_reports_every_skill_safe(capsys):
     _, out = _run(capsys, CLEAN, ["--full"])
-    section = out.split(SECTION, 1)[1]
+    section = _skill_sweep_section(out)
     assert "alpha" in section and "beta" in section
     assert "2 skill(s) checked | 2 safe | 0 suspicious | 0 dangerous" in section
     assert "DANGEROUS" not in section
@@ -204,7 +221,7 @@ def test_clean_home_reports_every_skill_safe(capsys):
 
 def test_dangerous_skill_is_named_with_evidence(capsys):
     _, out = _run(capsys, DANGEROUS, ["--full"])
-    section = out.split(SECTION, 1)[1]
+    section = _skill_sweep_section(out)
     assert "evil-fetch-skill" in section
     assert "DANGEROUS" in section
     assert "Evidence:" in section
@@ -214,7 +231,7 @@ def test_dangerous_skill_is_named_with_evidence(capsys):
 def test_no_skills_directory_says_so_plainly(capsys):
     """An honest one-liner, not a wall of UNKNOWN noise."""
     rc, out = _run(capsys, NO_SKILLS, ["--full"])
-    section = out.split(SECTION, 1)[1]
+    section = _skill_sweep_section(out)
     assert rc == 0
     assert "No skills directory found under" in section
     assert "Aggregate summary" not in section
@@ -225,7 +242,7 @@ def test_empty_skills_directory_says_so_plainly(tmp_path, capsys):
     (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
     (tmp_path / "skills").mkdir()
     rc, out = _run(capsys, str(tmp_path), ["--full"])
-    section = out.split(SECTION, 1)[1]
+    section = _skill_sweep_section(out)
     assert rc == 0
     assert "No skills found under" in section
     assert "Aggregate summary" not in section
@@ -334,7 +351,7 @@ def test_full_without_exit_code_stays_zero_on_dangerous_skill(capsys):
 def test_suspicious_fixture_exits_zero_end_to_end(capsys):
     """The real WARN fixture through the real engine — no stub — still exits 0."""
     rc, out = _run(capsys, SUSPICIOUS, ["--full", "--exit-code"])
-    section = out.split(SECTION, 1)[1]
+    section = _skill_sweep_section(out)
     assert "SUSPICIOUS" in section
     assert rc == 0
 
@@ -362,7 +379,7 @@ def test_sweep_does_not_change_score_or_grade(capsys):
 def test_budget_exhausted_names_unscanned_skills_in_full(capsys, monkeypatch):
     monkeypatch.setattr(cli, "budget_exceeded", lambda deadline: True)
     _, out = _run(capsys, CLEAN, ["--full"])
-    section = out.split(SECTION, 1)[1]
+    section = _skill_sweep_section(out)
     assert "NOT scanned" in section
     assert "alpha" in section and "beta" in section
     assert "not scanned (budget exceeded)" in section
@@ -438,7 +455,7 @@ def test_skill_name_escape_sequence_is_sanitized(tmp_path, capsys):
     home = _home_with_skill(tmp_path, "ev\x1b[31mil")
     _, out = _run(capsys, str(home), ["--full"])
     assert "\x1b[31m" not in out
-    assert "evil" in out.split(SECTION, 1)[1]
+    assert "evil" in _skill_sweep_section(out)
 
 
 # ---------------------------------------------------------------------------
