@@ -428,7 +428,9 @@ def test_remote_debugging_address_ipv4_mapped_loopback_is_silent(tmp_path):
 
 def test_remote_debugging_address_legacy_numeric_loopback_is_silent(tmp_path):
     """The legacy numeric IPv4 spellings of loopback that strict `ipaddress` rejects."""
-    for idx, value in enumerate(("127.1", "0177.0.0.1", "127.000.000.001", "2130706433")):
+    for idx, value in enumerate(
+        ("127.1", "0177.0.0.1", "127.000.000.001", "2130706433", "0x7f000001")
+    ):
         home = _home(
             tmp_path / f"case{idx}",
             config={"browser": {"extraArgs": [f"--remote-debugging-address={value}"]}},
