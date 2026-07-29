@@ -128,13 +128,21 @@ def test_top_level_keys_match_schema_doc(capsys):
 
 def test_full_json_top_level_keys_match_schema_doc(capsys):
     """--full --json must emit exactly the documented set, INCLUDING the conditional
-    `skill_sweep` key (F-149) — the counterpart to the plain-`--json` check above."""
+    `skill_sweep` key (F-149) — the counterpart to the plain-`--json` check above.
+
+    `secondOpinion` is documented 'only with `--full --judged-bundle <file>`' — a
+    THIRD tier stricter than the plain '--full' conditional every other row here
+    uses, so it is legitimately absent from a bare `--full --json` run (no bundle
+    supplied) and is excluded from the "missing" set here. See
+    :func:`test_full_json_with_judged_bundle_emits_second_opinion` for its own
+    presence check.
+    """
     documented_all = _documented_top_level_keys()
     main(["--home", VULN] + BASE + ["--full", "--json"])
     emitted = set(json.loads(capsys.readouterr().out).keys())
 
     undocumented = emitted - documented_all
-    missing = documented_all - emitted
+    missing = documented_all - emitted - {"secondOpinion"}
 
     assert not undocumented and not missing, (
         "--full --json top-level keys drifted from docs/OUTPUT_SCHEMA.md §1 "
@@ -143,6 +151,19 @@ def test_full_json_top_level_keys_match_schema_doc(capsys):
         + (f"  documented but not emitted: {sorted(missing)}\n" if missing else "")
         + f"\nUpdate {SCHEMA_DOC} or clawseccheck/report.py::render_json() to resync."
     )
+
+
+def test_full_json_with_judged_bundle_emits_second_opinion(capsys, tmp_path):
+    """The one top-level key conditional on --judged-bundle, not merely --full,
+    actually appears once a bundle is supplied — the presence half the exclusion
+    above carves out of the general check."""
+    bundle_path = tmp_path / "bundle.json"
+    bundle_path.write_text(json.dumps({"judged": {}}), encoding="utf-8")
+    main(["--home", VULN] + BASE + ["--full", "--json",
+                                    "--judged-bundle", str(bundle_path)])
+    payload = json.loads(capsys.readouterr().out)
+    assert "secondOpinion" in payload
+    assert isinstance(payload["secondOpinion"], list)
 
 
 def test_top_level_keys_present_on_safe_fixture_too(capsys):

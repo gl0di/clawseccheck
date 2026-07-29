@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import re
 import unicodedata
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 from .. import attest as _attest
@@ -27,12 +28,16 @@ from ..collector import (
     LIMIT_DOMAIN_CONFIG,
     Context,
     classify_bytes,
+    collect,
     dig,
 )
 from ..configloader import loads_json5
 from ..scanbudget import (
+    DEFAULT_VET_ALL_BUDGET_S,
     DEFAULT_VET_TARGET_BUDGET_S,
     ScanBudgetExceeded,
+    budget_deadline,
+    budget_exceeded,
     cpu_deadline,
     cpu_exceeded,
 )
@@ -647,6 +652,208 @@ def vet_plugin(
         # status further to FAIL.
         finding.axis_reasons = {"build": [[WARN, w] for w in warns]}
     return finding
+
+
+# ---------- sweep_plugins: bulk vet of every installed plugin (F-150) ----------
+#
+# Grounded against the installed dist, not the recon doc. There is no filesystem
+# "plugins/" root to glob the way collector.SKILL_DIRS does for skills — OpenClaw
+# records installed plugins in the shared state SQLite database's single-row
+# ``installed_plugin_index`` table, ``plugins_json`` column
+# (installed-plugin-index-N4jxqS0-.js:1241-1256), already read read-only into
+# ``ctx.plugin_index_records`` by ``collector._collect_plugin_trust`` (B-292/RT-2).
+# Each record's ``root_dir`` (JS ``rootDir``) IS the on-disk directory OpenClaw itself
+# loads that plugin from — the same value ``vet_plugin()`` expects as its ``path``
+# argument. A plugin therefore has no root to sweep only when the state DB, the
+# ``installed_plugin_index`` row, or its ``plugins_json`` column could not be read;
+# an empty *list* (a real install with zero plugins) is "no targets", not "no roots" —
+# the same distinction ``sweep_installed_skills`` draws for SKILL_DIRS.
+@dataclass
+class PluginSweep:
+    """P7's counterpart to ``cli.SkillSweep`` — the exact published surface
+    ``pipeline.run_plugin_sweep``/``resolve_plugin_sweep`` duck-type on
+    (``no_roots``/``no_targets``/``counts()``/``has_fail``/``complete``/
+    ``not_scanned()``), plus ``vet_targets()`` for a future per-plugin judge packet.
+
+    Deliberately defined here rather than imported from ``cli`` — this module is
+    Layer 2 and ``cli`` is Layer 4, so importing it would be the exact cycle
+    ``pipeline.record_skill_sweep``'s docstring already explains for the skill side.
+    """
+
+    home_dir: Path
+    checked_dirs: list = field(default_factory=list)
+    rows: list = field(default_factory=list)  # (sanitized plugin id, status, evidence count)
+    findings: list = field(default_factory=list)  # (sanitized plugin id, Finding)
+    target_paths: dict = field(default_factory=dict)
+    truncated: bool = False
+    worst: str = "PASS"
+    budget_s: float = 0.0
+
+    def vet_targets(self) -> list:
+        """``(vetted path, primary finding)`` per swept plugin — mirrors
+        ``SkillSweep.vet_targets()`` for a future per-plugin judge packet."""
+        return [(self.target_paths.get(name, name), f) for name, f in self.findings]
+
+    @property
+    def no_roots(self) -> bool:
+        """True when the installed-plugin index itself could not be read."""
+        return not self.checked_dirs
+
+    @property
+    def no_targets(self) -> bool:
+        """True when the index was read but names zero installed plugins."""
+        return not self.rows
+
+    @property
+    def has_fail(self) -> bool:
+        """FAIL-only — a WARN plugin does not trip this, matching SkillSweep."""
+        return any(status == "FAIL" for _name, status, _ev in self.rows)
+
+    @property
+    def complete(self) -> bool:
+        return not self.truncated
+
+    def counts(self) -> dict:
+        scanned = [r for r in self.rows if r[1] != "SKIPPED"]
+        truncated_n = sum(1 for _n, s, _e in scanned if s == "TRUNCATED")
+        fails = sum(1 for _n, s, _e in scanned if s == "FAIL")
+        warns = sum(1 for _n, s, _e in scanned if s == "WARN")
+        total = len(scanned)
+        return {
+            "total": total,
+            "fails": fails,
+            "warns": warns,
+            "truncated": truncated_n,
+            "skipped": len(self.rows) - total,
+            "safe": total - fails - warns - truncated_n,
+        }
+
+    def not_scanned(self) -> list:
+        return [n for n, s, _e in self.rows if s in ("SKIPPED", "TRUNCATED")]
+
+
+_PLUGIN_NARRATE_STRIP_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x1b]")
+
+
+def _plugin_narrate_safe(text: str) -> str:
+    """Strip C0 controls/DEL/ESC before a plugin-controlled string reaches a terminal.
+
+    ``narrate`` printing here is plain ``print()`` (Layer 2 has no ``report._sanitize``
+    to import — Layer 3 importing back into Layer 2 is the cycle this whole module
+    boundary exists to prevent), so this is the local, minimal equivalent: it is not
+    meant to replace ``report._sanitize``'s fuller contract, only to keep an
+    attacker-controlled plugin id or error string from emitting raw escape sequences
+    on the one path (``narrate=True``) that ever prints one directly.
+    """
+    return _PLUGIN_NARRATE_STRIP_RE.sub("", text)
+
+
+def sweep_plugins(home_dir, *, ascii_only: bool = False,
+                  sweep_budget_s: float = DEFAULT_VET_ALL_BUDGET_S,
+                  narrate: bool = True) -> PluginSweep:
+    """Vet every installed plugin OpenClaw's own state database records (F-150).
+
+    Reads ``installed_plugin_index.plugins_json`` (via ``collector.collect`` ->
+    ``ctx.plugin_index_records``), dedups by each record's resolved ``root_dir``, and
+    runs :func:`vet_plugin` on each — the bulk-vet counterpart to
+    ``cli.sweep_installed_skills`` for plugins rather than skills. ``--full``'s P7
+    phase calls this with ``narrate=False`` (see ``pipeline.run_plugin_sweep``);
+    ``narrate=True`` is for a future direct ``--vet-all`` extension (F-150 point 4),
+    kept in the signature now so that wiring needs no change here later.
+
+    Bounded exactly like ``sweep_installed_skills``: a whole-sweep wall-clock budget
+    (``sweep_budget_s``, default ``DEFAULT_VET_ALL_BUDGET_S`` — plugin scans share the
+    skill sweep's cost profile, driven by content hostility and file count rather than
+    plugin count) checked before every target, never mid-target; plus ``vet_plugin``'s
+    own per-target CPU ceiling underneath. Either bound truncates honestly (SKIPPED /
+    TRUNCATED rows, excluded from "safe", never folded into a clean verdict) — the same
+    Golden Rule #4 contract the skill sweep and F-148 already established.
+    """
+    home_dir = Path(home_dir)
+    ctx = collect(home_dir)
+
+    checked_dirs: list = [home_dir / "state"] if ctx.plugin_index_found else []
+    sweep = PluginSweep(home_dir=home_dir, checked_dirs=checked_dirs, budget_s=sweep_budget_s)
+
+    if not ctx.plugin_index_found:
+        if narrate:
+            print(f"No installed-plugin index found under {home_dir}")
+        return sweep
+
+    seen: set = set()
+    plugin_dirs: list = []
+    for rec in ctx.plugin_index_records:
+        root_dir = rec.get("root_dir")
+        if not root_dir:
+            continue
+        candidate = Path(root_dir)
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        if resolved in seen or not candidate.is_dir():
+            continue
+        seen.add(resolved)
+        plugin_id = rec.get("plugin_id") or candidate.name
+        plugin_dirs.append((plugin_id, candidate))
+
+    if not plugin_dirs:
+        if narrate:
+            print(f"No installed plugins found under {home_dir}")
+        return sweep
+
+    results = sweep.rows
+    worst = "PASS"
+    truncated = False
+    deadline = budget_deadline(sweep_budget_s)
+
+    for idx, (plugin_id, plugin_dir) in enumerate(plugin_dirs):
+        if budget_exceeded(deadline):
+            truncated = True
+            remaining = plugin_dirs[idx:]
+            if narrate:
+                print(
+                    f"(sweep budget of {sweep_budget_s:g}s exceeded — "
+                    f"{len(remaining)} plugin(s) NOT scanned; not counted as safe)"
+                )
+            for skipped_id, _d in remaining:
+                results.append((_plugin_narrate_safe(str(skipped_id)), "SKIPPED", 0))
+            break
+
+        name = _plugin_narrate_safe(str(plugin_id))
+        if narrate:
+            print(f"\n=== {name} ===")
+        try:
+            f = vet_plugin(str(plugin_dir))
+        except ScanBudgetExceeded:
+            if narrate:
+                print(f"  (scan of {name} ended early — only partially scanned; "
+                      "not counted as safe)")
+            results.append((name, "TRUNCATED", 0))
+            truncated = True
+            continue
+        except Exception as exc:  # noqa: BLE001 — one plugin must not abort the sweep
+            if narrate:
+                print(f"  (error vetting {name}: {_plugin_narrate_safe(str(exc))})")
+            results.append((name, "UNKNOWN", 0))
+            continue
+
+        if f.status == "FAIL":
+            worst = "FAIL"
+        elif f.status == "WARN" and worst != "FAIL":
+            worst = "WARN"
+
+        row_status = f.status
+        if narrate:
+            print(f"  {f.status} [{f.severity}]: {_plugin_narrate_safe(f.detail)}")
+
+        results.append((name, row_status, len(f.evidence) if f.evidence else 0))
+        sweep.findings.append((name, f))
+        sweep.target_paths[name] = str(plugin_dir)
+
+    sweep.truncated = truncated
+    sweep.worst = worst
+    return sweep
 
 
 # ---------- vet_mcp: supply-chain / trust vetting for MCP servers ----------

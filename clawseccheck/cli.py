@@ -16,6 +16,7 @@ No network. Pure stdlib. Cross-platform.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import secrets
@@ -62,8 +63,10 @@ from .adjudication import (
     render_vet_judge_packet_json,
 )
 from .scanbudget import (
-    DEFAULT_VET_ALL_BUDGET_S, ScanBudgetExceeded, budget_deadline, budget_exceeded,
+    DEFAULT_FULL_BUDGET_S, DEFAULT_VET_ALL_BUDGET_S, ScanBudgetExceeded, budget_deadline,
+    budget_exceeded,
 )
+from . import pipeline as _pipeline
 from .baseline import append_entries, is_fingerprint
 from .catalog import Finding
 from .dossier import build_profile
@@ -104,12 +107,41 @@ def _unicode_ok() -> bool:
         return False
 
 
+# B-351: when set, every _emit() line is also appended here. The appended --full
+# sections are printed as they are produced — the skill sweep in particular narrates
+# per-target because progress feedback matters on a run that can take minutes — so a
+# caller assembling the combined report cannot recover those lines after the fact.
+# A tee rather than an `emit=` parameter on each producer, deliberately: threading a
+# sink argument through would change published call signatures (and break every test
+# double written against the current one) to solve a problem that belongs entirely to
+# this one output path. Always installed via _tee_emitted(), which restores it.
+_EMIT_TEE: list[str] | None = None
+
+
 def _emit(text: str) -> None:
     """Print, falling back to ASCII-safe bytes if the console can't encode it."""
+    if _EMIT_TEE is not None:
+        _EMIT_TEE.append(text)
     try:
         print(text)
     except UnicodeEncodeError:
         print(text.encode("ascii", "replace").decode("ascii"))
+
+
+@contextlib.contextmanager
+def _tee_emitted(sink: list[str]):
+    """Collect every _emit() line into ``sink`` for the duration of the block.
+
+    Restores the previous tee on the way out, including on an exception — a leaked tee
+    would keep accumulating another run's output in a long-lived process.
+    """
+    global _EMIT_TEE
+    prev = _EMIT_TEE
+    _EMIT_TEE = sink
+    try:
+        yield
+    finally:
+        _EMIT_TEE = prev
 
 
 def _record_run(capability: str, args) -> None:
@@ -210,15 +242,30 @@ class SkillSweep:
     ``findings`` carries the primary :class:`~clawseccheck.catalog.Finding` for each
     target that produced one, so a later consumer never has to re-vet to get at the
     evidence.
+
+    ``target_paths`` maps each sanitized name back to the path that was actually
+    vetted. Needed because a judge packet binds its verdicts to a target's RESOLVED
+    PATH, not its bare name: two installed skills can share a name, and a bare name is
+    therefore not a safe key for a verdicts file to be matched on. Kept out of
+    :func:`_sweep_to_json` deliberately — it is plumbing for the adjudication phase,
+    not a fact about the sweep worth publishing.
     """
 
     home_dir: Path
     checked_dirs: list[Path] = field(default_factory=list)
     rows: list[tuple[str, str, int]] = field(default_factory=list)
     findings: list[tuple[str, Finding]] = field(default_factory=list)
+    target_paths: dict[str, str] = field(default_factory=dict)
     truncated: bool = False
     worst: str = "PASS"
     budget_s: float = 0.0
+
+    def vet_targets(self) -> list[tuple[str, Finding]]:
+        """``(vetted path, primary finding)`` for every target that produced one —
+        the input the adjudication phase needs to build a per-target judge packet."""
+        return [
+            (self.target_paths.get(name, name), f) for name, f in self.findings
+        ]
 
     @property
     def no_roots(self) -> bool:
@@ -323,8 +370,9 @@ def sweep_installed_skills(
       ``skillast`` also raises it cooperatively for its own reached-sinks cap, which
       is not a clock at all. Either way the target was not fully inspected, which is
       all this caller needs to know — and it must never fall into a bare
-      ``except Exception``, since that plain-Exception subclass would otherwise read
-      as a generic vetting error and get bucketed the way a clean result would.
+      ``except Exception``, which would read as a generic vetting error and get
+      bucketed the way a clean result would. Since B-352 the type derives from
+      ``BaseException``, so no such handler can take it by accident.
     """
     skill_paths: list[Path] = []
     seen: set[Path] = set()
@@ -410,11 +458,12 @@ def sweep_installed_skills(
             # Adversarial-review blocker: _run_content_ring deliberately RE-RAISES
             # ScanBudgetExceeded past vet_skill (see checks/_vet.py) so the caller that
             # owns the per-target deadline can report it honestly instead of it being
-            # swallowed into a false clean verdict. It MUST be caught here, BEFORE the
-            # bare `except Exception` below — ScanBudgetExceeded is a plain Exception
-            # subclass, and that bare handler would otherwise catch it, print it as a
-            # generic "(error vetting …)" row, and bucket it UNKNOWN, which — same as a
-            # plain PASS/UNKNOWN — currently reads as "safe" in the tally below. Treat
+            # swallowed into a false clean verdict. It MUST be caught here by NAME: the
+            # bare `except Exception` below would otherwise print it as a generic
+            # "(error vetting …)" row and bucket it UNKNOWN, which — same as a plain
+            # PASS/UNKNOWN — currently reads as "safe" in the tally below. Since B-352
+            # the type derives from BaseException, so that misfiling is now structurally
+            # impossible too; this arm is what turns the signal into a verdict. Treat
             # it exactly like the finding-shaped per-target truncation just below:
             # named, excluded from "safe", and it forces a non-zero return.
             if narrate:
@@ -475,6 +524,7 @@ def sweep_installed_skills(
 
         results.append((skill_name, row_status, len(f.evidence) if f.evidence else 0))
         sweep.findings.append((skill_name, f))
+        sweep.target_paths[skill_name] = str(skill_dir)
 
     sweep.truncated = truncated
     sweep.worst = worst
@@ -776,6 +826,15 @@ def _flag_coherence_notes(args) -> list[str]:
         # --quiet only collapses --full's appended sections; alone it has nothing to do.
         if bool(getattr(args, "quiet", False)) and not bool(getattr(args, "full", False)):
             notes.append("note: --quiet has no effect without --full")
+        # --fast / --judged-bundle are --full modifiers on exactly the same terms:
+        # --fast drops --full's deep phases, --judged-bundle answers their judge packet.
+        # Without --full there are no phases to drop and no packet to answer, so both
+        # would be silently dropped — the B-068 bug class this block exists to prevent.
+        if bool(getattr(args, "fast", False)) and not bool(getattr(args, "full", False)):
+            notes.append("note: --fast has no effect without --full")
+        if (getattr(args, "judged_bundle", None) is not None
+                and not bool(getattr(args, "full", False))):
+            notes.append("note: --judged-bundle has no effect without --full")
         return notes  # the default path honors every tracked global modifier
     win_attr, win_flag = active[0]
     ignored = [
@@ -808,6 +867,13 @@ def _flag_coherence_notes(args) -> list[str]:
     # --quiet is a --full modifier; a winning primary mode drops --full, so --quiet too.
     if bool(getattr(args, "quiet", False)) and "full" not in honored:
         no_effect.append("--quiet")
+    # Same for the other two --full modifiers (C7): they are modifiers, never primary
+    # modes, so they are never in _PRIMARY_MODES and never get their own top-level
+    # dispatch branch — a winning mode drops --full, and takes them with it.
+    if bool(getattr(args, "fast", False)) and "full" not in honored:
+        no_effect.append("--fast")
+    if getattr(args, "judged_bundle", None) is not None and "full" not in honored:
+        no_effect.append("--judged-bundle")
     if getattr(args, "attest", None) is not None and win_attr not in _ATTEST_CONSUMERS:
         no_effect.append("--attest")
     # --trend / --monitor record a score-history point as part of their job, so
@@ -1171,6 +1237,19 @@ def _main(argv=None) -> int:
                    help="only with --full: collapse the appended self-test and vet-mcp "
                         "sections to one-line summaries (lighter for CI logs / scroll); the "
                         "full detail stays available via --self-test / --vet-mcp")
+    p.add_argument("--fast", action="store_true",
+                   help="only with --full: skip the deep phases (installed-skill sweep, "
+                        "installed-plugin sweep, behavioural/trajectory replay) and run "
+                        "only the audit + self-test + vet-mcp sections — this is today's "
+                        "--full shape, for CI runs the deep phases are too slow for. The "
+                        "judge packet is still emitted; it re-runs no check and is free")
+    p.add_argument("--judged-bundle", metavar="PATH", dest="judged_bundle",
+                   help="only with --full: feed back one file holding a host-agent judge's "
+                        "answers to a prior '--full --json' packet — an 'attestation' "
+                        "object, a 'judged' verdicts object for your own config (advisory: "
+                        "the grade and findings stay unchanged) and a 'vetJudged' array of "
+                        "per-target verdicts for swept content (which may only ESCALATE a "
+                        "finding, never lower one); use '-' to read from stdin")
     p.add_argument("--ask", action="store_true",
                    help="emit an attestation template (JSON) for the agent to self-report "
                         "facts the config can't show; fill it, then pass --attest")
@@ -1799,6 +1878,16 @@ def _main(argv=None) -> int:
 
     vm_has_fail = False
     sweep_has_fail = False
+    pipeline_has_fail = False
+    # F-153: the pipeline's wall-clock window opens HERE, before the first appended
+    # phase, so the time the earlier phases spend is charged against the same window
+    # the later ones draw from. Cooperative (a plain monotonic float) — never a nested
+    # check_deadline block, whose disarm-on-exit would delete an outer deadline.
+    full_deadline = _pipeline.start_deadline(DEFAULT_FULL_BUDGET_S) if args.full else None
+    judged_bundle = (
+        _pipeline.read_judged_bundle(args.judged_bundle)
+        if (args.full and args.judged_bundle is not None) else None
+    )
     if args.json:
         # F-149 JSON gap: --full's printed SKILL SWEEP section had no machine-readable
         # counterpart — the whole self-test/vet-mcp/sweep block below is skipped
@@ -1808,16 +1897,43 @@ def _main(argv=None) -> int:
         # task does not cover — see docs/OUTPUT_SCHEMA.md). Silent (narrate=False),
         # matching the --quiet collapse: JSON output must never carry the narrative
         # prose a human report prints.
+        #
+        # F-153: --full --json is ALSO the phase-1 carrier — the one artifact handed to a
+        # host-agent judge — so it runs the whole pipeline, not just the sweep, and gains
+        # the pipeline's additive top-level keys below. C2 is untouched by this: C2 gates
+        # printed SECTIONS on `not args.json`, and nothing here prints.
         full_sweep_json = None
+        full_pipeline = None
         if args.full:
             sweep_home = Path(args.home).expanduser()
-            sweep = sweep_installed_skills(
-                sweep_home, ascii_only=ascii_only,
-                sweep_budget_s=DEFAULT_VET_ALL_BUDGET_S, narrate=False)
-            full_sweep_json = _sweep_to_json(sweep)
-            sweep_has_fail = sweep.has_fail
-            _record_run("vet", args)
+            sweep = None
+            if not args.fast:
+                sweep = sweep_installed_skills(
+                    sweep_home, ascii_only=ascii_only,
+                    sweep_budget_s=_pipeline.sub_budget(
+                        full_deadline, DEFAULT_VET_ALL_BUDGET_S),
+                    narrate=False)
+                full_sweep_json = _sweep_to_json(sweep)
+                sweep_has_fail = sweep.has_fail
+                _record_run("vet", args)
+            full_pipeline = _pipeline.run_pipeline(
+                ctx, findings, home_dir=sweep_home, skill_sweep=sweep,
+                vet_targets=sweep.vet_targets() if sweep is not None else (),
+                deadline=full_deadline, budget_s=DEFAULT_FULL_BUDGET_S,
+                fast=args.fast, ascii_only=ascii_only, version=__version__,
+                bundle=judged_bundle)
+            pipeline_has_fail = full_pipeline.has_fail
+            if not args.fast:
+                _record_run("behavioral", args)
         body = render_json(findings, score, risk=paths, ctx=ctx, skill_sweep=full_sweep_json)
+        if full_pipeline is not None:
+            # Additive merge, done here rather than by widening render_json's signature:
+            # these keys belong to the pipeline, not to the audit payload, and every
+            # existing key keeps its meaning and its value. Re-serialized with the same
+            # dumps() settings render_json uses, so the base document is unchanged.
+            _doc = json.loads(body)
+            _doc.update(full_pipeline.to_json())
+            body = json.dumps(_doc, ensure_ascii=True, indent=2)
     elif args.card:
         body = render_card(score, findings, ascii_only)
     else:
@@ -1860,132 +1976,184 @@ def _main(argv=None) -> int:
 
     _emit(body)
 
-    if args.full and not args.json and not args.card:
-        seed = args.seed if args.seed is not None else secrets.token_hex(8)
-        # F-149: the installed-skill sweep runs under the same wall-clock ceiling
-        # --vet-all uses. Cost is driven by content hostility, not skill count, so a
-        # hostile fleet is what this bounds. Kept as the phase default rather than a
-        # new flag, following the precedent that vet_all()'s sweep_budget_s is a
-        # Python parameter the CLI deliberately does not expose.
-        sweep_home = Path(args.home).expanduser()
-        sweep_budget_s = DEFAULT_VET_ALL_BUDGET_S
-        if args.quiet:
-            # C-110: --full --quiet — the appended self-test material + per-server
-            # vet-mcp detail are what push --full to ~700 lines; collapse each to a
-            # single honest summary line (the concise report above is unchanged).
-            # The self-test harnesses emit generated adversarial *scenarios* for the
-            # agent to run — there is no PASS/score the tool computes, so the summary
-            # states counts, not a verdict (Golden Rule #4: no fabricated result).
-            # record_run() / vm_has_fail still fire, so ledger freshness and
-            # --exit-code behave identically to the verbose path.
-            n_rt = len(make_suite(seed))
-            n_dr = len(make_scenarios())
-            n_mt = len(make_multiturn())
-            _emit("")
-            _emit(f"SELF-TEST: 1 canary + {n_rt} red-team + {n_dr} dry-run + {n_mt} multi-turn "
-                  "injection scenario(s) generated — run them against your agent "
-                  "(RESISTANT = good). Full harness: --self-test.")
-            _record_run("self_test", args)
-            vm_findings = vet_mcp(target=None, home=args.home)
-            vm_has_fail = any(vmf.status == "FAIL" for vmf in vm_findings)
-            if len(vm_findings) == 1 and vm_findings[0].status == "UNKNOWN":
-                _emit(f"VET-MCP: {_sanitize(vm_findings[0].detail)}")
-            else:
-                _vc = {st: sum(1 for v in vm_findings if v.status == st)
-                       for st in ("FAIL", "WARN", "PASS", "UNKNOWN")}
-                _summary = (f"VET-MCP: {len(vm_findings)} server-check(s) — "
-                            f"{_vc['FAIL']} FAIL, {_vc['WARN']} WARN, {_vc['PASS']} PASS")
-                if _vc["UNKNOWN"]:
-                    _summary += f", {_vc['UNKNOWN']} UNKNOWN"
-                _emit(_summary + ". Full detail: --vet-mcp.")
-            _record_run("vet_mcp", args)
-            # F-149: the installed-skill sweep, collapsed the same way. narrate=False
-            # keeps the sweep completely silent; the single line below is the whole
-            # section. sweep.has_fail is read from the SAME SkillSweep object the
-            # verbose branch reads, so --exit-code cannot diverge between the two.
-            sweep = sweep_installed_skills(
-                sweep_home, ascii_only=ascii_only,
-                sweep_budget_s=sweep_budget_s, narrate=False)
-            _emit(_sweep_quiet_line(sweep))
-            sweep_has_fail = sweep.has_fail
-            _record_run("vet", args)
-        else:
-            # --- Self-test section (canary + red-team + dry-run) ---
-            _emit("")
-            _emit("=" * 60)
-            _emit("CLAWSECCHECK SELF-TEST")
-            _emit("=" * 60)
-            _emit(render_canary(make_canary(), ascii_only))
-            _emit("")
-            _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
-            _emit("")
-            _emit(render_dryrun(make_scenarios(), ascii_only))
-            _emit("")
-            _emit(render_multiturn(make_multiturn(), ascii_only))
-            _record_run("self_test", args)
-            # --- vet-mcp section ---
-            _emit("")
-            _emit("=" * 60)
-            _emit("CLAWSECCHECK VET-MCP")
-            _emit("=" * 60)
-            vm_findings = vet_mcp(target=None, home=args.home)
-            if len(vm_findings) == 1 and vm_findings[0].status == "UNKNOWN":
-                vmf = vm_findings[0]
-                vm_icon = "[?]" if ascii_only else "❔"
-                _emit(f"{vm_icon} {_sanitize(vmf.detail)}")
-            else:
+    # B-351: --save must write the WHOLE combined report. `body` is assembled above,
+    # BEFORE these sections are emitted, so a saved --full report used to stop at the
+    # report body — the self-test, vet-mcp, sweep and pipeline sections silently never
+    # reached the file, and nothing said so. The tee collects them as they print.
+    _full_lines: list[str] = []
+    with _tee_emitted(_full_lines):
+        if args.full and not args.json and not args.card:
+            seed = args.seed if args.seed is not None else secrets.token_hex(8)
+            # F-149: the installed-skill sweep runs under the same wall-clock ceiling
+            # --vet-all uses. Cost is driven by content hostility, not skill count, so a
+            # hostile fleet is what this bounds. Kept as the phase default rather than a
+            # new flag, following the precedent that vet_all()'s sweep_budget_s is a
+            # Python parameter the CLI deliberately does not expose.
+            #
+            # F-153: clamped to whatever is left of the pipeline's outer wall-clock window
+            # (min(own default, remaining)). An unclamped phase would defeat the outer
+            # budget entirely — it could spend the whole window on its own and leave every
+            # later phase reporting "not reached" on a run that was in fact healthy. The
+            # clamp is cooperative arithmetic on a monotonic float, never a nested
+            # check_deadline block; the deadline is consulted BETWEEN targets, inside the
+            # sweep, so a target already underway always finishes.
+            sweep_home = Path(args.home).expanduser()
+            sweep_budget_s = _pipeline.sub_budget(full_deadline, DEFAULT_VET_ALL_BUDGET_S)
+            sweep = None
+            if args.quiet:
+                # C-110: --full --quiet — the appended self-test material + per-server
+                # vet-mcp detail are what push --full to ~700 lines; collapse each to a
+                # single honest summary line (the concise report above is unchanged).
+                # The self-test harnesses emit generated adversarial *scenarios* for the
+                # agent to run — there is no PASS/score the tool computes, so the summary
+                # states counts, not a verdict (Golden Rule #4: no fabricated result).
+                # record_run() / vm_has_fail still fire, so ledger freshness and
+                # --exit-code behave identically to the verbose path.
+                n_rt = len(make_suite(seed))
+                n_dr = len(make_scenarios())
+                n_mt = len(make_multiturn())
+                _emit("")
+                _emit(f"SELF-TEST: 1 canary + {n_rt} red-team + {n_dr} dry-run + {n_mt} multi-turn "
+                      "injection scenario(s) generated — run them against your agent "
+                      "(RESISTANT = good). Full harness: --self-test.")
+                _record_run("self_test", args)
+                vm_findings = vet_mcp(target=None, home=args.home)
                 vm_has_fail = any(vmf.status == "FAIL" for vmf in vm_findings)
-                for vmf in vm_findings:
-                    vm_icon = _VET_ICON_ASCII[vmf.status] if ascii_only else _VET_ICON_UNI[vmf.status]
-                    vm_verdict = _VET_VERDICT[vmf.status]
-                    _emit(f"{vm_icon} {vm_verdict}: {_sanitize(vmf.title)}")
-                    if vmf.evidence:
-                        for vm_ev in vmf.evidence[:4]:
-                            _emit(f"    - {_sanitize(vm_ev)}")
-                    _emit(f"    fix: {_sanitize(vmf.fix)}")
+                if len(vm_findings) == 1 and vm_findings[0].status == "UNKNOWN":
+                    _emit(f"VET-MCP: {_sanitize(vm_findings[0].detail)}")
+                else:
+                    _vc = {st: sum(1 for v in vm_findings if v.status == st)
+                           for st in ("FAIL", "WARN", "PASS", "UNKNOWN")}
+                    _summary = (f"VET-MCP: {len(vm_findings)} server-check(s) — "
+                                f"{_vc['FAIL']} FAIL, {_vc['WARN']} WARN, {_vc['PASS']} PASS")
+                    if _vc["UNKNOWN"]:
+                        _summary += f", {_vc['UNKNOWN']} UNKNOWN"
+                    _emit(_summary + ". Full detail: --vet-mcp.")
+                _record_run("vet_mcp", args)
+                # F-149: the installed-skill sweep, collapsed the same way. narrate=False
+                # keeps the sweep completely silent; the single line below is the whole
+                # section. sweep.has_fail is read from the SAME SkillSweep object the
+                # verbose branch reads, so --exit-code cannot diverge between the two.
+                #
+                # F-153: --fast drops this phase (and P7/P8) entirely. The pipeline then
+                # prints its own honest "skipped — --fast was given" line in this slot, so
+                # the section never simply vanishes.
+                if not args.fast:
+                    sweep = sweep_installed_skills(
+                        sweep_home, ascii_only=ascii_only,
+                        sweep_budget_s=sweep_budget_s, narrate=False)
+                    _emit(_sweep_quiet_line(sweep))
+                    sweep_has_fail = sweep.has_fail
+                    _record_run("vet", args)
+            else:
+                # --- Self-test section (canary + red-team + dry-run) ---
+                _emit("")
+                _emit("=" * 60)
+                _emit("CLAWSECCHECK SELF-TEST")
+                _emit("=" * 60)
+                _emit(render_canary(make_canary(), ascii_only))
+                _emit("")
+                _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
+                _emit("")
+                _emit(render_dryrun(make_scenarios(), ascii_only))
+                _emit("")
+                _emit(render_multiturn(make_multiturn(), ascii_only))
+                _record_run("self_test", args)
+                # --- vet-mcp section ---
+                _emit("")
+                _emit("=" * 60)
+                _emit("CLAWSECCHECK VET-MCP")
+                _emit("=" * 60)
+                vm_findings = vet_mcp(target=None, home=args.home)
+                if len(vm_findings) == 1 and vm_findings[0].status == "UNKNOWN":
+                    vmf = vm_findings[0]
+                    vm_icon = "[?]" if ascii_only else "❔"
+                    _emit(f"{vm_icon} {_sanitize(vmf.detail)}")
+                else:
+                    vm_has_fail = any(vmf.status == "FAIL" for vmf in vm_findings)
+                    for vmf in vm_findings:
+                        vm_icon = _VET_ICON_ASCII[vmf.status] if ascii_only else _VET_ICON_UNI[vmf.status]
+                        vm_verdict = _VET_VERDICT[vmf.status]
+                        _emit(f"{vm_icon} {vm_verdict}: {_sanitize(vmf.title)}")
+                        if vmf.evidence:
+                            for vm_ev in vmf.evidence[:4]:
+                                _emit(f"    - {_sanitize(vm_ev)}")
+                        _emit(f"    fix: {_sanitize(vmf.fix)}")
+                        _emit("")
+                _record_run("vet_mcp", args)
+                # --- installed-skill sweep section (F-149) ---
+                # Appended LAST on purpose. Everything above it — the report body, the
+                # SELF-TEST section, the VET-MCP section — keeps the byte-for-byte shape
+                # and order it has always had; a new section inserted higher up would
+                # break the report-body prefix --full --quiet is compared against.
+                #
+                # What this adds on top of the audit, since the audit already inspects
+                # skill content (the surface="skills" checks plus the shared content
+                # ring): the audit answers "is anything wrong across this fleet", as
+                # findings attributed to the HOME. The sweep answers "which skill, and
+                # how bad is THAT skill" — one merged verdict per installed skill, from
+                # the vet engine, which builds its own Context per target precisely
+                # because a skill is untrusted third-party content and must not share
+                # the audit's. So the unit of the answer differs, and that unit is what
+                # an owner acts on: you uninstall a skill, not a finding.
+                #
+                # Visibility only: these verdicts are deliberately NOT folded into the
+                # audit score or grade. Changing a scoring rule is a separate, explicit
+                # decision — it is not something a new section gets to do as a side
+                # effect. The one place the sweep does reach the outside world is
+                # --exit-code, FAIL-only, exactly as the vet-mcp section already does.
+                if not args.fast:
                     _emit("")
-            _record_run("vet_mcp", args)
-            # --- installed-skill sweep section (F-149) ---
-            # Appended LAST on purpose. Everything above it — the report body, the
-            # SELF-TEST section, the VET-MCP section — keeps the byte-for-byte shape
-            # and order it has always had; a new section inserted higher up would
-            # break the report-body prefix --full --quiet is compared against.
-            #
-            # What this adds on top of the audit, since the audit already inspects
-            # skill content (the surface="skills" checks plus the shared content
-            # ring): the audit answers "is anything wrong across this fleet", as
-            # findings attributed to the HOME. The sweep answers "which skill, and
-            # how bad is THAT skill" — one merged verdict per installed skill, from
-            # the vet engine, which builds its own Context per target precisely
-            # because a skill is untrusted third-party content and must not share
-            # the audit's. So the unit of the answer differs, and that unit is what
-            # an owner acts on: you uninstall a skill, not a finding.
-            #
-            # Visibility only: these verdicts are deliberately NOT folded into the
-            # audit score or grade. Changing a scoring rule is a separate, explicit
-            # decision — it is not something a new section gets to do as a side
-            # effect. The one place the sweep does reach the outside world is
-            # --exit-code, FAIL-only, exactly as the vet-mcp section already does.
-            _emit("")
-            _emit("=" * 60)
-            _emit("CLAWSECCHECK SKILL SWEEP")
-            _emit("=" * 60)
-            _emit("Per-skill verdict for every installed skill. Not folded into the "
-                  "score or grade above; per-skill dossier: --vet <path>.")
-            sweep = sweep_installed_skills(
-                sweep_home, ascii_only=ascii_only,
-                sweep_budget_s=sweep_budget_s, narrate=True)
-            for _sweep_line in _sweep_summary_lines(sweep, ascii_only=ascii_only):
-                _emit(_sweep_line)
-            sweep_has_fail = sweep.has_fail
-            _record_run("vet", args)
+                    _emit("=" * 60)
+                    _emit("CLAWSECCHECK SKILL SWEEP")
+                    _emit("=" * 60)
+                    _emit("Per-skill verdict for every installed skill. Not folded into the "
+                         "score or grade above; per-skill dossier: --vet <path>.")
+                    sweep = sweep_installed_skills(
+                        sweep_home, ascii_only=ascii_only,
+                        sweep_budget_s=sweep_budget_s, narrate=True)
+                    for _sweep_line in _sweep_summary_lines(sweep, ascii_only=ascii_only):
+                        _emit(_sweep_line)
+                    sweep_has_fail = sweep.has_fail
+                    _record_run("vet", args)
+
+            # --- pipeline phases P7-P9 + the combined roll-up (P10) ------------------
+            # Appended after everything above, for the same reason the skill sweep is: the
+            # report body, SELF-TEST and VET-MCP keep the byte-for-byte shape and order they
+            # have always had. Nothing new is printed between the report body and the
+            # SELF-TEST line, which is the prefix --full --quiet is compared against.
+            full_pipeline = _pipeline.run_pipeline(
+                ctx, findings, home_dir=sweep_home, skill_sweep=sweep,
+                vet_targets=sweep.vet_targets() if sweep is not None else (),
+                deadline=full_deadline, budget_s=DEFAULT_FULL_BUDGET_S,
+                fast=args.fast, ascii_only=ascii_only, version=__version__,
+                bundle=judged_bundle)
+            # C5: read from the SAME PipelineResult on both branches, so --exit-code cannot
+            # diverge between quiet and verbose — the property the sweep already guarantees.
+            pipeline_has_fail = full_pipeline.has_fail
+            _rendered = (_pipeline.quiet_lines(full_pipeline) if args.quiet
+                         else _pipeline.render_sections(full_pipeline, ascii_only=ascii_only))
+            for _pipeline_line in _rendered:
+                _emit(_pipeline_line)
+            if not args.fast:
+                # C1: ledger writes route through _record_run, never ledger.record_run —
+                # so --no-history suppresses them here exactly as everywhere else.
+                _record_run("behavioral", args)
 
     _save_failed = False
     if args.save:
         try:
             # Persist plain text — a saved report must never carry ANSI escape codes,
             # even when the on-screen copy was colourised for the terminal.
-            secure_write_text(Path(args.save).expanduser(), strip_ansi(body))
+            #
+            # B-351: the WHOLE combined output, not just `body`. `body` is assembled
+            # before the appended --full sections are emitted, so a saved --full report
+            # used to stop at the report body — the self-test, vet-mcp, sweep and
+            # pipeline sections silently never reached the file, and nothing said so.
+            # `_full_lines` is empty on every non---full path, so this is exactly
+            # today's behaviour there.
+            _saved = "\n".join([body, *_full_lines]) if _full_lines else body
+            secure_write_text(Path(args.save).expanduser(), strip_ansi(_saved))
             _emit(f"\n(report saved to {args.save})")
         except OSError as exc:
             _emit(f"\n(could not save report: {exc})")
@@ -2021,7 +2189,14 @@ def _main(argv=None) -> int:
         # incomplete sweep is reported honestly in its printed section instead.
         # docs/USAGE.md ("CI / automation") and references/cli-flags.md state all four
         # sources; keep them in step with this disjunction if a fifth is ever added.
-        if (has_fail or vm_has_fail or sweep_has_fail
+        #
+        # F-153: pipeline_has_fail joins on identical terms — FAIL-only, aggregated
+        # across the pipeline phases. A phase that was skipped (--fast), never reached
+        # (budget), unavailable in this build or errored contributes nothing: an ABSENT
+        # verdict is not a FAIL. Truncation is reported by the printed section and by
+        # the JSON "complete"/"notScanned" keys, never by reddening a gate that would
+        # otherwise be green.
+        if (has_fail or vm_has_fail or sweep_has_fail or pipeline_has_fail
                 or getattr(ctx, "config_parse_error", False)):
             return 1
 
