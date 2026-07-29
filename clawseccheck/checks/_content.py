@@ -8847,6 +8847,147 @@ def check_pth_persistence(ctx: Context) -> Finding:
     )
 
 
+_SITE_PACKAGES_TARGET_RE = re.compile(
+    r"\bsite\.get(?:user)?sitepackages\s*\("
+    r"|os\.path\.join\([^)]*?,\s*[\"'](?:site|user)customize\.py[\"']"
+)
+# B-343 C-135 (adversarial review): the literal auto-exec FILENAME, not just "a
+# site-packages lookup happened somewhere in the file". `_SITE_PACKAGES_TARGET_RE`
+# alone (its bare `site.get(user)?sitepackages(` alternative) is deliberately kept
+# loose as a cheap pre-filter, but on its own it matches plenty of benign,
+# read-only diagnostics (coverage config, venv doctors, package auditors). Requiring
+# this filename too — and requiring the write to sit near it (see
+# `_B335_PROXIMITY_WINDOW`) — is what actually distinguishes "installs
+# sitecustomize.py/usercustomize.py" from "looks up site-packages for some unrelated
+# reason and separately writes some unrelated file elsewhere in the same module".
+_SITECUSTOMIZE_FILENAME_RE = re.compile(r"(?:site|user)customize\.py")
+_WRITE_MODE_OPEN_RE = re.compile(r"""open\s*\([^)]*?,\s*["'][wa]b?["']""")
+# B-343 C-135: PYTHONSTARTUP must be in *assignment* position (`PYTHONSTARTUP=...`,
+# `export PYTHONSTARTUP=...`, `os.environ['PYTHONSTARTUP'] = ...`) — the actual
+# shell/env syntax an installer writes — not a bare `\bPYTHONSTARTUP\b` mention,
+# which also matches a docstring/comment that merely *discusses* the variable
+# (including ones explicitly disclaiming any use of it).
+_PYTHONSTARTUP_SET_RE = re.compile(r"PYTHONSTARTUP[\"']?\]?\s*=")
+_SHELL_RC_TARGET_RE = re.compile(r"\.(?:bashrc|zshrc|bash_profile|profile|zprofile)\b")
+# Chars of slack between the specific "install" signal (the sitecustomize/
+# usercustomize filename for mechanism A; the PYTHONSTARTUP assignment for
+# mechanism B) and the write-mode open() call that must accompany it. Matches this
+# module's established proximity-window idiom (_B63_WINDOW=120, _B65_WINDOW=160,
+# _B67_WINDOW=140, _CLICKFIX_PROXIMITY_WINDOW=300) rather than a whole-file scan —
+# a write anywhere in the file no longer counts as "the same install".
+_B335_PROXIMITY_WINDOW = 200
+
+
+def _b335_write_near(pos: int, write_spans: "list[tuple[int, int]]") -> bool:
+    """True when any write-mode open() span in *write_spans* falls within
+    `_B335_PROXIMITY_WINDOW` chars of *pos* (a signal match's start offset)."""
+    lo = pos - _B335_PROXIMITY_WINDOW
+    hi = pos + _B335_PROXIMITY_WINDOW
+    return any(lo <= start <= hi for start, _end in write_spans)
+
+
+def check_python_runtime_persist_install(ctx: Context) -> Finding:
+    """B335 (T06, SkillTrustBench / B-343) — runtime-computed Python auto-execution
+    persistence install detector.
+
+    B99's sibling: B99 catches a file *shipped as-is* named sitecustomize.py/.pth;
+    this check catches a script that *computes* an auto-exec target path at runtime and
+    writes/installs it, where the shipped skill itself contains no such filename —
+    closing the T06 blind spot. Two independent signals inspected within a SINGLE
+    file's body (cross-file co-occurrence is deliberately not used — two unrelated
+    files in one skill each doing something benign is too FP-prone to correlate),
+    each requiring the write-mode `open()` to sit within `_B335_PROXIMITY_WINDOW`
+    chars of the specific install signal — not merely anywhere in the same file
+    (C-135 adversarial review, B-343: a bare whole-file boolean AND let an unrelated
+    write — a JSON report, a cache file, a log — anywhere in the file combine with an
+    unrelated, read-only site-packages/PYTHONSTARTUP mention elsewhere to false-WARN
+    on ordinary CI/devtooling/dotfiles skills):
+
+    Mechanism A — the literal `sitecustomize.py`/`usercustomize.py` auto-exec
+    filename (as built by `os.path.join(..., "sitecustomize.py")` or an equivalent
+    runtime-computed path) with a write-mode `open()` nearby, gated on a
+    site-packages target lookup (`site.getsitepackages()` / `site.getusersitepackages()`)
+    appearing somewhere in the same file. The filename requirement is deliberate: a
+    site-packages lookup used only to build some *other* filename (a lint cache, a
+    dependency lock, a diagnostics report) is not an auto-execution install.
+
+    Mechanism B — a PYTHONSTARTUP *assignment* (`PYTHONSTARTUP=...`, `export
+    PYTHONSTARTUP=...`, `os.environ['PYTHONSTARTUP'] = ...` — not a bare textual
+    mention, which also matches prose that only discusses or disclaims the
+    variable) with a write-mode `open()` nearby, gated on a shell-rc target
+    (.bashrc/.zshrc/.bash_profile/.profile/.zprofile) appearing somewhere in the
+    same file. The write/append mode plus assignment syntax is what distinguishes an
+    *install* from merely reading `os.environ.get("PYTHONSTARTUP")` or mentioning the
+    variable in a comment/docstring.
+
+    WARN when either mechanism fires. PASS when no installed skill file matches
+    either mechanism. Advisory (scored=False).
+    """
+    if not ctx.installed_skills:
+        return _custom(
+            "B335",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for runtime-computed Python "
+            "auto-execution persistence installs.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+
+    warns: list[str] = []
+    for name, blob in ctx.installed_skills.items():
+        for m in _MANIFEST_HEADER_RE.finditer(blob):
+            fname = m.group("name").strip()
+            body = m.group("body")
+            write_spans = [wm.span() for wm in _WRITE_MODE_OPEN_RE.finditer(body)]
+            if not write_spans:
+                continue
+
+            fired = False
+            if _SITE_PACKAGES_TARGET_RE.search(body):
+                for fm in _SITECUSTOMIZE_FILENAME_RE.finditer(body):
+                    if _b335_write_near(fm.start(), write_spans):
+                        warns.append(
+                            f"{name}: {fname} computes a site-packages sitecustomize/"
+                            "usercustomize target path and opens a file for write — "
+                            "runtime-installed auto-execution persistence (mechanism A)"
+                        )
+                        fired = True
+                        break
+            if not fired and _SHELL_RC_TARGET_RE.search(body):
+                for sm in _PYTHONSTARTUP_SET_RE.finditer(body):
+                    if _b335_write_near(sm.start(), write_spans):
+                        warns.append(
+                            f"{name}: {fname} references PYTHONSTARTUP and writes/appends "
+                            "to a shell rc file — runtime-installed PYTHONSTARTUP "
+                            "persistence (mechanism B)"
+                        )
+                        break
+
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _custom(
+            "B335",
+            HIGH,
+            WARN,
+            "Runtime-computed Python auto-execution persistence install: "
+            + "; ".join(warns[:4])
+            + extra,
+            "Avoid computing a sitecustomize/usercustomize target path and writing to "
+            "it, and avoid setting PYTHONSTARTUP while writing/appending to a shell rc "
+            "file, unless the auto-execution is genuinely required — document why if so.",
+            warns,
+        )
+    return _custom(
+        "B335",
+        MEDIUM,
+        PASS,
+        "No runtime-computed sitecustomize/usercustomize install or "
+        "PYTHONSTARTUP shell-rc install pattern found.",
+        "Avoid runtime-computing a Python auto-execution persistence target path and "
+        "writing to it.",
+    )
+
+
 def check_silent_instruction(ctx: Context) -> Finding:
     """B63 — Silent-instruction detector (C-075).
 

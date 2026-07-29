@@ -1651,6 +1651,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B335 - Runtime-computed Python auto-execution persistence install (sitecustomize/usercustomize write, PYTHONSTARTUP shell-rc)
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Defensibility / Supply-Chain Tamper
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Runtime-computed Python auto-execution persistence install (sitecustomize/usercustomize write, PYTHONSTARTUP shell-rc)
+- Remediation:
+  - none
+
 ### B100 - ClickFix-style paste-into-terminal setup instruction
 
 - Severity: HIGH

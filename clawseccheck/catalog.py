@@ -1740,6 +1740,29 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="skills",
     ),
+    # B335 (T06, SkillTrustBench / B-343): B99's sibling. B99 catches a file *shipped
+    # as-is* named sitecustomize.py/.pth; B335 catches a script that *computes* an
+    # auto-exec target path at runtime and writes/installs it, where the shipped skill
+    # itself contains no such filename -- closing the T06 blind spot. Two independent
+    # co-occurrence signals, both textual/regex (same idiom as B99, no AST), scoped to
+    # a SINGLE file's body (not cross-file -- two unrelated files each doing something
+    # benign is too FP-prone to correlate). Mechanism A: a site-packages target lookup
+    # + a write-mode open() in the same file (installs a sitecustomize/usercustomize).
+    # Mechanism B: PYTHONSTARTUP + a shell rc target + a write-mode open() in the same
+    # file (installs a PYTHONSTARTUP hook via a shell rc file). Advisory (scored=False);
+    # WARN-only, never FAIL. MEDIUM confidence (not B99's HIGH): this is a multi-signal
+    # co-occurrence heuristic, not an exact filename match.
+    CheckMeta(
+        "B335",
+        "Runtime-computed Python auto-execution persistence install "
+        "(sitecustomize/usercustomize write, PYTHONSTARTUP shell-rc)",
+        HIGH,
+        "advisory",
+        "Defensibility / Supply-Chain Tamper",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # A Prerequisites/Setup/Installation heading whose body instructs the reader to
     # paste a remote-fetch shell command into a terminal is the ClickFix 2.0 / ClawHavoc
     # delivery technique (standard §2.1) — distinct from B13's bare remote-fetch WARN,

@@ -121,6 +121,7 @@ from ._content import (
     check_persona_jailbreak,
     check_prompt_self_replication,
     check_pth_persistence,
+    check_python_runtime_persist_install,
     check_prose_bulk_exfil,
     check_remote_code_dependency,
     check_self_privesc_directive,
@@ -4668,6 +4669,7 @@ SKILL_CONTENT_RING = (
     check_event_hook_interceptor,  # B97 — per-turn event-hook interceptor in a skill (F-104)
     check_manifest_absent,  # B98 — undeclared privilege: risky effects, no tools manifest
     check_pth_persistence,  # B99 — .pth/sitecustomize auto-execution persistence (F-088)
+    check_python_runtime_persist_install,  # B335 — runtime-computed sitecustomize/PYTHONSTARTUP install (T06/B-343)
     check_clickfix_setup_section,  # B100 — ClickFix paste-into-terminal + remote-fetch (F-090)
     check_config_trust_widening,  # B96 — config-driven trust widening, heuristic-only (F-100)
     check_install_directive_supply_chain,  # B103 — install[] supply-chain provenance (B-099)

@@ -249,6 +249,7 @@ check_prose_bulk_exfil
 check_provider_baseurl
 check_proxy_header_forging
 check_pth_persistence
+check_python_runtime_persist_install
 check_remote_code_dependency
 check_sandbox
 check_secrets
