@@ -1468,7 +1468,14 @@ _B63_SECRET_TERM_RE = re.compile(
         r"|access[_\- ]?key|keychain|keystore|wallet|mnemonic|passphrase)s?(?![a-z])"
         r"|auth\s+(?:token|string|value|key)"
         r"|gateway\s+(?:token|value|secret|key|auth)|recovery\s+(?:phrase|seed)|seed\s+phrase"
-        r"|\.env\b|\.ssh|\.aws|\.npmrc"
+        # B-366: .ssh/.aws are DIRECTORIES holding a mix of credential and non-credential
+        # files (.ssh/config, .ssh/known_hosts are not secrets) — bare `\.ssh`/`\.aws`
+        # substring-matched inside those too. Narrowed to the actual credential-bearing
+        # filename shape, mirroring _CRED_RE's own established precedent
+        # (checks/_shared.py) for exactly this directory/file distinction. `.env`/`.npmrc`
+        # are themselves the credential-relevant artifact (not directories), so they keep
+        # matching bare, same as _CRED_RE's own bare `.npmrc`.
+        r"|\.env\b|\.ssh/id_[a-z0-9]+|\.aws/credentials|\.npmrc"
         r"|(?<![а-я])(?:секрет|парол|токен|ключ)"
     ),
     re.IGNORECASE,
