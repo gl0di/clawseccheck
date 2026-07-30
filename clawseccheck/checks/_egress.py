@@ -40,6 +40,7 @@ from ._shared import (
     _mcp_has_remote,
     _mcp_servers,
     _mcp_url_is_local,
+    _plugins,
     _read_jsonl_tail,
     _surface_absent,
     correlation_indicators,
@@ -114,6 +115,25 @@ def _weak_allowlist_entries(allowlist) -> list[str]:
     return weak
 
 
+# B-362: shared not_applicable gate for the "no browser config" UNKNOWN branch that
+# B38/B195/B196/B321/B322/B330 all share verbatim (one locus, `ctx.config["browser"]`,
+# checked the same way by every one of them). Grounded against the installed dist
+# (~/.npm-global/lib/node_modules/openclaw/dist, openclaw@2026.7.1-2, 2026-07-30):
+# tools-effective-inventory-D78fLEDu.js:63 `hasExplicitBrowserIntent` --
+# `cfg.browser?.enabled !== false && Boolean(cfg.browser || cfg.plugins?.entries?.browser)`
+# -- is OpenClaw's OWN definition of "browser is configured/intended", and it ORs two
+# loci: the top-level `browser` block these checks already read, AND the bundled
+# browser plugin's alternate `plugins.entries.browser` enablement path (browser ships
+# as `bundledPluginId: "browser"` per sdk-alias-BJSUcD8n.js:303). A raw config with NO
+# `browser` key can still have live browser-tool config through that second path, so
+# not_applicable must require both to be absent -- mirrors _plugins()'s own legacy/
+# entries-shape handling rather than re-deriving it.
+def _browser_surface_absent(ctx: Context) -> bool:
+    return not _plugins(ctx.config).get("browser") and _surface_absent(
+        ctx, LIMIT_DOMAIN_CONFIG
+    )
+
+
 def check_browser_ssrf(ctx: Context) -> Finding:
     """B38 — Browser control / cookie & SSRF exposure.
 
@@ -138,6 +158,7 @@ def check_browser_ssrf(ctx: Context) -> Finding:
             UNKNOWN,
             "No browser config — browser SSRF / cookie exposure not applicable.",
             "—",
+            not_applicable=_browser_surface_absent(ctx),
         )
 
     ssrf_policy = browser.get("ssrfPolicy") if isinstance(browser.get("ssrfPolicy"), dict) else {}
@@ -460,6 +481,7 @@ def check_browser_extra_args(ctx: Context) -> Finding:
             UNKNOWN,
             "No browser config — extraArgs not applicable.",
             "—",
+            not_applicable=_browser_surface_absent(ctx),
         )
 
     extra_args = browser.get("extraArgs")
@@ -685,6 +707,7 @@ def check_browser_evaluate_enabled(ctx: Context) -> Finding:
             UNKNOWN,
             "No browser config — evaluateEnabled not applicable (browser tool not configured).",
             "—",
+            not_applicable=_browser_surface_absent(ctx),
         )
 
     evaluate_enabled = browser.get("evaluateEnabled")
@@ -2813,6 +2836,7 @@ def check_browser_executable_path(ctx: Context) -> Finding:
             UNKNOWN,
             "No browser config — executablePath / mcpCommand not applicable.",
             "—",
+            not_applicable=_browser_surface_absent(ctx),
         )
 
     candidates: list[tuple[str, str]] = []
@@ -3324,6 +3348,7 @@ def check_browser_existing_session_profile(ctx: Context) -> Finding:
             UNKNOWN,
             "No browser config — existing-session profile exposure not applicable.",
             "—",
+            not_applicable=_browser_surface_absent(ctx),
         )
 
     profiles_cfg = browser.get("profiles") if isinstance(browser.get("profiles"), dict) else {}
@@ -3642,6 +3667,7 @@ def check_browser_cdp_control_port(ctx: Context) -> Finding:
             "No browser config — the browser tool is not in use, so no managed Chrome "
             "and no CDP control port.",
             "—",
+            not_applicable=_browser_surface_absent(ctx),
         )
 
     if browser.get("enabled") is False:
