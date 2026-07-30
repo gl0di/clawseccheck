@@ -31,6 +31,13 @@ def _stub(fid: str):
     return types.SimpleNamespace(id=fid, status=WARN)
 
 
+# E-065/C-322: ring members that opt out of axis_for()'s static single-axis inference
+# (_AXIS_BY_ID[id] = None) in favor of build_profile()'s dynamic .axis_reasons dispatch —
+# same mechanism MCP-VET/PLUGIN-VET use, but those two are synthetic container ids, not
+# real ring members, so they never needed this exception set until B339.
+_DYNAMIC_AXIS_ROUTED = {"B339"}
+
+
 def _ring_ids() -> list[str]:
     """The real ids of every SKILL_CONTENT_RING member (drift-proof: derived, not listed)."""
     ctx = Context(home=Path("/nonexistent-clawseccheck-dossier"))
@@ -45,12 +52,19 @@ def _ring_ids() -> list[str]:
 
 # ── bucketing ─────────────────────────────────────────────────────────────────
 def test_every_ring_member_and_primary_maps_to_an_axis():
-    """Every content-ring check + the B13 primary resolves to a real axis, so no signal
-    is silently dropped when it fires under --vet (guards the unmapped[] gap)."""
+    """Every content-ring check + the B13 primary resolves to a real axis via axis_for()
+    ALONE, so no signal is silently dropped when it fires under --vet (guards the
+    unmapped[] gap) — except the ids in `_DYNAMIC_AXIS_ROUTED`, which opt out of
+    axis_for()'s single-axis inference on purpose and are instead routed by
+    build_profile()'s own dispatch via .axis_reasons (see
+    test_b339_fail_routes_to_danger_and_connections_and_floors below for the coverage
+    that replaces this check for them)."""
     ids = set(_ring_ids()) | {"B13"}
     assert len(ids) >= 15, f"expected the full ring, derived only {sorted(ids)}"
-    for fid in ids:
+    for fid in ids - _DYNAMIC_AXIS_ROUTED:
         assert axis_for(_stub(fid)) in AXES, f"{fid} did not map to an axis"
+    for fid in ids & _DYNAMIC_AXIS_ROUTED:
+        assert axis_for(_stub(fid)) is None, f"{fid} was expected to opt out of axis_for()"
 
 
 def test_synthetic_container_ids_map_to_none():
@@ -193,6 +207,35 @@ def test_mcp_pipe_to_run_routes_to_danger_and_floors(tmp_path):
     p = build_profile(vet_mcp(str(spec)), str(spec), "mcp")
     assert next(a for a in p.axes if a.axis == "danger").status == FAIL
     assert p.overall_grade == "F"
+
+
+def test_b339_fail_routes_to_danger_and_connections_and_floors():
+    """E-065/C-322: a B339 FAIL (cloud IMDS credential fetch) must land on BOTH the
+    Danger axis (so the grade floors to F, same as B13's malware verdict) AND the
+    Connections axis (the specific axis the HF-incident review exists to make honest —
+    before this routing, a credential-stealing skill's Connections axis silently read
+    PASS because nothing bucketed there)."""
+    detail = "cloud instance-metadata CREDENTIAL fetch"
+    f = Finding("B339", "IMDS cred fetch", MEDIUM, FAIL, detail, "remove it", "Credential Theft")
+    f.axis_reasons = {"danger": [[FAIL, detail]], "connections": [[FAIL, detail]]}
+    p = build_profile(f, "skill", "skill")
+    assert next(a for a in p.axes if a.axis == "danger").status == FAIL
+    assert next(a for a in p.axes if a.axis == "connections").status == FAIL
+    assert p.overall_grade == "F"
+
+
+def test_b339_clean_falls_through_to_connections_not_danger():
+    """A PASS/UNKNOWN B339 finding leaves .axis_reasons empty and must fall through to
+    Connections (the natural single axis for "no exfil signal found"), never to Danger —
+    an ordinary clean result must not misfile under the malware-verdict axis."""
+    f = Finding(
+        "B339", "IMDS cred fetch", MEDIUM, PASS,
+        "No cloud instance-metadata credential fetch found.", "-", "Credential Theft",
+    )
+    p = build_profile(f, "skill", "skill")
+    assert next(a for a in p.axes if a.axis == "connections").status == PASS
+    assert next(a for a in p.axes if a.axis == "danger").status == PASS
+    assert p.overall_grade == "A"
 
 
 def test_na_axes_excluded_from_grade_denominator():

@@ -1641,6 +1641,151 @@ def _rule_mcp_toxic_flow(ctx: Context, cfg: dict) -> RiskPath | None:
     )
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# E-065 (HF incident closing): eviction-resistant foothold + tunnel-defeated egress
+# ──────────────────────────────────────────────────────────────────────────────
+
+# RISK-23: each label maps to the check id(s) that detect ONE independent persistence
+# MECHANISM. B99 and B335 both detect Python-interpreter auto-execution (.pth /
+# sitecustomize / usercustomize / PYTHONSTARTUP) — the same underlying mechanism family
+# — so they count as a single class, not two, to avoid inflating the anchor count from
+# one real mechanism. C048 (cron) and B189 (cron run-log orphan) were deliberately
+# EXCLUDED: C048 fires UNKNOWN (never WARN) whenever `cron` is configured at all —
+# indistinguishable at the status level from "config unreadable" — and B189's own
+# docstring states self-erasure is the PRODUCT DEFAULT for one-shot cron jobs, so
+# neither has a clean WARN-only "anchor present" signal the way B99/B335/B150/B97/B338
+# do. An "authorized_keys" sub-signal inside B13's malware verdict was also excluded —
+# it has no distinct Finding id of its own to key on (B13's id is a single aggregate
+# verdict across ~20 evidence buckets), and fabricating a detail-text match here would
+# be the first Finding.detail parse in this module — a new, fragile pattern with no
+# existing precedent to follow.
+_PERSISTENCE_ANCHOR_CLASSES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Python interpreter auto-execution (.pth/sitecustomize/PYTHONSTARTUP)", ("B99", "B335")),
+    ("systemd user-unit Restart=always", ("B150",)),
+    ("per-turn event-hook shipped in a skill", ("B97",)),
+    ("covert tunnel / mesh-VPN enrollment", ("B338",)),
+)
+
+
+def _rule_persistence_anchor_multiplicity(ctx: Context, findings: list[Finding]) -> RiskPath | None:
+    """HIGH (RISK-23, E-065): 2+ independent persistence anchors of DIFFERENT
+    mechanism classes = an eviction-resistant foothold.
+
+    Motivated by the HuggingFace July-2026 agent-intrusion incident
+    (huggingface.co/blog/agent-intrusion-technical-timeline): 11 self-respawning
+    privileged pods and 181 re-enrollments meant removing any single foothold achieved
+    nothing — the attacker had layered multiple independent mechanisms, each capable of
+    re-establishing the others. This chain generalizes that lesson to what a static
+    audit of an ordinary OpenClaw install can actually see: each already-existing
+    persistence check (B99/B335/B150/B97/B338) fires independently and WARN-only, so no
+    single one of them is unusual or FAIL-worthy on its own — a developer might
+    legitimately have ONE of these for a real reason. The combinational signal is that
+    TWO OR MORE, from DIFFERENT mechanism classes, fired on the SAME install at once —
+    a coincidence with a low base rate, and exactly the shape that makes removing any
+    one anchor insufficient to evict the foothold.
+
+    Fires only when 2+ distinct classes in `_PERSISTENCE_ANCHOR_CLASSES` each have at
+    least one WARN-status Finding — zero-FP by construction (a single anchor alone
+    never fires; both must independently corroborate).
+    """
+    fired = [
+        label
+        for label, ids in _PERSISTENCE_ANCHOR_CLASSES
+        if any(_finding_status(findings, cid) == WARN for cid in ids)
+    ]
+    if len(fired) < 2:
+        return None
+    return RiskPath(
+        id="RISK-23",
+        severity=HIGH,
+        title="Multiple independent persistence anchors — eviction-resistant foothold",
+        chain=[*fired, "removing any single anchor does not evict the foothold"],
+        why=(
+            "This install has " + str(len(fired)) + " independent persistence "
+            "mechanisms flagged at once, from different mechanism classes: "
+            + "; ".join(fired) + ". Each of these checks is WARN-only and fires on a "
+            "real but individually-plausible signal — a developer might legitimately "
+            "have exactly one of them. Two or more firing TOGETHER is a low-base-rate "
+            "coincidence and the exact shape of a deliberately layered foothold: an "
+            "attacker (or an already-compromised agent) that plants several "
+            "independent re-establishment mechanisms so that discovering and removing "
+            "any single one leaves the others intact to reinstate it."
+        ),
+        fix=(
+            "Investigate every flagged anchor, not just one — review the .pth/"
+            "sitecustomize/PYTHONSTARTUP files, systemd units, per-turn skill hooks, "
+            "and any tunnel/mesh-VPN binaries this install surfaced. Removing a single "
+            "anchor without addressing the others leaves a working foothold in place."
+        ),
+    )
+
+
+def _host_class_status(ctx: Context, cls: str) -> dict:
+    """Read one hostwatch class's result dict, or {} when host detection did not run
+    or the platform is unsupported (mirrors _host_blind's own ctx.host access)."""
+    host = getattr(ctx, "host", None)
+    if not host or not host.get("supported"):
+        return {}
+    return (host.get("classes") or {}).get(cls) or {}
+
+
+def _rule_tunnel_bypasses_egress_policy(ctx: Context, tools: list[str],
+                                        cfg: dict) -> RiskPath | None:
+    """MEDIUM (RISK-24, E-065): a confirmed default-deny egress policy is
+    unenforceable in the presence of a tunnel/mesh-VPN transport the agent could
+    invoke — "the audit told the user egress was fine, and it isn't."
+
+    A default-deny OUTPUT firewall policy (hostwatch EGRESS_POSTURE, active=True —
+    the same signal B101 grades PASS on) governs ordinary outbound sockets. It does
+    NOT see traffic a tunnel/mesh-VPN client routes through its own already-
+    established, often encrypted transport (a Tailscale mesh peer connection, an
+    ngrok/cloudflared reverse tunnel) — those are not a new outbound connection the
+    local firewall's OUTPUT chain evaluates the same way. `present` on
+    hostwatch.TUNNEL_TRANSPORT alone is deliberately never a finding (a large share of
+    developers legitimately run tailscale) — this chain fires ONLY on the full
+    combination: the transport exists, egress policy was graded hardened, AND the
+    agent both can act destructively (exec/write) and is reachable by untrusted input,
+    so a compromise could actually reach and use that transport.
+    """
+    if _host_class_status(ctx, "tunnel_transport").get("status") != "present":
+        return None
+    if _host_class_status(ctx, "egress_posture").get("active") is not True:
+        return None
+    if not (_has_exec_or_write_tools(tools) and _has_untrusted_ingress(tools, cfg)):
+        return None
+    transport = _host_class_status(ctx, "tunnel_transport").get("found") or ["a tunnel transport"]
+    return RiskPath(
+        id="RISK-24",
+        severity=MEDIUM,
+        title="Default-deny egress policy is unenforceable — a tunnel transport bypasses it",
+        chain=[
+            "untrusted input reaches the agent",
+            "agent can execute / write on the host",
+            f"{', '.join(transport)} present on the host (its own outbound transport)",
+            "default-deny OUTPUT policy confirmed, but does not govern the tunnel's traffic",
+            "egress policy is bypassed",
+        ],
+        why=(
+            "ClawSecCheck confirmed a default-deny outbound firewall policy on this "
+            f"host, but {', '.join(transport)} is also present — a transport that "
+            "establishes its own outbound channel independent of the local OUTPUT "
+            "firewall (a mesh-VPN peer connection, or an outbound-initiated reverse "
+            "tunnel). This agent can act on the host (exec/write) and is reachable by "
+            "untrusted input, so a prompt-injection compromise could invoke that "
+            "transport directly — the audit's own 'egress is hardened' verdict would "
+            "not apply to that channel."
+        ),
+        fix=(
+            "Do not rely on host firewall policy alone to contain this agent. Either "
+            "remove the tunnel/mesh-VPN client if it is not required for this agent's "
+            "purpose, or explicitly account for it in your threat model (deny the "
+            "agent's process/user from invoking it, egress-filter the tunnel's own "
+            "control-plane endpoints, or run the agent in a container/namespace "
+            "without access to the host's tunnel client)."
+        ),
+    )
+
+
 def risk_paths(ctx: Context, findings: list[Finding],
                 ignore: set[str] | None = None) -> list[RiskPath]:
     """Compute dangerous capability chains from config + existing findings.
@@ -1755,6 +1900,14 @@ def risk_paths(ctx: Context, findings: list[Finding],
         candidates.append(path)
 
     path = _rule_mcp_toxic_flow(ctx, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_persistence_anchor_multiplicity(ctx, findings)
+    if path:
+        candidates.append(path)
+
+    path = _rule_tunnel_bypasses_egress_policy(ctx, tools, cfg)
     if path:
         candidates.append(path)
 

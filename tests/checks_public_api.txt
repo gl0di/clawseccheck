@@ -157,6 +157,7 @@ check_chunked_file_assembly_exec
 check_clawhub_registry_provenance
 check_clawhub_token_store
 check_clickfix_setup_section
+check_cloud_metadata_credential_fetch
 check_codex_project_trust
 check_compiled_tool_poisoning
 check_conditional_sleeper_trigger
@@ -276,6 +277,7 @@ check_tool_output_trust
 check_tool_output_trust_inversion
 check_trigger_homoglyph
 check_trustedproxy_loopback
+check_tunnel_enrollment
 check_undocumented_helper_directive
 check_unicode_obfuscation
 check_unit_embedded_gateway_secret

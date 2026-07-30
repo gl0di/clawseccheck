@@ -391,7 +391,13 @@ _CRED_RE = re.compile(
     # C-198: real default on-disk crypto-wallet stores — Geth/go-ethereum's keystore dir
     # and the Solana CLI's default keypair path (both well-known, documented paths, not
     # fabricated — grounded the same way as the .aws/.kube/.config/gcloud entries above).
-    r"\.ethereum/keystore|\.config/solana(?:/id\.json)?",
+    r"\.ethereum/keystore|\.config/solana(?:/id\.json)?|"
+    # E-065/C-323: same widening as skillast.py's _CRED_PATH_RE/_SH_CRED_FILE_RE — a
+    # process's own environment (procfs), the K8s service-account bearer token mount,
+    # and the Docker/Swarm secrets mount, all read by the HF-incident reproduction.
+    r"/proc/(?:self|\d+)/environ|"
+    r"/var/run/secrets/kubernetes\.io/serviceaccount/token|"
+    r"/run/secrets/[^/\s\"']+",
     re.I,
 )
 

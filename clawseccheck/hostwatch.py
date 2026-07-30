@@ -52,8 +52,19 @@ FIREWALL = "firewall"
 # egress policy, which is exactly the gap this class targets (consumed by
 # check B101).
 EGRESS_POSTURE = "egress_posture"
+# E-065/C-324: a covert tunnel / mesh-VPN transport binary or artifact present on the
+# HOST — tailscale/tailscaled, cloudflared, ngrok, frpc, bore. Distinct in KIND from
+# every class above: those all ask "is something watching/filtering"; this asks
+# "does an outbound-tunnel-capable transport already exist here". `present` on its own
+# is NEVER a finding (a large share of developers legitimately run tailscale) — RISK-24
+# is the only consumer, and it only fires on the full combination of this class PLUS an
+# agent holding exec+egress PLUS a hardened egress-posture grade (see risk.py).
+TUNNEL_TRANSPORT = "tunnel_transport"
 
-CLASSES = (NETWORK_IDS, HOST_AUDIT, FILE_INTEGRITY, EDR_AV, FIREWALL, EGRESS_POSTURE)
+CLASSES = (
+    NETWORK_IDS, HOST_AUDIT, FILE_INTEGRITY, EDR_AV, FIREWALL, EGRESS_POSTURE,
+    TUNNEL_TRANSPORT,
+)
 
 # The four *detection/visibility* classes (a firewall is prevention, not detection).
 # RISK-10 ("a breach would be invisible") keys off these only.
@@ -356,6 +367,20 @@ def _detect_linux(root: Path, which) -> dict:
 
     classes[EGRESS_POSTURE] = _egress_cls(found, deny, weak)
 
+    # Tunnel / mesh-VPN transport (E-065/C-324) --------------------------------
+    found = []
+    if which("tailscale") or which("tailscaled") or _exists(root, "var/lib/tailscale/tailscaled.state"):
+        found.append("Tailscale")
+    if which("cloudflared"):
+        found.append("cloudflared")
+    if which("ngrok"):
+        found.append("ngrok")
+    if which("frpc"):
+        found.append("frp")
+    if which("bore"):
+        found.append("bore")
+    classes[TUNNEL_TRANSPORT] = _detection_cls(found)
+
     return {"system": "Linux", "supported": True, "classes": classes}
 
 
@@ -438,6 +463,21 @@ def _detect_macos(root: Path, which) -> dict:
     if _proxychains_present(root):
         weak.append("proxychains config present")
     classes[EGRESS_POSTURE] = _egress_cls([], None, weak)
+
+    # Tunnel / mesh-VPN transport (E-065/C-324) --------------------------------
+    found = []
+    if (which("tailscale") or which("tailscaled")
+            or _exists(root, "Applications/Tailscale.app")):
+        found.append("Tailscale")
+    if which("cloudflared"):
+        found.append("cloudflared")
+    if which("ngrok"):
+        found.append("ngrok")
+    if which("frpc"):
+        found.append("frp")
+    if which("bore"):
+        found.append("bore")
+    classes[TUNNEL_TRANSPORT] = _detection_cls(found)
 
     return {"system": "Darwin", "supported": True, "classes": classes}
 
@@ -523,6 +563,20 @@ def _detect_windows(root: Path, which) -> dict:
         classes[FIREWALL] = _unknown_cls()
     else:
         classes[FIREWALL] = _cls(["Windows Firewall"], active=fw)
+
+    # Tunnel / mesh-VPN transport (E-065/C-324) --------------------------------
+    found = []
+    if which("tailscale") or which("tailscaled") or _win_service_exists("Tailscale") is True:
+        found.append("Tailscale")
+    if which("cloudflared"):
+        found.append("cloudflared")
+    if which("ngrok"):
+        found.append("ngrok")
+    if which("frpc"):
+        found.append("frp")
+    if which("bore"):
+        found.append("bore")
+    classes[TUNNEL_TRANSPORT] = _detection_cls(found)
 
     return {"system": "Windows", "supported": True, "classes": classes}
 

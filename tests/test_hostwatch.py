@@ -44,6 +44,11 @@ def test_linux_blind_host_all_absent(tmp_path):
             # file-integrity / EDR) is honest UNKNOWN, never a confident "absent" —
             # the monitor's config/agent may live in a path a non-root scan can't read.
             assert res["classes"][cls]["status"] == "unknown"
+        elif cls == hostwatch.TUNNEL_TRANSPORT:
+            # E-065/C-324: same B-172 reasoning as the visibility classes — a miss
+            # cannot prove a tunnel binary is absent (could be installed via a package
+            # manager or path this scan can't see), so it is honest UNKNOWN too.
+            assert res["classes"][cls]["status"] == "unknown"
         else:
             # firewall is prevention, not detection — its "absent" semantics are
             # unaffected by B-172.
@@ -301,6 +306,81 @@ def test_macos_host_audit_is_unknown(tmp_path):
     _touch(tmp_path, "etc/security/audit_control", "flags:lo\n")
     res = detect(root=tmp_path, system="Darwin", which=_none)
     assert res["classes"]["host_audit"]["status"] == "unknown"
+
+
+def test_macos_tailscale_app_detected(tmp_path):
+    (tmp_path / "Applications/Tailscale.app").mkdir(parents=True)
+    res = detect(root=tmp_path, system="Darwin", which=_none)
+    assert "Tailscale" in res["classes"]["tunnel_transport"]["found"]
+
+
+# ---------------------------------------------------------------------------
+# Tunnel / mesh-VPN transport (E-065/C-324) -- present alone is NEVER a finding
+# on its own; only risk.py's RISK-24 combinational rule consumes this class, and
+# only under the full triple (tunnel present + exec/egress capability + a
+# hardened egress-posture grade). No standalone check_host_tunnel_transport
+# exists, deliberately -- see hostwatch.py's TUNNEL_TRANSPORT comment.
+# ---------------------------------------------------------------------------
+
+def test_linux_tunnel_transport_unknown_when_nothing_found(tmp_path):
+    # B-172: a miss cannot prove absence (could be installed via snap/flatpak or a
+    # non-PATH location a non-root scan can't see) -- honest UNKNOWN, not "absent".
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    assert res["classes"]["tunnel_transport"]["status"] == "unknown"
+
+
+def test_linux_tailscale_detected_by_binary_on_path(tmp_path):
+    def which(n):
+        return "/usr/bin/tailscale" if n == "tailscale" else None
+    res = detect(root=tmp_path, system="Linux", which=which)
+    assert res["classes"]["tunnel_transport"]["status"] == "present"
+    assert "Tailscale" in res["classes"]["tunnel_transport"]["found"]
+
+
+def test_linux_tailscale_detected_by_state_file(tmp_path):
+    _touch(tmp_path, "var/lib/tailscale/tailscaled.state")
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    assert "Tailscale" in res["classes"]["tunnel_transport"]["found"]
+
+
+def test_linux_cloudflared_detected_by_binary_on_path(tmp_path):
+    def which(n):
+        return "/usr/local/bin/cloudflared" if n == "cloudflared" else None
+    res = detect(root=tmp_path, system="Linux", which=which)
+    assert "cloudflared" in res["classes"]["tunnel_transport"]["found"]
+
+
+def test_linux_ngrok_detected_by_binary_on_path(tmp_path):
+    def which(n):
+        return "/usr/local/bin/ngrok" if n == "ngrok" else None
+    res = detect(root=tmp_path, system="Linux", which=which)
+    assert "ngrok" in res["classes"]["tunnel_transport"]["found"]
+
+
+def test_linux_frpc_and_bore_detected_by_binary_on_path(tmp_path):
+    def which(n):
+        return f"/usr/local/bin/{n}" if n in ("frpc", "bore") else None
+    res = detect(root=tmp_path, system="Linux", which=which)
+    found = res["classes"]["tunnel_transport"]["found"]
+    assert "frp" in found
+    assert "bore" in found
+
+
+def test_linux_tunnel_transport_present_alone_carries_no_active_signal(tmp_path):
+    # "present" is a bare detection fact -- this class deliberately carries no
+    # "active"/severity judgement of its own; RISK-24 (risk.py) is the only place
+    # that combines it with capability + egress-posture context into a finding.
+    def which(n):
+        return "/usr/bin/tailscale" if n == "tailscale" else None
+    res = detect(root=tmp_path, system="Linux", which=which)
+    assert res["classes"]["tunnel_transport"]["active"] is None
+
+
+def test_windows_tailscale_detected_by_binary_on_path(tmp_path):
+    def which(n):
+        return "C:\\Program Files\\Tailscale\\tailscale.exe" if n == "tailscale" else None
+    res = detect(root=tmp_path, system="Windows", which=which)
+    assert "Tailscale" in res["classes"]["tunnel_transport"]["found"]
 
 
 # ---------------------------------------------------------------------------

@@ -9376,6 +9376,249 @@ def check_dotfile_exfil_directive(ctx: Context) -> Finding:
     )
 
 
+# ---------- B338: covert tunnel / mesh-VPN enrollment (E-065 / HF incident) -------------
+#
+# HuggingFace's July-2026 agent-intrusion incident (huggingface.co/blog/
+# agent-intrusion-technical-timeline) included the compromised agent enrolling the host
+# into a Tailscale mesh VPN and opening ngrok/cloudflared reverse tunnels plus a
+# userspace SOCKS5 proxy for command-and-control after the initial compromise. No
+# existing check recognizes a skill's OWN code invoking a tunnel/mesh-VPN binary --
+# B14/B38's 169.254.0.0/16 handling is a NETWORK-RANGE reachability check (egress/
+# browser reachability config), orthogonal to a skill launching a tunnel PROCESS.
+#
+# WARN-only: a brand-new detection surface whose real-fleet false-positive behavior is
+# not yet proven, same standing policy as B334/B336/B337. A large share of legitimate
+# developer skills run tailscale or cloudflared for perfectly ordinary remote-access /
+# dev-preview workflows, so a bare launch primitive alone is never escalated past WARN.
+# Read-only invocations (`tailscale status`, `tailscale ip`, `ngrok --version`) never
+# match at all -- only the specific enrollment/launch subcommand shapes do.
+_B338_LAUNCH_RE = re.compile(
+    r"\btailscaled\b"
+    r"|\btailscale\s+up\b"
+    r"|\btailscale\s+login\b"
+    r"|\bcloudflared\s+tunnel\s+(?:--url\b|run\b|create\b)"
+    r"|\bngrok\s+(?:http|tcp|tls|start)\b"
+    r"|\bssh\s+(?:-\w+\s+)*-R\s+\S*:\S+:\d+"
+    r"|\bsocat\s+\S*LISTEN\S*"
+    r"|\bfrpc\b"
+    r"|\bbore\s+local\b"
+    r"|--socks5-server\b",
+    re.IGNORECASE,
+)
+
+
+def check_tunnel_enrollment(ctx: Context) -> Finding:
+    """B338 -- a skill's own code launches a covert tunnel / mesh-VPN primitive
+    (tailscale/tailscaled, cloudflared tunnel, ngrok, ssh -R, a socat listener, frpc,
+    bore, or a SOCKS5 proxy flag). See the module comment above `_B338_LAUNCH_RE` for
+    the HF-incident motivation and why this stays WARN-only.
+
+    WARN    -- a tunnel/mesh-VPN launch primitive is found in an installed skill.
+    PASS    -- no such primitive found.
+    UNKNOWN -- no installed skills to inspect.
+    """
+    if not ctx.installed_skills:
+        return _finding(
+            "B338",
+            UNKNOWN,
+            "No installed skills found -- nothing to inspect for tunnel/mesh-VPN "
+            "enrollment.",
+            "Run on the host where the agent's skills are installed.",
+        )
+
+    evidence: list[str] = []
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        for m in _B338_LAUNCH_RE.finditer(norm):
+            lo = max(0, m.start() - 20)
+            snippet = _obf_clip(norm[lo : m.end() + 40], 100)
+            evidence.append(f'{skill_name}: "{snippet}"')
+
+    if evidence:
+        ev_summary = "; ".join(evidence[:4])
+        extra = f" (+{len(evidence) - 4} more)" if len(evidence) > 4 else ""
+        return _finding(
+            "B338",
+            WARN,
+            "Tunnel/mesh-VPN enrollment primitive found in an installed skill: "
+            + ev_summary
+            + extra,
+            "A skill launching tailscale/cloudflared/ngrok/ssh -R/socat/frpc/bore or "
+            "opening a SOCKS5 proxy establishes an outbound channel independent of "
+            "OpenClaw's own egress surface. Confirm this is an intentional, documented "
+            "part of the skill's stated purpose -- an undocumented tunnel is a covert "
+            "command-and-control channel.",
+            evidence,
+            severity=HIGH,
+            confidence="MEDIUM",
+        )
+
+    return _finding(
+        "B338",
+        PASS,
+        "No tunnel/mesh-VPN enrollment primitive found in the installed skills.",
+        "Ensure no bundled script launches a tunnel/mesh-VPN binary outside the "
+        "skill's documented purpose.",
+    )
+
+
+# ---------- B339: cloud instance-metadata credential fetch (E-065 / HF incident) --------
+#
+# The HuggingFace incident harvested AWS and GCP instance-role credentials from the
+# cloud metadata service after the initial compromise -- the standard "IMDS credential
+# theft" primitive (OWASP Agentic AST01). No existing check recognizes a skill's own
+# code reaching one of these endpoints; B14/B38's 169.254.0.0/16 handling is a NETWORK-
+# RANGE reachability check (egress/browser config), never a fetch from skill CODE.
+#
+# FAIL-only (no WARN tier): environment/region/instance-id detection via the metadata
+# service is ordinary, benign skill behavior (deployment tools, region-aware caching,
+# ...) with no exfiltration angle of its own -- flagging it at all would be a false
+# positive by this project's own zero-FP-on-clean-fixtures gate
+# (tests/test_vet_content_ring.py::test_clean_skill_stays_silent_via_vet, C-135 round 1
+# caught this directly: a "report which region this box is in" skill WARNed and failed
+# that gate). Only an actual credential-issuing URL is a finding at all.
+#
+# Each pattern below requires HOST and PATH to be the SAME contiguous URL token (no
+# separate proximity window -- C-135 round 1 found a bare 130-char window would match a
+# metadata-host mention and an unrelated credential-path-shaped FILENAME or doc-section
+# reference landing near each other by coincidence), and requires a role-name/account
+# segment after AWS/Alibaba's `security-credentials/` -- that endpoint WITHOUT a
+# trailing segment returns only the ROLE NAME (ordinary environment detection, same as
+# `instance-id`), not credentials; only `.../security-credentials/<RoleName>` mints
+# them, and the bare-listing form was, before this fix, wrongly the check's OWN "bad"
+# fixture.
+#
+# Curated to the metadata hosts/paths this project can ground with confidence (Golden
+# Rule #4): AWS EC2 (`169.254.169.254`, IAM role creds at
+# `iam/security-credentials/<RoleName>`), GCP (`metadata.google.internal`,
+# service-account token at `computeMetadata/v*/instance/service-accounts/*/token`),
+# Azure IMDS (also `169.254.169.254`, managed-identity token at
+# `identity/oauth2/token`), and Alibaba ECS (`100.100.100.200`, RAM role creds at
+# `ram/security-credentials/<RoleName>` -- mirrors AWS's shape). Deliberately does not
+# claim an Oracle OCI instance-principal path -- OCI's credential-delivery mechanism
+# differs enough that this project is not confident grounding a specific path for it.
+_B339_CRED_URL_RE = re.compile(
+    r"169\.254\.169\.254[^\s\"'`]*?/latest/meta-data/iam/security-credentials/[^\s\"'`/]+"
+    r"|100\.100\.100\.200[^\s\"'`]*?/latest/meta-data/ram/security-credentials/[^\s\"'`/]+"
+    r"|metadata\.google\.internal[^\s\"'`]*?/computeMetadata/v\d+/instance/"
+    r"service-accounts/[^/\s\"'`]+/token"
+    r"|169\.254\.169\.254[^\s\"'`]*?/metadata/identity/oauth2/token",
+    re.IGNORECASE,
+)
+
+
+def _b339_defensive_context(blob: str, pos: int, fence_ranges: list[tuple[int, int]]) -> bool:
+    """B339's own defensive-context guard -- deliberately NOT the shared
+    `_defensive_context` (its docstring reserves it, without exception, for
+    natural-language directive/prose detectors: "an NL directive regex was never meant
+    to read program text"). B339 is the opposite shape -- it looks for a LIVE URL
+    embedded in actual .py/.sh CODE, which is exactly where the HF incident's real
+    payload lived (`scripts/probe.py`'s `urlopen(...)` calls). `_defensive_context`'s
+    first, unconditional criterion (`_pos_in_source_code_section`) exempts any match
+    inside a `# file: *.py` section -- applying it here silently blinded this check to
+    every real code-embedded fetch, the exact incident-reproduction case this check
+    exists to catch (found in manual end-to-end verification against the HF-incident
+    reproduction fixture before this check shipped, not by any automated test).
+
+    Keeps every OTHER `_defensive_context` criterion (fence+negation, negation governs
+    the trigger, an immediate negator, a defensive heading + negation) -- those are
+    genuine "this is documentation, not a live payload" signals regardless of whether
+    the match sits in prose or in code.
+    """
+    if _in_fence(pos, fence_ranges) and _negation_context(blob, pos):
+        return True
+    if _negation_governs_trigger(blob, pos):
+        return True
+    if _IMMEDIATE_NEGATOR_RE.search(blob[max(0, pos - 24) : pos]):
+        return True
+    return _defensive_section(blob, pos)
+
+
+def check_cloud_metadata_credential_fetch(ctx: Context) -> Finding:
+    """B339 -- a skill's own code fetches cloud instance-metadata credentials. See the
+    module comment above `_B339_CRED_URL_RE` for the HF-incident motivation, the
+    host/path grounding, and why this stays FAIL-only (no WARN tier).
+
+    FAIL    -- a credential-issuing metadata URL (`_B339_CRED_URL_RE`) is found outside
+               a defensive/documentation context (`_b339_defensive_context`, and the
+               whole skill is not a detection-signature catalogue,
+               `_b58_text_is_detection_catalogue` -- C-135 round 1: an SSRF-hardening
+               skill or a SIEM-rule skill that merely NAMES or WARNS AGAINST this
+               endpoint is not itself fetching it). No benign reason exists for a skill
+               to actually mint cloud role credentials -- concrete, curated,
+               unambiguous, same FAIL discipline as B156's known-exfil-host anchor.
+    PASS    -- no such request found (this includes ordinary non-credential metadata
+               reads -- instance-id, hostname, region -- which are legitimate
+               environment detection and never produce a finding here).
+    UNKNOWN -- no installed skills to inspect.
+    """
+    if not ctx.installed_skills:
+        return _finding(
+            "B339",
+            UNKNOWN,
+            "No installed skills found -- nothing to inspect for cloud instance-"
+            "metadata credential fetches.",
+            "Run on the host where the agent's skills are installed.",
+        )
+
+    fail_ev: list[str] = []
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        # C-135 round 1: an educational/SSRF-hardening/SIEM-rule skill can legitimately
+        # narrate or catalogue this exact URL without ever fetching it -- whole-skill
+        # dampeners first (cheap, and correct regardless of which match triggered them),
+        # same pairing B58 uses (`base_defensive` + `catalogue_defensive`).
+        if _whole_text_is_defensive(norm) or _b58_text_is_detection_catalogue(norm):
+            continue
+        fr = _fence_ranges(norm)
+        for m in _B339_CRED_URL_RE.finditer(norm):
+            if _b339_defensive_context(norm, m.start(), fr):
+                continue
+            snippet = _obf_clip(norm[max(0, m.start() - 10) : m.end() + 10], 100)
+            fail_ev.append(f'{skill_name}: "{snippet}"')
+
+    if fail_ev:
+        ev_summary = "; ".join(fail_ev[:4])
+        extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
+        detail = (
+            "Cloud instance-metadata CREDENTIAL fetch found in an installed skill -- a "
+            "request targets a known cloud-metadata host's credential-issuing path: "
+            + ev_summary
+            + extra
+        )
+        finding = _finding(
+            "B339",
+            FAIL,
+            detail,
+            "Remove the request. A skill has no legitimate reason to mint cloud IAM/"
+            "service-account credentials from the instance metadata service -- this is "
+            "the standard IMDS credential-theft primitive used to pivot from a "
+            "compromised agent into the surrounding cloud account.",
+            fail_ev,
+            severity=HIGH,
+            confidence="MEDIUM",
+        )
+        # E-065/C-322: dual-axis -- this is as unambiguously malicious as B13's malware
+        # verdict (danger floor -> grade F), but it is ALSO the specific Connections-axis
+        # signal the HF-incident review exists to close. Routed via dossier.py's
+        # axis_reasons dispatch (fallback_axis="connections" for this check's non-FAIL
+        # branch, which leaves axis_reasons empty and falls through unchanged).
+        finding.axis_reasons = {
+            "danger": [[FAIL, detail]],
+            "connections": [[FAIL, detail]],
+        }
+        return finding
+
+    return _finding(
+        "B339",
+        PASS,
+        "No cloud instance-metadata credential fetch found in the installed skills.",
+        "Ensure no bundled script requests cloud IAM/service-account credentials from "
+        "the instance metadata service (169.254.169.254 / metadata.google.internal / "
+        "100.100.100.200).",
+    )
+
+
 # ---------- B334: undocumented bundled helper under an agent-directed run directive ----
 #
 # The shape: a block grafted into a skill's own Markdown that addresses the READING
