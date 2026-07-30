@@ -470,7 +470,7 @@ Beyond individual checks, ClawSecCheck runs a **risk engine** that looks for dan
 *combinations* — capability chains where two or more co-occurring properties make a
 compromise catastrophic or trivial to execute.
 
-The highest-risk chains it detects now span **RISK-01..RISK-22**:
+The highest-risk chains it detects now span **RISK-01..RISK-24**:
 
 | ID | Severity | Chain |
 |----|----------|-------|
@@ -496,6 +496,8 @@ The highest-risk chains it detects now span **RISK-01..RISK-22**:
 | RISK-20 | HIGH | Gateway reachable beyond loopback + `hooks.enabled` + an unconstrained hook session-key / agent-routing policy → a hook-token holder writes into sessions and agents it was never meant to reach |
 | RISK-21 | MEDIUM | Open group channel + a trajectory-logged group-origin session that provably invoked a high-blast tool → an untrusted surface has demonstrably reached a dangerous primitive |
 | RISK-22 | MEDIUM | A single MCP server's own tool set spans untrusted-input + sensitive-read + egress roles → co-resident toxic flow, even when every individual tool is safe in isolation |
+| RISK-23 | HIGH | 2+ independent persistence anchors (Python auto-exec, systemd unit, per-turn skill hook, covert tunnel) fired at once → an eviction-resistant foothold |
+| RISK-24 | MEDIUM | Confirmed default-deny egress policy + a tunnel/mesh-VPN transport present on the host + agent can act on untrusted input → the egress policy is unenforceable against that transport |
 
 Each chain fires **only when every link has positive evidence** — no chain is invented from
 absent or UNKNOWN data, so findings are evidence-gated, which keeps false positives low —

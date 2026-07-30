@@ -1581,6 +1581,30 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B338 - Covert tunnel / mesh-VPN enrollment primitive in an installed skill
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Command & Control / Covert Channel
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Covert tunnel / mesh-VPN enrollment primitive in an installed skill
+- Remediation:
+  - none
+
+### B339 - Cloud instance-metadata credential fetch in an installed skill
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Credential Theft / Cloud Metadata
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Cloud instance-metadata credential fetch in an installed skill
+- Remediation:
+  - none
+
 ## Advisory checks
 
 ### B93 - Confusable/mixed-script characters in a skill's trigger description
@@ -2581,3 +2605,42 @@ These paths are computed from multiple checks. They fire only when every leg is 
   untrusted-input, sensitive-read, and egress tools are never declared by the same server,
   or gate the sensitive-read/egress tools behind human approval (tools.exec.mode='ask') so
   an injected instruction from the input tool cannot reach them unattended.
+
+### RISK-23 - Multiple independent persistence anchors — eviction-resistant foothold
+
+- Severity: HIGH
+- Pattern: HIGH (RISK-23, E-065): 2+ independent persistence anchors of DIFFERENT
+- Chain: *fired -> removing any single anchor does not evict the foothold
+- Why:
+  This install has str(len(fired)) independent persistence mechanisms flagged at once,
+  from different mechanism classes: '; '.join(fired). Each of these checks is WARN-only
+  and fires on a real but individually-plausible signal — a developer might legitimately
+  have exactly one of them. Two or more firing TOGETHER is a low-base-rate coincidence and
+  the exact shape of a deliberately layered foothold: an attacker (or an already-
+  compromised agent) that plants several independent re-establishment mechanisms so that
+  discovering and removing any single one leaves the others intact to reinstate it.
+- Fix:
+  Investigate every flagged anchor, not just one — review the
+  .pth/sitecustomize/PYTHONSTARTUP files, systemd units, per-turn skill hooks, and any
+  tunnel/mesh-VPN binaries this install surfaced. Removing a single anchor without
+  addressing the others leaves a working foothold in place.
+
+### RISK-24 - Default-deny egress policy is unenforceable — a tunnel transport bypasses it
+
+- Severity: MEDIUM
+- Pattern: MEDIUM (RISK-24, E-065): a confirmed default-deny egress policy is
+- Chain: untrusted input reaches the agent -> agent can execute / write on the host -> {', '.join(transport)} present on the host (its own outbound transport) -> default-deny OUTPUT policy confirmed, but does not govern the tunnel's traffic -> egress policy is bypassed
+- Why:
+  ClawSecCheck confirmed a default-deny outbound firewall policy on this host, but {',
+  '.join(transport)} is also present — a transport that establishes its own outbound
+  channel independent of the local OUTPUT firewall (a mesh-VPN peer connection, or an
+  outbound-initiated reverse tunnel). This agent can act on the host (exec/write) and is
+  reachable by untrusted input, so a prompt-injection compromise could invoke that
+  transport directly — the audit's own 'egress is hardened' verdict would not apply to
+  that channel.
+- Fix:
+  Do not rely on host firewall policy alone to contain this agent. Either remove the
+  tunnel/mesh-VPN client if it is not required for this agent's purpose, or explicitly
+  account for it in your threat model (deny the agent's process/user from invoking it,
+  egress-filter the tunnel's own control-plane endpoints, or run the agent in a
+  container/namespace without access to the host's tunnel client).
