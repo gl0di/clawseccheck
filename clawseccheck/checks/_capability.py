@@ -19,6 +19,7 @@ from ..catalog import (
     Finding,
 )
 from ..collector import (
+    LIMIT_DOMAIN_CONFIG,
     Context,
     dig,
 )
@@ -32,6 +33,7 @@ from ._shared import (
     _hint,
     _open_channels,
     _profile_is_powerful,
+    _surface_absent,
 )
 
 
@@ -416,6 +418,10 @@ def check_effective_tools(ctx: Context) -> Finding:
     PASS    — deny lists exist and every one either uses 'group:fs' or denies
                the full mutating set (write, edit, apply_patch, exec, process).
     UNKNOWN — no deny lists configured anywhere.
+              B-362: ``not_applicable`` fires only on a COMPLETE config read with no
+              deny list in any of the three scopes — with none declared, there is no
+              list for a mutating tool to slip past (genuine absence, not unassessed
+              risk).
     """
     deny_lists = _b31_collect_deny_lists(ctx.config)
 
@@ -425,6 +431,7 @@ def check_effective_tools(ctx: Context) -> Finding:
             UNKNOWN,
             "No tool deny-policy configured — effective-tools bypass not applicable.",
             "—",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
 
     bypassable_scopes: list[str] = []
