@@ -2820,14 +2820,20 @@ def check_browser_executable_path(ctx: Context) -> Finding:
               writable by another account; no mcpCommand override found.
     UNKNOWN — no browser config at all; OR browser is configured but neither an
               executablePath (top-level or per-profile) nor an existing-session
-              mcpCommand override is set anywhere — nothing to assess; OR an
-              executablePath is configured but host-filesystem scanning is disabled
-              (ctx.include_host is False / --no-host) — mirrors C5's own --no-host gate
-              (checks/_capability.py check_path_safety): writability cannot be assessed
-              without stat()-ing the real path, and this check does not fall back to
-              reporting the independent mcpCommand signal alone in that specific run to
-              keep the "assessment incomplete" verdict unambiguous — a subsequent run
-              without --no-host (the CLI default) evaluates both signals normally.
+              mcpCommand override is set anywhere — nothing to assess (B-362: sets
+              ``not_applicable`` here — the config locus was read COMPLETELY and
+              neither sub-signal exists anywhere in the browser block, so there is
+              genuinely nothing for this check to assess, not merely an unassessed
+              risk); OR an executablePath is configured but host-filesystem scanning
+              is disabled (ctx.include_host is False / --no-host) — mirrors C5's own
+              --no-host gate (checks/_capability.py check_path_safety): writability
+              cannot be assessed without stat()-ing the real path, and this check does
+              not fall back to reporting the independent mcpCommand signal alone in
+              that specific run to keep the "assessment incomplete" verdict
+              unambiguous — a subsequent run without --no-host (the CLI default)
+              evaluates both signals normally. This THIRD branch stays a real UNKNOWN
+              (not not_applicable) — candidates were found, the scan is merely
+              incomplete right now.
     """
     browser = ctx.config.get("browser")
     if not isinstance(browser, dict):
@@ -2868,6 +2874,7 @@ def check_browser_executable_path(ctx: Context) -> Finding:
             "browser is configured but no executablePath (top-level or per-profile) "
             "and no existing-session mcpCommand override is set — nothing to assess.",
             "—",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
 
     if candidates and not getattr(ctx, "include_host", False):
