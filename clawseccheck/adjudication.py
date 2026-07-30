@@ -206,9 +206,67 @@ def _target_from_evidence(f) -> str:
 _LOC_SUFFIX_RE = re.compile(r"\(([^()\s][^()]*:\d+)\)\s*$")
 
 
+# C-361: real dig() root namespaces (grepped from checks/*.py + collector.py, not
+# invented -- Golden Rule #4). _config_field_path only treats a dotted/bracketed
+# token as an engine-authored config field path -- never skill prose -- when here.
+_CONFIG_PATH_ROOTS = frozenset({
+    "agents", "auth", "channels", "commands", "config", "cron", "discovery",
+    "env", "gateway", "heartbeat", "hooks", "lastTouchedVersion", "logging",
+    "marketplaces", "mcp", "meta", "models", "network", "openclaw", "plugins",
+    "proxy", "secrets", "security", "skills", "subagents", "tools", "update",
+})
+
+# A dotted/bracketed config-path SHAPE anchored at the start of an evidence string --
+# identifier segments joined by '.' or indexed with '[<digits>]'. No whitespace or
+# punctuation besides '.', '[', ']', '_' survives -- same "narrow shape, not free
+# text" defense as _safe_destination_host's hostname gate (C-284). The trailing
+# lookahead requires a non-identifier, non-':' boundary right after the match, so a
+# skill's "name: ..." evidence convention is never mistaken for a path.
+_CONFIG_PATH_RE = re.compile(
+    r"^(?P<path>[a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*|\[\d+\])+)(?![A-Za-z0-9_:])"
+)
+
+_MAX_FIELD_PATH_LEN = 120
+
+
+def _config_field_path(evidence_entry: str) -> "str | None":
+    """Leading config field path (e.g. ``gateway.trustedProxies``) at the start of
+    *evidence_entry*, or None. Always STRUCTURAL (a real dig() call site name, see
+    ``_CONFIG_PATH_ROOTS``) -- never the free-text value/prose that may follow it;
+    everything past the matched path is discarded, like ``_evidence_locations``
+    already discards everything but a trailing ``(relpath:lineno)`` location.
+    """
+    m = _CONFIG_PATH_RE.match(evidence_entry)
+    if not m:
+        return None
+    path = m.group("path")
+    root = re.split(r"[.\[]", path, maxsplit=1)[0]
+    if root not in _CONFIG_PATH_ROOTS:
+        return None
+    return path[:_MAX_FIELD_PATH_LEN]
+
+
+def _config_field_paths(f) -> list:
+    """Distinct config field paths from *f*'s evidence, in order, capped at 6."""
+    paths: list = []
+    for e in (f.evidence or []):
+        p = _config_field_path(e)
+        if p and p not in paths:
+            paths.append(p)
+    return paths[:6]
+
+
+# C-361: the old, contentless fallback shape, named so build_judge_packet can
+# recognize (and omit) an item still empty after the field-path fallback fires.
+_FALLBACK_EVIDENCE_RE = re.compile(
+    r"^\d+ evidence entr(?:y|ies) in the full report \(not reproduced here\)$"
+)
+
+
 def _evidence_locations(f) -> str:
-    """Skill-relative file:line locations pulled from a Finding's evidence,
-    with the matched free text itself dropped.
+    """Skill-relative file:line locations pulled from a Finding's evidence, with the
+    matched free text itself dropped -- falling back to a config field path
+    (C-361) when no location suffix exists, and only then to a contentless count.
 
     Several content-ring checks (persona-jailbreak, sleeper-trigger, secret-
     exfil, ...) quote the actual matched skill prose in their evidence so a
@@ -218,10 +276,18 @@ def _evidence_locations(f) -> str:
     text. Since this packet is meant for an external host-agent judge to
     read, only the location is surfaced here; the matched text itself never
     reaches this module's output.
+
+    C-361: config-derived findings (the audit-path majority) cite a dig() field path
+    like ``mcp.servers[2].command``, not a file:line -- so before this fix they
+    ALWAYS hit this fallback with zero information. ``_config_field_path`` extracts
+    that path under the same "narrow shape, never free text" discipline as above.
     """
     locs = [m.group(1) for e in (f.evidence or []) if (m := _LOC_SUFFIX_RE.search(e))]
     if locs:
         return redact("; ".join(locs))
+    paths = _config_field_paths(f)
+    if paths:
+        return redact("; ".join(paths))
     n = len(f.evidence) if f.evidence else (1 if f.detail else 0)
     if n == 0:
         return ""
@@ -366,6 +432,14 @@ def _attach_corroboration(items: list[dict], findings) -> list[dict]:
 
 def _item_from_finding(f) -> dict:
     host = _safe_destination_host(f)
+    field_paths = _config_field_paths(f)
+    # C-284/C-361: engine-authored facts only, never copied from prose. Always a
+    # dict (empty when nothing could be safely extracted).
+    safe_facts: dict = {}
+    if host:
+        safe_facts["destination_host"] = host
+    if field_paths:
+        safe_facts["config_field_paths"] = field_paths
     return {
         "finding_id": f.id,
         "target": _target_from_evidence(f),
@@ -373,11 +447,25 @@ def _item_from_finding(f) -> dict:
         "engine_disposition": f.status,
         "question": _question_for(f.id),
         "verdict_schema": _VERDICT_SCHEMA,
-        # C-284: engine-authored, never copied from prose — see _safe_destination_host.
-        # Always present (empty when no destination could be safely extracted) so a
-        # consumer never needs to branch on the key's existence.
-        "safe_facts": {"destination_host": host} if host else {},
+        "safe_facts": safe_facts,
     }
+
+
+# C-361: an item built from a finding that DID carry evidence, yet still collapses to
+# zero usable signal (no location/field-path, no curated question, no real target, no
+# safe_facts), asks the judge about something it structurally cannot see -- omit it
+# rather than ship an unanswerable question (2 real items beats 43 empty ones).
+# Scoped to findings that HAD evidence: a bare UNKNOWN with NO evidence at all keeps
+# its long-standing generic-question posture unchanged.
+def _is_judgeable(item: dict, f) -> bool:
+    if not (f.evidence or []):
+        return True
+    ev = item["redacted_evidence"]
+    has_real_evidence = bool(ev) and not _FALLBACK_EVIDENCE_RE.match(ev)
+    has_curated_question = f.id in _ID_QUESTIONS or f.id in _RULE_QUESTIONS
+    has_real_target = item["target"] != f.id
+    has_safe_facts = bool(item["safe_facts"])
+    return has_real_evidence or has_curated_question or has_real_target or has_safe_facts
 
 
 def _recover_dropped_taint(ctx) -> list[dict]:
@@ -487,7 +575,15 @@ def build_judge_packet(ctx, findings) -> list[dict]:
     Finding's status/severity/score. Deterministic: same inputs always sort to
     the same output order, regardless of dict-iteration order upstream.
     """
-    items: list[dict] = [_item_from_finding(f) for f in (findings or []) if _is_borderline(f)]
+    items: list[dict] = []
+    for f in (findings or []):
+        if not _is_borderline(f):
+            continue
+        item = _item_from_finding(f)
+        # C-361: scoped to this population only -- the B62/recovered-taint/env-auth
+        # sources below always carry real evidence by construction.
+        if _is_judgeable(item, f):
+            items.append(item)
 
     items.extend(_b62_items(ctx))
     items.extend(_recover_dropped_taint(ctx))
