@@ -8,6 +8,8 @@ Reading order depends on who you are:
 2. [USAGE.md](USAGE.md) — the user guide: recipes, monitoring modes, and trust details
 3. [FAQ.md](FAQ.md) — common questions, including "what if the host is already
    compromised?"
+4. [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — when ClawSecCheck itself won't run,
+   crashes, or OpenClaw doesn't see it (not a question about your audited setup)
 
 ## I want to understand what it checks and why
 

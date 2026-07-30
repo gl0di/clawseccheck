@@ -398,6 +398,18 @@ that as-is and stop; there's nothing to score. Any CI/artifact/work flag (`--jso
 are always honored. (A home that *exists* but can't be read is a different case — a plain
 "Cannot read the OpenClaw home" error, exit code 1.)
 
+**The command errors, hangs, or produces nothing at all?** That means ClawSecCheck *itself* has a
+problem — not the audited OpenClaw setup. Tell the user plainly that the tool hit a snag (not their
+config), then ask them to run one diagnostic command and share what it prints:
+
+```
+python3 {baseDir}/audit.py --debug
+```
+
+Relay its output and point to [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) for the fix, or
+filing an issue if nothing there applies. Never guess at a fix or edit the user's OpenClaw config to
+work around it yourself — remediation is out of scope here the same way it is in Step 4/5 below.
+
 ### Step 3 — Present the Dashboard
 
 **This step produces the ONLY chat-visible deliverable in this guided flow.** Nothing from

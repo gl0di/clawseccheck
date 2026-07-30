@@ -1074,6 +1074,11 @@ def _run_apply_ignore_proposals(args) -> int:
     return 0
 
 
+#: C-314: printed by both main() error arms below, and mirrored in
+#: docs/TROUBLESHOOTING.md's "how to file a good report" section — keep in sync.
+_ISSUES_URL = "https://github.com/gl0di/clawseccheck/issues"
+
+
 def main(argv=None) -> int:
     """Thin top-level guard (B-101): never dump a raw traceback at users.
 
@@ -1091,7 +1096,20 @@ def main(argv=None) -> int:
     NON-ZERO exit, because a run cut short mid-scan produced no verdict anyone may
     read as clean. It is reported separately from a crash rather than folded into the
     generic message, since a truncated scan and a bug are different things to a user.
+
+    C-314: the Python-version check runs before anything else in this
+    function — including the try/except below — because an unpacked (non-pip)
+    install on Python <3.9 parses cleanly (no clean ImportError) but can fail later
+    with a confusing runtime error; see docs/TROUBLESHOOTING.md.
     """
+    if sys.version_info < (3, 9):
+        print(
+            "clawseccheck: needs Python 3.9+ (found "
+            f"{sys.version_info[0]}.{sys.version_info[1]}); see "
+            "docs/TROUBLESHOOTING.md for how to point the skill at a newer interpreter.",
+            file=sys.stderr,
+        )
+        return 1
     try:
         return _main(argv)
     except ScanBudgetExceeded:
@@ -1101,7 +1119,8 @@ def main(argv=None) -> int:
         print(
             "clawseccheck: the scan was cut short by its own time budget and did not "
             "complete; no verdict from this run is reliable. Re-run with --debug for "
-            "the traceback.",
+            "the traceback, or narrower (--fast, or a targeted --vet <path>). If this "
+            f"keeps happening, see docs/TROUBLESHOOTING.md or open an issue: {_ISSUES_URL}",
             file=sys.stderr,
         )
         return 1
@@ -1111,7 +1130,8 @@ def main(argv=None) -> int:
             raise
         print(
             f"clawseccheck: unexpected internal error ({type(exc).__name__}); "
-            "re-run with --debug for the traceback.",
+            "re-run with --debug for the traceback. If this keeps happening, see "
+            f"docs/TROUBLESHOOTING.md or open an issue: {_ISSUES_URL}",
             file=sys.stderr,
         )
         return 1

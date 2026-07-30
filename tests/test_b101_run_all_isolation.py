@@ -79,7 +79,11 @@ def test_main_degrades_unexpected_error_to_clean_exit(monkeypatch, capsys):
     assert "unexpected internal error" in out.err
     assert "ValueError" in out.err
     assert "Traceback" not in out.err and "Traceback" not in out.out
-    # the exception message (path/token) must never leak
+    # CLAWSECCHECK-C-314: somewhere to go when the tool itself is the problem —
+    # cosmetic, unlike the leak check below, which is load-bearing
+    assert cli._ISSUES_URL in out.err
+    # the exception message (path/token) must never leak — this is the part that
+    # actually matters; the URL above must never be an excuse to relax it
     for secret in ("creds.json", "/home/user", "sk-live"):
         assert secret not in out.err and secret not in out.out
 
@@ -89,3 +93,58 @@ def test_main_debug_reraises_for_developers(monkeypatch):
     import pytest  # noqa: PLC0415
     with pytest.raises(ValueError):
         cli.main(["--home", _SAFE_HOME, "--debug"])
+
+
+def _budget_boom(*a, **k):
+    from clawseccheck.scanbudget import ScanBudgetExceeded  # noqa: PLC0415
+    raise ScanBudgetExceeded("leaky detail /home/user/.openclaw/creds.json api_key=sk-live")
+
+
+def test_main_degrades_scan_budget_exceeded_to_clean_exit(monkeypatch, capsys):
+    """CLAWSECCHECK-C-314: the ScanBudgetExceeded arm gets the same issues-URL
+    treatment as the generic-crash arm, and the same no-leak contract."""
+    monkeypatch.setattr(cli, "audit", _budget_boom)
+
+    rc = cli.main(["--home", _SAFE_HOME])  # must NOT raise
+
+    assert rc == 1
+    out = capsys.readouterr()
+    assert "cut short by its own time budget" in out.err
+    assert cli._ISSUES_URL in out.err
+    assert "Traceback" not in out.err and "Traceback" not in out.out
+    for secret in ("creds.json", "/home/user", "sk-live"):
+        assert secret not in out.err and secret not in out.out
+
+
+def test_main_debug_reraises_scan_budget_exceeded(monkeypatch):
+    monkeypatch.setattr(cli, "audit", _budget_boom)
+    import pytest  # noqa: PLC0415
+    from clawseccheck.scanbudget import ScanBudgetExceeded  # noqa: PLC0415
+    with pytest.raises(ScanBudgetExceeded):
+        cli.main(["--home", _SAFE_HOME, "--debug"])
+
+
+# ── Part 3: Python-version guard (CLAWSECCHECK-C-314) ─────────────────────────
+
+
+def test_main_rejects_old_python_before_doing_any_other_work(monkeypatch, capsys):
+    """The version guard is the very first thing main() does — it must fire even
+    when the rest of the pipeline (here, ``audit``) would blow up, proving nothing
+    else ran first."""
+    monkeypatch.setattr(cli, "audit", _explode)
+    monkeypatch.setattr(cli.sys, "version_info", (3, 8, 0, "final", 0))
+
+    rc = cli.main(["--home", _SAFE_HOME])
+
+    assert rc == 1
+    out = capsys.readouterr()
+    assert "Python 3.9+" in out.err
+    assert "3.8" in out.err
+    assert "unexpected internal error" not in out.err  # _explode never ran
+
+
+def test_main_accepts_current_python():
+    """On a supported interpreter the guard is a no-op (sanity check against a
+    guard that accidentally always fires)."""
+    rc = cli.main(["--home", _SAFE_HOME, "--card", "--no-native", "--no-history"])
+    assert rc == 0

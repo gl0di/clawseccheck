@@ -201,12 +201,14 @@ complete flag list.
 | [Threat coverage](docs/THREAT_COVERAGE.md) | OWASP LLM Top 10 / Agentic threat mapping |
 | [Output schema](docs/OUTPUT_SCHEMA.md) | The frozen `--json` / SARIF contract |
 | [FAQ](docs/FAQ.md) | Common questions, incl. the compromised-host protocol |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | ClawSecCheck itself won't run, crashes, or OpenClaw doesn't see it |
 | [Security model](SECURITY_MODEL.md) | ClawSecCheck's own capability surface and self-defense |
 | [Contributing](https://github.com/gl0di/clawseccheck/blob/main/CONTRIBUTING.md) | Dev setup, tests, how to author a new check |
 
 ## 🙌 Feedback, security, license
 
 - **Something looks wrong?** [Open an issue](https://github.com/gl0di/clawseccheck/issues) —
-  false alarms are treated as bugs.
+  false alarms are treated as bugs. If the *tool itself* won't run or crashes, try
+  [Troubleshooting](docs/TROUBLESHOOTING.md) first.
 - **Found a vulnerability?** Report privately via [SECURITY.md](SECURITY.md).
 - **License:** [MIT](LICENSE). Maintained by [gl0di](https://github.com/gl0di).

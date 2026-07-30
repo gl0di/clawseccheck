@@ -1,6 +1,10 @@
 # ClawSecCheck — Frequently Asked Questions
 
-Answers to the most common questions about ClawSecCheck output, grades, and usage.
+Answers to the most common questions about ClawSecCheck output, grades, and usage —
+i.e. questions about *your audited setup*. If ClawSecCheck itself won't run, crashes,
+or OpenClaw never picks it up, that's a different problem — see
+[`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md) instead.
+
 For the full check catalog see [`docs/CHECKS.md`](CHECKS.md).
 For the threat mapping see [`docs/THREAT_COVERAGE.md`](THREAT_COVERAGE.md).
 For all flags run `clawseccheck --help`.
