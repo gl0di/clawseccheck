@@ -185,6 +185,7 @@ check_discovery_mdns_mode
 check_dormant_capability
 check_dotfile_exfil_directive
 check_dynamic_dispatch_obfuscation
+check_effective_bind
 check_effective_tools
 check_egress
 check_egress_inventory

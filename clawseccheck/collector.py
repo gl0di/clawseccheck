@@ -463,6 +463,11 @@ class Context:
     native: object = None                           # NativeResult from openclaw security audit
     host: object = None                             # hostwatch.detect() result; set by audit(include_host=True)
     include_host: bool = False                      # host-filesystem scanning enabled (audit(include_host=True) / not --no-host)
+    # F-156: sockets.scan_listening_sockets() result; set by audit(include_sockets=True).
+    # None (the hermetic default) means the runtime socket scan was not run at all —
+    # check_effective_bind reports UNKNOWN, exactly like ctx.host is None for B50-B54.
+    sockets: object = None
+    include_sockets: bool = False  # /proc/net/tcp{,6} listening-socket scan enabled
     # B-231 sub-item 1: normalized cron jobs (from ~/.openclaw/cron/jobs.json, or the
     # SQLite-backed cron_jobs table when the JSON file is absent). Each entry is a plain
     # dict: id, name, enabled, delete_after_run, trigger_script, payload_kind,

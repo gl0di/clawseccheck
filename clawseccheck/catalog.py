@@ -2632,6 +2632,27 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="monitoring",
     ),
+    # B340 (F-156): every OTHER gateway-exposure verdict (B2, B70) is declared-state
+    # only -- it reads gateway.bind out of the config and reasons about that string,
+    # never what the process is ACTUALLY listening on. This corroborates the two:
+    # sockets.py reads /proc/net/tcp{,6} (no subprocess, matching hostwatch.py's
+    # doctrine) and check_effective_bind (checks/_config.py) compares the decoded
+    # listener against the declared bind. FAIL-capable (declared loopback + effective
+    # non-loopback = the config lies and the port is reachable from the network), so
+    # C-135 adversarial review is mandatory before this ships -- see the task record.
+    # HIGH (corroborates/contradicts CRITICAL B2 rather than replacing it, same tier
+    # as B70, its closest sibling). Degrades to UNKNOWN, never a guess, whenever the
+    # runtime signal is missing: no explicit port declared, the socket scan was not
+    # run (hermetic-by-default, same as ctx.host/include_host), /proc unavailable, or
+    # nothing listening on the declared port yet.
+    CheckMeta(
+        "B340",
+        "Effective-bind verification (declared gateway.bind vs. the actual listening socket)",
+        HIGH,
+        "hardening",
+        "Zero Trust / Gateway",
+        surface="gateway",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -2755,6 +2776,7 @@ AST_MAP = {
     "B79": ("AST03",),  # approval_policy=never = over-autonomous agency (cf. B8)
     "C032": ("AST06",),  # trusting spoofable forwarded headers = weak boundary (cf. B70)
     "B80": ("AST06",),  # no rate limiting on an exposed auth'd gateway = weak isolation (cf. B70)
+    "B340": ("AST06",),  # effective listening-socket bind diverges from declared gateway.bind = weak isolation (cf. B2/B70)
     "B81": ("AST03",),  # raised subagent spawn limits = over-privileged delegation (cf. B72)
     "B82": ("AST02",),  # bulk turn transcripts at rest = sensitive-data exposure (cf. C5)
     "B83": ("AST06",),  # excessive redirect-follow on fetch = weak isolation/SSRF (cf. B38)

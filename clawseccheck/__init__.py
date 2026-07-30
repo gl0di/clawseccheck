@@ -16,6 +16,7 @@ from .canary import evaluate, make_canary, render_canary
 from .checks import detect_vet_type, run_all, vet_mcp, vet_plugin, vet_skill, vet_source
 from .collector import collect
 from .hostwatch import detect as _host_detect
+from .sockets import scan_listening_sockets as _scan_listening_sockets
 from .monitor import (
     DEFAULT_EVENTS, diff, load_events, load_state, record_events, save_state, snapshot,
 )
@@ -40,7 +41,8 @@ __released__ = "2026-07-26"
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
           include_host: bool = False, host_root: str = "/",
           native_bin: str = "openclaw", native_timeout: int = 60,
-          attestation: dict | None = None):
+          attestation: dict | None = None,
+          include_sockets: bool = False, proc_root: str = "/proc"):
     """Run the full audit. Returns (ctx, findings, ScoreResult).
 
     `include_native=False` and `include_host=False` keep the engine fully offline
@@ -50,6 +52,12 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
 
     Host detection is populated BEFORE run_all so the B50–B54 checks can read it.
     When off, ctx.host stays None and those checks report UNKNOWN (no score impact).
+
+    `include_sockets` (default False, same hermetic-by-default reasoning as
+    `include_host`) enumerates the host's real listening TCP sockets
+    (`sockets.scan_listening_sockets`) so B340 can corroborate the declared
+    `gateway.bind` against what is actually listening (F-156). The CLI passes True by
+    default (`--no-sockets` to opt out). Read-only, stdlib-only, no subprocess.
 
     `attestation` (the agent's self-report; see attest.py) enriches the audit: when
     omitted, the attestation checks (B43/B44) report UNKNOWN and the score is
@@ -64,6 +72,9 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     ctx.include_host = include_host
     if include_host:
         ctx.host = _host_detect(root=host_root)
+    ctx.include_sockets = include_sockets
+    if include_sockets:
+        ctx.sockets = _scan_listening_sockets(proc_root=proc_root)
     if attestation:
         ctx.attestation = attestation
     findings = run_all(ctx)

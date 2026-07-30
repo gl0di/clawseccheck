@@ -69,6 +69,7 @@ gateway.host
 gateway.nodes.allowCommands
 gateway.nodes.denyCommands
 gateway.nodes.pairing.autoApproveCidrs
+gateway.port
 gateway.tailscale.mode
 gateway.tls.enabled
 gateway.token

@@ -9,6 +9,7 @@ import os
 import re
 from pathlib import Path
 from .. import attest as _attest
+from .. import sockets as _sockets
 from ..catalog import (
     CRITICAL,
     FAIL,
@@ -48,11 +49,13 @@ from ._shared import (
     SECRET_PATTERNS,
     SENSITIVE_TOOL_HINTS,
     _LEG_KEYS,
+    _canonical_ipv4,
     _channels,
     _config_unreadable,
     _enabled_tools,
     _external_input_channels,
     _finding,
+    _gateway_remote_exposure_reason,
     _hint,
     _hooks_session_key_exposures,
     _is_secret_reference,
@@ -2851,6 +2854,284 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
         "risk detected).",
         "Keep gateway.auth.trustedProxy.requiredHeaders/allowUsers and/or "
         "gateway.trustedProxies configured, or bind the gateway to loopback.",
+    )
+
+
+def _parse_bind_port(value) -> "int | None":
+    """Extract the port from a gateway.bind value, mirroring parse_bind_host's own
+    handling of the bracketed-IPv6 / host:port / bare forms (checks/_shared.py).
+
+    Returns None when no port can be unambiguously extracted — an empty value, a bare
+    address with no port at all, or a bare (unbracketed) IPv6 literal where "the port"
+    would be ambiguous. check_effective_bind treats None as "nothing to look up", not a
+    parse error.
+    """
+    s = str(value or "").strip()
+    if not s:
+        return None
+    if s.startswith("["):
+        end = s.find("]")
+        if end != -1 and s[end + 1 :].startswith(":"):
+            port_str = s[end + 2 :]
+            if port_str.isdigit():
+                return int(port_str)
+        return None
+    if s.count(":") == 1:
+        _, _, port_str = s.partition(":")
+        if port_str.isdigit():
+            return int(port_str)
+        return None
+    return None  # bare wildcard/IPv6 literal with no unambiguous port
+
+
+def _declared_bind_class(cfg: dict) -> str:
+    """Classify the DECLARED ``gateway.bind`` as ``loopback`` / ``remote`` / ``ambiguous``.
+
+    C-135 finding: a naive ``parse_bind_host(bind) in LOOPBACK`` test (what B2/B70 use
+    for their own, different, purpose) is WRONG for two of the current schema's five
+    ``gateway.bind`` profiles — ``auto`` resolves to loopback on bare metal but to
+    ``0.0.0.0`` inside a container, and ``custom`` resolves through the SEPARATE
+    ``gateway.customBindHost`` field, not the profile name itself. Reusing that naive
+    test here would misclassify a container's ``bind=auto`` (genuinely, correctly
+    ``0.0.0.0``) as "declared loopback", and the moment the effective socket confirms
+    the wildcard bind, this check would FAIL a config that is working exactly as
+    designed — a textbook false FAIL this module exists to never produce.
+
+    So this reuses ``_gateway_remote_exposure_reason`` (checks/_shared.py) — the
+    already-grounded, already-tested resolver RISK-20 relies on for the identical
+    per-profile logic (``loopback``/``local``/host:port → the shared ``LOOPBACK``
+    predicate; ``lan``/``tailnet`` → always remote; ``custom`` → discriminated by
+    ``customBindHost``; Tailscale ``serve``/``funnel`` → always remote regardless of
+    bind) — but does NOT stop at its ``Optional[str]`` return. That function
+    deliberately collapses two different truths into one ``None``: "provably
+    loopback" and "genuinely unprovable from a config file alone" (``auto``; ``custom``
+    with no valid ``customBindHost``, which — per that function's own docstring — the
+    product refuses to even start with). Corroboration needs the two kept apart:
+    treating "unprovable" as "declared loopback" is exactly the false-FAIL risk above,
+    so an ambiguous profile is reported as its own bucket instead — an honest UNKNOWN,
+    never a guess in either direction.
+    """
+    if _gateway_remote_exposure_reason(cfg) is not None:
+        return "remote"
+    profile = str(dig(cfg, "gateway.bind", "") or "").strip().lower()
+    if profile == "auto":
+        return "ambiguous"
+    if profile == "custom" and _canonical_ipv4(dig(cfg, "gateway.customBindHost")) is None:
+        return "ambiguous"
+    return "loopback"
+
+
+def check_effective_bind(ctx: Context) -> Finding:
+    """B340 (F-156): corroborate the DECLARED ``gateway.bind`` against the ACTUAL
+    listening socket, read from ``/proc/net/tcp{,6}`` (see ``sockets.py``).
+
+    Every other gateway-exposure verdict (B2, B70) is declared-state only — it reads
+    ``gateway.bind`` and reasons about that string. It never checks what the process is
+    actually listening on, which is a real blind spot in both directions: a config that
+    says loopback while an env override/wrapper/reverse-proxy actually exposes the port
+    (false PASS elsewhere), or a config that says wide-open while the gateway is not
+    even running (false FAIL elsewhere). This check adds the one runtime signal that
+    closes that gap.
+
+    Route decision (recorded per the task DoD): **no subprocess** — ``sockets.py``
+    reads ``/proc/net/tcp{,6}`` directly, matching ``hostwatch.py``'s "no subprocess, no
+    network" doctrine rather than ``native.py``'s guarded-subprocess precedent. Read-only,
+    stdlib-only, and — because it parses the fixed ``local_address`` column instead of
+    regexing a whole ``ss``/``netstat`` line — structurally immune to the peer-column bug
+    a competitor tool shipped (see ``sockets.py``'s module docstring).
+
+    Known, accepted scope boundary (deliberate, matches the task's own design — "only
+    socket-to-PID mapping needs /proc/*/fd, which we do not need"): matching is by
+    PORT NUMBER alone, never by process identity. On a shared host where an entirely
+    unrelated process happens to bind the exact same port number on a different
+    interface, this check cannot tell that listener apart from the gateway's own —
+    e.g. a genuinely loopback-only gateway sharing its port number with an unrelated
+    service bound to a LAN interface would read as a false FAIL. Closing this would
+    need ``/proc/*/fd`` PID correlation, a materially larger and more sensitive
+    surface the task explicitly scoped out; documented here rather than silently
+    accepted.
+
+    Fully enumerated verdict table (``declared`` = ``_declared_bind_class``, which
+    resolves the FULL 5-profile ``gateway.bind`` enum — not a naive ``LOOPBACK``
+    membership test, see its own docstring for why that would false-FAIL a container's
+    ``bind=auto``; ``effective`` = every listener found on the declared port, ALL
+    loopback or not — a dual-stack 127.0.0.1 + [::1] pair on the same port is ONE
+    effective state, not two findings):
+
+        declared      | effective         | verdict
+        --------------+-------------------+----------------------------------------
+        loopback      | loopback          | PASS — corroborates B2
+        loopback      | not loopback      | FAIL — the config lies; reachable from the network
+        remote        | loopback          | WARN — config is dangerous but not currently exposed
+        remote        | not loopback      | PASS — declared exposure is real; B2/B70 already assess it
+        ambiguous     | (any)             | UNKNOWN — profile (auto / custom w/o a valid
+                      |                   |   customBindHost) is not resolvable from the
+                      |                   |   config alone; corroborating it either way
+                      |                   |   would be a guess
+        (any)         | no listener found | UNKNOWN — gateway not running, nothing measured
+        (any)         | /proc unavailable | UNKNOWN — platform not supported, or scan not run
+        (any)         | no port declared  | UNKNOWN — nothing to look up
+
+    Port source (C-135 finding, fixed before this shipped): this package's whole
+    existing gateway-check family (B2, B70) reads ``gateway.bind`` as a ``host:port``
+    string via ``parse_bind_host`` — the shape every fixture in this repo uses. But the
+    CURRENT installed OpenClaw schema (grounded directly against the dist, since the
+    recon doc does not cover this: ``zod-schema-O9ml_nmo.js``, the ``gateway: object({
+    port: number().int().positive().optional(), mode: union([literal("local"),
+    literal("remote")]).optional(), bind: union([literal("auto"), literal("lan"),
+    literal("loopback"), literal("custom"), literal("tailnet")]).optional(),
+    customBindHost: string().optional(), ... })`` block) makes ``gateway.bind`` a
+    5-value MODE enum with no embedded port at all — confirmed against this machine's
+    own live ``~/.openclaw/openclaw.json`` (``"bind": "loopback", "port": 18789``,
+    sibling fields). Reading only an embedded port would make this check report UNKNOWN
+    on every config shaped this way — a real coverage gap on the exact real-fleet
+    config available for this check's own C-135 pass, not a false FAIL, but real
+    enough that it defeats the check's purpose. So the port is resolved from EITHER
+    source: an embedded ``host:port`` in ``gateway.bind`` (the fixture/legacy shape)
+    first, falling back to the sibling ``gateway.port`` (grounded above; manifest entry
+    in ``tests/grounded_schema_paths.txt``) when ``gateway.bind`` is a bare mode string.
+    """
+    cfg = ctx.config
+    if not cfg:
+        return _finding(
+            "B340",
+            UNKNOWN,
+            "No config loaded — cannot corroborate gateway.bind against the actual "
+            "listening socket.",
+            "Run on the host with ~/.openclaw present.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    gw_present = isinstance(cfg, dict) and "gateway" in cfg
+    gw = cfg.get("gateway") if gw_present else None
+    if gw_present and not isinstance(gw, dict):
+        return _finding(
+            "B340",
+            UNKNOWN,
+            "gateway config value is present but malformed (not an object) — cannot "
+            "corroborate it against the actual listening socket.",
+            "Fix `gateway` to be a config object, or remove the key.",
+        )
+
+    bind_raw = dig(cfg, "gateway.bind", "")
+    declared_class = _declared_bind_class(cfg)
+    if declared_class == "ambiguous":
+        return _finding(
+            "B340",
+            UNKNOWN,
+            f"gateway.bind={bind_raw!r} is a profile whose actual bind cannot be "
+            "determined from the config alone ('auto' resolves differently inside a "
+            "container vs. bare metal; a 'custom' profile with no valid "
+            "gateway.customBindHost cannot even start) — nothing to corroborate.",
+            "Set gateway.bind to an explicit profile ('loopback'/'lan'/'tailnet'), or "
+            "give a 'custom' profile a valid gateway.customBindHost, so this check can "
+            "state what is actually declared.",
+        )
+    declared_loopback = declared_class == "loopback"
+    # Port source, in order: an embedded host:port in gateway.bind (the shape every
+    # fixture in this repo uses), falling back to the sibling gateway.port (the shape
+    # the CURRENT OpenClaw schema actually uses when gateway.bind is a bare mode
+    # string — see the docstring's "Port source" note; grounded against the dist,
+    # manifest entry in tests/grounded_schema_paths.txt).
+    port = _parse_bind_port(bind_raw)
+    if port is None:
+        gw_port = dig(cfg, "gateway.port")
+        if isinstance(gw_port, int) and not isinstance(gw_port, bool) and gw_port > 0:
+            port = gw_port
+    if port is None:
+        return _finding(
+            "B340",
+            UNKNOWN,
+            f"gateway.bind={bind_raw!r} names no explicit port, and gateway.port is not "
+            "set either — cannot look up which listening socket to corroborate it "
+            "against.",
+            "Set gateway.bind to an explicit host:port (e.g. 127.0.0.1:8080), or set "
+            "gateway.port, so this check can corroborate it against the actual "
+            "listening socket.",
+        )
+
+    sockets_result = getattr(ctx, "sockets", None)
+    if sockets_result is None:
+        return _finding(
+            "B340",
+            UNKNOWN,
+            "The effective-bind socket scan was not run (audit(include_sockets=True), "
+            "or the CLI's --no-sockets was passed) — cannot corroborate gateway.bind "
+            "against reality.",
+            "Run the full CLI audit (omit --no-sockets) so this check can read "
+            "/proc/net/tcp{,6} and corroborate the declared bind.",
+        )
+    if not sockets_result.available:
+        return _finding(
+            "B340",
+            UNKNOWN,
+            f"Could not read the host's listening-socket table: {sockets_result.reason}.",
+            "Run ClawSecCheck on Linux with /proc mounted (the standard case) so this "
+            "check can corroborate the declared bind against reality.",
+        )
+
+    matches = _sockets.listeners_for_port(sockets_result, port)
+    if not matches:
+        return _finding(
+            "B340",
+            UNKNOWN,
+            f"Nothing is listening on port {port} (the port gateway.bind={bind_raw!r} "
+            "declares) — the gateway is not running, or is listening elsewhere; nothing "
+            "to corroborate.",
+            "Start the gateway and re-run the audit so this check can corroborate "
+            "gateway.bind against the actual listening socket.",
+        )
+
+    classes = {_sockets.classify_host(m.host) for m in matches}
+    effective_loopback = classes <= {"loopback"}
+    evidence = [
+        f"gateway.bind={bind_raw!r} (declared class={declared_class!r})",
+        "effective listener(s): "
+        + ", ".join(f"{m.host}:{m.port} ({_sockets.classify_host(m.host)})" for m in matches),
+    ]
+
+    if declared_loopback and not effective_loopback:
+        return _finding(
+            "B340",
+            FAIL,
+            f"gateway.bind={bind_raw!r} declares a loopback bind, but the gateway is "
+            f"ACTUALLY listening on a non-loopback address on port {port} — the config "
+            "lies and the port is reachable from the network (env override, launch "
+            "wrapper, or a reverse proxy re-publishing it).",
+            "Find why the running gateway does not match the declared bind (an "
+            "env-var override or launch wrapper is the usual cause) and align it with "
+            "gateway.bind, or update gateway.bind to state reality.",
+            evidence=evidence,
+        )
+    if not declared_loopback and effective_loopback:
+        return _finding(
+            "B340",
+            WARN,
+            f"gateway.bind={bind_raw!r} declares a non-loopback bind, but the gateway is "
+            f"currently only listening on loopback on port {port} — the config is "
+            "dangerous even though nothing is exposed right now.",
+            "Set gateway.bind to loopback (127.0.0.1) so the declared and actual "
+            "posture match, or confirm the non-loopback bind is intentional before it "
+            "takes effect.",
+            evidence=evidence,
+        )
+    if declared_loopback:
+        return _finding(
+            "B340",
+            PASS,
+            f"gateway.bind={bind_raw!r} is loopback and the gateway is ACTUALLY "
+            f"listening loopback-only on port {port} (corroborates B2).",
+            "Keep gateway.bind loopback and re-run this corroboration after any config "
+            "or deployment change.",
+            evidence=evidence,
+        )
+    return _finding(
+        "B340",
+        PASS,
+        f"gateway.bind={bind_raw!r} declares a non-loopback bind and the gateway is "
+        f"ACTUALLY listening non-loopback on port {port} — the declared exposure is "
+        "real, and already assessed by B2/B70.",
+        "See B2/B70 for the auth/exposure posture of this bind.",
+        evidence=evidence,
     )
 
 

@@ -284,6 +284,7 @@ from ._config import (
     check_controlui_origins,
     check_credential_blast_radius,
     check_dangerous_overrides,
+    check_effective_bind,
     check_gateway,
     check_gateway_rate_limit,
     check_hook_template_content,
@@ -1317,6 +1318,7 @@ CHECKS = [
     check_config_health_integrity,
     check_session_approval_policy,
     check_gateway_rate_limit,
+    check_effective_bind,  # B340 — corroborate declared gateway.bind against the actual listening socket (F-156)
     check_subagent_spawn_limits,
     check_cachetrace_redaction,
     # B-281/B-282 (ENV-1/ENV-6): is the audited file the one the agent loads, and is a

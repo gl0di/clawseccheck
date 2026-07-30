@@ -1164,6 +1164,9 @@ def _main(argv=None) -> int:
                    help="do not also run the built-in `openclaw security audit`")
     p.add_argument("--no-host", action="store_true",
                    help="skip host-monitor detection (IDS / audit / FIM / EDR / firewall posture)")
+    p.add_argument("--no-sockets", action="store_true",
+                   help="skip the effective-bind socket scan (B340: corroborates gateway.bind "
+                        "against /proc/net/tcp{,6})")
     p.add_argument("--save", metavar="PATH", help="also write the report to a file")
     p.add_argument("--monitor", action="store_true",
                    help="monitor mode: alert on what changed since the last check")
@@ -1696,6 +1699,7 @@ def _main(argv=None) -> int:
     try:
         ctx, findings, score = audit(args.home, include_native=not args.no_native,
                                      include_host=not args.no_host,
+                                     include_sockets=not args.no_sockets,
                                      attestation=attestation)
     except (PermissionError, OSError) as exc:
         _emit(f"Cannot read the OpenClaw home at {_sanitize(args.home)}: {_sanitize(str(exc))}")
