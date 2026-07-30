@@ -26,8 +26,27 @@ DoS guards (first-class, per the design doc §6 / the B-192 lesson): a per-file 
 (~2 MiB) stops reading and marks ``truncated``; an over-long single line is skipped (never
 regex-matched) and also marks ``truncated``; a cooperative per-file wall-clock deadline
 (reusing ``scanbudget``'s own monotonic-deadline helpers — the same ones ``run_all`` uses
-for its outer per-audit cap) marks ``timed_out`` and stops early. There is still no HARD
-(SIGALRM) per-file timeout here, but the reason has changed and is worth stating plainly,
+for its outer per-audit cap) marks ``timed_out`` and stops early.
+
+C-327: a base64 blob whose decoded bytes are themselves a gzip/zlib stream (the HF
+agent-intrusion precedent — ``exec(gzip.decompress(base64.b64decode(...)))`` packed
+payloads, chosen specifically to defeat a naive text scan) is decompressed ONE layer
+deeper and the recovered text is re-scanned with the SAME indicator regexes every
+ordinary line already goes through. This is a decompression-bomb sink risk by
+construction (a few compressed KB can claim to be gigabytes), so it is bounded the same
+way collector.py's own archive unpacking already bounds gzip/bz2/xz/zip expansion (that
+DoS class is on record here too — an unbounded expansion in EffectSimulator crashed the
+desktop three times via OOM before it was capped): a hard per-blob output-byte cap
+(``_MAX_DECODED_BLOB_BYTES``) enforced by STREAMING reads/decompress calls that are
+capped as bytes are produced, never by decompressing first and measuring after; a cap
+on the number of candidate blobs tried per line (``_MAX_BLOBS_PER_LINE``); and no
+recursion into a further layer found inside the decompressed text (one layer only, per
+this task's explicit scope — see ``_scan_line_content``'s ``allow_blob_decode``
+parameter). Reaching the per-blob cap marks ``blob_decode_truncated``/``truncated`` and
+simply stops reading that blob; it never raises. A malformed/truncated compressed
+stream is caught and treated as "not decompressible", also never raising. There is
+still no HARD (SIGALRM) per-file timeout here, but the reason has changed and is worth
+stating plainly,
 because the old one no longer holds: nesting a second ``scanbudget.check_deadline`` inside
 this function used to be actively unsafe — the check that calls this
 (``check_log_threat_hunt``, B164) runs inside ``run_all``'s own per-check itimer, and the
@@ -45,7 +64,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+import gzip
+import io
 import json
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -106,6 +128,19 @@ _MAX_LINE_LEN = 8000  # a line longer than this gets WINDOWED (see _OVERSIZED_WI
 _OVERSIZED_WINDOW_CHARS = 3000  # first 3000 + last 3000 chars
 _MAX_SAMPLES_PER_CLASS = 5
 
+# C-327: bounded gzip/zlib decode depth for a base64 blob (see the module docstring's
+# DoS-guards paragraph). Independent of every OTHER cap in this module because it bounds
+# a different resource: `_MAX_BYTES_PER_FILE` bounds bytes *read*; `_MAX_LINE_LEN` bounds
+# chars *regex-matched* in one call; this pair bounds bytes a single decompress call may
+# *produce* and how many such calls one line may trigger — a decompression bomb's whole
+# point is a tiny input claiming a huge output, so an input-side cap alone cannot bound it.
+_MAX_DECODED_BLOB_BYTES = 262_144  # 256 KiB hard streaming-output cap per blob — a
+# fraction of the whole-file byte cap on purpose: this bounds ONE embedded blob, not the
+# file, and the indicator regexes only need to SEE a payload once, never hold an
+# unbounded copy of it.
+_MAX_BLOBS_PER_LINE = 4  # candidate base64 blobs tried per line/window — bounds how many
+# decompression attempts one adversarial line stuffed with blob-shaped runs can force.
+
 # Trajectory schema anchors (mirrors trajectory.py's own grounded constants — recon §9.1).
 _TRACE_SCHEMA = "openclaw-trajectory"
 _SCHEMA_VERSION = 1
@@ -138,6 +173,11 @@ class LogScanResult:
     oversized_lines: int = 0  # count of lines that exceeded _MAX_LINE_LEN
     oversized_line_chars: int = 0  # total char length of those oversized lines
     unscanned_middle_chars: int = 0  # chars between the two windows, never regex-scanned
+    # C-327: disambiguates a bounded-decompression-bomb cap hit (a base64 blob's
+    # gzip/zlib layer produced more than _MAX_DECODED_BLOB_BYTES) from every other
+    # reason `truncated` can be True — mirrors how `byte_cap_truncated` already
+    # disambiguates the whole-file byte cap from a per-line skip.
+    blob_decode_truncated: bool = False
     # I-025/B-309 (RETRACTED, C-135 8th round, Dave's 2026-07-22 ruling): this project
     # tried, across four rounds (follow-ups #1-#4), to make the same-line
     # SECRET_PATTERNS + _EXFIL_RE pairing above ("exfil_evidence") sound enough to CAP
@@ -270,6 +310,164 @@ def _decodes_to_printable_blob(token: str) -> bool:
     return False
 
 
+def _decode_b64_variants(token: str):
+    """Yield each base64 decode of *token* that produces non-empty bytes — standard
+    alphabet first, then URL-safe. Mirrors the two-variant decode loop
+    ``_decodes_to_printable_blob`` already uses (same padding, same two encoders), but is
+    kept as its own small generator: that function's job is "does this decode to
+    printable text" and it stops at the first variant satisfying THAT test, whereas a
+    gzip/zlib layer underneath is by definition NOT printable, so a caller checking for
+    one needs every successfully-decoded raw candidate, not just the first.
+    """
+    pad = (-len(token)) % 4
+    padded = token + "=" * pad
+    for urlsafe in (False, True):
+        try:
+            raw = (
+                base64.urlsafe_b64decode(padded)
+                if urlsafe
+                else base64.b64decode(padded, validate=True)
+            )
+        except (binascii.Error, ValueError):
+            continue
+        if raw:
+            yield raw
+
+
+def _looks_like_zlib_header(raw: bytes) -> bool:
+    """True when the first two bytes of *raw* satisfy the zlib stream header check
+    (RFC 1950 §2.2): CMF's low nibble names the DEFLATE compression method (8), and
+    ``(CMF*256 + FLG) % 31 == 0`` (the header's own check-bits). A cheap, CORRECT
+    pre-filter — ``zlib.decompressobj()`` is still the real validator below — that
+    avoids attempting a decompress on bytes that provably cannot be a zlib stream (e.g.
+    a base64-decoded English-text blob that happens to start with the ASCII byte
+    ``0x78`` ('x'))."""
+    if len(raw) < 2:
+        return False
+    cmf, flg = raw[0], raw[1]
+    return (cmf & 0x0F) == 8 and ((cmf * 256 + flg) % 31 == 0)
+
+
+def _read_stream_capped(file_obj, byte_limit: int) -> tuple[bytes, bool]:
+    """Read up to *byte_limit* bytes from a streaming decompressor file object without
+    over-allocation — reads never ask for more than the remaining budget, so a
+    decompression bomb cannot expand past the cap no matter how it is shaped. Returns
+    ``(bytes, truncated)``; never raises (the caller wraps decompression errors).
+
+    Same shape as collector.py's ``_read_with_limit`` — proven there against a real
+    decompression-bomb DoS while unpacking a skill archive (gzip/bz2/xz members are
+    read through exactly this loop) — reused here rather than reinvented, per this
+    task's own instruction. Duplicated in-module rather than imported: collector.py's
+    helper is a private, single-purpose leaf with no export contract of its own, and
+    this module already has its own equally-private byte-cap idiom (``_MAX_BYTES_PER_
+    FILE`` above); the ALGORITHM is what is reused, not a new cross-module edge.
+    """
+    out = bytearray()
+    while True:
+        chunk = file_obj.read(byte_limit + 1 - len(out))
+        if not chunk:
+            return bytes(out), False
+        out.extend(chunk)
+        if len(out) > byte_limit:
+            return bytes(out[:byte_limit]), True
+
+
+def _bounded_decompress(raw: bytes) -> tuple[bytes | None, bool]:
+    """If *raw* looks like a gzip or zlib stream, bounded-streaming-decompress it and
+    return ``(decompressed_bytes, truncated)``. Returns ``(None, False)`` when *raw* is
+    not gzip/zlib-shaped at all — the caller then treats *raw* itself as the payload
+    (already handled elsewhere by ``_decodes_to_printable_blob``). Never raises: a
+    malformed/truncated compressed stream (garbage after a real magic number, a
+    decompression bomb cut off mid-stream by the cap) is caught and reported as "not
+    decompressible" rather than propagating — this function is a pure best-effort probe,
+    never a hard requirement that *raw* actually be valid compressed data.
+
+    The output cap (``_MAX_DECODED_BLOB_BYTES``) is enforced by STREAMING reads/decompress
+    calls bounded as bytes are produced — never by calling a whole-buffer ``.decompress()``
+    and measuring the result afterward, which is exactly the decompression-bomb sink this
+    task exists to close (a few compressed KB can legitimately claim to be gigabytes).
+    """
+    if raw[:2] == b"\x1f\x8b":
+        # gzip.GzipFile.read(n) is itself a bounded streaming decompress (it delegates to
+        # zlib's own max-length-bounded inflate internally) — the SAME primitive
+        # collector.py's decompress_and_classify already trusts for gzip archive members.
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb") as gz:
+                return _read_stream_capped(gz, _MAX_DECODED_BLOB_BYTES)
+        except (OSError, EOFError, zlib.error):
+            return None, False
+
+    if _looks_like_zlib_header(raw):
+        # No file-like wrapper ships for a bare zlib stream (unlike gzip/bz2/xz), so the
+        # bounded-streaming primitive here is zlib's own documented pattern for it:
+        # `decompressobj().decompress(data, max_length)` returns AT MOST max_length bytes
+        # per call, leaving any not-yet-processed compressed bytes in `unconsumed_tail` —
+        # the same "checked as bytes are produced" guarantee as the gzip path above, just
+        # expressed through zlib's own lower-level bounded call instead of a file object.
+        try:
+            decomp = zlib.decompressobj()
+            out = bytearray()
+            chunk = decomp.decompress(raw, _MAX_DECODED_BLOB_BYTES + 1)
+            out.extend(chunk)
+            while decomp.unconsumed_tail and len(out) <= _MAX_DECODED_BLOB_BYTES:
+                remaining = _MAX_DECODED_BLOB_BYTES + 1 - len(out)
+                if remaining <= 0:
+                    break
+                chunk = decomp.decompress(decomp.unconsumed_tail, remaining)
+                if not chunk:
+                    break
+                out.extend(chunk)
+        except zlib.error:
+            return None, False
+        if len(out) > _MAX_DECODED_BLOB_BYTES:
+            return bytes(out[:_MAX_DECODED_BLOB_BYTES]), True
+        return bytes(out), False
+
+    return None, False
+
+
+def _scan_blob_for_compressed_indicators(
+    result: LogScanResult, token: str, *, is_trajectory: bool
+) -> None:
+    """C-327: one layer deeper than ``_decodes_to_printable_blob`` — if *token* is a
+    base64 blob whose decoded bytes are themselves a gzip/zlib stream (the HF
+    agent-intrusion ``exec(gzip.decompress(base64.b64decode(...)))`` packing shape),
+    bounded-decompress it and re-scan the recovered text with the SAME already-vetted
+    indicator regexes every ordinary line goes through (``_scan_line_content`` — never a
+    new pattern, per this module's own docstring). Silent (does nothing) when *token*
+    does not decode to a gzip/zlib stream at all — a bare base64 blob of plain text is
+    already this module's OTHER, narrower B-249 corroboration path, not this one.
+
+    Deliberately never recurses into a further blob layer found INSIDE the decompressed
+    text: only the outermost ``_scan_line_content`` call (``allow_blob_decode=True``)
+    ever reaches this function, and it always calls back in with
+    ``allow_blob_decode=False``. One layer only, per this task's explicit scope — a
+    gzip-of-gzip-of-base64 chain is not chased.
+    """
+    for raw in _decode_b64_variants(token):
+        data, blob_truncated = _bounded_decompress(raw)
+        if data is None:
+            continue
+        if blob_truncated:
+            result.blob_decode_truncated = True
+            result.truncated = True
+        text = data.decode("utf-8", errors="replace")
+        if not text.strip():
+            return
+        if len(text) > _MAX_LINE_LEN:
+            # Same windowing discipline as an oversized RAW line (see
+            # _OVERSIZED_WINDOW_CHARS above) — a decompressed blob can be just as long,
+            # and the regex-cost bound windowing exists to enforce does not stop applying
+            # just because the text came from a decode step instead of the file directly.
+            head = text[:_OVERSIZED_WINDOW_CHARS]
+            tail = text[-_OVERSIZED_WINDOW_CHARS:]
+            _scan_line_content(result, head, is_trajectory=is_trajectory, allow_blob_decode=False)
+            _scan_line_content(result, tail, is_trajectory=is_trajectory, allow_blob_decode=False)
+        else:
+            _scan_line_content(result, text, is_trajectory=is_trajectory, allow_blob_decode=False)
+        return  # one successful decompression is enough; don't also try the other b64 variant
+
+
 # B-285/LOG-1 perf finding: `_SECRET_PATH_RE` (checks/_shared.py) is
 # `[\w./~+-]*(?:secret|token|credential|password|api[_-]?key)[\w./~+-]*` — its two
 # UNBOUNDED `[\w./~+-]*` quantifiers straddling a fixed alternation make it O(n^2) on any
@@ -330,7 +528,12 @@ def _maybe_secret_path_match(line: str):
 
 
 def _scan_line_content(
-    result: LogScanResult, line: str, *, is_trajectory: bool = False, cred_seen_before: bool = False
+    result: LogScanResult,
+    line: str,
+    *,
+    is_trajectory: bool = False,
+    cred_seen_before: bool = False,
+    allow_blob_decode: bool = True,
 ) -> bool:
     """Classes 1 / 2 / 4 / 6 — plain-text pattern scan over one (already length-capped)
     line. Applied uniformly to every sink kind, including trajectory sidecar lines.
@@ -340,6 +543,12 @@ def _scan_line_content(
     extension below. Returns whether THIS line itself is a cred-path read, so the caller
     can fold it into the running state for the next line (mirrors how ``last_seq``/
     ``last_ts`` are threaded through ``scan_log_file``'s loop).
+
+    ``allow_blob_decode`` — C-327: gates the gzip/zlib-beneath-base64 decode-and-rescan
+    step at the end of this function. Always False when THIS call is itself scanning
+    already-decompressed text (``_scan_blob_for_compressed_indicators`` sets it so),
+    which is what bounds the decode depth at exactly one layer — a gzip-of-gzip chain is
+    never chased.
     """
     normalized = normalize_for_scan(line)
 
@@ -466,6 +675,37 @@ def _scan_line_content(
     at_rest_m = secret_m or pan_m
     if at_rest_m:
         _add_sample(result, "secrets_at_rest", _windowed(line, at_rest_m.start(), at_rest_m.end()))
+
+    # C-327 — decode one layer deeper: a base64 blob whose decoded bytes are themselves
+    # gzip/zlib-compressed (the HF agent-intrusion packing shape) is invisible to every
+    # check above, since the compressed bytes are not printable/matchable text. Bounded
+    # to _MAX_BLOBS_PER_LINE candidate tokens (deduped by span — `_B64_BLOB_RE` and
+    # `_B64URL_BLOB_RE` frequently match the exact same run) so a line stuffed with many
+    # blob-shaped tokens cannot multiply decompression attempts. `allow_blob_decode=False`
+    # (set only when this call is itself scanning already-decompressed text) skips this
+    # entirely — one layer only, never recursive.
+    if allow_blob_decode:
+        seen_spans = set()
+        blob_tokens = []
+        for pat in (_B64_BLOB_RE, _B64URL_BLOB_RE):
+            for m in pat.finditer(line):
+                # `_B64_BLOB_RE` alone allows a trailing `={0,2}` padding suffix that
+                # `_B64URL_BLOB_RE` never matches — strip it before deduping by span, or
+                # the SAME underlying blob (found once by each pattern, spans differing
+                # only by whether the padding chars are included) is treated as two
+                # distinct candidates and decoded/scanned twice.
+                token = m.group(0).rstrip("=")
+                span = (m.start(), m.start() + len(token))
+                if span in seen_spans or len(token) < 40:
+                    continue
+                seen_spans.add(span)
+                blob_tokens.append(token)
+                if len(blob_tokens) >= _MAX_BLOBS_PER_LINE:
+                    break
+            if len(blob_tokens) >= _MAX_BLOBS_PER_LINE:
+                break
+        for token in blob_tokens:
+            _scan_blob_for_compressed_indicators(result, token, is_trajectory=is_trajectory)
 
     return bool(_CRED_RE.search(line))
 
