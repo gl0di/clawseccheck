@@ -34,6 +34,7 @@ from ..collector import (  # noqa: F401
     _OWN_SKILL_NAMES,
     _is_own_source,
 )
+from ..iocdb import known_bad_hosts as _iocdb_known_bad_hosts
 
 
 def _is_posix() -> bool:
@@ -447,6 +448,23 @@ _KNOWN_EXFIL_HOST_RE = re.compile(
 )
 
 
+def _compile_iocdb_host_re() -> re.Pattern:
+    """A named, dated, provenance-tagged sibling of `_KNOWN_EXFIL_HOST_RE` above --
+    compiled from ../iocdb.py's HOSTS table instead of a generic exfil-host-shape
+    list. Matches nothing if the dataset is ever emptied (never crashes on an empty
+    alternation)."""
+    hosts = sorted(_iocdb_known_bad_hosts())
+    if not hosts:
+        return re.compile(r"(?!)")
+    return re.compile(r"\b(?:" + "|".join(re.escape(h) for h in hosts) + r")\b", re.I)
+
+
+# Exact-match known-bad hosts/IPs from the bundled IOC dataset (../iocdb.py), computed
+# once at import time (the dataset is static -- see iocdb's module docstring on why it
+# ships as static Python data, never fetched).
+_IOCDB_HOST_RE = _compile_iocdb_host_re()
+
+
 # F-124/E-044 layer-fix: moved here VERBATIM from trajaudit.py (see _CRED_RE note above
 # for why) so logscan.py (a Layer-1 leaf) can reuse it without importing trajaudit.py.
 #
@@ -489,17 +507,17 @@ def correlation_indicators(installed_skills):
     Deliberately narrower than trajaudit.skill_indicators: only tokens whose appearance in
     the agent's OWN log corpus is strong cross-artifact evidence — credential-shaped paths
     (_CRED_RE), secret-named paths WITH a '/' separator (_SECRET_PATH_RE + the B-157 filter),
-    and KNOWN drop-point hosts (_KNOWN_EXFIL_HOST_RE). The bare _EXFIL_RE verbs
-    (curl/wget/fetch/base64/POST) are EXCLUDED — base-rate noise in any web/exec-capable
-    agent's logs. Keys are normalized (tilde-stripped, lowercased) for a case-insensitive
-    substring membership test; values are the declaring skill name. Capped at
-    _CORR_INDICATOR_CAP entries.
+    KNOWN drop-point hosts (_KNOWN_EXFIL_HOST_RE), and named IOC dataset hosts
+    (_IOCDB_HOST_RE). The bare _EXFIL_RE verbs (curl/wget/fetch/base64/POST) are EXCLUDED —
+    base-rate noise in any web/exec-capable agent's logs. Keys are normalized (tilde-stripped,
+    lowercased) for a case-insensitive substring membership test; values are the declaring
+    skill name. Capped at _CORR_INDICATOR_CAP entries.
     """
     out = {}
     for name, text in (installed_skills or {}).items():
         if not isinstance(text, str):
             continue
-        for rx in (_CRED_RE, _SECRET_PATH_RE, _KNOWN_EXFIL_HOST_RE):
+        for rx in (_CRED_RE, _SECRET_PATH_RE, _KNOWN_EXFIL_HOST_RE, _IOCDB_HOST_RE):
             for m in rx.finditer(text):
                 raw = m.group(0).strip().strip(".,;:\"'`)(")
                 if rx is _SECRET_PATH_RE and "/" not in raw:

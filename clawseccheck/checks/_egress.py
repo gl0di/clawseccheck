@@ -24,6 +24,7 @@ from ..collector import (
     Context,
     dig,
 )
+from ..iocdb import is_known_bad_host as _iocdb_is_known_bad_host
 
 from . import _shared
 from ._shared import (
@@ -2677,7 +2678,14 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         # counts as one extra signal class (needs a co-occurring class to clear the WARN
         # bar) and can never sole-trigger a WARN on a benign dual-use path (the C-135 false
         # positive: an aws-cost-helper skill naming ~/.aws/credentials + a benign log line).
-        strong_cross = {t: n for t, n in cross.items() if _KNOWN_EXFIL_HOST_RE.search(t)}
+        # A named, dated IOC dataset host (../iocdb.py) is at least as high-confidence
+        # as the generic drop-host shape list, so it also qualifies on its own — same
+        # treatment as _KNOWN_EXFIL_HOST_RE, never a sole FAIL trigger (B164 stays
+        # advisory/scored=False throughout regardless).
+        strong_cross = {
+            t: n for t, n in cross.items()
+            if _KNOWN_EXFIL_HOST_RE.search(t) or _iocdb_is_known_bad_host(t)
+        }
         weak_cross = {t: n for t, n in cross.items() if t not in strong_cross}
         effective = set(nonzero)
         if weak_cross:

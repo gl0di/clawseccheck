@@ -138,6 +138,12 @@ becomes part of your conversation and is handled by whatever model provider
 your agent already uses — the scanner itself adds no channel of its own.
 Details: [security model](SECURITY_MODEL.md) · [FAQ](docs/FAQ.md).
 
+The bundled known-bad IOC catalog is the same story: a small, dated,
+provenance-tagged dataset that ships **in-repo with each release** and is
+**never fetched** — no feed, no update endpoint, not even opt-in. See
+[Bundled IOC dataset](docs/IOC_DATA.md) for the provenance policy and how
+staleness is surfaced.
+
 <details>
 <summary><b>Verify your copy is genuine (for the cautious)</b></summary>
 
@@ -199,6 +205,7 @@ complete flag list.
 | [User guide](docs/USAGE.md) | Recipes, monitoring modes, and trust details |
 | [Check catalog](docs/CHECKS.md) | All 174 checks: what they verify and how to remediate |
 | [Threat coverage](docs/THREAT_COVERAGE.md) | OWASP LLM Top 10 / Agentic threat mapping |
+| [Bundled IOC dataset](docs/IOC_DATA.md) | Provenance policy, refresh cadence, and freshness discipline for the known-bad catalog |
 | [Output schema](docs/OUTPUT_SCHEMA.md) | The frozen `--json` / SARIF contract |
 | [FAQ](docs/FAQ.md) | Common questions, incl. the compromised-host protocol |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | ClawSecCheck itself won't run, crashes, or OpenClaw doesn't see it |

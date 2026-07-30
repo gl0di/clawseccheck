@@ -52,6 +52,10 @@ from ..scanbudget import (
 from ..textnorm import (
     normalize_for_scan,
 )
+from ..iocdb import (
+    freshness_notice as _iocdb_freshness_notice,
+    known_bad_sources as _iocdb_known_bad_sources,
+)
 
 from ._shared import (
     _KNOWN_EXFIL_HOST_RE,
@@ -4338,41 +4342,24 @@ def detect_vet_type(target: str | Path, home: str | Path = "~/.openclaw") -> str
 #
 # The known-bad catalog is seeded ONLY from real, primary-source-verified public advisories
 # (§2.4 — no fabricated IOCs), each entry citing its advisory. It is a POINT-IN-TIME SNAPSHOT
-# (2026-07-03), not a live feed (the feed idea is I-004's territory). Every entry below was
-# verified against the PRIMARY advisory text before commit (§4 wall, C-145): indicators the
-# primary source did not confirm were left out — e.g. the "hightower6eu" publisher account
-# (unconfirmed on the Koi page, and vet_source has no publisher field to match it against).
-# Generic slugs ("update", "pdfcheck") and shared hosts (rentry.co, glot.io, *.vercel.app)
-# are excluded as false-positive-prone. Tests inject synthetic catalogs via the
-# known_bad/known_good parameters. Ecosystem keys: "npm", "pypi", "clawhub", "git", "url",
-# "any". Slug pools match a source's name; the "url"/"any" pools also match a URL's host.
-_SOURCE_KNOWN_BAD: dict = {
-    "npm": frozenset(),
-    "pypi": frozenset(),
-    "clawhub": frozenset(
-        {
-            # Palo Alto Unit 42, "OpenClaw's Skill Marketplace and the Emerging AI Supply
-            # Chain Threat" (2026-06-23) — verified verbatim against
-            # unit42.paloaltonetworks.com/openclaw-ai-supply-chain-risk/.
-            "omnicogg",  # AMOS dropper hidden behind ~22 MB README padding (scanner evasion)
-            "money-radar",  # runtime affiliate-link injection abusing agent advisory authority
-            "letssendit",  # agentic meme-token front-running scheme
-            "ai-tradingview-assistant-for-macos",  # macOS infostealer delivery
-            "tradingview-ai-indicator-assistant",  # macOS infostealer delivery
-        }
-    ),
-    "git": frozenset(),
-    "url": frozenset(
-        {
-            # Malicious infrastructure hosts (matched against a vetted URL's host, incl.
-            # subdomains). Koi Security "ClawHavoc" (2026-02-01, koi.ai) + Unit 42 (2026-06-23).
-            "91.92.242.30",  # shared ClawHavoc C2 — confirmed by BOTH Koi and Unit 42
-            "laosji.net",  # Unit 42 — payload / hosting infrastructure
-            "letssendit.fun",  # Unit 42 — letssendit campaign infrastructure
-        }
-    ),
-    "any": frozenset(),
-}
+# (see ..iocdb.REVISION), not a live feed (the feed idea is I-004's territory). Every entry
+# was verified against the PRIMARY advisory text before commit (§4 wall, C-145): indicators
+# the primary source did not confirm were left out — e.g. the "hightower6eu" publisher
+# account (unconfirmed on the Koi page, and vet_source has no publisher field to match it
+# against). Generic slugs ("update", "pdfcheck") and shared hosts (rentry.co, glot.io,
+# *.vercel.app) are excluded as false-positive-prone. Tests inject synthetic catalogs via
+# the known_bad/known_good parameters. Ecosystem keys: "npm", "pypi", "clawhub", "git",
+# "url", "any". Slug pools match a source's name; the "url"/"any" pools also match a URL's
+# host.
+#
+# The catalog itself (records + per-entry provenance: source_url, source_name,
+# first_seen, note) now lives in ../iocdb.py — a dated, provenance-bound
+# dataset shared with the C-221 cross-artifact host correlation (checks/_shared.py /
+# _egress.py) and the install-directive / remote-dependency known-bad-host checks
+# (checks/_content.py), not just this one gate. `known_bad_sources()` builds the exact
+# same dict[str, frozenset] shape this literal used to be — see its docstring for how
+# HOSTS records populate the "url"/"any" pools, preserving prior behavior unchanged.
+_SOURCE_KNOWN_BAD: dict = _iocdb_known_bad_sources()
 
 
 # Known-good identity pools for typosquat comparison, per ecosystem, used ON TOP of
@@ -4559,6 +4546,13 @@ def vet_source(
         + (f" · kind≈{info['kind']}" if info.get("kind") else "")
         + (f" · version={info['version']}" if info.get("version") else " · version=unpinned")
     ]
+    # Fold the shipped IOC dataset's own freshness advisory into this gate's evidence
+    # trail -- ONLY when the caller is using the real, shipped catalog (not a synthetic
+    # known_bad= injected by a test), since a synthetic catalog carries no revision
+    # date of its own. Contributes zero lines while the dataset is current (see
+    # ..iocdb.STALE_AFTER_DAYS); never affects the verdict.
+    if known_bad is None:
+        notes.extend(_iocdb_freshness_notice())
 
     # 1. Known-bad IOC — exact ecosystem+name match (a bare registry name is checked
     #    against every ecosystem, mirroring OpenClaw's bare-spec resolution order).

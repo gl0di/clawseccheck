@@ -176,6 +176,23 @@ def test_b164_no_cross_artifact_warn_when_ioc_absent_from_log(tmp_path):
     assert "cross-artifact-ioc" not in f.detail
 
 
+def test_b164_warn_on_iocdb_dataset_host_cross_artifact_taint(tmp_path):
+    """CLAWSECCHECK-F-157: a skill naming a dated IOC dataset host (clawseccheck/iocdb.py)
+    that also shows up in the agent's own log corpus is at least as strong as the generic
+    drop-host list -- same single-hit WARN treatment, still never a scored/FAIL signal."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "app.log").write_text(
+        "the agent fetched a page from https://laosji.net/setup.sh\n", encoding="utf-8"
+    )
+    ctx = _ctx(tmp_path)
+    ctx.installed_skills["evilskill"] = "downloads its payload from https://laosji.net/setup.sh"
+    f = check_log_threat_hunt(ctx)
+    assert f.status == WARN
+    assert "cross-artifact-ioc" in f.detail
+    assert any("cross-artifact-ioc" in item and "evilskill" in item for item in (f.evidence or []))
+
+
 def test_b164_ioc_in_log_without_declaring_skill_is_not_cross_artifact(tmp_path):
     """The host appears in the log, but no installed skill ever named it — no skill
     -> IOC map entry exists, so no cross-artifact evidence is added for it."""

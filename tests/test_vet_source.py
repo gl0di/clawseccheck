@@ -10,9 +10,11 @@ FAIL-path tests still inject synthetic catalogs so they never depend on the live
 """
 from __future__ import annotations
 
+import datetime
 import json
 from pathlib import Path
 
+from clawseccheck import iocdb
 from clawseccheck.catalog import FAIL, UNKNOWN, WARN
 from clawseccheck.checks import _SOURCE_KNOWN_BAD, _parse_source_target, vet_source
 from clawseccheck.cli import main
@@ -292,11 +294,74 @@ def test_near_miss_of_ioc_still_routes_through_typosquat_only():
     assert vet_source("clawhub:omnicoggg").status in (WARN, UNKNOWN)
 
 
+# --------------------------------------------------------------------------- #
+# CLAWSECCHECK-F-157: the shipped catalog is now iocdb.py — a dated,           #
+# provenance-bound dataset, not an inline frozenset literal.                   #
+# --------------------------------------------------------------------------- #
+def test_shipped_catalog_round_trips_through_iocdb():
+    # Every value formerly hardcoded in _SOURCE_KNOWN_BAD is still matched after the
+    # move to iocdb.py — no silent coverage loss.
+    assert vet_source("clawhub:omnicogg").status == FAIL
+    assert vet_source("clawhub:money-radar").status == FAIL
+    assert vet_source("clawhub:letssendit").status == FAIL
+    assert vet_source("clawhub:ai-tradingview-assistant-for-macos").status == FAIL
+    assert vet_source("clawhub:tradingview-ai-indicator-assistant").status == FAIL
+    assert vet_source("https://91.92.242.30/x").status == FAIL
+    assert vet_source("https://laosji.net/x").status == FAIL
+    assert vet_source("https://letssendit.fun/x").status == FAIL
+
+
+def test_vet_source_stays_silent_when_iocdb_is_fresh():
+    # Real dataset, real (current) clock -- freshness_notice() contributes nothing.
+    f = vet_source("clawhub:my-totally-new-skill")
+    assert not any("days old" in e for e in f.evidence)
+
+
+def test_vet_source_surfaces_iocdb_staleness_notice(monkeypatch):
+    monkeypatch.setattr(iocdb, "REVISION", "2020-01-01")
+    f = vet_source("clawhub:my-totally-new-skill")
+    assert any("IOC dataset is" in e and "days old" in e for e in f.evidence)
+    assert any("no network call was made" in e for e in f.evidence)
+
+
+def test_vet_source_synthetic_catalog_never_gets_real_staleness_notice(monkeypatch):
+    # A test-injected known_bad= catalog has no revision of its own -- the real
+    # dataset's (possibly stale) freshness notice must never leak onto it.
+    monkeypatch.setattr(iocdb, "REVISION", "2020-01-01")
+    f = vet_source("npm:evil-agent-tool", known_bad=_BAD)
+    assert not any("days old" in e for e in f.evidence)
+
+
+# --------------------------------------------------------------------------- #
+# iocdb.py itself: freshness_notice() unit coverage (dated, provenance-bound).  #
+# --------------------------------------------------------------------------- #
+def test_iocdb_freshness_notice_silent_when_current():
+    assert iocdb.freshness_notice(today=iocdb.revision_date()) == []
+
+
+def test_iocdb_freshness_notice_silent_just_under_threshold():
+    just_under = iocdb.revision_date() + datetime.timedelta(days=iocdb.STALE_AFTER_DAYS - 1)
+    assert iocdb.freshness_notice(today=just_under) == []
+
+
+def test_iocdb_freshness_notice_fires_at_threshold():
+    at_threshold = iocdb.revision_date() + datetime.timedelta(days=iocdb.STALE_AFTER_DAYS)
+    notice = iocdb.freshness_notice(today=at_threshold)
+    assert notice and "days old" in notice[0]
+
+
+def test_iocdb_freshness_notice_fires_well_past_threshold():
+    old = iocdb.revision_date() + datetime.timedelta(days=iocdb.STALE_AFTER_DAYS + 400)
+    notice = iocdb.freshness_notice(today=old)
+    assert notice and f"{iocdb.STALE_AFTER_DAYS + 400} days old" in notice[0]
+
+
 def test_catalog_is_populated_and_source_cited():
     # The shipped catalog is no longer empty, and its source block cites the advisories.
+    # CLAWSECCHECK-F-157: the catalog (and its per-entry provenance) now lives in
+    # clawseccheck/iocdb.py, not an inline literal in checks/_vet.py.
     assert _SOURCE_KNOWN_BAD["clawhub"] and _SOURCE_KNOWN_BAD["url"]
-    pkg = Path(__file__).resolve().parent.parent / "clawseccheck" / "checks"
-    text = "".join(f.read_text(encoding="utf-8") for f in sorted(pkg.glob("*.py")))
-    block = text.split("_SOURCE_KNOWN_BAD: dict = {", 1)[1].split("_SOURCE_KNOWN_GOOD", 1)[0]
-    assert "Unit 42" in block
-    assert "ClawHavoc" in block or "Koi" in block
+    iocdb_path = Path(__file__).resolve().parent.parent / "clawseccheck" / "iocdb.py"
+    text = iocdb_path.read_text(encoding="utf-8")
+    assert "Unit 42" in text
+    assert "ClawHavoc" in text or "Koi" in text

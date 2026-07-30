@@ -35,6 +35,10 @@ _FLEET = os.path.expanduser("~/.npm-global/lib/node_modules/openclaw/skills/*/SK
 
 @pytest.mark.parametrize("name", [
     "bad_b103_http_download", "bad_b103_ftp", "bad_b103_ip_host", "bad_b103_onion",
+    # CLAWSECCHECK-F-157: an install directive fetching from an exact, dated IOC
+    # dataset host (clawseccheck/iocdb.py) — a strictly higher-confidence signal
+    # than the generic public-IP/.onion shape heuristics above.
+    "bad_b103_known_ioc_host",
 ])
 def test_bad_fixtures_fail(name):
     f = check_install_directive_supply_chain(collect(FIXTURES / name))
@@ -61,6 +65,15 @@ def test_b103_public_ip_host_still_fails():
     assert "public-IP" in f.detail
 
 
+def test_b103_known_ioc_host_fails_with_specific_reason():
+    # CLAWSECCHECK-F-157: the dataset-host match takes priority and names itself
+    # explicitly, rather than reading as a generic "raw public-IP host" / plaintext hit.
+    f = check_install_directive_supply_chain(collect(FIXTURES / "bad_b103_known_ioc_host"))
+    assert f.status == FAIL
+    assert "KNOWN-BAD host" in f.detail
+    assert "bundled IOC dataset" in "\n".join(f.evidence)
+
+
 def test_b103_private_and_ipv6_hosts_not_flagged():
     from clawseccheck.checks import _install_host_is_public_ip
     for host in ("185.199.108.153", "8.8.8.8", "2606:4700:4700::1111"):
@@ -81,6 +94,16 @@ def test_plaintext_and_anonymous_hosts_fail():
          "url": "https://abcdefghijklmnop234567.onion/p.tar.gz"},
     ):
         assert _install_entry_findings("s", [entry]), entry
+
+
+def test_iocdb_dataset_host_fails_even_over_https():
+    # CLAWSECCHECK-F-157: an exact dataset-host match FAILs regardless of transport --
+    # unlike the generic plaintext-http/raw-IP/onion heuristics, HTTPS to a named IOC
+    # host is still a known-compromised source.
+    hits = _install_entry_findings(
+        "s", [{"id": "a", "kind": "download", "url": "https://laosji.net/p.tar.gz"}]
+    )
+    assert hits and "KNOWN-BAD host" in hits[0]
 
 
 def test_package_coordinates_are_never_url_parsed():

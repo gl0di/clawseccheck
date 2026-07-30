@@ -27,6 +27,7 @@ from ..collector import (
     Context,
     dig,
 )
+from ..iocdb import is_known_bad_host as _iocdb_is_known_bad_host
 from ..skillast import (
     analyze_python,
     extract_script_prose,
@@ -5572,7 +5573,18 @@ def _install_entry_findings(skill_name: str, install) -> list[str]:
             scheme, host = _install_url_target(val)
             if scheme is None:
                 continue  # not a URL-shaped value (package coordinate, path, etc.)
-            if scheme in ("http", "ftp"):
+            # An exact match against the bundled, dated IOC dataset (../iocdb.py) is
+            # checked FIRST — it is authoritative regardless of transport/shape, so it
+            # takes priority over (and gives a more specific reason than) the generic
+            # plaintext/public-IP/.onion heuristics below, which would otherwise catch
+            # a dataset IP host (e.g. a known C2 literal)
+            # first and report it only as a generic "raw public-IP host".
+            if host and _iocdb_is_known_bad_host(host):
+                fails.append(
+                    f"{skill_name}: install '{eid}' fetches from a KNOWN-BAD host ({host}) "
+                    "— exact match in the bundled IOC dataset"
+                )
+            elif scheme in ("http", "ftp"):
                 fails.append(
                     f"{skill_name}: install '{eid}' fetches over plaintext {scheme}:// "
                     f"({host or 'unknown host'})"
@@ -6146,6 +6158,11 @@ def _bad_provenance_url(val: str) -> bool:
     if v.lower().startswith("git+"):
         v = v[4:]
     scheme, host = _install_url_target(v)
+    # An exact match against the bundled, dated IOC dataset (../iocdb.py) is bad
+    # provenance regardless of scheme — checked first, same priority rationale as
+    # _install_entry_findings above.
+    if host and _iocdb_is_known_bad_host(host):
+        return True
     # Plaintext transport (http/ftp) FAILs — EXCEPT to a loopback/LAN-internal host, which is
     # an operator's own mirror (a self-hosted verdaccio), not an anonymous swappable source
     # (C-229 / C-135). ftps is FTP-over-TLS (encrypted), so it never reaches this leg.

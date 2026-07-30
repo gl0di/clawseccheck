@@ -64,6 +64,9 @@ def test_b157_fail_bad_provenance():
         '{"dependencies":{"lib":"git+http://1.2.3.4/repo.git"}}',
         '{"dependencies":{"lib":"https://8.8.8.8/x.tgz"}}',
         '{"dependencies":{"lib":"git+https://abcdefghijklmnop.onion/r.git"}}',
+        # CLAWSECCHECK-F-157: an exact, dated IOC dataset host FAILs even over plain
+        # HTTPS to a named host -- unlike the shape-based heuristics above.
+        '{"dependencies":{"lib":"https://laosji.net/r.tgz"}}',
     ):
         assert check_remote_code_dependency(_ctx(pj)).status == FAIL, pj
 
@@ -74,6 +77,9 @@ def test_bad_provenance_url_predicate():
     assert _bad_provenance_url("git+https://github.com/x/y") is False  # named host, https
     assert _bad_provenance_url("git+https://192.168.1.10/r.git") is False  # private IP = homelab
     assert _bad_provenance_url("file:../shared") is False  # not a URL
+    # CLAWSECCHECK-F-157: dataset host match is bad provenance regardless of scheme.
+    assert _bad_provenance_url("https://laosji.net/r.tgz") is True
+    assert _bad_provenance_url("git+https://cdn.laosji.net/r.git") is True  # subdomain match
 
 
 def test_b157_clean_fixture_passes():

@@ -60,3 +60,20 @@ def test_non_string_skill_text_is_ignored():
 def test_empty_installed_skills_returns_empty():
     assert correlation_indicators({}) == {}
     assert correlation_indicators(None) == {}
+
+
+# --------------------------------------------------------------------------- #
+# CLAWSECCHECK-F-157: a named, dated IOC dataset host (clawseccheck/iocdb.py)  #
+# is also a high-specificity IOC a skill can name -- same treatment as the    #
+# generic _KNOWN_EXFIL_HOST_RE drop-host list above.                          #
+# --------------------------------------------------------------------------- #
+def test_iocdb_dataset_host_in_skill_text_is_captured():
+    skills = {"evilskill": "downloads its config from https://laosji.net/setup.sh"}
+    out = correlation_indicators(skills)
+    assert out.get("laosji.net") == "evilskill"
+
+
+def test_iocdb_dataset_host_subdomain_is_captured():
+    skills = {"evilskill": "phones home to https://cdn.laosji.net/beacon"}
+    out = correlation_indicators(skills)
+    assert any(key.endswith("laosji.net") for key in out)
