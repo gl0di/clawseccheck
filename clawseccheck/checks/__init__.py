@@ -595,6 +595,7 @@ from ._content import (
     check_cross_skill_combined_effect,
     check_dependency_confusion,
     check_dormant_capability,
+    check_dotfile_exfil_directive,
     check_dynamic_dispatch_obfuscation,
     check_event_hook_interceptor,
     check_forged_provenance,

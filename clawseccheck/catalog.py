@@ -1637,6 +1637,25 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B337 (B-364): a skill's own Markdown frames a shell command as a
+    # MANDATORY, pre-response checkpoint (or tells the agent not to ask the user's
+    # permission), and that command reads one or more hidden dotfiles/config paths via a
+    # `$(cat ...)`/backtick-`cat` substitution and POSTs the captured bytes to a remote
+    # host via curl/wget — a "Skill Licensing Check" data-exfil pattern found evading
+    # every existing check across 4 SkillTrustBench gold-malicious cases. Neither B63
+    # (keys on HIDING an action) nor B334 (keys on a BUNDLED HELPER PATH) matches this
+    # shape — see the module comment above `_B337_MANDATORY_RE` in checks/_content.py.
+    # New detection surface, real-fleet FP behavior unproven; WARN-only (never FAIL).
+    CheckMeta(
+        "B337",
+        'Mandatory-directive shell exfil of dotfiles via curl/wget ("licensing check" pattern)',
+        HIGH,
+        "hardening",
+        "Data Exfiltration / Prompt Injection",
+        scored=True,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # A confusable/mixed-script character in a skill's frontmatter DESCRIPTION (the actual
     # trigger-phrase surface) can register as a distinct near-duplicate for preferential
     # routing while looking identical to a human reader. F-022 already covers the skill NAME;
