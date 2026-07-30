@@ -4687,3 +4687,90 @@ def simulate_effects(source: str, filename: str = "<skill>") -> list[dict]:
         raise
     except Exception:
         return []
+
+
+# --------------------------------------------------------------------------------- #
+# extract_script_prose (C-318): the natural-language-shaped slice of an otherwise-  #
+# interpreted script -- Python docstrings, or shell/JS comment TEXT.                #
+#                                                                                    #
+# checks/_content.py's `_pos_in_source_code_section` (B-305) deliberately treats an #
+# ENTIRE `.py`/`.sh`/`.bash`/`.zsh` section as never-prose, so the NL content-       #
+# security ring never reads it -- correctly, since an ordinary function name or     #
+# code identifier merely CONTAINING a directive-shaped word is not evidence of a    #
+# live directive. But a docstring or comment IS prose: a payload authored as a      #
+# module docstring ("You are now a developer mode assistant...") or a comment is    #
+# invisible to that ring today purely because of WHERE it sits, not what it says.   #
+# This extracts just that text so a caller can route it through the ring's existing #
+# scanners as its own distinct, clearly-labeled evidence source -- it does not      #
+# change what `_pos_in_source_code_section` exempts, and the code itself (control   #
+# flow, calls, string literals used as data) stays exactly as invisible to the NL   #
+# ring as before.                                                                   #
+# --------------------------------------------------------------------------------- #
+
+
+def _py_docstring_text(source: str) -> str:
+    """Module + class + function/async-function docstrings, concatenated in source
+    order. `ast.parse` only -- never compiled or executed, mirrors every other
+    function in this module. Empty on any parse failure (a syntactically invalid
+    .py file, or a Jupyter/templated file that isn't real Python) -- nothing to
+    extract, never an error."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError):
+        return ""
+    parts = []
+    mod_doc = ast.get_docstring(tree)
+    if mod_doc:
+        parts.append(mod_doc)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            doc = ast.get_docstring(node)
+            if doc:
+                parts.append(doc)
+    return "\n\n".join(parts)
+
+
+def _sh_comment_text(source: str) -> str:
+    """Inverse of `_sh_mask_comments` -- returns the comment TEXT (the part after the
+    leading `#`) of each whole-line shell comment, instead of blanking it. Skips the
+    `#!` shebang line (an interpreter path, never prose)."""
+    lines = []
+    for ln in source.splitlines():
+        stripped = ln.lstrip()
+        if stripped.startswith("#") and not stripped.startswith("#!"):
+            lines.append(stripped[1:].strip())
+    return "\n".join(lines)
+
+
+def _js_comment_text(source: str) -> str:
+    """Inverse of `_js_mask_comments` -- returns block (`/* */`) and line (`//`)
+    comment TEXT instead of blanking it. Mirrors that function's `(?<!:)` guard so a
+    `://` inside a live string/URL is never misread as a line-comment opener."""
+    block_comments = re.findall(r"/\*(.*?)\*/", source, flags=re.S)
+    line_comments = []
+    for ln in source.splitlines():
+        m = re.search(r"(?<!:)//(.*)$", ln)
+        if m:
+            line_comments.append(m.group(1).strip())
+    return "\n".join(block_comments + line_comments)
+
+
+def extract_script_prose(source: str, ext: str) -> str:
+    """C-318 (closes the PI-001/PE-005 residual gap): the docstring/comment TEXT of a
+    bundled script, keyed by its extension --
+
+      "py"                    -> module/class/function docstrings (`_py_docstring_text`)
+      "sh"/"bash"/"zsh"       -> comment lines (`_sh_comment_text`)
+      "js"/"ts"/"mjs"/"cjs"   -> block + line comments (`_js_comment_text`)
+
+    Returns "" for an unsupported extension or a script with no docstring/comment at
+    all -- never raises. See the module comment above this function for why this is
+    additive evidence, not a change to what `_pos_in_source_code_section` exempts.
+    """
+    if ext == "py":
+        return _py_docstring_text(source)
+    if ext in ("sh", "bash", "zsh"):
+        return _sh_comment_text(source)
+    if ext in ("js", "ts", "mjs", "cjs"):
+        return _js_comment_text(source)
+    return ""

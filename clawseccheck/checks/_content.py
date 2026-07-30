@@ -29,6 +29,7 @@ from ..collector import (
 )
 from ..skillast import (
     analyze_python,
+    extract_script_prose,
 )
 from ..textnorm import (
     _nfkc_ascii_fold_changed,
@@ -5279,6 +5280,56 @@ def _pos_in_source_code_section(
     return False
 
 
+def _script_prose_evidence(ctx: Context) -> list[tuple[str, str, str]]:
+    """C-318 (closes the PI-001/PE-005 residual gap): ``(skill_name, relpath,
+    prose_text)`` for every bundled ``.py``/``.sh``/``.bash``/``.zsh``/``.js``/``.ts``/
+    ``.mjs``/``.cjs`` script's extracted docstring/comment TEXT
+    (``skillast.extract_script_prose``) -- the natural-language-shaped slice of an
+    otherwise-interpreted file that ``_pos_in_source_code_section`` (immediately
+    above) deliberately keeps invisible to the NL content-security ring when reading
+    the WHOLE ``# file:`` section.
+
+    A NARROW, ADDITIVE extension, not a change to that exemption: callers scan the
+    returned prose through the ring's OWN existing regexes (``_b66_scan``,
+    ``_b66_authority_override_scan``, ``_b156_scan``, ...) as their own distinct,
+    clearly-labeled evidence source (the ``relpath`` in each tuple exists precisely so
+    the caller can tag it "docstring/comment", never conflating it with live
+    bootstrap/SKILL.md prose). The surrounding CODE (control flow, calls, string
+    literals used as data) stays exactly as invisible to this ring as before --
+    that's still the AST/shell-analyzer engines' job (skillast.py), not this one's.
+
+    Reuses ``ctx.installed_skill_py``/``_shell``/``_js`` -- the same per-file
+    ``(relpath, source)`` collections ``check_dynamic_dispatch_obfuscation`` (B91) and
+    ``check_event_hook_interceptor`` (B97) already read, already byte/file-capped by
+    the collector (``read_skill_python``/``read_skill_shell``/``read_skill_js``), and
+    already populated identically by BOTH the full-audit collector (``collect()``) and
+    ``--vet``'s synthetic ``Context`` (``_vet.py``'s ``vet_skill``) -- so a check that
+    reads this helper picks up the fix on both paths for free.
+
+    Skips a script with no docstring/comment at all (``extract_script_prose`` returns
+    ``""``) -- nothing to scan. The returned prose is already run through
+    ``normalize_for_scan`` (same de-obfuscation every other loop in this ring applies
+    before scanning) -- callers must NOT normalize it again.
+    """
+    out: list[tuple[str, str, str]] = []
+    for name, files in (getattr(ctx, "installed_skill_py", None) or {}).items():
+        for relpath, src in files:
+            prose = extract_script_prose(src, "py")
+            if prose:
+                out.append((name, relpath, normalize_for_scan(prose)))
+    for name, files in (getattr(ctx, "installed_skill_shell", None) or {}).items():
+        for relpath, src in files:
+            prose = extract_script_prose(src, "sh")
+            if prose:
+                out.append((name, relpath, normalize_for_scan(prose)))
+    for name, files in (getattr(ctx, "installed_skill_js", None) or {}).items():
+        for relpath, src in files:
+            prose = extract_script_prose(src, "js")
+            if prose:
+                out.append((name, relpath, normalize_for_scan(prose)))
+    return out
+
+
 def _fm_metadata_obj(fm: str) -> dict:
     """Parse the single-line JSON `metadata:` value from a frontmatter block, best-effort.
     Returns {} when absent or not single-line JSON (multi-line YAML metadata is skipped —
@@ -6722,6 +6773,12 @@ def check_overt_secret_exfil(ctx: Context) -> Finding:
     skill may transmit its OWN credential to its OWN backend ("send the api_key to the
     server") — that stays WARN (never FAIL) even when the flagged host happens to be one
     of the known drop-point domains, via the same own-host safety valve B160 uses.
+
+    Also scans a bundled script's docstring/comment TEXT (C-318, PE-005) — otherwise
+    invisible to this check for the same B-305 reason B66 above documents. Deliberately
+    WARN-only from this source, regardless of `is_known_bad_host`: never escalated to
+    FAIL, since a script's own comment is a lower-confidence surface than live
+    bootstrap/SKILL.md prose.
     """
     if not ctx.bootstrap and not ctx.installed_skills:
         return _finding(
@@ -6750,6 +6807,26 @@ def check_overt_secret_exfil(ctx: Context) -> Finding:
         for snippet, is_known_bad_host in _b156_scan(norm, fr, own_host):
             tag = f"{skill_name}: secret sent to external/2nd-party destination: {snippet}"
             (fail_ev if is_known_bad_host else warn_ev).append(tag)
+
+    # C-318 (PE-005 residual gap): a bundled script's own docstring/comment is
+    # invisible to the loop above (B-305's `_pos_in_source_code_section` correctly
+    # exempts the whole `.py`/`.sh`/`.js` section as CODE) -- but a docstring/comment
+    # IS prose, so scan the extracted TEXT (`_script_prose_evidence`) as its own,
+    # clearly-labeled evidence source. Scope guard: WARN-only, deliberately never
+    # escalated to FAIL regardless of `is_known_bad_host` -- a script's own
+    # docstring/comment is a lower-confidence surface than live bootstrap/SKILL.md
+    # prose (that's the whole B-305 point: an ordinary comment can read like prose
+    # without being a live directive), so this new source stays advisory even when
+    # the destination happens to match a known-bad host.
+    for skill_name, relpath, prose in _script_prose_evidence(ctx):
+        fr = _fence_ranges(prose)
+        own_host = _skill_own_host(prose, fr)
+        for snippet, _is_known_bad_host in _b156_scan(prose, fr, own_host):
+            tag = (
+                f"{skill_name} ({relpath} docstring/comment): secret sent to "
+                f"external/2nd-party destination: {snippet}"
+            )
+            warn_ev.append(tag)
 
     if fail_ev:
         ev_summary = "; ".join(fail_ev[:4])
@@ -8817,7 +8894,11 @@ def check_persona_jailbreak(ctx: Context) -> Finding:
     (for example, "You are DAN" + "no restrictions").
 
     WARN  — persona override token/pattern found in proximity to policy-reset
-            language.
+            language. Also scans a bundled script's docstring/comment TEXT
+            (C-318, PI-001) — a payload authored inside a `scripts/*.py`
+            module docstring is otherwise invisible to this check, since
+            `_defensive_context`/`_pos_in_source_code_section` (B-305)
+            correctly exempts the surrounding CODE.
     PASS  — no persona-jailbreak pattern.
     UNKNOWN — nothing to inspect.
     """
@@ -8857,6 +8938,23 @@ def check_persona_jailbreak(ctx: Context) -> Finding:
             evidence.append(f"{skill_name}: persona override pattern: {hit}")
         for hit in _b66_authority_override_scan(norm, fr):
             evidence.append(f"{skill_name}: elevated-mode authority-override pattern: {hit}")
+
+    # C-318 (PI-001 residual gap): a bundled script's own docstring/comment is
+    # invisible to the loops above (`_pos_in_source_code_section`/B-305 correctly
+    # exempts the whole `.py`/`.sh`/`.js` section as CODE) -- but a docstring/comment
+    # IS prose, so scan the extracted TEXT (`_script_prose_evidence`) as its own,
+    # clearly-labeled evidence source. Same scanners, no new detection vocabulary.
+    for skill_name, relpath, prose in _script_prose_evidence(ctx):
+        fr = _fence_ranges(prose)
+        for hit in _b66_scan(prose, fr):
+            evidence.append(
+                f"{skill_name} ({relpath} docstring/comment): persona override pattern: {hit}"
+            )
+        for hit in _b66_authority_override_scan(prose, fr):
+            evidence.append(
+                f"{skill_name} ({relpath} docstring/comment): elevated-mode "
+                f"authority-override pattern: {hit}"
+            )
 
     if evidence:
         return _finding(
