@@ -54,6 +54,7 @@ from ._shared import (
     _mcp_servers,
     _read_jsonl_tail,
     _safe_mtime,
+    _skill_corpus_complete,
     _skill_frontmatter_block,
     _surface_absent,
 )
@@ -4402,13 +4403,43 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
 
 
 def check_supply_chain(ctx: Context) -> Finding:
+    """B5 — supply-chain integrity of installed plugins/skills.
+
+    B-362: the first UNKNOWN branch (``cfg.get("plugins")`` and ``cfg.get("skills")``
+    both falsy) sets ``not_applicable`` only when BOTH loci were read completely:
+    ``plugins.*`` is config-only (``_plugins()``/this check's own ``cfg.get("plugins")``
+    read has no disk counterpart), but "skills" here is only the openclaw.json
+    ``skills.*`` settings block, NOT the actual installed-skill corpus — that is
+    discovered by an independent disk walk into ``ctx.installed_skills``
+    (``collector._read_installed_skills``), so a host can have real installed skills
+    with zero ``skills`` key in openclaw.json. ``_surface_absent`` alone would wrongly
+    mark this not_applicable on exactly that host; requiring ``not ctx.installed_skills``
+    AND ``_skill_corpus_complete(ctx)`` (the disk-locus completeness counterpart, see its
+    own docstring in ``checks/_shared.py``) closes that gap.
+
+    The second UNKNOWN branch below is deliberately NOT migrated: pinning/integrity
+    metadata is per-manifest, not stored in openclaw.json at all (see the comment
+    below), so that branch fires when plugins/skills genuinely ARE present but this
+    config-only check structurally cannot read their state — a real capability gap of
+    this locus, not a "no such surface" case.
+    """
     cfg = ctx.config
     # plugins.installs_unpinned_npm_specs / plugins.installs_missing_integrity do NOT exist
     # in the OpenClaw schema — install metadata is per-manifest, not stored in config.
     # Pinning is checked by B25; MCP npx specs by B24.
     # plugins.tools_reachable_policy also does NOT exist in the OpenClaw schema.
     if not (cfg.get("plugins") or cfg.get("skills")):
-        return _finding("B5", UNKNOWN, "No plugins/skills declared in config.", "—")
+        return _finding(
+            "B5",
+            UNKNOWN,
+            "No plugins/skills declared in config.",
+            "—",
+            not_applicable=(
+                _surface_absent(ctx, LIMIT_DOMAIN_CONFIG)
+                and not ctx.installed_skills
+                and _skill_corpus_complete(ctx)
+            ),
+        )
     # Pinning & integrity are not recorded in openclaw.json (per-manifest metadata), so B5
     # cannot assess supply-chain integrity from config alone — be honest (UNKNOWN) rather than
     # falsely reassure. Real coverage: B13 (content scan), B24 (MCP), B25 (update pinning).
