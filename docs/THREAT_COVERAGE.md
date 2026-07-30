@@ -221,6 +221,34 @@ silent gap by definition; `tests/test_threat_coverage_ledger.py` fails the build
   in this repo's own real installed skill and multiple `clean_*` fixtures. Covered today via
   B13/skillast (a genuinely malicious helper fires regardless of SKILL.md framing) and B100
   (the narrower remote-fetch-under-a-setup-heading variant) `[CEILING]`
+- **Expression evaluation in a config data field** (C-328, transferability check on the
+  HuggingFace agent-intrusion postmortem, where an fsspec reference-spec numeric-offset field
+  carried a Jinja2 `{{ cycler.__init__.__globals__.__builtins__.exec(...) }}` payload that the
+  config-driven loader evaluated) — grepped the installed dist (grounded against dist
+  openclaw@2026.7.1-2) for every `{{ }}`/`${}` template consumer and every `eval`/
+  `new Function`/`vm.Script` sink reachable from config parsing. Every config-facing template
+  surface found is substitution-only, never expression evaluation: `hooks.mappings[].
+  messageTemplate`/`textTemplate`/`sessionKey` (`dist/hooks-Bjrm8pWp.js`, `renderTemplate`/
+  `resolveTemplateExpr`) resolve only a fixed literal-prefix whitelist (`path`, `now`,
+  `headers.`, `query.`, `payload.`) through a dot-path `getByPath` walker that blocks
+  `__proto__`/`prototype`/`constructor` — no arithmetic, no method calls, no arbitrary JS;
+  `${VAR_NAME}` env-var interpolation (`dist/env-substitution-CATXLg7n.js`, `substituteString`/
+  `resolveConfigEnvVars`) is a character-scan literal lookup against `process.env`; the
+  Discord/status presence text fields (`dist/provider-DNXfDOia.js`, a second, unrelated
+  `renderTemplate`) substitute only one fixed `{reason}` placeholder. The two real `vm.Script`/
+  `eval` sinks found in the dist — `runModelCode` (`dist/tool-search-B8B4Spes.js`, the
+  `tool_search` agent-tool feature, `src/agents/local-model-lean.ts`) and the Playwright
+  browser `evaluate` action (`dist/pw-ai-BHPU7V7C.js`) — both run code the AGENT supplies as an
+  explicit tool-call argument at runtime, never a value read from a static config field, so
+  they are a different, already-in-scope surface (agent tool-use), not this bug class. Secret
+  references (`dist/resolve-configured-secret-input-string-BefspyML.js`) are a typed
+  `{source,provider,id}` dispatch, not expression parsing; the Shiki syntax-highlighting
+  grammars bundled under names like `jinja`/`handlebars` are dead JSON grammar data for code-
+  block rendering, not live engines. The bug class the incident describes — a plain config
+  VALUE silently passed through a general-purpose expression evaluator — has no reachable
+  instance in OpenClaw today; a check here would be exactly the fabricated-risk Golden Rule #4
+  forbids. Re-derive against a newer dist if OpenClaw ever adds a real expression evaluator to
+  config parsing `[CEILING]`
 
 ## Framework mapping (OWASP)
 
