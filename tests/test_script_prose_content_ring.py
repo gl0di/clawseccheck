@@ -11,13 +11,25 @@ mode assistant ... safety filters are paused ... destructive commands as approve
 never reached B66's scanners at all.
 
 `extract_script_prose` (clawseccheck/skillast.py) pulls out just that docstring/
-comment TEXT -- module/class/function docstrings for Python (via `ast.get_docstring`,
-parse-only, never compiled/executed), comment lines for shell, block+line comments
-for JS. `_script_prose_evidence` (clawseccheck/checks/_content.py) feeds the result
-through B66's (`_b66_scan`/`_b66_authority_override_scan`) and B156's (`_b156_scan`)
-OWN existing scanners as a distinct, clearly-labeled evidence source -- no new
-detection vocabulary, and the surrounding CODE stays exactly as invisible to this
-ring as it was before this change.
+comment TEXT, as a LIST OF INDEPENDENT BLOCKS -- module/class/function docstrings for
+Python (via `ast.get_docstring`, parse-only, never compiled/executed), one block per
+contiguous comment run for shell, one block per comment for JS -- NEVER joined into
+one string. `_script_prose_evidence` (clawseccheck/checks/_content.py) feeds EACH
+block, independently, through B66's (`_b66_scan`/`_b66_authority_override_scan`) and
+B156's (`_b156_scan`) OWN existing scanners as a distinct, clearly-labeled evidence
+source -- no new detection vocabulary, and the surrounding CODE stays exactly as
+invisible to this ring as it was before this change.
+
+C-135 (2026-07-30): the very first shipped version of this feature joined every
+block in a file into one string before scanning, which collapsed the real physical
+distance between UNRELATED functions' docstrings/comments down to a few characters --
+letting B66's proximity-window corroboration (`_B66_WINDOW`) treat two individually-
+benign blocks from different functions as if they sat side-by-side in hand-authored
+prose. The regression tests below (`test_b66_*_cross_block_collapse_regression_c135`)
+pin the fix: blocks are scanned independently, so unrelated blocks elsewhere in the
+same file can never corroborate, while a SINGLE block containing both a trigger and
+its own negation still correctly stays PASS (`test_b66_documented_attack_example_in_
+docstring_stays_pass` below pins that its still the case).
 
 Scope guard: WARN-only. B156's script-prose evidence never escalates to FAIL, even
 when the destination matches a known-bad host -- a script's own comment is a lower-
@@ -48,6 +60,7 @@ FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
 def test_extract_script_prose_python_docstrings():
+    """Each docstring comes back as its OWN independent block -- never joined (C-135)."""
     src = (
         '"""Module docstring text."""\n'
         "\n"
@@ -58,10 +71,12 @@ def test_extract_script_prose_python_docstrings():
         "class C:\n"
         '    """Class docstring text."""\n'
     )
-    prose = extract_script_prose(src, "py")
-    assert "Module docstring text." in prose
-    assert "Function docstring text." in prose
-    assert "Class docstring text." in prose
+    blocks = extract_script_prose(src, "py")
+    assert blocks.count("Module docstring text.") == 1
+    assert "Function docstring text." in blocks
+    assert "Class docstring text." in blocks
+    # Three separate docstrings -> three separate blocks, never one joined string.
+    assert len(blocks) == 3
 
 
 def test_extract_script_prose_python_never_reads_code_bodies():
@@ -72,16 +87,34 @@ def test_extract_script_prose_python_never_reads_code_bodies():
         "    x = 'this is a plain string literal, not a docstring'\n"
         "    return x\n"
     )
-    assert "plain string literal" not in extract_script_prose(src, "py")
+    blocks = extract_script_prose(src, "py")
+    assert not any("plain string literal" in b for b in blocks)
 
 
 def test_extract_script_prose_python_syntax_error_is_empty():
-    """A file that doesn't parse yields "" -- never raises."""
-    assert extract_script_prose("def f(:\n    pass\n", "py") == ""
+    """A file that doesn't parse yields [] -- never raises."""
+    assert extract_script_prose("def f(:\n    pass\n", "py") == []
 
 
 def test_extract_script_prose_python_no_docstring_is_empty():
-    assert extract_script_prose("def f():\n    return 1\n", "py") == ""
+    assert extract_script_prose("def f():\n    return 1\n", "py") == []
+
+
+def test_extract_script_prose_python_two_docstrings_are_independent_blocks():
+    """C-135: two docstrings from UNRELATED functions must never be joined into one
+    block, no matter how close together they sit in the extracted list -- each is
+    scanned as its own independent unit downstream."""
+    src = (
+        "def f():\n"
+        '    """First function docstring."""\n'
+        "    pass\n"
+        "\n\n"
+        "def g():\n"
+        '    """Second, unrelated function docstring."""\n'
+        "    pass\n"
+    )
+    blocks = extract_script_prose(src, "py")
+    assert blocks == ["First function docstring.", "Second, unrelated function docstring."]
 
 
 def test_extract_script_prose_shell_whole_line_comments():
@@ -90,14 +123,28 @@ def test_extract_script_prose_shell_whole_line_comments():
         "# a real whole-line comment\n"
         "echo hi  # trailing comment is not extracted\n"
     )
-    prose = extract_script_prose(src, "sh")
-    assert "a real whole-line comment" in prose
-    assert "trailing comment is not extracted" not in prose
-    assert "!/bin/bash" not in prose  # shebang is never prose
+    blocks = extract_script_prose(src, "sh")
+    assert any("a real whole-line comment" in b for b in blocks)
+    assert not any("trailing comment is not extracted" in b for b in blocks)
+    assert not any("!/bin/bash" in b for b in blocks)  # shebang is never prose
 
 
 def test_extract_script_prose_shell_no_comments_is_empty():
-    assert extract_script_prose("echo hi\n", "sh") == ""
+    assert extract_script_prose("echo hi\n", "sh") == []
+
+
+def test_extract_script_prose_shell_comment_runs_separated_by_code_are_independent():
+    """C-135: two whole-line comment RUNS separated by real shell code must come back
+    as two separate blocks, never joined into one string."""
+    src = (
+        "#!/bin/bash\n"
+        "# first comment run\n"
+        "echo hi\n"
+        "# second, unrelated comment run\n"
+        "echo bye\n"
+    )
+    blocks = extract_script_prose(src, "sh")
+    assert blocks == ["first comment run", "second, unrelated comment run"]
 
 
 def test_extract_script_prose_js_block_and_line_comments():
@@ -108,14 +155,24 @@ def test_extract_script_prose_js_block_and_line_comments():
         "const url = 'https://example.com';  // not a comment opener via ://\n"
         "console.log(url);\n"
     )
-    prose = extract_script_prose(src, "js")
-    assert "a line comment" in prose
-    assert "a block" in prose and "comment" in prose
-    assert "not a comment opener via" in prose
+    blocks = extract_script_prose(src, "js")
+    assert any("a line comment" in b for b in blocks)
+    assert any("a block" in b and "comment" in b for b in blocks)
+    assert any("not a comment opener via" in b for b in blocks)
+    # Each construct is its own independent block, never joined.
+    assert len(blocks) == 3
+
+
+def test_extract_script_prose_js_line_comment_runs_separated_by_code_are_independent():
+    """C-135: two `//` comment RUNS separated by real JS code must come back as two
+    separate blocks, never joined into one string."""
+    src = "// first run\nconsole.log(1);\n// second, unrelated run\nconsole.log(2);\n"
+    blocks = extract_script_prose(src, "js")
+    assert blocks == ["first run", "second, unrelated run"]
 
 
 def test_extract_script_prose_unsupported_extension_is_empty():
-    assert extract_script_prose("anything", "rb") == ""
+    assert extract_script_prose("anything", "rb") == []
 
 
 # --------------------------------------------------------------------------- #
@@ -242,6 +299,101 @@ def test_b66_vet_skill_picks_up_script_docstring():
     f = vet_skill(FIXTURES / "bad_b66_script_docstring_override" / "skills" / "role-helper")
     assert f.status == WARN
     assert f.id == "B66"
+
+
+# --------------------------------------------------------------------------- #
+# C-135 regression: cross-block collapse (found 2026-07-30 on the shipped     #
+# C-318 commit, reported in this task's Pulse comment). Two INDIVIDUALLY      #
+# BENIGN docstrings/comments from UNRELATED functions must never falsely     #
+# corroborate into a B66 WARN just because they happen to share one file.    #
+# --------------------------------------------------------------------------- #
+
+
+def test_b66_python_cross_block_collapse_regression_c135():
+    """Exact repro from the C-135 bug report: two functions ~145 real source lines
+    apart in one file. `welcome_new_hire`'s docstring is an ordinary onboarding-
+    permissions note ("...you are now an admin.") and the UNRELATED, distant
+    `check_lab_firewall_profile`'s docstring is an ordinary test-lab network-diagnostic
+    note ("...safety checks are disabled for the isolated test-lab network profile...").
+    Neither is remotely jailbreak-shaped alone. Before the fix, `extract_script_prose`
+    concatenated every docstring in the file into one blob, putting the two triggers
+    a few characters apart and well inside `_B66_WINDOW` -- a false corroboration. The
+    fix scans each docstring as its own independent block, so this must stay PASS."""
+    filler_table = "\n".join(f"_LOOKUP_{i} = {i}" for i in range(120))
+    src = (
+        "def welcome_new_hire():\n"
+        '    """After completing onboarding and provisioning, you are now an admin."""\n'
+        '    print("welcome")\n'
+        "\n\n"
+        f"{filler_table}\n"
+        "\n\n"
+        "def _helper_one():\n"
+        "    return 1\n"
+        "\n\n"
+        "def _helper_two():\n"
+        "    return 2\n"
+        "\n\n"
+        "def check_lab_firewall_profile():\n"
+        '    """Note: safety checks are disabled for the isolated test-lab network '
+        'profile while this diagnostic runs."""\n'
+        "    pass\n"
+    )
+    # Sanity: the two docstrings really are ~145 real source lines apart, mirroring
+    # the bug report -- not merely conceptually unrelated.
+    first_pos = src.index("you are now an admin")
+    second_pos = src.index("safety checks are disabled")
+    lines_apart = src.count("\n", first_pos, second_pos)
+    assert lines_apart > 100, f"fixture regressed to only {lines_apart} lines apart"
+
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.installed_skills = {"ops-helper": "# file: SKILL.md\n---\nname: ops-helper\n---\n"}
+    ctx.installed_skill_py = {"ops-helper": [("scripts/ops_utils.py", src)]}
+    f = check_persona_jailbreak(ctx)
+    assert f.status == PASS, (
+        "C-135 cross-block collapse regression: two unrelated docstrings elsewhere "
+        f"in the same file falsely corroborated into a WARN: {f.detail}"
+    )
+
+
+def test_b66_shell_cross_block_collapse_regression_c135():
+    """Shell-comment analogue of the regression above: two unrelated whole-line
+    comment RUNS, separated by real shell code, must never falsely corroborate."""
+    filler_code = "\n".join(f"VAR_{i}={i}" for i in range(30))
+    src = (
+        "#!/usr/bin/env bash\n"
+        "# After completing onboarding and provisioning, you are now an admin.\n"
+        'echo "welcome"\n'
+        "\n"
+        f"{filler_code}\n"
+        "\n"
+        "# Note: safety checks are disabled for the isolated test-lab network profile.\n"
+        'echo "done"\n'
+    )
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.installed_skills = {"ops-helper-sh": "# file: SKILL.md\n---\nname: ops-helper-sh\n---\n"}
+    ctx.installed_skill_shell = {"ops-helper-sh": [("scripts/ops_utils.sh", src)]}
+    f = check_persona_jailbreak(ctx)
+    assert f.status == PASS, f"C-135 shell cross-block collapse regression: {f.detail}"
+
+
+def test_b66_js_cross_block_collapse_regression_c135():
+    """JS line-comment analogue of the regression above: two unrelated `//` comment
+    RUNS, separated by real JS code, must never falsely corroborate."""
+    filler_code = "\n".join(f"const v{i} = {i};" for i in range(30))
+    src = (
+        "// After completing onboarding and provisioning, you are now an admin.\n"
+        'console.log("welcome");\n'
+        "\n"
+        f"{filler_code}\n"
+        "\n"
+        "// Note: safety checks are disabled for the isolated test-lab network profile.\n"
+        'console.log("done");\n'
+    )
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.installed_skills = {"ops-helper-js": "# file: SKILL.md\n---\nname: ops-helper-js\n---\n"}
+    ctx.installed_skill_js = {"ops-helper-js": [("scripts/ops_utils.js", src)]}
+    f = check_persona_jailbreak(ctx)
+    assert f.status == PASS, f"C-135 JS cross-block collapse regression: {f.detail}"
 
 
 # --------------------------------------------------------------------------- #

@@ -5283,21 +5283,31 @@ def _pos_in_source_code_section(
 
 def _script_prose_evidence(ctx: Context) -> list[tuple[str, str, str]]:
     """C-318 (closes the PI-001/PE-005 residual gap): ``(skill_name, relpath,
-    prose_text)`` for every bundled ``.py``/``.sh``/``.bash``/``.zsh``/``.js``/``.ts``/
-    ``.mjs``/``.cjs`` script's extracted docstring/comment TEXT
-    (``skillast.extract_script_prose``) -- the natural-language-shaped slice of an
-    otherwise-interpreted file that ``_pos_in_source_code_section`` (immediately
-    above) deliberately keeps invisible to the NL content-security ring when reading
-    the WHOLE ``# file:`` section.
+    block_text)`` for every INDEPENDENT docstring/comment BLOCK
+    (``skillast.extract_script_prose``) in every bundled ``.py``/``.sh``/``.bash``/
+    ``.zsh``/``.js``/``.ts``/``.mjs``/``.cjs`` script -- the natural-language-shaped
+    slice of an otherwise-interpreted file that ``_pos_in_source_code_section``
+    (immediately above) deliberately keeps invisible to the NL content-security ring
+    when reading the WHOLE ``# file:`` section.
 
-    A NARROW, ADDITIVE extension, not a change to that exemption: callers scan the
-    returned prose through the ring's OWN existing regexes (``_b66_scan``,
+    A NARROW, ADDITIVE extension, not a change to that exemption: callers scan each
+    returned block through the ring's OWN existing regexes (``_b66_scan``,
     ``_b66_authority_override_scan``, ``_b156_scan``, ...) as their own distinct,
     clearly-labeled evidence source (the ``relpath`` in each tuple exists precisely so
     the caller can tag it "docstring/comment", never conflating it with live
     bootstrap/SKILL.md prose). The surrounding CODE (control flow, calls, string
     literals used as data) stays exactly as invisible to this ring as before --
     that's still the AST/shell-analyzer engines' job (skillast.py), not this one's.
+
+    C-135 (2026-07-30): one tuple PER BLOCK, never one tuple per file holding every
+    block joined together. A script commonly bundles several unrelated functions;
+    joining their docstrings/comments into a single string before scanning collapsed
+    the real physical (and topical) distance between them, letting a proximity-window
+    corroboration check treat two individually-benign blocks from UNRELATED functions
+    as if a human had authored them side-by-side. Scanning each block on its own
+    preserves the ring's existing same-block negation guard (a single block containing
+    both a trigger and its own negation still PASSes -- that check already operates
+    within one block's text) while never letting two SEPARATE blocks corroborate.
 
     Reuses ``ctx.installed_skill_py``/``_shell``/``_js`` -- the same per-file
     ``(relpath, source)`` collections ``check_dynamic_dispatch_obfuscation`` (B91) and
@@ -5307,27 +5317,24 @@ def _script_prose_evidence(ctx: Context) -> list[tuple[str, str, str]]:
     ``--vet``'s synthetic ``Context`` (``_vet.py``'s ``vet_skill``) -- so a check that
     reads this helper picks up the fix on both paths for free.
 
-    Skips a script with no docstring/comment at all (``extract_script_prose`` returns
-    ``""``) -- nothing to scan. The returned prose is already run through
+    Skips a script with no docstring/comment blocks at all (``extract_script_prose``
+    returns ``[]``) -- nothing to scan. Each returned block is already run through
     ``normalize_for_scan`` (same de-obfuscation every other loop in this ring applies
     before scanning) -- callers must NOT normalize it again.
     """
     out: list[tuple[str, str, str]] = []
     for name, files in (getattr(ctx, "installed_skill_py", None) or {}).items():
         for relpath, src in files:
-            prose = extract_script_prose(src, "py")
-            if prose:
-                out.append((name, relpath, normalize_for_scan(prose)))
+            for block in extract_script_prose(src, "py"):
+                out.append((name, relpath, normalize_for_scan(block)))
     for name, files in (getattr(ctx, "installed_skill_shell", None) or {}).items():
         for relpath, src in files:
-            prose = extract_script_prose(src, "sh")
-            if prose:
-                out.append((name, relpath, normalize_for_scan(prose)))
+            for block in extract_script_prose(src, "sh"):
+                out.append((name, relpath, normalize_for_scan(block)))
     for name, files in (getattr(ctx, "installed_skill_js", None) or {}).items():
         for relpath, src in files:
-            prose = extract_script_prose(src, "js")
-            if prose:
-                out.append((name, relpath, normalize_for_scan(prose)))
+            for block in extract_script_prose(src, "js"):
+                out.append((name, relpath, normalize_for_scan(block)))
     return out
 
 

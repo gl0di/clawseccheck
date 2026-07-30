@@ -4705,67 +4705,104 @@ def simulate_effects(source: str, filename: str = "<skill>") -> list[dict]:
 # change what `_pos_in_source_code_section` exempts, and the code itself (control   #
 # flow, calls, string literals used as data) stays exactly as invisible to the NL   #
 # ring as before.                                                                   #
+#                                                                                    #
+# C-135 (2026-07-30, found on the shipped C-318 commit): the extractors return a    #
+# LIST of independent blocks, one per docstring / contiguous comment run -- NEVER   #
+# joined into one string. Joining collapsed real physical distance between          #
+# unrelated functions' docstrings/comments down to a few characters, which let a    #
+# proximity-window corroboration check (B66's `_b66_authority_override_scan`,       #
+# `_B66_WINDOW`) treat two individually-benign blocks from UNRELATED functions      #
+# elsewhere in the same file as if they sat side-by-side in hand-authored prose.    #
+# That assumption is true for a hand-authored bootstrap/SKILL.md file (physical     #
+# proximity really does reflect authorial/topical proximity there) but false for    #
+# docstrings/comments mechanically concatenated in AST/line order. Scanning each    #
+# block independently keeps corroboration scoped to text a human actually wrote     #
+# next to itself, while still correctly preserving same-block negation (a single    #
+# docstring/comment containing both a trigger and its own negation still PASSes --  #
+# that guard operates on one block's text either way).                             #
 # --------------------------------------------------------------------------------- #
 
 
-def _py_docstring_text(source: str) -> str:
-    """Module + class + function/async-function docstrings, concatenated in source
-    order. `ast.parse` only -- never compiled or executed, mirrors every other
-    function in this module. Empty on any parse failure (a syntactically invalid
-    .py file, or a Jupyter/templated file that isn't real Python) -- nothing to
-    extract, never an error."""
+def _py_docstring_text(source: str) -> list[str]:
+    """Module + class + function/async-function docstrings, as independent blocks in
+    source order -- NEVER joined into one string (see the C-135 module comment above).
+    `ast.parse` only -- never compiled or executed, mirrors every other function in
+    this module. Empty on any parse failure (a syntactically invalid .py file, or a
+    Jupyter/templated file that isn't real Python) -- nothing to extract, never an
+    error."""
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError, RecursionError):
-        return ""
-    parts = []
+        return []
+    blocks = []
     mod_doc = ast.get_docstring(tree)
     if mod_doc:
-        parts.append(mod_doc)
+        blocks.append(mod_doc)
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             doc = ast.get_docstring(node)
             if doc:
-                parts.append(doc)
-    return "\n\n".join(parts)
+                blocks.append(doc)
+    return blocks
 
 
-def _sh_comment_text(source: str) -> str:
-    """Inverse of `_sh_mask_comments` -- returns the comment TEXT (the part after the
-    leading `#`) of each whole-line shell comment, instead of blanking it. Skips the
-    `#!` shebang line (an interpreter path, never prose)."""
-    lines = []
+def _sh_comment_text(source: str) -> list[str]:
+    """Inverse of `_sh_mask_comments` -- returns each CONTIGUOUS run of whole-line
+    shell comments as its own independent block, instead of blanking it. A run ends
+    the moment a non-comment (or shebang) line appears, so two comments separated by
+    real code are NEVER joined into one block (see the C-135 module comment above).
+    Skips the `#!` shebang line (an interpreter path, never prose) -- it also ends
+    whatever run precedes it."""
+    blocks: list[str] = []
+    current: list[str] = []
     for ln in source.splitlines():
         stripped = ln.lstrip()
         if stripped.startswith("#") and not stripped.startswith("#!"):
-            lines.append(stripped[1:].strip())
-    return "\n".join(lines)
+            current.append(stripped[1:].strip())
+        elif current:
+            blocks.append("\n".join(current))
+            current = []
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
 
 
-def _js_comment_text(source: str) -> str:
-    """Inverse of `_js_mask_comments` -- returns block (`/* */`) and line (`//`)
-    comment TEXT instead of blanking it. Mirrors that function's `(?<!:)` guard so a
+def _js_comment_text(source: str) -> list[str]:
+    """Inverse of `_js_mask_comments` -- returns each block (`/* */`) comment as its
+    own independent block, plus each CONTIGUOUS run of line (`//`) comments as its own
+    independent block. A `//` run ends the moment a non-comment line appears, so two
+    line comments separated by real code are NEVER joined into one block (see the
+    C-135 module comment above). Mirrors `_js_mask_comments`'s `(?<!:)` guard so a
     `://` inside a live string/URL is never misread as a line-comment opener."""
-    block_comments = re.findall(r"/\*(.*?)\*/", source, flags=re.S)
-    line_comments = []
+    blocks: list[str] = [m.strip() for m in re.findall(r"/\*(.*?)\*/", source, flags=re.S)]
+    current: list[str] = []
     for ln in source.splitlines():
         m = re.search(r"(?<!:)//(.*)$", ln)
         if m:
-            line_comments.append(m.group(1).strip())
-    return "\n".join(block_comments + line_comments)
+            current.append(m.group(1).strip())
+        elif current:
+            blocks.append("\n".join(current))
+            current = []
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
 
 
-def extract_script_prose(source: str, ext: str) -> str:
+def extract_script_prose(source: str, ext: str) -> list[str]:
     """C-318 (closes the PI-001/PE-005 residual gap): the docstring/comment TEXT of a
-    bundled script, keyed by its extension --
+    bundled script, as a list of independent BLOCKS -- one per docstring, or per
+    contiguous comment run -- keyed by its extension --
 
-      "py"                    -> module/class/function docstrings (`_py_docstring_text`)
-      "sh"/"bash"/"zsh"       -> comment lines (`_sh_comment_text`)
-      "js"/"ts"/"mjs"/"cjs"   -> block + line comments (`_js_comment_text`)
+      "py"                    -> one block per docstring (`_py_docstring_text`)
+      "sh"/"bash"/"zsh"       -> one block per comment run (`_sh_comment_text`)
+      "js"/"ts"/"mjs"/"cjs"   -> one block per comment (`_js_comment_text`)
 
-    Returns "" for an unsupported extension or a script with no docstring/comment at
-    all -- never raises. See the module comment above this function for why this is
-    additive evidence, not a change to what `_pos_in_source_code_section` exempts.
+    Returns [] for an unsupported extension or a script with no docstring/comment at
+    all -- never raises. Blocks are deliberately never joined into one string -- see
+    the C-135 module comment above this function for why (proximity-window
+    corroboration false-firing across unrelated blocks). See the module comment
+    further above for why this is additive evidence, not a change to what
+    `_pos_in_source_code_section` exempts.
     """
     if ext == "py":
         return _py_docstring_text(source)
@@ -4773,4 +4810,4 @@ def extract_script_prose(source: str, ext: str) -> str:
         return _sh_comment_text(source)
     if ext in ("js", "ts", "mjs", "cjs"):
         return _js_comment_text(source)
-    return ""
+    return []
