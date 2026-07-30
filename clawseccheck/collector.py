@@ -41,9 +41,25 @@ from .textnorm import normalize_for_scan, obfuscation_signals
 # Bootstrap / prompt files injected into the system prompt as "trusted context".
 # The native `openclaw security audit` does not inspect these files; checks
 # B6/B7/B9 cover that gap.
+#
+# B-365: BOOT.md is the ONE bootstrap file with an automatic EXECUTION trigger, not
+# merely an injection surface — the bundled `boot-md` hook (`gateway:startup` event)
+# runs it once per agent workspace on every gateway restart, no user turn involved
+# (grounded against the installed dist's own docs, `~/.npm-global/lib/node_modules/
+# openclaw/`: docs/concepts/agent-workspace.md:85, docs/automation/hooks.md:229,280,
+# docs/cli/hooks.md:31,101, docs/reference/templates/BOOT.md). Before this fix it was
+# absent here, so an attacker who could write one file into the workspace got a
+# directive-injection surface the whole content ring (B6/B7/B9 and friends, which all
+# iterate ctx.bootstrap) never saw at all. Adding it here is enough — those checks
+# already scan every ctx.bootstrap entry by name, so BOOT.md is now covered by the
+# SAME generic detection as SOUL.md/AGENTS.md/TOOLS.md, with no new check id needed.
+# (The `boot-md` hook itself ships DISABLED by default and must be explicitly enabled
+# via `openclaw hooks enable boot-md`, i.e. `hooks.internal.entries.boot-md.enabled` /
+# `hooks.internal.enabled` in openclaw.json — reading that toggle to gate severity is
+# left for a follow-up task, not this fix.)
 BOOTSTRAP_FILES = [
     "SOUL.md", "AGENTS.md", "TOOLS.md", "MEMORY.md", "IDENTITY.md",
-    "USER.md", "HEARTBEAT.md", "BOOTSTRAP.md", "memory.md",
+    "USER.md", "HEARTBEAT.md", "BOOTSTRAP.md", "memory.md", "BOOT.md",
 ]
 
 WORKSPACE_DIRS = ["workspace-home", "workspace-work", "workspace"]
