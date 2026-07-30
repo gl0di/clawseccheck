@@ -877,6 +877,15 @@ def check_subagents_allow_agents(ctx: Context) -> Finding:
     spawn target; the default restricts spawning to the requesting agent only.
 
     UNKNOWN — neither defaults nor any per-agent allowAgents is configured.
+              B-362: sets ``not_applicable`` only when the config locus was read
+              COMPLETELY and neither locus is configured. Grounded in the docstring's
+              own citation (docs.openclaw.ai/agents/subagents): with allowAgents unset
+              ANYWHERE, OpenClaw's own default restricts spawning to the requesting
+              agent only, so the wildcard-delegation surface this check grades
+              genuinely does not exist — not merely an unassessed risk. Both loci
+              (``agents.defaults.subagents.allowAgents`` and each
+              ``agents.list[].subagents.allowAgents``) are plain ``ctx.config`` reads,
+              so config-locus completeness is the whole proof obligation.
     WARN    — any allowAgents list contains '*'.
     PASS    — all allowAgents use explicit non-'*' lists.
     """
@@ -915,6 +924,7 @@ def check_subagents_allow_agents(ctx: Context) -> Finding:
             "restricts subagent spawning to the requesting agent only.",
             "The default is safe; only configure agents.defaults.subagents.allowAgents "
             "if you explicitly need cross-agent delegation.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     return _finding(
         "B72",
@@ -1025,6 +1035,14 @@ def check_untrusted_context(ctx: Context) -> Finding:
               model prompt (prompt-injection surface).  Never FAIL — this is a
               hardening advisory, not a broken config.
     UNKNOWN — no channels configured; cannot assess.
+              B-362: sets ``not_applicable`` only when the config locus was read
+              COMPLETELY and ``channels`` still resolves to no real provider entry
+              (same locus and same "no channels" test as B25/B26's sibling
+              check_sender_identity — see its F-140 note). With no channel configured
+              at all there is no untrusted-sender ingress for contextVisibility to
+              gate, so absence here is genuine inapplicability, not an unassessed
+              risk. The whole read is ``ctx.config``, so config-locus completeness is
+              the entire proof obligation.
     """
     cfg = ctx.config
     channel_map = dig(cfg, "channels")
@@ -1041,6 +1059,7 @@ def check_untrusted_context(ctx: Context) -> Finding:
             "No channels configured — cannot assess untrusted-context exposure.",
             "Set channels.defaults.contextVisibility to 'allowlist' or 'allowlist_quote' "
             "before enabling any channel.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
 
     # B-283 (c): resolution is account -> channel -> channels.defaults -> "all", matching
@@ -1136,6 +1155,13 @@ def check_wildcard_group_ingress(ctx: Context) -> Finding:
               allowFrom restricting it. Advisory only — never FAIL, since a public/
               community bot may intentionally accept any group.
     UNKNOWN — no channels configured; cannot assess.
+              B-362: sets ``not_applicable`` only when the config locus was read
+              COMPLETELY and ``channels`` still resolves to no real provider entry —
+              same locus, same "no channels" test, as B26 above. With no channel
+              configured there is no group-ingress surface for a wildcard entry to
+              exist on, so absence here is genuine inapplicability. The read is
+              ``ctx.config`` only, so config-locus completeness is the whole proof
+              obligation.
 
     B-297: the predicate itself now lives in `checks/_shared.py`
     (`_wildcard_group_gap` / `_resolved_channel_nodes`) so the risk engine's ingress
@@ -1155,6 +1181,7 @@ def check_wildcard_group_ingress(ctx: Context) -> Finding:
             "No channels configured — cannot assess wildcard group-ingress exposure.",
             "If you enable a channel with group support, set allowFrom (channel-level "
             "or per-group) before allowing a wildcard ('*') group entry.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
 
     affected: list[str] = []
