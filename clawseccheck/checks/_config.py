@@ -2045,6 +2045,16 @@ def check_gateway(ctx: Context) -> Finding:
             UNKNOWN,
             "No config loaded — cannot assess gateway.",
             "Run on the host with ~/.openclaw present.",
+            # B-362: sets not_applicable only when the config locus was read COMPLETELY
+            # and cfg is still empty. Every condition this check grades (bind, auth mode,
+            # trusted-proxy identity, open channels) is a plain ctx.config read, so a
+            # genuinely empty (but completely-read) config means none of that surface
+            # exists to misconfigure -- not merely an unassessed risk. _surface_absent's
+            # own config_found gate keeps a host with NO openclaw.json at all (a
+            # non-OpenClaw machine) on the real-UNKNOWN side, matching the existing
+            # check_control_plane_mutation precedent for the same "no gateway config"
+            # wording.
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     # C-182: `if not cfg:` above only catches a WHOLE-CONFIG-empty state. A
     # present-but-malformed `gateway` value (e.g. `"gateway": null`, a list, a
@@ -2052,6 +2062,10 @@ def check_gateway(ctx: Context) -> Finding:
     # ("absent") without raising — indistinguishable from "gateway key simply
     # not present" — and falls through to a confident PASS below. A field that
     # genuinely can't be assessed must read UNKNOWN, not a fabricated PASS.
+    # B-362: this malformed-value branch stays a REAL UNKNOWN (never not_applicable)
+    # -- a present-but-corrupt `gateway` value is not "no such surface", it is "we
+    # cannot tell what was intended", which is exactly the ambiguous case the sweep
+    # must not flip.
     gw_present = isinstance(cfg, dict) and "gateway" in cfg
     gw = cfg.get("gateway") if gw_present else None
     if gw_present and not isinstance(gw, dict):
@@ -2770,6 +2784,19 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
             "If you use a reverse proxy, configure gateway.auth.mode=trusted-proxy "
             "explicitly (with requiredHeaders/allowUsers) and bind the gateway to "
             "loopback.",
+            # B-362: sets not_applicable only when the config locus was read COMPLETELY
+            # and neither locus is set. Grounded (dist docs/gateway/index.md,
+            # configuration-reference.md, onboard.md): "token" is the default auth mode
+            # and trusted-proxy delegation is an explicit opt-in
+            # (gateway.auth.mode="trusted-proxy") -- with mode not set to it AND
+            # allowLoopback unset, the spoofable-header surface this check grades
+            # genuinely does not exist, not merely an unassessed risk. Both loci are
+            # plain ctx.config reads, so config-locus completeness is the whole proof
+            # obligation. (Contrast: this is unlike check_sandbox's "no exec tools"
+            # branch, which was left un-converted -- a full/unrestricted tool profile is
+            # OpenClaw's own default when tools.profile is unset, so absence there does
+            # NOT mean the surface is off.)
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
     if mode == "trusted-proxy" and bind_host not in LOOPBACK:
