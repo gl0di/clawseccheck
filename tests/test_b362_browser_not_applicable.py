@@ -75,21 +75,46 @@ def test_browser_key_entirely_absent_sets_not_applicable(check_fn):
 # 2. Present-but-empty ("browser": {}) -- adversarial control. `isinstance(browser,
 #    dict)` is True for `{}`, so every one of these checks never reaches its "no
 #    browser config" UNKNOWN branch (the one this task converted) at all -- they fall
-#    through to a real verdict, or (B321 only) a second, DIFFERENT, still-unconverted
-#    UNKNOWN branch ("browser configured but no executablePath/mcpCommand anywhere" --
-#    out of scope for this pass, left for follow-up). Decision: present-but-empty is
-#    therefore NOT the same case as wholly absent -- it never reaches the converted
-#    branch, so not_applicable must stay False either way. Pinned here so a future
-#    change to any of these checks' "isinstance(browser, dict)" gate can't silently
-#    make {} start reaching the not_applicable branch unnoticed.
+#    through to a real verdict, OR (B321 only) a second, DIFFERENT UNKNOWN branch
+#    ("browser configured but no executablePath/mcpCommand anywhere"). That second
+#    branch was itself converted to not_applicable in a follow-up pass -- see
+#    tests/test_b362_browser_executable_path_not_applicable.py, which pins B321's
+#    updated expectation (not_applicable=True for this exact fixture) in isolation.
+#    So B321 is deliberately EXCLUDED from this assertion below: for the other five,
+#    present-but-empty is NOT the same case as wholly absent -- it never reaches any
+#    not_applicable branch, so the flag must stay False. Pinned here so a future
+#    change to any of these five checks' "isinstance(browser, dict)" gate can't
+#    silently make {} start reaching a not_applicable branch unnoticed.
 # ---------------------------------------------------------------------------
 
-@_BROWSER_CHECKS
+_BROWSER_CHECKS_EXCEPT_B321 = pytest.mark.parametrize(
+    "check_fn",
+    [
+        check_browser_ssrf,
+        check_browser_extra_args,
+        check_browser_evaluate_enabled,
+        check_browser_existing_session_profile,
+        check_browser_cdp_control_port,
+    ],
+    ids=["B38", "B195", "B196", "B322", "B330"],
+)
+
+
+@_BROWSER_CHECKS_EXCEPT_B321
 def test_browser_present_but_empty_is_not_the_absence_branch(check_fn):
     f = check_fn(_ctx({"browser": {}}))
     assert f.not_applicable is False, (
         "an empty-but-present browser block must never be reported not_applicable"
     )
+
+
+def test_b321_browser_present_but_empty_now_is_its_own_not_applicable_branch():
+    """B321-specific control: unlike the other five, an empty browser block DOES
+    reach a (different, later-converted) not_applicable branch for this check --
+    see tests/test_b362_browser_executable_path_not_applicable.py for full coverage."""
+    f = check_browser_executable_path(_ctx({"browser": {}}))
+    assert f.status == UNKNOWN
+    assert f.not_applicable is True
 
 
 # ---------------------------------------------------------------------------
