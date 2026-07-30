@@ -20,7 +20,7 @@ from clawseccheck.checks import run_all
 from clawseccheck.scoring import compute
 from clawseccheck.risk import RiskPath, risk_paths, render_risk_paths
 from clawseccheck.report import render_json, render_report
-from clawseccheck.catalog import CRITICAL, HIGH, MEDIUM, FAIL, Finding
+from clawseccheck.catalog import CRITICAL, HIGH, MEDIUM, FAIL, PASS, WARN, Finding
 from clawseccheck.cli import main
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -1070,6 +1070,153 @@ def test_risk18_clean_restricted_context():
 
 def test_risk18_empty_config_no_fire():
     assert not any(p.id == "RISK-18" for p in _paths({}))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule RISK-23 (E-065): 2+ independent persistence anchors -> eviction-resistant
+# foothold. Anchors are synthetic Findings appended via _paths(cfg, extra_findings=...)
+# rather than crafted fixtures -- these checks (B99/B335/B150/B97/B338) each already
+# have their own dedicated test coverage for HOW they fire; this rule only cares about
+# their STATUS, so injecting the status directly keeps these tests focused on the
+# combinational logic (mirrors how _finding_status's "last entry wins" override is
+# meant to be used).
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _anchor(cid: str, status: str = WARN) -> Finding:
+    return Finding(cid, "anchor", HIGH, status, "detail", "fix", "Persistence")
+
+
+def test_risk23_two_different_anchors_fires():
+    paths = _paths({}, extra_findings=[_anchor("B99"), _anchor("B150")])
+    p = next((p for p in paths if p.id == "RISK-23"), None)
+    assert p is not None, [x.id for x in paths]
+    assert p.severity == HIGH
+    chain_text = " ".join(p.chain).lower()
+    assert "python interpreter auto-execution" in chain_text
+    assert "systemd" in chain_text
+
+
+def test_risk23_single_anchor_no_fire():
+    paths = _paths({}, extra_findings=[_anchor("B99")])
+    assert not any(p.id == "RISK-23" for p in paths)
+
+
+def test_risk23_b99_and_b335_are_the_same_class_no_fire():
+    # Both detect Python-interpreter auto-execution -- one mechanism, not two.
+    paths = _paths({}, extra_findings=[_anchor("B99"), _anchor("B335")])
+    assert not any(p.id == "RISK-23" for p in paths)
+
+
+def test_risk23_pass_status_does_not_count_as_an_anchor():
+    paths = _paths({}, extra_findings=[_anchor("B99", status=PASS), _anchor("B150")])
+    assert not any(p.id == "RISK-23" for p in paths)
+
+
+def test_risk23_three_anchors_all_named_in_chain():
+    paths = _paths({}, extra_findings=[_anchor("B99"), _anchor("B97"), _anchor("B338")])
+    p = next(p for p in paths if p.id == "RISK-23")
+    chain_text = " ".join(p.chain).lower()
+    assert "python interpreter auto-execution" in chain_text
+    assert "per-turn event-hook" in chain_text
+    assert "covert tunnel" in chain_text
+
+
+def test_risk23_empty_config_no_fire():
+    assert not any(p.id == "RISK-23" for p in _paths({}))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule RISK-24 (E-065): confirmed default-deny egress + a tunnel transport present
+# on the host + an agent that can act on untrusted input = the egress policy is
+# unenforceable against that transport.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_RISK24_EXEC_INGRESS_CFG = {
+    "channels": {"discord": {"dmPolicy": "open"}},
+    "tools": {"exec": {"security": "full"}},
+}
+
+
+def _host(tunnel_status="present", egress_active=True, supported=True):
+    return {
+        "system": "Linux",
+        "supported": supported,
+        "classes": {
+            "tunnel_transport": {
+                "status": tunnel_status,
+                "found": ["Tailscale"] if tunnel_status == "present" else [],
+                "active": None,
+                "evidence": [],
+            },
+            "egress_posture": {
+                "status": "present" if egress_active is not None else "unknown",
+                "found": ["nftables OUTPUT policy=drop"] if egress_active else [],
+                "active": egress_active,
+                "evidence": [],
+            },
+        },
+    }
+
+
+def _ctx_with_host(cfg: dict, host: dict) -> Context:
+    ctx = _ctx(cfg)
+    ctx.host = host
+    return ctx
+
+
+def test_risk24_fires_on_full_combination():
+    ctx = _ctx_with_host(_RISK24_EXEC_INGRESS_CFG, _host())
+    paths = risk_paths(ctx, _findings(ctx))
+    p = next((p for p in paths if p.id == "RISK-24"), None)
+    assert p is not None, [x.id for x in paths]
+    assert p.severity == MEDIUM
+    assert "Tailscale" in " ".join(p.chain)
+
+
+def test_risk24_no_fire_without_tunnel_present():
+    ctx = _ctx_with_host(_RISK24_EXEC_INGRESS_CFG, _host(tunnel_status="unknown"))
+    assert not any(p.id == "RISK-24" for p in risk_paths(ctx, _findings(ctx)))
+
+
+def test_risk24_no_fire_without_confirmed_deny():
+    ctx = _ctx_with_host(_RISK24_EXEC_INGRESS_CFG, _host(egress_active=False))
+    assert not any(p.id == "RISK-24" for p in risk_paths(ctx, _findings(ctx)))
+
+
+def test_risk24_no_fire_without_confirmed_deny_when_unknown():
+    ctx = _ctx_with_host(_RISK24_EXEC_INGRESS_CFG, _host(egress_active=None))
+    assert not any(p.id == "RISK-24" for p in risk_paths(ctx, _findings(ctx)))
+
+
+def test_risk24_no_fire_without_exec_tool():
+    cfg = {"channels": {"discord": {"dmPolicy": "open"}}}
+    ctx = _ctx_with_host(cfg, _host())
+    assert not any(p.id == "RISK-24" for p in risk_paths(ctx, _findings(ctx)))
+
+
+def test_risk24_no_fire_without_untrusted_ingress():
+    cfg = {"tools": {"exec": {"security": "full"}}}
+    ctx = _ctx_with_host(cfg, _host())
+    assert not any(p.id == "RISK-24" for p in risk_paths(ctx, _findings(ctx)))
+
+
+def test_risk24_no_fire_tunnel_present_alone_matches_hostwatch_fp_guard():
+    # Mirrors hostwatch.py's own doctrine: tunnel_transport "present" alone, with no
+    # confirmed egress policy and no host-capability corroboration, is never a finding.
+    ctx = _ctx_with_host({}, _host(egress_active=None))
+    assert not any(p.id == "RISK-24" for p in risk_paths(ctx, _findings(ctx)))
+
+
+def test_risk24_no_host_data_no_fire():
+    # Default _ctx() never sets .host -> getattr returns None -> no fire, same as
+    # RISK-10's _host_blind default-safe behavior.
+    ctx = _ctx(_RISK24_EXEC_INGRESS_CFG)
+    assert not any(p.id == "RISK-24" for p in risk_paths(ctx, _findings(ctx)))
+
+
+def test_risk24_unsupported_platform_no_fire():
+    ctx = _ctx_with_host(_RISK24_EXEC_INGRESS_CFG, _host(supported=False))
+    assert not any(p.id == "RISK-24" for p in risk_paths(ctx, _findings(ctx)))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
