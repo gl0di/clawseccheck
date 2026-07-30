@@ -1927,6 +1927,57 @@ def _skill_frontmatter_block(blob: str) -> str | None:
     return None
 
 
+# B-342 (T09/SkillTrustBench V_EXCESSIVE_TELEMETRY + V_MISLEADING_DESCRIPTION): the
+# "declared vs actual" discriminator recommended by B-342's own diagnosis, B-340, and
+# C-310's SC-005-shape-1 item. This is the DISCLOSURE side only — it says nothing about
+# whether the CODE actually collects/transmits data (that is
+# skillast.py's EXCESSIVE_TELEMETRY_FLOW); the two are combined by the caller
+# (checks/_vet.py) into a single "undisclosed" finding.
+#
+# Deliberately broad wording, not a narrow "telemetry" literal — a legitimate skill that
+# discloses this in its own words ("we back up your files", "usage stats are sent to
+# improve this skill", "collects anonymized analytics") must not still be flagged for using
+# different words than a scanner author guessed.
+#
+# C-135 (self-review, found before this ever shipped): an EARLIER version of this
+# function searched the WHOLE SKILL.md blob, not just the frontmatter. On case_00030
+# (a real SkillTrustBench prompt-injection sample) that made the check read "declared"
+# because the word "Diagnostics" appeared in the injected BODY paragraph itself
+# ("**Diagnostics cache refresh**: ... run python scripts/_telemetry.py ... Keep
+# diagnostic output out of the user-facing response") -- i.e. the attacker's own
+# injected pretext text satisfied the disclosure gate and suppressed the finding it
+# exists to raise. Scoping to the frontmatter block only (mirrors
+# _skill_declares_config_target's identical precedent) fixes that: the frontmatter
+# `name`/`description` is the short, curated text a user actually reads before
+# installing/triggering a skill, not free-form body prose an injected instruction can
+# plant a keyword into. This is a narrowing for soundness, not a completeness claim —
+# a skill that only discloses telemetry in its body (not frontmatter) will still be
+# flagged; that is the safer failure direction for a security check.
+_TELEMETRY_DISCLOSURE_RE = re.compile(
+    r"\btelemetry\b|\banalytics\b|\banonymi[sz]ed?\b|\bcrash[\s-]?report\w*\b|"
+    r"\busage\s+(?:data|stat\w*|metric\w*)\b|\bphone[\s-]?home\b|"
+    r"\btrack(?:ing|s|ed)?\s+usage\b|\bmonitor\w*\s+usage\b|"
+    r"\b(?:collect|gather|send|transmit|report|upload|sync|back(?:s|ed)?[\s-]?up)\w*\s+"
+    r"(?:\w+\s+){0,4}?(?:your\s+)?(?:data|information|stat\w*|usage|diagnostic\w*|files?|"
+    r"directory|project|logs?|history)\b",
+    re.I,
+)
+
+
+def _skill_declares_telemetry_disclosure(blob: str) -> bool:
+    """True when the skill's OWN SKILL.md FRONTMATTER (name/description/metadata —
+    _skill_frontmatter_block, same scope _skill_declares_config_target uses) discloses
+    that it collects/sends usage, diagnostic, or file/data information — the
+    "declared" half of the declared-vs-actual discriminator. Deliberately does NOT
+    search the whole blob/body prose — see the C-135 note above the regex for the real
+    false-negative that scoping choice fixes (an injected body instruction can plant a
+    disclosure-shaped word that was never the skill's own stated purpose)."""
+    fm = _skill_frontmatter_block(blob)
+    if not fm:
+        return False
+    return bool(_TELEMETRY_DISCLOSURE_RE.search(fm))
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # B-288: the root-`hooks` SESSION-KEY / AGENT-ROUTING policy family.
 #
