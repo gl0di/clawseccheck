@@ -18,7 +18,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
-    <img src="docs/assets/stats-light.svg" alt="174 security checks · 24 attack-chain detectors · 11,733 automated tests · 0 dependencies · 0 network calls" width="900">
+    <img src="docs/assets/stats-light.svg" alt="174 security checks · 24 attack-chain detectors · 12,158 automated tests · 0 dependencies · 0 network calls" width="900">
   </picture>
 </p>
 
@@ -112,7 +112,7 @@ tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)*
 - **Honest by design.** What it can't determine is reported as `UNKNOWN` —
   never quietly counted as safe. An open CRITICAL finding hard-caps your score:
   you can never get a pretty "A" with a real hole in it.
-- **Built like it matters.** 11,733 automated tests run on every change, a
+- **Built like it matters.** 12,158 automated tests run on every change, a
   false alarm is treated as a release-blocking bug, and every release is
   cryptographically signed.
 - **Free and readable.** MIT-licensed, pure Python standard library, zero
