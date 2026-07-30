@@ -642,8 +642,12 @@ python3 audit.py --log audit.log            # also write log to a local file
   - **`--judged-bundle PATH`** (only with `--full`, `-` for stdin) feeds back one file holding
     a host-agent judge's answers to a prior `--full --json` packet: an `attestation` object,
     a `judged` verdicts object for your own config (advisory — never changes the score or
-    grade), and a `vetJudged` array of per-target verdicts for the swept skills/plugins
-    (escalate-only — can never downgrade a finding on untrusted content). The result is a
+    grade), a `vetJudged` array of per-target verdicts for the swept skills/plugins
+    (escalate-only — can never downgrade a finding on untrusted content), and a `liveTest`
+    object carrying a `--canary`/`--dryrun`/`--redteam`/`--multiturn` verdict (F-155): only
+    `VULNERABLE` ever caps the grade — `RESISTANT` or nothing submitted changes nothing — and
+    only a run submitted with a `seed` is recorded into history/trend (see
+    `docs/OUTPUT_SCHEMA.md` §12 for the exact shape). The result is a
     `"Second opinion (advisory)"` section and, in `--json`, a `secondOpinion` array.
   - The whole pipeline shares one wall-clock budget (`DEFAULT_FULL_BUDGET_S`, currently
     2000s) so a hostile fleet cannot make `--full` hang indefinitely; a phase that could not

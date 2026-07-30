@@ -47,6 +47,8 @@ versioning §6 in `CLAUDE.md`).
 | `config_symlink_escapes_home` | `bool` | yes | `true` when `openclaw.json` is a symlink whose target leaves its config directory AND that target is a readable regular file owned by the auditing user — a benign dotfiles layout (stow/chezmoi/yadm/bare-git). The collector follows it and audits the real bytes, so this is NOT a blind config: `config_parse_error` stays `false` and the run is never `config_blind_capped` for this reason. Lets a consumer distinguish a safely-relocated config from a genuinely dark one. `false` on every normal (non-symlinked, or in-directory-symlinked) run. |
 | `degraded_capped` | `bool` | yes | `true` when a check that crashed or timed out this run (`Finding.id` prefixed `"ERR:"`) alone hard-capped the score at the same ceiling a proven CRITICAL FAIL gets (B-313). Same shape as `config_blind_capped` but at check-granularity instead of config-granularity: a degraded check's own would-be verdict is unknowable, so the sound worst-case assumption is "cannot rule out a CRITICAL". Composes with `cap_severity`/`runtime_capped`/`config_blind_capped` — whichever cap is tightest wins; only `true` when THIS cap was the one that actually lowered the score below what the other caps already produced. |
 | `degraded_count` | `int` | yes | How many checks crashed or timed out this run (`0` when none did) — unconditional, independent of whether `degraded_capped` ended up strictly binding. A consumer should treat any nonzero value as "this grade is incomplete", even when a tighter cap already explains the number on screen. |
+| `live_injection_capped` | `bool` | yes | F-155: `true` when a submitted VULNERABLE verdict from a live injection-test harness (`--canary`/`--dryrun`/`--redteam`/`--multiturn`) alone hard-capped the score at the same ceiling a proven CRITICAL FAIL gets — see `--full --judged-bundle`'s `liveTest` bucket (§12). Self-attestation guard: the verdict is produced by the agent UNDER TEST, so a RESISTANT verdict or no submission at all leaves this `false` — never an ordinary scored point, never a reason to raise anything. Composes with `cap_severity`/`runtime_capped`/`config_blind_capped`/`degraded_capped` — whichever cap is tightest wins; only `true` when THIS cap was the one that actually lowered the score below what the other caps already produced. |
+| `live_injection_cap_reason` | `str \| null` | yes | Stable label naming which harness/scenario(s) drove `live_injection_capped`, e.g. `"redteam:PI-01"` — built only from allow-listed tool names and validated scenario ids, never free text from the submission. `null` when `live_injection_capped` is `false`. |
 | `config_parse_reason` | `string \| null` | yes | Short diagnostic for why `config_parse_error` is `true` (the raw loader message), OR a note that a dotfiles-style symlink was safely followed when `config_symlink_escapes_home` is `true`. `null` when the config parsed cleanly with no relocation. Never contains a secret or file-content value. |
 | `errors` | `array[str]` | yes | Human-readable collection/parse messages (e.g. the `openclaw.json` parse error). Empty array on a clean run. |
 | `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §18. |
@@ -77,6 +79,8 @@ versioning §6 in `CLAUDE.md`).
   "config_blind_reason": null,
   "degraded_capped": false,
   "degraded_count": 0,
+  "live_injection_capped": false,
+  "live_injection_cap_reason": null,
   "assessable": true,
   "trifecta": "1/3",
   "findings": [ ... ],
@@ -648,6 +652,24 @@ counterpart in §1). The bundle's SEPARATE `vetJudged` array answers the per-tar
 `vetPackets` this same `--full --json` run also carries (§1) — the escalate-only
 sibling this packet's own authority rule does not apply to; see §15's own
 `--full`/`--judged-bundle` note below for that path.
+
+**`--full --judged-bundle`'s FOURTH bucket, `liveTest` (F-155):** a separate submission
+channel from the three above — it carries no relation to the audit's own borderline
+band, but reuses the identical bundle file/parsing shape (no second flag, no second
+bound) rather than inventing one. Shape:
+`{"seed": "<string>|omit", "verdicts": [{"tool": "canary"|"redteam"|"dryrun"|"multiturn",
+"id": "<scenario id>", "verdict": "VULNERABLE"|"RESISTANT"}, ...]}`. Self-attestation
+guard: only a `"VULNERABLE"` entry can ever move anything (`live_injection_capped` in
+§1) — a `"RESISTANT"` entry, an unrecognized tool/id/verdict, or an absent bucket has
+ZERO effect, by construction, not by convention (the verdict is produced by the agent
+UNDER TEST, so the asymmetry is load-bearing). `seed` gates recordability, not the cap
+itself: only a bucket carrying a non-empty `seed` string (the same value passed to the
+harness's own `--seed`, making its tokens reproducible) is eligible to be written into
+`~/.clawseccheck/history.jsonl`/`--trend`/the `--monitor` baseline — an unseeded
+(randomly-tokened) VULNERABLE verdict still caps THIS run's grade, but that run is never
+recorded, so a random token cannot manufacture drift across runs. Malformed/forged
+entries are dropped per-entry (never a crash), mirroring `judged`/`vetJudged`'s own
+defensive parsing.
 
 Sources folded into the packet:
 

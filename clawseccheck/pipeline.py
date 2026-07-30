@@ -51,6 +51,7 @@ failing one. It never moves the score, the grade or the exit code.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -703,9 +704,10 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
 # ── phase 2: the judged bundle ───────────────────────────────────────────────
 
 def split_judged_bundle(raw: str) -> dict:
-    """Split a ``--judged-bundle`` payload into its three independent buckets.
+    """Split a ``--judged-bundle`` payload into its four independent buckets.
 
-    Returns ``{"attestation": obj|None, "judged": obj|None, "vetJudged": [...]}``.
+    Returns ``{"attestation": obj|None, "judged": obj|None, "vetJudged": [...],
+    "liveTest": obj|None}``.
 
     Bounded and never raises — this is untrusted input, and it is advisory data that
     must never be able to crash or otherwise perturb the audit itself. Anything
@@ -714,8 +716,14 @@ def split_judged_bundle(raw: str) -> dict:
     Splitting first, then handing each piece to the *existing* hardened consumer, is
     deliberate: growing ``--judged``'s own parser to carry N per-target buckets would
     put a bounded, adversarially test-pinned parser at risk for no gain.
+
+    F-155: ``liveTest`` is the fourth bucket, added on this same terms — it is NOT a
+    second submission channel (the task's own instruction: reuse this bundle's shape
+    rather than inventing one). Its own contents are validated separately by
+    :func:`live_test_cap_signal`; this function only does the same coarse
+    "is it even a dict" gate every other bucket already gets.
     """
-    empty: dict = {"attestation": None, "judged": None, "vetJudged": []}
+    empty: dict = {"attestation": None, "judged": None, "vetJudged": [], "liveTest": None}
     if not isinstance(raw, str):
         return empty
     if len(raw.encode("utf-8", "surrogatepass")) > MAX_BUNDLE_BYTES:
@@ -734,6 +742,8 @@ def split_judged_bundle(raw: str) -> dict:
     vet_judged = data.get("vetJudged")
     if isinstance(vet_judged, list):
         out["vetJudged"] = [e for e in vet_judged if isinstance(e, dict)]
+    if isinstance(data.get("liveTest"), dict):
+        out["liveTest"] = data["liveTest"]
     return out
 
 
@@ -751,6 +761,145 @@ def read_judged_bundle(path: str) -> dict:
         except OSError:
             raw = ""
     return split_judged_bundle(raw)
+
+
+# ── liveTest bucket (F-155) ───────────────────────────────────────────────────
+#
+# The fourth --judged-bundle bucket: a host agent's self-tested canary/dryrun/redteam/
+# multiturn verdict, fed back so `scoring.compute`'s cap-only LIVE_INJECTION_CAP can see
+# it. This is NOT a second submission channel — it rides the same bundle file, the same
+# MAX_BUNDLE_BYTES bound, and the same "never raises, degrade to inert on anything
+# malformed" discipline `_parse_verdicts` (adjudication.py) already established for the
+# `judged`/`vetJudged` buckets.
+#
+# Self-attestation guard (scoring.LIVE_INJECTION_CAP's docstring): the verdict is
+# produced by the AGENT UNDER TEST, so only "VULNERABLE" may ever have an effect —
+# structurally, not by convention. `live_test_cap_signal` never even looks for a
+# "RESISTANT" or unrecognized verdict to react to; the only thing this module ever
+# extracts is the presence of at least one VULNERABLE entry.
+
+# The only four harnesses that can ever submit a live-test verdict — matches the modules
+# this task names (canary.py/dryrun.py/redteam.py/multiturn.py) exactly.
+LIVE_TEST_TOOLS = frozenset({"canary", "redteam", "dryrun", "multiturn"})
+
+# Exactly the two verdicts these harnesses' own evaluate() functions ever return
+# (canary.evaluate / redteam.evaluate / dryrun.evaluate all return one of these two
+# literal strings) — never a third value.
+_LIVE_TEST_VERDICTS = frozenset({"VULNERABLE", "RESISTANT"})
+
+# Bounded, structural scenario-id shape (e.g. "canary", "PI-01", "DR-07", "MT-02") — the
+# real ids every harness's own make_*() emits are short alnum-plus-hyphen tokens. Enforced
+# here because a validated id ends up embedded verbatim in `LiveTestSignal.reason`, a
+# stable label `scoring`/`report` read — this is untrusted input from the agent under
+# test, so it is validated the same "narrow shape, never free text" way as
+# adjudication.py's `_CONFIG_PATH_RE`/`_LDH_HOST_RE`, never trusted as arbitrary prose.
+_LIVE_TEST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+
+# F-155: only a SEEDED run's tokens are deterministic/reproducible (canary.make_canary /
+# redteam.make_suite / dryrun.make_scenarios all draw a fresh `secrets` value unless an
+# explicit seed is supplied) — see LIVE_INJECTION_CAP's docstring for why an unseeded
+# verdict must still cap THIS run but never reach history.jsonl/trend/baseline. A seed
+# longer than this is treated as malformed (not reproducible) rather than parsed further;
+# generous above any real --seed value (an operator-chosen string, or canary/redteam's own
+# `secrets.token_hex(8)` default — 16 hex chars).
+_MAX_LIVE_TEST_SEED_LEN = 128
+
+
+@dataclass
+class LiveTestSignal:
+    """F-155: the reduced, cap-only signal from one --judged-bundle ``liveTest`` bucket.
+
+    ``hit`` is True iff at least one structurally-valid entry carried a VULNERABLE
+    verdict — see the self-attestation guard above; RESISTANT and unrecognized/malformed
+    entries can never set this True.
+    ``reason`` is a stable, bounded label (e.g. ``"redteam:PI-01"``) built only from
+    allow-listed tool names and regex-validated scenario ids — never free text copied
+    from the submission. None when ``hit`` is False.
+    ``reproducible`` is True only when the bucket also carried a well-formed, non-empty,
+    bounded ``seed`` string — the gate `cli.py` uses to decide whether this run's
+    verdict may be recorded into history.jsonl/trend/baseline.
+    """
+
+    hit: bool = False
+    reason: str | None = None
+    reproducible: bool = False
+
+
+def _valid_live_test_entries(bucket) -> list[tuple[str, str, str]]:
+    """Every structurally-valid ``(tool, id, verdict)`` triple in *bucket*'s
+    ``"verdicts"`` list.
+
+    Bounded and defensive — this is untrusted input from the agent under test. Any
+    entry that is not a dict, names an unrecognized tool, carries an id outside
+    ``_LIVE_TEST_ID_RE``'s shape, or carries anything but exactly "VULNERABLE"/
+    "RESISTANT" is simply dropped — mirroring `adjudication._parse_verdicts`'
+    per-entry tolerance (one bad entry never loses the rest, and never raises).
+    """
+    if not isinstance(bucket, dict):
+        return []
+    entries = bucket.get("verdicts")
+    if not isinstance(entries, list):
+        return []
+    out: list[tuple[str, str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        tool, entry_id, verdict = entry.get("tool"), entry.get("id"), entry.get("verdict")
+        if not (isinstance(tool, str) and tool in LIVE_TEST_TOOLS):
+            continue
+        if not (isinstance(entry_id, str) and _LIVE_TEST_ID_RE.match(entry_id)):
+            continue
+        if verdict not in _LIVE_TEST_VERDICTS:
+            continue
+        out.append((tool, entry_id, verdict))
+    return out
+
+
+def _live_test_reproducible(bucket) -> bool:
+    """True only when *bucket* carries a well-formed, non-empty, bounded ``seed``.
+
+    Deliberately structural, not a claimed boolean: a client-supplied
+    ``"reproducible": true`` field would let any submission (seeded or not) simply
+    assert its way past the history-recording gate, so this derives the fact from the
+    same real signal (a usable seed string) `canary`/`redteam`/`dryrun` themselves need
+    to reproduce their tokens, and ignores any such field entirely.
+    """
+    if not isinstance(bucket, dict):
+        return False
+    seed = bucket.get("seed")
+    return isinstance(seed, str) and 0 < len(seed) <= _MAX_LIVE_TEST_SEED_LEN
+
+
+# How many VULNERABLE entries' labels `reason` names before collapsing the rest to a
+# "(+N more)" tail — bounded so a submission with many entries cannot inflate the label
+# without limit; mirrors adjudication.py's own "first 12, then (+N more)" convention.
+_MAX_LIVE_TEST_REASON_ENTRIES = 6
+
+
+def live_test_cap_signal(bucket) -> LiveTestSignal:
+    """F-155: reduce a ``--judged-bundle`` ``"liveTest"`` bucket to a cap-only signal.
+
+    *bucket* is whatever :func:`split_judged_bundle` put at ``["liveTest"]`` — ``None``
+    when the bundle carried no such bucket, or carried one that failed the coarse
+    "is it a dict" gate. Never raises regardless of what *bucket* actually contains.
+
+    The self-attestation guard is enforced HERE, structurally: this function only ever
+    looks for a VULNERABLE entry among the ones :func:`_valid_live_test_entries`
+    validated. There is no branch anywhere in this function, or in
+    `scoring._live_injection_cap_signal` downstream, that reacts to a RESISTANT verdict
+    or to an absent submission — both simply produce no VULNERABLE entries to find, so
+    the natural "nothing found" result (``LiveTestSignal()``, every field at its
+    zero-effect default) is what they get, not a special case carved out for them.
+    """
+    entries = _valid_live_test_entries(bucket)
+    vulnerable = [(tool, entry_id) for tool, entry_id, verdict in entries if verdict == "VULNERABLE"]
+    if not vulnerable:
+        return LiveTestSignal()
+    labels = [f"{tool}:{entry_id}" for tool, entry_id in vulnerable[:_MAX_LIVE_TEST_REASON_ENTRIES]]
+    reason = "; ".join(labels)
+    if len(vulnerable) > _MAX_LIVE_TEST_REASON_ENTRIES:
+        reason += f" (+{len(vulnerable) - _MAX_LIVE_TEST_REASON_ENTRIES} more)"
+    return LiveTestSignal(hit=True, reason=reason, reproducible=_live_test_reproducible(bucket))
 
 
 # ── the pipeline roll-up (P10) ───────────────────────────────────────────────

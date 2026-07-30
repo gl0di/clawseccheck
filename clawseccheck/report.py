@@ -103,6 +103,19 @@ def _runtime_cap_phrase(reason: str | None) -> str:
     return "a corroborated runtime signal"
 
 
+def _live_injection_cap_phrase(reason: str | None) -> str:
+    """Plain-English rendering of scoring's stable ``live_injection_cap_reason`` label.
+
+    `reason` is a bounded, allow-listed ``"tool:id[; tool:id ...]"`` string (see
+    `pipeline.live_test_cap_signal`) — already safe to embed directly (no free text ever
+    reaches it), but this still routes through the same "report.py owns the sentence,
+    the scoring layer only names a stable label" discipline as `_runtime_cap_phrase`.
+    """
+    if not reason:
+        return "a live injection-test scenario reported VULNERABLE"
+    return f"a live injection-test scenario reported VULNERABLE ({reason})"
+
+
 _SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}
 # Within a family: FAIL/WARN (the actionable items) before PASS/UNKNOWN (context).
 _STATUS_ORDER = {FAIL: 0, WARN: 1, UNKNOWN: 2, PASS: 3}
@@ -1156,8 +1169,36 @@ def render_report(findings: list[Finding], score: ScoreResult,
     _audited_path = getattr(ctx, "config_path", None) if ctx is not None else None
     _cfg_found = getattr(ctx, "config_found", True) if ctx is not None else True
     _degraded_capped = getattr(score, "degraded_capped", False)
-    if score.capped or score.config_blind_capped or score.runtime_capped or _degraded_capped:
-        if score.config_blind_capped:
+    # F-155: this only ever becomes True on a submitted VULNERABLE live injection-test
+    # verdict (self-attestation guard — see scoring.LIVE_INJECTION_CAP) so every existing
+    # call site/test, which never sets it, takes the exact same branches below as before
+    # this field existed.
+    _live_capped = getattr(score, "live_injection_capped", False)
+    if score.capped or score.config_blind_capped or score.runtime_capped or _degraded_capped or _live_capped:
+        if _live_capped:
+            # F-155: display priority over config-blind/degraded/severity/runtime — this
+            # is direct, positive proof of a successful live attack (not "cannot rule
+            # out"), so it takes the top slot the same way config_blind_capped already
+            # does for its own reasoning. Co-occurring signals are still named via
+            # `_extra`, same convention as every other branch here.
+            _extra = []
+            if score.config_blind_capped:
+                _extra.append("a blind/unreadable config")
+            if _degraded_capped or _degraded_n:
+                _extra.append(f"{_degraded_n} degraded check(s)")
+            if score.cap_severity:
+                _extra.append(f"an open {score.cap_severity} finding")
+            if score.runtime_capped:
+                _extra.append(
+                    f"a corroborated runtime signal ({_runtime_cap_phrase(score.runtime_cap_reason)})"
+                )
+            _also = f"; also {', '.join(_extra)}" if _extra else ""
+            lines.append(
+                f"(capped from {score.raw_score} - "
+                f"{_live_injection_cap_phrase(getattr(score, 'live_injection_cap_reason', None))}"
+                f"{_also})"
+            )
+        elif score.config_blind_capped:
             # B-306 (C-135 follow-up): takes display priority over cap_severity/runtime/
             # degraded — when more than one signal fires, this names every one that did
             # so the reader never loses a co-occurring reason (the `total == 0` branch
@@ -1325,6 +1366,24 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append(
             f"  This run's grade WAS capped by that exception: "
             f"{_runtime_cap_phrase(score.runtime_cap_reason)}."
+        )
+    # F-155: a SECOND exception to "this grade never reflects runtime behaviour" — a
+    # submitted VULNERABLE verdict from a live injection-test harness (canary/dryrun/
+    # redteam/multiturn) MAY CAP this grade, never raise it, and only when actually
+    # submitted (self-attestation guard: RESISTANT or no submission at all has ZERO
+    # effect — see scoring.LIVE_INJECTION_CAP). Distinct from the I-025 exception above:
+    # that one is the engine corroborating its OWN trajectory sidecar; this one is the
+    # agent under test self-reporting the outcome of an ACTIVE probe it just ran.
+    #
+    # Deliberately gated on `live_injection_capped` (unlike the I-025 paragraph above,
+    # which is unconditional) — this task's own test plan requires a run with nothing
+    # submitted to render byte-identically to before this feature existed, so no new line
+    # may appear here unless a VULNERABLE verdict actually capped this run.
+    if getattr(score, "live_injection_capped", False):
+        lines.append(
+            "Live-test exception (F-155): this run's grade WAS capped by a submitted "
+            f"VULNERABLE verdict — {_live_injection_cap_phrase(score.live_injection_cap_reason)}."
+            " RESISTANT or no submission would have changed nothing."
         )
     # B-306 (C-135 follow-up): openclaw.json itself went dark this run (present but
     # unparseable, or unreadable) — every config-derived check (A1/B41/B1/B11/...)
@@ -2297,6 +2356,12 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         # run this many times) even when this bool is False because a tighter cap won.
         "degraded_capped": getattr(score, "degraded_capped", False),
         "degraded_count": getattr(score, "degraded_count", 0),
+        # F-155: true when a submitted VULNERABLE live injection-test verdict (canary/
+        # dryrun/redteam/multiturn, via --judged-bundle's "liveTest" bucket) alone
+        # hard-capped the grade — see scoring.LIVE_INJECTION_CAP. RESISTANT or no
+        # submission at all always leaves this False (self-attestation guard).
+        "live_injection_capped": getattr(score, "live_injection_capped", False),
+        "live_injection_cap_reason": getattr(score, "live_injection_cap_reason", None),
         "assessable": bool(score.assessable),
         "trifecta": _trifecta_ratio(findings),
         "findings": [
@@ -2483,6 +2548,11 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
     _cfg_blind = getattr(score, "config_blind_capped", False)
     _rt_capped = getattr(score, "runtime_capped", False)
     _rt_reason = getattr(score, "runtime_cap_reason", None)
+    # F-155: only True on a submitted VULNERABLE live injection-test verdict — every
+    # existing call site/test, which never sets it, takes the exact same branches below
+    # as before this field existed (self-attestation guard, scoring.LIVE_INJECTION_CAP).
+    _live_capped = getattr(score, "live_injection_capped", False)
+    _live_reason = getattr(score, "live_injection_cap_reason", None)
     # B-313: same "unconditional, above the grade" disclosure as render_report's text
     # banner — a degraded check count is shown whenever it's nonzero, independent of
     # whether it ended up strictly binding the cap (see _degraded_capped below).
@@ -2495,7 +2565,26 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
             f'<p class="degraded"><strong>⚠️ Incomplete:</strong> {_degraded_n} {_plural}'
             ' did not run (crashed or timed out) — this grade is incomplete.</p>'
         )
-    if _cfg_blind:
+    if _live_capped:
+        # F-155: display priority over config-blind/degraded/severity/runtime — direct,
+        # positive proof of a successful live attack, same top-slot reasoning as
+        # render_report's text branch.
+        _extra = []
+        if _cfg_blind:
+            _extra.append('a blind/unreadable config')
+        if _degraded_capped or _degraded_n:
+            _extra.append(f'{_degraded_n} degraded check(s)')
+        if score.cap_severity:
+            _extra.append(f'an open {esc(score.cap_severity)} finding')
+        if _rt_capped:
+            _extra.append(
+                f'a corroborated runtime signal ({esc(_runtime_cap_phrase(_rt_reason))})'
+            )
+        _also = f'; also {", ".join(_extra)}' if _extra else ''
+        capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
+                       f'from {score.raw_score} '
+                       f'({esc(_live_injection_cap_phrase(_live_reason))}{_also})</p>')
+    elif _cfg_blind:
         # B-306 (C-135 follow-up): display priority over cap_severity/runtime/degraded —
         # see render_report for why more than one signal can co-occur only in that branch.
         _extra = []

@@ -73,6 +73,7 @@ from .dossier import build_profile
 from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE, verify_chain
 from .tamperscore import tamper_subgrade
+from .scoring import compute
 from .redteam import make_suite, render_suite
 from .dryrun import make_scenarios, render_dryrun
 from .multiturn import make_multiturn, render_multiturn
@@ -1270,9 +1271,12 @@ def _main(argv=None) -> int:
                    help="only with --full: feed back one file holding a host-agent judge's "
                         "answers to a prior '--full --json' packet — an 'attestation' "
                         "object, a 'judged' verdicts object for your own config (advisory: "
-                        "the grade and findings stay unchanged) and a 'vetJudged' array of "
+                        "the grade and findings stay unchanged), a 'vetJudged' array of "
                         "per-target verdicts for swept content (which may only ESCALATE a "
-                        "finding, never lower one); use '-' to read from stdin")
+                        "finding, never lower one), and a 'liveTest' object carrying a "
+                        "canary/dryrun/redteam/multiturn VULNERABLE|RESISTANT verdict (only "
+                        "VULNERABLE ever caps the grade; a seeded 'seed' makes the verdict "
+                        "reproducible and eligible for history/trend); use '-' to read from stdin")
     p.add_argument("--ask", action="store_true",
                    help="emit an attestation template (JSON) for the agent to self-report "
                         "facts the config can't show; fill it, then pass --attest")
@@ -1912,6 +1916,32 @@ def _main(argv=None) -> int:
         _pipeline.read_judged_bundle(args.judged_bundle)
         if (args.full and args.judged_bundle is not None) else None
     )
+    # F-155: a VULNERABLE live injection-test verdict (canary/dryrun/redteam/multiturn),
+    # fed back through the SAME --judged-bundle file the "judged"/"vetJudged" buckets
+    # already use (no second submission channel) — never a second CLI flag. Only present
+    # when --full carried one; every other invocation sees `live_signal.hit is False` and
+    # this whole block is a no-op, which is what keeps every non---full path (--dashboard,
+    # --trend, --monitor, the plain report, and --full runs with no bundle) byte-identical
+    # to before this feature existed.
+    #
+    # `score` was already computed once, above, by `audit()` — recomputed here (not
+    # mutated in place) only when a VULNERABLE verdict actually fired, so
+    # `scoring.compute`'s self-attestation guard (RESISTANT/absent -> zero effect) is
+    # enforced by the SAME function every other caller uses, not re-implemented here.
+    #
+    # Known, deliberate scope limit: `render_json`'s "projection" (what-if FIX FIRST)
+    # sub-block calls `scoring.project` -> `scoring.compute` a second time over
+    # (findings, ctx) alone, with no live-test signal threaded through — unlike the three
+    # earlier cap-only signals (config-blind/degraded/runtime), which are fully derivable
+    # from (findings, ctx) alone and so already agree with `score` for free, this one
+    # needs external input `project()`'s call site does not have. Left unaddressed here
+    # rather than widening `render_json`/`project`'s signatures for a projection feature
+    # this task does not otherwise touch.
+    live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
+    live_signal = _pipeline.live_test_cap_signal(live_test_bucket)
+    if live_signal.hit:
+        score = compute(findings, ctx, live_test_vulnerable=True,
+                        live_test_reason=live_signal.reason)
     if args.json:
         # F-149 JSON gap: --full's printed SKILL SWEEP section had no machine-readable
         # counterpart — the whole self-test/vet-mcp/sweep block below is skipped
@@ -2183,7 +2213,15 @@ def _main(argv=None) -> int:
             _emit(f"\n(could not save report: {exc})")
             _save_failed = True
 
-    if not args.no_history and not args.trend and not args.monitor:
+    # F-155: a live-test verdict that fired the cap but was NOT reproducible (no usable
+    # seed — see LiveTestSignal.reproducible / LIVE_INJECTION_CAP's docstring) must still
+    # cap THIS run's score/grade above, but must never be written to history.jsonl/trend/
+    # baseline — those exist to show drift across runs, and a random, unrepeatable signal
+    # recorded there would manufacture drift where none exists and let the grade oscillate
+    # on its own every time the harness is re-run with a fresh token. A seeded (or absent)
+    # live-test signal records exactly as before this feature existed.
+    _skip_history_for_live_test = live_signal.hit and not live_signal.reproducible
+    if not args.no_history and not args.trend and not args.monitor and not _skip_history_for_live_test:
         history_record(score, args.history)
 
     if _save_failed:

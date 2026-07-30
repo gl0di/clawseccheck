@@ -538,7 +538,7 @@ def test_vetjudged_quiet_collapses_to_one_line_including_the_judged_bucket():
 # split_judged_bundle — adversarial input, never raises
 # ---------------------------------------------------------------------------
 
-_EMPTY_BUNDLE = {"attestation": None, "judged": None, "vetJudged": []}
+_EMPTY_BUNDLE = {"attestation": None, "judged": None, "vetJudged": [], "liveTest": None}
 
 
 def test_split_judged_bundle_non_string_input():
