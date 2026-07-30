@@ -12,6 +12,12 @@ config-absence UNKNOWN sites in checks/_config.py.
   branch is deliberately left a real UNKNOWN — a present-but-corrupt value is not "no
   such surface", it is "cannot tell what was intended" — so this file pins that it is
   NOT flipped (test_b2_malformed_gateway_value_stays_real_unknown).
+* B70 (``check_trustedproxy_loopback``) — neither ``gateway.auth.mode="trusted-proxy"``
+  nor ``gateway.auth.trustedProxy.allowLoopback`` is configured. Grounded (dist
+  docs/gateway/index.md, configuration-reference.md, onboard.md): "token" is the
+  default auth mode and trusted-proxy delegation is an explicit opt-in, so with
+  neither locus set the spoofable-header surface this check grades genuinely does not
+  exist.
 
 Same three-part shape as the prior B-362 test files: (1) the flag fires when the
 surface is genuinely absent, (2) it degrades to False on an incomplete read, (3) it
@@ -26,7 +32,7 @@ from pathlib import Path
 
 from clawseccheck.adjudication import build_judge_packet
 from clawseccheck.catalog import UNKNOWN, Finding
-from clawseccheck.checks import check_gateway
+from clawseccheck.checks import check_gateway, check_trustedproxy_loopback
 from clawseccheck.collector import LIMIT_DOMAIN_CONFIG, Context, note_limit
 from clawseccheck.report import render_report
 from clawseccheck.scoring import ScoreResult
@@ -108,6 +114,73 @@ def test_report_distinguishes_not_applicable_from_real_unknown_for_b2():
         detail="could not determine", fix="—", framework="Test", not_applicable=False,
     )
     na = check_gateway(_ctx({}))
+    out = render_report([real_unknown, na], _score())
+    assert "not assessed (config can't tell)" in out
+    assert "not applicable (no such surface in your config)" in out
+
+
+# ---------------------------------------------------------------------------
+# B70 — check_trustedproxy_loopback, "trusted-proxy not configured" branch
+# ---------------------------------------------------------------------------
+
+def test_b70_trusted_proxy_entirely_unconfigured_sets_not_applicable():
+    f = check_trustedproxy_loopback(_ctx({}))
+    assert f.status == UNKNOWN
+    assert f.not_applicable is True
+
+
+def test_b70_domain_tagged_limit_hit_keeps_flag_false():
+    ctx = _ctx({})
+    note_limit(ctx.limit_hits, LIMIT_DOMAIN_CONFIG, "hit the config scan cap")
+    f = check_trustedproxy_loopback(ctx)
+    assert f.status == UNKNOWN
+    assert f.not_applicable is False
+
+
+def test_b70_config_parse_error_keeps_flag_false():
+    f = check_trustedproxy_loopback(_ctx({}, config_parse_error=True))
+    assert f.not_applicable is False
+
+
+def test_b70_config_not_found_keeps_flag_false():
+    f = check_trustedproxy_loopback(_ctx({}, config_found=False))
+    assert f.not_applicable is False
+
+
+def test_b70_not_applicable_finding_excluded_from_judge_packet():
+    ctx = _ctx({})
+    f = check_trustedproxy_loopback(ctx)
+    assert f.not_applicable is True  # control
+    packet = build_judge_packet(ctx, [f])
+    assert packet == []
+
+
+def test_b70_trusted_proxy_mode_configured_never_reaches_the_absence_branch():
+    """Adversarial: explicitly configuring gateway.auth.mode=trusted-proxy must never be
+    reported not_applicable -- it reaches a real WARN/PASS verdict instead."""
+    f = check_trustedproxy_loopback(
+        _ctx({"gateway": {"bind": "0.0.0.0", "auth": {"mode": "trusted-proxy"}}})
+    )
+    assert f.status != UNKNOWN
+    assert f.not_applicable is False
+
+
+def test_b70_allow_loopback_alone_never_reaches_the_absence_branch():
+    """Adversarial: allowLoopback set (even without mode=trusted-proxy) is itself a
+    declaration -- `configured` becomes True via the second half of the OR -- so this
+    must never be reported not_applicable."""
+    f = check_trustedproxy_loopback(
+        _ctx({"gateway": {"auth": {"trustedProxy": {"allowLoopback": True}}}})
+    )
+    assert f.not_applicable is False
+
+
+def test_report_distinguishes_not_applicable_from_real_unknown_for_b70():
+    real_unknown = Finding(
+        id="B999", title="Synthetic unresolved check", severity="LOW", status=UNKNOWN,
+        detail="could not determine", fix="—", framework="Test", not_applicable=False,
+    )
+    na = check_trustedproxy_loopback(_ctx({}))
     out = render_report([real_unknown, na], _score())
     assert "not assessed (config can't tell)" in out
     assert "not applicable (no such surface in your config)" in out

@@ -2784,6 +2784,19 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
             "If you use a reverse proxy, configure gateway.auth.mode=trusted-proxy "
             "explicitly (with requiredHeaders/allowUsers) and bind the gateway to "
             "loopback.",
+            # B-362: sets not_applicable only when the config locus was read COMPLETELY
+            # and neither locus is set. Grounded (dist docs/gateway/index.md,
+            # configuration-reference.md, onboard.md): "token" is the default auth mode
+            # and trusted-proxy delegation is an explicit opt-in
+            # (gateway.auth.mode="trusted-proxy") -- with mode not set to it AND
+            # allowLoopback unset, the spoofable-header surface this check grades
+            # genuinely does not exist, not merely an unassessed risk. Both loci are
+            # plain ctx.config reads, so config-locus completeness is the whole proof
+            # obligation. (Contrast: this is unlike check_sandbox's "no exec tools"
+            # branch, which was left un-converted -- a full/unrestricted tool profile is
+            # OpenClaw's own default when tools.profile is unset, so absence there does
+            # NOT mean the surface is off.)
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
     if mode == "trusted-proxy" and bind_host not in LOOPBACK:
