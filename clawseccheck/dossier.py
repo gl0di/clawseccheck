@@ -67,6 +67,8 @@ _AXIS_BY_ID: dict[str, str | None] = {
     "B87": "persistence",  # symlink escape to a sensitive path = staged exfil primitive
     "B62": "build",  # capability over-grant = a build-quality / least-privilege defect
     "B59": "connections",  # markdown-image data-exfil = outbound channel
+    "B338": "connections",  # covert tunnel / mesh-VPN enrollment = outbound channel (E-065)
+    "B339": None,  # cloud IMDS credential fetch — dual-axis via axis_reasons (E-065/C-322)
     "SOURCE-VET": "danger",  # reputation gate is a pure danger/identity verdict
     # F-148: the content ring was cut short by the scan budget, so part of the skill was
     # never assessed. Mapped to danger deliberately — the ring feeds several axes, but
@@ -360,6 +362,18 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
             # .axis_reasons by the MCP engine; until then, keep the whole verdict on the
             # danger axis so a dangerous server can never read as falsely clean.
             _route_axis_reasons(f, buckets, fallback_axis="danger")
+        elif f.id == "B339":
+            # E-065/C-322: B339 (cloud IMDS credential fetch) is FAIL-only and, on FAIL,
+            # sets .axis_reasons to BOTH danger (so the F floor at _grade_profile still
+            # applies — this is as unambiguously malicious as B13's malware verdict) and
+            # connections (the specific axis the HF-incident review exists to make
+            # honest — before this routing, a credential-stealing skill's Connections
+            # axis silently read PASS because nothing bucketed there). Its non-FAIL
+            # (PASS/UNKNOWN) branches leave .axis_reasons empty and fall through here
+            # unchanged onto "connections" — the natural single axis for "no exfil
+            # signal found" — never onto "danger", which would misfile an ordinary clean
+            # result under the malware-verdict axis.
+            _route_axis_reasons(f, buckets, fallback_axis="connections")
         else:
             # A real finding that maps nowhere is a coverage gap we surface, never swallow.
             unmapped.append(f.id)
@@ -475,7 +489,11 @@ def _clean_reason(axis: str, families: set) -> str:
         return "no dormant or staged code detected"
     if axis == "connections":
         if "network" in families:
-            return "reaches the network for its stated purpose; no exfiltration signal"
+            # E-065/C-322: the prior wording ("reaches the network for its stated
+            # purpose") claimed this axis had verified the network use matches the
+            # skill's declared purpose — it never did; PASS here means only that no
+            # bucketed finding fired, an absence, not a positive alignment check.
+            return "no exfiltration signal found"
         return "no outbound network surface"
     return "no issue found"
 
