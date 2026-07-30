@@ -348,7 +348,12 @@ def _is_trusted_installer_url(url: str) -> bool:
 _CRED_PATH_RE = re.compile(
     r"\.ssh/id_|\bid_rsa\b|\bid_ed25519\b|\.aws/credentials|login\.keychain|wallet\.dat|"
     r"keystore\.json|\.npmrc|\.pypirc|\.netrc|\.docker/config|\.kube/config|"
-    r"\.config/gcloud|/\.?secrets?\b|cookies\.sqlite|Cookies\b",
+    r"\.config/gcloud|/\.?secrets?\b|cookies\.sqlite|Cookies\b|"
+    # E-065/C-323: the HF-incident reproduction read a process's own environment
+    # (which commonly carries API keys/tokens passed via env var) through procfs
+    # rather than a dotfile. /var/run/secrets and /run/secrets (K8s service-account
+    # token, Docker/Swarm secrets mounts) are already covered above by /\.?secrets?\b.
+    r"/proc/(?:self|\d+)/environ",
     re.I,
 )
 _NET_SINK_ATTRS_ANY = {"post", "put", "patch", "urlopen", "request"}
@@ -4227,7 +4232,15 @@ def analyze_python_package(files) -> list[ASTFinding]:
 _SH_CRED_FILE_RE = re.compile(
     r"\.ssh/id_[a-z0-9_]+|\bid_rsa\b|\bid_ed25519\b|\.aws/credentials|\.netrc\b|"
     r"login\.keychain|wallet\.dat|\.docker/config\b|\.kube/config\b|\.npmrc\b|\.pypirc\b|"
-    r"\.openclaw/|/\.config/[^/\s\"']+/",
+    r"\.openclaw/|/\.config/[^/\s\"']+/|"
+    # E-065/C-323: same widening as the Python _CRED_PATH_RE above -- a process's own
+    # environment (procfs), the K8s service-account bearer token mount, and the
+    # Docker/Swarm secrets mount are all real credential-bearing paths the HF-incident
+    # reproduction actually read. Unlike the Python regex, this one has no generic
+    # /\.?secrets?\b catch-all, so both mounts need an explicit entry.
+    r"/proc/(?:self|\d+)/environ|"
+    r"/var/run/secrets/kubernetes\.io/serviceaccount/token|"
+    r"/run/secrets/[^/\s\"']+",
     re.I,
 )
 # Outbound commands that can send data off the machine.
