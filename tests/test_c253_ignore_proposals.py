@@ -304,13 +304,18 @@ def test_applying_a_proposal_is_still_monitor_drift(tmp_path):
 def _judge_packet_first_unknown_id(tmp_path):
     """Run a real audit and return (finding_id, target) of some real UNKNOWN
     finding, so the CLI round-trip tests exercise a genuine finding rather
-    than a synthetic one."""
+    than a synthetic one.
+
+    Skips ``not_applicable`` UNKNOWNs (B-362): those are excluded from the judge
+    packet by design (B-361), so an ignore-proposal round-trip against one would
+    never produce a proposal to apply — this helper needs a genuinely judgeable
+    UNKNOWN, not merely any UNKNOWN-status finding."""
     from clawseccheck import audit
     ctx, findings, _score = audit(tmp_path)
     for f in findings:
-        if f.status == UNKNOWN and not f.suppressed:
+        if f.status == UNKNOWN and not f.suppressed and not f.not_applicable:
             return f.id, f.id  # _target_from_evidence falls back to f.id with no evidence
-    raise AssertionError("fixture produced no UNKNOWN finding to test against")
+    raise AssertionError("fixture produced no judgeable UNKNOWN finding to test against")
 
 
 def test_cli_propose_ignore_is_read_only(tmp_path, capsys):

@@ -72,6 +72,9 @@ _RING_EXEMPT = {
     # installed_skills ONLY to build IOC tokens correlated against that corpus; under --vet
     # there is a single skill and no log corpus, so the axis is structurally inert — same
     # full-audit-scope reason as check_cross_skill_combined_effect above.
+    "check_supply_chain",       # B5 (B-362) — supply-chain/plugin-config posture check;
+    # reads ctx.installed_skills only to gate its not_applicable flag (whether the disk
+    # skill corpus is empty and completely walked), never to scan skill content itself.
 }
 
 
