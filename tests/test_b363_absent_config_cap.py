@@ -147,7 +147,12 @@ class TestThreeWayContract:
         assert score.config_blind_reason is None
         assert score.score > CONFIG_BLIND_CAP
 
-        rc = main(["--home", str(CLEAN_HOME), "--exit-code", "--no-native", "--no-history"])
+        # F-156/B340 reads the real host's live listening sockets by default; this
+        # fixture's declared gateway.bind (127.0.0.1:8080) can collide with whatever
+        # this machine happens to have listening there, which is not what this test
+        # is meant to exercise. --no-sockets keeps the assertion deterministic.
+        rc = main(["--home", str(CLEAN_HOME), "--exit-code", "--no-native", "--no-history",
+                   "--no-sockets"])
         capsys.readouterr()
         assert rc == 0
 

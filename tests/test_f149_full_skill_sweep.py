@@ -349,8 +349,14 @@ def test_full_without_exit_code_stays_zero_on_dangerous_skill(capsys):
 
 
 def test_suspicious_fixture_exits_zero_end_to_end(capsys):
-    """The real WARN fixture through the real engine — no stub — still exits 0."""
-    rc, out = _run(capsys, SUSPICIOUS, ["--full", "--exit-code"])
+    """The real WARN fixture through the real engine — no stub — still exits 0.
+
+    --no-sockets keeps this deterministic: F-156/B340 otherwise reads this
+    machine's real live listening sockets and can disagree with this fixture's
+    declared gateway.bind (127.0.0.1:8080) depending on what else happens to be
+    listening on this host.
+    """
+    rc, out = _run(capsys, SUSPICIOUS, ["--full", "--exit-code", "--no-sockets"])
     section = _skill_sweep_section(out)
     assert "SUSPICIOUS" in section
     assert rc == 0

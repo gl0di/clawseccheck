@@ -65,8 +65,14 @@ def test_exit_code_on_vuln_returns_one(capsys):
 
 
 def test_exit_code_on_safe_returns_zero(capsys):
-    """home_safe has no FAIL findings -> --exit-code must return 0."""
-    rc = main(["--home", SAFE] + BASE + ["--exit-code"])
+    """home_safe has no FAIL findings -> --exit-code must return 0.
+
+    --no-sockets keeps this deterministic: F-156/B340 otherwise reads this
+    machine's real live listening sockets and can disagree with home_safe's
+    declared gateway.bind (127.0.0.1:8080) depending on what else happens to be
+    listening on this host.
+    """
+    rc = main(["--home", SAFE] + BASE + ["--exit-code", "--no-sockets"])
     assert rc == 0
 
 
