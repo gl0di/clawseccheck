@@ -4358,7 +4358,8 @@ def detect_vet_type(target: str | Path, home: str | Path = "~/.openclaw") -> str
 # _egress.py) and the install-directive / remote-dependency known-bad-host checks
 # (checks/_content.py), not just this one gate. `known_bad_sources()` builds the exact
 # same dict[str, frozenset] shape this literal used to be — see its docstring for how
-# HOSTS records populate the "url"/"any" pools, preserving prior behavior unchanged.
+# HOSTS records populate the "url" pool only (the "any" pool stays empty of host
+# literals, exactly as the former literal had it), preserving prior behavior unchanged.
 _SOURCE_KNOWN_BAD: dict = _iocdb_known_bad_sources()
 
 

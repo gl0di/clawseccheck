@@ -311,6 +311,41 @@ def test_shipped_catalog_round_trips_through_iocdb():
     assert vet_source("https://letssendit.fun/x").status == FAIL
 
 
+def test_c135_bare_name_colliding_with_host_ioc_is_not_a_false_fail():
+    # CLAWSECCHECK-F-157 C-135 regression: a pypi/npm/git/clawhub package whose bare
+    # NAME happens to equal one of the 3 HOSTS literals must NOT fail as a
+    # known-bad SOURCE -- it has nothing to do with the actual IOC host, only a
+    # name collision. Pre-fix, iocdb.known_bad_sources() leaked HOSTS values into
+    # the "any" pool, so vet_source's step-1 exact-name match (eco_keys =
+    # [eco, "any"]) wrongly FAILed every one of these. Correct verdict: UNKNOWN
+    # (no known-bad SOURCE record for that ecosystem+name).
+    for target in (
+        "pypi:laosji.net",
+        "npm:letssendit.fun",
+        "git:github.com/someuser/91.92.242.30@main",  # ref pinned: isolate from the
+        # separate unpinned-ref WARN so only the known-bad-name path is under test
+    ):
+        f = vet_source(target)
+        assert f.status == UNKNOWN, f"{target} -> {f.status}: {f.detail}"
+        assert "known-compromised" not in f.detail
+
+
+def test_c135_real_host_ioc_still_fails_after_the_any_pool_fix():
+    # The companion assertion to the fix above: restricting HOSTS to the "url" pool
+    # must NOT silently disable real host-IOC detection. A genuine URL/host source
+    # actually served off the known-bad infrastructure still FAILs via the step-1b
+    # host check (catalog: url) -- this is the true positive the fix must preserve.
+    for target in (
+        "https://laosji.net/payload.sh",
+        "https://letssendit.fun/x",
+        "https://91.92.242.30/x",
+    ):
+        f = vet_source(target)
+        assert f.status == FAIL, f"{target} -> {f.status}: {f.detail}"
+        assert "known-compromised infrastructure" in f.detail
+        assert "catalog: url" in f.detail
+
+
 def test_vet_source_stays_silent_when_iocdb_is_fresh():
     # Real dataset, real (current) clock -- freshness_notice() contributes nothing.
     f = vet_source("clawhub:my-totally-new-skill")

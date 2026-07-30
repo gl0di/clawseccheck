@@ -198,8 +198,16 @@ def known_bad_sources() -> dict:
 
     Backward-compatible with the dict `checks/_vet.py` used to hardcode: SOURCES
     records populate their own `type` (ecosystem) pool, and HOSTS records populate
-    BOTH the "url" and "any" pools (vet_source matches a URL/git source's *host*
-    against exactly those two pools) -- identical behavior to the former literal.
+    ONLY the "url" pool -- identical to the former literal, where "any" was an
+    explicit, always-empty frozenset(). HOSTS values are meaningful as a URL/git
+    source's *host* IOC (matched via vet_source's step 1b host check against the
+    "url"/"any" pools), not as a bare package/slug name to be checked against
+    EVERY ecosystem via the "any" pool -- putting them there made a pypi/npm/git/
+    clawhub package whose bare NAME happens to collide with a host literal
+    (e.g. a pypi package literally named "laosji.net") FAIL as a known-bad source,
+    even though it has nothing to do with the actual IOC host (a C-135 adversarial
+    review caught this widening as a real false positive). Do not re-add HOSTS to
+    the "any" pool without re-running that adversarial pass.
     """
     pools: dict = {"npm": set(), "pypi": set(), "clawhub": set(), "git": set(),
                    "url": set(), "any": set()}
@@ -207,7 +215,6 @@ def known_bad_sources() -> dict:
         pools.setdefault(rec["type"], set()).add(rec["value"].lower())
     for rec in HOSTS:
         pools["url"].add(rec["value"].lower())
-        pools["any"].add(rec["value"].lower())
     return {k: frozenset(v) for k, v in pools.items()}
 
 

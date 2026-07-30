@@ -142,8 +142,28 @@ def test_known_bad_sources_round_trips_the_former_hardcoded_values():
         "ai-tradingview-assistant-for-macos", "tradingview-ai-indicator-assistant",
     })
     assert pools["url"] == frozenset({"91.92.242.30", "laosji.net", "letssendit.fun"})
-    assert pools["any"] == pools["url"]
+    # CLAWSECCHECK-F-157 (C-135 regression): pre-commit, the hardcoded "any" pool was
+    # an explicit, always-empty frozenset() — NOT the same set as "url". HOSTS values
+    # are a host IOC (matched via vet_source's url/registry-host path), not a bare
+    # name to be checked against every ecosystem, so "any" must stay empty exactly
+    # like the former literal — never widen to equal "url" again.
+    assert pools["any"] == frozenset()
     assert pools["npm"] == pools["pypi"] == pools["git"] == frozenset()
+
+
+def test_known_bad_sources_any_pool_excludes_every_hosts_value():
+    # CLAWSECCHECK-F-157 regression pin: none of the 3 HOSTS literals may leak into
+    # the "any" pool, or a pypi/npm/git/clawhub package whose bare NAME happens to
+    # collide with a host literal (e.g. a pypi package literally named "laosji.net")
+    # would wrongly FAIL vet_source's exact-name match (eco_keys = [eco, "any"])
+    # as a "known-bad source", despite having nothing to do with the actual IOC host.
+    pools = iocdb.known_bad_sources()
+    hosts_values = {rec["value"].lower() for rec in iocdb.HOSTS}
+    assert hosts_values, "sanity: HOSTS must be non-empty for this test to mean anything"
+    assert not (hosts_values & pools["any"])
+    # And confirm the true positive is preserved: every HOSTS value IS still in "url",
+    # so a real url/registry-host IOC match keeps firing (no real detection lost).
+    assert hosts_values <= pools["url"]
 
 
 def test_known_bad_sources_values_are_lowercased():
