@@ -395,12 +395,21 @@ def run_behavioral(ctx, *, ascii_only: bool = False) -> PhaseResult:
     whole phase: the behavioural block above already rendered successfully, and a
     second, independent renderer's failure must not erase it.
 
-    Advisory only, both renderers. Behavioural/trajectory findings are never folded
-    into the score, the grade or ``--exit-code`` — this phase reports ``has_fail=False``
-    unconditionally, which is the same visibility-only contract the skill sweep's WARN
-    rows already have. Nothing here computes a Finding or touches ``ctx``/scoring, so
-    that invariant holds structurally, the same way the plain behavioural render above
-    always has — there is no separate cap to apply or protect.
+    Advisory only, both renderers, w.r.t. ``--exit-code``: this phase reports
+    ``has_fail=False`` unconditionally, the same visibility-only contract the skill
+    sweep's WARN rows already have — nothing here computes a Finding or sets
+    ``has_fail``, so that invariant holds structurally regardless of what either
+    renderer prints.
+
+    F-154: the SCORE/GRADE half of that claim is narrower than it used to be. A fired
+    T1/T2/T3/B191 detector MAY now cap the A-F grade (never raise it, never earn/cost
+    an ordinary scored point) — but that cap is computed by `cli.py`, EARLIER in the
+    same `--full` invocation, from its own `behavioral.analyze(ctx)` call (see
+    `scoring.BEHAVIORAL_SIGNAL_CAP`), never by this phase's own render. This function
+    still never touches `ctx`/scoring itself, and the trajectory-incident renderer
+    (`render_trajectory_analysis`, the INCIDENT SIGNAL line) stays advisory-only in
+    both directions — its own runtime cap (I-025/RUNTIME_SIGNAL_CAP) is likewise
+    computed elsewhere, never here.
     """
     started = time.monotonic()
     try:
@@ -437,12 +446,14 @@ def run_behavioral(ctx, *, ascii_only: bool = False) -> PhaseResult:
 
     if incident:
         detail = ("trajectory replay complete — an INCIDENT SIGNAL was found in the "
-                  "trajectory incident analysis below (advisory only, never folded "
-                  "into the grade).")
+                  "trajectory incident analysis below (that signal itself is advisory "
+                  "only; a fired behavioral detector above it may separately have "
+                  "capped the grade — see F-154).")
         quiet_line = ("behavioural replay complete — INCIDENT SIGNAL found (advisory). "
                      "Full detail: --analyze-trajectory.")
     else:
-        detail = "trajectory replay complete — advisory only, never folded into the grade."
+        detail = ("trajectory replay complete — a fired behavioral detector may have "
+                  "capped the grade (F-154); this replay itself never scores a FAIL.")
         quiet_line = ("behavioural replay complete (advisory). Full detail: --behavioral "
                      "/ --analyze-trajectory.")
 

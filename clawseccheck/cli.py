@@ -92,6 +92,8 @@ from .logsafe import get_logger
 from .safeio import secure_write_text
 from .incident import render_incident
 from .trajaudit import render_trajectory_analysis
+from .behavioral import analyze as _behavioral_analyze
+from .behavioral import grade_cap_signal as _behavioral_grade_cap_signal
 from .behavioral import render_behavioral_analysis
 from .sbom import render_sbom
 
@@ -1939,9 +1941,31 @@ def _main(argv=None) -> int:
     # this task does not otherwise touch.
     live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
     live_signal = _pipeline.live_test_cap_signal(live_test_bucket)
-    if live_signal.hit:
-        score = compute(findings, ctx, live_test_vulnerable=True,
-                        live_test_reason=live_signal.reason)
+    # F-154: the behavioral cap-only signal (T1/T2/T3/B191), gated on THIS invocation
+    # having ACTUALLY run `behavioral.analyze(ctx)` — mirrors --fast's own skip of P8
+    # (`_pipeline.run_pipeline`'s `run_behavioral`), so a --full --fast run (or any
+    # non---full invocation) sees byte-identical behaviour to before this cap existed:
+    # no analysis run == no cap, never a guess. Computed once, early — before either
+    # the --json or plain-text branch below renders `score` — so both paths see the
+    # identical, already-capped score, the same discipline `live_signal` above already
+    # established.
+    #
+    # Known, deliberate scope limit: this re-runs `behavioral.analyze(ctx)` a second
+    # time when the P8 phase further below (inside `_pipeline.run_pipeline`) renders
+    # its OWN section — there is no cheap way to thread the result through without
+    # widening `run_pipeline`'s signature, and P8's own wall-clock budget check runs at
+    # a DIFFERENT point in the pipeline (after P6/P7 have already spent part of the
+    # window) than this early call can see. A run tight enough on the budget for P8
+    # itself to later report "not reached" could therefore still show a behavioral-
+    # capped score here — a narrow, documented edge case left to F-153's planned
+    # restructuring of the whole --full rendering order, not this task.
+    behavioral_fired_ids: "frozenset[str]" = frozenset()
+    if args.full and not args.fast:
+        behavioral_fired_ids = _behavioral_grade_cap_signal(_behavioral_analyze(ctx))
+    if live_signal.hit or behavioral_fired_ids:
+        score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
+                        live_test_reason=live_signal.reason,
+                        behavioral_fired_ids=behavioral_fired_ids)
     if args.json:
         # F-149 JSON gap: --full's printed SKILL SWEEP section had no machine-readable
         # counterpart — the whole self-test/vet-mcp/sweep block below is skipped

@@ -10,11 +10,15 @@
   show an "A".
 - Nothing scorable (empty / all-UNKNOWN / all-advisory) -> "not assessable",
   reported distinctly instead of mislabeled as a worst-possible F (B-014).
-- Two CAP-ONLY signals never earn/cost an ordinary scored point, only ever lower the
+- Cap-only signals never earn/cost an ordinary scored point, only ever lower the
   ceiling, applied after the severity caps above: a corroborated runtime signal
-  (RUNTIME_SIGNAL_CAP, I-025/B-309) and an unreadable/unparseable primary config
-  (CONFIG_BLIND_CAP, B-306) — the latter closes the "config went dark mid-audit and the
-  grade rose because its own FAILs correctly degraded to UNKNOWN" gap.
+  (RUNTIME_SIGNAL_CAP, I-025/B-309); an unreadable/unparseable primary config
+  (CONFIG_BLIND_CAP, B-306) — closes the "config went dark mid-audit and the grade rose
+  because its own FAILs correctly degraded to UNKNOWN" gap; a crashed/timed-out check
+  (DEGRADED_CHECK_CAP, B-313); a submitted VULNERABLE live injection-test verdict
+  (LIVE_INJECTION_CAP, F-155); and a fired behavioral T1/T2/T3/B191 detector
+  (BEHAVIORAL_SIGNAL_CAP, F-154) — only when ``--behavioral``/``--full`` actually ran
+  the analysis this invocation, never computed automatically.
 """
 from __future__ import annotations
 
@@ -42,9 +46,13 @@ _SEV_ORDER = (CRITICAL, HIGH, MEDIUM, LOW)
 # trajaudit indicator's Finding never becomes `scored=True` — it stays excluded from
 # the `scored` filter above exactly as before; this cap is a SEPARATE, additional path
 # that never touches `earned`/`total`. Every runtime-consuming check (B83, B84, B85,
-# B164, B180, T1/T2/T3) stays permanently unable to reach the grade any other way — see
+# B164, B180) stays permanently unable to reach the grade any other way — see
 # tests/test_i025_runtime_cap.py's enumeration, which pins each one's scored/cap status
-# so a future flag flip anywhere in that set turns red.
+# so a future flag flip anywhere in that set turns red. F-154: T1/T2/T3 (plus B191)
+# gained a SEPARATE, dedicated cap-only channel of their own (BEHAVIORAL_SIGNAL_CAP,
+# below) — they still never earn an ordinary scored point, and still cannot reach the
+# grade through THIS (RUNTIME_SIGNAL_CAP) channel; `_runtime_cap_signal` below still
+# reads only *ctx* (the trajaudit half), never their findings.
 #
 # The cap mirrors FAIL_CAPS' "one real problem always costs a grade" philosophy, set at
 # the same ceiling as a HIGH-severity static FAIL: a corroborated runtime signal is
@@ -168,6 +176,79 @@ DEGRADED_CHECK_CAP = FAIL_CAPS[CRITICAL]
 # testable, and independently able to be "the" binding cap).
 LIVE_INJECTION_CAP = FAIL_CAPS[CRITICAL]
 
+# F-154: T1/T2/T3/B191 (BEHAVIORAL_CHECK_IDS, behavioral.py) reach the grade through a
+# dedicated cap-only channel of their own — reusing RUNTIME_SIGNAL_CAP's SHAPE (cap-
+# only, applied after the severity caps, never touches earned/total) but NOT its tier,
+# and NOT LIVE_INJECTION_CAP's either: this is proven-by-LOG behavioral observation (a
+# verb-sequence/outcome/drift/audit-trail heuristic over ctx.home's OWN trajectory
+# sidecar), never live-injection-test evidence (an active probe's self-reported
+# verdict) — Dave's design keeps those two categorically separate (see
+# LIVE_INJECTION_CAP's own docstring: "should not be shoehorned into an existing
+# tier"), so this is its own named tier too, not a graft onto either.
+#
+# GATED ON ACTUAL EXECUTION — unlike RUNTIME_SIGNAL_CAP's own ctx-only trajaudit half.
+# `_runtime_cap_signal` calls `trajaudit.grade_cap_signal(ctx)` UNCONDITIONALLY on every
+# `compute()` call that supplies ctx (a comparatively cheap indicator-membership scan).
+# T1/T2/T3/B191's OWN detectors (`behavioral.analyze()` — thread-grouping plus per-verb
+# classification over the whole event stream) are deliberately NOT run that way:
+# BEHAVIORAL_CHECK_IDS exist ONLY under --behavioral/--full (behavioral.py's own module
+# docstring), precisely so a plain `clawseccheck` invocation never pays that cost. So
+# this cap is admitted ONLY via `compute()`'s additive `behavioral_fired_ids` argument,
+# supplied by the CALLER (cli.py) after it has ALREADY run `behavioral.analyze(ctx)`
+# under --behavioral or --full — never computed automatically inside `compute()`
+# itself. A caller that never ran the analysis passes the empty-frozenset default, so
+# this cap is provably inert on every plain (non---behavioral, non---full) invocation —
+# byte-identical to before this task, exactly like every other additive cap-only
+# argument above.
+#
+# PER-DETECTOR CEILING, not one flat value — the four detectors are not equally strong
+# evidence:
+#   * T1 (behavioral trifecta: an ingress leg, then a sensitive-data verb, then an
+#     egress verb, PROVEN in that order within one thread) is the closest match to
+#     RUNTIME_SIGNAL_CAP's own "proof a chain was ATTEMPTED, not a config heuristic"
+#     reasoning — literally the same trifecta shape A1/RUNTIME_SIGNAL_CAP already
+#     treat that way, just observed via a verb sequence instead of a skill/bootstrap
+#     indicator matched in runtime arguments. Elevated to the SAME ceiling as
+#     RUNTIME_SIGNAL_CAP (FAIL_CAPS[HIGH]) despite T1's own catalogued severity being
+#     MEDIUM (catalog.py) — exactly how LIVE_INJECTION_CAP already elevates past its
+#     producers' un-scored status: a cap tier's severity-shape rationale is an
+#     independent evidentiary judgment, not a mirror of a check's catalogued severity.
+#   * T2 (outcome anomaly), T3 (capability drift) and B191 (audit-trail divergence)
+#     stay at their own catalogued MEDIUM ceiling (FAIL_CAPS[MEDIUM]) — each is
+#     explicitly advisory by its OWN docstring: T2 is "ambiguous by design" (a
+#     fail-fail-success series can be persistence past a denial OR ordinary
+#     retry/backoff on a transient failure); T3 is "advisory, not proof of abuse" (a
+#     verb beyond tools.allow is often legitimate — built-ins/MCP tools are
+#     auto-available beyond it); B191's own three signals each have "a legitimate
+#     benign story this check cannot rule out" (a deliberately tightened policy; a
+#     third-party tool name that slipped past an older syntax gate; trajectory tracing
+#     turned off on purpose) — corroborating incomplete/divergent audit COVERAGE, not a
+#     proven attack chain. None of the three individually rises to T1's "proven
+#     multi-stage chain" bar, so none individually earns T1's tighter ceiling.
+# The tightest ceiling among whatever fired wins, mirroring how FAIL_CAPS' own
+# "most-severe FAIL cap wins" composes multiple concurrently-true severities.
+_BEHAVIORAL_CAP_BY_ID: dict = {
+    "T1": FAIL_CAPS[HIGH],
+    "T2": FAIL_CAPS[MEDIUM],
+    "T3": FAIL_CAPS[MEDIUM],
+    "B191": FAIL_CAPS[MEDIUM],
+}
+# Convenience constant for callers/tests that want "the tightest this tier can ever
+# apply" without enumerating the per-id table above — equal to FAIL_CAPS[HIGH] (T1's
+# own ceiling), since T1 is the strongest of the four.
+BEHAVIORAL_SIGNAL_CAP = min(_BEHAVIORAL_CAP_BY_ID.values())
+
+# Stable, testable labels for `behavioral_cap_reason` — never free text, same
+# discipline as `_runtime_cap_signal`/`_live_injection_cap_signal`; report.py owns the
+# owner-facing sentence built from these (mirrors `_runtime_cap_phrase`/
+# `_live_injection_cap_phrase`).
+_BEHAVIORAL_LABELS: dict = {
+    "T1": "T1 behavioral trifecta",
+    "T2": "T2 outcome anomaly",
+    "T3": "T3 capability drift",
+    "B191": "B191 audit-trail divergence",
+}
+
 
 def grade_for(score: int) -> str:
     for threshold, letter in GRADES:
@@ -236,6 +317,19 @@ class ScoreResult:
     # rendered as-is — report.py owns the user-facing sentence, same discipline as
     # `runtime_cap_reason`/`config_blind_reason`.
     live_injection_cap_reason: str | None = None
+    # F-154: True only when BEHAVIORAL_SIGNAL_CAP actually bound (lower than whatever
+    # the severity/config-blind/degraded/runtime/live-injection caps above already
+    # produced) — same "only-when-actually-binding" discipline as the other cap-only
+    # signals. False whenever no BEHAVIORAL_CHECK_IDS WARN was supplied via
+    # `compute()`'s `behavioral_fired_ids` argument (including every call site that
+    # never ran --behavioral/--full at all), OR one was but a tighter cap already
+    # applied.
+    behavioral_capped: bool = False
+    # F-154: stable label(s) naming which behavioral detector(s) drove this cap (e.g.
+    # "T1 behavioral trifecta") — never free text; see `_behavioral_cap_signal`. None
+    # whenever `behavioral_capped` is False. Never rendered as-is — report.py owns the
+    # owner-facing sentence, same discipline as the other `*_cap_reason` fields.
+    behavioral_cap_reason: str | None = None
 
 
 def _degraded_signal(findings: list[Finding]) -> tuple[bool, int]:
@@ -350,9 +444,36 @@ def _live_injection_cap_signal(live_test_vulnerable: bool,
     return True, live_test_reason
 
 
+def _behavioral_cap_signal(behavioral_fired_ids) -> tuple[bool, str | None, int]:
+    """F-154: reduce the caller-supplied set of fired BEHAVIORAL_CHECK_IDS to a cap
+    decision.
+
+    *behavioral_fired_ids* is whatever `behavioral.grade_cap_signal(result)` returned —
+    the set of T1/T2/T3/B191 ids that fired WARN in a run of `behavioral.analyze(ctx)`
+    the CALLER already performed (under --behavioral or --full). This function does no
+    analysis of its own and never raises: an unrecognized id is silently dropped
+    (defensive against a future id added to BEHAVIORAL_CHECK_IDS without a matching
+    entry here — it would simply never cap, not crash), and an empty/absent set (every
+    call site that never ran the analysis) always yields ``(False, None, ...)``.
+
+    Returns ``(hit, reason, cap)`` — *reason* is a stable, testable label (never
+    rendered prose — report.py builds the user-facing sentence from it, same
+    convention as `_runtime_cap_signal`/`_live_injection_cap_signal`). *cap* is the
+    TIGHTEST ceiling among whatever fired (see `_BEHAVIORAL_CAP_BY_ID`'s per-detector
+    rationale above `BEHAVIORAL_SIGNAL_CAP`); it is only meaningful when *hit* is True.
+    """
+    fired = frozenset(behavioral_fired_ids) & _BEHAVIORAL_CAP_BY_ID.keys()
+    if not fired:
+        return False, None, BEHAVIORAL_SIGNAL_CAP
+    cap = min(_BEHAVIORAL_CAP_BY_ID[i] for i in fired)
+    reason = "; ".join(_BEHAVIORAL_LABELS[i] for i in sorted(fired))
+    return True, reason, cap
+
+
 def compute(findings: list[Finding], ctx=None, *,
            live_test_vulnerable: bool = False,
-           live_test_reason: str | None = None) -> ScoreResult:
+           live_test_reason: str | None = None,
+           behavioral_fired_ids=frozenset()) -> ScoreResult:
     """Weighted pass-rate + severity FAIL caps (module docstring), plus I-025/B-309's
     cap-only runtime signal and B-306's cap-only config-blind signal.
 
@@ -387,6 +508,16 @@ def compute(findings: list[Finding], ctx=None, *,
     arguments. RESISTANT or no submission at all must never reach this function with
     ``live_test_vulnerable=True`` — see `_live_injection_cap_signal`'s self-attestation
     guard and `LIVE_INJECTION_CAP`'s docstring for why that asymmetry is load-bearing.
+
+    F-154: *behavioral_fired_ids* is optional and additive, exactly like the arguments
+    above — every existing call site that omits it sees byte-identical behaviour
+    (``behavioral_capped`` stays False). Pass the set of T1/T2/T3/B191 ids that fired
+    WARN in a `behavioral.analyze(ctx)` the CALLER already ran this invocation (under
+    --behavioral or --full) — see `behavioral.grade_cap_signal`, the ONLY intended
+    producer of this argument. A caller that never ran the analysis must simply omit
+    it (or pass the empty-frozenset default) — there is no path here that computes the
+    analysis itself, unlike `_runtime_cap_signal`'s ctx-only trajaudit half; see
+    `BEHAVIORAL_SIGNAL_CAP`'s docstring for why this cap is gated on actual execution.
     """
     # Suppression is a reporting/triage decision, not proof that a real FAIL stopped
     # existing. Keep suppressed FAILs in the score so an ignore entry cannot turn a
@@ -426,18 +557,25 @@ def compute(findings: list[Finding], ctx=None, *,
     # else scored still cannot fall through to a neutral "N/A" while a VULNERABLE live-test
     # verdict was submitted.
     live_hit, live_reason = _live_injection_cap_signal(live_test_vulnerable, live_test_reason)
+    # F-154: same reordering discipline — read alongside the other cap-only signals,
+    # before the `total == 0` short-circuit, so a run with nothing else scored still
+    # cannot fall through to a neutral "N/A" while a behavioral detector fired.
+    behavioral_hit, behavioral_reason, behavioral_cap_value = _behavioral_cap_signal(
+        behavioral_fired_ids)
 
     if total == 0:
-        if not config_blind and not runtime_hit and not degraded_hit and not live_hit:
+        if (not config_blind and not runtime_hit and not degraded_hit and not live_hit
+                and not behavioral_hit):
             # Nothing measurable and no cap signal fired either — the honest "not
             # assessable" result (B-014), completely unchanged from before B-306.
             return ScoreResult(0, "N/A", False, 0, 0, 0, assessable=False)
-        # B-306 (C-135 follow-up #2) / B-313 / F-155: nothing else scored this run, BUT a
-        # blind config (ctx.config_parse_error), a corroborated runtime signal (trajaudit),
-        # a degraded check (crash/timeout), or a submitted VULNERABLE live-test verdict
-        # fired. Those are real, structural facts, never a guess — exactly what
-        # CONFIG_BLIND_CAP/RUNTIME_SIGNAL_CAP/DEGRADED_CHECK_CAP/LIVE_INJECTION_CAP already
-        # treat as "cannot rule out a CRITICAL/HIGH" one severity-cap tier up when
+        # B-306 (C-135 follow-up #2) / B-313 / F-155 / F-154: nothing else scored this
+        # run, BUT a blind config (ctx.config_parse_error), a corroborated runtime
+        # signal (trajaudit), a degraded check (crash/timeout), a submitted VULNERABLE
+        # live-test verdict, or a fired behavioral detector fired. Those are real,
+        # structural facts, never a guess — exactly what CONFIG_BLIND_CAP/
+        # RUNTIME_SIGNAL_CAP/DEGRADED_CHECK_CAP/LIVE_INJECTION_CAP/BEHAVIORAL_SIGNAL_CAP
+        # already treat as "cannot rule out a CRITICAL/HIGH/MEDIUM" one cap tier up when
         # *something else* is scored too. Falling back to a neutral "N/A" here would be the
         # identical lying-clean bypass reached through the OTHER short-circuit — the exact
         # defect this task closes. The result mirrors what a single scored FAIL of that
@@ -464,6 +602,8 @@ def compute(findings: list[Finding], ctx=None, *,
             degraded_count=degraded_count,
             live_injection_capped=live_hit,
             live_injection_cap_reason=live_reason if live_hit else None,
+            behavioral_capped=behavioral_hit,
+            behavioral_cap_reason=behavioral_reason if behavioral_hit else None,
         )
 
     earned = 0.0
@@ -542,6 +682,19 @@ def compute(findings: list[Finding], ctx=None, *,
         score = min(score, LIVE_INJECTION_CAP)
         live_injection_capped = score < pre_live_score
 
+    # F-154 — cap-only behavioral signal, applied LAST, after every other cap-only
+    # signal above: composes exactly like config_blind/degraded/runtime/live_injection
+    # do (left-to-right, tightest wins, "only-when-actually-binding" discipline). Never
+    # touches `earned`/`total` — T1/T2/T3/B191 stay `scored=False` PERMANENTLY (Golden
+    # Rule #5); this is a wholly separate path. `behavioral_hit`/`behavioral_reason`/
+    # `behavioral_cap_value` were already computed above (before the `total == 0`
+    # check) — reused here unchanged, never re-derived.
+    behavioral_capped = False
+    if behavioral_hit:
+        pre_behavioral_score = score
+        score = min(score, behavioral_cap_value)
+        behavioral_capped = score < pre_behavioral_score
+
     return ScoreResult(
         score=score,
         grade=grade_for(score),
@@ -561,6 +714,8 @@ def compute(findings: list[Finding], ctx=None, *,
         degraded_count=degraded_count,
         live_injection_capped=live_injection_capped,
         live_injection_cap_reason=live_reason if live_injection_capped else None,
+        behavioral_capped=behavioral_capped,
+        behavioral_cap_reason=behavioral_reason if behavioral_capped else None,
     )
 
 

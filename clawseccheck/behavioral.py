@@ -17,9 +17,18 @@ payloads), nor the `sessionKey` peer-id segment `origin` is bucketed from (PII).
 Findings are WARN-only, `scored=False` (Golden Rule #5) — a heuristic on observed VERB
 NAMES classified by role (ingress/sensitive/egress), not on the untouched payload
 content, so confidence stays MEDIUM even though "this verb ran" itself is log-observed
-HIGH-confidence fact. T1/T2 never run as part of the main `audit()`/CHECKS list or the
-A-F score — only through `--behavioral`, mirroring `--analyze-trajectory`'s own
-`trajaudit.py` scope.
+HIGH-confidence fact. T1/T2 never run as part of the main `audit()`/CHECKS list — only
+through `--behavioral`/`--full`, mirroring `--analyze-trajectory`'s own `trajaudit.py`
+scope, and no finding here ever becomes an ordinary scored point.
+
+F-154: since this module's own `analyze()` actually ran (--behavioral or --full), a
+fired T1/T2/T3/B191 WARN MAY CAP the A-F grade — never raise it, never earn/cost an
+ordinary scored point. See `grade_cap_signal` below (the reducer `scoring.compute`'s
+`behavioral_fired_ids` argument is built from) and `scoring.BEHAVIORAL_SIGNAL_CAP`'s
+docstring for the full cap-only mechanism, the per-detector ceiling rationale, and why
+this is gated on this module's analysis having ACTUALLY run this invocation — a plain
+`clawseccheck` audit that never ran `--behavioral`/`--full` sees byte-identical
+behaviour to before this cap existed.
 """
 from __future__ import annotations
 
@@ -833,6 +842,35 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         b191,
     ]
     return result
+
+
+# ---------------------------------------------------------------------------
+# F-154 — cap-only grade signal (mirrors trajaudit.grade_cap_signal / pipeline.
+# live_test_cap_signal's naming, one reducer per source module).
+# ---------------------------------------------------------------------------
+
+def grade_cap_signal(result: dict) -> "frozenset[str]":
+    """F-154: reduce an `analyze()` result to the set of BEHAVIORAL_CHECK_IDS that
+    fired WARN this run — the ONLY intended producer of `scoring.compute`'s
+    `behavioral_fired_ids` argument.
+
+    *result* is whatever `analyze(ctx)` returned. This function does no I/O and never
+    re-reads the trajectory sidecar — it only filters findings `analyze()` already
+    computed, so calling it costs nothing beyond the `analyze()` call itself.
+
+    Callers must only ever pass a `result` from an `analyze()` call THIS invocation
+    actually performed (under --behavioral or --full) — see `scoring.
+    BEHAVIORAL_SIGNAL_CAP`'s docstring for why this cap is gated on actual execution
+    rather than computed automatically inside `scoring.compute`. There is no "present"
+    gate here beyond that: `analyze()`'s own result already encodes "nothing to
+    replay" as an empty/PASS finding set (T1/T2/T3 absent when no trajectory sidecar
+    exists — see `analyze`'s own docstring), which naturally reduces to an empty
+    frozenset below, exactly like the "no cap" case.
+    """
+    return frozenset(
+        f.id for f in result.get("findings", ())
+        if f.id in BEHAVIORAL_CHECK_IDS and f.status == WARN
+    )
 
 
 def render_behavioral_analysis(ctx, *, explicit_path: str | None = None, ascii_only: bool = False) -> str:

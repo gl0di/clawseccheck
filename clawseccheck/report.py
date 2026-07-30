@@ -116,6 +116,20 @@ def _live_injection_cap_phrase(reason: str | None) -> str:
     return f"a live injection-test scenario reported VULNERABLE ({reason})"
 
 
+def _behavioral_cap_phrase(reason: str | None) -> str:
+    """Plain-English rendering of scoring's stable ``behavioral_cap_reason`` label.
+
+    `reason` is one of `scoring._BEHAVIORAL_LABELS`'s values (e.g. "T1 behavioral
+    trifecta"), joined with "; " when more than one detector fired — already safe to
+    embed directly (bounded, never free text), but this still routes through the same
+    "report.py owns the sentence, the scoring layer only names a stable label"
+    discipline as `_runtime_cap_phrase`/`_live_injection_cap_phrase`.
+    """
+    if not reason:
+        return "a behavioral detector fired"
+    return f"a behavioral detector fired ({reason})"
+
+
 _SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}
 # Within a family: FAIL/WARN (the actionable items) before PASS/UNKNOWN (context).
 _STATUS_ORDER = {FAIL: 0, WARN: 1, UNKNOWN: 2, PASS: 3}
@@ -1174,13 +1188,20 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # call site/test, which never sets it, takes the exact same branches below as before
     # this field existed.
     _live_capped = getattr(score, "live_injection_capped", False)
-    if score.capped or score.config_blind_capped or score.runtime_capped or _degraded_capped or _live_capped:
+    # F-154: this only ever becomes True on a fired T1/T2/T3/B191 detector, and only
+    # when --behavioral/--full actually ran the analysis — see
+    # scoring.BEHAVIORAL_SIGNAL_CAP. Every existing call site/test, which never sets
+    # it, takes the exact same branches below as before this field existed.
+    _behavioral_capped = getattr(score, "behavioral_capped", False)
+    if (score.capped or score.config_blind_capped or score.runtime_capped
+            or _degraded_capped or _live_capped or _behavioral_capped):
         if _live_capped:
-            # F-155: display priority over config-blind/degraded/severity/runtime — this
-            # is direct, positive proof of a successful live attack (not "cannot rule
-            # out"), so it takes the top slot the same way config_blind_capped already
-            # does for its own reasoning. Co-occurring signals are still named via
-            # `_extra`, same convention as every other branch here.
+            # F-155: display priority over config-blind/degraded/severity/runtime/
+            # behavioral — this is direct, positive proof of a successful live attack
+            # (not "cannot rule out"), so it takes the top slot the same way
+            # config_blind_capped already does for its own reasoning. Co-occurring
+            # signals are still named via `_extra`, same convention as every other
+            # branch here.
             _extra = []
             if score.config_blind_capped:
                 _extra.append("a blind/unreadable config")
@@ -1192,6 +1213,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 _extra.append(
                     f"a corroborated runtime signal ({_runtime_cap_phrase(score.runtime_cap_reason)})"
                 )
+            if _behavioral_capped:
+                _extra.append(_behavioral_cap_phrase(score.behavioral_cap_reason))
             _also = f"; also {', '.join(_extra)}" if _extra else ""
             lines.append(
                 f"(capped from {score.raw_score} - "
@@ -1200,10 +1223,10 @@ def render_report(findings: list[Finding], score: ScoreResult,
             )
         elif score.config_blind_capped:
             # B-306 (C-135 follow-up): takes display priority over cap_severity/runtime/
-            # degraded — when more than one signal fires, this names every one that did
-            # so the reader never loses a co-occurring reason (the `total == 0` branch
-            # above is the only place more than one of these can be True at once; the
-            # ordinary severity-cap path keeps them mutually exclusive because
+            # degraded/behavioral — when more than one signal fires, this names every one
+            # that did so the reader never loses a co-occurring reason (the `total == 0`
+            # branch above is the only place more than one of these can be True at once;
+            # the ordinary severity-cap path keeps them mutually exclusive because
             # CONFIG_BLIND_CAP/DEGRADED_CHECK_CAP <= RUNTIME_SIGNAL_CAP always wins first).
             _extra = []
             if score.cap_severity:
@@ -1214,6 +1237,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 _extra.append(
                     f"a corroborated runtime signal ({_runtime_cap_phrase(score.runtime_cap_reason)})"
                 )
+            if _behavioral_capped:
+                _extra.append(_behavioral_cap_phrase(score.behavioral_cap_reason))
             _also = f"; also {', '.join(_extra)}" if _extra else ""
             # B-363: word the two config-blind states distinctly — "absent" (nothing to
             # read at all) is strictly less information than "unreadable" (present but
@@ -1233,18 +1258,39 @@ def render_report(findings: list[Finding], score: ScoreResult,
             # B-313: no config-blind signal, but at least one check crashed/timed out and
             # that alone drove the cap — same "cannot rule out a CRITICAL" reasoning,
             # applied at check-granularity (see DEGRADED_CHECK_CAP's docstring).
+            _extra = []
+            if _behavioral_capped:
+                _extra.append(_behavioral_cap_phrase(score.behavioral_cap_reason))
+            _also = f"; also {', '.join(_extra)}" if _extra else ""
             lines.append(
                 f"(capped from {score.raw_score} - {_degraded_n} check(s) crashed or timed"
-                " out this run: cannot rule out a CRITICAL condition)"
+                f" out this run: cannot rule out a CRITICAL condition{_also})"
             )
         elif score.cap_severity:
-            lines.append(f"(capped from {score.raw_score} - open {score.cap_severity} finding)")
-        else:
+            _extra = []
+            if _behavioral_capped:
+                _extra.append(_behavioral_cap_phrase(score.behavioral_cap_reason))
+            _also = f"; also {', '.join(_extra)}" if _extra else ""
+            lines.append(
+                f"(capped from {score.raw_score} - open {score.cap_severity} finding{_also})"
+            )
+        elif score.runtime_capped:
             # I-025/B-309: no scored FAIL drove this cap — only a corroborated runtime
             # signal can, and only as a cap (never an ordinary scored point).
+            _extra = []
+            if _behavioral_capped:
+                _extra.append(_behavioral_cap_phrase(score.behavioral_cap_reason))
+            _also = f"; also {', '.join(_extra)}" if _extra else ""
             lines.append(
                 f"(capped from {score.raw_score} - corroborated runtime signal: "
-                f"{_runtime_cap_phrase(score.runtime_cap_reason)})"
+                f"{_runtime_cap_phrase(score.runtime_cap_reason)}{_also})"
+            )
+        else:
+            # F-154: nothing above fired — only a behavioral detector (T1/T2/T3/B191,
+            # --behavioral/--full) drove this cap.
+            lines.append(
+                f"(capped from {score.raw_score} - "
+                f"{_behavioral_cap_phrase(score.behavioral_cap_reason)})"
             )
 
     # B-281 (ENV-1): name the file this grade actually describes. OpenClaw resolves its
@@ -1346,21 +1392,22 @@ def render_report(findings: list[Finding], score: ScoreResult,
         " grade means \"not statically lethal-capable\", not \"runtime-proof\". Use the live"
         " tests above to probe actual resistance."
     )
-    # I-025/B-309: the ONE exception to "this grade never reflects runtime behaviour"
-    # above. Honest labelling, exhaustive per Dave's 2026-07-22 ruling: a trajaudit-
-    # style skill/bootstrap indicator match (--analyze-trajectory) MAY CAP this grade —
-    # never raise it, never earn/cost an ordinary scored point. Every OTHER runtime-
-    # consuming signal (T1/T2/T3 under --behavioral, B83, B84, B85, B180, and every
-    # B164 corroboration including exfil_evidence, same-line or cross-line) still
-    # cannot move this grade at all, in either direction — see
+    # I-025/B-309: an exception to "this grade never reflects runtime behaviour" above —
+    # a trajaudit-style skill/bootstrap indicator match (--analyze-trajectory) MAY CAP
+    # this grade — never raise it, never earn/cost an ordinary scored point. B83, B84,
+    # B85, B180, and every B164 corroboration (including exfil_evidence, same-line or
+    # cross-line) still cannot move this grade at all, in either direction — see
     # tests/test_i025_runtime_cap.py for the pinned enumeration. (B164's exfil_evidence
     # class was briefly cap-eligible under Dave's original 2026-07-20 ruling; retracted
     # after four C-135 rounds proved no sound host/verb gate exists for this tool's own
-    # audience — see logscan.py's retraction note.)
+    # audience — see logscan.py's retraction note.) F-154: T1/T2/T3/B191 are NO LONGER
+    # in the "cannot move it at all" set — see the behavioral exception further below —
+    # so this paragraph's own claim is narrowed to name only what it still covers.
     lines.append(
         "Runtime exception (I-025): a trajectory-indicator match MAY CAP this grade"
-        " (never raise it) — every other runtime-observed signal still cannot move the"
-        " grade at all."
+        " (never raise it) — every other capability-vs-runtime corroboration still"
+        " cannot move the grade at all; the behavioral verb-sequence/audit-trail layer"
+        " below has a separate exception of its own."
     )
     if score.runtime_capped:
         lines.append(
@@ -1384,6 +1431,22 @@ def render_report(findings: list[Finding], score: ScoreResult,
             "Live-test exception (F-155): this run's grade WAS capped by a submitted "
             f"VULNERABLE verdict — {_live_injection_cap_phrase(score.live_injection_cap_reason)}."
             " RESISTANT or no submission would have changed nothing."
+        )
+    # F-154: a THIRD exception to "this grade never reflects runtime behaviour" — a
+    # fired T1/T2/T3/B191 behavioral detector (--behavioral or --full) MAY CAP this
+    # grade, never raise it, never earn/cost an ordinary scored point. Distinct from
+    # both exceptions above: this is proven-by-LOG observation over the trajectory
+    # sidecar's own verb sequence/outcome/drift/audit-trail — not a corroborated
+    # indicator match (I-025) and not a self-reported ACTIVE-probe verdict (F-155).
+    #
+    # Deliberately gated on `behavioral_capped` (same discipline as the F-155 paragraph
+    # above, unlike the I-025 one) — a run that never executed --behavioral/--full sees
+    # no new line here, byte-identical to before this task existed.
+    if getattr(score, "behavioral_capped", False):
+        lines.append(
+            "Behavioral exception (F-154): this run's grade WAS capped by a fired "
+            f"behavioral detector — {_behavioral_cap_phrase(score.behavioral_cap_reason)}."
+            " A clean --behavioral/--full replay would have changed nothing."
         )
     # B-306 (C-135 follow-up): openclaw.json itself went dark this run (present but
     # unparseable, or unreadable) — every config-derived check (A1/B41/B1/B11/...)
@@ -2362,6 +2425,12 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         # submission at all always leaves this False (self-attestation guard).
         "live_injection_capped": getattr(score, "live_injection_capped", False),
         "live_injection_cap_reason": getattr(score, "live_injection_cap_reason", None),
+        # F-154: true when a fired T1/T2/T3/B191 behavioral detector (--behavioral or
+        # --full, which already runs the analysis) alone hard-capped the grade — see
+        # scoring.BEHAVIORAL_SIGNAL_CAP. Always False when the analysis never ran this
+        # invocation (the default — a plain audit never sets it).
+        "behavioral_capped": getattr(score, "behavioral_capped", False),
+        "behavioral_cap_reason": getattr(score, "behavioral_cap_reason", None),
         "assessable": bool(score.assessable),
         "trifecta": _trifecta_ratio(findings),
         "findings": [
@@ -2553,6 +2622,11 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
     # as before this field existed (self-attestation guard, scoring.LIVE_INJECTION_CAP).
     _live_capped = getattr(score, "live_injection_capped", False)
     _live_reason = getattr(score, "live_injection_cap_reason", None)
+    # F-154: only True on a fired T1/T2/T3/B191 detector, and only when --behavioral/
+    # --full actually ran the analysis — every existing call site/test, which never
+    # sets it, takes the exact same branches below as before this field existed.
+    _behavioral_capped = getattr(score, "behavioral_capped", False)
+    _behavioral_reason = getattr(score, "behavioral_cap_reason", None)
     # B-313: same "unconditional, above the grade" disclosure as render_report's text
     # banner — a degraded check count is shown whenever it's nonzero, independent of
     # whether it ended up strictly binding the cap (see _degraded_capped below).
@@ -2580,6 +2654,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
             _extra.append(
                 f'a corroborated runtime signal ({esc(_runtime_cap_phrase(_rt_reason))})'
             )
+        if _behavioral_capped:
+            _extra.append(esc(_behavioral_cap_phrase(_behavioral_reason)))
         _also = f'; also {", ".join(_extra)}' if _extra else ''
         capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
                        f'from {score.raw_score} '
@@ -2596,6 +2672,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
             _extra.append(
                 f'a corroborated runtime signal ({esc(_runtime_cap_phrase(_rt_reason))})'
             )
+        if _behavioral_capped:
+            _extra.append(esc(_behavioral_cap_phrase(_behavioral_reason)))
         _also = f'; also {", ".join(_extra)}' if _extra else ''
         # B-363: word the two config-blind states distinctly (see render_report). No
         # ctx/path is available in this renderer's signature, so the HTML text stays
@@ -2610,18 +2688,36 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
     elif _degraded_capped:
         # B-313: no config-blind signal, but at least one check crashed/timed out and
         # that alone drove the cap.
+        _extra = []
+        if _behavioral_capped:
+            _extra.append(esc(_behavioral_cap_phrase(_behavioral_reason)))
+        _also = f'; also {", ".join(_extra)}' if _extra else ''
         capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
                        f'from {score.raw_score} ({_degraded_n} check(s) crashed or timed out '
-                       f'this run: cannot rule out a CRITICAL condition)</p>')
+                       f'this run: cannot rule out a CRITICAL condition{_also})</p>')
     elif score.capped and score.cap_severity:
+        _extra = []
+        if _behavioral_capped:
+            _extra.append(esc(_behavioral_cap_phrase(_behavioral_reason)))
+        _also = f'; also {", ".join(_extra)}' if _extra else ''
         capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
-                       f'from {score.raw_score} (open {esc(score.cap_severity)} finding)</p>')
+                       f'from {score.raw_score} (open {esc(score.cap_severity)} finding{_also})</p>')
     elif score.capped or _rt_capped:
         # I-025/B-309: no scored FAIL drove this cap — only a corroborated runtime signal
         # can, and only as a cap (never an ordinary scored point).
         _reason = esc(_runtime_cap_phrase(_rt_reason))
+        _extra = []
+        if _behavioral_capped:
+            _extra.append(esc(_behavioral_cap_phrase(_behavioral_reason)))
+        _also = f'; also {", ".join(_extra)}' if _extra else ''
         capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
-                       f'from {score.raw_score} (corroborated runtime signal: {_reason})</p>')
+                       f'from {score.raw_score} (corroborated runtime signal: {_reason}{_also})</p>')
+    elif _behavioral_capped:
+        # F-154: nothing above fired — only a behavioral detector (T1/T2/T3/B191,
+        # --behavioral/--full) drove this cap.
+        capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
+                       f'from {score.raw_score} '
+                       f'({esc(_behavioral_cap_phrase(_behavioral_reason))})</p>')
     else:
         capped_html = ""
     capped_html = degraded_html + capped_html
