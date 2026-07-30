@@ -19,6 +19,7 @@ from ..catalog import (
     Finding,
 )
 from ..collector import (
+    LIMIT_DOMAIN_CONFIG,
     Context,
     bundled_root_overrides,
     dig,
@@ -34,6 +35,7 @@ from ._shared import (
     _file_readable_by_others,
     _finding,
     _plugins,
+    _surface_absent,
 )
 
 
@@ -252,10 +254,13 @@ def _host_finding(cid: str, cls: str, ctx: Context) -> Finding:
 
 def check_audit_log(ctx: Context) -> Finding:
     cfg = ctx.config
-    # logging.audit and audit.enabled do NOT exist in the OpenClaw config schema.
-    # Audit is a CLI command only: `openclaw security audit`
-    # There is no config toggle to enable/disable audit logging.
-    # We check what IS observable: log redaction (separate from audit).
+    # logging.audit / audit.enabled do NOT exist in the OpenClaw config schema; audit is
+    # a CLI command only (`openclaw security audit`). We check what IS observable: log
+    # redaction (separate from audit).
+    # not_applicable (F-140/B-362): "no audit config field" is a structural fact of every
+    # openclaw.json (grounded against the installed dist: security-cli-*.js implements
+    # the CLI command, no config toggle) -- gated on _surface_absent so an unreadable/
+    # absent config still reads as an ordinary UNKNOWN.
     redact = dig(cfg, "logging.redactSensitive")
     if redact == "off":
         return _finding(
@@ -273,6 +278,7 @@ def check_audit_log(ctx: Context) -> Finding:
         "`openclaw security audit`) — cannot assess from config alone. "
         "Run `openclaw security audit` periodically to detect issues.",
         "Schedule `openclaw security audit` and wire its output to an alert channel.",
+        not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
     )
 
 
