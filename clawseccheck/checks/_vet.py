@@ -98,6 +98,7 @@ from ._content import (
     check_capability_intent_mismatch,
     check_chunked_file_assembly_exec,
     check_clickfix_setup_section,
+    check_cloud_metadata_credential_fetch,
     check_conditional_sleeper_trigger,
     check_config_trust_widening,
     check_cross_file_boundary_payload,
@@ -133,6 +134,7 @@ from ._content import (
     check_symlink_escape,
     check_tool_output_trust_inversion,
     check_trigger_homoglyph,
+    check_tunnel_enrollment,
     check_undocumented_helper_directive,
     check_unicode_obfuscation,
     check_unsafe_deserialization,
@@ -4725,6 +4727,8 @@ SKILL_CONTENT_RING = (
     check_silent_instruction,  # B63 — "don't tell the user"
     check_instruction_hierarchy_override,  # B64 — instruction-hierarchy override
     check_dotfile_exfil_directive,  # B337 — mandatory-directive shell exfil of dotfiles (B-364)
+    check_tunnel_enrollment,  # B338 — covert tunnel / mesh-VPN enrollment primitive (E-065)
+    check_cloud_metadata_credential_fetch,  # B339 — cloud instance-metadata credential fetch (E-065)
     check_undocumented_helper_directive,  # B334 — undocumented bundled helper + directive
     check_self_privesc_directive,  # B159 — self-privilege-escalation directive (C-207)
     check_prose_bulk_exfil,  # B160 — prose-intent bulk-data exfiltration (C-210)

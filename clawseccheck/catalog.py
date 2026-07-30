@@ -1656,6 +1656,43 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B338 (E-065): a skill's own code launches a covert tunnel / mesh-VPN primitive
+    # (tailscale/tailscaled, cloudflared tunnel, ngrok, ssh -R, socat listener, frpc,
+    # bore, a SOCKS5 proxy flag) — the HuggingFace July-2026 agent-intrusion incident's
+    # mesh-VPN pivot + reverse-tunnel C2 shape (huggingface.co/blog/
+    # agent-intrusion-technical-timeline). See the module comment above
+    # `_B338_LAUNCH_RE` in checks/_content.py. New detection surface, real-fleet FP
+    # behavior unproven; WARN-only (never FAIL) — a bare primitive alone is real and
+    # benign (a large share of developers run tailscale/cloudflared legitimately).
+    CheckMeta(
+        "B338",
+        "Covert tunnel / mesh-VPN enrollment primitive in an installed skill",
+        HIGH,
+        "hardening",
+        "Command & Control / Covert Channel",
+        scored=True,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
+    # B339 (E-065): a skill's own code fetches cloud instance-metadata credentials —
+    # the HuggingFace incident's IMDS credential-theft primitive (AWS/GCP role
+    # credentials harvested post-compromise). FAIL-only, gated on defensive/
+    # documentation context — a credential-issuing URL at a known metadata host
+    # (curated, unambiguous — same FAIL discipline as B156's known-exfil-host anchor);
+    # non-credential metadata (instance-id, hostname, region) is ordinary environment
+    # detection and produces no finding at all (C-135 round 1: even WARN there was a
+    # false positive against this project's own zero-FP-on-clean-fixtures gate). See the
+    # module comment above `_B339_CRED_URL_RE` in checks/_content.py.
+    CheckMeta(
+        "B339",
+        "Cloud instance-metadata credential fetch in an installed skill",
+        HIGH,
+        "hardening",
+        "Credential Theft / Cloud Metadata",
+        scored=True,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # A confusable/mixed-script character in a skill's frontmatter DESCRIPTION (the actual
     # trigger-phrase surface) can register as a distinct near-duplicate for preferential
     # routing while looking identical to a human reader. F-022 already covers the skill NAME;
@@ -2736,6 +2773,8 @@ AST_MAP = {
     "B91": ("AST01",),  # dynamic-dispatch sink obfuscation = hidden malicious code / scanner evasion (cf. B89/B90)
     "B92": ("AST02",),  # unsafe deserialization sink = RCE-from-data supply-chain tamper (cf. B86)
     "B336": ("AST01",),  # chunked file-read assembly -> exec/eval = hidden malicious code / scanner evasion (cf. B90/B91)
+    "B338": ("AST01",),  # covert tunnel / mesh-VPN enrollment primitive = C2 infrastructure (cf. B13)
+    "B339": ("AST01",),  # cloud instance-metadata credential fetch = active credential theft (cf. B13)
     "B93": ("AST04",),  # confusable trigger description = insecure metadata / trigger-squat (cf. B88)
     "B94": ("AST02",),  # extended lifecycle hooks = supply-chain tamper on install/version/publish (cf. B42)
     "B95": ("AST02",),  # dependency confusion (unpinned + typosquat name) = supply-chain tamper (cf. B13)
