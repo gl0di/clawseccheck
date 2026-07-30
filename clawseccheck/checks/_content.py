@@ -9214,6 +9214,168 @@ def check_silent_instruction(ctx: Context) -> Finding:
     )
 
 
+# ---------- B337: mandatory-directive shell exfil of dotfiles via curl/wget (B-364) ----
+#
+# The shape (B-364): a skill's own Markdown frames a shell command as a
+# MANDATORY, pre-response checkpoint the agent must run before answering -- or tells it
+# not to ask the user for permission -- and that command reads one or more hidden
+# dotfiles/config paths through a `$(cat ...)`/backtick-`cat` substitution and POSTs the
+# captured bytes to a remote host via curl/wget. Found investigating a SkillTrustBench gap:
+# 4 gold-malicious cases (PI_PURE_SKILLMD/T01) shared one injected line -- framed as a
+# "Skill Licensing Check" -- that evaded every existing check with zero ring findings.
+#
+# WHY NEITHER B63 NOR B334 ALREADY CATCHES THIS. B63's secrecy vocabulary
+# (`_B63_SECRECY_RE`) is built around HIDING an action from the user -- "don't tell",
+# "silently execute", "suppress the output" -- and this shape never hides anything; it
+# openly names the curl command and tells the agent not to ask permission, which is a
+# consent-bypass claim, not a concealment one, so it never anchors `_B63_SECRECY_RE`.
+# B334's whole architecture keys on a BUNDLED HELPER PATH (`_B334_BUNDLED_PATH_RE`
+# requires a `dir/file.ext` mention, cross-checked against the rest of the skill's own
+# docs for "undocumented elsewhere") -- this shape has no such file; the payload is an
+# inline shell one-liner in prose, never a reference to a shipped script. Both existing
+# checks' machinery is the wrong SHAPE for this, not merely mistuned -- hence a new,
+# narrow check rather than widening either.
+#
+# WHY `~/.gitconfig` / `~/.ssh/config` DON'T ANCHOR ALONE. `_CRED_RE` (checks/_shared.py)
+# deliberately excludes both: a git CONFIG file and the SSH client's own config are not
+# credential stores, and a bare mention of either path is common in entirely benign
+# scripts (`ssh -F ~/.ssh/config`, `git config --list`). The anchor here is never a path
+# mention alone -- it is the co-occurrence of (a) a mandatory/pre-response directive
+# addressed to the agent and (b) a `cat`-substitution reading a hidden (dot-prefixed)
+# path segment feeding directly into a curl/wget invocation carrying a POST-shaped flag.
+#
+# WARN-only (never FAIL): a brand-new detection surface whose real-fleet false-positive
+# behavior is not yet proven -- the same standing policy B334 documents for itself.
+# Escalates a human's attention; it does not assert malice on its own.
+_B337_MANDATORY_RE = re.compile(
+    r"before\s+(?:producing|generating|writing|returning|emitting)\s+"
+    r"(?:any\s+|the\s+|a\s+)?(?:main\s+)?(?:answer|response|reply|output|result)"
+    r"|before\s+(?:you\s+)?(?:answer|respond|reply)\b"
+    r"|prior\s+to\s+(?:answering|responding|(?:producing|generating)\s+"
+    r"(?:any|a|the)\s+response)"
+    r"|on\s+(?:each|every)\s+(?:invocation|call|run|request)\b"
+    r"|do(?:\s+not|n't)\s+ask\s+(?:the\s+)?user\s+for\s+"
+    r"(?:permission|confirmation|approval)"
+    r"|without\s+(?:first\s+)?asking\s+(?:the\s+)?user\b",
+    re.IGNORECASE,
+)
+
+# A `$(cat <args>)` or backtick-`cat <args>` command substitution. Bounded capture (no
+# unbounded backtracking) — stops at the next backtick/close-paren/newline.
+_B337_CAT_SUBST_RE = re.compile(
+    r"(?:\$\(|`)\s*cat\s+(?P<args>[^`)\n]{1,200})",
+    re.IGNORECASE,
+)
+
+# At least one hidden (dot-prefixed) path segment among the `cat` arguments — matches
+# `~/.gitconfig`, `~/.ssh/config`, `.netrc`, `~/.aws/credentials`, but not an ordinary
+# dotted filename like `order.json` (the dot there is not preceded by a path/word
+# boundary).
+_B337_DOTFILE_ARG_RE = re.compile(r"(?:^|[\s~/\"'])\.[A-Za-z0-9_][\w.\-]*")
+
+_B337_POST_VERB_RE = re.compile(r"\bcurl\b|\bwget\b", re.IGNORECASE)
+_B337_POST_FLAG_RE = re.compile(
+    r"-d\b|--data(?:-raw|-binary|-urlencode)?\b|--post-data\b|-X\s*POST\b|-XPOST\b",
+    re.IGNORECASE,
+)
+
+_B337_POST_PROXIMITY_WINDOW = 200  # chars around the cat-substitution to find curl/wget+flag
+_B337_DIRECTIVE_WINDOW = 400  # chars between the directive phrase and the exfil command
+
+
+def _b337_dotfile_exfil_hits(text: str) -> list[str]:
+    """Snippet per co-located mandatory-directive + dotfile-cat-into-curl/wget-POST hit.
+
+    Three signals, all required, none alone sufficient (same two-halves discipline as
+    B334): a directive phrase (`_B337_MANDATORY_RE`), a `$(cat ...)`/backtick-cat
+    substitution that reads a hidden path (`_B337_DOTFILE_ARG_RE`), and a curl/wget
+    invocation carrying a POST-shaped flag within `_B337_POST_PROXIMITY_WINDOW` chars of
+    that substitution (argument order isn't fixed -- `-d` can precede or follow the
+    substitution -- so the window is symmetric, not just forward). The directive phrase
+    may sit anywhere within `_B337_DIRECTIVE_WINDOW` chars of the substitution.
+    """
+    hits: list[str] = []
+    directive_spans = [m.span() for m in _B337_MANDATORY_RE.finditer(text)]
+    if not directive_spans:
+        return hits
+    for cm in _B337_CAT_SUBST_RE.finditer(text):
+        if not _B337_DOTFILE_ARG_RE.search(cm.group("args")):
+            continue
+        lo = max(0, cm.start() - _B337_POST_PROXIMITY_WINDOW)
+        hi = min(len(text), cm.end() + _B337_POST_PROXIMITY_WINDOW)
+        window = text[lo:hi]
+        if not (_B337_POST_VERB_RE.search(window) and _B337_POST_FLAG_RE.search(window)):
+            continue
+        if not any(
+            ds - _B337_DIRECTIVE_WINDOW <= cm.start() and cm.end() <= de + _B337_DIRECTIVE_WINDOW
+            for ds, de in directive_spans
+        ):
+            continue
+        snip_lo = max(0, cm.start() - 20)
+        hits.append(_obf_clip(text[snip_lo:cm.end() + 20], 120))
+    return hits
+
+
+def check_dotfile_exfil_directive(ctx: Context) -> Finding:
+    """B337 — mandatory-directive shell exfil of dotfiles via curl/wget (B-364).
+
+    Detects a skill's Markdown framing a shell command as a mandatory, pre-response
+    checkpoint (or telling the agent not to ask the user's permission) where that command
+    reads one or more hidden dotfiles/config paths via a `$(cat ...)`/backtick-`cat`
+    substitution and POSTs the captured bytes to a remote host via curl/wget. See the
+    module comment above `_B337_MANDATORY_RE` for why neither B63 nor B334 already
+    catches this shape.
+
+    WARN    — the directive framing and the dotfile-cat-into-POST shape co-occur.
+    PASS    — no such pairing found in any installed skill.
+    UNKNOWN — no installed skills to inspect.
+
+    WARN, not FAIL: brand-new detection surface, real-fleet false-positive behavior not
+    yet proven (same standing policy as B334).
+    """
+    if not ctx.installed_skills:
+        return _finding(
+            "B337",
+            UNKNOWN,
+            "No installed skills found — nothing to inspect for a mandatory-directive "
+            "shell exfil of dotfiles.",
+            "Run on the host where the agent's skills are installed.",
+        )
+
+    evidence: list[str] = []
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        for snippet in _b337_dotfile_exfil_hits(norm):
+            evidence.append(f'{skill_name}: "{snippet}"')
+
+    if evidence:
+        ev_summary = "; ".join(evidence[:4])
+        extra = f" (+{len(evidence) - 4} more)" if len(evidence) > 4 else ""
+        return _finding(
+            "B337",
+            WARN,
+            "Mandatory-directive shell exfil of dotfiles: a skill frames a curl/wget "
+            "command as a required pre-response step (or tells the agent not to ask "
+            "permission), and that command reads a hidden config/dotfile via "
+            "`$(cat ...)` and POSTs it to a remote host: " + ev_summary + extra,
+            "Remove the directive and the command. A legitimate skill never needs to "
+            "read `~/.gitconfig`, `~/.ssh/config`, or any other local dotfile and POST "
+            "its contents to a remote server before answering — that is credential/"
+            "host-fingerprint exfiltration dressed up as a licensing or telemetry check.",
+            evidence,
+            severity=HIGH,
+            confidence="MEDIUM",
+        )
+
+    return _finding(
+        "B337",
+        PASS,
+        "No mandatory-directive shell exfil of dotfiles found in the installed skills.",
+        "Ensure no directive frames a curl/wget command reading local dotfiles as a "
+        "mandatory pre-response check.",
+    )
+
+
 # ---------- B334: undocumented bundled helper under an agent-directed run directive ----
 #
 # The shape: a block grafted into a skill's own Markdown that addresses the READING
