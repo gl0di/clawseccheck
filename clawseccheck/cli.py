@@ -1747,7 +1747,7 @@ def _main(argv=None) -> int:
         return 0
 
     if args.dashboard:
-        _emit(render_dashboard(findings, score, ascii_only=ascii_only))
+        _emit(render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx))
         return 0
 
     if args.dashboard_findings:

@@ -991,6 +991,46 @@ def _inventory_bucket_lines(label: str, bucket: dict, by_id: dict, *, ascii_only
     return out
 
 
+def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False) -> list[str]:
+    """Per-skill verdict lines (design §4.4) -- single source of truth shared by
+    render_subject_inventory (full report's "Inventory by subject" block) and
+    render_dashboard (B-356: the same verdicts, compact, in the chat-pasted card)."""
+    icon = _ICON_ASCII if ascii_only else _ICON
+    skills = inv["skills"]
+    n_skills = len(skills)
+    if n_skills == 0:
+        return [f" {SUBJECT_LABEL['skills']} (none installed)"]
+    # B-268: `inv["skills"]` is built from ctx.installed_skills, which the collector caps at
+    # _MAX_SKILLS. Printing its length as "(N installed)" reported the CAP as the inventory
+    # total — a home with 311 skills on disk rendered "Skills (300 installed)", and the 11
+    # unexamined ones were invisible in the very block whose job is to enumerate what is
+    # installed. Disclose the truncation instead of presenting a capped view as a census.
+    n_skipped = int(getattr(ctx, "skills_capped_count", 0) or 0)
+    installed_text = (
+        f"{n_skills} inspected, {n_skipped} NOT inspected — inspection cap reached"
+        if n_skipped else f"{n_skills} installed"
+    )
+    flagged = [s for s in skills if s.get("status") in (FAIL, WARN, UNKNOWN)]
+    flagged_names = {s["name"] for s in flagged}
+    sk_marker = icon.get(_worst_of_statuses(s["status"] for s in flagged), "?")
+    count_text = f"{len(flagged)} flagged" if flagged else "clear"
+    lines = [f" {SUBJECT_LABEL['skills']} ({installed_text}) — {sk_marker} {count_text}"]
+    if n_skipped:
+        lines.append(
+            f"   {icon.get(UNKNOWN, '?')} {n_skipped} skill(s) beyond the inspection "
+            "cap were not scanned; their verdict is unknown, not clean")
+    # Skill names are untrusted (directory names) -- _sanitize() every one before it
+    # reaches a line, same as finding title/detail elsewhere in this file (B164: no raw
+    # ANSI/control chars may reach the terminal).
+    clean = [_sanitize(s["name"]) for s in skills if s["name"] not in flagged_names]
+    if clean:
+        lines.append(f"   {icon.get(PASS, '?')} {len(clean)} clean: " + ", ".join(clean))
+    for s in flagged:
+        reason_text = "; ".join(s.get("reasons") or []) or s["verdict"]
+        lines.append(f"   {icon.get(s['status'], '?')} {_sanitize(s['name'])}  {s['verdict']} - {reason_text}")
+    return lines
+
+
 def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool = False,
                               color: bool = False) -> str:
     """Owner-facing "Inventory by subject" block (F-131 Phase 1) -- System / Agents /
@@ -1020,39 +1060,7 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
     if not ag.get("attested"):
         lines.append("   note  attest (--attest) for per-agent separation (B45/B47)")
 
-    skills = inv["skills"]
-    n_skills = len(skills)
-    # B-268: `inv["skills"]` is built from ctx.installed_skills, which the collector caps at
-    # _MAX_SKILLS. Printing its length as "(N installed)" reported the CAP as the inventory
-    # total — a home with 311 skills on disk rendered "Skills (300 installed)", and the 11
-    # unexamined ones were invisible in the very block whose job is to enumerate what is
-    # installed. Disclose the truncation instead of presenting a capped view as a census.
-    n_skipped = int(getattr(ctx, "skills_capped_count", 0) or 0)
-    installed_text = (
-        f"{n_skills} inspected, {n_skipped} NOT inspected — inspection cap reached"
-        if n_skipped else f"{n_skills} installed"
-    )
-    flagged = [s for s in skills if s.get("status") in (FAIL, WARN, UNKNOWN)]
-    flagged_names = {s["name"] for s in flagged}
-    if n_skills == 0:
-        lines.append(f" {SUBJECT_LABEL['skills']} (none installed)")
-    else:
-        sk_marker = icon.get(_worst_of_statuses(s["status"] for s in flagged), "?")
-        count_text = f"{len(flagged)} flagged" if flagged else "clear"
-        lines.append(f" {SUBJECT_LABEL['skills']} ({installed_text}) — {sk_marker} {count_text}")
-        if n_skipped:
-            lines.append(
-                f"   {icon.get(UNKNOWN, '?')} {n_skipped} skill(s) beyond the inspection "
-                "cap were not scanned; their verdict is unknown, not clean")
-        # Skill/server/channel names are untrusted (directory names, config keys) --
-        # _sanitize() every one before it reaches a line, same as finding title/detail
-        # elsewhere in this file (B164: no raw ANSI/control chars may reach the terminal).
-        clean = [_sanitize(s["name"]) for s in skills if s["name"] not in flagged_names]
-        if clean:
-            lines.append(f"   {icon.get(PASS, '?')} {len(clean)} clean: " + ", ".join(clean))
-        for s in flagged:
-            reason_text = "; ".join(s.get("reasons") or []) or s["verdict"]
-            lines.append(f"   {icon.get(s['status'], '?')} {_sanitize(s['name'])}  {s['verdict']} - {reason_text}")
+    lines.extend(_skills_inventory_lines(inv, ctx, ascii_only=ascii_only))
 
     mcp = inv["mcp"]
     n_mcp = len(mcp)
@@ -1603,14 +1611,23 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
 
 
 def render_dashboard(findings: list[Finding], score: ScoreResult, *,
-                     ascii_only: bool = False) -> str:
-    """Deterministic chat Dashboard card — Sections 1-2 of SKILL.md Step 3, pasted verbatim.
+                     ascii_only: bool = False, ctx=None) -> str:
+    """Deterministic chat Dashboard card — Sections 1-2 of SKILL.md Step 3, pasted verbatim,
+    plus an optional Section 3 (B-356) with per-skill vet verdicts.
 
     Live testing (F-070) showed the host LLM silently drops the 🦞 header and the family
     frame when asked to *compose* them, so the whole card is code-rendered (B-077): grade
     card + score-bar + issue count, then the framed findings block. Reports-only (F-074):
     the card names what is wrong and why — it carries no remediation and no fix offers.
     The host agent pastes this output and only writes its own prose *around* it.
+
+    B-356: `--full`'s per-skill sweep (v3.57.0) never reached this card, so a user going
+    through the normal guided flow never saw it. `ctx` is optional and additive — passing
+    None (every pre-existing caller) reproduces the exact prior Sections 1-2 output,
+    byte-identical. When `ctx` carries installed skills, a compact "Skills" section is
+    appended below Findings, reusing the SAME per-skill verdict lines
+    (`_skills_inventory_lines`) the full report's "Inventory by subject" block already
+    shows — one source of truth, not a second formatter to drift out of sync.
     """
     findings = deduplicate_findings(findings)
     n_issues = sum(
@@ -1632,6 +1649,11 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     lines.append(f"{sep} Findings {sep}")
     body = render_dashboard_findings(findings, ascii_only=ascii_only).rstrip("\n")
     out = "\n".join(lines) + "\n" + body + "\n"
+    if ctx is not None:
+        inv = build_inventory(findings, ctx)
+        if inv["skills"]:
+            skill_lines = _skills_inventory_lines(inv, ctx, ascii_only=ascii_only)
+            out += "\n" + f"{sep} Skills {sep}" + "\n" + "\n".join(skill_lines) + "\n"
     return _asciify(out) if ascii_only else out
 
 

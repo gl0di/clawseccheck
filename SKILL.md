@@ -424,9 +424,10 @@ as the tool prints it (see below) because its frame relies on monospace alignmen
 
 **Channel-aware delivery:** the full Dashboard card can exceed a chat channel's message
 limit (e.g. Telegram's ~4096-character cap — Sections 1-2 alone can already run to
-≈6,482 characters). If the destination channel truncates long messages, deliver a
-compact summary instead with `--card` (grade + score + trifecta) and offer to save the
-full report as a file via `--save <path>` or `--html <path>`.
+≈6,482 characters, and the Skills block below adds one line per installed skill on top).
+If the destination channel truncates long messages, deliver a compact summary instead
+with `--card` (grade + score + trifecta) and offer to save the full report as a file via
+`--save <path>` or `--html <path>`.
 
 **Sections 1-2 — the Dashboard card: do not compose it, paste it.**
 
@@ -445,6 +446,10 @@ and paste its **entire stdout here, verbatim**. It emits, in order:
   **No standalone Lethal Trifecta chip (F-044)** — trifecta state is one Privilege &
   Execution finding among others in Section 2.
 - **Section 2 — Findings, grouped by area** (details below).
+- **Skills block (B-356, when skills are installed):** a compact per-skill vet verdict
+  — install count, a `clean:` list, and a `verdict - reason` line for anything flagged.
+  Reuses the same scoring path `--vet-skill` uses; **omitted entirely** when no skills
+  are installed, same as an empty finding family.
 
 Do **not** re-draw the frame, swap it for markdown bold, drop the rule lines, or re-order —
 paste exactly what the command prints. Your own prose around the paste follows the
@@ -454,14 +459,13 @@ plain-language rule.
 
 **Known gap — the plugin sweep, behavioral replay, and judge packet are not in this card yet.**
 Step 2's `--full` run also produces a per-plugin sweep, a behavioral/trajectory replay, and a judge
-packet for the borderline band (see Step 1's mode-map row) — but `--dashboard` above only ever
-renders the Section 1-2 grade-card-and-findings contract it always has, so none of that reaches the
-user through this guided flow today. Per Step 2's existing rule, `--full`'s own raw stdout stays
-internal-only, so there is currently no chat-visible surface for it at all. If the user explicitly
-asks for one of these, use the matching standalone command instead of trying to extract it from a
-`--full` run: `--vet-all` for the skill sweep (plugins have no standalone bulk-vet flag yet — vet
-them one at a time with `--vet-plugin <path>`, or point them at `--vet <path>` which autodetects),
-`--behavioral` for the replay, `--judge-packet` for the packet (all three from Step 5).
+packet for the borderline band (see Step 1's mode-map row) — `--dashboard` above does NOT render
+these (only the per-skill sweep reaches it, as the Skills block above). Per Step 2's existing rule,
+`--full`'s own raw stdout stays internal-only, so there is currently no chat-visible surface for
+these three. If the user explicitly asks for one of these, use the matching standalone command
+instead of trying to extract it from a `--full` run: plugins have no standalone bulk-vet flag yet —
+vet them one at a time with `--vet-plugin <path>`, or point them at `--vet <path>` which autodetects
+— `--behavioral` for the replay, `--judge-packet` for the packet (all three from Step 5).
 
 **Section 2 — what the pasted findings block contains**
 
