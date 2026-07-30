@@ -154,6 +154,35 @@ _GIT_REMOTE_RE = re.compile(r"\bgit\s+remote\b", re.I)
 _HOST_INFO_SIGNAL_RE = re.compile(
     r"gethostname|platform\.(?:node|uname)|os\.uname|git|remote|hostname|whoami", re.I
 )
+
+# B-342 (T09/SkillTrustBench V_EXCESSIVE_TELEMETRY): EXCESSIVE_TELEMETRY_FLOW -- a
+# function that assembles a payload from >=2 distinct "over-collection" axes (bulk
+# environment-variable dump, recursive/bulk filesystem enumeration, bulk directory
+# listing, or a shell/command-history file read) whose value then reaches a network
+# sink. The bar is TWO distinct axes, not one -- a lone os.walk()/os.environ.items()/
+# os.listdir() call has too many ordinary uses on its own (indexing a project,
+# printing the current env for debugging, listing one directory the user pointed at)
+# to be a signal by itself; the requirement that a SINGLE function combine two or
+# more of these is what is actually rare in benign code and common in every corpus
+# sample this rule targets. Severity "info" -- WARN-first, same dual-use rationale as
+# ENV_EXFIL_FLOW/HOST_INFO_EXFIL_FLOW. The checks engine (checks/_vet.py) additionally
+# gates the finding on the skill's OWN SKILL.md NOT disclosing the collection (see
+# checks/_shared.py's _skill_declares_telemetry_disclosure) -- that disclosure check,
+# not this AST shape alone, is what actually distinguishes a hidden phone-home from a
+# disclosed, legitimate telemetry/diagnostics/backup skill.
+#
+# Taint here is name-based (not scope-precise) across the WHOLE file, same limitation
+# as the existing ENV_EXFIL_FLOW/HOST_INFO_EXFIL_FLOW/CRED_EXFIL_FLOW rules above --
+# a collector function's NAME is tracked so `data = collect_x(); send_x(data)` still
+# connects even though the invasive read and the network send live in different
+# functions (the two-function collect/send split every corpus sample uses).
+_HISTORY_FILENAME_RE = re.compile(
+    r"\.(?:bash|zsh|fish|ksh)_history\b|python_history\b", re.I
+)
+# Cheap prefilter so files with no telemetry-shaped signal at all skip the extra walks.
+_TELEMETRY_SIGNAL_RE = re.compile(
+    r"environ|\bwalk\b|rglob|listdir|iterdir|history|glob", re.I
+)
 # A shell command string containing a live host-identity substitution -- the concat-built
 # `'curl -s ' + URL + '/eval_chain -d h=$(hostname)'` shape that evades literal-curl
 # matching (no single contiguous "curl ... | sh"-style literal to match against).
@@ -1185,6 +1214,180 @@ def _host_info_tainted_names(tree: ast.AST) -> set[str]:
                     if isinstance(t, ast.Name) and t.id not in tainted:
                         tainted.add(t.id)
                         changed = True
+        if not changed:
+            break
+    return tainted
+
+
+# ---- B-342 (T09/SkillTrustBench V_EXCESSIVE_TELEMETRY) helpers ------------------
+
+
+def _is_bulk_environ_call(node: ast.AST) -> bool:
+    """True for a BULK read of the whole environment -- os.environ.items()/.keys()/
+    .values()/.copy(), dict(os.environ), sorted(os.environ)/list(os.environ) -- as
+    opposed to a single named lookup (os.getenv("X") / os.environ.get("X")), which is
+    the ordinary, non-invasive way a skill reads its own config and is deliberately
+    NOT matched here (that shape is ENV_EXFIL_FLOW's territory, not this rule's)."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+
+    def _is_environ_obj(n: ast.AST) -> bool:
+        if isinstance(n, ast.Attribute) and n.attr == "environ" and _attr_base(n.value) == "os":
+            return True
+        return isinstance(n, ast.Name) and n.id == "environ"
+
+    if isinstance(f, ast.Attribute) and f.attr in ("items", "keys", "values", "copy"):
+        return _is_environ_obj(f.value)
+    if isinstance(f, ast.Name) and f.id in ("dict", "sorted", "list"):
+        return bool(node.args) and _is_environ_obj(node.args[0])
+    return False
+
+
+def _is_bulk_fs_walk_call(node: ast.AST) -> bool:
+    """True for a recursive/bulk filesystem enumeration: os.walk(...), <expr>.rglob(...),
+    or glob.glob(..., recursive=True)."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    if not isinstance(f, ast.Attribute):
+        return False
+    if f.attr == "walk" and _attr_base(f.value) == "os":
+        return True
+    if f.attr == "rglob":
+        return True
+    if f.attr == "glob" and _attr_base(f.value) == "glob":
+        return any(
+            kw.arg == "recursive"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is True
+            for kw in node.keywords
+        )
+    return False
+
+
+def _is_bulk_dir_listing_call(node: ast.AST) -> bool:
+    """True for os.listdir(...) / <expr>.iterdir() -- a bulk directory-contents read,
+    as opposed to checking/opening one named file."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    if not isinstance(f, ast.Attribute):
+        return False
+    if f.attr == "listdir" and _attr_base(f.value) == "os":
+        return True
+    return f.attr == "iterdir"
+
+
+def _function_has_history_file_read(fn: ast.AST) -> bool:
+    """True when *fn*'s body both names a shell/command-history file (.bash_history,
+    .zsh_history, .python_history, ...) as a string constant AND contains a file-read
+    call -- a same-function co-occurrence check (not a precise path-to-read dataflow
+    connection), matching this rule's per-function-not-per-call precision level."""
+    has_literal = any(
+        isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and _HISTORY_FILENAME_RE.search(n.value)
+        for n in ast.walk(fn)
+    )
+    if not has_literal:
+        return False
+    return any(
+        (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in _FILE_READ_METHOD_ATTRS)
+        or (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in _FILE_OPEN_NAMES)
+        for n in ast.walk(fn)
+    )
+
+
+def _telemetry_overcollection_categories(fn: ast.AST) -> set[str]:
+    """The distinct over-collection axes (env/fswalk/dirlist/history) directly present
+    anywhere in *fn*'s body."""
+    cats: set[str] = set()
+    for n in ast.walk(fn):
+        if _is_bulk_environ_call(n):
+            cats.add("env")
+        elif _is_bulk_fs_walk_call(n):
+            cats.add("fswalk")
+        elif _is_bulk_dir_listing_call(n):
+            cats.add("dirlist")
+    if _function_has_history_file_read(fn):
+        cats.add("history")
+    return cats
+
+
+def _telemetry_collector_funcnames(tree: ast.AST) -> set[str]:
+    """Top-level function/method names whose OWN body combines >=2 distinct
+    over-collection axes -- see the EXCESSIVE_TELEMETRY_FLOW comment above for why
+    two axes, not one, is the bar."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if len(_telemetry_overcollection_categories(node)) >= 2:
+                names.add(node.name)
+    return names
+
+
+def _telemetry_tainted_names(tree: ast.AST, collector_funcs: set[str]) -> set[str]:
+    """Names whose value derives (transitively, name-based) from calling one of
+    *collector_funcs* -- same assignment-fixpoint shape as _host_info_tainted_names,
+    sourced from a call to a known over-collection function instead of a single
+    built-in call.
+
+    Also seeds taint at CALL SITES, not just assignments: ``send(collect())`` passes
+    the collector's return value directly as an argument, with no intermediate
+    variable for the assignment scan above to ever see. Every corpus sample this rule
+    targets uses the two-function collect/send split, and both the assign-then-call
+    form (``data = collect(); send(data)``) and this direct-nested-call form appear in
+    practice, so missing the second halves real recall. When a user-defined function
+    is called with a sourced argument, ALL of its parameter names are tainted together
+    (not matched positionally/by keyword) -- the same name-based, whole-file
+    approximation already used above, not a scope-precise binding."""
+    if not collector_funcs:
+        return set()
+    tainted: set[str] = set()
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    param_names: dict[str, set[str]] = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names = {a.arg for a in fn.args.args} | {a.arg for a in fn.args.kwonlyargs}
+            if fn.args.vararg:
+                names.add(fn.args.vararg.arg)
+            if fn.args.kwarg:
+                names.add(fn.args.kwarg.arg)
+            param_names.setdefault(fn.name, set()).update(names)
+
+    def _is_sourced(subtree: ast.AST) -> bool:
+        return bool(_names_in(subtree) & tainted) or any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in collector_funcs
+            for n in ast.walk(subtree)
+        )
+
+    for _ in range(4):
+        changed = False
+        for a in assigns:
+            if _is_sourced(a.value):
+                for t in a.targets:
+                    if isinstance(t, ast.Name) and t.id not in tainted:
+                        tainted.add(t.id)
+                        changed = True
+                    elif (
+                        isinstance(t, ast.Subscript)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id not in tainted
+                    ):
+                        tainted.add(t.value.id)
+                        changed = True
+        for c in calls:
+            params = param_names.get(c.func.id)
+            if not params or params <= tainted:
+                continue
+            arg_nodes = [*c.args, *(kw.value for kw in c.keywords)]
+            if any(_is_sourced(arg) for arg in arg_nodes):
+                newly = params - tainted
+                if newly:
+                    tainted |= newly
+                    changed = True
         if not changed:
             break
     return tainted
@@ -2951,6 +3154,51 @@ def analyze_python(
                         "telemetry beacon",
                     )
                     break
+
+    # B-342 (T09/SkillTrustBench V_EXCESSIVE_TELEMETRY): EXCESSIVE_TELEMETRY_FLOW — a
+    # function combining >=2 over-collection axes (bulk env dump, recursive/bulk
+    # filesystem walk, bulk directory listing, shell/command-history file read) whose
+    # value reaches a network sink. See the constant block near _TELEMETRY_SIGNAL_RE
+    # (top of file) for the full rationale, including why the disclosure gate — not
+    # this AST shape alone — is what actually separates a hidden collector from a
+    # disclosed, legitimate telemetry/diagnostics/backup skill.
+    if _TELEMETRY_SIGNAL_RE.search(source):
+        collector_funcs = _telemetry_collector_funcnames(tree)
+        if collector_funcs:
+            telemetry_tainted = _telemetry_tainted_names(tree, collector_funcs)
+            for node in ast.walk(tree):
+                if len(out) >= _MAX_FINDINGS_PER_FILE:
+                    break
+                if not (isinstance(node, ast.Call) and _is_net_sink(node.func)):
+                    continue
+                arg_subtrees = [
+                    *node.args,
+                    *(kw.value for kw in node.keywords if kw.arg not in _ENV_AUTH_KWARGS),
+                ]
+                hit = False
+                for arg in arg_subtrees:
+                    if telemetry_tainted and (_names_in(arg) & telemetry_tainted):
+                        hit = True
+                        break
+                    if any(
+                        isinstance(n, ast.Call)
+                        and isinstance(n.func, ast.Name)
+                        and n.func.id in collector_funcs
+                        for n in ast.walk(arg)
+                    ):
+                        hit = True
+                        break
+                if hit:
+                    add(
+                        "EXCESSIVE_TELEMETRY_FLOW",
+                        "info",
+                        getattr(node, "lineno", 0),
+                        "a function collects data across multiple over-collection axes "
+                        "(bulk env-var dump, recursive/bulk filesystem or directory "
+                        "enumeration, or a shell/command-history file read) and the "
+                        "assembled value flows into a network sink — verify this is "
+                        "disclosed telemetry, not a hidden collector",
+                    )
 
     # C-205: DROPPER_DOWNLOAD_TO_TMP — an argv-list curl/wget subprocess call staging a
     # script into a writable/tmp-like path, with no literal pipe for B100's regex to

@@ -61,6 +61,7 @@ from ._shared import (
     _is_own_source,
     _is_public_ip,
     _mcp_servers,
+    _skill_declares_telemetry_disclosure,
     _skill_frontmatter_block,
 )
 from ._content import (
@@ -2981,6 +2982,7 @@ def check_installed_skills(ctx: Context) -> Finding:
     )
     warns_timebomb: list[str] = []
     warns_host_exfil: list[str] = []  # C-203: host/machine-identity info -> outbound sink
+    warns_telemetry_undisclosed: list[str] = []  # B-342: undisclosed excessive telemetry
     warns_curl_dropper: list[str] = []  # C-205: argv-list curl/wget staging a script to /tmp
     warns_shell_injection: list[str] = []  # C-199: subprocess/os.system shell-injection-prone shape
     warns_insecure_tempfile: list[str] = []  # C-199: hardcoded predictable /tmp write (CWE-377)
@@ -3380,6 +3382,18 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if af.rule == "HOST_INFO_EXFIL_FLOW":
                     warns_host_exfil.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
                     continue
+                # B-342 (T09/SkillTrustBench V_EXCESSIVE_TELEMETRY): a function combining
+                # >=2 over-collection axes reaches a network sink. WARN-grade, and ONLY
+                # surfaced when the skill's OWN SKILL.md does NOT disclose the collection
+                # (_skill_declares_telemetry_disclosure) — a disclosed telemetry/diagnostics/
+                # backup skill is not flagged; an undisclosed one is the actual T09 gap this
+                # closes (V_EXCESSIVE_TELEMETRY co-occurring with V_MISLEADING_DESCRIPTION).
+                if af.rule == "EXCESSIVE_TELEMETRY_FLOW":
+                    if not _skill_declares_telemetry_disclosure(blob):
+                        warns_telemetry_undisclosed.append(
+                            f"{name}: {af.reason} ({relpath}:{af.lineno})"
+                        )
+                    continue
                 # C-205: argv-list curl/wget staging a script to a writable/tmp path.
                 # WARN-grade (staging a download isn't itself proof of malice).
                 if af.rule == "DROPPER_DOWNLOAD_TO_TMP":
@@ -3470,6 +3484,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         "warns_install_curl": warns_install_curl,
         "warns_env_exfil": warns_env_exfil,
         "warns_host_exfil": warns_host_exfil,
+        "warns_telemetry_undisclosed": warns_telemetry_undisclosed,
         "warns_curl_dropper": warns_curl_dropper,
         "warns_timebomb": warns_timebomb,
         "warns_shell_injection": warns_shell_injection,
@@ -3641,6 +3656,36 @@ def check_installed_skills(ctx: Context) -> Finding:
             warns_host_exfil,
             _signal_buckets,
             "warns_host_exfil",
+        )
+
+    # B-342 (T09/SkillTrustBench V_EXCESSIVE_TELEMETRY): a function combines >=2
+    # over-collection axes (bulk env dump, recursive/bulk filesystem or directory
+    # enumeration, shell/command-history file read) and the result reaches a network
+    # sink, with no disclosure of this anywhere in the skill's own SKILL.md. WARN-first
+    # (same dual-use rationale as warns_host_exfil); ranked just below it — an
+    # undisclosed bulk local-data collector is a comparable but slightly narrower
+    # signal than a bare host-identity phone-home.
+    if warns_telemetry_undisclosed:
+        extra = (
+            f" (+{len(warns_telemetry_undisclosed) - 6} more)"
+            if len(warns_telemetry_undisclosed) > 6
+            else ""
+        )
+        return _b13_verdict(
+            HIGH,
+            WARN,
+            "Possible undisclosed telemetry/data collection in installed skill(s): "
+            + "; ".join(warns_telemetry_undisclosed[:6])
+            + extra,
+            "A skill collects data across multiple axes (bulk environment-variable dump, "
+            "recursive/bulk filesystem or directory enumeration, or a shell/command-history "
+            "file read) and sends it to a network endpoint, but nothing in the skill's own "
+            "SKILL.md discloses this. Confirm the destination is trusted and the collection "
+            "is something you'd expect — an undisclosed collector reading history/env/files "
+            "and phoning it home is the excessive-telemetry pattern this rule targets.",
+            warns_telemetry_undisclosed,
+            _signal_buckets,
+            "warns_telemetry_undisclosed",
         )
 
     # C-205: argv-list curl/wget staging a script into a writable/tmp-like path — the
