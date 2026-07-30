@@ -11,14 +11,17 @@ so the tests do not just check the decoder against itself.
 """
 from __future__ import annotations
 
+import os
 import socket
 
 from clawseccheck.sockets import (
     ListenSocket,
+    ProcessIdentity,
     SocketScanResult,
     _decode_hex_addr,
     _parse_table,
     classify_host,
+    identify_listener_process,
     listeners_for_port,
     scan_listening_sockets,
 )
@@ -123,7 +126,7 @@ def test_classify_host_unknown_on_garbage():
 def test_parse_table_loopback_listener():
     text = HEADER + "\n" + _row(_local("127.0.0.1", 8765))
     out = _parse_table(text, "inet")
-    assert out == [ListenSocket(host="127.0.0.1", port=8765, family="inet")]
+    assert out == [ListenSocket(host="127.0.0.1", port=8765, family="inet", inode="10000")]
 
 
 def test_parse_table_wildcard_listener():
@@ -135,7 +138,7 @@ def test_parse_table_wildcard_listener():
 def test_parse_table_ipv6_loopback_listener():
     text = HEADER + "\n" + _row(_local("::1", 8765))
     out = _parse_table(text, "inet6")
-    assert out == [ListenSocket(host="::1", port=8765, family="inet6")]
+    assert out == [ListenSocket(host="::1", port=8765, family="inet6", inode="10000")]
 
 
 def test_parse_table_non_listen_state_is_ignored():
@@ -155,7 +158,23 @@ def test_parse_table_malformed_line_is_skipped_not_raised():
     good = _row(_local("127.0.0.1", 22))
     lines = [HEADER, "garbage short line", "1: ZZZZZZZZ:0016 00000000:0000 0A 00 00 00 0 0 1 1 0 0 0 0 0", good]
     out = _parse_table("\n".join(lines), "inet")
-    assert out == [ListenSocket(host="127.0.0.1", port=22, family="inet")]
+    assert out == [ListenSocket(host="127.0.0.1", port=22, family="inet", inode="10000")]
+
+
+def test_parse_table_records_inode():
+    text = HEADER + "\n" + _row(_local("127.0.0.1", 8765), inode=54321)
+    out = _parse_table(text, "inet")
+    assert out[0].inode == "54321"
+
+
+def test_parse_table_short_row_has_no_inode():
+    # A row with too few fields to reach the inode column must not raise, and must
+    # leave inode "" rather than misreading a neighbouring field as the inode.
+    local = _local("127.0.0.1", 8765)
+    short_row = f"   0: {local} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0"
+    out = _parse_table(HEADER + "\n" + short_row, "inet")
+    assert len(out) == 1
+    assert out[0].inode == ""
 
 
 def test_parse_table_dual_stack_loopback_both_present():
@@ -243,3 +262,87 @@ def test_listeners_for_port_filters_by_port():
 def test_listeners_for_port_empty_when_no_match():
     result = SocketScanResult(available=True, listeners=())
     assert listeners_for_port(result, 8765) == ()
+
+
+# ---------------------------------------------------------------------------
+# identify_listener_process — C-135 bug 1: best-effort PID/process correlation.
+# Fake /proc/<pid>/fd + comm/cmdline built under tmp_path; the "socket:[inode]" fd
+# symlink targets are the same magic (non-dereferenced) strings the real kernel
+# exposes, so a dangling os.symlink target is realistic, not a test shortcut.
+# ---------------------------------------------------------------------------
+
+def _make_pid(root, pid: str, fd_targets: dict, comm: "str | None" = None, cmdline: "bytes | None" = None):
+    fd_dir = root / pid / "fd"
+    fd_dir.mkdir(parents=True, exist_ok=True)
+    for fd_num, target in fd_targets.items():
+        os.symlink(target, fd_dir / str(fd_num))
+    if comm is not None:
+        (root / pid / "comm").write_text(comm, encoding="utf-8")
+    if cmdline is not None:
+        (root / pid / "cmdline").write_bytes(cmdline)
+
+
+def test_identify_listener_process_resolves_via_comm(tmp_path):
+    _make_pid(tmp_path, "1234", {5: "socket:[999]"}, comm="docker-proxy\n")
+    identity = identify_listener_process("999", proc_root=tmp_path)
+    assert identity == ProcessIdentity(pid="1234", name="docker-proxy")
+
+
+def test_identify_listener_process_falls_back_to_cmdline_when_comm_absent(tmp_path):
+    _make_pid(tmp_path, "4321", {3: "socket:[555]"}, cmdline=b"/usr/sbin/nginx\x00-g\x00daemon off;\x00")
+    identity = identify_listener_process("555", proc_root=tmp_path)
+    assert identity == ProcessIdentity(pid="4321", name="nginx")
+
+
+def test_identify_listener_process_no_matching_inode_returns_none(tmp_path):
+    _make_pid(tmp_path, "1234", {5: "socket:[999]"}, comm="docker-proxy\n")
+    assert identify_listener_process("111", proc_root=tmp_path) is None
+
+
+def test_identify_listener_process_empty_inode_returns_none(tmp_path):
+    assert identify_listener_process("", proc_root=tmp_path) is None
+
+
+def test_identify_listener_process_non_numeric_inode_returns_none(tmp_path):
+    assert identify_listener_process("not-a-number", proc_root=tmp_path) is None
+
+
+def test_identify_listener_process_ambiguous_names_returns_none(tmp_path):
+    # Two different PIDs both appear to hold the same inode but disagree on process
+    # name -- genuine ambiguity, must never be resolved by guessing.
+    _make_pid(tmp_path, "111", {5: "socket:[999]"}, comm="docker-proxy\n")
+    _make_pid(tmp_path, "222", {5: "socket:[999]"}, comm="nginx\n")
+    assert identify_listener_process("999", proc_root=tmp_path) is None
+
+
+def test_identify_listener_process_consistent_across_forked_workers(tmp_path):
+    # Multiple PIDs sharing one inode (a pre-forking server's workers inheriting the
+    # listening socket) that all agree on the SAME name is not ambiguous.
+    _make_pid(tmp_path, "111", {5: "socket:[999]"}, comm="node\n")
+    _make_pid(tmp_path, "222", {5: "socket:[999]"}, comm="node\n")
+    identity = identify_listener_process("999", proc_root=tmp_path)
+    assert identity is not None
+    assert identity.name == "node"
+    assert identity.pid in ("111", "222")
+
+
+def test_identify_listener_process_unreadable_fd_dir_is_skipped_not_raised(tmp_path):
+    # Simulate an inaccessible /proc/<pid>/fd (a real PermissionError reading another
+    # UID's process) by making "fd" a plain file, not a directory -- iterdir() raises
+    # NotADirectoryError (an OSError subclass), which must be swallowed, not propagated,
+    # and must not stop the scan from finding the real match elsewhere.
+    (tmp_path / "555").mkdir(parents=True)
+    (tmp_path / "555" / "fd").write_text("not a directory", encoding="utf-8")
+    _make_pid(tmp_path, "666", {5: "socket:[999]"}, comm="docker-proxy\n")
+    identity = identify_listener_process("999", proc_root=tmp_path)
+    assert identity == ProcessIdentity(pid="666", name="docker-proxy")
+
+
+def test_identify_listener_process_proc_root_missing_returns_none(tmp_path):
+    assert identify_listener_process("999", proc_root=tmp_path / "does-not-exist") is None
+
+
+def test_identify_listener_process_pid_found_but_unnameable_returns_none(tmp_path):
+    # The owning PID resolves, but neither comm nor cmdline can be read -- inconclusive.
+    _make_pid(tmp_path, "777", {5: "socket:[999]"})
+    assert identify_listener_process("999", proc_root=tmp_path) is None

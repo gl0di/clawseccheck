@@ -58,6 +58,9 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     (`sockets.scan_listening_sockets`) so B340 can corroborate the declared
     `gateway.bind` against what is actually listening (F-156). The CLI passes True by
     default (`--no-sockets` to opt out). Read-only, stdlib-only, no subprocess.
+    `proc_root` is always recorded on `ctx.proc_root` (regardless of `include_sockets`)
+    so B340's best-effort PID-identity corroboration (C-135 bug 1) reads from the same
+    root the socket scan itself used.
 
     `attestation` (the agent's self-report; see attest.py) enriches the audit: when
     omitted, the attestation checks (B43/B44) report UNKNOWN and the score is
@@ -73,6 +76,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     if include_host:
         ctx.host = _host_detect(root=host_root)
     ctx.include_sockets = include_sockets
+    ctx.proc_root = proc_root
     if include_sockets:
         ctx.sockets = _scan_listening_sockets(proc_root=proc_root)
     if attestation:

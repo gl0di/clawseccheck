@@ -28,13 +28,33 @@ module never reads a peer column at all: it parses ``/proc/net/tcp{,6}``'s fixed
 ``local_address`` field by position, and returns only that. See
 ``tests/test_sockets.py``'s regression test naming this exact bug.
 
+**C-135 bug-1 addendum (independent review, 2026-07-30 — live-reproduced on this very
+machine)**: matching a listener to ``gateway.bind`` by PORT NUMBER ALONE has its own
+false-positive-FAIL mode — an entirely unrelated process can happen to bind the exact
+same port number on a different interface (reproduced live: Docker's userland proxy
+bound to ``0.0.0.0:8080`` for a published container port, sharing that number with
+``fixtures/home_safe``'s correctly-configured loopback-only ``gateway.bind``).
+:func:`identify_listener_process` adds a best-effort, still fully read-only
+process-identity correlation for exactly that case: it reads the LISTEN socket's own
+``inode`` (the ``/proc/net/tcp{,6}`` column this module already parses) and scans
+``/proc/*/fd/*`` for the ``socket:[inode]`` symlink that names which PID holds it, then
+reads that PID's ``comm``/``cmdline``. A ``PermissionError`` reading another UID's
+``/proc/<pid>/fd`` is the normal, expected case (most processes are not readable by an
+unprivileged caller) and is silently skipped, never surfaced as an error — this stays
+just as read-only and privilege-free as the rest of the module. This module still
+names no verdict: it returns a process identity or ``None``, never "the gateway" or
+"not the gateway" — that judgement belongs to the check that knows what "the gateway"
+means (``checks/_config.py``'s ``check_effective_bind``).
+
 Injectable for tests: ``scan_listening_sockets(proc_root=...)`` lets tests point at a
 fake filesystem root (pytest's ``tmp_path``) so the suite stays offline, deterministic,
-and never opens a real socket or reads outside ``tmp_path``.
+and never opens a real socket or reads outside ``tmp_path``. ``identify_listener_process``
+takes the same ``proc_root`` for the same reason.
 """
 from __future__ import annotations
 
 import ipaddress
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,6 +74,25 @@ class ListenSocket:
     host: str  # decoded bind address, e.g. "127.0.0.1", "0.0.0.0", "::1", "::"
     port: int
     family: str  # "inet" | "inet6"
+    # /proc/net/tcp{,6}'s `inode` column (decimal, as text) -- "" when the row had too
+    # few fields to read one, or the field was non-numeric. Feeds identify_listener_process()
+    # for best-effort PID correlation (C-135 bug 1); a default so every existing caller
+    # that builds a ListenSocket without one (every test predating this field) is unaffected.
+    inode: str = ""
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    """A best-effort PID + process-name correlation for one listening socket's inode.
+
+    Resolved by scanning /proc/*/fd for the specific socket:[inode] symlink that names
+    which PID holds THIS socket (never by listing all sockets a PID holds), then reading
+    that PID's comm (preferred) or the argv[0] basename from its cmdline. Carries no
+    verdict of its own -- a caller decides what a given name implies.
+    """
+
+    pid: str
+    name: str
 
 
 @dataclass(frozen=True)
@@ -153,7 +192,12 @@ def _parse_table(text: str, family: str) -> list[ListenSocket]:
                 host = str(ipaddress.IPv6Address(raw))
         except ValueError:
             continue
-        out.append(ListenSocket(host=host, port=port, family=family))
+        # inode is field index 9 (sl, local, rem, st, tx:rx, tr:tm, retrnsmt, uid,
+        # timeout, inode, ...) -- decimal, unlike the hex address/port fields above.
+        # Missing/non-numeric is left as "" rather than raised: one short/odd row must
+        # only cost the PID-correlation feature for that row, never the whole scan.
+        inode = parts[9] if len(parts) > 9 and parts[9].isdigit() else ""
+        out.append(ListenSocket(host=host, port=port, family=family, inode=inode))
     return out
 
 
@@ -189,3 +233,79 @@ def scan_listening_sockets(proc_root: "str | Path" = "/proc") -> SocketScanResul
 def listeners_for_port(result: SocketScanResult, port: int) -> "tuple[ListenSocket, ...]":
     """The subset of *result*'s listeners bound to *port*, across both families."""
     return tuple(sock for sock in result.listeners if sock.port == port)
+
+
+def _process_name(pid: str, root: Path) -> "str | None":
+    """Best-effort name for *pid*: ``comm`` (preferred, already just the short executable
+    name) falling back to the ``argv[0]`` basename from ``cmdline``. ``None`` when
+    neither can be read -- a vanished process, or one this caller has no permission to
+    inspect (both normal, expected outcomes, never raised as an error)."""
+    try:
+        name = (root / pid / "comm").read_text(encoding="utf-8", errors="replace").strip()
+        if name:
+            return name
+    except OSError:
+        pass
+    try:
+        raw = (root / pid / "cmdline").read_bytes()
+    except OSError:
+        return None
+    argv0 = raw.split(b"\x00", 1)[0]
+    if not argv0:
+        return None
+    return Path(argv0.decode("utf-8", errors="replace")).name or None
+
+
+def identify_listener_process(
+    inode: str, proc_root: "str | Path" = "/proc"
+) -> "ProcessIdentity | None":
+    """Best-effort PID/process-name correlation for one listening socket's *inode*.
+
+    Read-only, no subprocess, no elevated privileges: scans ``<proc_root>/<pid>/fd/*``
+    for the ``socket:[inode]`` symlink that names which PID holds this exact socket,
+    then reads that PID's name (see :func:`_process_name`).
+
+    Returns ``None`` -- "unresolved or inconclusive", never a guess -- when: *inode* is
+    empty/non-numeric; the process listing itself can't be read; no ``fd`` symlink
+    anywhere resolves to this inode (very commonly because the owning process belongs
+    to another user and its ``/proc/<pid>/fd`` is not readable by us -- an expected
+    ``PermissionError``, silently skipped, not a fault); the matched PID's name can't be
+    read either; or more than one matched PID disagrees on the process name (genuine
+    ambiguity -- never resolved by guessing). Multiple PIDs sharing the same inode that
+    all agree on the SAME name (e.g. a pre-forking server's worker processes inheriting
+    one listening socket) is NOT treated as ambiguous -- that shape is resolved to that
+    one consistent identity.
+    """
+    if not inode or not str(inode).isdigit():
+        return None
+    target = f"socket:[{inode}]"
+    root = Path(proc_root)
+    try:
+        pid_dirs = [p for p in root.iterdir() if p.name.isdigit()]
+    except OSError:
+        return None
+    identity: "ProcessIdentity | None" = None
+    for pid_dir in pid_dirs:
+        try:
+            fds = list((pid_dir / "fd").iterdir())
+        except OSError:
+            continue  # permission denied / vanished process -- normal, not an error
+        matched = False
+        for fd in fds:
+            try:
+                link = os.readlink(fd)
+            except OSError:
+                continue
+            if link == target:
+                matched = True
+                break
+        if not matched:
+            continue
+        name = _process_name(pid_dir.name, root)
+        if name is None:
+            return None  # found the owning PID but can't name it -- inconclusive
+        if identity is None:
+            identity = ProcessIdentity(pid=pid_dir.name, name=name)
+        elif name != identity.name:
+            return None  # different PIDs naming different processes -- genuinely ambiguous
+    return identity

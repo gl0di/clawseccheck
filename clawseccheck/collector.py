@@ -468,6 +468,12 @@ class Context:
     # check_effective_bind reports UNKNOWN, exactly like ctx.host is None for B50-B54.
     sockets: object = None
     include_sockets: bool = False  # /proc/net/tcp{,6} listening-socket scan enabled
+    # C-135 bug 1: the proc_root audit() was called with (default "/proc"), carried on ctx
+    # so check_effective_bind's best-effort PID correlation (sockets.identify_listener_process)
+    # reads from the SAME root a test injected for the socket scan itself, rather than a
+    # second, independent "/proc" hardcode. Always set by audit(), not just when
+    # include_sockets=True, so it is available whenever ctx.sockets happens to be populated.
+    proc_root: str = "/proc"
     # B-231 sub-item 1: normalized cron jobs (from ~/.openclaw/cron/jobs.json, or the
     # SQLite-backed cron_jobs table when the JSON file is absent). Each entry is a plain
     # dict: id, name, enabled, delete_after_run, trigger_script, payload_kind,

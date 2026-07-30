@@ -2643,8 +2643,16 @@ CATALOG: list[CheckMeta] = [
     # HIGH (corroborates/contradicts CRITICAL B2 rather than replacing it, same tier
     # as B70, its closest sibling). Degrades to UNKNOWN, never a guess, whenever the
     # runtime signal is missing: no explicit port declared, the socket scan was not
-    # run (hermetic-by-default, same as ctx.host/include_host), /proc unavailable, or
-    # nothing listening on the declared port yet.
+    # run (hermetic-by-default, same as ctx.host/include_host), /proc unavailable,
+    # nothing listening on the declared port yet, or the declared bind profile itself
+    # is unresolvable from the config alone.
+    # C-135 bugs 1+2 (independent review, 2026-07-30, both live-reproduced): (1) a
+    # non-loopback listener on the declared port now only FAILs when it can't be
+    # positively cleared as an unrelated process (/proc/*/fd socket-inode -> PID/comm
+    # correlation) -- e.g. Docker's userland proxy sharing a port number no longer
+    # false-FAILs a correctly loopback-only fixtures/home_safe; (2) an absent/empty
+    # gateway.bind now classifies as ambiguous, same as "auto", instead of "loopback"
+    # -- it resolves through the SAME container-dependent vendor default path.
     CheckMeta(
         "B340",
         "Effective-bind verification (declared gateway.bind vs. the actual listening socket)",

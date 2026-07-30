@@ -10,6 +10,7 @@ real /proc read or a real listening socket.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
@@ -18,6 +19,17 @@ from clawseccheck.collector import Context, collect
 from clawseccheck.sockets import ListenSocket, SocketScanResult
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
+
+
+def _make_pid(root, pid: str, fd_targets: dict, comm: "str | None" = None):
+    """Build a fake /proc/<pid>/fd + comm under *root*, for the C-135 bug-1 PID
+    correlation tests below -- same shape tests/test_sockets.py's own helper uses."""
+    fd_dir = root / pid / "fd"
+    fd_dir.mkdir(parents=True, exist_ok=True)
+    for fd_num, target in fd_targets.items():
+        os.symlink(target, fd_dir / str(fd_num))
+    if comm is not None:
+        (root / pid / "comm").write_text(comm, encoding="utf-8")
 
 
 def _ctx(cfg: dict, sockets=None) -> Context:
@@ -125,6 +137,85 @@ def test_mixed_loopback_and_wildcard_listeners_is_fail():
 
 
 # ---------------------------------------------------------------------------
+# C-135 bug 1 (independent review, 2026-07-30 -- live-reproduced on
+# fixtures/home_safe by an unrelated Docker userland-proxy listener sharing the
+# declared gateway port): declared-loopback / effective-non-loopback must downgrade
+# to WARN, never FAIL, when the non-loopback listener positively, confidently
+# resolves to a process that is NOT the gateway. Every OTHER FAIL test above/below
+# injects a ListenSocket with no inode (the default "") -- PID correlation is a
+# no-op for all of them (see test_sockets.py), so none of those FAILs are affected.
+# ---------------------------------------------------------------------------
+
+def test_unrelated_process_on_same_port_downgrades_fail_to_warn(tmp_path):
+    # The exact real-world repro: fixtures/home_safe declares gateway.bind loopback
+    # on port 8080; Docker's userland proxy happens to also listen on 0.0.0.0:8080,
+    # unrelated to the gateway. Positive process-identity evidence must downgrade
+    # this to WARN, not silently FAIL a correctly-hardened host.
+    _make_pid(tmp_path, "4242", {7: "socket:[8080001]"}, comm="docker-proxy\n")
+    ctx = _ctx(_BASE, _scan(ListenSocket("0.0.0.0", 8765, "inet", inode="8080001")))
+    ctx.proc_root = str(tmp_path)
+    r = check_effective_bind(ctx)
+    assert r.status == WARN
+    assert r.status != FAIL
+    assert "docker-proxy" in r.detail
+    assert "not the gateway" in r.detail or "NOT the gateway" in r.detail
+
+
+def test_bad_fixture_with_no_pid_info_still_fails():
+    # The pre-existing bad fixture/test must be completely unaffected: no inode was
+    # ever recorded for its synthetic listener, so PID correlation is a no-op and
+    # the original FAIL behavior must survive this change exactly as before.
+    ctx = collect(FIXTURES / "bad_b340_effective_bind_wildcard")
+    ctx.sockets = _scan(ListenSocket(host="0.0.0.0", port=8765, family="inet"))
+    r = check_effective_bind(ctx)
+    assert r.status == FAIL
+
+
+def test_unresolvable_pid_correlation_keeps_the_fail(tmp_path):
+    # An inode is recorded, but nothing in the (fake) process table owns it -- PID
+    # correlation is unavailable, so the conservative default (keep FAIL) applies.
+    ctx = _ctx(_BASE, _scan(ListenSocket("0.0.0.0", 8765, "inet", inode="999999")))
+    ctx.proc_root = str(tmp_path)  # empty fake /proc -- no matching inode anywhere
+    assert check_effective_bind(ctx).status == FAIL
+
+
+def test_process_that_could_plausibly_be_the_gateway_keeps_the_fail(tmp_path):
+    # PID correlation succeeds, but the resolved process is a Node.js process -- which
+    # could plausibly BE the gateway itself (comm alone can't distinguish OpenClaw's
+    # own node process from any other). Must never guess this away.
+    _make_pid(tmp_path, "1111", {3: "socket:[555]"}, comm="node\n")
+    ctx = _ctx(_BASE, _scan(ListenSocket("0.0.0.0", 8765, "inet", inode="555")))
+    ctx.proc_root = str(tmp_path)
+    assert check_effective_bind(ctx).status == FAIL
+
+
+def test_ambiguous_pid_correlation_keeps_the_fail(tmp_path):
+    # Two different PIDs disagree on the name for the same inode -- genuinely
+    # ambiguous, never resolved by guessing; must keep the FAIL.
+    _make_pid(tmp_path, "111", {5: "socket:[555]"}, comm="docker-proxy\n")
+    _make_pid(tmp_path, "222", {5: "socket:[555]"}, comm="nginx\n")
+    ctx = _ctx(_BASE, _scan(ListenSocket("0.0.0.0", 8765, "inet", inode="555")))
+    ctx.proc_root = str(tmp_path)
+    assert check_effective_bind(ctx).status == FAIL
+
+
+def test_one_unresolved_listener_among_several_keeps_the_fail(tmp_path):
+    # Two non-loopback listeners match the port; only ONE resolves to a confirmed
+    # unrelated process. The other is unresolved, so the FAIL must be kept overall --
+    # downgrading requires EVERY non-loopback listener to be positively cleared.
+    _make_pid(tmp_path, "4242", {7: "socket:[111]"}, comm="docker-proxy\n")
+    ctx = _ctx(
+        _BASE,
+        _scan(
+            ListenSocket("0.0.0.0", 8765, "inet", inode="111"),
+            ListenSocket("192.168.1.5", 8765, "inet", inode="222"),  # no PID info at all
+        ),
+    )
+    ctx.proc_root = str(tmp_path)
+    assert check_effective_bind(ctx).status == FAIL
+
+
+# ---------------------------------------------------------------------------
 # gateway.port fallback (C-135 finding): the CURRENT OpenClaw schema makes
 # gateway.bind a bare mode enum (auto/lan/loopback/custom/tailnet) with the real
 # port living in the sibling gateway.port field -- confirmed against a live
@@ -178,6 +269,39 @@ def test_bind_auto_with_loopback_effective_is_unknown_not_pass():
     # Also must not silently claim PASS -- the declared state genuinely isn't provable.
     cfg = {"gateway": {"bind": "auto", "port": 18789, "auth": {"mode": "token", "token": "x" * 32}}}
     ctx = _ctx(cfg, _scan(ListenSocket("127.0.0.1", 18789, "inet")))
+    assert check_effective_bind(ctx).status == UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# C-135 bug 2 (independent review, 2026-07-30): an ABSENT gateway.bind must resolve
+# the SAME way as an explicit "auto" -- ambiguous/UNKNOWN -- because the vendor's own
+# effective default for an absent bind resolves through the identical
+# container-dependent path (grounded against net-BOKtNTf8.js's defaultGatewayBindMode).
+# Must never silently fall through to "loopback" and then FAIL a container's correct
+# 0.0.0.0 default.
+# ---------------------------------------------------------------------------
+
+def test_absent_bind_with_wildcard_effective_is_unknown_never_fail():
+    # This exact shape (gateway.port set, no "bind" key at all) already exists in
+    # fixtures/bad_c015_config_backup, fixtures/bad_c032_proxy_headers, and
+    # fixtures/clean_c032_proxy_headers -- a real, non-hypothetical config shape.
+    cfg = {"gateway": {"port": 18443, "auth": {"mode": "token", "token": "x" * 32}}}
+    ctx = _ctx(cfg, _scan(ListenSocket("0.0.0.0", 18443, "inet")))
+    r = check_effective_bind(ctx)
+    assert r.status == UNKNOWN
+    assert r.status != FAIL
+
+
+def test_absent_bind_with_loopback_effective_is_unknown_not_pass():
+    # Also must not silently claim PASS -- same reasoning as bind="auto" above.
+    cfg = {"gateway": {"port": 18443, "auth": {"mode": "token", "token": "x" * 32}}}
+    ctx = _ctx(cfg, _scan(ListenSocket("127.0.0.1", 18443, "inet")))
+    assert check_effective_bind(ctx).status == UNKNOWN
+
+
+def test_empty_string_bind_is_ambiguous_like_absent():
+    cfg = {"gateway": {"bind": "", "port": 18443, "auth": {"mode": "token", "token": "x" * 32}}}
+    ctx = _ctx(cfg, _scan(ListenSocket("0.0.0.0", 18443, "inet")))
     assert check_effective_bind(ctx).status == UNKNOWN
 
 
