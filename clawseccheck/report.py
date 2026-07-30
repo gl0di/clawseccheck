@@ -1140,6 +1140,13 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # the scenario B-306 exists to make loud — this is a rendering-gate fix, not a
     # scoring.py semantics change, so the JSON contract/docs above stay exactly as
     # documented.
+    # B-281 (ENV-1)/B-363: computed here (ahead of both the cap-reason text below and the
+    # "Audited config:" line further down) so both agree on whether a config was ever
+    # actually read this run. `_audited_path` is the resolved-or-canonical path either
+    # way (see resolve_config_in_home) — `_cfg_found` is what distinguishes "we read
+    # this file" from "we looked for this file and it wasn't there".
+    _audited_path = getattr(ctx, "config_path", None) if ctx is not None else None
+    _cfg_found = getattr(ctx, "config_found", True) if ctx is not None else True
     _degraded_capped = getattr(score, "degraded_capped", False)
     if score.capped or score.config_blind_capped or score.runtime_capped or _degraded_capped:
         if score.config_blind_capped:
@@ -1159,9 +1166,19 @@ def render_report(findings: list[Finding], score: ScoreResult,
                     f"a corroborated runtime signal ({_runtime_cap_phrase(score.runtime_cap_reason)})"
                 )
             _also = f"; also {', '.join(_extra)}" if _extra else ""
+            # B-363: word the two config-blind states distinctly — "absent" (nothing to
+            # read at all) is strictly less information than "unreadable" (present but
+            # broken), so it must never read as if a file was found and opened.
+            if getattr(score, "config_blind_reason", None) == "absent":
+                _cfg_blind_text = (
+                    f"no OpenClaw config found at {_audited_path}" if _audited_path is not None
+                    else "no OpenClaw config found"
+                )
+            else:
+                _cfg_blind_text = "openclaw.json unreadable/unparseable this run"
             lines.append(
-                f"(capped from {score.raw_score} - openclaw.json unreadable/unparseable"
-                f" this run: cannot rule out a CRITICAL condition{_also})"
+                f"(capped from {score.raw_score} - {_cfg_blind_text}:"
+                f" cannot rule out a CRITICAL condition{_also})"
             )
         elif _degraded_capped:
             # B-313: no config-blind signal, but at least one check crashed/timed out and
@@ -1187,8 +1204,12 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # audited file is a RESOLVED path, not a foregone conclusion. Printing it is what lets
     # a reader notice that a grade describes a stale, dormant config; B183 does the
     # comparison, but this line stands on its own and costs nothing when they agree.
-    _audited_path = getattr(ctx, "config_path", None) if ctx is not None else None
-    if _audited_path is not None:
+    # B-363: only when a config was actually FOUND and read — `_audited_path` is set to
+    # the canonical would-be path even when nothing was there (resolve_config_in_home),
+    # so printing it unconditionally used to claim a file was audited when the collector
+    # never opened anything at all. `_cfg_found`/`_audited_path` were both computed above,
+    # ahead of the cap-reason block, so this line and that one can never disagree.
+    if _audited_path is not None and _cfg_found:
         lines.append(f"Audited config: {_audited_path}")
 
     # B-306 safe-symlink split: openclaw.json is a symlink whose target leaves ~/.openclaw,
@@ -2244,7 +2265,11 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         "runtime_cap_reason": score.runtime_cap_reason,
         # B-306 (C-135 follow-up): true when openclaw.json was unreadable/unparseable
         # this run and that alone hard-capped the grade — see scoring.CONFIG_BLIND_CAP.
+        # B-363: also true when openclaw.json was simply ABSENT (no target found at
+        # all) — `config_blind_reason` ("unreadable" | "absent" | null) distinguishes
+        # the two states without a JSON consumer having to re-derive it from config_found.
         "config_blind_capped": score.config_blind_capped,
+        "config_blind_reason": getattr(score, "config_blind_reason", None),
         # B-313: true when a crashed/timed-out check alone hard-capped the grade — see
         # scoring.DEGRADED_CHECK_CAP. `degraded_count` is unconditional (checks did/didn't
         # run this many times) even when this bool is False because a tighter cap won.
@@ -2461,8 +2486,15 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
                 f'a corroborated runtime signal ({esc(_runtime_cap_phrase(_rt_reason))})'
             )
         _also = f'; also {", ".join(_extra)}' if _extra else ''
+        # B-363: word the two config-blind states distinctly (see render_report). No
+        # ctx/path is available in this renderer's signature, so the HTML text stays
+        # path-free where render_report's text output can name the file.
+        if getattr(score, "config_blind_reason", None) == "absent":
+            _cfg_blind_text = "no OpenClaw config found"
+        else:
+            _cfg_blind_text = "openclaw.json unreadable/unparseable this run"
         capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
-                       f'from {score.raw_score} (openclaw.json unreadable/unparseable this run: '
+                       f'from {score.raw_score} ({_cfg_blind_text}: '
                        f'cannot rule out a CRITICAL condition{_also})</p>')
     elif _degraded_capped:
         # B-313: no config-blind signal, but at least one check crashed/timed out and

@@ -85,6 +85,19 @@ RUNTIME_SIGNAL_CAP = FAIL_CAPS[HIGH]
 #     never touches `earned`/`total`, and is provably inert whenever ctx is None or
 #     ctx.config_parse_error is False (every pre-existing call site/test that never
 #     passes a blind ctx is unaffected).
+#
+# B-363: the same cap now ALSO fires when ``openclaw.json`` is simply ABSENT
+# (``ctx.config_found`` False), not only when it is present-but-unparseable. Absence is
+# strictly LESS information than a corrupt file — the collector never even opened
+# anything — yet pre-fix it scored a clean, uncapped grade (a nonexistent home measured
+# Grade B/89, exit code 0) while a present-but-unreadable config already correctly
+# capped to F/49. That is the exact "hiding evidence improves the grade" defect this cap
+# exists to prevent, just one state further back: not reading the config at all is never
+# a better outcome than reading it and finding it broken. This EXTENDS the existing
+# `config_blind_capped` signal (same ceiling, same field) rather than adding a fourth,
+# parallel cap — `_config_blind_signal` below also returns a stable reason label
+# ("unreadable" vs "absent") so report.py/JSON consumers can word the two cases
+# distinctly without the scoring layer inventing free text.
 CONFIG_BLIND_CAP = FAIL_CAPS[CRITICAL]
 
 # B-313: a check that crashed or timed out (`checks/__init__.py`'s `_check_error_finding`
@@ -149,6 +162,12 @@ class ScoreResult:
     # CRITICAL FAIL that is NOT itself config-derived already forced <=49 — the config-
     # blind cap is real but non-binding in that case).
     config_blind_capped: bool = False
+    # B-363: stable, testable label for WHICH config-blind state fired —
+    # "unreadable" (present but unparseable, the original B-306 case) or "absent" (no
+    # openclaw.json found at all). None whenever config_blind_capped is False. Never
+    # free-text prose — report.py owns the user-facing sentence, same discipline as
+    # `runtime_cap_reason`.
+    config_blind_reason: str | None = None
     # B-313: True only when DEGRADED_CHECK_CAP actually bound (lower than whatever the
     # severity/config-blind/runtime caps above already produced) — same "only-when-
     # actually-binding" discipline as `config_blind_capped`/`runtime_capped`. Distinct
@@ -172,6 +191,43 @@ def _degraded_signal(findings: list[Finding]) -> tuple[bool, int]:
     """
     count = sum(1 for f in findings if f.id.startswith("ERR:"))
     return (count > 0, count)
+
+
+def _config_blind_signal(ctx) -> tuple[bool, str | None]:
+    """B-306 / B-363: True + a reason label when openclaw.json could not actually be
+    read this run — either present-but-unparseable/unreadable (the original B-306
+    signal) or genuinely ABSENT (no config file found at all, B-363). Both are the same
+    real-world fact from this cap's point of view — "the audit did not see the config
+    that would have driven A1/B41/..." — so both fire the identical CONFIG_BLIND_CAP
+    ceiling; the reason label exists only so report.py/JSON consumers can word the two
+    cases distinctly, never to change the cap itself.
+
+    Structural collector state only (``ctx.config_found``/``ctx.config_parse_error``,
+    B-166/B-017) — never a text/keyword match, so this cannot regress into the
+    keyword-widening pattern this project has already learned to avoid.
+
+    Returns ``(hit, reason)``; *reason* is ``"unreadable"``, ``"absent"``, or ``None``.
+    """
+    if ctx is None:
+        return False, None
+    # B-306 safe-symlink split: a present-but-unparseable config is genuinely blind only
+    # when the bytes could not be read — a safely-followed dotfiles symlink must never
+    # trip this (see CONFIG_BLIND_CAP's own docstring above).
+    if (
+        getattr(ctx, "config_parse_error", False)
+        and not getattr(ctx, "config_symlink_escapes_home", False)
+    ):
+        return True, "unreadable"
+    # B-363: no openclaw.json (or legacy clawdbot.json) exists in the audited home at
+    # all — strictly LESS information than a corrupt file, so it must cap at least as
+    # hard. `config_found` defaults True here (rather than mirroring its own False
+    # dataclass default) so a duck-typed ctx stand-in that predates this field, or a
+    # hand-built Context() a test never ran through the real collector, stays inert —
+    # exactly the tolerance `_runtime_cap_signal`/the pre-existing config_parse_error
+    # check already extend to callers that omit an attribute.
+    if not getattr(ctx, "config_found", True):
+        return True, "absent"
+    return False, None
 
 
 def _runtime_cap_signal(findings: list[Finding], ctx) -> tuple[bool, str | None]:
@@ -267,11 +323,10 @@ def compute(findings: list[Finding], ctx=None) -> ScoreResult:
     # the two states can never re-conflate here even if a future collector change surfaced
     # both flags at once. It is STRUCTURAL collector state (B-166 family), never a
     # text/keyword match, so it cannot regress into keyword-widening.
-    config_blind = (
-        ctx is not None
-        and getattr(ctx, "config_parse_error", False)
-        and not getattr(ctx, "config_symlink_escapes_home", False)
-    )
+    #
+    # B-363: `_config_blind_signal` also folds in the "config genuinely absent"
+    # case (``ctx.config_found`` False) at the identical ceiling — see its docstring.
+    config_blind, config_blind_reason = _config_blind_signal(ctx)
     runtime_hit, runtime_reason = _runtime_cap_signal(findings, ctx)
     degraded_hit, degraded_count = _degraded_signal(findings)
 
@@ -307,6 +362,7 @@ def compute(findings: list[Finding], ctx=None) -> ScoreResult:
             runtime_capped=runtime_hit,
             runtime_cap_reason=runtime_reason if runtime_hit else None,
             config_blind_capped=config_blind,
+            config_blind_reason=config_blind_reason if config_blind else None,
             degraded_capped=degraded_hit,
             degraded_count=degraded_count,
         )
@@ -388,6 +444,7 @@ def compute(findings: list[Finding], ctx=None) -> ScoreResult:
         runtime_capped=runtime_capped,
         runtime_cap_reason=runtime_reason if runtime_capped else None,
         config_blind_capped=config_blind_capped,
+        config_blind_reason=config_blind_reason if config_blind_capped else None,
         degraded_capped=degraded_capped,
         degraded_count=degraded_count,
     )

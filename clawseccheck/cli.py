@@ -2196,8 +2196,16 @@ def _main(argv=None) -> int:
         # verdict is not a FAIL. Truncation is reported by the printed section and by
         # the JSON "complete"/"notScanned" keys, never by reddening a gate that would
         # otherwise be green.
+        #
+        # B-363: a wholly ABSENT openclaw.json (no target found at all — strictly LESS
+        # information than a present-but-unparseable one) must trip this gate exactly
+        # like config_parse_error already does, or `--exit-code` stays 0 on a run that
+        # never read anything. `config_found` defaults True via getattr so a duck-typed
+        # ScoreResult/ctx stand-in some tests build (which predates this field) stays
+        # inert, same tolerance as the config_parse_error term above.
         if (has_fail or vm_has_fail or sweep_has_fail or pipeline_has_fail
-                or getattr(ctx, "config_parse_error", False)):
+                or getattr(ctx, "config_parse_error", False)
+                or not getattr(ctx, "config_found", True)):
             return 1
 
     return 0

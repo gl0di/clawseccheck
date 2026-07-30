@@ -171,6 +171,11 @@ class TestScoringInvariantLock:
         # must never treat a safely-followed symlink as config-blind. Pins the second term
         # of the `config_blind` gate directly.
         ctx = Context(home=tmp_path)
+        # B-363: config_parse_error can only be True for a config that was actually
+        # found (collector.py: ``config_parse_error = config_found and not parsed_ok``);
+        # set config_found=True so this hand-built ctx matches that invariant now that
+        # the config-blind signal also reads config_found for the "absent" case.
+        ctx.config_found = True
         ctx.config_parse_error = True
         ctx.config_symlink_escapes_home = True
         findings = [self._f(LOW, PASS) for _ in range(20)]
@@ -182,6 +187,7 @@ class TestScoringInvariantLock:
         # The control: config_parse_error alone (no safe-symlink flag) still caps, so the
         # exemption cannot be reached by accident.
         ctx = Context(home=tmp_path)
+        ctx.config_found = True
         ctx.config_parse_error = True
         findings = [self._f(LOW, PASS) for _ in range(20)]
         r = compute(findings, ctx)
@@ -192,6 +198,7 @@ class TestScoringInvariantLock:
         # A genuine CRITICAL FAIL from the (readable) config still caps normally — the
         # exemption only removes the BLIND cap, never a real finding's cap.
         ctx = Context(home=tmp_path)
+        ctx.config_found = True
         ctx.config_parse_error = True
         ctx.config_symlink_escapes_home = True
         findings = [self._f(CRITICAL, FAIL)] + [self._f(LOW, PASS) for _ in range(20)]

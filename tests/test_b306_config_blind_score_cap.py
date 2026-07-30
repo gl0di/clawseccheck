@@ -39,12 +39,18 @@ def _f(severity, status, scored=True, fid="X"):
 
 def _blind_ctx(tmp_path) -> Context:
     ctx = Context(home=tmp_path)
+    # config_parse_error can only be True for a config that was actually found
+    # (collector.py: ``config_parse_error = config_found and not parsed_ok``) — set both
+    # so this fixture matches the real collector invariant now that B-363 also reads
+    # config_found.
+    ctx.config_found = True
     ctx.config_parse_error = True
     return ctx
 
 
 def _readable_ctx(tmp_path) -> Context:
     ctx = Context(home=tmp_path)
+    ctx.config_found = True
     ctx.config_parse_error = False
     return ctx
 
