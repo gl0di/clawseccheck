@@ -342,15 +342,21 @@ auto-update for anything security-sensitive.
 > again. This is an OpenClaw skill-reload timing artifact on the runtime side, not the audit —
 > confirm the engine is live with `clawseccheck --verify-self`.
 
-**Staleness reminder (offline).** A stale security scanner is itself a risk, so the default report
-may print a one-line "your build may be out of date" notice. It is **100% offline** — it reads only
-the local clock against the baked-in build date, plus an optional local hint file
-`~/.clawseccheck/latest.json` that your distribution layer or agent may write. ClawSecCheck **never
-checks for its own updates over the network** (that would break its zero-network promise and it
-would have to flag itself). The actual "is there a newer version?" lookup belongs to your package
-tooling or your agent — see SKILL.md "Keeping ClawSecCheck current". Silence the notice with
-`--no-update-notice` or `CLAWSECCHECK_NO_UPDATE_NOTICE=1`; after any update, verify the engine with
-`--verify-self`.
+**Staleness reminder (offline).** A stale security scanner is itself a risk — an old build misses
+the latest checks, the same "outdated install is the attack target" hygiene ClawSecCheck flags in
+others (B25 / C4) — so the default report may print a one-line "your build may be out of date"
+notice. It is **100% offline**, built from two signals: (a) the local clock read against the
+baked-in build date, plus an optional local hint file `~/.clawseccheck/latest.json` that your
+distribution layer or agent may write (ClawSecCheck never fetches that file, and never writes it
+as a side effect of an audit); and (b) a hedged nudge that fires only when an overwhelming majority
+of *scored* checks came back UNKNOWN on a populated config — a possible sign OpenClaw moved a field
+path and this build is stale for your version. It is deliberately worded as a possibility ("either
+a minimal setup, or possibly stale"), never an assertion, and computes purely from this run's own
+findings — no network, no schema fetch. ClawSecCheck **never checks for its own updates over the
+network** (that would break its zero-network promise and it would have to flag itself) — the
+actual "is there a newer version?" lookup belongs to your package tooling or your agent. Silence
+the notice with `--no-update-notice` or `CLAWSECCHECK_NO_UPDATE_NOTICE=1`; after any update, verify
+the engine with `--verify-self`.
 
 ## Threat monitoring
 
@@ -686,6 +692,32 @@ python3 audit.py --log audit.log            # also write log to a local file
     line points at `--save PATH` / `--html PATH` for the full detail. (The spec's original
     suggested flag name was `--card` — already taken by the shareable grade+score+trifecta
     badge above, hence `--compact`.)
+  - **Worked example** of the Grade card + findings block (real box-drawing, real severity
+    dots — the real paste continues past this excerpt with Skills/Plugins/MCP/RISK
+    Chains/Behavioural/Second opinion/Coverage/Worth a glance, in that fixed order):
+
+    ```text
+    🦞 OpenClaw Security Audit — Grade F · 49/100
+    ████████░░░░░░░░  ·  3 issues
+
+    — Findings —
+    ┌──────────────────────────────
+    │ 🌐 Exposure & Network — 1 issue(s)
+    └──────────────────────────────
+    🔴 CRITICAL  insecure control-UI auth
+        why: anyone on your local network can send commands to your agent right now — no pairing or auth required
+
+    ┌──────────────────────────────
+    │ 🔑 Privilege & Execution — 2 issue(s)
+    └──────────────────────────────
+    🔴 CRITICAL  Lethal Trifecta (untrusted input × sensitive data × outbound)
+        why: all three legs are active — outside input, sensitive data, and outbound actions; one injected prompt is enough to exfiltrate everything
+    🟠 HIGH  tool profile broader than minimal
+        why: the "coding" profile gives the agent filesystem write, shell, and package-install access — a hijacked agent can run arbitrary code
+    ```
+
+    This is a **sample for illustration only** — the guided flow ([`SKILL.md`](../SKILL.md)
+    Step 3) always pastes the real command's actual stdout, never this text.
 - **`--vet-plugin PATH`** vets an OpenClaw plugin (root dir, `openclaw.plugin.json`, or an
   installed wrapper project) *before* you install it: manifest sanity, npm lifecycle scripts,
   floating dependency versions, native-executable stowaways, and skills entries escaping the

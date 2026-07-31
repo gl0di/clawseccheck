@@ -364,7 +364,7 @@ rest on demand. The number, the phrase, or a tap all select an item; free phrasi
 
 | Choice | Flag(s) | Notes |
 |--------|---------|-------|
-| 1 Check everything ("check" / "go") | `--dashboard --full` (+ auto capability self-report AND a mandatory judge panel, see Step 2) | Read-only audit **+** capability self-report (resolves B43/B44 inline instead of leaving them UNKNOWN for a separate "deeper" step — F-043) **+** MCP vet **+** a per-skill sweep of every installed skill (`Skills`) **+** a per-plugin sweep of every installed plugin (`Plugins`, one merged vet verdict per plugin — F-150) **+** the highest-risk capability chains (`RISK Chains`) **+** a post-hoc behavioral/trajectory replay (`Behavioural` — advisory; folds in both `--behavioral`'s metadata-only T1/T2/T3 signals AND `--analyze-trajectory`'s indicator-vs-tool-call correlation, so a real `⚠ INCIDENT SIGNAL` line surfaces here too, not only from the standalone command — F-151) **+** a MANDATORY judge panel over the borderline band (`Second opinion (advisory)` — 3 lensed subagents per item, majority vote, run every time, never opt-in — see Step 2 and the "Judge-panel fan-out for `--judge-packet` items" section above), in one go. The skill/plugin sweeps are **visibility only** — their verdicts are deliberately not folded into the audit score or grade. The behavioral replay's printed section is likewise visibility-only, but a fired T1/T2/T3/B191 detector MAY separately CAP (never raise) the score/grade above via a dedicated cap-only channel (F-154) — the judge panel is likewise advisory-only and never moves the grade on its own. ALL of these — including the mandatory judge panel's own verdicts — are rendered in ONE fixed-order chat card by the single merged Step 2+3 `--dashboard --full` command (F-153, C-297); see Step 3. (Item 1 no longer pre-generates unused `--canary`/`--dryrun`/`--redteam` scenarios the way the old, now-discarded internal `--full --attest` report did — those were never shown to the user and never verdicted; generating AND running them together is still one step away via Section 6/Step 5's live test.) The actual ⚡ live behavioral test (VULNERABLE vs RESISTANT) is a separate, opt-in step offered after the dashboard (Section 6, item a) — not part of item 1. |
+| 1 Check everything ("check" / "go") | `--dashboard --full` (+ auto capability self-report AND a mandatory judge panel, see Step 2) | Full pipeline in one go: audit **+** capability self-report (B43/B44 resolved inline instead of UNKNOWN — F-043) **+** MCP vet **+** per-skill/per-plugin sweeps (`Skills`/`Plugins`, one merged verdict per item, F-150) **+** the highest-risk chains (`RISK Chains`) **+** a behavioral/trajectory replay (`Behavioural`, F-151) **+** a MANDATORY judge-panel second opinion (`Second opinion (advisory)` — see Step 2's "Judge-panel fan-out" protocol above). Everything here is **visibility/advisory-only** — it never moves the score or grade — except two disclosed, cap-only exceptions: a fired behavioral detector (F-154) and a VULNERABLE live-test verdict (F-155, Section 6). All rendered as ONE fixed-order Dashboard card by the merged Step 2+3 command (F-153) — see Step 2/3 below for the exact protocol, and [`docs/USAGE.md`](docs/USAGE.md) for the full flag-by-flag composition. The live injection test (⚡, Section 6 item a) stays a separate, opt-in step — not part of item 1. |
 | 2 Check before install | `--vet <path>` (autodetects skill · plugin · MCP spec; `--vet-skill` / `--vet-plugin` force an engine) · `--vet-mcp [name]` (configured MCP) · `--vet-source <slug\|url>` (before anything is even downloaded) | Supply-chain check on something you're about to trust. See the vet flow in Step 5 → [`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md). |
 | 3 Report & history | default report · `--save <path>` · `--trend` · `--badge <path>` | Show or save the last result, the score trend, or a shareable badge. |
 | 4 Menu | `--functions` (Screen 12 — the full palette) | Saying "menu" / "functions" / "more" expands the complete capability list — run `python3 {baseDir}/audit.py --functions` (or present its output). Every capability appears as a speakable prompt grounded to its real flag (verify, what-changed, html, sarif, percentile, risk-paths, the vet family, the ⚡ live tests, …), so there's no wall of raw flags. (`--menu` itself renders *this* Welcome screen; the palette is one level deeper.) |
@@ -556,29 +556,12 @@ finding: remediation is out of ClawSecCheck's scope — it is a reports-only aud
 invent fix commands on its behalf; point the user at the finding's `why:` facts and the
 relevant OpenClaw docs instead.
 
-Example of what the Grade card + findings block look like (paste the **real** output, not this
-sample — and remember the real paste continues past this excerpt with Skills/Plugins/MCP/RISK
-Chains/Behavioural/Second opinion/Coverage/Worth a glance, in that order):
-
-```
-🦞 OpenClaw Security Audit — Grade F · 49/100
-████████░░░░░░░░  ·  3 issues
-
-— Findings —
-┌──────────────────────────────
-│ 🌐 Exposure & Network — 1 issue(s)
-└──────────────────────────────
-🔴 CRITICAL  insecure control-UI auth
-    why: anyone on your local network can send commands to your agent right now — no pairing or auth required
-
-┌──────────────────────────────
-│ 🔑 Privilege & Execution — 2 issue(s)
-└──────────────────────────────
-🔴 CRITICAL  Lethal Trifecta (untrusted input × sensitive data × outbound)
-    why: all three legs are active — outside input, sensitive data, and outbound actions; one injected prompt is enough to exfiltrate everything
-🟠 HIGH  tool profile broader than minimal
-    why: the "coding" profile gives the agent filesystem write, shell, and package-install access — a hijacked agent can run arbitrary code
-```
+A full worked example of the Grade card + findings block (real box-drawing, real
+severity dots) lives in [`docs/USAGE.md`](docs/USAGE.md) next to the `--dashboard --full`
+reference — read it there if you want to see the exact shape before your first paste.
+**Always paste the real output, not a remembered sample** — and remember the real paste
+continues past the Grade card + Findings with Skills/Plugins/MCP/RISK
+Chains/Behavioural/Second opinion/Coverage/Worth a glance, in that order.
 
 **Section 3 — Coverage of OpenClaw surfaces**
 
@@ -661,14 +644,14 @@ mandatory judge panel only reviewed borderline findings, not tested the agent li
 is the first real behavioral test (VULNERABLE vs RESISTANT) in the flow.
 
 The verdict now reaches the grade, cap-only (F-155): feed it back via `--dashboard --full
---judged-bundle <file>`'s `liveTest` bucket — `{"seed": "<value or omit>", "verdicts":
-[{"tool": "canary"|"redteam"|"dryrun"|"multiturn", "id": "<scenario id>", "verdict":
-"VULNERABLE"|"RESISTANT"}]}`. A VULNERABLE verdict hard-caps the grade at the same
-ceiling a proven CRITICAL FAIL gets; RESISTANT or nothing submitted changes nothing —
-never an ordinary scored point, never a reason to raise anything (self-attestation
-guard). Pass `--seed <value>` to the harness itself and echo that same value as the
-bucket's `seed` to make the run reproducible and eligible for `--monitor`/`--trend`;
-without it, the verdict still caps this one report but is excluded from history.
+--judged-bundle <file>`'s `liveTest` bucket (exact JSON shape:
+[`docs/OUTPUT_SCHEMA.md`](docs/OUTPUT_SCHEMA.md) §12). A VULNERABLE verdict hard-caps
+the grade at the same ceiling a proven CRITICAL FAIL gets; RESISTANT or nothing
+submitted changes nothing — never an ordinary scored point, never a reason to raise
+anything (self-attestation guard). Pass `--seed <value>` to the harness itself and echo
+that same value in the bucket to make the run reproducible and eligible for
+`--monitor`/`--trend`; without it, the verdict still caps this one report but is
+excluded from history.
 
 ### Step 4 — Next menu routing
 
@@ -762,28 +745,15 @@ ClawSecCheck is a **reports-only checker**. It does NOT fix, and it does NOT app
 
 ## Keeping ClawSecCheck current (advisory only)
 
-A **stale security scanner is itself a risk** — an old build misses the latest checks, the same
-"outdated install is the attack target" hygiene ClawSecCheck flags in others (B25 / C4). The tool
-stays honest about this **without breaking its own promises**, by drawing a hard line:
-
-- ClawSecCheck itself **never touches the network** — not to check for updates, not for anything.
-  Its staleness signals are all **offline**: (a) a report line that reads the local clock and an
-  optional local hint file (`~/.clawseccheck/latest.json`) — it never fetches that file and never
-  writes it as a side effect of an audit (suppress with `--no-update-notice` or
-  `CLAWSECCHECK_NO_UPDATE_NOTICE=1`); and (b) a hedged nudge that fires only when an overwhelming
-  majority of *scored* checks came back UNKNOWN on a populated config — a possible sign that
-  OpenClaw moved a field path and this build is stale for your version. It is deliberately worded
-  as a possibility ("either a minimal setup, or possibly stale"), never an assertion, and computes
-  purely from this run's own findings — no network, no schema fetch.
-- **Updating is the user's own action, never an automatic step.** Do not check for or install
-  updates as a side effect of running an audit. If — and only if — the user explicitly asks to
-  update, they run the same tool they installed it with themselves (e.g.
-  `openclaw skills update clawseccheck` or `clawhub update --all`), reviewing or pinning a tag
-  rather than blind-updating anything security-sensitive.
-- After any update the user can confirm integrity with `--verify-self` (SHA-256 of the engine)
-  against the trusted release digest.
-
-The contract stays simple: the audit is **local-only and read-only**; anything that reaches the
+A **stale security scanner is itself a risk**, so the tool nudges honestly **without breaking its
+own promises**: every staleness signal is 100% offline (a local-clock/build-date report line plus
+an optional local hint file it never fetches, and a hedged "mostly UNKNOWN" nudge) — the exact
+mechanics are in [`docs/USAGE.md`](docs/USAGE.md) under "Staleness reminder (offline)".
+**Updating is the user's own action, never an automatic step** — never check for or install
+updates as a side effect of running an audit; if the user explicitly asks, they run the tool they
+installed it with (`openclaw skills update clawseccheck` / `clawhub update --all`), and can
+confirm integrity afterward with `--verify-self` (SHA-256 against the trusted release digest). The
+contract stays simple: the audit is **local-only and read-only**; anything that reaches the
 network is an **explicit, user-initiated** action — never something the skill does on its own.
 
 ---
