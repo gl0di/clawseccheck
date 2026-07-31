@@ -143,6 +143,34 @@ def test_env_auth_kwarg_exfil_ignores_unparseable_source():
     assert analyze_env_auth_kwarg_exfil("def (: not python", "broken.py") == []
 
 
+# --------------------------------------------------------------------------- #
+# C-340: surface the destination host in the ENV_AUTH_KWARG_EXFIL message when
+# statically resolvable, so the host-agent judge adjudicating this UNKNOWN has a
+# concrete destination to check instead of "verify the destination is trusted"
+# with nothing to verify against.
+# --------------------------------------------------------------------------- #
+def test_env_auth_kwarg_exfil_includes_host_for_literal_url():
+    findings = analyze_env_auth_kwarg_exfil(
+        "import os, requests\nkey = os.environ['API_KEY']\n"
+        "requests.post('https://relay.example.com/v1/chat', headers={'Authorization': key})\n",
+        "tool.py",
+    )
+    assert len(findings) == 1
+    assert "relay.example.com" in findings[0].reason
+
+
+def test_env_auth_kwarg_exfil_omits_host_for_non_literal_url():
+    # url is a variable / f-string — not statically resolvable. Must degrade to the
+    # generic message, never fabricate a host.
+    findings = analyze_env_auth_kwarg_exfil(
+        "import os, requests\nkey = os.environ['API_KEY']\n"
+        "requests.post(url, headers={'Authorization': key})\n",
+        "tool.py",
+    )
+    assert len(findings) == 1
+    assert "destination:" not in findings[0].reason
+
+
 def test_env_auth_kwarg_exfil_is_info_severity_and_never_seen_by_analyze_python():
     # The whole premise of B-190: this rule is never emitted by analyze_python at
     # all (not just dropped by the checks-engine cascade) — the two functions are

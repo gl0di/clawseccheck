@@ -3437,17 +3437,21 @@ def analyze_env_auth_kwarg_exfil(source: str, filename: str = "<skill>") -> list
         if lineno in seen:
             continue
         seen.add(lineno)
-        out.append(
-            ASTFinding(
-                "ENV_AUTH_KWARG_EXFIL",
-                "info",
-                lineno,
-                "an environment-variable or agent-config secret is placed in an "
-                "auth-shaped keyword (headers/auth/cert) of a network call — the normal "
-                "way a skill authenticates to its own API, but never independently "
-                "reviewed; verify the destination is trusted",
-            )
+        # C-340: surface the destination host when the URL is a plain string literal
+        # (the same resolver B-190's sibling walk already uses, line ~3115) so the
+        # host-agent judge adjudicating this UNKNOWN has something concrete to check —
+        # "verify the destination is trusted" with no destination was nothing to verify.
+        # A variable/f-string URL can't be resolved statically; the message stays
+        # generic rather than guessing (never fabricate a host).
+        dest_host = _url_literal_host(node.args[0]) if node.args else None
+        detail = (
+            "an environment-variable or agent-config secret is placed in an "
+            "auth-shaped keyword (headers/auth/cert) of a network call — the normal "
+            "way a skill authenticates to its own API, but never independently "
+            "reviewed; verify the destination is trusted"
+            + (f" (destination: {dest_host})" if dest_host else "")
         )
+        out.append(ASTFinding("ENV_AUTH_KWARG_EXFIL", "info", lineno, detail))
     return out
 
 
