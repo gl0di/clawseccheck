@@ -155,6 +155,13 @@ _EXEMPT = {
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet); a finer split (e.g. flag registration -> its own module) is "
               "a later cycle.",
+    "adjudication.py": "~1,210 lines — the judge-packet builder. Was already sitting at the "
+                       "exact 1,200-line ceiling with zero headroom before the ESET H1 2026 "
+                       "gap-closure pass; crossed it by recording, in-source next to the "
+                       "borderline-band sources it declines to extend, the decision NOT to "
+                       "treat security-scanner *efficacy* as a judgeable signal (C-303: any "
+                       "regex or judge-question proxy for it would flag honest thin tools). "
+                       "A finer split is a later cycle.",
 }
 
 
