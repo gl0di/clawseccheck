@@ -748,6 +748,48 @@ def test_c327_zlib_under_base64_blob_carrying_known_secret_is_found(tmp_path):
     assert secret not in dumped
 
 
+def test_c327_urlsafe_base64_blob_detected_same_as_standard_alphabet(tmp_path):
+    """B-383 item 1 regression: base64.urlsafe_b64encode must be detected identically
+    to base64.b64encode of the SAME compressed payload. Before the fix, the standard-
+    alphabet blob-candidate regex matched a urlsafe blob only in FRAGMENTS (split at
+    every '-'/'_'), filled the per-line cap on those fragments, and the loop broke
+    before the URL-safe pattern — the only one that would have matched the blob
+    WHOLE — ever ran, so a urlsafe-encoded payload produced zero detections."""
+    payload = _C327_INJECTION_PAYLOAD.encode() + b"\x00" * 4096  # long enough that the
+    # urlsafe/standard alphabets are very likely to actually differ in this blob (a
+    # blob with no '-'/'_'/'+'/'/ ' at all would spuriously "pass" even pre-fix).
+    compressed = gzip.compress(payload)
+    std_blob = base64.b64encode(compressed).decode()
+    url_blob = base64.urlsafe_b64encode(compressed).decode()
+    assert std_blob != url_blob, "fixture payload must actually exercise both alphabets"
+
+    std_sink = _write(tmp_path, "std.log", f"tool output: {std_blob} end\n")
+    url_sink = _write(tmp_path, "url.log", f"tool output: {url_blob} end\n")
+    std_result = logscan.scan_log_file(std_sink, None)
+    url_result = logscan.scan_log_file(url_sink, None)
+    assert std_result.counts.get("injection_against_agent", 0) == 1
+    assert url_result.counts.get("injection_against_agent", 0) == 1, (
+        "urlsafe_b64encode must be detected exactly like b64encode of the same payload"
+    )
+
+
+def test_c327_blob_containing_both_alphabets_charsets_still_detected(tmp_path):
+    """A blob containing BOTH '+'/'/' (matched by the standard pattern) and would-be
+    '-'/'_' equivalents doesn't apply to a single blob (an alphabet is chosen once per
+    encode), but a LINE containing one blob of each kind must have both detected —
+    proving the combined-span collection (not per-pattern-then-break) actually runs
+    both patterns to completion rather than stopping after the first fills the cap."""
+    payload1 = _C327_INJECTION_PAYLOAD.encode() + b"\x01" * 2048
+    payload2 = _C327_INJECTION_PAYLOAD.encode() + b"\x02" * 2048
+    std_blob = base64.b64encode(gzip.compress(payload1)).decode()
+    url_blob = base64.urlsafe_b64encode(gzip.compress(payload2)).decode()
+    sink = _write(tmp_path, "both.log", f"a={std_blob} b={url_blob}\n")
+    result = logscan.scan_log_file(sink, None)
+    # Two DISTINCT blobs (different padding -> different decoded samples) on one line —
+    # both must be found, proving both patterns ran to completion on the same line.
+    assert result.counts.get("injection_against_agent", 0) == 2
+
+
 def test_c327_same_indicator_as_plain_unencoded_text_still_found_no_regression(tmp_path):
     """Regression guard: adding the gzip/zlib decode step must not disturb the
     pre-existing plain-text detection of the exact same indicator phrase."""
