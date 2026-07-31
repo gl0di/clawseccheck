@@ -513,9 +513,25 @@ def check_browser_extra_args(ctx: Context) -> Finding:
             # nothing to report.
             if not value.strip():
                 continue
+            bind_class = _remote_debug_bind_class(value)
             # Loopback-bound: a no-op that restates OpenClaw's own default bind. Costs
             # nothing and produces no evidence line (B-331).
-            if _remote_debug_bind_class(value) == "loopback":
+            if bind_class == "loopback":
+                continue
+            if bind_class == "unresolved":
+                # Not an address literal in any recognized form (a DNS hostname, "*", a
+                # typo) -- the effective bind cannot be determined from this value at
+                # all, which is distinct from "offhost" naming a real non-loopback
+                # address below. "cannot be determined" is this project's standing
+                # phrasing for an applicable check that cannot resolve a fact.
+                warn_ev.append(
+                    f"browser.extraArgs has {arg!r} — the effective bind for the "
+                    "Chrome DevTools Protocol debug port cannot be determined from "
+                    "this value (not a recognized address literal). Chromium REMOVED "
+                    "the --remote-debugging-address switch in M113, so current Chrome "
+                    "ignores it regardless; this is reported as an unresolvable "
+                    "statement of intent, not a confirmed bind."
+                )
                 continue
             warn_ev.append(
                 f"browser.extraArgs has {arg!r} — this names a non-loopback bind for the "
