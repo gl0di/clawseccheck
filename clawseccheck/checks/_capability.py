@@ -175,7 +175,8 @@ def check_attestation_mismatch(ctx: Context) -> Finding:
 
     WARN    — config grants a high-blast verb absent from the attestation.
     PASS    — every high-blast verb in the allow-list is acknowledged.
-    UNKNOWN — no attestation, or no explicit tools.allow inventory to compare.
+    UNKNOWN — no attestation, or no explicit tools.allow/alsoAllow/gateway.tools.allow
+              inventory to compare.
     """
     att = ctx.attestation or {}
     reported = att.get("tools")
@@ -186,13 +187,28 @@ def check_attestation_mismatch(ctx: Context) -> Finding:
             "No tool inventory attested — nothing to cross-check against config.",
             "Provide '--attest <file>' with the agent's real 'tools' list.",
         )
-    listed = dig(ctx.config, "tools.allow") or dig(ctx.config, "gateway.tools.allow") or []
-    if not isinstance(listed, list) or not listed:
+    # I-028: tools.alsoAllow is a real, MERGED-ADDITIVE grant channel (OpenClaw's schema
+    # forbids allow+alsoAllow together and recommends profile+alsoAllow instead), so a
+    # config using that recommended shape has an EMPTY tools.allow -- reading only
+    # tools.allow/gateway.tools.allow (the previous `or`-chain, which also only ever took
+    # the FIRST truthy source rather than merging) missed every tool it grants. Concat all
+    # three additive sources; explicit `dig()` literals (not a loop var) so the
+    # schema-grounding AST scanner sees each path (§4, mirrors behavioral.py's
+    # `_t3_declared`).
+    listed: list = []
+    for src in (
+        dig(ctx.config, "tools.allow"),
+        dig(ctx.config, "tools.alsoAllow"),
+        dig(ctx.config, "gateway.tools.allow"),
+    ):
+        if isinstance(src, list):
+            listed.extend(src)
+    if not listed:
         return _finding(
             "B44",
             UNKNOWN,
-            "Config has no explicit 'tools.allow' inventory to cross-check the "
-            "self-report against.",
+            "Config has no explicit tools.allow/tools.alsoAllow/gateway.tools.allow "
+            "inventory to cross-check the self-report against.",
             "—",
         )
     # Compare on the NORMALIZED verb so MCP/provider namespacing doesn't cause a false
@@ -349,11 +365,20 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
             "audit on the host where those logs live, or run with '--attest' and cite "
             "'proven_tools'. With neither, the check stays UNKNOWN rather than guessing.",
         )
-    declared = {
-        _attest.normalize_verb(t)
-        for t in (dig(ctx.config, "tools.allow") or [])
-        if isinstance(t, (str, bytes))
-    }
+    # I-028: tools.alsoAllow only ever ADDS to the declared set (never a substitute, never
+    # a narrowing) -- fold it in alongside tools.allow so a profile+alsoAllow config (the
+    # OpenClaw-recommended shape; allow+alsoAllow together is schema-forbidden) isn't read
+    # as declaring nothing. `declared` here is purely informational (the "dead grants"
+    # evidence line below), never a verdict gate, so widening it cannot flip PASS->WARN.
+    declared: set = set()
+    for src in (
+        dig(ctx.config, "tools.allow"),
+        dig(ctx.config, "tools.alsoAllow"),
+    ):
+        if isinstance(src, list):
+            declared.update(
+                _attest.normalize_verb(t) for t in src if isinstance(t, (str, bytes))
+            )
     reported = att.get("tools")
     effective = (
         {
@@ -519,19 +544,32 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     """Which filesystem tools config GRANTS, and whether that is knowable at all.
 
     B-283 (b). Returns ``(granted, enumerable)``. ``enumerable`` is False when the config
-    declares neither an explicit tool allowlist nor a profile — the grants then depend on
-    OpenClaw's runtime defaults, which static config cannot resolve, so the caller must
-    report UNKNOWN rather than guess (GR#4: never assert a capability the config does not
-    declare).
+    declares neither an explicit tool allowlist, a profile, nor a tools.alsoAllow grant —
+    the grants then depend on OpenClaw's runtime defaults, which static config cannot
+    resolve, so the caller must report UNKNOWN rather than guess (GR#4: never assert a
+    capability the config does not declare).
 
     Deliberately conservative in both directions: an explicit allowlist is authoritative
     (only the fs tools actually listed count, minus anything denied), and a profile is
     only read as granting fs tools when it is one of the powerful profiles the package
     already recognises — so a "minimal"/"readonly"/"chat" profile yields no grant and
     cannot produce a WARN.
+
+    I-028: tools.alsoAllow is a real, MERGED-ADDITIVE grant channel — OpenClaw's schema
+    forbids allow+alsoAllow together and RECOMMENDS profile+alsoAllow instead, so the
+    common shape carries an EMPTY tools.allow/gateway.tools.allow and a non-powerful (or
+    absent) profile while alsoAllow does the actual granting; the pre-I-028 code fell
+    straight to the "no allowlist, no profile" / non-powerful-profile branches and missed
+    it entirely. alsoAllow is folded in as its OWN accumulator and unioned into whatever
+    tools.allow/gateway.tools.allow/tools.profile already grants, rather than merged into
+    `listed` up front — merging it into `listed` would make its mere presence take the
+    listed-branch and, for a POWERFUL profile, wrongly NARROW an already-established
+    "every fs tool granted" verdict down to just the alsoAllow tokens. Additive means it
+    can only ever WIDEN the granted set, never shrink it.
     """
     allow_a = dig(cfg, "tools.allow")
     allow_b = dig(cfg, "gateway.tools.allow")
+    also_allow = dig(cfg, "tools.alsoAllow")
     deny = dig(cfg, "tools.deny")
     denied = {str(t).strip().lower() for t in deny} if isinstance(deny, list) else set()
     # "group:fs" denies the whole family (see check at _capability.py:430).
@@ -543,20 +581,42 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
         if isinstance(v, list):
             listed.extend(str(t).strip().lower() for t in v)
 
-    if listed:
-        if "group:fs" in listed:
-            return [t for t in _B68_FS_TOOLS if t not in denied], True
-        granted = [t for t in _B68_FS_TOOLS if t in listed and t not in denied]
-        return granted, True
+    also_listed: list[str] = []
+    if isinstance(also_allow, list):
+        also_listed.extend(str(t).strip().lower() for t in also_allow)
 
     profile = dig(cfg, "tools.profile")
-    if profile is not None:
-        if _profile_is_powerful(profile):
-            return [t for t in _B68_FS_TOOLS if t not in denied], True
-        return [], True
 
-    # No allowlist and no profile: grants come from runtime defaults we cannot see.
-    return [], False
+    if listed:
+        if "group:fs" in listed:
+            granted = set(_B68_FS_TOOLS)
+        else:
+            granted = {t for t in _B68_FS_TOOLS if t in listed}
+        enumerable = True
+    elif profile is not None:
+        granted = set(_B68_FS_TOOLS) if _profile_is_powerful(profile) else set()
+        enumerable = True
+    else:
+        # No allowlist and no profile (yet): grants may still be bounded below by
+        # tools.alsoAllow alone.
+        granted = set()
+        enumerable = False
+
+    if "group:fs" in also_listed:
+        granted |= set(_B68_FS_TOOLS)
+        enumerable = True
+    else:
+        also_granted = {t for t in _B68_FS_TOOLS if t in also_listed}
+        if also_granted:
+            granted |= also_granted
+            enumerable = True
+
+    if not enumerable:
+        # Nothing at all to bound the grant on: allow-lists absent, no profile, and
+        # alsoAllow (if present) named no fs-family tool — runtime defaults decide, which
+        # static config cannot resolve.
+        return [], False
+    return sorted(granted - denied), True
 
 
 def check_exec_applypatch_workspace(ctx: Context) -> Finding:
@@ -589,8 +649,9 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
               dangerous-config-flags-current-CrOoyQT2.js:48), or the composite predicate
               holds with the field merely absent.
     UNKNOWN — fs tool grants are not enumerable from config (no tools.allow /
-              gateway.tools.allow and no tools.profile) and neither sibling is explicitly
-              false, so the composite predicate genuinely cannot be evaluated.
+              gateway.tools.allow / tools.alsoAllow naming an fs-family tool, and no
+              tools.profile) and neither sibling is explicitly false, so the composite
+              predicate genuinely cannot be evaluated.
 
     NARROWS, does not close: reasons over STATIC config only. Per-agent
     ``tools.allow``/``deny``/``profile`` overrides and group/sender-scoped tool policies
@@ -656,9 +717,10 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
             "B68",
             UNKNOWN,
             "tools.fs.workspaceOnly is not set and filesystem tool grants are not "
-            "enumerable from config (no tools.allow / gateway.tools.allow and no "
-            "tools.profile), so workspace confinement cannot be assessed. The OpenClaw "
-            "default for tools.fs.workspaceOnly is false (unconfined).",
+            "enumerable from config (no tools.allow / gateway.tools.allow / "
+            "tools.alsoAllow naming an fs-family tool, and no tools.profile), so "
+            "workspace confinement cannot be assessed. The OpenClaw default for "
+            "tools.fs.workspaceOnly is false (unconfined).",
             "Declare tools.allow (or tools.profile) explicitly so tool grants are "
             "auditable, and set tools.fs.workspaceOnly to true.",
         )
