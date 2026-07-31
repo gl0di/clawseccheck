@@ -688,7 +688,10 @@ python3 audit.py --log audit.log            # also write log to a local file
   say — including the F-154/F-155 cap-only grade adjustments (see "Threat monitoring"
   and `docs/OUTPUT_SCHEMA.md`).
   - **`--compact`** (only with `--dashboard --full`) is the ~4096-character Telegram-safe
-    layout: Plugins/MCP/RISK-chain blocks collapse to headline counts only, and a trailing
+    layout: Plugins/MCP/RISK-chain blocks collapse to headline counts only; the Findings
+    and "Worth a glance" blocks keep every finding (nothing dropped) but trim each one's
+    "why" text and drop its evidence bullets — Findings is the block that actually scales
+    with FAIL/WARN count, so it is condensed too, not left full-length; and a trailing
     line points at `--save PATH` / `--html PATH` for the full detail. (The spec's original
     suggested flag name was `--card` — already taken by the shareable grade+score+trifecta
     badge above, hence `--compact`.)

@@ -11,10 +11,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from clawseccheck.catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, WARN, Finding
+import re
+
+from clawseccheck.catalog import ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, WARN, Finding
+from clawseccheck.checks._mcp import PluginSweep
 from clawseccheck.cli import main
 from clawseccheck.collector import Context
-from clawseccheck.report import _sev_token, render_dashboard
+from clawseccheck.report import _plugins_inventory_lines, _sev_token, _worth_a_glance_lines, render_dashboard
 from clawseccheck.scoring import compute
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -212,3 +215,139 @@ class TestDashboardSkillsSection:
         without = render_dashboard(findings, score)
         with_skills = render_dashboard(findings, score, ctx=_skill_ctx({"good-skill": _CLEAN_SKILL_TEXT}))
         assert with_skills.startswith(without.rstrip("\n"))
+
+
+# ─── B-381 #1/#2: Plugins headline never lies about an all-unscanned sweep ────
+
+class TestPluginsInventoryAllUnscanned:
+    """A PluginSweep where every row is SKIPPED/TRUNCATED (no FAIL/WARN at all) must
+    never roll up to a green/'clear' headline -- that would tell the reader the exact
+    opposite of the truth (nothing was actually scanned). Mirrors the precedent
+    `_skills_inventory_lines` already sets for its own UNKNOWN rows."""
+
+    def _all_unscanned_sweep(self) -> PluginSweep:
+        return PluginSweep(
+            home_dir=Path("/x"), checked_dirs=[Path("/x/state")],
+            rows=[("plugin-a", "SKIPPED", 0), ("plugin-b", "TRUNCATED", 0),
+                 ("plugin-c", "SKIPPED", 0)],
+            findings=[],
+        )
+
+    def test_non_compact_headline_is_not_clear(self):
+        out = _plugins_inventory_lines(self._all_unscanned_sweep())
+        headline = out[0]
+        assert "clear" not in headline, headline
+        assert "flagged" in headline, headline
+        assert "3 flagged" in headline, headline
+
+    def test_compact_headline_is_not_clear(self):
+        out = _plugins_inventory_lines(self._all_unscanned_sweep(), compact=True)
+        headline = out[0]
+        assert "clear" not in headline, headline
+        assert "flagged" in headline, headline
+
+    def test_compact_still_discloses_not_scanned_count(self):
+        # B-381 #1: the "not (fully) scanned" disclosure must survive compact=True,
+        # not just the non-compact branch it used to be trapped in.
+        out = _plugins_inventory_lines(self._all_unscanned_sweep(), compact=True)
+        joined = "\n".join(out)
+        assert "not (fully) scanned" in joined
+        assert "3 plugin(s)" in joined
+
+    def test_non_compact_also_discloses_not_scanned_count(self):
+        out = _plugins_inventory_lines(self._all_unscanned_sweep())
+        joined = "\n".join(out)
+        assert "not (fully) scanned" in joined
+
+    def test_marker_is_not_the_pass_icon(self):
+        # icon.get(PASS, ...) is the checkmark/[OK] glyph -- an all-unscanned sweep
+        # must not carry it in its headline.
+        from clawseccheck.report import _ICON
+        out = _plugins_inventory_lines(self._all_unscanned_sweep())
+        assert _ICON[PASS] not in out[0]
+
+
+class TestPluginsInstalledCount:
+    """B-381 #2: the '(N installed)' headline count must be len(sweep.rows), not
+    counts()['total'] (which excludes SKIPPED rows and so under-reports)."""
+
+    def test_installed_count_includes_skipped_rows(self):
+        sweep = PluginSweep(
+            home_dir=Path("/x"), checked_dirs=[Path("/x/state")],
+            rows=[("plugin-a", PASS, 0), ("plugin-b", FAIL, 1), ("plugin-c", "SKIPPED", 0)],
+            findings=[("plugin-b", Finding(id="MCP-VET", title="t", severity=CRITICAL,
+                                           status=FAIL, detail="d", fix="f", framework="Test"))],
+        )
+        # counts()['total'] would report 2 here (SKIPPED excluded) -- the fix must
+        # report all 3 actually-installed plugins.
+        assert sweep.counts()["total"] == 2
+        out = _plugins_inventory_lines(sweep)
+        assert "(3 installed)" in out[0], out[0]
+
+
+# ─── B-381 #3: "Worth a glance" never leaks an absolute home-directory path ───
+
+_ABS_PATH_RE = re.compile(r"/home/[^/\s]|/Users/[^/\s]|[A-Za-z]:\\Users\\")
+
+
+class TestWorthAGlanceRedactsHomePaths:
+    def test_home_path_in_detail_is_redacted(self):
+        f = Finding(
+            id="NATIVE-PATH", title="Native binary PATH safety", severity=LOW,
+            status=WARN, confidence=MEDIUM,
+            detail=("openclaw binary dir /home/dave/.npm-global/lib/node_modules/openclaw "
+                    "is group-writable"),
+            fix="tighten permissions", framework="Test",
+        )
+        out = _worth_a_glance_lines([f])
+        joined = "\n".join(out)
+        assert not _ABS_PATH_RE.search(joined), joined
+        assert "~/.npm-global/lib/node_modules/openclaw" in joined
+
+    def test_macos_home_path_is_redacted(self):
+        f = Finding(
+            id="NATIVE-PATH", title="Native binary PATH safety", severity=LOW,
+            status=WARN, confidence=ATTESTED,
+            detail="binary dir /Users/dave/Library/npm is group-writable",
+            fix="tighten permissions", framework="Test",
+        )
+        out = _worth_a_glance_lines([f])
+        joined = "\n".join(out)
+        assert not _ABS_PATH_RE.search(joined), joined
+
+    def test_no_line_reaching_the_full_dashboard_card_leaks_a_home_path(self):
+        findings = [
+            Finding(id="B2", title="title B2", severity=CRITICAL, status=FAIL,
+                   detail="detail B2", fix="fix B2", framework="Test"),
+            Finding(
+                id="NATIVE-PATH", title="Native binary PATH safety", severity=LOW,
+                status=WARN, confidence=MEDIUM,
+                detail="binary dir /home/dave/.npm-global/lib is group-writable",
+                fix="tighten permissions", framework="Test",
+            ),
+        ]
+        score = compute(findings)
+        out = render_dashboard(findings, score, full=True)
+        assert not _ABS_PATH_RE.search(out), out
+
+
+# ─── B-381 #4: --compact must actually fit the Telegram ~4096-char budget ────
+
+class TestCompactCharBudget:
+    """render_dashboard's own docstring says --compact targets Telegram's
+    ~4096-char message cap -- this pins that the real, documented gate fixtures
+    (clean + bad) both actually fit, not just that trimming happened somewhere."""
+
+    def test_compact_home_safe_fits_telegram_budget(self, capsys):
+        rc = main(["--home", str(FIXTURES / "home_safe"), "--no-native", "--no-history",
+                   "--dashboard", "--full", "--compact"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert len(out) <= 4096, len(out)
+
+    def test_compact_home_vuln_fits_telegram_budget(self, capsys):
+        rc = main(["--home", str(FIXTURES / "home_vuln"), "--no-native", "--no-history",
+                   "--dashboard", "--full", "--compact"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert len(out) <= 4096, len(out)

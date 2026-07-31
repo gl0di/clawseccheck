@@ -54,6 +54,35 @@ def _sanitize(s: str) -> str:
     return redact(s)
 
 
+# B-381: an absolute path under a user's home directory carries the operator's OS
+# username (e.g. "/home/dave/.npm-global/..."). Fine inside the full report / --save
+# file (stays on the owner's own machine), but --dashboard --full's card is explicitly
+# designed to be pasted into chat (Telegram et al.) -- CLAUDE.md §8 "No PII... in logs,
+# reports, fixtures, or test output" applies to that card specifically. Reproduced: a
+# MEDIUM-confidence "Native binary PATH safety" finding's `detail` embeds the operator's
+# npm-global install path under /home/<user>/... . Scoped to a leading "~" so the
+# remainder of the path (still useful context, e.g. ".npm-global/lib/node_modules") is
+# preserved -- only the username-bearing prefix is removed, matching the well-known
+# shell convention for "my home dir" rather than inventing a new placeholder syntax.
+_HOME_PATH_RE = re.compile(
+    r"/home/[^/\s]+|/Users/[^/\s]+|[A-Za-z]:\\+Users\\+[^\\\s]+"
+)
+
+
+def _redact_home_paths(text: str) -> str:
+    """Collapse a leading user-home path segment to '~' (B-381).
+
+    Applied only to the --dashboard --full "Worth a glance" card section (the
+    MEDIUM/ATTESTED-confidence findings render_dashboard_findings's own HIGH-confidence
+    filter deliberately excludes) -- the rest of the report/--save/--html output keeps
+    full paths, which is correct there: those stay on the owner's own machine and a
+    real path is exactly what an owner debugging their own config needs to see.
+    """
+    if not text:
+        return text
+    return _HOME_PATH_RE.sub("~", text)
+
+
 def _sanitize_tree(value):
     """Recursively sanitize untrusted strings in machine-readable output trees."""
     if isinstance(value, str):
@@ -128,6 +157,152 @@ def _behavioral_cap_phrase(reason: str | None) -> str:
     if not reason:
         return "a behavioral detector fired"
     return f"a behavioral detector fired ({reason})"
+
+
+# ── Cap-reason cascade (B-380) ──────────────────────────────────────────
+#
+# Six independent cap-only signals can each tighten a score below its raw value —
+# severity FAILs, a blind/unreadable config, a degraded (crashed/timed-out) check, a
+# corroborated runtime signal, a submitted VULNERABLE live-injection-test verdict, and
+# a fired behavioral detector. `compute()` (scoring.py) documents every one of the
+# `*_capped` fields as True ONLY when that specific signal actually bound (tightened
+# the score further than whatever had already applied) — `cap_severity` has the
+# identical property by construction (only set when its own cap loop actually reduced
+# the score) — so more than one of these six can be True on the SAME ScoreResult.
+#
+# `render_report` and `render_html` used to each hand-roll their own five-branch
+# "elif" ladder plus a private "_extra = []; if X: _extra.append(...)" block per
+# branch — ten near-identical copies of the same six-signal enumeration, hand-edited
+# separately every time a new signal type was added. That duplication is what let two
+# real defects ship green: `render_html`'s runtime branch tested `score.capped or
+# _rt_capped` (true for ANY cap, not just a runtime one, so a behavioral-only cap fell
+# through to it and fabricated a runtime-signal claim), and neither renderer's
+# severity-cap branch named a co-occurring runtime cap even when the runtime cap was
+# the one that actually set the final number.
+#
+# `_CAP_SIGNAL_TABLE` is the ONE ordered (flag, phrase) table both renderers read, and
+# `_cap_cascade()` is the ONE place that decides which signal leads (the primary
+# reason) and which other active signals are named as "also" mentions. A new signal
+# type is added to the table exactly once and both renderers pick it up automatically
+# — the defect class above becomes structurally impossible to reintroduce.
+_CAP_LIVE = "live"
+_CAP_CONFIG_BLIND = "config_blind"
+_CAP_DEGRADED = "degraded"
+_CAP_SEVERITY = "severity"
+_CAP_RUNTIME = "runtime"
+_CAP_BEHAVIORAL = "behavioral"
+
+# Display-priority order (highest first): also the order in which `_cap_cascade` picks
+# the PRIMARY reason, and the order "also" mentions are listed in. This mirrors the
+# existing, deliberate priority render_report already used (live > config-blind >
+# degraded > severity > runtime > behavioral) — a direct, positive proof of a
+# successful attack outranks "cannot rule out a CRITICAL condition", which outranks an
+# actual open FAIL, which outranks a corroborated-but-indirect runtime signal, which
+# outranks the weakest/most-heuristic behavioral layer.
+#
+# Each entry's `phrase(score)` returns the unescaped English "also ..." wording for
+# that signal — never called unless the signal is active (`_cap_signal_active` below).
+# Deliberately free of "(capped from N - ...)" framing and of HTML escaping: both
+# renderers reuse the identical English, and `render_html` applies `esc()` itself so
+# nothing here duplicates that decision.
+_CAP_SIGNAL_TABLE = (
+    (_CAP_LIVE, lambda score: _live_injection_cap_phrase(
+        getattr(score, "live_injection_cap_reason", None))),
+    (_CAP_CONFIG_BLIND, lambda score: "a blind/unreadable config"),
+    (_CAP_DEGRADED, lambda score: f"{getattr(score, 'degraded_count', 0)} degraded check(s)"),
+    (_CAP_SEVERITY, lambda score: f"an open {score.cap_severity} finding"),
+    (_CAP_RUNTIME, lambda score: (
+        f"a corroborated runtime signal ({_runtime_cap_phrase(score.runtime_cap_reason)})")),
+    (_CAP_BEHAVIORAL, lambda score: _behavioral_cap_phrase(
+        getattr(score, "behavioral_cap_reason", None))),
+)
+
+
+def _cap_signal_active(score: ScoreResult) -> dict:
+    """Which of the six cap-only signals actually bound the score on *score*.
+
+    `getattr(score, name, default)` throughout — never direct attribute access —
+    because some tests build minimal duck-typed ScoreResult stand-ins that predate the
+    newer fields; this is the same tolerance every call site already established
+    individually (see the B-306/F-154/F-155 comments this replaces).
+    """
+    return {
+        _CAP_LIVE: bool(getattr(score, "live_injection_capped", False)),
+        _CAP_CONFIG_BLIND: bool(getattr(score, "config_blind_capped", False)),
+        _CAP_DEGRADED: bool(getattr(score, "degraded_capped", False)),
+        _CAP_SEVERITY: bool(getattr(score, "cap_severity", None)),
+        _CAP_RUNTIME: bool(getattr(score, "runtime_capped", False)),
+        _CAP_BEHAVIORAL: bool(getattr(score, "behavioral_capped", False)),
+    }
+
+
+def _cap_cascade(score: ScoreResult) -> tuple[str | None, list[str]]:
+    """Decide the primary cap-reason signal and the co-occurring "also" phrases.
+
+    Returns ``(primary, extra_phrases)``: *primary* is one of the six ``_CAP_*``
+    names — the highest-priority ACTIVE signal, per `_CAP_SIGNAL_TABLE`'s order — or
+    ``None`` when nothing capped the score at all. *extra_phrases* is every OTHER
+    active signal's "also ..." wording, already in priority order and ready to
+    ``", ".join(...)``.
+
+    This is the ONE place that makes the primary/co-occurring decision — both
+    `render_report` and `render_html` call it instead of maintaining their own copy of
+    the same six-signal priority ladder (B-380).
+    """
+    active = _cap_signal_active(score)
+    order = [name for name, _phrase in _CAP_SIGNAL_TABLE]
+    primary = next((name for name in order if active[name]), None)
+    if primary is None:
+        return None, []
+    extras = [
+        phrase(score)
+        for name, phrase in _CAP_SIGNAL_TABLE
+        if name != primary and active[name]
+    ]
+    return primary, extras
+
+
+def _cap_also_clause(extras: list[str]) -> str:
+    """``"; also X, Y"`` (or ``""``) — the join both renderers used to hand-roll."""
+    return f"; also {', '.join(extras)}" if extras else ""
+
+
+def _cap_primary_reason_text(primary: str, score: ScoreResult, *,
+                             audited_path=None) -> str:
+    """The middle clause of "(capped from N - <this>...)" for whichever signal
+    `_cap_cascade` chose as primary.
+
+    Unescaped English — `render_html` applies `esc()` around the result;
+    `render_report` uses it as-is. `audited_path` is only ever meaningful for the
+    config-blind "absent" case (`render_report` passes the resolved would-be config
+    path when it has one; `render_html`'s signature has no ctx/path available, so it
+    always passes ``None`` and the HTML text stays path-free — matching the pre-
+    existing per-renderer wording exactly).
+    """
+    if primary == _CAP_LIVE:
+        return _live_injection_cap_phrase(getattr(score, "live_injection_cap_reason", None))
+    if primary == _CAP_CONFIG_BLIND:
+        # B-363: word the two config-blind states distinctly — "absent" (nothing to
+        # read at all) is strictly less information than "unreadable" (present but
+        # broken), so it must never read as if a file was found and opened.
+        if getattr(score, "config_blind_reason", None) == "absent":
+            if audited_path is not None:
+                text = f"no OpenClaw config found at {audited_path}"
+            else:
+                text = "no OpenClaw config found"
+        else:
+            text = "openclaw.json unreadable/unparseable this run"
+        return f"{text}: cannot rule out a CRITICAL condition"
+    if primary == _CAP_DEGRADED:
+        n = getattr(score, "degraded_count", 0)
+        return f"{n} check(s) crashed or timed out this run: cannot rule out a CRITICAL condition"
+    if primary == _CAP_SEVERITY:
+        return f"open {score.cap_severity} finding"
+    if primary == _CAP_RUNTIME:
+        return f"corroborated runtime signal: {_runtime_cap_phrase(score.runtime_cap_reason)}"
+    if primary == _CAP_BEHAVIORAL:
+        return _behavioral_cap_phrase(getattr(score, "behavioral_cap_reason", None))
+    raise ValueError(f"unknown cap-cascade primary: {primary!r}")  # pragma: no cover
 
 
 _SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}
@@ -663,8 +838,36 @@ def _render_finding_compact(lines, icon, f):
     lines.append(f"  {icon[f.status]} [{f.severity}] {_sanitize(f.title)}")
 
 
+# B-381: --dashboard --full --compact's per-finding "why" text, word-boundary
+# truncated so a bad config's Section-2 Findings block (which scales with FAIL/WARN
+# count, unlike every other section render_dashboard's docstring already calls
+# "already short") can fit the Telegram ~4096-char budget. Tuned against the two
+# fixtures --compact is measured against (fixtures/home_safe, fixtures/home_vuln):
+# before this fix, --dashboard --full --compact measured 4775/7936 chars respectively
+# (already over budget on the CLEAN config too, let alone the 25-issue bad one); after
+# this fix (this limit + dropped evidence bullets + a narrower family-frame border
+# rule + a lower "Worth a glance" limit under compact), 1976/3788 chars -- both under
+# 4096 with headroom. Re-measure and retune if a future change grows a section this
+# doesn't already trim.
+_COMPACT_WHY_LIMIT = 36
+
+
+def _compact_detail(text: str, limit: int) -> str:
+    """Truncate *text* to at most ~*limit* chars at a word boundary, appending an
+    ellipsis when cut. Never splits mid-word; falls back to a hard cut only when the
+    first word alone already exceeds *limit* (never returns emptystring for
+    nonempty input)."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip()
+    if not cut:
+        cut = text[:limit].rstrip()
+    return f"{cut}…"
+
+
 def _render_finding(lines, f, cfg: dict | None = None, *,
-                    ascii_only: bool = False, color: bool = False):
+                    ascii_only: bool = False, color: bool = False,
+                    compact: bool = False):
     conf = getattr(f, "confidence", "HIGH")
     tag = f"  (confidence: {conf.lower()})" if conf != "HIGH" and f.status in (FAIL, WARN) else ""
     pc = getattr(f, "pass_confidence", None)
@@ -675,13 +878,18 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
                  f"{_sanitize(f.title)}{tag}{pass_tag}")
     why_text = _sanitize(f.detail) if f.detail else ""
     if why_text:
-        lines.append(f"    why: {why_text}")
+        # B-381: --compact trims the detail text itself -- the growth driver on a bad
+        # config is many findings' full "why" paragraphs, not any single fixed section.
+        shown_why = _compact_detail(why_text, _COMPACT_WHY_LIMIT) if compact else why_text
+        lines.append(f"    why: {shown_why}")
     # Surface the concrete evidence (e.g. the exact verbs B43/B44 flagged) when a
     # FAIL/WARN carries it — naming the specific item is the value of the finding.
     # B-078: many checks build `detail` by joining their evidence, so a bullet that is
     # already quoted verbatim inside the why line is pure duplication — skip it. Bullets
     # survive only when they ADD something the why line doesn't literally contain.
-    if f.evidence and f.status in (FAIL, WARN):
+    # B-381: --compact drops evidence bullets entirely -- the same "headline only"
+    # trim already applied to Plugins/MCP/RISK-chain detail under --compact.
+    if f.evidence and f.status in (FAIL, WARN) and not compact:
         for ev in f.evidence[:12]:
             ev_s = _sanitize(ev)
             if ev_s and ev_s not in why_text:
@@ -1193,116 +1401,21 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # this file" from "we looked for this file and it wasn't there".
     _audited_path = getattr(ctx, "config_path", None) if ctx is not None else None
     _cfg_found = getattr(ctx, "config_found", True) if ctx is not None else True
-    _degraded_capped = getattr(score, "degraded_capped", False)
-    # F-155: this only ever becomes True on a submitted VULNERABLE live injection-test
-    # verdict (self-attestation guard — see scoring.LIVE_INJECTION_CAP) so every existing
-    # call site/test, which never sets it, takes the exact same branches below as before
-    # this field existed.
-    _live_capped = getattr(score, "live_injection_capped", False)
-    # F-154: this only ever becomes True on a fired T1/T2/T3/B191 detector, and only
-    # when --behavioral/--full actually ran the analysis — see
-    # scoring.BEHAVIORAL_SIGNAL_CAP. Every existing call site/test, which never sets
-    # it, takes the exact same branches below as before this field existed.
-    _behavioral_capped = getattr(score, "behavioral_capped", False)
-    if (score.capped or score.config_blind_capped or score.runtime_capped
-            or _degraded_capped or _live_capped or _behavioral_capped):
-        if _live_capped:
-            # F-155: display priority over config-blind/degraded/severity/runtime/
-            # behavioral — this is direct, positive proof of a successful live attack
-            # (not "cannot rule out"), so it takes the top slot the same way
-            # config_blind_capped already does for its own reasoning. Co-occurring
-            # signals are still named via `_extra`, same convention as every other
-            # branch here.
-            _extra = []
-            if score.config_blind_capped:
-                _extra.append("a blind/unreadable config")
-            if _degraded_capped or _degraded_n:
-                _extra.append(f"{_degraded_n} degraded check(s)")
-            if score.cap_severity:
-                _extra.append(f"an open {score.cap_severity} finding")
-            if score.runtime_capped:
-                _extra.append(
-                    f"a corroborated runtime signal ({_runtime_cap_phrase(score.runtime_cap_reason)})"
-                )
-            if _behavioral_capped:
-                _extra.append(_behavioral_cap_phrase(score.behavioral_cap_reason))
-            _also = f"; also {', '.join(_extra)}" if _extra else ""
-            lines.append(
-                f"(capped from {score.raw_score} - "
-                f"{_live_injection_cap_phrase(getattr(score, 'live_injection_cap_reason', None))}"
-                f"{_also})"
-            )
-        elif score.config_blind_capped:
-            # B-306 (C-135 follow-up): takes display priority over cap_severity/runtime/
-            # degraded/behavioral — when more than one signal fires, this names every one
-            # that did so the reader never loses a co-occurring reason (the `total == 0`
-            # branch above is the only place more than one of these can be True at once;
-            # the ordinary severity-cap path keeps them mutually exclusive because
-            # CONFIG_BLIND_CAP/DEGRADED_CHECK_CAP <= RUNTIME_SIGNAL_CAP always wins first).
-            _extra = []
-            if score.cap_severity:
-                _extra.append(f"an open {score.cap_severity} finding")
-            if _degraded_capped or _degraded_n:
-                _extra.append(f"{_degraded_n} degraded check(s)")
-            if score.runtime_capped:
-                _extra.append(
-                    f"a corroborated runtime signal ({_runtime_cap_phrase(score.runtime_cap_reason)})"
-                )
-            if _behavioral_capped:
-                _extra.append(_behavioral_cap_phrase(score.behavioral_cap_reason))
-            _also = f"; also {', '.join(_extra)}" if _extra else ""
-            # B-363: word the two config-blind states distinctly — "absent" (nothing to
-            # read at all) is strictly less information than "unreadable" (present but
-            # broken), so it must never read as if a file was found and opened.
-            if getattr(score, "config_blind_reason", None) == "absent":
-                _cfg_blind_text = (
-                    f"no OpenClaw config found at {_audited_path}" if _audited_path is not None
-                    else "no OpenClaw config found"
-                )
-            else:
-                _cfg_blind_text = "openclaw.json unreadable/unparseable this run"
-            lines.append(
-                f"(capped from {score.raw_score} - {_cfg_blind_text}:"
-                f" cannot rule out a CRITICAL condition{_also})"
-            )
-        elif _degraded_capped:
-            # B-313: no config-blind signal, but at least one check crashed/timed out and
-            # that alone drove the cap — same "cannot rule out a CRITICAL" reasoning,
-            # applied at check-granularity (see DEGRADED_CHECK_CAP's docstring).
-            _extra = []
-            if _behavioral_capped:
-                _extra.append(_behavioral_cap_phrase(score.behavioral_cap_reason))
-            _also = f"; also {', '.join(_extra)}" if _extra else ""
-            lines.append(
-                f"(capped from {score.raw_score} - {_degraded_n} check(s) crashed or timed"
-                f" out this run: cannot rule out a CRITICAL condition{_also})"
-            )
-        elif score.cap_severity:
-            _extra = []
-            if _behavioral_capped:
-                _extra.append(_behavioral_cap_phrase(score.behavioral_cap_reason))
-            _also = f"; also {', '.join(_extra)}" if _extra else ""
-            lines.append(
-                f"(capped from {score.raw_score} - open {score.cap_severity} finding{_also})"
-            )
-        elif score.runtime_capped:
-            # I-025/B-309: no scored FAIL drove this cap — only a corroborated runtime
-            # signal can, and only as a cap (never an ordinary scored point).
-            _extra = []
-            if _behavioral_capped:
-                _extra.append(_behavioral_cap_phrase(score.behavioral_cap_reason))
-            _also = f"; also {', '.join(_extra)}" if _extra else ""
-            lines.append(
-                f"(capped from {score.raw_score} - corroborated runtime signal: "
-                f"{_runtime_cap_phrase(score.runtime_cap_reason)}{_also})"
-            )
-        else:
-            # F-154: nothing above fired — only a behavioral detector (T1/T2/T3/B191,
-            # --behavioral/--full) drove this cap.
-            lines.append(
-                f"(capped from {score.raw_score} - "
-                f"{_behavioral_cap_phrase(score.behavioral_cap_reason)})"
-            )
+    # B-380: the five-branch "elif" ladder + ten near-identical
+    # "_extra = []; if X: _extra.append(...)" blocks that used to live here (one per
+    # branch, hand-edited separately every time a signal type was added) are gone —
+    # `_cap_cascade` is the single, shared decision both render_report and render_html
+    # defer to now. It reads exactly the same six signals the old gate condition named
+    # (`score.capped` covers the ordinary severity-cap path; the granular flags cover
+    # every cap-only signal, including the `total == 0` branch where `capped` stays
+    # False by design — see the B-306 comment this replaces), so `_primary is not
+    # None` is the correct, single-source-of-truth gate.
+    _primary, _extras = _cap_cascade(score)
+    if _primary is not None:
+        _reason_text = _cap_primary_reason_text(_primary, score, audited_path=_audited_path)
+        lines.append(
+            f"(capped from {score.raw_score} - {_reason_text}{_cap_also_clause(_extras)})"
+        )
 
     # B-281 (ENV-1): name the file this grade actually describes. OpenClaw resolves its
     # config through OPENCLAW_CONFIG_PATH / OPENCLAW_HOME / OPENCLAW_STATE_DIR (what
@@ -1690,7 +1803,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
     return out
 
 
-def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = False) -> str:
+def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = False,
+                              compact: bool = False) -> str:
     """Deterministic, framed Findings block for the chat Dashboard (SKILL.md Step 3, Section 3).
 
     Emits ONLY what Section 3 must contain, so the host agent PASTES this verbatim instead
@@ -1699,6 +1813,16 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
       - MEDIUM/ATTESTED-confidence findings excluded (they surface in Section 4);
       - families with no qualifying finding are omitted (no empty "— clear" headers);
       - each family under the same open 3-sided frame render_report uses.
+
+    `compact=True` (B-381) is render_dashboard's --dashboard --full --compact mode:
+    this block is the one section that SCALES with FAIL/WARN count (a bad config has
+    many), so it is the real driver of the Telegram ~4096-char budget being missed —
+    every other combined-pipeline section is already bounded/short. `compact` threads
+    into `_render_finding`, which trims each finding's "why" text and drops its
+    evidence bullets; the family frames, titles and severity tokens are unchanged
+    (still the exact literal block the host agent pastes verbatim). Default False
+    reproduces the exact prior byte-identical output for every existing caller
+    (the standalone `--dashboard-findings` command, and every test).
     """
     findings = deduplicate_findings(findings)
     qualifying = [
@@ -1731,12 +1855,15 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
             # the CLI report's family headers stay emoji-less by design.
             emoji = _FAMILY_EMOJI.get(fam_key)
             head = f"{emoji} {label}" if emoji else label
-            _rule = "─" * 30
+            # B-381: --compact narrows the frame's own border rule (still an open
+            # 3-sided box -- same shape, fewer dashes) -- one of several small per-
+            # family savings that add up across a bad config's many families/findings.
+            _rule = "─" * (10 if compact else 30)
             lines.append(f"┌{_rule}")
             lines.append(f"│ {head} — {count_text}")
             lines.append(f"└{_rule}")
         for f in members:
-            _render_finding(lines, f, cfg=None, ascii_only=ascii_only)
+            _render_finding(lines, f, cfg=None, ascii_only=ascii_only, compact=compact)
         lines.append("")
 
     out = "\n".join(lines).rstrip() + "\n"
@@ -1755,26 +1882,44 @@ def _plugins_inventory_lines(sweep, *, ascii_only: bool = False, compact: bool =
     Returns [] when there is genuinely nothing to sweep (no installed-plugin index
     found, or an index naming zero plugins) — the caller omits the whole "Plugins"
     block then, same as "Skills" already does when inv["skills"] is empty.
-    `compact=True` (--compact) collapses this to the headline count line only.
+    `compact=True` (--compact) collapses this to the headline count line plus the
+    not-scanned disclosure (when there is one) — the per-plugin roster/reason lines
+    are what gets dropped, not the disclosure (B-381).
+
+    B-381 (Golden Rule #4): SKIPPED/TRUNCATED rows are folded into "flagged" for the
+    headline marker/count, the same precedent `_skills_inventory_lines` already sets
+    for its own UNKNOWN rows. `_worst_of_statuses` only recognizes FAIL/WARN/UNKNOWN/
+    PASS (`_STATUS_ORDER`) — "SKIPPED"/"TRUNCATED" aren't in that table, so they used
+    to be silently ignored by the rollup, and a sweep where EVERY row was
+    SKIPPED/TRUNCATED (no FAIL/WARN at all) rolled up to a bare PASS and rendered a
+    green "clear" headline for a sweep that scanned nothing — the exact opposite of
+    the truth. Also: the headline count is `len(sweep.rows)`, not `counts()['total']`
+    — `counts()` defines `scanned = rows where status != 'SKIPPED'` and `total =
+    len(scanned)`, so a sweep with any SKIPPED row under-reported the installed count
+    (the same defect B-268 already fixed once for `_skills_inventory_lines`).
     """
     if sweep is None or sweep.no_roots or sweep.no_targets:
         return []
     icon = _ICON_ASCII if ascii_only else _ICON
     by_name = dict(sweep.findings)
-    c = sweep.counts()
     fail_warn = [(name, status) for name, status, _ev in sweep.rows if status in (FAIL, WARN)]
     not_scanned = [name for name, status, _ev in sweep.rows if status in ("TRUNCATED", "SKIPPED")]
     clean = [name for name, status, _ev in sweep.rows if status == PASS]
-    marker = icon.get(_worst_of_statuses(s for _n, s in fail_warn), "?")
-    count_text = f"{len(fail_warn)} flagged" if fail_warn else "clear"
-    lines = [f" Plugins ({c['total']} installed) — {marker} {count_text}"]
-    if compact:
-        return lines
+    flagged_n = len(fail_warn) + len(not_scanned)
+    # UNKNOWN stands in for SKIPPED/TRUNCATED in the rollup -- _worst_of_statuses
+    # doesn't recognize those two strings, so without this substitution an
+    # all-unscanned sweep (fail_warn empty) rolls up to bare PASS.
+    worst_statuses = [s for _n, s in fail_warn] + ([UNKNOWN] * len(not_scanned))
+    marker = icon.get(_worst_of_statuses(worst_statuses), "?")
+    count_text = f"{flagged_n} flagged" if flagged_n else "clear"
+    lines = [f" Plugins ({len(sweep.rows)} installed) — {marker} {count_text}"]
     if not_scanned:
         lines.append(
             f"   {icon.get(UNKNOWN, '?')} {len(not_scanned)} plugin(s) not (fully) "
             "scanned — their verdict is unknown, not clean"
         )
+    if compact:
+        return lines
     if clean:
         lines.append(f"   {icon.get(PASS, '?')} {len(clean)} clean: "
                      + ", ".join(_sanitize(n) for n in clean))
@@ -1849,13 +1994,31 @@ def _second_opinion_lines(phase, *, ascii_only: bool = False) -> list[str]:
 
 
 def _worth_a_glance_lines(findings: list[Finding], *, ascii_only: bool = False,
-                          limit: int = 12) -> list[str]:
+                          limit: int = 12, compact: bool = False) -> list[str]:
     """MEDIUM/ATTESTED-confidence findings for the combined pipeline Dashboard
     (F-153) — the exact complement of render_dashboard_findings's own filter (which
     excludes these from Section 2), so nothing is shown twice and nothing is
     dropped. Reuses _render_finding, the SAME per-finding renderer Section 2 uses,
     so the two blocks stay one system rather than two hand-written formatters that
     can drift apart on why/evidence text or the confidence tag.
+
+    B-381 (PII / CLAUDE.md §8): render_dashboard_findings's HIGH-confidence filter has
+    always kept MEDIUM/ATTESTED findings off the --dashboard card; this block is the
+    deliberate exception (F-153's "nothing dropped" design) and needs its own guard —
+    a MEDIUM-confidence "Native binary PATH safety" finding's `detail` embeds an
+    absolute path under the operator's home directory (username included), and this
+    card is explicitly designed to be pasted into chat (Telegram et al). Every line is
+    passed through `_redact_home_paths` before it is returned; keeping these findings
+    (redacted) rather than dropping them entirely was the deliberate call here — this
+    section exists specifically so a lower-confidence signal is never silently
+    invisible, and that "worth a glance" is genuinely useful (e.g. an over-permissive
+    npm-global install dir) even once the path is collapsed to '~'.
+
+    `compact=True` (B-381) also lowers the effective `limit` (the caller passes a
+    smaller value) and threads `compact` into `_render_finding`, same trims Section 2
+    applies under --compact — this block is unbounded by FAIL/WARN family structure,
+    so a bad config with many MEDIUM/ATTESTED findings could otherwise blow the
+    Telegram ~4096-char budget on its own.
     """
     qualifying = [
         f for f in findings
@@ -1868,7 +2031,9 @@ def _worth_a_glance_lines(findings: list[Finding], *, ascii_only: bool = False,
     qualifying.sort(key=lambda f: (_STATUS_ORDER.get(f.status, 9), _SEV_ORDER.get(f.severity, 9)))
     lines: list[str] = []
     for f in qualifying[:limit]:
-        _render_finding(lines, f, cfg=None, ascii_only=ascii_only)
+        raw: list[str] = []
+        _render_finding(raw, f, cfg=None, ascii_only=ascii_only, compact=compact)
+        lines.extend(_redact_home_paths(ln) for ln in raw)
     if len(qualifying) > limit:
         lines.append(f"(+{len(qualifying) - limit} more)")
     return lines
@@ -1919,8 +2084,18 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     the spec's suggested flag name `--card` was already taken by the pre-existing
     shareable-badge flag, so the CLI flag is `--compact`). It trims the Plugins/MCP/
     RISK-chain blocks to headline counts only and appends a save-to-file pointer;
-    Sections 1-2, Skills, Behavioural, Second opinion and Coverage are already short
-    (a handful of lines) and unaffected.
+    Skills, Behavioural, Second opinion and Coverage are already short (a handful of
+    lines) and unaffected.
+
+    B-381: Section 2 (Findings) is NOT one of the short/unaffected sections above — it
+    scales with FAIL/WARN count, exactly what a bad config has many of, and measured
+    out as the actual driver of --compact missing its own ~4096-char budget (5058/7551
+    chars measured for a clean/bad home before this fix, against a documented ~4096
+    target Telegram itself enforces). `compact=True` now also threads into
+    `render_dashboard_findings` (trims each finding's "why" text and drops evidence
+    bullets, narrows the family frame's border rule) and into `_worth_a_glance_lines`
+    (lower `limit`, same per-finding trim) — see `_COMPACT_WHY_LIMIT`'s own comment for
+    the tuned value and the fixtures it was measured against.
     """
     findings = deduplicate_findings(findings)
     n_issues = sum(
@@ -1940,7 +2115,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     ]
     lines.append("")
     lines.append(f"{sep} Findings {sep}")
-    body = render_dashboard_findings(findings, ascii_only=ascii_only).rstrip("\n")
+    body = render_dashboard_findings(findings, ascii_only=ascii_only, compact=compact).rstrip("\n")
     out = "\n".join(lines) + "\n" + body + "\n"
     inv = None
     if ctx is not None:
@@ -1979,7 +2154,12 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         out += "\n" + "\n".join(coverage_lines) + "\n"
 
     glance_marker = "" if ascii_only else "👀 "
-    glance_lines = _worth_a_glance_lines(findings, ascii_only=ascii_only)
+    # B-381: --compact also tightens the "Worth a glance" limit (12 -> 6) -- this
+    # block is unbounded by family structure, so a bad config with many MEDIUM/
+    # ATTESTED findings could blow the char budget on its own even after Section 2
+    # is trimmed.
+    glance_lines = _worth_a_glance_lines(
+        findings, ascii_only=ascii_only, limit=6 if compact else 12, compact=compact)
     if glance_lines:
         out += ("\n" + f"{sep} {glance_marker}Worth a glance {sep}" + "\n"
                + "\n".join(glance_lines) + "\n")
@@ -2031,7 +2211,7 @@ def _header_rule_width(header_line: str, ascii_only: bool) -> int:
 
 def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
                    baseline: bool = False, persisted: bool = True,
-                   baseline_corrupt: bool = False) -> str:
+                   baseline_corrupt: bool = False, live_test_skipped: bool = False) -> str:
     """Render the --monitor body.
 
     *baseline* — this was a genuine first run (no prior state file at all).
@@ -2050,7 +2230,16 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     this flag adds is the closing note that a replacement baseline now exists — which is
     printed only when it actually got written.
 
-    All three default to the pre-B-270/B-271 behaviour, so existing callers are unchanged.
+    *live_test_skipped* — B-379: the F-155 seed gate deliberately excluded this run from
+    the journal/baseline (an unseeded/unreproducible VULNERABLE verdict), NOT a write
+    failure — `persisted` is False here too (nothing WAS written), but the CLI does not
+    treat this as an error (no stderr, exit 0), so this function must not read `persisted=
+    False` alone as "the write failed" the way it otherwise would. When True, an explicit
+    "not persisted because..." line replaces the generic silence `persisted=False` would
+    otherwise produce, so the reader is told WHY rather than left to infer a crash.
+
+    All four default to the pre-B-270/B-271/B-379 behaviour, so existing callers are
+    unchanged.
     """
     # LOW is a real catalog severity and must outrank INFO: a LOW check that regressed to
     # FAIL is a security finding, while INFO is an informational counter. Omitting it made
@@ -2074,6 +2263,13 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
         # B-271: nothing was written, so make no claim about the baseline either way.
         if alerts:
             lines += _alert_lines()
+        if live_test_skipped:
+            # B-379: distinguish "deliberately not persisted" from "write failed" —
+            # the CLI does not treat this as an error, and neither should this text.
+            lines += ["", "Not persisted: this run's grade was capped by an unseeded "
+                          "(unreproducible) live injection-test verdict — recording it "
+                          "would manufacture drift where none exists. Re-run without a "
+                          "seed-less verdict, or with a seeded one, to resume monitoring."]
     elif baseline:
         lines += ["", "Baseline saved. Future runs will alert on what changes since now."]
     else:
@@ -2598,7 +2794,9 @@ def render_permission_manifest(ctx, target: str) -> str:
 
 
 def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
-                ctx=None, skill_sweep: dict | None = None) -> str:
+                ctx=None, skill_sweep: dict | None = None,
+                live_test_vulnerable: bool = False, live_test_reason: str | None = None,
+                behavioral_fired_ids=frozenset()) -> str:
     actions = suggest_actions(findings, score)
     _json_cfg: dict | None = (getattr(ctx, "config", {}) or {}) if ctx is not None else None
 
@@ -2680,7 +2878,14 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     from .coverage import coverage as _coverage  # noqa: PLC0415
     from .scoring import project as _project  # noqa: PLC0415
     payload["coverage"] = _coverage(findings)
-    payload["projection"] = _project(findings, ctx)
+    # B-379: thread the SAME cap inputs `score` (above) was computed with, so
+    # projection.current can never disagree with the top-level score/grade for a
+    # capped run — see this function's `behavioral_fired_ids`/`live_test_*` params.
+    payload["projection"] = _project(
+        findings, ctx,
+        live_test_vulnerable=live_test_vulnerable, live_test_reason=live_test_reason,
+        behavioral_fired_ids=behavioral_fired_ids,
+    )
     # B-166: config read/parse state is machine-visible. A broken openclaw.json must not
     # read as a silent all-clear — config_parse_error is a clean gating boolean and errors
     # carries the human-readable parse message(s) that were previously only in the text run.
@@ -2825,24 +3030,10 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
     # a minimal duck-typed ScoreResult stand-in that predates these fields, and the OLD
     # code never touched them because `score.capped and ...` short-circuited past them —
     # preserve that tolerance instead of demanding every caller supply every field.
-    _cfg_blind = getattr(score, "config_blind_capped", False)
-    _rt_capped = getattr(score, "runtime_capped", False)
-    _rt_reason = getattr(score, "runtime_cap_reason", None)
-    # F-155: only True on a submitted VULNERABLE live injection-test verdict — every
-    # existing call site/test, which never sets it, takes the exact same branches below
-    # as before this field existed (self-attestation guard, scoring.LIVE_INJECTION_CAP).
-    _live_capped = getattr(score, "live_injection_capped", False)
-    _live_reason = getattr(score, "live_injection_cap_reason", None)
-    # F-154: only True on a fired T1/T2/T3/B191 detector, and only when --behavioral/
-    # --full actually ran the analysis — every existing call site/test, which never
-    # sets it, takes the exact same branches below as before this field existed.
-    _behavioral_capped = getattr(score, "behavioral_capped", False)
-    _behavioral_reason = getattr(score, "behavioral_cap_reason", None)
     # B-313: same "unconditional, above the grade" disclosure as render_report's text
     # banner — a degraded check count is shown whenever it's nonzero, independent of
-    # whether it ended up strictly binding the cap (see _degraded_capped below).
+    # whether it ended up strictly binding the cap.
     _degraded_n = getattr(score, "degraded_count", 0)
-    _degraded_capped = getattr(score, "degraded_capped", False)
     degraded_html = ""
     if _degraded_n:
         _plural = "check" if _degraded_n == 1 else "checks"
@@ -2850,85 +3041,20 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
             f'<p class="degraded"><strong>⚠️ Incomplete:</strong> {_degraded_n} {_plural}'
             ' did not run (crashed or timed out) — this grade is incomplete.</p>'
         )
-    if _live_capped:
-        # F-155: display priority over config-blind/degraded/severity/runtime — direct,
-        # positive proof of a successful live attack, same top-slot reasoning as
-        # render_report's text branch.
-        _extra = []
-        if _cfg_blind:
-            _extra.append('a blind/unreadable config')
-        if _degraded_capped or _degraded_n:
-            _extra.append(f'{_degraded_n} degraded check(s)')
-        if score.cap_severity:
-            _extra.append(f'an open {esc(score.cap_severity)} finding')
-        if _rt_capped:
-            _extra.append(
-                f'a corroborated runtime signal ({esc(_runtime_cap_phrase(_rt_reason))})'
-            )
-        if _behavioral_capped:
-            _extra.append(esc(_behavioral_cap_phrase(_behavioral_reason)))
-        _also = f'; also {", ".join(_extra)}' if _extra else ''
+    # B-380: same shared `_cap_cascade` decision render_report now uses
+    # (see the comment there) — this renderer used to keep its OWN five-branch "elif"
+    # ladder, which is exactly how it drifted out of sync with render_report: its
+    # runtime branch tested `score.capped or _rt_capped` (true for ANY cap, so a
+    # behavioral-only cap fell through to it and fabricated a runtime-signal claim —
+    # B-380 item 1), and its severity branch never named a co-occurring
+    # runtime cap (item 2). Both are structurally impossible now: the primary/extras
+    # decision lives in exactly one place.
+    _primary, _extras = _cap_cascade(score)
+    if _primary is not None:
+        _reason_html = esc(_cap_primary_reason_text(_primary, score))
+        _also_html = _cap_also_clause([esc(p) for p in _extras])
         capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
-                       f'from {score.raw_score} '
-                       f'({esc(_live_injection_cap_phrase(_live_reason))}{_also})</p>')
-    elif _cfg_blind:
-        # B-306 (C-135 follow-up): display priority over cap_severity/runtime/degraded —
-        # see render_report for why more than one signal can co-occur only in that branch.
-        _extra = []
-        if score.cap_severity:
-            _extra.append(f'an open {esc(score.cap_severity)} finding')
-        if _degraded_capped or _degraded_n:
-            _extra.append(f'{_degraded_n} degraded check(s)')
-        if _rt_capped:
-            _extra.append(
-                f'a corroborated runtime signal ({esc(_runtime_cap_phrase(_rt_reason))})'
-            )
-        if _behavioral_capped:
-            _extra.append(esc(_behavioral_cap_phrase(_behavioral_reason)))
-        _also = f'; also {", ".join(_extra)}' if _extra else ''
-        # B-363: word the two config-blind states distinctly (see render_report). No
-        # ctx/path is available in this renderer's signature, so the HTML text stays
-        # path-free where render_report's text output can name the file.
-        if getattr(score, "config_blind_reason", None) == "absent":
-            _cfg_blind_text = "no OpenClaw config found"
-        else:
-            _cfg_blind_text = "openclaw.json unreadable/unparseable this run"
-        capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
-                       f'from {score.raw_score} ({_cfg_blind_text}: '
-                       f'cannot rule out a CRITICAL condition{_also})</p>')
-    elif _degraded_capped:
-        # B-313: no config-blind signal, but at least one check crashed/timed out and
-        # that alone drove the cap.
-        _extra = []
-        if _behavioral_capped:
-            _extra.append(esc(_behavioral_cap_phrase(_behavioral_reason)))
-        _also = f'; also {", ".join(_extra)}' if _extra else ''
-        capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
-                       f'from {score.raw_score} ({_degraded_n} check(s) crashed or timed out '
-                       f'this run: cannot rule out a CRITICAL condition{_also})</p>')
-    elif score.capped and score.cap_severity:
-        _extra = []
-        if _behavioral_capped:
-            _extra.append(esc(_behavioral_cap_phrase(_behavioral_reason)))
-        _also = f'; also {", ".join(_extra)}' if _extra else ''
-        capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
-                       f'from {score.raw_score} (open {esc(score.cap_severity)} finding{_also})</p>')
-    elif score.capped or _rt_capped:
-        # I-025/B-309: no scored FAIL drove this cap — only a corroborated runtime signal
-        # can, and only as a cap (never an ordinary scored point).
-        _reason = esc(_runtime_cap_phrase(_rt_reason))
-        _extra = []
-        if _behavioral_capped:
-            _extra.append(esc(_behavioral_cap_phrase(_behavioral_reason)))
-        _also = f'; also {", ".join(_extra)}' if _extra else ''
-        capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
-                       f'from {score.raw_score} (corroborated runtime signal: {_reason}{_also})</p>')
-    elif _behavioral_capped:
-        # F-154: nothing above fired — only a behavioral detector (T1/T2/T3/B191,
-        # --behavioral/--full) drove this cap.
-        capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
-                       f'from {score.raw_score} '
-                       f'({esc(_behavioral_cap_phrase(_behavioral_reason))})</p>')
+                       f'from {score.raw_score} ({_reason_html}{_also_html})</p>')
     else:
         capped_html = ""
     capped_html = degraded_html + capped_html

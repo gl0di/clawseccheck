@@ -476,9 +476,11 @@ prints it (see below) because its frame relies on monospace alignment.
 Telegram's ~4096-character cap — Sections 1-2 alone can already run to ≈6,482 characters,
 before the pipeline blocks below add more). If the destination channel truncates long
 messages, add `--compact` to the command above instead — it condenses Plugins/MCP/RISK
-Chains to headline counts and appends a `--save`/`--html` pointer for the full detail — or
-fall back to `--card` (grade + score + trifecta only) and offer to save the full report via
-`--save <path>` / `--html <path>`.
+Chains to headline counts, trims each Findings/"Worth a glance" finding's "why" text and
+drops its evidence bullets (kept, not dropped — just condensed, since Findings is what
+actually scales with a bad config's FAIL/WARN count), and appends a `--save`/`--html`
+pointer for the full detail — or fall back to `--card` (grade + score + trifecta only)
+and offer to save the full report via `--save <path>` / `--html <path>`.
 
 **Do not compose the card — paste it.**
 
