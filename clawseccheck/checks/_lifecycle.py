@@ -200,6 +200,14 @@ _KNOWN_ADVISORIES: list[tuple[str, tuple[int, ...], str, str]] = [
         "pinning, enabling LAN redirect + Gateway credential theft (CVE-2026-26327)",
     ),
     (
+        "CVE-2026-27488",
+        (2026, 2, 17),
+        "2026.2.19",
+        "Cron webhook delivery (server-cron.ts) called fetch() directly with no "
+        "SSRF policy checks (GHSA-w45g-5746-x9fp) — version-only, no config-field "
+        "surface to audit",
+    ),
+    (
         "CVE-2026-32045",
         (2026, 2, 20),
         "2026.2.21",
@@ -299,6 +307,13 @@ _KNOWN_ADVISORIES: list[tuple[str, tuple[int, ...], str, str]] = [
         "2026.5.18",
         "Paired nodes could forge exec lifecycle events without system.run "
         "provenance (CVE-2026-53816)",
+    ),
+    (
+        "CVE-2026-62223",
+        (2026, 5, 17),
+        "2026.5.18",
+        "device.pair approval feature allowed lower-trust callers to bypass "
+        "authorization checks (GHSA-hx85-fgcw-9vrc)",
     ),
     (
         "CVE-2026-62218",

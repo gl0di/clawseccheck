@@ -343,11 +343,13 @@ def test_b33_version_2026_6_6_passes_all_advisories():
     assert result.status == PASS
 
 
-def test_b33_known_advisories_table_has_twenty_three_entries():
+def test_b33_known_advisories_table_has_twenty_five_entries():
     """The ClawRadar sweep 2026-07-22 appended 19 fetch-confirmed advisories to
-    the existing 4 -> 23 total."""
+    the existing 4 -> 23. The 2026-07-31 sweep added 2 more, each verified against
+    osv.dev before landing (CVE-2026-27488 cron-webhook SSRF, last affected 2026.2.17;
+    CVE-2026-62223 device-pair authorization bypass, fixed 2026.5.18) -> 25 total."""
     from clawseccheck.checks import _KNOWN_ADVISORIES
-    assert len(_KNOWN_ADVISORIES) == 23
+    assert len(_KNOWN_ADVISORIES) == 25
 
 
 def test_b33_does_not_add_unverified_cve_2026_25593():
