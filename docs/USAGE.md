@@ -90,9 +90,14 @@ real image, in the badge's case), use the saved file, not the chat paste.
 ## Guided mode
 
 When you run ClawSecCheck inside OpenClaw, the agent walks you through the entire audit
-conversationally — you never need to know a flag. After every default run, ClawSecCheck prints a
-short **"What you can do next"** block: a prioritised list of the most relevant follow-up steps
-for *your* findings, with the exact command to run each one.
+conversationally — you never need to know a flag. Asking for a full check now gets you the
+combined pipeline report in one turn: your grade and findings, plus every installed skill/
+plugin/MCP server vetted, the riskiest capability chains, a behavioral replay, and a mandatory
+second-opinion review of any borderline call — all in the ONE `--dashboard --full` chat card
+(F-153), not a separate follow-up step (see [`SKILL.md`](../SKILL.md) Steps 2-3 for the exact
+protocol). After every default run, ClawSecCheck also prints a short **"What you can do next"**
+block: a prioritised list of the most relevant follow-up steps for *your* findings, with the
+exact command to run each one.
 
 The same list is available two other ways:
 

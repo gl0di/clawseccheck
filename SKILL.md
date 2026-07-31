@@ -151,17 +151,26 @@ plain-language question survive). This section generalizes the isolator pattern 
 from "one verdict per target" to "one **panel** of distinct-lens verdicts per packet
 item," so the second opinion draws on more than one way of reading the same evidence.
 
-**When to run it:** only as an extra, opt-in step after Step 3's Dashboard, when the
-user asks for a judge review / second opinion on the scan's borderline results — not
-automatically on every audit (same spirit as the ⚡ live tests in Section 6). This
-policy is about the **panel process** (spawning judge subagents, presenting a "Second
-opinion" block) staying opt-in — it has not changed. What HAS changed mechanically:
-Step 2's `--full` run now computes the same `judgePacket` data for free as part of its
-JSON output (F-152), so the packet itself no longer needs a separate `--judge-packet`
-invocation if you already have a `--full --json` result in hand — only step 1 above
-changes, never the "run the panel only when asked" rule.
+**When to run it:** as a MANDATORY part of the SAME guided-flow turn as Step 2's audit,
+whenever item 1 ("Check everything") was chosen — the same posture the capability
+self-report/`--attest` step already has (F-043): run it every time, never wait for the
+user to ask (Dave, 2026-07-30 — this reverses the prior "opt-in, only when asked"
+policy; see Step 2). Step 2's own `--judge-packet --attest` pull already hands you the
+`judgePacket` array in the same step — fan out the panel below over every item in it
+immediately, BEFORE presenting Step 3's Dashboard, so the pasted card's "Second opinion
+(advisory)" block already carries real per-item verdicts rather than a bare pending
+count. **Outside item 1's flow** — the user explicitly asks for "a second opinion" /
+"review the borderline findings" without having just run the full audit (Step 5's
+`judge packet` branch) — this panel stays exactly what it always was: run only when
+asked, per [`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md)'s `Choice: judge packet`
+section.
 
-1. Run `python3 {baseDir}/audit.py --judge-packet` and parse its `judgePacket` array.
+1. Run `python3 {baseDir}/audit.py --judge-packet --attest <path-or- ->` (the same
+   attestation file/stdin Step 2 just assembled) and parse its `judgePacket` array.
+   This pull is cheap and own-config-only — it never runs `--full`'s heavier sweep/
+   behavioral phases, so it costs nothing extra on top of Step 3's own
+   `--dashboard --full` render below. (Outside item 1's flow, drop `--attest` if there
+   is no attestation for this turn.)
 2. For each item, spawn **3 judge subagents**, each given a distinct lens on the **same**
    packet item (input is the item's `redacted_evidence`/`question` fields, plus its
    engine-authored `safe_facts` (C-284 — e.g. a validated destination hostname) and
@@ -197,14 +206,23 @@ changes, never the "run the panel only when asked" rule.
    `maxSpawnDepth: 1`, **ephemeral** — and bound concurrency the same way
    (`maxChildrenPerAgent` / `agents.subagents.maxConcurrent`); fan out across packet
    items, not unboundedly across items × 3 lenses at once.
-5. **Opt-in + graceful fallback**, same rule as that file's: if subagents are unavailable,
-   fall back to reasoning through all 3 lenses yourself in one inline turn per item,
-   with the SECURITY rule as the active guard — never claim a panel ran when it did not.
-6. Present the collected per-item majority verdicts as a **"Second opinion (advisory)"**
-   panel, explicitly labeled and **separate from the scored Dashboard** — feed them back
-   with `--judged` to render the combined report. This extends the "Verdicts are
-   advisory narration only" rule in [`docs/ISOLATION.md`](docs/ISOLATION.md): a judge panel can re-rank or annotate a finding
-   the engine already reported, but it can never raise or lower the A–F grade.
+5. **Mandatory, with graceful fallback**: run this panel every time item 1's audit
+   completes — never skip it and never wait to be asked, the same posture Step 2's
+   attestation already has. If subagents are unavailable, fall back to reasoning
+   through all 3 lenses yourself in one inline turn per item, with the SECURITY rule as
+   the active guard — never claim a panel ran when it did not, and never claim 3
+   distinct subagents ran when you reasoned through it inline instead.
+6. Build the verdicts JSON from the collected per-item majority votes and feed it back
+   as Step 3's `--judged-bundle <file-or- ->`'s `judged` bucket (see Step 3), so the
+   ONE pasted Dashboard card already shows the resulting **"Second opinion (advisory)"**
+   block, explicitly labeled and **separate from the scored Dashboard** — never a
+   follow-up message. (Outside item 1's flow, the standalone `--judge-packet` this
+   panel answered is instead fed back with `--judged <file>`, which renders just the
+   audit's grade/findings plus this same advisory panel — see
+   [`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md).) This extends the "Verdicts are
+   advisory narration only" rule in [`docs/ISOLATION.md`](docs/ISOLATION.md): a judge
+   panel can re-rank or annotate a finding the engine already reported, but it can
+   never raise or lower the A–F grade.
 7. **Optional, only on the user's OWN config, only if they ask to reduce noise:** the
    same verdicts JSON can instead be fed to `--propose-ignore` (C-253), which prints
    PROPOSED `.clawseccheckignore` entries for items the panel verdicted SAFE — never
@@ -346,7 +364,7 @@ rest on demand. The number, the phrase, or a tap all select an item; free phrasi
 
 | Choice | Flag(s) | Notes |
 |--------|---------|-------|
-| 1 Check everything ("check" / "go") | `--full` (+ auto capability self-report, see Step 2) | Read-only audit **+** capability self-report (resolves B43/B44 inline instead of leaving them UNKNOWN for a separate "deeper" step — F-043) **+** self-test scenario generation (canary/dryrun/redteam — generates injection scenarios; it does not itself run a behavioral verdict) **+** MCP vet **+** a per-skill sweep of every installed skill (`CLAWSECCHECK SKILL SWEEP`) **+** a per-plugin sweep of every installed plugin (`PLUGIN SWEEP`, one merged vet verdict per plugin — F-150) **+** a post-hoc behavioral/trajectory replay (`BEHAVIORAL REPLAY` — advisory; folds in both `--behavioral`'s metadata-only T1/T2/T3 signals AND `--analyze-trajectory`'s indicator-vs-tool-call correlation, so a real `⚠ INCIDENT SIGNAL` line surfaces here too, not only from the standalone command — F-151) **+** a judge packet for the borderline band (`ADJUDICATION` — the same items `--judge-packet` would produce, emitted as part of this one run rather than a separate command), in one go. The skill/plugin sweeps are **visibility only** — their verdicts are deliberately not folded into the audit score or grade. The behavioral replay's printed section is likewise visibility-only, but a fired T1/T2/T3/B191 detector MAY separately CAP (never raise) the score/grade above via a dedicated cap-only channel (F-154) — the judge packet is likewise advisory-only and never moves the grade on its own (see Step 2). These appended sections also reach the Step 3 Dashboard card via `--dashboard --full` (F-153) — see the note in Step 3. The actual ⚡ live behavioral test (VULNERABLE vs RESISTANT) is a separate, opt-in step offered after the dashboard (Section 6, item a) — not part of item 1. |
+| 1 Check everything ("check" / "go") | `--dashboard --full` (+ auto capability self-report AND a mandatory judge panel, see Step 2) | Read-only audit **+** capability self-report (resolves B43/B44 inline instead of leaving them UNKNOWN for a separate "deeper" step — F-043) **+** MCP vet **+** a per-skill sweep of every installed skill (`Skills`) **+** a per-plugin sweep of every installed plugin (`Plugins`, one merged vet verdict per plugin — F-150) **+** the highest-risk capability chains (`RISK Chains`) **+** a post-hoc behavioral/trajectory replay (`Behavioural` — advisory; folds in both `--behavioral`'s metadata-only T1/T2/T3 signals AND `--analyze-trajectory`'s indicator-vs-tool-call correlation, so a real `⚠ INCIDENT SIGNAL` line surfaces here too, not only from the standalone command — F-151) **+** a MANDATORY judge panel over the borderline band (`Second opinion (advisory)` — 3 lensed subagents per item, majority vote, run every time, never opt-in — see Step 2 and the "Judge-panel fan-out for `--judge-packet` items" section above), in one go. The skill/plugin sweeps are **visibility only** — their verdicts are deliberately not folded into the audit score or grade. The behavioral replay's printed section is likewise visibility-only, but a fired T1/T2/T3/B191 detector MAY separately CAP (never raise) the score/grade above via a dedicated cap-only channel (F-154) — the judge panel is likewise advisory-only and never moves the grade on its own. ALL of these — including the mandatory judge panel's own verdicts — are rendered in ONE fixed-order chat card by the single merged Step 2+3 `--dashboard --full` command (F-153, C-297); see Step 3. (Item 1 no longer pre-generates unused `--canary`/`--dryrun`/`--redteam` scenarios the way the old, now-discarded internal `--full --attest` report did — those were never shown to the user and never verdicted; generating AND running them together is still one step away via Section 6/Step 5's live test.) The actual ⚡ live behavioral test (VULNERABLE vs RESISTANT) is a separate, opt-in step offered after the dashboard (Section 6, item a) — not part of item 1. |
 | 2 Check before install | `--vet <path>` (autodetects skill · plugin · MCP spec; `--vet-skill` / `--vet-plugin` force an engine) · `--vet-mcp [name]` (configured MCP) · `--vet-source <slug\|url>` (before anything is even downloaded) | Supply-chain check on something you're about to trust. See the vet flow in Step 5 → [`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md). |
 | 3 Report & history | default report · `--save <path>` · `--trend` · `--badge <path>` | Show or save the last result, the score trend, or a shareable badge. |
 | 4 Menu | `--functions` (Screen 12 — the full palette) | Saying "menu" / "functions" / "more" expands the complete capability list — run `python3 {baseDir}/audit.py --functions` (or present its output). Every capability appears as a speakable prompt grounded to its real flag (verify, what-changed, html, sarif, percentile, risk-paths, the vet family, the ⚡ live tests, …), so there's no wall of raw flags. (`--menu` itself renders *this* Welcome screen; the palette is one level deeper.) |
@@ -364,26 +382,36 @@ folded into the single scan itself (F-043). Run the interrogation protocol docum
 section before you run it**: answer your own tool/verb inventory, `approval_gates`,
 and `untrusted_to_action` from your own runtime (you already know these), self-probe
 `host_monitors` with your own shell access and fall back to asking the user only if the probe is
-inconclusive, then assemble and feed the attestation in the SAME turn as the scan — one
-interaction, not two:
+inconclusive, then assemble the attestation into a file (or have it ready for stdin) — you feed
+the SAME attestation into both commands below, in the SAME turn.
+
+Then, still before showing anything to the user, run the now-**mandatory** judge-panel pull
+(Dave, 2026-07-30 — this used to be an opt-in extra the user had to ask for; it now runs every
+time item 1 is chosen, the same posture the capability self-report already has):
 
 ```
-python3 {baseDir}/audit.py --full --attest <path-or- ->
+python3 {baseDir}/audit.py --judge-packet --attest <path-or- ->
 ```
 
-**This command's stdout is internal-only. Do NOT show it, paste it, or summarize it to the
-user.** It exists solely so you (the agent) can confirm the scan ran and the attestation was
-consumed — nothing more. It prints a long (~700-line) human-formatted report as a side effect;
-that text is **not** the chat deliverable and must never be relayed, quoted, or pasted into the
-conversation. The **only** chat-visible artifact in this flow is the `--dashboard` card built in
-Step 3 below — always run that separately and paste *its* output instead.
+**This command's stdout is internal-only: parse it to run the panel below, but never paste,
+quote, or summarize its raw JSON to the user** — the panel's own output (the "Second opinion"
+block Step 3 pastes) is the user-facing artifact, not this packet. It is a cheap, own-config-only
+pull — it never runs `--full`'s heavier sweep/behavioral phases, so it adds no real cost on top
+of Step 3's own `--full` render below, and it does not by itself replace Step 3 (it consumes the
+attestation for THIS command only; Step 3's command below needs the same `--attest` again, since
+each invocation is its own fresh process — attestation is never persisted between them). Parse
+the `judgePacket` array and run the "Judge-panel fan-out for `--judge-packet` items" protocol
+above **now, unconditionally** — 3 lensed judge subagents per borderline item, majority vote per
+item — building the verdicts JSON Step 3 will feed back. An empty `judgePacket` just means
+nothing was in the borderline band this run; proceed to Step 3 with no verdicts file (omit
+`--judged-bundle` entirely).
 
 If the self-probe is inconclusive and the user doesn't know the `host_monitors` answer either,
-leave it `unknown` — never invent one — and proceed with the scan anyway; an unanswered field just
-means that one sub-check stays UNKNOWN.
+leave it `unknown` — never invent one — and proceed anyway; an unanswered field just means that
+one sub-check stays UNKNOWN.
 
-**For any other item**, run the flag for that mode directly — no self-report needed. Pick the right
-interpreter for the OS:
+**For any other item**, run the flag for that mode directly — no self-report and no judge panel
+needed. Pick the right interpreter for the OS:
 
 - **Linux / macOS:** `python3 {baseDir}/audit.py`
 - **Windows:** `python {baseDir}\audit.py` (or `py {baseDir}\audit.py`)
@@ -412,13 +440,23 @@ work around it yourself — remediation is out of scope here the same way it is 
 
 ### Step 3 — Present the Dashboard
 
-**This step produces the ONLY chat-visible deliverable in this guided flow.** Nothing from
-Step 2's `--full --attest` run is ever shown to the user — always execute Step 3 in full, even
-though Step 2 already printed something that looks like a finished report; that report is
-internal-only (see Step 2) and does not substitute for the steps below.
+**This step produces the ONLY chat-visible deliverable in this guided flow.** For item 1,
+Step 2's `--judge-packet` pull is never shown to the user — it exists solely to source the
+mandatory judge panel (see Step 2); it does not substitute for the paste below.
 
-Run `python3 {baseDir}/audit.py --json` and use the structured output to build the Dashboard below.
-Frame the whole result as an **OpenClaw Security Audit** — not "your setup" or "my agent."
+For item 1, run ONE command — the merged Step 2+3 render (F-153, C-297). It re-consumes the
+SAME attestation Step 2 assembled (so B43/B44 come back assessed in THIS render too, not just
+in Step 2's internal pull — each invocation is its own fresh process, so `--attest` has to be
+passed again) and folds in the mandatory judge panel's verdicts:
+
+```
+python3 {baseDir}/audit.py --dashboard --full --attest <path-or- -> --judged-bundle <verdicts-path-or- ->
+```
+
+`<verdicts-path-or- ->` is the file (or `-` for stdin) holding `{"judged": {...}}` — the
+verdicts map Step 2's mandatory judge panel just built. Omit `--judged-bundle` entirely only
+when Step 2 found `judgePacket` empty (genuinely nothing to judge this run). Frame the whole
+result as an **OpenClaw Security Audit** — not "your setup" or "my agent."
 
 **Plain-language rule:** Never use internal codes like "B2 FAIL". Describe the actual risk in one
 sentence. Examples:
@@ -429,62 +467,59 @@ sentence. Examples:
 - "B1 FAIL" → "Your agent's config file is readable by anyone on this computer."
 - "C5 FAIL" → "One of your installed skills has code patterns used by malware."
 
-Present all six sections below **in one message**, in order. Render menus and prose
-sections (5-6) as ordinary text — do NOT wrap them in a code block or monospace fence;
-that rule does not apply to the Section 1-2 Dashboard card, which must be pasted exactly
-as the tool prints it (see below) because its frame relies on monospace alignment.
+Present the pasted card, then the two prose sections below it, **in one message**. Render
+Sections 5-6 as ordinary text — do NOT wrap them in a code block or monospace fence; that
+rule does not apply to the pasted card itself, which must be pasted exactly as the tool
+prints it (see below) because its frame relies on monospace alignment.
 
-**Channel-aware delivery:** the full Dashboard card can exceed a chat channel's message
-limit (e.g. Telegram's ~4096-character cap — Sections 1-2 alone can already run to
-≈6,482 characters, and the Skills block below adds one line per installed skill on top).
-If the destination channel truncates long messages, deliver a compact summary instead
-with `--card` (grade + score + trifecta) and offer to save the full report as a file via
-`--save <path>` or `--html <path>`.
+**Channel-aware delivery:** the combined card can exceed a chat channel's message limit (e.g.
+Telegram's ~4096-character cap — Sections 1-2 alone can already run to ≈6,482 characters,
+before the pipeline blocks below add more). If the destination channel truncates long
+messages, add `--compact` to the command above instead — it condenses Plugins/MCP/RISK
+Chains to headline counts and appends a `--save`/`--html` pointer for the full detail — or
+fall back to `--card` (grade + score + trifecta only) and offer to save the full report via
+`--save <path>` / `--html <path>`.
 
-**Sections 1-2 — the Dashboard card: do not compose it, paste it.**
+**Do not compose the card — paste it.**
 
 Live testing showed that when the model composes the grade card / findings sections
-itself, the 🦞 header and the family frame silently vanish. So Sections 1-2 are one
-deterministic render. Run:
-
-```
-python3 {baseDir}/audit.py --dashboard
-```
-
-and paste its **entire stdout here, verbatim**. It emits, in order:
+itself, the 🦞 header and the family frame silently vanish. So the WHOLE card above is one
+deterministic render — paste its **entire stdout here, verbatim**. It emits, in this fixed
+order (F-153):
 
 - **Section 1 — Grade card:** `🦞 OpenClaw Security Audit — Grade {grade} · {score}/100`,
   a 16-cell score-bar, and the count of non-suppressed FAIL/WARN findings.
   **No standalone Lethal Trifecta chip (F-044)** — trifecta state is one Privilege &
   Execution finding among others in Section 2.
 - **Section 2 — Findings, grouped by area** (details below).
-- **Skills block (B-356, when skills are installed):** a compact per-skill vet verdict
-  — install count, a `clean:` list, and a `verdict - reason` line for anything flagged.
-  Reuses the same scoring path `--vet-skill` uses; **omitted entirely** when no skills
-  are installed, same as an empty finding family.
+- **Skills** (B-356, when skills are installed): a compact per-skill vet verdict — install
+  count, a `clean:` list, and a `verdict - reason` line for anything flagged. Reuses the
+  same scoring path `--vet-skill` uses.
+- **Plugins** (F-150): the same shape, one merged vet verdict per installed plugin.
+- **MCP**: a per-server verdict, reusing `--vet-mcp`'s own axis logic against the config
+  already in memory (no second re-read).
+- **RISK Chains**: the highest-risk capability chains `--risk-paths` would show.
+- **Behavioural** (F-151): a one-paragraph summary folding in both `--behavioral`'s
+  metadata-only T1/T2/T3 signals and `--analyze-trajectory`'s indicator-vs-tool-call
+  correlation — shown even to say "nothing fired" (Golden Rule #4), never silently
+  omitted. A fired T1/T2/T3/B191 detector separately caps the grade (F-154) — already
+  reflected in the Grade card above, not something you compute yourself.
+- **"Second opinion (advisory)"**: the mandatory judge panel's own verdicts from Step 2 —
+  per-item annotations, explicitly advisory, never changing the Grade card above.
+- **Section 3 — Coverage of OpenClaw surfaces** (details below).
+- **Section 4 — "Worth a glance"** (details below).
+
+Skills/Plugins/MCP/RISK Chains are each independently **omitted** only when there is
+genuinely nothing to show (no skills/plugins/MCP servers installed, no RISK chain
+detected) — Behavioural and Second opinion are always shown once computed, even to report
+"nothing fired" / "nothing in the borderline band," per the same never-guess-a-PASS rule
+the rest of the audit follows.
 
 Do **not** re-draw the frame, swap it for markdown bold, drop the rule lines, or re-order —
 paste exactly what the command prints. Your own prose around the paste follows the
 plain-language rule.
 
 (`--dashboard-findings` still prints Section 2 alone, if you ever need just the findings block.)
-
-**Gap closed (F-153) — `--dashboard --full` renders the whole pipeline, not just Sections 1-2.**
-Step 2's `--full` run also produces a per-plugin sweep, an MCP vet, the highest-risk capability
-chains, a behavioral/trajectory replay, and a judge packet for the borderline band (see Step 1's
-mode-map row) — running `--dashboard --full` instead of plain `--dashboard` renders ALL of these,
-in a fixed order (Skills → Plugins → MCP → RISK chains → Behavioural → "Second opinion
-(advisory)" → Coverage → "Worth a glance"), each block omitted only when there is genuinely
-nothing to show. `--compact` (only with `--dashboard --full`) further condenses this for a
-narrow chat channel (headline counts + a `--save`/`--html` pointer) — see `docs/USAGE.md`.
-Plain `--dashboard` (no `--full`) is unchanged: Sections 1-2 plus the Skills block, nothing else.
-**Not yet done: this Step still shows the OLD two-command flow** (Step 2's `--full --attest` run,
-discarded, followed by plain `--dashboard`) rather than the merged single
-`--dashboard --full --attest <path>` command the new mechanism is designed for — restructuring
-Steps 2-3 themselves, and this walkthrough's prose/examples, is tracked separately (C-297) so it
-lands deliberately rather than as a drive-by edit here. Until that lands, an agent that wants the
-combined report today should run `--dashboard --full` as its OWN Step 3 command (in place of
-plain `--dashboard`), accepting that it repeats work Step 2 already did in the same turn.
 
 **Section 2 — what the pasted findings block contains**
 
@@ -521,7 +556,9 @@ finding: remediation is out of ClawSecCheck's scope — it is a reports-only aud
 invent fix commands on its behalf; point the user at the finding's `why:` facts and the
 relevant OpenClaw docs instead.
 
-Example of what the `--dashboard` card prints (paste the **real** output, not this sample):
+Example of what the Grade card + findings block look like (paste the **real** output, not this
+sample — and remember the real paste continues past this excerpt with Skills/Plugins/MCP/RISK
+Chains/Behavioural/Second opinion/Coverage/Worth a glance, in that order):
 
 ```
 🦞 OpenClaw Security Audit — Grade F · 49/100
@@ -545,12 +582,15 @@ Example of what the `--dashboard` card prints (paste the **real** output, not th
 
 **Section 3 — Coverage of OpenClaw surfaces**
 
-Read `coverage.summary` and `coverage.gaps` from the JSON.
+Already part of the SAME pasted stdout above — nothing to build from a separate JSON call.
+It looks like this (names/counts vary; the `not-checkable`/`roadmap` lines appear only when
+that bucket is non-empty):
 
 ```
 — Coverage of OpenClaw surfaces —
-✅ Checked {checked} · ◑ Partial/UNKNOWN {partial}  (of 13 surfaces)
-○ Roadmap {roadmap} · ⊘ Not-checkable {not_checkable}  (known gaps — separate axis, not part of the 13)
+✅ checked {checked} · ◑ partial/unknown {partial}  (of {checked+partial} config surfaces)
+⊘ not-checkable {N} (no OpenClaw config control): {name, name, ...}
+○ roadmap {M} (no check yet): {name, name, ...}
 ```
 
 Since the pasted Section 2 no longer tallies UNKNOWN, this coverage line is the single place
@@ -566,20 +606,18 @@ control to audit there.
 
 **Section 4 — Worth a glance**
 
-The pasted `--dashboard` card already excludes `MEDIUM`/`ATTESTED` findings from Section 2,
-so this section is their only home — you don't need to pull them out of Section 2 yourself.
+Already part of the SAME pasted stdout above (a `— 👀 Worth a glance —` block, omitted
+entirely when nothing qualifies) — the pasted card already excludes `MEDIUM`/`ATTESTED`
+findings from Section 2's findings block, so this is their only home; you don't pull them
+out yourself. It reuses the SAME per-finding line format Section 2 uses (severity dot,
+title, `why:` line) — it is not a separately-worded narrative, so paste it exactly like the
+rest of the card rather than composing your own bullets.
 
-If any findings have `confidence` = `"MEDIUM"` or `"ATTESTED"`:
-
-```
-👀 Worth a glance — lower-confidence heuristics, confirm before acting:
-  • {plain-language title}: {what the specific concern is and why it matters}
-    → to confirm: {one action the user can take to verify or dismiss it}
-```
-
-Frame as heuristics — not definitive findings. Each bullet must say **what was seen and why it
-could matter** — never just a label. Include a concrete confirmation step so the user knows what
-to do next. The user should confirm before acting on them.
+**Your own surrounding prose is where the "confirm before acting" framing lives:** introduce
+this block as heuristics, not definitive findings — say **what was seen and why it could
+matter**, and suggest one concrete way the user could confirm or dismiss each item, rather
+than acting on it outright. Don't rewrite the pasted lines themselves to do this — add the
+framing before/after the paste, the same discipline the rest of the card already follows.
 
 **Section 5 — Scope + history**
 
@@ -607,19 +645,22 @@ attack, choose the live test from the menu below."
 **Section 6 — Next menu (inline, same message)**
 
 Append immediately at the end of the Dashboard (see Step 4 for routing detail). No "deeper scan"
-item — the capability self-report already ran automatically in Step 2 (F-043), so there's nothing
-left to offer as a separate follow-up (C-132). Render menus as ordinary text — do NOT wrap them
+item — the capability self-report already ran automatically in Step 2 (F-043) — and no "second
+opinion" item either — the mandatory judge panel already ran in Step 2 and its verdicts are
+already in the pasted card above (C-297) — so there's nothing left to offer as a separate
+follow-up for either (C-132). Render menus as ordinary text — do NOT wrap them
 in a code block or monospace fence:
 
 > Next — ✅ read-only · ⚡ touches live agent (asks)
 >   a ⚡ Live injection test   b ✅ Turn on monitoring
 >   c ✅ Save full report      d ✅ Menu   Start with a?
 
-Item a is not a duplicate of Step 2's audit: the full audit only *generated* injection
-scenarios (and never showed them to the user — Step 2 is internal-only), it never ran one
-against you, so this is the first real behavioral test (VULNERABLE vs RESISTANT) in the flow.
+Item a is not a duplicate of anything in Step 2/3: nothing so far actually ran an injection
+against you — the Behavioural block above is a post-hoc replay of past activity, and the
+mandatory judge panel only reviewed borderline findings, not tested the agent live — so this
+is the first real behavioral test (VULNERABLE vs RESISTANT) in the flow.
 
-The verdict now reaches the grade, cap-only (F-155): feed it back via `--full
+The verdict now reaches the grade, cap-only (F-155): feed it back via `--dashboard --full
 --judged-bundle <file>`'s `liveTest` bucket — `{"seed": "<value or omit>", "verdicts":
 [{"tool": "canary"|"redteam"|"dryrun"|"multiturn", "id": "<scenario id>", "verdict":
 "VULNERABLE"|"RESISTANT"}]}`. A VULNERABLE verdict hard-caps the grade at the same
@@ -692,16 +733,16 @@ dispatcher; the full protocol behind each row is the matching `## Choice:` secti
 | "is my MCP safe", "check my connected servers", "vet my MCP", "are my MCP servers trusted", "MCP supply chain" | `--vet-mcp` (add `--json` or `--sarif PATH` for machine-readable / CI output) |
 | "what dangerous actions can my agent take", "least privilege", "check my tools", "capability", "blast radius", "deeper check" | `--ask` then `--attest <filled.json>` |
 | "monitor", "watch", "alert me", "ongoing", "keep checking" | `--monitor` (ask first) |
-| "canary", "injection test", "am I vulnerable", "try an attack" | `--canary` then `--dryrun` |
+| "canary", "injection test", "am I vulnerable", "try an attack" | `--canary` then `--dryrun` — the standalone equivalent of Section 6's menu item a. A submitted VULNERABLE verdict fed back via `--dashboard --full --judged-bundle <file>`'s `liveTest` bucket hard-caps the grade (F-155); RESISTANT or nothing submitted changes nothing (self-attestation guard) — see Step 3, Section 6. |
 | "red team", "adversarial", "attack suite" | `--redteam` |
 | "trend", "history", "am I improving", "getting better" | `--trend` |
 | "percentile", "compare", "above average", "how do I rank" | `--percentile` |
 | "badge", "share my grade", "shareable", "certificate" | `--badge` or `--card` |
 | "HTML report", "full report" | `--html report.html` |
 | "JSON", "machine readable", "raw data" | `--json` |
-| "what did my agent actually do", "behavioral", "runtime audit", "did it really do that", "prove it happened" | `--behavioral` — post-hoc, proof-by-log tool-call sequences from the trajectory sidecar; metadata-only, WARN-only, never scored. **Always relay the output — never drop it.** (Also runs as part of `--full` item 1's `BEHAVIORAL REPLAY` section — but that section is currently internal-only, see Step 3's known-gap note, so a user asking for this by name should still get the standalone command.) |
-| "did a suspicious skill's instructions actually run", "was this indicator acted on" | `--analyze-trajectory` — post-hoc, correlates installed-skill indicators against real tool-call arguments. **Any `⚠ INCIDENT SIGNAL` line is a real incident finding — never drop it.** (Also runs as part of `--full` item 1's `BEHAVIORAL REPLAY` section as of F-151 — but that section is currently internal-only, see Step 3's known-gap note, so a user asking for this by name should still get the standalone command.) |
-| "second opinion", "judge packet", "review the borderline findings" | `--judge-packet` — JSON list of borderline findings for host-agent review; summarize item count + per-item verdicts, offer to save large output to a file, **never paste raw JSON, never drop it**. (Also produced as part of `--full` item 1's `ADJUDICATION` section, and answerable in the same run with `--full --judged-bundle <file>` — see `docs/USAGE.md`.) |
+| "what did my agent actually do", "behavioral", "runtime audit", "did it really do that", "prove it happened" | `--behavioral` — post-hoc, proof-by-log tool-call sequences from the trajectory sidecar; metadata-only, WARN-only, never scored. **Always relay the output — never drop it.** (Item 1's `--dashboard --full` also runs this as its "Behavioural" block — F-151 — but that block is a one-paragraph summary; a fired T1/T2/T3/B191 detector there also caps the grade, F-154. A user asking for this by name should still get the standalone command for the full per-line detail.) |
+| "did a suspicious skill's instructions actually run", "was this indicator acted on" | `--analyze-trajectory` — post-hoc, correlates installed-skill indicators against real tool-call arguments. **Any `⚠ INCIDENT SIGNAL` line is a real incident finding — never drop it.** (Folded into item 1's `--dashboard --full` "Behavioural" block too, F-151 — same one-paragraph-summary caveat as the row above; ask for the standalone command for full detail.) |
+| "second opinion", "judge packet", "review the borderline findings" | Outside item 1's flow: `--judge-packet` — JSON list of borderline findings for host-agent review; summarize item count + per-item verdicts, offer to save large output to a file, **never paste raw JSON, never drop it** — then feed panel verdicts back with `--judged <file>` (see `docs/FLOW_CHOICES.md`). Inside item 1's flow this already ran, MANDATORY, in Step 2 — its verdicts are already in the pasted "Second opinion (advisory)" block, nothing further to do (C-297). |
 
 ---
 
