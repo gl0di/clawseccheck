@@ -5321,20 +5321,54 @@ def _script_prose_evidence(ctx: Context) -> list[tuple[str, str, str]]:
     returns ``[]``) -- nothing to scan. Each returned block is already run through
     ``normalize_for_scan`` (same de-obfuscation every other loop in this ring applies
     before scanning) -- callers must NOT normalize it again.
+
+    C-330: memoized on ``ctx._script_prose_cache`` for the lifetime of that one
+    ``Context`` object -- the same idiom ``collector.py``'s ``Context._trajaudit_cache``
+    (and ``trajaudit.analyze``'s use of it) established for exactly this problem. This
+    helper has two call sites in this module (``check_overt_secret_exfil``/B156,
+    ``check_persona_jailbreak``/B66), and a single ``--full`` run reaches each of them
+    more than once against the exact same, unmutated ``ctx`` (the main audit, the
+    per-skill blast-radius re-scan in ``report.py``'s skill inventory, and ``--vet``'s
+    sweep) -- every one of those calls re-ran ``ast.parse`` on every bundled ``.py``
+    file, the ``.sh``/``.js`` comment extractors, and ``normalize_for_scan`` on every
+    extracted block, for byte-identical output each time.
+
+    Unlike ``_trajaudit_cache``, ``Context`` declares no ``_script_prose_cache`` field
+    (this fix is scoped to this module only) -- the cache dict is created lazily and
+    attached to ``ctx`` with a plain attribute assignment the first time this function
+    runs for that ``ctx`` (safe: ``Context`` is an ordinary, non-slotted, non-frozen
+    dataclass). The read is still the same defensive
+    ``getattr(ctx, "_script_prose_cache", None)`` used elsewhere in this codebase, and
+    the attribute-assignment is wrapped in a ``try/except AttributeError`` -- so a
+    duck-typed stub ``ctx`` that forbids new attributes (e.g. a slotted test double)
+    keeps working exactly as before this change, just uncached. A fresh ``Context``
+    (e.g. a synthetic per-skill ``--vet`` context) always starts with no cache
+    attribute, so nothing here can leak a cached result across two different
+    ``Context`` objects.
     """
+    cache = getattr(ctx, "_script_prose_cache", None)
+    if cache is not None and "triples" in cache:
+        return list(cache["triples"])
+
     out: list[tuple[str, str, str]] = []
-    for name, files in (getattr(ctx, "installed_skill_py", None) or {}).items():
-        for relpath, src in files:
-            for block in extract_script_prose(src, "py"):
-                out.append((name, relpath, normalize_for_scan(block)))
-    for name, files in (getattr(ctx, "installed_skill_shell", None) or {}).items():
-        for relpath, src in files:
-            for block in extract_script_prose(src, "sh"):
-                out.append((name, relpath, normalize_for_scan(block)))
-    for name, files in (getattr(ctx, "installed_skill_js", None) or {}).items():
-        for relpath, src in files:
-            for block in extract_script_prose(src, "js"):
-                out.append((name, relpath, normalize_for_scan(block)))
+    for attr_name, ext in (
+        ("installed_skill_py", "py"),
+        ("installed_skill_shell", "sh"),
+        ("installed_skill_js", "js"),
+    ):
+        for name, files in (getattr(ctx, attr_name, None) or {}).items():
+            for relpath, src in files:
+                for block in extract_script_prose(src, ext):
+                    out.append((name, relpath, normalize_for_scan(block)))
+
+    if cache is None:
+        cache = {}
+        try:
+            ctx._script_prose_cache = cache
+        except AttributeError:
+            cache = None  # duck-typed ctx that forbids new attributes -- stay uncached
+    if cache is not None:
+        cache["triples"] = out
     return out
 
 
