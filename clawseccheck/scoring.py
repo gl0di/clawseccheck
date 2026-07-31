@@ -17,8 +17,9 @@
   because its own FAILs correctly degraded to UNKNOWN" gap; a crashed/timed-out check
   (DEGRADED_CHECK_CAP, B-313); a submitted VULNERABLE live injection-test verdict
   (LIVE_INJECTION_CAP, F-155); and a fired behavioral T1/T2/T3/B191 detector
-  (BEHAVIORAL_SIGNAL_CAP, F-154) — only when ``--behavioral``/``--full`` actually ran
-  the analysis this invocation, never computed automatically.
+  (BEHAVIORAL_SIGNAL_CAP, F-154) — only when ``--full`` ran WITHOUT ``--fast``
+  (a standalone ``--behavioral`` run never wires this into a score at all), never
+  computed automatically.
 """
 from __future__ import annotations
 
@@ -530,9 +531,10 @@ def compute(findings: list[Finding], ctx=None, *,
     F-154: *behavioral_fired_ids* is optional and additive, exactly like the arguments
     above — every existing call site that omits it sees byte-identical behaviour
     (``behavioral_capped`` stays False). Pass the set of T1/T2/T3/B191 ids that fired
-    WARN in a `behavioral.analyze(ctx)` the CALLER already ran this invocation (under
-    --behavioral or --full) — see `behavioral.grade_cap_signal`, the ONLY intended
-    producer of this argument. A caller that never ran the analysis must simply omit
+    WARN in a `behavioral.analyze(ctx)` the CALLER already ran this invocation (only a
+    `--full` run without `--fast` does this in `cli.py`; a standalone `--behavioral`
+    run never reaches this function) — see `behavioral.grade_cap_signal`, the ONLY
+    intended producer of this argument. A caller that never ran the analysis must simply omit
     it (or pass the empty-frozenset default) — there is no path here that computes the
     analysis itself, unlike `_runtime_cap_signal`'s ctx-only trajaudit half; see
     `BEHAVIORAL_SIGNAL_CAP`'s docstring for why this cap is gated on actual execution.

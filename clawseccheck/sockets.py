@@ -8,9 +8,13 @@ module supplies the one runtime signal that closes that gap: it enumerates real
 bind (F-156).
 
 Doctrine (matches ``hostwatch.py``'s "no subprocess, no network"): on Linux this reads
-``/proc/net/tcp`` and ``/proc/net/tcp6`` directly — plain text, world-readable, no
-privileges required to read a bind address (only socket-to-PID mapping needs
-``/proc/*/fd``, which nothing here touches). No subprocess is ever run. Where ``/proc``
+``/proc/net/tcp`` and ``/proc/net/tcp6`` directly for the base listening-socket scan —
+plain text, world-readable, no privileges required to read a bind address. Socket-to-PID
+correlation (:func:`identify_listener_process`, see the C-135 addendum below) additionally
+reads ``/proc/*/fd`` and each matched PID's ``comm``/``cmdline`` — still no subprocess, no
+network, no privilege escalation, just a second read-only ``/proc`` walk; a
+``PermissionError`` on another UID's fd table is expected and silently skipped, never an
+error. No subprocess is ever run. Where ``/proc``
 is unavailable (macOS, Windows, a container without it mounted, or simply missing) this
 degrades to an honest "unavailable" result — never a guess (B-172 doctrine). A later
 revision MAY add a subprocess-based fallback (e.g. parsing ``lsof -F`` machine-readable

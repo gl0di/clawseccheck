@@ -1329,7 +1329,8 @@ def _main(argv=None) -> int:
                    help="skip host-monitor detection (IDS / audit / FIM / EDR / firewall posture)")
     p.add_argument("--no-sockets", action="store_true",
                    help="skip the effective-bind socket scan (B340: corroborates gateway.bind "
-                        "against /proc/net/tcp{,6})")
+                        "against /proc/net/tcp{,6}, plus a read-only /proc/*/fd walk for "
+                        "process-identity correlation)")
     p.add_argument("--save", metavar="PATH", help="also write the report to a file")
     p.add_argument("--monitor", action="store_true",
                    help="monitor mode: alert on what changed since the last check")

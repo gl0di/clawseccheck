@@ -581,7 +581,7 @@ ask, noted below):
 | Shareable card / SVG badge | `clawseccheck --card` · `clawseccheck --badge badge.svg` |
 | Trend & percentile | `clawseccheck --trend` · `clawseccheck --percentile` |
 | Accept a finding (show suppressed) | edit `.clawseccheckignore` · `clawseccheck --show-suppressed` |
-| Skip native audit / host posture | `clawseccheck --no-native` · `clawseccheck --no-host` |
+| Skip native audit / host posture / socket scan | `clawseccheck --no-native` · `clawseccheck --no-host` · `clawseccheck --no-sockets` |
 | Disable local history / age notice | `clawseccheck --no-history` · `clawseccheck --no-update-notice` |
 | CI gate | `clawseccheck --fail-under 70` · `clawseccheck --exit-code` |
 | Verify the engine itself | `clawseccheck --verify-self` |

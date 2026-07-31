@@ -1000,8 +1000,9 @@ def grade_cap_signal(result: dict) -> "frozenset[str]":
     computed, so calling it costs nothing beyond the `analyze()` call itself.
 
     Callers must only ever pass a `result` from an `analyze()` call THIS invocation
-    actually performed (under --behavioral or --full) — see `scoring.
-    BEHAVIORAL_SIGNAL_CAP`'s docstring for why this cap is gated on actual execution
+    actually performed — in practice only a `--full` run without `--fast` does this in
+    `cli.py`; a standalone `--behavioral` run never calls this function at all — see
+    `scoring.BEHAVIORAL_SIGNAL_CAP`'s docstring for why this cap is gated on actual execution
     rather than computed automatically inside `scoring.compute`. There is no "present"
     gate here beyond that: `analyze()`'s own result already encodes "nothing to
     replay" as an empty/PASS finding set (T1/T2/T3 absent when no trajectory sidecar

@@ -76,7 +76,8 @@ deletes its four known store files (history/events/state/coverage) plus their lo
 step; a crash-artifact `.tmp` sibling, if one is ever left behind, is not touched by `--purge` and
 needs a manual `rm`. Scoping flags at a glance: `--no-history` (skip
 local history), `--no-host` (skip the host-recon bullet above), `--no-native` (skip the one external
-command below). Pure Python standard library, no dependencies.
+command below), `--no-sockets` (skip the B340 effective-bind socket scan — the escape hatch if it
+false-FAILs on an unusual host). Pure Python standard library, no dependencies.
 
 It also runs OpenClaw's **built-in** audit — the one fixed, read-only external command
 `openclaw security audit --json` (its read-only mode, never a fixing one; the only subprocess call
@@ -615,9 +616,11 @@ framing before/after the paste, the same discipline the rest of the card already
    signal (a trajaudit indicator match); (2) a VULNERABLE verdict from the live
    injection test below (menu item a) — RESISTANT or no verdict submitted changes
    nothing (the agent under test grading its own resistance is never trusted upward);
-   (3) a fired --behavioral detector (T1/T2/T3/B191) when --behavioral/--full actually
-   ran the analysis this run (F-154) — a --behavioral/--full run that never fires one
-   changes nothing. Every OTHER runtime-observed signal (every B164 signal including
+   (3) a fired --behavioral detector (T1/T2/T3/B191) when --full ran WITHOUT --fast
+   (F-154) — that's the only path that computes this cap: a --full --fast run and a
+   standalone --behavioral run never wire it into a score at all, and a --full run
+   that ran the analysis but never fired one changes nothing. Every OTHER
+   runtime-observed signal (every B164 signal including
    exfil_evidence) still cannot move it either way.
    History: ~/.clawseccheck/ (--no-history to skip; a live-test verdict only reaches
    history/trend when the test was run with a fixed --seed — an unseeded verdict still
