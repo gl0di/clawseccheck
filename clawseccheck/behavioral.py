@@ -43,6 +43,7 @@ from .checks import (
     _channels,
     _finding,
     _norm_group_policy,
+    _open_wildcard_group_channels,
     _UNTRUSTED_INPUT_POLICIES,
     check_audit_trail_signals,
 )
@@ -287,10 +288,11 @@ def _classify_verb_role(name: str | None) -> str | None:
 # (absent groupPolicy, "owner", or per-message "ask" approval) no longer manufactures a
 # false trifecta purely from its origin kind, the same discipline `direct` already gets.
 def _group_untrusted_origin_channels(cfg: dict) -> "frozenset[str]":
-    """Channel ids (e.g. "telegram") whose GROUP-facing policy admits a message
-    authored by a non-owner sender — `groupPolicy` in `_UNTRUSTED_INPUT_POLICIES`
+    """Channel ids (e.g. "telegram") whose GROUP-facing config admits a message
+    authored by a non-owner sender — either `groupPolicy` in `_UNTRUSTED_INPUT_POLICIES`
     (open/allowlist/pairing; Feishu's "allowall" alias normalized to "open" via
-    `_norm_group_policy`, same as `_untrusted_input_channels`).
+    `_norm_group_policy`, same as `_untrusted_input_channels`), OR an effectively-
+    unrestricted wildcard group (B-382, below).
 
     Built once per `analyze()` call and threaded down to `_classify_event_role`, which
     only arms a group/channel-origin `prompt.submitted` event's ingress leg when its
@@ -305,8 +307,23 @@ def _group_untrusted_origin_channels(cfg: dict) -> "frozenset[str]":
     reproducing a narrower version of the exact false-positive shape this fix exists
     to close. `groupPolicy` alone is the field that actually governs who can post in a
     group/broadcast surface; `dmPolicy` governs 1:1 delivery and has no bearing on it.
+
+    B-382: the groupPolicy-only check above missed the B-297 wildcard-group shape —
+    `channels.<provider>.groups {"*": {...}}` — entirely. That shape is how open group
+    access is actually written in real configs and carries NO `dmPolicy`/`groupPolicy`
+    field at all, so a bare `{"groups": {"*": {}}}` channel (no `groupPolicy` key to
+    even normalize) fell straight through the loop below and this function returned an
+    empty set, even though `checks._shared._external_input_channels` — the sibling
+    trifecta-ingress helper this one is modelled on — already treated it as untrusted
+    ingress. Fixed by ALSO arming from `checks._shared._open_wildcard_group_channels`,
+    the same grounded, reachability- and allowFrom-aware predicate B-297/B140 use,
+    rather than re-deriving a second, narrower notion of "open wildcard group" here.
+    That helper already excludes `channels.defaults` (a config block, not a real
+    per-channel wildcard — B140/B26's own rule), so no separate exclusion is needed
+    here; `test_b382_channels_defaults_block_alone_does_not_arm` pins that this stays
+    true.
     """
-    out = set()
+    out = set(_open_wildcard_group_channels(cfg))
     for name, c in _channels(cfg).items():
         if not isinstance(c, dict) or c.get("enabled") is False:
             continue
@@ -999,8 +1016,22 @@ def grade_cap_signal(result: dict) -> "frozenset[str]":
     for f in result.get("findings", ()):
         if f.id not in BEHAVIORAL_CHECK_IDS or f.status != WARN:
             continue
-        if f.id == "B191" and not (f.sub_signals & _B191_STRONG_SUB_SIGNALS):
-            continue
+        if f.id == "B191":
+            # B-386: `sub_signals`' `frozenset` type (catalog.py) is only a hint under
+            # `from __future__ import annotations` — never runtime-enforced — so a
+            # caller-built Finding (e.g. a test, or a future producer) can hand this a
+            # plain list/tuple. `&` raises TypeError on those, so normalize before
+            # intersecting — same coerce-or-empty pattern this module already uses for
+            # `attested` (see the `reported` handling earlier in this file).
+            sub_signals = (
+                f.sub_signals
+                if isinstance(f.sub_signals, (set, frozenset))
+                else frozenset(f.sub_signals)
+                if isinstance(f.sub_signals, (list, tuple))
+                else frozenset()
+            )
+            if not (sub_signals & _B191_STRONG_SUB_SIGNALS):
+                continue
         fired.add(f.id)
     return frozenset(fired)
 

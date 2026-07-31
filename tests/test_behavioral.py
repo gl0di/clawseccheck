@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from clawseccheck.behavioral import (
     _classify_verb_role,
     _group_label,
@@ -23,6 +25,7 @@ from clawseccheck.catalog import PASS, UNKNOWN, WARN
 from clawseccheck.collector import Context
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
+RELIABILITY = FIXTURES / "reliability"
 
 
 def _ctx(home: Path, config: dict | None = None) -> Context:
@@ -853,6 +856,159 @@ def test_traj_channel_owner_clean_fixture_silent():
     trifecta — this is the pair that makes the bad fixture's WARN meaningful."""
     r = analyze(_ctx(FIXTURES / "traj_channel_owner_clean"))
     assert all(f.status != WARN for f in r["findings"])
+
+
+# ---------------------------------------------------------------------------
+# B-382 — the wildcard-group shape (`channels.<p>.groups {"*": ...}`) now also arms
+# `_group_untrusted_origin_channels`, not just the groupPolicy value check above.
+#
+# That shape carries NO `dmPolicy`/`groupPolicy` field at all — it is how open group
+# access is actually written in real configs (B-297's own finding) — so a bare
+# `{"groups": {"*": {}}}` channel fell straight through the groupPolicy-only loop and
+# this function returned an empty set even though `checks._shared._external_input_
+# channels` (the sibling trifecta-ingress helper this one is modelled on) already
+# treated it as untrusted ingress. Fixed by reusing `checks._shared._open_wildcard_
+# group_channels` — the same grounded, reachability-/allowFrom-aware predicate B-297/
+# B140 use — instead of re-deriving a second, narrower notion of "open wildcard group".
+# ---------------------------------------------------------------------------
+
+def _wildcard_group_config(channel: str, wildcard: dict | None = None) -> dict:
+    return {"channels": {channel: {"groups": {"*": {} if wildcard is None else wildcard}}}}
+
+
+def test_b382_bare_wildcard_group_is_untrusted_origin():
+    """The defect, directly: no groupPolicy field anywhere, yet this is the commonest
+    real open-group shape (B-297) and must arm the leg."""
+    from clawseccheck.behavioral import _group_untrusted_origin_channels
+
+    cfg = _wildcard_group_config("telegram")
+    assert _group_untrusted_origin_channels(cfg) == frozenset({"telegram"})
+
+
+def test_b382_explicit_group_policy_open_still_fires():
+    """Regression pin: the pre-existing groupPolicy-based path must be unchanged."""
+    from clawseccheck.behavioral import _group_untrusted_origin_channels
+
+    assert _group_untrusted_origin_channels(
+        _open_group_policy_config("telegram")
+    ) == frozenset({"telegram"})
+
+
+def test_b382_closed_allowlisted_wildcard_group_does_not_fire():
+    """The false positive a prior C-135 narrowing (F-154 round 2) was written to
+    remove, re-asserted here: a wildcard group that IS effectively restricted
+    (a real allowFrom source) must not arm the leg."""
+    from clawseccheck.behavioral import _group_untrusted_origin_channels
+
+    cfg = _wildcard_group_config("telegram", {"allowFrom": ["123"]})
+    assert _group_untrusted_origin_channels(cfg) == frozenset()
+
+
+def test_b382_group_ingress_switched_off_does_not_fire():
+    """C-135 reachability guard, mirrored from B-297: a leftover wildcard block beside
+    `groupPolicy: 'disabled'` admits no group message at all and must not arm."""
+    from clawseccheck.behavioral import _group_untrusted_origin_channels
+
+    cfg = {"channels": {"telegram": {"groupPolicy": "disabled", "groups": {"*": {}}}}}
+    assert _group_untrusted_origin_channels(cfg) == frozenset()
+
+
+def test_b382_channels_defaults_block_alone_does_not_arm():
+    """`channels.defaults` is a config block, not a real per-channel wildcard group
+    (the same rule B140/B26/B-297 apply) — it must not arm the leg on its own."""
+    from clawseccheck.behavioral import _group_untrusted_origin_channels
+
+    cfg = {"channels": {"defaults": {"groups": {"*": {}}}}}
+    assert _group_untrusted_origin_channels(cfg) == frozenset()
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        {"channels": {"telegram": {"groups": {"*": {"requireMention": True}}}}},
+        {"channels": {"telegram": {"groups": {"*": {}}}}},
+        {"channels": {"telegram": {"groups": {"*": {"allowFrom": ["123"]}}}}},
+        {"channels": {"defaults": {"groups": {"*": {}}}}},
+        {"channels": {"telegram": {"groupPolicy": "open"}}},
+        {"channels": {"telegram": {"groupPolicy": "allowlist"}}},
+        {"channels": {"telegram": {"groupPolicy": "disabled", "groups": {"*": {}}}}},
+        {"channels": {}},
+        {},
+    ],
+)
+def test_b382_parity_with_shared_wildcard_and_external_helpers(cfg):
+    """Pins the parity B-382's fix depends on so it cannot silently diverge again:
+
+    * every channel `_open_wildcard_group_channels` calls open is also armed here
+      (the union this fix adds never DROPS a wildcard-open channel), and
+    * for every config below — none of which sets a `dmPolicy` — the group-origin set
+      exactly equals `_external_input_channels`, the sibling helper this one is
+      modelled on. (Not asserted in general: `_group_untrusted_origin_channels` is
+      deliberately groupPolicy-only, see its own docstring, so a config that is
+      open-input ONLY via `dmPolicy` is expected to diverge — none of the configs
+      here exercise that axis.)
+    """
+    from clawseccheck.behavioral import _group_untrusted_origin_channels
+    from clawseccheck.checks import _external_input_channels, _open_wildcard_group_channels
+
+    wildcard_channels = set(_open_wildcard_group_channels(cfg))
+    behavioral_channels = set(_group_untrusted_origin_channels(cfg))
+    external_channels = set(_external_input_channels(cfg))
+    assert wildcard_channels <= behavioral_channels
+    assert behavioral_channels == external_channels
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "bad_b297_wildcard_group_account_scoped",
+        "clean_b297_wildcard_group_account_allowfrom",
+        "clean_b297_wildcard_group_base_allowfrom_account_groups",
+    ],
+)
+def test_b382_parity_on_b297_reliability_fixtures(name):
+    """Same parity pin, replayed on the real B-297 fixtures (account-scoped merge
+    semantics included) so the two features stay provably in sync."""
+    from clawseccheck.behavioral import _group_untrusted_origin_channels
+    from clawseccheck.checks import _external_input_channels, _open_wildcard_group_channels
+    from clawseccheck.collector import collect
+
+    cfg = collect(home=RELIABILITY / name).config
+    wildcard_channels = set(_open_wildcard_group_channels(cfg))
+    behavioral_channels = set(_group_untrusted_origin_channels(cfg))
+    external_channels = set(_external_input_channels(cfg))
+    assert wildcard_channels <= behavioral_channels
+    assert behavioral_channels == external_channels
+
+
+def test_b382_traj_fixture_warns_on_bare_wildcard_group_no_grouppolicy():
+    """End-to-end bad fixture: the existing group-origin trajectory (message ->
+    read-credential -> send, no ingress verb) replayed with a config that carries the
+    wildcard-group shape and NO `groupPolicy` at all — T1 must fire WARN."""
+    cfg = _wildcard_group_config("telegram")
+    r = analyze(_ctx(FIXTURES / "traj_channel_group_ingress", cfg))
+    t1 = next(f for f in r["findings"] if f.id == "T1")
+    assert t1.status == WARN
+
+
+def test_b382_traj_fixture_silent_on_closed_wildcard_group():
+    """End-to-end clean fixture: the SAME trajectory, but the wildcard group is
+    effectively restricted (a real allowFrom) — T1 must stay PASS. This is the false
+    positive a prior C-135 narrowing (F-154 round 2) exists to prevent; must not
+    regress."""
+    cfg = _wildcard_group_config("telegram", {"allowFrom": ["123"]})
+    r = analyze(_ctx(FIXTURES / "traj_channel_group_ingress", cfg))
+    t1 = next(f for f in r["findings"] if f.id == "T1")
+    assert t1.status == PASS
+
+
+def test_b382_traj_fixture_silent_on_defaults_block_alone():
+    """End-to-end clean fixture: `channels.defaults` carrying the wildcard shape must
+    not arm the leg on its own."""
+    cfg = {"channels": {"defaults": {"groups": {"*": {}}}}}
+    r = analyze(_ctx(FIXTURES / "traj_channel_group_ingress", cfg))
+    t1 = next(f for f in r["findings"] if f.id == "T1")
+    assert t1.status == PASS
 
 
 def test_behavioral_checks_stay_unscored():
