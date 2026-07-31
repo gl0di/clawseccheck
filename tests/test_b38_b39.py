@@ -216,6 +216,46 @@ def test_b38_clean_tight_allowlist_still_passes():
     assert f.status == PASS
 
 
+# --- C-342: AI-vendor user-content hosts (ESET H1 2026 "AI-fix") ---
+
+def test_b38_ai_vendor_user_content_host_warns():
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["claude.ai"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == WARN
+    assert "claude.ai" in " ".join(f.evidence)
+
+
+def test_b38_ai_vendor_api_host_stays_clean():
+    # A skill calling the provider's actual API host must NOT be caught by the
+    # claude.ai/chatgpt.com additions — api.anthropic.com is a different host
+    # entirely, not a subdomain of claude.ai.
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["api.anthropic.com"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == PASS
+
+
+def test_b38_ai_vendor_docs_host_stays_clean():
+    # Vendor documentation domains are not user-content hosts either.
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["docs.anthropic.com"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == PASS
+
+
 # --- Evidence populated on FAIL ---
 
 def test_b38_fail_evidence_populated():

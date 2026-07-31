@@ -211,6 +211,34 @@ def test_c014_mcp_clean_tight_allowed_hosts_passes():
     assert any("allowedHosts restricted" in item for item in f.evidence)
 
 
+# --- C-342: AI-vendor user-content hosts (ESET H1 2026 "AI-fix") ---
+
+def test_c014_mcp_ai_vendor_user_content_host_not_counted_as_restricted():
+    ctx = _ctx({
+        "mcp": {"servers": {"remote": {
+            "url": "https://mcp.example.com/sse",
+            "allowedHosts": ["chatgpt.com"],
+        }}},
+    })
+    f = check_egress_inventory(ctx)
+    assert f.status == WARN
+    assert any("weak mitigation" in item for item in f.evidence)
+    assert any("chatgpt.com" in item for item in f.evidence)
+
+
+def test_c014_mcp_ai_vendor_api_host_stays_clean():
+    # api.anthropic.com is a different host from claude.ai — must not be caught.
+    ctx = _ctx({
+        "mcp": {"servers": {"remote": {
+            "url": "https://mcp.example.com/sse",
+            "allowedHosts": ["api.anthropic.com"],
+        }}},
+    })
+    f = check_egress_inventory(ctx)
+    assert f.status == PASS
+    assert any("allowedHosts restricted" in item for item in f.evidence)
+
+
 
 def test_fixture_bad_c014_warns():
     assert check_egress_inventory(collect(FIXTURES / "bad_c014_egress_inventory")).status == WARN

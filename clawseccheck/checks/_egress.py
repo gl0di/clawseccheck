@@ -71,6 +71,18 @@ _EXT_SKILL_HINTS = (
 # admits (a) a wildcard pattern, or (b) a domain that hosts anonymous/user-generated
 # content an attacker could stage a payload on despite the host being "trusted".
 # Used by both B38 (browser.ssrfPolicy.hostnameAllowlist) and C014 (MCP allowedHosts).
+#
+# C-342 (ESET H1 2026 "AI-fix"): AI-vendor user-content publishing surfaces belong in
+# the same category — claude.ai serves arbitrary attacker-controlled pages at
+# /public/artifacts/…, and chatgpt.com serves them at /share/… (both confirmed against
+# the vendors' own docs, 2026-08-01) — exactly like gist.github.com. Deliberately the
+# SPECIFIC consumer-product host, not the vendor's root domain: adding "anthropic.com"
+# or "openai.com" here would suffix-match legitimate API/docs subdomains
+# (api.anthropic.com, docs.anthropic.com) via the matching below and false-positive on
+# every skill that merely calls the provider's API. copilot.microsoft.com included on
+# the same reasoning (Copilot Pages sharing is real and documented; the exact share-URL
+# path segment could not be independently confirmed, but the host-level match already
+# avoids the root-domain over-broadening this note warns about).
 _USER_CONTENT_HOSTS = frozenset(
     {
         "pastebin.com",
@@ -84,6 +96,9 @@ _USER_CONTENT_HOSTS = frozenset(
         "0x0.st",
         "discord.com",
         "webhook.site",
+        "claude.ai",
+        "chatgpt.com",
+        "copilot.microsoft.com",
     }
 )
 
