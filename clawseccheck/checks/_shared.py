@@ -926,7 +926,17 @@ def _open_channels(cfg: dict) -> list[str]:
         if isinstance(accounts, dict) and accounts and _channel_has_implicit_default_account(name, c):
             nodes = [*nodes, c]
         for node in nodes:
-            if isinstance(node, dict) and (
+            if not isinstance(node, dict):
+                continue
+            # B-391: a resolved node's own `enabled: false` (a per-account disable —
+            # e.g. a retired account left in place with its old, wide-open policy still
+            # on record) means that account ingests nothing, same reasoning as the
+            # channel-level B-041 guard above. The merged node carries the account's
+            # own `enabled` key verbatim (mergeAccountConfig is a shallow spread), so
+            # this is a plain per-node read, not a new merge rule.
+            if node.get("enabled") is False:
+                continue
+            if (
                 node.get("dmPolicy") == "open"
                 or _norm_group_policy(name, node.get("groupPolicy")) == "open"
             ):
@@ -1064,12 +1074,26 @@ def _resolved_channel_nodes(c: dict) -> list[dict]:
     account alongside explicit accounts is a known false NEGATIVE. That is the safe
     direction under Golden Rule #5 and is deliberate; do not "fix" it by also evaluating
     the raw base node, which reintroduces the first false positive above.
+
+    B-391 (mixed-schema ``accounts``): the pre-existing B-378 guard above degrades an
+    ``accounts`` that is a list/string/empty dict to "no accounts" (``[c]``), but a MIXED
+    dict — some entries genuine account dicts, one entry drifted to some other type —
+    used to fall through the list comprehension's ``isinstance(acc, dict)`` filter
+    silently: the well-formed entries produced a non-empty ``merged``, so the ``merged or
+    [c]`` fallback never fired, and the malformed entry (and, since ``accounts`` is
+    configured, the base node too) was dropped from the walk with no trace. We cannot
+    tell whether that malformed entry is a live account whose (unreadable) policy might
+    be wide open, so — same zero-false-PASS reasoning as the B-378 guard — treat ANY
+    non-dict entry as schema drift for the WHOLE ``accounts`` block and fall back to
+    ``[c]``, rather than silently proceeding on the well-formed subset alone.
     """
     accounts = c.get("accounts")
     if not isinstance(accounts, dict) or not accounts:
         return [c]
+    if any(not isinstance(acc, dict) for acc in accounts.values()):
+        return [c]
     base = {k: v for k, v in c.items() if k != "accounts"}
-    merged = [{**base, **acc} for acc in accounts.values() if isinstance(acc, dict)]
+    merged = [{**base, **acc} for acc in accounts.values()]
     return merged or [c]
 
 
@@ -1123,6 +1147,15 @@ def _open_wildcard_group_channels(cfg: dict) -> dict:
     * ``enabled: False`` channels are skipped (B-041 — a disabled channel ingests
       nothing), so this composes with ``_external_input_channels`` / ``_open_channels``,
       which already skip them;
+    * a RESOLVED node's own ``enabled: false`` is also skipped — a per-account disable
+      (e.g. a retired account left in place with its old, wide-open wildcard-group policy
+      still on record) ingests nothing, same reasoning as the channel-level guard above
+      and as the identical guard `_open_channels` carries for the dmPolicy/groupPolicy
+      leg. This is a caller-side scoping choice layered on top of `_resolved_channel_nodes`
+      (which does not itself drop disabled nodes), not a different restriction predicate —
+      B140's own check (`check_wildcard_group_ingress`) deliberately does NOT skip
+      `enabled` at all, at either the channel or node level (see its docstring), so there
+      is no upstream handling to lean on here;
     * ``_wildcard_group_is_reachable`` drops group-ingress-off nodes (C-135, see there).
 
     ``channels.defaults`` is a config block, not a provider, and is excluded (the same
@@ -1132,7 +1165,21 @@ def _open_wildcard_group_channels(cfg: dict) -> dict:
     for name, c in _channels(cfg).items():
         if name == "defaults" or not isinstance(c, dict) or c.get("enabled") is False:
             continue
-        for node in _resolved_channel_nodes(c):
+        nodes = _resolved_channel_nodes(c)
+        # Skipping a disabled resolved node (below) must not also silence the BASE
+        # node's own policy: a channel-level credential keeps running once `accounts`
+        # is added, so OpenClaw synthesizes an implicit default account carrying the
+        # base policy. Without this add-back, a single `accounts: {retired:
+        # {enabled: false}}` entry made the whole channel's open wildcard group
+        # invisible even though the implicit default account still ingests — a false
+        # NEGATIVE, and this helper feeds the behavioral arming and the RISK chains.
+        # Same guard `_open_channels` and `_b171_open_channels` already apply.
+        accounts = c.get("accounts")
+        if isinstance(accounts, dict) and accounts and _channel_has_implicit_default_account(name, c):
+            nodes = [*nodes, c]
+        for node in nodes:
+            if not isinstance(node, dict) or node.get("enabled") is False:
+                continue
             gap = _wildcard_group_gap(node)
             if gap and _wildcard_group_is_reachable(node):
                 out[name] = gap

@@ -50,6 +50,7 @@ from ._shared import (
     SENSITIVE_TOOL_HINTS,
     _LEG_KEYS,
     _canonical_ipv4,
+    _channel_has_implicit_default_account,
     _channels,
     _config_unreadable,
     _enabled_tools,
@@ -65,6 +66,7 @@ from ._shared import (
     _perms_loose,
     _plugins,
     _profile_is_powerful,
+    _resolved_channel_nodes,
     _secret_paths,
     _surface_absent,
     _trifecta_legs,
@@ -1253,17 +1255,41 @@ def _b171_open_channels(cfg: dict) -> list[str]:
     Deliberately duplicated rather than parameterizing the shared `_open_channels()` (B2):
     B2 asks a different question (gateway auth / "anyone can command") that is out of
     scope for this fix.
+
+    B-390: reads the RESOLVED per-account node (`_resolved_channel_nodes`), not the raw
+    ``[c] + accounts.values()`` idiom this used before -- see that helper's own docstring
+    for the full grounding (mirrors the identical B-389 fix already landed in the sibling
+    `_open_channels`). The bug this closes: a vestigial base-level `dmPolicy: "open"`
+    (template scaffolding, no live credential behind it) was scored as open EVEN WHEN
+    every real, running account overrode it to something restrictive -- because the raw
+    walk evaluated the unmerged base node IN ADDITION TO each account's own raw node,
+    never asking whether the account's override actually replaces it.
+
+    Same C-135 follow-up as `_open_channels`: blindly dropping the base node whenever
+    `accounts` is configured would trade that false positive for a worse false NEGATIVE --
+    a channel-level credential (e.g. a `botToken`) does not stop running once `accounts`
+    is added; OpenClaw synthesizes an extra IMPLICIT default account that keeps the base
+    node's own (possibly still-open, no-gate) policy live alongside the explicit accounts.
+    So the base node is added back to the walk exactly when
+    `_channel_has_implicit_default_account` says it is genuinely still live -- never
+    unconditionally.
     """
     out: list[str] = []
     for name, c in _channels(cfg).items():
         if not isinstance(c, dict) or c.get("enabled") is False:
             continue
-        # B-378: a schema-drifted "accounts" (list/string instead of dict) must
-        # degrade to "no accounts", never raise.
+        nodes = _resolved_channel_nodes(c)
         accounts = c.get("accounts")
-        nodes = [c] + (list(accounts.values()) if isinstance(accounts, dict) else [])
+        if isinstance(accounts, dict) and accounts and _channel_has_implicit_default_account(name, c):
+            nodes = [*nodes, c]
         for node in nodes:
             if not isinstance(node, dict):
+                continue
+            # B-390: a resolved node's own `enabled: false` (a per-account disable --
+            # e.g. a retired account left in place with its old, wide-open policy still
+            # on record) means that account authorizes no in-chat commands at all, same
+            # reasoning as the channel-level guard above.
+            if node.get("enabled") is False:
                 continue
             dm_open = node.get("dmPolicy") == "open" and not _b171_scoped_list(
                 node.get("allowFrom")
