@@ -690,6 +690,62 @@ def vet_all(
     return 0 if sweep.worst in ("PASS", "UNKNOWN") else 1
 
 
+def _resolve_runtime_caps(ctx, findings, score, args):
+    """F-153: shared by `--full`'s own cap computation and `--dashboard --full`'s —
+    the exact same two cap-only signals (F-154 behavioral, F-155 live-injection),
+    computed identically, so the two output surfaces can never show a different
+    grade for the same run. Pure extraction of the pre-existing `--full` logic;
+    behaviour is unchanged for that call site.
+
+    Returns `(score, full_deadline, judged_bundle, live_signal)`. `score` is the SAME
+    object passed in when neither cap fires, a freshly recomputed one otherwise
+    (mirrors `scoring.compute`'s own "never mutate, always return" contract).
+    `live_signal` is returned (not just consumed here) because the caller also uses
+    it afterwards to decide whether an unreproducible live-test verdict must be kept
+    OUT of history/trend/baseline (see the F-155 note at the history-record call).
+
+    Known, deliberate scope limit carried over unchanged from the pre-F-153 code
+    this replaces: this re-runs `behavioral.analyze(ctx)` a second time when the P8
+    phase later renders its OWN section (both `--full` and `--dashboard --full`
+    render one) — there is no cheap way to thread the result through without
+    widening `run_pipeline`/`run_behavioral`'s signatures, and P8's own budget
+    check runs at a different point in the pipeline than this early call can see.
+    """
+    # F-153: the pipeline's wall-clock window opens HERE, before the first appended
+    # phase, so the time the earlier phases spend is charged against the same window
+    # the later ones draw from. Cooperative (a plain monotonic float) — never a nested
+    # check_deadline block, whose disarm-on-exit would delete an outer deadline.
+    full_deadline = _pipeline.start_deadline(DEFAULT_FULL_BUDGET_S) if args.full else None
+    judged_bundle = (
+        _pipeline.read_judged_bundle(args.judged_bundle)
+        if (args.full and args.judged_bundle is not None) else None
+    )
+    # F-155: a VULNERABLE live injection-test verdict (canary/dryrun/redteam/multiturn),
+    # fed back through the SAME --judged-bundle file the "judged"/"vetJudged" buckets
+    # already use (no second submission channel) — never a second CLI flag. Only present
+    # when --full carried one; every other invocation sees `live_signal.hit is False` and
+    # this whole function is a no-op, which is what keeps every non---full path (a plain
+    # --dashboard with no --full, --trend, --monitor, the plain report) byte-identical to
+    # before this feature existed. `--dashboard --full` (F-153) is a DELIBERATE new
+    # exception: it calls this helper too, so its card shows the identical capped grade
+    # `--full`'s own report/--json would for the same run.
+    live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
+    live_signal = _pipeline.live_test_cap_signal(live_test_bucket)
+    # F-154: the behavioral cap-only signal (T1/T2/T3/B191), gated on THIS invocation
+    # having ACTUALLY run `behavioral.analyze(ctx)` — mirrors --fast's own skip of P8
+    # (`_pipeline.run_pipeline`'s `run_behavioral`), so a --full --fast run (or any
+    # non---full invocation) sees byte-identical behaviour to before this cap existed:
+    # no analysis run == no cap, never a guess.
+    behavioral_fired_ids: "frozenset[str]" = frozenset()
+    if args.full and not args.fast:
+        behavioral_fired_ids = _behavioral_grade_cap_signal(_behavioral_analyze(ctx))
+    if live_signal.hit or behavioral_fired_ids:
+        score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
+                        live_test_reason=live_signal.reason,
+                        behavioral_fired_ids=behavioral_fired_ids)
+    return score, full_deadline, judged_bundle, live_signal
+
+
 def _run_vet_mcp(target, args, ascii_only: bool) -> int:
     """Run vet_mcp on `target` (None = all configured servers) and render the risk
     dossier — shared by the explicit --vet-mcp mode and the --vet autodetect route
@@ -791,6 +847,9 @@ _MODE_HONORS = {
     "vet_mcp": frozenset({"json"}),
     "vet_source": frozenset({"json"}),
     "advise": frozenset({"json"}),
+    # F-153: --dashboard --full renders the whole combined pipeline report (the
+    # phases --full itself runs); --compact only ever modifies THAT combined render.
+    "dashboard": frozenset({"full", "compact"}),
 }
 
 # Primary modes that run AFTER the --attest block in main()'s cascade: their ctx and
@@ -838,6 +897,10 @@ def _flag_coherence_notes(args) -> list[str]:
         if (getattr(args, "judged_bundle", None) is not None
                 and not bool(getattr(args, "full", False))):
             notes.append("note: --judged-bundle has no effect without --full")
+        # F-153: --compact only ever modifies --dashboard --full's combined render;
+        # with no primary mode active here, --dashboard cannot be the one that ran.
+        if bool(getattr(args, "compact", False)):
+            notes.append("note: --compact has no effect without --dashboard --full")
         return notes  # the default path honors every tracked global modifier
     win_attr, win_flag = active[0]
     ignored = [
@@ -877,6 +940,18 @@ def _flag_coherence_notes(args) -> list[str]:
         no_effect.append("--fast")
     if getattr(args, "judged_bundle", None) is not None and "full" not in honored:
         no_effect.append("--judged-bundle")
+    # F-153: --quiet has no --dashboard analogue — --compact is the dashboard's own
+    # channel-limit lever — so it stays un-honored there even though --fast /
+    # --judged-bundle now genuinely are (checked above via the generic "full" gate,
+    # which --dashboard --full's honored set now includes).
+    if bool(getattr(args, "quiet", False)) and win_attr == "dashboard":
+        no_effect.append("--quiet")
+    # F-153: --compact only ever modifies --dashboard --full's combined render —
+    # both halves are required, so a winning --dashboard without --full still
+    # leaves it with no effect, same as any other winning mode.
+    if (bool(getattr(args, "compact", False))
+            and not (win_attr == "dashboard" and bool(getattr(args, "full", False)))):
+        no_effect.append("--compact")
     if getattr(args, "attest", None) is not None and win_attr not in _ATTEST_CONSUMERS:
         no_effect.append("--attest")
     # --trend / --monitor record a score-history point as part of their job, so
@@ -1334,8 +1409,19 @@ def _main(argv=None) -> int:
     p.add_argument("--next", action="store_true",
                    help="print recommended next actions based on the audit result")
     p.add_argument("--dashboard", action="store_true",
-                   help="print the deterministic chat Dashboard card (grade + FIX FIRST "
-                        "projection + framed findings, Sections 1-3) and exit")
+                   help="print the deterministic chat Dashboard card (grade + framed "
+                        "findings, Sections 1-2, + a Skills block when any are installed) "
+                        "and exit; add --full to render the WHOLE combined pipeline report "
+                        "(Skills/Plugins/MCP vet, RISK chains, behavioural replay, "
+                        "adjudication, coverage, worth-a-glance) in one fixed-order card "
+                        "instead of --full's own separate appended sections (F-153)")
+    p.add_argument("--compact", action="store_true",
+                   help="only with --dashboard --full: a condensed, ~4096-char "
+                        "Telegram-safe layout of the combined pipeline report — headline "
+                        "counts only for Plugins/MCP/RISK chains, plus a pointer to "
+                        "--save/--html for the full detail (F-153; named --compact rather "
+                        "than the spec's suggested --card, which already means the "
+                        "shareable grade+score+trifecta badge above)")
     p.add_argument("--dashboard-findings", action="store_true",
                    help="print only the framed Section-2 Findings block for the chat Dashboard "
                         "(FAIL/WARN, high-confidence, grouped by family) and exit")
@@ -1777,7 +1863,61 @@ def _main(argv=None) -> int:
         return 0
 
     if args.dashboard:
-        _emit(render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx))
+        if not args.full:
+            # Byte-identical to before F-153: the overwhelming majority of callers
+            # (every pre-existing test, and every plain `--dashboard` invocation)
+            # never asked for the rest of the pipeline, so nothing extra is computed.
+            _emit(render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx))
+            return 0
+        # F-153: Dave settled 2026-07-30 that --dashboard must fully render
+        # everything --full does, in the fixed order (Skills · Plugins · MCP · RISK
+        # chains · Behavioural · "Second opinion (advisory)" · Coverage · "Worth a
+        # glance"), replacing --full's own additive-append shape as the ONE combined
+        # pipeline report. The open mechanism call this task owns: does --dashboard
+        # itself repeat the expensive phases Step 2's `--full --attest` already ran
+        # in the same guided-flow turn, or does the flow feed Step 2's artifact in
+        # instead? Chosen here: --dashboard --full computes the phases itself, ONCE,
+        # using the exact same functions --full uses (no second engine, no risk of
+        # the two renderers drifting) — and the guided flow (SKILL.md, C-297) drops
+        # the separate discarded `--full --attest` call and merges Steps 2+3 into
+        # this one command instead, so a guided-flow turn still computes each phase
+        # exactly once, never twice. That is simpler and safer than a second code
+        # path that re-hydrates Finding objects from a saved --full --json artifact
+        # just to avoid a second process invocation — this project's own precedent
+        # (B-356's Skills block reusing _skills_inventory_lines) is "one source of
+        # truth, not a second formatter to drift out of sync", and a JSON-rehydration
+        # renderer would be exactly that second formatter.
+        #
+        # _resolve_runtime_caps also applies here (not just to --full's own report/
+        # --json branch below) so --dashboard --full shows the IDENTICAL F-154/F-155
+        # capped grade a plain --full run of the same config would.
+        score, full_deadline, judged_bundle, _live_signal = _resolve_runtime_caps(
+            ctx, findings, score, args)
+        sweep_home = Path(args.home).expanduser()
+        plugin_sweep = None
+        if not args.fast:
+            _plugin_sweep_fn = _pipeline.resolve_plugin_sweep()
+            if _plugin_sweep_fn is not None and not budget_exceeded(full_deadline):
+                _sweep_budget_s = _pipeline.sub_budget(full_deadline, DEFAULT_VET_ALL_BUDGET_S)
+                try:
+                    plugin_sweep = _plugin_sweep_fn(
+                        sweep_home, ascii_only=ascii_only,
+                        sweep_budget_s=_sweep_budget_s, narrate=False)
+                except Exception:  # noqa: BLE001 — one phase must not break the whole card
+                    plugin_sweep = None
+        behavioral_phase = None
+        if not args.fast and not budget_exceeded(full_deadline):
+            behavioral_phase = _pipeline.run_behavioral(ctx, ascii_only=ascii_only)
+        # P9 (adjudication) is deliberately NOT gated on --fast or the budget, same as
+        # --full's own P9: it re-runs no check, so there is no expense to skip.
+        adjudication_phase = _pipeline.run_adjudication(
+            ctx, findings,
+            vet_targets=plugin_sweep.vet_targets() if plugin_sweep is not None else (),
+            version=__version__, bundle=judged_bundle)
+        _emit(render_dashboard(
+            findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
+            risk=paths, plugin_sweep=plugin_sweep, behavioral=behavioral_phase,
+            adjudication=adjudication_phase, compact=args.compact))
         return 0
 
     if args.dashboard_findings:
@@ -1909,27 +2049,10 @@ def _main(argv=None) -> int:
     vm_has_fail = False
     sweep_has_fail = False
     pipeline_has_fail = False
-    # F-153: the pipeline's wall-clock window opens HERE, before the first appended
-    # phase, so the time the earlier phases spend is charged against the same window
-    # the later ones draw from. Cooperative (a plain monotonic float) — never a nested
-    # check_deadline block, whose disarm-on-exit would delete an outer deadline.
-    full_deadline = _pipeline.start_deadline(DEFAULT_FULL_BUDGET_S) if args.full else None
-    judged_bundle = (
-        _pipeline.read_judged_bundle(args.judged_bundle)
-        if (args.full and args.judged_bundle is not None) else None
-    )
-    # F-155: a VULNERABLE live injection-test verdict (canary/dryrun/redteam/multiturn),
-    # fed back through the SAME --judged-bundle file the "judged"/"vetJudged" buckets
-    # already use (no second submission channel) — never a second CLI flag. Only present
-    # when --full carried one; every other invocation sees `live_signal.hit is False` and
-    # this whole block is a no-op, which is what keeps every non---full path (--dashboard,
-    # --trend, --monitor, the plain report, and --full runs with no bundle) byte-identical
-    # to before this feature existed.
-    #
-    # `score` was already computed once, above, by `audit()` — recomputed here (not
-    # mutated in place) only when a VULNERABLE verdict actually fired, so
-    # `scoring.compute`'s self-attestation guard (RESISTANT/absent -> zero effect) is
-    # enforced by the SAME function every other caller uses, not re-implemented here.
+    # `score` was already computed once, above, by `audit()`; `_resolve_runtime_caps`
+    # returns the SAME object when neither cap-only signal fires, a freshly recomputed
+    # one (never mutated in place) otherwise — see its own docstring for the F-154/
+    # F-155 detail this used to carry inline.
     #
     # Known, deliberate scope limit: `render_json`'s "projection" (what-if FIX FIRST)
     # sub-block calls `scoring.project` -> `scoring.compute` a second time over
@@ -1939,33 +2062,8 @@ def _main(argv=None) -> int:
     # needs external input `project()`'s call site does not have. Left unaddressed here
     # rather than widening `render_json`/`project`'s signatures for a projection feature
     # this task does not otherwise touch.
-    live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
-    live_signal = _pipeline.live_test_cap_signal(live_test_bucket)
-    # F-154: the behavioral cap-only signal (T1/T2/T3/B191), gated on THIS invocation
-    # having ACTUALLY run `behavioral.analyze(ctx)` — mirrors --fast's own skip of P8
-    # (`_pipeline.run_pipeline`'s `run_behavioral`), so a --full --fast run (or any
-    # non---full invocation) sees byte-identical behaviour to before this cap existed:
-    # no analysis run == no cap, never a guess. Computed once, early — before either
-    # the --json or plain-text branch below renders `score` — so both paths see the
-    # identical, already-capped score, the same discipline `live_signal` above already
-    # established.
-    #
-    # Known, deliberate scope limit: this re-runs `behavioral.analyze(ctx)` a second
-    # time when the P8 phase further below (inside `_pipeline.run_pipeline`) renders
-    # its OWN section — there is no cheap way to thread the result through without
-    # widening `run_pipeline`'s signature, and P8's own wall-clock budget check runs at
-    # a DIFFERENT point in the pipeline (after P6/P7 have already spent part of the
-    # window) than this early call can see. A run tight enough on the budget for P8
-    # itself to later report "not reached" could therefore still show a behavioral-
-    # capped score here — a narrow, documented edge case left to F-153's planned
-    # restructuring of the whole --full rendering order, not this task.
-    behavioral_fired_ids: "frozenset[str]" = frozenset()
-    if args.full and not args.fast:
-        behavioral_fired_ids = _behavioral_grade_cap_signal(_behavioral_analyze(ctx))
-    if live_signal.hit or behavioral_fired_ids:
-        score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
-                        live_test_reason=live_signal.reason,
-                        behavioral_fired_ids=behavioral_fired_ids)
+    score, full_deadline, judged_bundle, live_signal = _resolve_runtime_caps(
+        ctx, findings, score, args)
     if args.json:
         # F-149 JSON gap: --full's printed SKILL SWEEP section had no machine-readable
         # counterpart — the whole self-test/vet-mcp/sweep block below is skipped

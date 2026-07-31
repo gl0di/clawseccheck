@@ -1058,6 +1058,32 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False) -> list
     return lines
 
 
+def _mcp_inventory_lines(inv: dict, *, ascii_only: bool = False, compact: bool = False) -> list[str]:
+    """Per-server verdict lines (design §4.5) -- the MCP counterpart to
+    _skills_inventory_lines: single source of truth shared by render_subject_inventory
+    (full report's "Inventory by subject" block, always `compact=False`) and
+    render_dashboard (F-153: the same verdicts in the chat-pasted combined pipeline
+    card, `compact=True` under --compact collapsing to the headline count only)."""
+    icon = _ICON_ASCII if ascii_only else _ICON
+    mcp = inv["mcp"]
+    n_mcp = len(mcp)
+    if n_mcp == 0:
+        return [f" {SUBJECT_LABEL['mcp']} (none configured)"]
+    mcp_ok = [_sanitize(m["name"]) for m in mcp if m["verdict"] == "ok"]
+    mcp_bad = [m for m in mcp if m["verdict"] != "ok"]
+    mcp_marker = icon.get(_worst_of_statuses(m["verdict"] for m in mcp_bad), "?")
+    count_text = f"{len(mcp_bad)} flagged" if mcp_bad else "clear"
+    lines = [f" {SUBJECT_LABEL['mcp']} ({n_mcp}) — {mcp_marker} {count_text}"]
+    if compact:
+        return lines
+    if mcp_ok:
+        lines.append(f"   {icon.get(PASS, '?')} " + " | ".join(mcp_ok))
+    for m in mcp_bad:
+        reason_text = "; ".join(m.get("reasons") or []) or m["verdict"]
+        lines.append(f"   {icon.get(m['verdict'], '?')} {_sanitize(m['name'])}  {reason_text}")
+    return lines
+
+
 def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool = False,
                               color: bool = False) -> str:
     """Owner-facing "Inventory by subject" block (F-131 Phase 1) -- System / Agents /
@@ -1070,7 +1096,6 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
         return ""
     inv = build_inventory(findings, ctx)
     by_id = {f.id: f for f in findings}
-    icon = _ICON_ASCII if ascii_only else _ICON
     rule_char = "=" if ascii_only else "═"
     lines: list[str] = ["== INVENTORY BY SUBJECT " + rule_char * 44]
 
@@ -1089,21 +1114,7 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
 
     lines.extend(_skills_inventory_lines(inv, ctx, ascii_only=ascii_only))
 
-    mcp = inv["mcp"]
-    n_mcp = len(mcp)
-    if n_mcp == 0:
-        lines.append(f" {SUBJECT_LABEL['mcp']} (none configured)")
-    else:
-        mcp_ok = [_sanitize(m["name"]) for m in mcp if m["verdict"] == "ok"]
-        mcp_bad = [m for m in mcp if m["verdict"] != "ok"]
-        mcp_marker = icon.get(_worst_of_statuses(m["verdict"] for m in mcp_bad), "?")
-        count_text = f"{len(mcp_bad)} flagged" if mcp_bad else "clear"
-        lines.append(f" {SUBJECT_LABEL['mcp']} ({n_mcp}) — {mcp_marker} {count_text}")
-        if mcp_ok:
-            lines.append(f"   {icon.get(PASS, '?')} " + " | ".join(mcp_ok))
-        for m in mcp_bad:
-            reason_text = "; ".join(m.get("reasons") or []) or m["verdict"]
-            lines.append(f"   {icon.get(m['verdict'], '?')} {_sanitize(m['name'])}  {reason_text}")
+    lines.extend(_mcp_inventory_lines(inv, ascii_only=ascii_only))
 
     ch = inv["channels"]
     croster = ch.get("roster") or []
@@ -1732,10 +1743,144 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
     return _asciify(out) if ascii_only else out
 
 
+def _plugins_inventory_lines(sweep, *, ascii_only: bool = False, compact: bool = False) -> list[str]:
+    """Per-plugin verdict lines for the combined pipeline Dashboard (F-153) — the
+    Plugins counterpart to _skills_inventory_lines/_mcp_inventory_lines. `sweep` is
+    duck-typed on checks._mcp.PluginSweep's published surface (.no_roots/.no_targets/
+    .counts()/.rows/.findings) and is never imported here — mirrors the precedent
+    pipeline.record_skill_sweep's own docstring already sets out for exactly this
+    Layer-2/Layer-3 hand-off (and, in this direction, avoids the report<->pipeline
+    import cycle: pipeline.py already imports report._sanitize/_sanitize_tree).
+
+    Returns [] when there is genuinely nothing to sweep (no installed-plugin index
+    found, or an index naming zero plugins) — the caller omits the whole "Plugins"
+    block then, same as "Skills" already does when inv["skills"] is empty.
+    `compact=True` (--compact) collapses this to the headline count line only.
+    """
+    if sweep is None or sweep.no_roots or sweep.no_targets:
+        return []
+    icon = _ICON_ASCII if ascii_only else _ICON
+    by_name = dict(sweep.findings)
+    c = sweep.counts()
+    fail_warn = [(name, status) for name, status, _ev in sweep.rows if status in (FAIL, WARN)]
+    not_scanned = [name for name, status, _ev in sweep.rows if status in ("TRUNCATED", "SKIPPED")]
+    clean = [name for name, status, _ev in sweep.rows if status == PASS]
+    marker = icon.get(_worst_of_statuses(s for _n, s in fail_warn), "?")
+    count_text = f"{len(fail_warn)} flagged" if fail_warn else "clear"
+    lines = [f" Plugins ({c['total']} installed) — {marker} {count_text}"]
+    if compact:
+        return lines
+    if not_scanned:
+        lines.append(
+            f"   {icon.get(UNKNOWN, '?')} {len(not_scanned)} plugin(s) not (fully) "
+            "scanned — their verdict is unknown, not clean"
+        )
+    if clean:
+        lines.append(f"   {icon.get(PASS, '?')} {len(clean)} clean: "
+                     + ", ".join(_sanitize(n) for n in clean))
+    for name, status in fail_warn:
+        f = by_name.get(name)
+        verdict = _VET_VERDICT.get(status, status)
+        reason = _sanitize(f.detail) if f is not None and f.detail else verdict
+        lines.append(f"   {icon.get(status, '?')} {_sanitize(name)}  {verdict} - {reason}")
+    return lines
+
+
+def _risk_chain_lines(paths, *, ascii_only: bool = False, compact: bool = False,
+                      limit: int = 8) -> list[str]:
+    """Highest-risk capability-chain lines for the combined pipeline Dashboard
+    (F-153). `paths` is the same list[RiskPath] risk.risk_paths() already produces —
+    duck-typed on .id/.severity/.title/.chain/.why only, so risk.py need not be
+    imported here (report.py already renders RISK-chain text for --risk-paths via
+    risk.render_risk_paths, which this deliberately does NOT call: that renderer's
+    own "No dangerous capability chains detected" sentence is the RIGHT answer for a
+    standalone `--risk-paths` run, but on a combined chat card a clean run is the
+    common case, Section 2's own findings already speak to it, and repeating it
+    here on every single run would just be more channel-limit noise).
+
+    Returns [] when `paths` is empty — the block is omitted entirely, matching the
+    other "nothing to show" blocks. `compact=True` (the --compact Telegram-safe
+    layout) drops the chain/why detail lines, keeping one line per chain.
+    """
+    if not paths:
+        return []
+    arrow = " -> " if ascii_only else " → "
+    shown = paths[:limit]
+    lines: list[str] = []
+    for p in shown:
+        lines.append(f"[{_sanitize(p.severity)}] {_sanitize(p.id)}: {_sanitize(p.title)}")
+        if not compact:
+            lines.append(f"   chain: {arrow.join(_sanitize(step) for step in p.chain)}")
+            lines.append(f"   why: {_sanitize(p.why)}")
+    if len(paths) > limit:
+        lines.append(f"  (+{len(paths) - limit} more — see --risk-paths)")
+    return lines
+
+
+def _behavioral_block_lines(phase, *, ascii_only: bool = False) -> list[str]:
+    """One-paragraph behavioural-replay summary for the combined pipeline Dashboard
+    (F-153). `phase` is duck-typed on pipeline.PhaseResult's published surface
+    (.ran/.detail/.lines) and is never imported here (pipeline.py already imports
+    report.py the other way — report.py importing pipeline.py back would be the
+    exact cycle pipeline.py's own module docstring says P6 must not reintroduce).
+
+    Always rendered when `phase` is supplied — never silently omitted, even when
+    nothing fired. Golden Rule #4: "not run" / "nothing found" are real answers a
+    security tool must say out loud, never leave the reader to read a missing
+    section as a clean pass.
+    """
+    if phase is None:
+        return []
+    marker = "*" if ascii_only else "•"
+    lines = [f"{marker} {_sanitize(phase.detail)}"]
+    if phase.ran and any("INCIDENT SIGNAL" in ln for ln in phase.lines):
+        lines.append(f"{marker} Full detail: --behavioral / --analyze-trajectory.")
+    return lines
+
+
+def _second_opinion_lines(phase, *, ascii_only: bool = False) -> list[str]:
+    """One-paragraph adjudication ("Second opinion (advisory)") summary for the
+    combined pipeline Dashboard (F-153). Same duck-typing note as
+    _behavioral_block_lines; always rendered when `phase` is supplied."""
+    if phase is None:
+        return []
+    marker = "*" if ascii_only else "•"
+    return [f"{marker} {_sanitize(phase.detail)}"]
+
+
+def _worth_a_glance_lines(findings: list[Finding], *, ascii_only: bool = False,
+                          limit: int = 12) -> list[str]:
+    """MEDIUM/ATTESTED-confidence findings for the combined pipeline Dashboard
+    (F-153) — the exact complement of render_dashboard_findings's own filter (which
+    excludes these from Section 2), so nothing is shown twice and nothing is
+    dropped. Reuses _render_finding, the SAME per-finding renderer Section 2 uses,
+    so the two blocks stay one system rather than two hand-written formatters that
+    can drift apart on why/evidence text or the confidence tag.
+    """
+    qualifying = [
+        f for f in findings
+        if f.status in (FAIL, WARN)
+        and not getattr(f, "suppressed", False)
+        and getattr(f, "confidence", "HIGH") in (MEDIUM, ATTESTED)
+    ]
+    if not qualifying:
+        return []
+    qualifying.sort(key=lambda f: (_STATUS_ORDER.get(f.status, 9), _SEV_ORDER.get(f.severity, 9)))
+    lines: list[str] = []
+    for f in qualifying[:limit]:
+        _render_finding(lines, f, cfg=None, ascii_only=ascii_only)
+    if len(qualifying) > limit:
+        lines.append(f"(+{len(qualifying) - limit} more)")
+    return lines
+
+
 def render_dashboard(findings: list[Finding], score: ScoreResult, *,
-                     ascii_only: bool = False, ctx=None) -> str:
+                     ascii_only: bool = False, ctx=None, full: bool = False,
+                     risk=None, plugin_sweep=None, behavioral=None,
+                     adjudication=None, compact: bool = False) -> str:
     """Deterministic chat Dashboard card — Sections 1-2 of SKILL.md Step 3, pasted verbatim,
-    plus an optional Section 3 (B-356) with per-skill vet verdicts.
+    plus an optional Section 3 (B-356) with per-skill vet verdicts, plus (F-153) the rest
+    of --full's pipeline when `full=True`.
 
     Live testing (F-070) showed the host LLM silently drops the 🦞 header and the family
     frame when asked to *compose* them, so the whole card is code-rendered (B-077): grade
@@ -1750,6 +1895,32 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     appended below Findings, reusing the SAME per-skill verdict lines
     (`_skills_inventory_lines`) the full report's "Inventory by subject" block already
     shows — one source of truth, not a second formatter to drift out of sync.
+
+    F-153: `full=False` (every pre-existing caller, and every `--dashboard` invocation
+    that doesn't also pass `--full`) reproduces the EXACT prior output byte-identical —
+    Sections 1-2 plus the optional Skills block, nothing else. Dave settled 2026-07-30
+    that `--dashboard` must fully render everything `--full` does rather than the
+    additive-append shape `--full` itself grew first (F-150/F-151/F-152); this is that
+    render, reached only via `--dashboard --full`. The fixed order is: Skills (vet) ·
+    Plugins (vet) · MCP · RISK chains · Behavioural · "Second opinion (advisory)" ·
+    Coverage · "Worth a glance" — each block independently omitted when there is
+    genuinely nothing to show for it (Plugins/MCP/RISK chains), except Behavioural and
+    Second opinion, which — per Golden Rule #4 — are shown whenever a phase result was
+    supplied, even to report "nothing fired". `risk`/`plugin_sweep`/`behavioral`/
+    `adjudication` are each independently optional: a caller that skipped a phase
+    (`--fast`, or the phase's own budget) passes None for it and only that ONE block
+    drops, mirroring the pre-existing `ctx=None` contract for Skills. This function
+    never triggers any of that computation itself — cli.py computes each phase once,
+    the same functions `--full` already uses, and hands the results in; nothing here
+    re-scans anything, so calling this with `full=True` costs only string formatting
+    over data the caller already has.
+
+    `compact=True` is ClawSecCheck's Telegram-safe ~4096-char layout (F-153 point 3;
+    the spec's suggested flag name `--card` was already taken by the pre-existing
+    shareable-badge flag, so the CLI flag is `--compact`). It trims the Plugins/MCP/
+    RISK-chain blocks to headline counts only and appends a save-to-file pointer;
+    Sections 1-2, Skills, Behavioural, Second opinion and Coverage are already short
+    (a handful of lines) and unaffected.
     """
     findings = deduplicate_findings(findings)
     n_issues = sum(
@@ -1771,11 +1942,51 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     lines.append(f"{sep} Findings {sep}")
     body = render_dashboard_findings(findings, ascii_only=ascii_only).rstrip("\n")
     out = "\n".join(lines) + "\n" + body + "\n"
+    inv = None
     if ctx is not None:
         inv = build_inventory(findings, ctx)
         if inv["skills"]:
             skill_lines = _skills_inventory_lines(inv, ctx, ascii_only=ascii_only)
             out += "\n" + f"{sep} Skills {sep}" + "\n" + "\n".join(skill_lines) + "\n"
+    if not full:
+        return _asciify(out) if ascii_only else out
+
+    # F-153: the rest of --full's pipeline, fixed order, each block independently
+    # omitted when there is genuinely nothing to show for it (see the docstring).
+    plugin_lines = _plugins_inventory_lines(plugin_sweep, ascii_only=ascii_only, compact=compact)
+    if plugin_lines:
+        out += "\n" + f"{sep} Plugins {sep}" + "\n" + "\n".join(plugin_lines) + "\n"
+
+    if inv is not None and inv["mcp"]:
+        mcp_lines = _mcp_inventory_lines(inv, ascii_only=ascii_only, compact=compact)
+        out += "\n" + f"{sep} MCP {sep}" + "\n" + "\n".join(mcp_lines) + "\n"
+
+    risk_lines = _risk_chain_lines(risk or [], ascii_only=ascii_only, compact=compact)
+    if risk_lines:
+        out += "\n" + f"{sep} RISK Chains {sep}" + "\n" + "\n".join(risk_lines) + "\n"
+
+    behavioral_lines = _behavioral_block_lines(behavioral, ascii_only=ascii_only)
+    if behavioral_lines:
+        out += "\n" + f"{sep} Behavioural {sep}" + "\n" + "\n".join(behavioral_lines) + "\n"
+
+    second_opinion_lines = _second_opinion_lines(adjudication, ascii_only=ascii_only)
+    if second_opinion_lines:
+        out += ("\n" + f"{sep} Second opinion (advisory) {sep}" + "\n"
+               + "\n".join(second_opinion_lines) + "\n")
+
+    coverage_lines = _coverage_lines(findings, ascii_only=ascii_only)
+    if coverage_lines:
+        out += "\n" + "\n".join(coverage_lines) + "\n"
+
+    glance_marker = "" if ascii_only else "👀 "
+    glance_lines = _worth_a_glance_lines(findings, ascii_only=ascii_only)
+    if glance_lines:
+        out += ("\n" + f"{sep} {glance_marker}Worth a glance {sep}" + "\n"
+               + "\n".join(glance_lines) + "\n")
+
+    if compact:
+        out += "\nFull pipeline detail: --save <path> or --html <path>.\n"
+
     return _asciify(out) if ascii_only else out
 
 

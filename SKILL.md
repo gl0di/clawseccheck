@@ -346,7 +346,7 @@ rest on demand. The number, the phrase, or a tap all select an item; free phrasi
 
 | Choice | Flag(s) | Notes |
 |--------|---------|-------|
-| 1 Check everything ("check" / "go") | `--full` (+ auto capability self-report, see Step 2) | Read-only audit **+** capability self-report (resolves B43/B44 inline instead of leaving them UNKNOWN for a separate "deeper" step — F-043) **+** self-test scenario generation (canary/dryrun/redteam — generates injection scenarios; it does not itself run a behavioral verdict) **+** MCP vet **+** a per-skill sweep of every installed skill (`CLAWSECCHECK SKILL SWEEP`) **+** a per-plugin sweep of every installed plugin (`PLUGIN SWEEP`, one merged vet verdict per plugin — F-150) **+** a post-hoc behavioral/trajectory replay (`BEHAVIORAL REPLAY` — advisory; folds in both `--behavioral`'s metadata-only T1/T2/T3 signals AND `--analyze-trajectory`'s indicator-vs-tool-call correlation, so a real `⚠ INCIDENT SIGNAL` line surfaces here too, not only from the standalone command — F-151) **+** a judge packet for the borderline band (`ADJUDICATION` — the same items `--judge-packet` would produce, emitted as part of this one run rather than a separate command), in one go. The skill/plugin sweeps are **visibility only** — their verdicts are deliberately not folded into the audit score or grade. The behavioral replay's printed section is likewise visibility-only, but a fired T1/T2/T3/B191 detector MAY separately CAP (never raise) the score/grade above via a dedicated cap-only channel (F-154) — the judge packet is likewise advisory-only and never moves the grade on its own (see Step 2). **Known gap:** these appended sections currently reach only `--full`'s own stdout/`--json`, not yet the Step 3 Dashboard card — see the note in Step 3. The actual ⚡ live behavioral test (VULNERABLE vs RESISTANT) is a separate, opt-in step offered after the dashboard (Section 6, item a) — not part of item 1. |
+| 1 Check everything ("check" / "go") | `--full` (+ auto capability self-report, see Step 2) | Read-only audit **+** capability self-report (resolves B43/B44 inline instead of leaving them UNKNOWN for a separate "deeper" step — F-043) **+** self-test scenario generation (canary/dryrun/redteam — generates injection scenarios; it does not itself run a behavioral verdict) **+** MCP vet **+** a per-skill sweep of every installed skill (`CLAWSECCHECK SKILL SWEEP`) **+** a per-plugin sweep of every installed plugin (`PLUGIN SWEEP`, one merged vet verdict per plugin — F-150) **+** a post-hoc behavioral/trajectory replay (`BEHAVIORAL REPLAY` — advisory; folds in both `--behavioral`'s metadata-only T1/T2/T3 signals AND `--analyze-trajectory`'s indicator-vs-tool-call correlation, so a real `⚠ INCIDENT SIGNAL` line surfaces here too, not only from the standalone command — F-151) **+** a judge packet for the borderline band (`ADJUDICATION` — the same items `--judge-packet` would produce, emitted as part of this one run rather than a separate command), in one go. The skill/plugin sweeps are **visibility only** — their verdicts are deliberately not folded into the audit score or grade. The behavioral replay's printed section is likewise visibility-only, but a fired T1/T2/T3/B191 detector MAY separately CAP (never raise) the score/grade above via a dedicated cap-only channel (F-154) — the judge packet is likewise advisory-only and never moves the grade on its own (see Step 2). These appended sections also reach the Step 3 Dashboard card via `--dashboard --full` (F-153) — see the note in Step 3. The actual ⚡ live behavioral test (VULNERABLE vs RESISTANT) is a separate, opt-in step offered after the dashboard (Section 6, item a) — not part of item 1. |
 | 2 Check before install | `--vet <path>` (autodetects skill · plugin · MCP spec; `--vet-skill` / `--vet-plugin` force an engine) · `--vet-mcp [name]` (configured MCP) · `--vet-source <slug\|url>` (before anything is even downloaded) | Supply-chain check on something you're about to trust. See the vet flow in Step 5 → [`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md). |
 | 3 Report & history | default report · `--save <path>` · `--trend` · `--badge <path>` | Show or save the last result, the score trend, or a shareable badge. |
 | 4 Menu | `--functions` (Screen 12 — the full palette) | Saying "menu" / "functions" / "more" expands the complete capability list — run `python3 {baseDir}/audit.py --functions` (or present its output). Every capability appears as a speakable prompt grounded to its real flag (verify, what-changed, html, sarif, percentile, risk-paths, the vet family, the ⚡ live tests, …), so there's no wall of raw flags. (`--menu` itself renders *this* Welcome screen; the palette is one level deeper.) |
@@ -469,15 +469,22 @@ plain-language rule.
 
 (`--dashboard-findings` still prints Section 2 alone, if you ever need just the findings block.)
 
-**Known gap — the plugin sweep, behavioral replay, and judge packet are not in this card yet.**
-Step 2's `--full` run also produces a per-plugin sweep, a behavioral/trajectory replay, and a judge
-packet for the borderline band (see Step 1's mode-map row) — `--dashboard` above does NOT render
-these (only the per-skill sweep reaches it, as the Skills block above). Per Step 2's existing rule,
-`--full`'s own raw stdout stays internal-only, so there is currently no chat-visible surface for
-these three. If the user explicitly asks for one of these, use the matching standalone command
-instead of trying to extract it from a `--full` run: plugins have no standalone bulk-vet flag yet —
-vet them one at a time with `--vet-plugin <path>`, or point them at `--vet <path>` which autodetects
-— `--behavioral` for the replay, `--judge-packet` for the packet (all three from Step 5).
+**Gap closed (F-153) — `--dashboard --full` renders the whole pipeline, not just Sections 1-2.**
+Step 2's `--full` run also produces a per-plugin sweep, an MCP vet, the highest-risk capability
+chains, a behavioral/trajectory replay, and a judge packet for the borderline band (see Step 1's
+mode-map row) — running `--dashboard --full` instead of plain `--dashboard` renders ALL of these,
+in a fixed order (Skills → Plugins → MCP → RISK chains → Behavioural → "Second opinion
+(advisory)" → Coverage → "Worth a glance"), each block omitted only when there is genuinely
+nothing to show. `--compact` (only with `--dashboard --full`) further condenses this for a
+narrow chat channel (headline counts + a `--save`/`--html` pointer) — see `docs/USAGE.md`.
+Plain `--dashboard` (no `--full`) is unchanged: Sections 1-2 plus the Skills block, nothing else.
+**Not yet done: this Step still shows the OLD two-command flow** (Step 2's `--full --attest` run,
+discarded, followed by plain `--dashboard`) rather than the merged single
+`--dashboard --full --attest <path>` command the new mechanism is designed for — restructuring
+Steps 2-3 themselves, and this walkthrough's prose/examples, is tracked separately (C-297) so it
+lands deliberately rather than as a drive-by edit here. Until that lands, an agent that wants the
+combined report today should run `--dashboard --full` as its OWN Step 3 command (in place of
+plain `--dashboard`), accepting that it repeats work Step 2 already did in the same turn.
 
 **Section 2 — what the pasted findings block contains**
 

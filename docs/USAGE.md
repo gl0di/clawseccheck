@@ -564,6 +564,7 @@ ask, noted below):
 | Reputation gate before download | `clawseccheck --vet-source clawhub:some-skill` |
 | Active injection self-test | `clawseccheck --canary` · `clawseccheck --redteam` · `clawseccheck --dryrun` |
 | All-in-one (audit + self-test + vet-mcp + skill sweep + plugin sweep + behavioral replay + judge packet) | `clawseccheck --full` · add `--quiet` to collapse the appended sections to one-line summaries (lighter for CI logs) · add `--fast` to drop the deep phases entirely (CI) · `--judged-bundle PATH` to feed back verdicts |
+| Combined pipeline chat card (grade + findings + the SAME sections `--full` runs, one fixed-order render) | `clawseccheck --dashboard --full` · add `--compact` for a ~4096-char Telegram-safe layout (headline counts only + a `--save`/`--html` pointer) · plain `--dashboard` (no `--full`) stays the lighter grade+findings(+Skills) card it always was |
 | Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
 | Attestation template / feed it back | `clawseccheck --ask` · `clawseccheck --attest attest.json` |
 | Shareable card / SVG badge | `clawseccheck --card` · `clawseccheck --badge badge.svg` |
@@ -647,12 +648,39 @@ python3 audit.py --log audit.log            # also write log to a local file
     object carrying a `--canary`/`--dryrun`/`--redteam`/`--multiturn` verdict (F-155): only
     `VULNERABLE` ever caps the grade — `RESISTANT` or nothing submitted changes nothing — and
     only a run submitted with a `seed` is recorded into history/trend (see
-    `docs/OUTPUT_SCHEMA.md` §12 for the exact shape). The result is a
-    `"Second opinion (advisory)"` section and, in `--json`, a `secondOpinion` array.
+    `docs/OUTPUT_SCHEMA.md` §12 for the exact shape). `--full`'s own printed section is
+    banner-titled `ADJUDICATION`; in `--json` the same data is the `secondOpinion` array.
+    (`--dashboard --full`, below, prints this same data under the literal heading
+    `"Second opinion (advisory)"` — the plain-language name a chat card uses.)
   - The whole pipeline shares one wall-clock budget (`DEFAULT_FULL_BUDGET_S`, currently
     2000s) so a hostile fleet cannot make `--full` hang indefinitely; a phase that could not
     start before the budget ran out reports itself `not_reached` — named, never silently
     skipped.
+- **`--dashboard --full`** (F-153) is the ONE combined pipeline report: the deterministic
+  chat Dashboard card (grade + framed findings, Sections 1-2 — see "Guided mode" above)
+  extended to also render everything `--full` computes, in one fixed order: **Skills
+  (vet) → Plugins (vet) → MCP → RISK chains → Behavioural → "Second opinion (advisory)"
+  → Coverage → "Worth a glance"**. Each block is independently omitted when there is
+  genuinely nothing to show (no skills/plugins/MCP servers installed, no RISK chain
+  detected) — Behavioural and Second opinion are always shown once computed, even to say
+  "nothing fired", per the same never-guess-a-PASS rule the rest of the audit follows.
+  Plain `--dashboard` (no `--full`) is **byte-identical** to before this existed — grade,
+  findings, and the optional Skills block (B-356), nothing else — so anything already
+  parsing that output is unaffected. `--fast` and `--judged-bundle PATH` are honored the
+  same way they are under plain `--full` (drop the deep phases; feed back a judge's
+  verdicts) — `--quiet` is not, since `--compact` (below) is the dashboard's own
+  channel-limit lever. This does not add a second engine: every block reuses the exact
+  same verdict logic `--full` itself calls — the plugin sweep, `--vet-mcp`'s own
+  per-server axis function (against the config already in memory, not a second
+  re-read), the RISK engine, and the behavioral/adjudication phases — computed once, so
+  the card can never disagree with what a plain `--full` run of the same config would
+  say — including the F-154/F-155 cap-only grade adjustments (see "Threat monitoring"
+  and `docs/OUTPUT_SCHEMA.md`).
+  - **`--compact`** (only with `--dashboard --full`) is the ~4096-character Telegram-safe
+    layout: Plugins/MCP/RISK-chain blocks collapse to headline counts only, and a trailing
+    line points at `--save PATH` / `--html PATH` for the full detail. (The spec's original
+    suggested flag name was `--card` — already taken by the shareable grade+score+trifecta
+    badge above, hence `--compact`.)
 - **`--vet-plugin PATH`** vets an OpenClaw plugin (root dir, `openclaw.plugin.json`, or an
   installed wrapper project) *before* you install it: manifest sanity, npm lifecycle scripts,
   floating dependency versions, native-executable stowaways, and skills entries escaping the
