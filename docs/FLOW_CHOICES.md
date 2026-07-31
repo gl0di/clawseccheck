@@ -129,8 +129,9 @@ names. This is the most important field: it is what lets the audit see whether a
 
 **Step 3 — answer what you can from your own context; ask the user only what they alone know.**
 
-For **approval_gates** — answer this yourself:
-> Look at your own tool grants and session parameters. If you are required to call `request_approval` or `ask_user` before every side-effecting action → `gated`. Otherwise → `ungated`.
+For **approval_gates** — answer this yourself, per action class (`exec`, `send`, `write` —
+not a single scalar):
+> For each of `exec`, `send`, `write`: are you required to call `request_approval` or `ask_user` before acting in that class? → `"required"`. Do you act without asking? → `"auto"`. Not sure? → `"unknown"`.
 
 For **untrusted_to_action** — answer this yourself:
 > Combine: do you have any channel with open/allowlist/paired dmPolicy or groupPolicy (external ingress exists)? AND do you have outbound tools (email, webhook, exec, deploy, etc.) without an approval gate? If both → `ungated`. If approval gate present → `gated`.
@@ -175,7 +176,8 @@ python3 {baseDir}/audit.py --attest -                # or pipe the JSON via stdi
 weaker than a config fact — advisory, and it never overrides one):
 - **B43 — Capability blast-radius.** Only reversible verbs (search/get/draft/label) → PASS:
   "forward-exfil and delete-evidence are physically impossible." A send/forward, delete-forever, or
-  mailbox-config (auto-forward/filter) verb that can fire without approval → FAIL.
+  mailbox-config (auto-forward/filter) verb that can fire without approval → WARN (never FAIL —
+  B43 is `ATTESTED`/advisory, so a self-report can only warn, not fail the grade).
 - **B44 — Self-report ⇄ config drift.** Config `tools.allow` grants a dangerous verb you did *not*
   list → flagged (drift / blind spot / something masking a capability).
 

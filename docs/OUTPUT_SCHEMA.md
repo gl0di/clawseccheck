@@ -282,8 +282,8 @@ is unavailable.
     }
   ],
   "edges": [
-    {"from": "input", "to": "main"},
-    {"from": "main", "to": "mcp:brave-search"}
+    ["input", "main"],
+    ["main", "mcp:brave-search"]
   ]
 }
 ```
@@ -300,12 +300,15 @@ is unavailable.
 | `can_write_memory` | `bool` | `true` if the node has write access to memory / workspace. |
 | `can_egress` | `bool` | `true` if the node can make outbound network calls. |
 
-### Edge fields
+### Edge shape
 
-| Field | Type | Description |
+Each edge is a 2-element JSON array `[from, to]` — not an object — of source/destination
+node `id` strings.
+
+| Position | Type | Description |
 |---|---|---|
-| `from` | `str` | Source node `id`. |
-| `to` | `str` | Destination node `id`. |
+| `[0]` | `str` | Source node `id`. |
+| `[1]` | `str` | Destination node `id`. |
 
 ---
 
@@ -709,7 +712,7 @@ Sources folded into the packet:
 | `engine_disposition` | `str` | The underlying status: `"WARN"` or `"UNKNOWN"` (this artifact never carries `PASS`/`FAIL` items). |
 | `question` | `str` | Plain-language attestation question for the host agent, ending in the same answer tail the `verdict_schema` beside it declares (`[SAFE / SUSPICIOUS / DANGEROUS + reason]`). |
 | `verdict_schema` | `object` | Fixed answer contract: `{"verdict": ["SAFE", "SUSPICIOUS", "DANGEROUS"], "reason": "free text"}` — exactly the entry shape §13's input contract requires, so a verdicts file written straight from this field is accepted as-is by `--judged` / `--propose-ignore` / `--vet-judged`. (Through v3.56.0 this field wrongly advertised `{"answer": ["yes", "no"], ...}`, which every consumer rejected; `yes`/`no` cannot express the SUSPICIOUS-vs-DANGEROUS distinction the `--vet-judged` escalation ladder depends on, so the packet was corrected to the parser's vocabulary rather than the reverse.) |
-| `safe_facts` | `object` | C-284: engine-extracted structured facts, never copied from prose. Today carries at most one key, `destination_host` (`str`, absent when none) — the hostname of the first URL found in the finding's raw evidence, reduced to bare `[a-z0-9-]`+`.` (no scheme/userinfo/port/path/query/fragment) and length-capped at 100 chars (C-135, 2026-07-24: the DNS protocol's 253-char ceiling was too permissive — several long hyphenated labels chained by dots can still spell a multi-clause directive within it; 100 stays comfortably above any realistic real-world hostname while shrinking that payload budget); anything that fails that shape check is dropped, never truncated. `{}` when no destination could be safely extracted. This exists because `redacted_evidence` deliberately strips content-ring findings down to a location suffix (the matched prose can itself be a jailbreak directive aimed at the judge) — `safe_facts` restores just enough for the judge to check a first-party-endpoint allowlist without reopening that redaction. |
+| `safe_facts` | `object` | C-284: engine-extracted structured facts, never copied from prose. Carries up to two independent keys, each present only when extracted: `destination_host` (`str`) — the hostname of the first URL found in the finding's raw evidence, reduced to bare `[a-z0-9-]`+`.` (no scheme/userinfo/port/path/query/fragment) and length-capped at 100 chars (C-135, 2026-07-24: the DNS protocol's 253-char ceiling was too permissive — several long hyphenated labels chained by dots can still spell a multi-clause directive within it; 100 stays comfortably above any realistic real-world hostname while shrinking that payload budget); anything that fails that shape check is dropped, never truncated. `config_field_paths` (`array[str]`, C-361) — up to 6 distinct `dig()`-style config field paths (e.g. `"gateway.bind"`) recovered from the finding's evidence, used as a fallback when `redacted_evidence` would otherwise carry no location suffix. A config-derived finding routinely populates only `config_field_paths` with no `destination_host` at all. `{}` when neither could be safely extracted. This exists because `redacted_evidence` deliberately strips content-ring findings down to a location suffix (the matched prose can itself be a jailbreak directive aimed at the judge) — `safe_facts` restores just enough for the judge to check a first-party-endpoint allowlist or the actual config field in question, without reopening that redaction. |
 | `corroboration` | `object` | C-285: `{"count": int, "check_ids": [str, ...], "scope": "target"}` — engine-authored, ids-only (no titles/details/evidence/paths). `count`/`check_ids` are the distinct unsuppressed WARN/FAIL check ids sharing this item's own `target` field, across the FULL findings list (not just other packet items); `check_ids` naturally includes this item's own id when its own status is WARN/FAIL, and naturally omits it when the item itself is UNKNOWN (most packet items) — in that case the field reflects purely how much OTHER live signal exists for the same target. `scope: "target"` matches C-252's own measurement unit (`docs/design/severity-separability.md` §5.1: one SkillTrustBench case per subject, not per file) — a lone WARN and a WARN sitting alongside three others on the same target used to be presented identically; C-252 found the co-occurrence count is the strongest signal separating malicious from benign in this engine's own output (monotonic, reaching 100% purity at 4+ distinct checks), stronger than `Finding.confidence`. **Context, not a verdict** — this field never implies a threshold (`count >= N` is not a rule the packet enforces or suggests); `SKILL.md`'s panel guidance says so explicitly. |
 
 ### Skeleton

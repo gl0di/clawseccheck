@@ -63,7 +63,11 @@ caveats that keep `text` the contract:** (1) Telegram buttons are **capability-g
   Audit"*).
   This voice/mascot/separator contract is a tested invariant — see tests/test_brand_consistency.py; drift here fails CI, not just this doc.
 - **Mascot:** 🦞 (the *Claw*) — header line only, once. ASCII mode drops it.
-- **Brand line:** `🦞 ClawSecCheck {version} · built {N} days ago`
+- **Brand line:** `brand.header()` renders `🦞 ClawSecCheck · {subtitle}` (e.g. the menu's
+  `🦞 ClawSecCheck · v{version}`); build-age is a separate, opt-in line — the offline
+  staleness nudge (`This ClawSecCheck build is {N} days old (v{version}, released
+  {date}).`) or the menu's `🆙 build is {N} days old — a newer one may exist · say
+  "update"` — never combined into the brand line itself.
 - **Severity = emoji, not color** (color doesn't survive most channels). Issue lines carry
   a severity **dot** (the Component-2 mock language, unified across CLI and chat in B-077);
   PASS/UNKNOWN roster lines keep status icons:
@@ -116,7 +120,7 @@ pure rendering switch.
 | 3 | **Dashboard** (A–F audit) | guided + CLI | Step 3 / `audit.py` | ✅ drawn |
 | 4 | **What-changed** (diff vs last) | guided + CLI | `--monitor` | ✅ drawn |
 | 5 | **Vet risk dossier** (skill / plugin / MCP / source) | guided + CLI | `--vet` / `--vet-mcp` | ✅ drawn |
-| 6 | **Self-test** (canary · red-team · dry-run) | guided + CLI | `--self-test` | ✅ drawn |
+| 6 | **Self-test** (canary · red-team · dry-run · multi-turn) | guided + CLI | `--self-test` | ✅ drawn |
 | **Reusable blocks** |||||
 | 7 | **Finding card** (one risk) | both | inside 3/4 | ✅ drawn |
 | 8 | ~~Fix prompts~~ — **removed** (F-074 reports-only: no remediation surfaces) | — | — | ❌ removed |
@@ -408,10 +412,13 @@ server, merged into one dossier (per-server detail stays in `findings[]`).
 
 ### 6. Self-test — `--self-test`
 
-Runs all three live-test generators back to back — canary · red-team · dry-run — and
-prints their instruction blocks in sequence. Grounded in the `cli.py` `args.self_test`
-handler, which calls `report.render_canary(make_canary())`, `report.render_suite(make_suite(seed))`,
-and `report.render_dryrun(make_scenarios())` one after another. **This screen only emits
+Runs all four live-test generators back to back — canary · red-team · dry-run ·
+multi-turn — and prints their instruction blocks in sequence. Grounded in the `cli.py`
+`args.self_test` handler, which calls `render_canary(make_canary())`,
+`render_suite(make_suite(seed))`, `render_dryrun(make_scenarios())`, and
+`render_multiturn(make_multiturn())` one after another (defined in `canary.py`/
+`redteam.py`/`dryrun.py`/`multiturn.py` respectively, re-exported via the package root —
+none of them live in `report.py`). **This screen only emits
 test material — it does not run the test.** The renderer's job stops at printing
 untrusted-looking payloads with instructions for the agent under test; feeding them to
 itself and reporting VULNERABLE/RESISTANT is the confirm-gated live part the host agent
@@ -591,7 +598,7 @@ complete list** of what the skill can do, grouped by intent, so the user never h
 flag in advance. ✅ = read-only; ⚡ = exercises the live agent (the tool only *emits* the test
 material — running it is the live part, and it's always confirm-gated). Every verb ties to its
 grounding flag (in parens) so this palette and `cli.py` can't silently drift — it covers the
-21 `_PRIMARY_MODES` plus the audit defaults and modifiers.
+`_PRIMARY_MODES` set (40 and growing) plus the audit defaults and modifiers.
 
 **`text` profile (baseline):**
 
@@ -611,7 +618,8 @@ Live tests  ⚡ exercises your running agent — I confirm first
   Canary            "canary"          plant a marker, see if an injection leaks it  (--canary)
   Red-team          "red-team"        a payload suite to run against the agent      (--redteam)
   Dry-run           "dry-run"         trace what an injection would reach           (--dryrun)
-  Self-test         "self-test"       all three at once                             (--self-test)
+  Multi-turn        "multi-turn"      plant a poisoned rule, trigger it a turn later (--multiturn)
+  Self-test         "self-test"       all live injection tests at once              (--self-test)
 
 Vet before you trust  ✅ read-only
   Vet a skill       "vet <path>"      malware/supply-chain check before you install (--vet)

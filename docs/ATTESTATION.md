@@ -17,7 +17,7 @@ it once with `--ask` and feed it back to the audit with `--attest <file>`.
 
 Without attestation the runtime-dependent checks return `UNKNOWN` and are
 excluded from the score — the grade stays conservative but honest.  With
-attestation four checks produce real verdicts:
+attestation five checks produce real verdicts:
 
 | Check | What it needs | Without attestation |
 |---|---|---|
@@ -25,6 +25,7 @@ attestation four checks produce real verdicts:
 | B44 — config/attest mismatch | `tools` | UNKNOWN |
 | B45 — per-agent privilege separation | `agents` | UNKNOWN |
 | B47 — cross-agent trifecta reassembly | `agents`, `delegation` | UNKNOWN |
+| B84 — declared vs. effective vs. proven tool use | `proven_tools` (prefers a trajectory-log source when available) | UNKNOWN |
 
 Two more checks are assisted (not blocked) by attestation:
 
@@ -32,7 +33,7 @@ Two more checks are assisted (not blocked) by attestation:
   upgrades UNKNOWN to PASS (ATTESTED confidence).
 - **B20** (bootstrap write protection) and **C5** (OpenClaw binary safety):
   `paths` fields point the engine at non-standard locations it then stat()s
-  itself — the verdict stays HIGH confidence, not ATTESTED.
+  itself — the verdict stays MEDIUM confidence, not ATTESTED.
 
 ---
 
@@ -56,7 +57,9 @@ ignores it.  Leave it or remove it — either works.
 
 ## Schema: clawseccheck-attest/1
 
-The file must be valid JSON with `"schema": "clawseccheck-attest/1"` at the top.
+The file must be valid JSON. `"schema": "clawseccheck-attest/1"` at the top is
+recommended and future-proofs the file, but is not required — an absent `schema`
+key is accepted as-is; only a *present but wrong* value is rejected.
 
 ### tools
 
@@ -81,6 +84,23 @@ The engine classifies each verb into a blast-radius class:
 
 A verb not matching any hint is classified UNKNOWN (treated as low-blast).
 
+### proven_tools
+
+```json
+"proven_tools": ["send_email"]
+```
+
+Verbs you have LOG or TRACE evidence you *actually invoked* — not just hold.
+Stronger than `tools` (which is only what you *could* invoke): a proven
+high-blast verb that fired with no approval gate is "the agent did, ungated,"
+not just "the agent could." Leave as `[]` if you have no execution log to
+cite. Feeds **B84** (declared vs. effective vs. proven tool use), which
+prefers an OpenClaw trajectory-log source over this field when one is
+present, and otherwise falls back to it — WARN only when a proven high-blast
+verb fired AND the attested posture is ungated; UNKNOWN when there's no
+proven-tool evidence at all (most setups, since this needs runtime/log
+evidence).
+
 ### approval_gates
 
 ```json
@@ -88,8 +108,10 @@ A verb not matching any hint is classified UNKNOWN (treated as low-blast).
 ```
 
 For each action class: `"required"` (human confirms first), `"auto"` (agent
-acts without asking), or `"unknown"` (the default; treated as worst-case).
-Keys are fixed: `exec`, `send`, `write`.
+acts without asking), or `"unknown"` (the default). Only an explicit `"auto"`
+value marks a class as ungated for B43's wording — `"unknown"` is treated the
+same as `"required"` (not escalated), so leaving a class at its default reads
+as gated, not worst-case. Keys are fixed: `exec`, `send`, `write`.
 
 B43 uses this to distinguish a milder WARN (high-blast verb + gate reported) from a
 stronger WARN (high-blast verb + no gate or bypass actor). B43 is `ATTESTED`
@@ -122,7 +144,9 @@ tool result), can a side-effect fire without human approval?
 
 - `"gated"` — no: human must confirm.
 - `"ungated"` — yes: side-effect can fire automatically.
-- `"unknown"` — not sure (default; treated as worst-case by B43).
+- `"unknown"` — not sure (default). B43 only escalates on the explicit,
+  evidenced `"ungated"` value — a config shorthand or an unanswered/default
+  field is not treated as worst-case, it reads the same as `"gated"`.
 
 ### host_monitors
 

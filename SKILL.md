@@ -466,7 +466,7 @@ sentence. Examples:
 - "A1 FAIL (trifecta 3/3)" → "Your agent has three risky things active at once: it accepts outside
   input, holds sensitive data, and can take actions online. That combination is the most dangerous setup."
 - "B1 FAIL" → "Your agent's config file is readable by anyone on this computer."
-- "C5 FAIL" → "One of your installed skills has code patterns used by malware."
+- "B13 FAIL" → "One of your installed skills has code patterns used by malware."
 
 Present the pasted card, then the two prose sections below it, **in one message**. Render
 Sections 5-6 as ordinary text — do NOT wrap them in a code block or monospace fence; that

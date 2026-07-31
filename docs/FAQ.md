@@ -99,8 +99,10 @@ for a timeout, valid JSON for an unparseable config — and the cap lifts on the
 - Secrets or tokens stored in plaintext inside `openclaw.json` or a bootstrap file (**B1**).
 - Gateway exposed with no authentication (**B2**).
 - Installed third-party skill flagged as suspicious or dangerous by the malware scan (**B13**).
-- Control-plane tools (config, cron, gateway) reachable over the HTTP gateway (**B32**).
-- A `dangerously*` sandbox escape flag is enabled (**B48**).
+- An `ownerAllowFrom`/`autoApproveCidrs` wildcard grants owner command authority or
+  device auto-pairing to ANY sender/IP (**B48**, the wildcard-authority case
+  specifically — a plain break-glass override on its own is HIGH severity and caps
+  the grade at C, not F).
 - **No FAIL at all** — a check crashed or timed out, or `openclaw.json` could not be
   parsed. See the cap table above; the report names which one it was.
 
@@ -303,8 +305,12 @@ clawseccheck --home /path/to/custom/openclaw/home
 - **Non-standard install paths.** If OpenClaw was installed system-wide or in a
   non-default location, pass the path to the directory that contains `openclaw.json`.
 
-The `.clawseccheckignore` suppress-file and the `--monitor` state snapshot default to
-paths inside the home directory you specify, so they stay per-profile automatically.
+The `.clawseccheckignore` suppress-file defaults to a path inside the home directory
+you specify, so it stays per-profile automatically. The `--monitor` state snapshot does
+**not** — its default (`~/.clawseccheck/state.json`) is a single fixed path independent
+of `--home`, so auditing two different `--home` profiles with `--monitor` and no other
+change writes both to the same shared snapshot. Pass `--state PATH` explicitly per
+profile if you run `--monitor` against more than one home.
 
 ---
 

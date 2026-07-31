@@ -48,11 +48,17 @@ setting — not even opt-in. `clawseccheck/iocdb.py` has zero I/O of any kind.
 ## Freshness is a first-class fact, not decoration
 
 The dataset exposes its own snapshot date (`iocdb.REVISION`). Past a staleness
-threshold (`iocdb.STALE_AFTER_DAYS`), the gates that consume it surface an explicit
-"IOC data is N days old" advisory instead of silently reading as a confident, current
-clean — the same freshness discipline `docs/USAGE.md`'s update/coverage nudges already
-apply elsewhere in the tool. A stale dataset never fails loudly and never blocks a
-scan; it just stops pretending to be current.
+threshold (`iocdb.STALE_AFTER_DAYS`), `iocdb.freshness_notice()` returns an explicit
+"IOC dataset is N days old (revision ..., staleness threshold ... days)." advisory —
+the same freshness discipline `docs/USAGE.md`'s update/coverage nudges already apply
+elsewhere in the tool. Today only the `--vet-source` CLI path calls it, and as a
+side-channel stderr print (gated by `--no-freshness-notice`), deliberately kept out of
+the `vet_source()` Finding itself — its `evidence`/`detail` never carry a
+`date.today()`-derived string, since that would make vet output non-reproducible.
+Cross-artifact host correlation and the install-directive/remote-dependency checks
+consult the dataset's contents (`is_known_bad_host()`) but do not yet surface this
+staleness advisory. A stale dataset never fails loudly and never blocks a scan; it just
+stops pretending to be current.
 
 ## Refresh cadence
 

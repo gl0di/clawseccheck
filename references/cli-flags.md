@@ -27,11 +27,13 @@ kept here so the always-loaded playbook stays lean.
 - `--fast` — only with `--full`: skip the plugin sweep, behavioral replay, and skill sweep,
   keeping the audit + self-test + vet-mcp + the (free) adjudication packet. For CI runs where
   the deep phases are too slow; this is the pre-F-150 `--full` shape.
-- `--judged-bundle PATH` — only with `--full` (`-` for stdin): feed back a host-agent judge's
-  answers to a prior `--full --json` packet in one file (`attestation` / `judged` / `vetJudged`
-  buckets). Produces a `"Second opinion (advisory)"` section and, in `--json`, a
-  `secondOpinion` array. Own-config verdicts may only annotate (never change score/grade);
-  swept-target verdicts are escalate-only.
+- `--judged-bundle PATH` (`-` for stdin): feed back a host-agent judge's answers to a
+  prior `--full --json` packet in one file (`attestation` / `judged` / `vetJudged`
+  buckets). Under `--full`, produces a `"Second opinion (advisory)"` section and, in
+  `--json`, a `secondOpinion` array; own-config verdicts may only annotate (never change
+  score/grade), swept-target verdicts are escalate-only. Its `liveTest` bucket also has
+  a separate, narrower effect WITHOUT `--full`: `--trend`/`--monitor`/`--percentile`/
+  `--next` each honor it on its own to cap the reported score/percentile.
 - `--verbose` / `--debug` / `--log PATH` — local logging with secret redaction.
 - `--no-native` — skip the built-in `openclaw security audit` (for offline / hermetic testing).
 - `--no-update-notice` — suppress the offline "your build may be stale" reminder
@@ -48,11 +50,11 @@ kept here so the always-loaded playbook stays lean.
   (non-suppressed FAIL/WARN, high-confidence, grouped by the 7 families, already framed in the
   open 3-sided box) and exit. Agent-facing: SKILL.md Step 3 runs this and pastes the output
   verbatim, so the family frame is deterministic instead of model-drawn. `--ascii` degrades the
-  frame to `[Family] — N to fix` brackets.
+  frame to `[Family] — N issue(s)` brackets.
 
 **Mode precedence.** Most flags above select a single mode; only one runs per invocation
 (resolved in a fixed order, `--json` winning over `--card` on the default report path). If you
-pass a second mode, or a modifier the chosen mode can't use (e.g. `--save` with `--card`, or
+pass a second mode, or a modifier the chosen mode can't use (e.g. `--save` with `--vet`, or
 `--exit-code` with `--sarif`), ClawSecCheck prints a `note: …` to **stderr** naming what was
 ignored and continues — machine-readable stdout (`--json`/`--sarif`) stays clean. `--no-history`
 is honored everywhere except `--trend`/`--monitor`, which record a score point as part of their job.

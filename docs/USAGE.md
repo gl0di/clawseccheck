@@ -481,7 +481,7 @@ Beyond individual checks, ClawSecCheck runs a **risk engine** that looks for dan
 *combinations* — capability chains where two or more co-occurring properties make a
 compromise catastrophic or trivial to execute.
 
-The highest-risk chains it detects now span **RISK-01..RISK-24**:
+The highest-risk chains it detects now span **RISK-01..RISK-26**:
 
 | ID | Severity | Chain |
 |----|----------|-------|
@@ -509,6 +509,8 @@ The highest-risk chains it detects now span **RISK-01..RISK-24**:
 | RISK-22 | MEDIUM | A single MCP server's own tool set spans untrusted-input + sensitive-read + egress roles → co-resident toxic flow, even when every individual tool is safe in isolation |
 | RISK-23 | HIGH | 2+ independent persistence anchors (Python auto-exec, systemd unit, per-turn skill hook, covert tunnel) fired at once → an eviction-resistant foothold |
 | RISK-24 | MEDIUM | Confirmed default-deny egress policy + a tunnel/mesh-VPN transport present on the host + agent can act on untrusted input → the egress policy is unenforceable against that transport |
+| RISK-25 | MEDIUM | Non-canonical marketplace feed + install-policy gate disabled (or its exec path-safety bypassed) → skills and plugins install from a non-default source with nothing reviewing what arrives |
+| RISK-26 | HIGH | Skill Workshop autonomous authoring enabled + an untrusted-ingress leg (open DM/group policy, or hooks with an unconstrained session-key) → one inbound message becomes persistent executable code on disk |
 
 Each chain fires **only when every link has positive evidence** — no chain is invented from
 absent or UNKNOWN data, so findings are evidence-gated, which keeps false positives low —
@@ -535,7 +537,7 @@ The SARIF file is written to the path you choose — ClawSecCheck never uploads 
 `--fail-under` and `--exit-code` do not change the default exit code (0) when omitted,
 preserving backward compatibility.
 
-**What `--exit-code` actually trips on.** Not only audit findings — three of the four
+**What `--exit-code` actually trips on.** Not only audit findings — most of the six
 sources are not findings at all, so nothing else in the report announces them:
 
 1. any **unsuppressed `FAIL` audit finding**;
@@ -545,7 +547,10 @@ sources are not findings at all, so nothing else in the report announces them:
 4. under `--full` (and not `--fast`), a **`DANGEROUS` (`FAIL`) installed plugin** from
    the pipeline's plugin sweep (F-150);
 5. on **any** run, a present-but-**unparseable** `openclaw.json` — a broken config yields
-   only `UNKNOWN`/`WARN` findings, so a FAIL-only gate would otherwise stay green on it.
+   only `UNKNOWN`/`WARN` findings, so a FAIL-only gate would otherwise stay green on it;
+6. on **any** run, a **wholly absent** `openclaw.json` (no config found at all, B-363) —
+   strictly less information than a present-but-unparseable one, so it trips the gate the
+   same way source 5 does rather than falling through to a misleading green.
 
 Sources 2-4 are **FAIL-only**, exactly like source 1: a `SUSPICIOUS` (WARN) server,
 skill, or plugin does not redden the gate. Neither does an **incomplete sweep** — a

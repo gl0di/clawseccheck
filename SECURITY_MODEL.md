@@ -156,10 +156,10 @@ doing — so a reviewer can check the claim against the code rather than take it
   `0600` at creation time (`secure_write_text` / `secure_append_text`). A hostile local
   process cannot pre-plant a symlink to turn a ClawSecCheck write into an arbitrary-file
   overwrite.
-- **The native OpenClaw CLI call is off by default and opt-in only by omission of a flag
-  — the flag turns it OFF, not on.** `audit()` accepts `include_native`, and the CLI sets
-  it to `not args.no_native`: the built-in `openclaw security audit --json` subprocess
-  runs unless `--no-native` is passed. It is the single fixed, read-only, argument-list-
+- **The native OpenClaw CLI call runs by default and is opt-out, not opt-in — the flag
+  turns it OFF.** `audit()` accepts `include_native`, and the CLI sets it to
+  `not args.no_native`: the built-in `openclaw security audit --json` subprocess runs
+  unless `--no-native` is passed. It is the single fixed, read-only, argument-list-
   hardcoded external command ClawSecCheck can ever invoke (no `shell=True`, a timeout,
   captured output) — see `native.py`.
 - **The host-level scan is similarly opt-out, not opt-in by an extra grant:**
@@ -391,8 +391,15 @@ OpenClaw's skill schema ships such a field, at which point `SKILL.md` should gai
 - **It does not replace red-teaming.** Static analysis of configuration files cannot
   detect all attack paths. Adversarial runtime testing against a live agent remains
   necessary.
-- **It does not scan your entire filesystem.** The read surface is bounded: the agent
-  home directory, installed-skill directories, and the paths you explicitly pass.
+- **It does not scan your entire filesystem.** It does not walk arbitrary user files.
+  The read surface is bounded and named: the agent home directory, installed-skill/
+  plugin directories, the bounded set of other OpenClaw-home artifacts listed under
+  "Allowed behavior" above, a handful of explicitly-named locations outside the home
+  (the ClawHub token store for B182, the global gateway dotenv), the fixed set of
+  host-monitor paths `hostwatch.py` checks by default unless `--no-host` (IDS/FIM/EDR/
+  firewall config files, e.g. `/etc/ufw/ufw.conf`), `/proc/net/tcp{,6}` and `/proc/*/fd`
+  for the socket scan by default unless `--no-sockets`, and any paths you explicitly
+  pass.
 - **It cannot detect zero-day vulnerabilities** in OpenClaw itself or in third-party
   MCP servers — it can only flag known risky patterns.
 - **UNKNOWN is not PASS.** When the tool cannot determine a configuration state

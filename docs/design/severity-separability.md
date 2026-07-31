@@ -128,7 +128,7 @@ skill tripping one weak bucket and a skill tripping five different ones return t
 identical WARN, at the identical severity, carrying only the winning bucket's evidence.
 
 The ring merge has the same property. `_VET_MERGE_RANK` (`_vet.py:2638`) picks the single
-highest-ranked finding across `{B13} ∪ ring` (40 ring checks, `_vet.py:3222`), so N ring
+highest-ranked finding across `{B13} ∪ ring` (45 ring checks and growing, `_vet.py:3222`), so N ring
 WARNs plus a B13 WARN still yield one WARN. Measured: of the 2,052 WARN cases, **975 have
 a ring check rather than B13 as the primary verdict** — the ring is not a side channel,
 it decides nearly half the WARN verdicts, and its corroboration is discarded too.
@@ -315,6 +315,19 @@ remain one if this benchmark did not exist.
 underneath it is lossy. That distinction is the recommendation.
 
 ## 7. Recommendation
+
+> **Status update (2026-07-22, post-authoring).** Item 2's `>= 3 distinct corroborating
+> checks` FAIL rule was implemented (C-257) and then **reverted two days later in
+> v3.55.0** after an independent C-135 adversarial pass — the precondition this section
+> itself calls for — found three structurally distinct real false positives
+> (advisory-check tallying, prose-family co-firing, a single technique re-escalating),
+> "signaling an unsound design rather than one narrow edge case" (CHANGELOG.md v3.55.0).
+> The rule is not present in current source: `check_installed_skills` is still a pure
+> first-match-wins chain, and `Finding.corroborating_buckets` is explicitly retention-only
+> bookkeeping that never itself changes a verdict. Item 5's B98/O6 promotion study was
+> also carried out (C-260, same wave-7 batch) and **concluded REFUTED** — no
+> B98-promotion-to-FAIL logic exists in current source. The rest of this section (items
+> 1/3/4, and the O3 architecture item 1 depends on) is unaffected and still holds.
 
 **Adopt the accumulation architecture (O3), not a threshold change. Keep the down-rank
 gates exactly as they are. Do not adopt B98 promotion.**

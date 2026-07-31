@@ -43,10 +43,13 @@ emits a `--judge-packet`/`--vet-judge-packet` — an already-redacted, structure
 under whatever model and policy the user already trusts, is the one that reads it and
 judges. No API key, no per-scan network call, no raw skill content leaves the machine
 through this engine. The context firewall is **structural**: content-ring evidence is
-reduced to an engine-authored `(relpath:lineno)` location before it ever reaches a judge
-(F-113), with two narrow, validated exceptions this same epic added — a length-capped
-LDH-only hostname (`safe_facts`, C-284) and bare check-id corroboration counts (C-285) —
-neither of which can carry attacker-authored free text. Authority is scoped by content
+reduced to an engine-authored `(relpath:lineno)` location — or, when no location suffix
+exists, a `dig()`-style config field path (`config_field_paths`, C-361) — before it ever
+reaches a judge (F-113), with three narrow, validated exceptions this same epic added: a
+length-capped LDH-only hostname (`safe_facts.destination_host`, C-284), bare check-id
+corroboration counts (C-285), and that config field path itself
+(`safe_facts.config_field_paths`, C-361) — none of which can carry attacker-authored free
+text. Authority is scoped by content
 **provenance**, not by a single global rule: a judge reviewing the user's own config may
 only suppress noise (`--propose-ignore`, C-253); a judge reviewing an untrusted `--vet`
 target may only escalate (C-254) — a successful injection against either path can only

@@ -4,11 +4,11 @@ Honest map of what ClawSecCheck checks today, what it does **not** yet check, an
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
 all (so they can't even surface as a finding). Updated 2026-07-26 for v3.58.0.
 
-Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 178 catalogued,
+Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 179 catalogued,
 of which **175 run in a default audit**; the three T-series behavioral checks plus B191
 (OpenClaw's own `audit_events` runtime trail) execute only under `--behavioral`
 total; see `docs/CHECKS.md` for the full generated list, plus the
-combinational risk engine `RISK-01..RISK-24`, the install-time vetters `--vet` (B13 plus
+combinational risk engine `RISK-01..RISK-26`, the install-time vetters `--vet` (B13 plus
 the content-security ring — `SKILL_CONTENT_RING`, run against an uninstalled skill; AST-,
 injection-, and capability-intent-aware) / `--vet-mcp`, the **attestation
 layer** (`--ask` / `--attest`, with a guided interrogation protocol so the agent self-builds
@@ -51,7 +51,7 @@ classified at all.
 | Least privilege / dangerous tools | B3, B7, B8 | Approval gate via real `tools.exec.mode` `[CHECK: B3, B7, B8]` |
 | Standing exec-approvals grant inventory | B172 | `~/.openclaw/exec-approvals.json` persisted per-agent `allowlist[]` entries with `source: "allow-always"` — a durable per-command exec grant from a historical "always allow" click, living entirely outside `openclaw.json`. WARN-only, unscored advisory: OpenClaw takes the stricter of `tools.exec.*` and the exec-approvals policy (confirmed against the dist: `minSecurity`/`maxAsk` merge), so a standing grant cannot loosen the gate B8/B22/B23/B48 already verify — this check exists purely to surface a forgotten persisted grant, not to override those checks' verdicts `[CHECK: B172]` |
 | Hooks enable-toggle attack-surface inventory | B179 | `hooks.enabled` and `hooks.internal.enabled`/`.entries`/`.installs`/`.load.extraDirs` were entirely uncovered (only `hooks.mappings` and `hooks.token` had a `dig()` path before this). `hooks.internal.load.extraDirs` gets sharper wording — it names extra directories OpenClaw searches for internal hook MODULES at startup, a code-exec/persistence surface, not just an enable flag. LOW severity, WARN-only, unscored advisory — the real fleet config has no `hooks` key at all, and the native audit itself treats this as info, not WARN/FAIL; hooks.token (B1), `hooks.mappings[].allowUnsafeExternalContent` (B48), and hook-template content (B169) already cover the higher-risk adjacent settings `[CHECK: B179]` |
-| Execution sandbox present | B4 | Depth is partial — see gaps (B35) `[CHECK: B4]` |
+| Execution sandbox present | B4 | Depth is partial — presence/mode only, not a full container-escape audit `[CHECK: B4]` |
 | Bootstrap-file injection surface | B6, B161 | Prompt-injection-prone directives in SOUL/AGENTS/TOOLS (B6); identity-file injection — staleness-framing/safety-disable directive corroborated by a fabricated admin/auth code (B161) `[CHECK: B6, B161]` |
 | Trusted-output boundary policy | B21, B169, B170 | Is external content treated as data, not instructions; combined with RISK-01/02/03 this is also the strongest automated leg of the dirty-input→action-gate concern (B27 was never implemented as its own id — no config surface exists for a generic gate — but this row plus the attestation layer below covers the same ground); B169 (B-231) content-scans `hooks.mappings[].messageTemplate`/`textTemplate` — the strings that carry an untrusted inbound webhook payload into an agent turn — through the content-ring directive/install detectors; B170 (B-232) flags the PRESENCE of a directive telling the agent to treat fetched tool/web/MCP output as authoritative operator instructions (the inverse of B67's absence check) — WARN-only, the content ring's highest-FP surface `[CHECK: B21, B169, B170]` |
 | Installed-skill malware (ClawHavoc class) | B13, B86, B87, B88, B89, B90, B91, B92, B336, B93, B94, B96, B97, B98, B99, B100, B335, B102, B103, B104, B105, B135, B151, B152, B153, B154, B156, B157, B158, B165, B338, B339, `--vet` | curl\|sh, base64/PS-encoded, split-stage exfil, paste hosts; **AST obfuscation** (`exec(b64decode)`, xor/zlib-layered and local `_decode()`-wrapper indirection incl. chained multi-stage wrappers, `getattr(os,…)()`, `__import__(…).system`) + injection directives in skill prose — ignore-instructions / hide-from-user plus **anti-refusal & system-prompt/tool-definition leak** directives (fence- and example-context dampened); **AST taint** cred-file→network (`CRED_EXFIL_FLOW`) and env-var / agent-config→network body/URL (`ENV_EXFIL_FLOW`, WARN-first — auth headers excluded, see the JUDGE band below for that exclusion's own recovery); **cross-file import-graph taint** (`CROSS_FILE_EXEC`); **bundled shell (`.sh`)** and **JS/TS** passes (decode-then-exec, remote-fetch-then-exec, dynamic dispatch, unsafe deserialization); **split-payload reassembly** across file boundaries (base64 — B90/B102 — and plaintext — B153/B154); **chunked/part-file assembly executed via exec()/eval()** — a helper reads and joins MULTIPLE chunked/part files at runtime (e.g. `_load.part1.txt`, `.part2.txt`) and the assembled result is exec()'d/eval()'d, the split-by-file scanner-evasion loader shape where the payload never exists whole in any single shipped `.py` file (B336, gated on a common stem+extension differing only by a numeric index); **frontmatter/trigger hygiene** (B88 tag-shaped values, B93 homoglyph/confusable trigger impersonation); **install-time supply chain** (B94 extended lifecycle hooks, B96 config-driven trust widening, B97 per-turn event-hook files, B103 install-directive metadata, B104 offboarding hygiene, B105 cross-skill combined effect, B135 accepted-despite-failed-verification, B151/B152 orphaned plugin cache, B156 overt secret-exfil — also scans a bundled script's own docstring/comment TEXT for the same send-verb+secret+destination shape, WARN-only from that source (never escalated to FAIL even against a known-bad host), B157 non-registry dependency source, B158 declared-but-absent load source, B165 hex-shaped crypto private-key value near wallet context — C-200, gated against tx/block-hash wording to avoid colliding with routine Ethereum tx-hash prose); covert tunnel / mesh-VPN enrollment primitive (tailscale/tailscaled, cloudflared, ngrok, ssh -R, socat, frpc, bore, a SOCKS5 proxy flag — WARN-only, a brand-new detection surface, B338, E-065); cloud instance-metadata CREDENTIAL fetch — a request URL combining a known metadata host (169.254.169.254 / metadata.google.internal / 100.100.100.200) with a credential-issuing path (AWS/Alibaba role creds, GCP service-account token, Azure managed-identity token) in one contiguous token, gated on defensive/documentation context so an SSRF-hardening tutorial or SIEM detection-signature skill does not self-FAIL (B339, E-065); import-path hijack (B86, `sys.path` from a writable/relative location); dormant-capability code (B89); undeclared capabilities (B98, no `tools.allow` manifest); `.pth`/sitecustomize persistence (B99); runtime-computed sitecustomize/usercustomize write or PYTHONSTARTUP shell-rc install — B99's sibling for a target the shipped skill *computes* rather than ships as a named file (B335, T06/SkillTrustBench gap closure); ClickFix paste-into-terminal (B100); **cross-session persistence** (B13 sub-signal, C-204/T1098.004 + T1053): `~/.ssh/authorized_keys` public-key append (argument-bound write detection — a read-only audit of the file never fires), plus cron/systemd gap closure (`crontab -` stdin install, the `["crontab","-"]` argv form, `systemctl --user enable`, and per-user `~/.config/systemd/user/*.service`/`.timer` unit files — the pre-existing check already covered `crontab -e`/`@reboot`/bare `systemctl enable`); **insecure-coding, no clear attack intent** (B13 sub-signal, C-199/SkillTrustBench T09): `SHELL_INJECTION_RISK` — a `subprocess.*(shell=True, …)` or bare `os.system()`/`os.popen()` call whose command is not a provable compile-time literal (WARN-grade on the unsafe SHAPE alone, distinct from the stronger crit `TT5_CMD_INJECTION`, which requires PROVEN external taint), and hardcoded/predictable `/tmp` writes (CWE-377 — `tempfile.mkstemp()`/`NamedTemporaryFile()` never flagged); parse failures surface UNKNOWN, not a silent skip `[CHECK: B13, B86, B87, B88, B89, B90, B91, B92, B336, B93, B94, B96, B97, B98, B99, B100, B335, B102, B103, B104, B105, B135, B151, B152, B153, B154, B156, B157, B158, B165, B338, B339]` |
@@ -262,16 +262,16 @@ OWASP Agentic (ASI) classes below, not stretched into a category they don't fit.
 
 | Code | Category | ClawSecCheck checks |
 |---|---|---|
-| LLM01 | Prompt Injection | A1, B2, B6, B21, B23, B26, B30, B48, B56, B58, B59, B60, B61, B64, B67, B74, B140, B180, C074 |
-| LLM02 | Sensitive Information Disclosure | B1, B9, B11, B12, B14, B19, B39, B41, B59, B61, B67, B182, C014, C015 |
-| LLM03 | Supply Chain | B5, B13, B15, B24, B25, B33, B42, B57, B103, B135, B151, B152, B177, B181, B182, C4, C5, C047 |
-| LLM04 | Data and Model Poisoning | B7, B20, B22, B55, B180 |
-| LLM05 | Improper Output Handling | B21, B47 |
-| LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B62, B63, B65, B66, B68, B69, B71, B72, B76, B79, B105, B136, B138, B150, B176, T1, T3 |
+| LLM01 | Prompt Injection | A1, B2, B6, B21, B23, B26, B30, B48, B56, B58, B59, B60, B61, B64, B67, B74, B88, B140, B170, B180, B185, C074 |
+| LLM02 | Sensitive Information Disclosure | B1, B9, B11, B12, B14, B19, B39, B41, B59, B61, B67, B82, B83, B170, B182, B193, C014, C015 |
+| LLM03 | Supply Chain | B5, B13, B15, B24, B25, B33, B42, B57, B103, B135, B151, B152, B174, B177, B181, B182, B184, B186, B187, B194, C4, C5, C047 |
+| LLM04 | Data and Model Poisoning | B7, B20, B22, B55, B175, B180 |
+| LLM05 | Improper Output Handling | B21, B47, B187 |
+| LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B62, B63, B65, B66, B68, B69, B71, B72, B76, B79, B81, B84, B105, B136, B138, B150, B175, B176, T1, T3 |
 | LLM07 | System Prompt Leakage | B9 |
 | LLM08 | Vector and Embedding Weaknesses | — (no agent-config surface; RAG/embedding concern) |
 | LLM09 | Misinformation | — (model output / overreliance; out of scope) |
-| LLM10 | Unbounded Consumption | B17, B150 |
+| LLM10 | Unbounded Consumption | B17, B80, B150 |
 
 LLM08/LLM09 are honest non-coverage: they live in the model/RAG layer, not the agent config
 ClawSecCheck reads. **Excessive Agency (LLM06)** is where the tool is densest — the whole
@@ -288,15 +288,15 @@ finding in `--json` (`"ast": [...]`).
 
 | AST code | Category | ClawSecCheck checks |
 |---|---|---|
-| AST01 | Malicious Skills | B13, B60, B63, B65, C048 |
-| AST02 | Supply Chain Compromise | B5, B13, B15, B24, B25, B42, B57, B103, B135, B151, B152, B177, B181, B182, C5, C047 |
-| AST03 | Over-Privileged Skills | B3, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B68, B69, B71, B72, B75, B76, B79, B138, B150, B176 |
-| AST04 | Insecure Metadata | B6, B44, B62, T3 |
-| AST05 | Untrusted External Instructions | B6, B7, B20, B21, B23, B26, B30, B58, B59, B60, B61, B63, B64, B65, B66, B67, B74, B105, B140, B180, C074, T1 |
-| AST06 | Weak Isolation | B4, B22, B38, B39, B48, B70, B73, B136, B340, C032 |
+| AST01 | Malicious Skills | B13, B60, B63, B65, B89, B90, B91, B100, B102, B336, B338, B339, C048 |
+| AST02 | Supply Chain Compromise | B5, B13, B15, B24, B25, B42, B57, B82, B86, B92, B94, B95, B99, B100, B103, B135, B151, B152, B174, B177, B181, B182, B184, B186, B187, B193, B194, C5, C047 |
+| AST03 | Over-Privileged Skills | B3, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B68, B69, B71, B72, B75, B76, B79, B81, B84, B138, B150, B175, B176 |
+| AST04 | Insecure Metadata | B6, B44, B62, B84, B88, B93, B96, B98, B185, T3 |
+| AST05 | Untrusted External Instructions | B6, B7, B20, B21, B23, B26, B30, B58, B59, B60, B61, B63, B64, B65, B66, B67, B74, B105, B140, B170, B180, B185, C074, T1 |
+| AST06 | Weak Isolation | B4, B22, B38, B39, B48, B70, B73, B80, B83, B87, B136, B175, B195, B196, B330, B340, C032 |
 | AST07 | Update Drift | B25, B33, C4, C6 |
 | AST08 | Poor Scanning | B16 |
-| AST09 | No Governance | B10, B16, B50, B51, B52, B53, B54, B77, B78 |
+| AST09 | No Governance | B10, B16, B50, B51, B52, B53, B54, B77, B78, B85, B97, B101 |
 | AST10 | Cross-Platform Reuse | — (documented coverage gap: single-install scope) |
 
 **Coverage notes:**

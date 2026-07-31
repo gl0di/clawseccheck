@@ -36,7 +36,7 @@ Spawn the subagent with these parameters — no other form is permitted:
 | Parameter | Required value | Rationale |
 |-----------|---------------|-----------|
 | tools granted | **none** | The isolator inspects only; granting tools would expand the attack surface flagged by B18 |
-| `maxSpawnDepth` | **`1`** | The isolator cannot spawn its own children — prevents recursive delegation (B46) |
+| `maxSpawnDepth` | **`1`** | The isolator cannot spawn its own children — prevents recursive delegation (B81) |
 | lifetime | **ephemeral** | Destroyed immediately after the verdict is returned |
 
 The isolator reads exactly one target (a skill directory, a single MCP server entry, or one
@@ -59,7 +59,7 @@ target text cannot reach or instruct the host agent — the typed-verdict schema
 When vetting multiple targets — for example `--vet-mcp` across M configured MCP servers, or a
 recursive `--vet-all` across N installed skills — spawn **N isolated subagents in parallel**, one
 per target. Bound the concurrency to the host's `maxChildrenPerAgent` limit and
-`agents.subagents.maxConcurrent` (default `maxChildrenPerAgent: 5`). The orchestrator aggregates
+`agents.defaults.subagents.maxConcurrent` (default `maxChildrenPerAgent: 5`). The orchestrator aggregates
 the typed verdicts and narrates the result; it receives no raw file contents from any target.
 
 ## Opt-in and graceful fallback

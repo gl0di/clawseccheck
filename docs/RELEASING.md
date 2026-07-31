@@ -74,5 +74,5 @@ Required OpenClaw/Python versions; breaking changes if any.
 
 ## Verification
 The release assets include SHA256SUMS.txt and its cosign bundle — see the
-README "Is it safe to run?" section for the exact verify command.
+README "🔒 Safe to run" section for the exact verify command.
 ```
