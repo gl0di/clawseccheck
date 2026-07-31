@@ -495,10 +495,10 @@ def _capability_graph(ctx) -> dict:
         SENSITIVE_TOOL_HINTS,
         _agent_legs,
         _enabled_tools,
+        _external_input_channels,
         _hint,
         _mcp_has_remote,
         _mcp_servers,
-        _untrusted_input_channels,
         _web_fetch_enabled,
     )
     from .collector import dig  # noqa: PLC0415
@@ -508,8 +508,16 @@ def _capability_graph(ctx) -> dict:
     nodes: list[dict] = []
     edges: list[tuple[str, str]] = []
 
+    # B-297/B-371: _external_input_channels (not the narrower _untrusted_input_channels)
+    # is what A1/B41/B46/RiskPaths already treat as "untrusted input" for every
+    # non-hard-FAIL consumer -- it additionally sees a channel open via an unrestricted
+    # groups["*"] entry with no dmPolicy/groupPolicy at all (_open_wildcard_group_channels),
+    # the commonest real open-group config (coding_telegram_insecure). Using the narrower
+    # helper here left this presentation-only graph showing an inert, edgeless "input" node
+    # on a config A1 correctly FAILs as 3/3 trifecta -- a real finding vs. capability_graph
+    # invariant mismatch (ClawRange hunt.py, 2026-07-31).
     input_surfaces = sorted({
-        *_untrusted_input_channels(cfg),
+        *_external_input_channels(cfg),
         *[t for t in _enabled_tools(cfg) if _hint([t], INPUT_TOOL_HINTS)],
         *(["web.fetch"] if _web_fetch_enabled(cfg) else []),
     })
