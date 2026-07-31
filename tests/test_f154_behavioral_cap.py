@@ -695,3 +695,46 @@ def test_behavioral_check_ids_stay_scored_false_permanently():
     assert set(BEHAVIORAL_CHECK_IDS) == {"T1", "T2", "T3", "B191"}
     for cid in BEHAVIORAL_CHECK_IDS:
         assert BY_ID[cid].scored is False, (cid, "must stay scored=False permanently")
+
+
+# ── B-378: a schema-drifted channels.<provider>.accounts must degrade, never crash ──
+
+class TestMalformedChannelsConfigDoesNotAbortFull:
+    """`_resolve_runtime_caps` (cli.py) calls `behavioral.analyze(ctx)` with no
+    containment before this fix — any exception inside it (e.g. a config whose
+    `channels.<provider>.accounts` is a list/string instead of a dict, which
+    `_group_untrusted_origin_channels`'s `(c.get("accounts") or {}).values()` idiom
+    could not survive) propagated out of `--full`/`--dashboard --full` BEFORE a single
+    line of the report had been printed: rc=1, zero report, zero grade, zero findings.
+    A malformed channels block must instead degrade the behavioural cap (treated as
+    "nothing fired"), exactly like every non---full invocation already does — never
+    abort the whole run."""
+
+    @staticmethod
+    def _home_with_channels(tmp_path: Path, channels: dict) -> Path:
+        home = tmp_path / "home"
+        shutil.copytree(SAFE, home)
+        cfg = json.loads((home / "openclaw.json").read_text())
+        cfg["channels"] = channels
+        (home / "openclaw.json").write_text(json.dumps(cfg))
+        return home
+
+    def test_accounts_as_a_list_does_not_abort_full(self, tmp_path, capsys):
+        home = self._home_with_channels(
+            tmp_path, {"telegram": {"accounts": [{"groupPolicy": "open"}]}}
+        )
+        main(["--home", str(home)] + BASE + ["--full", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["behavioral_capped"] is False
+
+    def test_accounts_as_a_bare_string_does_not_abort_full(self, tmp_path, capsys):
+        home = self._home_with_channels(tmp_path, {"telegram": {"accounts": "x"}})
+        main(["--home", str(home)] + BASE + ["--full", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["behavioral_capped"] is False
+
+    def test_group_policy_as_a_list_does_not_abort_full(self, tmp_path, capsys):
+        home = self._home_with_channels(tmp_path, {"telegram": {"groupPolicy": ["open"]}})
+        main(["--home", str(home)] + BASE + ["--full", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["behavioral_capped"] is False

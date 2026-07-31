@@ -33,6 +33,7 @@ behaviour to before this cap existed.
 from __future__ import annotations
 
 import re
+from collections.abc import Hashable
 from pathlib import Path
 
 from . import attest
@@ -309,12 +310,24 @@ def _group_untrusted_origin_channels(cfg: dict) -> "frozenset[str]":
     for name, c in _channels(cfg).items():
         if not isinstance(c, dict) or c.get("enabled") is False:
             continue
-        nodes = [c] + list((c.get("accounts") or {}).values())
+        # B-378: `or {}` only rescues an EMPTY/missing "accounts" key, not a WRONG
+        # TYPE — a schema-drifted config with accounts as a list or a bare string
+        # raised AttributeError/TypeError here with no containment above this
+        # function (see cli.py's _resolve_runtime_caps, which now also wraps the
+        # whole analyze() call as defense in depth; this is the actual root-cause
+        # guard). A malformed accounts block degrades to "no accounts", never a crash.
+        accounts = c.get("accounts")
+        nodes = [c] + (list(accounts.values()) if isinstance(accounts, dict) else [])
         for node in nodes:
-            if (
-                isinstance(node, dict)
-                and _norm_group_policy(name, node.get("groupPolicy")) in _UNTRUSTED_INPUT_POLICIES
-            ):
+            if not isinstance(node, dict):
+                continue
+            # B-378: _norm_group_policy passes an unmodeled value through unchanged
+            # (by design — see its own docstring), so a schema-drifted groupPolicy
+            # shaped as a list (e.g. {"groupPolicy": ["open"]}) reaches this `in` test
+            # as an unhashable type and raised TypeError. Only a hashable (str-shaped)
+            # policy can ever be a genuine member of _UNTRUSTED_INPUT_POLICIES anyway.
+            policy = _norm_group_policy(name, node.get("groupPolicy"))
+            if isinstance(policy, Hashable) and policy in _UNTRUSTED_INPUT_POLICIES:
                 out.add(name.strip().lower())
                 break
     return frozenset(out)
@@ -858,6 +871,8 @@ def _audit_event_sessions(ctx) -> "frozenset[str]":
     """
     out = set()
     for row in getattr(ctx, "audit_events", None) or ():
+        if not isinstance(row, dict):  # B-378: defensive — collector always yields
+            continue                   # dict rows, but never trust that unguarded.
         sid = row.get("session_id")
         if isinstance(sid, str) and sid.strip():
             out.add(sid.strip())

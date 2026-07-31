@@ -351,12 +351,14 @@ def test_full_without_exit_code_stays_zero_on_dangerous_skill(capsys):
 def test_suspicious_fixture_exits_zero_end_to_end(capsys):
     """The real WARN fixture through the real engine — no stub — still exits 0.
 
-    --no-sockets keeps this deterministic: F-156/B340 otherwise reads this
-    machine's real live listening sockets and can disagree with this fixture's
-    declared gateway.bind (127.0.0.1:8080) depending on what else happens to be
-    listening on this host.
+    Runs under DEFAULT flags (sockets scanning included): B-374 fixed the
+    underlying F-156/B340 attribution bug that used to make this nondeterministic
+    -- a non-loopback listener sharing this fixture's declared gateway.bind
+    (127.0.0.1:8080) port number can no longer FAIL this check unless it is
+    POSITIVELY confirmed (via /proc identity) to be the gateway process itself; an
+    unrelated listener now degrades to UNKNOWN, which --exit-code ignores.
     """
-    rc, out = _run(capsys, SUSPICIOUS, ["--full", "--exit-code", "--no-sockets"])
+    rc, out = _run(capsys, SUSPICIOUS, ["--full", "--exit-code"])
     section = _skill_sweep_section(out)
     assert "SUSPICIOUS" in section
     assert rc == 0

@@ -1257,7 +1257,10 @@ def _b171_open_channels(cfg: dict) -> list[str]:
     for name, c in _channels(cfg).items():
         if not isinstance(c, dict) or c.get("enabled") is False:
             continue
-        nodes = [c] + list((c.get("accounts") or {}).values())
+        # B-378: a schema-drifted "accounts" (list/string instead of dict) must
+        # degrade to "no accounts", never raise.
+        accounts = c.get("accounts")
+        nodes = [c] + (list(accounts.values()) if isinstance(accounts, dict) else [])
         for node in nodes:
             if not isinstance(node, dict):
                 continue
@@ -2857,14 +2860,17 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
     )
 
 
-def _parse_bind_port(value) -> "int | None":
-    """Extract the port from a gateway.bind value, mirroring parse_bind_host's own
-    handling of the bracketed-IPv6 / host:port / bare forms (checks/_shared.py).
+def _parse_bind_port_raw(value) -> "str | None":
+    """Extract the raw port SUBSTRING from a gateway.bind value (no range/decimal
+    validation), mirroring parse_bind_host's own handling of the bracketed-IPv6 /
+    host:port / bare forms (checks/_shared.py).
 
-    Returns None when no port can be unambiguously extracted — an empty value, a bare
-    address with no port at all, or a bare (unbracketed) IPv6 literal where "the port"
-    would be ambiguous. check_effective_bind treats None as "nothing to look up", not a
-    parse error.
+    Returns None when no port substring is present at all — an empty value, a bare
+    address with no port, or a bare (unbracketed) IPv6 literal where "the port" would
+    be ambiguous. Splitting this out from :func:`_parse_bind_port` (B-374 follow-up,
+    C-135 round 2) lets a caller distinguish "gateway.bind names no port at all" from
+    "gateway.bind names a port string that turned out to be invalid" — two different
+    UNKNOWN reasons check_effective_bind reports distinctly.
     """
     s = str(value or "").strip()
     if not s:
@@ -2872,16 +2878,41 @@ def _parse_bind_port(value) -> "int | None":
     if s.startswith("["):
         end = s.find("]")
         if end != -1 and s[end + 1 :].startswith(":"):
-            port_str = s[end + 2 :]
-            if port_str.isdigit():
-                return int(port_str)
+            return s[end + 2 :]
         return None
     if s.count(":") == 1:
         _, _, port_str = s.partition(":")
-        if port_str.isdigit():
-            return int(port_str)
-        return None
+        return port_str
     return None  # bare wildcard/IPv6 literal with no unambiguous port
+
+
+def _parse_bind_port(value) -> "int | None":
+    """Extract the port from a gateway.bind value as a validated 1-65535 int.
+
+    Returns None when no port can be unambiguously extracted (see
+    :func:`_parse_bind_port_raw`), the extracted text is not a plain decimal integer,
+    or the value parses but falls outside the valid TCP port range.
+
+    B-374 follow-up (C-135 round 2, 2026-07-31): uses ``str.isdecimal()``, not
+    ``str.isdigit()``, before calling ``int()``. A handful of Unicode characters (e.g.
+    the superscript ``"²"``) satisfy ``isdigit()`` while still raising ``ValueError``
+    out of ``int()`` — the OLD code could crash on a config value shaped like
+    ``"8080²"`` instead of degrading to UNKNOWN. ``isdecimal()`` only accepts
+    characters ``int()`` can actually parse, so this now never raises. The 1-65535
+    range check is new too — the old code accepted any positive int without an upper
+    bound. check_effective_bind treats None as "nothing to look up", not a parse
+    error — never raises.
+    """
+    port_str = _parse_bind_port_raw(value)
+    if port_str is None or not port_str.isdecimal():
+        return None
+    try:
+        port = int(port_str)
+    except ValueError:  # pragma: no cover - isdecimal() already guards this
+        return None
+    if not (1 <= port <= 65535):
+        return None
+    return port
 
 
 def _declared_bind_class(cfg: dict) -> str:
@@ -2931,49 +2962,46 @@ def _declared_bind_class(cfg: dict) -> str:
     return "loopback"
 
 
-# C-135 bug 1: substrings that mean a resolved process name COULD plausibly be the
-# OpenClaw gateway itself, so a match must never be used to downgrade a FAIL. OpenClaw
-# ships as a Node.js program (its own dist bundles are compiled JS, grounded throughout
-# this module's neighbouring checks), and /proc's `comm` for a Node process is just
-# "node" regardless of which script it runs -- it cannot distinguish the gateway from
-# any other Node process on the box. "openclaw" is included in case a wrapper script or
-# a future non-Node build names itself directly. Deliberately narrow and one-sided: this
-# only widens what counts as "could be it", never what counts as "definitely isn't".
-_GATEWAY_PROCESS_MARKERS = ("node", "openclaw", "bun", "deno")
+# B-374 (C-135 round 2, 2026-07-31): the ORIGINAL C-135 bug-1 fix (deleted here --
+# see git history) matched a resolved process name against a list of substrings that
+# COULD plausibly be the OpenClaw gateway ("node"/"openclaw"/"bun"/"deno") and used a
+# match only to BLOCK a FAIL-downgrade, never to positively confirm anything. That is
+# too coarse to serve as POSITIVE gateway evidence -- "node" is true of every unrelated
+# Node.js process on the box, so it can rule things OUT of "definitely not the
+# gateway" but can never rule anything IN as "definitely the gateway". Worse, the old
+# design kept FAIL whenever a listener's identity was merely UNRESOLVED (no inode, no
+# matching PID, permission denied, disagreeing names) -- "unattributable" read as
+# FAIL, an unproven guess in the FAIL direction that Golden Rule #5 forbids.
+#
+# Replaced with a symmetric three-way classifier that requires POSITIVE identity
+# evidence in either direction, using the fuller identity now available
+# (sockets.ProcessIdentity.cmdline, added alongside this fix): "gateway" only when the
+# resolved comm/cmdline actually NAMES OpenClaw (the invoking script's path usually
+# does, e.g. ".../.openclaw/dist/cli.js" -- comm alone cannot); "foreign" when the
+# identity resolves to something else nameable; "unknown" -- no positive evidence
+# either way -- for everything else, INCLUDING an unresolved identity. See
+# check_effective_bind for how "unknown" now degrades the verdict to UNKNOWN rather
+# than keeping FAIL (the accepted-FN trade this ticket mandates: a real lying gateway
+# whose /proc/<pid>/fd this reader cannot read now also reads UNKNOWN, not FAIL; B2/B70
+# still assess the DECLARED posture regardless).
+def _classify_listener_identity(identity: "object | None") -> str:
+    """Classify a resolved ``sockets.ProcessIdentity`` (or ``None`` -- unresolved) for
+    one non-loopback listener as ``"gateway"`` | ``"foreign"`` | ``"unknown"``.
 
-
-def _listener_process_plausibly_gateway(identity) -> bool:
-    """True when *identity* (a sockets.ProcessIdentity) could plausibly BE the OpenClaw
-    gateway process -- see _GATEWAY_PROCESS_MARKERS for why this stays conservative."""
-    name = (identity.name or "").lower()
-    return any(marker in name for marker in _GATEWAY_PROCESS_MARKERS)
-
-
-def _unrelated_listener_reason(non_loopback: "list", ctx: Context) -> "str | None":
-    """C-135 bug 1: best-effort corroboration for the declared-loopback / effective-
-    non-loopback FAIL path. *non_loopback* is the subset of matched listeners on the
-    declared port that are NOT loopback (i.e. the ones that would otherwise make this
-    check FAIL).
-
-    Returns a plain-English reason -- meaning "downgrade FAIL to WARN" -- ONLY when
-    EVERY listener in *non_loopback* resolves (via its socket inode) to a PID whose
-    process positively, confidently looks like something other than the gateway (see
-    _listener_process_plausibly_gateway). Returns ``None`` -- meaning "keep the
-    existing FAIL" -- the moment ANY listener's identity is unresolved (no inode
-    recorded, no matching PID found, permission denied, or the matched processes
-    disagree on a name) or inconclusive (looks like it could plausibly be the gateway
-    itself). This never guesses FAIL away; it only ever confirms it away.
+    ``"gateway"``  -- positive evidence: the resolved process's ``comm`` or full
+                      ``cmdline`` names OpenClaw itself (case-insensitive substring).
+    ``"foreign"``  -- positive evidence of the opposite: the process resolved to a
+                      specific, nameable identity that does NOT name OpenClaw (e.g.
+                      Docker's userland proxy sharing the port number).
+    ``"unknown"``  -- no identity evidence either way: the inode could not be resolved
+                      to any process at all (permission denied reading another user's
+                      ``/proc``, no inode recorded, the process vanished, or multiple
+                      PIDs disagreed on a name).
     """
-    proc_root = getattr(ctx, "proc_root", None) or "/proc"
-    reasons = []
-    for m in non_loopback:
-        identity = _sockets.identify_listener_process(getattr(m, "inode", ""), proc_root=proc_root)
-        if identity is None or _listener_process_plausibly_gateway(identity):
-            return None
-        reasons.append(f"{m.host}:{m.port} is held by pid {identity.pid} ({identity.name})")
-    if not reasons:
-        return None
-    return "; ".join(reasons) + " -- not the gateway."
+    if identity is None:
+        return "unknown"
+    haystack = f"{identity.name or ''} {identity.cmdline or ''}".lower()
+    return "gateway" if "openclaw" in haystack else "foreign"
 
 
 def check_effective_bind(ctx: Context) -> Finding:
@@ -3000,21 +3028,44 @@ def check_effective_bind(ctx: Context) -> Finding:
     live-reproduced on the reviewer's own machine against ``fixtures/home_safe`` —
     Docker's userland proxy sharing port 8080 with a correctly loopback-only declared
     gateway) showed that port-number-alone matching has a real false-positive-FAIL
-    mode, so this now adds the ``/proc/*/fd`` PID correlation the original design had
-    scoped out as unneeded: when the declared-loopback/effective-non-loopback FAIL
-    condition is reached, :func:`_unrelated_listener_reason` asks
-    ``sockets.identify_listener_process`` to resolve each non-loopback listener's owning
-    PID and process name from its socket inode, and downgrades FAIL to WARN ONLY when
-    EVERY one of them resolves to a process that positively, confidently looks like
-    something other than the gateway (see :func:`_listener_process_plausibly_gateway`).
-    Calibration is deliberately one-sided: PID lookup unavailable (permission denied —
-    the normal case for another user's process — or no matching inode), inconclusive,
-    or a name that could plausibly BE the gateway (e.g. any Node.js process, since
-    ``comm`` alone can't tell one Node process's script apart from another) all keep
-    the FAIL — this only ever softens the verdict on POSITIVE evidence of something
-    else, never on the absence of evidence. Every existing synthetic ``Context`` the
-    test suite injects carries no inode data at all, so this resolves to "keep FAIL"
-    for all of them unchanged.
+    mode, so this adds the ``/proc/*/fd`` PID correlation the original design had
+    scoped out as unneeded: when the declared-loopback/effective-non-loopback
+    condition is reached, every non-loopback listener's owning process is resolved
+    from its socket inode (``sockets.identify_listener_process``, one ``/proc`` walk
+    shared across all of them via ``sockets.build_inode_index``) and classified by
+    :func:`_classify_listener_identity`.
+
+    B-374 (C-135 round 2, 2026-07-31) REPLACED the original one-sided calibration.
+    The original fix could only ever DOWNGRADE FAIL to WARN, and only on POSITIVE
+    evidence the listener was something else — any unresolved identity (permission
+    denied, no matching inode, disagreeing names) kept the FAIL, which is itself an
+    unproven guess in the FAIL direction (Golden Rule #5 forbids exactly this). Now:
+    the verdict stays FAIL ONLY when at least one non-loopback listener is POSITIVELY
+    confirmed to be the gateway itself (its ``comm``/``cmdline`` actually names
+    OpenClaw — see :func:`_classify_listener_identity`); the moment NONE of them can
+    be so confirmed — whether because they positively resolve to something else
+    (Docker's userland proxy) or because identity resolution is inconclusive
+    (permission denied is the common case) — this reports UNKNOWN instead of FAIL.
+    This is a deliberate, accepted false-negative trade: a real lying gateway whose
+    ``/proc/<pid>/fd`` this reader cannot read now also reads UNKNOWN, not FAIL. B2/B70
+    still assess the DECLARED posture regardless, so the config's own stated exposure
+    is never hidden — only THIS check's runtime corroboration backs off. Every
+    existing synthetic ``Context`` the test suite injects with no inode data at all
+    now resolves to UNKNOWN in this branch (not "keep FAIL" as before) — see
+    ``tests/test_b340_effective_bind.py``.
+
+    Scoring (B-387, C-135 round 2, 2026-07-31): every PASS and WARN branch below
+    passes ``scored=False`` explicitly — B340 can never EARN a scored point, only ever
+    COST one via the single FAIL branch (which stays scored, HIGH-capped at 79). Before
+    this, a declared-remote config whose effective bind also read non-loopback (the
+    "already assessed by B2/B70" PASS below) scored a full-weight PASS — so WIDENING
+    ``gateway.bind`` from loopback to remote could swap a capped FAIL (a correctly
+    -declared config hitting an attribution edge case) for a full-weight PASS, i.e. a
+    LESS secure declaration scoring BETTER on this one check. Making every non-FAIL
+    branch unscored closes that inversion structurally: widening the declared/actual
+    exposure can only ever move this check from "scores a capped FAIL" to "scores
+    nothing", never to "scores a PASS" — see ``tests/test_b340_effective_bind.py``'s
+    monotonicity test.
 
     Fully enumerated verdict table (``declared`` = ``_declared_bind_class``, which
     resolves the FULL 5-profile ``gateway.bind`` enum — not a naive ``LOOPBACK``
@@ -3025,17 +3076,26 @@ def check_effective_bind(ctx: Context) -> Finding:
 
         declared      | effective         | verdict
         --------------+-------------------+----------------------------------------
-        loopback      | loopback          | PASS — corroborates B2
-        loopback      | not loopback      | FAIL — the config lies; reachable from the network
-        remote        | loopback          | WARN — config is dangerous but not currently exposed
-        remote        | not loopback      | PASS — declared exposure is real; B2/B70 already assess it
-        ambiguous     | (any)             | UNKNOWN — profile (auto / custom w/o a valid
-                      |                   |   customBindHost) is not resolvable from the
-                      |                   |   config alone; corroborating it either way
-                      |                   |   would be a guess
-        (any)         | no listener found | UNKNOWN — gateway not running, nothing measured
-        (any)         | /proc unavailable | UNKNOWN — platform not supported, or scan not run
-        (any)         | no port declared  | UNKNOWN — nothing to look up
+        loopback      | loopback          | PASS (unscored) — corroborates B2
+        loopback      | not loopback,      | FAIL (scored) — at least one non-loopback
+                      | >=1 confirmed      |   listener positively confirmed as the
+                      | gateway            |   gateway itself; the config lies
+        loopback      | not loopback,      | UNKNOWN — no non-loopback listener could be
+                      | none confirmed     |   positively tied to the gateway process
+                      | gateway            |   (foreign process, or unresolvable)
+        remote        | loopback           | WARN (unscored) — config is dangerous but
+                      |                    |   not currently exposed
+        remote        | not loopback       | PASS (unscored) — declared exposure is
+                      |                    |   real; B2/B70 already assess it
+        ambiguous     | (any)              | UNKNOWN — profile (auto / custom w/o a
+                      |                    |   valid customBindHost) is not resolvable
+                      |                    |   from the config alone; corroborating it
+                      |                    |   either way would be a guess
+        (any)         | no listener found  | UNKNOWN — gateway not running, nothing measured
+        (any)         | /proc unavailable  | UNKNOWN — platform not supported, or scan not run
+        (any)         | no port declared   | UNKNOWN — nothing to look up
+        (any)         | port out of range  | UNKNOWN — gateway.bind/gateway.port names an
+                      |                    |   invalid (non-1-65535) port
 
     Port source (C-135 finding, fixed before this shipped): this package's whole
     existing gateway-check family (B2, B70) reads ``gateway.bind`` as a ``host:port``
@@ -3097,11 +3157,39 @@ def check_effective_bind(ctx: Context) -> Finding:
     # the CURRENT OpenClaw schema actually uses when gateway.bind is a bare mode
     # string — see the docstring's "Port source" note; grounded against the dist,
     # manifest entry in tests/grounded_schema_paths.txt).
+    bind_port_raw = _parse_bind_port_raw(bind_raw)
     port = _parse_bind_port(bind_raw)
+    if port is None and bind_port_raw is not None:
+        # B-374 follow-up (C-135 round 2): gateway.bind DID name a port substring, but
+        # it is not a valid 1-65535 decimal port -- a distinct UNKNOWN from "no port
+        # declared at all" below (never "gateway is not running").
+        return _finding(
+            "B340",
+            UNKNOWN,
+            f"gateway.bind={bind_raw!r} names a port ({bind_port_raw!r}) that is not a "
+            "valid TCP port (1-65535) — cannot look up which listening socket to "
+            "corroborate it against.",
+            "Set gateway.bind to a valid host:port (port 1-65535), or set gateway.port "
+            "to a valid port, so this check can corroborate it against the actual "
+            "listening socket.",
+        )
     if port is None:
         gw_port = dig(cfg, "gateway.port")
-        if isinstance(gw_port, int) and not isinstance(gw_port, bool) and gw_port > 0:
-            port = gw_port
+        if isinstance(gw_port, int) and not isinstance(gw_port, bool):
+            if 1 <= gw_port <= 65535:
+                port = gw_port
+            else:
+                # Same distinction as above, sourced from gateway.port instead.
+                return _finding(
+                    "B340",
+                    UNKNOWN,
+                    f"gateway.port={gw_port!r} is not a valid TCP port (1-65535) — "
+                    f"cannot look up which listening socket to corroborate "
+                    f"gateway.bind={bind_raw!r} against.",
+                    "Set gateway.port to a valid port (1-65535) so this check can "
+                    "corroborate the declared bind against the actual listening "
+                    "socket.",
+                )
     if port is None:
         return _finding(
             "B340",
@@ -3156,25 +3244,54 @@ def check_effective_bind(ctx: Context) -> Finding:
 
     if declared_loopback and not effective_loopback:
         non_loopback = [m for m in matches if _sockets.classify_host(m.host) != "loopback"]
-        unrelated_reason = _unrelated_listener_reason(non_loopback, ctx)
-        if unrelated_reason is not None:
-            # C-135 bug 1: every non-loopback listener on this port positively resolved
-            # to a process that is confidently NOT the gateway (e.g. Docker's userland
-            # proxy sharing the same port number on a different interface) -- downgrade
-            # rather than FAIL a config that is, as far as we can prove, correctly
-            # hardened.
+        proc_root = getattr(ctx, "proc_root", None) or "/proc"
+        # One /proc walk serves every non-loopback listener on this port (B-374
+        # follow-up) instead of re-scanning /proc/*/fd once per listener.
+        inode_index = _sockets.build_inode_index(proc_root=proc_root)
+        identities = [
+            _sockets.identify_listener_process(
+                getattr(m, "inode", ""), proc_root=proc_root, index=inode_index
+            )
+            for m in non_loopback
+        ]
+        confirmed_gateway = [
+            m
+            for m, ident in zip(non_loopback, identities)
+            if _classify_listener_identity(ident) == "gateway"
+        ]
+        if not confirmed_gateway:
+            # B-374: NONE of the non-loopback listeners on this port could be
+            # POSITIVELY tied to the OpenClaw gateway process itself -- a foreign
+            # process sharing the port number (Docker's userland proxy is the
+            # live-reproduced example), or an identity this reader has no
+            # permission/evidence to resolve either way (permission denied reading
+            # another user's /proc is the normal case). Keeping FAIL here -- as the
+            # original C-135 bug-1 fix did -- is itself an unproven guess in the FAIL
+            # direction, which Golden Rule #5 forbids. Report UNKNOWN instead; this is
+            # a deliberate, accepted false-negative trade (see the function
+            # docstring): B2/B70 still assess the DECLARED posture regardless.
+            reasons = []
+            for m, ident in zip(non_loopback, identities):
+                if ident is None:
+                    reasons.append(f"{m.host}:{m.port} — process identity unresolvable")
+                else:
+                    reasons.append(
+                        f"{m.host}:{m.port} held by pid {ident.pid} ({ident.name}) — "
+                        "not identifiable as the OpenClaw gateway"
+                    )
             return _finding(
                 "B340",
-                WARN,
+                UNKNOWN,
                 f"gateway.bind={bind_raw!r} declares a loopback bind, and a non-loopback "
-                f"listener was found on port {port} — but it was NOT the gateway: "
-                f"{unrelated_reason} This looks like an unrelated process sharing the "
-                "same port number, not gateway.bind lying, though it could not be "
-                "proven to a certainty a static config-and-/proc reader ever can.",
-                f"Confirm what else is listening on port {port} (e.g. `lsof -i :{port}` "
-                "or `ss -tlnp` as root) to rule out a coincidental port collision, then "
-                "re-run this audit.",
-                evidence=evidence + [unrelated_reason],
+                f"listener was found on port {port}, but it could not be positively tied "
+                "to the OpenClaw gateway process itself: " + "; ".join(reasons) + ". This "
+                "could be gateway.bind lying (env override/launch wrapper/reverse proxy), "
+                "or an unrelated process coincidentally sharing the port number — not "
+                "distinguishable from a config file and a /proc read alone.",
+                f"Confirm what is actually listening on port {port} (e.g. `lsof -i "
+                f":{port}` or `ss -tlnp` as root) to determine whether gateway.bind is "
+                "being honored, then re-run this audit.",
+                evidence=evidence + reasons,
             )
         return _finding(
             "B340",
@@ -3186,19 +3303,52 @@ def check_effective_bind(ctx: Context) -> Finding:
             "Find why the running gateway does not match the declared bind (an "
             "env-var override or launch wrapper is the usual cause) and align it with "
             "gateway.bind, or update gateway.bind to state reality.",
-            evidence=evidence,
+            evidence=evidence
+            + [
+                f"{m.host}:{m.port} confirmed via pid {ident.pid} ({ident.name})"
+                for m, ident in zip(non_loopback, identities)
+                if _classify_listener_identity(ident) == "gateway"
+            ],
+            scored=True,
         )
     if not declared_loopback and effective_loopback:
+        # B-374 follow-up (item 4): when the DECLARED-remote classification actually
+        # comes from Tailscale serve/funnel (which requires a loopback gateway.bind —
+        # see _gateway_remote_exposure_reason's docstring), name that reason instead
+        # of telling the owner to "set gateway.bind to loopback" when it may already
+        # BE loopback and Tailscale's own relay path is what exposes it.
+        exposure_reason = _gateway_remote_exposure_reason(cfg)
+        if exposure_reason is not None and exposure_reason.startswith("gateway.tailscale.mode="):
+            detail = (
+                f"{exposure_reason} publishes the gateway externally regardless of "
+                f"gateway.bind={bind_raw!r} — the gateway is currently only listening "
+                f"loopback-only on port {port} on this host, but Tailscale's own "
+                "serve/funnel relay is what actually exposes it, not this machine's "
+                "socket."
+            )
+            fix = (
+                "Confirm the Tailscale serve/funnel exposure is intentional — it "
+                "publishes the gateway regardless of gateway.bind. Disable "
+                "gateway.tailscale.mode if that is not intended."
+            )
+        else:
+            detail = (
+                f"gateway.bind={bind_raw!r} declares a non-loopback bind, but the "
+                f"gateway is currently only listening on loopback on port {port} — the "
+                "config is dangerous even though nothing is exposed right now."
+            )
+            fix = (
+                "Set gateway.bind to loopback (127.0.0.1) so the declared and actual "
+                "posture match, or confirm the non-loopback bind is intentional before "
+                "it takes effect."
+            )
         return _finding(
             "B340",
             WARN,
-            f"gateway.bind={bind_raw!r} declares a non-loopback bind, but the gateway is "
-            f"currently only listening on loopback on port {port} — the config is "
-            "dangerous even though nothing is exposed right now.",
-            "Set gateway.bind to loopback (127.0.0.1) so the declared and actual "
-            "posture match, or confirm the non-loopback bind is intentional before it "
-            "takes effect.",
+            detail,
+            fix,
             evidence=evidence,
+            scored=False,
         )
     if declared_loopback:
         return _finding(
@@ -3209,6 +3359,7 @@ def check_effective_bind(ctx: Context) -> Finding:
             "Keep gateway.bind loopback and re-run this corroboration after any config "
             "or deployment change.",
             evidence=evidence,
+            scored=False,
         )
     return _finding(
         "B340",
@@ -3218,6 +3369,7 @@ def check_effective_bind(ctx: Context) -> Finding:
         "real, and already assessed by B2/B70.",
         "See B2/B70 for the auth/exposure posture of this bind.",
         evidence=evidence,
+        scored=False,
     )
 
 

@@ -20,6 +20,7 @@ from clawseccheck.sockets import (
     SocketScanResult,
     _decode_hex_addr,
     _parse_table,
+    build_inode_index,
     classify_host,
     identify_listener_process,
     listeners_for_port,
@@ -291,7 +292,9 @@ def test_identify_listener_process_resolves_via_comm(tmp_path):
 def test_identify_listener_process_falls_back_to_cmdline_when_comm_absent(tmp_path):
     _make_pid(tmp_path, "4321", {3: "socket:[555]"}, cmdline=b"/usr/sbin/nginx\x00-g\x00daemon off;\x00")
     identity = identify_listener_process("555", proc_root=tmp_path)
-    assert identity == ProcessIdentity(pid="4321", name="nginx")
+    assert identity == ProcessIdentity(
+        pid="4321", name="nginx", cmdline="/usr/sbin/nginx -g daemon off;"
+    )
 
 
 def test_identify_listener_process_no_matching_inode_returns_none(tmp_path):
@@ -346,3 +349,74 @@ def test_identify_listener_process_pid_found_but_unnameable_returns_none(tmp_pat
     # The owning PID resolves, but neither comm nor cmdline can be read -- inconclusive.
     _make_pid(tmp_path, "777", {5: "socket:[999]"})
     assert identify_listener_process("999", proc_root=tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# build_inode_index / identify_listener_process(index=...) -- B-374 follow-up
+# (C-135 round 2, 2026-07-31): one /proc walk resolving several sockets' owning
+# processes at once, instead of one scan per inode.
+# ---------------------------------------------------------------------------
+
+def test_build_inode_index_resolves_via_index_same_as_direct_scan(tmp_path):
+    _make_pid(tmp_path, "1234", {5: "socket:[999]"}, comm="docker-proxy\n")
+    index = build_inode_index(proc_root=tmp_path)
+    identity = identify_listener_process("999", proc_root=tmp_path, index=index)
+    assert identity == ProcessIdentity(pid="1234", name="docker-proxy", cmdline="")
+
+
+def test_build_inode_index_resolves_cmdline_too(tmp_path):
+    _make_pid(
+        tmp_path,
+        "4321",
+        {3: "socket:[555]"},
+        comm="node\n",
+        cmdline=b"/usr/bin/node\x00/home/user/.openclaw/dist/cli.js\x00",
+    )
+    index = build_inode_index(proc_root=tmp_path)
+    identity = identify_listener_process("555", proc_root=tmp_path, index=index)
+    assert identity.pid == "4321"
+    assert identity.name == "node"
+    assert identity.cmdline == "/usr/bin/node /home/user/.openclaw/dist/cli.js"
+
+
+def test_build_inode_index_one_pid_multiple_sockets(tmp_path):
+    _make_pid(
+        tmp_path, "10", {5: "socket:[100]", 6: "socket:[200]"}, comm="multi-listener\n"
+    )
+    index = build_inode_index(proc_root=tmp_path)
+    assert index["100"] == [("10", "multi-listener")]
+    assert index["200"] == [("10", "multi-listener")]
+
+
+def test_build_inode_index_ambiguous_names_via_index_returns_none(tmp_path):
+    _make_pid(tmp_path, "111", {5: "socket:[999]"}, comm="docker-proxy\n")
+    _make_pid(tmp_path, "222", {5: "socket:[999]"}, comm="nginx\n")
+    index = build_inode_index(proc_root=tmp_path)
+    assert identify_listener_process("999", proc_root=tmp_path, index=index) is None
+
+
+def test_build_inode_index_empty_when_no_inode_matches(tmp_path):
+    _make_pid(tmp_path, "1234", {5: "socket:[999]"}, comm="docker-proxy\n")
+    index = build_inode_index(proc_root=tmp_path)
+    assert identify_listener_process("111", proc_root=tmp_path, index=index) is None
+
+
+def test_build_inode_index_unreadable_fd_dir_is_skipped_not_raised(tmp_path):
+    (tmp_path / "555").mkdir(parents=True)
+    (tmp_path / "555" / "fd").write_text("not a directory", encoding="utf-8")
+    _make_pid(tmp_path, "666", {5: "socket:[999]"}, comm="docker-proxy\n")
+    index = build_inode_index(proc_root=tmp_path)
+    assert index == {"999": [("666", "docker-proxy")]}
+
+
+def test_build_inode_index_proc_root_missing_returns_empty_dict(tmp_path):
+    assert build_inode_index(proc_root=tmp_path / "does-not-exist") == {}
+
+
+def test_build_inode_index_skips_pid_with_unnameable_process(tmp_path):
+    # The owning PID resolves, but neither comm nor cmdline can be read -- excluded
+    # from the index entirely, matching identify_listener_process's own "inconclusive"
+    # treatment for this shape.
+    _make_pid(tmp_path, "777", {5: "socket:[999]"})
+    index = build_inode_index(proc_root=tmp_path)
+    assert index == {}

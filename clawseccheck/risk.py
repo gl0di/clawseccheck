@@ -148,7 +148,12 @@ def _open_channel_labels(cfg: dict) -> list[str]:
             suffix = ", any group, mention-gated" if mention else ", any group"
             labels.append(f"{name} (open group{suffix})")
             continue
-        nodes = [c] + list((c.get("accounts") or {}).values())
+        # B-378: a schema-drifted "accounts" (a list/string instead of a dict) must
+        # degrade to "no accounts", never raise — this is called directly from
+        # risk_paths() in cli.py's _main, OUTSIDE checks.run_all's per-check crash
+        # isolation, so an unguarded .values() here aborted the whole --full run.
+        accounts = c.get("accounts")
+        nodes = [c] + (list(accounts.values()) if isinstance(accounts, dict) else [])
         for node in nodes:
             if not isinstance(node, dict):
                 continue
@@ -360,7 +365,8 @@ def _has_multi_user_channel(cfg: dict) -> bool:
         if isinstance(c, dict):
             if c.get("groupPolicy") is not None:
                 return True
-            for acc in (c.get("accounts") or {}).values():
+            accounts = c.get("accounts")  # B-378: guard a schema-drifted non-dict value
+            for acc in (accounts.values() if isinstance(accounts, dict) else ()):
                 if isinstance(acc, dict) and acc.get("groupPolicy") is not None:
                     return True
     return False

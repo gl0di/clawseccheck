@@ -67,12 +67,14 @@ def test_exit_code_on_vuln_returns_one(capsys):
 def test_exit_code_on_safe_returns_zero(capsys):
     """home_safe has no FAIL findings -> --exit-code must return 0.
 
-    --no-sockets keeps this deterministic: F-156/B340 otherwise reads this
-    machine's real live listening sockets and can disagree with home_safe's
-    declared gateway.bind (127.0.0.1:8080) depending on what else happens to be
-    listening on this host.
+    Runs under DEFAULT flags (sockets scanning included): B-374 fixed the
+    underlying F-156/B340 attribution bug that used to make this nondeterministic
+    -- a non-loopback listener sharing home_safe's declared gateway.bind
+    (127.0.0.1:8080) port number can no longer FAIL this check unless it is
+    POSITIVELY confirmed (via /proc identity) to be the gateway process itself; an
+    unrelated listener now degrades to UNKNOWN, which --exit-code ignores.
     """
-    rc = main(["--home", SAFE] + BASE + ["--exit-code", "--no-sockets"])
+    rc = main(["--home", SAFE] + BASE + ["--exit-code"])
     assert rc == 0
 
 

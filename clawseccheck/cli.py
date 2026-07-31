@@ -736,9 +736,24 @@ def _resolve_runtime_caps(ctx, findings, score, args):
     # (`_pipeline.run_pipeline`'s `run_behavioral`), so a --full --fast run (or any
     # non---full invocation) sees byte-identical behaviour to before this cap existed:
     # no analysis run == no cap, never a guess.
+    #
+    # B-378: `behavioral.analyze(ctx)` is wrapped the same way `pipeline.run_behavioral`
+    # already wraps its own call to it (that phase's own comment: "one phase must not
+    # break the whole card"). Before this guard, ANY exception here — e.g. a schema-
+    # drifted `channels.<provider>.accounts` shaped as a list instead of a dict, which
+    # `behavioral.py`'s own ingress-classification helpers can raise on — propagated
+    # out of `_resolve_runtime_caps` before a single line of the report had been
+    # printed, so `--full`/`--dashboard --full` exited 1 with zero report, zero grade,
+    # zero findings. A security tool that produces NO verdict at all on a schema-
+    # drifted config is strictly worse than one that degrades a phase: on failure, the
+    # behavioural cap is simply not resolved (treated as "nothing fired"), exactly as
+    # it already is for every non---full / --fast invocation above.
     behavioral_fired_ids: "frozenset[str]" = frozenset()
     if args.full and not args.fast:
-        behavioral_fired_ids = _behavioral_grade_cap_signal(_behavioral_analyze(ctx))
+        try:
+            behavioral_fired_ids = _behavioral_grade_cap_signal(_behavioral_analyze(ctx))
+        except Exception:  # noqa: BLE001 — see run_behavioral's identical containment
+            behavioral_fired_ids = frozenset()
     if live_signal.hit or behavioral_fired_ids:
         score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
                         live_test_reason=live_signal.reason,

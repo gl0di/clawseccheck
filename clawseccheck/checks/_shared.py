@@ -9,6 +9,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+from collections.abc import Hashable
 from pathlib import Path
 from urllib.parse import urlparse
 from ..catalog import (
@@ -811,7 +812,10 @@ def _open_channels(cfg: dict) -> list[str]:
         # DISABLED open channel produced §5 hard-FAIL false positives (B2/B55).
         if not isinstance(c, dict) or c.get("enabled") is False:
             continue
-        nodes = [c] + list((c.get("accounts") or {}).values())
+        # B-378: a schema-drifted "accounts" (list/string instead of dict) must
+        # degrade to "no accounts", never raise.
+        accounts = c.get("accounts")
+        nodes = [c] + (list(accounts.values()) if isinstance(accounts, dict) else [])
         for node in nodes:
             if isinstance(node, dict) and (
                 node.get("dmPolicy") == "open"
@@ -1053,12 +1057,23 @@ def _external_input_channels(cfg: dict) -> list[str]:
         if name in open_wildcard:
             out.append(name)
             continue
-        nodes = [c] + list((c.get("accounts") or {}).values())
+        # B-378: a schema-drifted "accounts" (list/string instead of dict) must
+        # degrade to "no accounts", never raise.
+        accounts = c.get("accounts")
+        nodes = [c] + (list(accounts.values()) if isinstance(accounts, dict) else [])
         for node in nodes:
-            if isinstance(node, dict) and (
-                node.get("dmPolicy") in _UNTRUSTED_INPUT_POLICIES
-                or _norm_group_policy(name, node.get("groupPolicy"))
-                in _UNTRUSTED_INPUT_POLICIES
+            if not isinstance(node, dict):
+                continue
+            dm_policy = node.get("dmPolicy")
+            group_policy = _norm_group_policy(name, node.get("groupPolicy"))
+            # B-378: an unmodeled dmPolicy/groupPolicy (e.g. a list) is never a
+            # genuine policy member — only a hashable value even needs the `in` test.
+            if (
+                (isinstance(dm_policy, Hashable) and dm_policy in _UNTRUSTED_INPUT_POLICIES)
+                or (
+                    isinstance(group_policy, Hashable)
+                    and group_policy in _UNTRUSTED_INPUT_POLICIES
+                )
             ):
                 out.append(name)
                 break
@@ -1208,14 +1223,23 @@ def _untrusted_input_channels(cfg: dict) -> list[str]:
     for name, c in _channels(cfg).items():
         if not isinstance(c, dict) or c.get("enabled") is False:
             continue
-        nodes = [c] + list((c.get("accounts") or {}).values())
+        # B-378: a schema-drifted "accounts" (list/string instead of dict) must
+        # degrade to "no accounts", never raise.
+        accounts = c.get("accounts")
+        nodes = [c] + (list(accounts.values()) if isinstance(accounts, dict) else [])
         for node in nodes:
             if not isinstance(node, dict):
                 continue
+            dm_policy = node.get("dmPolicy")
+            group_policy = _norm_group_policy(name, node.get("groupPolicy"))
+            # B-378: an unmodeled dmPolicy/groupPolicy (e.g. a list) is never a
+            # genuine policy member — only a hashable value even needs the `in` test.
             if (
-                node.get("dmPolicy") in _UNTRUSTED_INPUT_POLICIES
-                or _norm_group_policy(name, node.get("groupPolicy"))
-                in _UNTRUSTED_INPUT_POLICIES
+                (isinstance(dm_policy, Hashable) and dm_policy in _UNTRUSTED_INPUT_POLICIES)
+                or (
+                    isinstance(group_policy, Hashable)
+                    and group_policy in _UNTRUSTED_INPUT_POLICIES
+                )
             ):
                 out.append(name)
                 break

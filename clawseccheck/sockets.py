@@ -46,10 +46,22 @@ names no verdict: it returns a process identity or ``None``, never "the gateway"
 "not the gateway" — that judgement belongs to the check that knows what "the gateway"
 means (``checks/_config.py``'s ``check_effective_bind``).
 
+**B-374 follow-up (C-135 round 2, 2026-07-31)**: the ORIGINAL C-135 bug-1 fix above
+only ever DOWNGRADED a FAIL, and only on positive evidence of a non-gateway process —
+any unresolved identity (permission denied, no matching inode, disagreeing names) kept
+the FAIL, which is itself a false-positive-FAIL mode (an unproven guess in the FAIL
+direction). ``check_effective_bind`` no longer treats "unattributable" as "keep
+FAIL" — see its own docstring. Two additions here support that: ``ProcessIdentity``
+now also carries ``cmdline`` (``comm`` alone is just ``"node"`` for every Node.js
+process, which cannot positively identify OpenClaw's own gateway process among them;
+the invoking script's path usually can), and :func:`build_inode_index` lets a caller
+resolve several listeners' identities from ONE ``/proc`` walk instead of one scan per
+socket (``identify_listener_process``'s optional *index* parameter).
+
 Injectable for tests: ``scan_listening_sockets(proc_root=...)`` lets tests point at a
 fake filesystem root (pytest's ``tmp_path``) so the suite stays offline, deterministic,
 and never opens a real socket or reads outside ``tmp_path``. ``identify_listener_process``
-takes the same ``proc_root`` for the same reason.
+and ``build_inode_index`` take the same ``proc_root`` for the same reason.
 """
 from __future__ import annotations
 
@@ -89,10 +101,22 @@ class ProcessIdentity:
     which PID holds THIS socket (never by listing all sockets a PID holds), then reading
     that PID's comm (preferred) or the argv[0] basename from its cmdline. Carries no
     verdict of its own -- a caller decides what a given name implies.
+
+    ``cmdline`` (B-374 follow-up, C-135 round 2, 2026-07-31): the resolved PID's FULL
+    command line, args re-joined with spaces, best-effort/lenient-decoded, empty string
+    when unreadable. ``name`` (``comm``) alone is just ``"node"`` for every Node.js
+    process on the box -- it cannot tell OpenClaw's own gateway process apart from any
+    other Node process. The invoking script's path (argv[1], e.g.
+    ``/home/user/.openclaw/dist/cli.js``) usually names the package that launched it,
+    which is the signal a caller can actually use to positively identify OpenClaw
+    itself (see ``checks/_config.py``'s ``_classify_listener_identity``). Defaulted so
+    every existing caller that builds a ``ProcessIdentity`` without one (every test
+    predating this field) is unaffected.
     """
 
     pid: str
     name: str
+    cmdline: str = ""
 
 
 @dataclass(frozen=True)
@@ -256,14 +280,84 @@ def _process_name(pid: str, root: Path) -> "str | None":
     return Path(argv0.decode("utf-8", errors="replace")).name or None
 
 
+def _process_cmdline(pid: str, root: Path) -> str:
+    """Best-effort FULL command line for *pid*: NUL-separated ``/proc/<pid>/cmdline``
+    args re-joined with spaces, decoded leniently. Empty string when unreadable (a
+    vanished process, or one this caller has no permission to inspect -- both normal,
+    expected outcomes, never raised as an error). See :class:`ProcessIdentity`'s
+    ``cmdline`` field for why this is read in addition to :func:`_process_name`."""
+    try:
+        raw = (root / pid / "cmdline").read_bytes()
+    except OSError:
+        return ""
+    parts = [p for p in raw.split(b"\x00") if p]
+    return " ".join(p.decode("utf-8", errors="replace") for p in parts)
+
+
+def build_inode_index(proc_root: "str | Path" = "/proc") -> "dict[str, list[tuple[str, str]]]":
+    """One ``/proc`` walk building an ``inode -> [(pid, name), ...]`` index, so a
+    caller that needs to attribute MULTIPLE listening sockets in one go (e.g.
+    ``check_effective_bind`` corroborating several non-loopback listeners on the same
+    declared port) does the ``/proc/*/fd`` scan ONCE instead of once per socket.
+
+    Read-only, stdlib-only, no subprocess -- identical ``OSError``/``PermissionError``
+    tolerance as :func:`identify_listener_process`: a process this caller cannot read
+    (most processes, normally, since ``/proc/<pid>/fd`` of another UID is not readable
+    by an unprivileged caller) is silently skipped, never surfaced as an error. A PID
+    that owns multiple sockets contributes to multiple inode buckets from the one fd
+    listing already read for it. Pass the result to :func:`identify_listener_process`
+    via its *index* parameter; omitting *index* there does its own, equivalent, one-off
+    scan instead (unchanged, pre-existing behavior).
+    """
+    root = Path(proc_root)
+    index: "dict[str, list[tuple[str, str]]]" = {}
+    try:
+        pid_dirs = [p for p in root.iterdir() if p.name.isdigit()]
+    except OSError:
+        return index
+    for pid_dir in pid_dirs:
+        try:
+            fds = list((pid_dir / "fd").iterdir())
+        except OSError:
+            continue  # permission denied / vanished process -- normal, not an error
+        inodes: "list[str]" = []
+        for fd in fds:
+            try:
+                link = os.readlink(fd)
+            except OSError:
+                continue
+            if link.startswith("socket:[") and link.endswith("]"):
+                candidate = link[len("socket:[") : -1]
+                if candidate.isdigit():
+                    inodes.append(candidate)
+        if not inodes:
+            continue
+        name = _process_name(pid_dir.name, root)
+        if name is None:
+            continue  # found the owning PID but can't name it -- inconclusive, skip
+        for inode in inodes:
+            index.setdefault(inode, []).append((pid_dir.name, name))
+    return index
+
+
 def identify_listener_process(
-    inode: str, proc_root: "str | Path" = "/proc"
+    inode: str,
+    proc_root: "str | Path" = "/proc",
+    index: "dict[str, list[tuple[str, str]]] | None" = None,
 ) -> "ProcessIdentity | None":
-    """Best-effort PID/process-name correlation for one listening socket's *inode*.
+    """Best-effort PID/process-name(+cmdline) correlation for one listening socket's
+    *inode*.
 
     Read-only, no subprocess, no elevated privileges: scans ``<proc_root>/<pid>/fd/*``
     for the ``socket:[inode]`` symlink that names which PID holds this exact socket,
-    then reads that PID's name (see :func:`_process_name`).
+    then reads that PID's name (see :func:`_process_name`) and full command line (see
+    :func:`_process_cmdline`, populating :class:`ProcessIdentity`'s ``cmdline`` field).
+
+    *index*: an optional pre-built :func:`build_inode_index` result. When given, this
+    looks the inode up in that index instead of re-walking ``/proc`` -- lets a caller
+    that needs to resolve several inodes in one call do the walk exactly once. Omitting
+    *index* (the default, ``None``) reproduces the exact original one-off-scan
+    behavior, unaffected -- every pre-existing caller/test is unaffected.
 
     Returns ``None`` -- "unresolved or inconclusive", never a guess -- when: *inode* is
     empty/non-numeric; the process listing itself can't be read; no ``fd`` symlink
@@ -278,8 +372,20 @@ def identify_listener_process(
     """
     if not inode or not str(inode).isdigit():
         return None
-    target = f"socket:[{inode}]"
+    inode = str(inode)
     root = Path(proc_root)
+
+    if index is not None:
+        entries = index.get(inode, [])
+        if not entries:
+            return None
+        names = {name for _pid, name in entries}
+        if len(names) > 1:
+            return None  # different PIDs naming different processes -- genuinely ambiguous
+        pid, name = entries[0]
+        return ProcessIdentity(pid=pid, name=name, cmdline=_process_cmdline(pid, root))
+
+    target = f"socket:[{inode}]"
     try:
         pid_dirs = [p for p in root.iterdir() if p.name.isdigit()]
     except OSError:
@@ -308,4 +414,8 @@ def identify_listener_process(
             identity = ProcessIdentity(pid=pid_dir.name, name=name)
         elif name != identity.name:
             return None  # different PIDs naming different processes -- genuinely ambiguous
-    return identity
+    if identity is None:
+        return None
+    return ProcessIdentity(
+        pid=identity.pid, name=identity.name, cmdline=_process_cmdline(identity.pid, root)
+    )

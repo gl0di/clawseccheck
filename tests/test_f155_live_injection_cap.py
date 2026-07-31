@@ -458,15 +458,25 @@ class TestTrendMonitorReachC135:
         return _bundle_file(tmp_path, {"liveTest": {"verdicts": [
             {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
 
-    def test_home_safe_baseline_is_uncapped_79_c(self, capsys):
+    def test_home_safe_baseline_is_uncapped_98_a(self, capsys):
         # Sanity anchor: without a live-test bundle, home_safe's own default score
-        # really is 79/C -- so the 49/F assertions below are a genuine cap, not two
+        # really is 98/A -- so the 49/F assertions below are a genuine cap, not two
         # coincidentally-equal runs.
-        rc = main(["--home", SAFE, "--no-native", "--full", "--json"])
+        #
+        # --no-sockets (B-374, C-135 round 2, 2026-07-31): without it, this read the
+        # REAL host's live listening sockets (F-156/B340), which is nondeterministic
+        # across machines/CI runs -- B340 now correctly reads UNKNOWN (not the old
+        # false-positive FAIL) for an unattributable non-loopback listener sharing
+        # home_safe's declared gateway.bind (127.0.0.1:8080) port number, but that
+        # UNKNOWN-vs-FAIL split still depends on whatever happens to be listening on
+        # this host, so the exact uncapped score is only deterministic with sockets
+        # scanning disabled. Only the actual VALUE (79 -> 98, C -> A) changed; the
+        # test's own point -- this is a real, non-49 baseline -- is unaffected.
+        rc = main(["--home", SAFE, "--no-native", "--full", "--json", "--no-sockets"])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
-        assert payload["score"] == 79
-        assert payload["grade"] == "C"
+        assert payload["score"] == 98
+        assert payload["grade"] == "A"
 
     def test_json_reference_is_capped_49_f(self, tmp_path, capsys):
         bundle = self._seeded_bundle(tmp_path)
@@ -573,13 +583,15 @@ class TestTrendMonitorReachC135:
     ):
         # RESISTANT never hits (self-attestation guard) -- both modes must stay
         # byte-identical to submitting nothing at all, exactly like the default path.
+        # --no-sockets: see test_home_safe_baseline_is_uncapped_98_a's comment -- the
+        # uncapped score is only deterministic with real-host socket scanning disabled.
         bundle = _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
             {"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}})
         hist = tmp_path / "history.jsonl"
         rc = main(["--home", SAFE, "--no-native", "--full", "--trend", "--ascii",
-                   "--judged-bundle", bundle, "--history", str(hist)])
+                   "--judged-bundle", bundle, "--history", str(hist), "--no-sockets"])
         assert rc == 0
         rows = history_load(str(hist))
         assert len(rows) == 1
-        assert rows[0]["score"] == 79
-        assert rows[0]["grade"] == "C"
+        assert rows[0]["score"] == 98
+        assert rows[0]["grade"] == "A"
