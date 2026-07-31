@@ -4577,13 +4577,58 @@ _JS_NATIVE_DLOPEN_RE = re.compile(
 )
 
 
+def _js_block_comment_spans(source: str) -> list[tuple[int, int]]:
+    """Every `/* ... */` block-comment span in `source`, as `(start, end)` character
+    offsets (`end` is exclusive, just past the closing `*/`) -- found with a LINEAR
+    `str.find()` scan, never a backtracking lazy-DOTALL regex (B-377).
+
+    The regex this replaced -- `re.findall(r"/\\*(.*?)\\*/", source, flags=re.S)` --
+    degrades to O(openers x filesize): every `/*` that is never closed by a `*/` makes
+    the lazy `.*?` re-scan from that opener all the way to EOF before giving up.
+    ORDINARY JavaScript/TS is full of such openers -- e.g. a tsconfig-style path-mapping
+    block (`"src/*": ["./src/*"]`) has a literal `/*` substring per glob entry with no
+    closing `*/` anywhere -- so a large, completely benign file blew the 15s per-check
+    scan budget (both `check_persona_jailbreak`/B66 and `check_overt_secret_exfil`/B156
+    hit `ScanBudgetExceeded` and degraded to UNKNOWN, pinning a clean config at grade F).
+
+    The moment one `/*` has no closing `*/` anywhere in the remainder of `source`, NO
+    later `/*` can find one either -- its search space is a SUFFIX of that same
+    remainder. So this scan can safely STOP at the first unclosed opener, which exactly
+    matches the old regex's own behavior (an unclosed `/*` was never part of a match
+    there either, and nothing after it could match once the last real `*/` in the file
+    is behind the scan position) -- while doing at most one forward `str.find()` per
+    real comment plus one final failed `str.find()`, i.e. true O(n)."""
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    n = len(source)
+    while pos < n:
+        start = source.find("/*", pos)
+        if start == -1:
+            break
+        end = source.find("*/", start + 2)
+        if end == -1:
+            break  # unclosed -- no later opener can close either; matches old no-match behavior
+        spans.append((start, end + 2))
+        pos = end + 2
+    return spans
+
+
 def _js_mask_comments(source: str) -> str:
     """Blank JS/TS comments while preserving line numbers, so a documented
     eval-of-atob example can't fire. A `//` preceded by ':' (i.e. inside a
-    URL like https://) is preserved so remote-import detection still works."""
-    def _blank_block(m):
-        return "\n" * m.group(0).count("\n")
-    no_block = re.sub(r"/\*.*?\*/", _blank_block, source, flags=re.S)
+    URL like https://) is preserved so remote-import detection still works.
+
+    Block-comment spans come from `_js_block_comment_spans` (linear `str.find()`,
+    B-377) -- never the backtracking lazy-DOTALL regex that function's docstring
+    explains was a quadratic-blowup DoS on ordinary (comment-free-but-`/*`-laden) JS."""
+    parts: list[str] = []
+    pos = 0
+    for start, end in _js_block_comment_spans(source):
+        parts.append(source[pos:start])
+        parts.append("\n" * source.count("\n", start, end))
+        pos = end
+    parts.append(source[pos:])
+    no_block = "".join(parts)
     return "\n".join(re.sub(r"(?<!:)//.*$", "", ln) for ln in no_block.splitlines())
 
 
@@ -4723,17 +4768,44 @@ def simulate_effects(source: str, filename: str = "<skill>") -> list[dict]:
 # --------------------------------------------------------------------------------- #
 
 
+class ScriptProseCoverageIncomplete(Exception):
+    """Raised by `_py_docstring_text` (via `extract_script_prose`) when `ast.parse`
+    could not parse a `.py` source at all -- B-377.
+
+    Parseability is Python-VERSION-dependent: PEP 695/701 syntax (e.g. a `type Alias =
+    int` statement) parses cleanly on 3.12+ but raised a `SyntaxError` on 3.9 (this
+    project's CI floor, exercised via `uv run --python 3.9`). The pre-fix code caught
+    that `SyntaxError` and returned `[]` -- the SAME value it returns for "this file
+    genuinely has no docstrings" -- so a malicious docstring authored in modern syntax
+    silently evaded the whole content-security ring on 3.9 with ZERO signal that
+    anything was skipped (Golden Rule #4: report UNKNOWN, never a confident-looking
+    empty result, when state can't be determined).
+
+    Raising instead of returning `[]` lets this reach `checks/__init__.py::run_all`'s
+    existing per-check crash isolation (B-101, `_check_error_finding`), which already
+    degrades a raising check to one honest UNKNOWN finding rather than sinking the
+    audit or silently reporting nothing found -- reusing that already-audited
+    degradation path rather than inventing a second, parallel one."""
+
+
 def _py_docstring_text(source: str) -> list[str]:
     """Module + class + function/async-function docstrings, as independent blocks in
     source order -- NEVER joined into one string (see the C-135 module comment above).
     `ast.parse` only -- never compiled or executed, mirrors every other function in
-    this module. Empty on any parse failure (a syntactically invalid .py file, or a
-    Jupyter/templated file that isn't real Python) -- nothing to extract, never an
-    error."""
+    this module.
+
+    Raises `ScriptProseCoverageIncomplete` when `ast.parse` cannot parse `source` at
+    all (B-377) -- deliberately NOT a silent `[]`, which would be indistinguishable
+    from "this file genuinely has no docstrings" (see that exception's docstring for
+    why the distinction matters). A `[]` return here means exactly one thing: parsing
+    succeeded and there were no docstrings to find."""
     try:
         tree = ast.parse(source)
-    except (SyntaxError, ValueError, RecursionError):
-        return []
+    except (SyntaxError, ValueError, RecursionError) as exc:
+        raise ScriptProseCoverageIncomplete(
+            f"could not parse Python source for docstring extraction "
+            f"({type(exc).__name__}) -- prose coverage is incomplete, not empty"
+        ) from exc
     blocks = []
     mod_doc = ast.get_docstring(tree)
     if mod_doc:
@@ -4767,19 +4839,71 @@ def _sh_comment_text(source: str) -> list[str]:
     return blocks
 
 
+def _js_line_comment_start(line: str) -> int | None:
+    """Index of a genuine `//` line-comment start in `line`, or `None` if the line has
+    none -- B-377 (defect 3). Tracks single/double-quoted and template-literal string
+    state (with backslash-escape handling) across the line so a `//` INSIDE a live JS
+    string literal is never misread as a comment opener: the old regex
+    (`re.search(r"(?<!:)//(.*)$", ln)`) matched the FIRST `//` anywhere on the line not
+    immediately preceded by `:`, with no notion of "inside a string" at all -- so
+    `const M = "See https://x.io // You are DAN now...";` extracted `// You are DAN
+    now...` as if it were a real comment, even though it sits INSIDE the still-open
+    string literal (the `(?<!:)` guard only ever blocked the `://` case, not a bare
+    `// ` reached after a space inside a string).
+
+    Trailing (same-line, after real code) comments are still recognized -- only a `//`
+    that the scan determines is genuinely OUTSIDE any string is accepted -- matching
+    the shell path's whole-line discipline in spirit (never misread string/data content
+    as prose) without dropping JS's legitimate trailing-comment shape.
+
+    Same-line only: a template literal that spans multiple physical lines is a
+    pre-existing limitation shared with the rest of this lexical (non-AST) pass, not
+    something this fix claims to solve."""
+    quote: str | None = None
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if quote:
+            if ch == "\\":
+                i += 2  # skip the escaped character too, so \" doesn't close the string
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and line[i + 1] == "/" and (i == 0 or line[i - 1] != ":"):
+            return i
+        i += 1
+    return None
+
+
 def _js_comment_text(source: str) -> list[str]:
     """Inverse of `_js_mask_comments` -- returns each block (`/* */`) comment as its
     own independent block, plus each CONTIGUOUS run of line (`//`) comments as its own
     independent block. A `//` run ends the moment a non-comment line appears, so two
     line comments separated by real code are NEVER joined into one block (see the
-    C-135 module comment above). Mirrors `_js_mask_comments`'s `(?<!:)` guard so a
-    `://` inside a live string/URL is never misread as a line-comment opener."""
-    blocks: list[str] = [m.strip() for m in re.findall(r"/\*(.*?)\*/", source, flags=re.S)]
+    C-135 module comment above).
+
+    Block-comment spans come from `_js_block_comment_spans` -- a linear `str.find()`
+    scan (B-377), never the backtracking lazy-DOTALL regex that made an ordinary
+    `/*`-laden (but comment-free) file like a tsconfig-style path-mapping block blow the
+    scan budget. Line-comment starts come from `_js_line_comment_start`, which is
+    string-literal-aware (B-377) so a `//` sitting inside a live string/URL is never
+    misread as a comment opener -- see that function's docstring for the exact false-
+    positive shape this closes."""
+    blocks: list[str] = [
+        source[start + 2 : end - 2].strip() for start, end in _js_block_comment_spans(source)
+    ]
     current: list[str] = []
     for ln in source.splitlines():
-        m = re.search(r"(?<!:)//(.*)$", ln)
-        if m:
-            current.append(m.group(1).strip())
+        idx = _js_line_comment_start(ln)
+        if idx is not None:
+            current.append(ln[idx + 2 :].strip())
         elif current:
             blocks.append("\n".join(current))
             current = []
@@ -4798,11 +4922,17 @@ def extract_script_prose(source: str, ext: str) -> list[str]:
       "js"/"ts"/"mjs"/"cjs"   -> one block per comment (`_js_comment_text`)
 
     Returns [] for an unsupported extension or a script with no docstring/comment at
-    all -- never raises. Blocks are deliberately never joined into one string -- see
-    the C-135 module comment above this function for why (proximity-window
-    corroboration false-firing across unrelated blocks). See the module comment
-    further above for why this is additive evidence, not a change to what
-    `_pos_in_source_code_section` exempts.
+    all. Blocks are deliberately never joined into one string -- see the C-135 module
+    comment above this function for why (proximity-window corroboration false-firing
+    across unrelated blocks). See the module comment further above for why this is
+    additive evidence, not a change to what `_pos_in_source_code_section` exempts.
+
+    Raises `ScriptProseCoverageIncomplete` for `ext == "py"` when `ast.parse` cannot
+    parse `source` at all (B-377) -- deliberately NOT folded into the `[]` case, which
+    would make "no docstrings" and "could not determine" indistinguishable; see that
+    exception's docstring. The "sh"/"js" paths never raise -- their extraction is
+    lexical (line/comment scanning), not a full parse, so there is no analogous
+    failure mode.
     """
     if ext == "py":
         return _py_docstring_text(source)

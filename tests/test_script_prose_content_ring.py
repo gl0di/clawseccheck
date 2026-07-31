@@ -40,6 +40,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import (
     SKILL_CONTENT_RING,
@@ -49,7 +51,7 @@ from clawseccheck.checks import (
 )
 from clawseccheck.checks._content import _script_prose_evidence
 from clawseccheck.collector import Context, collect
-from clawseccheck.skillast import extract_script_prose
+from clawseccheck.skillast import ScriptProseCoverageIncomplete, extract_script_prose
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -91,9 +93,16 @@ def test_extract_script_prose_python_never_reads_code_bodies():
     assert not any("plain string literal" in b for b in blocks)
 
 
-def test_extract_script_prose_python_syntax_error_is_empty():
-    """A file that doesn't parse yields [] -- never raises."""
-    assert extract_script_prose("def f(:\n    pass\n", "py") == []
+def test_extract_script_prose_python_syntax_error_raises_coverage_incomplete():
+    """B-377: a file that doesn't parse RAISES `ScriptProseCoverageIncomplete` --
+    deliberately NOT the same `[]` a genuinely-docstring-free file returns, so
+    "could not determine" is never silently indistinguishable from "nothing found"
+    (Golden Rule #4). The raise is caught by `checks.run_all`'s existing per-check
+    crash isolation (B-101), which degrades the calling check to one honest UNKNOWN
+    finding rather than either aborting the audit or reporting a confident empty
+    result -- see `ScriptProseCoverageIncomplete`'s own docstring in skillast.py."""
+    with pytest.raises(ScriptProseCoverageIncomplete):
+        extract_script_prose("def f(:\n    pass\n", "py")
 
 
 def test_extract_script_prose_python_no_docstring_is_empty():
