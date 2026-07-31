@@ -37,6 +37,22 @@ four tags. The test does *not* judge whether the tag is the *right* one — buck
 is an architect/human call, made here; the test only catches an entry that was never
 classified at all.
 
+## Efficacy, not just presence
+
+A check firing is not the same as a check mattering. A scanner that only wraps a
+reputation-lookup API, or matches a handful of obvious keywords, can present a "safe" or
+"not detected" verdict with the same apparent confidence as one that actually reasoned
+about the artifact — and a wrong output that *looks* trustworthy is worse than no output
+at all. Concretely, here: every check below carries its own fixture and test, not a
+single API call; `skillast.py` reasons about AST structure, not keyword presence; the
+combinational risk engine (`RISK-01..RISK-26`) exists because the attacks that matter are
+often only visible as a *combination* of individually-ordinary capabilities, not any one
+signal alone; the release bar is a documented zero-false-positive-FAIL discipline
+(`docs/RELEASING.md`) with any exception named and test-pinned, not asserted; and
+`UNKNOWN` is a first-class verdict precisely so the engine never presents a confident
+"safe" it can't back up. The engine also makes no network calls of its own — there is no
+third-party reputation database behind any verdict here.
+
 ## Covered
 
 | Threat | Covered by | Notes |

@@ -33,6 +33,20 @@ audit() pass already collected:
 Every string field is routed through logsafe.redact() before it reaches the
 packet — no raw skill source or secret value ever appears in the output.
 
+Explicitly declined: whether a security-branded skill is an *effective* scanner
+(ESET's H1 2026 threat report describes this class as "benign but problematic" —
+thin tools that merely wrap a reputation lookup, "resembling antivirus tools
+from the 1990s"). This is a judgment about efficacy, not a signal derivable
+from source structure, and there is no existing borderline finding to escalate
+in the first place — none of sources (a)-(e) above fire for an honest-but-weak
+scanner skill. Synthesizing a new "is this effective" question for the host
+agent to answer would recreate the same complaint one layer up: a confident
+judge verdict is exactly as capable of being confidently wrong as the
+antivirus-style tools being described, and any regex proxy for "claims
+security + does little" is the C-303 anti-pattern — it fits a corpus and
+flags real, honest, thin skills. Decision (2026-08-01): out of scope for
+both a new check and this module.
+
 Stdlib only. No network, no subprocess, no writes.
 """
 from __future__ import annotations

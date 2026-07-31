@@ -112,6 +112,14 @@ tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)*
 - **Honest by design.** What it can't determine is reported as `UNKNOWN` —
   never quietly counted as safe. An open CRITICAL finding hard-caps your score:
   you can never get a pretty "A" with a real hole in it.
+- **Not a rebadged lookup.** No network calls means no verdict borrowed from
+  someone else's reputation database and presented as ours. Every finding
+  traces to a real check with its own fixture and test, an AST layer that
+  reasons about code structure, and a combinational risk engine for the
+  attacks that only show up as a *combination* of individually-ordinary
+  capabilities — plus a documented zero-false-positive-FAIL release
+  discipline: an alarm reaching you is a specific, reproducible, test-pinned
+  condition in your own config, not a keyword match dressed up as a scan.
 - **Built like it matters.** 12,568 automated tests run on every change, a
   false alarm is treated as a release-blocking bug, and every release is
   cryptographically signed.
