@@ -92,6 +92,78 @@ def test_validator_never_raises_on_a_non_dict_record():
 
 
 # --------------------------------------------------------------------------- #
+# CLAWSECCHECK-B-384 item 1: `type` is a pinned vocabulary, not free text.     #
+# --------------------------------------------------------------------------- #
+def test_validator_rejects_out_of_vocabulary_source_type():
+    # The exact typo shape from the ticket: a mis-cased ecosystem key. Pre-fix this
+    # passed validate_dataset() (non-empty was all that was checked) while silently
+    # minting a dead "Clawhub" pool in known_bad_sources() that no ecosystem-scoped
+    # lookup could ever reach.
+    bad = {
+        "value": "evil-pkg", "type": "Clawhub", "first_seen": "2026-01-01",
+        "source_url": "https://example.org/advisory", "source_name": "Nobody",
+    }
+    problems = iocdb._validate_record("SOURCES", 0, bad)
+    assert any("not in the allowed vocabulary" in p for p in problems)
+
+
+def test_validator_rejects_space_padded_source_type():
+    bad = {
+        "value": "evil-pkg", "type": " clawhub", "first_seen": "2026-01-01",
+        "source_url": "https://example.org/advisory", "source_name": "Nobody",
+    }
+    problems = iocdb._validate_record("SOURCES", 0, bad)
+    assert any("not in the allowed vocabulary" in p for p in problems)
+
+
+def test_validator_accepts_every_vocabulary_word_for_sources():
+    for t in ("npm", "pypi", "clawhub", "git", "url", "any"):
+        good = {
+            "value": "x", "type": t, "first_seen": "2026-01-01",
+            "source_url": "https://example.org/advisory", "source_name": "Nobody",
+        }
+        assert iocdb._validate_record("SOURCES", 0, good) == []
+
+
+def test_validator_rejects_out_of_vocabulary_hosts_type():
+    bad = {
+        "value": "evil.example", "type": "domains", "first_seen": "2026-01-01",
+        "source_url": "https://example.org/advisory", "source_name": "Nobody",
+    }
+    problems = iocdb._validate_record("HOSTS", 0, bad)
+    assert any("not in the allowed vocabulary" in p for p in problems)
+
+
+def test_validator_accepts_every_vocabulary_word_for_hosts():
+    for t in ("ip", "domain"):
+        good = {
+            "value": "x", "type": t, "first_seen": "2026-01-01",
+            "source_url": "https://example.org/advisory", "source_name": "Nobody",
+        }
+        assert iocdb._validate_record("HOSTS", 0, good) == []
+
+
+def test_validator_type_vocab_check_never_raises_on_unhashable_type():
+    bad = {
+        "value": "x", "type": ["not", "a", "string"], "first_seen": "2026-01-01",
+        "source_url": "https://example.org/advisory", "source_name": "Nobody",
+    }
+    problems = iocdb._validate_record("SOURCES", 0, bad)
+    assert any("not in the allowed vocabulary" in p for p in problems)
+
+
+def test_validator_type_vocab_is_scoped_to_sources_and_hosts_labels_only():
+    # An arbitrary label (as the existing synthetic-record tests above already use)
+    # is not subject to a vocabulary check -- only SOURCES/HOSTS are.
+    ok = {
+        "value": "x", "type": "not-a-real-vocab-word", "first_seen": "2026-01-01",
+        "source_url": "https://example.org/advisory", "source_name": "Nobody",
+    }
+    assert iocdb._validate_record("TEST", 0, ok) == []
+    assert iocdb._validate_record("PUBLISHERS", 0, ok) == []
+
+
+# --------------------------------------------------------------------------- #
 # Freshness — mandatory, not decorative (mirrors ledger.freshness_notice /      #
 # update.update_notice).                                                       #
 # --------------------------------------------------------------------------- #
@@ -210,6 +282,107 @@ def test_is_known_bad_host_never_raises_on_bad_input():
     assert iocdb.is_known_bad_host(None) is False
     assert iocdb.is_known_bad_host("") is False
     assert iocdb.is_known_bad_host("   ") is False
+
+
+# --------------------------------------------------------------------------- #
+# CLAWSECCHECK-B-384 item 2: is_known_bad_host() honors `type` -- exact-only    #
+# for "ip" records, exact-or-subdomain for "domain" records.                  #
+# --------------------------------------------------------------------------- #
+def test_is_known_bad_host_ip_record_is_exact_only_not_suffix():
+    # The 91.92.242.30 dataset record is type="ip". Pre-fix, is_known_bad_host()
+    # discarded `type` entirely and applied the domain endswith-subdomain rule
+    # uniformly, so a longer numeric string ending in the exact IP text would wrongly
+    # match as though it were a "subdomain" of an IP -- which is not a meaningful
+    # concept for an IP record at all.
+    assert iocdb.is_known_bad_host("1.91.92.242.30") is False
+    assert iocdb.is_known_bad_host("991.92.242.30") is False
+    assert iocdb.is_known_bad_host("91.92.242.300") is False
+    # The exact IP itself must still match.
+    assert iocdb.is_known_bad_host("91.92.242.30") is True
+
+
+def test_is_known_bad_host_domain_record_still_does_subdomain_match():
+    # The type-honoring fix must not regress the (correct, pre-existing) domain
+    # subdomain-match behavior -- only the IP leg changes.
+    assert iocdb.is_known_bad_host("cdn.laosji.net") is True
+    assert iocdb.is_known_bad_host("a.b.letssendit.fun") is True
+
+
+def test_known_bad_host_records_carries_the_type_field():
+    records = iocdb.known_bad_host_records()
+    by_value = dict(records)
+    assert by_value["91.92.242.30"] == "ip"
+    assert by_value["laosji.net"] == "domain"
+    assert by_value["letssendit.fun"] == "domain"
+
+
+# --------------------------------------------------------------------------- #
+# CLAWSECCHECK-B-384 item 4: the HOSTS lookup structure is built once at       #
+# import time, not rebuilt on every call.                                     #
+# --------------------------------------------------------------------------- #
+def test_known_bad_hosts_returns_the_same_object_on_repeated_calls():
+    first = iocdb.known_bad_hosts()
+    second = iocdb.known_bad_hosts()
+    assert first is second
+
+
+def test_known_bad_host_records_returns_the_same_object_on_repeated_calls():
+    assert iocdb.known_bad_host_records() is iocdb.known_bad_host_records()
+
+
+def test_known_bad_host_records_is_the_module_level_constant():
+    assert iocdb.known_bad_host_records() is iocdb._KNOWN_BAD_HOST_RECORDS
+
+
+# --------------------------------------------------------------------------- #
+# CLAWSECCHECK-B-384 item 1 (round-trip): every SOURCES record must be         #
+# reachable via vet_source's ecosystem-scoped exact-match path -- catches a    #
+# dead pool (a typo'd/mis-cased type) mechanically, not just via validation.   #
+# --------------------------------------------------------------------------- #
+def test_every_sources_record_round_trips_through_vet_source():
+    from clawseccheck.catalog import FAIL
+    from clawseccheck.checks._vet import vet_source
+
+    for rec in iocdb.SOURCES:
+        target = f"{rec['type']}:{rec['value']}"
+        f = vet_source(target)
+        assert f.status == FAIL, (
+            f"{target!r} did not round-trip through vet_source (got {f.status}: "
+            f"{f.detail}) -- the SOURCES record's ecosystem pool may be dead "
+            f"(unreachable type)."
+        )
+
+
+# --------------------------------------------------------------------------- #
+# CLAWSECCHECK-B-384 item 3: checks/_shared.py's _KNOWN_EXFIL_HOST_RE now has  #
+# the IOC dataset's hosts spliced into its own alternation (replacing the      #
+# former, separately-compiled _IOCDB_HOST_RE) -- it must agree with            #
+# iocdb.is_known_bad_host() on every iocdb-dataset-derived verdict.            #
+# --------------------------------------------------------------------------- #
+def test_known_exfil_host_re_agrees_with_is_known_bad_host_on_a_small_corpus():
+    from clawseccheck.checks._shared import _KNOWN_EXFIL_HOST_RE
+
+    corpus = {
+        "91.92.242.30": True,  # exact match (ip)
+        "laosji.net": True,  # exact match (domain)
+        "cdn.laosji.net": True,  # subdomain match (domain)
+        "a.b.letssendit.fun": True,  # subdomain match (domain)
+        "1.91.92.242.30": False,  # ip: not a subdomain concept, must not match
+        "91.92.242.300": False,  # exact-only: not the same string
+        "evil-laosji.net": False,  # hyphen-prefixed: not a real subdomain
+        "notlaosji.net": False,  # hyphen/letter-prefixed: not a real subdomain
+        "laosji.net.evil.example": False,  # dataset host as prefix (path-suffixed)
+        "example.com": False,  # unrelated host
+    }
+    for host, expected in corpus.items():
+        precise = iocdb.is_known_bad_host(host)
+        regex = bool(_KNOWN_EXFIL_HOST_RE.search(host))
+        assert precise == expected, f"{host!r}: iocdb.is_known_bad_host = {precise}, want {expected}"
+        assert regex == expected, f"{host!r}: _KNOWN_EXFIL_HOST_RE match = {regex}, want {expected}"
+        assert precise == regex, (
+            f"{host!r}: iocdb.is_known_bad_host ({precise}) and _KNOWN_EXFIL_HOST_RE "
+            f"({regex}) disagree"
+        )
 
 
 # --------------------------------------------------------------------------- #

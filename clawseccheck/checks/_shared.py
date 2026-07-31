@@ -35,7 +35,7 @@ from ..collector import (  # noqa: F401
     _OWN_SKILL_NAMES,
     _is_own_source,
 )
-from ..iocdb import known_bad_hosts as _iocdb_known_bad_hosts
+from ..iocdb import known_bad_host_records as _iocdb_known_bad_host_records
 
 
 def _is_posix() -> bool:
@@ -438,32 +438,59 @@ _EXFIL_RE = re.compile(
 # skill-content blob. Deliberately narrower than _EXFIL_RE above: no generic curl/wget/
 # base64 keywords, only known drop-point HOSTNAMES, since an MCP server's argv commonly
 # contains a real `curl`/generic verb without that being any kind of signal.
-_KNOWN_EXFIL_HOST_RE = re.compile(
-    r"\b(glot\.io|pastebin\.com|hastebin|transfer\.sh|0x0\.st|webhook\.site|requestbin|"
-    r"rentry\.co|rentry\.org|"
-    r"beeceptor\.com|interactsh\.com|oast\.(?:pro|fun|me|live|site|online)|"
-    r"canarytokens\.(?:com|net|org)|file\.io|localtunnel\.me|trycloudflare\.com|"
-    r"[a-z0-9-]+\.ngrok(?:-free)?\.(?:io|app)|ngrok\.io|ngrok-free\.app|"
-    r"[a-z0-9-]+\.pipedream\.net|pipedream\.net)\b",
-    re.I,
-)
+#
+# B-384: the bundled, dated IOC dataset's HOST literals (../iocdb.py) are
+# spliced into this SAME alternation (built once at import time, same as before) rather
+# than living behind a second, separately-compiled regex (the former `_IOCDB_HOST_RE` /
+# `_compile_iocdb_host_re()`, removed here). Two regexes independently derived from
+# overlapping "known-bad host" concepts disagreed with each other and with
+# iocdb.is_known_bad_host() on borderline text (`_IOCDB_HOST_RE`'s plain `\b...\b`
+# alternation matched a hyphen-adjacent substring like "evil-laosji.net" and a
+# dataset-host-as-prefix string like "laosji.net.evil.example" that
+# iocdb.is_known_bad_host() correctly rejects). Collapsing to one canonical
+# alternation removes that drift outright: each IOC host below gets its own
+# lookaround-bounded fragment (`_iocdb_host_fragment`) that mirrors
+# iocdb.is_known_bad_host()'s type-honored exact-vs-subdomain contract exactly
+# (see tests/test_iocdb.py's regex/function agreement test), rather than the
+# generic list's looser `\b...\b` word-boundary style, which stays as-is for the
+# generic entries (unchanged, no false-negative risk introduced there). As a side
+# effect this also collapses what used to be two separate linear passes over the
+# same skill text in correlation_indicators() below into one.
+_DOMAIN_LEFT_CHARS = "a-z0-9-"  # chars that would extend a label to the LEFT
+_HOST_CHARS = "a-z0-9.-"  # chars that would extend a host on the RIGHT (or, for an
+# IP -- which has no "subdomain" concept -- on the LEFT too: a "." immediately before
+# an IP literal is NOT a subdomain separator, unlike for a domain).
 
 
-def _compile_iocdb_host_re() -> re.Pattern:
-    """A named, dated, provenance-tagged sibling of `_KNOWN_EXFIL_HOST_RE` above --
-    compiled from ../iocdb.py's HOSTS table instead of a generic exfil-host-shape
-    list. Matches nothing if the dataset is ever emptied (never crashes on an empty
-    alternation)."""
-    hosts = sorted(_iocdb_known_bad_hosts())
-    if not hosts:
-        return re.compile(r"(?!)")
-    return re.compile(r"\b(?:" + "|".join(re.escape(h) for h in hosts) + r")\b", re.I)
+def _iocdb_host_fragment(value: str, type_: str) -> str:
+    """One regex alternative for a single iocdb HOSTS record, precisely mirroring
+    iocdb.is_known_bad_host()'s type-honored contract: "ip" records match exact-only
+    (full host-char boundary on both sides), "domain" records match exact-or-subdomain
+    (the left boundary additionally allows a "." so a real subdomain like
+    "cdn.<host>" still matches, but a hyphen/letter/digit directly before it --
+    "evil-<host>" -- does not)."""
+    esc = re.escape(value)
+    left = _HOST_CHARS if type_ == "ip" else _DOMAIN_LEFT_CHARS
+    return rf"(?<![{left}]){esc}(?![{_HOST_CHARS}])"
 
 
-# Exact-match known-bad hosts/IPs from the bundled IOC dataset (../iocdb.py), computed
-# once at import time (the dataset is static -- see iocdb's module docstring on why it
-# ships as static Python data, never fetched).
-_IOCDB_HOST_RE = _compile_iocdb_host_re()
+def _build_known_exfil_host_re() -> re.Pattern:
+    generic = (
+        r"\b(?:glot\.io|pastebin\.com|hastebin|transfer\.sh|0x0\.st|webhook\.site|requestbin|"
+        r"rentry\.co|rentry\.org|"
+        r"beeceptor\.com|interactsh\.com|oast\.(?:pro|fun|me|live|site|online)|"
+        r"canarytokens\.(?:com|net|org)|file\.io|localtunnel\.me|trycloudflare\.com|"
+        r"[a-z0-9-]+\.ngrok(?:-free)?\.(?:io|app)|ngrok\.io|ngrok-free\.app|"
+        r"[a-z0-9-]+\.pipedream\.net|pipedream\.net)\b"
+    )
+    ioc_fragments = [
+        _iocdb_host_fragment(value, typ)
+        for value, typ in sorted(_iocdb_known_bad_host_records())
+    ]
+    return re.compile("(?:" + "|".join([generic, *ioc_fragments]) + ")", re.I)
+
+
+_KNOWN_EXFIL_HOST_RE = _build_known_exfil_host_re()
 
 
 # F-124/E-044 layer-fix: moved here VERBATIM from trajaudit.py (see _CRED_RE note above
@@ -508,17 +535,19 @@ def correlation_indicators(installed_skills):
     Deliberately narrower than trajaudit.skill_indicators: only tokens whose appearance in
     the agent's OWN log corpus is strong cross-artifact evidence — credential-shaped paths
     (_CRED_RE), secret-named paths WITH a '/' separator (_SECRET_PATH_RE + the B-157 filter),
-    KNOWN drop-point hosts (_KNOWN_EXFIL_HOST_RE), and named IOC dataset hosts
-    (_IOCDB_HOST_RE). The bare _EXFIL_RE verbs (curl/wget/fetch/base64/POST) are EXCLUDED —
-    base-rate noise in any web/exec-capable agent's logs. Keys are normalized (tilde-stripped,
-    lowercased) for a case-insensitive substring membership test; values are the declaring
-    skill name. Capped at _CORR_INDICATOR_CAP entries.
+    and KNOWN drop-point hosts (_KNOWN_EXFIL_HOST_RE — B-384: this now already
+    includes the bundled IOC dataset's HOST literals, spliced into its own alternation, so a
+    separate iocdb-only regex is no longer iterated here too). The bare _EXFIL_RE verbs
+    (curl/wget/fetch/base64/POST) are EXCLUDED — base-rate noise in any web/exec-capable
+    agent's logs. Keys are normalized (tilde-stripped, lowercased) for a case-insensitive
+    substring membership test; values are the declaring skill name. Capped at
+    _CORR_INDICATOR_CAP entries.
     """
     out = {}
     for name, text in (installed_skills or {}).items():
         if not isinstance(text, str):
             continue
-        for rx in (_CRED_RE, _SECRET_PATH_RE, _KNOWN_EXFIL_HOST_RE, _IOCDB_HOST_RE):
+        for rx in (_CRED_RE, _SECRET_PATH_RE, _KNOWN_EXFIL_HOST_RE):
             for m in rx.finditer(text):
                 raw = m.group(0).strip().strip(".,;:\"'`)(")
                 if rx is _SECRET_PATH_RE and "/" not in raw:
@@ -1807,6 +1836,52 @@ def _mcp_leg_contributions(cfg: dict) -> dict:
     return contribs
 
 
+def _unpolicied_open_wildcard_group_channels(cfg: dict) -> dict:
+    """B-371: the strict subset of `_open_wildcard_group_channels` (B-297) whose SAME
+    resolved node declares neither `dmPolicy` nor `groupPolicy` at all.
+
+    Used ONLY by `_trifecta_legs` (A1's CRITICAL-scored, hard-FAIL-capable leg). B41 /
+    B46's own `ext_ch` / RISK-01/02/03 keep reading the full, unguarded
+    `_open_wildcard_group_channels` via `_external_input_channels` — unaffected, since
+    none of them can hard-FAIL on it (B140 is WARN-never-FAIL, RiskPaths never move the
+    A-F score, B41/B46 are WARN-capped).
+
+    Why the extra guard exists here and nowhere else: `_wildcard_group_gap` treats only
+    the schema-valid `groupPolicy == "disabled"` (`GroupPolicySchema =
+    _enum(["open","disabled","allowlist"])`) as a closing signal — see its docstring.
+    An explicit-but-UNMODELED policy value (not a real schema literal — e.g. a config a
+    live OpenClaw instance's own zod validation would reject, or simply a value this
+    package hasn't been taught) is therefore read as "not disabled", i.e. open, same as
+    a genuinely absent field. That reading is the right call for the WARN-only/advisory
+    consumers above (better to nudge on something unparseable than stay silent), but
+    plugging it un-narrowed into A1 — a hard CRITICAL FAIL — would flip on ANY group
+    config carrying some policy value the resolver doesn't happen to recognize, which is
+    indistinguishable here from a deliberate, safe restriction. C-135 found this via two
+    pre-existing FP-guard tests
+    (`tests/test_checks.py::test_a1_approval_gated_group_bot_not_untrusted_input`,
+    `::test_a1_owner_only_group_bot_not_untrusted_input`) that broke under the first,
+    unguarded attempt at this fix — both went red before this guard was added, so this
+    isn't a hypothetical. Scoped instead to exactly the shape B-297's own docstring
+    calls "the commonest real open-group config": a channel/account node with NO
+    dmPolicy/groupPolicy field at all (verified live in the referenced
+    `coding_telegram_insecure` real-fleet config — see `_trifecta_legs`).
+    """
+    out = {}
+    for name, c in _channels(cfg).items():
+        if name == "defaults" or not isinstance(c, dict) or c.get("enabled") is False:
+            continue
+        for node in _resolved_channel_nodes(c):
+            if not isinstance(node, dict):
+                continue
+            if node.get("dmPolicy") is not None or node.get("groupPolicy") is not None:
+                continue
+            gap = _wildcard_group_gap(node)
+            if gap and _wildcard_group_is_reachable(node):
+                out[name] = gap
+                break
+    return out
+
+
 # ---------------------------------------------------------------- Block A
 def _trifecta_legs(ctx: Context) -> dict:
     """The three lethal-trifecta legs computed from the GLOBAL config surface.
@@ -1814,10 +1889,30 @@ def _trifecta_legs(ctx: Context) -> dict:
     Shared by A1 (check_trifecta) and B46 (check_multiagent_exposure) so both read
     one definition of the legs. Keys are the human-facing labels A1 emits; insertion
     order is preserved (input → sensitive → outbound).
+
+    B-371 (2026-07-31): the untrusted-input leg now ALSO counts
+    `_unpolicied_open_wildcard_group_channels` — a B-297 open `groups["*"]` entry with
+    no dmPolicy/groupPolicy at all. Before this, A1 was the one CRITICAL-scored consumer
+    of the dmPolicy/groupPolicy allowlist that could not see that shape at all (B41's
+    `_external_input_channels` already could), even though it is the commonest real
+    open-community-bot config and B140 already WARNs on it. That gap was deliberately
+    left open when B-297 landed pending "its own C-135 pass" (see the now-updated
+    `tests/test_b297_wildcard_group_ingress_leg.py`) — this is that pass. Verified
+    against every local `fixtures/` home (549) and the full clawrange corpus (73 real
+    configs, read-only): exactly one config's A1 verdict changes,
+    `coding_telegram_insecure` (PASS→FAIL) — an open Telegram group with no allowFrom
+    feeding a "coding"-profile agent with ungated exec, a genuine 3/3 trifecta A1 was
+    previously blind to. Deliberately NOT the full `_external_input_channels` reading —
+    see `_unpolicied_open_wildcard_group_channels`'s docstring for why a narrower guard
+    is used here specifically (two existing FP-guard tests, `test_checks.py`'s
+    `test_a1_approval_gated_group_bot_not_untrusted_input` /
+    `test_a1_owner_only_group_bot_not_untrusted_input`, would otherwise regress).
+    `_untrusted_input_channels` itself is unchanged.
     """
     cfg = ctx.config
     tools = _enabled_tools(cfg)
     untrusted_ch = _untrusted_input_channels(cfg)
+    unpolicied_wildcard = _unpolicied_open_wildcard_group_channels(cfg)  # B-371
     web_fetch = _web_fetch_enabled(cfg)
     # B-061: ungated exec/shell can read any private file (sensitive) AND exfiltrate
     # (outbound). Approval-gated exec — tools.exec.mode is deny/allowlist/ask/auto,
@@ -1843,6 +1938,7 @@ def _trifecta_legs(ctx: Context) -> dict:
     return {
         "untrusted input": (
             bool(untrusted_ch)
+            or bool(unpolicied_wildcard)  # B-371: unpolicied open groups["*"] (B-297)
             or _hint(tools, INPUT_TOOL_HINTS)
             or web_fetch
             or bool(mcp_legs["untrusted input"])  # B-247: fetch/web-search/inbox/... MCP

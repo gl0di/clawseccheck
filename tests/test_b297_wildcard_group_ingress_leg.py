@@ -38,8 +38,10 @@ from clawseccheck.checks import (
     _external_input_channels,
     _open_wildcard_group_channels,
     _resolved_channel_nodes,
+    _trifecta_legs,
     _untrusted_input_channels,
     _wildcard_group_gap,
+    check_trifecta,
     check_wildcard_group_ingress,
     run_all,
 )
@@ -315,15 +317,64 @@ def test_b297_policy_path_is_unchanged():
     ]
 
 
-def test_b297_untrusted_input_channels_deliberately_not_widened():
-    """SCOPE PIN (honest labelling): `_untrusted_input_channels` — A1's trifecta ingress
-    leg — is byte-identical in logic to `_external_input_channels` but was NOT widened
-    here. Widening the CRITICAL scored trifecta leg needs its own C-135 pass (the same
-    reasoning B-283 recorded when it left the absent-dmPolicy default out of scope).
-    This asserts the divergence is the CHOSEN state, so it is noticed rather than
-    silently inherited."""
+def test_b297_untrusted_input_channels_helper_itself_is_unchanged():
+    """`_untrusted_input_channels` (the plain dmPolicy/groupPolicy-allowlist helper, still
+    used standalone by B39/other WARN-level consumers) is deliberately NOT widened to see
+    the wildcard-group shape — only `_external_input_channels` (B41/B46's `ext_ch`/
+    RISK-01/02/03) and, as of B-371, `_trifecta_legs`'s own narrower
+    `_unpolicied_open_wildcard_group_channels` (see below) see it. Byte-identical in its
+    own policy-matching logic to `_external_input_channels`'s non-wildcard path; this
+    just isn't it."""
     assert _untrusted_input_channels(_REAL_SHAPE) == []
     assert _external_input_channels(_REAL_SHAPE) == ["telegram"]
+
+
+def test_b297_a1_trifecta_leg_now_widened_b371():
+    """B-371: the SCOPE PIN this test used to assert (`_trifecta_legs` — A1's ingress
+    leg — deliberately NOT seeing the B-297 wildcard-group shape, pending "its own C-135
+    pass") is now resolved for the shape B-297's own docstring calls "the commonest real
+    open-group config": a `groups["*"]` entry with no dmPolicy/groupPolicy field AT ALL,
+    like `_REAL_SHAPE` here. `_trifecta_legs` now also reads
+    `_unpolicied_open_wildcard_group_channels` (checks/_shared.py) — NOT the full,
+    unguarded `_external_input_channels` B41/B46/RISK-01 use: an initial attempt to wire
+    A1 straight to `_external_input_channels` broke two pre-existing FP-guard tests
+    (`test_checks.py::test_a1_approval_gated_group_bot_not_untrusted_input` /
+    `::test_a1_owner_only_group_bot_not_untrusted_input`, both an explicit-but-unmodeled
+    groupPolicy value like "ask"/"owner-only" alongside a wildcard group) — exactly the
+    C-135 "try to kill this FAIL" pass finding a real false positive, so the narrower
+    helper was used instead. Swept against every local fixture (549) and the full
+    clawrange corpus (73 real configs): the only config anywhere in that sweep whose A1
+    verdict flips is the real `coding_telegram_insecure` corpus scenario (PASS→FAIL): an
+    open Telegram group with no allowFrom feeding a "coding"-profile agent with ungated
+    exec — a genuine 3/3, not a false positive."""
+    ctx = _ctx(_REAL_SHAPE)
+    legs = _trifecta_legs(ctx)
+    assert legs["untrusted input"] is True
+
+    # The bare wildcard shape alone still has only 1/3 legs — no FAIL (GR#5 unaffected,
+    # matching test_b297_wildcard_group_never_manufactures_a_fail below).
+    assert check_trifecta(ctx).status != FAIL
+
+    # Add the other two legs (sensitive data via ungated exec, outbound via the enabled
+    # bidirectional channel) and A1 now correctly reaches 3/3 FAIL — the real config shape
+    # this ticket exists to close the gap on.
+    full_cfg = {
+        "channels": {"telegram": {"groups": {"*": {"requireMention": True}}}},
+        "tools": {"exec": {"security": "full"}},
+    }
+    assert check_trifecta(_ctx(full_cfg)).status == FAIL
+
+
+def test_b297_a1_leg_stays_off_for_unmodeled_group_policy_c135_guard():
+    """C-135 pin, in this file too (mirrors test_checks.py's two FP-guard tests): an
+    explicit-but-unmodeled groupPolicy value ("ask" is not a real schema literal —
+    GroupPolicySchema is open/disabled/allowlist, see `_wildcard_group_gap`'s docstring)
+    alongside an otherwise-open `groups["*"]` must NOT raise A1's leg, even though it
+    DOES still raise the broader `_external_input_channels`/B41 reading. This is the
+    deliberate asymmetry B-371 introduced, pinned so it cannot silently disappear."""
+    cfg = {"channels": {"telegram": {"groups": {"*": {}}, "groupPolicy": "ask"}}}
+    assert _trifecta_legs(_ctx(cfg))["untrusted input"] is False
+    assert _external_input_channels(cfg) == ["telegram"]
 
 
 # ---------------------------------------------------------------------------

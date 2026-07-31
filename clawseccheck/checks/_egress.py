@@ -24,8 +24,6 @@ from ..collector import (
     Context,
     dig,
 )
-from ..iocdb import is_known_bad_host as _iocdb_is_known_bad_host
-
 from . import _shared
 from ._shared import (
     LOOPBACK,
@@ -2694,13 +2692,19 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         # counts as one extra signal class (needs a co-occurring class to clear the WARN
         # bar) and can never sole-trigger a WARN on a benign dual-use path (the C-135 false
         # positive: an aws-cost-helper skill naming ~/.aws/credentials + a benign log line).
-        # A named, dated IOC dataset host (../iocdb.py) is at least as high-confidence
-        # as the generic drop-host shape list, so it also qualifies on its own — same
-        # treatment as _KNOWN_EXFIL_HOST_RE, never a sole FAIL trigger (B164 stays
-        # advisory/scored=False throughout regardless).
+        # B-384: a named, dated IOC dataset host (../iocdb.py) is at least as
+        # high-confidence as the generic drop-host shape list, so it also qualifies on its
+        # own — never a sole FAIL trigger (B164 stays advisory/scored=False throughout
+        # regardless). It no longer needs its own OR leg here: `_KNOWN_EXFIL_HOST_RE`
+        # (checks/_shared.py) now has the IOC dataset's hosts spliced into its own
+        # alternation, so a direct `iocdb.is_known_bad_host(t)` call would only ever be
+        # True when the regex leg below is already True too — checking both was two
+        # definitions of "known-bad host" that could disagree (and always agreed in
+        # practice, since precise-match implies substring-match), not two independent
+        # signals. One canonical check now covers both.
         strong_cross = {
             t: n for t, n in cross.items()
-            if _KNOWN_EXFIL_HOST_RE.search(t) or _iocdb_is_known_bad_host(t)
+            if _KNOWN_EXFIL_HOST_RE.search(t)
         }
         weak_cross = {t: n for t, n in cross.items() if t not in strong_cross}
         effective = set(nonzero)

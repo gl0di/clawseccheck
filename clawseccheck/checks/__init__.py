@@ -199,6 +199,7 @@ from ._egress import (
 )
 
 from ._shared import (_trifecta_legs,)
+from ._shared import (_unpolicied_open_wildcard_group_channels,)  # B-371
 from ._agents import (
     _B21_OBEY_RE,
     _B21_SAFE_STANCE_RE,

@@ -52,6 +52,22 @@ STALE_AFTER_DAYS = 120
 
 _REQUIRED_FIELDS = ("value", "type", "first_seen", "source_url", "source_name")
 
+# B-384: `type` is not free text -- it doubles as the ecosystem key
+# known_bad_sources() pools SOURCES records into (via `pools.setdefault(rec["type"],
+# set())`) and as the kind discriminator is_known_bad_host() needs to honor its own
+# documented exact-vs-subdomain contract for HOSTS records. Left unpinned, a
+# typo'd/mis-cased/space-padded type (e.g. "Clawhub" instead of "clawhub") silently
+# minted a brand-new, unreachable-by-ecosystem-lookup pool -- the record still passed
+# validate_dataset() (non-empty is all that was checked) while being permanently dead
+# via the ecosystem-scoped ("type:name") lookup path (it stayed reachable via
+# vet_source's separate "registry" bare-name-iteration branch, which is why this class
+# of bug is invisible from one direction and not the other -- see vet_source in
+# checks/_vet.py). Pinning the vocabulary here turns that into a validate_dataset()
+# failure instead of a silently-dead record.
+_SOURCES_TYPE_VOCAB = frozenset({"npm", "pypi", "clawhub", "git", "url", "any"})
+_HOSTS_TYPE_VOCAB = frozenset({"ip", "domain"})
+_TYPE_VOCAB_BY_LABEL = {"SOURCES": _SOURCES_TYPE_VOCAB, "HOSTS": _HOSTS_TYPE_VOCAB}
+
 
 def _rec(value: str, type_: str, first_seen: str, source_url: str, source_name: str,
          note: str = "") -> dict:
@@ -159,6 +175,18 @@ def _validate_record(label: str, index: int, rec, *, today: date | None = None) 
     for field in _REQUIRED_FIELDS:
         if not isinstance(rec, dict) or not str(rec.get(field) or "").strip():
             problems.append(f"{label}[{index}] ({ident!r}): missing required field {field!r}")
+    # B-384: pin `type` to the vocabulary the label actually consumes.
+    # `t not in vocab` (not a `.strip().lower()` comparison) is deliberate -- a
+    # mis-cased ("Clawhub") or space-padded (" clawhub") value must fail exactly like
+    # a wholly bogus one, never be silently normalized into matching.
+    vocab = _TYPE_VOCAB_BY_LABEL.get(label)
+    if vocab is not None and isinstance(rec, dict):
+        t = rec.get("type")
+        if not isinstance(t, str) or t not in vocab:
+            problems.append(
+                f"{label}[{index}] ({ident!r}): type {t!r} is not in the allowed "
+                f"vocabulary {sorted(vocab)!r}"
+            )
     fs = rec.get("first_seen") if isinstance(rec, dict) else None
     try:
         parsed = date.fromisoformat(str(fs))
@@ -218,9 +246,49 @@ def known_bad_sources() -> dict:
     return {k: frozenset(v) for k, v in pools.items()}
 
 
+def _build_known_bad_host_records() -> tuple:
+    """(value, type) pairs for every HOSTS record, lowercased.
+
+    B-384: is_known_bad_host()'s documented contract is "exact match for
+    IP-type records; exact-or-subdomain match for domain-type records" -- honoring that
+    requires keeping `type` alongside `value` instead of discarding it (the former
+    `known_bad_hosts()`-only lookup applied the domain endswith-subdomain rule
+    uniformly to every record regardless of type, so an IP record could wrongly match
+    as a "subdomain" of some longer numeric-looking host string).
+
+    Built ONCE at import time -- HOSTS is static in-repo data (see the module
+    docstring: no update mechanism, no network), so there is no reason to rebuild this
+    on every call. Mirrors checks/_shared.py's `_KNOWN_EXFIL_HOST_RE` "build once at
+    import" pattern for the same reason.
+    """
+    return tuple((rec["value"].lower(), str(rec.get("type") or "").strip().lower()) for rec in HOSTS)
+
+
+_KNOWN_BAD_HOST_RECORDS: tuple = _build_known_bad_host_records()
+_KNOWN_BAD_HOSTS: frozenset = frozenset(v for v, _t in _KNOWN_BAD_HOST_RECORDS)
+
+
+def known_bad_host_records() -> tuple:
+    """(value, type) pairs for every HOSTS record, lowercased -- the same type-aware
+    backing structure `is_known_bad_host()` consumes, computed once at import time.
+
+    Exposed (B-384) so a caller building a TEXT-SCANNING regex out of this
+    dataset (checks/_shared.py's `_KNOWN_EXFIL_HOST_RE`) can honor the same
+    exact-vs-subdomain-by-type contract instead of re-deriving it from the flat,
+    type-less `known_bad_hosts()` value set -- which is exactly how two definitions of
+    "known-bad host" drifted apart before this fix.
+    """
+    return _KNOWN_BAD_HOST_RECORDS
+
+
 def known_bad_hosts() -> frozenset:
-    """All HOSTS values (domains + IPs), lowercased."""
-    return frozenset(rec["value"].lower() for rec in HOSTS)
+    """All HOSTS values (domains + IPs), lowercased.
+
+    Computed once at import time (see `_KNOWN_BAD_HOST_RECORDS` above) -- the same
+    frozenset object is returned on every call, never rebuilt (B-384;
+    HOSTS is static in-repo data, so a per-call rebuild bought nothing).
+    """
+    return _KNOWN_BAD_HOSTS
 
 
 def known_bad_publishers() -> frozenset:
@@ -231,15 +299,23 @@ def known_bad_publishers() -> frozenset:
 def is_known_bad_host(host) -> bool:
     """True when *host* IS, or is a subdomain of, a known-bad host in the dataset.
 
-    Exact match for IP-type records; exact-or-subdomain match for domain-type
+    Exact match ONLY for "ip"-type records; exact-or-subdomain match for "domain"-type
     records (mirrors vet_source's existing host_l == h or host_l.endswith("." + h)
-    check). Never raises -- a non-string/empty input simply returns False.
+    check) -- this now actually HONORS the record's own `type` (B-384)
+    instead of discarding it and applying the domain subdomain rule to every record
+    uniformly. Any type other than "domain" (i.e. "ip", or a defensive fallback for
+    anything unexpected) is exact-only: an IP address has no meaningful "subdomain",
+    so a longer numeric-looking host string that merely ENDS WITH a known-bad IP's
+    digits must never match it that way. Never raises -- a non-string/empty input
+    simply returns False.
     """
     h = str(host or "").strip().lower()
     if not h:
         return False
-    for bad in known_bad_hosts():
-        if h == bad or h.endswith("." + bad):
+    for bad, typ in _KNOWN_BAD_HOST_RECORDS:
+        if h == bad:
+            return True
+        if typ == "domain" and h.endswith("." + bad):
             return True
     return False
 

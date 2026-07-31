@@ -308,13 +308,14 @@ def _has_world_open_cidr(value) -> bool:
 
 # F-036: for a 2/3 config, name the one missing leg + the concrete field that would
 # complete the trifecta. Grounded only in field paths the engine already reads
-# (_untrusted_input_channels / INPUT_TOOL_HINTS + web for input; SENSITIVE_TOOL_HINTS,
-# ungated exec, credentials/ for sensitive; OUTBOUND_TOOL_HINTS, exec, elevated, web for
-# outbound). No new schema invented.
+# (_untrusted_input_channels / _unpolicied_open_wildcard_group_channels (B-371) /
+# INPUT_TOOL_HINTS + web for input; SENSITIVE_TOOL_HINTS, ungated exec, credentials/ for
+# sensitive; OUTBOUND_TOOL_HINTS, exec, elevated, web for outbound). No new schema invented.
 _MISSING_LEG_ACTIVATORS = {
     "untrusted input": (
         "a non-owner channel (channels.<name>.dmPolicy/groupPolicy in "
-        "open/allowlist/paired), an input tool (tools.allow: web/email/imap/rss/fetch), "
+        "open/allowlist/paired), an unpolicied, unrestricted channels.<name>.groups[\"*\"] "
+        "entry (B-297/B-371), an input tool (tools.allow: web/email/imap/rss/fetch), "
         "or tools.web.fetch.enabled"
     ),
     "sensitive data": (
