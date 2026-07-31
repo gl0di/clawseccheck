@@ -858,7 +858,12 @@ def _valid_live_test_entries(bucket) -> list[tuple[str, str, str]]:
         tool, entry_id, verdict = entry.get("tool"), entry.get("id"), entry.get("verdict")
         if not (isinstance(tool, str) and tool in LIVE_TEST_TOOLS):
             continue
-        if not (isinstance(entry_id, str) and _LIVE_TEST_ID_RE.match(entry_id)):
+        # B-386: `.fullmatch()`, not `.match()` — `$` in the pattern matches BEFORE a
+        # trailing "\n", so `.match()` let an id like "PI-01\n" through, and that
+        # embedded newline then rode `LiveTestSignal.reason` straight into report.py's
+        # single-line grade-cap banner. `.fullmatch()` anchors both ends against the
+        # WHOLE string, closing that gap without widening the charset itself.
+        if not (isinstance(entry_id, str) and _LIVE_TEST_ID_RE.fullmatch(entry_id)):
             continue
         if verdict not in _LIVE_TEST_VERDICTS:
             continue
@@ -869,11 +874,20 @@ def _valid_live_test_entries(bucket) -> list[tuple[str, str, str]]:
 def _live_test_reproducible(bucket) -> bool:
     """True only when *bucket* carries a well-formed, non-empty, bounded ``seed``.
 
-    Deliberately structural, not a claimed boolean: a client-supplied
-    ``"reproducible": true`` field would let any submission (seeded or not) simply
-    assert its way past the history-recording gate, so this derives the fact from the
-    same real signal (a usable seed string) `canary`/`redteam`/`dryrun` themselves need
-    to reproduce their tokens, and ignores any such field entirely.
+    B-386 (C-135 round 2, honesty correction): this checks SHAPE only — non-empty,
+    length-bounded — never AUTHENTICITY. It does not verify the seed against the
+    submitted scenario ids, re-derive anything from it, or confirm it actually
+    originated from `canary`/`redteam`/`dryrun`. Any non-empty string within the length
+    bound passes. A prior version of this docstring called that "structural, not a
+    claimed boolean" and implied real verification — that overstated the guarantee:
+    the ONLY thing this closes is the literal `{"reproducible": true}` self-assertion
+    shape (a bare boolean flag any submission could set for free); a client can still
+    trivially satisfy this check with any throwaway non-empty string, e.g.
+    `{"seed": "x", ...}`. Genuinely binding the seed to something verifiable (deriving
+    the expected scenario-id set from it and requiring a match) would need a real
+    signing/derivation scheme, which is out of scope here — this function is an
+    advisory shape filter, not a cryptographic or structural guarantee, and callers
+    gating persistence on its result should read it that way.
     """
     if not isinstance(bucket, dict):
         return False
@@ -910,6 +924,12 @@ def live_test_cap_signal(bucket) -> LiveTestSignal:
     reason = "; ".join(labels)
     if len(vulnerable) > _MAX_LIVE_TEST_REASON_ENTRIES:
         reason += f" (+{len(vulnerable) - _MAX_LIVE_TEST_REASON_ENTRIES} more)"
+    # B-386: defense in depth. `entry_id` is already `_LIVE_TEST_ID_RE.fullmatch`-
+    # validated above, so `reason` should not be able to carry a control/newline
+    # character today — but route it through the same `_sanitize()` every other
+    # untrusted-string field in this module uses anyway, so a future widening of that
+    # regex's charset can't reopen the single-line grade-cap banner this was fixed for.
+    reason = _sanitize(reason)
     return LiveTestSignal(hit=True, reason=reason, reproducible=_live_test_reproducible(bucket))
 
 

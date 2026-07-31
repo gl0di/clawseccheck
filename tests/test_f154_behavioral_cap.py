@@ -197,6 +197,25 @@ class TestBehavioralCapSignalHelper:
         assert hit is True
         assert reason == "B191 audit-trail divergence; T1 behavioral trifecta"
 
+    def test_bare_string_treated_as_one_id_not_exploded_into_characters(self):
+        # B-386 regression: a bare "T1" used to be silently exploded character-by-
+        # character (frozenset("T1") == {"T", "1"}), which never intersects the real
+        # id set -- so the cap silently failed to apply and the grade came out
+        # HIGHER than it should, the exact wrong direction for a security tool. This
+        # must produce the SAME result as passing frozenset({"T1"}).
+        bare = _behavioral_cap_signal("T1")
+        wrapped = _behavioral_cap_signal(frozenset({"T1"}))
+        assert bare == wrapped
+        assert bare[0] is True
+
+    def test_compute_with_bare_string_behavioral_fired_ids_caps_identically(self):
+        findings = [_pass_finding()]
+        bare = compute(findings, behavioral_fired_ids="T1")
+        wrapped = compute(findings, behavioral_fired_ids=frozenset({"T1"}))
+        assert bare.behavioral_capped is True
+        assert bare.score == wrapped.score
+        assert bare.behavioral_cap_reason == wrapped.behavioral_cap_reason
+
 
 # ── behavioral.py: grade_cap_signal reducer ──────────────────────────────────
 
@@ -386,12 +405,56 @@ class TestFinding2B191SubSignalSplit:
         assert "evasive" in b191.sub_signals
         assert grade_cap_signal(result) == frozenset({"B191"})
 
+    @staticmethod
+    def _b191_finding(sub_signals):
+        return Finding(
+            id="B191", title="x", severity=MEDIUM, status=WARN, detail="x", fix="x",
+            framework="x", sub_signals=sub_signals,
+        )
+
+    def test_list_sub_signals_does_not_raise_and_matches_frozenset(self):
+        """B-386: `Finding.sub_signals`' `frozenset` annotation is only a hint under
+        `from __future__ import annotations` -- never runtime-enforced -- so a
+        caller-built Finding can hand `grade_cap_signal` a plain list. It must not raise
+        (a bare `list & frozenset` is a TypeError) and must treat the list exactly like
+        the equivalent frozenset/set: caps on a strong sub-signal, does not cap on bare
+        divergence."""
+        list_result = {"findings": [self._b191_finding(["blocked"])]}
+        frozenset_result = {"findings": [self._b191_finding(frozenset({"blocked"}))]}
+        set_result = {"findings": [self._b191_finding({"blocked"})]}
+
+        assert grade_cap_signal(list_result) == frozenset({"B191"})
+        assert grade_cap_signal(list_result) == grade_cap_signal(frozenset_result)
+        assert grade_cap_signal(list_result) == grade_cap_signal(set_result)
+
+        # bare divergence as a list must not cap, same as the frozenset case.
+        list_divergence = {"findings": [self._b191_finding(["divergence"])]}
+        frozenset_divergence = {"findings": [self._b191_finding(frozenset({"divergence"}))]}
+        assert grade_cap_signal(list_divergence) == frozenset()
+        assert grade_cap_signal(list_divergence) == grade_cap_signal(frozenset_divergence)
+
+        # tuple, and an unrecognized type (falls back to empty), must not raise either.
+        tuple_result = {"findings": [self._b191_finding(("blocked",))]}
+        assert grade_cap_signal(tuple_result) == frozenset({"B191"})
+        none_result = {"findings": [self._b191_finding(None)]}
+        assert grade_cap_signal(none_result) == frozenset()
+
 
 # ── report.py rendering ───────────────────────────────────────────────────────
 
 def _score(**kw) -> ScoreResult:
+    """Build a ScoreResult for rendering tests.
+
+    CLAWSECCHECK-B-380: `capped` is DERIVED as ``score != raw_score``, never a free
+    default — `compute()` (scoring.py) always sets `capped` that way, so a helper that
+    defaults `capped=False` while a caller separately overrides `score`/`raw_score` to
+    differ can construct a ScoreResult `compute()` could never actually produce (a
+    behavioral-only cap with `capped=False` swallowed the render_html defect this task
+    fixes, exactly because the test never exercised the branch a real capped=True run
+    would take). Pass `capped=` explicitly only for a deliberately-synthetic case.
+    """
     defaults = dict(
-        score=79, grade="C", capped=False, raw_score=79,
+        score=79, grade="C", raw_score=79,
         failed_critical=0, failed_high=0, failed_medium=0, failed_low=0,
         assessable=True, cap_severity=None,
         runtime_capped=False, runtime_cap_reason=None,
@@ -400,6 +463,7 @@ def _score(**kw) -> ScoreResult:
         behavioral_capped=False, behavioral_cap_reason=None,
     )
     defaults.update(kw)
+    defaults.setdefault("capped", defaults["score"] != defaults["raw_score"])
     return ScoreResult(**defaults)
 
 

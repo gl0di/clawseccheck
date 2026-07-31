@@ -461,9 +461,27 @@ def _behavioral_cap_signal(behavioral_fired_ids) -> tuple[bool, str | None, int]
     convention as `_runtime_cap_signal`/`_live_injection_cap_signal`). *cap* is the
     TIGHTEST ceiling among whatever fired (see `_BEHAVIORAL_CAP_BY_ID`'s per-detector
     rationale above `BEHAVIORAL_SIGNAL_CAP`); it is only meaningful when *hit* is True.
+
+    B-386: *behavioral_fired_ids* is guarded against a bare string before the
+    `frozenset()` reduction. `compute()` is package-public/exported, so a caller
+    that passes ``behavioral_fired_ids="T1"`` instead of ``{"T1"}``/``frozenset({"T1"})``
+    would otherwise have it silently exploded character-by-character
+    (``frozenset("T1") == {"T", "1"}``), which never intersects
+    `_BEHAVIORAL_CAP_BY_ID`'s real ids — so the cap would silently fail to apply and the
+    reported grade would come out HIGHER than it should, the exact wrong direction for
+    a security tool. A single string is therefore treated as one id, not an iterable of
+    characters.
     """
-    fired = frozenset(behavioral_fired_ids) & _BEHAVIORAL_CAP_BY_ID.keys()
+    ids = frozenset(
+        [behavioral_fired_ids] if isinstance(behavioral_fired_ids, str)
+        else behavioral_fired_ids
+    )
+    fired = ids & _BEHAVIORAL_CAP_BY_ID.keys()
     if not fired:
+        # B-386: this `BEHAVIORAL_SIGNAL_CAP` is a placeholder with no observable effect —
+        # `compute()` only ever reads the `cap` element of this tuple when `hit` is True
+        # (see its own docstring above), so callers must not rely on this branch's value
+        # meaning anything.
         return False, None, BEHAVIORAL_SIGNAL_CAP
     cap = min(_BEHAVIORAL_CAP_BY_ID[i] for i in fired)
     reason = "; ".join(_BEHAVIORAL_LABELS[i] for i in sorted(fired))
@@ -800,7 +818,8 @@ def assessment_coverage(findings: list[Finding]) -> dict:
     }
 
 
-def project(findings: list[Finding], ctx=None) -> dict:
+def project(findings: list[Finding], ctx=None, *, live_test_vulnerable: bool = False,
+            live_test_reason: str | None = None, behavioral_fired_ids=frozenset()) -> dict:
     """What-if projection: estimate the score impact of fixing FAIL findings.
 
     *ctx* is optional (default ``None``, unchanged behaviour) and, when supplied, is
@@ -809,6 +828,15 @@ def project(findings: list[Finding], ctx=None) -> dict:
     caller already reported (B-013 self-contradiction discipline) — fixing a FAIL never
     un-proves a corroborated runtime observation, so the cap (if any) applies to every
     projected figure exactly like it applies to "current".
+
+    B-379: *live_test_vulnerable*/*live_test_reason*/*behavioral_fired_ids* are the
+    SAME F-154/F-155 cap-only signals `compute()` otherwise accepts — unlike the
+    runtime/config-blind/degraded caps above, these are NOT derivable from
+    ``(findings, ctx)`` alone (they come from external input: a `--judged-bundle` file
+    and a `behavioral.analyze(ctx)` run resolved by the caller). Left unthreaded, this
+    function's "current" figure could silently disagree with a capped top-level
+    score/grade for the same run — the caller MUST pass the identical values it used
+    for its own `compute()` call, or this projection will not reflect that cap.
 
     Returns a dict with three keys:
 
@@ -833,7 +861,13 @@ def project(findings: list[Finding], ctx=None) -> dict:
     ``dataclasses.replace``.  Projection is *estimated* — labeling is the
     renderer's responsibility.
     """
-    current_result = compute(findings, ctx)
+    # B-379: the same F-154/F-155 inputs for every compute() call below, so a cap
+    # active in "current" cannot silently vanish from top1/cumulative.
+    _cap_kwargs = dict(
+        live_test_vulnerable=live_test_vulnerable, live_test_reason=live_test_reason,
+        behavioral_fired_ids=behavioral_fired_ids,
+    )
+    current_result = compute(findings, ctx, **_cap_kwargs)
     current_score = current_result.score
     current_grade = current_result.grade
 
@@ -853,7 +887,7 @@ def project(findings: list[Finding], ctx=None) -> dict:
                 dc_replace(x, status=PASS) if x is f else x
                 for x in findings
             ]
-            proj = compute(modified, ctx)
+            proj = compute(modified, ctx, **_cap_kwargs)
             candidates.append((f, proj.score, proj.grade))
 
         def _rank(item: tuple) -> tuple:
@@ -882,7 +916,7 @@ def project(findings: list[Finding], ctx=None) -> dict:
             dc_replace(x, status=PASS) if id(x) in crit_high_oids else x
             for x in findings
         ]
-        cum_result = compute(modified_all, ctx)
+        cum_result = compute(modified_all, ctx, **_cap_kwargs)
         cumulative = {
             "projected_score": cum_result.score,
             "projected_grade": cum_result.grade,

@@ -352,19 +352,55 @@ def test_vet_source_stays_silent_when_iocdb_is_fresh():
     assert not any("days old" in e for e in f.evidence)
 
 
-def test_vet_source_surfaces_iocdb_staleness_notice(monkeypatch):
+def test_vet_source_evidence_never_carries_iocdb_staleness_notice(monkeypatch):
+    # B-385: date.today()-derived text must NEVER reach Finding.evidence, staleness or
+    # not -- it was moved to a renderer-only channel (cli.py's --vet-source branch).
+    # Even with the dataset forced stale, evidence stays untouched.
     monkeypatch.setattr(iocdb, "REVISION", "2020-01-01")
     f = vet_source("clawhub:my-totally-new-skill")
-    assert any("IOC dataset is" in e and "days old" in e for e in f.evidence)
-    assert any("no network call was made" in e for e in f.evidence)
+    assert not any("days old" in e for e in f.evidence)
+
+
+def test_vet_source_evidence_byte_identical_across_dates(monkeypatch):
+    # B-385 regression test (the ticket's own required test): freeze the dataset as
+    # maximally stale and confirm Finding.evidence for the SAME target is byte-identical
+    # regardless of "which day" the stale-ness would have been computed on -- i.e.
+    # evidence no longer depends on the clock at all. This must have failed before the
+    # fix (the old code embedded a live-clock-derived "N days old" line whenever stale).
+    monkeypatch.setattr(iocdb, "REVISION", "2020-01-01")
+    f1 = vet_source("clawhub:my-totally-new-skill")
+    f2 = vet_source("clawhub:my-totally-new-skill")
+    assert f1.evidence == f2.evidence
+    assert not any("days old" in e for e in f1.evidence)
 
 
 def test_vet_source_synthetic_catalog_never_gets_real_staleness_notice(monkeypatch):
     # A test-injected known_bad= catalog has no revision of its own -- the real
-    # dataset's (possibly stale) freshness notice must never leak onto it.
+    # dataset's (possibly stale) freshness notice must never leak onto it (still true
+    # now that the notice never enters evidence for ANY catalog).
     monkeypatch.setattr(iocdb, "REVISION", "2020-01-01")
     f = vet_source("npm:evil-agent-tool", known_bad=_BAD)
     assert not any("days old" in e for e in f.evidence)
+
+
+def test_vet_source_cli_still_surfaces_staleness_notice_on_stderr(monkeypatch, capsys):
+    # The staleness warning must still reach the user SOMEWHERE (not silently dropped) --
+    # just never inside the Finding/dossier/--json result payload. Printed to stderr by
+    # the --vet-source CLI branch, sourced directly from iocdb.freshness_notice().
+    monkeypatch.setattr(iocdb, "REVISION", "2020-01-01")
+    rc = main(["--vet-source", "clawhub:my-totally-new-skill", "--json"])
+    assert rc in (0, 1)
+    captured = capsys.readouterr()
+    assert "IOC dataset is" in captured.err and "days old" in captured.err
+    # And it must not have leaked into the --json result payload's evidence either.
+    assert "days old" not in captured.out
+
+
+def test_vet_source_cli_respects_no_freshness_notice_flag(monkeypatch, capsys):
+    monkeypatch.setattr(iocdb, "REVISION", "2020-01-01")
+    main(["--vet-source", "clawhub:my-totally-new-skill", "--json", "--no-freshness-notice"])
+    err = capsys.readouterr().err
+    assert "days old" not in err
 
 
 # --------------------------------------------------------------------------- #

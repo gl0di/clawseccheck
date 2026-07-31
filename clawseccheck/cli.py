@@ -42,6 +42,7 @@ from .monitor import (
 )
 from .update import update_notice
 from .ledger import freshness_notice as _compute_freshness, load_ledger, record_run
+from .iocdb import freshness_notice as _iocdb_freshness_notice
 from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
@@ -697,12 +698,17 @@ def _resolve_runtime_caps(ctx, findings, score, args):
     grade for the same run. Pure extraction of the pre-existing `--full` logic;
     behaviour is unchanged for that call site.
 
-    Returns `(score, full_deadline, judged_bundle, live_signal)`. `score` is the SAME
-    object passed in when neither cap fires, a freshly recomputed one otherwise
-    (mirrors `scoring.compute`'s own "never mutate, always return" contract).
-    `live_signal` is returned (not just consumed here) because the caller also uses
-    it afterwards to decide whether an unreproducible live-test verdict must be kept
-    OUT of history/trend/baseline (see the F-155 note at the history-record call).
+    Returns `(score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids)`.
+    `score` is the SAME object passed in when neither cap fires, a freshly recomputed
+    one otherwise (mirrors `scoring.compute`'s own "never mutate, always return"
+    contract). `live_signal` is returned (not just consumed here) because the caller
+    also uses it afterwards to decide whether an unreproducible live-test verdict must
+    be kept OUT of history/trend/baseline (see the F-155 note at the history-record
+    call). `behavioral_fired_ids` is returned too (B-379) so callers building a
+    "what-if" projection (`scoring.project`) over the same findings can thread the
+    IDENTICAL cap inputs through their own `compute()` calls — this function already
+    has them; re-deriving them a second time is what caused `scoring.project()`'s
+    "projection" block to silently disagree with the top-level capped score before.
 
     Known, deliberate scope limit carried over unchanged from the pre-F-153 code
     this replaces: this re-runs `behavioral.analyze(ctx)` a second time when the P8
@@ -758,7 +764,7 @@ def _resolve_runtime_caps(ctx, findings, score, args):
         score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
                         live_test_reason=live_signal.reason,
                         behavioral_fired_ids=behavioral_fired_ids)
-    return score, full_deadline, judged_bundle, live_signal
+    return score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids
 
 
 def _apply_live_test_cap(ctx, findings, score, args):
@@ -786,10 +792,17 @@ def _apply_live_test_cap(ctx, findings, score, args):
     this run must be excluded from history/the monitor baseline (an unseeded verdict
     still caps THIS run's displayed score, but must never be recorded — see the F-155
     note at `_resolve_runtime_caps`'s own history-record call site).
+
+    B-379: reads `args.judged_bundle` regardless of `args.full`. This helper exists
+    SPECIFICALLY to reach `--trend`/`--monitor`/`--percentile`/`--next`, none of which
+    require `--full` — gating the read on `args.full` (as an earlier version of this
+    function did) meant `--trend --judged-bundle X` (no `--full`) silently dropped the
+    bundle with no warning and recorded an UNCAPPED score, exactly the defect this
+    function was written to close.
     """
     judged_bundle = (
         _pipeline.read_judged_bundle(args.judged_bundle)
-        if (args.full and args.judged_bundle is not None) else None
+        if args.judged_bundle is not None else None
     )
     live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
     live_signal = _pipeline.live_test_cap_signal(live_test_bucket)
@@ -912,6 +925,10 @@ _MODE_HONORS = {
     # "full" (which would wrongly silence the still-true --full/--quiet/--fast notes).
     "trend": frozenset({"judged_bundle"}),
     "monitor": frozenset({"judged_bundle"}),
+    # B-379: --percentile/--next now resolve the liveTest cap the same way
+    # --trend/--monitor already did (see _apply_live_test_cap's call sites below).
+    "percentile": frozenset({"judged_bundle"}),
+    "next": frozenset({"judged_bundle"}),
 }
 
 # Primary modes that run AFTER the --attest block in main()'s cascade: their ctx and
@@ -1486,10 +1503,12 @@ def _main(argv=None) -> int:
     p.add_argument("--compact", action="store_true",
                    help="only with --dashboard --full: a condensed, ~4096-char "
                         "Telegram-safe layout of the combined pipeline report — headline "
-                        "counts only for Plugins/MCP/RISK chains, plus a pointer to "
-                        "--save/--html for the full detail (F-153; named --compact rather "
-                        "than the spec's suggested --card, which already means the "
-                        "shareable grade+score+trifecta badge above)")
+                        "counts only for Plugins/MCP/RISK chains, trimmed why-text/no "
+                        "evidence bullets for Findings and Worth-a-glance (nothing "
+                        "dropped, just condensed), plus a pointer to --save/--html for "
+                        "the full detail (F-153; named --compact rather than the spec's "
+                        "suggested --card, which already means the shareable "
+                        "grade+score+trifecta badge above)")
     p.add_argument("--dashboard-findings", action="store_true",
                    help="print only the framed Section-2 Findings block for the chat Dashboard "
                         "(FAIL/WARN, high-confidence, grouped by family) and exit")
@@ -1729,6 +1748,15 @@ def _main(argv=None) -> int:
         profile = build_profile(f, args.vet_source, "source")
         _src_rc = 1 if profile.overall_status in ("FAIL", "WARN") else 0
         _record_run("vet_source", args)
+        # B-385: the IOC dataset's own staleness advisory is renderer-only — it never
+        # enters `f`/`profile`/Finding.evidence (see checks/_vet.py's vet_source), so it
+        # cannot drift a fingerprint or make --json output change day to day. Printed to
+        # STDERR only: it is presentation metadata about the audit tool's own dataset,
+        # not part of either the human dossier's or --json's result payload. Reuses
+        # --no-freshness-notice — the same opt-out the config-age notice already uses.
+        if not args.no_freshness_notice and not os.environ.get("CLAWSECCHECK_NO_FRESHNESS_NOTICE"):
+            for _line in _iocdb_freshness_notice():
+                print(_line, file=sys.stderr)
         if args.json:
             _emit(render_vet_json(profile, mode="vet-source", version=__version__))
             return _src_rc
@@ -1796,7 +1824,13 @@ def _main(argv=None) -> int:
             _emit("No .clawseccheckignore entries found.")
         else:
             _emit(f"{len(ignore)} suppressed entry/entries in .clawseccheckignore:")
-            ctx, findings, _ = audit(args.home, include_native=False)
+            # B-379: match the real audit path's include_sockets, or B340's finding
+            # detail differs here from a normal run (ctx.sockets is None => a
+            # different "socket scan was not run" UNKNOWN text) — since
+            # fingerprint() hashes the detail, a suppression captured from a real run
+            # was silently never found here, and the reverse also held.
+            ctx, findings, _ = audit(args.home, include_native=False,
+                                     include_sockets=not args.no_sockets)
             suppressed = [f for f in findings if getattr(f, "suppressed", False)]
             # B-154: a bare "RISK-NN" entry matches a RiskPath.id, not any Finding —
             # surface those explicitly too, or --show-suppressed silently missed them.
@@ -1932,10 +1966,17 @@ def _main(argv=None) -> int:
         return 0
 
     if args.percentile:
+        # B-379: resolve the liveTest cap before ranking — previously this returned
+        # before any cap resolution ran at all, so a run --full would grade F was
+        # ranked against the recorded distribution as though it were an uncapped A.
+        score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
         _emit(render_percentile(score.score, ascii_only))
         return 0
 
     if args.next:
+        # B-379: same cap-resolution gap as --percentile above — suggested next actions
+        # should reflect the capped grade, not an uncapped one.
+        score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
         _emit(render_next_actions(suggest_actions(findings, score), ascii_only))
         return 0
 
@@ -1968,8 +2009,9 @@ def _main(argv=None) -> int:
         # _resolve_runtime_caps also applies here (not just to --full's own report/
         # --json branch below) so --dashboard --full shows the IDENTICAL F-154/F-155
         # capped grade a plain --full run of the same config would.
-        score, full_deadline, judged_bundle, _live_signal = _resolve_runtime_caps(
-            ctx, findings, score, args)
+        score, full_deadline, judged_bundle, _live_signal, _behavioral_fired_ids = (
+            _resolve_runtime_caps(ctx, findings, score, args)
+        )
         sweep_home = Path(args.home).expanduser()
         plugin_sweep = None
         if not args.fast:
@@ -2095,7 +2137,13 @@ def _main(argv=None) -> int:
         # next run re-detects the same drift and journals it a second time. A duplicated
         # line in the timeline is strictly recoverable; a missing one is not, and the
         # duplicate only follows a failure that is now loud and non-zero anyway.
-        journal_err = record_events(alerts, args.events)
+        # B-379: gate the journal write behind the SAME F-155 seed-gate that already
+        # guards save_state/history_record below — this write used to run
+        # unconditionally, so an unseeded VULNERABLE verdict re-journaled the identical
+        # "score dropped" alert on every single run forever (the baseline never
+        # advances, so nothing ever consumes it), which is exactly the manufactured-
+        # drift failure mode the seed gate exists to prevent.
+        journal_err = record_events(alerts, args.events) if not _skip_live_test_persist else None
         state_err = None
         # F-155: an unseeded VULNERABLE verdict must never be recorded, so the baseline
         # advance is skipped exactly like a write failure would skip it — except this is
@@ -2111,7 +2159,8 @@ def _main(argv=None) -> int:
         _emit(render_monitor(alerts, score, ascii_only,
                              baseline=base_status == BASELINE_ABSENT,
                              persisted=persisted,
-                             baseline_corrupt=base_status == BASELINE_CORRUPT))
+                             baseline_corrupt=base_status == BASELINE_CORRUPT,
+                             live_test_skipped=_skip_live_test_persist))
         # --monitor records a score-history point as part of tracking drift, even under
         # --no-history; the conflict is surfaced as a stderr note (B-066), not silently
         # honored, to keep monitor's drift baseline intact. Recorded even on the failure
@@ -2147,16 +2196,17 @@ def _main(argv=None) -> int:
     # one (never mutated in place) otherwise — see its own docstring for the F-154/
     # F-155 detail this used to carry inline.
     #
-    # Known, deliberate scope limit: `render_json`'s "projection" (what-if FIX FIRST)
-    # sub-block calls `scoring.project` -> `scoring.compute` a second time over
-    # (findings, ctx) alone, with no live-test signal threaded through — unlike the three
-    # earlier cap-only signals (config-blind/degraded/runtime), which are fully derivable
-    # from (findings, ctx) alone and so already agree with `score` for free, this one
-    # needs external input `project()`'s call site does not have. Left unaddressed here
-    # rather than widening `render_json`/`project`'s signatures for a projection feature
-    # this task does not otherwise touch.
-    score, full_deadline, judged_bundle, live_signal = _resolve_runtime_caps(
-        ctx, findings, score, args)
+    # B-379: `render_json`'s "projection" (what-if FIX FIRST) sub-block used to call
+    # `scoring.project` -> `scoring.compute` a second time over (findings, ctx) ALONE,
+    # with no live-test/behavioral signal threaded through — unlike the three earlier
+    # cap-only signals (config-blind/degraded/runtime), which are fully derivable from
+    # (findings, ctx) alone and so already agreed with `score` for free, F-154/F-155
+    # need the external input resolved right here. Now threaded through explicitly
+    # (see the `render_json` call below) so `payload["projection"]["current"]` can
+    # never disagree with `payload["score"]`/`payload["grade"]` for the same run.
+    score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids = (
+        _resolve_runtime_caps(ctx, findings, score, args)
+    )
     if args.json:
         # F-149 JSON gap: --full's printed SKILL SWEEP section had no machine-readable
         # counterpart — the whole self-test/vet-mcp/sweep block below is skipped
@@ -2194,7 +2244,10 @@ def _main(argv=None) -> int:
             pipeline_has_fail = full_pipeline.has_fail
             if not args.fast:
                 _record_run("behavioral", args)
-        body = render_json(findings, score, risk=paths, ctx=ctx, skill_sweep=full_sweep_json)
+        body = render_json(findings, score, risk=paths, ctx=ctx, skill_sweep=full_sweep_json,
+                           live_test_vulnerable=live_signal.hit,
+                           live_test_reason=live_signal.reason,
+                           behavioral_fired_ids=behavioral_fired_ids)
         if full_pipeline is not None:
             # Additive merge, done here rather than by widening render_json's signature:
             # these keys belong to the pipeline, not to the audit payload, and every

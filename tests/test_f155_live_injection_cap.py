@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from clawseccheck.catalog import CRITICAL, FAIL, LOW, PASS, Finding
 from clawseccheck.cli import main
 from clawseccheck.history import load as history_load
@@ -131,8 +133,16 @@ class TestLiveInjectionCapScoring:
 # ── report.py rendering ───────────────────────────────────────────────────────
 
 def _score(**kw) -> ScoreResult:
+    """Build a ScoreResult for rendering tests.
+
+    CLAWSECCHECK-B-380: `capped` is DERIVED as ``score != raw_score``, never a free
+    default — `compute()` (scoring.py) always sets `capped` that way, so a helper that
+    defaults `capped=False` while a caller separately overrides `score`/`raw_score` to
+    differ can construct a ScoreResult `compute()` could never actually produce. Pass
+    `capped=` explicitly only for a deliberately-synthetic case.
+    """
     defaults = dict(
-        score=79, grade="C", capped=False, raw_score=79,
+        score=79, grade="C", raw_score=79,
         failed_critical=0, failed_high=0, failed_medium=0, failed_low=0,
         assessable=True, cap_severity=None,
         runtime_capped=False, runtime_cap_reason=None,
@@ -140,6 +150,7 @@ def _score(**kw) -> ScoreResult:
         live_injection_capped=False, live_injection_cap_reason=None,
     )
     defaults.update(kw)
+    defaults.setdefault("capped", defaults["score"] != defaults["raw_score"])
     return ScoreResult(**defaults)
 
 
@@ -250,6 +261,29 @@ class TestLiveTestCapSignal:
         bucket = {"verdicts": [
             {"tool": "canary", "id": "'; DROP TABLE --", "verdict": "VULNERABLE"}]}
         assert pl.live_test_cap_signal(bucket).hit is False
+
+    def test_id_with_trailing_newline_dropped_not_injected_into_reason(self):
+        # B-386 regression: `_LIVE_TEST_ID_RE` is anchored with `^...$`, and Python's
+        # `$` matches BEFORE a trailing "\n" under `.match()` (not `.fullmatch()`), so
+        # an id like "PI-01\n" used to pass this "narrow shape, never free text" gate
+        # and ride LiveTestSignal.reason (an untrusted, agent-under-test-controlled
+        # field) straight into report.py's single-line grade-cap banner, splitting it
+        # across two lines. The id must be dropped entirely -- not merely stripped.
+        bucket = {"verdicts": [
+            {"tool": "canary", "id": "PI-01\n", "verdict": "VULNERABLE"}]}
+        sig = pl.live_test_cap_signal(bucket)
+        assert sig.hit is False
+        assert sig.reason is None
+
+    def test_reason_never_contains_a_newline_or_carriage_return(self):
+        # Defense-in-depth companion to the id-anchoring fix above: even a hit's
+        # reason is routed through _sanitize() before being returned.
+        bucket = {"verdicts": [
+            {"tool": "redteam", "id": "PI-01", "verdict": "VULNERABLE"}]}
+        sig = pl.live_test_cap_signal(bucket)
+        assert sig.hit is True
+        assert "\n" not in sig.reason
+        assert "\r" not in sig.reason
 
     def test_oversized_id_dropped(self):
         bucket = {"verdicts": [{"tool": "canary", "id": "A" * 200, "verdict": "VULNERABLE"}]}
@@ -595,3 +629,146 @@ class TestTrendMonitorReachC135:
         assert len(rows) == 1
         assert rows[0]["score"] == 98
         assert rows[0]["grade"] == "A"
+
+
+class TestB379CapReachesRemainingDispatchPaths:
+    """B-379: five dispatch paths bypassed or misreported the F-154/F-155 runtime caps
+    that --full/--dashboard --full already correctly apply. TestTrendMonitorReachC135
+    above already pins --trend/--monitor WITH --full; these tests cover the parts that
+    were still broken: --trend/--monitor WITHOUT --full (item 1's actual defect —
+    _apply_live_test_cap's own bundle read was gated on args.full), --percentile/--next
+    (item 2), --full --json's projection block (item 3), --show-suppressed (item 4),
+    and --monitor's unseeded-verdict journal/persisted handling (item 5).
+    """
+
+    def _seeded_bundle(self, tmp_path: Path) -> str:
+        return _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
+            {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
+
+    def _unseeded_bundle(self, tmp_path: Path) -> str:
+        return _bundle_file(tmp_path, {"liveTest": {"verdicts": [
+            {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
+
+    def test_trend_without_full_still_honors_judged_bundle(self, tmp_path, capsys):
+        # Item 1's actual defect: _apply_live_test_cap's own internal bundle read used
+        # to require args.full — so --trend WITHOUT --full silently dropped the bundle
+        # and recorded an uncapped score, even though _MODE_HONORS["trend"] already
+        # declared judged_bundle honored regardless of --full.
+        bundle = self._seeded_bundle(tmp_path)
+        hist = tmp_path / "history.jsonl"
+        rc = main(["--home", SAFE, "--no-native", "--no-sockets", "--trend", "--ascii",
+                   "--judged-bundle", bundle, "--history", str(hist)])
+        assert rc == 0
+        rows = history_load(str(hist))
+        assert len(rows) == 1
+        assert rows[0]["grade"] == "F"
+
+    def test_monitor_without_full_still_honors_judged_bundle(self, tmp_path, capsys):
+        bundle = self._seeded_bundle(tmp_path)
+        state = tmp_path / "state.json"
+        events = tmp_path / "events.jsonl"
+        rc = main(["--home", SAFE, "--no-native", "--no-sockets", "--monitor", "--ascii",
+                   "--judged-bundle", bundle, "--state", str(state),
+                   "--events", str(events)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Grade: F" in out
+
+    def test_percentile_reflects_the_capped_score(self, tmp_path, capsys):
+        bundle = self._seeded_bundle(tmp_path)
+        hist = tmp_path / "history.jsonl"
+        # Seed a reference distribution wide enough that an uncapped (98/A) vs. a
+        # capped (49/F) run rank differently against it.
+        for _ in range(3):
+            main(["--home", SAFE, "--no-native", "--no-sockets", "--trend",
+                  "--history", str(hist)])
+            capsys.readouterr()
+
+        rc = main(["--home", SAFE, "--no-native", "--no-sockets", "--percentile",
+                   "--judged-bundle", bundle, "--history", str(hist)])
+        assert rc == 0
+        capped_out = capsys.readouterr().out
+
+        rc2 = main(["--home", SAFE, "--no-native", "--no-sockets", "--percentile",
+                    "--history", str(hist)])
+        assert rc2 == 0
+        uncapped_out = capsys.readouterr().out
+
+        # The capped (F-grade) run must not be reported as ranking the same as the
+        # uncapped (A-grade) run — this is the real regression B-379 item 2 guards:
+        # --percentile used to return before any cap resolution ran at all.
+        assert capped_out != uncapped_out
+
+    def test_next_actions_reflects_the_capped_score(self, tmp_path, capsys):
+        bundle = self._seeded_bundle(tmp_path)
+        rc = main(["--home", SAFE, "--no-native", "--no-sockets", "--next",
+                   "--judged-bundle", bundle])
+        assert rc == 0
+        # Must not raise / must produce SOME output — the real regression this guards
+        # is a silent uncapped score reaching suggest_actions(), which no single
+        # assertion on --next's prose can directly observe; the cap-application itself
+        # is what test_trend_without_full_still_honors_judged_bundle already proves for
+        # the shared _apply_live_test_cap helper --next now also calls.
+        assert capsys.readouterr().out
+
+    def test_full_json_projection_current_matches_top_level_score(self, tmp_path, capsys):
+        # Item 3: scoring.project()'s "current" figure used to be computed by a SECOND
+        # compute() call with no live-test/behavioral signal threaded through, so a
+        # capped run's projection.current could silently disagree with payload.score.
+        bundle = self._seeded_bundle(tmp_path)
+        rc = main(["--home", SAFE, "--no-native", "--no-sockets", "--full", "--json",
+                   "--judged-bundle", bundle])
+        assert rc in (0, 1)
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["score"] == payload["projection"]["current"]["score"]
+        assert payload["grade"] == payload["projection"]["current"]["grade"]
+
+    def test_show_suppressed_finds_a_fingerprint_from_a_normal_run(self, tmp_path):
+        # Item 4: --show-suppressed omitted include_sockets, so B340's finding detail
+        # (and therefore its fingerprint) differed from a normal run's — a suppression
+        # captured from a real run was silently "not found" here.
+        import shutil
+
+        from clawseccheck import audit
+        from clawseccheck.baseline import fingerprint
+
+        home = tmp_path / "home"
+        shutil.copytree(SAFE, home)
+        _, findings, _ = audit(str(home), include_native=False, include_sockets=True)
+        target = next((f for f in findings if f.status in ("FAIL", "WARN")), None)
+        if target is None:
+            pytest.skip("home_safe carries no FAIL/WARN finding to suppress in this env")
+        fp = fingerprint(target)
+        (home / ".clawseccheckignore").write_text(fp + "\n", encoding="utf-8")
+        rc = main(["--home", str(home), "--no-native", "--show-suppressed"])
+        assert rc == 0
+
+    def test_monitor_unseeded_verdict_journals_at_most_once_across_repeated_runs(
+        self, tmp_path, capsys
+    ):
+        # Item 5: record_events used to run BEFORE the seed gate, so an unseeded
+        # VULNERABLE verdict re-journaled the identical alert on every single run
+        # forever (the baseline never advances, so nothing ever consumes it).
+        bundle = self._unseeded_bundle(tmp_path)
+        state = tmp_path / "state.json"
+        events = tmp_path / "events.jsonl"
+        for _ in range(3):
+            main(["--home", SAFE, "--no-native", "--no-sockets", "--monitor", "--ascii",
+                  "--judged-bundle", bundle, "--state", str(state),
+                  "--events", str(events)])
+            capsys.readouterr()
+        assert not events.exists() or len(events.read_text().splitlines()) <= 1
+
+    def test_monitor_unseeded_verdict_explains_why_it_was_not_persisted(
+        self, tmp_path, capsys
+    ):
+        bundle = self._unseeded_bundle(tmp_path)
+        state = tmp_path / "state.json"
+        events = tmp_path / "events.jsonl"
+        rc = main(["--home", SAFE, "--no-native", "--no-sockets", "--monitor", "--ascii",
+                   "--judged-bundle", bundle, "--state", str(state),
+                   "--events", str(events)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Not persisted" in out
+        assert not state.exists()

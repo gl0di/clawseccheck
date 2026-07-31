@@ -53,7 +53,6 @@ from ..textnorm import (
     normalize_for_scan,
 )
 from ..iocdb import (
-    freshness_notice as _iocdb_freshness_notice,
     known_bad_sources as _iocdb_known_bad_sources,
 )
 
@@ -4547,13 +4546,15 @@ def vet_source(
         + (f" · kind≈{info['kind']}" if info.get("kind") else "")
         + (f" · version={info['version']}" if info.get("version") else " · version=unpinned")
     ]
-    # Fold the shipped IOC dataset's own freshness advisory into this gate's evidence
-    # trail -- ONLY when the caller is using the real, shipped catalog (not a synthetic
-    # known_bad= injected by a test), since a synthetic catalog carries no revision
-    # date of its own. Contributes zero lines while the dataset is current (see
-    # ..iocdb.STALE_AFTER_DAYS); never affects the verdict.
-    if known_bad is None:
-        notes.extend(_iocdb_freshness_notice())
+    # B-385: the IOC dataset's own freshness advisory used to be folded into `notes`
+    # (-> Finding.evidence) here. Removed -- date.today()-derived text has NO business
+    # in Finding.evidence/detail: it changes daily once the dataset crosses
+    # ..iocdb.STALE_AFTER_DAYS (2026-10-31 for the shipped dataset), making vet output
+    # non-reproducible across days and drifting tests/finding_fingerprint_manifest.txt's
+    # hashes with zero code change. Staleness is PRESENTATION, not evidence about the
+    # vetted subject -- callers now read it via ..iocdb.freshness_notice() directly and
+    # surface it through a renderer-only channel (see cli.py's --vet-source branch),
+    # never through this Finding.
 
     # 1. Known-bad IOC — exact ecosystem+name match (a bare registry name is checked
     #    against every ecosystem, mirroring OpenClaw's bare-spec resolution order).
