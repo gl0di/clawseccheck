@@ -77,6 +77,48 @@ def test_b43_real_session_toolset_warns():
     assert any("EXEC" in e for e in f.evidence)
 
 
+# --------------------------------------------------------------- C-339 COMMERCE
+def test_classify_commerce_is_high_blast():
+    # ESET H1 2026 "Credit Claw" shape: a verb that spends the user's money.
+    for v in ("create_order", "place_order", "submit_order", "complete_purchase",
+              "checkout", "charge_card", "process_payment", "capture_payment",
+              "make_payment", "pay_invoice", "purchase_item"):
+        assert attest.classify_verb(v) == "COMMERCE", v
+    assert "COMMERCE" in attest.HIGH_BLAST_CLASSES
+
+
+def test_commerce_hints_do_not_false_positive_on_benign_reads():
+    # Compound commerce verbs must not catch plausible read-shaped collisions.
+    for v in ("get_order_status", "list_orders", "sort_order", "reorder",
+              "order_by", "search_products", "display_order"):
+        assert attest.classify_verb(v) != "COMMERCE", v
+
+
+def test_b43_flags_a_lone_commerce_tool():
+    warn = check_capability_blast_radius(_ctx(attestation={"tools": ["create_order"]}))
+    assert warn.status == WARN and any("COMMERCE" in e for e in warn.evidence)
+    # B-315: ATTESTED/unscored — ungated escalation stays WARN, never FAIL.
+    ungated = check_capability_blast_radius(_ctx(attestation={
+        "tools": ["create_order"], "untrusted_to_action": "ungated"}))
+    assert ungated.status == WARN
+
+
+def test_b44_warn_undisclosed_commerce():
+    # config grants a purchase verb the agent omitted from its self-report
+    cfg = {"tools": {"allow": ["search_products", "create_order"]}}
+    att = {"tools": ["search_products"]}
+    f = check_attestation_mismatch(_ctx(config=cfg, attestation=att))
+    assert f.status == WARN
+    assert any("create_order" in e for e in f.evidence)
+
+
+def test_b44_pass_commerce_acknowledged():
+    cfg = {"tools": {"allow": ["search_products", "create_order"]}}
+    att = {"tools": ["search_products", "create_order"]}
+    f = check_attestation_mismatch(_ctx(config=cfg, attestation=att))
+    assert f.status == PASS
+
+
 def test_classify_reversible():
     for v in ("search_threads", "get_thread", "create_draft", "label_message",
               "list_labels", "archive_thread"):

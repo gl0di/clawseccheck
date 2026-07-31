@@ -63,6 +63,17 @@ _VERB_CLASSES = (
         "purge", "destroy", "expunge", "hard_delete", "drop_table", "drop_database",
         "wipe", "shred", "truncate",
     )),
+    # COMMERCE (C-339, ESET H1 2026 "Credit Claw" shape): a verb that spends the
+    # user's money — direct access, and the loss is irreversible the way a leaked
+    # file is not. Kept high-precision on purpose, same discipline as EXEC above: a
+    # bare "pay"/"buy"/"order" would FP on unrelated reads (get_order_status,
+    # list_orders, sort_order, reorder) — only compound verb forms that spell out an
+    # actual money-moving action land here.
+    ("COMMERCE", (
+        "create_order", "place_order", "submit_order", "complete_purchase",
+        "checkout", "charge_card", "process_payment", "capture_payment",
+        "make_payment", "pay_invoice", "purchase_item",
+    )),
     ("EGRESS", (
         "send", "forward", "reply", "post", "publish", "webhook", "http_post",
         "upload", "email_send", "share", "tweet", "broadcast", "dispatch",
@@ -126,9 +137,9 @@ def normalize_verb(name) -> str:
 def classify_verb(name: str) -> str:
     """Map one tool/verb name to a blast-radius class.
 
-    Returns one of MAILBOX_CONFIG, DESTRUCTIVE, EGRESS, REVERSIBLE, or UNKNOWN.
-    Classification runs on the normalized verb (namespace stripped) so a provider
-    name can never decide the class.
+    Returns one of EXEC, MAILBOX_CONFIG, DESTRUCTIVE, COMMERCE, EGRESS, REVERSIBLE,
+    or UNKNOWN. Classification runs on the normalized verb (namespace stripped) so a
+    provider name can never decide the class.
     """
     n = normalize_verb(name)
     for cls, hints in _VERB_CLASSES:
@@ -139,7 +150,7 @@ def classify_verb(name: str) -> str:
     return "UNKNOWN"
 
 
-HIGH_BLAST_CLASSES = ("EXEC", "MAILBOX_CONFIG", "DESTRUCTIVE", "EGRESS")
+HIGH_BLAST_CLASSES = ("EXEC", "MAILBOX_CONFIG", "DESTRUCTIVE", "COMMERCE", "EGRESS")
 
 
 def classify_tools(tools) -> dict:
