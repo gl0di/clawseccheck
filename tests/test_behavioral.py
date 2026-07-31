@@ -25,8 +25,16 @@ from clawseccheck.collector import Context
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
-def _ctx(home: Path) -> Context:
-    return Context(home=home)
+def _ctx(home: Path, config: dict | None = None) -> Context:
+    return Context(home=home, config=config or {})
+
+
+# F-154 round 2: the channel-scoped discriminator group/channel origin now needs (see
+# behavioral._group_untrusted_origin_channels) — a config whose named channel's
+# groupPolicy is genuinely non-owner-reachable. Used by the tests below that assert a
+# group/channel-origin message STILL correctly arms T1 when that evidence is present.
+def _open_group_policy_config(channel: str) -> dict:
+    return {"channels": {channel: {"groupPolicy": "open"}}}
 
 
 # ---------------------------------------------------------------------------
@@ -651,25 +659,54 @@ def _tool(seq, name, thread="th1", origin="group", channel="telegram"):
 
 def test_t1_warns_on_channel_delivered_message_then_sensitive_then_egress():
     """The defect, directly: no ingress VERB runs anywhere in this thread, yet the
-    canonical poisoned-message -> read-secret -> exfil sequence is present."""
+    canonical poisoned-message -> read-secret -> exfil sequence is present.
+
+    F-154 round 2: origin kind alone is no longer sufficient — this is the
+    genuinely-externally-exposed case (the channel's own groupPolicy is 'open'), so it
+    must still arm. See test_t1_does_not_arm_group_origin_without_untrusted_channel_
+    policy below for the owner-only-group counterpart that must NOT arm."""
     groups = {"th1": [
         _prompt(1, "group", "telegram"),
         _tool(2, "read_credential_file"),
         _tool(3, "send_message"),
     ]}
-    f = check_behavioral_trifecta(groups)
+    f = check_behavioral_trifecta(groups, untrusted_origin_channels=frozenset({"telegram"}))
     assert f.status == WARN
     # the finding must say the ingress leg was a channel message, not "an ingress verb"
     assert "external group message" in f.evidence[0]
 
 
 def test_t1_warns_on_broadcast_channel_origin():
+    """F-154 round 2: 'discord' is genuinely open (channel-policy evidence supplied)."""
     groups = {"th1": [
         _prompt(1, "channel", "discord"),
         _tool(2, "vault_get_secret", origin="channel", channel="discord"),
         _tool(3, "send_message", origin="channel", channel="discord"),
     ]}
-    assert check_behavioral_trifecta(groups).status == WARN
+    assert check_behavioral_trifecta(
+        groups, untrusted_origin_channels=frozenset({"discord"})
+    ).status == WARN
+
+
+def test_t1_does_not_arm_group_origin_without_untrusted_channel_policy():
+    """F-154 round 2 (C-135 finding) — THE FIX, directly: the identical group-origin +
+    sensitive + egress sequence as the WARN test above, but with NO evidence that
+    'telegram' is a genuinely non-owner-reachable channel (the default empty
+    untrusted_origin_channels). This is the owner-in-his-own-private-bot-group shape
+    the C-135 finding named — an everyday devops/coding-agent turn, not an externally-
+    exposed surface — and must stay PASS, mirroring the non-arming discipline `direct`
+    origin already gets (see the module docstring above _classify_event_role)."""
+    groups = {"th1": [
+        _prompt(1, "group", "telegram"),
+        _tool(2, "read_credential_file"),
+        _tool(3, "send_message"),
+    ]}
+    assert check_behavioral_trifecta(groups).status == PASS
+    # Explicitly supplying a set that does NOT include this event's channel must behave
+    # identically to supplying none at all.
+    assert check_behavioral_trifecta(
+        groups, untrusted_origin_channels=frozenset({"discord"})
+    ).status == PASS
 
 
 def test_t1_does_not_arm_on_owner_or_unknown_origins():
@@ -755,7 +792,11 @@ def test_t1_verb_role_wins_over_channel_origin():
 
 def test_t1_channel_finding_never_emits_a_peer_id(tmp_path):
     """§8 end-to-end through the real reader: a group session key embedding a peer id
-    fires T1, and neither the id nor the raw key appears anywhere in the output."""
+    fires T1, and neither the id nor the raw key appears anywhere in the output.
+
+    F-154 round 2: the config supplies 'telegram' as a genuinely open group channel —
+    without it this is exactly the owner-only-group shape that must NOT arm (see
+    test_t1_does_not_arm_group_origin_without_untrusted_channel_policy)."""
     import json
 
     peer = "3076" + "15315"
@@ -776,11 +817,12 @@ def test_t1_channel_finding_never_emits_a_peer_id(tmp_path):
         + line(3, "tool.call", "send_message"),
         encoding="utf-8",
     )
-    r = analyze(_ctx(tmp_path))
+    cfg = _open_group_policy_config("telegram")
+    r = analyze(_ctx(tmp_path, cfg))
     t1 = next(f for f in r["findings"] if f.id == "T1")
     assert t1.status == WARN
     blob = " ".join([t1.detail, t1.fix, *t1.evidence,
-                     render_behavioral_analysis(_ctx(tmp_path), ascii_only=True)])
+                     render_behavioral_analysis(_ctx(tmp_path, cfg), ascii_only=True)])
     assert peer not in blob
     assert key not in blob
     assert "external group message" in blob
@@ -788,10 +830,21 @@ def test_t1_channel_finding_never_emits_a_peer_id(tmp_path):
 
 def test_traj_channel_group_ingress_fixture_warns():
     """Bad fixture: a group-origin channel message opens the chain, with NO ingress verb
-    anywhere in the thread."""
-    r = analyze(_ctx(FIXTURES / "traj_channel_group_ingress"))
+    anywhere in the thread. F-154 round 2: 'telegram' is supplied as genuinely open —
+    the fixture's own sessionKey channel is 'telegram' (agent:main:telegram:group:...)."""
+    r = analyze(_ctx(FIXTURES / "traj_channel_group_ingress", _open_group_policy_config("telegram")))
     t1 = next(f for f in r["findings"] if f.id == "T1")
     assert t1.status == WARN
+
+
+def test_traj_channel_group_ingress_fixture_does_not_warn_without_open_policy():
+    """F-154 round 2 (C-135 finding): the SAME fixture as above, replayed with no
+    channel-policy evidence at all (analyze()'s real default) — this is the shape a
+    plain `--behavioral`/`--full` run hits on an owner-only private bot group, and it
+    must NOT arm T1."""
+    r = analyze(_ctx(FIXTURES / "traj_channel_group_ingress"))
+    t1 = next(f for f in r["findings"] if f.id == "T1")
+    assert t1.status == PASS
 
 
 def test_traj_channel_owner_clean_fixture_silent():

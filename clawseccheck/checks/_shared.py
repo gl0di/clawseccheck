@@ -662,6 +662,7 @@ def _finding(
     severity=None,
     scored=None,
     not_applicable=False,
+    sub_signals=None,
 ) -> Finding:
     """*scored*: per-finding override of CheckMeta.scored, same shape as *severity*.
 
@@ -677,6 +678,9 @@ def _finding(
 
     *not_applicable* (F-138/B1): per-branch, same shape as *scored* — see
     Finding.not_applicable. Defaults False; every existing caller is unaffected.
+
+    *sub_signals* (F-154 round 2): per-branch, same shape — see Finding.sub_signals.
+    Defaults to an empty frozenset when omitted; every existing caller is unaffected.
     """
     m = _meta(cid)
     return Finding(
@@ -692,6 +696,7 @@ def _finding(
         confidence=confidence or m.confidence,
         pass_confidence=pass_confidence,
         not_applicable=not_applicable,
+        sub_signals=frozenset(sub_signals) if sub_signals else frozenset(),
     )
 
 

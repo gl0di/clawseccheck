@@ -20,18 +20,35 @@ Covers, per the task's own test plan:
     `--full --fast` one, never run the analysis and therefore never cap, regardless of
     what the trajectory sidecar actually contains.
 
+Also covers the two C-135 round-2 review findings and their fixes (TestFinding1GroupChannel
+Corroboration, TestFinding2B191SubSignalSplit, plus their CLI end-to-end counterparts in
+TestCliEndToEnd):
+  - Finding 1 (HIGH): T1's group/channel ingress leg armed on origin kind alone, with no
+    way to tell an owner-only private bot group apart from a genuinely stranger-exposed
+    one. Fixed by requiring the channel's own config groupPolicy to be non-owner-reachable.
+  - Finding 2 (MEDIUM): B191 folded three sub-signals into one WARN, so grade_cap_signal
+    could not avoid capping on bare "divergence" alone — near-certain-benign background
+    noise per the check's own docstring. Fixed via Finding.sub_signals.
+
 Offline, deterministic, no network. Uses the shipped fixtures only.
 """
 from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 from pathlib import Path
 
-from clawseccheck.behavioral import BEHAVIORAL_CHECK_IDS, analyze, grade_cap_signal
+from clawseccheck.behavioral import (
+    BEHAVIORAL_CHECK_IDS,
+    analyze,
+    check_behavioral_trifecta,
+    grade_cap_signal,
+    group_events_by_thread,
+)
 from clawseccheck.catalog import CRITICAL, FAIL, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
 from clawseccheck.cli import main
-from clawseccheck.collector import collect
+from clawseccheck.collector import Context, collect
 from clawseccheck.report import render_html, render_json, render_report
 from clawseccheck.scoring import BEHAVIORAL_SIGNAL_CAP, ScoreResult, _behavioral_cap_signal, compute
 
@@ -224,6 +241,152 @@ class TestBehavioralGradeCapSignal:
         assert fired == frozenset()
 
 
+# ── F-154 round 2 (C-135 review, both findings) ──────────────────────────────
+#
+# Finding 1 (HIGH): T1's group/channel ingress leg armed unconditionally on origin
+# kind alone, with no way to tell an owner-only private bot group apart from a
+# genuinely stranger-exposed one — the exact ambiguity already reasoned through for
+# direct/DM origin, never extended to group/channel. Fixed in behavioral.py by
+# requiring the channel's OWN config groupPolicy to be non-owner-reachable
+# (`_group_untrusted_origin_channels`) before a group/channel-origin message arms.
+#
+# Finding 2 (MEDIUM, very common): B191 folded three sub-signals into one WARN, so
+# grade_cap_signal could not tell "only bare divergence fired" (near-certain-benign
+# per the check's own docstring) apart from a genuinely strong signal (blocked/
+# evasive), permanently ceilinging any long-lived, healthy install at B. Fixed via
+# `Finding.sub_signals` + `_B191_STRONG_SUB_SIGNALS` in behavioral.grade_cap_signal.
+# ---------------------------------------------------------------------------------
+
+
+def _owner_only_group_repro() -> dict:
+    """The EXACT C-135 repro (reviewer's comment on this task): an owner-only private
+    bot group — prompt.submitted origin=group, then a sensitive-hint tool call, then a
+    bash/exec call, single thread. An everyday devops/coding-agent turn, not an
+    externally-exposed surface."""
+    return group_events_by_thread([
+        {"type": "prompt.submitted", "name": None, "seq": 1, "ts": "1",
+         "sessionId": "s1", "threadId": "th1", "origin": "group",
+         "originChannel": "telegram"},
+        {"type": "tool.call", "name": "check_vault_credential_status", "seq": 2, "ts": "2",
+         "sessionId": "s1", "threadId": "th1", "origin": "group", "originChannel": "telegram"},
+        {"type": "tool.call", "name": "bash", "seq": 3, "ts": "3",
+         "sessionId": "s1", "threadId": "th1", "origin": "group", "originChannel": "telegram"},
+    ])
+
+
+class TestFinding1GroupChannelCorroboration:
+    """Finding 1's own repro, at the check/grade_cap_signal layer (no CLI needed —
+    the CLI end-to-end equivalents live in TestCliEndToEnd below)."""
+
+    def test_owner_only_group_repro_does_not_arm_t1(self):
+        groups = _owner_only_group_repro()
+        f = check_behavioral_trifecta(groups)  # no channel-policy evidence supplied
+        assert f.status == PASS
+
+    def test_owner_only_group_repro_does_not_reach_grade_cap_signal(self):
+        groups = _owner_only_group_repro()
+        result = {"findings": [check_behavioral_trifecta(groups)]}
+        assert grade_cap_signal(result) == frozenset()
+
+    def test_owner_only_group_repro_end_to_end_via_analyze(self, tmp_path):
+        """Same repro through the real `analyze()` entry point — `ctx.config` carries
+        NO untrusted groupPolicy for 'telegram' (the common, unconfigured/owner-only
+        shape), so T1 must stay PASS and cap-eligible fired set stays empty."""
+        home = tmp_path / "openclaw"
+        d = home / "agents" / "main" / "sessions"
+        d.mkdir(parents=True)
+        rec_lines = [
+            json.dumps({
+                "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                "type": "prompt.submitted", "ts": "1", "seq": 1, "sessionId": "s1",
+                "sessionKey": "agent:main:telegram:group:555000111",
+                "data": {"threadId": "th1", "turnId": "th1"},
+            }),
+            json.dumps({
+                "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                "type": "tool.call", "ts": "2", "seq": 2, "sessionId": "s1",
+                "sessionKey": "agent:main:telegram:group:555000111",
+                "data": {"name": "check_vault_credential_status", "threadId": "th1", "turnId": "th1"},
+            }),
+            json.dumps({
+                "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                "type": "tool.call", "ts": "3", "seq": 3, "sessionId": "s1",
+                "sessionKey": "agent:main:telegram:group:555000111",
+                "data": {"name": "bash", "threadId": "th1", "turnId": "th1"},
+            }),
+        ]
+        (d / "s.trajectory.jsonl").write_text("\n".join(rec_lines) + "\n", encoding="utf-8")
+        # No channels config at all -- the common unconfigured/owner-only shape.
+        ctx = Context(home=home, config={})
+        result = analyze(ctx)
+        t1 = next(f for f in result["findings"] if f.id == "T1")
+        assert t1.status == PASS
+        assert grade_cap_signal(result) == frozenset()
+
+    def test_genuinely_open_group_repro_still_arms_t1_and_reaches_grade_cap_signal(self):
+        """The counterpart the task's own test plan asks for: with an available
+        discriminator showing this channel's group surface IS non-owner-reachable
+        (groupPolicy='open'), the identical sequence must still fire -- T1's real
+        detection target (a genuinely stranger-exposed group) is preserved."""
+        groups = _owner_only_group_repro()
+        f = check_behavioral_trifecta(groups, untrusted_origin_channels=frozenset({"telegram"}))
+        assert f.status == WARN
+        result = {"findings": [f]}
+        assert grade_cap_signal(result) == frozenset({"T1"})
+
+
+class TestFinding2B191SubSignalSplit:
+    """Finding 2's own repro: a host whose audit_events shows ONLY the divergence
+    sub-signal must not cap; one where a strong sub-signal (blocked/evasive) fires
+    still must."""
+
+    @staticmethod
+    def _ctx_with_audit_events(tmp_path, rows) -> Context:
+        ctx = Context(home=tmp_path / "openclaw")
+        ctx.audit_events_found = True
+        ctx.audit_events = rows
+        ctx.audit_events_total_rows = len(rows)
+        return ctx
+
+    def test_bare_divergence_only_warns_but_does_not_reach_grade_cap_signal(self, tmp_path):
+        """audit_events has a session with NO matching trajectory record (divergence),
+        and NO blocked/evasive row at all -- the check's own docstring calls this
+        expected, near-certain-benign background noise (a rotated trajectory cap, or
+        tracing turned off on purpose). Must WARN (still reported) but must NOT cap."""
+        ctx = self._ctx_with_audit_events(
+            tmp_path, [{"status": "succeeded", "tool_name": "bash", "session_id": "sess-old"}]
+        )
+        result = analyze(ctx)  # no trajectory sidecar at all -> every audit session "diverges"
+        b191 = next(f for f in result["findings"] if f.id == "B191")
+        assert b191.status == WARN
+        assert b191.sub_signals == frozenset({"divergence"})
+        assert grade_cap_signal(result) == frozenset()
+
+    def test_strong_subsignal_blocked_still_reaches_grade_cap_signal(self, tmp_path):
+        """A genuine runtime policy denial (blocked/tool_blocked) alongside the SAME
+        divergence -- the strong sub-signal must still cap, even mixed with the weak
+        one."""
+        ctx = self._ctx_with_audit_events(tmp_path, [
+            {"status": "blocked", "error_code": "tool_blocked", "tool_name": "bash",
+             "session_id": "sess-old"},
+        ])
+        result = analyze(ctx)
+        b191 = next(f for f in result["findings"] if f.id == "B191")
+        assert b191.status == WARN
+        assert "blocked" in b191.sub_signals
+        assert grade_cap_signal(result) == frozenset({"B191"})
+
+    def test_strong_subsignal_evasive_still_reaches_grade_cap_signal(self, tmp_path):
+        ctx = self._ctx_with_audit_events(
+            tmp_path, [{"status": "succeeded", "tool_name": "unknown", "session_id": "sess-old"}]
+        )
+        result = analyze(ctx)
+        b191 = next(f for f in result["findings"] if f.id == "B191")
+        assert b191.status == WARN
+        assert "evasive" in b191.sub_signals
+        assert grade_cap_signal(result) == frozenset({"B191"})
+
+
 # ── report.py rendering ───────────────────────────────────────────────────────
 
 def _score(**kw) -> ScoreResult:
@@ -377,6 +540,151 @@ class TestCliEndToEnd:
         out = capsys.readouterr().out
         assert "Behavioral exception (F-154)" in out
         assert "T1 behavioral trifecta" in out
+
+    # ── F-154 round 2 (C-135 review) — Finding 1, real CLI end-to-end repro ──────
+
+    def _home_with_group_policy(self, tmp_path, group_policy) -> Path:
+        """`home_safe` with `channels.telegram.groupPolicy` overridden and the EXACT
+        C-135 repro trajectory (owner-only-shaped group chat: prompt.submitted
+        origin=group, a sensitive-hint call, a bash/exec call) added. Everything else
+        (gateway/tools/agents/plugins/logging/models) stays home_safe's, so only the
+        one variable under test — this channel's group-facing policy — changes."""
+        home = tmp_path / "home"
+        shutil.copytree(SAFE, home)
+        cfg_path = home / "openclaw.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg["channels"]["telegram"]["groupPolicy"] = group_policy
+        cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+        d = home / "agents" / "main" / "sessions"
+        d.mkdir(parents=True, exist_ok=True)
+        rec_lines = [
+            json.dumps({
+                "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                "type": "prompt.submitted", "ts": "1", "seq": 1, "sessionId": "s1",
+                "sessionKey": "agent:main:telegram:group:555000111",
+                "data": {"threadId": "th1", "turnId": "th1"},
+            }),
+            json.dumps({
+                "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                "type": "tool.call", "ts": "2", "seq": 2, "sessionId": "s1",
+                "sessionKey": "agent:main:telegram:group:555000111",
+                "data": {"name": "check_vault_credential_status", "threadId": "th1", "turnId": "th1"},
+            }),
+            json.dumps({
+                "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                "type": "tool.call", "ts": "3", "seq": 3, "sessionId": "s1",
+                "sessionKey": "agent:main:telegram:group:555000111",
+                "data": {"name": "bash", "threadId": "th1", "turnId": "th1"},
+            }),
+        ]
+        (d / "s.trajectory.jsonl").write_text("\n".join(rec_lines) + "\n", encoding="utf-8")
+        return home
+
+    def test_owner_only_group_chat_repro_full_does_not_cap(self, tmp_path, capsys):
+        """THE C-135 FINDING 1 REPRO, re-run after the fix: an owner-only private bot
+        group ('groupPolicy' left at a non-owner-UNreachable value, 'owner') firing the
+        exact sequence the reviewer used (prompt.submitted origin=group -> a
+        vault/credential-hinted call -> bash) must no longer cap --full's grade."""
+        home = self._home_with_group_policy(tmp_path, "owner")
+        main(["--home", str(home)] + BASE + ["--json"])
+        plain = json.loads(capsys.readouterr().out)
+        main(["--home", str(home)] + BASE + ["--full", "--json"])
+        full = json.loads(capsys.readouterr().out)
+        assert full["behavioral_capped"] is False
+        assert full["behavioral_cap_reason"] is None
+        assert full["score"] == plain["score"]
+
+    def test_genuinely_open_group_chat_repro_full_still_caps(self, tmp_path, capsys):
+        """Counterpart: the SAME sequence, but this channel's group surface really is
+        non-owner-reachable ('groupPolicy'='allowlist' -- home_safe's own unmodified
+        value, deliberately NOT 'open': that value alone trips an unrelated CRITICAL
+        finding (B2, "anyone can command"), which would cap the grade tighter than
+        BEHAVIORAL_SIGNAL_CAP for a reason unrelated to this fix and mask what this
+        test means to prove) — T1's actual detection target must still fire and cap."""
+        home = self._home_with_group_policy(tmp_path, "allowlist")
+        main(["--home", str(home)] + BASE + ["--json"])
+        plain = json.loads(capsys.readouterr().out)
+        main(["--home", str(home)] + BASE + ["--full", "--json"])
+        full = json.loads(capsys.readouterr().out)
+        assert full["behavioral_capped"] is True
+        assert full["behavioral_cap_reason"] == "T1 behavioral trifecta"
+        assert full["score"] <= BEHAVIORAL_SIGNAL_CAP
+        assert full["score"] < plain["score"]
+
+    # ── F-154 round 2 (C-135 review) — Finding 2, real CLI end-to-end repro ──────
+
+    _AUDIT_EVENTS_DDL = (
+        "CREATE TABLE audit_events ("
+        "sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, "
+        "source_id TEXT NOT NULL UNIQUE, source_sequence INTEGER NOT NULL, "
+        "occurred_at INTEGER NOT NULL, kind TEXT NOT NULL, action TEXT NOT NULL, "
+        "status TEXT NOT NULL, error_code TEXT, actor_type TEXT NOT NULL, "
+        "actor_id TEXT NOT NULL, agent_id TEXT NOT NULL, session_key TEXT, session_id TEXT, "
+        "run_id TEXT NOT NULL, tool_call_id TEXT, tool_name TEXT)"
+    )
+
+    def _home_with_audit_events(self, tmp_path, rows) -> Path:
+        """`home_safe` (no trajectory sidecar — so EVERY audit_events session_id
+        "diverges" by construction) plus a real state DB carrying *rows*. Reproduces
+        the C-135 Finding 2 scenario: 'home_safe drops from 98/A to 89/B under --full'
+        on bare divergence alone."""
+        home = tmp_path / "home"
+        shutil.copytree(SAFE, home)
+        state = home / "state"
+        state.mkdir(exist_ok=True)
+        conn = sqlite3.connect(state / "openclaw.sqlite")
+        try:
+            conn.execute(self._AUDIT_EVENTS_DDL)
+            for i, row in enumerate(rows):
+                conn.execute(
+                    "INSERT INTO audit_events (event_id, source_id, source_sequence, "
+                    "occurred_at, kind, action, status, error_code, actor_type, actor_id, "
+                    "agent_id, session_key, session_id, run_id, tool_call_id, tool_name) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        f"ev-{i}", f"src-{i}", i, 1_700_000_000_000 + i,
+                        "tool_action", "tool.action.finished",
+                        row.get("status", "succeeded"), row.get("error_code"),
+                        "agent", "main", "main", f"key-{row.get('session_id', 's1')}",
+                        row.get("session_id", "s1"), f"run-{i}", f"call-{i}",
+                        row.get("tool_name", "bash"),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return home
+
+    def test_b191_bare_divergence_repro_full_does_not_cap(self, tmp_path, capsys):
+        """THE C-135 FINDING 2 REPRO, re-run after the fix: no trajectory sidecar at
+        all (so audit_events' one session unavoidably "diverges") and no blocked/
+        evasive row — bare divergence alone must no longer drop --full's grade."""
+        home = self._home_with_audit_events(tmp_path, [{"session_id": "sess-old"}])
+        main(["--home", str(home)] + BASE + ["--json"])
+        plain = json.loads(capsys.readouterr().out)
+        main(["--home", str(home)] + BASE + ["--full", "--json"])
+        full = json.loads(capsys.readouterr().out)
+        assert full["behavioral_capped"] is False
+        assert full["behavioral_cap_reason"] is None
+        assert full["score"] == plain["score"]
+
+    def test_b191_strong_signal_repro_full_still_caps(self, tmp_path, capsys):
+        """Counterpart: a genuine runtime policy denial (blocked/tool_blocked) —
+        alongside the SAME unavoidable divergence — must still cap."""
+        home = self._home_with_audit_events(tmp_path, [
+            {"session_id": "sess-old", "status": "blocked", "error_code": "tool_blocked"},
+        ])
+        main(["--home", str(home)] + BASE + ["--json"])
+        plain = json.loads(capsys.readouterr().out)
+        main(["--home", str(home)] + BASE + ["--full", "--json"])
+        full = json.loads(capsys.readouterr().out)
+        assert full["behavioral_capped"] is True
+        assert full["behavioral_cap_reason"] == "B191 audit-trail divergence"
+        # B191 shares T2/T3's looser MEDIUM ceiling (89), not T1's tighter HIGH one
+        # (BEHAVIORAL_SIGNAL_CAP=79) — see TestBehavioralCapScoring.
+        # test_t2_and_b191_share_t3s_medium_ceiling.
+        assert full["score"] <= 89
+        assert full["score"] < plain["score"]
 
 
 # ── the exact ids, still permanently unscored (Golden Rule #5) ───────────────

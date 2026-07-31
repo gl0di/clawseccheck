@@ -3158,6 +3158,21 @@ class Finding:
     # meaningful alongside status == UNKNOWN (see __post_init__ below); no emitter sets
     # this yet (that starts with B2/F-139) — this field is plumbing only.
     not_applicable: bool = False
+    # F-154 (round 2, C-135): names WHICH of a multi-signal check's internal sub-signals
+    # actually fired, for a check whose WARN status alone conflates strengths a CAP-ONLY
+    # consumer needs to tell apart. Introduced for B191 (checks/_host.py:
+    # check_audit_trail_signals), which folds three sub-signals — "blocked" (a runtime
+    # policy-denied tool call), "evasive" (a malformed/evasive tool name), both near-
+    # zero-FP — and "divergence" (an audit_events session with no matching trajectory
+    # record), which the check's OWN docstring calls expected, near-certain-benign
+    # background noise on any host that has rotated its 60-file trajectory cap or
+    # intentionally disabled tracing — into ONE WARN status. behavioral.grade_cap_signal
+    # reads this to cap only on the two strong sub-signals, never on bare "divergence"
+    # alone; the WARN finding itself is untouched (still reports/evidences all three to a
+    # human reader, still scored=False — Golden Rule #5 is unaffected either way). Empty
+    # for every other producer; not part of the frozen public JSON shape (same footprint
+    # as ring_findings/axis_reasons/corroborating_buckets above).
+    sub_signals: frozenset = field(default_factory=frozenset)
 
     def __post_init__(self):
         # Normalizes, never raises: a Finding built with not_applicable=True at a

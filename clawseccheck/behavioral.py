@@ -37,7 +37,14 @@ from pathlib import Path
 
 from . import attest
 from .catalog import PASS, UNKNOWN, WARN
-from .checks import INPUT_TOOL_HINTS, _finding, check_audit_trail_signals
+from .checks import (
+    INPUT_TOOL_HINTS,
+    _channels,
+    _finding,
+    _norm_group_policy,
+    _UNTRUSTED_INPUT_POLICIES,
+    check_audit_trail_signals,
+)
 from .collector import dig
 from .trajectory import EXTERNAL_ORIGIN_KINDS, read_events, read_proven_tools
 
@@ -254,11 +261,80 @@ def _classify_verb_role(name: str | None) -> str | None:
 #    does everything through `bash` classifies as EGRESS/EXEC. On the real host, 0 of
 #    1,270 observed tool calls classify as sensitive. Fixing ingress alone therefore
 #    does not make T1 functional there.
-def _classify_event_role(event: dict) -> str | None:
+#
+# F-154 (round 2, C-135 finding) — group/channel origin gets the SAME discriminator.
+# The paragraph above already reasoned through this exact ambiguity for `direct`/DM
+# origin ("a DM-delivered injection from a non-owner still does not arm ingress...
+# arming it would reproduce exactly the false-positive shape") but the original B-298
+# landing never extended it to `group`/`channel` — those armed UNCONDITIONALLY on
+# origin kind alone, with no way to tell "the owner talking in his own private bot
+# group" (an everyday devops/coding-agent turn) apart from "a stranger in a genuinely
+# open group". Reproduced: a group-origin `prompt.submitted` + a sensitive-hint call +
+# a bash/exec call armed T1 even when the group's own config is owner-only.
+#
+# The fix mirrors the direct-origin comment's own prescription verbatim: "the channel's
+# configured dmPolicy, which A1 already reads STATICALLY" — for a group/channel-origin
+# event the equivalent, already-available static signal is that SAME channel's
+# `groupPolicy` (not `dmPolicy` — an open DM policy says nothing about who can post in a
+# GROUP on that channel; see `_group_untrusted_origin_channels`'s own docstring for why
+# this is deliberately NOT `_untrusted_input_channels`, which conflates the two). A
+# group/channel-origin message now arms ingress only when THIS PARTICULAR channel's
+# `groupPolicy` is one of `_UNTRUSTED_INPUT_POLICIES` (open/allowlist/pairing) — i.e.
+# only when config itself says a non-owner sender can actually reach that surface. This
+# preserves T1's actual detection target (a genuinely stranger-exposed group/channel
+# still arms — see the "still fires" test) while an owner-only/restrictive group
+# (absent groupPolicy, "owner", or per-message "ask" approval) no longer manufactures a
+# false trifecta purely from its origin kind, the same discipline `direct` already gets.
+def _group_untrusted_origin_channels(cfg: dict) -> "frozenset[str]":
+    """Channel ids (e.g. "telegram") whose GROUP-facing policy admits a message
+    authored by a non-owner sender — `groupPolicy` in `_UNTRUSTED_INPUT_POLICIES`
+    (open/allowlist/pairing; Feishu's "allowall" alias normalized to "open" via
+    `_norm_group_policy`, same as `_untrusted_input_channels`).
+
+    Built once per `analyze()` call and threaded down to `_classify_event_role`, which
+    only arms a group/channel-origin `prompt.submitted` event's ingress leg when its
+    `originChannel` is a member of this set — i.e. when THIS channel's own config says
+    a stranger can actually reach its group/broadcast surface, mirroring the exact
+    static discriminator the direct-origin comment above already names.
+
+    Deliberately NOT `checks._untrusted_input_channels` (checks/_shared.py): that
+    helper ORs `dmPolicy` and `groupPolicy` together into one per-channel flag, so a
+    channel with an open DM policy but an OWNER-ONLY `groupPolicy` would still arm here
+    on a group-origin message purely because of its (irrelevant) DM setting —
+    reproducing a narrower version of the exact false-positive shape this fix exists
+    to close. `groupPolicy` alone is the field that actually governs who can post in a
+    group/broadcast surface; `dmPolicy` governs 1:1 delivery and has no bearing on it.
+    """
+    out = set()
+    for name, c in _channels(cfg).items():
+        if not isinstance(c, dict) or c.get("enabled") is False:
+            continue
+        nodes = [c] + list((c.get("accounts") or {}).values())
+        for node in nodes:
+            if (
+                isinstance(node, dict)
+                and _norm_group_policy(name, node.get("groupPolicy")) in _UNTRUSTED_INPUT_POLICIES
+            ):
+                out.add(name.strip().lower())
+                break
+    return frozenset(out)
+
+
+def _classify_event_role(
+    event: dict, untrusted_origin_channels: "frozenset[str]" = frozenset()
+) -> str | None:
     """Classify one EVENT into a trifecta leg — verb role first, then channel origin.
 
     Falls through to the channel ingress leg only for an event that carries no verb
     role at all, so an explicit verb classification always wins.
+
+    *untrusted_origin_channels* (F-154 round 2) — the set `_group_untrusted_origin_
+    channels` computed for this run. A group/channel-origin event only arms ingress
+    when its `originChannel` is a member; absent evidence that the channel's own
+    `groupPolicy` admits a non-owner sender, origin kind ALONE is no longer sufficient
+    — the same non-arming discipline `direct` origin already gets above. Defaults to
+    an empty set (never arms on origin alone) so an explicit verb classification is
+    always the one intended discriminator when no channel context is supplied.
     """
     role = _classify_verb_role(event.get("name"))
     if role:
@@ -266,6 +342,8 @@ def _classify_event_role(event: dict) -> str | None:
     if (
         event.get("type") == "prompt.submitted"
         and event.get("origin") in EXTERNAL_ORIGIN_KINDS
+        and isinstance(event.get("originChannel"), str)
+        and event["originChannel"].strip().lower() in untrusted_origin_channels
     ):
         return "ingress"
     return None
@@ -337,19 +415,23 @@ def _disambiguated_labels(firing_keys: list[str]) -> list[str]:
 # order (by seq/ts), within one thread.
 # ---------------------------------------------------------------------------
 
-def _t1_thread_trifecta(thread_events: list[dict]) -> str | None:
+def _t1_thread_trifecta(
+    thread_events: list[dict], untrusted_origin_channels: "frozenset[str]" = frozenset()
+) -> str | None:
     """How this thread's ingress leg was armed, when it shows ingress -> sensitive ->
     egress in that order; ``None`` when it shows no trifecta.
 
     Returns ``"verb"`` when an ingress TOOL VERB opened the chain, or the external
     origin kind ("group"/"channel") when an externally-delivered channel message did
-    (B-298). The caller needs the distinction: reporting "an ingress verb ran" for a
-    channel-armed firing would be a false statement about what the log shows.
+    (B-298, narrowed F-154 round 2 — only when *untrusted_origin_channels* says that
+    channel's own config admits a non-owner sender). The caller needs the distinction:
+    reporting "an ingress verb ran" for a channel-armed firing would be a false
+    statement about what the log shows.
     """
     armed_by: str | None = None
     seen_sensitive_after_ingress = False
     for ev in thread_events:
-        role = _classify_event_role(ev)
+        role = _classify_event_role(ev, untrusted_origin_channels)
         if role == "ingress":
             if armed_by is None:
                 armed_by = "verb" if ev.get("name") else str(ev.get("origin"))
@@ -360,18 +442,25 @@ def _t1_thread_trifecta(thread_events: list[dict]) -> str | None:
     return None
 
 
-def check_behavioral_trifecta(groups: dict[str, list[dict]]) -> object:
+def check_behavioral_trifecta(
+    groups: dict[str, list[dict]], untrusted_origin_channels: "frozenset[str]" = frozenset()
+) -> object:
     """T1 — behavioral trifecta, proven by the trajectory log (not declared capability).
 
     WARN — at least one thread shows an ingress leg (an ingress VERB, or an
-           externally-delivered group/channel message — B-298), then a sensitive-verb,
-           then an egress-verb, in that order.
+           externally-delivered group/channel message whose channel's own config
+           admits a non-owner sender — B-298, narrowed F-154 round 2), then a
+           sensitive-verb, then an egress-verb, in that order.
     PASS — threads present, no thread shows the ordered sequence.
+
+    *untrusted_origin_channels* — see `_group_untrusted_origin_channels`; defaults to
+    an empty set (no channel arms on origin alone) when the caller supplies nothing,
+    matching `_classify_event_role`'s own default.
     """
     firing_keys: list[str] = []
     armed_by: dict[str, str] = {}
     for group_key, thread_events in groups.items():
-        ingress = _t1_thread_trifecta(thread_events)
+        ingress = _t1_thread_trifecta(thread_events, untrusted_origin_channels)
         if ingress:
             firing_keys.append(group_key)
             armed_by[group_key] = ingress
@@ -835,8 +924,13 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
 
     groups = group_events_by_thread(events)
     result["thread_count"] = len(groups)
+    # F-154 (round 2): the channel-scoped discriminator for T1's group/channel ingress
+    # leg — see `_group_untrusted_origin_channels`. Computed once per analyze() call
+    # from `ctx.config` (never re-read per-event).
+    cfg = getattr(ctx, "config", None) or {}
+    untrusted_origin_channels = _group_untrusted_origin_channels(cfg)
     result["findings"] = [
-        check_behavioral_trifecta(groups),
+        check_behavioral_trifecta(groups, untrusted_origin_channels),
         check_outcome_anomaly(groups),
         check_capability_drift(ctx),
         b191,
@@ -848,6 +942,21 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
 # F-154 — cap-only grade signal (mirrors trajaudit.grade_cap_signal / pipeline.
 # live_test_cap_signal's naming, one reducer per source module).
 # ---------------------------------------------------------------------------
+
+
+# F-154 (round 2, C-135 finding): B191 folds THREE sub-signals into one WARN status
+# (checks/_host.py:check_audit_trail_signals) — "blocked" and "evasive" are near-zero-FP
+# runtime facts, but "divergence" is that check's OWN docstring calling it expected,
+# near-certain-benign background noise on any host that has rotated its 60-file
+# trajectory cap or intentionally disabled tracing (both common, legitimate choices).
+# Capping the grade on bare divergence alone permanently ceilinged any long-lived,
+# healthy install at B, with no actionable remediation. So the reducer below only
+# counts a B191 WARN toward the cap when at least one of the two STRONG sub-signals
+# actually fired (`Finding.sub_signals`, set by check_audit_trail_signals) — the
+# rendered WARN finding itself is untouched: it still reports and evidences all three
+# signals to a human reader, and Golden Rule #5's scored=False is unaffected either way.
+_B191_STRONG_SUB_SIGNALS = frozenset({"blocked", "evasive"})
+
 
 def grade_cap_signal(result: dict) -> "frozenset[str]":
     """F-154: reduce an `analyze()` result to the set of BEHAVIORAL_CHECK_IDS that
@@ -866,11 +975,19 @@ def grade_cap_signal(result: dict) -> "frozenset[str]":
     replay" as an empty/PASS finding set (T1/T2/T3 absent when no trajectory sidecar
     exists — see `analyze`'s own docstring), which naturally reduces to an empty
     frozenset below, exactly like the "no cap" case.
+
+    B191 is additionally gated on `_B191_STRONG_SUB_SIGNALS` above (F-154 round 2): a
+    B191 WARN whose `sub_signals` is bare `{"divergence"}` does not cap, even though it
+    is still WARN/reported like any other B191 finding.
     """
-    return frozenset(
-        f.id for f in result.get("findings", ())
-        if f.id in BEHAVIORAL_CHECK_IDS and f.status == WARN
-    )
+    fired: set = set()
+    for f in result.get("findings", ()):
+        if f.id not in BEHAVIORAL_CHECK_IDS or f.status != WARN:
+            continue
+        if f.id == "B191" and not (f.sub_signals & _B191_STRONG_SUB_SIGNALS):
+            continue
+        fired.add(f.id)
+    return frozenset(fired)
 
 
 def render_behavioral_analysis(ctx, *, explicit_path: str | None = None, ascii_only: bool = False) -> str:
