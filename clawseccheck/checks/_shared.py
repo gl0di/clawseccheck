@@ -828,6 +828,73 @@ def _norm_group_policy(channel_name, value):
     return "open" if channel_name == "feishu" and value == "allowall" else value
 
 
+# B-389 (C-135 review of the fix below): a channel-level credential does not stop
+# governing traffic once `accounts` is added — OpenClaw runs it as an extra IMPLICIT
+# default account alongside the explicitly configured ones (`hasImplicitDefaultAccount`,
+# account-helpers-BAtt8fRD.js:15-19: `for (const key of
+# options?.implicitDefaultAccount?.channelKeys ?? []) if
+# (hasConfiguredAccountValue(channel?.[key])) return true`). So a still-running base
+# account's own dmPolicy/groupPolicy can't be dropped just because `accounts` exists —
+# only when nothing on the base node would spawn that implicit account. Grounded per
+# channel against the installed dist (each channel registers its own trigger keys):
+#   telegram      botToken / tokenFile           account-selection-CccGNkkz.js:59-63
+#   discord       token                          accounts-B2tNBeEr.js:12-15
+#   googlechat    serviceAccount(Ref|File)        accounts-CwNpKTEr.js:17-23
+#   zalo          botToken / tokenFile            accounts-C-ZPmqpb.js:72-75
+#   zalouser      profile                         setup-core-YieAw3pa.js:17-20
+#   imessage      cliPath / dbPath                accounts-DzM4R0Z8.js:9
+#   raft          profile                         setup-DWCfQpXL.js:14-20
+# feishu and nextcloud-talk register a bespoke predicate (multiple fields ANDed
+# together) instead of a single-key-present check — handled explicitly below.
+# Every other channel in the installed dist (slack/matrix/signal/msteams/line/...)
+# registers no implicitDefaultAccount trigger at all, so this table is exhaustive for
+# the channels where the gap can occur, not an arbitrarily incomplete allowlist.
+_IMPLICIT_DEFAULT_ACCOUNT_KEYS = {
+    "telegram": ("botToken", "tokenFile"),
+    "discord": ("token",),
+    "googlechat": ("serviceAccount", "serviceAccountRef", "serviceAccountFile"),
+    "zalo": ("botToken", "tokenFile"),
+    "zalouser": ("profile",),
+    "imessage": ("cliPath", "dbPath"),
+    "raft": ("profile",),
+}
+
+
+def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
+    """True when *raw_node* (the UNMERGED base channel node) carries a credential that
+    makes OpenClaw run it as an implicit default account alongside any explicitly
+    configured ``accounts`` — see the grounding above ``_IMPLICIT_DEFAULT_ACCOUNT_KEYS``.
+
+    Truthiness mirrors the dist's own ``hasConfiguredAccountValue`` exactly (a string
+    counts only after ``.strip()``; any other non-``None`` value counts as-is —
+    account-helpers-BAtt8fRD.js:61-64).
+
+    Deliberately config-only: the dist ALSO treats a matching env var (e.g.
+    ``$TELEGRAM_BOT_TOKEN``) as triggering the same implicit account, which this cannot
+    see — clawseccheck reads only the config file, and the target OpenClaw process' real
+    runtime environment is not reliably observable from here (e.g. a systemd service's
+    environment need not match this host's shell). That env-var route stays a
+    documented, deliberate residual false negative — the same "narrows, does not close"
+    trade-off ``_resolved_channel_nodes``' own docstring already accepts elsewhere, not a
+    new one introduced here.
+    """
+    if not isinstance(raw_node, dict):
+        return False
+
+    def _present(value) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        return value is not None
+
+    if name == "feishu":
+        return _present(raw_node.get("appId")) and _present(raw_node.get("appSecret"))
+    if name == "nextcloud-talk":
+        return _present(raw_node.get("baseUrl")) and (
+            _present(raw_node.get("botSecret")) or _present(raw_node.get("botSecretFile"))
+        )
+    return any(_present(raw_node.get(key)) for key in _IMPLICIT_DEFAULT_ACCOUNT_KEYS.get(name, ()))
+
+
 def _open_channels(cfg: dict) -> list[str]:
     """Channels where dmPolicy/groupPolicy == 'open' (truly public — anyone can command).
 
@@ -841,10 +908,23 @@ def _open_channels(cfg: dict) -> list[str]:
         # DISABLED open channel produced §5 hard-FAIL false positives (B2/B55).
         if not isinstance(c, dict) or c.get("enabled") is False:
             continue
-        # B-378: a schema-drifted "accounts" (list/string instead of dict) must
-        # degrade to "no accounts", never raise.
+        # B-389: read the RESOLVED per-account node, not the raw [c] + accounts.values()
+        # idiom the old code used — see _resolved_channel_nodes' docstring for why that
+        # shallow walk is unsound (a vestigial base-level "open" policy still scored as
+        # open even when every real running account overrides it to pairing/allowlist).
+        # Mirrors the precedent _open_wildcard_group_channels already set for the
+        # identical shape. _resolved_channel_nodes already degrades a schema-drifted
+        # "accounts" (list/string instead of dict) to "no accounts" (B-378), so that
+        # handling doesn't need to be duplicated here.
+        nodes = _resolved_channel_nodes(c)
+        # C-135 follow-up on the same B-389 fix: the base node can still be a LIVE
+        # implicit default account (see _channel_has_implicit_default_account) even once
+        # `accounts` is configured — it joins, not replaces. Add it back only then;
+        # unconditionally adding it back would reintroduce the exact bug this fix exists
+        # to close (a vestigial base policy with no live account behind it at all).
         accounts = c.get("accounts")
-        nodes = [c] + (list(accounts.values()) if isinstance(accounts, dict) else [])
+        if isinstance(accounts, dict) and accounts and _channel_has_implicit_default_account(name, c):
+            nodes = [*nodes, c]
         for node in nodes:
             if isinstance(node, dict) and (
                 node.get("dmPolicy") == "open"

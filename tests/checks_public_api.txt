@@ -74,6 +74,7 @@ _b62_surprising_families
 _b63_scan
 _blank_fences
 _canonical_ipv4
+_channel_has_implicit_default_account
 _check_unicode_obfuscation
 _defensive_context
 _defensive_section
