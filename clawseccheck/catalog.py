@@ -2664,6 +2664,42 @@ CATALOG: list[CheckMeta] = [
         "Zero Trust / Gateway",
         surface="gateway",
     ),
+    # B341: disclosure advisory for plugins.entries.<id>.hooks.allowPromptInjection /
+    # .hooks.allowConversationAccess (PluginEntrySchema, zod-schema-O9ml_nmo.js:788-806 in
+    # the installed openclaw npm dist) -- a per-plugin-entry grant to mutate the in-flight
+    # prompt / read the transcript, distinct from the ROOT-level `hooks` object
+    # (InternalHooksSchema, a separate .strict() schema with no such fields). Nothing reads
+    # either field today. WARN-only, scored=False, never FAIL: config alone cannot tell an
+    # intentional grant from an abusive one, and plugins already run in-process as trusted
+    # code (same posture as B57/B167).
+    CheckMeta(
+        "B341",
+        "plugins.entries.<id>.hooks.allowPromptInjection / .allowConversationAccess grants",
+        MEDIUM,
+        "advisory",
+        "Plugin / MCP Hardening",
+        scored=False,
+        confidence="HIGH",
+        surface="skills",
+    ),
+    # B342: disclosure advisory for plugins.slots.{memory,contextEngine} ownership and
+    # plugins.allow/plugins.deny contradictions (zod-schema-O9ml_nmo.js:1521-1529 in the
+    # installed openclaw npm dist -- `slots` is a .strict() object with exactly those two
+    # fields, not a record of arbitrary slot names). A slot owner sits in the agent's
+    # memory / context-assembly path; an id in both lists is silently blocked because deny
+    # wins over allow. WARN-only, scored=False, never FAIL: naming a memory plugin is
+    # ordinary configuration and a stale deny entry is usually an emergency-rollback
+    # leftover -- neither is adjudicable from config alone.
+    CheckMeta(
+        "B342",
+        "Plugin runtime-slot ownership and plugins.allow / plugins.deny contradictions",
+        MEDIUM,
+        "advisory",
+        "Plugin / MCP Hardening",
+        scored=False,
+        confidence="HIGH",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

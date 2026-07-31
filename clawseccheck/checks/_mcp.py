@@ -4443,6 +4443,160 @@ def check_plugin_app_server_command(ctx: Context) -> Finding:
     )
 
 
+def check_plugin_hook_grants(ctx: Context) -> Finding:
+    """B341 (disclosure advisory) — plugins.entries.<name>.hooks.allowPromptInjection /
+    .hooks.allowConversationAccess.
+
+    Grounded (PluginEntrySchema, zod-schema-O9ml_nmo.js:788-806, npm openclaw dist): a
+    per-plugin-entry ``hooks`` object — distinct from the ROOT-level ``hooks`` block
+    (InternalHooksSchema, a separate ``.strict()`` schema with no such fields; do not
+    conflate the two) — can carry ``allowPromptInjection`` (a per-turn grant to mutate
+    the in-flight prompt) and/or ``allowConversationAccess`` (a grant to read the
+    transcript). Nothing in this codebase reads either field today; this check exists
+    purely to surface that the grant is set so an operator notices it — not to judge
+    whether the grant is appropriate. Plugins already run in-process as trusted code
+    (same posture as B57/B167's grounding), so an explicit opt-in grant here may be
+    entirely intentional.
+
+    WARN-only, scored=False, NEVER FAIL: nothing distinguishes a legitimate, intentional
+    grant from an abusive one from config alone — both look identical. This is a
+    disclosure, not a verdict, per CLAUDE.md Golden Rule #5 and this check's own scope.
+
+    PASS    — plugins installed, none set either hooks grant. Silent in normal output.
+    WARN    — at least one installed plugin entry sets hooks.allowPromptInjection and/or
+              hooks.allowConversationAccess to true.
+    UNKNOWN — no plugins installed (plugins.entries absent); not applicable.
+    """
+    cfg = ctx.config
+    plugins = _plugins(cfg)
+    if not plugins:
+        return _finding(
+            "B341",
+            UNKNOWN,
+            "No plugins are installed (plugins.entries absent), so per-plugin hook "
+            "grants are not applicable.",
+            "When you install a plugin, only set hooks.allowPromptInjection / "
+            "hooks.allowConversationAccess if the plugin genuinely needs to mutate the "
+            "prompt or read the transcript.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    offenders = []
+    for name, entry in plugins.items():
+        if not isinstance(entry, dict):
+            continue
+        hooks = entry.get("hooks")
+        if not isinstance(hooks, dict):
+            continue
+        grants = [
+            field_name
+            for field_name in ("allowPromptInjection", "allowConversationAccess")
+            if hooks.get(field_name) is True
+        ]
+        if grants:
+            offenders.append(f"plugins.entries.{name}.hooks.{'/'.join(grants)}")
+    if offenders:
+        return _finding(
+            "B341",
+            WARN,
+            "One or more installed plugin(s) hold a per-turn prompt-mutation and/or "
+            "transcript-read grant (see evidence). Plugins already run in-process as "
+            "trusted code, so this may be an intentional grant — disclosed for "
+            "awareness, not judged as a misconfiguration.",
+            "Confirm each listed plugin genuinely needs hooks.allowPromptInjection "
+            "and/or hooks.allowConversationAccess; remove the grant if it does not.",
+            evidence=offenders,
+        )
+    return _finding(
+        "B341",
+        PASS,
+        "No installed plugin sets hooks.allowPromptInjection or "
+        "hooks.allowConversationAccess.",
+        "Keep per-plugin hook grants unset unless a plugin genuinely needs them.",
+    )
+
+
+def check_plugin_slots_and_deny(ctx: Context) -> Finding:
+    """B342 (disclosure advisory) — plugins.slots.{memory,contextEngine} ownership and
+    plugins.allow/plugins.deny contradictions.
+
+    Grounded (zod-schema-O9ml_nmo.js:1521-1529, npm openclaw dist): ``plugins.slots`` is
+    a ``.strict()`` object with exactly two optional string fields — ``memory`` and
+    ``contextEngine`` — NOT a record of arbitrary slot names. Each names the plugin id
+    that exclusively owns that runtime slot ("Selects which plugins own exclusive runtime
+    slots such as memory so only one plugin provides that capability",
+    schema-DRyO1XBt.js:812-814). ``plugins.deny`` is a list of plugin ids "blocked even if
+    allowlists or paths include them" (schema-DRyO1XBt.js:809) — so deny WINS over allow.
+    Of the plugin block, only allow / entries / mcp / load.paths were read anywhere in
+    this package before this check.
+
+    Two things are surfaced, both as disclosure only:
+
+    * **Slot ownership.** A plugin owning the memory or context-engine slot sits directly
+      in the agent's memory and context-assembly path — a high-trust position an operator
+      should be able to see named in an audit. ``"none"`` is NOT ownership: it is the
+      documented value for disabling memory plugins entirely, so it is never reported.
+    * **allow/deny contradiction.** An id in BOTH lists is silently blocked, because deny
+      wins. The operator believes they allowlisted it; they did not. Config cannot show
+      them this today.
+
+    WARN-only, scored=False, NEVER FAIL: naming a memory plugin is ordinary, intended
+    configuration, and a deny entry that also appears in allow is usually a leftover from
+    an emergency rollback rather than an attack. Neither is a misconfiguration this tool
+    can adjudicate from config alone, so it discloses and does not judge.
+
+    PASS    — a plugin block exists, no slot is owned and the two lists do not overlap.
+    WARN    — a slot is owned and/or an id appears in both allow and deny.
+    UNKNOWN — no plugins block at all; not applicable.
+    """
+    cfg = ctx.config
+    plugins = cfg.get("plugins")
+    if not isinstance(plugins, dict) or not plugins:
+        return _finding(
+            "B342",
+            UNKNOWN,
+            "No plugins block is configured, so plugin slot ownership and allow/deny "
+            "consistency are not applicable.",
+            "When you configure plugins, name the memory / context-engine slot owner "
+            "explicitly and keep plugins.allow and plugins.deny disjoint.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    disclosed = []
+    slots = plugins.get("slots")
+    if isinstance(slots, dict):
+        for slot in ("memory", "contextEngine"):
+            owner = slots.get(slot)
+            # "none" disables the slot outright -- the opposite of a capture.
+            if isinstance(owner, str) and owner.strip() and owner.strip().lower() != "none":
+                disclosed.append(f"plugins.slots.{slot}={owner.strip()}")
+    allow = plugins.get("allow")
+    deny = plugins.get("deny")
+    if isinstance(allow, list) and isinstance(deny, list):
+        allowed = {p.strip() for p in allow if isinstance(p, str) and p.strip()}
+        denied = {p.strip() for p in deny if isinstance(p, str) and p.strip()}
+        for pid in sorted(allowed & denied):
+            disclosed.append(f"{pid}: in both plugins.allow and plugins.deny (deny wins)")
+    if disclosed:
+        return _finding(
+            "B342",
+            WARN,
+            "Plugin runtime-slot ownership and/or an allow/deny contradiction is present "
+            "(see evidence). A slot owner sits in the agent's memory or context-assembly "
+            "path; an id in both lists is silently blocked because deny wins. Disclosed "
+            "for awareness, not judged as a misconfiguration.",
+            "Confirm the named plugin is the one you intend to own that slot, and remove "
+            "any id that appears in both plugins.allow and plugins.deny.",
+            evidence=disclosed,
+        )
+    return _finding(
+        "B342",
+        PASS,
+        "No plugin owns the memory or context-engine slot, and plugins.allow and "
+        "plugins.deny do not overlap.",
+        "Keep plugins.allow and plugins.deny disjoint so a deny never silently "
+        "overrides an entry you believe is allowed.",
+    )
+
+
 def check_mcp_tool_inheritance(ctx: Context) -> Finding:
     """B75 — MCP tool-inheritance bypass check (attestation-based).
 

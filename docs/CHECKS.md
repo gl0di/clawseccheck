@@ -2237,6 +2237,32 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B341 - plugins.entries.<id>.hooks.allowPromptInjection / .allowConversationAccess grants
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Plugin / MCP Hardening
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: plugins.entries.<id>.hooks.allowPromptInjection / .allowConversationAccess grants
+- Remediation:
+  - none
+
+### B342 - Plugin runtime-slot ownership and plugins.allow / plugins.deny contradictions
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Plugin / MCP Hardening
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Plugin runtime-slot ownership and plugins.allow / plugins.deny contradictions
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

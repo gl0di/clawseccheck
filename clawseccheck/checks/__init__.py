@@ -800,7 +800,9 @@ from ._mcp import (
     check_mcp_unenforced_annotations,
     check_plugin_app_server_command,
     check_plugin_clawhub_trust,
+    check_plugin_hook_grants,
     check_plugin_permission_mode,
+    check_plugin_slots_and_deny,
     check_plugin_tool_result_middleware,
     check_codex_plugin_hooks,
     check_compiled_tool_poisoning,
@@ -1295,6 +1297,8 @@ CHECKS = [
     check_controlui_origins,
     check_plugin_permission_mode,
     check_plugin_app_server_command,  # B167 — plugin appServer.command remote-fetch scan (B-231)
+    check_plugin_hook_grants,  # B341 — per-plugin-entry prompt-mutation / transcript-read grants
+    check_plugin_slots_and_deny,  # B342 — plugin slot ownership + allow/deny contradiction
     check_hook_policy_bypass,
     check_cron_scheduler,
     check_cron_job_content,  # B168 — cron job store payload.message/trigger.script scan (B-231)
