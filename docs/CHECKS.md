@@ -2658,3 +2658,45 @@ These paths are computed from multiple checks. They fire only when every leg is 
   account for it in your threat model (deny the agent's process/user from invoking it,
   egress-filter the tunnel's own control-plane endpoints, or run the agent in a
   container/namespace without access to the host's tunnel client).
+
+### RISK-25 - Non-canonical marketplace feed with no install-time review gate
+
+- Severity: MEDIUM
+- Pattern: MEDIUM (RISK-25, I-030): a non-canonical marketplace feed joined with a disabled
+- Chain: marketplaces.feeds (or .sources) names a non-canonical registry -> security.installPolicy is disabled, or its exec hook is escaped -> skill/plugin installs from that source run unmonitored and unreviewed
+- Why:
+  This install names a marketplace feed/source other than the public https://clawhub.ai,
+  and at the same time security.installPolicy — the operator-owned gate meant to review
+  every skill/plugin install and update — is not enabled, or is enabled with its own exec
+  hook's path-safety checks bypassed (exec.allowInsecurePath) or forwarding a secret-
+  shaped env var name. Neither posture alone is unusual: a private feed can be a
+  legitimate self-hosted mirror, and a disabled install-policy gate is a common untouched
+  default. Together, they mean whatever that non-canonical feed serves next installs with
+  nothing reviewing it first.
+- Fix:
+  Either confirm the marketplaces.feeds/.sources entry is your own trusted mirror and
+  enable security.installPolicy with a real exec review command (no unconstrained
+  allowInsecurePath — scope it with exec.trustedDirs if you need it), or restore the
+  canonical https://clawhub.ai feed if the non-default entry was not an intentional,
+  disclosed deployment.
+
+### RISK-26 - Skill Workshop's unattended install pipeline is reachable from untrusted ingress
+
+- Severity: HIGH
+- Pattern: HIGH (RISK-26, I-031): Skill Workshop's unattended author+install pipeline,
+- Chain: detail -> Skill Workshop authors + installs new skill code with no human review step -> persistent executable code on disk
+- Why:
+  This install has the full unattended Skill Workshop pipeline configured and reachable:
+  skills.workshop.autonomous.enabled authors new skill proposals from conversation
+  signals, and approvalPolicy='auto' installs them with no human confirmation. At the same
+  time, at least one ingress surface admits content from someone other than the owner:
+  {detail}. A single inbound message can therefore cause the agent to author and install
+  new executable code on disk with no review step in between.
+- Fix:
+  Set skills.workshop.approvalPolicy back to the default 'pending' so every generated
+  proposal needs an explicit `openclaw skills workshop apply` decision, and/or disable
+  skills.workshop.autonomous.enabled unless unattended authoring is genuinely intended.
+  Independently, close the flagged ingress surface(s): set
+  channels.<provider>.contextVisibility to 'allowlist'/'allowlist_quote' (B26), scope
+  commands.ownerAllowFrom/allowFrom to your own channel-native ID(s) (B171), or disable
+  hooks.enabled / hooks.internal if it is not required (B179).

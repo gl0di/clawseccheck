@@ -18,7 +18,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
-    <img src="docs/assets/stats-light.svg" alt="175 security checks · 24 attack-chain detectors · 12,568 automated tests · 0 dependencies · 0 network calls" width="900">
+    <img src="docs/assets/stats-light.svg" alt="175 security checks · 26 attack-chain detectors · 12,568 automated tests · 0 dependencies · 0 network calls" width="900">
   </picture>
 </p>
 

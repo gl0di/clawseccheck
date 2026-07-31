@@ -1792,6 +1792,189 @@ def _rule_tunnel_bypasses_egress_policy(ctx: Context, tools: list[str],
     )
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# I-030 / RISK-25 — non-canonical marketplace feed + disabled install-policy gate
+# ──────────────────────────────────────────────────────────────────────────────
+# Two already-shipped checks each read one half of the same supply-chain story and had
+# never been joined (grep of risk.py for "marketplaces"/"installPolicy" was 0 hits
+# before this rule). B325 reports when marketplaces.feeds.<name>.url (plus the
+# supplementary marketplaces.sources allowlist) names a registry other than the public
+# clawhub.ai — WARN-only, "where the next install COULD come from"; never FAIL, because
+# a self-hosted/enterprise mirror is a legitimate, disclosed deployment reusing
+# OpenClaw's own documented extension point. B174 reports when security.installPolicy —
+# the operator-owned gate meant to review every skill/plugin install and update — is
+# not enabled at all (WARN), or is enabled with its own exec-hook path-safety checks
+# bypassed via allowInsecurePath (FAIL when unconstrained by trustedDirs, WARN when
+# scoped, or WARN for a secret-shaped passEnv name).
+#
+# Neither finding alone is unusual: an operator may run a private/self-hosted feed with
+# no install-policy gate simply because they have never touched that operator-only
+# setting either way; or may leave install-policy disabled while relying entirely on
+# the canonical clawhub.ai feed's own vetting. The combinational signal is that BOTH
+# hold on the SAME install: a non-default install source with nothing reviewing what
+# actually gets pulled from it.
+#
+# Pure correlation of two already-emitted verdicts, by design: this rule reads no
+# config itself, only `_finding_status(findings, "B325"/"B174")` — it cannot introduce a
+# new false FAIL that neither underlying check would already have raised on its own.
+def _rule_marketplace_unreviewed_install(ctx: Context,
+                                         findings: list[Finding]) -> RiskPath | None:
+    """MEDIUM (RISK-25, I-030): a non-canonical marketplace feed joined with a disabled
+    or escaped install-policy review gate — an unmonitored, unreviewed supply-chain
+    install path.
+
+    Fires only when BOTH already-shipped findings hold:
+
+    1. B325 == WARN — at least one marketplaces.feeds.<name>.url (or the accompanying
+       marketplaces.sources allowlist) points at a registry other than the public
+       https://clawhub.ai;
+    2. B174 in (WARN, FAIL) — security.installPolicy is not enabled, or its exec hook's
+       own allowInsecurePath/passEnv escape flags leave the review gate degraded.
+
+    Neither alone is a chain: a private feed with a healthy install-policy gate is a
+    reviewed custom source (B174 stays PASS, no chain); a disabled install-policy gate
+    against the canonical clawhub.ai feed relies on ClawHub's own vetting (B325 stays
+    PASS, no chain either). It is the JOIN — a non-default source AND nothing reviewing
+    what it delivers — that turns two individually-plausible postures into an actual
+    unmonitored install path.
+    """
+    if _finding_status(findings, "B325") != WARN:
+        return None
+    if _finding_status(findings, "B174") not in (WARN, FAIL):
+        return None
+    return RiskPath(
+        id="RISK-25",
+        severity=MEDIUM,
+        title="Non-canonical marketplace feed with no install-time review gate",
+        chain=[
+            "marketplaces.feeds (or .sources) names a non-canonical registry",
+            "security.installPolicy is disabled, or its exec hook is escaped",
+            "skill/plugin installs from that source run unmonitored and unreviewed",
+        ],
+        why=(
+            "This install names a marketplace feed/source other than the public "
+            "https://clawhub.ai, and at the same time security.installPolicy — the "
+            "operator-owned gate meant to review every skill/plugin install and update "
+            "— is not enabled, or is enabled with its own exec hook's path-safety "
+            "checks bypassed (exec.allowInsecurePath) or forwarding a secret-shaped "
+            "env var name. Neither posture alone is unusual: a private feed can be a "
+            "legitimate self-hosted mirror, and a disabled install-policy gate is a "
+            "common untouched default. Together, they mean whatever that non-canonical "
+            "feed serves next installs with nothing reviewing it first."
+        ),
+        fix=(
+            "Either confirm the marketplaces.feeds/.sources entry is your own trusted "
+            "mirror and enable security.installPolicy with a real exec review command "
+            "(no unconstrained allowInsecurePath — scope it with exec.trustedDirs if "
+            "you need it), or restore the canonical https://clawhub.ai feed if the "
+            "non-default entry was not an intentional, disclosed deployment."
+        ),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# I-031 / RISK-26 — Skill Workshop autonomous authoring + untrusted ingress
+# ──────────────────────────────────────────────────────────────────────────────
+# B175 already reports the FULL unattended Skill Workshop pipeline — autonomous
+# authoring (skills.workshop.autonomous.enabled) plus no-review install
+# (approvalPolicy="auto") — as FAIL only once the skill_workshop tool is also confirmed
+# reachable (not sandboxed / denied / profile-restricted). That FAIL is a standalone
+# posture finding: it says the agent COULD author and install new executable skill code
+# from a single conversation turn with zero human review, but it says nothing about
+# whether anyone untrusted can start that conversation turn. B26 / B171 / B179 each
+# independently report one shape of "an inbound message from someone other than the
+# owner reaches this agent" — untrusted quoted/history context reaching the model (B26,
+# channels.<p>.contextVisibility), a privileged in-chat command surface reachable with
+# an under-scoped owner/allow-from gate (B171, which itself FAILs outright on an open
+# dmPolicy/groupPolicy with no gate), or an inbound webhook hooks endpoint / internal
+# hook module loading enabled (B179, hooks.enabled / hooks.internal). grep of risk.py
+# for "workshop" was 0 hits before this rule — none of these were ever joined.
+#
+# The join: B175's FAIL state means a single inbound message, once it reaches the
+# agent, needs no further review step to become persistent code on disk. Whether such a
+# message can arrive from someone other than the owner is exactly what B26/B171/B179
+# already answer. Fires HIGH only when B175 == FAIL (deliberately not its WARN states —
+# see the rule's own docstring) AND at least one ingress arm below is positive.
+#
+# Pure correlation of already-emitted verdicts: no config is read directly here, only
+# `_finding_status` on B175/B26/B171/B179 — this cannot introduce a new false FAIL
+# beyond what those four checks already raised independently.
+_R26_INGRESS_ARMS = {
+    "B26": "untrusted senders' quoted/history context reaches the model "
+           "(channels.<p>.contextVisibility)",
+    "B171": "a privileged in-chat command surface (bash/config/mcp/plugins) is "
+            "reachable with an under-scoped or absent owner/allow-from gate",
+    "B179": "an inbound webhook hooks endpoint and/or internal hook module loading "
+            "is enabled",
+}
+
+
+def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
+                                              findings: list[Finding]) -> RiskPath | None:
+    """HIGH (RISK-26, I-031): Skill Workshop's unattended author+install pipeline,
+    reachable from at least one untrusted-ingress surface — one inbound message can
+    become persistent executable code on disk.
+
+    Fires only when:
+
+    1. B175 == FAIL — Skill Workshop can autonomously author new executable skill code
+       from conversation signals AND install it with no human review step, AND the
+       skill_workshop tool is confirmed reachable (not sandboxed/denied/profile-
+       restricted). Deliberately NOT B175's WARN states: one WARN branch means the full
+       pipeline is configured but the tool is currently unreachable (dormant, not live
+       — chaining on it here would claim a message can reach a tool the config itself
+       blocks); the other WARN branch means only a PARTIAL gap (e.g. just
+       allowSymlinkTargetWrites, with approvalPolicy still at its safe "pending"
+       default) — a real widening, but not the "no review at all" shape this chain
+       describes. Only FAIL proves every ingredient the title claims.
+    2. at least one of B26 / B171 / B179 holds — a live ingress path for a message from
+       someone other than the owner (see `_R26_INGRESS_ARMS`).
+
+    HONEST LABELLING. This does not claim the pipeline has actually been triggered —
+    every leg is config/posture, read from findings already emitted elsewhere. Silence
+    is not an all-clear for Skill Workshop generally; it means these specific legs did
+    not both hold.
+    """
+    if _finding_status(findings, "B175") != FAIL:
+        return None
+    arms = [
+        label for cid, label in _R26_INGRESS_ARMS.items()
+        if _finding_status(findings, cid) in (WARN, FAIL)
+    ]
+    if not arms:
+        return None
+    detail = "; ".join(arms)
+    return RiskPath(
+        id="RISK-26",
+        severity=HIGH,
+        title="Skill Workshop's unattended install pipeline is reachable from untrusted ingress",
+        chain=[
+            detail,
+            "Skill Workshop authors + installs new skill code with no human review step",
+            "persistent executable code on disk",
+        ],
+        why=(
+            "This install has the full unattended Skill Workshop pipeline configured "
+            "and reachable: skills.workshop.autonomous.enabled authors new skill "
+            "proposals from conversation signals, and approvalPolicy='auto' installs "
+            "them with no human confirmation. At the same time, at least one ingress "
+            f"surface admits content from someone other than the owner: {detail}. A "
+            "single inbound message can therefore cause the agent to author and "
+            "install new executable code on disk with no review step in between."
+        ),
+        fix=(
+            "Set skills.workshop.approvalPolicy back to the default 'pending' so every "
+            "generated proposal needs an explicit `openclaw skills workshop apply` "
+            "decision, and/or disable skills.workshop.autonomous.enabled unless "
+            "unattended authoring is genuinely intended. Independently, close the "
+            "flagged ingress surface(s): set channels.<provider>.contextVisibility to "
+            "'allowlist'/'allowlist_quote' (B26), scope commands.ownerAllowFrom/"
+            "allowFrom to your own channel-native ID(s) (B171), or disable "
+            "hooks.enabled / hooks.internal if it is not required (B179)."
+        ),
+    )
+
+
 def risk_paths(ctx: Context, findings: list[Finding],
                 ignore: set[str] | None = None) -> list[RiskPath]:
     """Compute dangerous capability chains from config + existing findings.
@@ -1914,6 +2097,14 @@ def risk_paths(ctx: Context, findings: list[Finding],
         candidates.append(path)
 
     path = _rule_tunnel_bypasses_egress_policy(ctx, tools, cfg)
+    if path:
+        candidates.append(path)
+
+    path = _rule_marketplace_unreviewed_install(ctx, findings)
+    if path:
+        candidates.append(path)
+
+    path = _rule_workshop_autonomy_untrusted_ingress(ctx, findings)
     if path:
         candidates.append(path)
 
