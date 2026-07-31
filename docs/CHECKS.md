@@ -2263,6 +2263,20 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
+### B343 - ML model artifact loaded without provenance (huggingface / gguf / safetensors / ollama)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: ML model artifact loaded without provenance (huggingface / gguf / safetensors / ollama)
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

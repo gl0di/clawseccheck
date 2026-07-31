@@ -6299,6 +6299,195 @@ def check_remote_code_dependency(ctx: Context) -> Finding:
     )
 
 
+# ---------- B343 (C-341): ML model artifact provenance ----------
+# ESET H1 2026 supply-chain section: a skill can depend on libraries, scripts, APIs,
+# models, or CLI utilities. We provenance-check libraries (B95/B157), scripts/APIs/CLI
+# (C5/B86) — models are the one dependency class with no check. Distinct from B92
+# (unsafe deserialization FORMAT): this is about WHERE the artifact came from, not
+# whether the file format is dangerous to load.
+#
+# Real-fleet base rate (C-135 prep, SkillTrustBench 5,521 cases): ~1% reference a model
+# loader at all — thin but real, and model IDs are near-universally passed as a CLI arg
+# or variable (`args.model_id`), not a literal — this check structurally misses most
+# real usage and is inventory-grade, same caveat B153/B157 already carry.
+_MODEL_LOADER_RE = re.compile(
+    r'\b(?:from_pretrained|snapshot_download|hf_hub_download)\s*\(\s*'
+    r'(?:repo_id\s*=\s*)?["\']([^"\']+)["\']',
+    re.I,
+)
+_OLLAMA_PULL_RE = re.compile(
+    r'\bollama\s+pull\s+([^\s"\')]+)'  # shell/prose text: "ollama pull llama3:8b"
+    r'|\bollama\.pull\(\s*["\']([^"\']+)["\']'  # Python client: ollama.pull("llama3:8b")
+    # argv-list form: subprocess.run(["ollama", "pull", "llama3:8b"]) — the same shape
+    # B338 was found to miss (project memory) for a different check; covered here too.
+    r'|["\']ollama["\']\s*,\s*["\']pull["\']\s*,\s*["\']([^"\']+)["\']',
+    re.I,
+)
+_MODEL_FILE_URL_RE = re.compile(
+    r'https?://[^\s"\'<>)\]]+\.(?:gguf|safetensors|onnx)\b',
+    re.I,
+)
+# A revision/commit/digest pin near the call site — checked in a window around the
+# match, not just inside the captured argument, since revision= is usually a sibling
+# kwarg on the same call rather than part of the repo-id string.
+_MODEL_REVISION_PIN_RE = re.compile(
+    r'\b(?:revision|commit_hash)\s*=|@sha256:|:[0-9a-f]{12,64}\b',
+    re.I,
+)
+_MODEL_PIN_WINDOW = 200
+# C-135: an already-vendored local model path (relative, absolute, home-relative, or a
+# Windows drive letter) — no remote host to have provenance about. A real HF/ollama
+# repo-id/tag never starts with any of these.
+_MODEL_LOCAL_PATH_RE = re.compile(r'^(?:\.{1,2}/|/|~|[A-Za-z]:[\\/])')
+
+
+def _model_provenance_hits(name: str, blob: str) -> tuple[list[str], list[str], int]:
+    """(fails, warns, hits) evidence for B343. `hits` counts every recognized
+    model-loader call site regardless of verdict — a clean/pinned reference still
+    counts as inspected, so the caller doesn't misread "found and clean" as "found
+    nothing" (UNKNOWN). FAIL only for the same unverifiable-provenance shape B103/B157
+    already FAIL on (plaintext http/ftp, raw public IP, .onion, or an exact IOC-dataset
+    match), reusing their vetted `_bad_provenance_url` predicate verbatim. An unpinned
+    bare repo-id/tag, or an arbitrary-but-HTTPS-named-host, stays WARN — there is no
+    sound static way to tell a legitimate community fine-tune from a typosquat repo by
+    string shape alone (mirrors B103's own "unpinned is the norm" tension)."""
+    fails: list[str] = []
+    warns: list[str] = []
+    hits = 0
+    seen_spans: set[tuple[int, int]] = set()
+    fr = _fence_ranges(blob)
+
+    def _pinned_nearby(start: int, end: int) -> bool:
+        window = blob[max(0, start - _MODEL_PIN_WINDOW) : end + _MODEL_PIN_WINDOW]
+        return bool(_MODEL_REVISION_PIN_RE.search(window))
+
+    for m in _MODEL_FILE_URL_RE.finditer(blob):
+        if m.span() in seen_spans:
+            continue
+        seen_spans.add(m.span())
+        # C-135: a documentation example ("e.g. http://evil.example/x.gguf") or a
+        # fenced code block quoting someone else's snippet is not this skill's own
+        # fetch — same dampening every other content-ring check already applies.
+        if _is_code_example(blob, m.start(), fr):
+            continue
+        hits += 1
+        url = m.group(0)
+        if _bad_provenance_url(url):
+            fails.append(f"{name}: model artifact fetched with unverifiable provenance ({_obf_clip(url)})")
+        # An HTTPS fetch to a named host is treated like B103's PASS case (no WARN —
+        # a direct artifact URL is not the "unpinned reference" shape reasoned about
+        # below, it's already a fully-specified fetch target).
+
+    for rx in (_MODEL_LOADER_RE, _OLLAMA_PULL_RE):
+        for m in rx.finditer(blob):
+            if m.span() in seen_spans:
+                continue
+            seen_spans.add(m.span())
+            ref = next((g for g in m.groups() if g), "").strip()
+            if not ref:
+                continue
+            # C-135: a docstring/README showing HF's own canonical usage example
+            # ("e.g. model = AutoModel.from_pretrained(...)") is documentation, not a
+            # live call this skill makes.
+            if _is_code_example(blob, m.start(), fr):
+                continue
+            # C-135: an already-vendored LOCAL model path has no remote provenance
+            # question to pin — "add revision=" is meaningless advice for a path the
+            # skill already ships. Only a repo-id/tag/URL is in scope here.
+            if _MODEL_LOCAL_PATH_RE.match(ref):
+                continue
+            hits += 1
+            scheme, host = _install_url_target(ref)
+            if scheme is not None:
+                # A literal URL passed straight to the loader — same FAIL/clean split
+                # as a direct artifact URL above.
+                if _bad_provenance_url(ref):
+                    fails.append(
+                        f"{name}: model loader fetches from an unverifiable-provenance URL ({_obf_clip(ref)})"
+                    )
+                continue
+            # A bare repo-id / tag (e.g. "org/model", "llama3:8b"). WARN only when
+            # unpinned — never FAIL, matching B103's own unpinned-is-the-norm stance.
+            if not _pinned_nearby(m.start(), m.end()):
+                warns.append(f"{name}: model reference '{_obf_clip(ref, 60)}' has no revision/digest pin")
+    return fails, warns, hits
+
+
+def check_model_artifact_provenance(ctx: Context) -> Finding:
+    """B343 (C-341) — provenance of an ML model artifact a skill loads (huggingface
+    from_pretrained/snapshot_download/hf_hub_download, ollama pull, or a direct
+    .gguf/.safetensors/.onnx URL).
+
+    FAIL    — the model is fetched from a source with unverifiable provenance: plaintext
+              HTTP/FTP, a raw public IP, a .onion host, or an exact match in the bundled
+              IOC dataset. Mirrors B103/B157's FAIL discriminator exactly.
+    WARN    — a bare repo-id/tag reference with no revision/commit/digest pin, or a
+              literal HTTPS URL to a non-canonical host. A model is executable
+              influence, not inert data — an attacker-swapped model changes agent
+              behavior with no code diff to notice, and unlike a pip package there is
+              no lockfile convention to lean on.
+    PASS    — every model reference found is pinned (or no model reference is unpinned).
+    UNKNOWN — no installed skills, or none reference a model loader / artifact at all.
+    """
+    skills = getattr(ctx, "installed_skills", None)
+    if not skills:
+        return _custom(
+            "B343",
+            HIGH,
+            UNKNOWN,
+            "No installed skills to inspect for ML model artifact provenance.",
+            "Run --vet on a skill dir, or on a host with installed skills.",
+        )
+    fails: list[str] = []
+    warns: list[str] = []
+    inspected = 0
+    for name, blob in skills.items():
+        f, w, hits = _model_provenance_hits(name, blob)
+        inspected += hits
+        fails.extend(f)
+        warns.extend(w)
+    if inspected == 0:
+        return _custom(
+            "B343",
+            HIGH,
+            UNKNOWN,
+            "No model-loader call sites (from_pretrained/ollama pull/model-artifact URL) found.",
+            "Run --vet on a skill that loads an ML model.",
+        )
+    if fails:
+        extra = f" (+{len(fails) - 6} more)" if len(fails) > 6 else ""
+        return _custom(
+            "B343",
+            HIGH,
+            FAIL,
+            "Model artifact fetched with unverifiable provenance: " + "; ".join(fails[:6]) + extra,
+            "Fetch model artifacts over HTTPS from a named host, or remove the direct fetch "
+            "and use the provider's own pinned loader.",
+            fails + warns,
+        )
+    if warns:
+        extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
+        return _custom(
+            "B343",
+            HIGH,
+            WARN,
+            "Model reference has no provenance pin (review before trusting): "
+            + "; ".join(warns[:6]) + extra,
+            "Pin model references to an exact revision/commit hash or content digest "
+            "(e.g. revision=\"<sha>\" or model:tag@sha256:...) so an update to the "
+            "upstream repo cannot silently swap what the skill loads.",
+            warns,
+        )
+    return _custom(
+        "B343",
+        HIGH,
+        PASS,
+        f"Inspected {inspected} model reference(s): all pinned to a revision/digest or "
+        "fetched from a named host.",
+        "Keep model references pinned to an exact revision/commit hash or content digest.",
+    )
+
+
 def _whole_text_is_defensive(blob: str) -> bool:
     """Conservative whole-document gate for B58's base variant: True only when the
     document BOTH has a defensive heading AND contains a broad negation somewhere.

@@ -123,6 +123,7 @@ from ._content import (
     check_lifecycle_hooks_extended,
     check_manifest_absent,
     check_markdown_image_exfil,
+    check_model_artifact_provenance,
     check_overt_secret_exfil,
     check_per_source_trust_contracts,
     check_persona_jailbreak,
@@ -4759,4 +4760,5 @@ SKILL_CONTENT_RING = (
     check_config_trust_widening,  # B96 — config-driven trust widening, heuristic-only (F-100)
     check_install_directive_supply_chain,  # B103 — install[] supply-chain provenance (B-099)
     check_interpreter_interpolation_injection,  # B153 — interpreter one-liner interpolation
+    check_model_artifact_provenance,  # B343 — ML model artifact provenance (C-341)
 )

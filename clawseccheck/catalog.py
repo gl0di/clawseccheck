@@ -2700,6 +2700,25 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="skills",
     ),
+    # B343 (C-341, ESET H1 2026): ML model artifact provenance — the one dependency
+    # class libraries/scripts/APIs/CLI utilities already get provenance checks for
+    # (B95/B157/C5/B86) but models do not. Distinct from B92 (unsafe deserialization
+    # FORMAT); this is about WHERE the model artifact came from. FAIL only for the same
+    # unverifiable-provenance shape B103/B157 already FAIL on (plaintext http/ftp, raw
+    # public IP, .onion), reusing their vetted host predicates verbatim — an unpinned
+    # reference or an arbitrary-but-HTTPS-named-host repo stays WARN, matching B103's
+    # own "unpinned is the norm" tension (there is no sound way to tell a legitimate
+    # community fine-tune from a typosquat by string shape alone).
+    CheckMeta(
+        "B343",
+        "ML model artifact loaded without provenance (huggingface / gguf / safetensors / ollama)",
+        HIGH,
+        "hardening",
+        "Supply Chain",
+        scored=True,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
