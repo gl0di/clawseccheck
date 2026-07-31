@@ -67,11 +67,11 @@ def test_b39_disabled_channel_not_cross_user_failed():
 
 
 # ── B55: disabled open channel must not make fs_write "reachable" ────────────────
-# B-315: B55's broad-reach verdict was downgraded FAIL->WARN (unscored checks must
-# never FAIL), so both the disabled and the enabled case now render as WARN — status
-# alone no longer distinguishes them. Assert on the evidence content instead: only the
-# ENABLED (truly reachable) case names an "open-ingress channel(s)"; the disabled case
-# falls through to the unrelated "no approval gate" fallback WARN.
+# B-376/B-369 (2026-07-31): B55's broad-reach verdict was re-escalated WARN->FAIL, per
+# a scored=True per-Finding override (B186 precedent) — so the disabled/enabled cases
+# are distinguishable by status again: the disabled channel falls through to the
+# unrelated "no approval gate" fallback WARN, while the ENABLED (truly reachable) case
+# now FAILs.
 
 def test_b55_disabled_channel_not_broad_reach():
     cfg = {"tools": {"allow": ["fs_write"]},
@@ -82,7 +82,8 @@ def test_b55_disabled_channel_not_broad_reach():
     # enabled control: fs_write reachable via an open channel IS flagged as broad reach
     cfg["channels"]["telegram"].pop("enabled")
     enabled = _run(cfg)["B55"]
-    assert enabled.status == WARN
+    assert enabled.status == FAIL
+    assert enabled.scored is True
     assert any("open-ingress channel(s)" in e for e in enabled.evidence)
 
 

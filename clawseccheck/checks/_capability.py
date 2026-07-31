@@ -744,9 +744,8 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     A write-capable tool (fs_write / apply_patch) explicitly listed in the tool
     allowlist lets the agent create or overwrite files. Unscoped — reachable by a
     wildcard sender allowlist or an open channel without write-specific scoping — untrusted
-    input can drive arbitrary writes (tamper / persistence). Advisory (scored=False):
-    it names the capability and feeds RISK-12; the scored write/least-privilege
-    dimensions stay with B3/B22/B31 so this never moves the grade.
+    input can drive arbitrary writes (tamper / persistence). CheckMeta stays scored=False
+    (B3/B22/B31 own the general dimension); the FAIL branch is a per-Finding override.
 
     UNKNOWN — no tool allowlist declared (tools.allow / gateway.tools.allow absent):
               fs-write grants are not enumerable from config.
@@ -754,8 +753,8 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
               gate for non-open ingress, or a tight non-wildcard sender allowlist).
     WARN    — write tool granted, no approval gate and no explicit sender allowlist,
               but no proven broad reach.
-    FAIL    — write tool granted AND reachable by untrusted senders (wildcard
-              allowFrom or open channel) AND no approval gate.
+    FAIL    — write tool granted AND reachable by PROVEN broad reach (wildcard
+              allowFrom or an open channel), gated or not. scored=True.
     """
     cfg = ctx.config
     allow_a = dig(cfg, "tools.allow")
@@ -789,8 +788,22 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     label = ", ".join(write_tools)
     gated = _has_approval_gate(cfg)
     allow_from = dig(cfg, "tools.elevated.allowFrom")
-    tight_allowlist = isinstance(allow_from, list) and bool(allow_from) and "*" not in allow_from
-    wildcard = allow_from == "*" or (isinstance(allow_from, list) and "*" in allow_from)
+    # B-376 C-135 fix: REAL shape is a dict keyed by provider (see B3's identical
+    # grounded comment) -- a flat list/bare "*" is legacy. The flat-only check let a
+    # textbook dict allowlist fall through to the open_ch-only FAIL below.
+    if isinstance(allow_from, dict):
+        wildcard = any(v == "*" or (isinstance(v, list) and "*" in v) for v in allow_from.values())
+        tight_allowlist = bool(allow_from) and not wildcard
+    else:
+        tight_allowlist = isinstance(allow_from, list) and bool(allow_from) and "*" not in allow_from
+        wildcard = allow_from == "*" or (isinstance(allow_from, list) and "*" in allow_from)
+    # B-376 C-135 fix: B68 (same file) treats either field as sufficient fs confinement
+    # for this identical tool family (its own composite predicate, quoted there).
+    # Confined-but-reachable writes are a real but lesser risk than "arbitrary".
+    fs_confined = (
+        dig(cfg, "tools.fs.workspaceOnly") is True
+        or dig(cfg, "agents.defaults.sandbox.mode") == "all"
+    )
     # DELIBERATE: _open_channels (open-only), NOT _external_input_channels. This feeds the
     # FAIL gate below; a hard FAIL ("arbitrary writes reachable by untrusted senders")
     # requires proven-broad reach — a wildcard sender or a truly-open/public channel. An
@@ -828,19 +841,35 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
             ev.append(
                 "open-ingress bypasses exec-style approval and can still drive write-capable tools"
             )
-        # B-315: was FAIL, downgraded to WARN. B55 is scored=False by design — the
-        # write/least-privilege dimension it fires on is already SCORED by B3/B22/B31, so
-        # capping the grade here would double-count the same risk under a second check id.
+        # B-376/B-369 (2026-07-31): re-escalated from B-315's WARN, per B186's
+        # narrow-FAIL-override precedent -- proven broad reach, gated or not (an
+        # exec-only gate doesn't scope write tools). See test_b315_unscored_never_fails.
+        if fs_confined:
+            ev.append(
+                "filesystem writes are confined to the workspace (tools.fs.workspaceOnly "
+                "or agents.defaults.sandbox.mode='all') -- not arbitrary write reach"
+            )
+            return _finding(
+                "B55",
+                WARN,
+                f"Filesystem-write capability ({label}) is reachable by untrusted senders, "
+                f"but confined to the workspace, so writes can tamper the project itself "
+                f"rather than reach arbitrary paths.",
+                "Restrict tools.elevated.allowFrom to an explicit allowlist (no '*') or "
+                "lock open channels to 'allowlist' to remove untrusted reach entirely.",
+                evidence=ev,
+            )
         return _finding(
             "B55",
-            WARN,
+            FAIL,
             f"Broad filesystem-write capability ({label}) is reachable by untrusted "
-            f"senders without write-specific scoping, so untrusted input can drive arbitrary "
-            f"file writes (tamper / persistence).",
-            "Add an approval gate (tools.exec.mode='ask') and restrict "
-            "tools.elevated.allowFrom to an explicit allowlist (no '*'); lock open "
-            "channels to 'allowlist'.",
+            f"senders with no write-specific scoping, so untrusted input can drive "
+            f"arbitrary file writes (tamper / persistence).",
+            "Restrict tools.elevated.allowFrom to an explicit allowlist (no '*') or lock "
+            "open channels to 'allowlist'. tools.exec.mode='ask' alone does not clear "
+            "this — it doesn't scope write-capable tools.",
             evidence=ev,
+            scored=True,
         )
 
     return _finding(

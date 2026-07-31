@@ -1,13 +1,19 @@
 """B55 / C-013 — filesystem-write tool exposure check + RISK-12 chain.
 
-B55 is advisory (scored=False): it names a broad/ungated fs-write grant and feeds
-RISK-12 (write + untrusted ingress = tamper/persistence). It must never FAIL/WARN on
-a scoped config (§5 zero-false-positive).
+B55's CheckMeta is advisory (scored=False): the WARN/PASS/UNKNOWN branches name a
+broad/ungated fs-write grant and feed RISK-12 (write + untrusted ingress =
+tamper/persistence), while the general write/least-privilege dimension stays with the
+SCORED checks B3/B22/B31. It must never WARN/FAIL on a genuinely scoped config (§5
+zero-false-positive).
 
-B-315: B55's broad-reach case was downgraded FAIL->WARN — an unscored check must never
-FAIL (Dave's ruling: scored=False caps at WARN), and the catalog comment already says
-this risk is duplicated by the SCORED checks B3/B22/B31, so capping the grade here would
-double-count it under a second check id.
+B-315 originally downgraded the broad-reach case FAIL->WARN (an unscored check must
+never FAIL — Dave's ruling: scored=False caps at WARN). B-376/B-369 (2026-07-31)
+re-escalated it: ClawRange's false-negative hunter found real misses on two grounded,
+PROVEN-broad-reach mutations, so this branch now follows the B186 narrow-FAIL-override
+precedent instead — CheckMeta stays scored=False, and only this one Finding carries
+scored=True (see tests/test_b315_unscored_never_fails.py for the cross-check
+invariant). Everything short of proven broad reach (an allowlist/paired channel, or no
+broad-reach signal at all) is unaffected and still stays WARN.
 """
 from pathlib import Path
 
@@ -33,22 +39,25 @@ def _write_config(tmp_path: Path, body: str) -> Path:
     return tmp_path
 
 
-# --------------------------------------------------------------------------- WARN (B-315: was FAIL)
-def test_broad_fs_write_warns_on_bad_fixture():
+# --------------------------------------------------------------------------- FAIL (B-376/B-369)
+def test_broad_fs_write_fails_on_bad_fixture():
     f = _b55(FIXTURES / "bad_b55_fs_write_broad")
     assert f.id == "B55"
-    assert f.status == WARN
-    assert f.status != FAIL  # B-315: an unscored check must never FAIL
-    assert f.scored is False  # advisory — never moves the grade
+    assert f.status == FAIL
+    assert f.scored is True  # per-finding override — this specific Finding participates
     assert any("fs_write" in e for e in f.evidence)
     assert any("no approval gate" in e for e in f.evidence)
 
 
-def test_bad_fixture_b55_is_not_scored_in_audit():
-    """The whole audit must run and B55 must be present but advisory."""
+def test_bad_fixture_b55_is_scored_in_audit_but_checkmeta_is_not():
+    """The whole audit must run; this FAIL must be visible to scoring.compute() even
+    though CheckMeta.scored stays False for B55's other branches."""
+    from clawseccheck.catalog import BY_ID
+
+    assert BY_ID["B55"].scored is False
     _, findings, _ = audit(FIXTURES / "bad_b55_fs_write_broad")
     b55 = _by_id(findings)["B55"]
-    assert b55.status == WARN and b55.scored is False
+    assert b55.status == FAIL and b55.scored is True
 
 
 # --------------------------------------------------------------------------- PASS
@@ -70,15 +79,76 @@ def test_tight_sender_allowlist_passes(tmp_path):
     assert _b55(home).status == PASS
 
 
-def test_open_channel_not_scoped_by_exec_gate_warns(tmp_path):
+# C-135 (2026-07-31): the real tools.elevated.allowFrom shape is a dict keyed by
+# provider (see B3's check_least_privilege), not the flat list/bare "*" form. An
+# adversarial review of the FAIL escalation found this dict shape fell through to the
+# open_ch-only FAIL branch unrecognized — the textbook-recommended way to scope
+# elevated tools was itself a false-positive FAIL trigger.
+def test_dict_shaped_tight_allowlist_passes_even_with_open_channel(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"dmPolicy": "open"}},'
+        ' "tools": {"allow": ["fs_write"], "elevated": '
+        '{"allowFrom": {"telegram": ["987654321"]}}}}',
+    )
+    f = _b55(home)
+    assert f.status == PASS, f.detail
+
+
+def test_dict_shaped_wildcard_allowlist_still_fails(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"dmPolicy": "open"}},'
+        ' "tools": {"allow": ["fs_write"], "elevated": '
+        '{"allowFrom": {"telegram": ["*"]}}}}',
+    )
+    f = _b55(home)
+    assert f.status == FAIL, f.detail
+    assert f.scored is True
+
+
+def test_open_channel_not_scoped_by_exec_gate_fails(tmp_path):
+    """B-369's exact mutation: an exec-only approval gate does not scope write tools,
+    so it cannot clear an otherwise-broad-reach fs_write grant."""
     home = _write_config(
         tmp_path,
         '{"channels": {"telegram": {"dmPolicy": "open"}},'
         ' "tools": {"allow": ["fs_write"], "exec": {"mode": "ask"}}}',
     )
     f = _b55(home)
-    assert f.status == WARN, f.detail  # B-315: was FAIL
-    assert any("open-ingress channel(s)" in e for e in f.evidence)
+    assert f.status == FAIL, f.detail
+    assert f.scored is True
+    assert any("open-ingress bypasses exec-style approval" in e for e in f.evidence)
+
+
+# C-135 (2026-07-31): B68 (check_exec_applypatch_workspace, same file) already treats
+# tools.fs.workspaceOnly=true / agents.defaults.sandbox.mode="all" as sufficient
+# confinement for this identical tool family. An adversarial review of the FAIL
+# escalation found B55 never consulted either field, so a workspace-confined or fully
+# sandboxed write grant still hard-FAILed as "arbitrary" — downgraded to WARN instead:
+# still reachable, but not arbitrary, so not scored=True.
+def test_workspace_confined_write_downgrades_to_warn_not_fail(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"dmPolicy": "open"}},'
+        ' "tools": {"allow": ["fs_write"], "fs": {"workspaceOnly": true}}}',
+    )
+    f = _b55(home)
+    assert f.status == WARN, f.detail
+    assert f.scored is False
+    assert any("confined to the workspace" in e for e in f.evidence)
+
+
+def test_fully_sandboxed_write_downgrades_to_warn_not_fail(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"discord": {"dmPolicy": "open", "groupPolicy": "open"}},'
+        ' "tools": {"allow": ["apply_patch"]},'
+        ' "agents": {"defaults": {"sandbox": {"mode": "all"}}}}',
+    )
+    f = _b55(home)
+    assert f.status == WARN, f.detail
+    assert f.scored is False
 
 
 # --------------------------------------------------------------------------- WARN

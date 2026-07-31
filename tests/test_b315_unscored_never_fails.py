@@ -13,22 +13,30 @@ merits (not a blanket rule):
 
   - B43 (downgrade): confidence=ATTESTED — the verdict is the audited agent's OWN
     self-report; a grade cap the subject can talk itself into is unsound.
-  - B55 (downgrade): catalog.py's own comment says this risk is already carried by the
-    SCORED checks B3/B22/B31 — scoring it too would double-count under a second id.
   - B70 (downgrade): the B68-B73 block comment claims the group is WARN-only with zero
     false-positive FAILs; B70's FAIL branch was the sole violator of that documented
     intent (and this exact loopback predicate is the one CLAUDE.md records as
     version-dependent across Python 3.9/3.12) — downgrading restores the claim.
-  - B185/B186/B193 (per-finding scored=True override, CheckMeta stays scored=False):
+  - B55/B185/B186/B193 (per-finding scored=True override, CheckMeta stays scored=False):
     each has a genuinely deterministic, narrowly-scoped, well-vetted FAIL branch (B185
     carries 5 rounds of C-135 in tests/test_b185_compiled_tool_poisoning.py) sitting
     alongside a WARN/PASS branch its own catalog.py comment explicitly wants excluded
     from scoring for an unrelated reason (opportunistic log presence for B185;
-    protecting a benign relocated/legacy setup from being docked for B186/B193). A
-    blanket CheckMeta promotion would have started scoring those protected branches
-    too; a blanket downgrade would have thrown away a well-vetted FAIL signal. The
-    `_finding(..., scored=True)` override (checks/_shared.py) lets only the FAIL
-    finding itself participate.
+    protecting a benign relocated/legacy setup from being docked for B186/B193; the
+    general write/least-privilege dimension staying with B3/B22/B31 for B55's own
+    WARN/PASS/UNKNOWN branches). A blanket CheckMeta promotion would have started
+    scoring those protected branches too; a blanket downgrade would have thrown away a
+    well-vetted FAIL signal. The `_finding(..., scored=True)` override
+    (checks/_shared.py) lets only the FAIL finding itself participate.
+
+    B55 moved from "downgrade" to this group on 2026-07-31 (CLAWSECCHECK-B-376/B-369):
+    ClawRange's false-negative hunter found the original WARN a real miss on two
+    grounded mutations — proven broad reach (a wildcard elevated sender, or a
+    genuinely open channel per `_open_channels`) is not "merely unscoped", and an
+    exec-only approval gate does not scope write-capable tools, so neither mutation
+    should have stayed silent at WARN. Followed the exact B186 precedent rather than
+    inventing a new one: CheckMeta stays scored=False (B3/B22/B31 still own the
+    general dimension), only this one narrow FAIL branch gets scored=True.
 
 This file pins the Finding-level invariant every future check must hold — including
 new ones nobody has audited yet — over the full 466-home fixture corpus (+ each
@@ -97,7 +105,7 @@ def test_catalog_scored_false_ids_match_the_audited_set():
     assert len(unscored) == 84
 
 
-# ── Targeted: the three downgrades (FAIL -> WARN, CheckMeta unchanged) ────────────────
+# ── Targeted: the two downgrades (FAIL -> WARN, CheckMeta unchanged) ──────────────────
 
 def test_b43_never_fails():
     from clawseccheck.collector import Context
@@ -119,14 +127,6 @@ def test_b43_never_fails():
     assert BY_ID["B43"].scored is False
 
 
-def test_b55_never_fails():
-    f = check_fs_write_exposure(collect(FIXTURES / "bad_b55_fs_write_broad"))
-    assert f.status != FAIL
-    assert f.status == WARN
-    assert f.scored is False
-    assert BY_ID["B55"].scored is False
-
-
 def test_b70_never_fails():
     f = check_trustedproxy_loopback(
         collect(FIXTURES / "bad_b233_trustedproxy_nonloopback_no_headers")
@@ -137,7 +137,15 @@ def test_b70_never_fails():
     assert BY_ID["B70"].scored is False
 
 
-# ── Targeted: the three per-finding promotions (FAIL -> scored=True override) ─────────
+# ── Targeted: the four per-finding promotions (FAIL -> scored=True override) ──────────
+
+def test_b55_fail_branch_is_scored_but_checkmeta_is_not():
+    assert BY_ID["B55"].scored is False  # WARN/PASS/UNKNOWN stay unscored (B3/B22/B31 own it)
+
+    f = check_fs_write_exposure(collect(FIXTURES / "bad_b55_fs_write_broad"))
+    assert f.status == FAIL
+    assert f.scored is True  # per-finding override — this specific Finding participates
+
 
 def test_b186_fail_branch_is_scored_but_checkmeta_is_not(tmp_path):
     import os

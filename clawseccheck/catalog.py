@@ -803,8 +803,11 @@ CATALOG: list[CheckMeta] = [
     ),
     # B55 (C-013): filesystem-write tool exposure. Advisory (scored=False) — it names
     # the fs-write capability and feeds RISK-12 (write + untrusted ingress = tamper /
-    # persistence); the scored write/least-privilege dimensions stay with B3/B22/B31 so
-    # this never introduces a new scored FAIL on real configs.
+    # persistence); the general write/least-privilege dimension stays with B3/B22/B31.
+    # B-376/B-369 (2026-07-31): the one FAIL branch (proven broad reach — a wildcard
+    # elevated sender or a genuinely open channel, unscoped or exec-gated-only) carries
+    # a per-Finding scored=True override, the same B186 narrow-FAIL-override precedent —
+    # see check_fs_write_exposure's own docstring/comment.
     CheckMeta(
         "B55",
         "Filesystem-write tool exposure (broad fs-write without scoping)",
