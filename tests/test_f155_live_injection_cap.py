@@ -23,6 +23,7 @@ from pathlib import Path
 from clawseccheck.catalog import CRITICAL, FAIL, LOW, PASS, Finding
 from clawseccheck.cli import main
 from clawseccheck.history import load as history_load
+from clawseccheck.monitor import load_state
 from clawseccheck.report import render_html, render_json, render_report
 from clawseccheck.scoring import LIVE_INJECTION_CAP, ScoreResult, compute
 
@@ -436,3 +437,149 @@ class TestCliEndToEnd:
         assert rc == 0
         rows = history_load(str(hist))
         assert len(rows) == 1
+
+
+class TestTrendMonitorReachC135:
+    """C-135 finding on this task: `--trend` and `--monitor` both returned from
+    `_main`'s dispatch cascade BEFORE the `liveTest` bucket in `--judged-bundle` was
+    ever parsed, so a VULNERABLE verdict -- seeded or not -- could never bind
+    LIVE_INJECTION_CAP for either mode: the UNCAPPED score got shown AND recorded
+    into history.jsonl / baked into the --monitor drift baseline, contradicting
+    SKILL.md / docs/OUTPUT_SCHEMA.md Sec.12 / docs/USAGE.md, which all promise a
+    seeded liveTest verdict reaches --trend/--monitor. Exact repro from the review
+    comment, now pinning the fixed (capped) behaviour permanently.
+    """
+
+    def _seeded_bundle(self, tmp_path: Path) -> str:
+        return _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
+            {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
+
+    def _unseeded_bundle(self, tmp_path: Path) -> str:
+        return _bundle_file(tmp_path, {"liveTest": {"verdicts": [
+            {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
+
+    def test_home_safe_baseline_is_uncapped_79_c(self, capsys):
+        # Sanity anchor: without a live-test bundle, home_safe's own default score
+        # really is 79/C -- so the 49/F assertions below are a genuine cap, not two
+        # coincidentally-equal runs.
+        rc = main(["--home", SAFE, "--no-native", "--full", "--json"])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["score"] == 79
+        assert payload["grade"] == "C"
+
+    def test_json_reference_is_capped_49_f(self, tmp_path, capsys):
+        bundle = self._seeded_bundle(tmp_path)
+        rc = main(["--home", SAFE, "--no-native", "--full", "--json",
+                   "--judged-bundle", bundle])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["score"] == LIVE_INJECTION_CAP == 49
+        assert payload["grade"] == "F"
+
+    def test_trend_shows_and_records_the_capped_score(self, tmp_path, capsys):
+        bundle = self._seeded_bundle(tmp_path)
+        hist = tmp_path / "history.jsonl"
+        rc = main(["--home", SAFE, "--no-native", "--full", "--trend", "--ascii",
+                   "--judged-bundle", bundle, "--history", str(hist)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert " F  49 " in out
+        rows = history_load(str(hist))
+        assert len(rows) == 1
+        assert rows[0]["score"] == LIVE_INJECTION_CAP == 49
+        assert rows[0]["grade"] == "F"
+
+    def test_monitor_shows_and_records_the_capped_score(self, tmp_path, capsys):
+        bundle = self._seeded_bundle(tmp_path)
+        state = tmp_path / "state.json"
+        events = tmp_path / "events.jsonl"
+        hist = tmp_path / "history.jsonl"
+        rc = main(["--home", SAFE, "--no-native", "--full", "--monitor", "--ascii",
+                   "--judged-bundle", bundle, "--state", str(state),
+                   "--events", str(events), "--history", str(hist)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Current: 49/100  Grade: F" in out
+        baseline = load_state(str(state))
+        assert baseline is not None
+        assert baseline["score"] == LIVE_INJECTION_CAP == 49
+        assert baseline["grade"] == "F"
+        rows = history_load(str(hist))
+        assert len(rows) == 1
+        assert rows[0]["score"] == LIVE_INJECTION_CAP == 49
+        assert rows[0]["grade"] == "F"
+
+    # ── --judged-bundle now genuinely affects --trend/--monitor (flag-coherence) ──
+
+    def test_judged_bundle_no_longer_flagged_as_no_effect_for_trend(self, tmp_path, capsys):
+        bundle = self._seeded_bundle(tmp_path)
+        main(["--home", SAFE, "--no-native", "--full", "--trend",
+              "--judged-bundle", bundle, "--history", str(tmp_path / "h.jsonl")])
+        assert "--judged-bundle" not in capsys.readouterr().err
+
+    def test_judged_bundle_no_longer_flagged_as_no_effect_for_monitor(self, tmp_path, capsys):
+        bundle = self._seeded_bundle(tmp_path)
+        main(["--home", SAFE, "--no-native", "--full", "--monitor",
+              "--judged-bundle", bundle, "--state", str(tmp_path / "s.json"),
+              "--events", str(tmp_path / "e.jsonl"), "--history", str(tmp_path / "h.jsonl")])
+        assert "--judged-bundle" not in capsys.readouterr().err
+
+    def test_full_itself_still_flagged_as_no_effect_for_trend(self, tmp_path, capsys):
+        # --full itself genuinely still has no effect on --trend (no deep phase ever
+        # runs there) -- only --judged-bundle's liveTest bucket does now. The note
+        # fix above must not over-silence this still-true note.
+        main(["--home", SAFE, "--no-native", "--full", "--trend",
+              "--history", str(tmp_path / "h.jsonl")])
+        assert "--full has no effect with --trend" in capsys.readouterr().err
+
+    def test_full_itself_still_flagged_as_no_effect_for_monitor(self, tmp_path, capsys):
+        main(["--home", SAFE, "--no-native", "--full", "--monitor",
+              "--state", str(tmp_path / "s.json"), "--events", str(tmp_path / "e.jsonl"),
+              "--history", str(tmp_path / "h.jsonl")])
+        assert "--full has no effect with --monitor" in capsys.readouterr().err
+
+    # ── unseeded exclusion (docs' OTHER promise) also reaches --trend/--monitor ──
+
+    def test_unseeded_verdict_caps_trend_display_but_is_not_recorded(self, tmp_path, capsys):
+        bundle = self._unseeded_bundle(tmp_path)
+        hist = tmp_path / "history.jsonl"
+        rc = main(["--home", SAFE, "--no-native", "--full", "--trend", "--ascii",
+                   "--judged-bundle", bundle, "--history", str(hist)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        # This run's OWN score is still capped (shown via the percentile line and by
+        # there being no history row to plot at all) -- it just must never be recorded.
+        assert "No history yet" in out
+        assert not hist.exists()
+
+    def test_unseeded_verdict_caps_monitor_display_but_is_not_persisted(self, tmp_path, capsys):
+        bundle = self._unseeded_bundle(tmp_path)
+        state = tmp_path / "state.json"
+        events = tmp_path / "events.jsonl"
+        hist = tmp_path / "history.jsonl"
+        rc = main(["--home", SAFE, "--no-native", "--full", "--monitor", "--ascii",
+                   "--judged-bundle", bundle, "--state", str(state),
+                   "--events", str(events), "--history", str(hist)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Current: 49/100  Grade: F" in out
+        assert "Baseline saved." not in out
+        assert not state.exists()
+        assert not hist.exists()
+
+    def test_resistant_verdict_still_shows_and_records_uncapped_for_trend_monitor(
+        self, tmp_path, capsys
+    ):
+        # RESISTANT never hits (self-attestation guard) -- both modes must stay
+        # byte-identical to submitting nothing at all, exactly like the default path.
+        bundle = _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
+            {"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}})
+        hist = tmp_path / "history.jsonl"
+        rc = main(["--home", SAFE, "--no-native", "--full", "--trend", "--ascii",
+                   "--judged-bundle", bundle, "--history", str(hist)])
+        assert rc == 0
+        rows = history_load(str(hist))
+        assert len(rows) == 1
+        assert rows[0]["score"] == 79
+        assert rows[0]["grade"] == "C"

@@ -746,6 +746,44 @@ def _resolve_runtime_caps(ctx, findings, score, args):
     return score, full_deadline, judged_bundle, live_signal
 
 
+def _apply_live_test_cap(ctx, findings, score, args):
+    """F-155 fix (C-135): `--trend` and `--monitor` both return from `_main`'s dispatch
+    cascade BEFORE `_resolve_runtime_caps` ever runs (that call sits after both branches,
+    reached only by the default `--full` report/--json path and by `--dashboard --full`)
+    — so a VULNERABLE live-test verdict, seeded or not, could never bind
+    `LIVE_INJECTION_CAP` for these two modes. That contradicts SKILL.md,
+    docs/OUTPUT_SCHEMA.md §12, and docs/USAGE.md, which all promise a seeded liveTest
+    verdict reaches `--trend`/`--monitor` (and that an unseeded one still caps the run
+    without being recorded). This helper is called from inside each of those two
+    branches, before they compute/print/record anything that reads `score`.
+
+    Deliberately narrower than `_resolve_runtime_caps`: this resolves ONLY the liveTest
+    bucket — never the F-154 behavioral cap (`behavioral.analyze(ctx)` is not re-run
+    here) and never the `judged`/`vetJudged` buckets. Neither has a matching documented
+    promise for `--trend`/`--monitor` (both stay visibility/advisory-only there, exactly
+    as before this fix), so folding them in here would be undocumented scope creep, not
+    a fix for this defect.
+
+    Returns `(score, live_signal)` — `score` is the SAME object passed in when the
+    signal does not hit, a freshly recomputed one otherwise (the same "never mutate,
+    always return" contract `_resolve_runtime_caps`/`scoring.compute` already follow).
+    The caller uses `live_signal.hit and not live_signal.reproducible` to decide whether
+    this run must be excluded from history/the monitor baseline (an unseeded verdict
+    still caps THIS run's displayed score, but must never be recorded — see the F-155
+    note at `_resolve_runtime_caps`'s own history-record call site).
+    """
+    judged_bundle = (
+        _pipeline.read_judged_bundle(args.judged_bundle)
+        if (args.full and args.judged_bundle is not None) else None
+    )
+    live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
+    live_signal = _pipeline.live_test_cap_signal(live_test_bucket)
+    if live_signal.hit:
+        score = compute(findings, ctx, live_test_vulnerable=True,
+                        live_test_reason=live_signal.reason)
+    return score, live_signal
+
+
 def _run_vet_mcp(target, args, ascii_only: bool) -> int:
     """Run vet_mcp on `target` (None = all configured servers) and render the risk
     dossier — shared by the explicit --vet-mcp mode and the --vet autodetect route
@@ -850,6 +888,15 @@ _MODE_HONORS = {
     # F-153: --dashboard --full renders the whole combined pipeline report (the
     # phases --full itself runs); --compact only ever modifies THAT combined render.
     "dashboard": frozenset({"full", "compact"}),
+    # F-155 fix (C-135): --judged-bundle's `liveTest` bucket now caps the score
+    # reaching --trend/--monitor too (see _apply_live_test_cap) — a SEPARATE honor
+    # from "full", deliberately not folded into it the way --dashboard's is: --full/
+    # --quiet/--fast genuinely still have no effect here (no deep phase ever runs for
+    # --trend/--monitor), only --judged-bundle does, so the "full"-bundle no_effect
+    # check below is given its own "judged_bundle" escape hatch rather than reusing
+    # "full" (which would wrongly silence the still-true --full/--quiet/--fast notes).
+    "trend": frozenset({"judged_bundle"}),
+    "monitor": frozenset({"judged_bundle"}),
 }
 
 # Primary modes that run AFTER the --attest block in main()'s cascade: their ctx and
@@ -938,7 +985,13 @@ def _flag_coherence_notes(args) -> list[str]:
     # dispatch branch — a winning mode drops --full, and takes them with it.
     if bool(getattr(args, "fast", False)) and "full" not in honored:
         no_effect.append("--fast")
-    if getattr(args, "judged_bundle", None) is not None and "full" not in honored:
+    # F-155 fix (C-135): --trend/--monitor now genuinely honor --judged-bundle's
+    # liveTest bucket (the cap reaches them — see _apply_live_test_cap) even though
+    # --full itself still has no effect there, so this checks its OWN "judged_bundle"
+    # honor rather than reusing "full" the way --dashboard's does (which would wrongly
+    # silence the still-true --full/--quiet/--fast notes above for --trend/--monitor).
+    if (getattr(args, "judged_bundle", None) is not None
+            and "full" not in honored and "judged_bundle" not in honored):
         no_effect.append("--judged-bundle")
     # F-153: --quiet has no --dashboard analogue — --compact is the dashboard's own
     # channel-limit lever — so it stays un-honored there even though --fast /
@@ -1845,10 +1898,19 @@ def _main(argv=None) -> int:
             return 1
 
     if args.trend:
+        # F-155 fix (C-135): resolve the liveTest cap BEFORE recording/rendering, so a
+        # VULNERABLE verdict binds here too, not just on the default --full --json path
+        # (see _apply_live_test_cap's own docstring for why this is scoped to ONLY the
+        # liveTest bucket). A seeded (reproducible) verdict is capped AND recorded; an
+        # unseeded one still caps THIS run's shown/percentile score but is excluded from
+        # history — the same seed-gate the default path already applies below.
+        score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
+        _skip_live_test_history = _live_signal.hit and not _live_signal.reproducible
         # --trend's job is to record the point AND show the trend, so it records even
         # under --no-history (a documented, tested contract). The conflict is surfaced
         # as a stderr note by _flag_coherence_notes rather than silently honored (B-066).
-        history_record(score, args.history)
+        if not _skip_live_test_history:
+            history_record(score, args.history)
         rows = history_load(args.history)
         _emit(render_trend(rows, ascii_only))
         _emit(render_percentile(score.score, ascii_only))
@@ -1978,6 +2040,17 @@ def _main(argv=None) -> int:
         return 0
 
     if args.monitor:
+        # F-155 fix (C-135): resolve the liveTest cap BEFORE the snapshot is taken, so a
+        # VULNERABLE verdict is baked into the drift baseline capped — not the uncapped
+        # score --monitor recorded before this fix (this branch returned before the
+        # liveTest bucket in --judged-bundle was ever parsed; see _apply_live_test_cap's
+        # own docstring for why this is scoped to ONLY the liveTest bucket). An unseeded
+        # (non-reproducible) VULNERABLE verdict still caps what THIS run reports, but —
+        # per the same seed-gate the default --full path already applies
+        # (docs/OUTPUT_SCHEMA.md §12) — is excluded from the persisted baseline/history
+        # below, so a random token can never manufacture drift on the next run.
+        score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
+        _skip_live_test_persist = _live_signal.hit and not _live_signal.reproducible
         # B-270: ONE predicate decides what "no usable baseline" means, and it tells
         # *absent* (a real first run) apart from *corrupt* (a prior baseline existed and is
         # gone). Both used to collapse into `prev is None`, so a destroyed baseline
@@ -2009,12 +2082,15 @@ def _main(argv=None) -> int:
         # duplicate only follows a failure that is now loud and non-zero anyway.
         journal_err = record_events(alerts, args.events)
         state_err = None
-        if journal_err is None:
+        # F-155: an unseeded VULNERABLE verdict must never be recorded, so the baseline
+        # advance is skipped exactly like a write failure would skip it — except this is
+        # not a failure (state_err stays None; no stderr, no non-zero exit below).
+        if journal_err is None and not _skip_live_test_persist:
             try:
                 save_state(args.state, snap)
             except OSError as exc:
                 state_err = str(exc)
-        persisted = journal_err is None and state_err is None
+        persisted = journal_err is None and state_err is None and not _skip_live_test_persist
         # B-271: render AFTER the writes, and tell the renderer whether they landed — the
         # success wording used to be printed before the save was even attempted.
         _emit(render_monitor(alerts, score, ascii_only,
@@ -2025,8 +2101,10 @@ def _main(argv=None) -> int:
         # --no-history; the conflict is surfaced as a stderr note (B-066), not silently
         # honored, to keep monitor's drift baseline intact. Recorded even on the failure
         # paths below: this run's score was really measured, and the trend should not gain
-        # a hole because a different file was unwritable.
-        history_record(score, args.history)
+        # a hole because a different file was unwritable. Skipped only for the same F-155
+        # unseeded-live-test exclusion as the baseline advance above.
+        if not _skip_live_test_persist:
+            history_record(score, args.history)
         # B-271/B-278: a write mode that could not write must not report success. --badge /
         # --html / --sarif / --save all return 1 on OSError; --monitor was the sole outlier,
         # returning 0 forever while persisting nothing, so cron saw a healthy job.
