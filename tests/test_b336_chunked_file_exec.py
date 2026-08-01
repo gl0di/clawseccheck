@@ -205,6 +205,111 @@ exec(compile(_load(), "<runtime>", "exec"), {})
     assert "CHUNKED_FILE_EXEC" not in _rules(src)
 
 
+def test_unrelated_chunked_helper_does_not_donate_evidence_to_other_exec():
+    # B-417 (C-135 follow-up): when a file has MORE THAN ONE composing helper, leg 3
+    # used to be evaluated against the UNION of every composing helper's paths in the
+    # file, not just the one that actually fed the sink under test. So a totally
+    # unrelated helper that reads genuinely chunked/sharded DATA files (e.g. a schema
+    # index split to stay under a hosting blob-size limit) could donate chunk-shaped
+    # path evidence to a DIFFERENT exec() call that is really fed by two ordinary,
+    # non-chunked template fragments. Pinned FP -- this is the exact B-417 repro
+    # (sqlmodel-codegen shape).
+    src = """
+import json
+import os
+
+INDEX_CHUNKS = ["data/schema_index.part1.jsonl", "data/schema_index.part2.jsonl"]
+
+
+def load_schema_index():
+    rows = []
+    for path in INDEX_CHUNKS:
+        with open(path, encoding="utf-8") as fh:
+            rows.append(fh.read())
+    return "".join(rows)
+
+
+def build_model_source():
+    with open("templates/model_header.tmpl", encoding="utf-8") as header:
+        with open("templates/model_body.tmpl", encoding="utf-8") as body:
+            return header.read() + body.read()
+
+
+def materialize_models():
+    namespace = {}
+    exec(build_model_source(), namespace)
+    return namespace
+
+
+def schema_names():
+    return [
+        json.loads(line)["name"]
+        for line in load_schema_index().splitlines()
+        if line.strip()
+    ]
+"""
+    assert "CHUNKED_FILE_EXEC" not in _rules(src)
+
+
+def test_unrelated_chunked_helper_control_single_helper_still_clean():
+    # Control for the test above: with load_schema_index() removed, only one
+    # composing helper (build_model_source) remains -- confirms the exec() in
+    # question is correctly silent on its own, independent of the multi-helper fix.
+    src = """
+def build_model_source():
+    with open("templates/model_header.tmpl", encoding="utf-8") as header:
+        with open("templates/model_body.tmpl", encoding="utf-8") as body:
+            return header.read() + body.read()
+
+
+def materialize_models():
+    namespace = {}
+    exec(build_model_source(), namespace)
+    return namespace
+"""
+    assert "CHUNKED_FILE_EXEC" not in _rules(src)
+
+
+def test_actually_chunked_helper_still_fires_alongside_unrelated_composing_helper():
+    # The true-positive twin of the two tests above: the GENUINELY chunked helper
+    # (load_payload) feeds exec(), while a second, unrelated composing helper
+    # (load_docs, two ordinary non-chunked files) does NOT. B-417's per-helper
+    # attribution fix must not regress this real positive, and the evidence must cite
+    # only load_payload()'s chunked paths.
+    src = """
+import os
+
+_PARTS = ["payload.part1.bin", "payload.part2.bin"]
+
+
+def load_payload():
+    parts = []
+    for p in _PARTS:
+        with open(os.path.join("/tmp", p)) as fh:
+            parts.append(fh.read())
+    return "".join(parts)
+
+
+def load_docs():
+    with open("docs/intro.md") as a:
+        with open("docs/outro.md") as b:
+            return a.read() + b.read()
+
+
+def run():
+    exec(load_payload())
+
+
+def render_docs():
+    return load_docs()
+"""
+    rules = _rules(src)
+    assert "CHUNKED_FILE_EXEC" in rules
+    reason = rules["CHUNKED_FILE_EXEC"].reason
+    assert "payload.part1.bin" in reason and "payload.part2.bin" in reason
+    assert "docs/intro.md" not in reason and "docs/outro.md" not in reason
+
+
 # --- check-level ---
 
 
@@ -280,6 +385,25 @@ def test_vet_clean_name_shadow_b336_passes():
     )
 
 
+def test_vet_clean_cross_helper_misattribution_b336_passes():
+    # B-417: the unrelated, genuinely chunked helper (load_schema_index) must not
+    # donate leg-3 evidence to the unrelated, non-chunked exec() actually fed by
+    # build_model_source().
+    skill_dir = FIXTURES / "clean_b336_cross_helper_misattribution" / "skills" / "loader"
+    f = vet_skill(skill_dir)
+    assert not any(
+        x.id == "B336" and x.status == WARN for x in [f, *getattr(f, "ring_findings", [])]
+    )
+
+
+def test_vet_bad_multi_helper_true_feed_is_warn():
+    # True-positive twin: the genuinely chunked helper still fires even with a second,
+    # unrelated (non-feeding) composing helper in the same file.
+    skill_dir = FIXTURES / "bad_b336_multi_helper_true_feed" / "skills" / "loader"
+    f = vet_skill(skill_dir)
+    assert any(x.id == "B336" and x.status == WARN for x in [f, *getattr(f, "ring_findings", [])])
+
+
 # --- B13 (check_installed_skills) end-to-end: WARN, not FAIL, not PASS ---
 
 
@@ -288,6 +412,21 @@ def test_b13_bad_chunked_file_exec_is_warn_not_fail():
     f = check_installed_skills(ctx)
     assert f.status == WARN
     assert f.severity == "HIGH"
+
+
+def test_b13_bad_multi_helper_true_feed_is_warn_not_fail():
+    ctx = collect(FIXTURES / "bad_b336_multi_helper_true_feed")
+    f = check_installed_skills(ctx)
+    assert f.status == WARN
+    assert f.severity == "HIGH"
+
+
+def test_b13_clean_cross_helper_misattribution_stays_pass():
+    # B-417 end-to-end: an unrelated, genuinely chunked helper in the same file must
+    # not turn B13's verdict into a WARN via this rule.
+    ctx = collect(FIXTURES / "clean_b336_cross_helper_misattribution")
+    f = check_installed_skills(ctx)
+    assert f.status == PASS
 
 
 def test_b13_clean_nonchunked_names_stays_pass():

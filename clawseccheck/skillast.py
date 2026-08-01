@@ -2950,7 +2950,19 @@ def _chunked_file_exec_findings(tree: ast.AST) -> list:
     `global`/`nonlocal` indirection specific to THAT set to resolve -- but the taint a
     hop introduces still needs to respect ordinary lexical scoping once it starts
     propagating through further name-to-name assignments, exactly like decode taint
-    does."""
+    does.
+
+    B-417 (independent review, C-135 follow-up): when a file has MORE THAN ONE
+    composing helper, leg 3 used to be evaluated against the UNION of every composing
+    helper's paths in the file, not just whichever one actually fed THIS sink -- so an
+    unrelated helper that happens to read genuinely chunked DATA files (e.g. a schema
+    index sharded to stay under a hosting limit) could donate chunk-shaped path
+    evidence to a completely different, non-chunked exec()/eval() call elsewhere in the
+    same file. Fixed by running the taint fixpoint ONCE PER composing helper, seeded
+    only from calls to that one helper (`_propagate`), so each sink's `fed_paths` are
+    attributed to exactly the helper(s) that actually flow into it -- still the union of
+    every helper that GENUINELY feeds a given sink (e.g. `exec(a() + b())`), just never
+    a helper that plays no part in that particular call."""
     composing = _chunked_read_composing_funcnames(tree)
     if not composing:
         return []
@@ -2962,49 +2974,65 @@ def _chunked_file_exec_findings(tree: ast.AST) -> list:
     _toplevel_classes = [n for n in getattr(tree, "body", []) if isinstance(n, ast.ClassDef)]
     owner_map, parent_scope = _build_toplevel_owner_map(_toplevel_funcs, _toplevel_classes)
     shadow_cache: dict = {}
-
-    tainted: dict = {}  # owning scope node (or None = module level) -> tainted names
     assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
-    for _ in range(6):
-        changed = False
-        for a in assigns:
-            hop = any(
-                isinstance(sub, ast.Call)
-                and isinstance(sub.func, ast.Name)
-                and sub.func.id in composing_names
-                for sub in ast.walk(a.value)
-            )
-            visible = _tainted_names_visible(a, tainted, owner_map, parent_scope, shadow_cache)
-            if not (hop or (_names_in(a.value) & visible)):
-                continue
-            scope = owner_map.get(a)
-            global_names = _global_declared_names(scope, owner_map) if scope is not None else set()
-            nonlocal_names = _nonlocal_declared_names(scope, owner_map) if scope is not None else set()
-            for t in a.targets:
-                if not isinstance(t, ast.Name):
+
+    def _propagate(seed_names: set) -> dict:
+        """The same scope-aware taint fixpoint as before, but seeded ONLY from calls to
+        `seed_names` (a subset of composing_names) rather than every composing helper in
+        the file -- lets the caller ask "what does exactly THIS helper's return value
+        taint," so leg-3 evidence can be attributed per-helper instead of unioned across
+        every composing helper (the B-417 bug this fixes). Returns the same
+        `owning-scope -> tainted names` shape the original single combined fixpoint did."""
+        tainted: dict = {}  # owning scope node (or None = module level) -> tainted names
+        for _ in range(6):
+            changed = False
+            for a in assigns:
+                hop = any(
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Name)
+                    and sub.func.id in seed_names
+                    for sub in ast.walk(a.value)
+                )
+                visible = _tainted_names_visible(a, tainted, owner_map, parent_scope, shadow_cache)
+                if not (hop or (_names_in(a.value) & visible)):
                     continue
-                if t.id in global_names:
-                    bucket_keys = [None]
-                elif t.id in nonlocal_names:
-                    targets = _nonlocal_target_scopes(
-                        t.id, scope, parent_scope, owner_map, shadow_cache, {}
-                    )
-                    if not targets:
-                        targets = []
-                        ancestor = parent_scope.get(scope)
-                        while ancestor is not None:
-                            targets.append(ancestor)
-                            ancestor = parent_scope.get(ancestor)
-                    bucket_keys = targets
-                else:
-                    bucket_keys = [scope]
-                for key in bucket_keys:
-                    bucket = tainted.setdefault(key, set())
-                    if t.id not in bucket:
-                        bucket.add(t.id)
-                        changed = True
-        if not changed:
-            break
+                scope = owner_map.get(a)
+                global_names = _global_declared_names(scope, owner_map) if scope is not None else set()
+                nonlocal_names = (
+                    _nonlocal_declared_names(scope, owner_map) if scope is not None else set()
+                )
+                for t in a.targets:
+                    if not isinstance(t, ast.Name):
+                        continue
+                    if t.id in global_names:
+                        bucket_keys = [None]
+                    elif t.id in nonlocal_names:
+                        targets = _nonlocal_target_scopes(
+                            t.id, scope, parent_scope, owner_map, shadow_cache, {}
+                        )
+                        if not targets:
+                            targets = []
+                            ancestor = parent_scope.get(scope)
+                            while ancestor is not None:
+                                targets.append(ancestor)
+                                ancestor = parent_scope.get(ancestor)
+                        bucket_keys = targets
+                    else:
+                        bucket_keys = [scope]
+                    for key in bucket_keys:
+                        bucket = tainted.setdefault(key, set())
+                        if t.id not in bucket:
+                            bucket.add(t.id)
+                            changed = True
+            if not changed:
+                break
+        return tainted
+
+    # One fixpoint per composing helper, each seeded ONLY from that helper's own calls
+    # -- isolates every helper's taint from every OTHER composing helper's, so a sink
+    # fed by helper A never inherits helper B's (possibly chunked) paths just because
+    # both live in the same file.
+    tainted_by_helper = {name: _propagate({name}) for name in composing_names}
 
     found: list = []
     for node in ast.walk(tree):
@@ -3013,23 +3041,36 @@ def _chunked_file_exec_findings(tree: ast.AST) -> list:
         f = node.func
         if not (isinstance(f, ast.Name) and f.id in _EXEC_NAMES):
             continue
-        visible_tainted = _tainted_names_visible(node, tainted, owner_map, parent_scope, shadow_cache)
-        any_t, _direct = _call_args_tainted(node, visible_tainted)
-        inline = any(
-            isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in composing_names
+
+        call_arg_nodes = [
+            n
             for arg in list(node.args) + [kw.value for kw in node.keywords]
             for n in ast.walk(arg)
-        )
-        if not (any_t or inline):
+        ]
+        feeding: set = set()
+        for cname, tainted in tainted_by_helper.items():
+            visible_tainted = _tainted_names_visible(
+                node, tainted, owner_map, parent_scope, shadow_cache
+            )
+            any_t, _direct = _call_args_tainted(node, visible_tainted)
+            inline = any(
+                isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == cname
+                for n in call_arg_nodes
+            )
+            if any_t or inline:
+                feeding.add(cname)
+        if not feeding:
             continue
-        if len(composing) == 1:
-            fed_paths = next(iter(composing.values()))
-        else:
-            fed_paths = []
-            for plist in composing.values():
-                for p in plist:
-                    if p not in fed_paths:
-                        fed_paths.append(p)
+
+        # fed_paths is the union of ONLY the helper(s) actually feeding THIS call --
+        # e.g. `exec(a() + b())` still unions a's and b's paths (both genuinely feed
+        # it), but a THIRD, unrelated composing helper elsewhere in the file never
+        # contributes, however chunk-shaped ITS own paths happen to look (B-417).
+        fed_paths = []
+        for cname in feeding:
+            for p in composing[cname]:
+                if p not in fed_paths:
+                    fed_paths.append(p)
         if not _paths_are_chunked(fed_paths):
             continue
         extra = "..." if len(fed_paths) > 3 else ""
