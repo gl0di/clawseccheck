@@ -62,10 +62,20 @@ _B31_WRITE_CLASS = frozenset({"write", "edit"})
 _B71_INEFFECTIVE_RE = re.compile(r"[ *|&;/]|--")
 
 
-# B55: filesystem-write tool names. Grounded: fs_write is in OUTBOUND_TOOL_HINTS and
-# apply_patch is the canonical patch-writer (see B31 — "apply_patch/exec still write").
-# Matched as substrings so write_file / writeFile variants of the same capability count.
+# B55: filesystem-write tool names. Matched as substrings so write_file / writeFile
+# variants of the same capability count. B-395: NONE of these are real OpenClaw tool
+# ids in the current dist (grounded: CORE_TOOL_DEFINITIONS names write/edit/apply_patch;
+# "fs_write" appears only inside two legacy deny constants, never as a grantable id) —
+# kept as a legacy-alias union (not the primary detection path any more, see
+# _B55_FS_WRITE_TOOLS / check_fs_write_exposure below) purely so old-style configs and
+# this project's own pre-existing fixtures/tests, which already use "fs_write" as their
+# token, keep matching.
 _FS_WRITE_TOOL_HINTS = ("fs_write", "write_file", "writefile", "apply_patch")
+
+# B55/B-395: the real, canonical write-capable subset of _B68_FS_TOOLS. "read" is
+# deliberately excluded — B68's tuple includes it because B68 asks a DIFFERENT question
+# ("is any fs tool reachable"), but B55 asks specifically about WRITE exposure.
+_B55_FS_WRITE_TOOLS = frozenset({"write", "edit", "apply_patch"})
 
 
 def _approval_bypass_actors(
@@ -588,7 +598,11 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     profile = dig(cfg, "tools.profile")
 
     if listed:
-        if "group:fs" in listed:
+        # B-395: a bare "*" allowlist token grants EVERY tool, same as "group:fs" grants
+        # every fs-family one — before this, ["*"] resolved to an empty granted set
+        # (none of read/write/edit/apply_patch literally equals "*"), a lying "nothing
+        # granted" for a config that grants everything.
+        if "group:fs" in listed or "*" in listed:
             granted = set(_B68_FS_TOOLS)
         else:
             granted = {t for t in _B68_FS_TOOLS if t in listed}
@@ -602,7 +616,24 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
         granted = set()
         enumerable = False
 
-    if "group:fs" in also_listed:
+    # NOTE (C-135 on this same fix, 2026-08-01): OpenClaw's own resolver
+    # (sandbox-tool-policy-*.js:9-14, `unionAllow`) injects an IMPLICIT wildcard into
+    # the effective allow list when tools.allow is absent/empty and tools.alsoAllow is
+    # non-empty -- i.e. alsoAllow-only grants EVERY tool, not just the tokens it
+    # literally names, which this helper does NOT model (it grants only the literal
+    # alsoAllow tokens). Deliberately NOT fixed here: I-028 (see the module-level
+    # `tests/test_also_allow_grants.py`) already made a considered, tested design
+    # decision that alsoAllow grants exactly its own tokens, and the SAME
+    # narrow-alsoAllow assumption is independently baked into B44
+    # (check_attestation_mismatch) and B84 (check_declared_effective_proven) too, each
+    # with their own accumulator and pinned tests. Patching only this helper (B55/B68)
+    # would make B55/B68 agree with reality while leaving B44/B84 agreeing with each
+    # other but not with reality -- reintroducing the exact cross-check disagreement
+    # class B-395 exists to close, just moved one level over. Filed as its own
+    # follow-up: closing it needs a coordinated fix across all three call sites plus a
+    # deliberate re-review of test_also_allow_grants.py's pinned expectations, not a
+    # one-line patch inside a critical-severity ticket already in flight.
+    if "group:fs" in also_listed or "*" in also_listed:
         granted |= set(_B68_FS_TOOLS)
         enumerable = True
     else:
@@ -803,62 +834,138 @@ def check_exec_strict_inline_eval(ctx: Context) -> Finding:
 def check_fs_write_exposure(ctx: Context) -> Finding:
     """B55 (C-013) — filesystem-write tool granted without scoping.
 
-    A write-capable tool (fs_write / apply_patch) explicitly listed in the tool
-    allowlist lets the agent create or overwrite files. Unscoped — reachable by a
-    wildcard sender allowlist or an open channel without write-specific scoping — untrusted
-    input can drive arbitrary writes (tamper / persistence). CheckMeta stays scored=False
-    (B3/B22/B31 own the general dimension); the FAIL branch is a per-Finding override.
+    A write-capable tool (write / edit / apply_patch) granted via the tool allowlist,
+    a powerful tools.profile, or tools.alsoAllow lets the agent create or overwrite
+    files. Unscoped — reachable by an open channel without write-specific scoping —
+    untrusted input can drive arbitrary writes (tamper / persistence). CheckMeta stays
+    scored=False (B3/B22/B31 own the general dimension); the FAIL branch is a
+    per-Finding override.
 
-    UNKNOWN — no tool allowlist declared (tools.allow / gateway.tools.allow absent):
-              fs-write grants are not enumerable from config.
-    PASS    — no write-capable tool granted, OR one is granted but scoped (an approval
-              gate for non-open ingress, or a tight non-wildcard sender allowlist).
-    WARN    — write tool granted, no approval gate and no explicit sender allowlist,
-              but no proven broad reach.
-    FAIL    — write tool granted AND reachable by PROVEN broad reach (wildcard
-              allowFrom or an open channel), gated or not. scored=True.
+    B-395: grant resolution is delegated to `_b68_fs_tools_granted` (the same helper
+    B68 already uses for this identical tool family) rather than re-derived here — the
+    prior independent accumulator only matched the LEGACY, non-canonical alias names in
+    `_FS_WRITE_TOOL_HINTS` ("fs_write" is not a real OpenClaw tool id) against a raw
+    `tools.allow` LIST only, so it produced a confident PASS on every real-world grant
+    shape: the canonical tool ids (write/edit/apply_patch), group:fs, a wildcard "*"
+    allowlist, tools.profile, and tools.alsoAllow all went undetected. The legacy alias
+    list is kept as an additional union (see `write_tools` below) so old-style configs
+    and this project's own pre-existing fixtures/tests keep matching.
+
+    Also B-395: `tools.elevated.allowFrom` is REMOVED from this function's decision
+    tree entirely — the only signals consulted are `open_ch` (proven-open channel
+    reach), `gated` (a non-write-specific but still real `tools.exec.mode` approval
+    gate), and `fs_confined` (workspace/sandbox confinement). Grounded against the
+    installed OpenClaw dist: `tools.elevated` gates the exec/bash privileged-command
+    escalation surface, never the ordinary write/edit/apply_patch tools this check is
+    about — it is not one of OpenClaw's tool-policy resolution layers. A first pass
+    dropped it only from the FAIL trigger (a wildcard elevated allowlist alone, no open
+    channel, no untrusted ingress anywhere, used to produce a hard FAIL); an independent
+    second-round review found that left an asymmetric false PASS — broadening grant
+    detection above (a powerful profile / wildcard / group:fs / alsoAllow grant) meant
+    a genuinely open channel + a granted write tool still PASSed outright whenever a
+    TIGHT `tools.elevated.allowFrom` happened to also be set, even though that field
+    cannot scope write-tool reachability either. Removed from both directions.
+
+    Known, deliberately UNFIXED gap #1 in this same pass (documented rather than silently
+    left, and filed as a follow-up): OpenClaw resolves the EFFECTIVE tool set through
+    up to 8 composable policy layers (global profile/allow/byProvider, then
+    per-agent profile/allow/byProvider, then channel/group tools, then
+    toolsBySender — each layer can only further NARROW the set, `tool-policy-
+    pipeline-*.js`). This check (like `_b68_fs_tools_granted`) reads only the global
+    `tools.allow`/`gateway.tools.allow`/`tools.alsoAllow`/`tools.profile` layer. A
+    narrower per-agent, per-channel, or per-sender policy that actually removes the
+    write tool from the agent reachable through an open channel is invisible here and
+    can still produce a false FAIL. Closing this needs a real multi-layer policy
+    composer, not a one-line patch — out of scope for this pass.
+
+    Known, deliberately UNFIXED gap #2 in this same pass (a third C-135 round on the
+    elevated-allowFrom removal above found it, and recommended its own dedicated review
+    rather than a same-sitting patch — three sequential "fix one thing, find the
+    adjacent one" cycles is itself a signal this PASS branch wants a holistic
+    redesign, not a fourth incremental one): `gated` (`tools.exec.mode` having an
+    approval-gate value) still clears `not open_ch` straight to PASS, even though this
+    same function's own FAIL-branch reasoning says `tools.exec.mode` "doesn't scope
+    write-capable tools" either. Concretely, `tools.profile: "full"` (a new B-395
+    grant-detection path) + `tools.exec.mode: "ask"` + a channel that is declared but
+    only `dmPolicy: "allowlist"` (untrusted CONTENT reachable, not "open"/proven-broad
+    reach — the same category this function's own comment already carves out as
+    "stays the WARN fallback" for the UNGATED case) still PASSes once gated, instead of
+    staying WARN. Unlike the elevated-allowFrom removal, `tools.exec.mode` is not
+    PROVEN entirely irrelevant to write-tool reachability (only "not write-specific"),
+    so the right fix isn't a clean removal — it likely needs to distinguish "no
+    channels declared at all" (a defensible PASS) from "channels declared, none proven
+    open" (arguably still WARN even when gated), which the current `not open_ch` test
+    conflates. Filed as a follow-up, not patched here.
+
+    Known, deliberately UNFIXED gap #3 in this same pass (found by the SAME C-135
+    round as gap #2, filed alongside it rather than fixed here): `_b68_fs_tools_granted`
+    grants only the LITERAL tokens `tools.alsoAllow` names, but OpenClaw's own resolver
+    (`unionAllow`, sandbox-tool-policy-*.js) injects an IMPLICIT wildcard into the
+    effective allow list whenever `tools.allow` is absent/empty and `tools.alsoAllow`
+    is non-empty — i.e. alsoAllow-only grants EVERY tool, not just the ones it names.
+    Not patched in `_b68_fs_tools_granted` itself despite being the most directly
+    relevant fix: the SAME narrow-alsoAllow assumption is independently baked into B44
+    (check_attestation_mismatch) and B84 (check_declared_effective_proven), each with
+    its own accumulator and its own pinned tests (`tests/test_also_allow_grants.py`,
+    an I-028 design decision). Fixing only this helper would make B55/B68 agree with
+    reality while leaving B44/B84 agreeing with each other but not with reality —
+    reintroducing the exact cross-check disagreement class B-395 exists to close, one
+    level over. Needs a coordinated fix across all three call sites plus a deliberate
+    re-review of test_also_allow_grants.py's pinned expectations.
+
+    UNKNOWN — fs-write grants are not enumerable from config: no tools.allow /
+              gateway.tools.allow / tools.alsoAllow declared as a LIST, and no
+              tools.profile set. A declared-but-non-list tools.allow (a scalar or
+              mapping — schema-invalid, but seen in the wild) also lands here, not PASS.
+    PASS    — no write-capable tool granted, OR one is granted, no open-ingress channel
+              reaches it, and tools.exec.mode has an approval gate set.
+    WARN    — write tool granted with no proven broad reach and no approval gate
+              (ungated), OR reachable by a proven-open channel but confined to the
+              workspace (tools.fs.workspaceOnly / sandbox.mode='all').
+    FAIL    — write tool granted AND reachable by a PROVEN-open channel, not confined,
+              gated or not. scored=True.
     """
     cfg = ctx.config
-    allow_a = dig(cfg, "tools.allow")
-    allow_b = dig(cfg, "gateway.tools.allow")
-    listed: list[str] = []
-    for v in (allow_a, allow_b):
-        if isinstance(v, list):
-            listed.extend(str(t) for t in v)
+    granted, enumerable = _b68_fs_tools_granted(cfg)
 
-    write_tools = sorted({t for t in listed if _hint([t], _FS_WRITE_TOOL_HINTS)})
-
-    if allow_a is None and allow_b is None:
+    if not enumerable:
         return _finding(
             "B55",
             UNKNOWN,
-            "Tool allowlist (tools.allow / gateway.tools.allow) is not declared in "
-            "config, so filesystem-write tool grants cannot be enumerated.",
-            "Declare tools.allow explicitly so write-capable tools are auditable, and "
-            "scope any fs_write/apply_patch grant with an approval gate "
-            "(tools.exec.mode='ask') or a tight tools.elevated.allowFrom allowlist.",
+            "Tool allowlist (tools.allow / gateway.tools.allow / tools.alsoAllow) is "
+            "not declared as an enumerable list in config, and no tools.profile is "
+            "set, so filesystem-write tool grants cannot be enumerated.",
+            "Declare tools.allow explicitly (as a list) so write-capable tools are "
+            "auditable, and scope any write/edit/apply_patch grant with an approval "
+            "gate (tools.exec.mode='ask').",
         )
+
+    # Legacy aliases matched independently against the raw allow/alsoAllow tokens,
+    # since _b68_fs_tools_granted only recognizes the canonical _B68_FS_TOOLS names —
+    # an additive union, deny-filtered the same way _b68_fs_tools_granted deny-filters
+    # its own canonical result, so an explicitly denied legacy token doesn't count.
+    deny = dig(cfg, "tools.deny")
+    denied = {str(t).strip().lower() for t in deny} if isinstance(deny, list) else set()
+    raw_tokens: list[str] = []
+    for v in (dig(cfg, "tools.allow"), dig(cfg, "gateway.tools.allow"), dig(cfg, "tools.alsoAllow")):
+        if isinstance(v, list):
+            raw_tokens.extend(str(t) for t in v)
+    legacy_write = {
+        t.strip().lower() for t in raw_tokens if _hint([t], _FS_WRITE_TOOL_HINTS)
+    } - denied
+
+    write_tools = sorted((set(granted) & _B55_FS_WRITE_TOOLS) | legacy_write)
 
     if not write_tools:
         return _finding(
             "B55",
             PASS,
-            "No filesystem-write tool (fs_write / apply_patch) is granted in the tool allowlist.",
+            "No filesystem-write tool (write / edit / apply_patch) is granted.",
             "Keep write-capable tools out of the allowlist unless they are required.",
         )
 
     label = ", ".join(write_tools)
     gated = _has_approval_gate(cfg)
-    allow_from = dig(cfg, "tools.elevated.allowFrom")
-    # B-376 C-135 fix: REAL shape is a dict keyed by provider (see B3's identical
-    # grounded comment) -- a flat list/bare "*" is legacy. The flat-only check let a
-    # textbook dict allowlist fall through to the open_ch-only FAIL below.
-    if isinstance(allow_from, dict):
-        wildcard = any(v == "*" or (isinstance(v, list) and "*" in v) for v in allow_from.values())
-        tight_allowlist = bool(allow_from) and not wildcard
-    else:
-        tight_allowlist = isinstance(allow_from, list) and bool(allow_from) and "*" not in allow_from
-        wildcard = allow_from == "*" or (isinstance(allow_from, list) and "*" in allow_from)
     # B-376 C-135 fix: B68 (same file) treats either field as sufficient fs confinement
     # for this identical tool family (its own composite predicate, quoted there).
     # Confined-but-reachable writes are a real but lesser risk than "arbitrary".
@@ -875,31 +982,43 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # a §5 false-positive FAIL. B46 uses the broader helper because it is WARN-capped.
     open_ch = _open_channels(cfg)
 
-    # Approval via tools.exec affects exec/shell-like actions; it is not a
-    # write-specific boundary. Treat fs_write/apply_patch as scoped only when
-    # there is a tight sender allowlist or no open-ingress channel.
-    if tight_allowlist or (gated and not open_ch):
-        return _finding(
-            "B55",
-            PASS,
-            f"Filesystem-write tool granted ({label}) but scoped by an approval gate "
-            f"or a tight sender allowlist.",
-            "Scoping is in place — keep tools.exec.mode='ask' (or the "
-            "tools.elevated.allowFrom allowlist) tight.",
-            evidence=[f"write tool granted: {label}"],
-        )
-
-    if wildcard or open_ch:
-        ev = [f"filesystem-write tool granted: {label}"]
-        if wildcard:
-            ev.append(
-                "tools.elevated.allowFrom is a wildcard (any sender can invoke elevated tools)"
+    # B-395 (C-135 round 2 on this same fix): `tools.elevated.allowFrom` — in ANY shape,
+    # tight or wildcard — used to gate BOTH directions here (a wildcard drove FAIL, a
+    # tight allowlist short-circuited to PASS). Grounded against the installed OpenClaw
+    # dist: tools.elevated is a privileged-command / auto-approve ESCALATION control for
+    # the exec/bash surface only (schema doc: "Elevated tool access controls for
+    # privileged command surfaces"; consumed only in the exec/bash tool module,
+    # bash-tools-*.js; zero hits across agent-tools.policy-*.js / tool-policy-
+    # pipeline-*.js / tool-resolution-*.js / tool-dispatch-*.js) — it is not one of
+    # OpenClaw's tool-policy resolution layers and says nothing about whether
+    # write/edit/apply_patch are reachable. Dropping it from the FAIL trigger alone
+    # (first round of this fix) left an asymmetric, confirmed false PASS: broadening
+    # grant detection (this same change) meant a powerful tools.profile, a wildcard
+    # allowlist, group:fs, or tools.alsoAllow granting write, reachable through a
+    # genuinely open channel, still PASSed outright whenever a TIGHT
+    # tools.elevated.allowFrom happened to also be set — a field this check's own
+    # grounding says cannot scope write-tool reachability at all. Removed from both
+    # directions: the only signals this function's decision tree consults now are
+    # open_ch (proven broad reach), gated (a non-write-specific but still real
+    # exec-mode approval gate), and fs_confined (workspace/sandbox confinement).
+    if not open_ch:
+        if gated:
+            return _finding(
+                "B55",
+                PASS,
+                f"Filesystem-write tool granted ({label}) but no open-ingress channel "
+                f"reaches it, and an approval gate (tools.exec.mode) is set.",
+                "Scoping is in place — keep tools.exec.mode='ask' (or 'deny'/'allowlist').",
+                evidence=[f"write tool granted: {label}"],
             )
-        if open_ch:
-            ev.append(f"open-ingress channel(s): {', '.join(open_ch)}")
+    else:
+        ev = [
+            f"filesystem-write tool granted: {label}",
+            f"open-ingress channel(s): {', '.join(open_ch)}",
+        ]
         if not gated:
             ev.append("no approval gate (tools.exec.mode is not deny/allowlist/ask/auto)")
-        elif open_ch:
+        else:
             ev.append(
                 "open-ingress bypasses exec-style approval and can still drive write-capable tools"
             )
@@ -917,8 +1036,8 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 f"Filesystem-write capability ({label}) is reachable by untrusted senders, "
                 f"but confined to the workspace, so writes can tamper the project itself "
                 f"rather than reach arbitrary paths.",
-                "Restrict tools.elevated.allowFrom to an explicit allowlist (no '*') or "
-                "lock open channels to 'allowlist' to remove untrusted reach entirely.",
+                "Lock the open channel(s) to 'allowlist' to remove untrusted reach "
+                "entirely.",
                 evidence=ev,
             )
         return _finding(
@@ -927,9 +1046,8 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
             f"Broad filesystem-write capability ({label}) is reachable by untrusted "
             f"senders with no write-specific scoping, so untrusted input can drive "
             f"arbitrary file writes (tamper / persistence).",
-            "Restrict tools.elevated.allowFrom to an explicit allowlist (no '*') or lock "
-            "open channels to 'allowlist'. tools.exec.mode='ask' alone does not clear "
-            "this — it doesn't scope write-capable tools.",
+            "Lock the open channel(s) to 'allowlist'. tools.exec.mode='ask' alone "
+            "does not clear this — it doesn't scope write-capable tools.",
             evidence=ev,
             scored=True,
         )
@@ -937,10 +1055,10 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     return _finding(
         "B55",
         WARN,
-        f"Filesystem-write tool granted ({label}) without an approval gate and without "
-        f"an explicit sender allowlist.",
-        "Scope it: set tools.exec.mode='ask' or add a tight tools.elevated.allowFrom "
-        "allowlist so only trusted senders can drive file writes.",
+        f"Filesystem-write tool granted ({label}) without an approval gate, and no "
+        f"open-ingress channel was found to prove broader reach either way.",
+        "Scope it: set tools.exec.mode='ask' (or 'deny'/'allowlist') so write-capable "
+        "tools require approval.",
         evidence=[
             f"write tool granted: {label}",
             "no approval gate (tools.exec.mode is not deny/allowlist/ask/auto)",

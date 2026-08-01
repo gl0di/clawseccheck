@@ -85,8 +85,38 @@ def _finding_status(findings: list[Finding], check_id: str) -> str | None:
 
 
 def _has_exec_or_write_tools(tools: list[str]) -> bool:
-    """True when exec, shell, fs_write or elevated tools are present."""
-    return _hint(tools, ("exec", "shell", "fs_write", "deploy")) or "elevated" in tools
+    """True when exec, shell, fs_write or elevated tools are present.
+
+    B-395 (C-135 round 1 caught a false-positive regression in the first attempt at
+    this fix): "write"/"edit" are checked by EXACT membership, not folded into the
+    `_hint()` substring tuple alongside "fs_write". `_hint()` matches its needles as
+    unanchored substrings against the whole joined blob of granted tool names
+    (checks/_shared.py's `_hint`/`h in blob`) -- safe for "fs_write"/"write_file"
+    (multi-word, not realistic accidental substrings) but NOT for bare "write"/"edit":
+    both are common English word fragments ("edit" ⊂ "credit_score", "write" ⊂
+    "underwriter"/"copywriter"), so folding them into the substring tuple produced a
+    CRITICAL RISK-01 false alarm ("untrusted sender can reach host execution") on a
+    config granting nothing more than a finance-lookup tool. "write"/"edit" are the
+    REAL OpenClaw write-tool ids (B55/_capability.py's check_fs_write_exposure had the
+    identical naming gap, grounded there against the installed dist) and are matched
+    the same way B55 matches them: exact list membership, not substring. "fs_write" is
+    kept in the substring tuple for the same reason B55 keeps it: not a real tool id,
+    but this project's own existing configs/tests already use it as a token.
+
+    `tools` here (risk._enabled_tools) is the raw tools.allow/gateway.tools.allow
+    token list, not resolved against group:fs/a wildcard "*"/tools.profile the way
+    check_fs_write_exposure's `_b68_fs_tools_granted` call now is -- a config granting
+    the write family only via one of those shapes still won't match here. Filed as a
+    follow-up rather than fixed here: closing it means teaching _enabled_tools itself
+    to expand those shapes, which is shared by every RISK-* rule, not just the
+    fs-write ones, and deserves its own adversarial review at that scope.
+    """
+    return (
+        _hint(tools, ("exec", "shell", "fs_write", "deploy"))
+        or "elevated" in tools
+        or "write" in tools
+        or "edit" in tools
+    )
 
 
 def _has_outbound(tools: list[str], cfg: dict) -> bool:
@@ -388,7 +418,14 @@ def _rule_open_sender_exec(ctx: Context, tools: list[str], cfg: dict) -> RiskPat
     if not (_has_exec_or_write_tools(tools) or "elevated" in tools):
         return None
     channel_label = open_ch[0]
-    tool_label = "exec/write tool" if _hint(tools, ("exec", "shell", "fs_write", "deploy")) else "elevated tool"
+    # NOT _has_exec_or_write_tools(tools): that also returns True for a BARE "elevated"
+    # grant with no exec/write tool at all, which would mislabel this branch -- the
+    # guard at :418 already established at least one of {exec/write, elevated} is
+    # present, so this picks the more specific label only when exec/write itself is.
+    is_exec_or_write = (
+        _hint(tools, ("exec", "shell", "fs_write", "deploy")) or "write" in tools or "edit" in tools
+    )
+    tool_label = "exec/write tool" if is_exec_or_write else "elevated tool"
     return RiskPath(
         id="RISK-01",
         severity=CRITICAL,
@@ -449,7 +486,7 @@ def _rule_sandbox_off_untrusted_exec(ctx: Context, tools: list[str], cfg: dict) 
         return None
     if not _has_untrusted_ingress(tools, cfg):
         return None
-    if not (_hint(tools, ("exec", "shell", "fs_write", "deploy")) or "elevated" in tools):
+    if not _has_exec_or_write_tools(tools):
         return None
     open_ch = _open_channel_labels(cfg)
     ingress_label = open_ch[0] if open_ch else "untrusted input (email/web/feed)"
@@ -570,7 +607,7 @@ def _rule_self_modification(ctx: Context, findings: list[Finding],
                                or _finding_status(findings, "B22") == FAIL)
     if not has_writable_bootstrap:
         return None
-    if not (_hint(tools, ("exec", "shell", "fs_write", "deploy")) or "elevated" in tools):
+    if not _has_exec_or_write_tools(tools):
         return None
     # Only fire when there is no approval gate (real OpenClaw field: tools.exec.mode)
     if _has_approval_gate(cfg):
