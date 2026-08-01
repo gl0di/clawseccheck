@@ -62,6 +62,21 @@ the invoking script's path usually can), and :func:`build_inode_index` lets a ca
 resolve several listeners' identities from ONE ``/proc`` walk instead of one scan per
 socket (``identify_listener_process``'s optional *index* parameter).
 
+**B-400 (2026-08-01)**: ``cmdline`` turned out to still be matched by
+``checks/_config.py``'s ``_classify_listener_identity`` as a bare substring search for
+``"openclaw"`` over the WHOLE joined command line — which credits any decoy that merely
+*mentions* the word anywhere in its argv (``ssh -L 8080:localhost:8080
+user@my-openclaw-server``, a text editor with the repo path open, a shell script run
+from a directory literally named ``openclaw``) as the gateway itself. ``ProcessIdentity``
+now also carries ``exe`` (:func:`_process_exe`) — the target of ``/proc/<pid>/exe``, a
+symlink the KERNEL resolves at exec time from the inode that was actually run, which
+argv text cannot spoof (unlike every field read so far). For an INTERPRETED process
+(node/bun/deno) this names the INTERPRETER, never the invoked script, so it cannot
+positively confirm OpenClaw by itself — but it CAN immediately clear anything whose
+executable is something else entirely (``ssh``, a text editor, ``bash``), which is
+exactly the false-positive-FAIL shape above. See ``checks/_config.py``'s
+``_classify_listener_identity`` for how ``exe`` and ``cmdline`` are combined.
+
 Injectable for tests: ``scan_listening_sockets(proc_root=...)`` lets tests point at a
 fake filesystem root (pytest's ``tmp_path``) so the suite stays offline, deterministic,
 and never opens a real socket or reads outside ``tmp_path``. ``identify_listener_process``
@@ -116,11 +131,25 @@ class ProcessIdentity:
     itself (see ``checks/_config.py``'s ``_classify_listener_identity``). Defaulted so
     every existing caller that builds a ``ProcessIdentity`` without one (every test
     predating this field) is unaffected.
+
+    ``exe`` (B-400, 2026-08-01): the resolved target of
+    ``/proc/<pid>/exe`` -- unlike ``name``/``cmdline``, this is never attacker- or
+    argv-controlled text; it is a symlink the KERNEL points at the actual inode that
+    was ``execve()``'d, so nothing in the process's own arguments can make it read
+    anything but the truth. Empty string when unreadable (permission denied reading
+    another UID's ``/proc/<pid>/exe`` is the common, expected case -- same doctrine as
+    every other per-PID read in this module -- or the process vanished). See
+    :func:`_process_exe` and ``checks/_config.py``'s ``_classify_listener_identity``
+    for how this is combined with ``cmdline`` to positively identify OpenClaw without
+    trusting a bare substring match over free-form command-line text. Defaulted so
+    every existing caller that builds a ``ProcessIdentity`` without one (every test
+    predating this field) is unaffected.
     """
 
     pid: str
     name: str
     cmdline: str = ""
+    exe: str = ""
 
 
 @dataclass(frozen=True)
@@ -298,6 +327,42 @@ def _process_cmdline(pid: str, root: Path) -> str:
     return " ".join(p.decode("utf-8", errors="replace") for p in parts)
 
 
+def _process_exe(pid: str, root: Path) -> str:
+    """Best-effort RESOLVED executable path for *pid*: the target of
+    ``/proc/<pid>/exe``, read via ``os.readlink`` (never followed further -- the
+    kernel has already done the resolving; this module only reports what it points
+    at). Empty string when unreadable -- permission denied reading another UID's
+    ``/proc/<pid>/exe`` is the common, expected case (same tolerance as every other
+    per-PID read in this module), a vanished process, or no such symlink at all --
+    never raised as an error.
+
+    Unlike ``comm``/``cmdline`` (:func:`_process_name`, :func:`_process_cmdline`),
+    this value is NOT attacker-controlled text: a process cannot make ``argv`` or its
+    thread name lie about which binary the kernel actually ``execve()``'d. For an
+    INTERPRETED process (node/bun/deno running a ``.js``/``.mjs`` file via a
+    ``#!/usr/bin/env node`` shebang -- OpenClaw's own real shape, confirmed against
+    the installed dist's ``openclaw.mjs``) this names the INTERPRETER binary, never
+    the invoked script, so it can never by itself confirm "this is OpenClaw" -- but it
+    CAN immediately clear anything whose executable is something else entirely (ssh, a
+    text editor, a shell), which no amount of cmdline text-matching can do reliably
+    (see ``checks/_config.py``'s ``_classify_listener_identity``, B-400).
+
+    Linux appends a literal `` (deleted)`` suffix to ``readlink(2)``'s result when the
+    executed file's inode no longer exists at that path (e.g. replaced in-place by an
+    upgrade after the process started) -- stripped here so basename matching downstream
+    still works; the caller only loses the immaterial "still-deleted" fact, never a
+    wrong path.
+    """
+    try:
+        target = os.readlink(root / pid / "exe")
+    except OSError:
+        return ""
+    suffix = " (deleted)"
+    if target.endswith(suffix):
+        target = target[: -len(suffix)]
+    return target
+
+
 def build_inode_index(proc_root: "str | Path" = "/proc") -> "dict[str, list[tuple[str, str]]]":
     """One ``/proc`` walk building an ``inode -> [(pid, name), ...]`` index, so a
     caller that needs to attribute MULTIPLE listening sockets in one go (e.g.
@@ -387,7 +452,9 @@ def identify_listener_process(
         if len(names) > 1:
             return None  # different PIDs naming different processes -- genuinely ambiguous
         pid, name = entries[0]
-        return ProcessIdentity(pid=pid, name=name, cmdline=_process_cmdline(pid, root))
+        return ProcessIdentity(
+            pid=pid, name=name, cmdline=_process_cmdline(pid, root), exe=_process_exe(pid, root)
+        )
 
     target = f"socket:[{inode}]"
     try:
@@ -421,5 +488,8 @@ def identify_listener_process(
     if identity is None:
         return None
     return ProcessIdentity(
-        pid=identity.pid, name=identity.name, cmdline=_process_cmdline(identity.pid, root)
+        pid=identity.pid,
+        name=identity.name,
+        cmdline=_process_cmdline(identity.pid, root),
+        exe=_process_exe(identity.pid, root),
     )

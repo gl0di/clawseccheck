@@ -272,7 +272,14 @@ def test_listeners_for_port_empty_when_no_match():
 # exposes, so a dangling os.symlink target is realistic, not a test shortcut.
 # ---------------------------------------------------------------------------
 
-def _make_pid(root, pid: str, fd_targets: dict, comm: "str | None" = None, cmdline: "bytes | None" = None):
+def _make_pid(
+    root,
+    pid: str,
+    fd_targets: dict,
+    comm: "str | None" = None,
+    cmdline: "bytes | None" = None,
+    exe: "str | None" = None,
+):
     fd_dir = root / pid / "fd"
     fd_dir.mkdir(parents=True, exist_ok=True)
     for fd_num, target in fd_targets.items():
@@ -281,6 +288,8 @@ def _make_pid(root, pid: str, fd_targets: dict, comm: "str | None" = None, cmdli
         (root / pid / "comm").write_text(comm, encoding="utf-8")
     if cmdline is not None:
         (root / pid / "cmdline").write_bytes(cmdline)
+    if exe is not None:
+        os.symlink(exe, root / pid / "exe")
 
 
 def test_identify_listener_process_resolves_via_comm(tmp_path):
@@ -420,3 +429,53 @@ def test_build_inode_index_skips_pid_with_unnameable_process(tmp_path):
     _make_pid(tmp_path, "777", {5: "socket:[999]"})
     index = build_inode_index(proc_root=tmp_path)
     assert index == {}
+
+
+# ---------------------------------------------------------------------------
+# B-400: ProcessIdentity.exe / _process_exe -- the resolved target of
+# /proc/<pid>/exe, read via both the direct scan and the build_inode_index(index=...)
+# path. Unlike comm/cmdline this is never attacker-controlled argv text -- see
+# checks/_config.py's _classify_listener_identity for why that distinction matters.
+# ---------------------------------------------------------------------------
+
+def test_identify_listener_process_resolves_exe_directly(tmp_path):
+    _make_pid(tmp_path, "42", {3: "socket:[7]"}, comm="node\n", exe="/usr/bin/node")
+    identity = identify_listener_process("7", proc_root=tmp_path)
+    assert identity is not None
+    assert identity.exe == "/usr/bin/node"
+
+
+def test_identify_listener_process_resolves_exe_via_index(tmp_path):
+    _make_pid(tmp_path, "42", {3: "socket:[7]"}, comm="node\n", exe="/usr/bin/node")
+    index = build_inode_index(proc_root=tmp_path)
+    identity = identify_listener_process("7", proc_root=tmp_path, index=index)
+    assert identity is not None
+    assert identity.exe == "/usr/bin/node"
+
+
+def test_identify_listener_process_exe_absent_leaves_it_empty(tmp_path):
+    # No exe= given -- /proc/<pid>/exe does not exist in the fake root, matching a
+    # process this caller has no permission to read (the common, expected case).
+    _make_pid(tmp_path, "42", {3: "socket:[7]"}, comm="node\n")
+    identity = identify_listener_process("7", proc_root=tmp_path)
+    assert identity is not None
+    assert identity.exe == ""
+
+
+def test_identify_listener_process_exe_deleted_suffix_is_stripped(tmp_path):
+    # Linux appends " (deleted)" to readlink(2)'s result when the executed file's
+    # inode no longer exists at that path (e.g. an in-place upgrade after exec).
+    fd_dir = tmp_path / "42" / "fd"
+    fd_dir.mkdir(parents=True)
+    os.symlink("socket:[7]", fd_dir / "3")
+    (tmp_path / "42" / "comm").write_text("node\n", encoding="utf-8")
+    os.symlink("/usr/bin/node (deleted)", tmp_path / "42" / "exe")
+    identity = identify_listener_process("7", proc_root=tmp_path)
+    assert identity is not None
+    assert identity.exe == "/usr/bin/node"
+
+
+def test_process_exe_missing_proc_root_returns_empty_string(tmp_path):
+    from clawseccheck.sockets import _process_exe
+
+    assert _process_exe("42", tmp_path / "does-not-exist") == ""

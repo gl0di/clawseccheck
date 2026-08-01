@@ -39,14 +39,24 @@ from clawseccheck.checks import _config as _config_mod
 from clawseccheck.checks import check_effective_bind
 from clawseccheck.collector import Context, collect
 from clawseccheck.scoring import compute
-from clawseccheck.sockets import ListenSocket, SocketScanResult
+from clawseccheck.sockets import ListenSocket, ProcessIdentity, SocketScanResult
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
-def _make_pid(root, pid: str, fd_targets: dict, comm: "str | None" = None, cmdline: "bytes | None" = None):
-    """Build a fake /proc/<pid>/fd + comm/cmdline under *root* -- same shape
-    tests/test_sockets.py's own helper uses."""
+def _make_pid(
+    root,
+    pid: str,
+    fd_targets: dict,
+    comm: "str | None" = None,
+    cmdline: "bytes | None" = None,
+    exe: "str | None" = None,
+):
+    """Build a fake /proc/<pid>/fd + comm/cmdline/exe under *root* -- same shape
+    tests/test_sockets.py's own helper uses. *exe*, when given, becomes the
+    /proc/<pid>/exe symlink target (B-400: the kernel-resolved
+    executable path _classify_listener_identity now requires before it will even
+    look at cmdline -- see that function's own docstring)."""
     fd_dir = root / pid / "fd"
     fd_dir.mkdir(parents=True, exist_ok=True)
     for fd_num, target in fd_targets.items():
@@ -55,6 +65,8 @@ def _make_pid(root, pid: str, fd_targets: dict, comm: "str | None" = None, cmdli
         (root / pid / "comm").write_text(comm, encoding="utf-8")
     if cmdline is not None:
         (root / pid / "cmdline").write_bytes(cmdline)
+    if exe is not None:
+        os.symlink(exe, root / pid / "exe")
 
 
 def _ctx(cfg: dict, sockets=None) -> Context:
@@ -101,14 +113,16 @@ def test_bad_fixture_declared_loopback_effective_wildcard_is_unknown_without_att
 
 def test_bad_fixture_with_positively_confirmed_gateway_still_fails(tmp_path):
     # Same fixture/socket shape as above, but this time the non-loopback listener's
-    # inode resolves to a process whose cmdline names OpenClaw itself -- positive
-    # confirmation, so the FAIL is preserved.
+    # inode resolves to a process whose exe IS a real node interpreter and whose
+    # cmdline names OpenClaw itself -- positive confirmation (B-400:
+    # exe is now REQUIRED before cmdline is even consulted), so the FAIL is preserved.
     _make_pid(
         tmp_path,
         "9999",
         {3: "socket:[42]"},
         comm="node\n",
         cmdline=b"/usr/bin/node\x00/home/user/.openclaw/dist/cli.js\x00",
+        exe="/usr/bin/node",
     )
     ctx = collect(FIXTURES / "bad_b340_effective_bind_wildcard")
     ctx.sockets = _scan(ListenSocket(host="0.0.0.0", port=8765, family="inet", inode="42"))
@@ -141,14 +155,15 @@ def test_declared_loopback_effective_wildcard_without_attribution_is_unknown():
 
 
 def test_declared_loopback_effective_wildcard_confirmed_gateway_is_fail(tmp_path):
-    # B-374 acceptance test (b): a resolved process whose cmdline names OpenClaw is
-    # POSITIVE evidence the gateway itself is lying -- the verdict table applies and
-    # FAIL is preserved.
+    # B-374 acceptance test (b): a resolved process whose exe is a real node
+    # interpreter and whose cmdline names OpenClaw is POSITIVE evidence the gateway
+    # itself is lying -- the verdict table applies and FAIL is preserved.
     _make_pid(
         tmp_path,
         "42",
         {3: "socket:[7]"},
         cmdline=b"/usr/bin/node\x00/opt/openclaw/dist/cli.js\x00",
+        exe="/usr/bin/node",
     )
     ctx = _ctx(_BASE, _scan(ListenSocket("0.0.0.0", 8765, "inet", inode="7")))
     ctx.proc_root = str(tmp_path)
@@ -307,12 +322,13 @@ def test_one_confirmed_gateway_listener_among_several_still_fails(tmp_path):
     # Mirror of the above: as soon as ONE non-loopback listener is positively
     # confirmed as the gateway itself, the FAIL fires regardless of what the other,
     # unrelated listener on the same port resolves to.
-    _make_pid(tmp_path, "4242", {7: "socket:[111]"}, comm="docker-proxy\n")
+    _make_pid(tmp_path, "4242", {7: "socket:[111]"}, comm="docker-proxy\n", exe="/usr/bin/docker-proxy")
     _make_pid(
         tmp_path,
         "9000",
         {3: "socket:[222]"},
         cmdline=b"/usr/bin/node\x00/home/user/.openclaw/dist/cli.js\x00",
+        exe="/usr/bin/node",
     )
     ctx = _ctx(
         _BASE,
@@ -518,9 +534,19 @@ def test_malformed_gateway_value_is_unknown():
 
 
 def test_no_port_declared_is_unknown():
+    # B-400: gateway.bind names no embedded port AND gateway.port is
+    # absent entirely -- this NO LONGER reports "nothing to look up" outright; it now
+    # falls back to OpenClaw's own grounded default port (18789, see
+    # _DEFAULT_GATEWAY_PORT) and looks THERE instead. This fixture's injected listener
+    # is on 8765, not 18789, so it still reads UNKNOWN -- but now via "nothing is
+    # listening on [the default] port", a materially different reason than before. See
+    # test_absent_gateway_port_falls_back_to_grounded_default_and_fires below for the
+    # case where a listener genuinely IS on the default port.
     cfg = {"gateway": {"bind": "127.0.0.1", "auth": {"mode": "token", "token": "x" * 32}}}
     ctx = _ctx(cfg, _scan(ListenSocket("127.0.0.1", 8765, "inet")))
-    assert check_effective_bind(ctx).status == UNKNOWN
+    r = check_effective_bind(ctx)
+    assert r.status == UNKNOWN
+    assert "18789" in r.detail
 
 
 def test_sockets_not_scanned_is_unknown():
@@ -657,6 +683,7 @@ def test_widening_the_effective_bind_never_improves_the_score_with_confirmed_att
         "42",
         {3: "socket:[7]"},
         cmdline=b"/usr/bin/node\x00/opt/openclaw/dist/cli.js\x00",
+        exe="/usr/bin/node",
     )
     tight_ctx = _ctx(_BASE, _scan(ListenSocket("127.0.0.1", 8765, "inet")))
     tight_finding = check_effective_bind(tight_ctx)
@@ -674,6 +701,183 @@ def test_widening_the_effective_bind_never_improves_the_score_with_confirmed_att
     assert score_wide < score_tight  # the confirmed-FAIL case must strictly cost something
 
 
+# ---------------------------------------------------------------------------
+# B-400, decoy processes: the retired substring test credited ANY
+# process merely MENTIONING "openclaw" in its cmdline as the gateway. Each of these
+# is a real, plausible decoy from the ticket, all sharing the declared port by pure
+# coincidence -- none of them may ever be classified "gateway", regardless of what
+# "openclaw"-shaped text sits in their command line.
+# ---------------------------------------------------------------------------
+
+def test_ssh_tunnel_decoy_with_openclaw_in_hostname_is_not_credited_as_gateway(tmp_path):
+    # `ssh -L 8080:localhost:8080 user@my-openclaw-server` -- the word "openclaw" only
+    # ever appears inside the remote hostname, never in a path. Old substring test:
+    # confidently "gateway" -> FAIL. New test: exe resolves to the real ssh binary,
+    # which is neither OpenClaw nor a script interpreter -> "foreign", never FAIL.
+    _make_pid(
+        tmp_path,
+        "5001",
+        {4: "socket:[321]"},
+        comm="ssh\n",
+        cmdline=b"ssh\x00-L\x008080:localhost:8080\x00user@my-openclaw-server\x00",
+        exe="/usr/bin/ssh",
+    )
+    ctx = _ctx(_BASE, _scan(ListenSocket("0.0.0.0", 8765, "inet", inode="321")))
+    ctx.proc_root = str(tmp_path)
+    r = check_effective_bind(ctx)
+    assert r.status != FAIL
+    assert r.status == UNKNOWN
+
+
+def test_text_editor_with_repo_path_open_is_not_credited_as_gateway(tmp_path):
+    # A text editor with this very repo's checkout (a directory containing "openclaw"
+    # in its path) open in an argv-visible tab/recent-file list. exe resolves to the
+    # editor binary, not node/bun/deno/openclaw -> "foreign", never FAIL.
+    _make_pid(
+        tmp_path,
+        "5002",
+        {4: "socket:[322]"},
+        comm="code\n",
+        cmdline=b"/usr/bin/code\x00/home/user/dev/openclaw/README.md\x00",
+        exe="/usr/bin/code",
+    )
+    ctx = _ctx(_BASE, _scan(ListenSocket("0.0.0.0", 8765, "inet", inode="322")))
+    ctx.proc_root = str(tmp_path)
+    r = check_effective_bind(ctx)
+    assert r.status != FAIL
+    assert r.status == UNKNOWN
+
+
+def test_shell_script_from_a_directory_literally_named_openclaw_is_not_credited(tmp_path):
+    # A shell script invoked from a directory someone happens to have named
+    # "openclaw" -- the OLD substring test over cmdline text would match this too.
+    # exe resolves to /bin/bash, never a script interpreter this check treats as an
+    # OpenClaw candidate -> "foreign", never FAIL, regardless of the path's own name.
+    _make_pid(
+        tmp_path,
+        "5003",
+        {4: "socket:[323]"},
+        comm="bash\n",
+        cmdline=b"/bin/bash\x00/home/user/openclaw/run.sh\x00",
+        exe="/bin/bash",
+    )
+    ctx = _ctx(_BASE, _scan(ListenSocket("0.0.0.0", 8765, "inet", inode="323")))
+    ctx.proc_root = str(tmp_path)
+    r = check_effective_bind(ctx)
+    assert r.status != FAIL
+    assert r.status == UNKNOWN
+
+
+def test_exe_unresolvable_is_never_credited_as_gateway_even_with_openclaw_cmdline(tmp_path):
+    # Identity resolves (inode -> PID, comm/cmdline readable), but /proc/<pid>/exe
+    # itself could not be read (e.g. permission denied on another UID's exe symlink --
+    # a real, common case distinct from the fd-level PermissionError this module
+    # already tolerated). Must never fall back to trusting cmdline text alone just
+    # because exe is unavailable -- that would silently reopen the retired bug for
+    # exactly the processes hardest to positively clear.
+    _make_pid(
+        tmp_path,
+        "5004",
+        {4: "socket:[324]"},
+        comm="node\n",
+        cmdline=b"/usr/bin/node\x00/opt/openclaw/dist/cli.js\x00",
+        # deliberately no exe= -- /proc/5004/exe does not exist in this fake root
+    )
+    ctx = _ctx(_BASE, _scan(ListenSocket("0.0.0.0", 8765, "inet", inode="324")))
+    ctx.proc_root = str(tmp_path)
+    r = check_effective_bind(ctx)
+    assert r.status != FAIL
+    assert r.status == UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# B-400, absent gateway.port fallback: an absent gateway.port must fall
+# back to OpenClaw's own grounded default port (18789 -- see _DEFAULT_GATEWAY_PORT's
+# grounding) and actually corroborate against it, instead of reporting UNKNOWN
+# ("nothing to look up") outright -- the single most common real config shape
+# (gateway.port simply never set) previously got NO runtime corroboration at all.
+# ---------------------------------------------------------------------------
+
+_ABSENT_PORT_LOOPBACK_CFG = {
+    "gateway": {"bind": "loopback", "auth": {"mode": "token", "token": "x" * 32}},
+}
+
+
+def test_absent_gateway_port_falls_back_to_default_and_passes_when_matched(tmp_path):
+    # Declared loopback, no gateway.port at all, and the gateway really IS listening
+    # loopback-only on the grounded default port -- must corroborate (PASS), proving
+    # the fallback actually resolves a usable port rather than merely avoiding UNKNOWN.
+    ctx = _ctx(_ABSENT_PORT_LOOPBACK_CFG, _scan(ListenSocket("127.0.0.1", 18789, "inet")))
+    r = check_effective_bind(ctx)
+    assert r.status == PASS
+
+
+def test_absent_gateway_port_falls_back_to_default_and_fires_when_world_open(tmp_path):
+    # Declared loopback, no gateway.port at all, and a listener on the grounded
+    # default port is confirmed (via exe+cmdline) to BE the gateway itself, wide open.
+    # This must FIRE -- not read UNKNOWN as it did before this fix.
+    _make_pid(
+        tmp_path,
+        "6001",
+        {3: "socket:[888]"},
+        cmdline=b"/usr/bin/node\x00/home/user/.openclaw/dist/cli.js\x00",
+        exe="/usr/bin/node",
+    )
+    ctx = _ctx(
+        _ABSENT_PORT_LOOPBACK_CFG, _scan(ListenSocket("0.0.0.0", 18789, "inet", inode="888"))
+    )
+    ctx.proc_root = str(tmp_path)
+    r = check_effective_bind(ctx)
+    assert r.status == FAIL
+    assert r.scored is True
+    assert "18789" in r.detail
+
+
+def test_absent_gateway_port_falls_back_to_default_and_warns_when_declared_remote(tmp_path):
+    # Declared remote (lan), no gateway.port at all, but the gateway is currently only
+    # listening loopback-only on the grounded default port -- WARN (dangerous config,
+    # not currently exposed), corroborated against the fallback port.
+    cfg = {"gateway": {"bind": "lan", "auth": {"mode": "token", "token": "x" * 32}}}
+    ctx = _ctx(cfg, _scan(ListenSocket("127.0.0.1", 18789, "inet")))
+    r = check_effective_bind(ctx)
+    assert r.status == WARN
+    assert r.scored is False
+
+
+def test_gateway_port_null_is_treated_as_absent_not_malformed():
+    # An explicit JSON `null` and a genuinely missing key both mean "no value was
+    # given" -- dig() cannot and need not distinguish them; both take the default-port
+    # fallback, not the "present but malformed" UNKNOWN.
+    cfg = {"gateway": {"bind": "loopback", "port": None, "auth": {"mode": "token", "token": "x" * 32}}}
+    ctx = _ctx(cfg, _scan(ListenSocket("127.0.0.1", 18789, "inet")))
+    assert check_effective_bind(ctx).status == PASS
+
+
+# ---------------------------------------------------------------------------
+# B-400, non-Linux / procfs-less host: the whole corroboration path --
+# not just the socket table read -- must degrade to a DISCLOSED UNKNOWN, never a
+# crash and never a confident verdict either way. This drives the REAL
+# sockets.scan_listening_sockets() codepath end-to-end (not an injected
+# SocketScanResult) against a proc_root that simply does not exist, standing in for a
+# platform with no /proc at all (macOS, Windows, a container without it mounted).
+# ---------------------------------------------------------------------------
+
+def test_full_audit_with_missing_proc_root_degrades_to_disclosed_unknown_not_crash(tmp_path):
+    from clawseccheck import audit as _audit  # noqa: PLC0415
+
+    home = FIXTURES / "clean_b340_effective_bind_loopback"
+    no_such_proc = tmp_path / "no-such-proc"
+    _, findings, _ = _audit(str(home), include_sockets=True, proc_root=str(no_such_proc))
+    b340 = [f for f in findings if f.id == "B340"]
+    assert len(b340) == 1
+    r = b340[0]
+    assert r.status == UNKNOWN
+    assert r.status not in (FAIL, WARN, PASS)
+    # The reason must be disclosed, not a bare "UNKNOWN" with no explanation.
+    assert "tcp" in r.detail
+    assert "Could not read the host's listening-socket table" in r.detail
+
+
 def test_widening_the_effective_bind_without_attribution_never_improves_the_score(tmp_path):
     # Same comparison, but the wide listener's identity is unresolvable -- UNKNOWN,
     # not FAIL (B-374). Both scenarios are unscored, so the scores are equal --
@@ -689,3 +893,93 @@ def test_widening_the_effective_bind_without_attribution_never_improves_the_scor
     score_wide = compute([_anchor(), wide_finding]).score
     score_tight = compute([_anchor(), tight_finding]).score
     assert score_wide <= score_tight
+
+
+# ---------------------------------------------------------------------------
+# B-400: _classify_listener_identity / _names_openclaw_install unit
+# tests, exercised directly (not through the full check) for precise branch coverage.
+# ---------------------------------------------------------------------------
+
+def test_classify_identity_none_is_unknown():
+    assert _config_mod._classify_listener_identity(None) == "unknown"
+
+
+def test_classify_identity_no_exe_is_unknown_even_with_openclaw_cmdline():
+    ident = ProcessIdentity(pid="1", name="node", cmdline="/usr/bin/node /opt/openclaw/dist/cli.js")
+    assert _config_mod._classify_listener_identity(ident) == "unknown"
+
+
+def test_classify_identity_exe_openclaw_binary_is_gateway():
+    ident = ProcessIdentity(pid="1", name="openclaw", exe="/usr/local/bin/openclaw")
+    assert _config_mod._classify_listener_identity(ident) == "gateway"
+
+
+def test_classify_identity_node_with_openclaw_script_path_is_gateway():
+    ident = ProcessIdentity(
+        pid="1", name="node", cmdline="/usr/bin/node /opt/openclaw/dist/cli.js", exe="/usr/bin/node"
+    )
+    assert _config_mod._classify_listener_identity(ident) == "gateway"
+
+
+def test_classify_identity_node_with_dotopenclaw_script_path_is_gateway():
+    ident = ProcessIdentity(
+        pid="1",
+        name="node",
+        cmdline="/usr/bin/node /home/user/.openclaw/dist/cli.js",
+        exe="/usr/bin/node",
+    )
+    assert _config_mod._classify_listener_identity(ident) == "gateway"
+
+
+def test_classify_identity_node_with_unrelated_script_is_unknown():
+    ident = ProcessIdentity(
+        pid="1", name="node", cmdline="/usr/bin/node /opt/some-other-app/server.js", exe="/usr/bin/node"
+    )
+    assert _config_mod._classify_listener_identity(ident) == "unknown"
+
+
+def test_classify_identity_ssh_with_openclaw_hostname_is_foreign():
+    ident = ProcessIdentity(
+        pid="1",
+        name="ssh",
+        cmdline="ssh -L 8080:localhost:8080 user@my-openclaw-server",
+        exe="/usr/bin/ssh",
+    )
+    assert _config_mod._classify_listener_identity(ident) == "foreign"
+
+
+def test_classify_identity_bash_from_openclaw_named_dir_is_foreign():
+    # exe alone (bash, not node/bun/deno/openclaw) settles this -- cmdline's path
+    # containing "openclaw" is never even consulted.
+    ident = ProcessIdentity(
+        pid="1", name="bash", cmdline="/bin/bash /home/user/openclaw/run.sh", exe="/bin/bash"
+    )
+    assert _config_mod._classify_listener_identity(ident) == "foreign"
+
+
+def test_classify_identity_docker_proxy_is_foreign():
+    ident = ProcessIdentity(pid="1", name="docker-proxy", exe="/usr/bin/docker-proxy")
+    assert _config_mod._classify_listener_identity(ident) == "foreign"
+
+
+def test_names_openclaw_install_rejects_lookalike_directory_name():
+    # A directory whose name merely CONTAINS "openclaw" as a substring of a longer
+    # segment must not match -- only an exact path-segment equality counts.
+    assert _config_mod._names_openclaw_install("/tmp/my-openclaw-notes/script.js") is False
+
+
+def test_names_openclaw_install_accepts_node_modules_layout():
+    assert _config_mod._names_openclaw_install(
+        "/home/user/.npm-global/lib/node_modules/openclaw/openclaw.mjs"
+    ) is True
+
+
+def test_names_openclaw_install_accepts_bare_symlink_basename():
+    # The real, observed shape: `~/.npm-global/bin/openclaw` is a shebang symlink, and
+    # argv[1] shows the AS-INVOKED path (the symlink itself), not the resolved
+    # target -- confirmed empirically for this task (C-135 notes).
+    assert _config_mod._names_openclaw_install("/home/user/.npm-global/bin/openclaw") is True
+
+
+def test_names_openclaw_install_rejects_non_path_token():
+    assert _config_mod._names_openclaw_install("user@my-openclaw-server") is False
