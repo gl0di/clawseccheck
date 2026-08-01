@@ -4541,19 +4541,51 @@ def check_plugin_hook_grants(ctx: Context) -> Finding:
     conflate the two) — can carry ``allowPromptInjection`` (a per-turn grant to mutate
     the in-flight prompt) and/or ``allowConversationAccess`` (a grant to read the
     transcript). Nothing in this codebase reads either field today; this check exists
-    purely to surface that the grant is set so an operator notices it — not to judge
+    purely to surface that the grant is held so an operator notices it — not to judge
     whether the grant is appropriate. Plugins already run in-process as trusted code
     (same posture as B57/B167's grounding), so an explicit opt-in grant here may be
     entirely intentional.
+
+    B-401 — POLARITY, grounded against the runtime ENFORCEMENT site, not just the
+    schema shape: ``registry-B8eQDFB4.js:1390`` —
+    ``(cfg.plugins?.entries?.[pluginId])?.hooks?.allowPromptInjection !== false`` — and
+    the guard at ``:4206-4207`` (``policy?.allowPromptInjection === false`` is the ONLY
+    condition that ever blocks the typed hook). ``allowPromptInjection`` is therefore
+    GRANTED BY DEFAULT: an absent field (or an entirely absent ``hooks`` object) is the
+    exact same permissive state as an explicit ``true`` — only an explicit ``false``
+    withholds it. The pre-B-401 code keyed on "field present and ``is True``", so an
+    omitted field read as PASS — the silently-exposed default, not the safe one — and
+    the old fix text told operators to "keep it unset", i.e. to keep the permissive
+    default. Both are corrected below.
+
+    ``allowConversationAccess`` does **not** share this polarity and its reading here is
+    unchanged: ``registry-B8eQDFB4.js:4226-4232`` blocks it for
+    ``record.origin !== "bundled"`` plugins unless ``explicitConversationAccess === true``
+    ("non-bundled plugins must set ... =true") — the OPPOSITE default — while bundled
+    plugins get the same ``!== false`` default as ``allowPromptInjection`` (``:4236``).
+    ``PluginEntrySchema`` carries no field this check (or the real config) can use to
+    tell a bundled plugin's entry from a non-bundled one — ``origin`` is a
+    runtime/loader property, never part of static config — so "explicit ``true`` only"
+    is the one reading this check can actually ground for the entries it can see.
+
+    Either field holding a non-boolean value is schema-invalid (both are
+    ``boolean().optional()``, zod-schema-O9ml_nmo.js:791-792) and is routed to UNKNOWN
+    rather than silently read as "not granted" — Golden Rule #4: never a confident PASS
+    (or a silent WARN-omission) when the state can't be determined from config alone.
 
     WARN-only, scored=False, NEVER FAIL: nothing distinguishes a legitimate, intentional
     grant from an abusive one from config alone — both look identical. This is a
     disclosure, not a verdict, per CLAUDE.md Golden Rule #5 and this check's own scope.
 
-    PASS    — plugins installed, none set either hooks grant. Silent in normal output.
-    WARN    — at least one installed plugin entry sets hooks.allowPromptInjection and/or
-              hooks.allowConversationAccess to true.
-    UNKNOWN — no plugins installed (plugins.entries absent); not applicable.
+    PASS    — plugins installed, every entry explicitly withholds both grants (or holds
+              neither). Silent in normal output.
+    WARN    — at least one installed plugin entry HOLDS hooks.allowPromptInjection
+              (absent or `true` — granted by default) and/or hooks.allowConversationAccess
+              (`true` only).
+    UNKNOWN — no plugins installed (plugins.entries absent), so not applicable; OR every
+              plugin's grant state resolves cleanly except for a non-boolean
+              hooks.allowPromptInjection / hooks.allowConversationAccess value whose
+              grant state can't be read either way.
     """
     cfg = ctx.config
     plugins = _plugins(cfg)
@@ -4563,43 +4595,81 @@ def check_plugin_hook_grants(ctx: Context) -> Finding:
             UNKNOWN,
             "No plugins are installed (plugins.entries absent), so per-plugin hook "
             "grants are not applicable.",
-            "When you install a plugin, only set hooks.allowPromptInjection / "
-            "hooks.allowConversationAccess if the plugin genuinely needs to mutate the "
-            "prompt or read the transcript.",
+            "When you install a plugin, explicitly set hooks.allowPromptInjection: "
+            "false unless it genuinely needs to mutate the in-flight prompt -- the "
+            "grant is held by default when the field is left unset. Only set "
+            "hooks.allowConversationAccess: true if the plugin genuinely needs to read "
+            "the transcript.",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     offenders = []
+    unresolved = []
     for name, entry in plugins.items():
         if not isinstance(entry, dict):
             continue
         hooks = entry.get("hooks")
-        if not isinstance(hooks, dict):
+        if hooks is not None and not isinstance(hooks, dict):
+            unresolved.append(f"plugins.entries.{name}.hooks (not an object)")
             continue
-        grants = [
-            field_name
-            for field_name in ("allowPromptInjection", "allowConversationAccess")
-            if hooks.get(field_name) is True
-        ]
+        hooks = hooks if isinstance(hooks, dict) else {}
+        grants = []
+        malformed = []
+        # allowPromptInjection: `!== false` at the enforcement site -- absent (None)
+        # is the SAME granted state as an explicit `true`; only `False` withholds it.
+        prompt_injection = hooks.get("allowPromptInjection")
+        if prompt_injection is None or prompt_injection is True:
+            grants.append("allowPromptInjection")
+        elif prompt_injection is not False:
+            malformed.append("allowPromptInjection")
+        # allowConversationAccess: opposite polarity for the non-bundled entries this
+        # check can see -- only an explicit `true` is a grant; absent is the safe
+        # default (see docstring). Unchanged from before B-401.
+        conversation_access = hooks.get("allowConversationAccess")
+        if conversation_access is True:
+            grants.append("allowConversationAccess")
+        elif conversation_access is not None and conversation_access is not False:
+            malformed.append("allowConversationAccess")
         if grants:
             offenders.append(f"plugins.entries.{name}.hooks.{'/'.join(grants)}")
+        if malformed:
+            unresolved.append(f"plugins.entries.{name}.hooks.{'/'.join(malformed)}")
     if offenders:
         return _finding(
             "B341",
             WARN,
             "One or more installed plugin(s) hold a per-turn prompt-mutation and/or "
-            "transcript-read grant (see evidence). Plugins already run in-process as "
-            "trusted code, so this may be an intentional grant — disclosed for "
-            "awareness, not judged as a misconfiguration.",
-            "Confirm each listed plugin genuinely needs hooks.allowPromptInjection "
-            "and/or hooks.allowConversationAccess; remove the grant if it does not.",
+            "transcript-read grant (see evidence) -- held either by an explicit `true` "
+            "or by the unset default (hooks.allowPromptInjection is granted unless "
+            "explicitly set to `false`). Plugins already run in-process as trusted "
+            "code, so this may be an intentional grant -- disclosed for awareness, not "
+            "judged as a misconfiguration.",
+            "Confirm each listed plugin genuinely needs the grant. Set "
+            "hooks.allowPromptInjection: false to withdraw the default prompt-mutation "
+            "grant; leave hooks.allowConversationAccess unset (or false) unless the "
+            "plugin genuinely needs transcript access.",
             evidence=offenders,
+        )
+    if unresolved:
+        return _finding(
+            "B341",
+            UNKNOWN,
+            "One or more installed plugin(s) set hooks.allowPromptInjection and/or "
+            "hooks.allowConversationAccess to a non-boolean value (see evidence), so "
+            "whether the grant is held cannot be determined from config alone.",
+            "Set hooks.allowPromptInjection / hooks.allowConversationAccess to a "
+            "literal `true` or `false` -- a non-boolean value does not match the "
+            "schema and its effective state cannot be assessed.",
+            evidence=unresolved,
         )
     return _finding(
         "B341",
         PASS,
-        "No installed plugin sets hooks.allowPromptInjection or "
-        "hooks.allowConversationAccess.",
-        "Keep per-plugin hook grants unset unless a plugin genuinely needs them.",
+        "No installed plugin holds the hooks.allowPromptInjection or "
+        "hooks.allowConversationAccess grant.",
+        "Keep hooks.allowPromptInjection explicitly set to false unless a plugin "
+        "genuinely needs to mutate the prompt -- the grant is held by default when "
+        "unset. Keep hooks.allowConversationAccess unset (or false) unless a plugin "
+        "genuinely needs transcript access.",
     )
 
 
@@ -4627,14 +4697,46 @@ def check_plugin_slots_and_deny(ctx: Context) -> Finding:
       wins. The operator believes they allowlisted it; they did not. Config cannot show
       them this today.
 
-    WARN-only, scored=False, NEVER FAIL: naming a memory plugin is ordinary, intended
-    configuration, and a deny entry that also appears in allow is usually a leftover from
-    an emergency rollback rather than an attack. Neither is a misconfiguration this tool
-    can adjudicate from config alone, so it discloses and does not judge.
+    B-401 — the ``memory`` slot has the SAME "unset is not the safe state" defect as
+    B341, grounded independently against the normalization layer (not just the schema):
+    ``config-normalization-shared-w2iz0aeC.js:314-323`` —
+    ``memory: memorySlot === void 0 ? defaultSlotIdForKey("memory") : memorySlot`` —
+    where ``defaultSlotIdForKey("memory")`` resolves to the literal bundled plugin id
+    ``"memory-core"`` (``DEFAULT_SLOT_BY_KEY``, slots-kpL659LX.js:6-8; the plugin itself
+    ships from ``src/plugin-sdk/memory-core-bundled-runtime.ts``). ``memorySlot`` comes
+    from ``normalizeSlotValue``, same file, which folds ANY non-string value — absent,
+    JSON ``null``, or a non-``"none"`` empty/whitespace string — to ``undefined``. So an
+    UNSET ``plugins.slots.memory`` does not mean "no owner": it means the bundled
+    ``memory-core`` plugin owns the slot, identically to naming it explicitly. Only the
+    literal (trimmed, case-insensitive) ``"none"`` truly disables the slot. The pre-B-401
+    code only disclosed an EXPLICIT non-``"none"`` string, so an unset/absent
+    ``plugins.slots`` block silently hid the real default owner.
 
-    PASS    — a plugin block exists, no slot is owned and the two lists do not overlap.
-    WARN    — a slot is owned and/or an id appears in both allow and deny.
-    UNKNOWN — no plugins block at all; not applicable.
+    ``contextEngine`` carries NO such default at the same normalization site --
+    ``contextEngine: normalizeSlotValue(config?.slots?.contextEngine)`` never calls
+    ``defaultSlotIdForKey`` for it, unlike the ``memory`` line right above it -- so an
+    absent ``contextEngine`` genuinely has no assigned owner at the config layer. This
+    check's original "absent -> not reported" reading was already correct for that field
+    and stays unchanged; only ``memory`` gets the default-owner disclosure.
+
+    A ``plugins.slots`` value of the wrong TYPE (not an object) or a ``memory``/
+    ``contextEngine`` value of the wrong type (not a string) is schema-invalid and is
+    routed to UNKNOWN rather than silently folded into either "no owner" or "the
+    default owner" -- Golden Rule #4.
+
+    WARN-only, scored=False, NEVER FAIL: naming a memory plugin (explicitly or by the
+    unset default) is ordinary, intended configuration, and a deny entry that also
+    appears in allow is usually a leftover from an emergency rollback rather than an
+    attack. Neither is a misconfiguration this tool can adjudicate from config alone,
+    so it discloses and does not judge.
+
+    PASS    — a plugin block exists, plugins.slots.memory is explicitly "none", no
+              contextEngine owner is named, and the two allow/deny lists do not overlap.
+    WARN    — the memory slot is owned (explicitly or via the unset default), and/or a
+              contextEngine owner is named, and/or an id appears in both allow and deny.
+    UNKNOWN — no plugins block at all (not applicable); or plugins.slots / one of its
+              two fields holds a non-string, non-object value that can't be read as
+              owned, default-owned, or disabled.
     """
     cfg = ctx.config
     plugins = cfg.get("plugins")
@@ -4645,17 +4747,49 @@ def check_plugin_slots_and_deny(ctx: Context) -> Finding:
             "No plugins block is configured, so plugin slot ownership and allow/deny "
             "consistency are not applicable.",
             "When you configure plugins, name the memory / context-engine slot owner "
-            "explicitly and keep plugins.allow and plugins.deny disjoint.",
+            "explicitly (or set plugins.slots.memory: \"none\" to disable it) and keep "
+            "plugins.allow and plugins.deny disjoint.",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     disclosed = []
-    slots = plugins.get("slots")
-    if isinstance(slots, dict):
-        for slot in ("memory", "contextEngine"):
-            owner = slots.get(slot)
-            # "none" disables the slot outright -- the opposite of a capture.
-            if isinstance(owner, str) and owner.strip() and owner.strip().lower() != "none":
-                disclosed.append(f"plugins.slots.{slot}={owner.strip()}")
+    unresolved = []
+    slots_raw = plugins.get("slots")
+    slots_malformed = slots_raw is not None and not isinstance(slots_raw, dict)
+    if slots_malformed:
+        unresolved.append("plugins.slots (not an object)")
+    slots = slots_raw if isinstance(slots_raw, dict) else {}
+    if not slots_malformed:
+        # memory: absent/None/whitespace-only all resolve to the SAME implicit
+        # "memory-core" default as an explicit owner (see docstring) -- only the
+        # literal "none" disables the slot; any other non-empty string overrides it.
+        memory_raw = slots.get("memory")
+        if memory_raw is None:
+            disclosed.append(
+                "plugins.slots.memory=memory-core (implicit default -- "
+                "plugins.slots.memory is unset)"
+            )
+        elif isinstance(memory_raw, str):
+            owner = memory_raw.strip()
+            if not owner:
+                disclosed.append(
+                    "plugins.slots.memory=memory-core (implicit default -- "
+                    "plugins.slots.memory is blank)"
+                )
+            elif owner.lower() != "none":
+                disclosed.append(f"plugins.slots.memory={owner}")
+        else:
+            unresolved.append(f"plugins.slots.memory (not a string): {memory_raw!r}")
+        # contextEngine: NO implicit default at the normalization layer -- absent
+        # genuinely means unowned, so only an explicit non-"none" string is reported.
+        context_raw = slots.get("contextEngine")
+        if isinstance(context_raw, str):
+            owner = context_raw.strip()
+            if owner and owner.lower() != "none":
+                disclosed.append(f"plugins.slots.contextEngine={owner}")
+        elif context_raw is not None:
+            unresolved.append(
+                f"plugins.slots.contextEngine (not a string): {context_raw!r}"
+            )
     allow = plugins.get("allow")
     deny = plugins.get("deny")
     if isinstance(allow, list) and isinstance(deny, list):
@@ -4668,18 +4802,32 @@ def check_plugin_slots_and_deny(ctx: Context) -> Finding:
             "B342",
             WARN,
             "Plugin runtime-slot ownership and/or an allow/deny contradiction is present "
-            "(see evidence). A slot owner sits in the agent's memory or context-assembly "
-            "path; an id in both lists is silently blocked because deny wins. Disclosed "
-            "for awareness, not judged as a misconfiguration.",
-            "Confirm the named plugin is the one you intend to own that slot, and remove "
-            "any id that appears in both plugins.allow and plugins.deny.",
+            "(see evidence) -- a slot owner may be named explicitly or held by the unset "
+            "default (plugins.slots.memory defaults to the bundled memory-core plugin "
+            "when left unset). A slot owner sits in the agent's memory or "
+            "context-assembly path; an id in both lists is silently blocked because deny "
+            "wins. Disclosed for awareness, not judged as a misconfiguration.",
+            "Confirm the named plugin is the one you intend to own that slot -- set "
+            "plugins.slots.memory: \"none\" if you do not intend any plugin to own it -- "
+            "and remove any id that appears in both plugins.allow and plugins.deny.",
             evidence=disclosed,
+        )
+    if unresolved:
+        return _finding(
+            "B342",
+            UNKNOWN,
+            "plugins.slots and/or one of its fields holds a non-string value (see "
+            "evidence), so slot ownership cannot be determined from config alone.",
+            "Set plugins.slots.memory / plugins.slots.contextEngine to a literal plugin "
+            "id string, or \"none\" to disable the memory slot -- a non-string value "
+            "does not match the schema and its effective state cannot be assessed.",
+            evidence=unresolved,
         )
     return _finding(
         "B342",
         PASS,
-        "No plugin owns the memory or context-engine slot, and plugins.allow and "
-        "plugins.deny do not overlap.",
+        "plugins.slots.memory is explicitly disabled (\"none\"), no contextEngine "
+        "owner is named, and plugins.allow and plugins.deny do not overlap.",
         "Keep plugins.allow and plugins.deny disjoint so a deny never silently "
         "overrides an entry you believe is allowed.",
     )

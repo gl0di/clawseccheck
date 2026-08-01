@@ -19,6 +19,20 @@ Grounding (installed openclaw npm dist, `zod-schema-O9ml_nmo.js`):
 The `"none"` case is the sharp edge worth pinning: `plugins.slots.memory: "none"` is the
 documented value for DISABLING memory plugins, i.e. the opposite of a slot capture. Reporting
 it would be a false positive on a config that is strictly safer than the default.
+
+B-401 (polarity fix). Both checks originally read "field absent" as "not granted" for
+`hooks.allowPromptInjection` (B341) and `plugins.slots.memory` (B342). Grounded against the
+runtime ENFORCEMENT / normalization sites (not just the schema shape):
+
+* `registry-B8eQDFB4.js:1390` — `...hooks?.allowPromptInjection !== false` — the grant is
+  held UNLESS explicitly withdrawn with `false`; absent is the same granted state as `true`.
+* `config-normalization-shared-w2iz0aeC.js:314-323` — an unset `plugins.slots.memory`
+  normalizes to `defaultSlotIdForKey("memory")` = the bundled `"memory-core"` plugin, not to
+  "no owner". Only the literal `"none"` disables the slot.
+
+`hooks.allowConversationAccess` (B341) and `plugins.slots.contextEngine` (B342) do **not**
+share this polarity (grounded separately, see the two check docstrings) and are unchanged:
+absent still reads as "not granted" / "no owner" for those two fields specifically.
 """
 from __future__ import annotations
 
@@ -77,16 +91,99 @@ def test_b341_clean_fixture_passes():
 # ------------------------------------------------------------------------- B341: semantics
 
 def test_b341_false_is_not_a_grant():
-    """Only `is True` counts — an explicitly-disabled grant is not a grant."""
+    """Only an explicit `False` withholds the grant -- the safe, corrected state."""
     cfg = {"plugins": {"entries": {"p": {"hooks": {"allowPromptInjection": False}}}}}
     assert check_plugin_hook_grants(_ctx(cfg)).status == PASS
 
 
-def test_b341_truthy_non_true_is_not_a_grant():
-    """A schema-invalid truthy value is not read as an enabled boolean grant."""
+# -------------------------------------------------------------- B-401: the four-case matrix
+
+
+def test_b341_absent_prompt_injection_field_is_a_grant():
+    """B-401: an omitted `allowPromptInjection` -- with a `hooks` object present for an
+    unrelated field -- is the SAME granted state as an explicit `true` (grounded
+    `!== false` semantics), so it must WARN, not PASS silently."""
+    cfg = {"plugins": {"entries": {"p": {"hooks": {"timeoutMs": 1000}}}}}
+    f = check_plugin_hook_grants(_ctx(cfg))
+    assert f.status == WARN
+    assert any("allowPromptInjection" in e for e in f.evidence or [])
+
+
+def test_b341_entirely_absent_hooks_block_is_also_a_grant():
+    """B-401: the field can be absent because the WHOLE `hooks` object is absent -- the
+    real enforcement site reads `entry?.hooks?.allowPromptInjection`, so an entry with no
+    `hooks` key at all is just the field being maximally absent, still granted."""
+    cfg = {"plugins": {"entries": {"p": {"enabled": True}}}}
+    f = check_plugin_hook_grants(_ctx(cfg))
+    assert f.status == WARN
+    assert any("allowPromptInjection" in e for e in f.evidence or [])
+
+
+def test_b341_explicit_true_is_a_grant():
+    cfg = {"plugins": {"entries": {"p": {"hooks": {"allowPromptInjection": True}}}}}
+    f = check_plugin_hook_grants(_ctx(cfg))
+    assert f.status == WARN
+    assert any("allowPromptInjection" in e for e in f.evidence or [])
+
+
+def test_b341_malformed_prompt_injection_value_is_unknown():
+    """B-401 / Golden Rule #4: a non-boolean value doesn't match the schema
+    (`boolean().optional()`) and must never be read confidently either way."""
     for value in ("yes", 1, ["x"], {}):
-        cfg = {"plugins": {"entries": {"p": {"hooks": {"allowConversationAccess": value}}}}}
-        assert check_plugin_hook_grants(_ctx(cfg)).status == PASS, value
+        cfg = {"plugins": {"entries": {"p": {"hooks": {"allowPromptInjection": value}}}}}
+        f = check_plugin_hook_grants(_ctx(cfg))
+        assert f.status == UNKNOWN, (value, f.status)
+        assert any("allowPromptInjection" in e for e in f.evidence or [])
+
+
+def test_b341_malformed_conversation_access_value_is_unknown():
+    """Same Golden Rule #4 treatment for the OTHER field -- previously silently folded
+    into PASS as "not `is True`", which is itself an unjustified confident guess.
+    `allowPromptInjection` is pinned explicitly to `False` in the same entry so its own
+    (correct, post-B-401) default-grant reading can't also fire and mask the result."""
+    for value in ("yes", 1, ["x"], {}):
+        cfg = {
+            "plugins": {
+                "entries": {
+                    "p": {
+                        "hooks": {
+                            "allowPromptInjection": False,
+                            "allowConversationAccess": value,
+                        }
+                    }
+                }
+            }
+        }
+        f = check_plugin_hook_grants(_ctx(cfg))
+        assert f.status == UNKNOWN, (value, f.status)
+        assert any("allowConversationAccess" in e for e in f.evidence or [])
+
+
+def test_b341_conversation_access_absent_is_still_not_a_grant():
+    """`allowConversationAccess` does NOT share allowPromptInjection's polarity (see
+    module docstring) -- absent stays the safe reading, unchanged by B-401."""
+    cfg = {"plugins": {"entries": {"p": {"hooks": {"allowPromptInjection": False}}}}}
+    assert check_plugin_hook_grants(_ctx(cfg)).status == PASS
+
+
+def test_b341_fix_text_never_recommends_the_permissive_default():
+    """B-401 general guard: whenever a PASS/WARN/UNKNOWN fix string names
+    `allowPromptInjection`, it must pair it with the real safe action (`false`) -- never
+    tell the operator that leaving it unset is fine, which is the exact defect this
+    ticket fixed (the old PASS fix text was 'Keep per-plugin hook grants unset...')."""
+    configs = [
+        {},
+        {"plugins": {"entries": {"p": {"hooks": {"allowPromptInjection": True}}}}},
+        {"plugins": {"entries": {"p": {"hooks": {"allowPromptInjection": False}}}}},
+        {"plugins": {"entries": {"p": {"hooks": {"allowPromptInjection": "yes"}}}}},
+    ]
+    for cfg in configs:
+        f = check_plugin_hook_grants(_ctx(cfg))
+        fix = f.fix or ""
+        if "allowPromptInjection" in fix:
+            assert "false" in fix, (cfg, f.status, fix)
+        # Regression pin: the exact old, wrong PASS fix text must never come back.
+        assert "unset unless a plugin genuinely needs them" not in fix, (cfg, f.status, fix)
 
 
 def test_b341_unknown_when_no_plugins():
@@ -94,8 +191,13 @@ def test_b341_unknown_when_no_plugins():
 
 
 def test_b341_root_level_hooks_are_not_the_plugin_entry_hooks():
-    """The root `hooks` block is a different schema; it must not drive this check."""
-    cfg = {"hooks": {"allowPromptInjection": True}, "plugins": {"entries": {"p": {}}}}
+    """The root `hooks` block is a different schema; it must not drive this check. The
+    entry itself explicitly withholds the grant so the assertion isolates the root-vs-
+    entry separation from the (correct, post-B-401) absent-is-granted behavior."""
+    cfg = {
+        "hooks": {"allowPromptInjection": True},
+        "plugins": {"entries": {"p": {"hooks": {"allowPromptInjection": False}}}},
+    }
     assert check_plugin_hook_grants(_ctx(cfg)).status == PASS
 
 
@@ -138,27 +240,97 @@ def test_b342_none_disables_the_slot_and_is_never_reported():
 
 
 def test_b342_context_engine_slot_is_reported_too():
-    cfg = {"plugins": {"slots": {"contextEngine": "ctxplug"}}}
+    cfg = {"plugins": {"slots": {"memory": "none", "contextEngine": "ctxplug"}}}
     f = check_plugin_slots_and_deny(_ctx(cfg))
     assert f.status == WARN
     assert any("contextEngine=ctxplug" in e for e in f.evidence or [])
 
 
 def test_b342_allow_deny_overlap_is_reported():
-    cfg = {"plugins": {"allow": ["a", "b"], "deny": ["b"]}}
+    cfg = {"plugins": {"slots": {"memory": "none"}, "allow": ["a", "b"], "deny": ["b"]}}
     f = check_plugin_slots_and_deny(_ctx(cfg))
     assert f.status == WARN
     assert any(e.startswith("b:") for e in f.evidence or [])
 
 
 def test_b342_disjoint_allow_and_deny_is_clean():
-    cfg = {"plugins": {"allow": ["a"], "deny": ["b"]}}
+    cfg = {"plugins": {"slots": {"memory": "none"}, "allow": ["a"], "deny": ["b"]}}
     assert check_plugin_slots_and_deny(_ctx(cfg)).status == PASS
 
 
 def test_b342_unknown_when_no_plugins_block():
     assert check_plugin_slots_and_deny(_ctx({})).status == UNKNOWN
     assert check_plugin_slots_and_deny(_ctx({"plugins": {}})).status == UNKNOWN
+
+
+# -------------------------------------------------------------- B-401: the four-case matrix
+# (mirrors the B341 matrix above, but for `plugins.slots.memory`'s implicit "memory-core"
+# default -- `plugins.slots.contextEngine` has no such default and is covered by the
+# unchanged `test_b342_context_engine_slot_is_reported_too` above.)
+
+
+def test_b342_absent_slots_block_is_the_memory_core_default():
+    """B-401: no `plugins.slots` key at all still resolves to the bundled `memory-core`
+    default owner (config-normalization-shared-w2iz0aeC.js:314-323), not "no owner"."""
+    cfg = {"plugins": {"entries": {"p": {"enabled": True}}}}
+    f = check_plugin_slots_and_deny(_ctx(cfg))
+    assert f.status == WARN
+    assert any("plugins.slots.memory=memory-core" in e for e in f.evidence or [])
+
+
+def test_b342_absent_memory_field_is_the_memory_core_default():
+    """Same default, but with an explicit (empty) `plugins.slots` object -- isolates
+    "memory key omitted" from "slots block omitted entirely"."""
+    cfg = {"plugins": {"slots": {}}}
+    f = check_plugin_slots_and_deny(_ctx(cfg))
+    assert f.status == WARN
+    assert any("plugins.slots.memory=memory-core" in e for e in f.evidence or [])
+
+
+def test_b342_explicit_memory_owner_is_reported():
+    cfg = {"plugins": {"slots": {"memory": "custom-memory-plugin"}}}
+    f = check_plugin_slots_and_deny(_ctx(cfg))
+    assert f.status == WARN
+    assert any("plugins.slots.memory=custom-memory-plugin" in e for e in f.evidence or [])
+
+
+def test_b342_explicit_none_is_the_clean_case():
+    cfg = {"plugins": {"slots": {"memory": "none"}}}
+    assert check_plugin_slots_and_deny(_ctx(cfg)).status == PASS
+
+
+def test_b342_malformed_memory_value_is_unknown():
+    """Golden Rule #4: a non-string `plugins.slots.memory` is schema-invalid
+    (`string().optional()`) and must never be folded into either "owned" or "disabled"."""
+    for value in (7, ["x"], {"a": 1}, True):
+        cfg = {"plugins": {"slots": {"memory": value}}}
+        f = check_plugin_slots_and_deny(_ctx(cfg))
+        assert f.status == UNKNOWN, (value, f.status)
+        assert any("plugins.slots.memory" in e for e in f.evidence or [])
+
+
+def test_b342_malformed_slots_block_is_unknown():
+    cfg = {"plugins": {"slots": "not-a-dict"}}
+    f = check_plugin_slots_and_deny(_ctx(cfg))
+    assert f.status == UNKNOWN
+    assert any("plugins.slots" in e for e in f.evidence or [])
+
+
+def test_b342_fix_text_never_recommends_the_permissive_default():
+    """B-401 general guard: whenever a fix string names `plugins.slots.memory`, it must
+    pair it with the real safe action (explicit `"none"`) -- never imply that leaving it
+    unset is the safe/no-owner state."""
+    configs = [
+        {},
+        {"plugins": {"slots": {"memory": "custom"}}},
+        {"plugins": {"slots": {"memory": "none"}}},
+        {"plugins": {"slots": {"memory": 7}}},
+    ]
+    for cfg in configs:
+        f = check_plugin_slots_and_deny(_ctx(cfg))
+        fix = f.fix or ""
+        if "plugins.slots.memory" in fix:
+            assert "none" in fix, (cfg, f.status, fix)
 
 
 def test_b342_malformed_shapes_do_not_raise():

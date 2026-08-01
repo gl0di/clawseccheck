@@ -11,7 +11,10 @@
       "notes": {
         "hooks": { "allowPromptInjection": false, "timeoutMs": 5000 }
       },
-      "recall": { "enabled": true }
+      "recall": {
+        "enabled": true,
+        "hooks": { "allowPromptInjection": false }
+      }
     }
   },
   "logging": { "redactSensitive": "tools" },
