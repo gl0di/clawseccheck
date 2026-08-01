@@ -219,11 +219,15 @@ complete flag list.
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | ClawSecCheck itself won't run, crashes, or OpenClaw doesn't see it |
 | [Security model](SECURITY_MODEL.md) | ClawSecCheck's own capability surface and self-defense |
 | [Contributing](https://github.com/gl0di/clawseccheck/blob/main/CONTRIBUTING.md) | Dev setup, tests, how to author a new check |
+| [Support](SUPPORT.md) | Where a report goes — issue, discussion, or private advisory |
 
 ## 🙌 Feedback, security, license
 
 - **Something looks wrong?** [Open an issue](https://github.com/gl0di/clawseccheck/issues) —
   false alarms are treated as bugs. If the *tool itself* won't run or crashes, try
   [Troubleshooting](docs/TROUBLESHOOTING.md) first.
+- **Questions, false positives, or an attack class we don't cover yet?**
+  [Start a discussion](https://github.com/gl0di/clawseccheck/discussions) — see
+  [SUPPORT.md](SUPPORT.md) for where each kind of report goes.
 - **Found a vulnerability?** Report privately via [SECURITY.md](SECURITY.md).
 - **License:** [MIT](LICENSE). Maintained by [gl0di](https://github.com/gl0di).
