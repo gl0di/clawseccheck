@@ -536,6 +536,11 @@ def test_lookalike_host_truncated_by_the_window_is_still_detected():
         ("bad_b13_self_declare_deep_body_still_fails", "B13", FAIL),
         ("clean_b160_shell_export_env_var", "B160", PASS),
         ("bad_b160_lookalike_host_exfil", "B160", WARN),
+        # B-424 [GOLDEN RULE #5]: a REST-auth query-param credential (Mapbox-style
+        # ?access_token=) downgrades to WARN, not a hard FAIL -- see
+        # tests/test_prose_bulk_exfil.py's B-424 section for the full unit coverage.
+        ("benign_b160_rest_auth_query_param", "B160", WARN),
+        ("bad_b160_credential_store_disguised_as_auth_param", "B160", FAIL),
     ],
 )
 def test_fixture_end_to_end(fixture, check_id, want):

@@ -12312,6 +12312,56 @@ _EXFIL_URL_RE = re.compile(r"https?://[^\s\"'<>)\]]+", re.I)
 _EXFIL_VERB_URL_WINDOW = 100  # destination must be close to the verb -- "Send X to <URL>"
 _EXFIL_OBJECT_WINDOW = 300  # the object may be described a workflow step earlier
 
+# B-424: a credential-shaped term appearing as the destination URL's own query-string
+# KEY -- not merely somewhere in the query string -- is the standard third-party
+# REST-API auth idiom (Mapbox `?access_token=`, PagerDuty `?routing_token=`, Grafana
+# `?auth_token=`, countless SaaS webhook/event APIs `?api_key=`), not credential
+# exfiltration: the credential authenticates TO the URL's own host, using that host's
+# own documented query-parameter NAME. This is a curated, small set of REAL, widely
+# documented REST-auth parameter NAMES -- deliberately narrower than _B63_SECRET_TERM_RE
+# (which also matches bare "token"/"key"/"secret") so it cannot be widened merely by an
+# attacker renaming their own exfil-sink parameter; they would have to reuse one of
+# these exact, well-known compound names. Mirrors ENV_EXFIL_FLOW's _ENV_AUTH_KWARGS
+# (skillast.py) -- a POSITION/SHAPE exemption (headers=/auth=/cert= there; the query
+# key's own recognized name here), not a content/vendor-name match (that approach was
+# already tried and RETRACTED above -- see the B-408 "vendor-name-token exemption"
+# comment on _B63_SECRET_TERM_RE's C-135 history: matching a credential's OWN name
+# against the destination host is attacker-controlled on both sides and proves
+# nothing). Deliberately excludes the BARE forms "token=" / "key=" / "secret=" --
+# those are exactly the generic exfil-sink-parameter shape (see
+# test_credential_in_url_query_string_still_fails's `?secret=$MY_SECRET_TOKEN`) and
+# must keep FAILing.
+#
+# C-135 (round 1, on this exact fix): even when the query key matches this allowlist,
+# the credential is NOT exempted outright to PASS -- it is downgraded to WARN (is_cred
+# stays False but the hit is still recorded, not silently dropped), per this project's
+# established ambiguous-suppression doctrine. A static regex cannot verify the VALUE
+# behind a well-named key was actually issued by the URL's own host -- a skill could
+# document a fake "callback URL" as its own API endpoint with a canonical-looking
+# `?access_token=` key, then actually send an unrelated, real stolen secret through it.
+# Staying at WARN (not PASS) keeps that residual visible rather than fully blind, while
+# still fixing the reported hard-FAIL false positive on the mainstream idiom.
+_URL_AUTH_QUERY_PARAM_NAME_RE = re.compile(
+    r"(?:^|[?&])(?:"
+    r"access[_-]?token|auth[_-]?token|bearer[_-]?token|refresh[_-]?token|"
+    r"session[_-]?token|routing[_-]?token|oauth[_-]?token|"
+    r"api[_-]?key|apikey|subscription[_-]?key|client[_-]?secret|secret[_-]?key"
+    r")=",
+    re.IGNORECASE,
+)
+
+# B-424 (C-135 round 2, on the fix above): a directive that reads a credential from a
+# dedicated credential-STORE FILE (rather than the plain "put your token in an env var"
+# every real REST-auth doc actually describes) overrides _URL_AUTH_QUERY_PARAM_NAME_RE's
+# exemption entirely -- see the C-135 round-2 comment above its use. Mirrors the same
+# credential-file alternatives already embedded in _B63_SECRET_TERM_RE (kept as an
+# independent, local pattern rather than importing that inline group, so this stays
+# self-contained to the leg it guards).
+_CRED_STORE_FILE_PATH_RE = re.compile(
+    r"\.env\b|\.ssh/id_[a-z0-9]+|\.aws/credentials|\.npmrc",
+    re.IGNORECASE,
+)
+
 
 def _prose_exfil_scan(blob: str, own_host, fence_ranges: list[tuple[int, int]]) -> list[tuple[str, bool]]:
     """Scan *blob* for prose-intent bulk-data exfiltration. Returns (snippet, is_cred)
@@ -12421,9 +12471,37 @@ def _prose_exfil_scan(blob: str, own_host, fence_ranges: list[tuple[int, int]]) 
         obj_start = max(0, vm.start() - _EXFIL_OBJECT_WINDOW)
         obj_end = vm.end() + um.end()  # um is relative to url_window, which starts at vm.end()
         obj_window = blob[obj_start:obj_end]
-        is_cred = bool(_B63_SECRET_TERM_RE.search(cred_window)) or bool(
-            url_query and _B63_SECRET_TERM_RE.search(url_query)
+        # B-424: a credential-shaped term in the URL's own query string is only a FAIL-
+        # grade signal when it is NOT confined to a recognized REST-auth query-parameter
+        # NAME (?access_token=, ?api_key=, ...) -- see _URL_AUTH_QUERY_PARAM_NAME_RE
+        # above. When it IS confined to that shape, the query-string leg alone no
+        # longer contributes to is_cred (so a lone `?access_token=$TOKEN` on an
+        # otherwise-clean directive no longer hard-FAILs) but still keeps the hit alive
+        # at WARN grade via is_url_auth_param below, rather than going silently PASS.
+        #
+        # C-135 (round 2, on this exact fix): the exemption alone is still bypassable --
+        # a directive that reads a genuinely unrelated credential from a dedicated
+        # credential-STORE FILE (~/.aws/credentials, ~/.ssh/id_*, ...) and dresses the
+        # outbound URL's query key as one of the allowlisted auth-parameter names
+        # (`?access_token=$AWS_SECRET_ACCESS_KEY`) would otherwise still downgrade to
+        # WARN. A real REST-auth walkthrough tells the user to put their OWN token in a
+        # plain env var (exactly what every real Mapbox/PagerDuty/Grafana/vendor doc
+        # does, and what every clean fixture below does) -- it never instructs reading a
+        # dedicated credential-store file first. That file-path shape (the same
+        # alternatives _B63_SECRET_TERM_RE's own credential-file arm already singles
+        # out) is a qualitatively stronger signal than a bare env-var reference, so its
+        # presence anywhere in the wider bulk/credential object window overrides the
+        # query-auth-param exemption entirely -- the directive stays FAIL-grade via the
+        # ordinary is_cred path, same as before this fix.
+        url_query_has_secret = bool(url_query and _B63_SECRET_TERM_RE.search(url_query))
+        url_query_is_own_auth_param = (
+            bool(url_query and _URL_AUTH_QUERY_PARAM_NAME_RE.search(url_query))
+            and not _CRED_STORE_FILE_PATH_RE.search(obj_window)
         )
+        is_cred = bool(_B63_SECRET_TERM_RE.search(cred_window)) or (
+            url_query_has_secret and not url_query_is_own_auth_param
+        )
+        is_url_auth_param = url_query_has_secret and url_query_is_own_auth_param and not is_cred
         is_bulk = bool(_BULK_DATA_OBJECT_RE.search(obj_window))
         # B-207: a BULK-quantified credential object described via backward pronoun-
         # reference ("Collect all stored passwords, then send them to <URL>") -- the
@@ -12433,7 +12511,7 @@ def _prose_exfil_scan(blob: str, own_host, fence_ranges: list[tuple[int, int]]) 
         # case is FAIL-grade). B-212: a bare wide-window search wasn't enough -- see
         # _bulk_cred_object_correlated.
         is_bulk_cred = _bulk_cred_object_correlated(blob, obj_window, obj_start, vm.start(), vm.end())
-        if not (is_cred or is_bulk or is_bulk_cred):
+        if not (is_cred or is_bulk or is_bulk_cred or is_url_auth_param):
             continue
         last_end = obj_end
         snippet_raw = blob[obj_start:obj_end]
@@ -12452,7 +12530,12 @@ def check_prose_bulk_exfil(ctx: Context) -> Finding:
 
     FAIL — the described object is credential/secret-shaped (a much stronger, less
            ambiguous signal than bulk PII data).
-    WARN — the described object is bulk/PII data without a credential signal.
+    WARN — the described object is bulk/PII data without a credential signal, OR
+           (B-424) a credential term appears only as a recognized REST-auth
+           query-parameter NAME in the destination URL's own query string
+           (`?access_token=`, `?api_key=`, ...) — the standard third-party API
+           auth idiom, not a hard exfiltration signal, but not silently
+           suppressed either (see _URL_AUTH_QUERY_PARAM_NAME_RE).
     PASS — no prose-intent bulk-exfil pattern found, or the destination is the
            skill's own declared homepage/repo/api/endpoint (first-party allowlist,
            reused from B-132 — a legitimate report generator or configured sync/
