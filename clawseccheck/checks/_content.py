@@ -1464,6 +1464,20 @@ _B63_FAIL_ANCHOR_RE = re.compile(
         r"(?:\w+\s+){0,2}?"
         r"(?:tell|inform|notif|alert|warn|reveal|disclos|mention|show|surfac|let|allow)"
         r"\w*\s+(?:the\s+)?(?:user|human|operator|owner|admin|them|him|her)"
+        # B-426: veto this branch when the disclosure verb's OBJECT — right after the
+        # person noun — is a concrete display/output ARTIFACT ("raw stack traces", "the
+        # compiler log") rather than an action or its outcome. "Don't show the user raw
+        # stack traces; summarise the error instead" is ordinary output-formatting UX (the
+        # ZKDS "don't dump noisy diagnostics" hygiene this project's own CLAUDE.md §8
+        # expects), not concealment of an ACTION from a human overseer — the actual threat
+        # this anchor exists to catch. An action/outcome object ("this step", "about this
+        # credential", a bare "it"/"about it") is UNCHANGED — the lookahead excludes only
+        # the named artifact nouns below, so every existing person-targeted-concealment
+        # fixture (bad_b63_heading_bypass, bad_b63_run_secrets_credential, the B-425
+        # variants in tests/test_b63.py) keeps anchoring exactly as before.
+        r"(?!\s+(?:\w+\s+){0,2}(?:stack\s+traces?|tracebacks?|outputs?|logs?|errors?"
+        r"|console\w*|terminal\w*|compiler\w*|responses?|results?|data\b|contents?"
+        r"|diffs?|exceptions?|warnings?)\b)"
         # (2) covertness markers — secrecy is the point, not verbosity. Word-boundary anchored
         # so "stealth" does not match a substring of a skill name ($CLAWSTEALTH…) — a real
         # false-FAIL on the benign clawstealth Tor skill (C-135 r2 real-fleet).
@@ -1532,6 +1546,28 @@ _B63_SECRET_ACCESS_RE = re.compile(
         r"\b(?:read|cat|less|head|tail|grep|jq|dump|grab|extract|steal|harvest|collect"
         r"|fetch|download|load|pull|open|copy|exfiltrat\w*|send|forward|transmit|upload|leak)\w*"
         r"|прочит\w*|чита\w*|скача\w*|загруз\w*|извлек\w*|собер\w*|укра\w*"
+    ),
+    re.IGNORECASE,
+)
+
+# B-426: "don't mention IT in your reply/response/summary" — a bare pronoun, confined to
+# the OUTPUT CHANNEL, directly after the secrecy verb — is the standard, ZKDS-encouraged
+# "don't echo a fetched secret's VALUE into the visible output" hygiene pattern (this
+# project's own CLAUDE.md §8 mandates exactly this of well-behaved skills: never echo raw
+# secrets into chat/logs). That is concealment of a VALUE from the transcript, not
+# concealment of the ACT of reading it from a human overseer — the actual threat the
+# secret-term+access anchor below exists to catch. Scoped tight: the pronoun must be
+# adjacent to the output-channel phrase (no filler), so "reveal it to the user in your
+# response" — which explicitly names a person as the audience being kept in the dark —
+# does NOT match here (it still anchors via `_B63_FAIL_ANCHOR_RE`'s own person-conceal
+# branch, untouched by this veto). A phrase naming the action itself ("mention this
+# step", "about this credential") or a bare "it" with NO output-channel scoping is also
+# untouched — see the B-425 fixtures in tests/test_b63.py, all still FAIL.
+_B63_ECHO_SUPPRESS_RE = re.compile(
+    normalize_for_scan(
+        r"^\s*(?:it|this|that|them)\s+(?:in|into)\s+(?:your|the)\s+"
+        r"(?:repl(?:y|ies)|respons\w*|answer\w*|output\w*|summar\w*|log\w*"
+        r"|transcript\w*|chat\w*)"
     ),
     re.IGNORECASE,
 )
@@ -4268,11 +4304,19 @@ def _b63_scan(text: str, fence_ranges: list[tuple[int, int]]) -> list[tuple[str,
         # window. A bare verbosity idiom ("suppress the output", "silently install") carries
         # none and is ambiguous, so it surfaces as WARN, not FAIL (§5). The live sink / cred
         # read still anchors a real attack.
+        secret_read_anchor = bool(
+            _B63_SECRET_TERM_RE.search(window)              # a secret that is actually being
+            and _B63_SECRET_ACCESS_RE.search(window)        #   read / exfil'd (not "token refresh")
+        )
+        # B-426: "don't mention it in your reply/response/…" right after THIS secrecy
+        # match is the standard "don't echo the secret's value back" hygiene pattern, not
+        # concealment of the act of reading it — see _B63_ECHO_SUPPRESS_RE's own comment.
+        if secret_read_anchor and _B63_ECHO_SUPPRESS_RE.match(text[m.end() : m.end() + 80]):
+            secret_read_anchor = False
         anchored = bool(
             _B63_FAIL_ANCHOR_RE.search(window)             # person-conceal / covert / exfil-prose
             or _has_outbound_exfil(window)                  # send-verb→2nd-party dest / sink / cred path
-            or (_B63_SECRET_TERM_RE.search(window)          # a secret that is actually being
-                and _B63_SECRET_ACCESS_RE.search(window))   #   read / exfil'd (not "token refresh")
+            or secret_read_anchor
         )
         # Keep a readable snippet for evidence (truncate long matches).
         snippet = m.group().strip()
