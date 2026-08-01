@@ -68,8 +68,9 @@ _EXT_SKILL_HINTS = (
 
 # ---------- Shared: egress-allowlist quality (weak-mitigation detection) ----------
 # An allowlist entry can be technically "present" yet still a weak mitigation if it
-# admits (a) a wildcard pattern, or (b) a domain that hosts anonymous/user-generated
-# content an attacker could stage a payload on despite the host being "trusted".
+# admits (a) a wildcard pattern, (b) a domain that hosts anonymous/user-generated
+# content an attacker could stage a payload on, or (c) a URL-rewriting proxy that will
+# relay to an arbitrary attacker-chosen target — despite the host itself being "trusted".
 # Used by both B38 (browser.ssrfPolicy.hostnameAllowlist) and C014 (MCP allowedHosts).
 #
 # C-342 (ESET H1 2026 "AI-fix"): AI-vendor user-content publishing surfaces belong in
@@ -102,14 +103,55 @@ _USER_CONTENT_HOSTS = frozenset(
     }
 )
 
+# F-158 (TA488/Void Blizzard OWAReaper, CVE-2026-42897, 2026-07-22 Proofpoint report):
+# a URL-rewriting image/CDN proxy in an allowlist is equivalent to an open allowlist —
+# the proxy host is trusted, but the target it relays is attacker-chosen. OWAReaper
+# exfiltrated over HTTPS by relaying through exactly these hosts. Each grounded
+# 2026-08-02:
+# - images.weserv.nl / wsrv.nl: open-source image proxy, forwards an arbitrary "?url="
+#   target to any origin (github.com/weserv/images — "nginx used as forward proxy").
+# - i0-i3.wp.com (Jetpack "Photon"): official docs scope it to WordPress/Jetpack-
+#   connected sites, but the Photon URL rewrite form independently proxies images from
+#   any external origin regardless of that restriction — exactly the mechanism OWAReaper
+#   abused. Not corrected upstream as of this grounding.
+# - slack-imgs.com: Slack's own image-proxy/unfurl CDN (api.slack.com/robots,
+#   Slack-ImgProxy) — refetches and re-serves the image at any URL posted into Slack.
+#   C-135 note (2026-08-02): the exact per-URL scoping of Slack's proxy tokens is not
+#   independently confirmed here (unlike Camo's public HMAC scheme below) — inclusion
+#   rests on real-world abuse (OWAReaper used it as a live exfil relay per the
+#   Proofpoint report), at WARN severity, not on a confirmed "any URL, unscoped" proof.
+#   Revisit if Slack's proxy-token scheme is ever independently confirmed either way.
+#
+# Deliberately does NOT include camo.githubusercontent.com (already in _content.py's
+# _B59_BADGE_HOSTS): Camo requires a 40-hex-char SHA1 HMAC over the target URL, keyed
+# with a GitHub-only secret, so an attacker cannot mint a valid camo.githubusercontent.com
+# URL for an arbitrary target — a materially different, non-abusable mechanism. Grounded
+# 2026-08-02; left in _B59_BADGE_HOSTS unchanged.
+_URL_PROXY_HOSTS = frozenset(
+    {
+        "images.weserv.nl",
+        "wsrv.nl",
+        "slack-imgs.com",
+        "i0.wp.com",
+        "i1.wp.com",
+        "i2.wp.com",
+        "i3.wp.com",
+    }
+)
+
+# Combined lookup for _weak_allowlist_entries — kept as a separate constant so the two
+# source categories above stay independently documented and greppable.
+_WEAK_ALLOWLIST_HOSTS = _USER_CONTENT_HOSTS | _URL_PROXY_HOSTS
+
 
 def _weak_allowlist_entries(allowlist) -> list[str]:
     """Return the subset of an allowlist that is a weak mitigation.
 
-    Flags wildcard patterns (bare "*" or "*.example.com") and known user-content /
-    anonymous-paste / webhook hosts (matched by exact host or domain suffix, after
-    stripping a leading "*." if present). Non-string / malformed entries are ignored
-    (best-effort, no FAIL on unparseable data).
+    Flags wildcard patterns (bare "*" or "*.example.com"), known user-content /
+    anonymous-paste / webhook hosts, and known URL-rewriting image/CDN proxies
+    (matched by exact host or domain suffix, after stripping a leading "*." if
+    present). Non-string / malformed entries are ignored (best-effort, no FAIL on
+    unparseable data).
     """
     weak: list[str] = []
     if not isinstance(allowlist, list):
@@ -122,8 +164,8 @@ def _weak_allowlist_entries(allowlist) -> list[str]:
             weak.append(entry)
             continue
         bare = host[2:] if host.startswith("*.") else host
-        if bare in _USER_CONTENT_HOSTS or any(
-            bare == h or bare.endswith("." + h) for h in _USER_CONTENT_HOSTS
+        if bare in _WEAK_ALLOWLIST_HOSTS or any(
+            bare == h or bare.endswith("." + h) for h in _WEAK_ALLOWLIST_HOSTS
         ):
             weak.append(entry)
     return weak
@@ -217,21 +259,25 @@ def check_browser_ssrf(ctx: Context) -> Finding:
             "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false.",
         )
 
-    # QUALITY: allowlist present but contains a wildcard or known user-content host —
-    # downgrade PASS to WARN. Still additive/advisory: does not touch FAIL behaviour.
+    # QUALITY: allowlist present but contains a wildcard, known user-content host, or
+    # known URL-rewriting proxy — downgrade PASS to WARN. Still additive/advisory: does
+    # not touch FAIL behaviour.
     weak_entries = _weak_allowlist_entries(allowlist)
     if weak_entries:
         return _finding(
             "B38",
             WARN,
             "Browser hostnameAllowlist is present but contains weak entries "
-            f"(wildcard and/or known user-content/paste/webhook host): {', '.join(weak_entries)} — "
-            "an attacker could stage a payload on a wildcard match or an anonymous "
-            "content host despite the allowlist.",
+            "(wildcard, known user-content/paste/webhook host, and/or URL-rewriting "
+            f"image/CDN proxy): {', '.join(weak_entries)} — an attacker could stage a "
+            "payload on a wildcard match, an anonymous content host, or relay "
+            "exfiltrated data through a proxy host despite the allowlist.",
             "Replace wildcard entries with explicit hostnames, and avoid allowlisting "
             "anonymous paste/gist/webhook hosts (e.g. pastebin.com, gist.github.com, "
-            "raw.githubusercontent.com, webhook.site) — an attacker-controlled payload "
-            "can be staged there even though the host itself is 'trusted'.",
+            "raw.githubusercontent.com, webhook.site) or URL-rewriting image/CDN "
+            "proxies (e.g. images.weserv.nl, i0-i3.wp.com, slack-imgs.com) — an "
+            "attacker-controlled target can be reached through them even though the "
+            "proxy host itself is 'trusted'.",
             evidence=weak_entries,
         )
 
@@ -2421,7 +2467,7 @@ def check_egress_inventory(ctx: Context) -> Finding:
             elif allowed_hosts and weak_hosts:
                 parts.append(
                     "allowedHosts present but contains a wildcard/user-content "
-                    f"host (weak mitigation): {', '.join(weak_hosts)}"
+                    f"host or URL-rewriting proxy (weak mitigation): {', '.join(weak_hosts)}"
                 )
             else:
                 parts.append("no allowedHosts restriction")

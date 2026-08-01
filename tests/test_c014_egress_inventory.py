@@ -239,6 +239,35 @@ def test_c014_mcp_ai_vendor_api_host_stays_clean():
     assert any("allowedHosts restricted" in item for item in f.evidence)
 
 
+# --- F-158: URL-rewriting image/CDN proxies (TA488/OWAReaper, CVE-2026-42897) ---
+
+def test_c014_mcp_url_proxy_host_not_counted_as_restricted():
+    # i3.wp.com is the exact host OWAReaper relayed exfil traffic through.
+    ctx = _ctx({
+        "mcp": {"servers": {"remote": {
+            "url": "https://mcp.example.com/sse",
+            "allowedHosts": ["i3.wp.com"],
+        }}},
+    })
+    f = check_egress_inventory(ctx)
+    assert f.status == WARN
+    assert any("weak mitigation" in item for item in f.evidence)
+    assert any("i3.wp.com" in item for item in f.evidence)
+
+
+def test_c014_mcp_wordpress_blog_host_stays_clean():
+    # Ordinary WordPress.com blog subdomain, not the i0-i3.wp.com Photon CDN — must
+    # not be caught by suffix matching.
+    ctx = _ctx({
+        "mcp": {"servers": {"remote": {
+            "url": "https://mcp.example.com/sse",
+            "allowedHosts": ["myblog.wordpress.com"],
+        }}},
+    })
+    f = check_egress_inventory(ctx)
+    assert f.status == PASS
+    assert any("allowedHosts restricted" in item for item in f.evidence)
+
 
 def test_fixture_bad_c014_warns():
     assert check_egress_inventory(collect(FIXTURES / "bad_c014_egress_inventory")).status == WARN

@@ -256,6 +256,81 @@ def test_b38_ai_vendor_docs_host_stays_clean():
     assert f.status == PASS
 
 
+# --- F-158: URL-rewriting image/CDN proxies (TA488/OWAReaper, CVE-2026-42897) ---
+
+def test_b38_weserv_proxy_host_warns():
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["images.weserv.nl"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == WARN
+    assert "images.weserv.nl" in " ".join(f.evidence)
+
+
+def test_b38_wsrv_proxy_host_warns():
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["wsrv.nl"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == WARN
+
+
+def test_b38_photon_proxy_host_warns():
+    # i3.wp.com is the exact host OWAReaper relayed exfil traffic through.
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["i3.wp.com"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == WARN
+    assert "i3.wp.com" in " ".join(f.evidence)
+
+
+def test_b38_slack_imgs_proxy_host_warns():
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["slack-imgs.com"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == WARN
+
+
+def test_b38_wordpress_blog_host_stays_clean():
+    # Deliberately did NOT add the bare "wp.com" / "wordpress.com" platform domains —
+    # only the specific i0-i3.wp.com Photon CDN hosts. An ordinary WordPress.com blog
+    # subdomain must not be caught by suffix matching.
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["myblog.wordpress.com"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == PASS
+
+
+def test_b38_bare_wp_com_stays_clean():
+    # "wp.com" itself (no i0-i3 prefix) is not a valid Photon proxy host form.
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["wp.com"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == PASS
+
+
 # --- Evidence populated on FAIL ---
 
 def test_b38_fail_evidence_populated():
