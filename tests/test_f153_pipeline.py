@@ -500,6 +500,219 @@ def test_vetjudged_verdict_for_one_target_never_escalates_a_different_target_sha
     assert _vet_pool(finding_b)[0].status == "UNKNOWN"
 
 
+# ---------------------------------------------------------------------------
+# Defect 1: the escalation join used to zip(before, after)
+# POSITIONALLY. escalate_vet_output preserves the original pool's order/length but
+# APPENDS new C-255 ATTEST-* findings past it, so the zip's shorter (original) length
+# structurally excluded every appended item — the three ALWAYS-offered pre-install
+# prose-attestation questions could NEVER produce an escalation row, no matter the
+# verdict. Fixed by joining on finding id instead of position.
+# ---------------------------------------------------------------------------
+
+def test_vetjudged_dangerous_c255_attest_verdict_now_escalates():
+    """Direct repro of the reported defect: a DANGEROUS verdict on
+    ATTEST-PROSE-INJECTION (one of the three ids build_vet_judge_packet ALWAYS offers,
+    with zero deterministic signal behind it) used to produce zero rows — the new
+    Finding escalate_vet_output creates for it lands past the original pool's length.
+    Its pre-escalation "engine_disposition" is UNKNOWN because that is exactly what
+    the packet item itself told the judge (_vet_attest_packet_items)."""
+    from clawseccheck.adjudication import _vet_run_fingerprint
+    ctx = collect(FIXTURES / "clean_full")
+    finding = _borderline_finding(target_name="prose-only-skill", status="UNKNOWN")
+    entry = {
+        "targetFingerprint": _vet_run_fingerprint("prose-only-skill"),
+        "verdicts": [
+            {"finding_id": "ATTEST-PROSE-INJECTION", "target": "prose-only-skill",
+             "verdict": "DANGEROUS"},
+        ],
+    }
+    p = pl.run_adjudication(ctx, [], vet_targets=[("prose-only-skill", finding)],
+                            version="9.9.9", bundle={"vetJudged": [entry]})
+    assert p.data["vetSecondOpinion"] == [{
+        "finding_id": "ATTEST-PROSE-INJECTION",
+        "target": "prose-only-skill",
+        "engine_disposition": "UNKNOWN",
+        "judge_verdict": "WARN",
+        "annotation": "engine: UNKNOWN -> escalated to WARN by host-agent judge "
+                      "(vetJudged, escalate-only)",
+    }]
+
+
+def test_vetjudged_escalation_join_count_matches_every_changed_packet_item():
+    """Count-equality guard (ticket-specified regression pin): submit a DANGEROUS
+    verdict for literally every item the packet offers — the borderline primary
+    finding AND all three always-offered C-255 attest ids — and assert every single
+    one produces its own row. A join that structurally excludes an appended tail (the
+    original bug) would under-count this; any future append that isn't wired into the
+    join would too."""
+    from clawseccheck.adjudication import _vet_run_fingerprint, build_vet_judge_packet
+    ctx = collect(FIXTURES / "clean_full")
+    finding = _borderline_finding(target_name="prose-only-skill", status="UNKNOWN")
+    items = build_vet_judge_packet(finding, "prose-only-skill")
+    assert len(items) == 4  # B13 (primary) + ATTEST-PROSE-{MISMATCH,INJECTION,SOCIAL-ENG}
+    entry = {
+        "targetFingerprint": _vet_run_fingerprint("prose-only-skill"),
+        "verdicts": [
+            {"finding_id": item["finding_id"], "target": "prose-only-skill",
+             "verdict": "DANGEROUS"}
+            for item in items
+        ],
+    }
+    p = pl.run_adjudication(ctx, [], vet_targets=[("prose-only-skill", finding)],
+                            version="9.9.9", bundle={"vetJudged": [entry]})
+    rows = p.data["vetSecondOpinion"]
+    assert len(rows) == len(items)
+    assert {r["finding_id"] for r in rows} == {i["finding_id"] for i in items}
+
+
+def test_full_prose_only_skill_dangerous_attest_escalates_end_to_end(tmp_path):
+    """The ticket's own end-to-end test plan: a real installed skill (vetted through
+    sweep_installed_skills — the exact engine --full's SKILL SWEEP phase and
+    cli.py's own run_adjudication call sites use, not a hand-built vet_targets list)
+    whose content trips no deterministic signal at all still gets the three C-255
+    attest questions offered. A DANGEROUS verdict on one, submitted through a real
+    vetJudged bundle, must escalate all the way through run_adjudication (the actual
+    P9 phase function --full's cli.py calls)."""
+    from clawseccheck.adjudication import _vet_run_fingerprint
+    from clawseccheck.cli import sweep_installed_skills
+
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    skill_dir = tmp_path / "skills" / "prose-only-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: prose-only-skill\n---\n\nAn ordinary, benign skill description.\n",
+        encoding="utf-8",
+    )
+
+    ctx = collect(tmp_path)
+    sweep = sweep_installed_skills(tmp_path, narrate=False, ctx=ctx)
+    vet_targets = sweep.vet_targets()
+    assert len(vet_targets) == 1
+    target_path, _finding = vet_targets[0]
+
+    entry = {
+        "targetFingerprint": _vet_run_fingerprint(target_path),
+        "verdicts": [
+            {"finding_id": "ATTEST-PROSE-INJECTION", "target": Path(target_path).name,
+             "verdict": "DANGEROUS"},
+        ],
+    }
+    p = pl.run_adjudication(ctx, [], vet_targets=vet_targets, version="9.9.9",
+                            bundle={"vetJudged": [entry]})
+    rows = p.data["vetSecondOpinion"]
+    assert any(
+        r["finding_id"] == "ATTEST-PROSE-INJECTION" and r["judge_verdict"] == "WARN"
+        for r in rows
+    ), rows
+
+
+# ---------------------------------------------------------------------------
+# Defect 2: SkillSweep used to bind each finding to its vet
+# target's path through a dict keyed by the SANITIZED display name
+# (cli.SkillSweep.target_paths). report._sanitize strips zero-width/bidi characters,
+# so two skill directories differing only by an invisible character sanitized down to
+# the identical name — the second write silently overwrote the first in that dict,
+# and BOTH findings' vet_targets() entries then resolved to the SAME (impostor's)
+# path. Fixed by storing each finding's path directly, atomically, alongside it.
+# ---------------------------------------------------------------------------
+
+def _write_skill(root: Path, name: str, body: str = "body") -> None:
+    d = root / name
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n\n{body}\n", encoding="utf-8")
+
+
+def test_vet_targets_distinct_paths_for_same_basename_skills_under_different_roots(tmp_path):
+    """The ticket's literally-described scenario: two installed skills sharing a
+    directory basename under different roots must never collapse onto the same
+    vet_targets() path."""
+    from clawseccheck.cli import sweep_installed_skills
+
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    _write_skill(tmp_path / "skills", "helper", body="managed tier")
+    _write_skill(tmp_path / "workspace" / "skills", "helper", body="workspace tier")
+
+    ctx = collect(tmp_path)
+    sweep = sweep_installed_skills(tmp_path, narrate=False, ctx=ctx)
+    vet_targets = sweep.vet_targets()
+    assert len(vet_targets) == 2
+    paths = [t for t, _f in vet_targets]
+    assert len(set(paths)) == 2  # each finding keeps its OWN resolved path
+
+
+def test_vet_targets_zero_width_obfuscated_name_does_not_collide(tmp_path):
+    """Confirmed root cause, reproduced directly: an attacker-planted skill directory
+    differing from a real one only by an invisible zero-width space sanitizes down to
+    the SAME display name (report._sanitize strips zero-width characters). Before the
+    fix this collapsed both findings onto one path — reproduced against the
+    pre-fix code: ``len({p for p, _f in vet_targets()}) == 1`` instead of 2."""
+    from clawseccheck.cli import sweep_installed_skills
+
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    zwsp = "\u200b"
+    real_dir = tmp_path / "skills" / "helper"
+    real_dir.mkdir(parents=True)
+    (real_dir / "SKILL.md").write_text("---\nname: helper\n---\n\nreal\n", encoding="utf-8")
+    impostor_dir = tmp_path / "workspace" / "skills" / f"help{zwsp}er"
+    impostor_dir.mkdir(parents=True)
+    (impostor_dir / "SKILL.md").write_text(
+        "---\nname: helper\n---\n\nimpostor\n", encoding="utf-8"
+    )
+
+    ctx = collect(tmp_path)
+    sweep = sweep_installed_skills(tmp_path, narrate=False, ctx=ctx)
+    vet_targets = sweep.vet_targets()
+    assert len(vet_targets) == 2
+    paths = {t for t, _f in vet_targets}
+    assert len(paths) == 2  # each finding keeps its OWN resolved path
+    assert str(real_dir) in paths
+    assert str(impostor_dir) in paths
+
+
+def test_vetjudged_zero_width_obfuscated_targets_bind_independently_end_to_end(tmp_path):
+    """End-to-end version of the C-135 cross-target-binding invariant
+    (test_vetjudged_verdict_for_one_target_never_escalates_a_different_target_sharing_a_name
+    above), sourced from the REAL SkillSweep engine rather than a hand-built
+    vet_targets list: a verdict bound to one target's fingerprint must escalate only
+    that target's own finding, even though both targets sanitize to the identical
+    display name."""
+    from clawseccheck.adjudication import _vet_run_fingerprint
+    from clawseccheck.cli import sweep_installed_skills
+
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    zwsp = "\u200b"
+    real_dir = tmp_path / "skills" / "helper"
+    real_dir.mkdir(parents=True)
+    (real_dir / "SKILL.md").write_text("---\nname: helper\n---\n\nreal\n", encoding="utf-8")
+    impostor_dir = tmp_path / "workspace" / "skills" / f"help{zwsp}er"
+    impostor_dir.mkdir(parents=True)
+    (impostor_dir / "SKILL.md").write_text(
+        "---\nname: helper\n---\n\nimpostor\n", encoding="utf-8"
+    )
+
+    ctx = collect(tmp_path)
+    sweep = sweep_installed_skills(tmp_path, narrate=False, ctx=ctx)
+    vet_targets = sweep.vet_targets()
+    assert len(vet_targets) == 2
+    (path_a, _finding_a), (_path_b, _finding_b) = vet_targets
+
+    entry = {
+        "targetFingerprint": _vet_run_fingerprint(path_a),
+        "verdicts": [
+            {"finding_id": "ATTEST-PROSE-INJECTION", "target": Path(path_a).name,
+             "verdict": "DANGEROUS"},
+        ],
+    }
+    p = pl.run_adjudication(ctx, [], vet_targets=vet_targets, version="9.9.9",
+                            bundle={"vetJudged": [entry]})
+    rows = p.data["vetSecondOpinion"]
+    # Exactly one row -- the fingerprint match is path-based, so only path_a's own
+    # target was ever selected, never path_b's, despite the identical display name.
+    assert len(rows) == 1
+    assert rows[0]["finding_id"] == "ATTEST-PROSE-INJECTION"
+    assert rows[0]["judge_verdict"] == "WARN"
+
+
 def test_vetjudged_hostile_reason_text_is_inert_never_reaches_output_or_control_flow():
     """A hostile/injection-shaped `reason` string must pass through as inert text
     only — it must never appear anywhere in the rendered output, and the escalation

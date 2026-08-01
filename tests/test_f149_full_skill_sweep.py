@@ -570,7 +570,10 @@ def test_aggregate_table_marks_truncation_on_a_fail_row_too():
     sweep = SkillSweep(
         home_dir=Path("/nonexistent"),
         rows=[("danger-skill", "FAIL", 1), ("clean-skill", "PASS", 0)],
-        findings=[("danger-skill", danger), ("clean-skill", clean)],
+        findings=[
+            ("danger-skill", "/nonexistent/skills/danger-skill", danger),
+            ("clean-skill", "/nonexistent/skills/clean-skill", clean),
+        ],
         truncated=True, worst="FAIL",
     )
     lines = _sweep_summary_lines(sweep)

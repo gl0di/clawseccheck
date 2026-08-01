@@ -243,23 +243,33 @@ class SkillSweep:
     ``rows`` holds ``(sanitized name, row status, evidence count)`` for every target
     the sweep accounted for — including the ones it never scanned, which carry the
     SKIPPED/TRUNCATED states from ``_SWEEP_VERDICT`` rather than being dropped.
-    ``findings`` carries the primary :class:`~clawseccheck.catalog.Finding` for each
-    target that produced one, so a later consumer never has to re-vet to get at the
-    evidence.
+    ``findings`` carries ``(sanitized display name, resolved absolute path, primary
+    Finding)`` for every target that produced one, so a later consumer never has to
+    re-vet to get at the evidence.
 
-    ``target_paths`` maps each sanitized name back to the path that was actually
-    vetted. Needed because a judge packet binds its verdicts to a target's RESOLVED
-    PATH, not its bare name: two installed skills can share a name, and a bare name is
-    therefore not a safe key for a verdicts file to be matched on. Kept out of
-    :func:`_sweep_to_json` deliberately — it is plumbing for the adjudication phase,
-    not a fact about the sweep worth publishing.
+    2026-08-01: the path used to live in a SEPARATE dict,
+    ``target_paths``, keyed by that same sanitized display name — needed because a
+    judge packet binds its verdicts to a target's RESOLVED PATH, not its bare name.
+    That was itself unsafe: sanitizing strips zero-width/bidi characters (report.py's
+    ``_sanitize``), so two skill directories differing ONLY by an invisible character
+    (a real obfuscation an attacker-planted skill can use to visually impersonate an
+    existing one) sanitized down to the IDENTICAL name. The second write to
+    ``target_paths[name]`` then silently overwrote the first, and ``vet_targets()``'s
+    name-keyed lookup handed BOTH findings the SAME (impostor's) path — a verdict a
+    judge submitted for one target's fingerprint would then escalate the OTHER
+    target's finding too. Confirmed by direct repro before this fix (two skills,
+    ``helper`` and ``help<ZWSP>er``, under different roots: both findings resolved to
+    the same path, ``len({p for p, _f in vet_targets()}) == 1`` instead of 2). Storing
+    the path directly alongside its own Finding, atomically, in the one loop that
+    produces both, removes the lossy name-keyed indirection entirely rather than
+    re-keying it by something else — there is no longer a shared mutable map for two
+    unrelated targets to collide in.
     """
 
     home_dir: Path
     checked_dirs: list[Path] = field(default_factory=list)
     rows: list[tuple[str, str, int]] = field(default_factory=list)
-    findings: list[tuple[str, Finding]] = field(default_factory=list)
-    target_paths: dict[str, str] = field(default_factory=dict)
+    findings: list[tuple[str, str, Finding]] = field(default_factory=list)
     truncated: bool = False
     worst: str = "PASS"
     budget_s: float = 0.0
@@ -274,10 +284,12 @@ class SkillSweep:
 
     def vet_targets(self) -> list[tuple[str, Finding]]:
         """``(vetted path, primary finding)`` for every target that produced one —
-        the input the adjudication phase needs to build a per-target judge packet."""
-        return [
-            (self.target_paths.get(name, name), f) for name, f in self.findings
-        ]
+        the input the adjudication phase needs to build a per-target judge packet.
+
+        Reads the path straight off ``findings`` (see its docstring above)
+        — never through a name-keyed map, which is exactly what let two different
+        targets collide onto one path before."""
+        return [(path, f) for _name, path, f in self.findings]
 
     @property
     def no_roots(self) -> bool:
@@ -593,8 +605,7 @@ def sweep_installed_skills(
             _emit("\n".join(lines))
 
         results.append((skill_name, row_status, len(f.evidence) if f.evidence else 0))
-        sweep.findings.append((skill_name, f))
-        sweep.target_paths[skill_name] = str(skill_dir)
+        sweep.findings.append((skill_name, str(skill_dir), f))
 
     sweep.truncated = truncated
     sweep.worst = worst
@@ -629,7 +640,12 @@ def _sweep_summary_lines(sweep: SkillSweep, ascii_only: bool = False) -> list[st
     # the fact here instead, from `sweep.findings` (populated for every completed
     # vet) — a marker suffix, not a change to `status` itself, since that value is
     # load-bearing for the icon lookup and `sweep.counts()`'s tally.
-    findings_by_name = dict(sweep.findings)
+    # Display-only lookup: a name collision here (e.g. two skills sanitizing to the
+    # same visible name) means the LATER entry wins, same as a plain dict(...) would
+    # have — this is a cosmetic annotation on an already name-deduplicated printed
+    # row, not the adjudication binding path (see SkillSweep.findings/vet_targets()
+    # docstrings for that fix).
+    findings_by_name = {name: f for name, _path, f in sweep.findings}
     partial_marker = "[~ partial: coverage incomplete]" if ascii_only else "⏳ partial: coverage incomplete"
     for name, status, ev_count in results:
         marker = ""

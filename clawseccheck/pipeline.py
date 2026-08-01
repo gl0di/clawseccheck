@@ -58,6 +58,7 @@ from pathlib import Path
 
 from .attest import template as attest_template
 from .behavioral import render_behavioral_analysis
+from .catalog import UNKNOWN
 from .report import _sanitize
 from .scanbudget import (
     DEFAULT_FULL_BUDGET_S, DEFAULT_VET_ALL_BUDGET_S, budget_deadline, budget_exceeded,
@@ -559,24 +560,36 @@ def _vet_second_opinion(vet_targets, vet_judged: list) -> list[dict]:
         except Exception:  # noqa: BLE001 — one bad target must not lose the rest
             continue
         target_name = _sanitize(_vet_target_name(str(target)))
-        # escalate_vet_output preserves the ORIGINAL pool's order and length, only ever
-        # appending new pre-install-attestation findings past it (adjudication.py's own
-        # docstring) — zip() over the shorter (original) length is therefore exactly
-        # "compare each original finding against its own escalated self", never a
-        # misalignment, and it naturally excludes the appended tail from this
-        # already-existing-finding comparison.
+        # This used to zip(before, after) — a POSITIONAL pairing
+        # that only ever compares the two pools' shared prefix. escalate_vet_output
+        # preserves the original pool's order and length but APPENDS new pre-install
+        # C-255 ATTEST-* findings past it (its own docstring), so those appended items
+        # always fell outside the zip's shorter length and could NEVER produce an
+        # escalation row — a DANGEROUS verdict on the three ALWAYS-offered prose
+        # attestation questions had no path to escalation at all. Joined by finding id
+        # instead: id-keyed, so an item's position in either pool is irrelevant and a
+        # future append (or reorder) cannot silently fall off the end again. A
+        # finding_id present in `after` with no counterpart in `before` is exactly
+        # that appended case — its pre-escalation status is treated as UNKNOWN, which
+        # is what the judge packet item itself already told the judge
+        # (_vet_attest_packet_items sets engine_disposition=UNKNOWN for these: "no
+        # deterministic signal, read the prose yourself"), so a SUSPICIOUS/DANGEROUS
+        # verdict on it now surfaces as an ordinary "UNKNOWN -> WARN" escalation row.
         before = _vet_pool(engine_output)
         after = _vet_pool(escalated)
-        for f_before, f_after in zip(before, after):
-            if f_after.status == f_before.status:
+        before_by_id = {f.id: f for f in before}
+        for f_after in after:
+            f_before = before_by_id.get(f_after.id)
+            before_status = f_before.status if f_before is not None else UNKNOWN
+            if f_after.status == before_status:
                 continue
             rows.append({
                 "finding_id": _sanitize(str(f_after.id)),
                 "target": target_name,
-                "engine_disposition": _sanitize(str(f_before.status)),
+                "engine_disposition": _sanitize(str(before_status)),
                 "judge_verdict": _sanitize(str(f_after.status)),
                 "annotation": _sanitize(
-                    f"engine: {f_before.status} -> escalated to {f_after.status} by "
+                    f"engine: {before_status} -> escalated to {f_after.status} by "
                     "host-agent judge (vetJudged, escalate-only)"
                 ),
             })
