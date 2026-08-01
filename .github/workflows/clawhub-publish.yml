@@ -224,7 +224,7 @@ jobs:
         run: |
           rm -rf dist && mkdir -p dist/clawseccheck
           cp -r clawseccheck SKILL.md README.md LICENSE \
-                SECURITY.md SECURITY_MODEL.md CHANGELOG.md pyproject.toml docs audit.py \
+                SECURITY.md SECURITY_MODEL.md SUPPORT.md CHANGELOG.md pyproject.toml docs audit.py \
                 dist/clawseccheck/
           # SKILL.md points the host agent at references/cli-flags.md for the full flag
           # reference; without it every ClawHub install shipped a dangling link (B-254).

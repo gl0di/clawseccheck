@@ -27,5 +27,5 @@ values with placeholders such as `<REDACTED>` or `sk-XXXX`.
   version, OS, and the relevant `--json` output (secret *values* are already
   redacted in that output — read it before posting regardless).
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution and PR
-workflow.
+See [CONTRIBUTING.md](https://github.com/gl0di/clawseccheck/blob/main/CONTRIBUTING.md)
+for the full contribution and PR workflow.

@@ -9,7 +9,7 @@ ported here — see recon) clawrange-style pre-release gates would catch it.
 guessed. That step currently copies, across **all** of its `cp` lines:
 
     clawseccheck SKILL.md README.md LICENSE SECURITY.md SECURITY_MODEL.md
-    CHANGELOG.md pyproject.toml docs audit.py
+    SUPPORT.md CHANGELOG.md pyproject.toml docs audit.py
     references/cli-flags.md
 
 `clawseccheck` and `docs` are directories; we expand them to every `git ls-files`
@@ -62,6 +62,7 @@ _EXPECTED_STAGED_SOURCES = [
     "LICENSE",
     "SECURITY.md",
     "SECURITY_MODEL.md",
+    "SUPPORT.md",
     "CHANGELOG.md",
     "pyproject.toml",
     "docs",
