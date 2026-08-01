@@ -23,14 +23,28 @@ by monkeypatching ``clawseccheck.cli.budget_exceeded``, never by sleeping.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import clawseccheck.cli as cli
+import clawseccheck.collector as collector
 from clawseccheck.cli import (
     _SWEEP_ICON_ASCII, _SWEEP_ICON_UNI, _SWEEP_VERDICT,
     _VET_ICON_ASCII, _VET_ICON_UNI, _VET_VERDICT,
     SkillSweep, _sweep_quiet_line, _sweep_summary_lines, main,
     sweep_installed_skills,
+)
+from clawseccheck.collector import (
+    LIMIT_DOMAIN_SKILL, Context, collect, note_limit,
+)
+
+import pytest
+
+_POSIX_ONLY = pytest.mark.skipif(
+    os.name != "posix", reason="POSIX permission bits only"
+)
+_SKIP_ROOT = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the read bit"
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -302,7 +316,7 @@ def test_quiet_is_substantially_shorter_with_skills_present(capsys):
 def _stub_sweep(monkeypatch, rows: list[tuple[str, str, int]], truncated: bool = False):
     """Replace the sweep with a synthetic result, so the exit-code wiring is tested
     in isolation from whatever the audit itself finds on the fixture."""
-    def fake(home_dir, ascii_only=False, sweep_budget_s=0.0, narrate=True):
+    def fake(home_dir, ascii_only=False, sweep_budget_s=0.0, narrate=True, ctx=None):
         if narrate:
             print("(stub sweep)")
         return SkillSweep(home_dir=Path(home_dir), checked_dirs=[Path(home_dir)],
@@ -573,3 +587,268 @@ def test_aggregate_table_marks_truncation_on_a_fail_row_too():
     c = sweep.counts()
     assert c["fails"] == 1
     assert c["safe"] == 1
+# ---------------------------------------------------------------------------
+# B-404: single discovery implementation.
+#
+# sweep_installed_skills() used to run its OWN, second, flat iterdir() over
+# collector.SKILL_DIRS -- one level deep, requiring <root>/<entry>/SKILL.md. A
+# GROUPED layout (a vendor-pack directory nesting a skill one level further
+# down) was invisible to it, while it still reported the sweep `complete`. It
+# now consumes ctx.installed_skill_dirs -- the exact result collect() itself
+# uses -- so the two can never independently disagree again.
+# ---------------------------------------------------------------------------
+
+def _home_with_flat_and_grouped_skill(tmp_path: Path) -> Path:
+    """A flat skill AND a skill nested one level deeper under a vendor-pack
+    directory -- the exact grouped shape the old flat sweep silently missed."""
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    flat = tmp_path / "skills" / "flat-skill"
+    flat.mkdir(parents=True)
+    (flat / "SKILL.md").write_text(_CLEAN_MD, encoding="utf-8")
+    grouped = tmp_path / "skills" / "vendor-pack" / "grouped-skill"
+    grouped.mkdir(parents=True)
+    (grouped / "SKILL.md").write_text(_CLEAN_MD, encoding="utf-8")
+    return tmp_path
+
+
+def test_sweep_finds_both_flat_and_grouped_skills(tmp_path):
+    """The repro/fix, at the function level: both the flat skill and the
+    vendor-packed grouped skill must be vetted."""
+    home = _home_with_flat_and_grouped_skill(tmp_path)
+    sweep = sweep_installed_skills(home, narrate=False)
+    names = {n for n, _s, _e in sweep.rows}
+    assert names == {"flat-skill", "grouped-skill"}
+    assert sweep.complete is True
+
+
+def test_sweep_target_set_matches_collector_on_grouped_layout(tmp_path):
+    """The sweep's target set must equal ctx.installed_skill_dirs exactly -- the
+    whole point of consuming the collector's own discovery result."""
+    home = _home_with_flat_and_grouped_skill(tmp_path)
+    ctx = collect(home)
+    assert set(ctx.installed_skill_dirs.keys()) == {"flat-skill", "grouped-skill"}
+    sweep = sweep_installed_skills(home, narrate=False, ctx=ctx)
+    names = {n for n, _s, _e in sweep.rows}
+    assert names == set(ctx.installed_skill_dirs.keys())
+
+
+def test_full_end_to_end_finds_grouped_skill_via_vendor_pack(tmp_path, capsys):
+    """End-to-end through main() --full, not just the function-level API."""
+    home = _home_with_flat_and_grouped_skill(tmp_path)
+    rc, out = _run(capsys, str(home), ["--full"])
+    section = out.split(SECTION, 1)[1]
+    assert "flat-skill" in section
+    assert "grouped-skill" in section
+    assert "2 skill(s) checked | 2 safe | 0 suspicious | 0 dangerous" in section
+    assert rc == 0
+
+
+def test_vet_all_end_to_end_finds_grouped_skill(tmp_path, capsys):
+    """The other consumer: --vet-all must see the grouped skill too."""
+    home = _home_with_flat_and_grouped_skill(tmp_path)
+    rc = main(["--vet-all", "--home", str(home), "--ascii"])
+    out = capsys.readouterr().out
+    assert "flat-skill" in out
+    assert "grouped-skill" in out
+    assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# B-404: an incomplete sweep must say so, never claim completeness
+# it does not have. Negative cases: a genuine enumeration failure.
+# ---------------------------------------------------------------------------
+
+@_POSIX_ONLY
+@_SKIP_ROOT
+def test_permission_denied_subdirectory_forces_incomplete(tmp_path):
+    """A locked sub-directory the discovery engine could not descend into must
+    flip complete=False, even though a SIBLING skill was found and scanned
+    cleanly -- an enumeration failure is not localized to only the target it
+    blinded."""
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    flat = tmp_path / "skills" / "flat-skill"
+    flat.mkdir(parents=True)
+    (flat / "SKILL.md").write_text(_CLEAN_MD, encoding="utf-8")
+    locked = tmp_path / "skills" / "locked-dir"
+    (locked / "inner").mkdir(parents=True)
+    os.chmod(locked, 0o000)
+    try:
+        sweep = sweep_installed_skills(tmp_path, narrate=False)
+    finally:
+        os.chmod(locked, 0o755)
+
+    assert sweep.complete is False
+    assert sweep.discovery_incomplete_reasons
+    # The reachable skill was still found and scanned -- not silently hidden by
+    # the completeness caveat.
+    assert any(n == "flat-skill" for n, _s, _e in sweep.rows)
+
+
+@_POSIX_ONLY
+@_SKIP_ROOT
+def test_permission_denied_skill_root_forces_incomplete_with_zero_targets(tmp_path):
+    """The harder direction: discovery fails so completely that ZERO skills are
+    found at all. An empty result from a walk that could not finish must not
+    read the same as a genuinely-empty, complete walk (Golden Rule #4)."""
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    skills_root = tmp_path / "skills"
+    hidden = skills_root / "hidden-skill"
+    hidden.mkdir(parents=True)
+    (hidden / "SKILL.md").write_text(_CLEAN_MD, encoding="utf-8")
+    os.chmod(skills_root, 0o000)
+    try:
+        sweep = sweep_installed_skills(tmp_path, narrate=False)
+    finally:
+        os.chmod(skills_root, 0o755)
+
+    assert sweep.no_targets is True
+    assert sweep.complete is False
+    assert sweep.discovery_incomplete_reasons
+
+
+def test_hand_built_ctx_discovery_gap_flips_completeness():
+    """Pure-unit wiring test, cross-platform and independent of real filesystem
+    permissions: a LIMIT_DOMAIN_SKILL-tagged limit hit on the ctx alone must be
+    enough to flip complete=False -- the exact signal check_installed_skills
+    (B13) already reads for the same purpose (limit_hits_for)."""
+    home = Path("/nonexistent")
+    ctx = Context(home=home)
+    ctx.installed_skill_roots = [home / "skills"]  # so no_roots reads False
+    note_limit(
+        ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+        "skill discovery under '/nonexistent/skills' stopped early (PermissionError)",
+    )
+
+    sweep = sweep_installed_skills(home, narrate=False, ctx=ctx)
+
+    assert sweep.no_roots is False
+    assert sweep.no_targets is True  # nothing was actually discoverable at this fake path
+    assert sweep.complete is False
+    assert sweep.discovery_incomplete_reasons == [
+        "skill discovery under '/nonexistent/skills' stopped early (PermissionError)"
+    ]
+
+
+def test_hand_built_ctx_with_no_discovery_gap_stays_complete():
+    """Negative control for the wiring test above -- an ordinary, gap-free ctx
+    must not spuriously trip the new signal."""
+    home = Path("/nonexistent")
+    ctx = Context(home=home)
+    sweep = sweep_installed_skills(home, narrate=False, ctx=ctx)
+    assert sweep.no_roots is True
+    assert sweep.complete is True
+    assert sweep.discovery_incomplete_reasons == []
+
+
+def test_quiet_line_mentions_discovery_gap_when_present():
+    sweep = SkillSweep(
+        home_dir=Path("/nonexistent"), checked_dirs=[Path("/x")],
+        rows=[("a", "PASS", 0)],
+        discovery_incomplete_reasons=["skill discovery under '/x' stopped early"],
+    )
+    line = _sweep_quiet_line(sweep)
+    assert "Skill discovery was incomplete" in line
+    assert "stopped early" in line
+
+
+def test_quiet_line_silent_about_discovery_gap_when_absent():
+    sweep = SkillSweep(home_dir=Path("/nonexistent"), checked_dirs=[Path("/x")],
+                       rows=[("a", "PASS", 0)])
+    line = _sweep_quiet_line(sweep)
+    assert "discovery was incomplete" not in line.lower()
+
+
+def test_vet_all_returns_nonzero_when_discovery_incomplete_with_no_targets(tmp_path, monkeypatch):
+    """vet_all()'s early return for 'no targets' must not silently mean 'clean'
+    when discovery itself could not be confirmed complete."""
+    def fake(home_dir, ascii_only=False, sweep_budget_s=0.0, narrate=True, ctx=None):
+        return SkillSweep(home_dir=Path(home_dir), checked_dirs=[Path(home_dir)],
+                          rows=[], truncated=True,
+                          discovery_incomplete_reasons=["synthetic gap"])
+    monkeypatch.setattr(cli, "sweep_installed_skills", fake)
+    rc = cli.vet_all(tmp_path, ascii_only=True)
+    assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# B-404 self-review: the two false-negative-on-completeness
+# directions the fix must NOT introduce.
+# ---------------------------------------------------------------------------
+
+def test_genuinely_flat_only_fleet_still_reports_complete_true():
+    """Direction 1: an install with ONLY flat skills and no permission issues
+    must still report complete=True -- the new discovery-gap machinery must
+    never fire on an ordinary, clean run."""
+    ctx = collect(Path(CLEAN))
+    sweep = sweep_installed_skills(Path(CLEAN), narrate=False, ctx=ctx)
+    assert sweep.complete is True
+    assert sweep.discovery_incomplete_reasons == []
+    assert {n for n, _s, _e in sweep.rows} == {"alpha", "beta"}
+
+
+def test_cyclic_symlink_under_plugin_skills_does_not_crash(tmp_path):
+    """Direction 2: a self-referential symlink loop under plugin-skills/ (the
+    one root that follows symlinks) must not hang or crash the sweep, and must
+    not spuriously report incompleteness either -- the cycle is fully resolved
+    (skilldiscovery dedups by resolved target), nothing was actually hidden."""
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    ps = tmp_path / "plugin-skills"
+    ps.mkdir()
+    real = ps / "real-skill"
+    real.mkdir()
+    (real / "SKILL.md").write_text(_CLEAN_MD, encoding="utf-8")
+    (ps / "loop").symlink_to(ps, target_is_directory=True)
+
+    sweep = sweep_installed_skills(tmp_path, narrate=False)
+
+    assert {n for n, _s, _e in sweep.rows} == {"real-skill"}
+    assert sweep.complete is True
+
+
+def test_max_skills_cap_forces_incomplete_without_crashing(tmp_path, monkeypatch):
+    """Direction 2, the cap-hit variant: a fleet whose real skill count exceeds
+    the collector's own installed-skill cap must degrade to complete=False --
+    never a crash, never a silently clean result. Exercised cheaply via a
+    monkeypatched cap rather than 300 real skill directories."""
+    monkeypatch.setattr(collector, "_MAX_SKILLS", 2)
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    for i in range(4):
+        d = tmp_path / "skills" / f"s{i}"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(_CLEAN_MD, encoding="utf-8")
+
+    sweep = sweep_installed_skills(tmp_path, narrate=False)  # must not raise
+
+    assert sweep.complete is False
+    assert sweep.discovery_incomplete_reasons
+    assert len(sweep.rows) == 2  # only the monkeypatched cap's worth was kept
+
+
+# ---------------------------------------------------------------------------
+# B-404: the agreement guard -- catches FUTURE re-divergence.
+#
+# Runs the real engine (collect() + sweep_installed_skills(), including real
+# vet_skill() calls) over EVERY fixture home in the corpus, not a hand-picked
+# sample: measured at ~2.7s over the 194 skill-bearing fixtures in this repo,
+# cheap enough that there is no reason to narrow it. A future change that
+# reintroduces a second, independent (even partially) discovery path fails
+# here immediately, which is the entire point of this test.
+# ---------------------------------------------------------------------------
+
+def test_sweep_agrees_with_collector_across_the_full_fixture_corpus():
+    row_mismatches = []
+    root_mismatches = []
+    for fixture_dir in sorted(p for p in FIXTURES.iterdir() if p.is_dir()):
+        ctx = collect(fixture_dir)
+        sweep = sweep_installed_skills(fixture_dir, narrate=False, ctx=ctx)
+
+        got = {n for n, _s, _e in sweep.rows}
+        want = set(ctx.installed_skill_dirs.keys())
+        if got != want:
+            row_mismatches.append((str(fixture_dir), sorted(got), sorted(want)))
+
+        if sweep.no_roots != (not ctx.installed_skill_roots):
+            root_mismatches.append(str(fixture_dir))
+
+    assert row_mismatches == []
+    assert root_mismatches == []

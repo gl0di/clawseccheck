@@ -34,7 +34,7 @@ from . import (
 )
 from . import __released__, __version__
 from .brand import WORDMARK
-from .collector import SKILL_DIRS
+from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
 # B-270: the shared baseline predicate. Imported from the submodule rather than the package
 # root so the new vocabulary does not have to widen the curated public API in __init__.py.
 from .monitor import (
@@ -263,6 +263,14 @@ class SkillSweep:
     truncated: bool = False
     worst: str = "PASS"
     budget_s: float = 0.0
+    # B-404: the concrete reason(s) skill DISCOVERY ITSELF could not be
+    # confirmed complete — collector.limit_hits_for(ctx, LIMIT_DOMAIN_SKILL), the same
+    # signal check_installed_skills (B13) already uses. Distinct from a per-target
+    # SKIPPED/TRUNCATED row (a target we KNOW about but could not finish scanning):
+    # this is "the walk that finds targets in the first place did not finish", which
+    # can be non-empty even when every row found so far scanned cleanly. Empty for a
+    # sweep whose discovery genuinely completed.
+    discovery_incomplete_reasons: list[str] = field(default_factory=list)
 
     def vet_targets(self) -> list[tuple[str, Finding]]:
         """``(vetted path, primary finding)`` for every target that produced one —
@@ -324,20 +332,67 @@ class SkillSweep:
         return [n for n, s, _e in self.rows if s in ("SKIPPED", "TRUNCATED")]
 
 
+def _discovery_gap_note(reasons: list[str]) -> str:
+    """One narration line naming why skill DISCOVERY ITSELF — not any one target's own
+    scan — was incomplete (B-404). Printed before the per-skill/aggregate
+    output so the caveat is seen first, never buried after results that may themselves
+    look clean."""
+    extra = f" (+{len(reasons) - 6} more)" if len(reasons) > 6 else ""
+    return (
+        "(skill discovery was incomplete — this sweep cannot claim full coverage: "
+        + "; ".join(reasons[:6]) + extra + ")"
+    )
+
+
+def _discovery_gap_suffix(sweep: SkillSweep) -> str:
+    """A short trailing caveat for the ``--quiet`` one-liner, which (unlike the verbose
+    branch) never sees ``sweep_installed_skills``'s own live narration. Empty when
+    discovery completed, so every pre-existing caller is unaffected."""
+    if not sweep.discovery_incomplete_reasons:
+        return ""
+    return (
+        " Skill discovery was incomplete — coverage may be missing target(s): "
+        + sweep.discovery_incomplete_reasons[0] + "."
+    )
+
+
 def sweep_installed_skills(
     home_dir: Path,
     ascii_only: bool = False,
     sweep_budget_s: float = DEFAULT_VET_ALL_BUDGET_S,
     narrate: bool = True,
+    ctx: Context | None = None,
 ) -> SkillSweep:
-    """Vet every installed skill discovered under any of collector.SKILL_DIRS.
+    """Vet every installed skill the collector engine itself discovered.
 
-    Mirrors the real OpenClaw skill-discovery locations the full audit engine
-    already uses (skills/, workspace/skills/, workspace-home/skills/,
-    workspace-work/skills/, .agents/skills/ — see collector.SKILL_DIRS), not
-    just the single legacy home_dir/skills/ path (B-147). Finds all
-    subdirectories across those roots that contain a SKILL.md file, dedups by
-    resolved path and runs vet_skill on each.
+    B-404: this used to run its OWN, second, flat ``iterdir()`` over
+    ``collector.SKILL_DIRS`` — exactly one level deep, requiring
+    ``<root>/<entry>/SKILL.md``. A GROUPED skill layout (a vendor-pack directory
+    nesting a skill one level further down, e.g.
+    ``skills/vendor-pack/grouped-skill/SKILL.md``) was therefore silently invisible
+    to both ``--full``'s SKILL SWEEP and ``--vet-all`` — while the sweep still
+    reported itself ``complete``. ``collector.py``'s own ``_read_installed_skills``
+    already resolves grouped (and every config-declared) layout correctly, via the
+    dedicated, bounded, cycle-safe ``skilldiscovery.py`` walk, and is what the MAIN
+    audit is scored against. So this now CONSUMES that same result —
+    ``ctx.installed_skill_dirs`` — instead of re-deriving a second, narrower view
+    that can silently drift from it. Passing an already-collected *ctx* (as the
+    ``--full`` call site does — it already ran ``collect()`` for the audit above
+    it) skips a second, redundant collection pass over the same home; when *ctx* is
+    omitted (the ``--vet-all`` call site, which runs before any audit) one is
+    collected here.
+
+    Completeness is read off the SAME signal ``check_installed_skills`` (B13)
+    already uses to decide "was the skill scan complete" —
+    ``limit_hits_for(ctx, LIMIT_DOMAIN_SKILL)`` — rather than inventing a second
+    notion of "truncated" for this one CLI surface. Any genuine enumeration
+    failure the collector recorded (a permission-denied skill root or
+    sub-directory, the discovery engine's own directory-count cap, the
+    installed-skill collection cap) surfaces here as a named reason
+    (``SkillSweep.discovery_incomplete_reasons``) and forces ``complete`` to
+    False — even when zero skills were found at all, because an empty result
+    from a walk that could not finish is not the same claim as an empty result
+    from a walk that finished and genuinely found nothing.
 
     With ``narrate`` (the default) it prints the per-skill verdict blocks as it
     goes — progress feedback matters on a sweep that can run for minutes — and
@@ -378,48 +433,59 @@ def sweep_installed_skills(
       bucketed the way a clean result would. Since B-352 the type derives from
       ``BaseException``, so no such handler can take it by accident.
     """
-    skill_paths: list[Path] = []
-    seen: set[Path] = set()
-    checked_dirs: list[Path] = []
-    for rel in SKILL_DIRS:
-        skills_dir = home_dir / rel
-        try:
-            if not skills_dir.is_dir():
-                continue
-            checked_dirs.append(skills_dir)
-            for entry in sorted(skills_dir.iterdir()):
-                if not (entry.is_dir() and (entry / "SKILL.md").exists()):
-                    continue
-                try:
-                    resolved = entry.resolve()
-                except OSError:
-                    resolved = entry
-                if resolved in seen:
-                    continue
-                seen.add(resolved)
-                skill_paths.append(entry)
-        except PermissionError as exc:
-            if narrate:
-                _emit(f"(could not read skills directory {skills_dir}: {exc})")
-            continue
+    if ctx is None:
+        ctx = collect(home_dir)
+
+    # B-404: the single discovery implementation — see this function's
+    # docstring. ``checked_dirs`` is every root the collector itself confirmed exists
+    # and walked (a superset of the old static SKILL_DIRS list: it also covers every
+    # config-declared workspace/extraDirs/plugins.load.paths root, the personal
+    # ~/.agents/skills tier, a bundled-root override, and plugin-skills).
+    # ``ctx.installed_skill_dirs`` is keyed by the collector's own collision-safe
+    # name (its own dedup, richer than a bare directory basename); sorted here purely
+    # for a stable, predictable sweep ordering independent of tier/root plumbing.
+    checked_dirs: list[Path] = list(ctx.installed_skill_roots)
+    skill_items = sorted(ctx.installed_skill_dirs.items())
+    skill_paths: list[Path] = [path for _name, path in skill_items]
+    skill_names: list[str] = [name for name, _path in skill_items]
+
+    # B-404: the collector's own record of "discovery could not finish"
+    # — see the docstring above. Read BEFORE the roots/targets early-returns below, so
+    # a root that exists but could not be enumerated (permission denied, or a cyclic/
+    # malformed structure past skilldiscovery's own caps) is never reported as a
+    # clean, complete "nothing found", regardless of whether it left any OTHER target
+    # scannable.
+    discovery_gaps = limit_hits_for(ctx, LIMIT_DOMAIN_SKILL)
 
     sweep = SkillSweep(home_dir=home_dir, checked_dirs=checked_dirs,
                        budget_s=sweep_budget_s)
+    if discovery_gaps:
+        sweep.truncated = True
+        sweep.discovery_incomplete_reasons = list(discovery_gaps)
 
     if not checked_dirs:
         if narrate:
             _emit(f"No skills directory found under {home_dir}")
+            if discovery_gaps:
+                _emit(_discovery_gap_note(discovery_gaps))
         return sweep
 
     if not skill_paths:
         if narrate:
             dirs_str = ", ".join(str(d) for d in checked_dirs)
             _emit(f"No skills found under {dirs_str}")
+            if discovery_gaps:
+                _emit(_discovery_gap_note(discovery_gaps))
         return sweep
+
+    if narrate and discovery_gaps:
+        _emit(_discovery_gap_note(discovery_gaps))
 
     results = sweep.rows  # (sanitized name, status, evidence_count)
     worst = "PASS"
-    truncated = False  # F-148: True once the sweep budget cut the run short
+    # F-148 + B-404: True once the sweep budget cuts the run short, OR
+    # discovery itself was already known incomplete (seeded above).
+    truncated = sweep.truncated
 
     # F-148: a monotonic deadline for the WHOLE sweep, checked before every target
     # (including the first) — never mid-target, so a target already underway always
@@ -429,23 +495,23 @@ def sweep_installed_skills(
     for idx, skill_dir in enumerate(skill_paths):
         if budget_exceeded(deadline):
             truncated = True
-            remaining = skill_paths[idx:]
+            remaining_names = skill_names[idx:]
             if narrate:
                 bullet = "*" if ascii_only else "•"
                 _emit("")
                 _emit(
                     f"(sweep budget of {sweep_budget_s:g}s exceeded — "
-                    f"{len(remaining)} skill(s) NOT scanned; listed below, not counted as safe)"
+                    f"{len(remaining_names)} skill(s) NOT scanned; listed below, not counted as safe)"
                 )
-                for skipped_dir in remaining[:12]:
-                    _emit(f"  {bullet} {_sanitize(skipped_dir.name)}")
-                if len(remaining) > 12:
-                    _emit(f"  {bullet} (+{len(remaining) - 12} more)")
+                for skipped_name in remaining_names[:12]:
+                    _emit(f"  {bullet} {_sanitize(skipped_name)}")
+                if len(remaining_names) > 12:
+                    _emit(f"  {bullet} (+{len(remaining_names) - 12} more)")
             # Every skipped target still gets its own row in the aggregate table
             # below, even the ones elided from the printed list above (no silent
             # caps on the machine-checkable summary, only on the narrative print).
-            for skipped_dir in remaining:
-                results.append((_sanitize(skipped_dir.name), "SKIPPED", 0))
+            for skipped_name in remaining_names:
+                results.append((_sanitize(skipped_name), "SKIPPED", 0))
             break
 
         # C8: the skill NAME is attacker-controlled (it is a directory name inside
@@ -453,7 +519,7 @@ def sweep_installed_skills(
         # sanitized form is what both the narrative and the aggregate table use —
         # sanitizing only at print time let a raw name reach the table and set its
         # column width.
-        skill_name = _sanitize(skill_dir.name)
+        skill_name = _sanitize(skill_names[idx])
         if narrate:
             _emit(f"\n=== {skill_name} ===")
         try:
@@ -602,10 +668,12 @@ def _sweep_quiet_line(sweep: SkillSweep) -> str:
     partial sweep for a clean one.
     """
     if sweep.no_roots:
-        return f"SKILL SWEEP: no skills directory found under {_sanitize(str(sweep.home_dir))}."
+        line = f"SKILL SWEEP: no skills directory found under {_sanitize(str(sweep.home_dir))}."
+        return line + _discovery_gap_suffix(sweep)
     if sweep.no_targets:
         dirs_str = ", ".join(_sanitize(str(d)) for d in sweep.checked_dirs)
-        return f"SKILL SWEEP: no installed skills found under {dirs_str}."
+        line = f"SKILL SWEEP: no installed skills found under {dirs_str}."
+        return line + _discovery_gap_suffix(sweep)
     c = sweep.counts()
     line = (f"SKILL SWEEP: {c['total']} installed skill(s) vetted — "
             f"{c['fails']} dangerous, {c['warns']} suspicious, {c['safe']} no known issue")
@@ -620,7 +688,7 @@ def _sweep_quiet_line(sweep: SkillSweep) -> str:
         if len(dangerous) > 3:
             named += f", +{len(dangerous) - 3} more"
         line += f" Dangerous: {named}."
-    return line + " Full detail: --vet-all."
+    return line + _discovery_gap_suffix(sweep) + " Full detail: --vet-all."
 
 
 def _sweep_to_json(sweep: SkillSweep) -> dict:
@@ -661,7 +729,11 @@ def vet_all(
     sweep = sweep_installed_skills(home_dir, ascii_only=ascii_only,
                                    sweep_budget_s=sweep_budget_s, narrate=True)
     if sweep.no_targets:
-        return 0
+        # B-404: "no targets" is not "clean" when discovery itself could
+        # not be confirmed complete (e.g. a permission-denied skill root) — that has
+        # no basis for the same 0 a genuinely-empty, fully-enumerated fleet gets. The
+        # reason was already narrated above (sweep_installed_skills ran narrate=True).
+        return 1 if sweep.truncated else 0
     for line in _sweep_summary_lines(sweep, ascii_only=ascii_only):
         _emit(line)
 
@@ -2228,11 +2300,16 @@ def _main(argv=None) -> int:
             sweep_home = Path(args.home).expanduser()
             sweep = None
             if not args.fast:
+                # B-404: reuse the SAME ctx the audit above already collected
+                # (ctx.home == sweep_home) instead of a second, redundant collect()
+                # pass — and, just as importantly, so the sweep's view of "what
+                # skills exist" can never disagree with what the score was actually
+                # computed against.
                 sweep = sweep_installed_skills(
                     sweep_home, ascii_only=ascii_only,
                     sweep_budget_s=_pipeline.sub_budget(
                         full_deadline, DEFAULT_VET_ALL_BUDGET_S),
-                    narrate=False)
+                    narrate=False, ctx=ctx)
                 full_sweep_json = _sweep_to_json(sweep)
                 sweep_has_fail = sweep.has_fail
                 _record_run("vet", args)
@@ -2362,9 +2439,11 @@ def _main(argv=None) -> int:
                 # prints its own honest "skipped — --fast was given" line in this slot, so
                 # the section never simply vanishes.
                 if not args.fast:
+                    # B-404: reuse the SAME ctx the audit above already collected —
+                    # see the matching comment at the --json call site above.
                     sweep = sweep_installed_skills(
                         sweep_home, ascii_only=ascii_only,
-                        sweep_budget_s=sweep_budget_s, narrate=False)
+                        sweep_budget_s=sweep_budget_s, narrate=False, ctx=ctx)
                     _emit(_sweep_quiet_line(sweep))
                     sweep_has_fail = sweep.has_fail
                     _record_run("vet", args)
@@ -2432,9 +2511,11 @@ def _main(argv=None) -> int:
                     _emit("=" * 60)
                     _emit("Per-skill verdict for every installed skill. Not folded into the "
                          "score or grade above; per-skill dossier: --vet <path>.")
+                    # B-404: reuse the SAME ctx the audit above already collected —
+                    # see the matching comment at the --json call site above.
                     sweep = sweep_installed_skills(
                         sweep_home, ascii_only=ascii_only,
-                        sweep_budget_s=sweep_budget_s, narrate=True)
+                        sweep_budget_s=sweep_budget_s, narrate=True, ctx=ctx)
                     for _sweep_line in _sweep_summary_lines(sweep, ascii_only=ascii_only):
                         _emit(_sweep_line)
                     sweep_has_fail = sweep.has_fail

@@ -343,13 +343,28 @@ class _ScopedLimitSink:
 # fake PASS). Recording the OSError in ``ctx.errors`` (when a Context is available) keeps
 # that degrade from being silent, matching how every other permission failure in this
 # module is surfaced.
-def _safe_is_dir(p: Path, ctx: Context | None = None, what: str | None = None) -> bool:
-    """``Path.is_dir()`` that answers False instead of raising on a permission error."""
+def _safe_is_dir(p: Path, ctx: Context | None = None, what: str | None = None,
+                  domain: str | None = None) -> bool:
+    """``Path.is_dir()`` that answers False instead of raising on a permission error.
+
+    B-404: when *domain* is given (alongside *ctx*), a genuine OSError also
+    becomes a domain-tagged ``limit_hits`` entry, not just a ``ctx.errors`` note — so a
+    consumer asking "was MY scan complete?" (``limit_hits_for``) can see a root that could
+    be confirmed to exist but could not be stat'd (e.g. a permission-denied skill root),
+    distinct from a root that simply is not there (which stays silent, exactly as before).
+    Purely additive: every existing caller that never passes *domain* keeps writing only
+    to ``ctx.errors``, unchanged.
+    """
     try:
         return p.is_dir()
     except OSError as exc:
         if ctx is not None:
             ctx.errors.append(f"could not check {what or p}: {exc}")
+            if domain is not None:
+                note_limit(
+                    ctx.limit_hits, domain,
+                    f"could not check {what or p} ({exc.__class__.__name__}) — not scanned",
+                )
         return False
 
 
@@ -593,6 +608,16 @@ class Context:
     # ring checks (B42 install-policy, B87 symlink-escape) don't cross-attribute another
     # skill's evidence onto this one.
     installed_skill_dirs: dict = field(default_factory=dict)
+    # B-404: every skill-load root _read_installed_skills actually confirmed
+    # exists and walked — the hardcoded SKILL_DIRS entries, any config-declared workspace/
+    # extraDirs/plugins.load.paths root, the personal ~/.agents/skills tier, a bundled-root
+    # env override, and plugin-skills — resolved-path deduped in the same order the walk
+    # used. This is the single source of truth for "was there anywhere to look"; cli.py's
+    # sweep_installed_skills reads it instead of re-deriving its own, narrower root list
+    # (the bug this field exists to close: a second, flat iterdir()-only guess over just
+    # the static SKILL_DIRS silently missed every grouped/config-declared root and then
+    # still reported the sweep complete).
+    installed_skill_roots: list = field(default_factory=list)
     attestation: dict = field(default_factory=dict)  # agent self-report (--attest); see attest.py
     _collected_skill_files: dict[str, list[dict]] = field(default_factory=dict)
 
@@ -2009,10 +2034,11 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
             _override = Path(_value).expanduser()
         except (OSError, ValueError, RuntimeError):
             continue
-        if _safe_is_dir(_override, ctx, what=f"bundled skills root '{_override}'"):
+        if _safe_is_dir(_override, ctx, what=f"bundled skills root '{_override}'",
+                        domain=LIMIT_DOMAIN_SKILL):
             roots.append((_override, False))
     plugin_skills = home / "plugin-skills"
-    if _safe_is_dir(plugin_skills, ctx, what=f"'{plugin_skills}'"):
+    if _safe_is_dir(plugin_skills, ctx, what=f"'{plugin_skills}'", domain=LIMIT_DOMAIN_SKILL):
         roots.append((plugin_skills, True))
     seen_roots: set[Path] = set()
     for base, allow_symlink in roots:
@@ -2020,7 +2046,12 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         # home, e.g. chmod 000) must be skipped like a root that does not exist at all —
         # ctx.installed_skills then simply stays emptier, which check_installed_skills
         # (B13) already degrades to UNKNOWN for, never a crash or a fake clean PASS.
-        if not _safe_is_dir(base, ctx, what=f"skill root '{base}'"):
+        # B-404: unlike a root that genuinely does not exist, a root that
+        # exists but could not be stat'd (permission denied) is a REAL enumeration
+        # failure — domain=LIMIT_DOMAIN_SKILL records it so a consumer asking "was this
+        # scan complete" (limit_hits_for) can see it, instead of it reading identically
+        # to "nothing configured here".
+        if not _safe_is_dir(base, ctx, what=f"skill root '{base}'", domain=LIMIT_DOMAIN_SKILL):
             continue
         try:
             base_key = base.resolve()
@@ -2029,6 +2060,9 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         if base_key in seen_roots:
             continue
         seen_roots.add(base_key)
+        # B-404: the single source of truth for "which roots did the real
+        # discovery engine confirm and walk" — see the field's docstring on Context.
+        ctx.installed_skill_roots.append(base)
         for sd, target in _iter_skill_dirs_guarded(base, allow_symlink, ctx):
             if len(ctx.installed_skills) >= _MAX_SKILLS:
                 # B-268: this used to `return` — the collection stopped dead, leaving
