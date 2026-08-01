@@ -1744,6 +1744,22 @@ _B64_WEAK_SIGNAL_RE = re.compile(
         r"|your\s+new\s+instructions\s+(?:are|will\s+be)"
         r"|as\s+(?:system\s+)?admin(?:istrator)?\s*,\s*override"
         r"|override\s+as\s+(?:system\s+)?admin(?:istrator)?"
+        # B-393/B-392 (C-135-mitigated synonym widening): `_B64_HIGH_CONFIDENCE_RE`'s
+        # object noun is restricted to "instructions"/"prompt", so "ignore your
+        # previous configuration" evaded B64 entirely (found independently by both
+        # tickets). Widening the FAIL-eligible regex itself would repeat the exact
+        # C-303 mistake CLAUDE.md's own cautionary tale describes -- "ignore your
+        # previous configuration and start fresh" is plausible benign settings-reset
+        # prose. Added here instead: weak-tier, WARN-only, never promoted to FAIL by
+        # this check (the loop that consumes this regex explicitly never escalates —
+        # see the "Weak signals never FAIL" comment at its call site). A skill that
+        # pairs this with a genuine attack anchor (credential path, exec/exfil sink)
+        # still reaches FAIL through THAT anchor's own check, same as every other
+        # ambiguous-suppression signal in this file.
+        r"|ignore\s+(?:all\s+)?(?:your\s+|the\s+)?previous\s+"
+        r"(?:configuration|settings|setup|principles|rules|policies)"
+        r"|disregard\s+(?:your\s+|the\s+)?(?:previous\s+)?"
+        r"(?:configuration|settings|setup|principles|rules|policies)"
         r")"
     ),
     re.I,
