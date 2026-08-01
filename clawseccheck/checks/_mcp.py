@@ -369,9 +369,20 @@ def vet_plugin(
         # BaseException, so that shadowing is now structurally impossible rather than
         # merely avoided by clause order; the explicit arm stays because this frame
         # genuinely OWNS the outcome (it sets budget_hit). No per-call hard timer is armed
-        # around this dispatch (see the docstring) — vet_skill's own content-ring loop
-        # can raise ScanBudgetExceeded cooperatively on its own (skillast.py's internal
-        # sink-count cap), which is what this catches.
+        # around this dispatch (see the docstring).
+        #
+        # B-394 (C-135 round 1 caught this going stale): vet_skill() used to let
+        # skillast.py's unattributed cooperative sink-count cap (owner=None) escape all
+        # the way out to here, which is what this arm was written to catch — one
+        # bundled skill hitting its cap aborted the ENTIRE remaining dispatch, so
+        # `skillB` in a two-skill plugin was never even scanned. vet_skill() now
+        # absorbs that same escape internally (owner=None) and returns a disclosed
+        # coverage-gap verdict for just that one skill instead of raising, so this
+        # dispatch loop CONTINUES to the next bundled skill instead — net more actual
+        # scanning happens per plugin, not less. This arm is no longer the live path
+        # for that cause; it stays as defense-in-depth for a genuinely OUTER deadline
+        # (one `vet_skill` would still re-raise, per its own owner-check) and for
+        # `vet_skill`'s other, non-ring failure modes.
         try:
             sf = vet_skill(sd)
         except ScanBudgetExceeded:
@@ -2167,12 +2178,44 @@ def _merge_mcp_tool_surface(
 
     ctx = Context(home=_MCP_SURFACE_SENTINEL_HOME)
     ctx.installed_skills = rendered
-    ring = [
-        fx
-        for fx in _run_content_ring(ctx)
-        if fx.id not in _MCP_RING_SKIP_IDS and (fx.id, fx.status) not in _MCP_RING_SKIP_STATUSES
-    ]
-    if not ring and not surface.truncated:
+    # B-394: both callers of this function (vet_mcp's config-embedded-spec loop and its
+    # file-based-dump loop) iterate every server with no surrounding try/except of their
+    # own -- an escaping ScanBudgetExceeded here would abort the ENTIRE multi-server
+    # dispatch, not just this one server's verdict, same class of gap as vet_skill's own
+    # unguarded call (fixed alongside this one). _run_content_ring can still raise even
+    # after its internal SIGALRM escape is closed: skillast.py's unattributed
+    # cooperative sink-count cap (owner=None) is deliberately re-raised past every
+    # owned_by(...) check. "Keep the base per-server verdict, disclose what we missed"
+    # for this one server, not "crash the whole --vet-mcp run" -- same policy
+    # report.py:1059 and vet_skill document for the identical call. `exc.owner is not
+    # None` still re-raises, matching vet_skill's own narrowing.
+    #
+    # The gap is recorded as `budget_gap`, NOT folded into `ring` (C-135 round 2): the
+    # worst_ring_status escalation just below reads `ring` as "real detector findings
+    # that matched something" and quotes the worst one's .title verbatim into
+    # finding.detail ("declared tool description(s) matched a content-security signal:
+    # {title}") — a coverage-gap placeholder landing in that list produced the
+    # nonsensical "matched a content-security signal: Content-ring coverage". This
+    # mirrors surface.truncated below instead: its own dedicated VET-COVERAGE finding,
+    # appended after the escalation logic, with wording that says what actually
+    # happened (budget exhausted) rather than a detection that never occurred.
+    budget_gap: str | None = None
+    try:
+        ring = [
+            fx
+            for fx in _run_content_ring(ctx)
+            if fx.id not in _MCP_RING_SKIP_IDS and (fx.id, fx.status) not in _MCP_RING_SKIP_STATUSES
+        ]
+    except ScanBudgetExceeded as exc:
+        if exc.owner is not None:
+            raise
+        ring = []
+        budget_gap = (
+            f"MCP tool surface of server '{sname}' scan budget was exhausted before "
+            "every content-security check had run — coverage is incomplete, so this "
+            "is not a clean verdict."
+        )
+    if not ring and not surface.truncated and budget_gap is None:
         return finding
 
     worst_ring_status = max(
@@ -2216,6 +2259,29 @@ def _merge_mcp_tool_surface(
                     "not a clean verdict."
                 ),
                 fix="Review this server's full declared tool list by hand.",
+                framework="MCP Trust",
+                scored=False,
+            )
+        )
+        if finding.status == PASS:
+            finding.status = UNKNOWN
+    if budget_gap is not None:
+        # Deliberately a SEPARATE finding from the surface.truncated one above, even
+        # though both share the "Content-ring coverage" title -- they are genuinely
+        # different facts (a surface too large for mcpsurface's own caps vs. the scan
+        # running out of budget while scanning it) and can co-occur on the same
+        # server. Not merged into one combined disclosure: that's a UX nicety outside
+        # this fix's scope, not a correctness requirement -- two honestly-worded gap
+        # findings beat one that hides which limit was actually hit.
+        finding.ring_findings.append(
+            Finding(
+                id="VET-COVERAGE",
+                title="Content-ring coverage",
+                severity=HIGH,
+                status=UNKNOWN,
+                detail=budget_gap,
+                fix="Re-run --vet-mcp; if this keeps happening, review this server's "
+                "declared tool surface by hand.",
                 framework="MCP Trust",
                 scored=False,
             )

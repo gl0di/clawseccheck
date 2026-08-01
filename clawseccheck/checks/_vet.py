@@ -4083,11 +4083,41 @@ def _run_content_ring(
     own_deadline_hit = False
     with check_deadline(target_budget_s) as own_frame:
         for idx, check in enumerate(SKILL_CONTENT_RING):
-            name = getattr(check, "__name__", "ring check")
-            if cpu_exceeded(deadline):
-                skipped.append(name)
-                continue
             try:
+                # B-394: `name = getattr(...)` and `cpu_exceeded(deadline)` used to sit
+                # OUTSIDE this try, guarded by nothing — a SIGALRM landing on either
+                # line (the signal can fire on any bytecode boundary, not just inside
+                # `check(ctx)`; see memory reference_python_signal_mask_not_atomic) threw
+                # ScanBudgetExceeded straight out of this function. Since B-352 made
+                # that type a BaseException specifically so nothing swallows it by
+                # accident, nothing up the stack caught it either — it escaped
+                # `_run_content_ring` entirely instead of being handled by the
+                # `owned_by(...)` logic below. Moving both lines inside the try changes
+                # nothing about their normal-path behavior (no exception, same skip/
+                # continue as before) and closes the window that produced the OBSERVED
+                # 10/30 CI failure rate under load (B-394's own measurement).
+                #
+                # NOT fully closed (C-135 round 2, confirmed by disassembling this
+                # function and reading co_exceptiontable): the `continue` right after
+                # `skipped.append(name)` compiles, in CPython 3.11+'s zero-cost
+                # exception model, to a jump instruction covered by the enclosing
+                # `with check_deadline(...)` block's OWN exception-table entry, not this
+                # try's — a signal landing on exactly that jump still bypasses
+                # `owned_by(...)` and escapes uncaught. This is a residual, not a
+                # regression: it is a narrower version of the SAME landing-spot class
+                # this fix closes, reachable only by a signal arriving during one
+                # specific ~1-instruction transition rather than across two whole
+                # unguarded lines, and it was only reproduced via `sys.settrace`-timed
+                # signal injection forcing the landing spot — not observed under real
+                # load, unlike the bug this fix targets. Eliminating it would mean never
+                # using `continue`/`break` inside a try guarding a signal-based
+                # exception anywhere a loop needs to skip an iteration, which is not
+                # achievable by restructuring THIS loop alone (the loop-back jump has to
+                # land somewhere). Documented here rather than chased further.
+                name = getattr(check, "__name__", "ring check")
+                if cpu_exceeded(deadline):
+                    skipped.append(name)
+                    continue
                 fx = check(ctx)
             except ScanBudgetExceeded as exc:
                 if not owned_by(exc, own_frame):
@@ -4227,13 +4257,49 @@ def vet_skill(path: str | Path) -> Finding:
     ctx.installed_skill_py = {name or "skill": py_sources}
     ctx.installed_skill_shell = {name or "skill": shell_sources}
     ctx.installed_skill_js = {name or "skill": js_sources}
-    finding = check_installed_skills(ctx)
+    # B-394: vet_skill is meant to be one of this exception's "designated per-target
+    # handler[s]" (cli.main's own docstring names "the vet dispatch sites" as such) —
+    # the CLI's bare `f = vet_skill(...)` call sites (--vet/--advise on one target) own
+    # no deadline of their own above this, unlike the sweep path (cli.py's bulk --vet,
+    # which already catches ScanBudgetExceeded by name) or report.py's _skill_inventory
+    # (which arms its own check_deadline around the ring call). Both calls below can
+    # raise it even with no timer involved at all: skillast.py's own reached-sinks cap
+    # cooperatively raises with owner=None when it hits its cap, from EITHER
+    # check_installed_skills (via its own effect-simulation pass) or _run_content_ring.
+    # Left unguarded, that reaches only cli.main's last-resort top-level handler, whose
+    # own docstring says reaching it "should not happen by design" — and that handler
+    # discards the ENTIRE result, including a FAIL check_installed_skills already found
+    # before the cap fired, rather than reporting the honest "keep the base verdict,
+    # disclose what we missed" policy report.py:1059 already documents for the
+    # identical situation. `exc.owner is not None` still re-raises: if some future
+    # caller ever wraps vet_skill in its own check_deadline, that owner's expiry must
+    # keep travelling to it, not be swallowed here (the false-PASS-adjacent shape
+    # C-175 fixed, restated one layer up — see owned_by()'s docstring).
+    try:
+        finding = check_installed_skills(ctx)
+    except ScanBudgetExceeded as exc:
+        if exc.owner is not None:
+            raise
+        gap = coverage_gap_finding(
+            "content-ring coverage is incomplete: the scan budget was exhausted "
+            "before the base scan could complete"
+        )
+        gap.ctx = ctx
+        return gap
     # F-048: also run the shared content-security ring. check_installed_skills has already
     # populated ctx.effect_profiles (so B62 can compare declared vs actual capability), and
     # ctx.installed_skills / ctx.installed_skill_py are set above. Fold in only the
     # actionable (FAIL/WARN) ring results: surface the worst as the primary verdict and
     # carry the rest on .ring_findings for the JSON / human / SARIF renderers.
-    ring = _run_content_ring(ctx)
+    try:
+        ring = _run_content_ring(ctx)
+    except ScanBudgetExceeded as exc:
+        if exc.owner is not None:
+            raise
+        ring = [coverage_gap_finding(
+            "content-ring coverage is incomplete: the scan budget was exhausted "
+            "before every content-security check had run"
+        )]
     if ring:
         pool = [finding, *ring]
         primary = max(pool, key=lambda fx: _VET_MERGE_RANK.get(fx.status, 0))
