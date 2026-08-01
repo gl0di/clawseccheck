@@ -57,6 +57,8 @@ from ..iocdb import (
 )
 
 from ._shared import (
+    _FM_BLOCK_BARE_RE,
+    _FM_BLOCK_HEADERED_RE,
     _KNOWN_EXFIL_HOST_RE,
     _MANIFEST_HEADER_RE,
     _SENTENCE_BREAK_RE,
@@ -800,14 +802,34 @@ _TEST_FIXTURE_BASENAME_RE = re.compile(
 # around a live payload is a harder, residual case the tool still surfaces as WARN
 # (not silently drops) rather than FAIL.
 #
-# Python test idioms are specific enough that ONE match suffices (a bare
-# `def test_...(` or `import pytest` is not something an unrelated script would
-# plausibly carry by accident).
-_TEST_SHAPE_RE = re.compile(
-    r"\bdef\s+test_\w*\s*\(|\bimport\s+pytest\b|\bimport\s+unittest\b|"
-    r"\bclass\s+Test\w*\b|@pytest\.mark\b|\bself\.assert\w*\(",
-    re.I,
-)
+# C-135 (round 2, B-408): the "ONE match suffices" reasoning above was live-repro'd
+# as a real FAIL-evasion bypass, the same class already fixed for the JS leg below —
+# a bare `import pytest` line, never otherwise used, is exactly the kind of
+# zero-cost decoy an attacker can drop into a file named test_*.py to make a live,
+# unconditionally-executed credential-exfiltration payload register as "the skill's
+# own test fixture" and be excluded from scanning entirely. `import pytest` alone
+# does NOT require authoring a real function — it is a single, forgeable line, no
+# different in kind from the JS leg's single gratuitous `import { expect } from
+# '@jest/globals'` bypass C-135 already closed. Fixed with the same discipline: each
+# idiom is a separate compiled regex and _pos_in_test_fixture_file requires
+# _PYTHON_TEST_SHAPE_MIN_SIGNALS distinct ones, not any single one alone.
+_PYTHON_TEST_SHAPE_SIGNALS = [
+    re.compile(r"\bdef\s+test_\w*\s*\(", re.I),
+    re.compile(r"\bimport\s+pytest\b", re.I),
+    re.compile(r"\bimport\s+unittest\b", re.I),
+    re.compile(r"\bclass\s+Test\w*\b", re.I),
+    re.compile(r"@pytest\.mark\b", re.I),
+    re.compile(r"\bself\.assert\w*\(", re.I),
+    # A bare `assert` statement — real pytest-style test bodies overwhelmingly use
+    # this instead of self.assert*(. Pairs with `def test_...(` to recognize the
+    # single most common real shape (a function definition that actually asserts
+    # something) as 2 signals, while a bare decoy `def test_evil(): pass` or a bare
+    # decoy `import pytest` with no assertion anywhere still falls short.
+    re.compile(r"\bassert\b", re.I),
+]
+
+
+_PYTHON_TEST_SHAPE_MIN_SIGNALS = 2
 
 
 # B-204: JS/TS test shape. _TEST_FIXTURE_BASENAME_RE already admits .spec.js/
@@ -901,17 +923,35 @@ def _manifest_header_matches(blob: str) -> list[re.Match[str]]:
     return list(_MANIFEST_HEADER_RE.finditer(blob))
 
 
+def _manifest_match_is_test_fixture(m: "re.Match[str]") -> bool:
+    """Shared predicate behind _pos_in_test_fixture_file: True when a single
+    _MANIFEST_HEADER_RE match's basename+body qualify as a genuine test-fixture file
+    — the two-part rule (basename convention AND real test-code shape) documented on
+    _pos_in_test_fixture_file below."""
+    if not _TEST_FIXTURE_BASENAME_RE.match(m.group("name").strip()):
+        return False
+    body = m.group("body")
+    py_signal_count = sum(1 for rx in _PYTHON_TEST_SHAPE_SIGNALS if rx.search(body))
+    if py_signal_count >= _PYTHON_TEST_SHAPE_MIN_SIGNALS:
+        return True
+    js_signal_count = sum(1 for rx in _JS_TEST_SHAPE_SIGNALS if rx.search(body))
+    if js_signal_count >= _JS_TEST_SHAPE_MIN_SIGNALS:
+        return True
+    shell_signal_count = sum(1 for rx in _SHELL_TEST_SHAPE_SIGNALS if rx.search(body))
+    return shell_signal_count >= _SHELL_TEST_SHAPE_MIN_SIGNALS
+
+
 def _pos_in_test_fixture_file(
     blob: str, pos: int, header_matches: list[re.Match[str]] | None = None
 ) -> bool:
     """True when *pos* falls inside a "# file: <name>" section whose basename matches
     a test-file naming convention AND whose body has genuine test-code shape — both
-    are required (C-135: a forged header alone is not enough). A Python test idiom
-    (_TEST_SHAPE_RE) is specific enough to count alone (it requires authoring a real
-    function definition, not just a one-line import); JS and shell idioms are each
-    generic/forgeable enough alone (C-135) that at least their respective MIN_SIGNALS
-    distinct ones must be present. Scopes a down-rank to exactly that file, not the
-    whole skill (a live attack elsewhere is unaffected).
+    are required (C-135: a forged header alone is not enough). Python, JS, and shell
+    idioms are each generic/forgeable enough alone (C-135, round 2 for the Python leg —
+    a bare `import pytest` decoy is not costlier to forge than the JS leg's single-
+    import bypass) that at least their respective MIN_SIGNALS distinct ones must be
+    present. Scopes a down-rank to exactly that file, not the whole skill (a live
+    attack elsewhere is unaffected).
 
     *header_matches*: pass a precomputed _manifest_header_matches(blob) result when
     calling this in a loop over many matches of the SAME blob (see
@@ -921,16 +961,7 @@ def _pos_in_test_fixture_file(
     matches = header_matches if header_matches is not None else _MANIFEST_HEADER_RE.finditer(blob)
     for m in matches:
         if m.start("body") <= pos < m.end("body"):
-            if not _TEST_FIXTURE_BASENAME_RE.match(m.group("name").strip()):
-                return False
-            body = m.group("body")
-            if _TEST_SHAPE_RE.search(body):
-                return True
-            js_signal_count = sum(1 for rx in _JS_TEST_SHAPE_SIGNALS if rx.search(body))
-            if js_signal_count >= _JS_TEST_SHAPE_MIN_SIGNALS:
-                return True
-            shell_signal_count = sum(1 for rx in _SHELL_TEST_SHAPE_SIGNALS if rx.search(body))
-            return shell_signal_count >= _SHELL_TEST_SHAPE_MIN_SIGNALS
+            return _manifest_match_is_test_fixture(m)
     return False
 
 
@@ -1050,6 +1081,59 @@ def _redirect_target_is_throwaway(blob: str, fname_start: int) -> bool:
     return any(am.group("var") == var for am in _MKTEMP_ASSIGN_RE.finditer(blob))
 
 
+# C-135 (SkillTrustBench case_00587): a write whose DESTINATION PATH itself carries an
+# unambiguous backup/template/archive marker adjacent to the agent-context filename is
+# not persistence into the LIVE config — it is the skill producing a sanitized COPY at a
+# clearly-labeled backup location (agent-migrate: redacts secrets out of the live
+# openclaw.json, then writes the redacted copy to something like
+# `agent-backup/openclaw.json.template`). This reads what the literal path STRING says,
+# not a proximity window over surrounding prose: the accepted-residual comment above
+# _manifest_section_span is explicit that another window-width tweak is not an
+# acceptable fix for this detector's remaining false-FAIL classes, and this is
+# deliberately not that — the marker must sit in the SAME contiguous path TOKEN that
+# contains the filename match (no whitespace/quote/paren between them), so it cannot be
+# bought by merely mentioning "backup" somewhere nearby in unrelated surrounding prose,
+# only by the destination path an attacker cannot rename without also renaming where the
+# bytes actually land.
+_BACKUP_PATH_MARKER_RE = re.compile(r"backup|template|archive|\.bak\b|sanitiz|sanitis", re.I)
+
+# Characters that can appear inside one shell/path TOKEN — just enough to walk out to
+# the edges of a bare or quoted path argument, not a general command parser.
+_PATH_TOKEN_CHARS_RE = re.compile(r"[\w./\\~$:{}-]")
+
+
+def _write_target_path_token(blob: str, m: "re.Match[str]") -> str:
+    """The contiguous path-like token containing filename match *m* — the run of path
+    characters immediately touching the match on both sides, stopping at the first
+    whitespace/quote/paren/etc. This is the literal write-DESTINATION text as written,
+    never a prose window."""
+    start, end = m.start(), m.end()
+    while start > 0 and _PATH_TOKEN_CHARS_RE.match(blob[start - 1]):
+        start -= 1
+    while end < len(blob) and _PATH_TOKEN_CHARS_RE.match(blob[end]):
+        end += 1
+    return blob[start:end]
+
+
+def _write_target_is_backup_artifact(blob: str, m: "re.Match[str]") -> bool:
+    """C-135 (case_00587): True when the literal path token containing filename match
+    *m* itself names a backup/template/archive/sanitized artifact — see
+    _BACKUP_PATH_MARKER_RE above.
+
+    C-135 (round 2, B-408): the marker search is a raw substring match over the
+    UN-normalized token, so a `..` parent-traversal segment lets the marker sit in a
+    path component that is itself cancelled out on resolution — e.g.
+    `agent-backup/../CLAUDE.md` contains "backup" as a string but resolves to the
+    exact same live path as bare `CLAUDE.md`. Reject the exemption outright whenever
+    the token contains a traversal segment; _PARENT_TRAVERSAL_RE already exists in
+    this module for the identical "can't trust this path string, it climbs back out"
+    reasoning (_redirect_target_is_throwaway)."""
+    token = _write_target_path_token(blob, m)
+    if _PARENT_TRAVERSAL_RE.search(token):
+        return False
+    return bool(_BACKUP_PATH_MARKER_RE.search(token))
+
+
 def _agent_config_write_hits(
     name: str, blob: str, fence_ranges: list[tuple[int, int]]
 ) -> list[tuple[str, str]]:
@@ -1072,6 +1156,10 @@ def _agent_config_write_hits(
     module already apply, simply never wired up here), and (3) a redirect whose target
     is a throwaway temp dir (_redirect_target_is_throwaway).
 
+    C-135: a fourth — the write DESTINATION path itself names a backup/template/
+    archive artifact (_write_target_is_backup_artifact), so the same filename match
+    substring is not persistence into the live config.
+
     B-287 NARROWS this detector's false-FAIL rate; it does not make it exact. Known
     remaining over-fire, reproduced and deliberately left alone: a skill whose declared
     job IS managing agent-context files, writing them into its own DATA directory rather
@@ -1093,6 +1181,9 @@ def _agent_config_write_hits(
             continue  # the injected "# file: <name>" header itself — not skill content
         if _pos_in_test_fixture_file(blob, m.start(), _headers):
             continue  # the skill's own test fixture, not a live write
+        if _write_target_is_backup_artifact(blob, m):
+            continue  # C-135 (case_00587): destination path names a backup/template
+            # artifact, not the live config — see _write_target_is_backup_artifact
         fname = m.group(0)
         # B-287: clamp the proximity window to the filename's own file section so a
         # verb from an adjacent file can never pair with it.
@@ -1329,32 +1420,114 @@ def _authkey_persistence_hits(
 # MEMORY.md" matched. Giving "set" the same stem wildcard the siblings have makes the
 # alternation internally consistent; it is not a widening of the verb SET, which was
 # always intended to cover this word's normal forms.
+#
+# C-135 (SkillTrustBench case_04133): the same internal-consistency gap, this time for
+# "modify" — every OTHER alternative already carries a `\w*` stem, but "modify" was
+# simply absent, so a frontmatter description that plainly says "...and can **modify**
+# your SOUL.md daily..." never satisfied the verb half of the two-part (verb + literal
+# filename) test even though it is exactly the self-declaration this gate exists to
+# recognize. Adding the verb widens the VOCABULARY only — the CONCRETE target filename
+# must still appear in the same 80-char window, so this cannot by itself manufacture a
+# match; case_01826 (generic "config manager" with no named file) still fails it.
 _CONFIG_DECLARE_VERB_RE = re.compile(
     r"\b(?:configur\w*|customi[sz]\w*|set\w*\s*-?\s*up\w*|manag\w*|edit\w*|updat\w*|"
-    r"writ\w*|generat\w*)\b",
+    r"writ\w*|generat\w*|modif\w*)\b",
     re.I,
 )
 
 
+# C-135 (SkillTrustBench case_04876/case_05047): a skill's stated purpose is not always
+# confined to the frontmatter `description:` — a very ordinary README shape is a short
+# "## What this skill does" / "## Description" / "## Overview" section immediately
+# under the title, restating the frontmatter description in more detail (case_04876:
+# "Updates `AGENTS.md` to enforce the workflow" lives there, not in `description:`).
+# Scanning the WHOLE body for this vocabulary would let an attacker plant a throwaway
+# declare-verb+filename sentence anywhere in an unrelated doc just to buy the down-rank
+# — the exact risk _skill_declares_telemetry_disclosure's frontmatter-only scoping
+# (checks/_shared.py) exists to avoid for its own, sibling, declared-vs-actual gate. So
+# this stays bounded to the FIRST level-2/3 heading that appears after the frontmatter
+# (skipping the bare `# Title` line, which is level 1) — AND ONLY when that heading's
+# own title is one of this small purpose-describing vocabulary. Any other first heading
+# (case_05047's actual first heading is "## When to Use", with the AGENTS.md-write
+# declaration itself sitting many sections later, under "## Operational Learnings") means
+# there is no qualifying top section and this returns None — it does not keep scanning
+# for a LATER heading with a matching title, which is what would turn "immediately
+# following" into "anywhere". case_05047 is therefore not fixed by this widening; no
+# further-reaching scope was found that stays sound (see the fix notes).
+_TOP_HEADING_RE = re.compile(r"^#{2,3}[ \t]+(?P<title>[^\n]*)\n", re.MULTILINE)
+
+_TOP_SECTION_TITLE_RE = re.compile(
+    r"^(?:what\s+this\s+skill\s+does|what\s+it\s+does|description|overview|purpose)\W*$",
+    re.I,
+)
+
+# Hard cap on how much of the top section is scanned even when no next heading is found
+# (a skill with only one, very long, top-level section) — keeps this a bounded excerpt,
+# never an unbounded whole-body scan.
+_TOP_SECTION_MAX_CHARS = 3000
+
+
+def _skill_top_section_text(blob: str) -> str | None:
+    """C-135 (case_04876): the skill's own top purpose-describing section — see the
+    _TOP_HEADING_RE comment above for the bounding rules. Returns None if the blob has
+    no frontmatter, or its first level-2/3 heading isn't one of the recognized
+    purpose-section titles.
+
+    C-135 (round 2, B-408): *blob* is the multi-file concatenated text
+    check_installed_skills operates on (every bundled file glued together by
+    _read_skill_text with "# file: <name>" headers) — not SKILL.md's own text alone.
+    An unbounded `blob[fm_end:]` sails straight past a single-`#`-prefixed
+    "# file: <next>" header (it doesn't match `#{2,3}`) into the NEXT file's raw
+    content, so a `##`-shaped comment line placed anywhere in an attacker-controlled
+    bundled script — with zero relationship to SKILL.md's own declared purpose —
+    could satisfy _TOP_HEADING_RE first. Clamp to SKILL.md's own section, the same
+    idiom _agent_config_write_hits/_pos_in_test_fixture_file already use via
+    _manifest_header_matches, so this can never reach past SKILL.md's own body."""
+    hm = _FM_BLOCK_HEADERED_RE.search(blob)
+    fm_end = hm.end() if hm else None
+    if fm_end is None:
+        bm = _FM_BLOCK_BARE_RE.match(blob)
+        fm_end = bm.end() if bm else None
+    if fm_end is None:
+        return None
+    rest_end = len(blob)
+    for m in _manifest_header_matches(blob):
+        if m.start("body") <= fm_end <= m.end("body"):
+            rest_end = m.end("body")
+            break
+    rest = blob[fm_end:rest_end]
+    first = _TOP_HEADING_RE.search(rest)
+    if not first or not _TOP_SECTION_TITLE_RE.match(first.group("title").strip()):
+        return None
+    body_start = first.end()
+    nxt = _TOP_HEADING_RE.search(rest, body_start)
+    body_end = nxt.start() if nxt else len(rest)
+    body_end = min(body_end, body_start + _TOP_SECTION_MAX_CHARS)
+    return rest[body_start:body_end]
+
+
 def _skill_declares_config_target(blob: str, target_fname: str) -> bool:
-    """B-193: True when the skill's OWN SKILL.md frontmatter (name/description) names
-    the exact write-target file near a configuration verb — the skill's stated purpose,
-    not a bare self-declared allowlist (case_01826, a legitimate statusline configurator
-    whose entire job is writing .claude/settings.json). Requires the CONCRETE target
-    filename, not just any configuration-sounding language, so a skill that declares
-    itself a generic "config manager" without naming this specific file does not
-    qualify — narrows the self-declaration to something an attacker can't get for free
-    just by claiming to be helpful."""
-    fm = _skill_frontmatter_block(blob)
-    if not fm:
-        return False
+    """B-193: True when the skill's OWN SKILL.md frontmatter (name/description) — or,
+    C-135, its top purpose-describing section immediately after
+    (_skill_top_section_text) — names the exact write-target file near a configuration
+    verb — the skill's stated purpose, not a bare self-declared allowlist (case_01826, a
+    legitimate statusline configurator whose entire job is writing .claude/settings.json).
+    Requires the CONCRETE target filename, not just any configuration-sounding
+    language, so a skill that declares itself a generic "config manager" without naming
+    this specific file does not qualify — narrows the self-declaration to something an
+    attacker can't get for free just by claiming to be helpful."""
     target_stem = target_fname.rsplit("/", 1)[-1]
-    fm_lower = fm.lower()
-    idx = fm_lower.find(target_stem.lower())
-    if idx == -1:
-        return False
-    window = fm[max(0, idx - 80) : idx + len(target_stem) + 80]
-    return bool(_CONFIG_DECLARE_VERB_RE.search(window))
+    target_lower = target_stem.lower()
+    for scope in (_skill_frontmatter_block(blob), _skill_top_section_text(blob)):
+        if not scope:
+            continue
+        idx = scope.lower().find(target_lower)
+        if idx == -1:
+            continue
+        window = scope[max(0, idx - 80) : idx + len(target_stem) + 80]
+        if _CONFIG_DECLARE_VERB_RE.search(window):
+            return True
+    return False
 
 
 # C-135 (adversarial review): a self-declared config-writer's "no other signal" gate is
@@ -1780,6 +1953,29 @@ _AGENCY_DOUBLE_NEG_RE = re.compile(
 )
 
 
+# C-135 (round 2, B-408): two affirmative-governance shapes — a "only run X when the
+# user explicitly asks" consent gate (SkillTrustBench case_01018), and a `--help`/-h
+# CLI-doc marker (case_02565) — were attempted here and RETRACTED after an independent
+# adversarial pass, TWICE, found real bypasses in each successive tightening:
+#
+# Round 1: a whole-paragraph-bound consent-gate search let an unrelated same-paragraph
+# consent sentence immunize an unrelated live directive. Tightened to same-clause-
+# backward or one-sentence-forward.
+#
+# Round 2 (on the tightened version): a live "execute arbitrary code" directive placed
+# one sentence before an UNRELATED, different-topic consent-gate sentence ("Only send
+# telemetry data when the user explicitly asks for it") still got wrongly immunized —
+# neither helper checks that the governing phrase is actually ABOUT the same action as
+# the exec-verb; distance alone was never sufficient, only relatedness would be. The
+# CLI-help-doc marker has the identical problem in the other direction: nothing stops
+# genuinely dangerous content from continuing in the SAME sentence right after "--help".
+#
+# No sound narrow fix (distance bound, clause bound, marker proximity) closed this in
+# two attempts — a real fix needs topical/referential binding between the governing
+# phrase and the exec-verb's own object, which is squarely the "cannot be discriminated
+# by sound static means" territory CLAUDE.md §2.5 routes to the judge band rather than
+# a third regex-iteration round. case_01018 and case_02565 are known, accepted, unfixed
+# spurious FAILs as a result.
 def _agency_prohibition_governs(blob: str, m: re.Match) -> bool:
     """B-197: True when a prohibition phrase GOVERNS the matched exec-directive text
     (same sentence, positioned before it, no double-negation) — mirrors B-194's
@@ -2788,6 +2984,22 @@ def _blank_fences(blob: str, ranges: list[tuple[int, int]]) -> str:
     return "".join(chars)
 
 
+# C-135 (round 2, B-408): a prior draft of this fix allowlisted yt-dlp's own
+# `--cookies-from-browser <browser>` flag (SkillTrustBench case_04193) by exempting
+# any _CRED_RE match with that flag text nearby. RETRACTED — an independent
+# adversarial pass proved this a real FAIL-evasion bypass, not a theoretical one:
+# _has_non_negated_cred_match is an any() over every _CRED_RE match in the WHOLE
+# document, so exempting the one match nearest the flag text silently zeroes out
+# the entire cross-skill cred+exfil correlation even when a genuinely unrelated,
+# separately-located credential-theft directive is the actual reason the check
+# should fire — e.g. a decoy "--cookies-from-browser" mention placed anywhere in
+# the document suppresses detection of real exfiltration prose elsewhere in the
+# same file. The claim "an attacker gains nothing by wrapping a live directive in
+# this flag spelling" was empirically false: the attacker does not need to wrap
+# anything — the exemption's effect is document-wide, not local to the flag text.
+# case_04193 (SkillTrustBench) is a known, accepted, unfixed spurious FAIL as a
+# result; do not re-attempt a text-proximity allowlist here without also solving
+# the document-wide-any() scoping problem.
 def _has_non_negated_cred_match(blob: str) -> bool:
     """B-144: True when _CRED_RE matches somewhere in *blob* outside a negation context.
 
@@ -2805,7 +3017,9 @@ def _has_non_negated_cred_match(blob: str) -> bool:
     dampen a genuine, unrelated credential-path match much further down the blob;
     only a negator that grammatically governs the SAME clause counts.
     """
-    return any(not _negation_governs_trigger(blob, m.start()) for m in _CRED_RE.finditer(blob))
+    return any(
+        not _negation_governs_trigger(blob, m.start()) for m in _CRED_RE.finditer(blob)
+    )
 
 
 def _has_cred_exfil_outside_fence(blob: str, fence_ranges: list[tuple[int, int]]) -> bool:
@@ -2814,6 +3028,19 @@ def _has_cred_exfil_outside_fence(blob: str, fence_ranges: list[tuple[int, int]]
     A line is only considered if its start position is outside every known fence
     range.  A line that is entirely inside a fenced code block is skipped so that
     documentation examples do not trigger a CRITICAL finding.
+
+    C-135 (round 2, B-408): a test-fixture-file exemption (SkillTrustBench
+    case_04843, via _pos_in_test_fixture_file — the same guard several sibling B13
+    detectors already apply to their own trigger patterns) was attempted here and
+    RETRACTED. An independent adversarial pass found the shared signal-counting
+    guard it depends on is itself bypassable with two cheap, structurally
+    unconnected decoy signals (e.g. a no-op `def test_x(): pass` plus a floating,
+    unrelated `assert True`), which would silently suppress detection of a live
+    credential-exfiltration payload on this — the highest-severity same-line cred+
+    exfil CRITICAL — detector. That guard is sound enough for the lower-stakes
+    checks it already protects elsewhere in this module; it is not sound enough to
+    extend to this one. case_04843 is a known, accepted, unfixed spurious FAIL as a
+    result.
     """
     pos = 0
     for ln in blob.splitlines():
@@ -3204,6 +3431,13 @@ def check_installed_skills(ctx: Context) -> Finding:
         # Cross-skill cred+exfil: run against the blob with fenced spans blanked so
         # a credential path that only appears inside a documentation example does not
         # combine with an exfil host reference to produce a cross-skill finding.
+        #
+        # C-135 (round 2, B-408): a test-fixture-file exemption (SkillTrustBench
+        # case_04843, also blanking _test_fixture_file_spans) was attempted here and
+        # RETRACTED for the same reason as _has_cred_exfil_outside_fence above — the
+        # shared signal-counting guard it depends on is bypassable with two cheap,
+        # structurally unconnected decoy signals. case_04843 is a known, accepted,
+        # unfixed spurious FAIL as a result.
         _blob_nofence = _blank_fences(blob, _fr)
         _has_same_line = _has_cred_exfil_outside_fence(blob, _fr)
         _has_cross = bool(
