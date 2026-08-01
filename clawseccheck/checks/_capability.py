@@ -26,6 +26,7 @@ from ..collector import (
 
 from . import _shared
 from ._shared import (
+    _b323_contains_env_var_reference,
     _config_unreadable,
     _custom,
     _finding,
@@ -1089,6 +1090,73 @@ _B326_JS_TRIM_CHARS = "".join(chr(c) for c in (
 ))
 
 
+# B-397: OpenClaw's real bypass computation (grounded against the installed dist,
+# bash-tools-*.js's createExecTool()/resolveExecModePolicy(), the same function the
+# B326 grounding comment above already traces for tools.elevated) does NOT stop at
+# tools.elevated.enabled/allowFrom -- the elevated "full" override is itself gated by
+# whether the GLOBAL tools.exec.* policy already resolves to security="full"/ask="off"
+# (`modePolicyAllowsFullBypass`). Absence of mode/security/ask resolves to that SAME
+# permissive state (configuredSecurity defaults absent -> "full" for a non-sandbox
+# host; ask defaults absent -> "off"; mode absent falls through the same way) -- so
+# only an EXPLICIT blocking value counts. The common "nothing under tools.exec set at
+# all" config genuinely reaches the bypass and must still FAIL; only a config that
+# EXPLICITLY hardens mode/security/ask should downgrade.
+_B326_BLOCKING_MODES = frozenset({"deny", "allowlist", "ask", "auto"})
+_B326_BLOCKING_SECURITIES = frozenset({"deny", "allowlist"})
+_B326_BLOCKING_ASKS = frozenset({"on-miss", "always"})
+
+
+def _b326_exec_policy_blocking_reason(cfg: dict) -> str | None:
+    """The GLOBAL tools.exec.* field (if any) that already blocks the elevated "full"
+    override from reaching security="full"/ask="off", or None if nothing does.
+
+    Deliberately checks all three fields independently rather than modelling the real
+    resolver's mode-takes-precedence-when-present rule exactly: a malformed config
+    that combines mode with security/ask (the real schema forbids this, so OpenClaw
+    itself would refuse to start on one) could in principle make this return a
+    blocking reason the real resolver would have ignored -- but that only pushes the
+    verdict from FAIL to WARN, which is the safe direction (Golden Rule #5), never a
+    false FAIL.
+
+    Deliberately GLOBAL-scope only: a per-agent agents.list[].tools.exec.* override
+    (which the real resolver layers under the global default, mirroring
+    resolveExecConfig()) is not read here -- see the check's own docstring for why
+    that is a documented, not silent, gap.
+    """
+    mode = dig(cfg, "tools.exec.mode")
+    if isinstance(mode, str) and mode in _B326_BLOCKING_MODES:
+        return f"tools.exec.mode={mode!r}"
+    security = dig(cfg, "tools.exec.security")
+    if isinstance(security, str) and security in _B326_BLOCKING_SECURITIES:
+        return f"tools.exec.security={security!r}"
+    ask = dig(cfg, "tools.exec.ask")
+    if isinstance(ask, str) and ask in _B326_BLOCKING_ASKS:
+        return f"tools.exec.ask={ask!r}"
+    return None
+
+
+def _b326_exec_policy_unresolved_reason(cfg: dict) -> str | None:
+    """B-397 (C-135 round on this same fix): the field (if any) among
+    tools.exec.mode/security/ask that contains an unresolved ${VAR} substitution --
+    the identical hazard Defect 1 fixed for agents.defaults.elevatedDefault itself,
+    just not originally extended to these three newer conjunct fields. OpenClaw's own
+    substituteAny()/resolveConfigForRead() applies ${VAR} substitution recursively to
+    every string value in the config tree, not just elevatedDefault, so
+    'tools.exec.mode: "${MODE}"' is just as real a config shape. Whichever value it
+    resolves to at runtime could be blocking or permissive; a static scan cannot tell,
+    so this must route to UNKNOWN rather than silently falling through
+    `_b326_exec_policy_blocking_reason` as "not blocking" (which produced a false
+    FAIL: the field could easily resolve to a genuinely blocking value)."""
+    for field, value in (
+        ("tools.exec.mode", dig(cfg, "tools.exec.mode")),
+        ("tools.exec.security", dig(cfg, "tools.exec.security")),
+        ("tools.exec.ask", dig(cfg, "tools.exec.ask")),
+    ):
+        if isinstance(value, str) and _b323_contains_env_var_reference(value):
+            return f"{field}={value!r}"
+    return None
+
+
 def _b326_elevated_allow_from_absent(cfg: dict) -> bool:
     """True when the GLOBAL tools.elevated.allowFrom grants no provider a reachable sender
     (mirrors the real resolver, not "is something configured" -- see the grounding comment
@@ -1107,12 +1175,51 @@ def check_elevated_default_full(ctx: Context) -> Finding:
     """B326 — agents.defaults.elevatedDefault="full" bypasses human approval by default
     (see the grounding comment above for why "full" alone bypasses while "on"/"ask" don't).
 
-    UNKNOWN — no openclaw.json, or unparseable/unreadable.
-    PASS    — elevatedDefault is absent, "off", "on", or "ask".
+    B-397 defect 1: elevatedDefault is compared against the literal string "full", which a
+    value reaching "full" through OpenClaw's own ${VAR} substitution (env.vars / process
+    env, applied by applyConfigEnvVars at startup) evades entirely -- the identical hazard
+    B323 already models for a PATH override, via the same _b323_contains_env_var_reference
+    this check now reuses (relocated to checks/_shared.py since it is reused by 2+ topics,
+    per CLAUDE.md §3.1). Routed to UNKNOWN, never PASS: static config cannot resolve what
+    an unresolved reference expands to.
+
+    B-397 defect 2: the FAIL branch previously modelled only 2 of the real 4 conjuncts the
+    installed dist requires for the bypass (see the B-397 grounding comment above
+    _B326_BLOCKING_MODES for the createExecTool()/resolveExecModePolicy() trace) -- an
+    explicit, hardening tools.exec.mode/security/ask at the GLOBAL scope also blocks it,
+    and previously still produced a false FAIL. A 4th real conjunct
+    (~/.openclaw/exec-approvals.json, mutable RUNTIME state OpenClaw itself writes, not
+    static config) is a genuine additional gate the dist enforces but is deliberately NOT
+    modelled here -- out of this tool's read-only static-config scope (Golden Rule #2), not
+    an oversight. A 5th, per-agent agents.list[].tools.exec.* override (layered under the
+    global default the same way B-395 found for tool-policy resolution generally) is also
+    NOT modelled here -- the same deferred multi-layer-composition gap B-395 already filed
+    as its own follow-up for tool-policy resolution generally.
+
+    B-397 (C-135 round on this same fix): defect 1's ${VAR} handling covered
+    elevatedDefault itself but not the three NEW exec-policy conjunct fields defect 2
+    added -- 'tools.exec.mode: "${MODE}"' is just as real a config shape (OpenClaw's
+    substitution is recursive over the whole config tree, not scoped to one field), and
+    silently fell through _b326_exec_policy_blocking_reason as "not blocking" -> a false
+    FAIL. _b326_exec_policy_unresolved_reason now catches this and routes to UNKNOWN.
+
+    UNKNOWN — no openclaw.json, unparseable/unreadable, elevatedDefault contains an
+              unresolved ${VAR} substitution, OR (once elevatedDefault=="full" and
+              elevated tools are otherwise reachable) one of tools.exec.mode/security/
+              ask contains an unresolved ${VAR} substitution -- either way, cannot
+              determine what it resolves to.
+    PASS    — elevatedDefault is absent, "off", "on", or "ask" (a literal, non-interpolated
+              value).
     WARN    — "full" but dormant: tools.elevated.enabled=False, OR global allowFrom has no
-              entry that could ever match a sender (blocks the bypass today; reopening the
-              gate later restores reachability).
-    FAIL    — "full" and reachable: enabled not explicitly False AND allowFrom has an entry.
+              entry that could ever match a sender, OR an explicit, LITERAL GLOBAL
+              tools.exec.mode/security/ask already hardens the exec-tool policy against
+              the bypass (any one blocks the bypass today; reopening any of them later
+              restores reachability).
+    FAIL    — "full" and reachable: enabled not explicitly False, allowFrom has an entry,
+              AND no explicit tools.exec.mode/security/ask hardening blocks it (absence of
+              all three resolves to the SAME permissive state as an explicit "full"/"off",
+              so absence does not clear this -- only an explicit, literal blocking value
+              does; an unresolved ${VAR} in any of the three routes to UNKNOWN instead).
     """
     if not ctx.config_found:
         return _finding(
@@ -1127,6 +1234,28 @@ def check_elevated_default_full(ctx: Context) -> Finding:
 
     cfg = ctx.config
     level = dig(cfg, "agents.defaults.elevatedDefault")
+
+    # B-397: a value reaching "full" through OpenClaw's own ${VAR} substitution
+    # (env.vars / process env, applied at startup by applyConfigEnvVars) evades a
+    # literal "full" comparison entirely -- the same hazard already modelled for
+    # B323's PATH-override check via _b323_contains_env_var_reference. Routed to
+    # UNKNOWN, never PASS: static config cannot resolve what the variable expands to,
+    # and a confident PASS here is the exact "lying when state is undeterminable"
+    # Golden Rule #4 forbids. This must run BEFORE the `level != "full"` PASS below,
+    # since an interpolated value is never the literal string "full" even when it
+    # resolves to it at runtime.
+    if isinstance(level, str) and _b323_contains_env_var_reference(level):
+        return _finding(
+            "B326",
+            UNKNOWN,
+            f"agents.defaults.elevatedDefault is {level!r}, which contains an "
+            "unresolved ${VAR} substitution -- OpenClaw applies env-var references at "
+            "startup, so whether this resolves to \"full\" (bypassing human approval) "
+            "cannot be determined from static config alone.",
+            "Avoid interpolating agents.defaults.elevatedDefault from an environment "
+            "variable; set it to a literal \"ask\" (or leave it unset) so its effective "
+            "value is auditable from config alone.",
+        )
 
     if level != "full":
         level_label = repr(level) if level is not None else "absent"
@@ -1143,10 +1272,12 @@ def check_elevated_default_full(ctx: Context) -> Finding:
     enabled = dig(cfg, "tools.elevated.enabled")
     enabled_false = enabled is False
     allow_from_absent = _b326_elevated_allow_from_absent(cfg)
-    if enabled_false or allow_from_absent:
+    exec_policy_block = _b326_exec_policy_blocking_reason(cfg)
+    if enabled_false or allow_from_absent or exec_policy_block:
         reasons = [r for r, hit in (
             ("tools.elevated.enabled=false", enabled_false),
             ("tools.elevated.allowFrom is absent/empty for every provider", allow_from_absent),
+            (exec_policy_block, exec_policy_block is not None),
         ) if hit]
         return _finding(
             "B326",
@@ -1159,13 +1290,41 @@ def check_elevated_default_full(ctx: Context) -> Finding:
             evidence=["agents.defaults.elevatedDefault=\"full\""] + reasons,
         )
 
+    # B-397 (C-135 round on this same fix): none of the three exec-policy fields
+    # matched a known-blocking value above, but one of them may contain an unresolved
+    # ${VAR} reference -- the same class of bug Defect 1 fixed for elevatedDefault
+    # itself, just not originally extended to these three newer conjunct fields.
+    # Whether an unresolved field would have resolved to a blocking value is
+    # undeterminable from static config, so this must route to UNKNOWN rather than
+    # confidently FAIL.
+    exec_policy_unresolved = _b326_exec_policy_unresolved_reason(cfg)
+    if exec_policy_unresolved is not None:
+        return _finding(
+            "B326",
+            UNKNOWN,
+            "agents.defaults.elevatedDefault=\"full\" and elevated tools are otherwise "
+            f"reachable, but {exec_policy_unresolved} contains an unresolved ${{VAR}} "
+            "substitution -- whether it resolves to a value that blocks the bypass "
+            "cannot be determined from static config alone.",
+            "Avoid interpolating tools.exec.mode/security/ask from an environment "
+            "variable; set them to literal values so their effective posture is "
+            "auditable from config alone.",
+            evidence=[
+                "agents.defaults.elevatedDefault=\"full\"",
+                f"tools.elevated.enabled={enabled!r} (not explicitly false)",
+                f"tools.elevated.allowFrom={dig(cfg, 'tools.elevated.allowFrom')!r} (reachable)",
+                f"{exec_policy_unresolved} (unresolved)",
+            ],
+        )
+
     return _finding(
         "B326",
         FAIL,
         "agents.defaults.elevatedDefault=\"full\" -- elevated tools bypass human approval "
-        "by default (tools.elevated.enabled is not explicitly false, and "
-        "tools.elevated.allowFrom grants at least one sender), unlike \"on\"/\"ask\" which "
-        "both still require approval.",
+        "by default (tools.elevated.enabled is not explicitly false, "
+        "tools.elevated.allowFrom grants at least one sender, and no tools.exec.mode/"
+        "security/ask hardening blocks it), unlike \"on\"/\"ask\" which both still "
+        "require approval.",
         "Set agents.defaults.elevatedDefault to \"ask\" (or leave it unset -- the runtime "
         "default is the equally-gated \"on\") so elevated actions still require human "
         "approval.",
@@ -1173,6 +1332,7 @@ def check_elevated_default_full(ctx: Context) -> Finding:
             "agents.defaults.elevatedDefault=\"full\"",
             f"tools.elevated.enabled={enabled!r} (not explicitly false)",
             f"tools.elevated.allowFrom={dig(cfg, 'tools.elevated.allowFrom')!r} (reachable)",
+            "no tools.exec.mode/security/ask hardening blocks the bypass",
         ],
     )
 

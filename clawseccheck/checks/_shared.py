@@ -2487,3 +2487,76 @@ def _gateway_remote_exposure_reason(cfg: dict) -> str | None:
     if mode in ("serve", "funnel"):
         return f"gateway.tailscale.mode={mode}"
     return None
+
+
+# B-397: relocated from _config.py (B323-only originally) -- B326 needs the identical
+# env-var-reference detection, so per §3.1's "reused by 2+ topics -> _shared.py" rule
+# this leaves its original topic module rather than reaching across it.
+_B323_ENV_VAR_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def _b323_parse_env_token_at(value: str, index: int) -> "tuple[str, int] | None":
+    """Faithful port of OpenClaw's ``parseEnvTokenAt``
+    (``env-substitution-CATXLg7n.js:32-58``).
+
+    Returns ``("escaped", end)`` for a ``$${NAME}`` token, ``("substitution", end)``
+    for a ``${NAME}`` token, or ``None`` if *index* isn't the start of either --
+    including the case where ``NAME`` doesn't match OpenClaw's own
+    ``ENV_VAR_NAME_PATTERN`` (``/^[A-Z_][A-Z0-9_]*$/``, all-caps only) or the ``}``
+    is missing. *end* is the index of the closing ``}``.
+    """
+    if index >= len(value) or value[index] != "$":
+        return None
+    nxt = value[index + 1] if index + 1 < len(value) else ""
+    after_next = value[index + 2] if index + 2 < len(value) else ""
+    if nxt == "$" and after_next == "{":
+        start = index + 3
+        end = value.find("}", start)
+        if end != -1:
+            name = value[start:end]
+            if _B323_ENV_VAR_NAME_RE.match(name):
+                return ("escaped", end)
+    if nxt == "{":
+        start = index + 2
+        end = value.find("}", start)
+        if end != -1:
+            name = value[start:end]
+            if _B323_ENV_VAR_NAME_RE.match(name):
+                return ("substitution", end)
+    return None
+
+
+def _b323_contains_env_var_reference(value: str) -> bool:
+    """Faithful port of OpenClaw's ``containsEnvVarReference()``
+    (``env-substitution-CATXLg7n.js:102-112``).
+
+    Only an unescaped ``${ALL_CAPS_NAME}`` counts as a real, filtered reference.
+    An escaped ``$${NAME}`` token, or a ``${...}``-shaped token whose name is not
+    all-caps (lowercase/mixed-case, digit-leading, etc.) or is missing its closing
+    ``}``, does NOT count -- OpenClaw's own ``isConfigRuntimeEnvVarAllowed()`` does
+    not block those values; it applies them verbatim (literal ``$`` characters and
+    all) to the runtime environment. A naive ``"${" in value`` substring test
+    conflates these two cases and was found (C-135 adversarial pass) to silently
+    miss a config-declared literal PATH override that OpenClaw actually applies,
+    whenever the token merely *looks* like a substitution (e.g.
+    ``${systemRoot}:/opt/evil/bin`` -- mixed-case name, not a real reference, but
+    the naive check skipped it as if it were one).
+    """
+    if "$" not in value:
+        return False
+    i = 0
+    n = len(value)
+    while i < n:
+        if value[i] != "$":
+            i += 1
+            continue
+        token = _b323_parse_env_token_at(value, i)
+        if token is not None:
+            kind, end = token
+            if kind == "escaped":
+                i = end + 1
+                continue
+            if kind == "substitution":
+                return True
+        i += 1
+    return False

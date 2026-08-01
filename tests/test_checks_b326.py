@@ -30,6 +30,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_elevated_default_full
 from clawseccheck.collector import collect
@@ -350,3 +352,227 @@ def test_fix_text_names_the_field(tmp_path):
     r = check_elevated_default_full(collect(home))
     assert "elevatedDefault" in r.fix
     assert "ask" in r.fix
+
+
+# =====================================================================================
+# B-397 defect 1 -- a value reaching "full" via OpenClaw's ${VAR} substitution evaded
+# the literal-string comparison entirely, producing a confident, lying PASS.
+# =====================================================================================
+
+def test_env_var_fixture_is_unknown_not_pass():
+    r = check_elevated_default_full(
+        collect(FIXTURES / "unknown_b326_elevated_default_env_var")
+    )
+    assert r.status == UNKNOWN, r.detail
+
+
+def test_env_var_substitution_full_is_unknown_not_pass(tmp_path):
+    home = _home(
+        tmp_path,
+        config={
+            "env": {"vars": {"LVL": "full"}},
+            "agents": {"defaults": {"elevatedDefault": "${LVL}"}},
+            "tools": {"elevated": {"allowFrom": {"telegram": ["123456"]}}},
+        },
+    )
+    r = check_elevated_default_full(collect(home))
+    assert r.status == UNKNOWN, r.detail
+
+
+def test_partial_env_var_substitution_is_unknown_not_pass(tmp_path):
+    """"f${SUF}" is not the literal string "full", but it isn't a literal, fully
+    resolved value either -- must not evade detection via a naive equality check."""
+    home = _home(
+        tmp_path,
+        config={
+            "env": {"vars": {"SUF": "ull"}},
+            "agents": {"defaults": {"elevatedDefault": "f${SUF}"}},
+            "tools": {"elevated": {"allowFrom": {"telegram": ["123456"]}}},
+        },
+    )
+    r = check_elevated_default_full(collect(home))
+    assert r.status == UNKNOWN, r.detail
+
+
+def test_escaped_env_var_token_is_not_a_reference(tmp_path):
+    """A literal "$${LVL}" (OpenClaw's own escape syntax) is NOT a real substitution
+    reference -- it is applied verbatim, containing actual '$' characters, so it is
+    also not the literal string "full" and correctly stays PASS (not UNKNOWN)."""
+    home = _home(
+        tmp_path,
+        config={"agents": {"defaults": {"elevatedDefault": "$${LVL}"}}},
+    )
+    r = check_elevated_default_full(collect(home))
+    assert r.status == PASS, r.detail
+
+
+# =====================================================================================
+# B-397 defect 2 -- the FAIL branch modelled only 2 of the 4 real conjuncts OpenClaw
+# requires for the bypass; an explicit, hardening tools.exec.mode/security/ask at the
+# global scope also blocks it and was previously still a false FAIL.
+# =====================================================================================
+
+def test_exec_hardened_fixture_is_warn_not_fail():
+    r = check_elevated_default_full(
+        collect(FIXTURES / "warn_b326_elevated_default_full_exec_hardened")
+    )
+    assert r.status == WARN, r.detail
+    assert "tools.exec.mode" in r.detail
+
+
+@pytest.mark.parametrize("mode", ["deny", "allowlist", "ask", "auto"])
+def test_exec_mode_hardening_downgrades_to_warn(tmp_path, mode):
+    home = _home(
+        tmp_path,
+        config={
+            "agents": {"defaults": {"elevatedDefault": "full"}},
+            "tools": {
+                "elevated": {"enabled": True, "allowFrom": {"telegram": ["*"]}},
+                "exec": {"mode": mode},
+            },
+        },
+    )
+    r = check_elevated_default_full(collect(home))
+    assert r.status == WARN, (mode, r.detail)
+
+
+@pytest.mark.parametrize("security", ["deny", "allowlist"])
+def test_exec_security_hardening_downgrades_to_warn(tmp_path, security):
+    home = _home(
+        tmp_path,
+        config={
+            "agents": {"defaults": {"elevatedDefault": "full"}},
+            "tools": {
+                "elevated": {"enabled": True, "allowFrom": {"telegram": ["*"]}},
+                "exec": {"security": security},
+            },
+        },
+    )
+    r = check_elevated_default_full(collect(home))
+    assert r.status == WARN, (security, r.detail)
+
+
+@pytest.mark.parametrize("ask", ["on-miss", "always"])
+def test_exec_ask_hardening_downgrades_to_warn(tmp_path, ask):
+    home = _home(
+        tmp_path,
+        config={
+            "agents": {"defaults": {"elevatedDefault": "full"}},
+            "tools": {
+                "elevated": {"enabled": True, "allowFrom": {"telegram": ["*"]}},
+                "exec": {"ask": ask},
+            },
+        },
+    )
+    r = check_elevated_default_full(collect(home))
+    assert r.status == WARN, (ask, r.detail)
+
+
+def test_no_tools_exec_at_all_still_fails(tmp_path):
+    """The common, default-posture case: NOTHING under tools.exec is set. Absence
+    resolves to the SAME permissive state as an explicit "full"/"off" (the installed
+    dist defaults configuredSecurity to "full" for a non-sandbox host and ask to
+    "off" when absent) -- this must still FAIL, exactly as before this fix. Absence
+    is not itself a mitigating signal."""
+    home = _home(
+        tmp_path,
+        config={
+            "agents": {"defaults": {"elevatedDefault": "full"}},
+            "tools": {"elevated": {"enabled": True, "allowFrom": {"telegram": ["*"]}}},
+        },
+    )
+    r = check_elevated_default_full(collect(home))
+    assert r.status == FAIL, r.detail
+
+
+def test_exec_mode_full_explicit_still_fails(tmp_path):
+    """An EXPLICIT tools.exec.mode="full" is the permissive value, identical to
+    absence -- must still FAIL, not be mistaken for hardening."""
+    home = _home(
+        tmp_path,
+        config={
+            "agents": {"defaults": {"elevatedDefault": "full"}},
+            "tools": {
+                "elevated": {"enabled": True, "allowFrom": {"telegram": ["*"]}},
+                "exec": {"mode": "full"},
+            },
+        },
+    )
+    r = check_elevated_default_full(collect(home))
+    assert r.status == FAIL, r.detail
+
+
+def test_exec_security_full_explicit_still_fails(tmp_path):
+    home = _home(
+        tmp_path,
+        config={
+            "agents": {"defaults": {"elevatedDefault": "full"}},
+            "tools": {
+                "elevated": {"enabled": True, "allowFrom": {"telegram": ["*"]}},
+                "exec": {"security": "full", "ask": "off"},
+            },
+        },
+    )
+    r = check_elevated_default_full(collect(home))
+    assert r.status == FAIL, r.detail
+
+
+# =====================================================================================
+# B-397 (C-135 round on this same fix): defect 1's ${VAR} handling covered
+# elevatedDefault itself but not the three exec-policy conjunct fields defect 2
+# added -- an unresolved reference in mode/security/ask fell through as "not
+# blocking" and produced a false FAIL.
+# =====================================================================================
+
+@pytest.mark.parametrize("field", ["mode", "security", "ask"])
+def test_exec_policy_env_var_reference_is_unknown_not_fail(tmp_path, field):
+    home = _home(
+        tmp_path,
+        config={
+            "env": {"vars": {"V": "ask"}},
+            "agents": {"defaults": {"elevatedDefault": "full"}},
+            "tools": {
+                "elevated": {"enabled": True, "allowFrom": {"telegram": ["*"]}},
+                "exec": {field: "${V}"},
+            },
+        },
+    )
+    r = check_elevated_default_full(collect(home))
+    assert r.status == UNKNOWN, (field, r.detail)
+
+
+def test_exec_policy_env_var_reference_does_not_override_a_literal_block(tmp_path):
+    """A DIFFERENT field already blocking via a literal value must still win WARN --
+    the unresolved-reference check only matters when nothing else already blocks."""
+    home = _home(
+        tmp_path,
+        config={
+            "env": {"vars": {"V": "always"}},
+            "agents": {"defaults": {"elevatedDefault": "full"}},
+            "tools": {
+                "elevated": {"enabled": True, "allowFrom": {"telegram": ["*"]}},
+                "exec": {"mode": "deny", "ask": "${V}"},
+            },
+        },
+    )
+    r = check_elevated_default_full(collect(home))
+    assert r.status == WARN, r.detail
+    assert "tools.exec.mode" in r.detail
+
+
+def test_exec_policy_env_var_reference_does_not_apply_when_already_dormant(tmp_path):
+    """When tools.elevated.enabled=false already forces WARN, an unresolved exec-policy
+    reference elsewhere must not be independently evaluated -- WARN either way."""
+    home = _home(
+        tmp_path,
+        config={
+            "env": {"vars": {"V": "ask"}},
+            "agents": {"defaults": {"elevatedDefault": "full"}},
+            "tools": {
+                "elevated": {"enabled": False, "allowFrom": {"telegram": ["*"]}},
+                "exec": {"mode": "${V}"},
+            },
+        },
+    )
+    r = check_elevated_default_full(collect(home))
+    assert r.status == WARN, r.detail

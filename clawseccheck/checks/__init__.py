@@ -275,8 +275,6 @@ from ._config import (
     _NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS,
     _is_native_unconditional_critical_check_id,
     _ENV6_TOGGLES,
-    _b323_parse_env_token_at,
-    _b323_contains_env_var_reference,
     _b323_is_literal_path_override,
     check_env_vars_path_override,
     check_audit_target_divergence,
@@ -305,6 +303,7 @@ from ._config import (
 )
 
 from ._shared import (INJECTION_PATTERNS, LOG_SCAN_INJECTION_PATTERNS, _FM_BLOCK_BARE_RE, _FM_BLOCK_HEADERED_RE, _HOOK_EXEC_RE, _skill_frontmatter_block,)
+from ._shared import (_B323_ENV_VAR_NAME_RE, _b323_parse_env_token_at, _b323_contains_env_var_reference,)  # B-397: relocated from _config (reused by B326 too)
 from ._lifecycle import (
     _APPROVAL_BYPASS_RE,
     _B182_ENV_OVERRIDES,
