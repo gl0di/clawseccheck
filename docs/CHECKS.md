@@ -2291,6 +2291,20 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
+### B345 - Self-modification directive in skill content, corroborated by a self-write sink
+
+- Severity: CRITICAL
+- Block: hardening
+- Framework: Prompt Injection / Self-Modification
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Self-modification directive in skill content, corroborated by a self-write sink
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

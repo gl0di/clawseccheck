@@ -625,6 +625,7 @@ from ._content import (
     check_python_runtime_persist_install,
     check_prose_bulk_exfil,
     check_remote_code_dependency,
+    check_self_modification_directive,
     check_self_privesc_directive,
     check_silent_instruction,
     check_social_engineering_phishing,

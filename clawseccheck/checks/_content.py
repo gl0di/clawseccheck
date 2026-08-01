@@ -11385,6 +11385,149 @@ def check_self_privesc_directive(ctx: Context) -> Finding:
     )
 
 
+# ---------- B345 (B-392): self-modification directive in skill content ----------
+# ESET H1 2026 publishes a real malicious sample: a self-modifying skill instructing
+# the agent to write a persistence file and rewrite its own principles, while
+# accepting external modifications. B22 (checks/_lifecycle.py, check_self_modification)
+# is pure config-posture (writable identity/skill files + tools enabled) — nothing in
+# the content ring asks whether a skill's own CONTENT instructs self-modification. A
+# skill can ship the full self-evolution recipe and B22 reads clean.
+#
+# Deliberately anchored on the BEHAVIORAL shape (a rewrite-your-own-X verb + a literal
+# write to the skill's OWN source file), not ESET's sample phrasing/filename — keying
+# on "evolution_skill.py" or "Self-Awakening" would be the C-303 anti-pattern (fits the
+# sample, not the behavior).
+#
+# (?!\.\w) after each noun guards against a config-editor/scaffolder skill that
+# names an actual FILE "instructions.yaml"/"configuration.yaml" — "modify your own
+# instructions.yaml" is a file-editing sentence, not a self-rewrite directive, but
+# without the lookahead the noun match ends right before the dot regardless (C-135).
+_SELF_REWRITE_VERB_RE = re.compile(
+    r"rewrite\s+your\s+(?:own\s+)?(?:underlying\s+)?"
+    r"(?:principles|instructions|configuration)(?!\.\w)"
+    r"|modify\s+your\s+(?:own\s+)?(?:underlying\s+)?(?:principles|instructions)(?!\.\w)"
+    r"|alter\s+your\s+(?:own\s+)?(?:underlying\s+)?(?:principles|instructions)(?!\.\w)"
+    r"|self[-\s]?(?:modify|evolv(?:e|ing)|rewrit(?:e|ing))\b"
+    r"|evolve\s+your\s+(?:own\s+)?(?:principles|instructions|capabilities)(?!\.\w)",
+    re.I,
+)
+# A literal write to the skill's OWN source file — `__file__` is an unambiguous,
+# fixed Python identifier (not a variable requiring dataflow tracking), so a text
+# match is as precise here as an AST walk would be. Mirrors B335's established
+# text-regex + proximity-window idiom for this content ring rather than introducing
+# new AST machinery for a single fixed-literal target.
+#
+# Tolerates the idiomatic keyword-argument forms `open(__file__, mode="a")` and
+# `open(file=__file__, mode="a")`, not just the positional `open(__file__, "a")`
+# (C-135) — `mode=` is common Python style and a bare positional-only match let a
+# real self-write sink silently under-score to WARN instead of FAIL.
+_SELF_WRITE_SINK_RE = re.compile(
+    r"""open\s*\(\s*(?:file\s*=\s*)?__file__\s*,\s*(?:mode\s*=\s*)?["'][wa]b?\+?["']"""
+    r"|Path\s*\(\s*__file__\s*\)\s*\.\s*write_(?:text|bytes)\s*\(",
+)
+_SELF_MOD_WINDOW = 400  # chars; the rewrite directive and the write sink may sit in
+# separate paragraphs/fenced code blocks of the same skill doc (prose describing the
+# change, then the code implementing it) — wider than B335's 200-char same-file window
+# since this correlates prose-to-embedded-code within one document, not two nearby
+# calls in one script.
+
+
+def check_self_modification_directive(ctx: Context) -> Finding:
+    """B345 (B-392) — a skill's own content instructs rewriting its own principles/
+    instructions, corroborated by a literal self-write sink targeting its own source
+    file.
+
+    FAIL    — the rewrite directive is corroborated within `_SELF_MOD_WINDOW` chars by
+              `open(__file__, "a"/"w").write(...)` or `Path(__file__).write_text(...)`
+              — the skill's own code writing to its own source file, an unambiguous
+              technical anchor. Mirrors B159/B335's "two independent signals, never a
+              bare one" discipline for this content ring.
+    WARN    — the bare rewrite-your-own-principles/instructions directive with no
+              corroborating self-write sink nearby. Ambiguous alone: could be prose
+              describing self-modification conceptually without a literal
+              implementation, or benign "you can customize this" scaffolding language
+              brushing against the wording.
+    PASS    — no self-modification directive found, or the only mention is negated
+              ("this skill never modifies itself").
+    UNKNOWN — no installed skills to inspect.
+
+    Distinct from B60 (check_prompt_self_replication — copying the PROMPT/instructions
+    to replies/memory/other agents, a different mechanism than writing a FILE to disk)
+    and B335 (check_python_runtime_persist_install — narrowly scoped to sitecustomize/
+    PYTHONSTARTUP auto-execution, not general self-file-mutation).
+    """
+    if not ctx.installed_skills:
+        return _finding(
+            "B345",
+            UNKNOWN,
+            "No installed skills to inspect for self-modification directives.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+
+    fails: list[str] = []
+    warns: list[str] = []
+    for name, blob in ctx.installed_skills.items():
+        for m in _SELF_REWRITE_VERB_RE.finditer(blob):
+            # _negation_governs_trigger, not the bare _negation_context: a whole-window
+            # negator match lets an unrelated, sentence-separated disclaimer ("Do not
+            # modify configuration files belonging to OTHER skills...") silently
+            # dampen a real, later self-rewrite directive within the same 200-char
+            # lookback (C-135) — the clause-bound helper requires no sentence break
+            # between the negator and this trigger, closing that evasion.
+            if _negation_governs_trigger(blob, m.start()):
+                continue
+            lo = max(0, m.start() - _SELF_MOD_WINDOW)
+            hi = min(len(blob), m.end() + _SELF_MOD_WINDOW)
+            window = blob[lo:hi]
+            snippet = _obf_clip(m.group(0))
+            if _SELF_WRITE_SINK_RE.search(window):
+                fails.append(
+                    f"{name}: self-modification directive ({snippet}) corroborated by "
+                    "a self-write sink targeting its own source file"
+                )
+            else:
+                warns.append(
+                    f"{name}: self-modification directive ({snippet}), no "
+                    "corroborating self-write sink nearby"
+                )
+            break  # one finding per skill is enough
+
+    if fails:
+        extra = f" (+{len(fails) - 4} more)" if len(fails) > 4 else ""
+        return _finding(
+            "B345",
+            FAIL,
+            "Self-modification directive with corroborating self-write sink: "
+            + "; ".join(fails[:4]) + extra,
+            "Remove the instruction to rewrite the skill's own principles/instructions "
+            "combined with the self-write sink (open(__file__, ...).write(...) / "
+            "Path(__file__).write_text(...)) — a skill should never persist changes to "
+            "its own source file.",
+            fails + warns,
+        )
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _finding(
+            "B345",
+            WARN,
+            "Possible self-modification directive (no corroborating self-write sink): "
+            + "; ".join(warns[:4]) + extra,
+            "Review this skill's self-modification language. If it is not intended to "
+            "literally rewrite its own instructions and persist the change, clarify "
+            "the wording; if it is, that is worth explicit human review before "
+            "installing.",
+            warns,
+            severity=MEDIUM,
+        )
+    return _finding(
+        "B345",
+        PASS,
+        "No self-modification directive found in installed skill content.",
+        "Keep skill content free of directives to rewrite its own principles/"
+        "instructions and persist the change to its own source file.",
+    )
+
+
 # C-210: prose-intent bulk-data exfiltration -- natural-language description of
 # collecting bulk/PII data and sending it to an external (non-first-party) endpoint.
 # Distinct from C-203 (code-shaped host-info telemetry): this is prose/workflow-step

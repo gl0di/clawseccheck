@@ -2739,6 +2739,25 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B345 (B-392, ESET H1 2026): a skill's own CONTENT (prose or code) instructs
+    # rewriting its own principles/instructions. Distinct from B22 (a config-posture
+    # check — writable identity/skill files + tools enabled), which inspects nothing
+    # about a skill's content: a skill can ship the full self-evolution recipe and B22
+    # still reads clean. WARN on the bare rewrite-your-own-principles directive
+    # (ambiguous alone); FAIL only when corroborated by a literal self-write sink in
+    # the same window (`open(__file__, "a"/"w").write(...)` / `Path(__file__)
+    # .write_text(...)`) — the skill's own code writing to its own source file, an
+    # unambiguous technical anchor. Same "two independent signals, never a bare one"
+    # discipline B159/B335 already established for this content ring.
+    CheckMeta(
+        "B345",
+        "Self-modification directive in skill content, corroborated by a self-write sink",
+        CRITICAL,
+        "hardening",
+        "Prompt Injection / Self-Modification",
+        confidence="MEDIUM",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
