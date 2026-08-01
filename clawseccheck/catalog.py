@@ -2719,6 +2719,26 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B344 (C-338, ESET H1 2026): a skill instructing the agent to run named
+    # offensive-security tooling (Mimikatz/Impacket/BloodHound/Rubeus/CrackMapExec)
+    # against Active Directory. Naming a tool is not malice — these have legitimate
+    # authorized-defender uses and a detection-engineering skill legitimately discusses
+    # all of them by name (same hazard the B-202 accepted residual documents). WARN
+    # only when an agent-directed imperative is tightly bound to the tool name, or an
+    # AD-credential/DC-access prerequisites phrase sits nearby a bare mention, AND no
+    # defensive/detection framing is present. Advisory (scored=False), never FAIL — a
+    # bare tool-name match has no hard technical anchor the way B156/B13's confirmed
+    # exfil transport does.
+    CheckMeta(
+        "B344",
+        "Offensive-security tooling (Mimikatz/Impacket/BloodHound/Rubeus/CrackMapExec) directive",
+        HIGH,
+        "advisory",
+        "Skill Malware / Offensive Tooling",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

@@ -2277,6 +2277,20 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B344 - Offensive-security tooling (Mimikatz/Impacket/BloodHound/Rubeus/CrackMapExec) directive
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Skill Malware / Offensive Tooling
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Offensive-security tooling (Mimikatz/Impacket/BloodHound/Rubeus/CrackMapExec) directive
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

@@ -124,6 +124,7 @@ from ._content import (
     check_manifest_absent,
     check_markdown_image_exfil,
     check_model_artifact_provenance,
+    check_offensive_tooling_directive,
     check_overt_secret_exfil,
     check_per_source_trust_contracts,
     check_persona_jailbreak,
@@ -4761,4 +4762,5 @@ SKILL_CONTENT_RING = (
     check_install_directive_supply_chain,  # B103 — install[] supply-chain provenance (B-099)
     check_interpreter_interpolation_injection,  # B153 — interpreter one-liner interpolation
     check_model_artifact_provenance,  # B343 — ML model artifact provenance (C-341)
+    check_offensive_tooling_directive,  # B344 — offensive-security tooling directive (C-338)
 )

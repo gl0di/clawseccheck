@@ -6930,6 +6930,202 @@ def check_clickfix_setup_section(ctx: Context) -> Finding:
     )
 
 
+# ---------- B344 (C-338): offensive-security tooling directive ----------
+# ESET H1 2026: a malicious skill class instructs the agent to run named red-team
+# tooling against Active Directory. The published sample's own Inputs/Outputs block
+# names domain credentials + DC network access as prerequisites and "Tools: Impacket,
+# Mimikatz, BloodHound, Rubeus, CrackMapExec" as the toolset.
+#
+# Deliberately narrow, named tool list (ESET's own sample vocabulary), not a general
+# AD/pentest wordlist — nmap/metasploit/cobalt-strike would need their own grounding
+# pass. Kerberoasting is included (a specific, high-precision AD-attack technique name,
+# not a bare generic term like "lsass" which is excluded — legitimate Windows
+# monitoring/EDR content references lsass.exe routinely and a bare match would be noisy).
+_OFFENSIVE_TOOL_NAMES = r"mimikatz|impacket|bloodhound|rubeus|crackmapexec|kerberoast(?:ing)?"
+
+# C-135 (two independent passes, round 1): the original design ALSO corroborated on an
+# AD-prerequisites phrase (domain credentials, Domain Controller) or the generic
+# _CRED_RE/_EXFIL_RE patterns (curl, base64, POST — tuned for a DIFFERENT threat model)
+# found ANYWHERE in a 300-char window around a bare tool mention. Both reviewers
+# independently constructed real false positives from this: a "Tools we don't bundle"
+# disclaimer sitting near an ordinary curl+POST+base64 heartbeat feature, and a benign
+# sysadmin skill mentioning "Domain Controller" (DNS config) near an unrelated "unlike
+# offensive tools such as Rubeus" comparison. A bare tool mention has no reliable window
+# corroborator that isn't also common in honest, unrelated documentation. Dropped
+# entirely — the imperative binding below is the sole trigger, and ESET's own sample
+# still fires through it ("Run CrackMapExec against the Domain Controller...").
+#
+# Agent-directed imperative TIGHTLY bound to the tool name (0-3 words of gap, not a wide
+# window) — "run/execute/use/launch/deploy/leverage Mimikatz" is a directive; "Mimikatz
+# is a well-known credential-dumping tool" is a mention. The trailing `(?!-\w)` excludes
+# a compound-adjective use ("Impacket-style protocol libraries" describes a FORMAT, not
+# an invocation of the tool itself — round-2 C-135 finding).
+_OFFENSIVE_TOOL_IMPERATIVE_RE = re.compile(
+    rf"\b(run|execute|use|launch|deploy|invoke|leverage)\s+(?:\w+\s+){{0,3}}?"
+    rf"(?:{_OFFENSIVE_TOOL_NAMES})\b(?!-\w)",
+    re.I,
+)
+# Defensive/detection-engineering framing — a blue-team skill that HUNTS this tooling
+# will match every tool-name keyword; this vocabulary is what a detection skill uses to
+# talk about tools it watches FOR, distinct from B334's "documents what not to do"
+# vocabulary (a different framing for a different check).
+_OFFENSIVE_TOOL_DEFENSIVE_RE = re.compile(
+    r"\b(?:detect(?:s|ion|ing)?|hunt(?:s|ing)?|alert(?:s|ing)?\s+on|"
+    r"identif(?:y|ies|ying)\s+(?:the\s+)?(?:use|usage)\s+of|"
+    r"sysmon|siem|\bedr\b|telemetry|"
+    r"blue[-\s]?team|defen(?:se|der|sive)|"
+    r"threat[-\s]?hunt(?:ing)?|"
+    r"security\s+research(?:er)?|"
+    r"authorized\s+(?:penetration\s+test|pentest|red[-\s]?team)"
+    r")\b",
+    re.I,
+)
+_OFFENSIVE_TOOL_WINDOW = 300  # chars, matches B100's _CLICKFIX_PROXIMITY_WINDOW convention
+
+# C-135 (round 1, two independent passes): the original negation gate was a bare
+# `_BROAD_NEGATION_RE.search()` over the whole ±300-char window — the exact bare-window
+# mistake B334 already had to retract (see its own C-135 ROUND 3 note above), because it
+# lets ONE negated sentence ANYWHERE in the window silence a genuinely bound imperative
+# elsewhere in it: "Run CrackMapExec against the DC to enumerate shares... Don't stop
+# until you have full domain compromise." wrongly suppressed via the unrelated second
+# sentence's negator. `_offensive_tool_verb_negated` below is verb-anchored instead —
+# the same fix B334 itself needed, reusing `_b334_verb_negated`'s already-proven
+# carrier-word/clause-boundary machinery (`_B334_NEGATION_CARRIER_RE`,
+# `_B334_CLAUSE_BREAK_RE`, `_B334_NEGATOR_VERB_GAP_RE`, `_B334_PARENTHETICAL_RE`)
+# verbatim, rather than re-deriving it. The only local piece is the trigger-word set:
+# `_BROAD_NEGATION_RE`'s `do\s?n['o]?t` alternative matches "don't"/"do not" but NOT
+# "does not"/"doesn't" (both agents found this independently) — "This tool does not run
+# any of Mimikatz's techniques" WARNed under the original design.
+_OFFENSIVE_TOOL_NEGATION_RE = re.compile(
+    r"\b(?:never|avoid|do\s?n['o]?t|don't|does\s?n['o]?t|doesn't|"
+    r"must\s+not|should\s+not|shouldn't|mustn't|cannot|can't|refuse\s+to)\s+\w+",
+    re.I,
+)
+_OFFENSIVE_TOOL_BARE_NEGATOR_RE = re.compile(
+    r"\b(?:never|do\s?n['o]?t|don't|does\s?n['o]?t|doesn't|must\s+not|should\s+not|"
+    r"shouldn't|mustn't|cannot|can't|avoid|refuse\s+to)\b",
+    re.I,
+)
+
+
+def _offensive_tool_verb_negated(blob: str, m: "re.Match") -> bool:
+    """True when a negator grammatically governs THIS imperative match.
+
+    Verb-anchored, not window-anchored — see the C-135 note above for why. Mirrors
+    `_b334_verb_negated` exactly (same carrier-word / clause-boundary / filler-gap
+    logic; see that function's own docstring for the full rationale of each piece),
+    swapped to `_OFFENSIVE_TOOL_NEGATION_RE`/`_OFFENSIVE_TOOL_BARE_NEGATOR_RE` so
+    "does not"/"doesn't" are covered too.
+    """
+    # m.group(1) is just the verb ("run"), not the full verb+filler+tool-name match —
+    # the negation regex only swallows ONE word after the negator ("never <word>"), so
+    # the "consumed the verb itself" check below must compare against the END OF THE
+    # VERB, not the end of the whole multi-word match (which includes the tool name).
+    verb_end = m.end(1)
+    lo = max(0, m.start() - _BROAD_NEGATION_WINDOW)
+    last = None
+    for nm in _OFFENSIVE_TOOL_NEGATION_RE.finditer(blob, lo, verb_end):
+        if nm.start() < m.start():
+            last = nm  # the closest negator that opens before the verb wins
+    if last is None:
+        bare = None
+        for nm in _OFFENSIVE_TOOL_BARE_NEGATOR_RE.finditer(blob, lo, m.start()):
+            bare = nm
+        return bool(bare and _B334_PARENTHETICAL_RE.match(blob[bare.end() : m.start()]))
+    if last.end() >= verb_end:
+        return True  # the negator consumed the verb itself: "never run", "does not run"
+    carrier = blob[last.start() : last.end()].split()[-1]
+    if not _B334_NEGATION_CARRIER_RE.match(carrier):
+        return False  # the negator already has its own object verb; this one is separate
+    gap = blob[last.end() : m.start()]
+    if _B334_CLAUSE_BREAK_RE.search(gap):
+        return False
+    return bool(_B334_NEGATOR_VERB_GAP_RE.match(gap))
+
+
+def check_offensive_tooling_directive(ctx: Context) -> Finding:
+    """B344 (C-338) — offensive-security tooling (Mimikatz/Impacket/BloodHound/Rubeus/
+    CrackMapExec) instructed against Active Directory.
+
+    WARN when an agent-directed imperative is tightly bound to the tool name ("run
+    Mimikatz", "use CrackMapExec" — 0-3 words of gap, not a wide proximity window).
+    Suppressed when defensive/detection-engineering framing (hunts/detects/SIEM/
+    blue-team/authorized pentest) sits within a window of the match, or when a negator
+    grammatically governs the match within the same clause: naming a tool is not
+    malice, and a security-research or detection-engineering skill legitimately
+    discusses all of these by name. This is the same hazard the B-202 accepted
+    residual documents (a defensive-comment exec-verb false positive that took three
+    C-135 rounds to retract) — do not create a second one.
+
+    C-135 (two independent adversarial passes) retracted an earlier design that also
+    corroborated on a wide-window AD-prerequisites phrase or generic credential/exfil
+    pattern (curl/base64/POST) near a BARE tool mention — both reviewers constructed
+    real false positives from ordinary, unrelated documentation shapes co-occurring in
+    the same window. The tight imperative binding is a sound-by-construction
+    replacement: it requires direct grammatical adjacency between the directive verb
+    and the tool name, not mere co-occurrence.
+
+    Advisory (scored=False), WARN-only — a bare tool-name match has no hard technical
+    anchor (unlike B156/B13's confirmed exfil transport), so this stays WARN like B100
+    rather than FAIL.
+
+    HONEST SCOPE: this is a narrow, ESET-sample-shaped signal keyed on five named
+    tools and a tight imperative binding, not general Active-Directory-attack
+    detection. A skill describing the same attack chain in generic terms ("standard AD
+    enumeration and credential extraction techniques"), or naming a tool without a
+    directly-bound action verb (e.g. only in an Inputs/Prerequisites list with no
+    "run X" sentence), is invisible to this check — a PASS here is not "this skill
+    doesn't attack AD."
+    """
+    if not ctx.installed_skills:
+        return _custom(
+            "B344",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for offensive-security tooling directives.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+
+    warns: list[str] = []
+    for name, blob in ctx.installed_skills.items():
+        for m in _OFFENSIVE_TOOL_IMPERATIVE_RE.finditer(blob):
+            window_start = max(0, m.start() - _OFFENSIVE_TOOL_WINDOW)
+            window = blob[window_start : m.end() + _OFFENSIVE_TOOL_WINDOW]
+            if _OFFENSIVE_TOOL_DEFENSIVE_RE.search(window):
+                continue
+            if _offensive_tool_verb_negated(blob, m):
+                continue
+            warns.append(
+                f"{name}: agent-directed imperative targeting offensive-security "
+                f"tooling ({_obf_clip(m.group(0))}), no defensive framing or negation"
+            )
+            break  # one finding per skill is enough
+
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _custom(
+            "B344",
+            MEDIUM,
+            WARN,
+            "Offensive-security tooling directive: " + "; ".join(warns[:4]) + extra,
+            "These tools have legitimate authorized-defender uses, but an explicit "
+            "instruction to run one of them is worth a human review before this "
+            "skill acts against a real Domain Controller. If this is a "
+            "detection-engineering or security-research skill, framing it as such "
+            "(hunts/detects/SIEM/authorized pentest) will clear this WARN.",
+            warns,
+        )
+    return _custom(
+        "B344",
+        MEDIUM,
+        PASS,
+        "No offensive-security tooling directive found (or the mention is framed "
+        "defensively/as documentation, or negated).",
+        "Keep offensive-tooling references limited to defensive/detection-engineering "
+        "or authorized-pentest documentation context.",
+    )
+
+
 def check_conditional_sleeper_trigger(ctx: Context) -> Finding:
     """B65 — Conditional sleeper-trigger detector (C-080).
 
