@@ -8,6 +8,7 @@ description: Keeps a repository's operating instructions current for multiple ag
 ## What this skill does
 
 Keeps the repo tidy for multi-agent work:
+
 - Updates `AGENTS.md` to reflect the current workflow rules
 
 ## When to use this skill
