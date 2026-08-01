@@ -525,14 +525,79 @@ def _external_tainted_names(
     `_tainted_names`'s own fixpoint (the same mature, C-135-hardened scope/binding
     model already used for the decode->exec taint rule -- near-mechanical
     transposition here, not a new design).
+
+    B-414: two more propagation shapes join the same fixpoint, using the SAME four
+    `sourced` predicates applied to a different expression, and the SAME global/
+    nonlocal-redirect bucketing (factored out into `_bucket_new_taint` below so it is
+    not triplicated):
+
+      * a comprehension's `for target in iterable` taints `target`, scope-bucketed to
+        the comprehension's OWN scope (`_build_toplevel_owner_map`'s B-414 addition --
+        `owner_map.get(<the ast.comprehension clause>)` resolves to the enclosing
+        ListComp/SetComp/DictComp/GeneratorExp node), when `iterable` is itself
+        sourced/tainted -- this is what closes the silent TT5 miss on
+        `[subprocess.run(c, shell=True) for c in cmds]` where `cmds` is tainted.
+      * a walrus (`x := ...`) target is sourced exactly like an assignment's RHS, but
+        BUBBLED past every enclosing comprehension-type scope before bucketing -- per
+        PEP 572, it binds in the scope CONTAINING the comprehension (the outermost one,
+        for a nested comprehension), never the comprehension itself, matching
+        `_own_bound_names`'s deliberate choice not to treat a walrus target as a
+        comprehension's own bound name either.
     """
     tainted: dict = {}
     for scope, names in func_param_taint.items():
         tainted.setdefault(scope, set()).update(names)
 
     assigns = [n for n in ast.walk(tree) if isinstance(n, (ast.Assign, ast.AugAssign))]
+    comprehensions = [n for n in ast.walk(tree) if isinstance(n, ast.comprehension)]
+    namedexprs = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name)
+    ]
     global_cache: dict = {}
     nonlocal_cache: dict = {}
+
+    def _global_nonlocal_for(scope) -> tuple[set[str], set[str]]:
+        if scope is None:
+            return set(), set()
+        if scope not in global_cache:
+            global_cache[scope] = _global_declared_names(scope, owner_map)
+        if scope not in nonlocal_cache:
+            nonlocal_cache[scope] = _nonlocal_declared_names(scope, owner_map)
+        return global_cache[scope], nonlocal_cache[scope]
+
+    def _bucket_new_taint(name: str, scope, global_names: set[str], nonlocal_names: set[str]) -> bool:
+        """Add `name` to `tainted`, redirected to its REAL bucket exactly like the
+        Assign path always has (B-205/B-215): a `global`-declared name always goes to
+        the module (None) bucket; a `nonlocal`-declared name resolves to whichever
+        ancestor(s) Python would really rebind (`_nonlocal_target_scopes`), falling
+        back to the pre-B-215 seed-every-ancestor over-approximation when unresolvable;
+        anything else buckets to `scope` itself. Returns whether anything changed."""
+        if name in global_names:
+            bucket_keys = [None]
+        elif name in nonlocal_names:
+            resolved = _nonlocal_target_scopes(
+                name, scope, parent_scope, owner_map, shadow_cache, nonlocal_cache
+            )
+            if not resolved:
+                # Unresolvable binding form -- fall back to the pre-B-215
+                # over-approximation (see `_nonlocal_target_scopes`).
+                resolved = []
+                ancestor = parent_scope.get(scope)
+                while ancestor is not None:
+                    resolved.append(ancestor)
+                    ancestor = parent_scope.get(ancestor)
+            bucket_keys = resolved
+        else:
+            bucket_keys = [scope]
+        changed_here = False
+        for key in bucket_keys:
+            bucket = tainted.setdefault(key, set())
+            if name not in bucket:
+                bucket.add(name)
+                changed_here = True
+        return changed_here
 
     for _ in range(6):
         changed = False
@@ -550,16 +615,7 @@ def _external_tainted_names(
                 continue
 
             scope = owner_map.get(a)
-            if scope is not None:
-                if scope not in global_cache:
-                    global_cache[scope] = _global_declared_names(scope, owner_map)
-                global_names = global_cache[scope]
-                if scope not in nonlocal_cache:
-                    nonlocal_cache[scope] = _nonlocal_declared_names(scope, owner_map)
-                nonlocal_names = nonlocal_cache[scope]
-            else:
-                global_names = set()
-                nonlocal_names = set()
+            global_names, nonlocal_names = _global_nonlocal_for(scope)
 
             names_to_add: list = []
             for t in targets:
@@ -569,28 +625,52 @@ def _external_tainted_names(
                     names_to_add.extend(elt.id for elt in t.elts if isinstance(elt, ast.Name))
 
             for name in names_to_add:
-                if name in global_names:
-                    bucket_keys = [None]
-                elif name in nonlocal_names:
-                    resolved = _nonlocal_target_scopes(
-                        name, scope, parent_scope, owner_map, shadow_cache, nonlocal_cache
-                    )
-                    if not resolved:
-                        # Unresolvable binding form -- fall back to the pre-B-215
-                        # over-approximation (see `_nonlocal_target_scopes`).
-                        resolved = []
-                        ancestor = parent_scope.get(scope)
-                        while ancestor is not None:
-                            resolved.append(ancestor)
-                            ancestor = parent_scope.get(ancestor)
-                    bucket_keys = resolved
-                else:
-                    bucket_keys = [scope]
-                for key in bucket_keys:
-                    bucket = tainted.setdefault(key, set())
-                    if name not in bucket:
-                        bucket.add(name)
-                        changed = True
+                if _bucket_new_taint(name, scope, global_names, nonlocal_names):
+                    changed = True
+
+        for gen in comprehensions:
+            iterable = gen.iter
+            # B-414 (C-135, self-caught): visibility is resolved from `iterable`'s OWN
+            # owner-map position, NOT `gen`'s (the `ast.comprehension` clause always
+            # owner-maps to the comprehension itself) -- `_build_toplevel_owner_map`'s
+            # `_map_comprehension_scope` maps the FIRST generator's `iter` to the
+            # ENCLOSING scope (real Python: it is evaluated there, before the
+            # comprehension's own `for`-target exists), so using `gen` here would
+            # wrongly let that target's own name shadow an outer occurrence of the
+            # SAME bare name in its own iterable (`for cmds in cmds`).
+            visible = _tainted_names_visible(iterable, tainted, owner_map, parent_scope, shadow_cache)
+            sourced = (
+                _value_is_tainted_source(iterable, visible)
+                or _rhs_has_subscript_environ(iterable)
+                or _rhs_has_fstring_taint(iterable, visible)
+                or bool(_names_in(iterable) & visible)
+            )
+            if not sourced:
+                continue
+            scope = owner_map.get(gen)
+            global_names, nonlocal_names = _global_nonlocal_for(scope)
+            for name in _assign_target_names(gen.target):
+                if _bucket_new_taint(name, scope, global_names, nonlocal_names):
+                    changed = True
+
+        for ne in namedexprs:
+            rhs = ne.value
+            visible = _tainted_names_visible(ne, tainted, owner_map, parent_scope, shadow_cache)
+            sourced = (
+                _value_is_tainted_source(rhs, visible)
+                or _rhs_has_subscript_environ(rhs)
+                or _rhs_has_fstring_taint(rhs, visible)
+                or bool(_names_in(rhs) & visible)
+            )
+            if not sourced:
+                continue
+            scope = owner_map.get(ne)
+            while isinstance(scope, _COMPREHENSION_SCOPE_NODES):
+                scope = parent_scope.get(scope)
+            global_names, nonlocal_names = _global_nonlocal_for(scope)
+            if _bucket_new_taint(ne.target.id, scope, global_names, nonlocal_names):
+                changed = True
+
         if not changed:
             break
     return tainted
@@ -1018,6 +1098,24 @@ def _call_args_tainted(node: ast.Call, tainted: set[str]) -> tuple:
 # module must stop here. Shared by `_scope_own_nodes` and `_own_bound_names` so the two
 # cannot drift apart again (B-214 follow-up: they did, and it cost a crit false FAIL).
 _NESTED_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+# B-414: comprehensions (list/set/dict/generator) are ALSO a real Python 3 scope -- a
+# `for` target inside one is local to the comprehension, not the enclosing function --
+# but they are deliberately kept OUT of `_NESTED_SCOPE_NODES` rather than added to it.
+# `_NESTED_SCOPE_NODES` also gates `_scope_own_nodes`, which `_single_list_bindings_local`/
+# `_list_bindings_by_call` (B-413 layer 2's argv-list resolution) and
+# `_function_composes_decode` (TT4) rely on to see every call/assignment "belonging to"
+# a function, INCLUDING ones textually nested inside a comprehension in that function's
+# body (`cmd = [...]; [subprocess.run(cmd) for _ in batch]`). Folding comprehensions into
+# that boundary too would silently stop `_list_bindings_by_call` from resolving such a
+# call's argv list at all (`list_bindings_by_call.get(node)` -> None), which
+# `_subprocess_taint_is_command_injection` reads as "unresolved" and defaults to crit --
+# trading this ticket's false CRITICAL for a DIFFERENT one on a real, common pattern.
+# So comprehension scoping is scoped narrowly to the taint/shadow model that actually
+# has the bug (`_own_bound_names`, `_build_toplevel_owner_map`, `_external_tainted_names`
+# below), via this separate constant, leaving `_scope_own_nodes` and its consumers
+# untouched.
+_COMPREHENSION_SCOPE_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
 
 def _enclosing_evaluated_parts(node: ast.AST) -> list:
@@ -1997,6 +2095,21 @@ def _own_bound_names(scope: ast.AST) -> set[str]:
     resolves to. (A nested def/class still contributes its own NAME, which really is
     bound here; only its body is skipped.)
 
+    B-414: a comprehension (list/set/dict/generator) is handled as a SEPARATE early
+    case (see the `_COMPREHENSION_SCOPE_NODES` check just below) rather than folded
+    into this general walk -- its own-bound-names are exactly its `for`-target(s),
+    nothing else can bind a name inside one, and a walk over its body would otherwise
+    wrongly treat a walrus target found there as bound to the COMPREHENSION instead of
+    the scope containing it (PEP 572). This general walk's existing behaviour when it
+    encounters a comprehension node while computing some OTHER (non-comprehension)
+    scope's own bound names is deliberately left as-is: it does not stop at one (no
+    entry was ever added for the four comprehension node types), so it still descends
+    into a comprehension's `elt`/`ifs`/`iter` looking for exactly the things that DO
+    bind in the enclosing scope by real Python semantics -- a walrus target (correct,
+    per PEP 572) -- while a `for`-target inside it matches no case here and is
+    correctly never picked up as the enclosing scope's own (it belongs to the
+    comprehension's own bucket instead, computed by the early-return case below).
+
     Deliberately position-INSENSITIVE within the scope: Python makes a name local to
     a function for the function's ENTIRE body if it is bound anywhere in it, so a
     rebinding on the last line shadows an outer name on the first line too. That part
@@ -2062,6 +2175,28 @@ def _own_bound_names(scope: ast.AST) -> set[str]:
         must stay hidden, yet its shadow is merged only AFTER its own bucket is read.
         Dropping `n` here is necessary but not sufficient; see `_tainted_names_visible`.
     """
+    if isinstance(scope, _COMPREHENSION_SCOPE_NODES):
+        # B-414: a comprehension's OWN bound names are exactly its `for`-clause
+        # targets, across every `ast.comprehension` in `scope.generators` (multiple
+        # `for`s in ONE comprehension share ONE scope -- `[x for a in A for b in B]`
+        # binds both `a` and `b` here, not two nested scopes). Nothing else can bind a
+        # name here: a comprehension has no statements and no `global`/`nonlocal`
+        # (invalid syntax inside one). A walrus (`:=`) found in `elt`/`key`/`value`/
+        # `ifs`/a later `iter` binds to the scope CONTAINING the comprehension instead
+        # (PEP 572 -- "for the purpose of this rule, the containing scope of a nested
+        # comprehension is the scope that contains the outermost comprehension"), never
+        # to the comprehension itself, so those parts are deliberately never walked
+        # here -- see `_external_tainted_names`'s NamedExpr handling, which bubbles a
+        # walrus target's taint past every enclosing comprehension scope to match. A
+        # nested comprehension/lambda reachable from `elt`/`ifs`/a later `iter` gets
+        # its OWN separate scope bucket (`_build_toplevel_owner_map`) and is resolved
+        # on its own pass, exactly like a nested function already is.
+        return {
+            name
+            for gen in scope.generators
+            for name in _assign_target_names(gen.target)
+        }
+
     bound: set[str] = set()
     # Names this scope declares as belonging to an OUTER binding. Collected by the same
     # scope-bounded walk as `bound`, so a declaration inside a nested function is not
@@ -2154,21 +2289,77 @@ def _build_toplevel_owner_map(funcs: list, classes: list | None = None) -> tuple
     islands; real method-closure chaining is out of scope for this fix, unchanged
     from B-205). Recurses into a nested class-within-a-class (`class Outer: class
     Inner: def load(self): ...`) so `Inner`'s methods get scoped too (C-135 round 2
-    found the one-level-only version reopened the same collision for that shape)."""
+    found the one-level-only version reopened the same collision for that shape).
+
+    B-414: a `Lambda` and a comprehension (list/set/dict/generator) ALSO get their own
+    isolated scope bucket now, at ANY nesting depth, the same way a nested function
+    already did -- `ast.Lambda` was already named in `_NESTED_SCOPE_NODES` (implying it
+    should behave like one) but was never actually special-cased here, so a call inside
+    a lambda body was silently owned by the ENCLOSING function instead; a comprehension
+    had no case at all. Lambda reuses `_map_function_scope` below (generic despite the
+    name: it only sets `parent_scope[node] = enclosing` and recurses treating `node`
+    itself as the new scope, which is exactly right for it too). A comprehension gets
+    its own `_map_comprehension_scope` instead of also reusing `_map_function_scope`
+    unmodified: C-135 (self-review) found that blindly attributing EVERY part of a
+    comprehension to its own new bucket reopens a DIFFERENT false negative when a
+    `for`-target's bare name collides with its OWN iterable's bare name (`for cmds in
+    cmds`, an unusual but syntactically ordinary self-referential rebind) -- real
+    Python evaluates only the FIRST generator's iterable in the scope CONTAINING the
+    comprehension (PEP 530), before the comprehension's own `for`-target binding
+    exists at all, so `_own_bound_names(comp_node)` including that same-named target
+    must not shadow the outer occurrence. `_map_comprehension_scope` maps that one
+    expression to the enclosing scope instead, mirroring `_enclosing_evaluated_parts`'s
+    existing precedent for a nested function/lambda's own decorator/default/annotation
+    expressions (also evaluated in the enclosing scope despite sitting inside the
+    nested node). Every other part of the comprehension -- that generator's own
+    target, all `ifs`, every OTHER generator's target/iter (which CAN see earlier
+    targets -- real Python scoping), and elt/key/value -- still belongs to the
+    comprehension's own bucket. Deliberately NOT via `_NESTED_SCOPE_NODES` itself,
+    which also gates `_scope_own_nodes` for unrelated consumers (B-413 layer 2's
+    argv-list resolution, TT4's decode-composing walk) that must keep seeing a
+    comprehension's own calls/assignments as part of the enclosing function -- see
+    `_COMPREHENSION_SCOPE_NODES`'s own comment for why widening `_NESTED_SCOPE_NODES`
+    itself was rejected."""
     owner: dict = {}
     parent_scope: dict = {}
+
+    def _dispatch_child(child: ast.AST, scope: ast.AST) -> None:
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            _map_function_scope(child, scope)
+        elif isinstance(child, _COMPREHENSION_SCOPE_NODES):
+            _map_comprehension_scope(child, scope)
+        elif isinstance(child, ast.Lambda):
+            _map_function_scope(child, scope)
+        else:
+            _map_scope_subtree(child, scope)
 
     def _map_scope_subtree(node: ast.AST, scope: ast.AST) -> None:
         owner.setdefault(node, scope)
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                _map_function_scope(child, scope)
-            else:
-                _map_scope_subtree(child, scope)
+            _dispatch_child(child, scope)
 
     def _map_function_scope(fn: ast.AST, enclosing) -> None:
         parent_scope[fn] = enclosing
         _map_scope_subtree(fn, fn)
+
+    def _map_comprehension_scope(comp_node: ast.AST, enclosing) -> None:
+        """B-414: like `_map_function_scope`, but the FIRST generator's own `iter`
+        expression is mapped to `enclosing`, NOT to `comp_node` -- real Python (PEP
+        530) evaluates only that one expression in the scope CONTAINING the
+        comprehension, before the comprehension's own `for`-target binding exists.
+        Every other part (that generator's own target, every `ifs`, every OTHER
+        generator's target/iter, and elt/key/value) belongs to `comp_node`'s own
+        bucket, same as `_map_function_scope` would give it."""
+        parent_scope[comp_node] = enclosing
+        owner.setdefault(comp_node, comp_node)
+        generators = getattr(comp_node, "generators", None) or ()
+        first_iter = generators[0].iter if generators else None
+        if first_iter is not None:
+            _map_scope_subtree(first_iter, enclosing)
+        for child in ast.iter_child_nodes(comp_node):
+            if child is first_iter:
+                continue  # already mapped to `enclosing` above
+            _dispatch_child(child, comp_node)
 
     for fn in funcs:
         _map_function_scope(fn, None)
