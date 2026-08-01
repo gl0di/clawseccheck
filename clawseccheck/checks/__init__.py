@@ -1413,6 +1413,10 @@ def _check_error_finding(chk, exc: BaseException) -> Finding:
         framework="Engine robustness",
         scored=False,
         evidence=[f"error type: {type(exc).__name__}"],
+        # B-399: redundant with the `ERR:` id prefix `_degraded_signal` already keys on,
+        # set anyway so the flag stays the single source of truth for "this UNKNOWN is
+        # engine-side" across every producer, not just this one.
+        engine_degraded=True,
     )
 
 
@@ -1443,6 +1447,8 @@ def _check_budget_finding(chk, kind: str, seconds: float | None = None) -> Findi
         framework="Engine robustness",
         scored=False,
         evidence=[f"scan budget: {kind}"],
+        # B-399: see the matching note in _check_error_finding above.
+        engine_degraded=True,
     )
 
 

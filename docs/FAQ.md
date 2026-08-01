@@ -74,9 +74,16 @@ they never add or remove a scored point, they just lower the ceiling.
 
 | Signal | Score capped at | Grade ceiling | What the report says |
 |---|---|---|---|
-| A check **crashed or timed out** | 49 | F | `N check(s) crashed or timed out this run: cannot rule out a CRITICAL condition`, plus a `N checks did not run` banner above the score |
+| A check **crashed, timed out, or hit an unreadable/corrupted input it needed** | 49 | F | `N check(s) could not reach a reliable verdict this run: cannot rule out a CRITICAL condition`, plus an `N checks could not reach a reliable verdict this run` banner above the score |
 | `openclaw.json` is present but **unreadable / unparseable** | 49 | F | `openclaw.json unreadable/unparseable this run: cannot rule out a CRITICAL condition` |
 | A **corroborated runtime signal** in your own trajectory log | 79 | C | `corroborated runtime signal: …` |
+
+The first row covers two shapes: the engine itself gave up on a check (a crash or a
+timeout — B-313), or a check ran fine but honestly couldn't tell you its own answer
+because something it needed to read was unreadable, corrupt, or malformed (B-399) — as
+opposed to a check finding nothing to look at, which never triggers this cap. "There was
+nothing to check" and "something broke while we tried to check" are different facts, and
+only the second one caps the grade.
 
 The reasoning is the same in all three cases, and it is deliberate: the audit lost
 visibility into something, and the honest assumption about an unexamined check is
@@ -103,8 +110,9 @@ for a timeout, valid JSON for an unparseable config — and the cap lifts on the
   device auto-pairing to ANY sender/IP (**B48**, the wildcard-authority case
   specifically — a plain break-glass override on its own is HIGH severity and caps
   the grade at C, not F).
-- **No FAIL at all** — a check crashed or timed out, or `openclaw.json` could not be
-  parsed. See the cap table above; the report names which one it was.
+- **No FAIL at all** — a check crashed, timed out, hit an unreadable/corrupted input it
+  needed, or `openclaw.json` could not be parsed. See the cap table above; the report
+  names which one it was.
 
 After fixing the underlying issue, re-run `clawseccheck` to see the new score.
 

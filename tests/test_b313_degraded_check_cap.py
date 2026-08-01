@@ -197,29 +197,38 @@ def _score(**kw) -> ScoreResult:
 
 
 class TestReportBanner:
+    # B-399: the wording changed from "N checks did not run (crashed or timed out)" to
+    # "N checks could not reach a reliable verdict this run (crashed, timed out, or hit
+    # unreadable/corrupted input)" — deliberately, because `_degraded_signal` now ALSO
+    # fires for a check that ran to completion and honestly reported its own UNKNOWN as
+    # engine-side (`Finding.engine_degraded`); "did not run"/"crashed or timed out" would
+    # be a factually wrong renderer message for that case (the check DID run). Same
+    # signal, same cap, same "N checks"/"check(s)" count — only the prose is updated
+    # here, matching a real, deliberate behavior change per this project's own testing
+    # protocol (not silenced, updated with the reason recorded).
     def test_banner_present_above_the_grade_line_text(self):
         out = render_report([], _score(degraded_count=2, degraded_capped=False,
                                         score=49, grade="F", raw_score=49),
                              ascii_only=True)
-        assert "2 checks did not run (crashed or timed out)" in out
-        assert out.index("did not run") < out.index("Score: 49/100")
+        assert "2 checks could not reach a reliable verdict this run" in out
+        assert out.index("could not reach a reliable verdict") < out.index("Score: 49/100")
 
     def test_capped_explanation_present_when_binding(self):
         out = render_report([], _score(degraded_count=1, degraded_capped=True,
                                         score=49, grade="F", raw_score=88),
                              ascii_only=True)
         assert (
-            "(capped from 88 - 1 check(s) crashed or timed out this run:"
+            "(capped from 88 - 1 check(s) could not reach a reliable verdict this run:"
             " cannot rule out a CRITICAL condition)"
         ) in out
 
     def test_no_banner_when_nothing_degraded(self):
         out = render_report([], _score(), ascii_only=True)
-        assert "did not run" not in out
+        assert "could not reach a reliable verdict" not in out
 
     def test_html_shows_incomplete_banner(self):
         html = render_html([], _score(degraded_count=3))
-        assert "3 checks did not run" in html
+        assert "3 checks could not reach a reliable verdict this run" in html
         assert "Incomplete" in html
 
     def test_json_carries_degraded_fields(self):

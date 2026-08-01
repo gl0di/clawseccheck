@@ -4176,6 +4176,11 @@ def coverage_gap_finding(detail: str) -> Finding:
     this is a synthetic vet-only verdict id with no CheckMeta, and `_custom()` resolves
     its id through BY_ID. Keeping it out of CATALOG is deliberate — it is not a check,
     and adding it would move `len(CATALOG)` and redden every shipped check-count claim.
+
+    B-399: `engine_degraded=True` below is this docstring's own "hitting the ceiling
+    BOUGHT a cleaner verdict" measurement, closed one layer up — a truncated scan
+    reaching a caller that folds this into a full-audit finding set now hard-caps via
+    scoring.DEGRADED_CHECK_CAP instead of scoring identically to a genuine clean PASS.
     """
     return Finding(
         "VET-COVERAGE",
@@ -4192,6 +4197,7 @@ def coverage_gap_finding(detail: str) -> Finding:
         "hand before trusting it.",
         "Skill Trust",
         False,
+        engine_degraded=True,
     )
 
 

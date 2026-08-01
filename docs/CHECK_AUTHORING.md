@@ -87,6 +87,32 @@ the `detail` should say what could not be determined and from where, e.g.
 *"OpenClaw exposes no audit-log config field … — cannot assess from config."* No
 consequence clause; the point is the honest gap.
 
+### `engine_degraded` — say so when the gap is the ENGINE'S fault (B-399)
+
+Not every UNKNOWN is the same kind of gap, and the scoring engine treats two shapes
+differently:
+
+- **Genuinely absent** — there is simply nothing to check (no `openclaw.json` at all, a
+  feature/file that legitimately does not exist for this subject). This is the common
+  case; leave `Finding.engine_degraded` at its default `False`. It must never lower an
+  otherwise-clean grade — "nothing was there to examine" is not evidence of a problem.
+- **Engine-side** — the check tried to determine state and failed for a reason that has
+  nothing to do with the feature being absent: an input it expected to read turned out
+  unreadable, corrupt, or malformed (a present-but-unparseable file, a permission error,
+  a truncated read), or it hit a scan-budget/timeout escape internal to its own logic.
+  Pass `engine_degraded=True` to `_finding()` (or set it directly on the `Finding`) for
+  this branch. `scoring.DEGRADED_CHECK_CAP` then hard-caps the grade — the same
+  worst-case "cannot rule out a CRITICAL" reasoning already applied to a check the run_all
+  wrapper had to crash/timeout out of.
+
+If the check reads `ctx.config` and the gap is `ctx.config_parse_error` (openclaw.json
+present but unparseable), don't hand-roll this — call `_config_unreadable(cid, ctx)`
+(checks/_shared.py), which already returns a correctly-tagged `engine_degraded=True`
+Finding for exactly that case. Reserve a hand-set `engine_degraded=True` for a check's
+OWN non-config engine-side failure (e.g. an `except OSError`/`except ValueError` on a
+file it positively found but could not read/parse) — never set it on a plain "this
+subject doesn't have that feature configured" UNKNOWN.
+
 ## `fix` is separate
 
 `detail` explains the problem (and, for FAIL/WARN, the consequence). `fix` is the

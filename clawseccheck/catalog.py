@@ -3222,6 +3222,24 @@ class Finding:
     # 'no_signal' = PASS by absence of a bad signal (config absent/default).
     # None for FAIL/WARN/UNKNOWN findings (not meaningful there).
     pass_confidence: str | None = None
+    # B-399: UNKNOWN-specific origin tag. True only when this check ran (or the engine
+    # tried to run it) and could not reach a verdict for an ENGINE-SIDE reason — a crash,
+    # a timeout/scan-budget escape, or an input the check expected to read that turned out
+    # unreadable/corrupt/malformed (e.g. `_config_unreadable()`'s openclaw.json-present-
+    # but-unparseable case, checks/_shared.py). False (the default) covers everything
+    # else, including the very common "genuinely absent" case — there is simply nothing to
+    # check (no openclaw.json at all, a feature/file that legitimately does not exist for
+    # this subject). Meaningless outside `status == UNKNOWN`; every producer of a FAIL/
+    # WARN/PASS finding leaves it at the default. scoring.DEGRADED_CHECK_CAP is the only
+    # reader (via `_degraded_signal`) — an engine-side UNKNOWN is worst-case "cannot rule
+    # out a CRITICAL", the same reasoning already applied to a crashed/timed-out check
+    # (`Finding.id` prefixed `"ERR:"`); a genuinely-absent UNKNOWN is strictly weaker
+    # evidence (nothing was ever there to examine) and must NOT trigger that cap. Defaults
+    # False so every existing UNKNOWN-producing call site (~300 of them) keeps its exact
+    # current scoring behavior unless a check deliberately opts in — see
+    # docs/CHECK_AUTHORING.md's "UNKNOWN details name why state is undetermined" section
+    # for the authoring guidance this field backs.
+    engine_degraded: bool = False
     # vet_skill() attaches per-check ring findings here (content-ring checks B59–B67, B74,
     # B42) so callers can inspect individual check results without changing the return type.
     # Not used by the full audit (stays empty); not rendered by report.py / sarif.py

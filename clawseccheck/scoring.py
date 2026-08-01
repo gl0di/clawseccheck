@@ -14,12 +14,17 @@
   ceiling, applied after the severity caps above: a corroborated runtime signal
   (RUNTIME_SIGNAL_CAP, I-025/B-309); an unreadable/unparseable primary config
   (CONFIG_BLIND_CAP, B-306) — closes the "config went dark mid-audit and the grade rose
-  because its own FAILs correctly degraded to UNKNOWN" gap; a crashed/timed-out check
-  (DEGRADED_CHECK_CAP, B-313); a submitted VULNERABLE live injection-test verdict
-  (LIVE_INJECTION_CAP, F-155); and a fired behavioral T1/T2/T3/B191 detector
-  (BEHAVIORAL_SIGNAL_CAP, F-154) — only when ``--full`` ran WITHOUT ``--fast``
-  (a standalone ``--behavioral`` run never wires this into a score at all), never
-  computed automatically.
+  because its own FAILs correctly degraded to UNKNOWN" gap; a degraded check
+  (DEGRADED_CHECK_CAP, B-313/B-399) — a check that crashed, timed out, or ran to
+  completion but could not reach a verdict for an ENGINE-SIDE reason (an input it
+  expected to read that turned out unreadable/corrupt/malformed, or a scan-budget
+  escape); a submitted VULNERABLE live injection-test verdict (LIVE_INJECTION_CAP,
+  F-155); and a fired behavioral T1/T2/T3/B191 detector (BEHAVIORAL_SIGNAL_CAP,
+  F-154) — only when ``--full`` ran WITHOUT ``--fast`` (a standalone ``--behavioral``
+  run never wires this into a score at all), never computed automatically.
+  B-399 deliberately does NOT cap a plain "nothing to check" UNKNOWN — see
+  `Finding.engine_degraded` (catalog.py) and `_degraded_signal` below for the
+  engine-side-vs-genuinely-absent distinction this relies on.
 """
 from __future__ import annotations
 
@@ -131,6 +136,37 @@ CONFIG_BLIND_CAP = FAIL_CAPS[CRITICAL]
 # reliable function->catalog-id mapping), so inventing a graduated scale would be a
 # guess dressed as precision. A cap-only signal, same shape as CONFIG_BLIND_CAP/
 # RUNTIME_SIGNAL_CAP: never touches `earned`/`total`, only ever lowers the ceiling.
+#
+# B-399: the `"ERR:"`-prefix trigger above only ever catches a check the ENGINE gave up
+# on (run_all's own crash/timeout wrapper, checks/__init__.py). It does NOT catch a check
+# that ran to completion, tried to read something it needed, hit an engine-side failure
+# reading it (unreadable/corrupt/malformed file, a scan-budget escape inside the check's
+# own logic), and honestly reported its own UNKNOWN with the check's REAL catalog id
+# (e.g. "B48", not "ERR:check_dangerous_overrides") — that shape was measured scoring
+# byte-identically to a clean PASS (100/A), same severity, same finding count, only the
+# status differing, because `total == 0`'s/`scored`'s filters exclude UNKNOWN from both
+# `earned` and `total` regardless of WHY it is UNKNOWN, and neither CONFIG_BLIND_CAP (keys
+# on `ctx.config_parse_error`, one signal for the WHOLE config, and a no-op whenever a
+# caller computes without `ctx`) nor the "ERR:" branch above (keys on the run_all wrapper
+# alone) ever sees it. That is the identical "hiding evidence improves the grade" defect
+# CONFIG_BLIND_CAP/the "ERR:" branch above already exist to prevent, one layer further in:
+# not just "the engine gave up", but "a check gave up on ITS OWN input".
+#
+# Extended, not duplicated: `_degraded_signal` below now ALSO counts any UNKNOWN finding
+# that self-reports `engine_degraded=True` (`Finding.engine_degraded`, catalog.py) — the
+# check ran, made its own honest judgment call that ITS failure to read/parse something
+# was engine-side rather than "there was nothing to check", and said so. This is Option 3
+# from the task: the narrowest, most defensible extension, because it composes with the
+# EXISTING "ERR:" signal in one `or` (no new ScoreResult field, no new cap tier, same
+# ceiling) rather than inventing a parallel mechanism. It is deliberately opt-in per
+# Finding, not "every UNKNOWN counts" — a check reporting UNKNOWN because a feature is
+# GENUINELY ABSENT (no openclaw.json at all; a file/field that legitimately does not
+# exist for this subject) leaves `engine_degraded` at its default False and stays
+# uncapped by this signal, exactly as before this task: "nothing was ever there to
+# examine" is strictly weaker evidence than "something broke while we tried to examine
+# it", and conflating the two would make DEGRADED_CHECK_CAP fire on ~300 existing UNKNOWN
+# call sites overnight — the over-broad alternative (Option 1/2 in the task) this
+# narrower extension deliberately avoids.
 DEGRADED_CHECK_CAP = FAIL_CAPS[CRITICAL]
 
 # F-155: a FOURTH, dedicated cap-only tier — Dave's 2026-07-30 ruling is explicit that
@@ -294,16 +330,19 @@ class ScoreResult:
     # free-text prose — report.py owns the user-facing sentence, same discipline as
     # `runtime_cap_reason`.
     config_blind_reason: str | None = None
-    # B-313: True only when DEGRADED_CHECK_CAP actually bound (lower than whatever the
-    # severity/config-blind/runtime caps above already produced) — same "only-when-
+    # B-313/B-399: True only when DEGRADED_CHECK_CAP actually bound (lower than whatever
+    # the severity/config-blind/runtime caps above already produced) — same "only-when-
     # actually-binding" discipline as `config_blind_capped`/`runtime_capped`. Distinct
     # from `degraded_count`: a run can have degraded checks (count > 0) while this stays
     # False because a tighter cap (e.g. a genuine CRITICAL FAIL) already applied.
     degraded_capped: bool = False
-    # B-313: how many checks crashed or timed out this run (0 when none did), regardless
-    # of whether the cap above actually bound. The report banner uses this directly so
-    # "N checks did not run" is disclosed even when a tighter cap already explains the
-    # grade — the reader still needs to know coverage was incomplete.
+    # B-313/B-399: how many checks could not reach a reliable verdict this run — either
+    # the run_all wrapper gave up on them (crashed/timed out, B-313) or a check ran to
+    # completion but honestly reported its own UNKNOWN as engine-side (B-399, see
+    # `_degraded_signal`) — regardless of whether the cap above actually bound. The report
+    # banner uses this directly so "N checks did not run" is disclosed even when a
+    # tighter cap already explains the grade — the reader still needs to know coverage
+    # was incomplete.
     degraded_count: int = 0
     # F-155: True only when LIVE_INJECTION_CAP actually bound (lower than whatever the
     # severity/config-blind/degraded/runtime caps above already produced) — same
@@ -334,14 +373,33 @@ class ScoreResult:
 
 
 def _degraded_signal(findings: list[Finding]) -> tuple[bool, int]:
-    """B-313: count checks degraded to an ``ERR:``-prefixed UNKNOWN this run.
+    """B-313/B-399: count checks that could not reach a reliable verdict this run.
 
-    Structural fact (a stable id prefix `_check_error_finding`/`_check_budget_finding`
-    already use, checks/__init__.py), never a text/keyword match over finding content —
-    cannot regress into the keyword-widening pattern this project has already learned
-    to avoid. Returns ``(hit, count)``.
+    Two structural sources compose with a single ``or`` (never a text/keyword match over
+    finding content — cannot regress into the keyword-widening pattern this project has
+    already learned to avoid):
+
+    1. B-313 — the run_all wrapper degraded the check to an ``"ERR:"``-prefixed UNKNOWN
+       (`_check_error_finding`/`_check_budget_finding`, checks/__init__.py) because it
+       crashed or timed out. The engine never even got the check's own opinion.
+    2. B-399 — the check RAN, kept its own real catalog id, and self-reported that its
+       own UNKNOWN is ``engine_degraded`` (`Finding.engine_degraded`, catalog.py) — it
+       tried to read/parse something it needed and failed for an engine-side reason (an
+       unreadable/corrupt/malformed input, a scan-budget escape inside its own logic),
+       as opposed to finding nothing to check at all. Gated on ``f.status == UNKNOWN`` in
+       addition to the flag so a future misuse (setting the flag on a non-UNKNOWN
+       finding, which is meaningless per the field's own docstring) cannot silently
+       inflate this count.
+
+    A Finding can only ever match one of the two `or` branches at once (an "ERR:" id is
+    never also `engine_degraded`, and vice versa in every current producer), so no finding
+    is ever double-counted. Returns ``(hit, count)``.
     """
-    count = sum(1 for f in findings if f.id.startswith("ERR:"))
+    count = sum(
+        1 for f in findings
+        if f.id.startswith("ERR:")
+        or (f.status == UNKNOWN and getattr(f, "engine_degraded", False))
+    )
     return (count > 0, count)
 
 
@@ -753,6 +811,14 @@ def assessment_coverage(findings: list[Finding]) -> dict:
     meant to answer "how much of the catalog could we actually assess" — the same
     fail-open blind spot DEGRADED_CHECK_CAP closes for the grade itself, one layer down.
 
+    B-399: the same carve-out extends to any ``scored=False`` finding that self-reports
+    ``engine_degraded=True`` (e.g. ``VET-COVERAGE`` — checks/_vet.py's coverage-gap
+    verdict for a scan-budget escape) — otherwise this metric would reopen the identical
+    blind spot for the NEW engine-side-UNKNOWN signal that B-313 already closed for the
+    crash/timeout one: a scored=False, non-"ERR:" engine-degraded finding would silently
+    vanish from `scored_total`/`unknown` even though `_degraded_signal` (scoring.py) and
+    the report banner both already count it.
+
     Returns a dict:
         {"scored_total": int, "assessable": int, "unknown": int,
          "not_applicable": int, "applicable_total": int,
@@ -786,7 +852,7 @@ def assessment_coverage(findings: list[Finding]) -> dict:
     """
     in_scope = [
         f for f in findings
-        if (f.scored or f.id.startswith("ERR:"))
+        if (f.scored or f.id.startswith("ERR:") or getattr(f, "engine_degraded", False))
         and f.status != "SKILL_ARCHIVE_PATH_TRAVERSAL"
         and not getattr(f, "suppressed", False)
     ]

@@ -624,6 +624,14 @@ def _config_unreadable(cid: str, ctx: Context) -> "Finding | None":
     Callers: ``if (f := _config_unreadable("B1", ctx)) is not None: return f`` (or the
     non-walrus two-line form) before trusting ``ctx.config``/``dig(ctx.config, ...)`` for
     an affirmative verdict.
+
+    B-399: this is THE canonical engine-side UNKNOWN — the collector positively found
+    openclaw.json and positively failed to parse/read it, which is categorically
+    different from a check finding nothing to look at. Marked ``engine_degraded=True`` so
+    scoring.DEGRADED_CHECK_CAP (via ``_degraded_signal``) hard-caps the grade even when a
+    caller invokes ``compute()`` without ``ctx`` (so scoring.CONFIG_BLIND_CAP's own
+    ctx.config_parse_error read never fires) — every one of this helper's ~30 call sites
+    across checks/*.py gets that protection for free, with no per-check change needed.
     """
     if not ctx.config_parse_error:
         return None
@@ -632,6 +640,7 @@ def _config_unreadable(cid: str, ctx: Context) -> "Finding | None":
         UNKNOWN,
         "openclaw.json present but unparseable/unreadable — cannot determine.",
         "Fix openclaw.json so it is valid JSON and owner-readable, then re-run the audit.",
+        engine_degraded=True,
     )
 
 
@@ -693,6 +702,7 @@ def _finding(
     scored=None,
     not_applicable=False,
     sub_signals=None,
+    engine_degraded=False,
 ) -> Finding:
     """*scored*: per-finding override of CheckMeta.scored, same shape as *severity*.
 
@@ -711,6 +721,12 @@ def _finding(
 
     *sub_signals* (F-154 round 2): per-branch, same shape — see Finding.sub_signals.
     Defaults to an empty frozenset when omitted; every existing caller is unaffected.
+
+    *engine_degraded* (B-399): pass True only for an UNKNOWN whose cause is ENGINE-SIDE
+    (crash/timeout/scan-budget escape, or an input the check expected to read that turned
+    out unreadable/corrupt) — never for a plain "nothing to check" UNKNOWN. See
+    ``Finding.engine_degraded``'s own docstring (catalog.py) for the full reasoning.
+    Defaults False, so every existing caller is unaffected.
     """
     m = _meta(cid)
     return Finding(
@@ -727,6 +743,7 @@ def _finding(
         pass_confidence=pass_confidence,
         not_applicable=not_applicable,
         sub_signals=frozenset(sub_signals) if sub_signals else frozenset(),
+        engine_degraded=engine_degraded,
     )
 
 

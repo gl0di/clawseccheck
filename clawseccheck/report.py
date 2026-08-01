@@ -294,8 +294,12 @@ def _cap_primary_reason_text(primary: str, score: ScoreResult, *,
             text = "openclaw.json unreadable/unparseable this run"
         return f"{text}: cannot rule out a CRITICAL condition"
     if primary == _CAP_DEGRADED:
+        # B-399: this cap now also fires on an engine-side-degraded UNKNOWN (a check
+        # that ran but couldn't reach a verdict because its own input was unreadable/
+        # corrupt) alongside a crashed/timed-out check -- "could not reach a reliable
+        # verdict" covers both without claiming a crash/timeout that didn't happen.
         n = getattr(score, "degraded_count", 0)
-        return f"{n} check(s) crashed or timed out this run: cannot rule out a CRITICAL condition"
+        return f"{n} check(s) could not reach a reliable verdict this run: cannot rule out a CRITICAL condition"
     if primary == _CAP_SEVERITY:
         return f"open {score.cap_severity} finding"
     if primary == _CAP_RUNTIME:
@@ -1373,21 +1377,24 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # --ascii drops the mascot and folds the separator (brand.header()).
     head = brand.header(subtitle="OpenClaw Security Audit", ascii_only=ascii_only)
     lines = [head, "=" * 44]
-    # B-313: disclosed ABOVE the grade, unconditionally whenever any check degraded this
-    # run (crashed or timed out) — regardless of whether DEGRADED_CHECK_CAP ended up
-    # strictly "binding" (a tighter cap, e.g. a genuine CRITICAL FAIL, may already apply).
-    # The reader still needs to know coverage was incomplete even when the number on
-    # screen would have been just as bad anyway; getattr/default tolerates the older
-    # duck-typed ScoreResult stand-ins some tests build (same tolerance B-306 established
-    # for config_blind_capped/runtime_capped below).
+    # B-313/B-399: disclosed ABOVE the grade, unconditionally whenever any check degraded
+    # this run (crashed, timed out, or — B-399 — ran to completion but could not reach a
+    # verdict for an engine-side reason, e.g. an input it expected to read that turned out
+    # unreadable/corrupt) — regardless of whether DEGRADED_CHECK_CAP ended up strictly
+    # "binding" (a tighter cap, e.g. a genuine CRITICAL FAIL, may already apply). The
+    # reader still needs to know coverage was incomplete even when the number on screen
+    # would have been just as bad anyway; getattr/default tolerates the older duck-typed
+    # ScoreResult stand-ins some tests build (same tolerance B-306 established for
+    # config_blind_capped/runtime_capped below).
     _degraded_n = getattr(score, "degraded_count", 0)
     if _degraded_n:
         warn_icon = "[!]" if ascii_only else "⚠️ "
         _plural = "check" if _degraded_n == 1 else "checks"
         lines.append(
-            f"{warn_icon}{_degraded_n} {_plural} did not run (crashed or timed out) —"
-            " this grade is incomplete. Re-run with --debug to see why, or on a quieter"
-            " machine if it was a timeout."
+            f"{warn_icon}{_degraded_n} {_plural} could not reach a reliable verdict this"
+            " run (crashed, timed out, or hit unreadable/corrupted input) — this grade is"
+            " incomplete. Re-run with --debug for a crash/timeout traceback, or review the"
+            " affected finding(s) below for an unreadable-input detail."
         )
     lines.append(f"Score: {score.score}/100   Grade: {grade_disp}")
     lines.append(_score_bar(score.score, score.grade, ascii_only=ascii_only, color=color))
@@ -1417,7 +1424,10 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # (`score.capped` covers the ordinary severity-cap path; the granular flags cover
     # every cap-only signal, including the `total == 0` branch where `capped` stays
     # False by design — see the B-306 comment this replaces), so `_primary is not
-    # None` is the correct, single-source-of-truth gate.
+    # None` is the correct, single-source-of-truth gate. B-399: `_CAP_DEGRADED`'s own
+    # text (`_cap_primary_reason_text`) already covers an engine-side-degraded UNKNOWN
+    # generically ("could not reach a reliable verdict") alongside crashed/timed-out --
+    # no renderer-side change needed for the new cause, only scoring.py's cap trigger.
     _primary, _extras = _cap_cascade(score)
     if _primary is not None:
         _reason_text = _cap_primary_reason_text(_primary, score, audited_path=_audited_path)
@@ -2831,9 +2841,12 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         # the two states without a JSON consumer having to re-derive it from config_found.
         "config_blind_capped": score.config_blind_capped,
         "config_blind_reason": getattr(score, "config_blind_reason", None),
-        # B-313: true when a crashed/timed-out check alone hard-capped the grade — see
-        # scoring.DEGRADED_CHECK_CAP. `degraded_count` is unconditional (checks did/didn't
-        # run this many times) even when this bool is False because a tighter cap won.
+        # B-313/B-399: true when a check that could not reach a reliable verdict this run
+        # (crashed, timed out, or hit an engine-side-degraded UNKNOWN — Finding.id
+        # prefixed "ERR:", or any UNKNOWN finding with engine_degraded=True) alone
+        # hard-capped the grade — see scoring.DEGRADED_CHECK_CAP. `degraded_count` is
+        # unconditional (checks did/didn't reach a verdict this many times) even when this
+        # bool is False because a tighter cap won.
         "degraded_capped": getattr(score, "degraded_capped", False),
         "degraded_count": getattr(score, "degraded_count", 0),
         # F-155: true when a submitted VULNERABLE live injection-test verdict (canary/
@@ -3038,8 +3051,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
     # a minimal duck-typed ScoreResult stand-in that predates these fields, and the OLD
     # code never touched them because `score.capped and ...` short-circuited past them —
     # preserve that tolerance instead of demanding every caller supply every field.
-    # B-313: same "unconditional, above the grade" disclosure as render_report's text
-    # banner — a degraded check count is shown whenever it's nonzero, independent of
+    # B-313/B-399: same "unconditional, above the grade" disclosure as render_report's
+    # text banner — a degraded check count is shown whenever it's nonzero, independent of
     # whether it ended up strictly binding the cap.
     _degraded_n = getattr(score, "degraded_count", 0)
     degraded_html = ""
@@ -3047,7 +3060,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
         _plural = "check" if _degraded_n == 1 else "checks"
         degraded_html = (
             f'<p class="degraded"><strong>⚠️ Incomplete:</strong> {_degraded_n} {_plural}'
-            ' did not run (crashed or timed out) — this grade is incomplete.</p>'
+            ' could not reach a reliable verdict this run (crashed, timed out, or hit'
+            ' unreadable/corrupted input) — this grade is incomplete.</p>'
         )
     # B-380: same shared `_cap_cascade` decision render_report now uses
     # (see the comment there) — this renderer used to keep its OWN five-branch "elif"
@@ -3056,7 +3070,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
     # behavioral-only cap fell through to it and fabricated a runtime-signal claim —
     # B-380 item 1), and its severity branch never named a co-occurring
     # runtime cap (item 2). Both are structurally impossible now: the primary/extras
-    # decision lives in exactly one place.
+    # decision lives in exactly one place. B-399's engine-side-degraded UNKNOWN cause
+    # needs no change here either, for the same reason noted in render_report.
     _primary, _extras = _cap_cascade(score)
     if _primary is not None:
         _reason_html = esc(_cap_primary_reason_text(_primary, score))

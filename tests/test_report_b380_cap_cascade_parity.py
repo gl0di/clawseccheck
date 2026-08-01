@@ -128,9 +128,13 @@ MATRIX = [
         primary_substr="openclaw.json unreadable/unparseable this run: cannot rule out a CRITICAL condition",
     ),
     _scenario(
+        # B-399: wording widened from "crashed or timed out" to "could not reach a
+        # reliable verdict" so the same cap-reason text also covers an engine-side-
+        # degraded UNKNOWN (Finding.engine_degraded=True) without claiming a crash/
+        # timeout that didn't happen.
         "degraded-only",
         findings=_pool() + [_err()],
-        primary_substr="1 check(s) crashed or timed out this run: cannot rule out a CRITICAL condition",
+        primary_substr="1 check(s) could not reach a reliable verdict this run: cannot rule out a CRITICAL condition",
     ),
     # ── Co-occurring pairs (this is the regression coverage for defects #1/#2) ──────
     _scenario(
@@ -158,7 +162,7 @@ MATRIX = [
     _scenario(
         "severity(MEDIUM)+degraded",
         findings=_pool() + [_fail(MEDIUM), _err()],
-        primary_substr="1 check(s) crashed or timed out this run",
+        primary_substr="1 check(s) could not reach a reliable verdict this run",
         extra_substrs=["an open MEDIUM finding"],
     ),
     _scenario(
@@ -245,7 +249,7 @@ class TestCapCascadeCrossRendererParity:
                 "no OpenClaw config found" if p.get("config_blind_reason") == "absent"
                 else "openclaw.json unreadable/unparseable"
             ),
-            "degraded_capped": lambda p: "crashed or timed out this run",
+            "degraded_capped": lambda p: "could not reach a reliable verdict this run",
             "runtime_capped": lambda p: "corroborated runtime signal",
             "behavioral_capped": lambda p: "behavioral detector fired",
         }
