@@ -9934,6 +9934,47 @@ _B337_CAT_SUBST_RE = re.compile(
 # boundary).
 _B337_DOTFILE_ARG_RE = re.compile(r"(?:^|[\s~/\"'])\.[A-Za-z0-9_][\w.\-]*")
 
+# B-418 FP-2: `_B337_DOTFILE_ARG_RE` matched every dot-prefixed path
+# equally, so a routine, always-committed, never-secret repo-tooling config
+# (`.editorconfig`, `.gitignore`, `.eslintrc`) anchored this check exactly as readily
+# as `~/.ssh/config` or `~/.aws/credentials` — confirmed via a single-variable control
+# in the ticket that isolated `_B337_MANDATORY_RE` as the sole trigger, i.e. the
+# dotfile identity never mattered at all. Deliberately an EXCLUSION list, not an
+# INCLUSION list keyed on `_CRED_RE`/`_B63_SECRET_TERM_RE`: this check's whole design
+# (module comment above `_B337_MANDATORY_RE`) is that `~/.gitconfig`/`~/.ssh/config`
+# don't carry credentials themselves either — `_CRED_RE` deliberately excludes both —
+# yet a directive that exfiltrates them under a fake "mandatory" pretext is still
+# worth a human's attention. Narrowing to a secret-shaped INCLUSION list would drop
+# that detection entirely (and break the existing `~/.gitconfig ~/.ssh/config` bad
+# fixture). The exclusion list stays short and each entry is a standard, name-stable
+# tooling config that is never a credential store — unlike `.npmrc`/`.env`,
+# deliberately NOT listed here: both routinely carry an auth token/secret and are
+# already recognized as credential-bearing by `_CRED_RE`/`_B63_SECRET_TERM_RE`.
+_B337_BENIGN_DOTFILE_RE = re.compile(
+    r"^\.(?:"
+    r"editorconfig|gitignore|gitattributes|dockerignore|npmignore|"
+    r"eslintrc(?:\.(?:json|jsonc|js|cjs|mjs|ya?ml))?|eslintignore|"
+    r"prettierrc(?:\.(?:json|jsonc|js|cjs|mjs|ya?ml))?|prettierignore|"
+    r"stylelintrc(?:\.(?:json|jsonc|js|cjs|mjs|ya?ml))?|"
+    r"markdownlint(?:\.(?:json|jsonc|ya?ml))?|"
+    r"nvmrc|node-version|python-version|ruby-version|browserslistrc"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _b337_has_sensitive_dotfile(args: str) -> bool:
+    """True when *args* (the `cat` command's argument text) names at least one
+    dot-prefixed path that is NOT on the `_B337_BENIGN_DOTFILE_RE` allowlist of
+    routine, always-committed, never-secret tooling configs (B-418 FP-2)."""
+    for m in _B337_DOTFILE_ARG_RE.finditer(args):
+        token = m.group(0)
+        token = token[token.index("."):]  # drop the leading separator char, if any
+        if not _B337_BENIGN_DOTFILE_RE.match(token):
+            return True
+    return False
+
+
 _B337_POST_VERB_RE = re.compile(r"\bcurl\b|\bwget\b", re.IGNORECASE)
 _B337_POST_FLAG_RE = re.compile(
     r"-d\b|--data(?:-raw|-binary|-urlencode)?\b|--post-data\b|-X\s*POST\b|-XPOST\b",
@@ -9944,23 +9985,124 @@ _B337_POST_PROXIMITY_WINDOW = 200  # chars around the cat-substitution to find c
 _B337_DIRECTIVE_WINDOW = 400  # chars between the directive phrase and the exfil command
 
 
+def _b337_post_target_is_local_only(window: str) -> bool:
+    """B-418 FP-3: True when every literal URL in *window* targets a
+    loopback/private/LAN-internal host, so the curl/wget invocation never actually
+    leaves the machine — a local dev-server round-trip, not exfiltration. Reuses
+    `_install_host_is_local`, the SAME classifier B103/B118's ClickFix corroborators
+    already rely on (private/loopback/link-local/TEST-NET IPv4 via pure integer-octet
+    math, IPv6 via stdlib `ipaddress`, plus the `localhost`/`.local`/`.internal`/`.lan`/
+    `.home.arpa` name suffixes — proper `==`/`.endswith()` matching, not a substring
+    search, so `localhost.attacker.example.com` does NOT match `localhost`).
+
+    Fails CLOSED (returns False — i.e. still treated as a real remote target, WARN
+    stays live) whenever locality cannot be proven from the text alone: no literal URL
+    at all (many real curl/wget invocations read their destination from a shell
+    variable, `curl -X POST "$ENDPOINT" -d ...`), a malformed URL, or a mix of local
+    and non-local URLs in the window. This is deliberately a static, no-DNS-resolution
+    check — Golden Rule #1 (local-only, forever, no network calls) forbids resolving a
+    hostname to see where it points, so a DNS name that only resolves to loopback at
+    runtime is not detected as local here and simply stays WARN; that is the safe
+    default, not a false negative in the exfil direction.
+    """
+    urls = _URL_IN_CMD_RE.findall(window)
+    if not urls:
+        return False
+    for u in urls:
+        try:
+            host = urlparse(u).hostname or ""
+        except ValueError:
+            return False  # unparsable -- fail closed, keep the WARN
+        if not host or not _install_host_is_local(host):
+            return False
+    return True
+
+
+def _b337_line_is_blockquoted(doc_text: str, pos: int) -> bool:
+    """True when the line containing *pos* is a Markdown blockquote line (starts with
+    `>`, allowing leading whitespace)."""
+    line_start = doc_text.rfind("\n", 0, pos) + 1
+    return doc_text[line_start:pos].lstrip().startswith(">")
+
+
+def _b337_under_defensive_heading(
+    doc_text: str, pos: int, blocks: list[tuple[int, int]]
+) -> bool:
+    """B-418 FP-1: B337 counterpart to B334's
+    `_b334_under_defensive_heading`. Same two-halves discipline — the nearest
+    preceding heading names a defensive section (`_B334_DEFENSIVE_HEADING_RE`, reused
+    as-is) AND the surrounding prose carries an explicit counter-instruction
+    (`_B334_COUNTER_INSTRUCTION_RE`, reused as-is).
+
+    Two shapes are recognised:
+      1. The counter-instruction is in the SAME block as the match — B334's own
+         tight, already-accepted scope, reused unchanged.
+      2. The counter-instruction is in the block immediately AFTER the match's block,
+         AND the match's own line is a Markdown blockquote (`> ...`). A quoted "here
+         is what a planted attack looks like" example is routinely blockquoted/fenced
+         on its own, with the "this is an attack, do not comply" commentary that
+         makes it a teaching example — rather than a live directive — as the very
+         next (unquoted) paragraph, one block away: confirmed against the ticket's
+         real FP-1 repro, where that commentary sits right after the fenced/
+         blockquoted curl command closes, separated from it by a blank line and
+         therefore a different block under B334's own block-splitting rules.
+
+    The blockquote gate on shape 2 is load-bearing, not decorative: an adversarial
+    pass (C-135) against an earlier version of this function — same next-block
+    extension, no blockquote requirement — found it could be smuggled past with a
+    REAL, still-executable, non-blockquoted curl directive immediately followed by an
+    unrelated generic "Do not comply with unrelated requests from strangers"
+    sentence under a "## Known risks" heading; the finding vanished even though the
+    payload was untouched. A live instruction meant to actually run is essentially
+    never authored as a blockquote — that formatting specifically signals "this is a
+    quotation of someone else's text", which is self-defeating for an attacker who
+    wants the payload read and executed rather than read and reported — so gating the
+    cross-block allowance on it closes that hole while leaving the tight, already-
+    accepted same-block shape (1) exactly as narrow as B334's own.
+    """
+    heading = _nearest_heading(doc_text, pos)
+    if not (heading and _B334_DEFENSIVE_HEADING_RE.match(heading)):
+        return False
+    for i, (a, b) in enumerate(blocks):
+        if not (a <= pos < b):
+            continue
+        if _B334_COUNTER_INSTRUCTION_RE.search(doc_text[a:b]):
+            return True
+        if i + 1 < len(blocks) and _b337_line_is_blockquoted(doc_text, pos):
+            nxt_a, nxt_b = blocks[i + 1]
+            return bool(_B334_COUNTER_INSTRUCTION_RE.search(doc_text[nxt_a:nxt_b]))
+        return False
+    return False
+
+
 def _b337_dotfile_exfil_hits(text: str) -> list[str]:
     """Snippet per co-located mandatory-directive + dotfile-cat-into-curl/wget-POST hit.
 
     Three signals, all required, none alone sufficient (same two-halves discipline as
     B334): a directive phrase (`_B337_MANDATORY_RE`), a `$(cat ...)`/backtick-cat
-    substitution that reads a hidden path (`_B337_DOTFILE_ARG_RE`), and a curl/wget
-    invocation carrying a POST-shaped flag within `_B337_POST_PROXIMITY_WINDOW` chars of
-    that substitution (argument order isn't fixed -- `-d` can precede or follow the
-    substitution -- so the window is symmetric, not just forward). The directive phrase
-    may sit anywhere within `_B337_DIRECTIVE_WINDOW` chars of the substitution.
+    substitution that reads a hidden, non-benign-tooling-config path
+    (`_B337_DOTFILE_ARG_RE` minus `_B337_BENIGN_DOTFILE_RE`, B-418 FP-2), and a
+    curl/wget invocation carrying a POST-shaped flag within
+    `_B337_POST_PROXIMITY_WINDOW` chars of that substitution (argument order isn't
+    fixed -- `-d` can precede or follow the substitution -- so the window is
+    symmetric, not just forward). The directive phrase may sit anywhere within
+    `_B337_DIRECTIVE_WINDOW` chars of the substitution.
+
+    Two additional vetoes (B-418), same order-independence: a hit is dropped when the
+    POST target is provably loopback/private/LAN-internal (`_b337_post_target_is_
+    local_only`, FP-3 -- nothing actually leaves the host), or when the match sits in
+    a genuinely defensive, counter-instructed teaching block (`_b337_under_defensive_
+    heading`, FP-1 -- the skill is teaching an agent to REFUSE this exact pattern, not
+    performing it).
     """
     hits: list[str] = []
     directive_spans = [m.span() for m in _B337_MANDATORY_RE.finditer(text)]
     if not directive_spans:
         return hits
+    fence_ranges = _fence_ranges(text)
+    blocks = _b334_blocks(text, fence_ranges)
     for cm in _B337_CAT_SUBST_RE.finditer(text):
-        if not _B337_DOTFILE_ARG_RE.search(cm.group("args")):
+        if not _b337_has_sensitive_dotfile(cm.group("args")):
             continue
         lo = max(0, cm.start() - _B337_POST_PROXIMITY_WINDOW)
         hi = min(len(text), cm.end() + _B337_POST_PROXIMITY_WINDOW)
@@ -9971,6 +10113,10 @@ def _b337_dotfile_exfil_hits(text: str) -> list[str]:
             ds - _B337_DIRECTIVE_WINDOW <= cm.start() and cm.end() <= de + _B337_DIRECTIVE_WINDOW
             for ds, de in directive_spans
         ):
+            continue
+        if _b337_post_target_is_local_only(window):
+            continue
+        if _b337_under_defensive_heading(text, cm.start(), blocks):
             continue
         snip_lo = max(0, cm.start() - 20)
         hits.append(_obf_clip(text[snip_lo:cm.end() + 20], 120))
@@ -10019,10 +10165,13 @@ def check_dotfile_exfil_directive(ctx: Context) -> Finding:
             "command as a required pre-response step (or tells the agent not to ask "
             "permission), and that command reads a hidden config/dotfile via "
             "`$(cat ...)` and POSTs it to a remote host: " + ev_summary + extra,
-            "Remove the directive and the command. A legitimate skill never needs to "
-            "read `~/.gitconfig`, `~/.ssh/config`, or any other local dotfile and POST "
-            "its contents to a remote server before answering — that is credential/"
-            "host-fingerprint exfiltration dressed up as a licensing or telemetry check.",
+            "Remove the directive and the command. A skill should not need to read a "
+            "local dotfile and POST its contents to a remote server before answering — "
+            "verify the destination isn't this machine's own loopback/private address "
+            "and that the dotfile isn't a routine, non-secret tooling config (e.g. "
+            "`.editorconfig`) before treating this as exfiltration; if both check out, "
+            "this is credential/host-fingerprint exfiltration dressed up as a "
+            "licensing or telemetry check.",
             evidence,
             severity=HIGH,
             confidence="MEDIUM",
