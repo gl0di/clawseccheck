@@ -2695,17 +2695,19 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Chain: *fired -> removing any single anchor does not evict the foothold
 - Why:
   This install has str(len(fired)) independent persistence mechanisms flagged at once,
-  from different mechanism classes: '; '.join(fired). Each of these checks is WARN-only
-  and fires on a real but individually-plausible signal — a developer might legitimately
-  have exactly one of them. Two or more firing TOGETHER is a low-base-rate coincidence and
-  the exact shape of a deliberately layered foothold: an attacker (or an already-
-  compromised agent) that plants several independent re-establishment mechanisms so that
-  discovering and removing any single one leaves the others intact to reinstate it.
+  from different mechanism classes: '; '.join(fired). Most of these checks are WARN-only
+  disclosure — a developer might legitimately have any one of them for a real reason. What
+  makes this combination worth escalating is that at least one of them (';
+  '.join(signal_bearing)) shows an actual suspicious signal beyond "the mechanism exists,
+  unreviewed", co-located with other independent re-establishment mechanisms — the shape
+  that makes removing any single anchor insufficient to evict a real foothold. This is not
+  proof of compromise; it warrants prioritized review of every flagged anchor, starting
+  with the one that shows the actual signal.
 - Fix:
-  Investigate every flagged anchor, not just one — review the
-  .pth/sitecustomize/PYTHONSTARTUP files, systemd units, per-turn skill hooks, and any
-  tunnel/mesh-VPN binaries this install surfaced. Removing a single anchor without
-  addressing the others leaves a working foothold in place.
+  Investigate every flagged anchor, starting with '; '.join(signal_bearing) — then review
+  the rest: the .pth/sitecustomize/PYTHONSTARTUP files, systemd units, per-turn skill
+  hooks, and any tunnel/mesh-VPN binaries this install surfaced. Removing a single anchor
+  without addressing the others leaves a working foothold in place.
 
 ### RISK-24 - Default-deny egress policy is unenforceable — a tunnel transport bypasses it
 

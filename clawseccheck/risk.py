@@ -8,11 +8,14 @@ Chains are ADVISORY: they are derived from the audit, never part of it. No chain
 carries a CheckMeta, and none can move the A–F grade — cli.py computes the score
 before calling ``risk_paths``, and scoring.py does not import this module.
 
-Almost every rule is a pure function of config + findings. The one exception is
-RISK-21 (F-135), which additionally reads the trajectory sidecars under ``ctx.home``
-— metadata only (tool verb names and session-key ORIGIN KINDS; never call arguments,
-never the peer id) — so that "a channel is open to non-owner senders" and "a
-high-blast verb provably ran from such a session" can finally be related.
+Almost every rule is a pure function of config + findings. Two exceptions read `ctx`
+directly rather than just `findings`: RISK-21 (F-135), which additionally reads the
+trajectory sidecars under ``ctx.home`` — metadata only (tool verb names and
+session-key ORIGIN KINDS; never call arguments, never the peer id) — so that "a
+channel is open to non-owner senders" and "a high-blast verb provably ran from such a
+session" can finally be related; and RISK-23's B97 signal predicate
+(``_b97_anchor_signal``, B-433), which re-reads ``ctx.installed_skill_js``
+for a narrow shell-exec pattern B97's own regexes don't cover — see its docstring.
 
 English-only. Read-only. Pure stdlib.
 """
@@ -21,6 +24,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from . import attest as _attest
 from . import mcpsurface as _mcpsurface
@@ -30,10 +34,12 @@ from .checks import (
     _b62_actual_families,
     _b62_extract_declaration,
     _enabled_tools,
+    _EVENT_HOOK_PATH_RE,
     _external_input_channels,
     _gateway_remote_exposure_reason,
     _has_approval_gate,
     _hint,
+    _HOOK_MINIFIED_LINE,
     _hooks_session_key_exposures,
     _mcp_servers,
     _open_wildcard_group_channels,
@@ -81,6 +87,16 @@ def _finding_status(findings: list[Finding], check_id: str) -> str | None:
     for f in findings:
         if f.id == check_id:
             result = f.status
+    return result
+
+
+def _finding_by_id(findings: list[Finding], check_id: str) -> Finding | None:
+    """Return the Finding by id, or None if absent (last entry wins, same override
+    semantics as `_finding_status` — see its docstring)."""
+    result = None
+    for f in findings:
+        if f.id == check_id:
+            result = f
     return result
 
 
@@ -1689,7 +1705,9 @@ def _rule_mcp_toxic_flow(ctx: Context, cfg: dict) -> RiskPath | None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 # RISK-23: each label maps to the check id(s) that detect ONE independent persistence
-# MECHANISM. B99 and B335 both detect Python-interpreter auto-execution (.pth /
+# MECHANISM, plus a SIGNAL predicate (B-433) deciding whether a WARN from
+# that class carries an actual suspicious signal, or merely "the mechanism exists,
+# unreviewed". B99 and B335 both detect Python-interpreter auto-execution (.pth /
 # sitecustomize / usercustomize / PYTHONSTARTUP) — the same underlying mechanism family
 # — so they count as a single class, not two, to avoid inflating the anchor count from
 # one real mechanism. C048 (cron) and B189 (cron run-log orphan) were deliberately
@@ -1701,18 +1719,127 @@ def _rule_mcp_toxic_flow(ctx: Context, cfg: dict) -> RiskPath | None:
 # it has no distinct Finding id of its own to key on (B13's id is a single aggregate
 # verdict across ~20 evidence buckets), and fabricating a detail-text match here would
 # be the first Finding.detail parse in this module — a new, fragile pattern with no
-# existing precedent to follow.
-_PERSISTENCE_ANCHOR_CLASSES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Python interpreter auto-execution (.pth/sitecustomize/PYTHONSTARTUP)", ("B99", "B335")),
-    ("systemd user-unit Restart=always", ("B150",)),
-    ("per-turn event-hook shipped in a skill", ("B97",)),
-    ("covert tunnel / mesh-VPN enrollment", ("B338",)),
+# existing precedent to follow (B97's signal predicate below is now the first, and it
+# is limited to that one, deliberately-marked WARN sub-case).
+#
+# B-433 (C-135 adversarial review of RISK-23 itself, filed against
+# C-348): "2+ classes WARN at once" is NOT zero-FP by construction, because
+# two of the four classes' WARN status is not a per-instance signal at all:
+#   - B150 (systemd Restart=always) has exactly ONE WARN shape, and its own text says so
+#     verbatim ("Restart=always is common, legitimate infrastructure ... not proof of
+#     compromise"). It fires for ANY OpenClaw-managed gateway unit — the RECOMMENDED
+#     deployment — with no sub-case to discriminate ordinary use from a suspicious one.
+#   - B338 (tunnel/mesh-VPN launch) fires identically whether the launch primitive sits
+#     in obfuscated code or is spelled out in the skill's own SKILL.md "Usage" section
+#     (confirmed FP repro: `tailscale up --ssh ...` documented in a skill's own docs).
+#     Its module comment concedes "a large share of legitimate developer skills run
+#     tailscale or cloudflared for perfectly ordinary ... workflows" — there is no
+#     documented/undisclosed split in its Finding text to key on.
+# Both still count toward the "2+ classes" co-occurrence below (removing either from the
+# chain narrative would hide a real, if weak, disclosure), but neither can ever supply
+# the signal this rule now requires before escalating to a "layered foothold" verdict.
+# B99/B335's WARN already requires literal auto-execution CONTENT (an executable .pth
+# import line, a shipped sitecustomize/usercustomize file, or a runtime-installed
+# PYTHONSTARTUP hook) — there is no "mechanism present but unreviewed" sub-case, so any
+# WARN there already is signal. B97 DOES have such a sub-case inside a single Finding
+# (see `_b97_anchor_signal`): its own text distinguishes a hook that reaches a network
+# sink / reads process.env / mutates the turn ("fires every turn AND <signal>") from one
+# that does none of those ("no sink/mutation seen — this is a normal tool-registration
+# mechanism, but review it") — only the former counts as signal here.
+def _anchor_signal_always(ctx: Context, findings: list[Finding], ids: tuple[str, ...]) -> bool:
+    """Signal predicate for a class whose WARN branch already requires positive
+    evidence of the mechanism itself (not just "exists, unreviewed") — B99/B335: any
+    WARN there means an actual auto-execution artifact was found."""
+    return any(_finding_status(findings, cid) == WARN for cid in ids)
+
+
+def _anchor_signal_never(ctx: Context, findings: list[Finding], ids: tuple[str, ...]) -> bool:
+    """Signal predicate for a class whose WARN branch is a single, undifferentiated
+    disclosure with no sub-case distinguishing ordinary use from a suspicious one
+    (B150, B338 — see the B-433 comment above). A WARN here still counts
+    toward the "2+ classes" co-occurrence but never supplies the required signal."""
+    return False
+
+
+_B97_SIGNAL_MARKER = "fires every turn and"
+
+# B-433 C-135 round 2 (independent adversarial review): B97's own three
+# regexes (_HOOK_NET_SINK_RE/_HOOK_ENV_READ_RE/_HOOK_MUTATE_RE, checks/_content.py) do
+# not cover a hook that shells out via node:child_process -- exactly the shape a
+# self-reinstalling persistence hook would use to re-run the very commands that plant
+# the OTHER anchors (e.g. `execSync("systemctl --user enable --now ...")` +
+# `execSync("tailscale up ...")` on every turn). B97's Finding text alone cannot see
+# this -- it falls in the "no sink/mutation seen" bucket -- so `_b97_anchor_signal`
+# below independently re-scans the same hook source for this ONE narrow pattern.
+# Deliberately excludes a bare `exec(` alternative: unqualified `exec(` collides with
+# JS's own `RegExp.prototype.exec()`, an extremely common, unrelated call shape that
+# would turn this into a false-signal generator. Named child_process functions
+# (execSync/execFileSync/spawnSync/execFile) are unambiguous and never legitimately
+# used for anything else; a bare `require`/`import` of the module is also treated as
+# signal on its own (matches the bar B97 itself already sets for env-read/net-sink);
+# `exec`/`spawn` only count when qualified (`child_process.exec(`/`cp.spawn(`) to avoid
+# colliding with unrelated same-named helpers (e.g. redux-saga's `spawn` effect).
+_HOOK_SHELL_EXEC_RE = re.compile(
+    r"\brequire\s*\(\s*['\"](?:node:)?child_process['\"]\s*\)"
+    r"|\bimport\b[^;\n]*['\"](?:node:)?child_process['\"]"
+    r"|\b(?:execSync|execFileSync|spawnSync|execFile)\s*\("
+    r"|\b(?:child_process|cp)\s*\.\s*(?:exec|spawn)\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _b97_anchor_signal(ctx: Context, findings: list[Finding], ids: tuple[str, ...]) -> bool:
+    """B97's WARN status covers two sub-cases inside ONE Finding (checks/_content.py's
+    check_event_hook_interceptor): a per-turn hook that reaches a network sink, reads
+    process.env, or mutates the turn/tool-call ("fires every turn AND <signal>"), and
+    one that does none of those ("... no sink/mutation seen — this is a normal
+    tool-registration mechanism, but review it"). Only the first is a real signal per
+    B97's OWN text; a minified/unreadable hook entry (UNKNOWN-shaped text folded into
+    a WARN detail when at least one other file in the same skill DID warn) matches
+    neither marker and is treated as no-signal too — an unreadable file proves nothing
+    either way.
+
+    Reads `.evidence` (the untruncated per-file list) rather than `.detail` (sliced to
+    the first 4 entries — B-097) so a signal on file 5+ is never missed; falls back to
+    `.detail` for a synthetic/test Finding built with no evidence list.
+
+    Also independently re-scans `ctx.installed_skill_js` (already available here, the
+    same source B97 itself reads) for `_HOOK_SHELL_EXEC_RE` — see the comment above it
+    for why this exists and why it's scoped this narrowly.
+    """
+    f = _finding_by_id(findings, "B97")
+    if f is None or f.status != WARN:
+        return False
+    entries = f.evidence or ([f.detail] if f.detail else [])
+    if any(_B97_SIGNAL_MARKER in e.lower() for e in entries):
+        return True
+    for _name, sources in (getattr(ctx, "installed_skill_js", None) or {}).items():
+        for relpath, src in sources:
+            if not _EVENT_HOOK_PATH_RE.search(relpath.replace("\\", "/")):
+                continue
+            longest = max((len(ln) for ln in src.splitlines()), default=0)
+            if longest >= _HOOK_MINIFIED_LINE:
+                continue
+            if _HOOK_SHELL_EXEC_RE.search(src):
+                return True
+    return False
+
+
+_PERSISTENCE_ANCHOR_CLASSES: tuple[
+    tuple[str, tuple[str, ...], Callable[[Context, list[Finding], tuple[str, ...]], bool]], ...
+] = (
+    ("Python interpreter auto-execution (.pth/sitecustomize/PYTHONSTARTUP)",
+     ("B99", "B335"), _anchor_signal_always),
+    ("systemd user-unit Restart=always", ("B150",), _anchor_signal_never),
+    ("per-turn event-hook shipped in a skill", ("B97",), _b97_anchor_signal),
+    ("covert tunnel / mesh-VPN enrollment", ("B338",), _anchor_signal_never),
 )
 
 
 def _rule_persistence_anchor_multiplicity(ctx: Context, findings: list[Finding]) -> RiskPath | None:
     """HIGH (RISK-23, E-065): 2+ independent persistence anchors of DIFFERENT
-    mechanism classes = an eviction-resistant foothold.
+    mechanism classes, AT LEAST ONE of which carries an actual suspicious signal (not
+    merely "the mechanism exists, unreviewed") = an eviction-resistant foothold.
 
     Motivated by the HuggingFace July-2026 agent-intrusion incident
     (huggingface.co/blog/agent-intrusion-technical-timeline): 11 self-respawning
@@ -1722,21 +1849,28 @@ def _rule_persistence_anchor_multiplicity(ctx: Context, findings: list[Finding])
     audit of an ordinary OpenClaw install can actually see: each already-existing
     persistence check (B99/B335/B150/B97/B338) fires independently and WARN-only, so no
     single one of them is unusual or FAIL-worthy on its own — a developer might
-    legitimately have ONE of these for a real reason. The combinational signal is that
-    TWO OR MORE, from DIFFERENT mechanism classes, fired on the SAME install at once —
-    a coincidence with a low base rate, and exactly the shape that makes removing any
-    one anchor insufficient to evict the foothold.
+    legitimately have ONE of these for a real reason.
 
-    Fires only when 2+ distinct classes in `_PERSISTENCE_ANCHOR_CLASSES` each have at
-    least one WARN-status Finding — zero-FP by construction (a single anchor alone
-    never fires; both must independently corroborate).
+    B-433: plain co-occurrence of 2+ WARN classes is NOT zero-FP, because
+    B150 and B338's WARN status never distinguishes ordinary use from a suspicious one
+    (see the comment above `_PERSISTENCE_ANCHOR_CLASSES`) — B150 fires for any
+    OpenClaw-managed gateway unit (the RECOMMENDED deployment) and B338 fires the same
+    whether the launch primitive is disclosed in the skill's own docs or hidden. Firing
+    now additionally requires at least one of the co-occurring classes to be genuinely
+    signal-bearing per its class's predicate — two "common, unreviewed" anchors alone
+    (e.g. a systemd-managed gateway plus a documented `tailscale up` skill) no longer
+    read as a deliberately layered foothold, but a real escalated signal (e.g. B97's
+    hook actually reaching a network sink) co-located with any other independent
+    mechanism still does.
     """
-    fired = [
-        label
-        for label, ids in _PERSISTENCE_ANCHOR_CLASSES
-        if any(_finding_status(findings, cid) == WARN for cid in ids)
-    ]
-    if len(fired) < 2:
+    fired: list[str] = []
+    signal_bearing: list[str] = []
+    for label, ids, signal_fn in _PERSISTENCE_ANCHOR_CLASSES:
+        if any(_finding_status(findings, cid) == WARN for cid in ids):
+            fired.append(label)
+            if signal_fn(ctx, findings, ids):
+                signal_bearing.append(label)
+    if len(fired) < 2 or not signal_bearing:
         return None
     return RiskPath(
         id="RISK-23",
@@ -1746,19 +1880,22 @@ def _rule_persistence_anchor_multiplicity(ctx: Context, findings: list[Finding])
         why=(
             "This install has " + str(len(fired)) + " independent persistence "
             "mechanisms flagged at once, from different mechanism classes: "
-            + "; ".join(fired) + ". Each of these checks is WARN-only and fires on a "
-            "real but individually-plausible signal — a developer might legitimately "
-            "have exactly one of them. Two or more firing TOGETHER is a low-base-rate "
-            "coincidence and the exact shape of a deliberately layered foothold: an "
-            "attacker (or an already-compromised agent) that plants several "
-            "independent re-establishment mechanisms so that discovering and removing "
-            "any single one leaves the others intact to reinstate it."
+            + "; ".join(fired) + ". Most of these checks are WARN-only disclosure — "
+            "a developer might legitimately have any one of them for a real reason. "
+            "What makes this combination worth escalating is that at least one of "
+            "them (" + "; ".join(signal_bearing) + ") shows an actual suspicious "
+            "signal beyond \"the mechanism exists, unreviewed\", co-located with "
+            "other independent re-establishment mechanisms — the shape that makes "
+            "removing any single anchor insufficient to evict a real foothold. This "
+            "is not proof of compromise; it warrants prioritized review of every "
+            "flagged anchor, starting with the one that shows the actual signal."
         ),
         fix=(
-            "Investigate every flagged anchor, not just one — review the .pth/"
-            "sitecustomize/PYTHONSTARTUP files, systemd units, per-turn skill hooks, "
-            "and any tunnel/mesh-VPN binaries this install surfaced. Removing a single "
-            "anchor without addressing the others leaves a working foothold in place."
+            "Investigate every flagged anchor, starting with " + "; ".join(signal_bearing)
+            + " — then review the rest: the .pth/sitecustomize/PYTHONSTARTUP files, "
+            "systemd units, per-turn skill hooks, and any tunnel/mesh-VPN binaries "
+            "this install surfaced. Removing a single anchor without addressing the "
+            "others leaves a working foothold in place."
         ),
     )
 
