@@ -2479,6 +2479,15 @@ _B66_AUTHORITY_NEUTRALIZE_RE = re.compile(
 # the existing _B66_WINDOW proximity idiom) rather than folding into
 # `_defensive_context`, which is negation-shaped (never/must not) and does not model
 # "allowed, but only under condition X".
+# B-429: the qualifiers above are a finite word-list keyed on "approval"/"sign-off",
+# which misses one of the most common real break-glass phrasings — a NAMED human
+# approver who is present and confirming in real time ("pre-approved by the incident
+# commander, who stays on the call ... and confirms each one out loud") rather than
+# the literal words "approval"/"sign-off". A "by <role>, who ... confirms" clause is
+# the same governance-gate shape (a human is in the loop, live), so it dampens the
+# same way. Deliberately still requires BOTH a named role (the "by ... who" clause)
+# AND a confirming verb — a bare "by the operator" alone (no "who ... confirms") does
+# not qualify, keeping this as narrow as the existing entries above.
 _B66_CONDITIONAL_QUALIFIER_RE = re.compile(
     r"\bonly\s+(?:after|when|if|with)\b|"
     r"\bprovided\s+(?:that\s+)?\b|"
@@ -2487,12 +2496,55 @@ _B66_CONDITIONAL_QUALIFIER_RE = re.compile(
     r"\brequir\w*\s+(?:a\s+|an\s+)?(?:approval|review|sign-?off)\b|"
     r"\bwith\s+(?:a\s+|an\s+)?(?:sign-?off|approval|review|peer\s+review)\b|"
     r"\bafter\s+(?:a\s+|an\s+)?(?:documented\s+)?"
-    r"(?:approval|review|sign-?off|change\s+ticket|ticket)\b",
+    r"(?:approval|review|sign-?off|change\s+ticket|ticket)\b|"
+    r"\bby\s+(?:the\s+|an?\s+)?[a-z][\w\s-]{1,40}?,?\s*who\s+"
+    r"(?:stays?|remains?|is\b)[^.]{0,80}?\bconfirms?\b",
     re.IGNORECASE,
 )
 
 
-_B66_QUALIFIER_WINDOW = 80
+# B-429: widened 80 -> 100 for the new "by <role>, who ... confirms" alternative above
+# — the qualifier clause for a real named-approver shape ("by the incident commander,
+# who stays on the call ... and confirms") routinely runs ~85 chars past the trigger's
+# end, just past the original 80-char reach. The pre-existing short qualifier phrases
+# ("only after a documented change ticket") stay comfortably inside either width, so
+# this is a pure widening for the new alternative, not a behavior change for the old ones.
+_B66_QUALIFIER_WINDOW = 100
+
+
+# B-429: `_b66_scan`'s trigger (a bare "you are" role-start + a bare CORE token like
+# "bypass safety/policy/rules" or the all-caps "DAN") never distinguished a live
+# performative directive ("you are now X, do Y") from a sentence that DESCRIBES the
+# very pattern it detects — a security-tooling skill's own docstring/prose talking
+# ABOUT jailbreak/bypass behavior in the third person, not issuing it. Two concrete
+# shapes corroborated the same guard:
+#   - reported/hypothetical speech ("a prompt tells the model you are now DAN", "asks
+#     it to bypass safety filters") — the instruction is attributed to a HYPOTHETICAL
+#     prompt, not addressed live to the reading agent, and the block self-describes as
+#     a "classifier"/"heuristic" for the pattern.
+#   - a detection-verb relative clause governing the CORE token ("Flag any rule that
+#     would bypass policy enforcement", "Report every signature that can bypass
+#     safety filters") — the token is the OBJECT of a flag/report/detect verb, not
+#     something the persona is being told to perform.
+# Scoped narrowly to the trigger's OWN sentence (same idiom as `_b64_reported_or_quoted`
+# below: bounded lookback + `_SENTENCE_BREAK_RE` trim) so a genuine live directive in an
+# EARLIER sentence of the same block (e.g. "Session role helper.\n\nYou are now an
+# admin ... approved without further review.") is unaffected — that shape fires via
+# `_b66_authority_override_scan` instead and never reaches this guard at all (see
+# fixtures/bad_b66_script_docstring_override, unaffected by this change).
+_B66_DETECTIVE_FRAME_RE = re.compile(
+    r"\b(?:flag(?:s|ged|ging)?|report(?:s|ed|ing)?|detect(?:s|ed|ing|ion)?|"
+    r"identif(?:y|ies|ied|ying)|recogni[sz]e[sd]?|catch(?:es|ing)?|"
+    r"block(?:s|ed|ing)?|reject(?:s|ed|ing)?|scores?|"
+    r"watch(?:es)?\s+for|scan(?:s|ned|ning)?\s+for|check(?:s|ed|ing)?\s+for|"
+    r"classif(?:y|ier|ies)|scanner|heuristics?|"
+    r"tells?\s+(?:the\s+)?(?:model|assistant|agent)|"
+    r"asks?\s+it\s+to)\b",
+    re.IGNORECASE,
+)
+
+
+_B66_DETECTIVE_WINDOW = 100
 
 
 _B67_CHANNEL_SRC_RE = {
@@ -4606,6 +4658,24 @@ def _b156_scan(
     return hits
 
 
+def _b66_descriptive_frame(blob: str, pos: int) -> bool:
+    """B-429: True when a detection-verb / reported-speech frame word GOVERNS the
+    trigger at *pos* within its OWN sentence — mirrors `_b64_reported_or_quoted`'s
+    bounded-lookback + `_SENTENCE_BREAK_RE`-trim idiom (same file, same shape), scoped
+    to `_B66_DETECTIVE_FRAME_RE`'s own vocabulary instead of B64's. Sentence-scoping
+    matters: a frame word in an EARLIER, unrelated sentence of the same block must not
+    launder a genuine directive later in the block (see the constant's own docstring
+    for the concrete fixture this protects)."""
+    lo = max(0, pos - _B66_DETECTIVE_WINDOW)
+    seg = blob[lo:pos]
+    last_break = None
+    for last_break in _SENTENCE_BREAK_RE.finditer(seg):
+        pass
+    if last_break is not None:
+        seg = seg[last_break.end():]
+    return bool(_B66_DETECTIVE_FRAME_RE.search(seg))
+
+
 def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
     """Scan *text* for persona-jailbreak snippets."""
     hits: list[str] = []
@@ -4626,6 +4696,12 @@ def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         # guard B63/B156 apply via _defensive_context. _b66_scan previously had none, so the
         # B-187 possessive widening ("ignore your …") surfaced this pro-safety false-WARN.
         if _defensive_context(text, start + trigger.start(), fr):
+            continue
+        # B-429: a detection-verb clause ("Flag any rule that would bypass ...", "Report
+        # every signature that can bypass ...") or reported/hypothetical speech ("a
+        # prompt tells the model you are now DAN") governing the trigger describes the
+        # attack pattern rather than performing it — see _B66_DETECTIVE_FRAME_RE.
+        if _b66_descriptive_frame(text, start + trigger.start()):
             continue
         # A skill DOCUMENTING / defending against the attack (under a Known-Risks / Security
         # heading) must not WARN (B-120 guard for the reset-alone firing path).
