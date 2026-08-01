@@ -397,9 +397,38 @@ _CRED_RE = re.compile(
     # E-065/C-323: same widening as skillast.py's _CRED_PATH_RE/_SH_CRED_FILE_RE — a
     # process's own environment (procfs), the K8s service-account bearer token mount,
     # and the Docker/Swarm secrets mount, all read by the HF-incident reproduction.
-    r"/proc/(?:self|\d+)/environ|"
+    #
+    # B-425: the K8s mount below is one fully-specified FILE that is always the bearer
+    # token itself, so it stays a bare match. The other two additions broke the
+    # discipline every OTHER entry in this regex already follows — a specific
+    # credential-bearing FILENAME (`.ssh/id_[a-z0-9]+`, `.aws/credentials`), never a
+    # bare directory or a content-agnostic diagnostic path. `/run/secrets/[^/\s"']+`
+    # matched ANY file under the Docker/Swarm secret mount (a TLS CA cert, a license
+    # file — not just an actual secret), and a bare `/proc/*/environ` mention alone
+    # treated "read my own environment" as inherently a credential access. Confirmed
+    # false-FAIL via B63 (`_has_outbound_exfil`, checks/_content.py): a skill reading a
+    # Docker-mounted TLS CA cert (`/run/secrets/registry_ca.pem`) and asking not to
+    # paste the PEM blob into chat hard-FAILed, while the identical instruction over
+    # `/etc/pki/...` did not (B-425). Narrowed the same way B-366 already
+    # narrowed `_B63_SECRET_TERM_RE`'s bare `.ssh`/`.aws` substrings to actual
+    # credential-bearing filenames: `/run/secrets/` now requires the filename itself to
+    # look secret-shaped (same noun set `_B63_SECRET_TERM_RE`, checks/_content.py, uses
+    # — duplicated rather than imported: this module is a Layer-1 leaf and _content.py
+    # is Layer-2), and a bare `/proc/*/environ` mention now requires one of those same
+    # nouns within 60 chars either side — mirroring skillast.py's AST-level
+    # CRED_EXFIL_FLOW/SHELL_CRED_EXFIL, which already require an actual
+    # credential-derived value reaching a sink, not just path presence. A genuine
+    # `/run/secrets/db_password` or `/run/secrets/api_key` read is unaffected.
+    r"/proc/(?:self|\d+)/environ(?=[^\n]{0,60}(?<![a-z])(?:secret|token|credential|"
+    r"password|passwd|api[_\- ]?key|private[_\- ]?key|access[_\- ]?key|passphrase|"
+    r"mnemonic)s?(?![a-z]))|"
+    r"(?<![a-z])(?:secret|token|credential|password|passwd|api[_\- ]?key|"
+    r"private[_\- ]?key|access[_\- ]?key|passphrase|mnemonic)s?(?![a-z])"
+    r"[^\n]{0,60}/proc/(?:self|\d+)/environ|"
     r"/var/run/secrets/kubernetes\.io/serviceaccount/token|"
-    r"/run/secrets/[^/\s\"']+",
+    r"/run/secrets/[^/\s\"']*(?<![a-z])(?:secret|token|credential|password|passwd|"
+    r"api[_\- ]?key|private[_\- ]?key|access[_\- ]?key|passphrase|mnemonic)s?"
+    r"(?![a-z])[^/\s\"']*",
     re.I,
 )
 

@@ -1496,7 +1496,18 @@ _B63_SECRET_TERM_RE = re.compile(
         # so an incidental substring inside a word does not anchor ("secretary", "tokenizer",
         # $CLAWSTEALTH) while a compound file/var name still matches ("fake_secrets",
         # "db_token") — `_` and `.` and `/` are separators, not letters (C-135 r2 real-fleet).
-        r"(?<![a-z])(?:secret|token|credential|password|passwd|api[_\- ]?key|private[_\- ]?key"
+        #
+        # B-425: "secret(s)" is pulled out of the shared noun alternation and given its own
+        # `(?<!run/)` exclusion — the Docker/Swarm secret MOUNT DIRECTORY is literally named
+        # `/run/secrets/` (and `/var/run/secrets/...` for the K8s service-account mount), so
+        # the bare noun matched on the DIRECTORY NAME itself for every file underneath it,
+        # regardless of what that file actually is (e.g. `/run/secrets/registry_ca.pem`, a
+        # public TLS CA cert). A genuine `/run/secrets/<credential-name>` read is unaffected:
+        # `_CRED_RE` (checks/_shared.py) independently requires the FILENAME to be
+        # secret-shaped, and a credential-shaped filename (`db_password`, `api_key`, ...)
+        # still matches THIS noun list on its own, unrelated occurrence.
+        r"(?<![a-z])(?<!run/)secrets?(?![a-z])"
+        r"|(?<![a-z])(?:token|credential|password|passwd|api[_\- ]?key|private[_\- ]?key"
         r"|access[_\- ]?key|keychain|keystore|wallet|mnemonic|passphrase)s?(?![a-z])"
         r"|auth\s+(?:token|string|value|key)"
         r"|gateway\s+(?:token|value|secret|key|auth)|recovery\s+(?:phrase|seed)|seed\s+phrase"

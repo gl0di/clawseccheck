@@ -29,6 +29,20 @@ three additions explicitly.
 
 `/proc/self/mountinfo` and `/proc/self/cgroup` (legitimate container-detection reads)
 deliberately stay unmatched -- pinned here as a negative control.
+
+B-425 FOLLOW-UP: the claim above -- "widening the path family cannot turn an ordinary
+diagnostic read into a finding" -- held for the AST families (`CRED_EXFIL_FLOW`/
+`SHELL_CRED_EXFIL`, which already gate on a real network-sink flow) but NOT for
+`_CRED_RE` (checks/_shared.py): several prose-level B63-family anchors (B63's own
+`_has_outbound_exfil` among them) treat a BARE `_CRED_RE` match as sufficient evidence of
+a credential access, with no taint/sink gate at all -- the same "purely additive" widening
+that was safe for the AST families reopened the directory-vs-file false-positive gap
+B-366 had already fixed once for `.ssh`/`.aws`, this time for
+`/run/secrets/*` (matched ANY file under the mount, not just a secret) and a bare
+`/proc/*/environ` mention (treated "read my own environment" as inherently a credential
+access). `_CRED_RE`'s two new alternatives are narrowed below to close that gap without
+touching the (unaffected, out of scope) AST families -- see checks/_shared.py's `_CRED_RE`
+comment for the full narrowing rationale.
 """
 from __future__ import annotations
 
@@ -39,19 +53,45 @@ from clawseccheck.skillast import _CRED_PATH_RE, _SH_CRED_FILE_RE, analyze_pytho
 # --- regex-level: all three families recognize the new paths ---
 
 
-def test_proc_self_environ_matches_all_three_families():
+def test_proc_self_environ_matches_ast_families_bare():
+    # AST-level families (skillast.py) are UNCHANGED by B-425 -- they already gate on a
+    # two-part taint flow (a tainted cred-path-derived value reaching a network sink), so
+    # a bare path match here never turns into a finding on its own (see the taint-flow
+    # tests below). Out of B-425's scope -- B-415 covers this consumer.
     assert _CRED_PATH_RE.search("/proc/self/environ")
     assert _SH_CRED_FILE_RE.search("/proc/self/environ")
-    assert _CRED_RE.search("/proc/self/environ")
 
 
-def test_proc_pid_environ_matches_all_three_families():
+def test_proc_pid_environ_matches_ast_families_bare():
     assert _CRED_PATH_RE.search("/proc/1234/environ")
     assert _SH_CRED_FILE_RE.search("/proc/1234/environ")
-    assert _CRED_RE.search("/proc/1234/environ")
+
+
+def test_proc_environ_bare_no_longer_matches_cred_re():
+    """B-425: unlike the AST families, `_CRED_RE` (checks/_shared.py) feeds several
+    prose-level, bare-match anchors -- B63's `_has_outbound_exfil` among them -- with NO
+    two-part taint gate at all: a bare match alone was sufficient to grade-cap a FAIL.
+    Confirmed false-FAIL: a skill reading `/proc/self/environ` purely to check whether an
+    env var is SET, then asking the agent not to echo the raw dump in its reply (ordinary
+    privacy hygiene), hard-FAILed B63 (B-425 repro). `_CRED_RE`'s
+    procfs-environ alternative now requires a genuinely credential-shaped term (secret/
+    token/credential/password/api_key/...) within 60 chars either side -- mirroring the
+    AST families' own two-part taint discipline -- so a bare mention alone no longer
+    anchors."""
+    assert not _CRED_RE.search("/proc/self/environ")
+    assert not _CRED_RE.search("/proc/1234/environ")
+
+
+def test_proc_environ_with_nearby_credential_term_still_matches_cred_re():
+    # The narrowing does not reopen the real HF-incident gap: a procfs-environ mention
+    # actually co-located with a credential-shaped term still anchors.
+    assert _CRED_RE.search("read /proc/self/environ to find the API_KEY value")
+    assert _CRED_RE.search("the api_key is exposed via /proc/self/environ")
 
 
 def test_k8s_serviceaccount_token_matches_all_three_families():
+    # Unaffected by B-425: this is one fully-specified FILE that is always the bearer
+    # token itself (never a public artifact), so it stays a bare match everywhere.
     path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
     assert _CRED_PATH_RE.search(path)
     assert _SH_CRED_FILE_RE.search(path)
@@ -59,10 +99,23 @@ def test_k8s_serviceaccount_token_matches_all_three_families():
 
 
 def test_docker_run_secrets_matches_all_three_families():
+    # A genuine credential-shaped filename under the mount is unaffected by B-425.
     path = "/run/secrets/db_password"
     assert _CRED_PATH_RE.search(path)
     assert _SH_CRED_FILE_RE.search(path)
     assert _CRED_RE.search(path)
+
+
+def test_docker_run_secrets_public_artifact_no_longer_matches_cred_re():
+    """B-425: `/run/secrets/[^/\\s"']+` matched ANY file under the Docker/Swarm secret
+    mount -- a TLS CA cert, a license file, not just a secret. Narrowed to require the
+    FILENAME itself to look secret-shaped, the same discipline B-366 already
+    applied to `.ssh`/`.aws`. The AST families keep their broader "any file under the
+    mount" net -- unaffected, out of scope (B-415)."""
+    assert not _CRED_RE.search("/run/secrets/registry_ca.pem")
+    assert not _CRED_RE.search("/run/secrets/license.txt")
+    assert _CRED_PATH_RE.search("/run/secrets/registry_ca.pem")
+    assert _SH_CRED_FILE_RE.search("/run/secrets/registry_ca.pem")
 
 
 def test_proc_self_mountinfo_does_not_match_any_family():
