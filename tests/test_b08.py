@@ -9,7 +9,7 @@ Verdicts:
 from pathlib import Path
 
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
-from clawseccheck.checks import check_human_approval
+from clawseccheck.checks import _has_approval_gate, check_human_approval
 from clawseccheck.collector import Context, collect
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -83,8 +83,22 @@ def test_b08_exec_security_deny_passes():
     assert check_human_approval(_ctx({"tools": {"exec": {"security": "deny"}}})).status == PASS
 
 
-def test_b08_exec_security_ask_passes():
-    assert check_human_approval(_ctx({"tools": {"exec": {"security": "ask"}}})).status == PASS
+def test_b08_exec_security_allowlist_passes():
+    # CLAWSECCHECK-B-412: tools.exec.security's real enum (grounded against the
+    # installed OpenClaw dist's Zod schema) is deny/allowlist/full — "allowlist" is a
+    # real, gate-providing value that was previously missing from _has_approval_gate.
+    assert check_human_approval(
+        _ctx({"tools": {"exec": {"security": "allowlist"}}})).status == PASS
+
+
+def test_b08_exec_security_ask_is_not_a_valid_security_value_warns():
+    # CLAWSECCHECK-B-412 fixture-drift fix: "ask" was NEVER a valid tools.exec.security
+    # value (that enum is deny/allowlist/full; "ask" belongs to the separate
+    # tools.exec.ask field). This test used to assert PASS, which was pinning the bug
+    # itself. An unrecognized security string must warn exactly like "full" does
+    # (test_b08_exec_security_full_no_gate_warns) — it must not be specially truthy.
+    f = check_human_approval(_ctx({"tools": {"exec": {"security": "ask"}}}))
+    assert f.status == WARN
 
 
 def test_b08_exec_ask_field_on_miss_passes():
@@ -135,3 +149,36 @@ def test_b08_never_fail():
         {"tools": {"allow": ["read_file"]}},
     ):
         assert check_human_approval(_ctx(cfg)).status != FAIL, f"unexpected FAIL for {cfg}"
+
+
+# ---- CLAWSECCHECK-B-412: _has_approval_gate direct unit tests ----
+#
+# tools.exec.security's real Zod enum (grounded against the installed OpenClaw
+# dist, zod-schema.agent-runtime-C02vY4RT.js:372-376) is deny/allowlist/full.
+# "ask" was never a valid value of this field (it belongs to the separate
+# tools.exec.ask field, off/on-miss/always) and must not be specially truthy.
+
+def test_has_approval_gate_security_allowlist_alone_is_true():
+    # Direct repro from the bug report: security="allowlist" with no mode and no
+    # ask field must be recognized as a real gate.
+    assert _has_approval_gate({"tools": {"exec": {"security": "allowlist"}}}) is True
+
+
+def test_has_approval_gate_security_ask_alone_is_false():
+    # "ask" is not a valid tools.exec.security value; it must be treated like any
+    # other unrecognized string (e.g. "full"), not specially truthy.
+    assert _has_approval_gate({"tools": {"exec": {"security": "ask"}}}) is False
+
+
+def test_has_approval_gate_security_deny_alone_is_true():
+    assert _has_approval_gate({"tools": {"exec": {"security": "deny"}}}) is True
+
+
+def test_has_approval_gate_security_full_alone_is_false():
+    assert _has_approval_gate({"tools": {"exec": {"security": "full"}}}) is False
+
+
+def test_has_approval_gate_security_garbage_string_is_false():
+    # Any other unrecognized security value (not one of the three real enum members)
+    # must not be treated as a gate either.
+    assert _has_approval_gate({"tools": {"exec": {"security": "sandbox"}}}) is False

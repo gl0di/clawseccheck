@@ -326,9 +326,13 @@ def test_risk07_with_approval_no_fire():
         status=FAIL, detail="test", fix="test",
         framework="Write Integrity", scored=True,
     )
-    # Real approval gate (tools.exec.security='ask') — RISK-07 must not fire.
+    # Real approval gate (tools.exec.security='allowlist'). CLAWSECCHECK-B-412
+    # fixture-drift fix: this used to read security='ask', but "ask" was never a
+    # valid tools.exec.security value (real enum: deny/allowlist/full) — it only
+    # happened to read as gated because of the bug this ticket fixed. 'allowlist'
+    # is the real, gate-providing value.
     cfg = {
-        "tools": {"exec": {"security": "ask"}},
+        "tools": {"exec": {"security": "allowlist"}},
     }
     ctx = _ctx(cfg)
     f = _findings(ctx) + [fake_b20]

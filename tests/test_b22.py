@@ -125,11 +125,23 @@ def test_b22_writable_with_approval_warns(tmp_path):
     assert check_self_modification(c).status == "WARN"
 
 
-# ---- WARN: tools.exec.security='ask' also counts as a real approval gate ----
-def test_b22_exec_security_ask_counts_as_approval(tmp_path):
+# ---- WARN: tools.exec.security='allowlist' counts as a real approval gate ----
+def test_b22_exec_security_allowlist_counts_as_approval(tmp_path):
+    _make_workspace(tmp_path, ws_mode=0o777)
+    c = _ctx(_cfg_with_tools(exec_security="allowlist"), home=str(tmp_path))
+    assert check_self_modification(c).status == "WARN"
+
+
+# ---- CLAWSECCHECK-B-412 fixture-drift fix: tools.exec.security's real Zod enum
+# ---- (grounded against the installed OpenClaw dist) is deny/allowlist/full — "ask"
+# ---- was never a valid value of THIS field (it belongs to the separate tools.exec.ask
+# ---- field). This test used to assert WARN, which was pinning the old bug (the
+# ---- invalid "ask" value was being treated as a gate). It is now correctly treated
+# ---- like any other unrecognized security string -> no gate -> FAIL.
+def test_b22_exec_security_ask_is_not_a_valid_value_no_gate_fails(tmp_path):
     _make_workspace(tmp_path, ws_mode=0o777)
     c = _ctx(_cfg_with_tools(exec_security="ask"), home=str(tmp_path))
-    assert check_self_modification(c).status == "WARN"
+    assert check_self_modification(c).status == "FAIL"
 
 
 # ---- tools.exec.mode='full' is NO gate -> FAIL ----

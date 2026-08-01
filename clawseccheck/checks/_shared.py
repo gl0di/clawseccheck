@@ -1509,11 +1509,25 @@ _LEG_KEYS = ("untrusted input", "sensitive data", "outbound actions")
 def _has_approval_gate(cfg: dict) -> bool:
     """Return True when the config has a meaningful exec approval gate.
 
-    Real fields (docs.openclaw.ai/tools/permission-modes):
+    Real fields — grounded against the installed OpenClaw dist's Zod schema
+    (`zod-schema.agent-runtime-C02vY4RT.js:358-381`, ToolExecBaseShape), which
+    corrects the field-list doc at docs.openclaw.ai/tools/permission-modes:
       tools.exec.mode     — deny/allowlist/ask/auto/full
-      tools.exec.security — deny/ask/full
+      tools.exec.security — deny/allowlist/full   ("ask" is NOT a valid value of THIS
+                             field — it belongs to tools.exec.ask below; a Zod
+                             .strict() config can't even set mode together with
+                             security/ask, see addExecPolicyModeConflictIssue)
       tools.exec.ask      — off/on-miss/always
     Non-existent: tools.confirm, tools.requireApproval, tools.elevated.requireApproval
+
+    security="allowlist" is a real gate even with an empty/default allowlist and even
+    when tools.exec.ask is unset (default "off"): verified against the live runtime
+    decision path (exec-approvals-BIKWP8_V.js requiresExecApproval/
+    hasGatewayAllowlistMiss, consumed by bash-tools-DHyGpWCr.js) — a non-matching
+    command is either routed to human approval (ask="on-miss"/"always") or denied
+    outright ("exec denied: allowlist miss", ask="off"). There is no path where
+    security="allowlist" alone lets an unmatched command run unattended, so a sparse
+    allowlist makes this MORE restrictive, never a false gate.
     """
     mode = dig(cfg, "tools.exec.mode")
     security = dig(cfg, "tools.exec.security")
@@ -1525,7 +1539,7 @@ def _has_approval_gate(cfg: dict) -> bool:
     # Do not re-flag "auto" as a false-PASS (previously reported and closed not-a-bug).
     if mode in ("deny", "allowlist", "ask", "auto"):
         return True
-    if security in ("deny", "ask"):
+    if security in ("deny", "allowlist"):
         return True
     if ask in ("on-miss", "always"):
         return True
@@ -2060,7 +2074,7 @@ def _trifecta_legs(ctx: Context) -> dict:
     web_fetch = _web_fetch_enabled(cfg)
     # B-061: ungated exec/shell can read any private file (sensitive) AND exfiltrate
     # (outbound). Approval-gated exec — tools.exec.mode is deny/allowlist/ask/auto,
-    # security=deny/ask, ask=on-miss/always — see _has_approval_gate) is NOT autonomous:
+    # security=deny/allowlist, ask=on-miss/always — see _has_approval_gate) is NOT autonomous:
     # a human signs each call, so it must NOT raise the sensitive leg. Without this guard
     # §5 breaks — home_safe + clean_b55/b68/b69/c014/c6 pair an untrusted channel with
     # mode='ask' exec and would flip to a spurious 3/3. Only ungated exec at mode='full'
