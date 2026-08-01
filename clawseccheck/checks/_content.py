@@ -10071,6 +10071,382 @@ _B339_CRED_URL_RE = re.compile(
 )
 
 
+# B-398 round 2 (independent C-135 review found round 1's design unsound -- see
+# below): what happens to the token AFTER the fetch, not the fetch itself, is the
+# discriminator between the recommended keyless-cloud-auth pattern (GCE workload
+# identity / Azure managed identity / EC2 instance profile all fetch this exact
+# credential class as their NORMAL, correct operation) and IMDS credential theft. A
+# bare fetch with no observable misuse is ambiguous (WARN); FAIL is reserved for a
+# corroborated leg below (mirrors B156's is_known_bad_host FAIL/WARN split,
+# `_b156_scan` above -- same "match, then corroborate before escalating" shape).
+#
+# Round 1 tried a destination-HOST allowlist (a legitimate flow calls back into the
+# SAME cloud provider's own API). C-135 broke it: every apex domain in the allowlist
+# (amazonaws.com, googleapis.com, azure.com, aliyuncs.com) also hosts ATTACKER-
+# PROVISIONABLE customer resources under the identical hostname shape -- an S3/GCS/
+# Blob-storage bucket the attacker owns is indistinguishable BY HOSTNAME ALONE from
+# the skill author's own bucket (`https://attacker-bucket.s3.amazonaws.com/collect`
+# passed the allowlist). No hostname-shape fix closes this: a customer-provisionable
+# apex domain cannot be safely suffix-matched, full stop.
+#
+# Round 2 abandons destination classification entirely and keys on DATA FLOW
+# instead: does the CREDENTIAL VALUE ITSELF (not just "some outbound call exists
+# nearby") appear as the PAYLOAD of an outbound call? A legitimate keyless-auth flow
+# extracts the token STRING and puts it in an Authorization/Bearer HEADER to
+# authenticate a call -- it never needs to send the raw fetched credential BLOB as
+# the call's data/json/body. Sending the credential variable as a payload argument
+# is the theft-specific shape regardless of which host receives it (an attacker's
+# own S3 bucket, a pastebin, or literally anywhere) -- this is sound where the host
+# allowlist was not, because it does not depend on classifying the destination at
+# all. This is also why the destination-host allowlist is gone: it is no longer
+# needed once the discriminator is what's being sent, not where.
+_B339_VAR_NAME_RE = r"[A-Za-z_][A-Za-z0-9_]*"
+_B339_ASSIGN_LOOKBACK = 120
+
+# The variable capturing the credential fetch's response sits on the SAME statement,
+# immediately BEFORE the URL match (Python `creds = requests.get(URL)...`, bash
+# `TOKEN=$(curl ... URL)`) -- searched backward from the match start, taking the
+# CLOSEST such assignment (the innermost enclosing one for a multi-line call).
+#
+# Anchored to start-of-line/`;`/start-of-string (C-135 round 2 found the unanchored
+# form grabbed a KEYWORD ARGUMENT name instead: `creds = requests.get(url="...URL...",
+# timeout=5)` -- the closest `NAME =` before the match was `url=`, not `creds =`, so
+# the corroborator searched for the wrong variable and silently missed a real exfil).
+# A statement-level assignment starts a line (or follows `;`); a kwarg is preceded by
+# `(` or `, ` inside a call's argument list -- this excludes the latter.
+_B339_VAR_ASSIGN_RE = re.compile(
+    rf"(?:^|[\n;])[^\S\n]*({_B339_VAR_NAME_RE})\s*=\s*\$?\(?", re.MULTILINE
+)
+
+_B339_CORROBORATOR_WINDOW = 300  # chars AFTER the credential-URL match to look for misuse
+
+# The disclose-directive leg's own, WIDER window: unlike the network/disk legs (which
+# need TIGHT proximity to the credential VARIABLE to avoid corroborating on unrelated
+# nearby code), a natural-language "report the result" instruction typically addresses
+# a whole fenced code example's output, sitting in the PROSE paragraph before or after
+# the fence -- not adjacent to the specific URL token inside it. 300 chars was too
+# narrow for even a short instructional sentence plus a 3-4 line fenced command block
+# (found by the C-135 round-2 review process itself, against this project's own real
+# incident-motivated bad fixture). Still bounded, not whole-skill: the same-clause +
+# addressee-phrase requirement inside `_b339_disclose_directive` is the actual
+# discriminator against false pairing, not this window -- widening it does not reopen
+# Defect 2 (an unrelated heading elsewhere in the file is still never in-clause with
+# any verb+noun match).
+_B339_DISCLOSE_WINDOW = 600
+
+# Outbound network-call verb shapes, CODE-oriented -- deliberately narrower than the
+# shared _EXFIL_RE (checks/_shared.py), which mixes call verbs with bare known-bad-
+# host NAME mentions (pastebin, webhook.site, ...) meant for prose/mixed scanning.
+# Here we want actual CALL SITES whose ARGUMENTS can be inspected for the credential
+# variable -- a bare mention of "pastebin" with no call verb is not by itself
+# evidence the fetched token went anywhere.
+_B339_OUTBOUND_CALL_RE = re.compile(
+    r"\bcurl\b|\bwget\b|requests?\.(?:post|put|patch)\s*\(|\bfetch\s*\(|"
+    r"axios\.(?:post|put)\s*\(|urlopen\s*\(|\.send\s*\(",
+    re.I,
+)
+
+# How far past each call verb its own argument list can extend before the next
+# unrelated call's arguments could bleed in -- generous enough for a wrapped
+# multi-line requests.post(...) call, narrow enough that a SECOND, unrelated call
+# later in the window is not mistaken for the first one's arguments.
+_B339_CALL_ARGS_WINDOW = 200
+
+# B-398: a skill's stated PURPOSE can be to relay the fetched identity/credential back
+# through the agent's own reply channel ("include the result in your response",
+# "report the token to the user") -- this is the shape the original bad fixture used.
+# The agent's own output is a real disclosure sink (whoever reads/logs/relays that
+# reply receives the credential), distinct from a code-level network/disk sink, so it
+# is its own corroborator leg rather than folded into the network leg above.
+#
+# Round 2 (C-135 found round 1's bare verb+noun co-occurrence false-FAILed on
+# ordinary keyless-auth documentation -- a docstring "return the access token for
+# use in subsequent API calls", a defensive comment "we never print or output the
+# secret", or disclose-shaped wording in a wholly unrelated sibling function all hit
+# it): now requires an ADDRESSEE phrase naming the reply channel itself (your
+# response/reply/message, the user, the operator) in the SAME CLAUSE as the verb+
+# noun match (no sentence break between them, mirroring this file's established
+# _negation_governs_trigger/B-098 clause-scoping discipline), and is exempted by a
+# broad negation in that same clause. A function's own docstring describing what it
+# returns, or a defensive warning against disclosure, does not name an addressee in
+# the same breath; an actual instruction to relay the value through the agent's own
+# reply does.
+_B339_DISCLOSE_VERB_NOUN_RE = re.compile(
+    r"\b(?:include|report|output|reveal|return|show|share|display|print|echo)\b"
+    r"[^.\n]{0,60}\b(?:token|credential|key|secret|response|result)\b",
+    re.I,
+)
+_B339_DISCLOSE_ADDRESSEE_RE = re.compile(
+    r"\b(?:your\s+(?:response|reply|next\s+(?:message|reply))|the\s+user|"
+    r"the\s+operator|in\s+(?:the|your)\s+(?:chat|reply))\b",
+    re.I,
+)
+
+# B-398 round 2 (C-135): the shared _SENTENCE_BREAK_RE only recognizes `.!?` -- a
+# colon or semicolon joining two otherwise-unrelated sentences ("...for debugging:
+# Contact the user if you see errors.") was invisible to it, so an unrelated
+# addressee phrase after a colon/semicolon got pulled into the SAME "clause" as an
+# unrelated verb+noun match before it, producing a false FAIL on a benign
+# diagnostics skill. B339's own clause bound is deliberately STRICTER than the
+# shared regex (which other checks rely on NOT breaking at a colon) rather than
+# widening the shared one -- this is a leaf, single-purpose disclose-directive gate,
+# not a general-purpose sentence splitter other checks share.
+_B339_CLAUSE_BREAK_RE = re.compile(r"[.!?:;][\"')\]]?(?:\s|$)|\n[^\S\n]*\n")
+
+# B-398: the third misuse category the ticket names alongside exfiltration and
+# disclosure -- persistence to disk. Round 2 (C-135 found round 1's bare
+# open(..., "w") proximity check false-FAILed on ordinary, UNRELATED nearby logging/
+# caching code): now requires the credential variable to actually be the argument of
+# a .write(...) call following the open() -- the same data-flow discriminator as the
+# network leg above, not mere co-location. Deliberately still does not match shell
+# redirection (`>`/`>>`) -- see the original round-1 note, unchanged: too common and
+# untargeted to serve as a corroborator without its own dedicated design.
+_B339_DISK_PROXIMITY_WINDOW = 200
+_B339_WRITE_ARGS_WINDOW = 100
+
+
+def _b339_response_variable(norm: str, match_start: int) -> str | None:
+    """The identifier (if any) capturing the credential fetch's response -- the
+    CLOSEST `var = `/`var=$(` assignment immediately before the URL match. Returns
+    None when no such assignment is found within the lookback window (e.g. the
+    fetch's result is used inline, never bound to a name) -- callers must treat that
+    as "cannot determine", not as absence of misuse; a fetch with no visible variable
+    at all has no visible data flow to inspect either way, which is exactly the
+    ambiguous WARN case this whole redesign exists for."""
+    lookback = norm[max(0, match_start - _B339_ASSIGN_LOOKBACK) : match_start]
+    best = None
+    for m in _B339_VAR_ASSIGN_RE.finditer(lookback):
+        best = m
+    return best.group(1) if best else None
+
+
+# B-398 round 3 (C-135 found the two-hop shape -- `r = requests.get(URL)...` then,
+# a line later, `creds = r.json()` -- untracked: `_b339_response_variable` only
+# looks at the statement immediately wrapping the URL match ("r"), so the SECOND
+# name that actually flows into a later payload/write call ("creds") was invisible.
+# This is not a narrow edge case -- it is the exact two-statement shape the ticket's
+# own motivating incident-reproduction example uses). One additional hop only:
+# `NEWNAME = OLDNAME(\.|\[)...` shortly after the fetch, anchored the same
+# start-of-statement way as every other assignment regex here.
+_B339_DERIVED_VAR_LOOKAHEAD = 150
+
+
+def _b339_derived_variable(norm: str, match_end: int, varname: str) -> "tuple[str, int] | None":
+    """A SECOND identifier (if any) assigned shortly after the fetch from an
+    expression starting with *varname* followed by `.`/`[` (attribute/subscript
+    access -- `creds = r.json()`, `token = r.json()["access_token"]`) -- the
+    one-hop-derived name a later payload/write call is more likely to actually use.
+    Returns `(name, end_pos)` -- *end_pos* is where the DEFINING assignment itself
+    ends, so callers search for corroborating evidence starting there, not from
+    *match_end* (which would make `_b339_truncate_at_reassignment` mistake the
+    derived variable's own defining assignment for a later reassignment of itself
+    and truncate the window before ever reaching the real payload/write call).
+    Returns None when no such derived assignment is found; callers should still
+    check *varname* itself, which may be what a call site uses directly."""
+    lookahead = norm[match_end : match_end + _B339_DERIVED_VAR_LOOKAHEAD]
+    derive_re = re.compile(
+        rf"(?:^|[\n;])[^\S\n]*({_B339_VAR_NAME_RE})\s*=\s*{re.escape(varname)}\s*[.\[]",
+        re.MULTILINE,
+    )
+    m = derive_re.search(lookahead)
+    return (m.group(1), match_end + m.end()) if m is not None else None
+
+
+def _b339_truncate_at_reassignment(window: str, varname: str) -> str:
+    """*window*, cut short at the first point *varname* is REASSIGNED to something
+    else (C-135 round 2: a generic name like `data`/`r`/`resp`/`result` -- exactly
+    the kind `_b339_response_variable` tends to extract -- is routinely reused a few
+    lines later for something unrelated; without this, `data = <credential>` then
+    `data = <unrelated status blob>` then `requests.post(..., json=data)` wrongly
+    corroborated on the STALE binding). Anchored the same way
+    `_B339_VAR_ASSIGN_RE` is (start-of-line/`;`, not a kwarg) so a `json=data`
+    argument two calls later is never mistaken for a reassignment of `data` itself."""
+    reassign_re = re.compile(
+        rf"(?:^|[\n;])[^\S\n]*{re.escape(varname)}\s*=(?!=)", re.MULTILINE
+    )
+    m = reassign_re.search(window)
+    return window[: m.start()] if m is not None else window
+
+
+# B-398 round 3 (C-135): a destination BUILT FROM A SHELL VARIABLE
+# (`API_HOST="https://own.example.com"; curl -d "$CREDS" "$API_HOST/x"`) has no
+# literal URL for `_EXFIL_URL_RE` to extract, so the own-host safety valve was never
+# reached even when the resolved destination genuinely IS the skill's own declared
+# host. Best-effort, bounded resolution: a literal string assignment to that same
+# shell-variable NAME anywhere earlier in the text (generously bounded, not
+# whole-file-unlimited -- host constants are conventionally declared near the top of
+# a script, not deep in unrelated logic).
+_B339_SHELL_VAR_REF_RE = re.compile(rf"\$\{{?({_B339_VAR_NAME_RE})\}}?")
+_B339_SHELL_VAR_RESOLVE_LOOKBACK = 3000
+
+
+def _b339_resolve_shell_var(norm: str, pos: int, varname: str) -> str | None:
+    """The literal string value (if any) of a shell-style `NAME="value"` assignment
+    to *varname*, searched backward from *pos* -- best-effort constant resolution,
+    not general data-flow; returns None (not "not own host") when nothing is found,
+    so callers must not treat a resolution failure as proof of an external
+    destination."""
+    lookback = norm[max(0, pos - _B339_SHELL_VAR_RESOLVE_LOOKBACK) : pos]
+    assign_re = re.compile(
+        rf"(?:^|[\n;])[^\S\n]*{re.escape(varname)}\s*=\s*[\"']([^\"'\n]+)[\"']", re.MULTILINE
+    )
+    best = None
+    for m in assign_re.finditer(lookback):
+        best = m
+    return best.group(1) if best is not None else None
+
+
+def _b339_credential_as_payload(norm: str, search_start: int, varname: str) -> tuple[bool, str | None]:
+    """The destination-agnostic exfil leg: the credential VARIABLE appears as the
+    payload/data/body argument of an outbound call within the forward corroborator
+    window starting at *search_start* -- not merely co-located with one. *search_start*
+    is the credential URL match's own end for the directly-captured variable, or the
+    END of the derived variable's OWN defining assignment for a one-hop-derived name
+    (`_b339_derived_variable`) -- starting from the URL match for a derived name
+    would make `_b339_truncate_at_reassignment` mistake its defining assignment for a
+    later reassignment of itself and truncate the window before ever reaching the
+    real payload/write call. Iterates every call in the window (not just the first,
+    round 1's Bug B) so an early, unrelated call cannot shield a later real one. The
+    window is truncated at the first reassignment of *varname* before searching
+    (`_b339_truncate_at_reassignment`) so a later, unrelated reuse of the same name
+    cannot be mistaken for the credential still flowing through it.
+
+    Returns `(found, url_or_none)`: `found` is False when no such call exists at
+    all (no corroboration); True with a URL string when one was extracted or
+    resolved (callers can apply the own-host safety valve to it) -- a
+    `$SHELL_VAR`-shaped destination is resolved via `_b339_resolve_shell_var` before
+    falling through to None; True with None when a payload-carrying call was found
+    but no destination could be extracted OR resolved from its arguments -- still
+    corroborated (the credential visibly flows into an outbound call's payload),
+    just without a destination to name or own-host-check."""
+    window = norm[search_start : search_start + _B339_CORROBORATOR_WINDOW]
+    window = _b339_truncate_at_reassignment(window, varname)
+    var_re = re.escape(varname)
+    payload_re = re.compile(
+        rf"\b(?:json|data|body|payload)\s*=\s*\$?\{{?{var_re}\b"
+        rf"|(?:-d|--data(?:-raw|-binary)?)\s+[\"']?\$?\{{?{var_re}\b",
+        re.I,
+    )
+    for call_m in _B339_OUTBOUND_CALL_RE.finditer(window):
+        seg = window[call_m.start() : call_m.start() + _B339_CALL_ARGS_WINDOW]
+        payload_m = payload_re.search(seg)
+        if payload_m is not None:
+            url_m = _EXFIL_URL_RE.search(seg)
+            if url_m is not None:
+                return True, url_m.group(0).rstrip(").,;:'\"")
+            # The destination sits AFTER the payload argument itself (e.g. `-d
+            # "$CREDS" "$API_HOST/x"`) -- searching from seg's start would find the
+            # credential's own `$CREDS` reference instead of the destination.
+            var_m = _B339_SHELL_VAR_REF_RE.search(seg, payload_m.end())
+            if var_m is not None:
+                resolved = _b339_resolve_shell_var(
+                    norm, search_start + call_m.start() + var_m.start(), var_m.group(1)
+                )
+                if resolved is not None:
+                    return True, resolved
+            return True, None
+    return False, None
+
+
+def _b339_disclose_directive(window: str) -> bool:
+    """The disclose-directive leg, clause-scoped: True only when an addressee phrase
+    sits in the SAME clause (no sentence break) as the verb+credential-noun match,
+    and no broad negation governs that same clause."""
+    for m in _B339_DISCLOSE_VERB_NOUN_RE.finditer(window):
+        clause_start = 0
+        for sb in _B339_CLAUSE_BREAK_RE.finditer(window[: m.start()]):
+            clause_start = sb.end()
+        end_sb = _B339_CLAUSE_BREAK_RE.search(window, m.end())
+        clause_end = end_sb.start() if end_sb else len(window)
+        clause = window[clause_start:clause_end]
+        if not _B339_DISCLOSE_ADDRESSEE_RE.search(clause):
+            continue
+        if _BROAD_NEGATION_RE.search(clause):
+            continue
+        return True
+    return False
+
+
+def _b339_credential_persisted(window: str, varname: str) -> bool:
+    """The disk-persistence leg: the credential VARIABLE appears as the argument of
+    a `.write(...)` call following a write-mode `open(...)` within *window*.
+    *window* is truncated at the first reassignment of *varname* first (same reason
+    and helper as `_b339_credential_as_payload` -- a generic name reused for an
+    unrelated value before an unrelated `.write()` call must not corroborate)."""
+    window = _b339_truncate_at_reassignment(window, varname)
+    var_re = re.escape(varname)
+    write_call_re = re.compile(rf"\.write\s*\(\s*\$?\{{?{var_re}\b", re.I)
+    for open_m in _WRITE_MODE_OPEN_RE.finditer(window):
+        seg = window[open_m.end() : open_m.end() + _B339_WRITE_ARGS_WINDOW]
+        if write_call_re.search(seg):
+            return True
+    return False
+
+
+def _b339_corroborated(norm: str, match_start: int, match_end: int, own_host) -> str | None:
+    """The corroboration reason (a short label) when the credential URL match has
+    real, nearby evidence of misuse -- the fetched credential VARIABLE flowing into
+    an outbound call's payload, an instruction to disclose it through the agent's
+    own reply channel, or it being persisted to disk via a `.write()` call. Returns
+    None when no such evidence is found (the ambiguous, WARN-only case -- a bare
+    fetch consistent with ordinary keyless-auth SDK operation, including one that
+    goes on to use the token in an Authorization header -- USE is not the signal,
+    the raw credential value flowing into a payload/write is).
+
+    The network-exfil and disk-persistence legs are FORWARD-only from the match: the
+    token can only flow into code that runs AFTER it is fetched, and both need the
+    variable captured by `_b339_response_variable` -- when no variable can be
+    identified, these two legs cannot fire (stays WARN, not a false FAIL from a
+    failed extraction). The disclose-directive leg is BIDIRECTIONAL: task
+    instructions commonly state the intent ("fetch this and include it in your
+    response") BEFORE showing the actual command, as well as after ("report the
+    result above") -- the original incident-motivated bad fixture uses exactly this
+    before-the-fetch phrasing, so a forward-only window would have missed it. It is
+    NOT tied to the extracted variable (natural-language prose does not reliably
+    name a code identifier), which is why it stays the bare verb+noun+addressee
+    shape rather than the data-flow shape the other two legs now use. Checks BOTH the
+    directly-captured variable and one derived hop (`_b339_derived_variable`) -- a
+    later call site may use either the wrapper (`r`) or the unwrapped value
+    (`creds` from `creds = r.json()`)."""
+    varname = _b339_response_variable(norm, match_start)
+    if varname is not None:
+        # (name, forward-search-start, disk-window) per candidate -- the derived
+        # variable's own defining assignment sits INSIDE what would otherwise be its
+        # search window, so its searches must start AFTER that assignment ends (see
+        # _b339_derived_variable's docstring for why starting from match_end would
+        # make the reassignment-truncation logic cut the window before it ever
+        # reaches a real payload/write call). Derived tried first: it's the name a
+        # later call site is more likely to actually use.
+        candidates = []
+        derived = _b339_derived_variable(norm, match_end, varname)
+        if derived is not None:
+            derived_name, derived_end = derived
+            derived_disk_window = norm[derived_end : derived_end + _B339_DISK_PROXIMITY_WINDOW]
+            candidates.append((derived_name, derived_end, derived_disk_window))
+        varname_disk_window = norm[
+            max(0, match_start - _B339_DISK_PROXIMITY_WINDOW) : match_end + _B339_DISK_PROXIMITY_WINDOW
+        ]
+        candidates.append((varname, match_end, varname_disk_window))
+
+        for candidate, search_start, disk_window in candidates:
+            found, url = _b339_credential_as_payload(norm, search_start, candidate)
+            if found:
+                if url is None:
+                    return "fetched credential forwarded as a call payload"
+                if not _url_matches_own_host(url, own_host):
+                    host_m = _URL_HOST_RE.match(url)
+                    host = host_m.group(1) if host_m is not None else url
+                    return f"fetched credential forwarded to {host}"
+            if _b339_credential_persisted(disk_window, candidate):
+                return "fetched credential persisted to disk"
+    disclose_window = norm[
+        max(0, match_start - _B339_DISCLOSE_WINDOW) : match_end + _B339_DISCLOSE_WINDOW
+    ]
+    if _b339_disclose_directive(disclose_window):
+        return "instructed to disclose the fetched credential in the agent's own reply"
+    return None
+
+
 def _b339_defensive_context(blob: str, pos: int, fence_ranges: list[tuple[int, int]]) -> bool:
     """B339's own defensive-context guard -- deliberately NOT the shared
     `_defensive_context` (its docstring reserves it, without exception, for
@@ -10100,20 +10476,77 @@ def _b339_defensive_context(blob: str, pos: int, fence_ranges: list[tuple[int, i
 
 def check_cloud_metadata_credential_fetch(ctx: Context) -> Finding:
     """B339 -- a skill's own code fetches cloud instance-metadata credentials. See the
-    module comment above `_B339_CRED_URL_RE` for the HF-incident motivation, the
-    host/path grounding, and why this stays FAIL-only (no WARN tier).
+    module comment above `_B339_CRED_URL_RE` for the HF-incident motivation and the
+    host/path grounding.
+
+    B-398 (two confirmed defects in the original FAIL-only design, fixed together --
+    see the ticket for why they had to be, not sequentially):
+
+    Defect 1: a bare fetch was an unconditional FAIL, but IMDS access is not itself
+    the attack -- it is how GCE workload identity / Azure managed identity / EC2
+    instance-profile auth *works*, the vendor-recommended alternative to static keys.
+    Fixed by requiring a corroborator (`_b339_corroborated`): the fetched token
+    forwarded to a non-cloud-provider host, persisted to disk, or an instruction to
+    disclose it through the agent's own reply channel. No corroborator -> WARN, not
+    FAIL -- consistent with this project's ambiguous-suppression discipline (a signal
+    this ambiguous is WARN territory, not a confident FAIL).
+
+    Defect 2: the whole-skill dampeners (`_whole_text_is_defensive`,
+    `_b58_text_is_detection_catalogue`) used to run BEFORE the match loop and skip the
+    ENTIRE skill outright -- an attacker's own SKILL.md could satisfy either with a
+    generic heading placed anywhere, unrelated to the actual payload, silencing a
+    real, corroborated credential-theft attempt. Fixed by moving them AFTER
+    corroboration: a corroborated match still FAILs regardless of a whole-skill
+    dampener (real evidence of misuse cannot be waved away by an unrelated heading
+    elsewhere in the same file); the dampeners now only ever soften an UNCORROBORATED
+    match from WARN down to PASS -- their original, legitimate purpose (an SSRF-
+    hardening tutorial or SIEM-rule skill that merely narrates or catalogues this
+    endpoint, with no corroborated misuse of its own, must not itself WARN).
+
+    The per-match `_b339_defensive_context` (local, proximity-gated: is THIS specific
+    occurrence documentation) is unchanged and still applies first, regardless of
+    corroboration -- a match that is itself inside a fenced, negated example is
+    documentation no matter what a later, unrelated line in the same file does.
+
+    B-398 round 3 (a second, independent C-135 pass on round 2's own redesign): found
+    4 issues in the newly-introduced variable-extraction/data-flow machinery
+    (`_b339_response_variable`, `_b339_credential_as_payload`,
+    `_b339_credential_persisted`), all fixed: a `url=` keyword argument shadowing
+    the real response variable; a generic variable name like `data`/`r` reused for
+    an unrelated value before an unrelated payload/write call (see
+    `_b339_truncate_at_reassignment`); the own-host safety valve not being
+    consulted when the destination is a shell variable rather than a literal URL
+    (see `_b339_resolve_shell_var` -- a skill forwarding its own fetched identity to
+    its OWN declared backend via `API_HOST="..."; curl -d "$CREDS" "$API_HOST/x"`
+    used to FAIL with the exemption never reached); and a two-hop reassignment
+    (`r = get(URL)...` then, a line later, `creds = r.json()`) not being tracked --
+    `_b339_response_variable` only looked at the statement immediately wrapping the
+    URL match ("r"), so the SECOND name that actually flowed into the payload call
+    ("creds") was invisible and the whole scenario silently WARNed. This last one
+    is not a narrow edge case: it is the EXACT shape of this ticket's own
+    motivating "attacker payload" example (this module's docstring, Defect 2) --
+    found by re-running that literal repro one final time before committing, after
+    every test already in this file (all single-hop-shaped) stayed green. Fixed by
+    `_b339_derived_variable`, one additional hop only (not general data-flow
+    tracking): a statement shortly after the fetch assigning FROM the captured
+    variable via attribute/subscript access. Both the directly-captured and
+    one-hop-derived names are checked by every leg (`_b339_corroborated`).
 
     FAIL    -- a credential-issuing metadata URL (`_B339_CRED_URL_RE`) is found outside
-               a defensive/documentation context (`_b339_defensive_context`, and the
-               whole skill is not a detection-signature catalogue,
-               `_b58_text_is_detection_catalogue` -- C-135 round 1: an SSRF-hardening
-               skill or a SIEM-rule skill that merely NAMES or WARNS AGAINST this
-               endpoint is not itself fetching it). No benign reason exists for a skill
-               to actually mint cloud role credentials -- concrete, curated,
-               unambiguous, same FAIL discipline as B156's known-exfil-host anchor.
-    PASS    -- no such request found (this includes ordinary non-credential metadata
-               reads -- instance-id, hostname, region -- which are legitimate
-               environment detection and never produce a finding here).
+               a defensive/documentation context (`_b339_defensive_context`) AND has a
+               corroborator (`_b339_corroborated`) proving the fetched value was
+               forwarded off-host to a non-cloud-provider destination, persisted to
+               disk, or the skill instructs disclosing it through the agent's own
+               reply.
+    WARN    -- the same match, but with no corroborator and no whole-skill dampener --
+               ambiguous: consistent with either theft or ordinary keyless-auth SDK
+               operation this scanner cannot further distinguish statically.
+    PASS    -- no such request found, OR a match survived local defensive context but
+               has no corroborator AND the whole skill is a documented SSRF-hardening/
+               SIEM-signature catalogue (`_whole_text_is_defensive` /
+               `_b58_text_is_detection_catalogue`) -- this includes ordinary non-
+               credential metadata reads (instance-id, hostname, region), which never
+               produce a finding here at all.
     UNKNOWN -- no installed skills to inspect.
     """
     if not ctx.installed_skills:
@@ -10126,27 +10559,31 @@ def check_cloud_metadata_credential_fetch(ctx: Context) -> Finding:
         )
 
     fail_ev: list[str] = []
+    warn_ev: list[str] = []
     for skill_name, blob in ctx.installed_skills.items():
         norm = normalize_for_scan(blob)
-        # C-135 round 1: an educational/SSRF-hardening/SIEM-rule skill can legitimately
-        # narrate or catalogue this exact URL without ever fetching it -- whole-skill
-        # dampeners first (cheap, and correct regardless of which match triggered them),
-        # same pairing B58 uses (`base_defensive` + `catalogue_defensive`).
-        if _whole_text_is_defensive(norm) or _b58_text_is_detection_catalogue(norm):
-            continue
         fr = _fence_ranges(norm)
+        # B-398: whole-skill dampeners computed once, but no longer an unconditional
+        # pre-gate -- see the docstring above for why. Applied per-match below, only
+        # to the uncorroborated case.
+        whole_doc_dampened = _whole_text_is_defensive(norm) or _b58_text_is_detection_catalogue(norm)
+        own_host = _skill_own_host(blob, fr)
         for m in _B339_CRED_URL_RE.finditer(norm):
             if _b339_defensive_context(norm, m.start(), fr):
                 continue
             snippet = _obf_clip(norm[max(0, m.start() - 10) : m.end() + 10], 100)
-            fail_ev.append(f'{skill_name}: "{snippet}"')
+            reason = _b339_corroborated(norm, m.start(), m.end(), own_host)
+            if reason is not None:
+                fail_ev.append(f'{skill_name}: "{snippet}" ({reason})')
+            elif not whole_doc_dampened:
+                warn_ev.append(f'{skill_name}: "{snippet}"')
 
     if fail_ev:
         ev_summary = "; ".join(fail_ev[:4])
         extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
         detail = (
-            "Cloud instance-metadata CREDENTIAL fetch found in an installed skill -- a "
-            "request targets a known cloud-metadata host's credential-issuing path: "
+            "Cloud instance-metadata CREDENTIAL fetch found in an installed skill, "
+            "with corroborated evidence of misuse: "
             + ev_summary
             + extra
         )
@@ -10154,10 +10591,11 @@ def check_cloud_metadata_credential_fetch(ctx: Context) -> Finding:
             "B339",
             FAIL,
             detail,
-            "Remove the request. A skill has no legitimate reason to mint cloud IAM/"
-            "service-account credentials from the instance metadata service -- this is "
-            "the standard IMDS credential-theft primitive used to pivot from a "
-            "compromised agent into the surrounding cloud account.",
+            "Remove the request. A skill has no legitimate reason to fetch cloud IAM/"
+            "service-account credentials from the instance metadata service and then "
+            "forward or disclose them -- this is the standard IMDS credential-theft "
+            "primitive used to pivot from a compromised agent into the surrounding "
+            "cloud account.",
             fail_ev,
             severity=HIGH,
             confidence="MEDIUM",
@@ -10172,6 +10610,26 @@ def check_cloud_metadata_credential_fetch(ctx: Context) -> Finding:
             "connections": [[FAIL, detail]],
         }
         return finding
+
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
+        return _finding(
+            "B339",
+            WARN,
+            "Cloud instance-metadata CREDENTIAL fetch found in an installed skill, but "
+            "with no corroborating evidence of misuse (no forwarding to an external "
+            "host, no instruction to disclose it) -- this is consistent with either "
+            "credential theft or the ordinary keyless-cloud-auth pattern (GCE workload "
+            "identity / Azure managed identity / EC2 instance profile), which fetches "
+            "this same credential class as normal operation: "
+            + ev_summary
+            + extra,
+            "Review the flagged request. If this is a legitimate keyless-auth flow, no "
+            "action is needed. If not, remove the request and any code path that "
+            "forwards or persists the fetched value.",
+            warn_ev,
+        )
 
     return _finding(
         "B339",
