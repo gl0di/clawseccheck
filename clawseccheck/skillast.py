@@ -356,6 +356,28 @@ _CRED_PATH_RE = re.compile(
     r"/proc/(?:self|\d+)/environ",
     re.I,
 )
+
+# B-415: an in-cluster K8s/container identity token -- the standard mount at
+# /var/run/secrets/kubernetes.io/serviceaccount/token -- read and presented as a
+# Bearer credential to the cluster's OWN API server is the textbook, correct way
+# for a pod-resident tool to authenticate in-cluster (kubernetes.client's own
+# incluster_config, and virtually every K8s operator/controller, do exactly
+# this). It is not credential theft. Narrower than _CRED_PATH_RE on purpose:
+# ONLY this fully-qualified service-account token path counts as an "in-cluster
+# identity token" for the CRED_EXFIL_FLOW exemption below -- .ssh/.aws/generic
+# secrets-mount reads never qualify, at any position or destination.
+_INCLUSTER_TOKEN_PATH_RE = re.compile(
+    r"/(?:var/)?run/secrets/kubernetes\.io/serviceaccount/token\b", re.I
+)
+# The cluster's own in-cluster API server -- the ONLY destination the exemption
+# below recognizes. A destination this can't positively resolve to this pattern
+# (an attacker-controlled host, or an expression it can't statically resolve at
+# all) fails CLOSED: the finding stays crit exactly as before.
+_INCLUSTER_API_HOST_RE = re.compile(
+    r"kubernetes\.default(?:\.svc(?:\.cluster\.local)?)?\b|\.svc\.cluster\.local\b|"
+    r"KUBERNETES_SERVICE_HOST",
+    re.I,
+)
 _NET_SINK_ATTRS_ANY = {"post", "put", "patch", "urlopen", "request"}
 _NET_SINK_ATTRS_BASED = {"send", "sendall", "sendto", "connect"}
 _NET_SINK_BASES = {
@@ -2013,6 +2035,142 @@ def _cred_tainted_names(tree: ast.AST) -> set[str]:
     return tainted
 
 
+def _has_incluster_token_path_const(node: ast.AST) -> bool:
+    """True if the subtree contains a string constant naming the K8s in-cluster
+    service-account token mount specifically (not any other credential path)."""
+    for n in ast.walk(node):
+        if (
+            isinstance(n, ast.Constant)
+            and isinstance(n.value, str)
+            and _INCLUSTER_TOKEN_PATH_RE.search(n.value)
+        ):
+            return True
+    return False
+
+
+def _cred_source_classification(node: ast.AST) -> str:
+    """Classifies *node*'s own credential-path string constants (not recursing
+    through names -- callers combine this with the running pure/impure sets for
+    that): 'other' if it contains ANY credential-path literal that is NOT the
+    narrow in-cluster token path -- even when an in-cluster literal ALSO appears,
+    since mixing the two in one expression (e.g. a ternary) makes the value
+    impure; 'incluster' if it contains ONLY in-cluster token literal(s); 'none'
+    if it contains no credential-path literal at all."""
+    has_incluster = False
+    has_other = False
+    for n in ast.walk(node):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            if _INCLUSTER_TOKEN_PATH_RE.search(n.value):
+                has_incluster = True
+            elif _CRED_PATH_RE.search(n.value):
+                has_other = True
+    if has_other:
+        return "other"
+    if has_incluster:
+        return "incluster"
+    return "none"
+
+
+def _incluster_pure_tainted_names(tree: ast.AST) -> set[str]:
+    """Subset of credential-tainted names whose value derives ONLY from the
+    narrow in-cluster service-account-token path -- never mixed with, or
+    overwritten by, a read from any OTHER credential-path source (.ssh, .aws, a
+    generic secrets mount, etc.) on ANY reaching assignment. This is the
+    source-side half of the CRED_EXFIL_FLOW in-cluster-auth exemption (see its
+    call site below): a name tainted via BOTH an in-cluster read and a generic
+    credential read -- e.g. one branch of an if/else reads the K8s token, the
+    other reads ~/.ssh/id_rsa, into the SAME variable -- is deliberately
+    excluded here, so a mixed flow can never qualify for the exemption. C-135:
+    this closes the specific smuggling attempt of dressing a real stolen
+    credential as if it shared a name with the legitimate in-cluster token."""
+    pure: set[str] = set()
+    impure: set[str] = set()
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    for _ in range(4):  # small fixpoint, mirrors _cred_tainted_names
+        changed = False
+        for a in assigns:
+            targets = [t.id for t in a.targets if isinstance(t, ast.Name)]
+            if not targets:
+                continue
+            classification = _cred_source_classification(a.value)
+            refs_impure = bool(_names_in(a.value) & impure)
+            refs_pure = bool(_names_in(a.value) & pure)
+            for name in targets:
+                if classification == "other" or refs_impure:
+                    if name not in impure:
+                        impure.add(name)
+                        pure.discard(name)
+                        changed = True
+                elif classification == "incluster" or refs_pure:
+                    if name not in impure and name not in pure:
+                        pure.add(name)
+                        changed = True
+        if not changed:
+            break
+    return pure - impure
+
+
+def _simple_str_const_assigns(tree: ast.AST) -> dict:
+    """Best-effort `name -> literal` map for simple single-target
+    `name = "..."` string assignments -- used only to resolve a destination-host
+    VARIABLE (e.g. `api_server = "https://kubernetes.default.svc"`) for the
+    CRED_EXFIL_FLOW in-cluster-auth exemption's destination check below; not a
+    general dataflow model. An unresolvable name is simply absent from the map,
+    which the destination check below treats as "not confirmed" (fails closed)."""
+    out: dict = {}
+    for n in ast.walk(tree):
+        if (
+            isinstance(n, ast.Assign)
+            and len(n.targets) == 1
+            and isinstance(n.targets[0], ast.Name)
+            and isinstance(n.value, ast.Constant)
+            and isinstance(n.value.value, str)
+        ):
+            out[n.targets[0].id] = n.value.value
+    return out
+
+
+def _resolves_to_incluster_host(subtrees: list, str_map: dict) -> bool:
+    """True if any of *subtrees* contains (directly, or via a name resolved
+    through *str_map*) a literal matching the cluster's own in-cluster API
+    server signal. Fails closed: anything it can't positively resolve is simply
+    not a match."""
+    for subtree in subtrees:
+        for n in ast.walk(subtree):
+            if isinstance(n, ast.Constant) and isinstance(n.value, str):
+                if _INCLUSTER_API_HOST_RE.search(n.value):
+                    return True
+            elif isinstance(n, ast.Name) and n.id in str_map:
+                if _INCLUSTER_API_HOST_RE.search(str_map[n.id]):
+                    return True
+    return False
+
+
+def _is_incluster_auth_exempt(node: ast.Call, hit_names: set, str_map: dict) -> bool:
+    """B-415/C-135: True only when EVERY tainted name in *hit_names* (already
+    confirmed by the caller to derive PURELY from the in-cluster service-account
+    token, via `_incluster_pure_tainted_names`) appears ONLY in an auth-position
+    kwarg (headers=/auth=/cert=, mirroring ENV_EXFIL_FLOW's own _ENV_AUTH_KWARGS
+    exemption) -- never the URL, body, params, or a positional arg -- AND the
+    call's own non-auth-position arguments resolve to the cluster's own API
+    server. Both conditions are read from the SAME non-auth-position subtrees on
+    purpose: a decoy destination string planted inside headers=/auth=/cert=
+    itself must never count as confirming the destination, or a real exfil call
+    could launder its true destination through the very kwarg this exemption
+    trusts (e.g. `headers={"Authorization": tok, "X-Decoy": "kubernetes.default.svc"}`
+    aimed at an attacker host in the URL)."""
+    non_auth_subtrees = [
+        *node.args,
+        *(kw.value for kw in node.keywords if kw.arg not in _ENV_AUTH_KWARGS),
+    ]
+    auth_subtrees = [kw.value for kw in node.keywords if kw.arg in _ENV_AUTH_KWARGS]
+    if any(hit_names & _names_in(s) for s in non_auth_subtrees):
+        return False  # a tainted name also reaches a non-auth position -- real exfil shape
+    if not any(hit_names & _names_in(s) for s in auth_subtrees):
+        return False  # tainted name isn't actually in an auth position at all
+    return _resolves_to_incluster_host(non_auth_subtrees, str_map)
+
+
 def _is_decode_call(node: ast.AST) -> bool:
     if not isinstance(node, ast.Call):
         return False
@@ -3609,18 +3767,30 @@ def analyze_python(
     if _CRED_PATH_RE.search(source):
         cred_tainted = _cred_tainted_names(tree)
         if cred_tainted:
+            # B-415: names sourced PURELY from the in-cluster K8s service-account
+            # token -- computed once per file, only when there's anything credential-
+            # tainted at all, since both helpers re-walk the whole tree.
+            incluster_pure = _incluster_pure_tainted_names(tree)
+            str_map = _simple_str_const_assigns(tree) if incluster_pure else {}
             for node in ast.walk(tree):
-                if (
-                    isinstance(node, ast.Call)
-                    and _is_net_sink(node.func)
-                    and (_names_in(node) & cred_tainted)
+                if not (isinstance(node, ast.Call) and _is_net_sink(node.func)):
+                    continue
+                hit_names = _names_in(node) & cred_tainted
+                if not hit_names:
+                    continue
+                # Exemption applies ONLY when every hit name is in-cluster-pure (never
+                # a name also/ever sourced from .ssh/.aws/a generic secrets mount) AND
+                # the position+destination checks in _is_incluster_auth_exempt hold.
+                if hit_names <= incluster_pure and _is_incluster_auth_exempt(
+                    node, hit_names, str_map
                 ):
-                    add(
-                        "CRED_EXFIL_FLOW",
-                        "crit",
-                        getattr(node, "lineno", 0),
-                        "credential-file contents flow into a network sink (read secret -> send out)",
-                    )
+                    continue
+                add(
+                    "CRED_EXFIL_FLOW",
+                    "crit",
+                    getattr(node, "lineno", 0),
+                    "credential-file contents flow into a network sink (read secret -> send out)",
+                )
 
     # F-049: env-var / agent-config secret reaching a network sink (SkillSpector E2 env
     # harvesting + E1 external transmission).  Severity is "info" and the checks engine routes it
@@ -4912,6 +5082,151 @@ _SH_CRED_ASSIGN_RE = re.compile(
     r"\.docker/config|\.kube/config|\.npmrc|\.pypirc|\.openclaw/)",
     re.I,
 )
+
+# B-415: shell-side counterparts of the Python in-cluster-auth exemption above
+# (_INCLUSTER_TOKEN_PATH_RE / _INCLUSTER_API_HOST_RE are shared, module-level --
+# same narrow token path, same narrow destination signal, defined once near
+# _CRED_PATH_RE). Two DISTINCT legitimate shapes cause a false SHELL_CRED_EXFIL:
+#
+#   1. curl's own TLS-material flags (--cacert/--capath/--cert/--key/-E) name a
+#      certificate/key file curl reads LOCALLY for the TLS handshake -- the raw
+#      bytes are never placed in the request URL/body/headers the way a
+#      credential VALUE would be (a CA cert only verifies the PEER; a client
+#      cert/key is used cryptographically to sign a challenge, never
+#      transmitted in the clear). This holds regardless of which file is named
+#      or which host is being called, so this exemption is deliberately
+#      POSITION-ONLY -- mirrors the Python side's _ENV_AUTH_KWARGS "cert" entry.
+#   2. The narrow in-cluster token specifically, referenced ONLY inside a
+#      -H/--header "Authorization: ..." value, on a line whose own destination
+#      resolves to the cluster's own API server -- mirrors the Python side's
+#      headers=/auth= position exemption. Unlike (1), this DOES need the
+#      narrow-source + destination checks: an Authorization header's VALUE is
+#      genuinely transmitted, so a generic credential (.ssh/.aws/etc.) or an
+#      attacker-controlled destination must never qualify.
+_SH_TLS_MATERIAL_FLAG_RE = re.compile(r"(?:--cacert|--capath|--cert|--key|-E)\s+")
+_SH_AUTH_HEADER_RE = re.compile(r"(?:-H|--header)\s+(['\"])\s*Authorization\s*:.*?\1", re.I)
+# ANY -H/--header value (not just Authorization) -- used to blank header text out
+# of the destination search below, not to detect a credential match.
+_SH_ANY_HEADER_VALUE_RE = re.compile(r"(?:-H|--header)\s+(['\"]).*?\1", re.I)
+_SH_VAR_ASSIGN_RE = re.compile(r"^[ \t]*(?P<var>[A-Za-z_][A-Za-z0-9_]{0,127})=(?P<val>.*)$")
+_SH_VAR_REF_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]{0,127})\}?")
+
+
+def _sh_var_mentions_incluster_host(masked: str, name: str) -> bool:
+    """True if any top-level `name=...` assignment line in the WHOLE script
+    mentions the in-cluster API server signal -- a text-substrate search (never
+    a full value resolution), same limitation the Python side's simple
+    `_simple_str_const_assigns` map has."""
+    for m in _SH_VAR_ASSIGN_RE.finditer(masked):
+        if m.group("var") == name and _INCLUSTER_API_HOST_RE.search(m.group("val")):
+            return True
+    return False
+
+
+def _sh_line_destination_text(raw: str) -> str:
+    """*raw* with every -H/--header flag's own quoted value, and every
+    TLS-material flag's own path argument, blanked out (character positions
+    preserved so this stays a drop-in substitute for *raw* in a search). C-135:
+    a decoy destination string planted inside ANY header -- not just
+    Authorization -- must never be able to confirm the destination; only text
+    that can plausibly BE the outbound URL/body/positional arguments may."""
+    spans = [m.span() for m in _SH_ANY_HEADER_VALUE_RE.finditer(raw)]
+    for m in _SH_TLS_MATERIAL_FLAG_RE.finditer(raw):
+        arg_end = m.end()
+        while arg_end < len(raw) and not raw[arg_end].isspace():
+            arg_end += 1
+        spans.append((m.start(), arg_end))
+    if not spans:
+        return raw
+    chars = list(raw)
+    for start, end in spans:
+        for i in range(start, min(end, len(chars))):
+            chars[i] = " "
+    return "".join(chars)
+
+
+def _sh_candidate_destination_tokens(text: str) -> list:
+    """Whitespace-split tokens from *text* that could plausibly BE curl's own
+    outbound destination argument: a quoted/bare http(s) URL, or a variable
+    reference (`$VAR`/`${VAR}`, optionally with a literal path suffix like
+    `${API_SERVER}/api/...`). C-135: a flag (`-X`, `--foo`) or a bare word/
+    trailing-comment fragment with no scheme and no variable reference is NEVER
+    a candidate -- that closed a real gap where a decoy word like a bare
+    `kubernetes.default.svc` floating anywhere on the line (not an actual URL
+    argument at all), or the same text after an inline `#` comment, could
+    confirm a destination curl never actually requests."""
+    tokens = []
+    for tok in text.split():
+        t = tok.strip("'\"")
+        if not t or t.startswith("-"):
+            continue
+        if t.lower().startswith(("http://", "https://")) or t.startswith("$"):
+            tokens.append(t)
+    return tokens
+
+
+def _sh_line_has_incluster_destination(raw: str, masked: str) -> bool:
+    """True if a candidate destination TOKEN (see `_sh_candidate_destination_tokens`)
+    in the non-header, non-TLS-flag part of *raw* -- or a variable it references
+    (resolved against the whole script's simple `VAR=...` assignments) -- mentions
+    the cluster's own API server. Fails closed: an unresolvable variable, an
+    opaque expression, or text that isn't even URL/variable-shaped is simply not
+    a match, so the finding stays crit."""
+    dest_text = _sh_line_destination_text(raw)
+    for tok in _sh_candidate_destination_tokens(dest_text):
+        if _INCLUSTER_API_HOST_RE.search(tok):
+            return True
+        for name in _SH_VAR_REF_RE.findall(tok):
+            if _sh_var_mentions_incluster_host(masked, name):
+                return True
+    return False
+
+
+def _sh_cred_match_is_incluster_auth_only(raw: str, masked: str) -> bool:
+    """B-415/C-135: True only when EVERY `_SH_CRED_FILE_RE` match on *raw* is
+    either (a) inside curl's own TLS-material flag argument (--cacert/--capath/
+    --cert/--key/-E -- read locally for the handshake, never sent as request
+    data), or (b) the narrow in-cluster service-account token specifically,
+    referenced ONLY inside a -H/--header 'Authorization: ...' value, on a line
+    whose own destination resolves to the cluster's own API server. A
+    credential-path match ANYWHERE ELSE -- the URL, -d/--data body, a
+    non-Authorization header, or a bare unflagged argument -- makes this return
+    False, so the exemption can never launder a real exfil position. A generic
+    secrets-mount or dotfile credential (not the exact service-account token
+    path) never qualifies for (b), at any position or destination -- only the
+    TLS-flag case (a) can ever apply to it."""
+    matches = list(_SH_CRED_FILE_RE.finditer(raw))
+    if not matches:
+        return False
+    auth_header_spans = [m.span() for m in _SH_AUTH_HEADER_RE.finditer(raw)]
+    destination_ok: bool | None = None
+    for m in matches:
+        prefix = raw[: m.start()]
+        flag_matches = list(_SH_TLS_MATERIAL_FLAG_RE.finditer(prefix))
+        is_tls_flag_arg = False
+        if flag_matches:
+            between = prefix[flag_matches[-1].end() :]
+            # The match must still be the SAME shell word the flag introduced --
+            # no whitespace/segment-separator between the flag and the match
+            # (the credential-path regex can match a SUFFIX of the path token,
+            # e.g. the .../ca.crt case below, not always its very first char).
+            if not re.search(r"[\s;&|]", between):
+                is_tls_flag_arg = True
+        if is_tls_flag_arg:
+            continue
+        is_incluster_token = bool(_INCLUSTER_TOKEN_PATH_RE.search(m.group(0)))
+        in_auth_header = any(
+            start <= m.start() and m.end() <= end for start, end in auth_header_spans
+        )
+        if is_incluster_token and in_auth_header:
+            if destination_ok is None:
+                destination_ok = _sh_line_has_incluster_destination(raw, masked)
+            if destination_ok:
+                continue
+        return False
+    return True
+
+
 # decode-then-exec: an encoded blob is decoded (base64/xxd/openssl) and piped straight
 # into a shell/interpreter — the classic obfuscated-RCE dropper. Encode (no -d) and
 # decode-to-file (no `| interp`) stay silent.
@@ -5324,13 +5639,17 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         if not (_SH_OUTBOUND_RE.search(raw) or _sh_bare_nc_invocation(raw)):
             continue
         if _SH_CRED_FILE_RE.search(raw):
-            add(
-                "SHELL_CRED_EXFIL",
-                "crit",
-                i,
-                "reads a credential file and sends it to an outbound command "
-                "(curl/wget/nc) — credential exfiltration",
-            )
+            # B-415: curl's own TLS-material flags, and the narrow in-cluster
+            # token in an Authorization header aimed at the cluster's own API
+            # server, are legitimate in-cluster auth -- not exfiltration.
+            if not _sh_cred_match_is_incluster_auth_only(raw, masked):
+                add(
+                    "SHELL_CRED_EXFIL",
+                    "crit",
+                    i,
+                    "reads a credential file and sends it to an outbound command "
+                    "(curl/wget/nc) — credential exfiltration",
+                )
             continue
         if any(re.search(r"\$\{?" + re.escape(v) + r"\b", raw) for v in cred_vars):
             add(
