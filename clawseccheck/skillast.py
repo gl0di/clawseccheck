@@ -493,37 +493,104 @@ def _value_is_tainted_source(node: ast.AST, tainted: set[str]) -> bool:
     return False
 
 
-def _external_tainted_names(tree: ast.AST, func_params: set[str]) -> set[str]:
-    """Compute tainted names for TT4/TT5/SSRF rules.
+def _external_tainted_names(
+    tree: ast.AST,
+    func_param_taint: dict,
+    owner_map: dict,
+    parent_scope: dict,
+    shadow_cache: dict,
+) -> dict:
+    """Compute SCOPE-BUCKETED tainted names for TT4/TT5/SSRF rules (B-413, layer 1).
 
-    Sources: function parameters, os.getenv/os.environ[...], open/read (file),
-    requests.get/urllib.urlopen/httpx.get (network input), input(), tool-result calls.
-    Propagation: assignment, dict/list packing, f-strings, fixpoint up to 6 iterations.
+    Returns a dict keyed by owning scope node (a function at any nesting depth, a
+    top-level class's own method, or None for module-level / global-declared /
+    owner-map-unreachable assignments) -- mirrors `_tainted_names`'s scope-bucketing
+    model, fixing the SAME class of false positive for THIS rule's own taint source.
+    The old flat `set[str]` seed (every function's params, no scope) let a parameter
+    in one function taint an unrelated same-named local in a totally different
+    function, or let a generic name reused across sibling functions collide -- see
+    `_func_param_taint_by_scope`'s docstring for the concrete case_00374/case_01948
+    shapes. `func_param_taint` fixes the SOURCE half by seeding each function's OWN
+    params into its OWN bucket instead of one flat whole-file set; this function fixes
+    the PROPAGATION half by testing sourced-ness, and bucketing a newly-tainted
+    target, against the taint actually VISIBLE at each assignment's own lexical
+    position (`_tainted_names_visible`) instead of a flat whole-file set.
+
+    Sources: function parameters (scope-bucketed, see above), os.getenv/
+    os.environ[...], open/read (file), requests.get/urllib.urlopen/httpx.get (network
+    input), input(), tool-result calls -- the same four `sourced` predicates as
+    before, kept VERBATIM (they are the rule's semantics, not what B-413 fixes).
+    Propagation: assignment (Assign AND AugAssign) and tuple/list-unpacking targets,
+    fixpoint up to 6 iterations. global/nonlocal bucket redirection mirrors
+    `_tainted_names`'s own fixpoint (the same mature, C-135-hardened scope/binding
+    model already used for the decode->exec taint rule -- near-mechanical
+    transposition here, not a new design).
     """
-    tainted: set[str] = set(func_params)
+    tainted: dict = {}
+    for scope, names in func_param_taint.items():
+        tainted.setdefault(scope, set()).update(names)
+
     assigns = [n for n in ast.walk(tree) if isinstance(n, (ast.Assign, ast.AugAssign))]
+    global_cache: dict = {}
+    nonlocal_cache: dict = {}
 
     for _ in range(6):
         changed = False
         for a in assigns:
             rhs = a.value
             targets = a.targets if isinstance(a, ast.Assign) else [a.target]
+            visible = _tainted_names_visible(a, tainted, owner_map, parent_scope, shadow_cache)
             sourced = (
-                _value_is_tainted_source(rhs, tainted)
+                _value_is_tainted_source(rhs, visible)
                 or _rhs_has_subscript_environ(rhs)
-                or _rhs_has_fstring_taint(rhs, tainted)
-                or bool(_names_in(rhs) & tainted)
+                or _rhs_has_fstring_taint(rhs, visible)
+                or bool(_names_in(rhs) & visible)
             )
-            if sourced:
-                for t in targets:
-                    if isinstance(t, ast.Name) and t.id not in tainted:
-                        tainted.add(t.id)
+            if not sourced:
+                continue
+
+            scope = owner_map.get(a)
+            if scope is not None:
+                if scope not in global_cache:
+                    global_cache[scope] = _global_declared_names(scope, owner_map)
+                global_names = global_cache[scope]
+                if scope not in nonlocal_cache:
+                    nonlocal_cache[scope] = _nonlocal_declared_names(scope, owner_map)
+                nonlocal_names = nonlocal_cache[scope]
+            else:
+                global_names = set()
+                nonlocal_names = set()
+
+            names_to_add: list = []
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    names_to_add.append(t.id)
+                elif isinstance(t, (ast.Tuple, ast.List)):
+                    names_to_add.extend(elt.id for elt in t.elts if isinstance(elt, ast.Name))
+
+            for name in names_to_add:
+                if name in global_names:
+                    bucket_keys = [None]
+                elif name in nonlocal_names:
+                    resolved = _nonlocal_target_scopes(
+                        name, scope, parent_scope, owner_map, shadow_cache, nonlocal_cache
+                    )
+                    if not resolved:
+                        # Unresolvable binding form -- fall back to the pre-B-215
+                        # over-approximation (see `_nonlocal_target_scopes`).
+                        resolved = []
+                        ancestor = parent_scope.get(scope)
+                        while ancestor is not None:
+                            resolved.append(ancestor)
+                            ancestor = parent_scope.get(ancestor)
+                    bucket_keys = resolved
+                else:
+                    bucket_keys = [scope]
+                for key in bucket_keys:
+                    bucket = tainted.setdefault(key, set())
+                    if name not in bucket:
+                        bucket.add(name)
                         changed = True
-                    elif isinstance(t, (ast.Tuple, ast.List)):
-                        for elt in t.elts:
-                            if isinstance(elt, ast.Name) and elt.id not in tainted:
-                                tainted.add(elt.id)
-                                changed = True
         if not changed:
             break
     return tainted
@@ -551,8 +618,10 @@ def _external_tainted_names(tree: ast.AST, func_params: set[str]) -> set[str]:
 #
 # Deliberately NARROW, to keep this crit rule sound:
 #   * only NETWORK reads are sources — not file reads, not env, and above all not
-#     function parameters (every param is `ext_tainted`, so admitting params would make
-#     almost any helper "remote-returning" and mass-false-fire this crit rule);
+#     function parameters (every param is externally tainted for TT5/SSRF's own
+#     purposes — see `_func_param_taint_by_scope`/`_external_tainted_names` — so
+#     admitting params here too would make almost any helper "remote-returning" and
+#     mass-false-fire this crit rule);
 #   * only ONE hop of return-value propagation (a locally-defined function whose own
 #     return value is network-derived), not a general interprocedural analysis;
 #   * the sink set is exec/eval only — the shell/subprocess sinks stay with TT5, whose
@@ -825,18 +894,67 @@ def _remote_fetch_tainted_names(tree: ast.AST) -> set[str]:
     return tainted
 
 
-def _collect_func_params(tree: ast.AST) -> set[str]:
-    """All argument names of all function definitions in *tree*."""
-    params: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for arg in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
-                params.add(arg.arg)
-            if node.args.vararg:
-                params.add(node.args.vararg.arg)
-            if node.args.kwarg:
-                params.add(node.args.kwarg.arg)
-    return params
+def _func_param_taint_by_scope(tree: ast.AST, owner_map: dict, parent_scope: dict) -> dict:
+    """B-413 layer 1: seed each function's OWN parameter names into its OWN taint
+    bucket -- the scope-bucketed replacement for the old `_collect_func_params`, whose
+    single flat `set[str]` let a parameter in one function taint an unrelated
+    same-named local in a completely different function (SkillTrustBench case_00374:
+    `_venv_python(venv_dir)`'s parameter falsely tainted an unrelated `venv_dir` local
+    in `main()`, a deterministic `__file__`-derived path), or let a generic name
+    (`missing`/`data`/`result`) reused across sibling functions collide (case_01948).
+
+    Returns a dict keyed by owning scope node (mirrors `_tainted_names`'s bucketing:
+    a function at any nesting depth, a top-level class's own method, or `None` for
+    module-level code). A function that `_build_toplevel_owner_map` never reached --
+    it is seeded from `tree.body`'s own top-level funcs/classes only, so a function
+    nested inside a bare module-level `if`/`try` (not inside a class or another
+    function) is invisible to it -- falls back to the `None` (module) bucket rather
+    than being silently dropped: losing the seed entirely would be a false NEGATIVE
+    (an untracked parameter would then read as untainted everywhere), so the
+    conservative direction here is to over-taint, not under-taint.
+
+    C-135 (round 1, self-review at implementation time): a scope-count safety cap
+    that redirected excess scopes to the shared `None` bucket was attempted here and
+    RETRACTED before shipping -- an independent adversarial pass proved it a real,
+    reproducible detection-loss regression, not the "fails toward crit" safety valve
+    its own comment claimed. `_tainted_names_visible`'s shadow-subtraction (correct
+    for its ORIGINAL purpose -- a local rebinding shadows an unrelated outer-scope
+    taint source of the same name) treats a scope's own parameter binding as shadowing
+    the module bucket's same-named entry, so a param whose seed was dumped into `None`
+    by the cap became invisible inside its OWN owning function -- the one place it is
+    genuinely, unambiguously tainted. Confirmed via an unmodified-default-cap repro (a
+    ~6,000-line file, 2001 throwaway functions followed by one real tainted
+    `subprocess.call(cmd, shell=True)` wrapper) that TT5_CMD_INJECTION silently never
+    fired, where the pre-B-413 flat model correctly caught it. No cap is applied here;
+    an unbounded scope count was measured (same adversarial pass) to cost real time
+    but not memory (no product/powerset structure, unlike the `_EffectSimulator`
+    B-192 blowup this file already guards against elsewhere) -- the project's
+    existing `ScanBudgetExceeded`/`check_deadline` wall-clock budget, which already
+    wraps the check pipeline, is the correct backstop for that cost, not a
+    correctness-affecting cap invented here.
+    """
+    taint: dict = {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        # A function becomes its OWN scope bucket iff `_build_toplevel_owner_map`
+        # actually walked it -- in which case owner_map[fn] is fn itself (see that
+        # function's docstring: every FunctionDef/AsyncFunctionDef it reaches maps to
+        # itself) and fn is a key of parent_scope. Anything else (unreached by the
+        # owner-map walk) is not one of "owner_map's scope set" and falls to None.
+        scope = owner_map.get(fn)
+        is_own_scope = scope is fn and fn in parent_scope
+        bucket = scope if is_own_scope else None
+
+        args = fn.args
+        names = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+        if args.vararg:
+            names.add(args.vararg.arg)
+        if args.kwarg:
+            names.add(args.kwarg.arg)
+        if names:
+            taint.setdefault(bucket, set()).update(names)
+    return taint
 
 
 def _is_exec_sink_call(func: ast.AST) -> tuple:
@@ -1010,21 +1128,272 @@ def _list_bindings_by_call(tree: ast.AST) -> dict[ast.Call, dict[str, ast.List |
     return out
 
 
+# B-413 layer 2 safety cap: a wrapper function with more intra-file call sites than
+# this is treated as UNRESOLVABLE (stays crit) rather than scanned in full -- a hard
+# cap on cost, not a soft one. Exposed as a module constant so tests can monkeypatch
+# a small threshold instead of generating 200+ call sites.
+_MAX_WRAPPER_CALL_SITES = 200
+
+
+def _param_argv_call_sites(
+    fn: ast.AST, param_name: str, tree: ast.AST, owner_map: dict
+) -> list | None:
+    """B-413 layer 2: the argument expression bound to `fn`'s `param_name` at EVERY
+    intra-file call to `fn` -- the call-site view of the ordinary, encouraged wrapper
+    idiom (`def run(cmd): subprocess.check_call(cmd, cwd=ROOT)`) that a purely
+    intra-function taint model (layer 1) cannot clear, since the parameter genuinely
+    IS tainted in `fn`'s own scope (that part of layer 1 is correct); only the CALL
+    SITES can prove every real invocation is actually safe.
+
+    Returns None (unresolvable -> the caller must stay conservative / crit) whenever
+    anything about the binding cannot be proven safe by a simple, SOUND static match
+    -- soundness here means "never wrongly conclude safe", so every ambiguous case
+    bails rather than guesses:
+
+      * `fn` is not a bare top-level FunctionDef/AsyncFunctionDef (a nested function
+        or a class method is out of scope for this narrow fix);
+      * `fn` itself takes `*args`/`**kwargs` (the position of `param_name` cannot be
+        pinned down for every caller);
+      * `fn`'s name is not unique at module level (two top-level defs sharing a name
+        -- which real caller means?);
+      * `param_name` cannot be located in `fn`'s own positional/keyword-or-positional/
+        keyword-only parameter list;
+      * `fn`'s bare NAME is referenced anywhere in the file OTHER than as the `func`
+        of a Call to it -- passed as a value/callback/re-assigned (`f = run`) is an
+        indirect call this walk cannot see, so it must not silently ignore it;
+      * ANY call site to `fn` uses `*args`/`**kwargs` unpacking -- positional
+        resolution is not safe to assume;
+      * a call site does not bind `param_name` at all (relies on `fn`'s own default
+        value) -- not modelled here, bail rather than assume the default is safe;
+      * more than `_MAX_WRAPPER_CALL_SITES` intra-file call sites (a hard cost cap);
+      * ZERO call sites are found -- load-bearing: a helper with no intra-file caller
+        is genuinely unknown from outside the file and MUST stay crit.
+
+    This walk is deliberately NOT scope-precise about which `fn`-named reference goes
+    with which `fn` (it matches every `ast.Name(id=fn.name)` in the whole file, not
+    just ones actually resolving to `fn` under Python's real scoping) -- a same-named
+    nested closure or unrelated local could, in principle, add noise. That noise can
+    only make this MORE conservative (an extra call site or an extra "used as a
+    value" hit only ever pushes the result toward None/False, i.e. toward staying
+    crit), never less -- so it stays sound without needing full scope resolution here.
+    """
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None
+    if fn not in getattr(tree, "body", []):
+        return None  # not a bare top-level function
+    args = fn.args
+    if args.vararg or args.kwarg:
+        return None
+
+    fn_name = fn.name
+    toplevel_defs_named = [
+        n
+        for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn_name
+    ]
+    if len(toplevel_defs_named) != 1:
+        return None  # name not unique at module level
+
+    positional_names = [a.arg for a in (*args.posonlyargs, *args.args)]
+    kwonly_names = {a.arg for a in args.kwonlyargs}
+    if param_name in positional_names:
+        pos_index = positional_names.index(param_name)
+    elif param_name in kwonly_names:
+        pos_index = None  # keyword-only -- must be bound by keyword at every call site
+    else:
+        return None
+
+    all_name_refs = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == fn_name]
+    all_calls = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == fn_name
+    ]
+    call_func_ids = {id(c.func) for c in all_calls}
+    for ref in all_name_refs:
+        if id(ref) not in call_func_ids:
+            return None  # used as a value somewhere other than Call.func -- bail
+
+    if not all_calls:
+        return None  # zero call sites -- stays crit, load-bearing
+    if len(all_calls) > _MAX_WRAPPER_CALL_SITES:
+        return None  # cost cap -- stays crit
+
+    bound_exprs: list = []
+    for call in all_calls:
+        if any(isinstance(a, ast.Starred) for a in call.args):
+            return None
+        if any(kw.arg is None for kw in call.keywords):  # **kwargs unpack at the call
+            return None
+        kw_match = next((kw.value for kw in call.keywords if kw.arg == param_name), None)
+        if kw_match is not None:
+            bound_exprs.append(kw_match)
+            continue
+        if pos_index is None:
+            return None  # keyword-only param not passed by keyword here -- relies on
+            # fn's own default; not modelled, bail rather than assume it is safe
+        if pos_index < len(call.args):
+            bound_exprs.append(call.args[pos_index])
+        else:
+            return None  # relies on fn's default value -- not modelled, bail
+    return bound_exprs
+
+
+# B-413 layer 2 (C-135 round 1, self-review at implementation time): checking only
+# argv[0] for taint was RETRACTED-AND-NARROWED here after an independent adversarial
+# pass proved it a real, reproducible false-negative regression, not just a
+# theoretical gap. When argv[0] names a shell or another indirect-execution
+# interpreter, the REST of the argv list is not inert execve data -- it is text the
+# interpreter itself parses and runs, so a tainted value anywhere in argv[1:] is
+# genuine command injection even though argv[0] is a hardcoded, innocuous-looking
+# literal. Concrete repro that motivated this: `def run(cmd): subprocess.check_call
+# (cmd)` called as `run(["sh", "-c", os.environ["WEBHOOK_PAYLOAD"]])` -- argv[0] is
+# the constant "sh", so the pre-fix check certified the call site "fixed" and
+# downgraded a CRITICAL command injection to an informational finding.
+#
+# C-135 (2nd round, self-caught in integration): a first cut of this fix treated
+# EVERY invocation of a general-purpose interpreter (python/perl/ruby/node/...) as
+# dangerous whenever ANY later argv element was tainted -- but `python -m edge_tts
+# --text {text} --voice {voice}` (a real, previously-correctly-PASSing fixture,
+# clean_b13_fixed_argv_subprocess) passes `text`/`voice` as ORDINARY CLI ARGUMENTS
+# to a well-behaved module, not as code for python to execute; that flipped a
+# genuinely safe skill to FAIL. Fixed by splitting into two categories:
+#   * _SHELL_EVAL_FLAG_INTERPRETERS -- general scripting-language interpreters and
+#     shells that CAN take an "execute this string as code" flag but usually don't;
+#     these only count as dangerous when such a flag (_EVAL_FLAG_NAMES) is ALSO
+#     present somewhere in the argv, matching the exact "sh -c <tainted>" shape that
+#     motivated this fix without over-matching ordinary "<interpreter> script.py
+#     --flag value" invocations.
+#   * _REEXEC_WRAPPER_NAMES -- commands whose basic invocation shape already treats
+#     everything after argv[0] (or, for `find`, everything after `-exec`) as a
+#     command to run, with no extra flag needed: `env CMD ARGS...`, `sudo CMD
+#     ARGS...`, `ssh HOST CMD` are dangerous by construction, not merely "can be
+#     misused via a flag".
+_SHELL_EVAL_FLAG_INTERPRETERS = frozenset({
+    "sh", "bash", "zsh", "ksh", "dash", "csh", "tcsh", "ash",
+    "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh",
+    "python", "python2", "python3", "perl", "ruby", "php", "node", "deno",
+})
+_EVAL_FLAG_NAMES = frozenset({"-c", "-e", "--eval", "/c", "-command", "--command"})
+_REEXEC_WRAPPER_NAMES = frozenset({"env", "sudo", "doas", "nohup", "ssh"})
+
+
+def _argv0_is_shell_indirect_exec(elts: list) -> bool:
+    """True when literal argv[0] of *elts* names a shell/interpreter or another
+    program whose invocation shape means LATER argv elements are not inert execve
+    data -- either it always re-execs its trailing args as a new command
+    (`_REEXEC_WRAPPER_NAMES`), or it is a scripting interpreter/shell actually
+    invoked with an explicit "run this string" flag (`_SHELL_EVAL_FLAG_INTERPRETERS`
+    + `_EVAL_FLAG_NAMES` present somewhere in the SAME argv) -- an interpreter
+    invoked WITHOUT such a flag (`python -m mod --flag value`) is an ordinary
+    program call whose own args are just data to it, not code."""
+    if not elts:
+        return False
+    prog = elts[0]
+    if not isinstance(prog, ast.Constant) or not isinstance(prog.value, str):
+        return False
+    basename = prog.value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+    if basename in _REEXEC_WRAPPER_NAMES:
+        return True
+    if basename in _SHELL_EVAL_FLAG_INTERPRETERS:
+        return any(
+            isinstance(e, ast.Constant)
+            and isinstance(e.value, str)
+            and e.value.lower() in _EVAL_FLAG_NAMES
+            for e in elts[1:]
+        )
+    return False
+
+
+def _all_call_sites_bind_fixed_argv(
+    bound_exprs: list,
+    list_bindings_by_call: dict,
+    owner_map: dict,
+    ext_taint_map: dict,
+    parent_scope: dict,
+    shadow_cache: dict,
+) -> bool:
+    """B-413 layer 2: True iff EVERY expression in `bound_exprs` (from
+    `_param_argv_call_sites`) is provably a hardcoded command: a non-empty literal
+    List/Tuple (inline, or a bare Name resolved through the EXISTING
+    `_single_list_bindings_local`/`_list_bindings_by_call` machinery) whose
+    program-name element (argv[0]) is untainted in the CALLING scope's own visible
+    taint set -- AND, when argv[0] is itself a shell/indirect-execution interpreter
+    (`_argv0_is_shell_indirect_exec`), every OTHER element is untainted too, since
+    the interpreter re-parses them as its own command text. A single unresolvable,
+    empty, or tainted call site fails the whole check -- the wrapper's parameter
+    stays crit.
+
+    Name resolution reuses `list_bindings_by_call` (already computed once per file by
+    the caller, passed in here -- never recomputed) by re-keying its existing
+    per-CALL entries by SCOPE instead of by call node: `owner_map.get(call_node) is
+    owner_map.get(expr)` always holds for an `expr` that is a direct argument of
+    `call_node` (both are visited in the same scope-subtree walk in
+    `_build_toplevel_owner_map`), so this is a free re-index of already-computed
+    `_single_list_bindings_local` results, not a new computation of them.
+    """
+    if not bound_exprs:
+        return False
+    scope_bindings: dict = {}
+    for call_node, binds in list_bindings_by_call.items():
+        scope_bindings.setdefault(owner_map.get(call_node), binds)
+
+    for expr in bound_exprs:
+        resolved = expr
+        if isinstance(expr, ast.Name):
+            binds = scope_bindings.get(owner_map.get(expr))
+            if binds:
+                resolved = binds.get(expr.id, expr)  # resolve a var-bound command list
+        if not isinstance(resolved, (ast.List, ast.Tuple)) or not resolved.elts:
+            return False  # unresolvable or empty -- not provably a fixed command
+        prog = resolved.elts[0]
+        visible = _tainted_names_visible(expr, ext_taint_map, owner_map, parent_scope, shadow_cache)
+        if _names_in(prog) & visible:
+            return False  # tainted program name at THIS call site -> stays crit
+        if _argv0_is_shell_indirect_exec(resolved.elts):
+            rest_names = set()
+            for elt in resolved.elts[1:]:
+                rest_names |= _names_in(elt)
+            if rest_names & visible:
+                return False  # tainted arg handed to a shell/interpreter -> stays crit
+    return True
+
+
 def _subprocess_taint_is_command_injection(
-    node: ast.Call, tainted: set, list_bindings: dict[str, ast.List | ast.Tuple] | None = None
+    node: ast.Call,
+    tainted: set,
+    list_bindings: dict[str, ast.List | ast.Tuple] | None = None,
+    *,
+    tree: ast.AST | None = None,
+    owner_map: dict | None = None,
+    parent_scope: dict | None = None,
+    shadow_cache: dict | None = None,
+    ext_taint_map: dict | None = None,
+    list_bindings_by_call: dict | None = None,
 ) -> bool:
     """For a subprocess.* call with tainted input, is it command-injection grade?
 
     True  -> shell=True (or a non-literal shell value), OR a non-list first arg
-             (string command / tainted program path), OR the program element argv[0]
-             is itself tainted.
+             (string command / tainted program path) that layer 2 cannot clear, OR
+             the program element argv[0] is itself tainted.
     False -> argv-list form with shell not True and a fixed (untainted) program — the
              tainted value is only a non-program argument. That is argument injection
              (low risk: metacharacters are literal argv data passed to execve), NOT
              command injection. Regression guard for the B13 false-positive class.
+             ALSO False (B-413 layer 2) when `first` is the wrapper's OWN bare
+             parameter Name and EVERY intra-file call site to the wrapper binds that
+             parameter to a fully-literal, untainted-program argv list -- the
+             ordinary `def run(cmd): subprocess.check_call(cmd, ...)` idiom, where
+             `cmd` is genuinely tainted from `run`'s own perspective (layer 1 is
+             correct about that) but every real invocation is hardcoded.
 
     The argv list may be inline (`run([prog, arg])`) or bound to a local resolved via
     ``list_bindings`` (`cmd = [prog, arg]; run(cmd)`) — the dominant real-world form.
+
+    The keyword-only `tree`/`owner_map`/`parent_scope`/`shadow_cache`/`ext_taint_map`/
+    `list_bindings_by_call` args are layer 2's extra context; all optional (default
+    None) so this stays callable exactly as before layer 2 existed. Layer 2 is only
+    attempted when every one of them is supplied.
     """
     for kw in node.keywords:
         if kw.arg == "shell":
@@ -1039,7 +1408,40 @@ def _subprocess_taint_is_command_injection(
         prog = first.elts[0] if first.elts else None
         if prog is not None and (_names_in(prog) & tainted):
             return True  # tainted program name -> arbitrary program execution
+        # C-135 (B-413 round 1): argv[0] being untainted is not enough when argv[0]
+        # is ITSELF a shell/indirect-execution interpreter -- the rest of the argv
+        # list is text that interpreter parses and runs, not inert execve data (see
+        # _argv0_is_shell_indirect_exec's docstring, layer 2's identical check below).
+        if _argv0_is_shell_indirect_exec(first.elts):
+            rest_names = set()
+            for elt in first.elts[1:]:
+                rest_names |= _names_in(elt)
+            if rest_names & tainted:
+                return True  # tainted arg handed to a shell/interpreter -> command injection
         return False  # only a non-program argv element is tainted -> argument injection
+
+    # B-413 layer 2: `first` is a bare, unresolved Name -- possibly the wrapper's OWN
+    # parameter, which is genuinely tainted at THIS scope (layer 1 is correct about
+    # that) but may still be safe if EVERY intra-file call site binds it to a
+    # fully-literal argv list with an untainted program name.
+    if (
+        isinstance(first, ast.Name)
+        and tree is not None
+        and owner_map is not None
+        and parent_scope is not None
+        and shadow_cache is not None
+        and ext_taint_map is not None
+        and list_bindings_by_call is not None
+    ):
+        fn = owner_map.get(node)
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+            a.arg == first.id for a in (*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs)
+        ):
+            call_sites = _param_argv_call_sites(fn, first.id, tree, owner_map)
+            if call_sites is not None and _all_call_sites_bind_fixed_argv(
+                call_sites, list_bindings_by_call, owner_map, ext_taint_map, parent_scope, shadow_cache
+            ):
+                return False  # every real call site is a hardcoded command
     return True  # string / name / concat first arg -> string command or program path
 
 
@@ -3265,11 +3667,15 @@ def analyze_python(
 
     # Extended taint rules: TT5 (external-input -> exec), TT4 (file-read -> network),
     # SSRF (tainted URL -> network-fetch).  Compute external taint once and reuse.
-    func_params = _collect_func_params(tree)
-    ext_tainted = _external_tainted_names(tree, func_params)
-    bindings_by_call = _list_bindings_by_call(tree)
+    # B-413 layer 1: scope-bucketed, reusing the SAME owner_map/parent_scope/
+    # shadow_cache/list_bindings_by_call already built above for the decode->exec
+    # taint rule (never recomputed).
+    func_param_taint = _func_param_taint_by_scope(tree, owner_map, parent_scope)
+    ext_taint_map = _external_tainted_names(
+        tree, func_param_taint, owner_map, parent_scope, shadow_cache
+    )
 
-    if ext_tainted:
+    if ext_taint_map:
         for node in ast.walk(tree):
             if len(out) >= _MAX_FINDINGS_PER_FILE:
                 break
@@ -3280,14 +3686,29 @@ def analyze_python(
             # TT5: tainted value flows into exec/eval/os.system/os.popen/subprocess.*
             is_exec, exec_name = _is_exec_sink_call(node.func)
             if is_exec:
-                any_t, direct = _call_args_tainted(node, ext_tainted)
+                ext_visible = _tainted_names_visible(
+                    node, ext_taint_map, owner_map, parent_scope, shadow_cache
+                )
+                any_t, direct = _call_args_tainted(node, ext_visible)
                 if any_t:
                     # A subprocess argv-list call (shell=False, fixed program) is only
                     # argument injection, not command injection — do not escalate to crit.
+                    # B-413 layer 2: also downgraded when EVERY intra-file call site to
+                    # a wrapper function binds this tainted parameter to a hardcoded,
+                    # untainted-program argv list — see
+                    # _subprocess_taint_is_command_injection's own docstring.
                     if exec_name.startswith(
                         "subprocess."
                     ) and not _subprocess_taint_is_command_injection(
-                        node, ext_tainted, bindings_by_call.get(node)
+                        node,
+                        ext_visible,
+                        list_bindings_by_call.get(node),
+                        tree=tree,
+                        owner_map=owner_map,
+                        parent_scope=parent_scope,
+                        shadow_cache=shadow_cache,
+                        ext_taint_map=ext_taint_map,
+                        list_bindings_by_call=list_bindings_by_call,
                     ):
                         add(
                             "TT5_ARG_INJECTION",
@@ -3325,7 +3746,10 @@ def analyze_python(
             # SSRF: externally-tainted value flows into a network-fetch URL argument.
             is_ssrf_s, ssrf_name = _is_ssrf_sink_call(node.func)
             if is_ssrf_s:
-                any_t, direct = _call_args_tainted(node, ext_tainted)
+                ext_visible = _tainted_names_visible(
+                    node, ext_taint_map, owner_map, parent_scope, shadow_cache
+                )
+                any_t, direct = _call_args_tainted(node, ext_visible)
                 if any_t:
                     # Elevate evidence when a literal internal endpoint appears in the file.
                     has_internal = bool(_SSRF_LITERAL_RE.search(source))
