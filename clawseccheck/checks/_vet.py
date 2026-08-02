@@ -4899,14 +4899,36 @@ def vet_source(
     #     for eco == "git" (HOSTS values only ever populate the "url" pool, so a
     #     git:-sourced install off known-bad infra was silently never flagged). Both
     #     are exactly what iocdb.is_known_bad_host() -- the one canonical,
-    #     type-honoring predicate -- already exists to prevent; call it directly
-    #     instead of re-deriving a second, looser, eco-scoped copy here.
+    #     type-honoring predicate -- already exists to prevent.
+    #
+    #     B-436 FOLLOW-UP: the fix above called iocdb.is_known_bad_host() directly,
+    #     which always consults the module-level (live, shipped) dataset -- silently
+    #     bypassing vet_source's OWN `known_bad=` parameter, its documented
+    #     test-isolation mechanism (step 1's name check above still honors it via
+    #     `bad`). A caller that explicitly overrides the catalog to be empty (or to a
+    #     fixed test fixture) must not have step 1b quietly fall back to production
+    #     IOCs. So: when an override was actually injected, match against ITS pools
+    #     (the pre-B-436 flat exact-or-subdomain check -- an injected dict has no
+    #     per-record "ip" vs "domain" type, so it cannot honor that distinction; that
+    #     refinement stays scoped to the canonical predicate/live dataset). Only when
+    #     `known_bad` is None (the real, default catalog) do we delegate to the
+    #     canonical, type-honoring, dot-stripping `is_known_bad_host()`.
     host_l = (info.get("host") or "").lower()
-    if host_l and not reasons_bad and _iocdb_is_known_bad_host(host_l):
-        reasons_bad.append(
-            f"host '{host_l}' is known-compromised infrastructure "
-            f"(exact IOC match, catalog: url)"
-        )
+    if host_l and not reasons_bad:
+        if known_bad is not None:
+            for k in (eco, "any"):
+                pool = bad.get(k) or frozenset()
+                if any(host_l == h or host_l.endswith("." + h) for h in pool):
+                    reasons_bad.append(
+                        f"host '{host_l}' is known-compromised infrastructure "
+                        f"(exact IOC match, catalog: {k})"
+                    )
+                    break
+        elif _iocdb_is_known_bad_host(host_l):
+            reasons_bad.append(
+                f"host '{host_l}' is known-compromised infrastructure "
+                f"(exact IOC match, catalog: url)"
+            )
 
     # 2. Typosquat vs the brand list + ecosystem known-good pools + real plugin ids.
     pool = set(_KNOWN_NAMES) | set(good.get("plugin-ids") or ())

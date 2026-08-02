@@ -393,6 +393,39 @@ def test_b436_trailing_dot_fqdn_no_longer_evades_the_host_match():
     assert "known-compromised infrastructure" in f.detail
 
 
+# --------------------------------------------------------------------------- #
+# CLAWSECCHECK-B-436 follow-up (adversarial-review regression): step 1b used to  #
+# call iocdb.is_known_bad_host() directly, silently bypassing vet_source's own  #
+# `known_bad=` override -- its documented test-isolation parameter, still       #
+# honored by step 1's name check via `bad`. A caller that explicitly empties    #
+# the catalog must see step 1b honor that too, not fall back to production      #
+# IOCs.                                                                         #
+# --------------------------------------------------------------------------- #
+def test_b436_followup_host_match_honors_known_bad_override_when_emptied():
+    empty = {"npm": frozenset(), "pypi": frozenset(), "clawhub": frozenset(),
+              "git": frozenset(), "url": frozenset(), "any": frozenset()}
+    # Sanity: the same host FAILs against the real, default (non-overridden) catalog.
+    assert vet_source("https://laosji.net/setup.sh").status == FAIL
+    # But with the catalog explicitly overridden to empty, it must not.
+    f = vet_source("https://laosji.net/setup.sh", known_bad=empty)
+    assert f.status != FAIL, f"{f.status}: {f.detail}"
+    assert "known-compromised" not in f.detail
+
+
+def test_b436_followup_host_match_honors_known_bad_override_when_populated():
+    # The override must still be CONSULTED, not merely ignored-safe: a host placed
+    # in an injected catalog's own "url" pool must FAIL, independent of whatever the
+    # live/default dataset says about that same string.
+    custom = {"npm": frozenset(), "pypi": frozenset(), "clawhub": frozenset(),
+              "git": frozenset(), "url": frozenset({"totally-fixture-only-host.example"}),
+              "any": frozenset()}
+    assert iocdb.is_known_bad_host("totally-fixture-only-host.example") is False
+    f = vet_source("https://totally-fixture-only-host.example/x", known_bad=custom)
+    assert f.status == FAIL, f"{f.status}: {f.detail}"
+    assert "known-compromised infrastructure" in f.detail
+    assert "catalog: url" in f.detail
+
+
 def test_vet_source_stays_silent_when_iocdb_is_fresh():
     # Real dataset, real (current) clock -- freshness_notice() contributes nothing.
     f = vet_source("clawhub:my-totally-new-skill")
