@@ -40,7 +40,7 @@ from clawseccheck.checks import (
     check_tunnel_enrollment,
     vet_skill,
 )
-from clawseccheck.checks._content import _B338_LAUNCH_RE
+from clawseccheck.checks._content import _B338_LAUNCH_RE, _b338_test_path
 from clawseccheck.checks._vet import _read_skill_text
 from clawseccheck.collector import Context
 from clawseccheck.skillast import analyze_python
@@ -309,6 +309,90 @@ def test_check_warn_on_argv_list_form_via_installed_skill_py():
     f = check_tunnel_enrollment(ctx)
     assert f.status == WARN
     assert f.id == "B338"
+
+
+# --- C-355: AST evidence loop defensive-context gating ---
+#
+# The AST path (unlike the text-regex path above) had NO defensive-context gating at
+# all -- a test file mocking subprocess.run but still containing a literal
+# subprocess.run(["tailscale", "up", ...]) call as, say, a mock-assertion argument
+# produces a real ast.Call node and WARNed exactly like a live invocation.
+
+
+@pytest.mark.parametrize(
+    "relpath",
+    [
+        "tests/test_tunnel.py",
+        "test_probe.py",
+        "scripts/probe_test.py",
+        "scripts/probe_tests.py",
+        "conftest.py",
+        "tests/conftest.py",
+        "a/b/tests/helpers.py",
+    ],
+)
+def test_b338_test_path_detects_test_shaped_relpaths(relpath):
+    assert _b338_test_path(relpath) is True
+
+
+@pytest.mark.parametrize(
+    "relpath",
+    [
+        "scripts/probe.py",
+        "scripts/testrunner.py",  # "test" as a substring, not a path segment/prefix
+        "attest.py",
+        "contest_entry.py",
+        "src/latest_probe.py",
+    ],
+)
+def test_b338_test_path_does_not_match_ordinary_paths(relpath):
+    assert _b338_test_path(relpath) is False
+
+
+def test_check_does_not_warn_on_tunnel_launch_inside_a_test_file():
+    """The C-355 repro: a test file that mocks subprocess.run but still contains a
+    literal argv-list tunnel-launch Call node (e.g. as a mock-assertion argument) must
+    not WARN -- that code never executes at runtime."""
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.installed_skills = {"probe-skill": "# file: tests/test_probe.py\nimport subprocess\n"}
+    ctx.installed_skill_py = {
+        "probe-skill": [
+            (
+                "tests/test_probe.py",
+                "from unittest.mock import patch\n"
+                "import subprocess\n\n"
+                "@patch('subprocess.run')\n"
+                "def test_probe_launches_tailscale(mock_run):\n"
+                "    probe.main()\n"
+                '    mock_run.assert_called_with(["tailscale", "up", "--auth-key", "x"])\n',
+            )
+        ]
+    }
+    f = check_tunnel_enrollment(ctx)
+    assert f.status == PASS
+
+
+def test_check_still_warns_on_tunnel_launch_in_a_non_test_file_alongside_a_test_file():
+    """Regression guard: a genuine tunnel launch in the skill's OWN (non-test) code
+    must still WARN, even when the skill also bundles an unrelated test file -- the
+    C-355 fix must not blind the check to real invocations."""
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.installed_skills = {"probe-skill": "# file: scripts/probe.py\nimport subprocess\n"}
+    ctx.installed_skill_py = {
+        "probe-skill": [
+            (
+                "scripts/probe.py",
+                "import subprocess\n"
+                'subprocess.run(["tailscale", "up", "--auth-key", auth_key])\n',
+            ),
+            (
+                "tests/test_probe.py",
+                "def test_something_unrelated():\n    assert True\n",
+            ),
+        ]
+    }
+    f = check_tunnel_enrollment(ctx)
+    assert f.status == WARN
 
 
 def test_vet_bad_tunnel_launch_argv_is_warn():

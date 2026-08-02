@@ -10682,6 +10682,46 @@ def _b338_defensive_context(blob: str, pos: int, fence_ranges: list[tuple[int, i
     return _defensive_section(blob, pos)
 
 
+# C-355: the AST evidence loop below has no defensive-context gating of
+# its own -- unlike the text-regex path just above, which runs every match through
+# _b338_defensive_context. A test suite bundled alongside a skill's own automation
+# scripts (e.g. a test asserting `subprocess.run` was called with the right argv, via
+# `@patch("subprocess.run")`) still contains a real, literal `subprocess.run(["tailscale",
+# "up", ...])` Call node in its body -- `ast.parse` has no notion of "this code never
+# executes because the target is mocked," so it would WARN on a test file exercising the
+# skill's own tunnel-launch code, not on a live invocation. Path-scoped only (deliberately
+# NOT the enclosing-function/decorator check the ticket's own suggested direction also
+# floats): resolving "is the enclosing function decorated with @patch/@mock.patch" would
+# need skillast.analyze_python's shared ASTFinding shape (rule, severity, lineno, reason)
+# to start carrying enclosing-scope context for every one of its many consumers, which is
+# a bigger, riskier change to shared infra than this WARN-only, low-priority ticket
+# justifies -- left for a future pass if it proves to matter in practice.
+_B338_TEST_BASENAME_RE = re.compile(r"^(?:test_.*|.*_tests?)\.py$", re.IGNORECASE)
+
+
+def _b338_test_path(relpath: str) -> bool:
+    """True when *relpath* is itself a test file or lives under a test/tests/
+    directory -- e.g. ``tests/test_tunnel.py``, ``test_probe.py``,
+    ``scripts/probe_test.py``, ``conftest.py``, ``tests/conftest.py``. A skill's own
+    automation script that merely happens to launch a tunnel (the case this check
+    exists to catch) is never shaped like this.
+
+    Path-scoped by design (see the module comment above), which is itself a residual
+    bypass worth naming rather than losing: a skill could name its real launcher
+    ``tests/test_probe.py`` purely to dodge this WARN. Accepted for the same reason
+    B338 is WARN-only, MEDIUM-confidence to begin with (module docstring above) -- a
+    check this check's own severity ceiling already treats as a soft signal, not the
+    kind of gap that needs the C-135 discipline a FAIL-capable check would.
+    """
+    segments = re.split(r"[\\/]", relpath)
+    basename = segments[-1] if segments else relpath
+    if basename.lower() == "conftest.py":
+        return True
+    if _B338_TEST_BASENAME_RE.match(basename):
+        return True
+    return any(seg.lower() in ("test", "tests") for seg in segments[:-1])
+
+
 def check_tunnel_enrollment(ctx: Context) -> Finding:
     """B338 -- a skill's own code launches a covert tunnel / mesh-VPN primitive
     (tailscale/tailscaled, cloudflared tunnel, ngrok, ssh -R, a socat listener, frpc,
@@ -10711,7 +10751,11 @@ def check_tunnel_enrollment(ctx: Context) -> Finding:
     The AST path is naturally immune to this class of false positive -- `ast.parse`
     never turns a comment or docstring into a real `Call` node, and a markdown-fenced
     example embedded in a README is never a real `.py` file in `ctx.installed_skill_py`
-    to begin with.
+    to begin with. It is NOT immune to a test file exercising the skill's own
+    tunnel-launch code (e.g. `@patch("subprocess.run")` asserting the right argv) --
+    `ast.parse` has no notion of "this call is mocked, it never executes." Fixed
+    (C-355) by skipping any file under a test/tests/ path or shaped like
+    a test module (`_b338_test_path`) before running the AST rule against it.
 
     WARN    -- a tunnel/mesh-VPN launch primitive is found in an installed skill (text
                or argv-list form), outside a defensive/documentation context.
@@ -10741,6 +10785,8 @@ def check_tunnel_enrollment(ctx: Context) -> Finding:
     # Defect 1: the argv-list form -- see the module comment above.
     for skill_name, files in getattr(ctx, "installed_skill_py", {}).items():
         for relpath, src in files:
+            if _b338_test_path(relpath):
+                continue
             for af in analyze_python(src, relpath):
                 if af.rule != "TUNNEL_LAUNCH_ARGV":
                     continue
