@@ -12030,6 +12030,61 @@ def _b334_documented_inventory_entry(doc_text: str, pos: int) -> bool:
     return bool(_B334_INVENTORY_PREFIX_RE.match(doc_text[line_start:pos]))
 
 
+# B-419: a prose sentence describing what the helper DOES, in ordinary language -- the
+# fourth documented shape. Anchored on a THIRD-PERSON subject naming the file itself (a
+# pronoun, or "the script"/"helper"/"command"/"tool") followed by a plain descriptive
+# verb, because that is the shape a human writes when explaining a script's effect ("it
+# walks `src/`, writes `.cache/api.json`, prints a one-line summary") and it is never the
+# shape of the run directive itself -- the directive's own exec verb is drawn from
+# `_B334_EXEC_RE`, which this set deliberately excludes, so a sentence cannot satisfy both
+# at once.
+_B334_EFFECT_DESCRIPTION_RE = re.compile(
+    r"\b(?:it|this|that|the\s+(?:script|helper|command|tool))\s+(?:then\s+)?"
+    r"(?:writes|prints|downloads|fetches|generates|produces|extracts|parses|builds|"
+    r"reads|scans|outputs|returns|creates|checks|validates|updates|refreshes|uploads|"
+    r"computes|counts|indexes|walks|processes|syncs|collects|gathers|rebuilds|"
+    r"regenerates|takes)\b",
+    re.IGNORECASE,
+)
+
+
+def _b334_documented_prose_description(doc_text: str, start: int, segment: str) -> bool:
+    """True when *segment* documents the helper in prose that states its effect (B-419).
+
+    Shapes 1-3 all recognise DELIBERATE documentation: a fenced usage example, a
+    catalogued bullet/table entry, or a second mention elsewhere in the docs. None of them
+    recognise the single-mention Usage/Setup PARAGRAPH that is a small skill's *entire*
+    documentation --
+
+        ## Usage
+
+        ... so run `python scripts/gen_api_index.py` before you answer any API question.
+        It walks `src/`, writes `.cache/api.json`, prints a one-line summary, and takes
+        about two seconds.
+
+    both names the file (already required to reach here) and states, in plain language,
+    what it does -- which is what documenting a bundled script in prose looks like when a
+    skill has no separate inventory section. The check's own remediation ("document it in
+    the skill's usage section") is unactionable against a block that already is that
+    section.
+
+    Gated the same way shape 2 is (an install/usage/scripts heading covers *start*): a
+    graft with no such heading gets no benefit of the doubt just for describing its own
+    effect -- an attacker narrating what a malicious script does is not consent, and this
+    shape only fires where a legitimate skill would put its documentation in the first
+    place.
+    """
+    heading = _nearest_heading(doc_text, start)
+    if not heading:
+        return False
+    if not (
+        _INSTALL_HEADING_RE.search(heading)
+        or _B334_DOC_SECTION_HEADING_RE.search(heading)
+    ):
+        return False
+    return bool(_B334_EFFECT_DESCRIPTION_RE.search(segment))
+
+
 # Block boundary: a blank line, or a Markdown heading starting a new line. Fenced regions
 # are excluded by the caller so a blank line INSIDE a code block never splits it.
 _B334_BLOCK_SEP_RE = re.compile(r"\n[^\S\n]*\n|\n[^\S\n]{0,3}#{1,6}[^\S\n]")
@@ -12088,6 +12143,11 @@ def _b334_scan(doc_text: str) -> list[tuple[str, str, str]]:
             continue
         start, end = owning.pop()
         segment = doc_text[start:end]
+        # Documented, shape 4: the block is prose that both names the file and states,
+        # in ordinary language, what it does -- the sole-documentation-section case
+        # shapes 1-3 miss (B-419).
+        if _b334_documented_prose_description(doc_text, start, segment):
+            continue
         if not _b334_directed_run(segment):
             continue  # named but not run, or run only under a prohibition
         if _b334_consent_preserved(segment):
