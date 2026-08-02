@@ -238,7 +238,30 @@ jobs:
           # Repo-page images (README banner/screenshot + their sources) are for GitHub only —
           # they'd add ~650KB of dead weight to every skill install.
           rm -rf dist/clawseccheck/docs/assets
+          # CHANGELOG.md accumulates every release forever (352KB / 200 entries as of
+          # v3.59.0) and `clawhub publish` uploads every staged file as a raw,
+          # uncompressed multipart form part (dist/cli/commands/publish.js — no
+          # tar/gzip on this path, confirmed by reading the installed CLI; the
+          # unrelated `clawpack` command does gzip, `publish` does not) — so this file
+          # alone was ~6% of the payload that hit ClawHub's upload-size limit
+          # (v3.59.0's 5.6MB staged tree 413'd; v3.58.0's 4.5MB succeeded). The
+          # published copy keeps only the most recent releases; the git-tracked
+          # CHANGELOG.md itself is untouched — full history stays on GitHub.
+          KEEP_CHANGELOG_RELEASES=10
+          CUTOFF_LINE="$(grep -n '^## \[' dist/clawseccheck/CHANGELOG.md | sed -n "$((KEEP_CHANGELOG_RELEASES + 1))p" | cut -d: -f1)"
+          if [ -n "$CUTOFF_LINE" ]; then
+            head -n "$((CUTOFF_LINE - 1))" dist/clawseccheck/CHANGELOG.md > /tmp/changelog-trimmed.md
+            {
+              echo ""
+              echo "---"
+              echo ""
+              echo "_Older entries omitted from the published package to keep it small — full history:_"
+              echo "_<https://github.com/gl0di/clawseccheck/blob/main/CHANGELOG.md>_"
+            } >> /tmp/changelog-trimmed.md
+            mv /tmp/changelog-trimmed.md dist/clawseccheck/CHANGELOG.md
+          fi
           echo "Staged for publish:" && ls -1 dist/clawseccheck
+          echo "Staged size: $(du -sh dist/clawseccheck | cut -f1)"
 
       - name: Preflight — verify the staged tree locally
         # Cheap, offline, deterministic checks on the artifact we are about to upload.
