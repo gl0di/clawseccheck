@@ -560,6 +560,41 @@ def _maybe_secret_path_match(line: str):
 # always a same-blob fragment produced by the "wrong" alphabet's pattern splitting on a
 # character it cannot match, and is dropped rather than counted against the cap. The cap
 # is then applied to the surviving DISTINCT spans, combined across both patterns.
+def _decodes_to_compressed_blob(token: str) -> bool:
+    """B-432: True only when *token* actually decodes (either alphabet) AND
+    decompresses to a real gzip/zlib stream — the genuine, not merely shape-based, test
+    for whether a longer span is actually a bigger encoding of the SAME blob a shorter,
+    contained span also matched (see `_collect_blob_tokens`'s containment filter below).
+
+    Reuses the exact primitives `_scan_blob_for_compressed_indicators` itself uses
+    (`_maybe_compressed_blob`'s cheap prefix pre-check, then `_decode_b64_variants` +
+    `_bounded_decompress`) rather than inventing a new heuristic — same bounded,
+    already-vetted decode path, just consulted one step earlier to make a keep-or-drop
+    decision instead of a scan-or-skip one."""
+    if not _maybe_compressed_blob(token):
+        return False
+    for raw in _decode_b64_variants(token):
+        data, _truncated = _bounded_decompress(raw)
+        if data is not None:
+            return True
+    return False
+
+
+# B-432 (evasion of the B-383 fix above, FIXED): the maximal-span rule just above assumes
+# any span strictly CONTAINED in a longer overlapping span is always a same-blob fragment
+# produced by the "wrong" alphabet splitting on a character it cannot match — true for a
+# genuine urlsafe_b64encode blob, but an attacker can defeat it directly: glue a
+# `-`/`_`-joined word onto the FRONT of a real base64url blob ("x-cache-key-" + blob) and
+# the resulting single token STRICTLY CONTAINS the real blob, so it gets discarded as a
+# "fragment" of the longer wrapper — which itself starts with the glued word, not a
+# compressed-blob prefix, so no decode is ever attempted on it either. Net effect: the one
+# span that would have decoded is thrown away in favor of one that never could.
+# Fix: only drop a contained span when the longer span containing it is a GENUINE superset
+# of the same blob — i.e. it actually decodes+decompresses to a real gzip/zlib stream
+# itself (`_decodes_to_compressed_blob`), not merely when it is longer. A real urlsafe
+# blob's own container span still decodes fine (it IS the whole blob), so the ordinary
+# B-383 case is unaffected; an attacker-glued wrapper never does, so its "contained"
+# span — the real blob — survives instead. See CLAWSECCHECK-B-432.
 def _collect_blob_tokens(line: str) -> list:
     """Return up to `_MAX_BLOBS_PER_LINE` distinct base64 blob-candidate tokens from
     *line*, trying both the standard and URL-safe alphabets — see the note above for why
@@ -577,8 +612,12 @@ def _collect_blob_tokens(line: str) -> list:
     def _is_contained(i) -> bool:
         start, end, _ = candidates[i]
         return any(
-            j != i and o_start <= start and end <= o_end and (o_start, o_end) != (start, end)
-            for j, (o_start, o_end, _) in enumerate(candidates)
+            j != i
+            and o_start <= start
+            and end <= o_end
+            and (o_start, o_end) != (start, end)
+            and _decodes_to_compressed_blob(o_token)
+            for j, (o_start, o_end, o_token) in enumerate(candidates)
         )
 
     maximal = [c for i, c in enumerate(candidates) if not _is_contained(i)]
