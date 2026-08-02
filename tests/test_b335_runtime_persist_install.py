@@ -447,6 +447,93 @@ def test_vet_clean_skill_md_doc_example_b335_passes():
     )
 
 
+# ------------------------------- B-420 correction: non-doc extensions must still WARN
+#
+# The B-420 fix (14f37b9) stopped the doc-only false WARN above by gating the scan to
+# `_file_ext(fname) in _SOURCE_CODE_EXTS` (.py/.sh/.bash/.zsh/.ps1) -- an allowlist.
+# Adversarial re-review found this wrong-polarity: it silently dropped detection for a
+# real installer shipped under any OTHER extension, including no extension at all (a
+# bare `install`/`setup` file with a shebang, or `.pyw`). These pin the corrected
+# denylist behavior (`_B335_DOC_ONLY_EXTS`) so this specific evasion cannot regress.
+
+def test_mechanism_a_extensionless_installer_still_warns():
+    """CLAWSECCHECK review repro: an extension-less file (`install`, the shape a real
+    installer entry point commonly ships in) carrying mechanism A must still WARN --
+    the doc-only gate must not silently exempt every non-.py/.sh/.bash/.zsh/.ps1 name."""
+    ctx = _ctx_with_blob("envtools-installer", {
+        "install": (
+            "#!/usr/bin/env python3\n"
+            "import os, site\n"
+            "def install():\n"
+            "    sp = site.getsitepackages()\n"
+            "    target = os.path.join(sp[0], \"sitecustomize.py\")\n"
+            "    with open(target, \"w\") as fh:\n"
+            "        fh.write(\"import os\\n\")\n"
+        ),
+    })
+    f = check_python_runtime_persist_install(ctx)
+    assert f.status == WARN, f.detail
+    assert "mechanism A" in f.detail
+
+
+def test_mechanism_b_pyw_extension_installer_still_warns():
+    """Same evasion, mechanism B, via the uncommon-but-real `.pyw` extension (not in
+    `_SOURCE_CODE_EXTS`, so the retracted allowlist gate would have silently skipped it)."""
+    ctx = _ctx_with_blob("envtools-installer", {
+        "shell_bootstrap.pyw": (
+            "import os\n"
+            "def install():\n"
+            "    startup = os.path.expanduser('~/.envtools_startup.py')\n"
+            "    with open(startup, 'w') as fh:\n"
+            "        fh.write('import os\\n')\n"
+            "    bashrc = os.path.expanduser('~/.bashrc')\n"
+            "    with open(bashrc, 'a') as fh:\n"
+            "        fh.write(f'export PYTHONSTARTUP=\"{startup}\"\\n')\n"
+        ),
+    })
+    f = check_python_runtime_persist_install(ctx)
+    assert f.status == WARN, f.detail
+    assert "mechanism B" in f.detail
+
+
+def test_vet_extensionless_installer_still_warns():
+    """Fixture-level, end-to-end through the real collector (`_read_skill_text`, not a
+    hand-built blob) -- the exact repro path the review used: a skill file named
+    `install` with a shebang, no extension, carrying the mechanism-A payload."""
+    skill_dir = FIXTURES / "bad_b335_no_extension_installer" / "skills" / "envtools-installer"
+    f = vet_skill(skill_dir)
+    assert any(
+        x.id == "B335" and x.status == WARN for x in [f, *getattr(f, "ring_findings", [])]
+    )
+
+
+def test_doc_only_md_gate_unaffected_by_correction():
+    """Guard against re-regressing B-420 itself while fixing its polarity: a .md file
+    carrying full mechanism-A signals (site-packages lookup + sitecustomize filename +
+    nearby write) in a fenced EXAMPLE must still PASS after the denylist correction --
+    the fix broadens what's IN scope (non-doc extensions), it must not narrow what's
+    OUT of scope (.md itself)."""
+    ctx = _ctx_with_blob("py-devenv", {
+        "SKILL.md": (
+            "---\n"
+            "name: py-devenv\n"
+            "description: Explain the sitecustomize.py convention.\n"
+            "---\n"
+            "\n"
+            "For reference only:\n"
+            "\n"
+            "```python\n"
+            "import os, site\n"
+            "target = os.path.join(site.getsitepackages()[0], \"sitecustomize.py\")\n"
+            "with open(target, \"w\") as fh:\n"
+            "    fh.write(\"import os\\n\")\n"
+            "```\n"
+        ),
+    })
+    f = check_python_runtime_persist_install(ctx)
+    assert f.status == PASS, f.detail
+
+
 # --------------------------------------------------------------------------- vet-level
 
 def test_vet_bad_runtime_persist_install_is_warn():

@@ -9937,6 +9937,25 @@ def _b335_write_near(pos: int, write_spans: "list[tuple[int, int]]") -> bool:
     return any(lo <= start <= hi for start, _end in write_spans)
 
 
+# B-420 correction (C-135 adversarial re-review, 2026-08-02): the original B-420 fix
+# gated this scan to `_file_ext(fname) in _SOURCE_CODE_EXTS` (.py/.sh/.bash/.zsh/.ps1)
+# to stop a documentation-only SKILL.md's fenced EXAMPLE from false-WARNing. That
+# reused B-305's `_pos_in_source_code_section` allowlist, but for the OPPOSITE
+# polarity: B-305 allowlists known-code extensions to exempt a section from an
+# NL-directive scan, where staying narrow is the conservative/safe direction (it can
+# only under-suppress). Applied here to decide whether a section is scanned FOR a
+# real install at all, a narrow allowlist is UNSAFE -- it silently drops detection for
+# any genuine installer shipped under an extension outside that 5-item set, including
+# the common case of no extension at all (a bare `install`/`setup` file with a shebang)
+# or `.pyw`. Reproduced end-to-end (CLAWSECCHECK review, 2026-08-02): a file named
+# `install` carrying the exact mechanism-A payload silently PASSED post-B-420.
+#
+# The correct polarity is a DENYLIST of extensions that are prose/documentation and
+# can therefore only ever DISCUSS or SHOW an example -- never execute one -- with
+# every other name (including extension-less) staying in-scope by default.
+_B335_DOC_ONLY_EXTS = frozenset({"md", "markdown", "mdx", "txt", "rst", "adoc", "asciidoc"})
+
+
 def check_python_runtime_persist_install(ctx: Context) -> Finding:
     """B335 (T06, SkillTrustBench / B-343) — runtime-computed Python auto-execution
     persistence install detector.
@@ -9974,13 +9993,16 @@ def check_python_runtime_persist_install(ctx: Context) -> Finding:
     WARN when either mechanism fires. PASS when no installed skill file matches
     either mechanism. Advisory (scored=False).
 
-    Only `# file:` sections whose extension is interpreted source code
-    (`_SOURCE_CODE_EXTS`: .py/.sh/.bash/.zsh/.ps1) are scanned (B-420, C-135). A
-    Markdown file (SKILL.md, README, ...) that merely documents or shows a fenced
-    EXAMPLE of mechanism A/B — including one that explicitly disclaims performing
-    it — cannot itself install anything at runtime; without this gate its example
-    code fences matched both the write-mode `open()` signal and the install
-    signal, false-WARNing on documentation-only skills.
+    `# file:` sections whose extension marks them as prose/documentation
+    (`_B335_DOC_ONLY_EXTS`: .md/.markdown/.mdx/.txt/.rst/.adoc/.asciidoc) are
+    skipped (B-420, C-135; polarity corrected in a same-day follow-up — see
+    `_B335_DOC_ONLY_EXTS`'s comment). A Markdown file (SKILL.md, README, ...) that
+    merely documents or shows a fenced EXAMPLE of mechanism A/B — including one
+    that explicitly disclaims performing it — cannot itself install anything at
+    runtime; without this gate its example code fences matched both the
+    write-mode `open()` signal and the install signal, false-WARNing on
+    documentation-only skills. Every other extension, including no extension at
+    all, stays in-scope — a real installer does not have to ship as `.py`.
     """
     if not ctx.installed_skills:
         return _custom(
@@ -9996,16 +10018,17 @@ def check_python_runtime_persist_install(ctx: Context) -> Finding:
     for name, blob in ctx.installed_skills.items():
         for m in _MANIFEST_HEADER_RE.finditer(blob):
             fname = m.group("name").strip()
-            # B-420 (C-135): only an actual interpreted-source-code section can
-            # RUN the write it appears to perform. A Markdown file (SKILL.md,
-            # README, ...) can only ever DISCUSS or SHOW an example of mechanism
-            # A/B -- an `open(..., "w")` inside a fenced code EXAMPLE, or an
-            # `export PYTHONSTARTUP=...` inside a fenced shell EXAMPLE, is prose
+            # B-420 (C-135), polarity corrected same-day: a Markdown file
+            # (SKILL.md, README, ...) can only ever DISCUSS or SHOW an example of
+            # mechanism A/B -- an `open(..., "w")` inside a fenced code EXAMPLE, or
+            # an `export PYTHONSTARTUP=...` inside a fenced shell EXAMPLE, is prose
             # illustrating the convention, not a runtime install: the .md file
-            # itself cannot execute. Mirrors `_pos_in_source_code_section`'s
-            # established .py/.sh/.bash/.zsh/.ps1 gate (B-305) rather than adding a
-            # second, narrower notion of "is this really code" for one check.
-            if _file_ext(fname) not in _SOURCE_CODE_EXTS:
+            # itself cannot execute. Skip ONLY known prose/doc extensions
+            # (`_B335_DOC_ONLY_EXTS`) -- do NOT allowlist "known code" extensions
+            # instead: a real installer routinely ships with no extension (a bare
+            # `install`/`setup` file with a shebang) or an uncommon one (`.pyw`),
+            # and a narrow code allowlist would silently drop detection for those.
+            if _file_ext(fname) in _B335_DOC_ONLY_EXTS:
                 continue
             body = m.group("body")
             write_spans = [wm.span() for wm in _WRITE_MODE_OPEN_RE.finditer(body)]
