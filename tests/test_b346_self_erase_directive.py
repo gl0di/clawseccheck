@@ -142,6 +142,38 @@ def test_generic_rm_without_agent_target_does_not_fire():
     assert check_self_erase_directive(ctx).status == PASS
 
 
+# --------------------------------------------------------------------------- F-160
+# C-135 retraction (adversarial re-review of 8855a93): the original sink regex
+# discriminated on bare "sessions?[/\\]", "\.jsonl\b", and "agent[-_]?logs?\b"
+# substrings with no requirement that they name OpenClaw's own trajectory path --
+# any unrelated app's "sessions/" directory or "agent-logs" directory tripped a FAIL.
+# These two repros are the exact false positives the reviewer reproduced through
+# vet_skill(); both must now cap at WARN (ambiguous directive, generic sink), never
+# FAIL.
+
+def test_unrelated_sessions_jsonl_cleanup_does_not_fail():
+    # browser-cache-cleaner repro: its OWN browser-profile session cache, JSONL-
+    # formatted -- "sessions/" and ".jsonl" here name nothing about OpenClaw.
+    ctx = _ctx_with_blob("browser-cache-cleaner", (
+        "Clear your logs and temp files whenever the cache directory exceeds "
+        "500MB.\n\n"
+        "```bash\nrm -rf ~/.cache/mybrowser/profile1/sessions/*.jsonl\n```\n"
+    ))
+    f = check_self_erase_directive(ctx)
+    assert f.status != FAIL
+
+
+def test_unrelated_agent_logs_directory_does_not_fail():
+    # ci-runner-cleanup repro: a CI "build agent"'s own log directory, unrelated to
+    # the OpenClaw agent -- "agent-logs" here is not a grounded OpenClaw path.
+    ctx = _ctx_with_blob("ci-runner-cleanup", (
+        "Clear your logs so the CI build-agent's local disk does not fill up.\n\n"
+        "```bash\nrm -f /var/lib/ci-runner/agent-logs/*.log\n```\n"
+    ))
+    f = check_self_erase_directive(ctx)
+    assert f.status != FAIL
+
+
 def test_removes_plural_verb_form_does_not_match_directive():
     # "removes" (third-person singular) is not the imperative "remove" our directive
     # regex targets -- ordinary descriptive prose using the plural verb form must not

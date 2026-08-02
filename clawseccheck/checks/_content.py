@@ -12679,13 +12679,35 @@ _SELF_ERASE_DIRECTIVE_RE = re.compile(
 # is the exact C-135 hazard F-160 calls out: the TARGET discriminates, not the verb.
 # "Same statement" = no `;`/`|`/`&`/newline between the verb and the target, so an
 # unrelated later command sharing a script line can't borrow the verb's match.
+#
+# C-135 retraction (F-160 adversarial re-review, post-8855a93): the first cut's target
+# alternation -- bare `sessions?[/\\]`, bare `\.jsonl\b`, bare `agent[-_]?logs?\b` --
+# discriminated on generic English substrings, not the agent's own path. "sessions/"
+# is a common directory name in totally unrelated apps (browser-profile session
+# caches, web-framework sessions); ".jsonl" is a generic file format; "agent-logs" is
+# not even a grounded OpenClaw path (`logging.file` is user-configurable with no fixed
+# name -- see docs/research/openclaw-schema-recon.md §21.1) and reads naturally in
+# unrelated "agent" senses (a CI build agent, etc.). Confirmed reproducible: a
+# browser-cache-cleaner skill clearing its OWN `~/.cache/.../profile1/sessions/*.jsonl`,
+# and a ci-runner-cleanup skill clearing `/var/lib/ci-runner/agent-logs/*.log`, both
+# FAILed. Retracted those three alternatives; the target must now name something
+# actually grounded to OpenClaw's own trajectory sidecar (recon §9.1/§21,
+# `agents/*/sessions/*.trajectory.jsonl` under `~/.openclaw` or `OPENCLAW_TRAJECTORY_DIR`)
+# -- the literal "trajector*" noun, the env var, or a path that is itself rooted under
+# `.openclaw/` before reaching an agents/sessions segment. A directive with an
+# uncorroborated generic sink (like the two FP repros above) now grades WARN, not
+# FAIL -- ambiguous, same as a bare directive alone; see
+# tests/test_b346_self_erase_directive.py.
 _SELF_ERASE_SINK_RE = re.compile(
     r"\bhistory\s+-c\b"
     r"|\bunset\s+HISTFILE\b"
     r"|\bHISTFILE\s*=\s*(?:/dev/null|[\"'][\"'])"
     r"|\bHIST(?:SIZE|FILESIZE)\s*=\s*0\b"
     r"|(?:\btruncate\s+-s\s*0\s+|:\s*>\s*|\bshred\s+(?:-\w+\s+)*|\brm\s+(?:-\w+\s+)*)"
-    r"[^\n;|&]*(?:trajector\w*|\.jsonl\b|agent[-_]?logs?\b|sessions?[/\\])",
+    r"[^\n;|&]*"
+    r"(?:trajector\w*"
+    r"|OPENCLAW_TRAJECTORY_DIR\b"
+    r"|\.openclaw[/\\][^\n;|&]*(?:agents?|sessions?)[/\\])",
     re.I,
 )
 _SELF_ERASE_WINDOW = 400  # chars; mirrors B345's _SELF_MOD_WINDOW -- the directive and
@@ -12700,8 +12722,13 @@ def check_self_erase_directive(ctx: Context) -> Finding:
     delivery evidence, applied to a skill's own footprint.
 
     FAIL    — an erase directive corroborated within `_SELF_ERASE_WINDOW` chars by a
-              concrete sink targeting the agent's audit trail (shell-history tampering,
-              or truncate/`: >`/shred/rm aimed at a trajectory/session/agent-log path).
+              concrete sink targeting the agent's OWN audit trail: shell-history
+              tampering, or truncate/`: >`/shred/rm aimed at OpenClaw's grounded
+              trajectory sidecar (a "trajector*" path, `OPENCLAW_TRAJECTORY_DIR`, or a
+              path rooted under `.openclaw/` reaching an agents/sessions segment) --
+              NOT a bare "sessions/"/".jsonl"/"agent-logs" substring, which any
+              unrelated app can use for its own, unrelated files (F-160 C-135
+              retraction; see the comment above `_SELF_ERASE_SINK_RE`).
     WARN    — a bare erase directive with no corroborating sink nearby, OR a bare sink
               with no directive anywhere in the skill. Ambiguous alone: legitimate log
               rotation / temp cleanup looks identical at the verb level; only the
