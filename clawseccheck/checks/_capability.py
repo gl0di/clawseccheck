@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 from pathlib import Path
+from typing import NamedTuple
 from .. import attest as _attest
 from .. import trajectory as _trajectory
 from ..catalog import (
@@ -27,6 +28,7 @@ from ..collector import (
 from . import _shared
 from ._shared import (
     _b323_contains_env_var_reference,
+    _canon_tool,
     _config_unreadable,
     _custom,
     _finding,
@@ -186,8 +188,8 @@ def check_attestation_mismatch(ctx: Context) -> Finding:
 
     WARN    — config grants a high-blast verb absent from the attestation.
     PASS    — every high-blast verb in the allow-list is acknowledged.
-    UNKNOWN — no attestation, or no explicit tools.allow/alsoAllow/gateway.tools.allow
-              inventory to compare.
+    UNKNOWN — no attestation, or no explicit tools.allow/tools.alsoAllow inventory to
+              compare (gateway.tools.allow is not a grant source — see _tool_policy_view).
     """
     att = ctx.attestation or {}
     reported = att.get("tools")
@@ -198,38 +200,33 @@ def check_attestation_mismatch(ctx: Context) -> Finding:
             "No tool inventory attested — nothing to cross-check against config.",
             "Provide '--attest <file>' with the agent's real 'tools' list.",
         )
-    # I-028: tools.alsoAllow is a real, MERGED-ADDITIVE grant channel (OpenClaw's schema
-    # forbids allow+alsoAllow together and recommends profile+alsoAllow instead), so a
-    # config using that recommended shape has an EMPTY tools.allow -- reading only
-    # tools.allow/gateway.tools.allow (the previous `or`-chain, which also only ever took
-    # the FIRST truthy source rather than merging) missed every tool it grants. Concat all
-    # three additive sources; explicit `dig()` literals (not a loop var) so the
-    # schema-grounding AST scanner sees each path (§4, mirrors behavioral.py's
-    # `_t3_declared`).
-    listed: list = []
-    for src in (
-        dig(ctx.config, "tools.allow"),
-        dig(ctx.config, "tools.alsoAllow"),
-        dig(ctx.config, "gateway.tools.allow"),
-    ):
-        if isinstance(src, list):
-            listed.extend(src)
-    if not listed:
+    # B-423/B-411: grant resolution is delegated to _tool_policy_view (the same model
+    # B55/B68/B84 use) rather than re-derived here. `named` is tools.allow +
+    # tools.alsoAllow only -- gateway.tools.allow is deliberately excluded (it only
+    # de-denies OpenClaw's default HTTP tool-deny list, never an additive grant; see
+    # _tool_policy_view's docstring). grants_all (the alsoAllow-only implicit wildcard)
+    # is deliberately NOT consumed here: it has no enumerable token set and no evidence
+    # to cite, so there is nothing sound to compare against the self-report.
+    view = _tool_policy_view(ctx.config)
+    if not view.named:
         return _finding(
             "B44",
             UNKNOWN,
-            "Config has no explicit tools.allow/tools.alsoAllow/gateway.tools.allow "
-            "inventory to cross-check the self-report against.",
+            "Config has no explicit tools.allow/tools.alsoAllow inventory to "
+            "cross-check the self-report against.",
             "—",
         )
     # Compare on the NORMALIZED verb so MCP/provider namespacing doesn't cause a false
     # mismatch (config 'mcp__Gmail__send_email' vs attested 'send_email' are the same verb).
-    reported_l = {_attest.normalize_verb(t) for t in reported if isinstance(t, (str, bytes))}
+    reported_l = {
+        _canon_tool(_attest.normalize_verb(t)) for t in reported if isinstance(t, (str, bytes))
+    }
     undisclosed = [
-        str(t)
-        for t in listed
-        if _attest.classify_verb(str(t)) in _attest.HIGH_BLAST_CLASSES
-        and _attest.normalize_verb(t) not in reported_l
+        raw
+        for canon, raw in zip(view.named, view.raw_named)
+        if canon not in view.denied
+        and _attest.classify_verb(raw) in _attest.HIGH_BLAST_CLASSES
+        and _canon_tool(_attest.normalize_verb(raw)) not in reported_l
     ]
     if undisclosed:
         return _finding(
@@ -376,20 +373,18 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
             "audit on the host where those logs live, or run with '--attest' and cite "
             "'proven_tools'. With neither, the check stays UNKNOWN rather than guessing.",
         )
-    # I-028: tools.alsoAllow only ever ADDS to the declared set (never a substitute, never
-    # a narrowing) -- fold it in alongside tools.allow so a profile+alsoAllow config (the
-    # OpenClaw-recommended shape; allow+alsoAllow together is schema-forbidden) isn't read
-    # as declaring nothing. `declared` here is purely informational (the "dead grants"
-    # evidence line below), never a verdict gate, so widening it cannot flip PASS->WARN.
-    declared: set = set()
-    for src in (
-        dig(ctx.config, "tools.allow"),
-        dig(ctx.config, "tools.alsoAllow"),
-    ):
-        if isinstance(src, list):
-            declared.update(
-                _attest.normalize_verb(t) for t in src if isinstance(t, (str, bytes))
-            )
+    # B-423/B-411: grant resolution delegated to _tool_policy_view (the same model
+    # B44/B55/B68 use). `declared` here is purely informational (the "dead grants"
+    # evidence line below), never a verdict gate, so widening or narrowing it cannot
+    # flip PASS->WARN. Like B44, grants_all (the alsoAllow-only implicit wildcard) is
+    # deliberately NOT consumed — a "dead grants: everything minus proven" line would
+    # not be a meaningful evidence line.
+    view = _tool_policy_view(ctx.config)
+    declared: set = {
+        _canon_tool(_attest.normalize_verb(raw))
+        for canon, raw in zip(view.named, view.raw_named)
+        if canon not in view.denied
+    }
     reported = att.get("tools")
     effective = (
         {
@@ -551,104 +546,134 @@ def _b68_fs_workspace_only_scopes(cfg: dict) -> list[tuple[str, object]]:
 _B68_FS_TOOLS = ("read", "write", "edit", "apply_patch")
 
 
+class _ToolPolicyView(NamedTuple):
+    """One resolution of the GLOBAL tools.* layer, shared by B44/B55/B68/B84.
+
+    Before this (B-423/B-411), each of the four had its own accumulator and the four
+    disagreed (B44 read gateway.tools.allow as a grant, B84 did not; the helper
+    alias-folded neither side of deny). One resolver, four projections: a check reads
+    the field that answers ITS question, never re-derives the model.
+    """
+
+    named: tuple  # canonical literal tokens: tools.allow + tools.alsoAllow, deduped
+    raw_named: tuple  # the ORIGINAL strings behind `named`, index-aligned (evidence)
+    denied: frozenset  # canonical tools.deny tokens
+    profile: object  # tools.profile as read (None when absent)
+    grants_all: bool  # the effective allow list resolves to "*"
+    implicit_all: bool  # grants_all came from unionAllow's injection, not a literal "*"
+    enumerable: bool  # static config bounds the grant at all
+
+
+def _tool_policy_view(cfg: dict) -> _ToolPolicyView:
+    """Resolve the global tools.* layer the way the installed OpenClaw dist does.
+
+    Three corrections over the four accumulators this replaces (B-423/B-411):
+
+    (a) IMPLICIT WILDCARD. unionAllow (sandbox-tool-policy-ClB7s2K0.js:9-14) injects
+        "*" into the effective allow list when tools.allow is absent OR an empty array
+        AND tools.alsoAllow is non-empty -- so alsoAllow-only grants EVERY tool, not
+        just the tokens it names. That resolver runs on the GLOBAL config, not only a
+        sandbox sub-config: pickSandboxToolPolicy(params.cfg.tools) at
+        agent-tools.policy-YD9HuYgO.js:96 (the function name is historical).
+
+        SUPPRESSED when tools.profile is set. The profile is a SEPARATE policy entry
+        in the same AND-ed policies[] list (agent-tools.policy-YD9HuYgO.js:92-102,
+        profile at :94 and the allow/alsoAllow policy at :96) and gets alsoAllow via
+        its own mergeAlsoAllowPolicy (tool-policy-BHUGxE3p.js:225-231), which has no
+        unionAllow concept. The wildcard from the global layer is therefore
+        intersected straight back down to the profile's own grant -- widening on it
+        would override a legitimately narrow profile with "everything".
+
+    (b) gateway.tools.allow is NOT read here, in any direction. It only REMOVES
+        entries from OpenClaw's default HTTP tool-deny list
+        (tool-resolution-XVJDzZpY.js:49-50, and dist docs at
+        dangerous-tools-1CBnzkwG.js:22-24) -- a de-denylist over one surface. It can
+        never put a tool in an agent's hands that the tool policy did not already
+        grant, so treating it as a grant produced confident findings about tools the
+        agent has no access to. The gateway surface is B32's (checks/_config.py).
+
+    (c) Every token is alias-folded through _canon_tool BEFORE any comparison, on the
+        allow side AND the deny side, exactly as the dist matcher does
+        (tool-policy-match-CgU98OQh.js:9-19).
+
+    NOT modelled, deliberately (each a NARROWING or verdict-neutral gap, never a
+    false grant): allow/deny entries are glob patterns, not literals
+    (compileGlobPatterns); an empty allow list with a non-empty deny means "everything
+    not denied" (tool-policy-match-CgU98OQh.js:21); allowing "write" implicitly allows
+    "apply_patch" (:22); and per-agent / per-channel / toolsBySender layers can only
+    narrow further (the multi-layer-composer gap B-395 already filed).
+    """
+    allow_raw = dig(cfg, "tools.allow")
+    also_raw = dig(cfg, "tools.alsoAllow")
+    deny_raw = dig(cfg, "tools.deny")
+    profile = dig(cfg, "tools.profile")
+
+    allow_is_list = isinstance(allow_raw, list)
+    also_is_list = isinstance(also_raw, list)
+
+    named: list = []
+    raw_named: list = []
+    seen: set = set()
+    for src in (allow_raw if allow_is_list else (), also_raw if also_is_list else ()):
+        for v in src:
+            c = _canon_tool(v)
+            if not c or c in seen:
+                continue
+            seen.add(c)
+            named.append(c)
+            raw_named.append(v if isinstance(v, str) else str(v))
+
+    denied = frozenset(
+        c for c in (_canon_tool(v) for v in (deny_raw if isinstance(deny_raw, list) else ())) if c
+    )
+
+    explicit_all = "*" in seen
+    # unionAllow's own emptiness tests run on the RAW arrays, before blank-filtering
+    # (sandbox-tool-policy-ClB7s2K0.js:10-12) -- so alsoAllow: [""] does inject the
+    # wildcard even though it names no tool. Mirror that, do not "clean it up".
+    implicit_all = (
+        also_is_list
+        and len(also_raw) > 0
+        and (not allow_is_list or len(allow_raw) == 0)
+        and profile is None  # see (a)
+    )
+
+    return _ToolPolicyView(
+        named=tuple(named),
+        raw_named=tuple(raw_named),
+        denied=denied,
+        profile=profile,
+        grants_all=explicit_all or implicit_all,
+        implicit_all=implicit_all,
+        enumerable=bool(named) or explicit_all or implicit_all or profile is not None,
+    )
+
+
 def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     """Which filesystem tools config GRANTS, and whether that is knowable at all.
 
-    B-283 (b). Returns ``(granted, enumerable)``. ``enumerable`` is False when the config
-    declares neither an explicit tool allowlist, a profile, nor a tools.alsoAllow grant —
-    the grants then depend on OpenClaw's runtime defaults, which static config cannot
-    resolve, so the caller must report UNKNOWN rather than guess (GR#4: never assert a
-    capability the config does not declare).
+    B-283 (b). Returns ``(granted, enumerable)``. Delegates ALL policy resolution to
+    _tool_policy_view — see its docstring for the grounding, including the alsoAllow
+    implicit-wildcard (B-411) and the gateway.tools.allow de-denylist correction (B-423).
 
-    Deliberately conservative in both directions: an explicit allowlist is authoritative
-    (only the fs tools actually listed count, minus anything denied), and a profile is
-    only read as granting fs tools when it is one of the powerful profiles the package
-    already recognises — so a "minimal"/"readonly"/"chat" profile yields no grant and
-    cannot produce a WARN.
-
-    I-028: tools.alsoAllow is a real, MERGED-ADDITIVE grant channel — OpenClaw's schema
-    forbids allow+alsoAllow together and RECOMMENDS profile+alsoAllow instead, so the
-    common shape carries an EMPTY tools.allow/gateway.tools.allow and a non-powerful (or
-    absent) profile while alsoAllow does the actual granting; the pre-I-028 code fell
-    straight to the "no allowlist, no profile" / non-powerful-profile branches and missed
-    it entirely. alsoAllow is folded in as its OWN accumulator and unioned into whatever
-    tools.allow/gateway.tools.allow/tools.profile already grants, rather than merged into
-    `listed` up front — merging it into `listed` would make its mere presence take the
-    listed-branch and, for a POWERFUL profile, wrongly NARROW an already-established
-    "every fs tool granted" verdict down to just the alsoAllow tokens. Additive means it
-    can only ever WIDEN the granted set, never shrink it.
+    Every grant source is ADDITIVE (union) so no source can narrow another: a narrow
+    alsoAllow can never shrink a powerful profile's "every fs tool" verdict. deny is
+    subtracted last, so nothing can defeat a deny.
     """
-    allow_a = dig(cfg, "tools.allow")
-    allow_b = dig(cfg, "gateway.tools.allow")
-    also_allow = dig(cfg, "tools.alsoAllow")
-    deny = dig(cfg, "tools.deny")
-    denied = {str(t).strip().lower() for t in deny} if isinstance(deny, list) else set()
-    # "group:fs" denies the whole family (see check at _capability.py:430).
-    if "group:fs" in denied:
+    view = _tool_policy_view(cfg)
+    if "group:fs" in view.denied:
         return [], True
 
-    listed: list[str] = []
-    for v in (allow_a, allow_b):
-        if isinstance(v, list):
-            listed.extend(str(t).strip().lower() for t in v)
-
-    also_listed: list[str] = []
-    if isinstance(also_allow, list):
-        also_listed.extend(str(t).strip().lower() for t in also_allow)
-
-    profile = dig(cfg, "tools.profile")
-
-    if listed:
-        # B-395: a bare "*" allowlist token grants EVERY tool, same as "group:fs" grants
-        # every fs-family one — before this, ["*"] resolved to an empty granted set
-        # (none of read/write/edit/apply_patch literally equals "*"), a lying "nothing
-        # granted" for a config that grants everything.
-        if "group:fs" in listed or "*" in listed:
-            granted = set(_B68_FS_TOOLS)
-        else:
-            granted = {t for t in _B68_FS_TOOLS if t in listed}
-        enumerable = True
-    elif profile is not None:
-        granted = set(_B68_FS_TOOLS) if _profile_is_powerful(profile) else set()
-        enumerable = True
-    else:
-        # No allowlist and no profile (yet): grants may still be bounded below by
-        # tools.alsoAllow alone.
-        granted = set()
-        enumerable = False
-
-    # NOTE (C-135 on this same fix, 2026-08-01): OpenClaw's own resolver
-    # (sandbox-tool-policy-*.js:9-14, `unionAllow`) injects an IMPLICIT wildcard into
-    # the effective allow list when tools.allow is absent/empty and tools.alsoAllow is
-    # non-empty -- i.e. alsoAllow-only grants EVERY tool, not just the tokens it
-    # literally names, which this helper does NOT model (it grants only the literal
-    # alsoAllow tokens). Deliberately NOT fixed here: I-028 (see the module-level
-    # `tests/test_also_allow_grants.py`) already made a considered, tested design
-    # decision that alsoAllow grants exactly its own tokens, and the SAME
-    # narrow-alsoAllow assumption is independently baked into B44
-    # (check_attestation_mismatch) and B84 (check_declared_effective_proven) too, each
-    # with their own accumulator and pinned tests. Patching only this helper (B55/B68)
-    # would make B55/B68 agree with reality while leaving B44/B84 agreeing with each
-    # other but not with reality -- reintroducing the exact cross-check disagreement
-    # class B-395 exists to close, just moved one level over. Filed as its own
-    # follow-up: closing it needs a coordinated fix across all three call sites plus a
-    # deliberate re-review of test_also_allow_grants.py's pinned expectations, not a
-    # one-line patch inside a critical-severity ticket already in flight.
-    if "group:fs" in also_listed or "*" in also_listed:
+    granted: set = set()
+    if view.grants_all or "group:fs" in view.named:
         granted |= set(_B68_FS_TOOLS)
-        enumerable = True
-    else:
-        also_granted = {t for t in _B68_FS_TOOLS if t in also_listed}
-        if also_granted:
-            granted |= also_granted
-            enumerable = True
+    granted |= {t for t in _B68_FS_TOOLS if t in view.named}
+    if view.profile is not None and _profile_is_powerful(view.profile):
+        granted |= set(_B68_FS_TOOLS)
 
-    if not enumerable:
-        # Nothing at all to bound the grant on: allow-lists absent, no profile, and
-        # alsoAllow (if present) named no fs-family tool — runtime defaults decide, which
-        # static config cannot resolve.
+    if not view.enumerable:
         return [], False
-    return sorted(granted - denied), True
+    return sorted(granted - view.denied), True
 
 
 def check_exec_applypatch_workspace(ctx: Context) -> Finding:
@@ -681,9 +706,9 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
               dangerous-config-flags-current-CrOoyQT2.js:48), or the composite predicate
               holds with the field merely absent.
     UNKNOWN — fs tool grants are not enumerable from config (no tools.allow /
-              gateway.tools.allow / tools.alsoAllow naming an fs-family tool, and no
-              tools.profile) and neither sibling is explicitly false, so the composite
-              predicate genuinely cannot be evaluated.
+              tools.alsoAllow naming an fs-family tool, and no tools.profile) and
+              neither sibling is explicitly false, so the composite predicate
+              genuinely cannot be evaluated.
 
     NARROWS, does not close: reasons over STATIC config only. Per-agent
     ``tools.allow``/``deny``/``profile`` overrides and group/sender-scoped tool policies
@@ -749,10 +774,10 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
             "B68",
             UNKNOWN,
             "tools.fs.workspaceOnly is not set and filesystem tool grants are not "
-            "enumerable from config (no tools.allow / gateway.tools.allow / "
-            "tools.alsoAllow naming an fs-family tool, and no tools.profile), so "
-            "workspace confinement cannot be assessed. The OpenClaw default for "
-            "tools.fs.workspaceOnly is false (unconfined).",
+            "enumerable from config (no tools.allow / tools.alsoAllow naming an "
+            "fs-family tool, and no tools.profile), so workspace confinement cannot "
+            "be assessed. The OpenClaw default for tools.fs.workspaceOnly is false "
+            "(unconfined).",
             "Declare tools.allow (or tools.profile) explicitly so tool grants are "
             "auditable, and set tools.fs.workspaceOnly to true.",
         )
@@ -873,7 +898,7 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     per-agent profile/allow/byProvider, then channel/group tools, then
     toolsBySender — each layer can only further NARROW the set, `tool-policy-
     pipeline-*.js`). This check (like `_b68_fs_tools_granted`) reads only the global
-    `tools.allow`/`gateway.tools.allow`/`tools.alsoAllow`/`tools.profile` layer. A
+    `tools.allow`/`tools.alsoAllow`/`tools.profile` layer. A
     narrower per-agent, per-channel, or per-sender policy that actually removes the
     write tool from the agent reachable through an open channel is invisible here and
     can still produce a false FAIL. Closing this needs a real multi-layer policy
@@ -898,33 +923,32 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     open" (arguably still WARN even when gated), which the current `not open_ch` test
     conflates. Filed as a follow-up, not patched here.
 
-    Known, deliberately UNFIXED gap #3 in this same pass (found by the SAME C-135
-    round as gap #2, filed alongside it rather than fixed here): `_b68_fs_tools_granted`
-    grants only the LITERAL tokens `tools.alsoAllow` names, but OpenClaw's own resolver
-    (`unionAllow`, sandbox-tool-policy-*.js) injects an IMPLICIT wildcard into the
-    effective allow list whenever `tools.allow` is absent/empty and `tools.alsoAllow`
-    is non-empty — i.e. alsoAllow-only grants EVERY tool, not just the ones it names.
-    Not patched in `_b68_fs_tools_granted` itself despite being the most directly
-    relevant fix: the SAME narrow-alsoAllow assumption is independently baked into B44
-    (check_attestation_mismatch) and B84 (check_declared_effective_proven), each with
-    its own accumulator and its own pinned tests (`tests/test_also_allow_grants.py`,
-    an I-028 design decision). Fixing only this helper would make B55/B68 agree with
-    reality while leaving B44/B84 agreeing with each other but not with reality —
-    reintroducing the exact cross-check disagreement class B-395 exists to close, one
-    level over. Needs a coordinated fix across all three call sites plus a deliberate
-    re-review of test_also_allow_grants.py's pinned expectations.
+    Gap #3 (alsoAllow-only implicit wildcard, B-411) is now CLOSED: `_b68_fs_tools_granted`
+    delegates to `_tool_policy_view`, which models OpenClaw's `unionAllow` injection of an
+    implicit "*" into the effective allow list whenever `tools.allow` is absent/empty and
+    `tools.alsoAllow` is non-empty — so alsoAllow-only now grants EVERY tool, matching
+    reality, and B44/B55/B68/B84 all resolve from the same one model (B-423 closed the
+    companion gateway.tools.allow-as-grant defect the same way). See `_tool_policy_view`'s
+    docstring for the full grounding and the profile-guard rationale.
 
     UNKNOWN — fs-write grants are not enumerable from config: no tools.allow /
-              gateway.tools.allow / tools.alsoAllow declared as a LIST, and no
-              tools.profile set. A declared-but-non-list tools.allow (a scalar or
-              mapping — schema-invalid, but seen in the wild) also lands here, not PASS.
+              tools.alsoAllow declared as a LIST, and no tools.profile set. A
+              declared-but-non-list tools.allow (a scalar or mapping — schema-invalid,
+              but seen in the wild) also lands here, not PASS.
     PASS    — no write-capable tool granted, OR one is granted, no open-ingress channel
               reaches it, and tools.exec.mode has an approval gate set.
     WARN    — write tool granted with no proven broad reach and no approval gate
               (ungated), OR reachable by a proven-open channel but confined to the
-              workspace (tools.fs.workspaceOnly / sandbox.mode='all').
-    FAIL    — write tool granted AND reachable by a PROVEN-open channel, not confined,
-              gated or not. scored=True.
+              workspace (tools.fs.workspaceOnly / sandbox.mode='all'), OR reachable by
+              a proven-open channel, unconfined, but the ONLY grant signal is
+              tools.alsoAllow's implicit wildcard (B-411) with no explicit
+              write/edit/apply_patch/"*"/"group:fs" token and no powerful
+              tools.profile -- an independent C-135 review found a real per-agent
+              tools.profile can narrow that implicit grant away invisibly to this
+              static check, so it stays the "ambiguous" WARN case rather than FAIL.
+    FAIL    — an EXPLICIT write tool grant (a literal write/edit/apply_patch/"*"/
+              "group:fs" token, or a powerful tools.profile) AND reachable by a
+              PROVEN-open channel, not confined, gated or not. scored=True.
     """
     cfg = ctx.config
     granted, enumerable = _b68_fs_tools_granted(cfg)
@@ -933,27 +957,25 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
         return _finding(
             "B55",
             UNKNOWN,
-            "Tool allowlist (tools.allow / gateway.tools.allow / tools.alsoAllow) is "
-            "not declared as an enumerable list in config, and no tools.profile is "
-            "set, so filesystem-write tool grants cannot be enumerated.",
+            "Tool allowlist (tools.allow / tools.alsoAllow) is not declared as an "
+            "enumerable list in config, and no tools.profile is set, so "
+            "filesystem-write tool grants cannot be enumerated.",
             "Declare tools.allow explicitly (as a list) so write-capable tools are "
             "auditable, and scope any write/edit/apply_patch grant with an approval "
             "gate (tools.exec.mode='ask').",
         )
 
-    # Legacy aliases matched independently against the raw allow/alsoAllow tokens,
-    # since _b68_fs_tools_granted only recognizes the canonical _B68_FS_TOOLS names —
-    # an additive union, deny-filtered the same way _b68_fs_tools_granted deny-filters
-    # its own canonical result, so an explicitly denied legacy token doesn't count.
-    deny = dig(cfg, "tools.deny")
-    denied = {str(t).strip().lower() for t in deny} if isinstance(deny, list) else set()
-    raw_tokens: list[str] = []
-    for v in (dig(cfg, "tools.allow"), dig(cfg, "gateway.tools.allow"), dig(cfg, "tools.alsoAllow")):
-        if isinstance(v, list):
-            raw_tokens.extend(str(t) for t in v)
+    # Legacy aliases matched independently against the raw allow/alsoAllow tokens
+    # (_tool_policy_view.raw_named), since _b68_fs_tools_granted only recognizes the
+    # canonical _B68_FS_TOOLS names — an additive union, deny-filtered against the same
+    # alias-folded denied set _tool_policy_view already resolved, so an explicitly
+    # denied legacy token doesn't count.
+    view = _tool_policy_view(cfg)
     legacy_write = {
-        t.strip().lower() for t in raw_tokens if _hint([t], _FS_WRITE_TOOL_HINTS)
-    } - denied
+        canon
+        for canon, raw in zip(view.named, view.raw_named)
+        if _hint([raw], _FS_WRITE_TOOL_HINTS)
+    } - view.denied
 
     write_tools = sorted((set(granted) & _B55_FS_WRITE_TOOLS) | legacy_write)
 
@@ -964,6 +986,31 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
             "No filesystem-write tool (write / edit / apply_patch) is granted.",
             "Keep write-capable tools out of the allowlist unless they are required.",
         )
+
+    # B-423/B-411 C-135 round 2 (independent adversarial review, same fix): the grant
+    # above can now come SOLELY from _tool_policy_view's implicit wildcard
+    # (tools.alsoAllow-only, tools.allow/tools.profile both absent -- OpenClaw's own
+    # unionAllow injecting "*", sandbox-tool-policy-ClB7s2K0.js:9-14). The review found
+    # a real false FAIL on that path: a per-agent tools.profile
+    # (agents.list[N].tools.profile) is AND-ed into the SAME resolved policy OpenClaw's
+    # real resolver reads first (agent-tools.policy-YD9HuYgO.js:232) and can legitimately
+    # narrow the grant away from write -- but this check, like _tool_policy_view, only
+    # reads the GLOBAL tools.profile, so it never sees that narrowing. OpenClaw itself
+    # treats the implicit "*" as an artifact rather than confirmed operator intent: it
+    # mints a dedicated provenance marker (IMPLICIT_ALLOW_ALL_FROM_ALSO_ALLOW,
+    # sandbox-tool-policy-ClB7s2K0.js:7-14) purely to refuse to honor it wherever it
+    # can (collectExplicitAllowlist substitutes the plugin-tools default instead,
+    # tool-policy-BHUGxE3p.js:100-103). Mirror that caution: FAIL only when an EXPLICIT
+    # signal backs the grant (a literal write/edit/apply_patch token, "*"/"group:fs", or
+    # a powerful tools.profile) -- an implicit-wildcard-only grant stays the WARN
+    # "ambiguous" case, not the FAIL "proven broad reach" case.
+    explicit_write_grant = bool(
+        (set(view.named) & _B55_FS_WRITE_TOOLS)
+        or legacy_write
+        or "*" in view.named
+        or "group:fs" in view.named
+        or (view.profile is not None and _profile_is_powerful(view.profile))
+    )
 
     label = ", ".join(write_tools)
     gated = _has_approval_gate(cfg)
@@ -1039,6 +1086,25 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 f"rather than reach arbitrary paths.",
                 "Lock the open channel(s) to 'allowlist' to remove untrusted reach "
                 "entirely.",
+                evidence=ev,
+            )
+        if not explicit_write_grant:
+            ev.append(
+                "the only write-tool grant signal is tools.alsoAllow's implicit "
+                "wildcard (tools.allow/tools.profile absent) -- not an explicit "
+                "write/edit/apply_patch grant, and a narrower per-agent tools.profile "
+                "could exist unseen by this static check"
+            )
+            return _finding(
+                "B55",
+                WARN,
+                f"Filesystem-write capability ({label}) is reachable by untrusted "
+                f"senders, but the grant itself is only the implicit result of an "
+                f"alsoAllow-only config (tools.allow/tools.profile both absent) rather "
+                f"than an explicit write-tool grant, so this stays WARN pending "
+                f"confirmation of real intent.",
+                "Set tools.allow explicitly (or a tools.profile) so the intended grant "
+                "is unambiguous, and lock the open channel(s) to 'allowlist'.",
                 evidence=ev,
             )
         return _finding(

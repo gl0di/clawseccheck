@@ -50,6 +50,7 @@ _SKILL_CRIT
 _SKILL_HIGH
 _SKILL_TOOLS_LINE_RE
 _SOURCE_KNOWN_BAD
+_ToolPolicyView
 _agent_config_write_hits
 _agent_is_powerful
 _agent_legs
@@ -130,6 +131,7 @@ _skill_declared_tools
 _skill_frontmatter_block
 _squat_hits
 _suspicious_pipe_hosts
+_tool_policy_view
 _unpinned_deps_in_skill
 _untrusted_input_channels
 _vet_mcp_least_privilege

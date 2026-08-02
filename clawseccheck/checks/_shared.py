@@ -2633,3 +2633,30 @@ def _b323_contains_env_var_reference(value: str) -> bool:
                 return True
         i += 1
     return False
+
+
+# OpenClaw folds a small set of tool names to a canonical id BEFORE any allow/deny
+# matching, on BOTH sides of the comparison (dist tool-policy-BHUGxE3p.js:12-22
+# TOOL_NAME_ALIASES + normalizeToolName; applied to allow AND deny at
+# tool-policy-match-CgU98OQh.js:9-19). Without the same fold, denying "apply-patch"
+# fails to suppress a grant of "apply_patch" and we report a config that correctly
+# hardened itself. Deliberately ONLY the two policy-layer aliases: the dynamic
+# (thread-lifecycle DYNAMIC_TOOL_NAME_ALIASES) and native-hook
+# (NATIVE_HOOK_TOOL_NAME_ALIASES, exec_command->exec) tables are applied at a
+# different layer and are folded by behavioral._t3_canon, not here.
+_TOOL_NAME_ALIASES = {"bash": "exec", "apply-patch": "apply_patch"}
+
+
+def _canon_tool(token) -> str:
+    """One allow/deny token, lowercased, stripped and alias-folded.
+
+    Mirrors OpenClaw's normalizeToolName (tool-policy-BHUGxE3p.js:19-22). Returns ""
+    for anything that is not a usable string, so callers can filter blanks the way
+    normalizeToolList does (tool-policy-BHUGxE3p.js:44-47).
+    """
+    if isinstance(token, bytes):
+        token = token.decode("utf-8", "replace")
+    if not isinstance(token, str):
+        return ""
+    s = token.strip().lower()
+    return _TOOL_NAME_ALIASES.get(s, s)
