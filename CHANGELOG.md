@@ -3,6 +3,86 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.59.0] — 2026-08-02
+
+179 commits over v3.58.0. Fourteen new detection checks widen the content-security
+ring (self-modification, C2, anti-forensics, offensive-security tooling, supply-chain
+provenance), four new RISK attack chains, and a scoring-integrity pass closes five
+critical/high verdict bugs — including two where the fix itself shipped a false
+FAIL/PASS inversion, caught by this release's own adversarial (C-135) review before
+landing.
+
+### Added
+- **Content-security ring**: B334 (prose-documentation-aware directive scoping), B335,
+  B336, B337 (mandatory-directive dotfile exfil), B338 (covert tunnel/mesh-VPN
+  enrollment), B339 (cloud IMDS credential fetch), B341/B342 (plugin hook-grant and
+  memory-slot-ownership disclosure), B343 (ML model artifact provenance), B344
+  (offensive-security tooling directives — Mimikatz/Impacket/BloodHound/Rubeus/
+  CrackMapExec), B345 (self-modification directives), B346 (anti-forensic self-erase),
+  B347 (dead-drop C2 resolver: poll → decode → exec), and undisclosed
+  excessive-telemetry collection (T09).
+- **RISK-23** (eviction-resistant foothold), **RISK-24** (tunnel bypasses egress
+  controls), **RISK-25** (marketplace feed + disabled install-policy = unreviewed
+  supply-chain install), **RISK-26** (Skill Workshop autonomous authoring joined with
+  untrusted-ingress legs).
+- **Finding.not_applicable** (F-138/B1): a check whose surface is structurally absent
+  from the config now reports distinctly from a genuine UNKNOWN, across a dozen
+  previously-conflated config-absence sites (B2, B70, B321, the audit-log and
+  browser-config clusters, and others).
+- **`--full` as one pipeline** (E-064): plugin sweep, behavioral detection, and the
+  adjudication judge now run as a single orchestrated pass with a combined
+  `--dashboard --full` render, rather than requiring separate flags stitched by hand.
+  A fired behavioral T1/T2/T3/B191 detector or a live-injection VULNERABLE verdict now
+  caps the grade directly.
+- **Host-signal corroboration**: `gateway.bind` is now cross-checked against the
+  actual listening socket (`/proc/net/tcp{,6}`, F-156), and the hardcoded IOC blacklist
+  was replaced with a dated, provenance-bound dataset (F-157).
+- CVE-2026-27488 and CVE-2026-62223 tracked in the version-advisory table.
+- COMMERCE blast-radius class (financial/purchase capability inventory).
+
+### Fixed
+- **B55** (fs-write exposure) both over- and under-fired: a lying PASS on OpenClaw's
+  actual tool ids (`write`/`edit`/`apply_patch` — the check was matching a nonexistent
+  `fs_write`) alongside scored false FAILs on benign configs. Unified B44/B55/B68/B84
+  onto one shared tool-grant resolution model so they can no longer disagree on the
+  same config.
+- **A scan-budget expiry could escape `_run_content_ring` uncaught**, intermittently
+  redding the Python 3.9 CI floor and, composed with the scoring gap below, silently
+  downgrading a check's coverage without ever showing up as a FAIL.
+- **Scoring fail-open**: a HIGH check resolving to UNKNOWN could scaffold toward the
+  same grade band as a clean PASS; the not_applicable work above is the first structural
+  piece of closing that gap.
+- **B-358** (MCP tool-poisoning severity): a benign decoy sentence anywhere in a tool
+  description could launder an unrelated, unambiguous forged system header from FAIL
+  down to WARN — fixed to evaluate the placeholder shape per-occurrence, not
+  whole-description.
+- **B326** (elevated-default-full bypass): a confident PASS on `${VAR}`-interpolated
+  values, and a FAIL branch that modeled only 2 of the 4 conjuncts OpenClaw actually
+  requires for the approval bypass.
+- **B339** (cloud IMDS credential fetch) FAILed on the vendor-recommended keyless auth
+  flows it exists to distinguish from real credential theft (GCE/Azure/EC2), and its
+  whole-skill dampener was attacker-satisfiable via an ordinary Markdown heading.
+  Rebuilt around a destination-agnostic corroborator (does the credential *value* flow
+  into a payload/persist/disclose sink) rather than host allowlisting.
+- A latent absolute-path leak in the credential-surface map's `_rel()` fallback,
+  found via ClawHub's own published security-audit page — hardened to never return
+  more than a bare filename outside the audited home.
+- Dozens of narrower precision fixes across B13, B63, B65, B66, B70, B74, B334–B342,
+  B347, and RISK-23/24/26 — false-positive and false-negative corrections found via
+  adversarial (C-135) review, each with its own pinned regression test (see git log
+  for the individual commits; too numerous to list here).
+- A macOS CI flake in the scanbudget reentrancy stress test now gets the same bounded
+  retry on a low-fire-rate attempt that it already had for a SIGALRM-kill, instead of
+  lowering the sensitivity bar a fourth time.
+- Stale doc-count claims (test count, THREAT_COVERAGE stamp) restamped to the current
+  suite size.
+
+### Changed
+- `checks/_capability.py`'s B44/B55/B68/B84 tool-grant paths now read `tools.alsoAllow`
+  as a shared, additive source (previously read by none of them consistently).
+- Two `security:` commits this cycle: B55's WARN→FAIL escalation (superseded by the
+  fix above) and a bounded gzip/zlib decode depth in the agent-log scanner.
+
 ## [3.58.0] — 2026-07-26
 
 The MCP Surface Engine: five new checks and a new tool-surface model that let
