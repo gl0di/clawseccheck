@@ -54,6 +54,7 @@ _ToolPolicyView
 _agent_config_write_hits
 _agent_is_powerful
 _agent_legs
+_agent_profile_widenings
 _allow_from_is_present
 _ancestors_allow_other_access
 _b135_is_pending_security

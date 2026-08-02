@@ -68,7 +68,7 @@ _EXEMPT = {
                          "_shared.py can host without a checks/_<topic> -> _shared import "
                          "cycle (CLAUDE.md §3 dependency flow). A finer split is a later "
                          "cycle.",
-    "checks/_capability.py": "~1,635 lines — the declared-vs-effective capability / "
+    "checks/_capability.py": "~1,775 lines — the declared-vs-effective capability / "
                              "manifest topic (B44/B55/B68/B84/B326 + helpers). Crossed the "
                              "budget with CLAWSECCHECK-B-376/B-369's B55 WARN->FAIL "
                              "escalation: an independent C-135 adversarial pass found and "
@@ -80,8 +80,14 @@ _EXEMPT = {
                              "resolver (+2 independent C-135 rounds' worth of grounding "
                              "comments) that B44/B55/B68/B84 now delegate to, replacing four "
                              "independent accumulators that used to disagree with each "
-                             "other and with OpenClaw's real tool-grant resolution. A finer "
-                             "split is a later cycle.",
+                             "other and with OpenClaw's real tool-grant resolution. Grew "
+                             "again with CLAWSECCHECK-B-409 Slice B: _agent_profile_widenings "
+                             "(the one per-agent policy layer that WIDENS rather than "
+                             "narrows, `??`-coalesced against the global tools.profile) "
+                             "wired into _b68_fs_tools_granted plus grounding comments on "
+                             "why it's WARN-only and correcting a prior false "
+                             "\"per-agent layers can only narrow\" claim in two docstrings. "
+                             "A finer split is a later cycle.",
     "checks/_agents.py": "~1,270 lines — the multi-agent / subagent-exposure topic "
                         "(check_agent_separation, check_untrusted_context, "
                         "check_subagents_allow_agents, etc.). Crossed the budget with "

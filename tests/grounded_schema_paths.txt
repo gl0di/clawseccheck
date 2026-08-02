@@ -153,3 +153,4 @@ relative:subagents.allowAgents
 relative:tools.allow
 relative:tools.deny
 relative:tools.fs.workspaceOnly
+relative:tools.profile

@@ -235,6 +235,7 @@ from ._capability import (
     _B71_INEFFECTIVE_RE,
     _FS_WRITE_TOOL_HINTS,
     _ToolPolicyView,
+    _agent_profile_widenings,
     _approval_bypass_actors,
     _b31_collect_deny_lists,
     _b68_fs_tools_granted,

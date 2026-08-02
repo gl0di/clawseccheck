@@ -565,6 +565,45 @@ class _ToolPolicyView(NamedTuple):
     enumerable: bool  # static config bounds the grant at all
 
 
+def _agent_profile_widenings(cfg: dict) -> list:
+    """Per-agent tools.profile entries that WIDEN beyond the global tools.profile.
+
+    B-409: every OTHER per-agent/per-channel/per-sender policy layer this module
+    doesn't read (allow/deny/group/toolsBySender/byProvider/subagent/inherited) is
+    AND-ed against the global one via OpenClaw's own isToolAllowedByPolicies
+    (`policies.every(...)`, tool-policy-match-CgU98OQh.js:32-34) -- narrowing-only,
+    so being blind to them is an FP risk, never a false grant. tools.profile is
+    different: it is resolved with `??` COALESCING, not AND-ing
+    (agent-tools.policy-YD9HuYgO.js:94, and identically :232 in
+    resolveEffectiveToolPolicy) -- a per-agent tools.profile REPLACES the global
+    one in the AND-ed policies[] list rather than adding a second entry that
+    constrains it. A global tools.profile="minimal" with a per-agent
+    tools.profile="coding" therefore GRANTS write/edit/apply_patch to that agent
+    even though the global layer alone would not -- the one layer this file's
+    model was blind to that can WIDEN a grant, producing a lying PASS rather than
+    just a missed WARN.
+
+    Returns (path, profile_value) pairs, one per agents.list[N] whose tools.profile
+    is powerful while the global tools.profile is not. When the global profile is
+    already powerful no per-agent profile can widen further (there is nothing left
+    to widen into), so the whole scan is skipped.
+    """
+    if _profile_is_powerful(dig(cfg, "tools.profile")):
+        return []
+
+    out: list = []
+    agents = dig(cfg, "agents.list")
+    if not isinstance(agents, list):
+        return out
+    for idx, entry in enumerate(agents):
+        if not isinstance(entry, dict):
+            continue
+        profile = dig(entry, "tools.profile")
+        if isinstance(profile, str) and profile and _profile_is_powerful(profile):
+            out.append((f"agents.list[{idx}].tools.profile", profile))
+    return out
+
+
 def _tool_policy_view(cfg: dict) -> _ToolPolicyView:
     """Resolve the global tools.* layer the way the installed OpenClaw dist does.
 
@@ -597,12 +636,17 @@ def _tool_policy_view(cfg: dict) -> _ToolPolicyView:
         allow side AND the deny side, exactly as the dist matcher does
         (tool-policy-match-CgU98OQh.js:9-19).
 
-    NOT modelled, deliberately (each a NARROWING or verdict-neutral gap, never a
-    false grant): allow/deny entries are glob patterns, not literals
+    NOT modelled, deliberately: allow/deny entries are glob patterns, not literals
     (compileGlobPatterns); an empty allow list with a non-empty deny means "everything
     not denied" (tool-policy-match-CgU98OQh.js:21); allowing "write" implicitly allows
-    "apply_patch" (:22); and per-agent / per-channel / toolsBySender layers can only
-    narrow further (the multi-layer-composer gap B-395 already filed).
+    "apply_patch" (:22); and per-channel / toolsBySender / byProvider / subagent /
+    inherited layers can only narrow further (each a NARROWING or verdict-neutral gap,
+    never a false grant — the multi-layer-composer gap B-409 already filed).
+    per-agent tools.profile is the ONE exception and is NOT in that "narrow only" set —
+    see _agent_profile_widenings (B-409, Slice B): it is `??`-coalesced against the
+    global profile rather than AND-ed (agent-tools.policy-YD9HuYgO.js:94, :232), so it
+    can WIDEN a grant. `_b68_fs_tools_granted` unions its result in separately for
+    exactly that reason; this resolver stays "the GLOBAL layer" and does not read it.
     """
     allow_raw = dig(cfg, "tools.allow")
     also_raw = dig(cfg, "tools.alsoAllow")
@@ -660,10 +704,40 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     Every grant source is ADDITIVE (union) so no source can narrow another: a narrow
     alsoAllow can never shrink a powerful profile's "every fs tool" verdict. deny is
     subtracted last, so nothing can defeat a deny.
+
+    B-409: also unions in any per-agent tools.profile WIDENING (_agent_profile_widenings)
+    — the one layer that can make an fs tool reachable even when the global view alone
+    says nothing is granted / isn't enumerable. This runs AFTER the group:fs deny
+    short-circuit above, deliberately: a global tools.deny entry is its own AND-ed
+    policy layer in OpenClaw's real resolver (pickSandboxToolPolicy(cfg.tools), pushed
+    unconditionally alongside the profile policy) and always intersects regardless of
+    which profile substitutes in, so no per-agent widening can defeat it.
+
+    C-135 (round 2, caught a real scored false FAIL): the widening contribution is
+    INTERSECTED with the global tools.allow/alsoAllow layer when that layer is a real,
+    non-empty, non-wildcard allowlist -- NOT unioned in wholesale. A first version
+    unioned the full _B68_FS_TOOLS set in unconditionally whenever a widening existed,
+    reasoning (wrongly) that the per-agent profile policy is the only thing that
+    matters. But `pickSandboxToolPolicy(cfg.tools)` (the tools.allow/alsoAllow/deny
+    layer) is its OWN separate, always-pushed AND-ed policy entry in OpenClaw's real
+    resolver (agent-tools.policy-YD9HuYgO.js:92-98) -- independent of which profile
+    substitutes in. `tools.allow: ["read","write"], tools.deny: ["write"]` plus a
+    powerful per-agent profile has a TRUE effective set of exactly {"read"}: the
+    profile grants the coding family, but the global allowlist only ever named "read"
+    and "write" (and "write" is denied), so "edit"/"apply_patch" were never in the
+    intersection at all -- unioning them in wholesale manufactured a grant the real
+    resolver never produces, and (via B55's own explicit_write_grant computation
+    picking up the separately-denied "write" token from view.named) escalated a
+    genuinely benign config to a scored FAIL. When the global allow layer is empty/
+    absent (or itself an explicit/implicit wildcard), it imposes no restriction on this
+    axis, so the widening applies without intersection -- this is the ORIGINAL
+    motivating case (a bare tools.profile with no tools.allow declared at all).
     """
     view = _tool_policy_view(cfg)
     if "group:fs" in view.denied:
         return [], True
+
+    widenings = _agent_profile_widenings(cfg)
 
     granted: set = set()
     if view.grants_all or "group:fs" in view.named:
@@ -671,8 +745,16 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     granted |= {t for t in _B68_FS_TOOLS if t in view.named}
     if view.profile is not None and _profile_is_powerful(view.profile):
         granted |= set(_B68_FS_TOOLS)
+    if widenings:
+        if view.grants_all or not view.named:
+            granted |= set(_B68_FS_TOOLS)
+        else:
+            # A real, non-empty, non-wildcard global allowlist is its own separate
+            # AND-ed policy layer that still constrains the widened profile -- only
+            # the tools it ALSO names survive the intersection.
+            granted |= set(_B68_FS_TOOLS) & set(view.named)
 
-    if not view.enumerable:
+    if not view.enumerable and not widenings:
         return [], False
     return sorted(granted - view.denied), True
 
@@ -784,6 +866,23 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
         )
 
     if granted:
+        evidence = [
+            "tools.fs.workspaceOnly unset (OpenClaw default: false)",
+            f"filesystem tools granted: {', '.join(granted)}",
+            f"agents.defaults.sandbox.mode={sandbox_mode!r} (not 'all')",
+        ]
+        widenings = _agent_profile_widenings(cfg)
+        if widenings:
+            global_profile = dig(cfg, "tools.profile")
+            widen_desc = (
+                f'widens beyond the global tools.profile={global_profile!r}'
+                if global_profile is not None
+                else "is the only declared tools.profile (no global tools.profile is set)"
+            )
+            evidence.append(
+                f"grant includes a per-agent tools.profile that {widen_desc} (B-409): "
+                + ", ".join(f'{path}="{profile}"' for path, profile in widenings)
+            )
         return _finding(
             "B68",
             WARN,
@@ -794,11 +893,7 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
             "read, write or delete anywhere the agent process can reach.",
             "Set tools.fs.workspaceOnly to true, or set agents.defaults.sandbox.mode to "
             "'all' so filesystem access is contained.",
-            evidence=[
-                "tools.fs.workspaceOnly unset (OpenClaw default: false)",
-                f"filesystem tools granted: {', '.join(granted)}",
-                f"agents.defaults.sandbox.mode={sandbox_mode!r} (not 'all')",
-            ],
+            evidence=evidence,
         )
 
     return _finding(
@@ -894,15 +989,16 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     cannot scope write-tool reachability either. Removed from both directions.
 
     Known, deliberately UNFIXED gap #1 in this same pass (documented rather than silently
-    left, and filed as a follow-up): OpenClaw resolves the EFFECTIVE tool set through
-    up to 8 composable policy layers (global profile/allow/byProvider, then
-    per-agent profile/allow/byProvider, then channel/group tools, then
-    toolsBySender — each layer can only further NARROW the set, `tool-policy-
-    pipeline-*.js`). This check (like `_b68_fs_tools_granted`) reads only the global
-    `tools.allow`/`tools.alsoAllow`/`tools.profile` layer. A
-    narrower per-agent, per-channel, or per-sender policy that actually removes the
-    write tool from the agent reachable through an open channel is invisible here and
-    can still produce a false FAIL. Closing this needs a real multi-layer policy
+    left, and filed as a follow-up, B-409): OpenClaw resolves the EFFECTIVE tool set
+    through up to 8 composable policy layers (global allow/deny, per-agent allow/deny,
+    byProvider ×2, channel/group tools, toolsBySender, subagent/inherited session
+    policy — each AND-ed via `policies.every(...)`, `tool-policy-match-*.js:32-34`, so
+    each of THESE layers can only further NARROW the set; per-agent `tools.profile` is
+    the one exception and is covered separately as gap #4 below). This check reads only
+    the global `tools.allow`/`tools.alsoAllow`/`tools.profile` layer for these eight. A
+    narrower per-agent-allow, per-channel, or per-sender policy that actually removes
+    the write tool from the agent reachable through an open channel is invisible here
+    and can still produce a false FAIL. Closing this needs a real multi-layer policy
     composer, not a one-line patch — out of scope for this pass.
 
     Gap #2 (B-410) is now CLOSED: `gated` (`tools.exec.mode` having an approval-gate
@@ -931,10 +1027,42 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     companion gateway.tools.allow-as-grant defect the same way). See `_tool_policy_view`'s
     docstring for the full grounding and the profile-guard rationale.
 
+    Gap #4 (per-agent tools.profile WIDENING, B-409 Slice B) is CLOSED for the
+    `tools.profile`-only path, and is a different shape of bug than gap #1 above: every
+    OTHER layer gap #1 lists is narrowing-only (AND-ed via `policies.every(...)`), so
+    being blind to it can only produce a false FAIL, never a false PASS.
+    `agents.list[N].tools.profile` is `??`-coalesced against the global profile instead
+    (`agent-tools.policy-YD9HuYgO.js:94`, `:232`) — it REPLACES the global profile in
+    the AND-ed policy list rather than adding a second, narrowing entry — so a global
+    `tools.profile: "minimal"` with a per-agent `tools.profile: "coding"` grants
+    write/edit/apply_patch to that agent even though the global layer alone grants
+    nothing: a lying PASS, not a missed WARN. This is now unioned in via
+    `_agent_profile_widenings` (see `_b68_fs_tools_granted`), and can only ever push a
+    verdict from PASS toward WARN here — it deliberately never sets
+    `explicit_write_grant` below, so it cannot alone drive a FAIL: the seven still-open
+    narrowing layers in gap #1 could still remove the write tool for that specific
+    agent/channel/sender combination, which this static check still cannot see.
+
+    STILL OPEN, found by the same C-135 pass that closed the above: when a global
+    `tools.profile` is set AND global `tools.alsoAllow` is also set, `_tool_policy_view`
+    suppresses alsoAllow's implicit-wildcard injection on the theory that the profile
+    policy governs (see its docstring, part (a)) — sound for the GLOBAL profile, but
+    under a widening the EFFECTIVE profile is the per-agent one, and OpenClaw's real
+    `pickSandboxToolPolicy` never reads `profile` at all, so alsoAllow's implicit "*"
+    still applies at the global-allow layer regardless of which profile substitutes in.
+    `{"tools": {"profile": "minimal", "alsoAllow": ["search"]}, "agents": {"list":
+    [{"tools": {"profile": "coding"}}]}}` under a proven-open channel is a false
+    NEGATIVE (PASS when the true grant includes write/edit/apply_patch) — never a false
+    FAIL, so this does not violate GR#5, and it is IDENTICAL to pre-B-409 behavior
+    (verified by neutralizing `_agent_profile_widenings` and confirming the verdict
+    doesn't change), so it is not a regression this fix introduced. Filed as a
+    follow-up rather than fixed here.
+
     UNKNOWN — fs-write grants are not enumerable from config: no tools.allow /
-              tools.alsoAllow declared as a LIST, and no tools.profile set. A
-              declared-but-non-list tools.allow (a scalar or mapping — schema-invalid,
-              but seen in the wild) also lands here, not PASS.
+              tools.alsoAllow declared as a LIST, no tools.profile set, and no
+              per-agent tools.profile widening (B-409) either. A declared-but-non-list
+              tools.allow (a scalar or mapping — schema-invalid, but seen in the wild)
+              also lands here, not PASS.
     PASS    — no write-capable tool granted, OR one is granted, no open-ingress channel
               reaches it, AND no channel is declared at all with untrusted-content
               reach either (_external_input_channels empty), with tools.exec.mode
@@ -947,16 +1075,21 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
               confined to the workspace (tools.fs.workspaceOnly / sandbox.mode='all'),
               OR reachable by a proven-open channel, unconfined, but the ONLY grant
               signal is tools.alsoAllow's implicit wildcard (B-411) with no explicit
-              write/edit/apply_patch/"*"/"group:fs" token and no powerful
+              write/edit/apply_patch/"*"/"group:fs" token and no powerful global
               tools.profile -- an independent C-135 review found a real per-agent
               tools.profile can narrow that implicit grant away invisibly to this
-              static check, so it stays the "ambiguous" WARN case rather than FAIL.
+              static check, so it stays the "ambiguous" WARN case rather than FAIL, OR
+              reachable by a proven-open channel, unconfined, but the ONLY grant signal
+              is a per-agent tools.profile WIDENING (B-409) with no explicit global
+              grant -- deliberately never a FAIL, for the same "seven still-unread
+              narrowing layers" reason gap #4 above gives.
     FAIL    — an EXPLICIT write tool grant (a literal write/edit/apply_patch/"*"/
               "group:fs" token, or a powerful tools.profile) AND reachable by a
               PROVEN-open channel, not confined, gated or not. scored=True.
     """
     cfg = ctx.config
     granted, enumerable = _b68_fs_tools_granted(cfg)
+    widenings = _agent_profile_widenings(cfg)
 
     if not enumerable:
         return _finding(
@@ -1009,8 +1142,20 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # signal backs the grant (a literal write/edit/apply_patch token, "*"/"group:fs", or
     # a powerful tools.profile) -- an implicit-wildcard-only grant stays the WARN
     # "ambiguous" case, not the FAIL "proven broad reach" case.
+    #
+    # C-135 (B-409 round 2): the first clause used to read `view.named` WITHOUT
+    # subtracting `view.denied`, unlike `legacy_write` right below it (which already
+    # does, `- view.denied` at its own definition) -- an explicitly-denied write token
+    # (e.g. tools.allow: ["write"], tools.deny: ["write"]) could leak through as
+    # "explicit" even though it grants nothing. This was provably unreachable before
+    # B-409 (reaching this line already requires write_tools non-empty, which requires
+    # a genuine, deny-survived write-family token elsewhere backing it), but B-409's
+    # widening review found a path that made it reachable and consequential — fixed at
+    # the root there too (the widening now intersects with a real global allowlist
+    # instead of granting wholesale), but this clause is fixed to match `legacy_write`'s
+    # existing pattern regardless, so it can't become a landmine for the next change.
     explicit_write_grant = bool(
-        (set(view.named) & _B55_FS_WRITE_TOOLS)
+        (set(view.named) & _B55_FS_WRITE_TOOLS) - view.denied
         or legacy_write
         or "*" in view.named
         or "group:fs" in view.named
@@ -1120,6 +1265,34 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 evidence=ev,
             )
         if not explicit_write_grant:
+            if widenings:
+                global_profile = dig(cfg, "tools.profile")
+                widen_desc = (
+                    f'widens beyond the global tools.profile={global_profile!r}'
+                    if global_profile is not None
+                    else "is the only declared tools.profile (no global tools.profile is set)"
+                )
+                ev.append(
+                    f"grant traces to a per-agent tools.profile that {widen_desc} "
+                    "(B-409): "
+                    + ", ".join(f'{path}="{profile}"' for path, profile in widenings)
+                    + " -- not an explicit global write/edit/apply_patch grant, and "
+                    "the seven still-unread narrowing layers (per-agent allow/deny, "
+                    "channel/group, toolsBySender, byProvider) could remove it for "
+                    "this agent unseen by this static check"
+                )
+                return _finding(
+                    "B55",
+                    WARN,
+                    f"Filesystem-write capability ({label}) is reachable by untrusted "
+                    f"senders, but the grant traces to a per-agent tools.profile that "
+                    f"{widen_desc}, so this stays WARN pending confirmation this is "
+                    f"intentional and not narrowed away by a policy layer this static "
+                    f"check can't read.",
+                    "Confirm the per-agent tools.profile grant is intentional, and "
+                    "lock the open channel(s) to 'allowlist'.",
+                    evidence=ev,
+                )
             ev.append(
                 "the only write-tool grant signal is tools.alsoAllow's implicit "
                 "wildcard (tools.allow/tools.profile absent) -- not an explicit "

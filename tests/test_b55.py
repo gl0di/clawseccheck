@@ -30,7 +30,11 @@ import pytest
 from clawseccheck import audit
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.collector import collect
-from clawseccheck.checks import check_fs_write_exposure, _b68_fs_tools_granted
+from clawseccheck.checks import (
+    check_fs_write_exposure,
+    _agent_profile_widenings,
+    _b68_fs_tools_granted,
+)
 from clawseccheck.collector import Context
 from clawseccheck.risk import risk_paths, _has_exec_or_write_tools
 
@@ -598,3 +602,285 @@ def test_b44_b55_b68_b84_all_agree_alsoallow_and_gateway_shapes():
             if "never proven" not in ev:
                 continue
             assert any(t in ev for t in view.named) or not view.named, (cfg, ev, view.named)
+
+
+# --------------------------------------------------------------------------- B-409
+# Per-agent tools.profile WIDENING: the one policy layer this module's grant model was
+# blind to that can produce a false PASS rather than a merely-missed WARN (every other
+# per-agent/per-channel/per-sender layer this file doesn't read is narrowing-only,
+# tool-policy-match-CgU98OQh.js:32-34). Grounded: agents.list[N].tools.profile is
+# `??`-coalesced against the global tools.profile (agent-tools.policy-YD9HuYgO.js:94,
+# :232) -- it REPLACES the global profile in the AND-ed policies[] list rather than
+# adding a second, narrowing entry, so a global "minimal" + per-agent "coding" grants
+# write/edit/apply_patch to that agent even though the global layer alone grants
+# nothing. Deliberately WARN-only: this can push a verdict from PASS toward WARN, but
+# it never sets explicit_write_grant, so it cannot alone drive a FAIL -- the seven
+# still-unread narrowing layers (per-agent allow/deny, channel/group, toolsBySender,
+# byProvider) could remove the grant for that specific agent, unseen by this check.
+
+
+def test_agent_profile_widenings_empty_with_no_agents_declared():
+    assert _agent_profile_widenings({"tools": {"profile": "minimal"}}) == []
+    assert _agent_profile_widenings({}) == []
+
+
+def test_agent_profile_widenings_silent_when_global_already_powerful():
+    cfg = {
+        "tools": {"profile": "coding"},
+        "agents": {"list": [{"id": "a", "tools": {"profile": "full"}}]},
+    }
+    assert _agent_profile_widenings(cfg) == []
+
+
+def test_agent_profile_widenings_silent_on_a_narrowing_override():
+    cfg = {
+        "tools": {"profile": "coding"},
+        "agents": {"list": [{"id": "a", "tools": {"profile": "minimal"}}]},
+    }
+    assert _agent_profile_widenings(cfg) == []
+
+
+def test_agent_profile_widenings_detects_a_widening_override():
+    cfg = {
+        "tools": {"profile": "minimal"},
+        "agents": {"list": [{"id": "worker", "tools": {"profile": "coding"}}]},
+    }
+    assert _agent_profile_widenings(cfg) == [("agents.list[0].tools.profile", "coding")]
+
+
+def test_agent_profile_widenings_detects_multiple_agents_independently():
+    cfg = {
+        "tools": {},
+        "agents": {
+            "list": [
+                {"id": "a", "tools": {"profile": "minimal"}},
+                {"id": "b", "tools": {"profile": "full"}},
+                {"id": "c"},
+            ]
+        },
+    }
+    assert _agent_profile_widenings(cfg) == [("agents.list[1].tools.profile", "full")]
+
+
+def test_agent_profile_widenings_tolerates_malformed_shapes():
+    # agents.list not a list, entries not dicts, profile not a non-empty string --
+    # none of these should raise, all should be silently skipped.
+    assert _agent_profile_widenings({"agents": {"list": "not-a-list"}}) == []
+    assert _agent_profile_widenings({"agents": {"list": [None, "x", 5]}}) == []
+    assert _agent_profile_widenings(
+        {"agents": {"list": [{"id": "a", "tools": {"profile": ""}}]}}
+    ) == []
+    assert _agent_profile_widenings(
+        {"agents": {"list": [{"id": "a", "tools": {"profile": 7}}]}}
+    ) == []
+
+
+def test_b68_fs_tools_granted_widening_makes_an_otherwise_blind_config_enumerable():
+    # No global grant signal at all -- would be ([], False) before B-409.
+    cfg = {"agents": {"list": [{"id": "worker", "tools": {"profile": "coding"}}]}}
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    assert enumerable is True
+    assert set(granted) >= {"write", "edit", "apply_patch"}
+
+
+def test_b68_fs_tools_granted_widening_does_not_defeat_a_global_deny():
+    # A global group:fs deny is its own AND-ed policy layer in OpenClaw's real
+    # resolver -- always intersects, regardless of which profile substitutes in.
+    cfg = {
+        "tools": {"deny": ["group:fs"]},
+        "agents": {"list": [{"id": "worker", "tools": {"profile": "coding"}}]},
+    }
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    assert granted == []
+    assert enumerable is True
+
+
+def test_b68_fs_tools_granted_widening_intersects_a_real_global_allowlist():
+    # C-135 round 2's exact repro at the unit level: a non-empty, non-wildcard global
+    # tools.allow is its own separate AND-ed policy layer and must bound the widened
+    # profile grant, not be overridden by it.
+    cfg = {
+        "tools": {"allow": ["read", "write"], "deny": ["write"]},
+        "agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]},
+    }
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    assert granted == ["read"]
+    assert enumerable is True
+
+
+def test_b68_fs_tools_granted_widening_unaffected_by_a_wildcard_global_allow():
+    cfg = {
+        "tools": {"allow": ["*"]},
+        "agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]},
+    }
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    assert set(granted) == {"read", "write", "edit", "apply_patch"}
+    assert enumerable is True
+
+
+def test_b68_fs_tools_granted_widening_full_when_global_allow_absent():
+    cfg = {"agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]}}
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    assert set(granted) == {"read", "write", "edit", "apply_patch"}
+    assert enumerable is True
+
+
+def test_b55_widening_alone_warns_not_pass_not_fail_on_open_channel(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"dmPolicy": "open"}},'
+        ' "tools": {"profile": "minimal"},'
+        ' "agents": {"list": [{"id": "worker", "tools": {"profile": "coding"}}]}}',
+    )
+    f = _b55(home)
+    assert f.status == WARN, f.detail
+    assert f.status != FAIL
+    assert f.scored is False
+    assert any("tools.profile widening" in e or "B-409" in e for e in f.evidence)
+
+
+def test_b55_widening_stays_pass_when_no_channel_declared_and_gated(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"tools": {"profile": "minimal", "exec": {"mode": "ask"}},'
+        ' "agents": {"list": [{"id": "worker", "tools": {"profile": "coding"}}]}}',
+    )
+    f = _b55(home)
+    assert f.status == PASS, f.detail
+
+
+def test_b55_narrowing_per_agent_profile_does_not_disturb_verdict():
+    # Unchanged from pre-B-409 behavior: global "coding" already grants write
+    # explicitly; the narrower per-agent profile is not modelled (accepted gap #1)
+    # and must not be mistaken for a widening either -- _agent_profile_widenings
+    # correctly returns [] here (global already powerful), so the verdict is driven
+    # entirely by the pre-existing global-profile grant path, unchanged by this fix.
+    f = _b55_cfg(
+        {
+            "tools": {"profile": "coding", "exec": {"mode": "ask"}},
+            "agents": {"list": [{"id": "reader", "tools": {"profile": "minimal"}}]},
+        }
+    )
+    assert f.status == PASS, f.detail
+
+
+def test_clean_agent_profile_narrower_fixture_passes():
+    f = _b55(FIXTURES / "clean_agent_profile_narrower")
+    assert f.status == PASS, f.detail
+
+
+def test_warn_b55_agent_profile_widens_fixture_warns_not_fails():
+    f = _b55(FIXTURES / "warn_b55_agent_profile_widens")
+    assert f.status == WARN, f.detail
+    assert f.status != FAIL
+
+
+# --------------------------------------------------------- B-409 C-135 round 2
+# CONFIRMED false FAIL, found by an independent adversarial review of the first
+# version of the widening fix above: `tools.allow: ["read","write"], deny: ["write"]`
+# plus a powerful per-agent profile used to FAIL (scored=True) on a config whose TRUE
+# effective grant is exactly {"read"}. Root cause: `pickSandboxToolPolicy(cfg.tools)`
+# (the tools.allow/alsoAllow/deny layer) is its OWN separate, always-pushed, AND-ed
+# policy entry in OpenClaw's real resolver (agent-tools.policy-YD9HuYgO.js:92-98) --
+# independent of which profile substitutes in. The first version unioned the WHOLE
+# fs-tool family into `granted` whenever a widening existed, ignoring that a real,
+# non-empty global tools.allow still constrains what the widened profile can reach.
+# Fixed by intersecting the widening with view.named when it is a real, non-empty,
+# non-wildcard allowlist (see _b68_fs_tools_granted's docstring for the full account).
+def test_b409_c135_exact_repro_no_longer_fails(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"tools": {"allow": ["read", "write"], "deny": ["write"]},'
+        ' "agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]},'
+        ' "channels": {"telegram": {"enabled": true, "dmPolicy": "open"}}}',
+    )
+    granted, enumerable = _b68_fs_tools_granted(
+        {
+            "tools": {"allow": ["read", "write"], "deny": ["write"]},
+            "agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]},
+        }
+    )
+    assert granted == ["read"], granted
+    f = _b55(home)
+    assert f.status == PASS, f.detail
+    assert f.status != FAIL
+
+
+def test_b409_c135_multi_token_deny_variant_no_longer_fails(tmp_path):
+    # The reviewer's variant B: multiple write-family tokens named AND denied.
+    home = _write_config(
+        tmp_path,
+        '{"tools": {"allow": ["read", "write", "edit"], "deny": ["write", "edit"]},'
+        ' "agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]},'
+        ' "channels": {"telegram": {"dmPolicy": "open"}}}',
+    )
+    f = _b55(home)
+    assert f.status == PASS, f.detail
+
+
+def test_b409_widening_still_applies_when_global_allow_is_a_wildcard(tmp_path):
+    # grants_all (explicit "*") imposes no restriction on this axis, so the widening
+    # should still apply without intersection -- confirms the fix isn't over-corrected
+    # into never widening through a genuinely permissive global allow layer.
+    home = _write_config(
+        tmp_path,
+        '{"tools": {"allow": ["*"]},'
+        ' "agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]},'
+        ' "channels": {"telegram": {"dmPolicy": "open"}}}',
+    )
+    f = _b55(home)
+    assert f.status == FAIL, f.detail  # "*" alone is already an explicit grant
+
+
+def test_b409_profile_substring_false_positive_stays_bounded_by_allowlist(tmp_path):
+    # _profile_is_powerful's substring fallback matches "code" anywhere, including
+    # "barcode-reader" -- a real false-positive widening detection. It must stay
+    # harmless because the corrected fix intersects with the real global allowlist
+    # regardless of whether the widening detection itself is precise.
+    home = _write_config(
+        tmp_path,
+        '{"tools": {"allow": ["read", "write"], "deny": ["write"]},'
+        ' "agents": {"list": [{"id": "x", "tools": {"profile": "barcode-reader"}}]},'
+        ' "channels": {"telegram": {"dmPolicy": "open"}}}',
+    )
+    f = _b55(home)
+    assert f.status == PASS, f.detail
+
+
+def test_b409_explicit_write_grant_ignores_a_denied_named_token(tmp_path):
+    # Direct regression for the explicit_write_grant deny-subtraction fix: a write
+    # token that is BOTH named in tools.allow AND denied must not count as "explicit"
+    # on its own (matching legacy_write's existing deny-subtracted pattern).
+    home = _write_config(
+        tmp_path,
+        '{"tools": {"allow": ["write"], "deny": ["write"]},'
+        ' "channels": {"telegram": {"dmPolicy": "open"}}}',
+    )
+    f = _b55(home)
+    assert f.status == PASS, f.detail
+
+
+def test_b409_evidence_does_not_assert_widening_when_no_global_profile_set(tmp_path):
+    # GR#4: evidence must not assert "widens beyond the global tools.profile" when no
+    # global tools.profile was declared at all -- there is nothing to widen beyond.
+    home = _write_config(
+        tmp_path,
+        '{"agents": {"list": [{"id": "worker", "tools": {"profile": "coding"}}]},'
+        ' "channels": {"telegram": {"dmPolicy": "open"}}}',
+    )
+    f = _b55(home)
+    assert f.status == WARN, f.detail
+    assert any("no global tools.profile is set" in e for e in f.evidence)
+    assert not any("widens beyond the global tools.profile" in e for e in f.evidence)
+
+
+def test_b409_evidence_asserts_widening_when_global_profile_is_weak(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"tools": {"profile": "minimal"},'
+        ' "agents": {"list": [{"id": "worker", "tools": {"profile": "coding"}}]},'
+        ' "channels": {"telegram": {"dmPolicy": "open"}}}',
+    )
+    f = _b55(home)
+    assert f.status == WARN, f.detail
+    assert any("widens beyond the global tools.profile" in e for e in f.evidence)

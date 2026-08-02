@@ -98,6 +98,40 @@ def test_b68_clean_fixture_passes():
     ).status == PASS
 
 
+# B-409: a per-agent tools.profile that WIDENS beyond the global one (`??`-coalesced,
+# not AND-ed -- agent-tools.policy-YD9HuYgO.js:94/:232) can grant fs tools B68's grant
+# model was previously blind to when the global layer alone names nothing. See
+# tests/test_b55.py's B-409 section for the full grounding this shares via
+# _agent_profile_widenings / _b68_fs_tools_granted.
+def test_b68_agent_profile_widening_warns_with_evidence():
+    f = check_exec_applypatch_workspace(
+        _ctx(
+            {
+                "tools": {"profile": "minimal"},
+                "agents": {"list": [{"id": "worker", "tools": {"profile": "coding"}}]},
+            }
+        )
+    )
+    assert f.status == WARN, f.detail
+    assert any("tools.profile widening" in e or "B-409" in e for e in f.evidence)
+
+
+def test_b68_agent_profile_narrowing_does_not_falsely_warn_via_widening_path():
+    # Global already powerful -> _agent_profile_widenings returns [] (nothing left to
+    # widen into); the pre-existing global-profile grant path alone drives the verdict,
+    # unchanged by this fix.
+    f = check_exec_applypatch_workspace(
+        _ctx(
+            {
+                "tools": {"profile": "coding"},
+                "agents": {"list": [{"id": "reader", "tools": {"profile": "minimal"}}]},
+            }
+        )
+    )
+    assert f.status == WARN, f.detail
+    assert not any("B-409" in e for e in f.evidence)
+
+
 # ---------------------------------------------------------------------------
 # B69 — exec inline-eval gate
 # ---------------------------------------------------------------------------
