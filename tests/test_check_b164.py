@@ -4,6 +4,8 @@ never WARN (base-rate discipline) — that calibration test is the highest-risk 
 of this check and gets the most scrutiny here."""
 from __future__ import annotations
 
+import base64
+import gzip
 from pathlib import Path
 
 from clawseccheck import audit
@@ -421,3 +423,53 @@ def test_b164_truncation_note_is_quantified(tmp_path):
     assert "1 line(s)" in f.detail
     assert "exceeded the 8000-char scan cap" in f.detail
     assert "unscanned" in f.detail
+
+
+# ------------------------------------------------------------- B-431: gzip/zlib line-collapse
+# A support bundle whose collector already redacted every secret, but which merely logs
+# ordinary HTTP method names (POST/GET) near ordinary config key names (api_key/
+# client_secret) on DIFFERENT lines, must PASS at the check level exactly like its
+# plaintext twin — not WARN purely because gzip-wrapping collapsed the line boundaries
+# the plaintext path's same-line AND-pairing guards rely on.
+_B431_SUPPORT_BUNDLE = (
+    "support bundle: acme-mcp-server 2.4.0   collected 2026-07-31T11:00:00Z\n"
+    "[transport]\n"
+    "endpoint = https://mcp.acme.dev/v1/stream\n"
+    "retry_policy = exponential\n"
+    "[credentials]  (values scrubbed by the bundle collector)\n"
+    "api_key = <redacted>\n"
+    "client_secret = <redacted>\n"
+    "[recent requests]\n"
+    "POST /v1/stream 200 41ms\n"
+    "POST /v1/stream 200 38ms\n"
+    "GET  /v1/health 200 4ms\n"
+)
+
+
+def test_b164_gzip_support_bundle_pass_matches_plaintext(tmp_path):
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    blob = base64.b64encode(gzip.compress(_B431_SUPPORT_BUNDLE.encode())).decode()
+    (logs_dir / "app.log").write_text(f"blob: {blob}\n", encoding="utf-8")
+    f = check_log_threat_hunt(_ctx(tmp_path))
+    assert f.status == PASS
+
+
+def test_b164_gzip_base64url_support_bundle_pass_matches_plaintext(tmp_path):
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    blob = base64.urlsafe_b64encode(gzip.compress(_B431_SUPPORT_BUNDLE.encode())).decode()
+    (logs_dir / "app.log").write_text(f"blob: {blob}\n", encoding="utf-8")
+    f = check_log_threat_hunt(_ctx(tmp_path))
+    assert f.status == PASS
+
+
+def test_b164_plaintext_support_bundle_also_pass(tmp_path):
+    """Sanity anchor: the plaintext twin of the two gzip fixtures above must ALSO PASS —
+    proves the gzip cases above are matching a genuinely clean verdict, not just an
+    unrelated UNKNOWN/no-signal short-circuit."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "app.log").write_text(_B431_SUPPORT_BUNDLE, encoding="utf-8")
+    f = check_log_threat_hunt(_ctx(tmp_path))
+    assert f.status == PASS

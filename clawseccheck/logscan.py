@@ -481,17 +481,33 @@ def _scan_blob_for_compressed_indicators(
         text = data.decode("utf-8", errors="replace")
         if not text.strip():
             return
-        if len(text) > _MAX_LINE_LEN:
-            # Same windowing discipline as an oversized RAW line (see
-            # _OVERSIZED_WINDOW_CHARS above) — a decompressed blob can be just as long,
-            # and the regex-cost bound windowing exists to enforce does not stop applying
-            # just because the text came from a decode step instead of the file directly.
-            head = text[:_OVERSIZED_WINDOW_CHARS]
-            tail = text[-_OVERSIZED_WINDOW_CHARS:]
-            _scan_line_content(result, head, is_trajectory=is_trajectory, allow_blob_decode=False)
-            _scan_line_content(result, tail, is_trajectory=is_trajectory, allow_blob_decode=False)
-        else:
-            _scan_line_content(result, text, is_trajectory=is_trajectory, allow_blob_decode=False)
+        # B-431: this used to hand the ENTIRE decompressed document to
+        # `_scan_line_content` as one synthetic "line". Every FP guard in that function
+        # (Class 2/4's same-line AND-pairing, Class 6's per-line secrets_at_rest) relies
+        # on `line` being one actual line of the source document — collapsing a genuine
+        # multi-line document (a support bundle, a JSON diagnostics dump, an application
+        # log) into one string let a secret-shaped token on one original line pair with
+        # an exfil-transport token on an entirely DIFFERENT original line, exactly the
+        # cross-line collapse that discipline exists to prevent. Re-split on the SAME
+        # line boundaries the plaintext path (`scan_log_file`) already respects, and
+        # apply that same per-line oversized-window discipline to each split line, so a
+        # decompressed document gets exactly the AND-pairing behavior it would have had
+        # if it had been scanned as a plaintext file in the first place.
+        for decoded_line in text.splitlines():
+            if not decoded_line.strip():
+                continue
+            if len(decoded_line) > _MAX_LINE_LEN:
+                # Same windowing discipline as an oversized RAW line (see
+                # _OVERSIZED_WINDOW_CHARS above) — a single decompressed line can be just
+                # as long, and the regex-cost bound windowing exists to enforce does not
+                # stop applying just because the line came from a decode step instead of
+                # the file directly.
+                head = decoded_line[:_OVERSIZED_WINDOW_CHARS]
+                tail = decoded_line[-_OVERSIZED_WINDOW_CHARS:]
+                _scan_line_content(result, head, is_trajectory=is_trajectory, allow_blob_decode=False)
+                _scan_line_content(result, tail, is_trajectory=is_trajectory, allow_blob_decode=False)
+            else:
+                _scan_line_content(result, decoded_line, is_trajectory=is_trajectory, allow_blob_decode=False)
         return  # one successful decompression is enough; don't also try the other b64 variant
 
 

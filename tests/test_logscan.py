@@ -911,3 +911,109 @@ def test_c327_deadline_in_the_past_still_stops_before_any_blob_decode(tmp_path):
     result = logscan.scan_log_file(sink, past_deadline)
     assert result.timed_out is True
     assert result.counts == {}
+
+
+# ------------------------------------------------------------- B-431: multi-line collapse
+# `_scan_blob_for_compressed_indicators` used to hand the WHOLE decompressed document to
+# `_scan_line_content` as one synthetic "line". Every FP guard in that function (Class
+# 2/4's same-line AND-pairing) relies on `line` actually being one line of the source
+# document — a secret-shaped token on one ORIGINAL line could pair with an exfil-transport
+# token on a completely DIFFERENT original line once the whole document was flattened.
+# A support bundle whose secrets are already redacted, but which merely logs ordinary HTTP
+# method names (POST/GET) near ordinary config key names (api_key/client_secret) on
+# DIFFERENT lines, is the exact real-world shape that tripped this.
+_B431_SUPPORT_BUNDLE = (
+    "support bundle: acme-mcp-server 2.4.0   collected 2026-07-31T11:00:00Z\n"
+    "[transport]\n"
+    "endpoint = https://mcp.acme.dev/v1/stream\n"
+    "retry_policy = exponential\n"
+    "[credentials]  (values scrubbed by the bundle collector)\n"
+    "api_key = <redacted>\n"
+    "client_secret = <redacted>\n"
+    "[recent requests]\n"
+    "POST /v1/stream 200 41ms\n"
+    "POST /v1/stream 200 38ms\n"
+    "GET  /v1/health 200 4ms\n"
+)
+
+
+def test_b431_gzip_base64_support_bundle_matches_plaintext_verdict(tmp_path):
+    """The gzip+base64-encoded bundle must produce the IDENTICAL signal-class counts as
+    the byte-identical plaintext file — no cross-line exfil_evidence/env_compromise_ioc
+    conjured purely by collapsing the document's line boundaries during decode."""
+    plain_sink = _write(tmp_path, "plain.log", _B431_SUPPORT_BUNDLE)
+    plain_result = logscan.scan_log_file(plain_sink, None)
+
+    blob = base64.b64encode(gzip.compress(_B431_SUPPORT_BUNDLE.encode())).decode()
+    gz_sink = _write(tmp_path, "gz.log", f"blob: {blob}\n")
+    gz_result = logscan.scan_log_file(gz_sink, None)
+
+    assert gz_result.counts == plain_result.counts
+    assert "exfil_evidence" not in gz_result.counts
+    assert "env_compromise_ioc" not in gz_result.counts
+
+
+def test_b431_gzip_base64url_support_bundle_matches_plaintext_verdict(tmp_path):
+    """Same repro, URL-safe base64 alphabet (0b704fd extended the original FP's decode
+    path to this alphabet too) — must ALSO match the plaintext verdict."""
+    plain_sink = _write(tmp_path, "plain.log", _B431_SUPPORT_BUNDLE)
+    plain_result = logscan.scan_log_file(plain_sink, None)
+
+    blob = base64.urlsafe_b64encode(gzip.compress(_B431_SUPPORT_BUNDLE.encode())).decode()
+    gz_sink = _write(tmp_path, "gzurl.log", f"blob: {blob}\n")
+    gz_result = logscan.scan_log_file(gz_sink, None)
+
+    assert gz_result.counts == plain_result.counts
+    assert "exfil_evidence" not in gz_result.counts
+    assert "env_compromise_ioc" not in gz_result.counts
+
+
+def test_b431_zlib_base64_support_bundle_matches_plaintext_verdict(tmp_path):
+    """Same repro via zlib.compress(level=9) instead of gzip — the collapse was never
+    gzip-specific, so the fix must not be either."""
+    plain_sink = _write(tmp_path, "plain.log", _B431_SUPPORT_BUNDLE)
+    plain_result = logscan.scan_log_file(plain_sink, None)
+
+    blob = base64.b64encode(zlib.compress(_B431_SUPPORT_BUNDLE.encode(), 9)).decode()
+    z_sink = _write(tmp_path, "zlib.log", f"blob: {blob}\n")
+    z_result = logscan.scan_log_file(z_sink, None)
+
+    assert z_result.counts == plain_result.counts
+    assert "exfil_evidence" not in z_result.counts
+    assert "env_compromise_ioc" not in z_result.counts
+
+
+def test_b431_genuine_same_line_pairing_still_caught_after_decompression(tmp_path):
+    """The fix must not overcorrect into blindness: a secret and an exfil-transport
+    token that ARE genuinely on the SAME original line must still corroborate once the
+    document is decompressed and re-split back into lines."""
+    doc = (
+        "normal line one\n"
+        "another benign line\n"
+        "leaked credential: api_key=AKIA1234567890ABCD posted via curl to "
+        "https://evil.example/collect\n"
+        "trailing benign line\n"
+    )
+    blob = base64.b64encode(gzip.compress(doc.encode())).decode()
+    sink = _write(tmp_path, "gz.log", f"blob: {blob}\n")
+    result = logscan.scan_log_file(sink, None)
+    assert result.counts.get("exfil_evidence", 0) == 1
+    assert result.counts.get("env_compromise_ioc", 0) == 1
+
+
+def test_b431_cross_line_pairing_stays_silent_after_decompression(tmp_path):
+    """Narrower isolation of the exact defect: a secret-shaped token on one line of the
+    decompressed document and an exfil-transport token several lines away must NOT pair
+    — mirrors what a single flattened synthetic line used to let happen."""
+    doc = (
+        "line one is benign\n"
+        "line two is benign\n"
+        "api_key = notarealsecretvalue\n"
+        "line four is benign\n"
+        "line five is benign\n"
+        "POST /v1/data 200 12ms\n"
+    )
+    blob = base64.b64encode(gzip.compress(doc.encode())).decode()
+    sink = _write(tmp_path, "gz.log", f"blob: {blob}\n")
+    result = logscan.scan_log_file(sink, None)
+    assert "env_compromise_ioc" not in result.counts
