@@ -508,7 +508,7 @@ The highest-risk chains it detects now span **RISK-01..RISK-26**:
 | RISK-21 | MEDIUM | Open group channel + a trajectory-logged group-origin session that provably invoked a high-blast tool → an untrusted surface has demonstrably reached a dangerous primitive |
 | RISK-22 | MEDIUM | A single MCP server's own tool set spans untrusted-input + sensitive-read + egress roles → co-resident toxic flow, even when every individual tool is safe in isolation |
 | RISK-23 | HIGH | 2+ independent persistence anchors (Python auto-exec, systemd unit, per-turn skill hook, covert tunnel) fired at once → an eviction-resistant foothold |
-| RISK-24 | MEDIUM | Confirmed default-deny egress policy + a tunnel/mesh-VPN transport present on the host + agent can act on untrusted input → the egress policy is unenforceable against that transport |
+| RISK-24 | MEDIUM | Confirmed default-deny egress policy + an ENROLLED tunnel/mesh-VPN transport on the host (not just a `which()`-found binary) + agent can act on untrusted input → destination-based egress filtering is defeated for traffic riding that transport |
 | RISK-25 | MEDIUM | Non-canonical marketplace feed + install-policy gate disabled (or its exec path-safety bypassed) → skills and plugins install from a non-default source with nothing reviewing what arrives |
 | RISK-26 | HIGH | Skill Workshop autonomous authoring enabled + an untrusted-ingress leg (open DM/group policy, or hooks with an unconstrained session-key) → one inbound message becomes persistent executable code on disk |
 

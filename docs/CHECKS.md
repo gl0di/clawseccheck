@@ -2733,19 +2733,20 @@ These paths are computed from multiple checks. They fire only when every leg is 
   hooks, and any tunnel/mesh-VPN binaries this install surfaced. Removing a single anchor
   without addressing the others leaves a working foothold in place.
 
-### RISK-24 - Default-deny egress policy is unenforceable — a tunnel transport bypasses it
+### RISK-24 - An enrolled tunnel transport defeats destination-based egress filtering
 
 - Severity: MEDIUM
-- Pattern: MEDIUM (RISK-24, E-065): a confirmed default-deny egress policy is
-- Chain: untrusted input reaches the agent -> agent can execute / write on the host -> {', '.join(transport)} present on the host (its own outbound transport) -> default-deny OUTPUT policy confirmed, but does not govern the tunnel's traffic -> egress policy is bypassed
+- Pattern: MEDIUM (RISK-24, E-065): a confirmed default-deny egress policy cannot see
+- Chain: untrusted input reaches the agent -> agent can execute / write on the host -> {', '.join(transport)} enrolled and active on the host (its own outbound transport) -> default-deny OUTPUT policy confirmed, but cannot see destinations carried inside the tunnel's own already-permitted connection -> destination-based egress filtering is defeated for traffic riding the tunnel
 - Why:
-  ClawSecCheck confirmed a default-deny outbound firewall policy on this host, but {',
-  '.join(transport)} is also present — a transport that establishes its own outbound
-  channel independent of the local OUTPUT firewall (a mesh-VPN peer connection, or an
-  outbound-initiated reverse tunnel). This agent can act on the host (exec/write) and is
+  ClawSecCheck confirmed a default-deny outbound firewall policy on this host, and {',
+  '.join(transport)} is enrolled and active — its own outbound control connection is
+  itself a locally-generated packet the OUTPUT chain does evaluate, but once that one
+  connection is up, destination-based egress filtering cannot see the individual
+  destinations carried inside it. This agent can act on the host (exec/write) and is
   reachable by untrusted input, so a prompt-injection compromise could invoke that
-  transport directly — the audit's own 'egress is hardened' verdict would not apply to
-  that channel.
+  transport directly — the audit's own 'egress is hardened' verdict does not extend to
+  traffic riding inside it.
 - Fix:
   Do not rely on host firewall policy alone to contain this agent. Either remove the
   tunnel/mesh-VPN client if it is not required for this agent's purpose, or explicitly

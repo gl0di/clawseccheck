@@ -237,6 +237,23 @@ def test_linux_egress_ufw_outgoing_deny_is_deny(tmp_path):
     assert any("DEFAULT_OUTPUT_POLICY=deny" in e for e in eg["evidence"])
 
 
+def test_linux_egress_ufw_outgoing_drop_is_deny(tmp_path):
+    # B-437 follow-up: real ufw never writes the literal "deny" to this file.
+    # `ufw default deny outgoing` (the exact hardening command this check's own
+    # remediation recommends) writes DEFAULT_OUTPUT_POLICY="DROP" — verified
+    # against backend_iptables.py's set_default_policy(). Before this fix, only
+    # "deny"/"reject" counted as deny, so the single most common real value
+    # ("drop") produced the backwards, self-contradictory WARN that an operator
+    # who correctly hardened their host defaults to ALLOW.
+    _touch(tmp_path, "etc/default/ufw", 'DEFAULT_OUTPUT_POLICY="DROP"\n')
+    _touch(tmp_path, "etc/ufw/ufw.conf", "ENABLED=yes\n")
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    eg = res["classes"]["egress_posture"]
+    assert eg["status"] == "present"
+    assert eg["active"] is True
+    assert any("DEFAULT_OUTPUT_POLICY=drop" in e for e in eg["evidence"])
+
+
 def test_linux_egress_ufw_outgoing_allow_is_allow(tmp_path):
     _touch(tmp_path, "etc/default/ufw", 'DEFAULT_OUTPUT_POLICY="allow"\n')
     _touch(tmp_path, "etc/ufw/ufw.conf", "ENABLED=yes\n")
@@ -397,12 +414,47 @@ def test_linux_frpc_and_bore_detected_by_binary_on_path(tmp_path):
 
 
 def test_linux_tunnel_transport_present_alone_carries_no_active_signal(tmp_path):
-    # "present" is a bare detection fact -- this class deliberately carries no
-    # "active"/severity judgement of its own; RISK-24 (risk.py) is the only place
-    # that combines it with capability + egress-posture context into a finding.
+    # B-434: a bare `shutil.which()` PATH hit is "present" but NOT, by itself,
+    # evidence the transport is actually enrolled -- an installed-but-never-used
+    # binary is indistinguishable from a live tunnel at that level. `active` stays
+    # None until a stronger corroboration signal is also found (see the
+    # systemd-enabled tests below); RISK-24 (risk.py) requires that corroboration.
     def which(n):
         return "/usr/bin/tailscale" if n == "tailscale" else None
     res = detect(root=tmp_path, system="Linux", which=which)
+    assert res["classes"]["tunnel_transport"]["status"] == "present"
+    assert res["classes"]["tunnel_transport"]["active"] is None
+
+
+def test_linux_tailscale_active_via_systemd_symlink(tmp_path):
+    # B-434: an enabled tailscaled.service means the daemon is actually enrolled
+    # as a running service, not merely a binary someone downloaded once.
+    def which(n):
+        return "/usr/bin/tailscale" if n == "tailscale" else None
+    _touch(tmp_path, "etc/systemd/system/multi-user.target.wants/tailscaled.service")
+    res = detect(root=tmp_path, system="Linux", which=which)
+    assert res["classes"]["tunnel_transport"]["active"] is True
+
+
+def test_linux_cloudflared_active_via_systemd_symlink(tmp_path):
+    # B-434: `cloudflared service install` (Cloudflare's own documented path to run
+    # a persistent tunnel) enables this exact unit.
+    def which(n):
+        return "/usr/local/bin/cloudflared" if n == "cloudflared" else None
+    _touch(tmp_path, "etc/systemd/system/multi-user.target.wants/cloudflared.service")
+    res = detect(root=tmp_path, system="Linux", which=which)
+    assert res["classes"]["tunnel_transport"]["active"] is True
+
+
+def test_linux_ngrok_present_never_carries_active_signal(tmp_path):
+    # B-434: ngrok has no single, authoritative systemd-unit convention to ground
+    # an "active" corroboration against without fabricating one -- present stays
+    # uncorroborated even with the binary on PATH. This is the exact repro from
+    # CLAWSECCHECK-B-434 (an unused `ngrok` binary downloaded once, never run).
+    def which(n):
+        return "/usr/local/bin/ngrok" if n == "ngrok" else None
+    res = detect(root=tmp_path, system="Linux", which=which)
+    assert res["classes"]["tunnel_transport"]["status"] == "present"
     assert res["classes"]["tunnel_transport"]["active"] is None
 
 

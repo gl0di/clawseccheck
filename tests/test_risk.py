@@ -1409,9 +1409,17 @@ def test_risk23_e2e_bare_regexp_exec_in_hook_no_fire(tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rule RISK-24 (E-065): confirmed default-deny egress + a tunnel transport present
-# on the host + an agent that can act on untrusted input = the egress policy is
-# unenforceable against that transport.
+# Rule RISK-24 (E-065): confirmed default-deny egress + an ENROLLED tunnel transport
+# on the host + an agent that can act on untrusted input = destination-based egress
+# filtering is defeated for traffic riding that transport.
+#
+# B-434 (C-135 adversarial review): a bare `shutil.which()` PATH hit on the tunnel
+# binary is not, by itself, evidence the transport is actually enrolled/running (an
+# installed-but-never-used binary is indistinguishable from a live tunnel at that
+# level) -- `tunnel_transport.active is True` (hostwatch's own corroboration, e.g. a
+# systemd-enabled tailscaled/cloudflared unit) is now required too. `_host()`'s
+# default `tunnel_active=True` represents that corroboration so the other
+# leg-by-leg tests below stay focused on the leg they exercise.
 # ──────────────────────────────────────────────────────────────────────────────
 
 _RISK24_EXEC_INGRESS_CFG = {
@@ -1420,7 +1428,7 @@ _RISK24_EXEC_INGRESS_CFG = {
 }
 
 
-def _host(tunnel_status="present", egress_active=True, supported=True):
+def _host(tunnel_status="present", tunnel_active=True, egress_active=True, supported=True):
     return {
         "system": "Linux",
         "supported": supported,
@@ -1428,7 +1436,7 @@ def _host(tunnel_status="present", egress_active=True, supported=True):
             "tunnel_transport": {
                 "status": tunnel_status,
                 "found": ["Tailscale"] if tunnel_status == "present" else [],
-                "active": None,
+                "active": tunnel_active if tunnel_status == "present" else None,
                 "evidence": [],
             },
             "egress_posture": {
@@ -1448,12 +1456,24 @@ def _ctx_with_host(cfg: dict, host: dict) -> Context:
 
 
 def test_risk24_fires_on_full_combination():
-    ctx = _ctx_with_host(_RISK24_EXEC_INGRESS_CFG, _host())
+    # tunnel_active=True (the default) represents hostwatch's B-434 corroboration
+    # (e.g. a systemd-enabled tailscaled unit) -- a genuinely enrolled transport.
+    ctx = _ctx_with_host(_RISK24_EXEC_INGRESS_CFG, _host(tunnel_active=True))
     paths = risk_paths(ctx, _findings(ctx))
     p = next((p for p in paths if p.id == "RISK-24"), None)
     assert p is not None, [x.id for x in paths]
     assert p.severity == MEDIUM
     assert "Tailscale" in " ".join(p.chain)
+
+
+def test_risk24_no_fire_without_tunnel_active_corroboration():
+    # B-434 (C-135 FP repro): tunnel_transport "present" from a bare `which()` hit
+    # alone, with NO active corroboration -- an installed-but-never-enrolled binary
+    # (e.g. a `ngrok` downloaded once and never run) -- must not fire, even though
+    # every other leg (confirmed default-deny egress, exec/write tool, untrusted
+    # ingress) is present.
+    ctx = _ctx_with_host(_RISK24_EXEC_INGRESS_CFG, _host(tunnel_active=None))
+    assert not any(p.id == "RISK-24" for p in risk_paths(ctx, _findings(ctx)))
 
 
 def test_risk24_no_fire_without_tunnel_present():

@@ -1911,23 +1911,37 @@ def _host_class_status(ctx: Context, cls: str) -> dict:
 
 def _rule_tunnel_bypasses_egress_policy(ctx: Context, tools: list[str],
                                         cfg: dict) -> RiskPath | None:
-    """MEDIUM (RISK-24, E-065): a confirmed default-deny egress policy is
-    unenforceable in the presence of a tunnel/mesh-VPN transport the agent could
-    invoke — "the audit told the user egress was fine, and it isn't."
+    """MEDIUM (RISK-24, E-065): a confirmed default-deny egress policy cannot see
+    destinations reached through an ENROLLED tunnel/mesh-VPN transport the agent
+    could invoke — "the audit told the user egress was fine, and traffic riding the
+    tunnel is invisible to it."
 
     A default-deny OUTPUT firewall policy (hostwatch EGRESS_POSTURE, active=True —
-    the same signal B101 grades PASS on) governs ordinary outbound sockets. It does
-    NOT see traffic a tunnel/mesh-VPN client routes through its own already-
-    established, often encrypted transport (a Tailscale mesh peer connection, an
-    ngrok/cloudflared reverse tunnel) — those are not a new outbound connection the
-    local firewall's OUTPUT chain evaluates the same way. `present` on
-    hostwatch.TUNNEL_TRANSPORT alone is deliberately never a finding (a large share of
-    developers legitimately run tailscale) — this chain fires ONLY on the full
-    combination: the transport exists, egress policy was graded hardened, AND the
-    agent both can act destructively (exec/write) and is reachable by untrusted input,
-    so a compromise could actually reach and use that transport.
+    the same signal B101 grades PASS on) is destination-based: it evaluates each new
+    outbound connection's destination against its ruleset. A tunnel/mesh-VPN
+    client's own control connection (a Tailscale mesh peer connection, an
+    ngrok/cloudflared reverse tunnel) IS itself a locally-generated outbound packet
+    and DOES traverse that OUTPUT chain like any other — if the tunnel works at all
+    under a real default-deny policy, the operator made a deliberate, disclosed
+    allowance for it. What the OUTPUT policy genuinely cannot see is the traffic
+    carried *inside* that already-permitted connection: once the tunnel is up,
+    destination-based filtering has nothing left to evaluate per inner destination.
+
+    `present` on hostwatch.TUNNEL_TRANSPORT alone is deliberately never a finding (a
+    large share of developers legitimately run tailscale), and — B-434 (C-135
+    adversarial review) — neither is a bare `shutil.which()` PATH hit on its own: an
+    installed-but-never-enrolled binary is indistinguishable from a live tunnel at
+    that level (the exact repro: an unused `ngrok` binary downloaded once and never
+    run). This chain now also requires hostwatch's `active is True` corroboration
+    (e.g. a systemd-enabled tailscaled/cloudflared unit — see hostwatch.py) that the
+    transport is actually enrolled, not merely installed. Even then it fires ONLY on
+    the full combination: the transport is enrolled, egress policy was graded
+    hardened, AND the agent both can act destructively (exec/write) and is reachable
+    by untrusted input, so a compromise could actually reach and use that transport.
     """
     if _host_class_status(ctx, "tunnel_transport").get("status") != "present":
+        return None
+    if _host_class_status(ctx, "tunnel_transport").get("active") is not True:
         return None
     if _host_class_status(ctx, "egress_posture").get("active") is not True:
         return None
@@ -1937,23 +1951,25 @@ def _rule_tunnel_bypasses_egress_policy(ctx: Context, tools: list[str],
     return RiskPath(
         id="RISK-24",
         severity=MEDIUM,
-        title="Default-deny egress policy is unenforceable — a tunnel transport bypasses it",
+        title="An enrolled tunnel transport defeats destination-based egress filtering",
         chain=[
             "untrusted input reaches the agent",
             "agent can execute / write on the host",
-            f"{', '.join(transport)} present on the host (its own outbound transport)",
-            "default-deny OUTPUT policy confirmed, but does not govern the tunnel's traffic",
-            "egress policy is bypassed",
+            f"{', '.join(transport)} enrolled and active on the host (its own outbound transport)",
+            "default-deny OUTPUT policy confirmed, but cannot see destinations "
+            "carried inside the tunnel's own already-permitted connection",
+            "destination-based egress filtering is defeated for traffic riding the tunnel",
         ],
         why=(
             "ClawSecCheck confirmed a default-deny outbound firewall policy on this "
-            f"host, but {', '.join(transport)} is also present — a transport that "
-            "establishes its own outbound channel independent of the local OUTPUT "
-            "firewall (a mesh-VPN peer connection, or an outbound-initiated reverse "
-            "tunnel). This agent can act on the host (exec/write) and is reachable by "
-            "untrusted input, so a prompt-injection compromise could invoke that "
-            "transport directly — the audit's own 'egress is hardened' verdict would "
-            "not apply to that channel."
+            f"host, and {', '.join(transport)} is enrolled and active — its own "
+            "outbound control connection is itself a locally-generated packet the "
+            "OUTPUT chain does evaluate, but once that one connection is up, "
+            "destination-based egress filtering cannot see the individual "
+            "destinations carried inside it. This agent can act on the host "
+            "(exec/write) and is reachable by untrusted input, so a prompt-injection "
+            "compromise could invoke that transport directly — the audit's own "
+            "'egress is hardened' verdict does not extend to traffic riding inside it."
         ),
         fix=(
             "Do not rely on host firewall policy alone to contain this agent. Either "

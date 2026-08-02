@@ -59,6 +59,16 @@ EGRESS_POSTURE = "egress_posture"
 # is NEVER a finding (a large share of developers legitimately run tailscale) — RISK-24
 # is the only consumer, and it only fires on the full combination of this class PLUS an
 # agent holding exec+egress PLUS a hardened egress-posture grade (see risk.py).
+# B-434 (C-135 adversarial review of RISK-24): a bare `shutil.which()` PATH hit is not
+# enough to justify RISK-24's severity by itself — an installed-but-never-enrolled
+# binary (downloaded once, never used) is indistinguishable from a live tunnel at that
+# level. On Linux, `active` is now corroborated the same way NETWORK_IDS/HOST_AUDIT
+# already do: a systemd-enabled tailscaled.service / cloudflared.service means the
+# daemon is actually enrolled as a running service, not merely present on PATH.
+# ngrok/frpc/bore have no single, authoritative systemd-unit convention to ground this
+# against without fabricating one, so `active` stays uncorroborated (None) for them —
+# honest "can't confirm" beats a guessed unit name. macOS/Windows are unchanged
+# (still uncorroborated) for the same reason.
 TUNNEL_TRANSPORT = "tunnel_transport"
 
 CLASSES = (
@@ -127,8 +137,9 @@ def _ufw_enabled(root: Path) -> bool | None:
 
 
 def _ufw_outgoing_policy(root: Path) -> str | None:
-    """DEFAULT_OUTPUT_POLICY from /etc/default/ufw, lowercased ('deny'/'reject'/
-    'allow'/...), or None if the key or file is absent/unreadable.
+    """DEFAULT_OUTPUT_POLICY from /etc/default/ufw, lowercased ('drop'/'reject'/
+    'accept'/...; ufw itself writes 'drop', not 'deny' — see B-437 follow-up on
+    the caller), or None if the key or file is absent/unreadable.
 
     B-437: the key does NOT live in /etc/ufw/ufw.conf (that file only holds
     ENABLED/LOGLEVEL-style toggles) — it is DEFAULT_OUTPUT_POLICY in
@@ -358,7 +369,13 @@ def _detect_linux(root: Path, which) -> dict:
     # credited as enforcing a deny-outbound policy it isn't actually applying.
     if ufw_policy is not None and _ufw_enabled(root) is True:
         found.append(f"ufw DEFAULT_OUTPUT_POLICY={ufw_policy}")
-        policy_deny = ufw_policy in ("deny", "reject")
+        # B-437 follow-up: real ufw never writes the literal "deny" to this file.
+        # `ufw default deny outgoing` (the exact hardening command this check's
+        # own remediation recommends) writes DEFAULT_OUTPUT_POLICY="DROP" —
+        # verified against backend_iptables.py's set_default_policy(). "deny" is
+        # kept for defense-in-depth (e.g. a hand-edited file) but "drop" is the
+        # value that actually occurs on real hosts.
+        policy_deny = ufw_policy in ("deny", "drop", "reject")
         # multiple confirmed sources: any confirmed default-allow is a real gap,
         # so let a False win over an earlier True rather than silently hiding it.
         deny = policy_deny if deny is None else (deny and policy_deny)
@@ -376,18 +393,26 @@ def _detect_linux(root: Path, which) -> dict:
     classes[EGRESS_POSTURE] = _egress_cls(found, deny, weak)
 
     # Tunnel / mesh-VPN transport (E-065/C-324) --------------------------------
-    found = []
+    found, active = [], None
     if which("tailscale") or which("tailscaled") or _exists(root, "var/lib/tailscale/tailscaled.state"):
         found.append("Tailscale")
+        # B-434: an enabled systemd unit means tailscaled is actually enrolled as a
+        # running service, not merely a binary someone downloaded once and never ran.
+        if _systemd_enabled(root, "tailscaled.service"):
+            active = True
     if which("cloudflared"):
         found.append("cloudflared")
+        # B-434: `cloudflared service install` (Cloudflare's own documented path to
+        # run a persistent tunnel) enables this exact unit.
+        if _systemd_enabled(root, "cloudflared.service"):
+            active = True
     if which("ngrok"):
         found.append("ngrok")
     if which("frpc"):
         found.append("frp")
     if which("bore"):
         found.append("bore")
-    classes[TUNNEL_TRANSPORT] = _detection_cls(found)
+    classes[TUNNEL_TRANSPORT] = _detection_cls(found, active)
 
     return {"system": "Linux", "supported": True, "classes": classes}
 
@@ -473,6 +498,10 @@ def _detect_macos(root: Path, which) -> dict:
     classes[EGRESS_POSTURE] = _egress_cls([], None, weak)
 
     # Tunnel / mesh-VPN transport (E-065/C-324) --------------------------------
+    # B-434: no grounded, read-only "is it actually enrolled/running" signal on
+    # macOS (no equivalent of Linux's systemd-enabled unit check here) — `active`
+    # stays uncorroborated (None), same as before. RISK-24 (risk.py) requires
+    # `active is True`, so it simply cannot fire from macOS host data yet.
     found = []
     if (which("tailscale") or which("tailscaled")
             or _exists(root, "Applications/Tailscale.app")):
@@ -573,6 +602,9 @@ def _detect_windows(root: Path, which) -> dict:
         classes[FIREWALL] = _cls(["Windows Firewall"], active=fw)
 
     # Tunnel / mesh-VPN transport (E-065/C-324) --------------------------------
+    # B-434: `active` stays uncorroborated (None) here for now, same as before —
+    # see the Linux block's B-434 comment. RISK-24 (risk.py) requires
+    # `active is True`, so it simply cannot fire from Windows host data yet.
     found = []
     if which("tailscale") or which("tailscaled") or _win_service_exists("Tailscale") is True:
         found.append("Tailscale")
