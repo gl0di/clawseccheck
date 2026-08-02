@@ -121,7 +121,7 @@ _EXEMPT = {
                   "first post-upgrade run. Same shape as the guards above: most of the bulk "
                   "is the grounding each field read has to carry (dist file:line for every "
                   "schema key) plus the reasoning for the upgrade-safety gate.",
-    "risk.py": "~1,470 lines — the combinational attack-chain engine (one _rule_* per chain "
+    "risk.py": "~2,429 lines — the combinational attack-chain engine (one _rule_* per chain "
                "plus the shared leg predicates they compose). Crossed the 1,200-line ceiling "
                "with B-283 (c), which taught _channels_with_visibility_all the account -> "
                "channel -> default precedence the dist resolver uses; that helper MUST stay "

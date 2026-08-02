@@ -2794,4 +2794,4 @@ These paths are computed from multiple checks. They fire only when every leg is 
   Independently, close the flagged ingress surface(s): set
   channels.<provider>.contextVisibility to 'allowlist'/'allowlist_quote' (B26), scope
   commands.ownerAllowFrom/allowFrom to your own channel-native ID(s) (B171), or disable
-  hooks.enabled / hooks.internal if it is not required (B179).
+  hooks.enabled if it is not required (B179).

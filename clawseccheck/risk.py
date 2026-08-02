@@ -2092,16 +2092,64 @@ def _rule_marketplace_unreviewed_install(ctx: Context,
 # see the rule's own docstring) AND at least one ingress arm below is positive.
 #
 # Pure correlation of already-emitted verdicts: no config is read directly here, only
-# `_finding_status` on B175/B26/B171/B179 — this cannot introduce a new false FAIL
-# beyond what those four checks already raised independently.
+# `_finding_status`/`.evidence` on B175/B26/B171/B179 — this cannot introduce a new
+# false FAIL beyond what those four checks already raised independently.
+#
+# B-435 correction: being a pure correlation of already-emitted statuses does NOT by
+# itself mean every WARN/FAIL status on B171/B179 means what this chain's ingress
+# language claims. B179's single WARN status folds together the real inbound webhook
+# toggle (hooks.enabled) with hooks.internal.* LOCAL startup module loading — B179's
+# own fix text calls that "a visibility inventory, not a misconfiguration finding", not
+# an ingress surface. B171's WARN status likewise folds together "no owner/allow-from
+# gate configured at all" with "a real, scoped ownerAllowFrom/allowFrom is set but
+# commands.useAccessGroups=false" (a secondary enforcement layer, not sender scope).
+# `_r26_b171_ingress_arm`/`_r26_b179_ingress_arm` below narrow each WARN status to only
+# the sub-signal that genuinely admits a message from someone other than the owner,
+# reading the same Finding's `.evidence` the way `_b97_anchor_signal` already does
+# above. B26 has no such split (its WARN state is uniformly "untrusted context reaches
+# the model") and keeps the plain status check.
 _R26_INGRESS_ARMS = {
     "B26": "untrusted senders' quoted/history context reaches the model "
            "(channels.<p>.contextVisibility)",
     "B171": "a privileged in-chat command surface (bash/config/mcp/plugins) is "
             "reachable with an under-scoped or absent owner/allow-from gate",
-    "B179": "an inbound webhook hooks endpoint and/or internal hook module loading "
-            "is enabled",
+    "B179": "an inbound webhook hooks endpoint is enabled (hooks.enabled)",
 }
+
+# B-435 repro B: only count B171 WARN toward this chain's "under-scoped or absent
+# gate" language when the gate itself is what's missing -- not when useAccessGroups
+# alone was the WARN driver over an otherwise-scoped ownerAllowFrom/allowFrom (see
+# check_privileged_commands_exposure's own WARN-evidence construction, checks/
+# _config.py). A FAIL status is never ambiguous this way -- it is only ever reached
+# via a wildcard-open gate or a no-gate-at-all open channel, both real.
+_B171_ABSENT_GATE_MARKER = "ownerAllowFrom/allowFrom not configured"
+
+
+def _r26_b171_ingress_arm(findings: list[Finding]) -> bool:
+    f = _finding_by_id(findings, "B171")
+    if f is None:
+        return False
+    if f.status == FAIL:
+        return True
+    if f.status != WARN:
+        return False
+    return any(_B171_ABSENT_GATE_MARKER in e for e in f.evidence)
+
+
+def _r26_b179_ingress_arm(findings: list[Finding]) -> bool:
+    """B179 (checks/_config.py) never reaches FAIL, only WARN -- and its WARN evidence
+    lines are prefixed by the exact config path each line reports on. Every line the
+    real inbound webhook (hooks.enabled) and its B-288 session-key policy siblings can
+    produce is prefixed "hooks." but NOT "hooks.internal" (`_hooks_session_key_exposures`
+    in checks/_shared.py only ever emits those siblings when hooks.enabled is True); the
+    local-only startup module-loading lines are all prefixed "hooks.internal.*". So a
+    "hooks." evidence line that is not "hooks.internal.*" is proof the genuine webhook
+    surface, not just local module loading, is what made B179 WARN.
+    """
+    f = _finding_by_id(findings, "B179")
+    if f is None or f.status != WARN:
+        return False
+    return any(e.startswith("hooks.") and not e.startswith("hooks.internal") for e in f.evidence)
 
 
 def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
@@ -2123,7 +2171,9 @@ def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
        default) — a real widening, but not the "no review at all" shape this chain
        describes. Only FAIL proves every ingredient the title claims.
     2. at least one of B26 / B171 / B179 holds — a live ingress path for a message from
-       someone other than the owner (see `_R26_INGRESS_ARMS`).
+       someone other than the owner (see `_R26_INGRESS_ARMS`). B26 accepts its plain
+       WARN|FAIL status; B171/B179 are narrowed to their genuinely ingress-shaped
+       sub-signal (see `_r26_b171_ingress_arm`/`_r26_b179_ingress_arm` — B-435).
 
     HONEST LABELLING. This does not claim the pipeline has actually been triggered —
     every leg is config/posture, read from findings already emitted elsewhere. Silence
@@ -2132,10 +2182,13 @@ def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
     """
     if _finding_status(findings, "B175") != FAIL:
         return None
-    arms = [
-        label for cid, label in _R26_INGRESS_ARMS.items()
-        if _finding_status(findings, cid) in (WARN, FAIL)
-    ]
+    arms = []
+    if _finding_status(findings, "B26") in (WARN, FAIL):
+        arms.append(_R26_INGRESS_ARMS["B26"])
+    if _r26_b171_ingress_arm(findings):
+        arms.append(_R26_INGRESS_ARMS["B171"])
+    if _r26_b179_ingress_arm(findings):
+        arms.append(_R26_INGRESS_ARMS["B179"])
     if not arms:
         return None
     detail = "; ".join(arms)
@@ -2165,7 +2218,7 @@ def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
             "flagged ingress surface(s): set channels.<provider>.contextVisibility to "
             "'allowlist'/'allowlist_quote' (B26), scope commands.ownerAllowFrom/"
             "allowFrom to your own channel-native ID(s) (B171), or disable "
-            "hooks.enabled / hooks.internal if it is not required (B179)."
+            "hooks.enabled if it is not required (B179)."
         ),
     )
 
