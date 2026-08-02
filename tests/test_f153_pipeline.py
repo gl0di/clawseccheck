@@ -168,6 +168,105 @@ def test_run_plugin_sweep_no_plugins_found_runs_cleanly():
 
 
 # ---------------------------------------------------------------------------
+# B-405: the judge packet's own-target corpus must not depend on which renderer
+# built it. Before this fix: run_pipeline's P9 (used by --full's human/json report)
+# saw ONLY the caller-supplied `vet_targets` kwarg (the skill sweep) -- P7's own
+# plugin sweep ran, rendered its own "Plugins" section, and its vet_targets were
+# silently discarded. `--dashboard --full` (which calls run_adjudication directly,
+# bypassing run_pipeline) had the OPPOSITE gap: it passed only its plugin sweep,
+# never a skill sweep. Same audit run, two renderers, two different corpora.
+# ---------------------------------------------------------------------------
+
+class _FakeVetSweep:
+    """Duck-typed on the SkillSweep/PluginSweep published surface `_sweep_phase_from`
+    needs, plus `vet_targets()` -- the one property the P9 union (B-405) reads."""
+
+    def __init__(self, targets, *, no_roots=False, no_targets=False):
+        self._targets = targets
+        self.no_roots = no_roots
+        self.no_targets = no_targets
+        self.complete = True
+        self.has_fail = False
+
+    def counts(self):
+        return {"total": len(self._targets), "fails": 0, "warns": 0,
+                "safe": len(self._targets), "truncated": 0, "skipped": 0}
+
+    def not_scanned(self):
+        return []
+
+    def vet_targets(self):
+        return self._targets
+
+
+def _b405_finding(id_: str, status: str = "UNKNOWN"):
+    from clawseccheck.catalog import Finding
+    return Finding(id=id_, title="synthetic", severity="LOW", status=status,
+                   detail="synthetic detail", fix="synthetic fix", framework="Test")
+
+
+def test_run_pipeline_p9_includes_p7s_own_swept_targets(monkeypatch):
+    """A plugin target the caller never named must still reach P9's vetPackets --
+    P7's own sweep is no longer computed and thrown away."""
+    plugin_sweep = _FakeVetSweep([("plugin-path", _b405_finding("PLUGIN-X"))])
+    monkeypatch.setattr(pl, "resolve_plugin_sweep",
+                        lambda: (lambda home, **kw: plugin_sweep))
+
+    ctx = collect(FIXTURES / "clean_full")
+    result = pl.run_pipeline(ctx, [], home_dir=FIXTURES / "clean_full", vet_targets=())
+    adj = result.by_name(pl.PHASE_ADJUDICATION)
+    targets = {p["target"] for p in adj.data["vetPackets"]}
+    assert "plugin-path" in targets
+
+
+def test_run_pipeline_p9_unions_caller_and_own_swept_targets(monkeypatch):
+    """The caller-supplied (P6/skill) targets and this module's own (P7/plugin)
+    targets must BOTH reach P9 -- neither silently displaces the other."""
+    plugin_sweep = _FakeVetSweep([("plugin-path", _b405_finding("PLUGIN-X"))])
+    monkeypatch.setattr(pl, "resolve_plugin_sweep",
+                        lambda: (lambda home, **kw: plugin_sweep))
+
+    ctx = collect(FIXTURES / "clean_full")
+    result = pl.run_pipeline(
+        ctx, [], home_dir=FIXTURES / "clean_full",
+        vet_targets=[("skill-path", _b405_finding("SKILL-Y"))])
+    adj = result.by_name(pl.PHASE_ADJUDICATION)
+    targets = {p["target"] for p in adj.data["vetPackets"]}
+    assert {"plugin-path", "skill-path"} <= targets
+
+
+def test_dashboard_and_full_renderer_paths_see_the_same_vet_target_corpus(monkeypatch):
+    """B-405 (the reported bug), reproduced and pinned fixed: simulate both cli.py
+    call shapes -- `run_pipeline` (plain `--full`, human/json) and a direct
+    `run_adjudication` call fed the plugin+skill union (`--dashboard --full`, post-
+    fix) -- against the SAME synthetic plugin/skill sweep, one fixed fixture, one
+    fixed (empty) findings list. Both must resolve to the identical vetPackets
+    target set."""
+    plugin_sweep = _FakeVetSweep([("plugin-path", _b405_finding("PLUGIN-X"))])
+    skill_targets = [("skill-path", _b405_finding("SKILL-Y"))]
+    monkeypatch.setattr(pl, "resolve_plugin_sweep",
+                        lambda: (lambda home, **kw: plugin_sweep))
+
+    ctx = collect(FIXTURES / "clean_full")
+    findings: list = []
+
+    # cli.py's plain `--full` shape: run_pipeline (P6 caller-supplied + P7 self-swept).
+    full_result = pl.run_pipeline(ctx, findings, home_dir=FIXTURES / "clean_full",
+                                  vet_targets=skill_targets)
+    full_targets = {
+        p["target"] for p in full_result.by_name(pl.PHASE_ADJUDICATION).data["vetPackets"]
+    }
+
+    # cli.py's `--dashboard --full` shape (post-B-405 fix): the union is computed by
+    # the caller, then handed straight to run_adjudication.
+    dash_vet_targets = list(plugin_sweep.vet_targets()) + list(skill_targets)
+    dash_phase = pl.run_adjudication(ctx, findings, vet_targets=dash_vet_targets)
+    dash_targets = {p["target"] for p in dash_phase.data["vetPackets"]}
+
+    assert full_targets == dash_targets == {"plugin-path", "skill-path"}
+
+
+# ---------------------------------------------------------------------------
 # P8 — run_behavioral
 # ---------------------------------------------------------------------------
 

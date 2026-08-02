@@ -863,6 +863,52 @@ def _render_finding_compact(lines, icon, f):
 # doesn't already trim.
 _COMPACT_WHY_LIMIT = 36
 
+# B-405: the per-item trims above (this file, tuned against two fixtures) are NOT a
+# hard guarantee -- a real fleet config with more FAIL/WARN findings than either
+# fixture measured this against (many findings * a few chars each still adds up) blew
+# straight through the budget (5641 chars measured against a real ~/.openclaw before
+# this fix). render_dashboard now enforces the budget itself at render time, as a
+# deterministic last line of defence rather than trusting per-item tuning to always be
+# enough: the documented Telegram cap.
+_COMPACT_CHAR_BUDGET = 4096
+
+# B-405: render_dashboard's reduction ladder once _COMPACT_CHAR_BUDGET is still
+# exceeded after the existing per-item trims. Each level is CUMULATIVE and widens
+# `why_drop_severities` (dropping the whole why line, not just narrowing it) for one
+# more severity, weakest first -- LOW detail is the first thing a reader loses,
+# CRITICAL detail is the last. Findings' titles/severity/family structure are never
+# dropped by this ladder; only the "why" explanatory line is.
+_COMPACT_WHY_DROP_LEVELS = (
+    frozenset({LOW}),
+    frozenset({LOW, MEDIUM}),
+    frozenset({LOW, MEDIUM, HIGH}),
+    frozenset({LOW, MEDIUM, HIGH, CRITICAL}),
+)
+
+
+def _hard_truncate_compact(out: str, budget: int = _COMPACT_CHAR_BUDGET) -> str:
+    """Absolute last-resort guarantee (B-405): reached only if a config has so many
+    findings that even dropping every why line (all four severities) still leaves the
+    bare title/family-frame lines over budget. Cuts deterministically at the last
+    newline at-or-before the budget (reserving room for the trailing marker) so the
+    render NEVER exceeds its own documented cap, even in this pathological case.
+
+    This runs AFTER _finalize_compact_dashboard's own _asciify step (it is the final
+    fallback in that function, not wrapped by it -- see _finalize_compact_dashboard),
+    so the marker itself must always be pure ASCII: a raw "…" here would silently
+    break the documented ascii_only contract in exactly this extreme-fallback case.
+    """
+    if len(out) <= budget:
+        return out
+    marker = "\n...(truncated to fit budget)\n"
+    room = max(budget - len(marker), 0)
+    cut = out[:room]
+    nl = cut.rfind("\n")
+    if nl > 0:
+        cut = cut[:nl]
+    result = cut + marker
+    return result[:budget] if len(result) > budget else result
+
 
 def _compact_detail(text: str, limit: int) -> str:
     """Truncate *text* to at most ~*limit* chars at a word boundary, appending an
@@ -879,7 +925,7 @@ def _compact_detail(text: str, limit: int) -> str:
 
 def _render_finding(lines, f, cfg: dict | None = None, *,
                     ascii_only: bool = False, color: bool = False,
-                    compact: bool = False):
+                    compact: bool = False, why_drop_severities: frozenset = frozenset()):
     conf = getattr(f, "confidence", "HIGH")
     tag = f"  (confidence: {conf.lower()})" if conf != "HIGH" and f.status in (FAIL, WARN) else ""
     pc = getattr(f, "pass_confidence", None)
@@ -889,7 +935,12 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
     lines.append(f"{_sev_token(f.severity, ascii_only=ascii_only, color=color)}  "
                  f"{_sanitize(f.title)}{tag}{pass_tag}")
     why_text = _sanitize(f.detail) if f.detail else ""
-    if why_text:
+    # B-405: when the per-item --compact trim below still isn't enough to fit the
+    # documented 4096-char budget on a large real config, render_dashboard retries
+    # with progressively larger `why_drop_severities` sets -- dropping the why line
+    # ENTIRELY for the named severities, weakest first, so CRITICAL/HIGH detail is the
+    # last thing to go. Default (empty set) reproduces the exact prior behaviour.
+    if why_text and not (compact and f.severity in why_drop_severities):
         # B-381: --compact trims the detail text itself -- the growth driver on a bad
         # config is many findings' full "why" paragraphs, not any single fixed section.
         shown_why = _compact_detail(why_text, _COMPACT_WHY_LIMIT) if compact else why_text
@@ -1822,7 +1873,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
 
 
 def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = False,
-                              compact: bool = False) -> str:
+                              compact: bool = False,
+                              why_drop_severities: frozenset = frozenset()) -> str:
     """Deterministic, framed Findings block for the chat Dashboard (SKILL.md Step 3, Section 3).
 
     Emits ONLY what Section 3 must contain, so the host agent PASTES this verbatim instead
@@ -1841,6 +1893,12 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
     (still the exact literal block the host agent pastes verbatim). Default False
     reproduces the exact prior byte-identical output for every existing caller
     (the standalone `--dashboard-findings` command, and every test).
+
+    `why_drop_severities` (B-405) is render_dashboard's final, hard 4096-char budget
+    enforcement: when the per-item trim above still isn't enough on a large real
+    config, the caller re-renders with this set widened (weakest severity first) so
+    entire why lines are dropped rather than merely narrowed. Empty by default,
+    reproducing the exact prior output.
     """
     findings = deduplicate_findings(findings)
     qualifying = [
@@ -1881,7 +1939,8 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
             lines.append(f"│ {head} — {count_text}")
             lines.append(f"└{_rule}")
         for f in members:
-            _render_finding(lines, f, cfg=None, ascii_only=ascii_only, compact=compact)
+            _render_finding(lines, f, cfg=None, ascii_only=ascii_only, compact=compact,
+                            why_drop_severities=why_drop_severities)
         lines.append("")
 
     out = "\n".join(lines).rstrip() + "\n"
@@ -2012,7 +2071,8 @@ def _second_opinion_lines(phase, *, ascii_only: bool = False) -> list[str]:
 
 
 def _worth_a_glance_lines(findings: list[Finding], *, ascii_only: bool = False,
-                          limit: int = 12, compact: bool = False) -> list[str]:
+                          limit: int = 12, compact: bool = False,
+                          why_drop_severities: frozenset = frozenset()) -> list[str]:
     """MEDIUM/ATTESTED-confidence findings for the combined pipeline Dashboard
     (F-153) — the exact complement of render_dashboard_findings's own filter (which
     excludes these from Section 2), so nothing is shown twice and nothing is
@@ -2036,7 +2096,9 @@ def _worth_a_glance_lines(findings: list[Finding], *, ascii_only: bool = False,
     smaller value) and threads `compact` into `_render_finding`, same trims Section 2
     applies under --compact — this block is unbounded by FAIL/WARN family structure,
     so a bad config with many MEDIUM/ATTESTED findings could otherwise blow the
-    Telegram ~4096-char budget on its own.
+    Telegram ~4096-char budget on its own. `why_drop_severities` (B-405) threads the
+    same final-budget-enforcement drop set Section 2 gets — see
+    `render_dashboard_findings`'s docstring.
     """
     qualifying = [
         f for f in findings
@@ -2050,11 +2112,41 @@ def _worth_a_glance_lines(findings: list[Finding], *, ascii_only: bool = False,
     lines: list[str] = []
     for f in qualifying[:limit]:
         raw: list[str] = []
-        _render_finding(raw, f, cfg=None, ascii_only=ascii_only, compact=compact)
+        _render_finding(raw, f, cfg=None, ascii_only=ascii_only, compact=compact,
+                        why_drop_severities=why_drop_severities)
         lines.extend(_redact_home_paths(ln) for ln in raw)
     if len(qualifying) > limit:
         lines.append(f"(+{len(qualifying) - limit} more)")
     return lines
+
+
+def _finalize_compact_dashboard(assemble, *, compact: bool, ascii_only: bool) -> str:
+    """B-405: render_dashboard's hard budget enforcement.
+
+    `assemble(why_drop_severities)` builds the full (non-asciified) card for a given
+    drop set; this wrapper renders it, applies `_asciify` when requested (the length
+    check below runs on the ACTUAL final string the caller emits, not a pre-ascii
+    proxy for it — `_asciify` can change length, e.g. "…" -> "..."), and — only when
+    `compact=True` — retries with a progressively more aggressive drop set from
+    `_COMPACT_WHY_DROP_LEVELS` until the result fits `_COMPACT_CHAR_BUDGET`. If the
+    most aggressive level still doesn't fit, `_hard_truncate_compact` is the
+    deterministic last resort that guarantees the return value is never over budget.
+
+    `compact=False` (every pre-existing caller) calls `assemble()` exactly once and
+    returns it untouched — byte-identical to the pre-B-405 behaviour.
+    """
+    def _final(why_drop_severities: frozenset = frozenset()) -> str:
+        out = assemble(why_drop_severities)
+        return _asciify(out) if ascii_only else out
+
+    result = _final()
+    if not compact or len(result) <= _COMPACT_CHAR_BUDGET:
+        return result
+    for drop_set in _COMPACT_WHY_DROP_LEVELS:
+        result = _final(drop_set)
+        if len(result) <= _COMPACT_CHAR_BUDGET:
+            return result
+    return _hard_truncate_compact(result, _COMPACT_CHAR_BUDGET)
 
 
 def render_dashboard(findings: list[Finding], score: ScoreResult, *,
@@ -2114,6 +2206,19 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     bullets, narrows the family frame's border rule) and into `_worth_a_glance_lines`
     (lower `limit`, same per-finding trim) — see `_COMPACT_WHY_LIMIT`'s own comment for
     the tuned value and the fixtures it was measured against.
+
+    B-405: the per-item trims above were tuned against two fixtures and are NOT a hard
+    guarantee — a real config with more FAIL/WARN findings than either fixture still
+    busted the ~4096 budget (5641 chars measured against a real fleet config). When
+    `compact=True`, this function now enforces `_COMPACT_CHAR_BUDGET` on the actual
+    final rendered string (post-`_asciify`) as a hard cap: if the first render is over
+    budget, it retries with `_COMPACT_WHY_DROP_LEVELS` (dropping whole why-lines,
+    weakest severity first) until it fits, and if even the most aggressive level still
+    doesn't fit, `_hard_truncate_compact` deterministically cuts the string to the
+    budget as an absolute last resort. `full=False` output is included in this
+    enforcement too (Section 2 alone can already be large); the byte-identical
+    guarantees above still hold whenever `compact=False` (the default), since the
+    budget loop is a no-op in that case.
     """
     findings = deduplicate_findings(findings)
     n_issues = sum(
@@ -2126,66 +2231,86 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     sep = brand.ASCII_SEPARATOR.strip() if ascii_only else brand.SEPARATOR.strip()
     mascot = "" if ascii_only else f"{brand.MASCOT} "
     issues_word = "issue" if n_issues == 1 else "issues"
-    lines = [
+    header_lines = [
         f"{mascot}OpenClaw Security Audit {sep} Grade {score.grade} {sep} {score.score}/100",
         f"{_score_bar(score.score, score.grade, ascii_only=ascii_only)}"
         f"  {sep}  {n_issues} {issues_word}",
+        "",
+        f"{sep} Findings {sep}",
     ]
-    lines.append("")
-    lines.append(f"{sep} Findings {sep}")
-    body = render_dashboard_findings(findings, ascii_only=ascii_only, compact=compact).rstrip("\n")
-    out = "\n".join(lines) + "\n" + body + "\n"
+    header_block = "\n".join(header_lines) + "\n"
+
+    # Skills is a fixed block (unaffected by why_drop_severities): computed once.
     inv = None
+    skills_block = ""
     if ctx is not None:
         inv = build_inventory(findings, ctx)
         if inv["skills"]:
             skill_lines = _skills_inventory_lines(inv, ctx, ascii_only=ascii_only)
-            out += "\n" + f"{sep} Skills {sep}" + "\n" + "\n".join(skill_lines) + "\n"
+            skills_block = "\n" + f"{sep} Skills {sep}" + "\n" + "\n".join(skill_lines) + "\n"
+
     if not full:
-        return _asciify(out) if ascii_only else out
+        def _assemble(why_drop_severities: frozenset = frozenset()) -> str:
+            body = render_dashboard_findings(
+                findings, ascii_only=ascii_only, compact=compact,
+                why_drop_severities=why_drop_severities).rstrip("\n")
+            return header_block + body + "\n" + skills_block
+
+        return _finalize_compact_dashboard(_assemble, compact=compact, ascii_only=ascii_only)
 
     # F-153: the rest of --full's pipeline, fixed order, each block independently
     # omitted when there is genuinely nothing to show for it (see the docstring).
+    # None of these depend on why_drop_severities, so they're computed once, outside
+    # the budget-retry loop below.
+    tail_block = ""
     plugin_lines = _plugins_inventory_lines(plugin_sweep, ascii_only=ascii_only, compact=compact)
     if plugin_lines:
-        out += "\n" + f"{sep} Plugins {sep}" + "\n" + "\n".join(plugin_lines) + "\n"
+        tail_block += "\n" + f"{sep} Plugins {sep}" + "\n" + "\n".join(plugin_lines) + "\n"
 
     if inv is not None and inv["mcp"]:
         mcp_lines = _mcp_inventory_lines(inv, ascii_only=ascii_only, compact=compact)
-        out += "\n" + f"{sep} MCP {sep}" + "\n" + "\n".join(mcp_lines) + "\n"
+        tail_block += "\n" + f"{sep} MCP {sep}" + "\n" + "\n".join(mcp_lines) + "\n"
 
     risk_lines = _risk_chain_lines(risk or [], ascii_only=ascii_only, compact=compact)
     if risk_lines:
-        out += "\n" + f"{sep} RISK Chains {sep}" + "\n" + "\n".join(risk_lines) + "\n"
+        tail_block += "\n" + f"{sep} RISK Chains {sep}" + "\n" + "\n".join(risk_lines) + "\n"
 
     behavioral_lines = _behavioral_block_lines(behavioral, ascii_only=ascii_only)
     if behavioral_lines:
-        out += "\n" + f"{sep} Behavioural {sep}" + "\n" + "\n".join(behavioral_lines) + "\n"
+        tail_block += "\n" + f"{sep} Behavioural {sep}" + "\n" + "\n".join(behavioral_lines) + "\n"
 
     second_opinion_lines = _second_opinion_lines(adjudication, ascii_only=ascii_only)
     if second_opinion_lines:
-        out += ("\n" + f"{sep} Second opinion (advisory) {sep}" + "\n"
+        tail_block += ("\n" + f"{sep} Second opinion (advisory) {sep}" + "\n"
                + "\n".join(second_opinion_lines) + "\n")
 
     coverage_lines = _coverage_lines(findings, ascii_only=ascii_only)
     if coverage_lines:
-        out += "\n" + "\n".join(coverage_lines) + "\n"
+        tail_block += "\n" + "\n".join(coverage_lines) + "\n"
 
     glance_marker = "" if ascii_only else "👀 "
-    # B-381: --compact also tightens the "Worth a glance" limit (12 -> 6) -- this
-    # block is unbounded by family structure, so a bad config with many MEDIUM/
-    # ATTESTED findings could blow the char budget on its own even after Section 2
-    # is trimmed.
-    glance_lines = _worth_a_glance_lines(
-        findings, ascii_only=ascii_only, limit=6 if compact else 12, compact=compact)
-    if glance_lines:
-        out += ("\n" + f"{sep} {glance_marker}Worth a glance {sep}" + "\n"
-               + "\n".join(glance_lines) + "\n")
+    footer_block = "\nFull pipeline detail: --save <path> or --html <path>.\n" if compact else ""
 
-    if compact:
-        out += "\nFull pipeline detail: --save <path> or --html <path>.\n"
+    def _assemble(why_drop_severities: frozenset = frozenset()) -> str:
+        body = render_dashboard_findings(
+            findings, ascii_only=ascii_only, compact=compact,
+            why_drop_severities=why_drop_severities).rstrip("\n")
+        out = header_block + body + "\n" + skills_block + tail_block
 
-    return _asciify(out) if ascii_only else out
+        # B-381: --compact also tightens the "Worth a glance" limit (12 -> 6) -- this
+        # block is unbounded by family structure, so a bad config with many MEDIUM/
+        # ATTESTED findings could blow the char budget on its own even after Section 2
+        # is trimmed.
+        glance_lines = _worth_a_glance_lines(
+            findings, ascii_only=ascii_only, limit=6 if compact else 12, compact=compact,
+            why_drop_severities=why_drop_severities)
+        if glance_lines:
+            out += ("\n" + f"{sep} {glance_marker}Worth a glance {sep}" + "\n"
+                   + "\n".join(glance_lines) + "\n")
+
+        return out + footer_block
+
+    return _finalize_compact_dashboard(_assemble, compact=compact, ascii_only=ascii_only)
 
 
 def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = False) -> str:

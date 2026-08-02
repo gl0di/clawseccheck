@@ -147,6 +147,23 @@ def test_percentile_returns_zero(capsys):
     assert rc == 0
 
 
+def test_percentile_never_touches_the_history_file(tmp_path, capsys):
+    """B-405 (CLAWSECCHECK-B-405): --percentile is a pure computation over the
+    hard-coded offline reference CDF (percentile.py) -- it never reads OR writes
+    ~/.clawseccheck/ state at all. Point --history at a path inside a directory
+    that does not exist and cannot be created (the parent itself is read-only), so
+    ANY attempted read *or* write there would raise OSError; --percentile must
+    still succeed, proving it genuinely never touches the file."""
+    locked_dir = tmp_path / "locked"
+    locked_dir.mkdir(mode=0o555)
+    hist = locked_dir / "nonexistent" / "history.jsonl"
+    try:
+        rc = main(["--home", VULN] + BASE + ["--percentile", "--history", str(hist)])
+    finally:
+        locked_dir.chmod(0o755)
+    assert rc == 0
+
+
 # ---------------------------------------------------------------------------
 # --trend + --history
 # ---------------------------------------------------------------------------

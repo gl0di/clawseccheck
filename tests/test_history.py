@@ -346,6 +346,33 @@ def test_cli_verify_history_exits_one_on_tampered_chain(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# B-405: --verify-history is a pure READ path (Golden Rule #2). CLAWSECCHECK-B-405
+# investigated a ticket claim that clawseccheck's own local state is opened without
+# a read-only guard on read-only CLI paths (the ticket's own framing was "no
+# sqlite3.connect calls exist here — check the real analog: open(path, 'r') vs a
+# writable mode"). load()/verify() were already read-only (`Path.read_text()` /
+# `Path.open("r", ...)` throughout history.py/monitor.py) -- this pins that as a
+# real behavioural guarantee, not just a source-reading claim: --verify-history
+# must succeed even when the history file (and its directory) are read-only on
+# disk, proving the read path genuinely never attempts a write.
+# ---------------------------------------------------------------------------
+
+def test_cli_verify_history_succeeds_against_a_read_only_file(tmp_path, capsys):
+    path = tmp_path / "history.jsonl"
+    record(_score(72, "C"), path=str(path), when="2026-06-15")
+    path.chmod(0o444)
+    tmp_path.chmod(0o555)
+    try:
+        rc = main(["--verify-history", "--history", str(path)])
+    finally:
+        # Restore so pytest's tmp_path cleanup can remove the directory.
+        tmp_path.chmod(0o755)
+        path.chmod(0o644)
+    assert rc == 0
+    assert "OK" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # F-128: 'ts' timestamp
 # ---------------------------------------------------------------------------
 

@@ -348,9 +348,17 @@ def _sweep_data(sweep) -> dict:
     }
 
 
-def run_plugin_sweep(home_dir, *, deadline: float | None = None,
-                     ascii_only: bool = False) -> PhaseResult:
-    """P7 — vet every installed plugin, under the pipeline's remaining budget."""
+def _run_plugin_sweep_with_sweep(home_dir, *, deadline: float | None = None,
+                                 ascii_only: bool = False):
+    """P7's actual work, returning `(PhaseResult, sweep_or_None)`.
+
+    B-405: the raw sweep is what :func:`run_pipeline` needs to fold P7's OWN targets
+    into P9's adjudication packet (see that function's docstring) — without this, P9
+    only ever saw whichever vet_targets its CALLER happened to pass in, never the
+    plugin sweep this phase runs for itself. :func:`run_plugin_sweep` (the public,
+    already-tested function) is now a thin wrapper over this that discards the sweep,
+    keeping its existing signature/behaviour byte-identical.
+    """
     fn = resolve_plugin_sweep()
     if fn is None:
         return PhaseResult(
@@ -359,7 +367,7 @@ def run_plugin_sweep(home_dir, *, deadline: float | None = None,
             complete=False,
             detail=("the installed-plugin sweep is not available in this build — no "
                     "plugin was inspected. Vet a plugin directly with --vet-plugin."),
-        )
+        ), None
     budget_s = sub_budget(deadline, DEFAULT_VET_ALL_BUDGET_S)
     started = time.monotonic()
     try:
@@ -371,10 +379,19 @@ def run_plugin_sweep(home_dir, *, deadline: float | None = None,
             elapsed_s=time.monotonic() - started,
             detail=(f"the plugin sweep could not complete ({_sanitize(str(exc))}) — no "
                     "plugin verdict below can be relied on."),
-        )
-    return _sweep_phase_from(PHASE_PLUGIN_SWEEP, sweep, unit="plugin",
-                             elapsed_s=time.monotonic() - started,
-                             full_detail_flag="--vet-plugin <path>")
+        ), None
+    phase = _sweep_phase_from(PHASE_PLUGIN_SWEEP, sweep, unit="plugin",
+                              elapsed_s=time.monotonic() - started,
+                              full_detail_flag="--vet-plugin <path>")
+    return phase, sweep
+
+
+def run_plugin_sweep(home_dir, *, deadline: float | None = None,
+                     ascii_only: bool = False) -> PhaseResult:
+    """P7 — vet every installed plugin, under the pipeline's remaining budget."""
+    phase, _sweep = _run_plugin_sweep_with_sweep(
+        home_dir, deadline=deadline, ascii_only=ascii_only)
+    return phase
 
 
 # ── P8: behavioural replay ───────────────────────────────────────────────────
@@ -1086,6 +1103,19 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
     it re-runs no check and reads only what the audit already computed. A flag whose
     only effect would be to suppress a cheap deterministic artifact would be flag
     surface for nothing.
+
+    B-405: ``vet_targets`` is P6's contribution ONLY (the caller's already-run skill
+    sweep — see the module docstring on why P6 is computed in ``cli.py``, not here).
+    P9 used to see ONLY that: P7's own plugin sweep ran, rendered its own section, and
+    then its vet_targets were simply discarded — a config's plugins were swept and
+    DISPLAYED but never reached adjudication, while its skills always did. That made
+    the judge packet's own-target corpus depend on which renderer built it (a plain
+    `--full` skipped this union entirely; `--dashboard --full`, which calls
+    :func:`run_adjudication` directly instead of through this function, passed ONLY
+    its plugin sweep and no skill sweep at all — the exact opposite gap). Now P7's
+    freshly-swept plugin targets are unioned with the caller's P6 targets before P9
+    runs, so every caller of `run_pipeline` gets the SAME (skills + plugins) corpus
+    regardless of which section it goes on to render.
     """
     if deadline is None:
         deadline = start_deadline(budget_s)
@@ -1099,13 +1129,18 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
     else:
         result.add(record_skill_sweep(skill_sweep, elapsed_s=skill_sweep_elapsed_s))
 
-    # P7 — installed-plugin sweep.
+    # P7 — installed-plugin sweep. B-405: also captures the raw sweep so its
+    # vet_targets() can join P9's own-target corpus below, not just render its own
+    # section.
+    plugin_sweep_obj = None
     if fast:
         result.add(_skipped(PHASE_PLUGIN_SWEEP, fast_note))
     elif budget_exceeded(deadline):
         result.add(_not_reached(PHASE_PLUGIN_SWEEP, budget_s))
     else:
-        result.add(run_plugin_sweep(home_dir, deadline=deadline, ascii_only=ascii_only))
+        plugin_phase, plugin_sweep_obj = _run_plugin_sweep_with_sweep(
+            home_dir, deadline=deadline, ascii_only=ascii_only)
+        result.add(plugin_phase)
 
     # P8 — behavioural replay.
     if fast:
@@ -1118,6 +1153,10 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
     # P9 — adjudication. Deliberately NOT gated on --fast or on the budget: it re-runs
     # no check, so there is no expense to skip, and the borderline band is exactly what
     # a user running a shortened pipeline still wants to hand to their agent.
-    result.add(run_adjudication(ctx, findings, vet_targets=vet_targets,
+    # B-405: union P6's (caller-supplied) and P7's (just-swept) vet_targets — see this
+    # function's own docstring.
+    combined_vet_targets = list(vet_targets) + (
+        list(plugin_sweep_obj.vet_targets()) if plugin_sweep_obj is not None else [])
+    result.add(run_adjudication(ctx, findings, vet_targets=combined_vet_targets,
                                 version=version, bundle=bundle))
     return result

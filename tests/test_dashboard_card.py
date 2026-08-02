@@ -13,11 +13,15 @@ from pathlib import Path
 
 import re
 
+from clawseccheck import audit
 from clawseccheck.catalog import ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, WARN, Finding
 from clawseccheck.checks._mcp import PluginSweep
 from clawseccheck.cli import main
 from clawseccheck.collector import Context
-from clawseccheck.report import _plugins_inventory_lines, _sev_token, _worth_a_glance_lines, render_dashboard
+from clawseccheck.report import (
+    _plugins_inventory_lines, _sev_token, _worth_a_glance_lines, render_dashboard,
+    render_dashboard_findings,
+)
 from clawseccheck.scoring import compute
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -351,3 +355,96 @@ class TestCompactCharBudget:
         out = capsys.readouterr().out
         assert rc == 0
         assert len(out) <= 4096, len(out)
+
+    @staticmethod
+    def _synthetic_findings(n: int, *, start: int = 900) -> list:
+        """Realistic-shaped FAIL/WARN findings (severity cycles, ~150-char detail
+        text like a real check's `detail`) -- large enough sets of these are what
+        actually busted the budget on a real fleet config with more findings than
+        either committed fixture (fixtures/home_safe, fixtures/home_vuln) produces."""
+        sev_cycle = (CRITICAL, HIGH, MEDIUM, LOW)
+        return [
+            Finding(
+                id=f"B{start + i}", title=f"Synthetic finding {i} — real-shaped issue text",
+                severity=sev_cycle[i % 4], status=FAIL if i % 3 else WARN,
+                detail=(f"Realistic-length why explanation for finding {i}, describing the "
+                        "exact condition detected in the audited configuration file."),
+                fix="fix it", framework="Test",
+            )
+            for i in range(n)
+        ]
+
+    def test_compact_large_real_shaped_config_fits_budget(self):
+        """B-405: home_vuln's real, audited findings (21 qualifying) don't scale up
+        enough to exercise the reduction ladder on their own -- extend them with
+        synthetic FAIL/WARN findings to reproduce the scale of the real fleet config
+        that motivated this fix, portably (no dependency on any one machine's private
+        ~/.openclaw). First assert this reproduces the bug this test pins: the
+        pre-B-405 per-item-only trim (`render_dashboard_findings` with no severity
+        drop) already busts the budget on its own. Then assert render_dashboard's
+        actual --compact output stays within budget."""
+        ctx, findings, _score = audit(home=FIXTURES / "home_vuln")
+        big_findings = findings + self._synthetic_findings(40)
+
+        unenforced_body = render_dashboard_findings(big_findings, compact=True)
+        assert len(unenforced_body) > 4096, len(unenforced_body)
+
+        big_score = compute(big_findings)
+        out = render_dashboard(big_findings, big_score, ctx=ctx, full=True, compact=True)
+        assert len(out) <= 4096, len(out)
+
+    def test_compact_drops_low_severity_why_before_critical(self):
+        """B-405: the reduction ladder is severity-ordered, not all-or-nothing --
+        confirm a config that needs exactly one rung (drop LOW why-text) keeps the
+        CRITICAL finding's why line while dropping the LOW finding's."""
+        findings = self._synthetic_findings(38)
+        score = compute(findings)
+        out = render_dashboard(findings, score, full=True, compact=True)
+        assert len(out) <= 4096, len(out)
+
+        crit_idx = out.find("Synthetic finding 0 ")  # i=0 % 4 == 0 -> CRITICAL
+        low_idx = out.find("Synthetic finding 3 ")    # i=3 % 4 == 3 -> LOW
+        assert crit_idx != -1 and low_idx != -1
+        crit_block = out[crit_idx:crit_idx + 200]
+        low_block = out[low_idx:low_idx + 200]
+        assert "why:" in crit_block, crit_block
+        assert "why:" not in low_block.split("\n\n")[0], low_block
+
+    def test_compact_hard_truncate_never_exceeds_budget(self):
+        """B-405 last resort: even a pathological all-CRITICAL config (so every
+        severity in the reduction ladder is exhausted with nothing left to drop)
+        must never produce output over the documented budget -- the deterministic
+        hard truncation is the final guarantee."""
+        findings = [
+            Finding(
+                id=f"B{700 + i}", title=f"Pathological all-critical finding {i} " * 2,
+                severity=CRITICAL, status=FAIL,
+                detail="detail text " * 15, fix="fix it", framework="Test",
+            )
+            for i in range(300)
+        ]
+        score = compute(findings)
+        out = render_dashboard(findings, score, full=True, compact=True)
+        assert len(out) <= 4096, len(out)
+        assert out.endswith("truncated to fit budget)\n")
+
+    def test_compact_hard_truncate_stays_ascii_when_requested(self):
+        """C-135 (B-405 review round): _hard_truncate_compact runs AFTER
+        _finalize_compact_dashboard's own _asciify step, not wrapped by it -- an
+        earlier version of the truncation marker used a raw "…" and silently broke
+        the documented ascii_only contract in exactly this extreme-fallback case
+        (confirmed via direct repro: isascii() was False). Pin both the budget AND
+        the ascii guarantee together on the same pathological input."""
+        findings = [
+            Finding(
+                id=f"B{700 + i}", title=f"Pathological all-critical finding {i} " * 2,
+                severity=CRITICAL, status=FAIL,
+                detail="detail text " * 15, fix="fix it", framework="Test",
+            )
+            for i in range(300)
+        ]
+        score = compute(findings)
+        out = render_dashboard(findings, score, full=True, compact=True, ascii_only=True)
+        assert len(out) <= 4096, len(out)
+        assert out.endswith("truncated to fit budget)\n")
+        assert out.isascii(), out

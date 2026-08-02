@@ -2103,6 +2103,16 @@ def _main(argv=None) -> int:
         )
         sweep_home = Path(args.home).expanduser()
         plugin_sweep = None
+        # B-405: also swept for adjudication's own-target corpus (below) — NOT for a
+        # separate SKILL SWEEP section (the Skills section above already came from
+        # `ctx`/`build_inventory`, unaffected by this). Before this fix, this branch
+        # fed P9 ONLY plugin_sweep.vet_targets() — a plain `--full` (human/json) fed
+        # P9 only its SKILL sweep's targets via `run_pipeline`'s own P6/P7 union (see
+        # that function's docstring) — so the SAME audit run's judge packet covered
+        # plugins-only here and skills-only there. Computing the skill sweep here too,
+        # exactly the way `--full` already does, closes that gap: both renderers now
+        # union skills + plugins into the SAME corpus.
+        skill_sweep = None
         if not args.fast:
             _plugin_sweep_fn = _pipeline.resolve_plugin_sweep()
             if _plugin_sweep_fn is not None and not budget_exceeded(full_deadline):
@@ -2113,14 +2123,29 @@ def _main(argv=None) -> int:
                         sweep_budget_s=_sweep_budget_s, narrate=False)
                 except Exception:  # noqa: BLE001 — one phase must not break the whole card
                     plugin_sweep = None
+            if not budget_exceeded(full_deadline):
+                _skill_sweep_budget_s = _pipeline.sub_budget(full_deadline, DEFAULT_VET_ALL_BUDGET_S)
+                try:
+                    # B-404: reuse the SAME ctx the audit above already collected —
+                    # same pattern the --full (human/json) call sites use.
+                    skill_sweep = sweep_installed_skills(
+                        sweep_home, ascii_only=ascii_only,
+                        sweep_budget_s=_skill_sweep_budget_s, narrate=False, ctx=ctx)
+                except Exception:  # noqa: BLE001 — one phase must not break the whole card
+                    skill_sweep = None
         behavioral_phase = None
         if not args.fast and not budget_exceeded(full_deadline):
             behavioral_phase = _pipeline.run_behavioral(ctx, ascii_only=ascii_only)
         # P9 (adjudication) is deliberately NOT gated on --fast or the budget, same as
         # --full's own P9: it re-runs no check, so there is no expense to skip.
+        _dashboard_vet_targets = (
+            list(plugin_sweep.vet_targets()) if plugin_sweep is not None else []
+        ) + (
+            list(skill_sweep.vet_targets()) if skill_sweep is not None else []
+        )
         adjudication_phase = _pipeline.run_adjudication(
             ctx, findings,
-            vet_targets=plugin_sweep.vet_targets() if plugin_sweep is not None else (),
+            vet_targets=_dashboard_vet_targets,
             version=__version__, bundle=judged_bundle)
         _emit(render_dashboard(
             findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
