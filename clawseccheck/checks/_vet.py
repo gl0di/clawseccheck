@@ -2940,6 +2940,28 @@ _REPUTABLE_INSTALL_HOSTS = (
 )
 
 
+# I-032 (C-259 corpus follow-up): 18/374 real gold-normal benign skills hit the
+# pipe-to-shell HIGH bucket below specifically because they cite example.com —
+# an RFC 2606 second-level domain that is administratively barred from ever
+# resolving to a live service, so it structurally CANNOT be a real dropper
+# host (this is a provable fact about the domain, not a corpus-tuned
+# heuristic). RFC 2606 §3 reserves ONLY example.com/example.net/example.org
+# (plus the .test/.example/.invalid/.localhost TLDs, not relevant to a
+# two-label host match here). C-135 adversarial review (found while
+# implementing this) checked a 4th candidate, example.edu, against the actual
+# RFC 2606 text and IANA's reserved-domains page — neither lists it, and it is
+# NOT non-resolving (it is EDUCAUSE's live .edu site, which happens to mirror
+# the IANA placeholder page as a discretionary courtesy, not a protocol
+# guarantee) — a public, deliberately-chosen dropper host would defeat the
+# "provable fact" premise this whole downgrade relies on, so it is
+# deliberately excluded. Do not add it back without first re-grounding the
+# claim the same way. Matching is EXACT only (`h in _RESERVED_EXAMPLE_DOMAINS`,
+# no endswith/suffix check) — a suffix match would let a crafted
+# "evil-example.com" or "example.com.attacker.io" slip through as if it were
+# the reserved domain itself.
+_RESERVED_EXAMPLE_DOMAINS = frozenset({"example.com", "example.net", "example.org"})
+
+
 # Bounded quantifiers ({0,256}) instead of unbounded [^\n|]* — two adjacent
 # unbounded same-class runs split by a tail that fails on no-pipe lines caused
 # catastrophic O(n^2) backtracking, so one long line of attacker-controlled
@@ -3434,10 +3456,15 @@ def check_installed_skills(ctx: Context) -> Finding:
                 # F-097: pipe-to-shell to the skill's own host or under an install/setup
                 # heading is a documented installer -> WARN; else it stays FAIL.
                 _own = _own_host is not None and (h == _own_host or h.endswith("." + _own_host))
+                # I-032: an RFC 2606 reserved example domain (exact match only — see
+                # _RESERVED_EXAMPLE_DOMAINS above) can never be a live dropper host,
+                # so it downgrades the same as an own-host/install-heading match. This
+                # never suppresses the finding outright, only downgrades HIGH -> WARN.
+                _reserved_example = h in _RESERVED_EXAMPLE_DOMAINS
                 # B-193: same test-fixture FP driver as the base64/exec label above
                 # (case_01472) — a live pipe-to-shell string inside the skill's own
                 # tests/test_*.py is a fixture, not a directive.
-                if _own or _under_install_heading(blob, pm.start()):
+                if _own or _under_install_heading(blob, pm.start()) or _reserved_example:
                     warns_install_curl.append(msg)
                 elif _pos_in_test_fixture_file(blob, pm.start()):
                     warns_content.append(msg + " (inside the skill's own test fixture)")

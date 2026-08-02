@@ -165,6 +165,21 @@ def test_live_instruction_skill_still_fails():
     )
 
 
+def test_pipe_to_shell_against_reserved_example_domain_does_not_fail():
+    """I-032: the same live, unfenced pipe-to-shell shape as bad_b13_live_instruction
+    above, but against example.com (an RFC 2606 reserved domain that structurally
+    cannot resolve to a live dropper host) instead of evil.example.com — must
+    down-rank to WARN, not FAIL. The sibling test above (genuinely non-reputable,
+    non-reserved host) proves the down-rank is host-specific, not a general
+    pipe-to-shell exemption."""
+    f = _b13(FIXTURES / "bad_b13_pipe_reserved_example_domain_warns")
+    assert f.status != FAIL, (
+        f"B13 FAILed on a pipe-to-shell against an RFC 2606 reserved example domain "
+        f"(should down-rank to WARN, not suppress). "
+        f"status={f.status!r} severity={f.severity!r} detail={f.detail!r}"
+    )
+
+
 def test_b119_defensive_quote_of_canonical_phrase_does_not_fail():
     """B-119: the canonical-phrase (standalone) arm previously had no defensive/example
     guard, so a wholly-defensive skill that merely QUOTES 'ignore previous instructions'

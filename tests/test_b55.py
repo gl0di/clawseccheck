@@ -32,8 +32,12 @@ from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.collector import collect
 from clawseccheck.checks import (
     check_fs_write_exposure,
+    check_exec_applypatch_workspace,
+    check_attestation_mismatch,
+    check_declared_effective_proven,
     _agent_profile_widenings,
     _b68_fs_tools_granted,
+    _tool_policy_view,
 )
 from clawseccheck.collector import Context
 from clawseccheck.risk import risk_paths, _has_exec_or_write_tools
@@ -80,6 +84,91 @@ def test_bad_fixture_b55_is_scored_in_audit_but_checkmeta_is_not():
     _, findings, _ = audit(FIXTURES / "bad_b55_fs_write_broad")
     b55 = _by_id(findings)["B55"]
     assert b55.status == FAIL and b55.scored is True
+
+
+# --------------------------------------------------------- B-438
+# _open_channels (feeding B55's FAIL gate) is deliberately scoped to dmPolicy/
+# groupPolicy == "open" only -- it does not see the wildcard-group-open shape
+# (channels.<provider>.groups with a "*" key and no dmPolicy/groupPolicy at all,
+# the B-297 shape). B55 is FAIL-capable like A1, so it now unions in the STRICT
+# subset from _unpolicied_open_wildcard_group_channels (A1's B-371 precedent), not
+# the permissive _open_wildcard_group_channels.
+def test_unpolicied_wildcard_group_open_write_grant_now_fails(tmp_path):
+    """The false negative this fix closes: a genuinely open groups["*"] entry (no
+    dmPolicy/groupPolicy at all) reaching a write-capable tool used to read as no
+    proven-open reach at all (WARN), even though it is the commonest real open-group
+    ingress config (B-297's own docstring)."""
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"enabled": true, "groups": {"*": {}}}},'
+        ' "tools": {"allow": ["write"]}}',
+    )
+    f = _b55(home)
+    assert f.status == FAIL, f.detail
+    assert f.scored is True
+    assert any("telegram" in e for e in f.evidence)
+
+
+# The two direct C-135 regression guards A1's B-371 fix cites (test_checks.py::
+# test_a1_approval_gated_group_bot_not_untrusted_input /
+# ::test_a1_owner_only_group_bot_not_untrusted_input) -- the same false-FAIL exposure
+# would exist here if the permissive _open_wildcard_group_channels were used instead
+# of the strict _unpolicied_open_wildcard_group_channels subset.
+def test_approval_gated_wildcard_group_write_grant_does_not_fail(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"enabled": true, "groups": {"*": {}},'
+        ' "groupPolicy": "ask"}},'
+        ' "tools": {"allow": ["write"]}}',
+    )
+    f = _b55(home)
+    assert f.status != FAIL, f.detail
+
+
+def test_owner_only_wildcard_group_write_grant_does_not_fail(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"enabled": true, "groups": {"*": {}},'
+        ' "groupPolicy": "owner-only"}},'
+        ' "tools": {"allow": ["write"]}}',
+    )
+    f = _b55(home)
+    assert f.status != FAIL, f.detail
+
+
+def test_disabled_account_wildcard_group_write_grant_does_not_fail(tmp_path):
+    """B-438 (C-135 adversarial review): `_unpolicied_open_wildcard_group_channels`
+    used to check only the CHANNEL-level `enabled` flag, not the per-resolved-NODE one
+    -- so a retired account left with its old, wide-open `groups["*"]` policy still on
+    record counted as open reach even though it is administratively disabled and
+    ingests nothing. Same reasoning `_open_wildcard_group_channels` (B41's broader
+    helper) already applies at the node level."""
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"enabled": true, "accounts": {"retired_bot": '
+        '{"enabled": false, "groups": {"*": {}}}}}},'
+        ' "tools": {"allow": ["write"]}}',
+    )
+    f = _b55(home)
+    assert f.status != FAIL, f.detail
+
+
+def test_wildcard_group_open_and_dmpolicy_open_channels_are_unioned_deduped(tmp_path):
+    """Two distinct open-reach shapes on two different channels must both surface in
+    open_ch, deduplicated, not just the last one computed."""
+    home = _write_config(
+        tmp_path,
+        '{"channels": {'
+        '"telegram": {"enabled": true, "groups": {"*": {}}},'
+        '"discord": {"enabled": true, "dmPolicy": "open"}'
+        '},'
+        ' "tools": {"allow": ["write"]}}',
+    )
+    f = _b55(home)
+    assert f.status == FAIL, f.detail
+    open_ev = next(e for e in f.evidence if e.startswith("open-ingress channel(s):"))
+    assert "telegram" in open_ev
+    assert "discord" in open_ev
 
 
 # --------------------------------------------------------------------------- PASS
@@ -884,3 +973,174 @@ def test_b409_evidence_asserts_widening_when_global_profile_is_weak(tmp_path):
     f = _b55(home)
     assert f.status == WARN, f.detail
     assert any("widens beyond the global tools.profile" in e for e in f.evidence)
+
+
+# --------------------------------------------------------- B-409 round 3 (this fix)
+# CONFIRMED false NEGATIVE, previously documented as "STILL OPEN" in
+# check_fs_write_exposure's own docstring: a global tools.profile PLUS a non-empty
+# global tools.alsoAllow used to fall into the "real allowlist" intersection branch
+# in _b68_fs_tools_granted and lose the whole grant, because view.named was
+# non-empty (populated by alsoAllow's own tokens) purely as a side effect of
+# _tool_policy_view's implicit_all profile guard -- sound for evaluating the GLOBAL
+# profile, but under a widening the profile actually AND-ed into OpenClaw's real
+# resolver for that agent is the PER-AGENT one, and pickSandboxToolPolicy(cfg.tools)
+# never reads `profile` at all, so alsoAllow's implicit "*" still applies at the
+# global-allow layer regardless of which profile substitutes in. Fixed by
+# recomputing the same unionAllow emptiness test _tool_policy_view uses for
+# implicit_all, but ignoring the profile guard, inside the widening branch only.
+def test_b68_fs_tools_granted_widening_full_when_global_profile_suppressed_alsoallow():
+    # The exact ticket repro at the unit level: global tools.profile="minimal" +
+    # global tools.alsoAllow=["search"] + a powerful per-agent widening. Before this
+    # fix: view.named=('search',) (non-empty, purely from alsoAllow), grants_all=False
+    # (suppressed by the global profile) -> wrongly fell into the intersection branch
+    # and produced granted=[] (no overlap between _B68_FS_TOOLS and {"search"}).
+    cfg = {
+        "tools": {"profile": "minimal", "alsoAllow": ["search"]},
+        "agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]},
+    }
+    view = _tool_policy_view(cfg)
+    assert view.named == ("search",)
+    assert view.grants_all is False  # unchanged invariant -- _tool_policy_view itself is untouched
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    assert enumerable is True
+    assert set(granted) == {"read", "write", "edit", "apply_patch"}, granted
+
+
+def test_b68_fs_tools_granted_no_widening_stays_narrow_with_profile_and_alsoallow():
+    # Control (a): same global shape (profile + alsoAllow) but NO per-agent widening
+    # at all -- _tool_policy_view's profile guard is legitimately suppressing the
+    # implicit wildcard here (there is no widening to make it irrelevant), so the
+    # grant must stay empty, exactly as test_helper_non_powerful_profile_plus_
+    # alsoallow_still_adds_narrow_grant (tests/test_also_allow_grants.py) already pins.
+    cfg = {"tools": {"profile": "minimal", "alsoAllow": ["search"]}}
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    assert enumerable is True
+    assert granted == []
+
+
+def test_b68_fs_tools_granted_weak_per_agent_profile_does_not_trigger_the_new_branch():
+    # Control (b): the ticket repro shape, but the per-agent profile is NOT powerful,
+    # so _agent_profile_widenings detects no widening at all and the new branch never
+    # fires -- must stay identical to the no-widening control above.
+    cfg = {
+        "tools": {"profile": "minimal", "alsoAllow": ["search"]},
+        "agents": {"list": [{"id": "reader", "tools": {"profile": "readonly"}}]},
+    }
+    assert _agent_profile_widenings(cfg) == []
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    assert enumerable is True
+    assert granted == []
+
+
+def test_b68_fs_tools_granted_real_allowlist_plus_alsoallow_still_intersects():
+    # Control (c): a REAL, non-empty, non-wildcard tools.allow alongside the global
+    # profile, global alsoAllow, and a powerful widening -- the new disjunct must NOT
+    # fire (tools.allow is non-empty, so implicit_all_ignoring_profile is False by the
+    # same construction unionAllow itself uses), so this still lands in the existing
+    # intersection branch, unaffected by this fix. Mirrors
+    # test_b409_c135_exact_repro_no_longer_fails but with alsoAllow decoration added.
+    cfg = {
+        "tools": {
+            "profile": "minimal",
+            "allow": ["read", "write"],
+            "deny": ["write"],
+            "alsoAllow": ["search"],
+        },
+        "agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]},
+    }
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    assert enumerable is True
+    assert granted == ["read"], granted  # identical to the no-alsoAllow b409 test
+
+
+def test_b55_profile_alsoallow_widening_warns_not_pass_not_fail(tmp_path):
+    # End-to-end: the ticket repro under a proven-open channel now WARNs instead of
+    # lying PASS. Never FAIL -- explicit_write_grant stays False since the grant
+    # traces only to the widening (matching the existing "widening alone never drives
+    # FAIL" design already covering the plain-widening case above).
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"dmPolicy": "open"}},'
+        ' "tools": {"profile": "minimal", "alsoAllow": ["search"]},'
+        ' "agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]}}',
+    )
+    f = _b55(home)
+    assert f.status == WARN, f.detail
+    assert f.status != FAIL
+    assert f.scored is False
+    assert any("tools.profile" in e and "widens" in e for e in f.evidence)
+
+
+def test_b68_profile_alsoallow_widening_warns():
+    # Same repro, B68's side: apply_patch confinement check must also see the full
+    # fs-tool family granted, not the previously-empty intersection.
+    ctx = Context(home=None)
+    ctx.config = {
+        "tools": {"profile": "minimal", "alsoAllow": ["search"]},
+        "agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]},
+    }
+    f = check_exec_applypatch_workspace(ctx)
+    assert f.status == WARN, f.detail
+    assert "apply_patch" in f.detail and "write" in f.detail
+
+
+def test_warn_fixture_b409_profile_alsoallow_widening():
+    home = FIXTURES / "warn_b409_profile_alsoallow_widening"
+    f = _b55(home)
+    assert f.status == WARN, f.detail
+    assert f.status != FAIL
+    f68 = check_exec_applypatch_workspace(collect(home))
+    assert f68.status == WARN, f68.detail
+
+
+def test_clean_fixture_weak_agent_profile_no_widening_passes():
+    f = _b55(FIXTURES / "clean_b409_weak_agent_profile_no_widening")
+    assert f.status == PASS, f.detail
+
+
+def test_clean_fixture_real_allowlist_intersection_unaffected_passes():
+    # tools.allow=["read"] narrows the widened profile down to "read" -- no
+    # write-capable tool is granted, so B55 PASSes exactly as it would pre-fix.
+    f = _b55(FIXTURES / "clean_b409_real_allowlist_intersection_unaffected")
+    assert f.status == PASS, f.detail
+
+
+def test_b44_b84_unaffected_by_the_profile_alsoallow_widening_fix(tmp_path):
+    # B44/B84 delegate to _tool_policy_view directly (never to
+    # _b68_fs_tools_granted, which is the only function this fix touches) and their
+    # own docstrings say they don't consume grants_all/implicit_all either -- so their
+    # verdict on the exact ticket repro config must be driven entirely by
+    # view.named/raw_named/denied, unchanged by this fix. Attestation/proven_tools
+    # data is supplied so both checks take their real comparison path instead of the
+    # trivial "no attestation" UNKNOWN.
+    cfg = {
+        "tools": {"profile": "minimal", "alsoAllow": ["search"]},
+        "agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]},
+    }
+    view = _tool_policy_view(cfg)
+    assert view.named == ("search",)  # unchanged by this fix -- _tool_policy_view untouched
+
+    ctx = Context(home=None)
+    ctx.config = cfg
+    ctx.attestation = {"tools": ["search"], "proven_tools": ["search"]}
+
+    f44 = check_attestation_mismatch(ctx)
+    # "search" is not a HIGH_BLAST class verb, so nothing undisclosed -- PASS either way.
+    assert f44.status == PASS, f44.detail
+
+    f84 = check_declared_effective_proven(ctx)
+    # proven ("search") is a subset of declared ("search") and not high-blast -- PASS.
+    assert f84.status == PASS, f84.detail
+
+    # Now attest something that doesn't mention "search" at all -- B44 must still
+    # only ever compare against view.named ("search", not REVERSIBLE-classified, so
+    # never HIGH_BLAST anyway), so this stays PASS; confirms B44 never picked up the
+    # widening's write/edit/apply_patch grant, which only _b68_fs_tools_granted
+    # (B55/B68) sees -- if it had, an unattested "write"/"edit"/"apply_patch" would
+    # show up in undisclosed evidence here.
+    ctx2 = Context(home=None)
+    ctx2.config = cfg
+    ctx2.attestation = {"tools": ["unrelated_tool"]}
+    f44_2 = check_attestation_mismatch(ctx2)
+    assert f44_2.status == PASS, f44_2.detail
+    assert not any("write" in e or "edit" in e or "apply_patch" in e for e in f44_2.evidence)

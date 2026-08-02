@@ -136,6 +136,32 @@ def test_b371_wildcard_group_shape_full_findings_agree():
 # ---------------------------------------------------------------------------
 
 
+def test_b371_disabled_account_wildcard_group_is_not_untrusted_ingress():
+    """B-438 (C-135 adversarial review, found while widening B55's FAIL gate to reuse
+    this same helper): `_unpolicied_open_wildcard_group_channels` used to check the
+    CHANNEL-level `enabled` flag but not the per-resolved-NODE one — so a retired
+    Telegram account left with its old, wide-open `groups["*"]` policy on record (no
+    dmPolicy/groupPolicy field, same shape `_WILDCARD_GROUP_CFG` above carries) still
+    counted as untrusted ingress for A1 even though it is administratively disabled and
+    ingests nothing. `_open_wildcard_group_channels` (B41's broader helper) already
+    carried this guard — this pins the two helpers back in parity for this shape."""
+    cfg = {
+        "channels": {
+            "telegram": {
+                "enabled": True,
+                "accounts": {
+                    "retired_support_bot": {
+                        "enabled": False,
+                        "groups": {"*": {"requireMention": True}},
+                    }
+                },
+            }
+        }
+    }
+    assert _untrusted_ingress_per_a1(cfg) is False
+    assert _untrusted_ingress_per_b41(cfg) is False
+
+
 def test_b371_residual_asymmetry_on_unmodeled_group_policy_is_deliberate():
     """A1 and B41 do NOT agree on every possible config — an explicit-but-unmodeled
     groupPolicy value (e.g. "ask"/"owner-only" — not a real OpenClaw schema literal,

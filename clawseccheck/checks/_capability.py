@@ -38,6 +38,7 @@ from ._shared import (
     _open_channels,
     _profile_is_powerful,
     _surface_absent,
+    _unpolicied_open_wildcard_group_channels,
 )
 
 
@@ -732,6 +733,30 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     absent (or itself an explicit/implicit wildcard), it imposes no restriction on this
     axis, so the widening applies without intersection -- this is the ORIGINAL
     motivating case (a bare tools.profile with no tools.allow declared at all).
+
+    B-409 (round 3, a false NEGATIVE this time -- previously documented as "STILL
+    OPEN" in check_fs_write_exposure's docstring): a global `tools.profile` PLUS a
+    non-empty global `tools.alsoAllow` used to fall straight into the "real allowlist"
+    intersection branch above and lose the whole grant, because `view.named` was
+    non-empty (populated by alsoAllow's own tokens) and `view.grants_all` was False.
+    But `view.grants_all` is False here SOLELY because `_tool_policy_view.implicit_all`
+    suppresses unionAllow's wildcard injection whenever the GLOBAL tools.profile is
+    set (see its docstring, part (a)) -- sound for evaluating the global profile, but
+    under a widening the profile actually AND-ed into OpenClaw's real resolver for
+    this agent is the PER-AGENT one, and `pickSandboxToolPolicy(cfg.tools)` never
+    reads `profile` at all, so alsoAllow's implicit "*" still applies at the
+    global-allow layer for this agent regardless of which profile substitutes in.
+    `view.named` being non-empty here is an ARTIFACT of the (irrelevant, for this
+    agent) global-profile suppression, not a real, narrowing explicit allowlist -- so
+    intersecting against it was wrong in the same direction C-135 round 2 above
+    guards against being wrong in (a real allowlist that DOES narrow). Fixed by
+    recomputing the same unionAllow emptiness test locally, ignoring the profile
+    guard: when it says the global layer WOULD have granted "*" but for the profile
+    guard, the widening applies wholesale (this new branch), exactly like the
+    tools.allow-absent case already did. A real, non-empty, non-wildcard
+    `tools.allow` is unaffected -- it makes the local emptiness test False too (same
+    formula, minus the profile check), so it still lands in the intersection branch
+    below, unchanged.
     """
     view = _tool_policy_view(cfg)
     if "group:fs" in view.denied:
@@ -746,12 +771,40 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     if view.profile is not None and _profile_is_powerful(view.profile):
         granted |= set(_B68_FS_TOOLS)
     if widenings:
-        if view.grants_all or not view.named:
+        # The "STILL OPEN" gap this closes: when a global tools.profile is set AND
+        # global tools.alsoAllow is also non-empty, _tool_policy_view's implicit_all
+        # suppresses unionAllow's wildcard injection on the theory that the GLOBAL
+        # profile policy governs instead (see its docstring, part (a)) -- correct for
+        # that global profile. But under a widening, the profile actually AND-ed into
+        # OpenClaw's real resolver for THIS agent is the per-agent one, not the global
+        # one, and pickSandboxToolPolicy(cfg.tools) never reads `profile` at all -- so
+        # alsoAllow's implicit "*" still applies at the global-allow layer for this
+        # agent, unsuppressed by the (irrelevant, for this agent) global profile.
+        # Recompute the same unionAllow eligibility test _tool_policy_view uses for
+        # implicit_all, but WITHOUT the profile guard, so `view.named` being
+        # non-empty ONLY because of that (now-irrelevant) suppression doesn't get
+        # treated as a real, narrowing explicit allowlist below.
+        global_allow_raw = dig(cfg, "tools.allow")
+        global_also_raw = dig(cfg, "tools.alsoAllow")
+        implicit_all_ignoring_profile = (
+            isinstance(global_also_raw, list)
+            and len(global_also_raw) > 0
+            and (not isinstance(global_allow_raw, list) or len(global_allow_raw) == 0)
+        )
+        if (
+            view.grants_all
+            or not view.named
+            or (view.profile is not None and implicit_all_ignoring_profile)
+        ):
             granted |= set(_B68_FS_TOOLS)
         else:
             # A real, non-empty, non-wildcard global allowlist is its own separate
             # AND-ed policy layer that still constrains the widened profile -- only
-            # the tools it ALSO names survive the intersection.
+            # the tools it ALSO names survive the intersection. This is untouched by
+            # the disjunct above: when tools.allow is genuinely non-empty,
+            # implicit_all_ignoring_profile is False by construction (same emptiness
+            # test unionAllow itself uses), so a real explicit allowlist still lands
+            # here exactly as before.
             granted |= set(_B68_FS_TOOLS) & set(view.named)
 
     if not view.enumerable and not widenings:
@@ -1027,23 +1080,25 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     companion gateway.tools.allow-as-grant defect the same way). See `_tool_policy_view`'s
     docstring for the full grounding and the profile-guard rationale.
 
-    Gap #4 (per-agent tools.profile WIDENING, B-409 Slice B) is CLOSED for the
-    `tools.profile`-only path, and is a different shape of bug than gap #1 above: every
-    OTHER layer gap #1 lists is narrowing-only (AND-ed via `policies.every(...)`), so
-    being blind to it can only produce a false FAIL, never a false PASS.
-    `agents.list[N].tools.profile` is `??`-coalesced against the global profile instead
-    (`agent-tools.policy-YD9HuYgO.js:94`, `:232`) — it REPLACES the global profile in
-    the AND-ed policy list rather than adding a second, narrowing entry — so a global
-    `tools.profile: "minimal"` with a per-agent `tools.profile: "coding"` grants
-    write/edit/apply_patch to that agent even though the global layer alone grants
-    nothing: a lying PASS, not a missed WARN. This is now unioned in via
-    `_agent_profile_widenings` (see `_b68_fs_tools_granted`), and can only ever push a
-    verdict from PASS toward WARN here — it deliberately never sets
-    `explicit_write_grant` below, so it cannot alone drive a FAIL: the seven still-open
-    narrowing layers in gap #1 could still remove the write tool for that specific
-    agent/channel/sender combination, which this static check still cannot see.
+    Gap #4 (per-agent tools.profile WIDENING, B-409 Slice B) is now fully CLOSED,
+    including the combination noted below as previously "still open" — and is a
+    different shape of bug than gap #1 above: every OTHER layer gap #1 lists is
+    narrowing-only (AND-ed via `policies.every(...)`), so being blind to it can only
+    produce a false FAIL, never a false PASS. `agents.list[N].tools.profile` is
+    `??`-coalesced against the global profile instead (`agent-tools.policy-YD9HuYgO.js
+    :94`, `:232`) — it REPLACES the global profile in the AND-ed policy list rather
+    than adding a second, narrowing entry — so a global `tools.profile: "minimal"`
+    with a per-agent `tools.profile: "coding"` grants write/edit/apply_patch to that
+    agent even though the global layer alone grants nothing: a lying PASS, not a
+    missed WARN. This is now unioned in via `_agent_profile_widenings` (see
+    `_b68_fs_tools_granted`), and can only ever push a verdict from PASS toward WARN
+    here — it deliberately never sets `explicit_write_grant` below, so it cannot alone
+    drive a FAIL: the seven still-open narrowing layers in gap #1 could still remove
+    the write tool for that specific agent/channel/sender combination, which this
+    static check still cannot see.
 
-    STILL OPEN, found by the same C-135 pass that closed the above: when a global
+    Gap #5 (global tools.profile + global tools.alsoAllow under a widening) is now
+    also CLOSED. Previously documented here as "STILL OPEN": when a global
     `tools.profile` is set AND global `tools.alsoAllow` is also set, `_tool_policy_view`
     suppresses alsoAllow's implicit-wildcard injection on the theory that the profile
     policy governs (see its docstring, part (a)) — sound for the GLOBAL profile, but
@@ -1051,12 +1106,17 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     `pickSandboxToolPolicy` never reads `profile` at all, so alsoAllow's implicit "*"
     still applies at the global-allow layer regardless of which profile substitutes in.
     `{"tools": {"profile": "minimal", "alsoAllow": ["search"]}, "agents": {"list":
-    [{"tools": {"profile": "coding"}}]}}` under a proven-open channel is a false
-    NEGATIVE (PASS when the true grant includes write/edit/apply_patch) — never a false
-    FAIL, so this does not violate GR#5, and it is IDENTICAL to pre-B-409 behavior
-    (verified by neutralizing `_agent_profile_widenings` and confirming the verdict
-    doesn't change), so it is not a regression this fix introduced. Filed as a
-    follow-up rather than fixed here.
+    [{"tools": {"profile": "coding"}}]}}` under a proven-open channel used to be a
+    false NEGATIVE (PASS when the true grant includes write/edit/apply_patch) — never a
+    false FAIL, so this never violated GR#5, and it was IDENTICAL to pre-B-409
+    behavior (verified by neutralizing `_agent_profile_widenings` and confirming the
+    verdict didn't change), so it was not a regression B-409 introduced. Fixed in
+    `_b68_fs_tools_granted` (see its docstring): the widening branch now recomputes
+    the same unionAllow emptiness test locally, ignoring the profile guard, so a
+    `view.named` that is non-empty ONLY because of the (irrelevant, for the widened
+    agent) global-profile suppression is no longer mistaken for a real, narrowing
+    explicit allowlist. Like gap #4, this can only push PASS toward WARN — it does
+    not set `explicit_write_grant`, so it cannot alone drive a FAIL.
 
     UNKNOWN — fs-write grants are not enumerable from config: no tools.allow /
               tools.alsoAllow declared as a LIST, no tools.profile set, and no
@@ -1086,6 +1146,20 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     FAIL    — an EXPLICIT write tool grant (a literal write/edit/apply_patch/"*"/
               "group:fs" token, or a powerful tools.profile) AND reachable by a
               PROVEN-open channel, not confined, gated or not. scored=True.
+
+    B-438: "PROVEN-open channel" (open_ch, feeding the FAIL gate) now also counts the
+    wildcard-group-open shape (channels.<provider>.groups with a "*" key and no
+    dmPolicy/groupPolicy at all) via _unpolicied_open_wildcard_group_channels — the same
+    shape and same STRICT (no-policy-field-at-all) helper A1's B-371 fix uses, for the
+    same reason: this check is also FAIL-capable, and the broader
+    _open_wildcard_group_channels was proven by A1's own C-135 pass to false-FAIL an
+    approval-gated or owner-only group bot (see
+    test_a1_approval_gated_group_bot_not_untrusted_input /
+    test_a1_owner_only_group_bot_not_untrusted_input). Before this, a write-capable tool
+    reachable ONLY through a genuinely open groups["*"] entry (no dmPolicy/groupPolicy
+    set) read as no proven-open reach at all — a false NEGATIVE (WARN instead of FAIL) on
+    exactly the ingress shape B-297/B-371 already established is the commonest real
+    open-group config.
     """
     cfg = ctx.config
     granted, enumerable = _b68_fs_tools_granted(cfg)
@@ -1178,7 +1252,24 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # stays the WARN fallback (locked by test_ungated_write_without_broad_reach_warns).
     # Widening this to _external_input_channels would flip allowlist configs WARN->FAIL,
     # a §5 false-positive FAIL. B46 uses the broader helper because it is WARN-capped.
-    open_ch = _open_channels(cfg)
+    #
+    # B-438: _open_channels is deliberately scoped to dmPolicy/groupPolicy == "open" only
+    # (see its own docstring) — it does not see the wildcard-group-open shape
+    # (channels.<provider>.groups with a "*" key and no dmPolicy/groupPolicy at all);
+    # the B-297 block comment right after _open_channels' definition in _shared.py
+    # documents that as a SEPARATE ingress shape with its own helper family. B55 is
+    # FAIL-capable (like A1/check_trifecta), so it follows A1's
+    # B-371 precedent rather than reaching for the permissive _open_wildcard_group_channels:
+    # union in ONLY the STRICT subset from _unpolicied_open_wildcard_group_channels — a
+    # resolved channel node with NO dmPolicy/groupPolicy key at all, not merely an
+    # unrecognized value. A1's own C-135 pass proved the permissive version produces real
+    # false positives on an approval-gated or owner-only group bot (see
+    # test_a1_approval_gated_group_bot_not_untrusted_input /
+    # test_a1_owner_only_group_bot_not_untrusted_input in tests/test_checks.py); the same
+    # two configs would false-FAIL here too if the broader helper were used instead.
+    open_ch = sorted(
+        set(_open_channels(cfg)) | set(_unpolicied_open_wildcard_group_channels(cfg))
+    )
 
     # B-395 (C-135 round 2 on this same fix): `tools.elevated.allowFrom` — in ANY shape,
     # tight or wildcard — used to gate BOTH directions here (a wildcard drove FAIL, a

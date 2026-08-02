@@ -2058,7 +2058,13 @@ def _unpolicied_open_wildcard_group_channels(cfg: dict) -> dict:
         if name == "defaults" or not isinstance(c, dict) or c.get("enabled") is False:
             continue
         for node in _resolved_channel_nodes(c):
-            if not isinstance(node, dict):
+            # B-438 (C-135 adversarial review): mirror the per-resolved-node
+            # `enabled: false` skip `_open_wildcard_group_channels` already carries — a
+            # retired/disabled account left with its old open wildcard-group policy still
+            # on record ingests nothing, same reasoning as that sibling's own guard. This
+            # helper feeds A1's CRITICAL hard-FAIL leg (`_trifecta_legs`), so missing it
+            # is a real false-positive FAIL, not just a missed WARN.
+            if not isinstance(node, dict) or node.get("enabled") is False:
                 continue
             if node.get("dmPolicy") is not None or node.get("groupPolicy") is not None:
                 continue
