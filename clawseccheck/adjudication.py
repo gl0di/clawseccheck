@@ -623,6 +623,12 @@ _MAX_VERDICTS_BYTES = 2_000_000
 # contract shown to the judge and the guard applied to its answer can never drift.
 _VALID_VERDICTS = frozenset(_VERDICT_VALUES)
 
+# B-406: severity rank derived from the SAME severity-ascending tuple (SAFE=0 <
+# SUSPICIOUS=1 < DANGEROUS=2), so the duplicate-entry resolution below can never
+# rank against a vocabulary that has drifted from what the packet actually declared.
+# See its one call site in _parse_verdicts for why this exists.
+_VERDICT_RANK = {verdict: rank for rank, verdict in enumerate(_VERDICT_VALUES)}
+
 _PRIORITY_BY_VERDICT = {
     "DANGEROUS": "treat as high priority",
     "SUSPICIOUS": "worth a closer look",
@@ -694,6 +700,21 @@ def _parse_verdicts(raw: str) -> dict:
     JSON artifact). This is the single funnel all three consumers use -- ``--judged``,
     ``--propose-ignore`` and ``--vet-judged`` -- so the diagnostic cannot be wired up
     for one of them and forgotten for the others.
+
+    B-406: a payload carrying more than one entry for the SAME ``(finding_id,
+    target)`` pair (e.g. several judge-panel lens verdicts a host agent forwarded
+    without pre-reducing them to one, or a retried judge call appended rather than
+    replaced) no longer resolves to "whichever the array happened to list last" --
+    that made the applied verdict depend on submission order alone, so byte-identical
+    input could silently produce a different outcome across two calls. The MOST
+    SEVERE of the conflicting verdicts (_VERDICT_RANK) now always wins, regardless of
+    array order -- the same fail-safe direction SKILL.md's own panel tie-break
+    already uses ("a tie escalates to the worst of the three rather than picking
+    arbitrarily"), just applied to duplicate entries instead of a 3-way tie. This
+    covers exactly the "same input, same output" property every consumer needs, but
+    it is deliberately scoped to entries the SAME parse call actually sees -- it
+    cannot make two wholly separate invocations of an external judge agree with each
+    other; nothing offline and stdlib-only can compel that.
     """
     if not isinstance(raw, str) or len(raw.encode("utf-8", "surrogatepass")) > _MAX_VERDICTS_BYTES:
         _note_nothing_applied(
@@ -719,8 +740,17 @@ def _parse_verdicts(raw: str) -> dict:
         verdict = entry.get("verdict")
         if not (isinstance(fid, str) and isinstance(target, str) and verdict in _VALID_VERDICTS):
             continue
+        key = (fid, target)
+        existing = out.get(key)
+        # B-406: a later, LESS severe duplicate must never silently overwrite an
+        # already-parsed more-severe one for the same key -- see the docstring note.
+        # An equal-or-more-severe duplicate still overwrites (keeps the loop's
+        # existing "last one wins" behavior for votes/reason metadata when the
+        # verdict itself does not regress).
+        if existing is not None and _VERDICT_RANK[verdict] < _VERDICT_RANK[existing["verdict"]]:
+            continue
         votes = entry.get("votes")
-        out[(fid, target)] = {"verdict": verdict, "votes": votes if isinstance(votes, dict) else None}
+        out[key] = {"verdict": verdict, "votes": votes if isinstance(votes, dict) else None}
     # An explicitly empty "verdicts": [] IS "no verdicts submitted" -- say nothing.
     # Entries that were submitted and all rejected is the case worth shouting about.
     if entries and not out:

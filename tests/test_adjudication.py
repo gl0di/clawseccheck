@@ -1617,3 +1617,131 @@ def test_the_diagnostic_never_makes_the_parse_raise(capsys):
     for garbage in (None, 12345, [], {}, b"\x00\x01\xff", "", "\ud800"):
         assert _parse_verdicts(garbage) == {}
     capsys.readouterr()
+
+
+# ---------------------------------------------------------------------------
+# CLAWSECCHECK-B-406: duplicate (finding_id, target) entries resolve to the most
+# severe verdict, independent of array order.
+#
+# Root-cause note (recorded here, not just in the commit, since this is the test
+# that pins it): grounding against the source found NO code-level fan-out to
+# diverge from in the first place. _parse_verdicts (adjudication.py:576) is the
+# single shared funnel for all three consumers -- render_judged_json (--judged),
+# render_ignore_proposals_json (--propose-ignore) and escalate_vet_output
+# (--vet-judged) -- and every one of them consumes exactly one already-decided
+# "verdict" string per (finding_id, target); none of them invoke a judge or run
+# multiple lenses (adjudication.py's own module docstring: "ClawSecCheck never
+# calls an LLM or the network"). The N-lens/majority-vote panel SKILL.md
+# describes is entirely host-agent-side prose, and it already covers --vet
+# identically to the audit path (SKILL.md "Judge-panel fan-out for `--vet`
+# targets", added by C-254 well before the pilot this ticket cites, explicitly:
+# "same 3-lens panel and majority-vote process as above"). So the two paths do
+# not diverge in this codebase; cli.py wires --judge-packet/--judged
+# (cli.py:1180-1190) and --vet-judge-packet/--vet-judged (cli.py:1083-1090)
+# through the same funnel with no fan-out logic in either. The pilot's "one
+# fresh judge context each" (no panel, no vote) is upstream of clawseccheck's
+# code -- Python cannot force an external harness or host agent to run the
+# documented panel. What IS a real, fixable code-level gap: the shared funnel's
+# own duplicate-key handling silently kept "whichever entry the array listed
+# last," which is itself a second, independent source of order-dependent
+# non-determinism for genuinely identical input. That is what these tests pin.
+#
+# What this does NOT close (rescoped, not silently dropped -- see
+# CLAWSECCHECK-B-406's Pulse comment): cross-INVOCATION non-determinism, i.e. the
+# SAME prose judged in two wholly separate `--vet-judged` calls (as in the
+# dev-6c046c8 pilot) can still disagree -- this fix only guarantees stability
+# WITHIN one parse call. Closing that needs either the host agent actually
+# running its documented panel every time (a prompt-adherence issue, not a
+# Python bug) or a new persistent, opt-in verdict cache -- a real feature with
+# its own Golden-Rule-#2 design question, not a same-sitting patch.
+# ---------------------------------------------------------------------------
+
+def test_parse_verdicts_duplicate_entry_keeps_the_more_severe_verdict():
+    """Two entries for the SAME (finding_id, target) with conflicting verdicts must
+    resolve to the more severe one, and the result must be the SAME regardless of
+    which one the payload lists first -- the literal "same input, stable output"
+    property B-406 exists to guarantee for the shared parse funnel.
+    """
+    from clawseccheck.adjudication import _parse_verdicts
+
+    worst_first = json.dumps({"verdicts": [
+        {"finding_id": "B65", "target": "skillx", "verdict": "DANGEROUS"},
+        {"finding_id": "B65", "target": "skillx", "verdict": "SAFE"},
+    ]})
+    worst_last = json.dumps({"verdicts": [
+        {"finding_id": "B65", "target": "skillx", "verdict": "SAFE"},
+        {"finding_id": "B65", "target": "skillx", "verdict": "DANGEROUS"},
+    ]})
+    for raw in (worst_first, worst_last):
+        parsed = _parse_verdicts(raw)
+        assert parsed[("B65", "skillx")]["verdict"] == "DANGEROUS", (
+            f"duplicate resolution depended on array order for {raw!r}"
+        )
+
+
+def test_parse_verdicts_duplicate_entry_with_equal_verdicts_is_a_no_op():
+    """Two duplicate entries carrying the SAME verdict must not raise or otherwise
+    misbehave -- the equal-severity branch still just re-applies the value."""
+    from clawseccheck.adjudication import _parse_verdicts
+
+    raw = json.dumps({"verdicts": [
+        {"finding_id": "B65", "target": "skillx", "verdict": "SUSPICIOUS"},
+        {"finding_id": "B65", "target": "skillx", "verdict": "SUSPICIOUS"},
+    ]})
+    parsed = _parse_verdicts(raw)
+    assert parsed[("B65", "skillx")]["verdict"] == "SUSPICIOUS"
+
+
+def test_vet_judged_escalation_is_stable_regardless_of_duplicate_verdict_order():
+    """The concrete --vet-judged repro: the SAME byte-identical prose (here, a
+    conflicting verdict pair for the SAME finding) must escalate to the SAME
+    status regardless of which verdict the verdicts payload lists last -- this is
+    the "vet path has no consistency mechanism" symptom CLAWSECCHECK-B-406 reports,
+    pinned at the one layer clawseccheck's own offline code controls.
+    """
+    from clawseccheck.adjudication import _vet_run_fingerprint, escalate_vet_output
+
+    def _primary():
+        return Finding("B65", "t", HIGH, WARN, "primary detail", "fix it", "fw",
+                        evidence=["skillx: matched pattern (skill.py:1)"])
+
+    fingerprint = _vet_run_fingerprint("skillx")
+    dangerous_last = json.dumps({
+        "targetFingerprint": fingerprint,
+        "verdicts": [
+            {"finding_id": "B65", "target": "skillx", "verdict": "SAFE"},
+            {"finding_id": "B65", "target": "skillx", "verdict": "DANGEROUS"},
+        ],
+    })
+    dangerous_first = json.dumps({
+        "targetFingerprint": fingerprint,
+        "verdicts": [
+            {"finding_id": "B65", "target": "skillx", "verdict": "DANGEROUS"},
+            {"finding_id": "B65", "target": "skillx", "verdict": "SAFE"},
+        ],
+    })
+    for raw in (dangerous_last, dangerous_first):
+        out = escalate_vet_output(_primary(), raw, target="skillx")
+        assert out.status == FAIL, f"escalation depended on duplicate-entry order for {raw!r}"
+
+
+def test_vet_judged_duplicate_downgrade_attempt_never_softens_a_real_escalation():
+    """A genuine bad case must still fire even alongside a conflicting duplicate:
+    the fix for the order-dependence bug must not trade it for a NEW false negative
+    where a spurious/duplicate SAFE entry quietly cancels a real DANGEROUS verdict
+    -- do not weaken real detection while fixing the consistency gap.
+    """
+    from clawseccheck.adjudication import _vet_run_fingerprint, escalate_vet_output
+
+    primary = Finding("B65", "t", HIGH, WARN, "primary detail", "fix it", "fw",
+                       evidence=["skillx: matched pattern (skill.py:1)"])
+    fingerprint = _vet_run_fingerprint("skillx")
+    payload = json.dumps({
+        "targetFingerprint": fingerprint,
+        "verdicts": [
+            {"finding_id": "B65", "target": "skillx", "verdict": "DANGEROUS"},
+            {"finding_id": "B65", "target": "skillx", "verdict": "SAFE"},
+        ],
+    })
+    out = escalate_vet_output(primary, payload, target="skillx")
+    assert out.status == FAIL
