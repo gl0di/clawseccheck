@@ -10510,14 +10510,69 @@ _B338_LAUNCH_RE = re.compile(
 )
 
 
+def _b338_defensive_context(blob: str, pos: int, fence_ranges: list[tuple[int, int]]) -> bool:
+    """B338's own defensive-context guard -- deliberately NOT the shared
+    `_defensive_context` (mirrors B339's own `_b339_defensive_context`
+    just below, and its docstring's reasoning): `_defensive_context`'s first,
+    unconditional criterion (`_pos_in_source_code_section`) exempts any match inside an
+    unfenced `# file: *.py`/`.sh`/`.bash`/`.zsh`/`.ps1` section outright. B338's
+    companion AST rule (`TUNNEL_LAUNCH_ARGV`, skillast.py) covers exactly ONE specific
+    Python shape -- a literal subprocess.run/call/check_call/check_output/Popen
+    argv-list call -- not a shell-string form
+    (`subprocess.run("tailscale up", shell=True)`), not `os.system(...)`, and not a
+    bundled .sh/.bash script invoking these binaries directly (this project has no
+    AST/shell analyzer for that specific shape). Applying the unconditional
+    source-code exemption here would silently blind this text-regex path to all of
+    those -- the exact mistake B339's own docstring documents finding and fixing.
+
+    Keeps every OTHER `_defensive_context` criterion (fence+negation, negation governs
+    the trigger, an immediate negator, a defensive heading + negation) -- those are
+    genuine "this is documentation, not a live invocation" signals regardless of
+    whether the match sits in prose or in code.
+    """
+    if _in_fence(pos, fence_ranges) and _negation_context(blob, pos):
+        return True
+    if _negation_governs_trigger(blob, pos):
+        return True
+    if _IMMEDIATE_NEGATOR_RE.search(blob[max(0, pos - 24) : pos]):
+        return True
+    return _defensive_section(blob, pos)
+
+
 def check_tunnel_enrollment(ctx: Context) -> Finding:
     """B338 -- a skill's own code launches a covert tunnel / mesh-VPN primitive
     (tailscale/tailscaled, cloudflared tunnel, ngrok, ssh -R, a socat listener, frpc,
     bore, or a SOCKS5 proxy flag). See the module comment above `_B338_LAUNCH_RE` for
     the HF-incident motivation and why this stays WARN-only.
 
-    WARN    -- a tunnel/mesh-VPN launch primitive is found in an installed skill.
-    PASS    -- no such primitive found.
+    Two defects, fixed together:
+
+    Defect 1: `_B338_LAUNCH_RE` is a pure text-regex over the concatenated skill blob
+    and requires its subcommand words to be literally ADJACENT in the source TEXT (e.g.
+    "tailscale up"). The idiomatic Python argv-list form the HF incident's own
+    compromised `scripts/probe.py` payload used --
+    `subprocess.run(["tailscale", "up", ...])` -- never produces that adjacency (a
+    `", "` sits between the two string literals, not whitespace), so the check missed
+    the exact shape it exists to catch. Fixed by also running skillast.py's AST
+    analysis (`analyze_python`) over every bundled `.py` file and consuming its
+    `TUNNEL_LAUNCH_ARGV` rule (see the module comment above
+    `_TUNNEL_ARGV_BARE_PROGRAMS` in skillast.py) -- mirrors
+    `check_dynamic_dispatch_obfuscation`'s (B91) exact wiring.
+
+    Defect 2: the text-regex scan had no defensive-context/fenced-code-example gating
+    at all, unlike its ring-mates -- a fenced, negated example, an immediately-negated
+    instruction ("don't run..."), or a match under a defensive heading ("Known Risks:
+    never launch...") all WARNed exactly like a live invocation, on 7/7 plausible
+    benign skills. Fixed by gating each text-regex match on `_b338_defensive_context`
+    (see that function's docstring for why it is NOT the shared `_defensive_context`).
+    The AST path is naturally immune to this class of false positive -- `ast.parse`
+    never turns a comment or docstring into a real `Call` node, and a markdown-fenced
+    example embedded in a README is never a real `.py` file in `ctx.installed_skill_py`
+    to begin with.
+
+    WARN    -- a tunnel/mesh-VPN launch primitive is found in an installed skill (text
+               or argv-list form), outside a defensive/documentation context.
+    PASS    -- no such primitive found, or every match sits in documentation.
     UNKNOWN -- no installed skills to inspect.
     """
     if not ctx.installed_skills:
@@ -10532,10 +10587,21 @@ def check_tunnel_enrollment(ctx: Context) -> Finding:
     evidence: list[str] = []
     for skill_name, blob in ctx.installed_skills.items():
         norm = normalize_for_scan(blob)
+        fr = _fence_ranges(norm)
         for m in _B338_LAUNCH_RE.finditer(norm):
+            if _b338_defensive_context(norm, m.start(), fr):
+                continue
             lo = max(0, m.start() - 20)
             snippet = _obf_clip(norm[lo : m.end() + 40], 100)
             evidence.append(f'{skill_name}: "{snippet}"')
+
+    # Defect 1: the argv-list form -- see the module comment above.
+    for skill_name, files in getattr(ctx, "installed_skill_py", {}).items():
+        for relpath, src in files:
+            for af in analyze_python(src, relpath):
+                if af.rule != "TUNNEL_LAUNCH_ARGV":
+                    continue
+                evidence.append(f"{skill_name}: {af.reason} ({relpath}:{af.lineno})")
 
     if evidence:
         ev_summary = "; ".join(evidence[:4])

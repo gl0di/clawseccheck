@@ -295,6 +295,98 @@ def _curl_dropper_url_literal(node: ast.Call) -> str | None:
     return found
 
 
+# TUNNEL_LAUNCH_ARGV (B338 fix, checks/_content.py) -- the argv-list form of the same
+# tunnel/mesh-VPN launch primitives checks/_content.py's
+# `_B338_LAUNCH_RE` already names as TEXT (tailscale/tailscaled, cloudflared tunnel,
+# ngrok, ssh -R, a socat listener, frpc, bore, a bare --socks5-server flag). That regex
+# requires its subcommand words to be literally ADJACENT in the source text (e.g.
+# "tailscale up"); the idiomatic Python argv-list form the HuggingFace July-2026
+# incident's own compromised scripts/probe.py payload used --
+# `subprocess.run(["tailscale", "up", ...])` -- never produces that adjacency (there is
+# a `", "` between the two string literals, not whitespace), so the regex structurally
+# cannot match it. Mirrors `_is_curl_wget_argv_call`/DROPPER_DOWNLOAD_TO_TMP (C-205):
+# the sink is a subprocess.run/call/check_call/check_output/Popen call whose first
+# positional arg is a List/Tuple literal. Per-tool subcommand specificity mirrors
+# `_B338_LAUNCH_RE`'s own alternatives exactly, so a read-only invocation
+# (`["tailscale", "status"]`, `["ngrok", "--version"]`, `["cloudflared", "tunnel",
+# "list"]`/`["cloudflared", "tunnel", "login"]`) still does not match.
+_TUNNEL_ARGV_BARE_PROGRAMS = {"tailscaled", "frpc"}  # any invocation counts -- no subcommand
+_TUNNEL_ARGV_SUBCOMMANDS = {
+    "tailscale": {"up", "login"},
+    "ngrok": {"http", "tcp", "tls", "start"},
+    "bore": {"local"},
+}
+_CLOUDFLARED_TUNNEL_SUBCOMMANDS = {"--url", "run", "create"}
+# `\bssh\s+(?:-\w+\s+)*-R\s+\S*:\S+:\d+` -- the port-forward spec immediately after a
+# literal "-R" element, e.g. "8080:localhost:22".
+_SSH_R_SPEC_RE = re.compile(r"^\S*:\S+:\d+$")
+
+
+def _argv_str_elts(node: ast.List | ast.Tuple) -> list[str | None]:
+    """String value of each element of an argv List/Tuple literal, or None for a
+    non-string-constant element (a variable/f-string -- can't be resolved statically)."""
+    out: list[str | None] = []
+    for elt in node.elts:
+        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+            out.append(elt.value)
+        else:
+            out.append(None)
+    return out
+
+
+def _is_tunnel_launch_argv_call(node: ast.AST) -> bool:
+    """subprocess.run/call/check_call/check_output/Popen(['tailscale', 'up', ...] | ...)
+    -- see the module comment above `_TUNNEL_ARGV_BARE_PROGRAMS` for the HF-incident
+    motivation and why the text-regex form misses this shape entirely."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    if not (
+        isinstance(f, ast.Attribute)
+        and f.attr in _EXEC_SINK_SUBP_ATTRS
+        and _attr_base(f.value) in _EXEC_SINK_BASES_SUBP
+    ):
+        return False
+    if not node.args or not isinstance(node.args[0], (ast.List, ast.Tuple)):
+        return False
+    elts = _argv_str_elts(node.args[0])
+    if not elts:
+        return False
+
+    # --socks5-server is a standalone flag `_B338_LAUNCH_RE` matches regardless of the
+    # invoking program (the bad fixture's `tailscaled --tun=... --socks5-server=...`
+    # userspace-networking mode) -- check every element, not just the program name.
+    if any(e is not None and e.lower().startswith("--socks5-server") for e in elts):
+        return True
+
+    prog = elts[0].lower() if elts[0] is not None else None
+    if prog is None:
+        return False
+    if prog in _TUNNEL_ARGV_BARE_PROGRAMS:
+        return True
+    if prog == "cloudflared":
+        for i in range(1, len(elts) - 1):
+            e = elts[i]
+            if e is not None and e.lower() == "tunnel":
+                nxt = elts[i + 1]
+                if nxt is not None and nxt.lower() in _CLOUDFLARED_TUNNEL_SUBCOMMANDS:
+                    return True
+        return False
+    if prog == "ssh":
+        for i, e in enumerate(elts):
+            if e == "-R" and i + 1 < len(elts):
+                nxt = elts[i + 1]
+                if nxt is not None and _SSH_R_SPEC_RE.match(nxt):
+                    return True
+        return False
+    if prog == "socat":
+        return len(elts) > 1 and elts[1] is not None and "listen" in elts[1].lower()
+    subs = _TUNNEL_ARGV_SUBCOMMANDS.get(prog)
+    if subs is not None:
+        return any(e is not None and e.lower() in subs for e in elts[1:])
+    return False
+
+
 # C-224: curated first-party installer allowlist for DROPPER_DOWNLOAD_TO_TMP's
 # literal-URL sub-case. DUPLICATED from checks/_content.py's B-118
 # _CLICKFIX_TRUSTED_INSTALLERS (not imported: skillast.py is a Layer-1 leaf and
@@ -4435,6 +4527,29 @@ def analyze_python(
                 f"({out_path}) — staged dropper shape (no literal pipe, evades a plain "
                 "curl|sh match)",
             )
+
+    # TUNNEL_LAUNCH_ARGV — an argv-list tunnel/mesh-VPN launch
+    # primitive (see the module comment above `_TUNNEL_ARGV_BARE_PROGRAMS`). info (not
+    # crit), matching DROPPER_DOWNLOAD_TO_TMP/CHUNKED_FILE_EXEC's grade — checks/_vet.py's
+    # check_installed_skills routes this rule through its own explicit continue-branch
+    # (mirrors CHUNKED_FILE_EXEC's guard), so it can never become FAIL-capable there
+    # regardless of this severity label; checks/_content.py's check_tunnel_enrollment
+    # (B338) is this rule's sole consumer and stays WARN-only by design.
+    for node in ast.walk(tree):
+        if len(out) >= _MAX_FINDINGS_PER_FILE:
+            break
+        if not _is_tunnel_launch_argv_call(node):
+            continue
+        prog_elts = _argv_str_elts(node.args[0])
+        argv_repr = ", ".join(repr(e) for e in prog_elts[:4])
+        add(
+            "TUNNEL_LAUNCH_ARGV",
+            "info",
+            getattr(node, "lineno", 0),
+            f"argv-list subprocess call launches a tunnel/mesh-VPN primitive: "
+            f"[{argv_repr}] — the idiomatic Python form a text-regex scan of the same "
+            "skill's source would miss",
+        )
 
     # B336: CHUNKED_FILE_EXEC — a locally-defined helper reads and joins multiple
     # chunked/part files at runtime, and the assembled result is exec()'d/eval()'d — the

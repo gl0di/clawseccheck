@@ -3661,6 +3661,19 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if af.rule == "CHUNKED_FILE_EXEC":
                     warns_chunked_file_exec.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
                     continue
+                # Argv-list tunnel/mesh-VPN launch primitive (TUNNEL_LAUNCH_ARGV).
+                # WARN-only, HIGH severity but explicitly not
+                # FAIL-capable (checks/_content.py's check_tunnel_enrollment / B338 —
+                # a bare launch primitive alone is real and benign, same standing
+                # policy as B334/B336/B337). Routed here, BEFORE the generic crit/
+                # cred-exfil fallthrough below (mirrors CHUNKED_FILE_EXEC's guard just
+                # above), so it can never bleed into THIS function's own B13 verdict
+                # regardless of its own "info" severity label or any co-occurring
+                # cred/exfil signal — B338 already reports it independently via
+                # SKILL_CONTENT_RING (check_dynamic_dispatch_obfuscation/B91's exact
+                # wiring template), so this rule has no B13-facing bucket at all.
+                if af.rule == "TUNNEL_LAUNCH_ARGV":
+                    continue
                 loc = f"{relpath}:{af.lineno}"
                 if af.severity == "crit":
                     crit.append(f"{name}: {af.reason} ({loc})")
