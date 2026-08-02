@@ -2335,14 +2335,76 @@ def _has_cred_path_const(node: ast.AST) -> bool:
     return False
 
 
-def _is_net_sink(func: ast.AST) -> bool:
+# B-422 follow-up (C-348 adversarial re-review): base-gating put/patch/request on the
+# LITERAL _NET_SINK_BASES names (see the block above) silently kills detection for the
+# overwhelmingly common case of a session/client bound to a non-literal variable name --
+# `s = requests.Session(); s.put(...)`, `client = httpx.Client(); client.request(...)`,
+# `conn = socket.socket(...); conn.connect(...)` -- since _attr_base has no alias/data-flow
+# resolution and none of "s"/"client"/"conn"/"sess" are in _NET_SINK_BASES. That reopened
+# the exact false-negative the original literal-base check already had (it only ever
+# recognized the single spelling "session"), and now spans all five rules _is_net_sink
+# feeds (CRED_EXFIL_FLOW/ENV_EXFIL_FLOW/HOST_INFO_EXFIL_FLOW/CONDITIONAL_SINK/env-auth-kwarg).
+# Fix: resolve a small, explicit alias set per file -- names assigned from a networking-
+# library constructor call (`<base in _NET_SINK_BASES>.<CapitalizedCtor>(...)` or
+# `socket.socket(...)`), plus a short alias-of-alias fixpoint (`s2 = s`) -- and let
+# _is_net_sink treat those names the same as a literal base. Deliberately narrow: only a
+# constructor-shaped call (attr starts uppercase, or the literal "socket" module-level
+# factory) seeds an alias, so an unrelated `x = requests.get(url)` response object does
+# NOT retroactively make `x.put(...)` a sink for something that isn't request-shaped.
+_NET_SINK_CTOR_BASES = frozenset({"socket"})  # base.attr() ctor pairs beyond CapitalCase
+# Full dotted-path spellings (via _dotted_path) recognized as networking constructor
+# MODULES, on top of the single-segment _NET_SINK_BASES lookup. Needed for a submodule
+# whose _attr_base last-segment alone isn't trustworthy as a bare base -- e.g.
+# `http.client.HTTPSConnection(...)`'s base is the Attribute chain `http.client`, whose
+# last segment is "client" (not a name worth matching on its own), but the full path
+# "http.client" unambiguously names the stdlib networking module. http.client is a
+# common dependency-free exfil vector (no `requests`/`httpx` import to catch on),
+# confirmed missed by the C-348 re-review of B-422.
+_NET_SINK_CTOR_MODULE_PATHS = frozenset({"http.client"})
+
+
+def _net_sink_alias_names(tree: ast.AST) -> frozenset[str]:
+    """Names (lowercased, to match _attr_base) transitively assigned from a known
+    networking-library session/client/socket constructor -- so `s = requests.Session()`
+    or `conn = http.client.HTTPSConnection(...)` followed by `s.put(...)` /
+    `conn.request(...)` is still recognized as a network sink even though neither
+    variable is literally named "session". Small fixpoint for simple alias-of-alias
+    chains (`s2 = s`), mirroring _cred_tainted_names' shape."""
+    aliases: set[str] = set()
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    for _ in range(4):
+        changed = False
+        for a in assigns:
+            rhs = a.value
+            is_known_ctor_module = isinstance(rhs, ast.Call) and isinstance(
+                rhs.func, ast.Attribute
+            ) and (
+                _attr_base(rhs.func.value) in _NET_SINK_BASES
+                or _dotted_path(rhs.func.value) in _NET_SINK_CTOR_MODULE_PATHS
+            )
+            is_ctor_call = is_known_ctor_module and (
+                rhs.func.attr[:1].isupper() or rhs.func.attr in _NET_SINK_CTOR_BASES
+            )
+            is_alias_chain = isinstance(rhs, ast.Name) and rhs.id.lower() in aliases
+            if is_ctor_call or is_alias_chain:
+                for t in a.targets:
+                    if isinstance(t, ast.Name) and t.id.lower() not in aliases:
+                        aliases.add(t.id.lower())
+                        changed = True
+        if not changed:
+            break
+    return frozenset(aliases)
+
+
+def _is_net_sink(func: ast.AST, net_sink_aliases: frozenset[str] = frozenset()) -> bool:
     if isinstance(func, ast.Name):
         return func.id == "urlopen"
     if isinstance(func, ast.Attribute):
         if func.attr in _NET_SINK_ATTRS_ANY:
             return True
         if func.attr in _NET_SINK_ATTRS_BASED:
-            return _attr_base(func.value) in _NET_SINK_BASES
+            base = _attr_base(func.value)
+            return base in _NET_SINK_BASES or base in net_sink_aliases
     return False
 
 
@@ -3556,6 +3618,7 @@ def _conditional_sink_findings(tree: ast.AST) -> list:
     pattern, distinct from B65's prose sleeper-trigger. WARN-grade (conditional execution
     has legit uses): the checks engine routes CONDITIONAL_SINK to a WARN, never an automatic FAIL."""
     out = []
+    net_sink_aliases = _net_sink_alias_names(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.If):
             continue
@@ -3567,7 +3630,7 @@ def _conditional_sink_findings(tree: ast.AST) -> list:
             for sub in ast.walk(stmt):
                 if isinstance(sub, ast.Call):
                     is_exec, sink = _is_exec_sink_call(sub.func)
-                    if is_exec or _is_net_sink(sub.func):
+                    if is_exec or _is_net_sink(sub.func, net_sink_aliases):
                         ln = getattr(sub, "lineno", getattr(node, "lineno", 0))
                         out.append(
                             ASTFinding(
@@ -3919,6 +3982,10 @@ def analyze_python(
         # interpolated command string — independent of taint (this is a shape check,
         # not a taint check; see _subprocess_call_is_fixed_argv).
         list_bindings_by_call = _list_bindings_by_call(tree)
+        # B-422 follow-up: names bound to a networking-library session/client/socket
+        # constructor (e.g. `s = requests.Session()`), so _is_net_sink recognizes
+        # `s.put(...)` the same as a literal `session.put(...)` — see _net_sink_alias_names.
+        net_sink_aliases = _net_sink_alias_names(tree)
     except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError) as exc:
         err_type = type(exc).__name__
         return [
@@ -4142,7 +4209,7 @@ def analyze_python(
             incluster_pure = _incluster_pure_tainted_names(tree)
             str_map = _simple_str_const_assigns(tree) if incluster_pure else {}
             for node in ast.walk(tree):
-                if not (isinstance(node, ast.Call) and _is_net_sink(node.func)):
+                if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
                     continue
                 hit_names = _names_in(node) & cred_tainted
                 if not hit_names:
@@ -4173,7 +4240,7 @@ def analyze_python(
         for node in ast.walk(tree):
             if len(out) >= _MAX_FINDINGS_PER_FILE:
                 break
-            if not (isinstance(node, ast.Call) and _is_net_sink(node.func)):
+            if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
                 continue
             # Only a BODY / URL / params position counts. A secret in headers=/auth= is the
             # normal way a skill authenticates to its own API (env key -> Authorization
@@ -4219,7 +4286,7 @@ def analyze_python(
             if not isinstance(node, ast.Call):
                 continue
             ln = getattr(node, "lineno", 0)
-            if _is_net_sink(node.func):
+            if _is_net_sink(node.func, net_sink_aliases):
                 arg_subtrees = [
                     *node.args,
                     *(kw.value for kw in node.keywords if kw.arg not in _ENV_AUTH_KWARGS),
@@ -4306,7 +4373,7 @@ def analyze_python(
             for node in ast.walk(tree):
                 if len(out) >= _MAX_FINDINGS_PER_FILE:
                     break
-                if not (isinstance(node, ast.Call) and _is_net_sink(node.func)):
+                if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
                     continue
                 arg_subtrees = [
                     *node.args,
@@ -4579,12 +4646,13 @@ def analyze_env_auth_kwarg_exfil(source: str, filename: str = "<skill>") -> list
         return []
 
     env_src_tainted = _env_tainted_names(tree) | _agent_config_file_tainted_names(source, tree)
+    net_sink_aliases = _net_sink_alias_names(tree)
     out: list[ASTFinding] = []
     seen: set[int] = set()
     for node in ast.walk(tree):
         if len(out) >= _MAX_FINDINGS_PER_FILE:
             break
-        if not (isinstance(node, ast.Call) and _is_net_sink(node.func)):
+        if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
             continue
         auth_kwarg_subtrees = [kw.value for kw in node.keywords if kw.arg in _ENV_AUTH_KWARGS]
         hit = False
