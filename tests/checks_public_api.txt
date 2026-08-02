@@ -177,6 +177,7 @@ check_cross_file_plaintext_payload
 check_cross_skill_combined_effect
 check_dangerous_overrides
 check_data_atrest
+check_deaddrop_resolver
 check_debug_proxy_capture
 check_declared_effective_proven
 check_declared_skill_reconciliation

@@ -12821,6 +12821,105 @@ def check_self_erase_directive(ctx: Context) -> Finding:
     )
 
 
+# ---------- B347 (F-159): dead-drop C2 resolver (poll -> decode -> exec) ----------
+# TA488's OWAReaper implant (Proofpoint/NSA, CVE-2026-42897) took commands from a
+# dead-drop resolver on a fully legitimate service: it queried the GitHub API every 24
+# hours, searching commit messages for the victim's email address, then base64-decoded
+# and executed whatever it found. The transferable shape: the C2 HOST is not
+# suspicious -- the COMPOSITION is. Pure wiring over skillast.py's DEADDROP_RESOLVER /
+# DEADDROP_RESOLVER_AMBIGUOUS rules (see the module comment above `_SLEEP_BASES` in
+# skillast.py) -- no new decode/sink/network vocabulary here, only routing.
+def check_deaddrop_resolver(ctx: Context) -> Finding:
+    """B347 (F-159) -- a skill's code implements a dead-drop C2 resolver: a periodic
+    poll of a remote content/search API (loop + sleep), whose response is decoded
+    (base64/hex/b85/zlib), and the decoded value reaches an exec sink (eval/exec/
+    os.system/subprocess.*).
+
+    FAIL    -- the decoded value demonstrably reaches an exec sink (taint confirmed,
+               not merely co-located in the file) -- DEADDROP_RESOLVER.
+    WARN    -- a poll loop, a decode primitive, and an exec sink are all present, but
+               no confirmed dataflow connects the decode to the sink (ambiguous) --
+               DEADDROP_RESOLVER_AMBIGUOUS.
+    PASS    -- neither pattern found in any installed skill's Python source.
+    UNKNOWN -- no installed skills to inspect, or every Python file that could carry
+               the pattern failed to parse (AST_UNANALYZABLE) with no FAIL/WARN
+               otherwise found -- a genuine "could not determine", never a guessed PASS.
+
+    Deliberately does NOT gate on the polled host: the host is legitimate by design (a
+    denylist would be the exact C-303 cautionary shape -- see the catalog.py comment
+    above CheckMeta("B347", ...)).
+    """
+    if not getattr(ctx, "installed_skills", None):
+        return _finding(
+            "B347",
+            UNKNOWN,
+            "No installed skills to inspect for a dead-drop C2 resolver composition.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+
+    fails: list[str] = []
+    warns: list[str] = []
+    unparseable: list[str] = []
+    for name, files in getattr(ctx, "installed_skill_py", {}).items():
+        for relpath, src in files:
+            for af in analyze_python(src, relpath):
+                if af.rule == "AST_UNANALYZABLE":
+                    unparseable.append(f"{name}: {relpath}")
+                elif af.rule == "DEADDROP_RESOLVER":
+                    fails.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                elif af.rule == "DEADDROP_RESOLVER_AMBIGUOUS":
+                    warns.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+
+    if fails:
+        extra = f" (+{len(fails) - 4} more)" if len(fails) > 4 else ""
+        return _finding(
+            "B347",
+            FAIL,
+            "Dead-drop C2 resolver composition, taint confirmed: " + "; ".join(fails[:4]) + extra,
+            "Remove the code that polls a remote source on a timer, decodes the "
+            "response, and executes the decoded value -- this is the OWAReaper/TA488 "
+            "dead-drop resolver shape (poll -> decode -> exec). A legitimate periodic "
+            "update check never executes what it downloads without an explicit, "
+            "reviewable install step.",
+            fails + warns,
+        )
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _finding(
+            "B347",
+            WARN,
+            "Possible dead-drop C2 resolver composition (ambiguous -- poll, decode, and "
+            "an exec sink co-occur, but dataflow is not confirmed): " + "; ".join(warns[:4]) + extra,
+            "Review the flagged file: confirm the decoded value never reaches the exec "
+            "sink. A periodic poll that decodes an embedded/local asset for display, or "
+            "that shells out to a fixed literal command, is fine -- only the CHAINED "
+            "poll -> decode -> exec composition is the concern.",
+            warns,
+            severity=MEDIUM,
+        )
+    if unparseable:
+        extra = f" (+{len(unparseable) - 4} more)" if len(unparseable) > 4 else ""
+        return _finding(
+            "B347",
+            UNKNOWN,
+            "Could not fully assess the dead-drop C2 resolver composition -- "
+            f"{len(unparseable)} python file(s) failed to parse: "
+            + "; ".join(unparseable[:4]) + extra,
+            "Fix the syntax error(s) so static analysis can inspect this file, or "
+            "review it manually for a poll -> decode -> exec composition.",
+            unparseable,
+        )
+    return _finding(
+        "B347",
+        PASS,
+        "No dead-drop C2 resolver composition found: no installed skill chains a "
+        "periodic poll, a decode primitive, and an exec sink.",
+        "Keep periodic update/polling code free of a decode -> exec chain; treat any "
+        "code path that executes a decoded remote response as a reviewable install "
+        "step, never an automatic one.",
+    )
+
+
 # C-210: prose-intent bulk-data exfiltration -- natural-language description of
 # collecting bulk/PII data and sending it to an external (non-first-party) endpoint.
 # Distinct from C-203 (code-shaped host-info telemetry): this is prose/workflow-step

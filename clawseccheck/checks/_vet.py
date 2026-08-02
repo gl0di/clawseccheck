@@ -109,6 +109,7 @@ from ._content import (
     check_cross_file_boundary_payload,
     check_cross_file_payload,
     check_cross_file_plaintext_payload,
+    check_deaddrop_resolver,
     check_dependency_confusion,
     check_dormant_capability,
     check_dotfile_exfil_directive,
@@ -5073,4 +5074,5 @@ SKILL_CONTENT_RING = (
     check_offensive_tooling_directive,  # B344 — offensive-security tooling directive (C-338)
     check_self_modification_directive,  # B345 — self-modification directive (B-392)
     check_self_erase_directive,  # B346 — anti-forensic self-erase directive (F-160)
+    check_deaddrop_resolver,  # B347 — dead-drop C2 resolver: poll -> decode -> exec (F-159)
 )

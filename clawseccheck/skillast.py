@@ -996,6 +996,239 @@ def _remote_fetch_tainted_names(tree: ast.AST) -> set[str]:
     return tainted
 
 
+# F-159 (TA488/OWAReaper — Proofpoint/NSA, CVE-2026-42897): the dead-drop C2 resolver
+# shape — a periodic poll of a remote content/search API, whose response is decoded,
+# and the decoded value reaches an exec sink. Each leg alone is common and benign (a
+# periodic version-check poll; a decode call reading an embedded asset; an exec sink in
+# a CLI wrapper); all three chained is a resolver. Reuses this module's EXISTING
+# decode->exec vocabulary end to end — `_is_decode_primitive_call` (the same
+# base64/hex/b85/zlib primitive family OBFUSCATED_EXEC/CHUNKED_FILE_EXEC already use),
+# `_is_exec_sink_call` (the same eval/exec/os.system/subprocess sink set TT5 uses), and
+# `_expr_reads_remote`/`_names_in` (the same network-source vocabulary REMOTE_CODE_LOAD
+# uses) — no new decode/sink taxonomy is introduced here, only the periodicity leg and
+# the taint sweep that connects the three.
+#
+# Deliberately does NOT gate on the polled host (api.github.com, a gist endpoint, a
+# search API, ...): per the task's own finding, the host is legitimate BY DESIGN — that
+# is the entire point of a dead drop. A host denylist here would be the exact C-303
+# cautionary shape (a signal that scores perfectly on a corpus and is unsound on real
+# skills, because every legitimate skill that touches the SAME host would also match).
+_SLEEP_BASES = {"time", "asyncio", "trio", "eventlet"}
+
+
+def _is_sleep_call(node: ast.AST) -> bool:
+    """`time.sleep(...)` / `asyncio.sleep(...)` / a bare `sleep(...)` (from `time import
+    sleep`) — the periodicity primitive a polling loop uses to wait between rounds."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    if isinstance(f, ast.Name) and f.id == "sleep":
+        return True
+    return isinstance(f, ast.Attribute) and f.attr == "sleep" and _attr_base(f.value) in _SLEEP_BASES
+
+
+def _fetching_funcnames(tree: ast.AST) -> set[str]:
+    """Names of locally-defined functions whose OWN body performs a network fetch
+    (`_is_remote_fetch_call`) anywhere in it — one hop, mirroring this module's other
+    remote-fetch helpers (`_remote_returning_funcs`), used so a poll LOOP that calls a
+    small `_poll_once()`-style helper (rather than fetching inline) still counts."""
+    names: set[str] = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if any(_is_remote_fetch_call(n) for n in ast.walk(fn)):
+            names.add(fn.name)
+    return names
+
+
+def _poll_loop_present(tree: ast.AST, fetching_funcs: set[str]) -> bool:
+    """True when a `while`/`for` loop's own subtree carries BOTH a sleep-like call and a
+    network fetch — inline, or one hop through a name in *fetching_funcs* — the
+    `while True: _poll_once(); time.sleep(N)` scheduler shape (leg 1 of the dead-drop
+    resolver composition). Deliberately narrow: a cron-like interval config/decorator or
+    an "every N minutes" prose directive is NOT recognised here — this narrows rather
+    than closes the periodicity signal; widening either needs its own fixture + C-135
+    pass, not folding in here unreviewed."""
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.While, ast.For)):
+            continue
+        has_sleep = False
+        has_fetch = False
+        for sub in ast.walk(node):
+            if _is_sleep_call(sub):
+                has_sleep = True
+                continue
+            if isinstance(sub, ast.Call):
+                if _is_remote_fetch_call(sub):
+                    has_fetch = True
+                elif isinstance(sub.func, ast.Name) and sub.func.id in fetching_funcs:
+                    has_fetch = True
+            if has_sleep and has_fetch:
+                return True
+    return False
+
+
+def _deaddrop_fetch_tainted_names(scope: ast.AST) -> set[str]:
+    """F-159: names holding network-fetched data WITHIN *scope*'s own body, propagated
+    through simple assignment AND a plain `for` target over a fetch-tainted iterable —
+    unlike `_remote_fetch_tainted_names` (Assign only), which misses the dead-drop
+    shape's `for line in body.splitlines():` idiom.
+
+    *scope* MUST be one node from `_deaddrop_resolver_findings`'s own scope list (an
+    `ast.Module`, or a single `ast.FunctionDef`/`ast.AsyncFunctionDef`), walked via
+    `_scope_own_nodes` — which stops at nested function/class/lambda boundaries. C-135
+    (adversarial self-review, same pass this check's own DoD requires): an EARLIER cut
+    walked the WHOLE tree in one flat pass, so a bare name reused across two unrelated
+    SIBLING functions (e.g. `data` fetched in a poller, and an unrelated `data` literal
+    in a totally different installer function) let the second bleed the first's taint —
+    a confirmed false FAIL. Scoping per function (mirroring `_scope_own_nodes`'s own
+    stated purpose: "a local name reused across sibling functions is resolved
+    per-scope, not conflated") closes that without weakening detection: the bad
+    fixture's poll/decode/exec all live in ONE function, so a per-scope sweep still
+    sees them together; only the periodicity leg (`_poll_loop_present`,
+    `_fetching_funcnames`) is intentionally structural/cross-function, one hop, exactly
+    like this module's other B-284 remote-fetch helpers."""
+    tainted: set[str] = set()
+    assigns = [n for n in _scope_own_nodes(scope) if isinstance(n, ast.Assign)]
+    for_loops = [n for n in _scope_own_nodes(scope) if isinstance(n, ast.For)]
+    for _ in range(6):
+        changed = False
+        for a in assigns:
+            if not (_expr_reads_remote(a.value) or (_names_in(a.value) & tainted)):
+                continue
+            for t in a.targets:
+                for name in _assign_target_names(t):
+                    if name not in tainted:
+                        tainted.add(name)
+                        changed = True
+        for f in for_loops:
+            if not (_expr_reads_remote(f.iter) or (_names_in(f.iter) & tainted)):
+                continue
+            for name in _assign_target_names(f.target):
+                if name not in tainted:
+                    tainted.add(name)
+                    changed = True
+        if not changed:
+            break
+    return tainted
+
+
+def _deaddrop_decode_tainted_names(scope: ast.AST, fetch_tainted: set[str]) -> set[str]:
+    """F-159: names holding the DECODED form of *fetch_tainted* data, WITHIN *scope*'s
+    own body (see `_deaddrop_fetch_tainted_names`'s docstring for the scoping
+    discipline and why it matters) — an assignment whose RHS is a real decode primitive
+    (`_is_decode_primitive_call`, the same base64/hex/b85/zlib family OBFUSCATED_EXEC
+    already trusts) applied to a fetch-tainted argument, propagated onward through
+    further plain assignment."""
+    if not fetch_tainted:
+        return set()
+    tainted: set[str] = set()
+    assigns = [n for n in _scope_own_nodes(scope) if isinstance(n, ast.Assign)]
+    for _ in range(6):
+        changed = False
+        for a in assigns:
+            rhs = a.value
+            is_decode_of_fetched = (
+                _is_decode_primitive_call(rhs)
+                and bool(rhs.args)
+                and bool(_names_in(rhs.args[0]) & fetch_tainted or _expr_reads_remote(rhs.args[0]))
+            )
+            if not (is_decode_of_fetched or (_names_in(rhs) & tainted)):
+                continue
+            for t in a.targets:
+                for name in _assign_target_names(t):
+                    if name not in tainted:
+                        tainted.add(name)
+                        changed = True
+        if not changed:
+            break
+    return tainted
+
+
+def _deaddrop_resolver_findings(
+    tree: ast.AST,
+) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
+    """F-159: the dead-drop C2 resolver composition — see the module comment above
+    `_SLEEP_BASES`. Returns (confirmed, ambiguous), each a list of (lineno, reason):
+
+      confirmed — WITHIN ONE SCOPE (a function, or module top-level), the decoded
+                  value (or an inline decode of fetch-tainted content) is a
+                  demonstrable ARGUMENT of an exec-sink call — FAIL-grade (taint
+                  confirmed, not merely co-located in the file). Taint is deliberately
+                  scoped per function (`_deaddrop_fetch_tainted_names`'s docstring) so
+                  an unrelated sibling function's same-named local can never be
+                  mistaken for fetched/decoded data.
+      ambiguous — a poll loop, a decode primitive, AND an exec sink are all present
+                  SOMEWHERE in the file (this leg is intentionally file-wide, not
+                  per-scope — it names an ambiguous co-occurrence for human review, not
+                  a proven chain), but no scope's dataflow confirms a connection —
+                  WARN-grade.
+
+    Neither list is populated unless the poll-loop gate (`_poll_loop_present`) holds —
+    a one-shot fetch->decode->exec with no periodicity is not this rule's concern; the
+    direct one-shot case is already covered elsewhere in this module (TT5_CMD_INJECTION,
+    REMOTE_CODE_LOAD)."""
+    fetching_funcs = _fetching_funcnames(tree)
+    if not _poll_loop_present(tree, fetching_funcs):
+        return [], []
+    if not any(_is_decode_primitive_call(n) for n in ast.walk(tree)):
+        return [], []
+
+    scopes: list[ast.AST] = [tree]
+    scopes.extend(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+
+    confirmed: list[tuple[int, str]] = []
+    exec_sink_present = False
+    first_sink_lineno = 0
+    for scope in scopes:
+        fetch_tainted = _deaddrop_fetch_tainted_names(scope)
+        decode_tainted = _deaddrop_decode_tainted_names(scope, fetch_tainted)
+        for node in _scope_own_nodes(scope):
+            if not isinstance(node, ast.Call):
+                continue
+            is_exec, sink_name = _is_exec_sink_call(node.func)
+            if not is_exec:
+                continue
+            exec_sink_present = True
+            ln = getattr(node, "lineno", 0)
+            if not first_sink_lineno:
+                first_sink_lineno = ln
+            args = list(node.args) + [kw.value for kw in node.keywords]
+            direct_hit = bool(decode_tainted) and any(_names_in(a) & decode_tainted for a in args)
+            inline_hit = any(
+                _is_decode_primitive_call(sub)
+                and bool(sub.args)
+                and bool(_names_in(sub.args[0]) & fetch_tainted or _expr_reads_remote(sub.args[0]))
+                for a in args
+                for sub in ast.walk(a)
+            )
+            if direct_hit or inline_hit:
+                confirmed.append(
+                    (
+                        ln,
+                        "content polled from a remote source on a timer is decoded and the "
+                        f"decoded value reaches {sink_name}() — dead-drop C2 resolver shape "
+                        "(poll -> decode -> exec)",
+                    )
+                )
+    if confirmed:
+        return confirmed, []
+    if exec_sink_present:
+        return (
+            [],
+            [
+                (
+                    first_sink_lineno,
+                    "a periodic network poll, a decode primitive, and an exec sink are "
+                    "all present in this file, but the decoded value does not "
+                    "demonstrably reach the sink — possible dead-drop C2 resolver "
+                    "composition (ambiguous)",
+                )
+            ],
+        )
+    return [], []
+
+
 def _func_param_taint_by_scope(tree: ast.AST, owner_map: dict, parent_scope: dict) -> dict:
     """B-413 layer 1: seed each function's OWN parameter names into its OWN taint
     bucket -- the scope-bucketed replacement for the old `_collect_func_params`, whose
@@ -4066,6 +4299,15 @@ def analyze_python(
             f"content fetched from a remote URL is written to {_se_path} and that path is "
             "then executed — staged remote code execution",
         )
+
+    # F-159: dead-drop C2 resolver — periodic poll -> decode -> exec (see the module
+    # comment above `_SLEEP_BASES`). confirmed dataflow is crit -> FAIL; the three
+    # ingredients merely co-located (no confirmed dataflow) is info -> WARN only.
+    _dd_confirmed, _dd_ambiguous = _deaddrop_resolver_findings(tree)
+    for _dd_ln, _dd_reason in _dd_confirmed:
+        add("DEADDROP_RESOLVER", "crit", _dd_ln, _dd_reason)
+    for _dd_ln, _dd_reason in _dd_ambiguous:
+        add("DEADDROP_RESOLVER_AMBIGUOUS", "info", _dd_ln, _dd_reason)
 
     # Extended taint rules: TT5 (external-input -> exec), TT4 (file-read -> network),
     # SSRF (tainted URL -> network-fetch).  Compute external taint once and reuse.

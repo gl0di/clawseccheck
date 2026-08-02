@@ -597,6 +597,7 @@ from ._content import (
     check_cross_file_payload,
     check_cross_file_plaintext_payload,
     check_cross_skill_combined_effect,
+    check_deaddrop_resolver,
     check_dependency_confusion,
     check_dormant_capability,
     check_dotfile_exfil_directive,

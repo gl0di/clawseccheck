@@ -2317,6 +2317,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B347 - Dead-drop C2 resolver composition (periodic poll -> decode -> exec)
+
+- Severity: CRITICAL
+- Block: hardening
+- Framework: Command & Control / Dead-Drop Resolver
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Dead-drop C2 resolver composition (periodic poll -> decode -> exec)
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

@@ -2780,6 +2780,31 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B347 (F-159, TA488/OWAReaper — Proofpoint/NSA, CVE-2026-42897): a skill's code
+    # implements a dead-drop C2 resolver — a periodic poll of a remote content/search
+    # API (loop + sleep), whose response is decoded (base64/hex/b85/zlib), and the
+    # decoded value reaches an exec sink (eval/exec/os.system/subprocess.*). Each leg
+    # alone is common and benign; all three chained is a resolver — TA488's OWAReaper
+    # implant took commands this way from the GitHub API's commit-message search,
+    # polled every 24 hours. Deliberately host-agnostic: the polled host is legitimate
+    # BY DESIGN (that is the whole point of a dead drop), so unlike B156/B339 this check
+    # never anchors on a specific host — a host list would be the exact C-303
+    # cautionary shape (perfect on a corpus, unsound on real skills, since every
+    # legitimate skill touching the same host would also match). WARN when a poll loop,
+    # a decode primitive, and an exec sink are all present but no confirmed dataflow
+    # connects the decode to the sink (ambiguous — co-located, not confirmed); FAIL only
+    # when the decoded value demonstrably reaches the exec sink (taint confirmed) — the
+    # same "encoding is the FAIL discriminator" discipline this project already applies
+    # elsewhere (B13's decoded-payload path).
+    CheckMeta(
+        "B347",
+        "Dead-drop C2 resolver composition (periodic poll -> decode -> exec)",
+        CRITICAL,
+        "hardening",
+        "Command & Control / Dead-Drop Resolver",
+        confidence="MEDIUM",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

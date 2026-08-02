@@ -18,7 +18,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
-    <img src="docs/assets/stats-light.svg" alt="181 security checks · 26 attack-chain detectors · 13,442 automated tests · 0 dependencies · 0 network calls" width="900">
+    <img src="docs/assets/stats-light.svg" alt="182 security checks · 26 attack-chain detectors · 13,442 automated tests · 0 dependencies · 0 network calls" width="900">
   </picture>
 </p>
 
@@ -91,7 +91,7 @@ No flags, no commands. Everything works as a conversation:
 | 🔐 **Secrets & data at rest** | Are your tokens, keys, and conversations lying around readable? |
 | 📡 **Monitoring & readiness** | Would you even notice a compromise — and could you investigate it? |
 
-On top of the 181 individual checks, a **risk engine** hunts for deadly
+On top of the 182 individual checks, a **risk engine** hunts for deadly
 *combinations* — chains like "untrusted input → reachable secrets → outbound
 tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)**.
 
@@ -211,7 +211,7 @@ complete flag list.
 | Document | What it covers |
 |---|---|
 | [User guide](docs/USAGE.md) | Recipes, monitoring modes, and trust details |
-| [Check catalog](docs/CHECKS.md) | All 181 checks: what they verify and how to remediate |
+| [Check catalog](docs/CHECKS.md) | All 182 checks: what they verify and how to remediate |
 | [Threat coverage](docs/THREAT_COVERAGE.md) | OWASP LLM Top 10 / Agentic threat mapping |
 | [Bundled IOC dataset](docs/IOC_DATA.md) | Provenance policy, refresh cadence, and freshness discipline for the known-bad catalog |
 | [Output schema](docs/OUTPUT_SCHEMA.md) | The frozen `--json` / SARIF contract |
