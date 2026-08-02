@@ -629,6 +629,25 @@ def _capability_graph_lines(ctx) -> list[str]:
     return lines
 
 
+def _credential_surface_rel(path: Path, home_path: Path | None) -> str:
+    """Render `path` as evidence text for the credential-surface map without ever
+    disclosing an absolute filesystem path (username, mount points, directory
+    layout). ClawHub security-audit finding (2026-07-27, v3.58.0, Intent-Code
+    Divergence): the previous inline closure fell back to `str(path)` — the
+    absolute path — whenever `relative_to()` failed. No call site in
+    `_credential_surface_map` actually triggered that fallback (every candidate is
+    built as `home_path / suffix`), but that was an invariant of the callers, not
+    one this helper enforced — a future credential-surface source could pass an
+    out-of-home path and leak silently. Falling back to `path.name` still tells
+    the reader WHAT was found, never WHERE on disk."""
+    if home_path is not None:
+        try:
+            return str(path.relative_to(home_path))
+        except ValueError:
+            pass
+    return path.name
+
+
 def _credential_surface_map(ctx) -> list[dict]:
     """Path-existence inventory of credential stores reachable from the agent home.
 
@@ -647,10 +666,7 @@ def _credential_surface_map(ctx) -> list[dict]:
     home_path = Path(home) if home is not None else None
 
     def _rel(path: Path) -> str:
-        try:
-            return str(path.relative_to(home_path)) if home_path is not None else str(path)
-        except Exception:
-            return str(path)
+        return _credential_surface_rel(path, home_path)
 
     def _summarize(items: list[str], label: str) -> str:
         if not items:
