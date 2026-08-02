@@ -4679,18 +4679,36 @@ def check_plugin_hook_grants(ctx: Context) -> Finding:
 # faithful to the real normalizer's behavior for this specific id.
 _MEMORY_SLOT_DEFAULT_OWNER = "memory-core"
 
-# B-421: OpenClaw's own built-in plugin-id alias table (config-state-CtMlHVRM.js:6-9,
-# BUILT_IN_PLUGIN_ALIAS_FALLBACKS) -- normalizePluginId folds an alias to its canonical id
-# before any allow/deny/activation comparison. NOTE what the real normalizer does NOT do:
-# it does not lowercase ids outside this table -- normalizePluginIdWithLookup (same file
-# :17-23) looks the LOWERCASED id up in the alias map, but on a miss falls back to the
-# CASE-PRESERVED trimmed string, not the lowercased one. So a bare case difference like
-# "Memory-Core" vs "memory-core" is never folded together by the real normalizer -- only
-# these five specific keys (3 aliases + their 2 canonical targets) are.
+# B-421 (corrected post-review, see below): OpenClaw's own built-in plugin-id alias table
+# (config-state-CtMlHVRM.js:6-9, BUILT_IN_PLUGIN_ALIAS_FALLBACKS) -- normalizePluginId
+# folds an alias to its canonical id before any allow/deny/activation comparison. NOTE
+# what the real normalizer does NOT do: it does not lowercase ids outside this table --
+# normalizePluginIdWithLookup (same file :17-23) looks the LOWERCASED id up in the alias
+# map, but on a miss falls back to the CASE-PRESERVED trimmed string, not the lowercased
+# one. So a bare case difference like "Memory-Core" vs "memory-core" is never folded
+# together by the real normalizer -- only these five specific keys (3 aliases + their 2
+# canonical targets) are.
+#
+# Post-B-421 adversarial-review correction: an independent pass ran the actual
+# BUILT_IN_PLUGIN_ALIAS_LOOKUP construction from the installed dist --
+# ``new Map([...BUILT_IN_PLUGIN_ALIAS_FALLBACKS, ...BUILT_IN_PLUGIN_ALIAS_FALLBACKS.map(
+# ([, pluginId]) => [pluginId, pluginId])])`` (config-state-CtMlHVRM.js:11) -- and
+# confirmed it self-maps the two canonical ids too ("google" -> "google", "minimax" ->
+# "minimax"), on top of the 3 alias -> canonical entries. The shipped B-421 table below
+# had only the 3 alias entries, NOT the 2 canonical self-entries the comment above
+# already (correctly) described -- so real OpenClaw folds "Google"/"GOOGLE" to "google"
+# (case-insensitively, via normalizeOptionalLowercaseString before the lookup) but this
+# table did not, making ``allow: ["Google"], deny: ["google"]`` a missed contradiction
+# (false negative, never a false FAIL). Fixed by adding the 2 missing self-entries so the
+# table matches the dist's actual 5-entry map. ``memory-core`` is correctly still absent
+# here -- it is NOT in BUILT_IN_PLUGIN_ALIAS_FALLBACKS, so it is never folded, matching
+# the real normalizer (verified separately; unchanged by this correction).
 _PLUGIN_ID_ALIASES = {
     "google-gemini-cli": "google",
     "minimax-portal": "minimax",
     "minimax-portal-auth": "minimax",
+    "google": "google",
+    "minimax": "minimax",
 }
 
 
@@ -4818,6 +4836,11 @@ def check_plugin_slots_and_deny(ctx: Context) -> Finding:
     normalizes through that alias table first. It deliberately does NOT case-fold ids
     outside the alias table -- the real ``normalizePluginId`` does not either (see
     ``_normalize_plugin_id`` above); a bare case difference is not folded together.
+    (Post-B-421 correction: the alias table itself was initially shipped missing the
+    dist's own ``"google"``/``"minimax"`` canonical self-entries, so ``allow: ["Google"],
+    deny: ["google"]`` was wrongly left unfolded -- fixed in ``_PLUGIN_ID_ALIASES`` above;
+    a bare case difference on a NON-alias id such as ``memory-core`` is still, correctly,
+    never folded.)
 
     A ``plugins.slots`` value of the wrong TYPE (not an object) or a ``memory``/
     ``contextEngine`` value of the wrong type (not a string) is schema-invalid and is

@@ -435,11 +435,36 @@ def test_b342_allow_deny_alias_collision_is_reported():
     assert "google-gemini-cli" in joined and "google" in joined
 
 
+def test_b342_allow_deny_canonical_id_case_difference_is_a_collision():
+    """Post-B-421 correction: the real BUILT_IN_PLUGIN_ALIAS_LOOKUP (config-state-
+    CtMlHVRM.js:11) is built as `new Map([...FALLBACKS, ...FALLBACKS.map(([, id]) =>
+    [id, id])])` -- it self-maps the two canonical alias TARGETS ("google", "minimax")
+    in addition to the 3 alias -> canonical entries, and the lookup itself is
+    case-insensitive (normalizeOptionalLowercaseString runs before the map .get()). So,
+    unlike an arbitrary non-alias id (see the case-difference-is-not-a-collision test
+    below), a bare case difference on "google" IS folded together by the real
+    normalizer and must be reported as a contradiction."""
+    cfg = {
+        "plugins": {
+            "slots": {"memory": "none"},
+            "allow": ["Google"],
+            "deny": ["google"],
+        }
+    }
+    f = check_plugin_slots_and_deny(_ctx(cfg))
+    assert f.status == WARN
+    joined = " ".join(f.evidence or [])
+    assert "Google" in joined and "google" in joined
+
+
 def test_b342_allow_deny_case_difference_alone_is_not_a_collision():
     """Grounding correction: the real `normalizePluginId` (config-state-CtMlHVRM.js
-    :17-23) does NOT lowercase arbitrary (non-alias) ids -- it only trims them and falls
-    back to the case-preserved original on an alias-lookup miss. So a bare case
-    difference alone -- unlike the alias case above -- is not treated as a collision."""
+    :17-23) does NOT lowercase arbitrary ids OUTSIDE the built-in alias table -- it only
+    trims them and falls back to the case-preserved original on an alias-lookup miss. So
+    a bare case difference on an id that is NOT in that table (like `memory-core`, which
+    is never a built-in alias target -- confirmed separately) is not treated as a
+    collision. Contrast the alias-table self-entry case above (`google`/`Google`), where
+    the lookup IS case-insensitive because the id is a member of the table."""
     cfg = {
         "plugins": {
             "slots": {"memory": "none"},
