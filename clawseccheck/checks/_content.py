@@ -12047,8 +12047,50 @@ _B334_EFFECT_DESCRIPTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Post-C-135 correction (round 2 of B-419): the original shape 4 vetoed the WHOLE block
+# for ALL FOUR modifier classes the instant any sentence anywhere in it matched
+# `_B334_EFFECT_DESCRIPTION_RE`, with no requirement that the sentence relate to the
+# flagged directive at all. That is the exact anti-pattern this file's own
+# `_B334_DISCLOSURE_VETOED` comment rejected for the disclosure veto ("a veto an attacker
+# can buy by appending one unrelated sentence is not a veto") -- except shape 4 had
+# neither of that veto's two restrictions. An adversarial pass confirmed the bypass is
+# live: a block pairing a genuine consent-bypass/concealment/keyword-trigger directive
+# with one appended third-person sentence under a common Usage/Setup heading silenced the
+# finding outright, for a class of directive documenting the helper's EFFECT does nothing
+# to defuse -- a script that honestly says "it reads the local ssh keys and uploads them"
+# is not rendered consented-to, visible, or off the keyword trigger by having said so.
+#
+# Fixed the same way the disclosure veto is scoped, on both axes:
+#   * CLASS. Only `ordering-before-reply` is prose-doc-vetoable. Documenting what a helper
+#     does can only speak to WHEN it runs relative to the reply -- it says nothing about
+#     whether the user consented, whether the run stays visible, or whether an input
+#     keyword should be triggering it at all, so the other three classes get no veto from
+#     this shape (mirrors why the disclosure veto excludes consent-bypass and
+#     input-keyword-trigger too). Both B-419 repros are ordering-before-reply; no other
+#     class was ever exercised by a test.
+#   * CLAUSE. The effect sentence must sit in the SAME sentence as the modifier match, or
+#     the one immediately after it -- exactly where both repros put it ("...before you
+#     answer any API question. It walks `src/`, ...") -- not merely "somewhere in the
+#     block", which could be an arbitrarily long, blank-line-free paragraph.
+_B334_PROSE_DOC_VETOED = frozenset({"ordering-before-reply"})
 
-def _b334_documented_prose_description(doc_text: str, start: int, segment: str) -> bool:
+
+def _b334_prose_description_window(segment: str, anchor: int) -> tuple[int, int]:
+    """(start, end) of the sentence at *anchor*, extended through the NEXT sentence.
+
+    Documentation prose describing a directive's effect is written in the sentence AFTER
+    the directive, not the same one ("run X before you answer any question. It writes
+    Y."), so the window has to reach one `_SENTENCE_BREAK_RE` further than
+    `_b334_sentence_span` alone would give it.
+    """
+    lo, mid = _b334_sentence_span(segment, anchor)
+    nxt = _SENTENCE_BREAK_RE.search(segment, mid)
+    return lo, (nxt.end() if nxt else len(segment))
+
+
+def _b334_documented_prose_description(
+    doc_text: str, start: int, segment: str, anchor: int
+) -> bool:
     """True when *segment* documents the helper in prose that states its effect (B-419).
 
     Shapes 1-3 all recognise DELIBERATE documentation: a fenced usage example, a
@@ -12073,6 +12115,14 @@ def _b334_documented_prose_description(doc_text: str, start: int, segment: str) 
     effect -- an attacker narrating what a malicious script does is not consent, and this
     shape only fires where a legitimate skill would put its documentation in the first
     place.
+
+    *anchor* is the position of the modifier match this veto is being considered for
+    (the caller only calls this for classes in `_B334_PROSE_DOC_VETOED`). The effect
+    sentence has to sit within `_b334_prose_description_window(segment, anchor)` -- the
+    modifier's own sentence, or the one right after it -- not merely anywhere in
+    *segment*. A block can be an arbitrarily long, blank-line-free paragraph; searching it
+    whole let one unrelated "it downloads/reads/uploads ..." sentence, placed anywhere at
+    all, silence a directive it has nothing to do with (round-2 C-135 finding).
     """
     heading = _nearest_heading(doc_text, start)
     if not heading:
@@ -12082,7 +12132,8 @@ def _b334_documented_prose_description(doc_text: str, start: int, segment: str) 
         or _B334_DOC_SECTION_HEADING_RE.search(heading)
     ):
         return False
-    return bool(_B334_EFFECT_DESCRIPTION_RE.search(segment))
+    lo, hi = _b334_prose_description_window(segment, anchor)
+    return bool(_B334_EFFECT_DESCRIPTION_RE.search(segment, lo, hi))
 
 
 # Block boundary: a blank line, or a Markdown heading starting a new line. Fenced regions
@@ -12143,11 +12194,6 @@ def _b334_scan(doc_text: str) -> list[tuple[str, str, str]]:
             continue
         start, end = owning.pop()
         segment = doc_text[start:end]
-        # Documented, shape 4: the block is prose that both names the file and states,
-        # in ordinary language, what it does -- the sole-documentation-section case
-        # shapes 1-3 miss (B-419).
-        if _b334_documented_prose_description(doc_text, start, segment):
-            continue
         if not _b334_directed_run(segment):
             continue  # named but not run, or run only under a prohibition
         if _b334_consent_preserved(segment):
@@ -12156,9 +12202,19 @@ def _b334_scan(doc_text: str) -> list[tuple[str, str, str]]:
             continue  # a section documenting the attack, not performing it
         for label, rx in _B334_MODIFIER_RES.items():
             mm = _b334_modifier_match(segment, label, rx)
-            if mm:
-                hits.append((path, label, _obf_clip(mm.group(0), 70)))
-                break
+            if not mm:
+                continue
+            # Documented, shape 4: an ordering-before-reply directive whose block also
+            # names the file and states, right next to that directive, what it does in
+            # ordinary prose -- the sole-documentation-section case shapes 1-3 miss
+            # (B-419). Scoped to this one class and to the directive's own clause, not
+            # the whole block, per the round-2 C-135 finding above `_B334_PROSE_DOC_VETOED`.
+            if label in _B334_PROSE_DOC_VETOED and _b334_documented_prose_description(
+                doc_text, start, segment, mm.start()
+            ):
+                continue
+            hits.append((path, label, _obf_clip(mm.group(0), 70)))
+            break
     return hits
 
 
