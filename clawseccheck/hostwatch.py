@@ -62,13 +62,32 @@ EGRESS_POSTURE = "egress_posture"
 # B-434 (C-135 adversarial review of RISK-24): a bare `shutil.which()` PATH hit is not
 # enough to justify RISK-24's severity by itself — an installed-but-never-enrolled
 # binary (downloaded once, never used) is indistinguishable from a live tunnel at that
-# level. On Linux, `active` is now corroborated the same way NETWORK_IDS/HOST_AUDIT
-# already do: a systemd-enabled tailscaled.service / cloudflared.service means the
-# daemon is actually enrolled as a running service, not merely present on PATH.
-# ngrok/frpc/bore have no single, authoritative systemd-unit convention to ground this
-# against without fabricating one, so `active` stays uncorroborated (None) for them —
-# honest "can't confirm" beats a guessed unit name. macOS/Windows are unchanged
-# (still uncorroborated) for the same reason.
+# level. On Linux, `active` is corroborated per-binary with a signal that needs more
+# than mere installation:
+#   - cloudflared: a systemd-enabled cloudflared.service. That unit is created only
+#     by the explicit `cloudflared service install` action (Cloudflare's own
+#     documented path to run a persistent tunnel) — installing the `cloudflared`
+#     binary alone never creates it, so "enabled" here really does mean "someone
+#     deliberately set this up to run".
+#   - tailscale: a persisted var/lib/tailscale/tailscaled.state file — NOT a
+#     systemd-enabled tailscaled.service. B-434 FOLLOW-UP (second adversarial
+#     pass): the original fix used the systemd-enabled signal for
+#     tailscale too, but that is unsound — Debian/Ubuntu's official tailscale .deb
+#     postinst (release/deb/debian.postinst.sh) both enables AND restarts
+#     tailscaled.service on a bare `apt install tailscale`, independent of whether
+#     the host was ever authenticated. Real repro: tailscaled.service enabled-at-
+#     boot, `tailscale up` never run, no tailscaled.state, no firewall exception for
+#     it at all — RISK-24 fired anyway. tailscaled.state is the sound signal instead:
+#     tailscaled lazily generates and persists its machine key only once it actually
+#     attempts to connect to control (upstream fix "ipn/ipnlocal: lazily connect to
+#     control, lazily generate machine key", tailscale/tailscale#1759) — a daemon
+#     merely started by the postinst script and never told to connect leaves no
+#     state file at all, so its presence is evidence `tailscale up` / `--auth-key`
+#     actually ran.
+# ngrok/frpc/bore have no single, authoritative systemd-unit convention (nor a state
+# file) to ground this against without fabricating one, so `active` stays
+# uncorroborated (None) for them — honest "can't confirm" beats a guessed signal.
+# macOS/Windows are unchanged (still uncorroborated) for the same reason.
 TUNNEL_TRANSPORT = "tunnel_transport"
 
 CLASSES = (
@@ -394,16 +413,20 @@ def _detect_linux(root: Path, which) -> dict:
 
     # Tunnel / mesh-VPN transport (E-065/C-324) --------------------------------
     found, active = [], None
-    if which("tailscale") or which("tailscaled") or _exists(root, "var/lib/tailscale/tailscaled.state"):
+    tailscale_state = _exists(root, "var/lib/tailscale/tailscaled.state")
+    if which("tailscale") or which("tailscaled") or tailscale_state:
         found.append("Tailscale")
-        # B-434: an enabled systemd unit means tailscaled is actually enrolled as a
-        # running service, not merely a binary someone downloaded once and never ran.
-        if _systemd_enabled(root, "tailscaled.service"):
+        # B-434 follow-up: tailscaled.state is the enrollment signal, deliberately
+        # NOT a systemd-enabled tailscaled.service (see the TUNNEL_TRANSPORT comment
+        # above for why the unit signal was retracted — it fires on a bare `apt
+        # install tailscale` with no authentication at all).
+        if tailscale_state:
             active = True
     if which("cloudflared"):
         found.append("cloudflared")
         # B-434: `cloudflared service install` (Cloudflare's own documented path to
-        # run a persistent tunnel) enables this exact unit.
+        # run a persistent tunnel) enables this exact unit; installing the binary
+        # alone never does, so this signal is unaffected by the follow-up above.
         if _systemd_enabled(root, "cloudflared.service"):
             active = True
     if which("ngrok"):

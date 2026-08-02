@@ -1932,12 +1932,17 @@ def _rule_tunnel_bypasses_egress_policy(ctx: Context, tools: list[str],
     adversarial review) — neither is a bare `shutil.which()` PATH hit on its own: an
     installed-but-never-enrolled binary is indistinguishable from a live tunnel at
     that level (the exact repro: an unused `ngrok` binary downloaded once and never
-    run). This chain now also requires hostwatch's `active is True` corroboration
-    (e.g. a systemd-enabled tailscaled/cloudflared unit — see hostwatch.py) that the
-    transport is actually enrolled, not merely installed. Even then it fires ONLY on
-    the full combination: the transport is enrolled, egress policy was graded
-    hardened, AND the agent both can act destructively (exec/write) and is reachable
-    by untrusted input, so a compromise could actually reach and use that transport.
+    run). This chain now also requires hostwatch's `active is True` corroboration —
+    a persisted tailscaled.state for Tailscale, or a systemd-enabled
+    cloudflared.service for cloudflared (see hostwatch.py; NOT a systemd-enabled
+    tailscaled.service — a second adversarial pass, B-434 follow-up, found that
+    signal fires from a bare `apt install tailscale` with no authentication at all,
+    since Debian/Ubuntu's official .deb postinst enables and starts that unit
+    unconditionally) — that the transport is actually enrolled, not merely
+    installed. Even then it fires ONLY on the full combination: the transport is
+    enrolled, egress policy was graded hardened, AND the agent both can act
+    destructively (exec/write) and is reachable by untrusted input, so a compromise
+    could actually reach and use that transport.
     """
     if _host_class_status(ctx, "tunnel_transport").get("status") != "present":
         return None

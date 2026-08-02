@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from clawseccheck import hostwatch
 from clawseccheck.collector import Context, collect
 from clawseccheck.checks import run_all
 from clawseccheck.scoring import compute
@@ -1416,10 +1417,20 @@ def test_risk23_e2e_bare_regexp_exec_in_hook_no_fire(tmp_path):
 # B-434 (C-135 adversarial review): a bare `shutil.which()` PATH hit on the tunnel
 # binary is not, by itself, evidence the transport is actually enrolled/running (an
 # installed-but-never-used binary is indistinguishable from a live tunnel at that
-# level) -- `tunnel_transport.active is True` (hostwatch's own corroboration, e.g. a
-# systemd-enabled tailscaled/cloudflared unit) is now required too. `_host()`'s
-# default `tunnel_active=True` represents that corroboration so the other
-# leg-by-leg tests below stay focused on the leg they exercise.
+# level) -- `tunnel_transport.active is True` (hostwatch's own corroboration -- a
+# persisted tailscaled.state for Tailscale, or a systemd-enabled cloudflared.service
+# for cloudflared) is now required too. `_host()`'s default `tunnel_active=True`
+# represents that corroboration so the other leg-by-leg tests below stay focused on
+# the leg they exercise.
+#
+# B-434 FOLLOW-UP (second adversarial pass, CLAWSECCHECK-B-434): the original
+# corroboration used a systemd-enabled tailscaled.service for Tailscale too. That
+# was unsound -- Debian/Ubuntu's official tailscale .deb postinst both enables AND
+# starts tailscaled.service on a bare `apt install tailscale`, independent of
+# authentication, so it fired on an installed-but-never-enrolled host exactly like
+# the original FP it was meant to fix. `test_risk24_no_fire_on_apt_install_only_
+# repro` below drives the real hostwatch.detect() over a crafted filesystem (not a
+# hand-authored `_host()` dict) to pin the corrected behavior end to end.
 # ──────────────────────────────────────────────────────────────────────────────
 
 _RISK24_EXEC_INGRESS_CFG = {
@@ -1464,6 +1475,39 @@ def test_risk24_fires_on_full_combination():
     assert p is not None, [x.id for x in paths]
     assert p.severity == MEDIUM
     assert "Tailscale" in " ".join(p.chain)
+
+
+def test_risk24_no_fire_on_apt_install_only_repro(tmp_path):
+    # CLAWSECCHECK-B-434 follow-up (second adversarial pass): a real repro built
+    # through the actual hostwatch.detect() (not a hand-authored `_host()` dict) --
+    # tailscaled.service enabled-at-boot (as Debian/Ubuntu's official tailscale
+    # .deb postinst does on a bare `apt install tailscale`, before this fix's own
+    # source), NO tailscaled.state, NO device registration, and NO firewall
+    # exception for it at all (nftables OUTPUT policy=drop, zero accept rules) --
+    # i.e. tailscale merely installed, `tailscale up` never run. This exact host
+    # previously made RISK-24 fire; it must not fire now.
+    root = tmp_path
+    (root / "etc/systemd/system/multi-user.target.wants").mkdir(parents=True)
+    (root / "etc/systemd/system/multi-user.target.wants/tailscaled.service").touch()
+    (root / "etc/nftables.conf").write_text(
+        "table inet filter {\n"
+        "    chain output {\n"
+        "        type filter hook output priority 0; policy drop;\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    def which(n):
+        return "/usr/bin/tailscale" if n == "tailscale" else None
+
+    host = hostwatch.detect(root=root, system="Linux", which=which)
+    assert host["classes"]["tunnel_transport"]["status"] == "present"
+    assert host["classes"]["tunnel_transport"]["active"] is None  # the fix under test
+    assert host["classes"]["egress_posture"]["active"] is True  # policy=drop, per repro
+
+    ctx = _ctx_with_host(_RISK24_EXEC_INGRESS_CFG, host)
+    assert not any(p.id == "RISK-24" for p in risk_paths(ctx, _findings(ctx)))
 
 
 def test_risk24_no_fire_without_tunnel_active_corroboration():

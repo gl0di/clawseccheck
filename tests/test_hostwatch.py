@@ -418,7 +418,8 @@ def test_linux_tunnel_transport_present_alone_carries_no_active_signal(tmp_path)
     # evidence the transport is actually enrolled -- an installed-but-never-used
     # binary is indistinguishable from a live tunnel at that level. `active` stays
     # None until a stronger corroboration signal is also found (see the
-    # systemd-enabled tests below); RISK-24 (risk.py) requires that corroboration.
+    # state-file / systemd-enabled tests below); RISK-24 (risk.py) requires that
+    # corroboration.
     def which(n):
         return "/usr/bin/tailscale" if n == "tailscale" else None
     res = detect(root=tmp_path, system="Linux", which=which)
@@ -426,14 +427,35 @@ def test_linux_tunnel_transport_present_alone_carries_no_active_signal(tmp_path)
     assert res["classes"]["tunnel_transport"]["active"] is None
 
 
-def test_linux_tailscale_active_via_systemd_symlink(tmp_path):
-    # B-434: an enabled tailscaled.service means the daemon is actually enrolled
-    # as a running service, not merely a binary someone downloaded once.
+def test_linux_tailscale_active_via_state_file(tmp_path):
+    # B-434 follow-up: tailscaled.state is the enrollment signal for Tailscale --
+    # tailscaled lazily generates and persists its machine key only once it
+    # actually attempts to connect to control (i.e. `tailscale up` / `--auth-key`
+    # was invoked), unlike a systemd-enabled unit which fires regardless of
+    # authentication (see the next test).
+    def which(n):
+        return "/usr/bin/tailscale" if n == "tailscale" else None
+    _touch(tmp_path, "var/lib/tailscale/tailscaled.state")
+    res = detect(root=tmp_path, system="Linux", which=which)
+    assert res["classes"]["tunnel_transport"]["active"] is True
+
+
+def test_linux_tailscale_systemd_enabled_alone_is_not_active(tmp_path):
+    # CLAWSECCHECK-B-434 follow-up (second adversarial pass): the original fix
+    # corroborated `active` via an enabled tailscaled.service alone. Real repro:
+    # Debian/Ubuntu's official tailscale .deb postinst (release/deb/
+    # debian.postinst.sh) both enables AND restarts tailscaled.service on a bare
+    # `apt install tailscale`, independent of authentication -- so a host with the
+    # package merely installed (tailscaled.service enabled-at-boot, `tailscale up`
+    # never run, no tailscaled.state, no firewall exception for it at all) looked
+    # identical to a genuinely enrolled tunnel and fired RISK-24 anyway. An enabled
+    # unit alone must NOT set `active` for tailscale.
     def which(n):
         return "/usr/bin/tailscale" if n == "tailscale" else None
     _touch(tmp_path, "etc/systemd/system/multi-user.target.wants/tailscaled.service")
     res = detect(root=tmp_path, system="Linux", which=which)
-    assert res["classes"]["tunnel_transport"]["active"] is True
+    assert res["classes"]["tunnel_transport"]["status"] == "present"
+    assert res["classes"]["tunnel_transport"]["active"] is None
 
 
 def test_linux_cloudflared_active_via_systemd_symlink(tmp_path):
