@@ -12835,11 +12835,19 @@ def check_deaddrop_resolver(ctx: Context) -> Finding:
     (base64/hex/b85/zlib), and the decoded value reaches an exec sink (eval/exec/
     os.system/subprocess.*).
 
-    FAIL    -- the decoded value demonstrably reaches an exec sink (taint confirmed,
-               not merely co-located in the file) -- DEADDROP_RESOLVER.
+    FAIL    -- the decoded value demonstrably reaches an exec sink AS THE THING
+               EXECUTED -- the command/payload itself, not merely a data argument to
+               a fixed program (taint confirmed) -- DEADDROP_RESOLVER.
     WARN    -- a poll loop, a decode primitive, and an exec sink are all present, but
-               no confirmed dataflow connects the decode to the sink (ambiguous) --
-               DEADDROP_RESOLVER_AMBIGUOUS.
+               no exec sink call is confirmed to EXECUTE the decoded value (ambiguous)
+               -- DEADDROP_RESOLVER_AMBIGUOUS. Covers both "no connection confirmed at
+               all" and (adversarial-review follow-up, F-159) "the only confirmed
+               connection is the decoded value reaching a subprocess.* sink as a
+               non-program DATA argument to a fixed, trusted local binary" -- e.g.
+               logging a decoded correlation id (`subprocess.run(["logger", "-t",
+               "x", corr_id])`) or verifying a downloaded artifact's checksum
+               (`subprocess.run(["sha256sum", "--check", checksum])`) -- common,
+               legitimate patterns that must never score CRITICAL/FAIL.
     PASS    -- neither pattern found in any installed skill's Python source.
     UNKNOWN -- no installed skills to inspect, or every Python file that could carry
                the pattern failed to parse (AST_UNANALYZABLE) with no FAIL/WARN

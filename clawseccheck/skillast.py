@@ -1145,35 +1145,104 @@ def _deaddrop_decode_tainted_names(scope: ast.AST, fetch_tainted: set[str]) -> s
     return tainted
 
 
+def _deaddrop_subprocess_command_parts(
+    node: ast.Call, list_bindings: dict[str, ast.List | ast.Tuple] | None
+) -> list[ast.AST] | None:
+    """F-159 follow-up (adversarial review on B347, subprocess data-argument false
+    FAIL): for a subprocess.* exec-sink Call *node*, return the list of the call's own
+    argument sub-expressions that constitute COMMAND position — the thing execve (or
+    a shell, or a re-invoked interpreter) actually runs — or None when the WHOLE call
+    is command position (shell=True/an unprovable dynamic shell= value, or the command
+    is not a resolvable fixed argv list — a string/joined/concatenated/unresolved-name
+    form, where there is no safe "data argument" position to carve out at all).
+
+    When a list is returned, it is EXACTLY argv[0] (the fixed program element) unless
+    argv[0] itself names a shell/indirect-execution interpreter
+    (`_argv0_is_shell_indirect_exec`), in which case every element counts, since that
+    interpreter re-parses the rest of the argv list as its own command text — the
+    identical classification `_subprocess_taint_is_command_injection` already applies
+    for TT5/TT5_ARG_INJECTION, reused here (not re-derived) so the two checks can
+    never quietly disagree about what "command position" means for the same call
+    shape.
+
+    Only subprocess.* has this distinction at all: os.system()/os.popen() run their
+    sole string argument through a shell (whatever is IN the string is executed —
+    there is no separate inert-data position), and bare eval()/exec() run their sole
+    argument itself AS code. Callers only invoke this for a `sink_name` that starts
+    with `"subprocess."`; see `_deaddrop_resolver_findings`.
+    """
+    for kw in node.keywords:
+        if kw.arg == "shell":
+            v = kw.value
+            if not (isinstance(v, ast.Constant) and v.value is False):
+                return None  # shell=True, or an unprovable dynamic value
+    first = node.args[0] if node.args else None
+    if isinstance(first, ast.Name) and list_bindings:
+        first = list_bindings.get(first.id, first)
+    if not isinstance(first, (ast.List, ast.Tuple)) or not first.elts:
+        return None  # string / joined-str / concatenated / unresolved / empty command
+    elts = first.elts
+    if _argv0_is_shell_indirect_exec(elts):
+        return list(elts)  # the interpreter re-parses ALL of them as command text
+    return [elts[0]]
+
+
 def _deaddrop_resolver_findings(
     tree: ast.AST,
+    list_bindings_by_call: dict[ast.Call, dict[str, ast.List | ast.Tuple]] | None = None,
 ) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
     """F-159: the dead-drop C2 resolver composition — see the module comment above
     `_SLEEP_BASES`. Returns (confirmed, ambiguous), each a list of (lineno, reason):
 
       confirmed — WITHIN ONE SCOPE (a function, or module top-level), the decoded
                   value (or an inline decode of fetch-tainted content) is a
-                  demonstrable ARGUMENT of an exec-sink call — FAIL-grade (taint
-                  confirmed, not merely co-located in the file). Taint is deliberately
-                  scoped per function (`_deaddrop_fetch_tainted_names`'s docstring) so
-                  an unrelated sibling function's same-named local can never be
-                  mistaken for fetched/decoded data.
+                  demonstrable ARGUMENT of an exec-sink call, AND — for a
+                  subprocess.* sink specifically — that argument lands in COMMAND
+                  position, not merely a trailing DATA position of a fixed,
+                  non-interpreter program (`_deaddrop_subprocess_command_parts`) —
+                  FAIL-grade (taint confirmed AND the decoded value is the thing
+                  actually executed, not merely inert execve data). Taint is
+                  deliberately scoped per function (`_deaddrop_fetch_tainted_names`'s
+                  docstring) so an unrelated sibling function's same-named local can
+                  never be mistaken for fetched/decoded data.
       ambiguous — a poll loop, a decode primitive, AND an exec sink are all present
                   SOMEWHERE in the file (this leg is intentionally file-wide, not
                   per-scope — it names an ambiguous co-occurrence for human review, not
-                  a proven chain), but no scope's dataflow confirms a connection —
-                  WARN-grade.
+                  a proven chain), but no scope's dataflow confirms the decoded value
+                  is EXECUTED by the sink — either no connection is confirmed at all,
+                  or (adversarial-review follow-up) the only confirmed connection is
+                  the decoded value reaching a subprocess.* sink as a non-program data
+                  argument to a FIXED, trusted local binary — e.g.
+                  `subprocess.run(["logger", "-t", "x", corr_id])` logging a decoded
+                  correlation id, or `subprocess.run(["sha256sum", "--check",
+                  checksum])` verifying a downloaded artifact's integrity with a
+                  decoded checksum. Both are common, legitimate patterns (the
+                  checksum case is a security-POSITIVE integrity check) — WARN-grade,
+                  same "argument injection, not command injection" distinction
+                  TT5_ARG_INJECTION already draws for the general case, deliberately
+                  reused rather than re-derived (see
+                  `_subprocess_taint_is_command_injection`'s docstring).
 
     Neither list is populated unless the poll-loop gate (`_poll_loop_present`) holds —
     a one-shot fetch->decode->exec with no periodicity is not this rule's concern; the
     direct one-shot case is already covered elsewhere in this module (TT5_CMD_INJECTION,
-    REMOTE_CODE_LOAD)."""
+    REMOTE_CODE_LOAD).
+
+    *list_bindings_by_call* (optional, default None — an empty per-call binding map is
+    used when omitted) is `_list_bindings_by_call(tree)`'s result, reused verbatim from
+    the caller (never recomputed here) so a subprocess command bound to a local
+    variable (`cmd = ["logger", "-t", "x"]; ...; subprocess.run(cmd + [corr_id])` —
+    well, more precisely the common `cmd = [...]; subprocess.run(cmd)` single-binding
+    idiom `_single_list_bindings_local` resolves) is still recognised as a fixed argv
+    list, not treated as an unresolved dynamic command.
+    """
     fetching_funcs = _fetching_funcnames(tree)
     if not _poll_loop_present(tree, fetching_funcs):
         return [], []
     if not any(_is_decode_primitive_call(n) for n in ast.walk(tree)):
         return [], []
 
+    bindings_by_call = list_bindings_by_call or {}
     scopes: list[ast.AST] = [tree]
     scopes.extend(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
 
@@ -1194,12 +1263,25 @@ def _deaddrop_resolver_findings(
             if not first_sink_lineno:
                 first_sink_lineno = ln
             args = list(node.args) + [kw.value for kw in node.keywords]
-            direct_hit = bool(decode_tainted) and any(_names_in(a) & decode_tainted for a in args)
+            # F-159 follow-up: for subprocess.* alone, narrow which of the call's own
+            # argument sub-expressions count as a genuine "decoded value IS the
+            # executed thing" hit down to COMMAND position — see
+            # _deaddrop_subprocess_command_parts's docstring. eval/exec/os.system/
+            # os.popen have no such position (their whole argument IS the code/shell
+            # command), so `hit_args` stays the full argument list for those.
+            hit_args = args
+            if sink_name.startswith("subprocess."):
+                command_parts = _deaddrop_subprocess_command_parts(
+                    node, bindings_by_call.get(node)
+                )
+                if command_parts is not None:
+                    hit_args = command_parts
+            direct_hit = bool(decode_tainted) and any(_names_in(a) & decode_tainted for a in hit_args)
             inline_hit = any(
                 _is_decode_primitive_call(sub)
                 and bool(sub.args)
                 and bool(_names_in(sub.args[0]) & fetch_tainted or _expr_reads_remote(sub.args[0]))
-                for a in args
+                for a in hit_args
                 for sub in ast.walk(a)
             )
             if direct_hit or inline_hit:
@@ -1220,9 +1302,10 @@ def _deaddrop_resolver_findings(
                 (
                     first_sink_lineno,
                     "a periodic network poll, a decode primitive, and an exec sink are "
-                    "all present in this file, but the decoded value does not "
-                    "demonstrably reach the sink — possible dead-drop C2 resolver "
-                    "composition (ambiguous)",
+                    "all present in this file, but no exec sink call is confirmed to "
+                    "run the decoded value as its executed command/payload (at most an "
+                    "inert data argument to a fixed program) — possible dead-drop C2 "
+                    "resolver composition (ambiguous)",
                 )
             ],
         )
@@ -4303,7 +4386,10 @@ def analyze_python(
     # F-159: dead-drop C2 resolver — periodic poll -> decode -> exec (see the module
     # comment above `_SLEEP_BASES`). confirmed dataflow is crit -> FAIL; the three
     # ingredients merely co-located (no confirmed dataflow) is info -> WARN only.
-    _dd_confirmed, _dd_ambiguous = _deaddrop_resolver_findings(tree)
+    # list_bindings_by_call (already computed above, B-132) is threaded through so a
+    # subprocess command bound to a local variable is still resolved to its fixed
+    # argv list for the command-vs-data-argument split (F-159 follow-up).
+    _dd_confirmed, _dd_ambiguous = _deaddrop_resolver_findings(tree, list_bindings_by_call)
     for _dd_ln, _dd_reason in _dd_confirmed:
         add("DEADDROP_RESOLVER", "crit", _dd_ln, _dd_reason)
     for _dd_ln, _dd_reason in _dd_ambiguous:
