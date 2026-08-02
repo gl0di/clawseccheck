@@ -9973,6 +9973,14 @@ def check_python_runtime_persist_install(ctx: Context) -> Finding:
 
     WARN when either mechanism fires. PASS when no installed skill file matches
     either mechanism. Advisory (scored=False).
+
+    Only `# file:` sections whose extension is interpreted source code
+    (`_SOURCE_CODE_EXTS`: .py/.sh/.bash/.zsh/.ps1) are scanned (B-420, C-135). A
+    Markdown file (SKILL.md, README, ...) that merely documents or shows a fenced
+    EXAMPLE of mechanism A/B — including one that explicitly disclaims performing
+    it — cannot itself install anything at runtime; without this gate its example
+    code fences matched both the write-mode `open()` signal and the install
+    signal, false-WARNing on documentation-only skills.
     """
     if not ctx.installed_skills:
         return _custom(
@@ -9988,6 +9996,17 @@ def check_python_runtime_persist_install(ctx: Context) -> Finding:
     for name, blob in ctx.installed_skills.items():
         for m in _MANIFEST_HEADER_RE.finditer(blob):
             fname = m.group("name").strip()
+            # B-420 (C-135): only an actual interpreted-source-code section can
+            # RUN the write it appears to perform. A Markdown file (SKILL.md,
+            # README, ...) can only ever DISCUSS or SHOW an example of mechanism
+            # A/B -- an `open(..., "w")` inside a fenced code EXAMPLE, or an
+            # `export PYTHONSTARTUP=...` inside a fenced shell EXAMPLE, is prose
+            # illustrating the convention, not a runtime install: the .md file
+            # itself cannot execute. Mirrors `_pos_in_source_code_section`'s
+            # established .py/.sh/.bash/.zsh/.ps1 gate (B-305) rather than adding a
+            # second, narrower notion of "is this really code" for one check.
+            if _file_ext(fname) not in _SOURCE_CODE_EXTS:
+                continue
             body = m.group("body")
             write_spans = [wm.span() for wm in _WRITE_MODE_OPEN_RE.finditer(body)]
             if not write_spans:

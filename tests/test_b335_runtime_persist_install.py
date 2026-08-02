@@ -365,6 +365,88 @@ def test_mechanism_b_transparent_pythonstartup_install_still_warns():
     assert "mechanism B" in f.detail
 
 
+# ------------------------------------------------------- B-420 C-135: doc-only .md gate
+
+def test_skill_md_documentation_example_does_not_warn():
+    """CLAWSECCHECK-B-420 repro: a documentation-only SKILL.md that EXPLAINS the
+    PYTHONSTARTUP convention (fenced bash + Python examples) and explicitly disclaims
+    performing it must not fire — SKILL.md is Markdown, not executable code, and
+    cannot itself install anything at runtime."""
+    ctx = _ctx_with_blob("py-devenv", {
+        "SKILL.md": (
+            "---\n"
+            "name: py-devenv\n"
+            "description: Explain and document Python developer environment "
+            "conventions (REPL startup file, history, completion).\n"
+            "---\n"
+            "\n"
+            "# Python dev environment\n"
+            "\n"
+            "Reference notes only — this skill writes nothing itself; it explains "
+            "the conventions so\n"
+            "you can walk the user through them.\n"
+            "\n"
+            "## REPL startup file\n"
+            "\n"
+            "The interpreter runs the file named by `PYTHONSTARTUP` at the start "
+            "of every interactive\n"
+            "session. The conventional setup, straight from the Python tutorial, "
+            "is one line in the\n"
+            "user's shell rc:\n"
+            "\n"
+            "```bash\n"
+            "# ~/.bashrc\n"
+            'export PYTHONSTARTUP="$HOME/.pythonrc.py"\n'
+            "```\n"
+            "\n"
+            "and a small startup file the user creates once:\n"
+            "\n"
+            "```python\n"
+            'with open("/home/me/.pythonrc.py", "w") as fh:\n'
+            '    fh.write("import readline, rlcompleter\\n")\n'
+            "```\n"
+            "\n"
+            "Explain both steps to the user and let them decide; never edit their "
+            "shell rc yourself.\n"
+        ),
+    })
+    f = check_python_runtime_persist_install(ctx)
+    assert f.status == PASS, f.detail
+
+
+def test_readme_documentation_example_mechanism_a_does_not_warn():
+    """Same doc-only gate, mechanism A: a README.md that shows a sitecustomize.py
+    install as a fenced code EXAMPLE (not real, executing code) must not fire."""
+    ctx = _ctx_with_blob("doc-only", {
+        "README.md": (
+            "# How sitecustomize.py works\n"
+            "\n"
+            "For reference only, here is how a tool COULD install a sitecustomize "
+            "hook:\n"
+            "\n"
+            "```python\n"
+            "import os, site\n"
+            "target = os.path.join(site.getsitepackages()[0], \"sitecustomize.py\")\n"
+            "with open(target, \"w\") as fh:\n"
+            "    fh.write(\"import os\\n\")\n"
+            "```\n"
+            "\n"
+            "This skill does not run this snippet; it is documentation only.\n"
+        ),
+    })
+    f = check_python_runtime_persist_install(ctx)
+    assert f.status == PASS, f.detail
+
+
+def test_vet_clean_skill_md_doc_example_b335_passes():
+    """Fixture-level repro of CLAWSECCHECK-B-420 via vet_skill (--vet-skill path)."""
+    skill_dir = FIXTURES / "clean_b335_skill_md_doc_example" / "skills" / "py-devenv"
+    f = vet_skill(skill_dir)
+    assert not any(
+        x.id == "B335" and x.status == WARN for x in [f, *getattr(f, "ring_findings", [])]
+    )
+
+
 # --------------------------------------------------------------------------- vet-level
 
 def test_vet_bad_runtime_persist_install_is_warn():
