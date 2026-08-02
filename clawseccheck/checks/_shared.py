@@ -2289,13 +2289,26 @@ def _skill_frontmatter_block(blob: str) -> str | None:
 # plant a keyword into. This is a narrowing for soundness, not a completeness claim —
 # a skill that only discloses telemetry in its body (not frontmatter) will still be
 # flagged; that is the safer failure direction for a security check.
+#
+# B-422 (C-348 adversarial review): the ORIGINAL verb/noun vocabulary below
+# was too narrow to recognize ordinary, honest disclosure prose. A real support-bundle
+# skill whose frontmatter description read "Collect a support bundle from this machine
+# and upload it to our support portal for troubleshooting." was scored as "nothing in
+# the skill's own SKILL.md discloses this" -- a false WARN on a textbook-disclosed skill,
+# because the noun set didn't include "bundle" and the verb set didn't include the
+# "archive"/"export"/"post"/"snapshot" family. Added "post", "export", "archive",
+# "snapshot" to the verb group and "bundle", "environment", "workspace" to the noun
+# group -- same shape as the existing entries, still gated on a collection-style verb
+# actually preceding the noun, so this stays a widening of the SAME discriminator, not a
+# different one.
 _TELEMETRY_DISCLOSURE_RE = re.compile(
     r"\btelemetry\b|\banalytics\b|\banonymi[sz]ed?\b|\bcrash[\s-]?report\w*\b|"
     r"\busage\s+(?:data|stat\w*|metric\w*)\b|\bphone[\s-]?home\b|"
     r"\btrack(?:ing|s|ed)?\s+usage\b|\bmonitor\w*\s+usage\b|"
-    r"\b(?:collect|gather|send|transmit|report|upload|sync|back(?:s|ed)?[\s-]?up)\w*\s+"
+    r"\b(?:collect|gather|send|transmit|report|upload|sync|post|export|archive|snapshot|"
+    r"back(?:s|ed)?[\s-]?up)\w*\s+"
     r"(?:\w+\s+){0,4}?(?:your\s+)?(?:data|information|stat\w*|usage|diagnostic\w*|files?|"
-    r"directory|project|logs?|history)\b",
+    r"directory|project|logs?|history|bundle\w*|environment\w*|workspace\w*)\b",
     re.I,
 )
 

@@ -378,8 +378,20 @@ _INCLUSTER_API_HOST_RE = re.compile(
     r"KUBERNETES_SERVICE_HOST",
     re.I,
 )
-_NET_SINK_ATTRS_ANY = {"post", "put", "patch", "urlopen", "request"}
-_NET_SINK_ATTRS_BASED = {"send", "sendall", "sendto", "connect"}
+# B-422 (C-348 adversarial review): "put"/"patch"/"request" are common
+# method names with nothing to do with networking on an arbitrary object --
+# queue.Queue.put / multiprocessing.Queue.put, unittest.mock.patch, and any bare
+# `.request()` handler all matched here on ANY attribute base, so e.g. a local
+# producer/consumer pattern that assembled two collection axes and called
+# `work.put(...)` on a plain queue.Queue read as "flows into a network sink"
+# (a false EXCESSIVE_TELEMETRY_FLOW/etc. -- _is_net_sink is shared by every rule
+# below that looks for an outbound sink). Moved into _NET_SINK_ATTRS_BASED so they
+# only count when the call's base object resolves to a known networking module or a
+# `session` variable (_NET_SINK_BASES) -- mirrors how send/sendall/sendto/connect
+# were already gated. "post"/"urlopen" stay ungated: no comparably common
+# non-network false-positive shape for those two turned up during the same review.
+_NET_SINK_ATTRS_ANY = {"post", "urlopen"}
+_NET_SINK_ATTRS_BASED = {"send", "sendall", "sendto", "connect", "put", "patch", "request"}
 _NET_SINK_BASES = {
     "requests",
     "httpx",

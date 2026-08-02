@@ -299,3 +299,162 @@ def test_undisclosed_telemetry_is_warn_not_fail():
     ctx = _ctx_for("undisclosed-telemetry-2", blob, _TELEMETRY_PY)
     finding = check_installed_skills(ctx)
     assert finding.status != "FAIL"
+
+
+# ---------------------------------------------------------------------------
+# CLAWSECCHECK-B-422 (C-348 adversarial review): FP-A -- disclosure gate vocabulary
+# too narrow to recognize ordinary, honestly-disclosed telemetry/backup prose. See
+# checks/_shared._TELEMETRY_DISCLOSURE_RE for the widened verb/noun vocabulary.
+# ---------------------------------------------------------------------------
+
+
+def test_support_bundle_frontmatter_disclosure_is_declared():
+    # Exact B-422 repro: the OLD noun set had no "bundle", so "Collect a support
+    # bundle ... and upload it" matched neither the "collect" nor the "upload" verb
+    # clause -- a textbook-disclosed skill read as undisclosed.
+    blob = (
+        "# file: SKILL.md\n"
+        "---\n"
+        "name: support-bundle\n"
+        "description: Collect a support bundle from this machine and upload it to "
+        "our support portal for troubleshooting.\n"
+        "---\n"
+        "# Support Bundle\n"
+    )
+    assert _skill_declares_telemetry_disclosure(blob) is True
+
+
+def test_archive_project_files_frontmatter_disclosure_is_declared():
+    # A second phrasing from the same B-422 vocabulary probe ("archive" verb, paired
+    # with the pre-existing "project" noun).
+    blob = (
+        "# file: SKILL.md\n"
+        "---\n"
+        "name: backup-archiver\n"
+        "description: Archives your project files to S3 nightly.\n"
+        "---\n"
+    )
+    assert _skill_declares_telemetry_disclosure(blob) is True
+
+
+def test_support_bundle_skill_produces_no_finding():
+    """Clean fixture (B-422 FP-A DoD, task's own repro verbatim): the code genuinely
+    collects >=2 over-collection axes and reaches a network sink (EXCESSIVE_TELEMETRY_FLOW
+    fires at the AST layer), but the frontmatter description fully discloses it -- the
+    end-to-end verdict must stay PASS, not WARN."""
+    blob = (
+        "# file: SKILL.md\n"
+        "---\n"
+        "name: support-bundle\n"
+        "description: Collect a support bundle from this machine and upload it to "
+        "our support portal for troubleshooting.\n"
+        "---\n"
+        "# Support Bundle\n"
+        "The bundle contains the environment variables of the running shell (with "
+        "secrets redacted), a listing of the log directory, and the last 200 lines "
+        "of each log file. It is uploaded over HTTPS to "
+        "https://support.acme.example/api/bundles.\n"
+    )
+    py_src = (
+        "import os, json\n"
+        "import urllib.request\n"
+        "def collect_bundle(log_dir='/var/log/acme'):\n"
+        "    env = dict(os.environ)\n"
+        "    logs = sorted(os.listdir(log_dir)) if os.path.isdir(log_dir) else []\n"
+        "    return {'env': env, 'logs': logs}\n"
+        "def upload(bundle):\n"
+        "    req = urllib.request.Request('https://support.acme.example/api/bundles',\n"
+        "                                  data=json.dumps(bundle).encode())\n"
+        "    return urllib.request.urlopen(req).read()\n"
+        "upload(collect_bundle())\n"
+    )
+    assert "EXCESSIVE_TELEMETRY_FLOW" in _rules(py_src)  # the AST rule DOES fire ...
+    ctx = _ctx_for("support-bundle", blob, py_src)
+    finding = check_installed_skills(ctx)
+    assert finding.status == "PASS"  # ... but disclosure suppresses the WARN
+
+
+# ---------------------------------------------------------------------------
+# CLAWSECCHECK-B-422 (C-348 adversarial review): FP-B -- skillast._is_net_sink
+# matched "put"/"patch"/"request" on ANY attribute base, not just a known networking
+# module/session. See skillast._NET_SINK_ATTRS_BASED for the base-gating fix.
+# ---------------------------------------------------------------------------
+
+
+def test_queue_put_is_not_a_net_sink():
+    # B-422 repro: a local queue.Queue().put(...) call misread as "flows into a
+    # network sink" purely because the method is named "put".
+    src = (
+        "import os, queue\n"
+        "work = queue.Queue()\n"
+        "def scan_tree(root):\n"
+        "    entries = [(d, f) for d, _, f in os.walk(root)]\n"
+        "    top = os.listdir(root)\n"
+        "    return {'tree': entries, 'top': top}\n"
+        "def enqueue(root):\n"
+        "    work.put(scan_tree(root))\n"
+    )
+    assert "EXCESSIVE_TELEMETRY_FLOW" not in _rules(src)
+
+
+def test_mock_patch_is_not_a_net_sink():
+    # B-422 repro: unittest.mock.patch(...) misread as a network sink because the
+    # method is named "patch".
+    src = (
+        "import os\n"
+        "from unittest import mock\n"
+        "def scan_tree(root):\n"
+        "    entries = [(d, f) for d, _, f in os.walk(root)]\n"
+        "    top = os.listdir(root)\n"
+        "    return {'tree': entries, 'top': top}\n"
+        "def gather(root):\n"
+        "    return scan_tree(root)\n"
+        "mock.patch('x.y', return_value=gather('.'))\n"
+    )
+    assert "EXCESSIVE_TELEMETRY_FLOW" not in _rules(src)
+
+
+def test_requests_patch_is_still_a_net_sink():
+    # Regression guard: base-gating "patch" must NOT lose the real
+    # requests.patch(...)/httpx.patch(...) network-call shape -- "requests" is in
+    # _NET_SINK_BASES, so this must still fire.
+    src = (
+        "import os, requests\n"
+        "def collect_telemetry():\n"
+        "    data = {}\n"
+        "    data['cwd_files'] = os.listdir('.')[:50]\n"
+        "    data['env_keys'] = sorted(os.environ.keys())\n"
+        "    return data\n"
+        "def send_telemetry(data):\n"
+        "    requests.patch('https://events.example.io/v1/events', json=data)\n"
+        "def main():\n"
+        "    send_telemetry(collect_telemetry())\n"
+    )
+    assert "EXCESSIVE_TELEMETRY_FLOW" in _rules(src)
+
+
+def test_queue_producer_consumer_skill_produces_no_finding():
+    """Clean fixture (B-422 FP-B DoD, task's own repro verbatim): a local
+    directory-indexing producer/consumer skill that queues its assembled result for
+    a worker -- no network call anywhere -- must stay PASS, not WARN."""
+    blob = (
+        "# file: SKILL.md\n"
+        "---\n"
+        "name: tree-indexer\n"
+        "description: Indexes a local directory tree for fast lookup.\n"
+        "---\n"
+        "# Tree Indexer\n"
+    )
+    py_src = (
+        "import os, queue\n"
+        "work = queue.Queue()\n"
+        "def scan_tree(root):\n"
+        "    entries = [(d, f) for d, _, f in os.walk(root)]\n"
+        "    top = os.listdir(root)\n"
+        "    return {'tree': entries, 'top': top}\n"
+        "def enqueue(root):\n"
+        "    work.put(scan_tree(root))\n"
+    )
+    ctx = _ctx_for("tree-indexer", blob, py_src)
+    finding = check_installed_skills(ctx)
+    assert finding.status == "PASS"
