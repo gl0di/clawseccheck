@@ -12641,6 +12641,159 @@ def check_self_modification_directive(ctx: Context) -> Finding:
     )
 
 
+# ---------- B346 (F-160): anti-forensic self-erase directive ----------
+# TA488's OWAReaper (Proofpoint/NSA, CVE-2026-42897) -- the blog's title, "Cleaning Out
+# Inboxes", names the behavior -- rewrote the delivery email on the Exchange server
+# after running and stripped the exploit content: the payload erased the evidence of
+# its own delivery. The agent analogue: a skill that, after acting, deletes or
+# truncates the agent's OWN audit trail -- trajectory sidecar, shell history, or log
+# directory -- so there is no record it ran.
+#
+# Distinct from what already exists: B22 (checks/_lifecycle.py, check_self_modification)
+# is pure config-posture. B345 (directly above -- the closest sibling this mirrors) is
+# the self-modification-CONTENT check, a different mechanism (rewriting the skill's own
+# source) than erasure. B189 (checks/_lifecycle.py, check_cron_run_log_orphans) is
+# deliberately advisory/never-FAIL because a cron job's run-log disappearing with the
+# job IS the OpenClaw product default for one-shot jobs -- this check must never
+# resurrect that as a FAIL; it targets a skill's own content/code instructing erasure
+# of the AGENT's audit trail, not a cron job's own log.
+#
+# Mirrors B345's two-tier grading and proximity-window idiom (C-135: reuse, don't
+# reinvent) with one deliberate difference the task calls for -- B345 is
+# directive-primary (a bare sink alone says nothing), but here a bare SINK alone (e.g.
+# `history -c` with no surrounding prose) is itself worth a WARN, since the erasure
+# code can ship without any accompanying directive text.
+_SELF_ERASE_DIRECTIVE_RE = re.compile(
+    r"\b(?:clear|wipe|erase|delete|remove)\s+"
+    r"(?:this\s+message\b"
+    r"|your\s+(?:trajectory|history|shell\s+history|logs?|trace)\b"
+    r"|(?:any\s+|all\s+)?(?:record|trace|evidence)\s+(?:of|that)\b"
+    r"|the\s+(?:trajectory|log)\b)",
+    re.I,
+)
+# Shell-history-tampering builtins/env-vars need no path corroboration -- they
+# inherently target ONLY the shell's own command history. The generic erase verbs
+# (truncate/`: >`/shred/rm) DO need a same-statement target naming the agent's own
+# trajectory/session/log surface -- otherwise an ordinary `rm -rf build/` or
+# `find ... -delete` cleanup of a skill's own output would match on verb alone. That
+# is the exact C-135 hazard F-160 calls out: the TARGET discriminates, not the verb.
+# "Same statement" = no `;`/`|`/`&`/newline between the verb and the target, so an
+# unrelated later command sharing a script line can't borrow the verb's match.
+_SELF_ERASE_SINK_RE = re.compile(
+    r"\bhistory\s+-c\b"
+    r"|\bunset\s+HISTFILE\b"
+    r"|\bHISTFILE\s*=\s*(?:/dev/null|[\"'][\"'])"
+    r"|\bHIST(?:SIZE|FILESIZE)\s*=\s*0\b"
+    r"|(?:\btruncate\s+-s\s*0\s+|:\s*>\s*|\bshred\s+(?:-\w+\s+)*|\brm\s+(?:-\w+\s+)*)"
+    r"[^\n;|&]*(?:trajector\w*|\.jsonl\b|agent[-_]?logs?\b|sessions?[/\\])",
+    re.I,
+)
+_SELF_ERASE_WINDOW = 400  # chars; mirrors B345's _SELF_MOD_WINDOW -- the directive and
+# its corroborating sink may sit in separate paragraphs/fenced code blocks (or separate
+# bundled files) of the same skill, prose describing the cleanup then a script doing it.
+
+
+def check_self_erase_directive(ctx: Context) -> Finding:
+    """B346 (F-160) — a skill's content instructs, or its code implements, erasing the
+    agent's own audit trail (trajectory sidecar / shell history / log directory) after
+    it runs -- the anti-forensic behavior TA488's OWAReaper implant used against Outlook
+    delivery evidence, applied to a skill's own footprint.
+
+    FAIL    — an erase directive corroborated within `_SELF_ERASE_WINDOW` chars by a
+              concrete sink targeting the agent's audit trail (shell-history tampering,
+              or truncate/`: >`/shred/rm aimed at a trajectory/session/agent-log path).
+    WARN    — a bare erase directive with no corroborating sink nearby, OR a bare sink
+              with no directive anywhere in the skill. Ambiguous alone: legitimate log
+              rotation / temp cleanup looks identical at the verb level; only the
+              (directive, target) PAIR is a hard technical anchor.
+    PASS    — no erase directive and no audit-trail-targeting sink found, or the only
+              mention is negated ("this skill never clears your trajectory log").
+    UNKNOWN — no installed skills to inspect.
+
+    Distinct from B22 (config-posture self-modification), B345 (self-modification
+    CONTENT, not erasure -- the direct sibling this mirrors), and B189
+    (check_cron_run_log_orphans — deliberately advisory/never-FAIL cron-job self-erase,
+    the OpenClaw product default; this check must not resurrect that as a FAIL).
+    """
+    if not ctx.installed_skills:
+        return _finding(
+            "B346",
+            UNKNOWN,
+            "No installed skills to inspect for anti-forensic self-erase directives.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+
+    fails: list[str] = []
+    warns: list[str] = []
+    for name, blob in ctx.installed_skills.items():
+        directive_m = None
+        for m in _SELF_ERASE_DIRECTIVE_RE.finditer(blob):
+            if _negation_governs_trigger(blob, m.start()):
+                continue
+            directive_m = m
+            break
+
+        if directive_m is not None:
+            lo = max(0, directive_m.start() - _SELF_ERASE_WINDOW)
+            hi = min(len(blob), directive_m.end() + _SELF_ERASE_WINDOW)
+            window = blob[lo:hi]
+            snippet = _obf_clip(directive_m.group(0))
+            if _SELF_ERASE_SINK_RE.search(window):
+                fails.append(
+                    f"{name}: anti-forensic self-erase directive ({snippet}) "
+                    "corroborated by a sink targeting the agent's own audit trail"
+                )
+            else:
+                warns.append(
+                    f"{name}: possible anti-forensic self-erase directive ({snippet}), "
+                    "no corroborating audit-trail sink nearby"
+                )
+            continue  # one finding per skill is enough
+
+        sink_m = _SELF_ERASE_SINK_RE.search(blob)
+        if sink_m is not None:
+            snippet = _obf_clip(sink_m.group(0))
+            warns.append(
+                f"{name}: audit-trail erasure sink ({snippet}), no corroborating "
+                "self-erase directive nearby"
+            )
+
+    if fails:
+        extra = f" (+{len(fails) - 4} more)" if len(fails) > 4 else ""
+        return _finding(
+            "B346",
+            FAIL,
+            "Anti-forensic self-erase directive with a corroborating audit-trail sink: "
+            + "; ".join(fails[:4]) + extra,
+            "Remove the instruction/code that clears the agent's trajectory log, shell "
+            "history, or log directory after the skill runs -- a skill should never "
+            "erase the record of its own execution.",
+            fails + warns,
+        )
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _finding(
+            "B346",
+            WARN,
+            "Possible anti-forensic self-erase signal (directive or sink alone): "
+            + "; ".join(warns[:4]) + extra,
+            "Review this skill's log/history-cleanup language and code. Legitimate log "
+            "rotation or temp-file cleanup targets the skill's OWN build/cache output, "
+            "never the agent's trajectory sidecar or shell history -- confirm the "
+            "target before installing.",
+            warns,
+            severity=MEDIUM,
+        )
+    return _finding(
+        "B346",
+        PASS,
+        "No anti-forensic self-erase directive or audit-trail erasure sink found in "
+        "installed skill content.",
+        "Keep skill content free of directives/code that clear the agent's trajectory "
+        "log, shell history, or log directory after execution.",
+    )
+
+
 # C-210: prose-intent bulk-data exfiltration -- natural-language description of
 # collecting bulk/PII data and sending it to an external (non-first-party) endpoint.
 # Distinct from C-203 (code-shaped host-info telemetry): this is prose/workflow-step

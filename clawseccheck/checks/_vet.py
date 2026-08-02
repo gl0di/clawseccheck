@@ -135,6 +135,7 @@ from ._content import (
     check_python_runtime_persist_install,
     check_prose_bulk_exfil,
     check_remote_code_dependency,
+    check_self_erase_directive,
     check_self_modification_directive,
     check_self_privesc_directive,
     check_silent_instruction,
@@ -5071,4 +5072,5 @@ SKILL_CONTENT_RING = (
     check_model_artifact_provenance,  # B343 — ML model artifact provenance (C-341)
     check_offensive_tooling_directive,  # B344 — offensive-security tooling directive (C-338)
     check_self_modification_directive,  # B345 — self-modification directive (B-392)
+    check_self_erase_directive,  # B346 — anti-forensic self-erase directive (F-160)
 )

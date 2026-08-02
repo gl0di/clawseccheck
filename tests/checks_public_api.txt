@@ -259,6 +259,7 @@ check_remote_code_dependency
 check_sandbox
 check_secrets
 check_secrets_at_rest_home
+check_self_erase_directive
 check_self_modification
 check_self_privesc_directive
 check_sender_identity

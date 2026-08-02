@@ -2758,6 +2758,28 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B346 (F-160, TA488/OWAReaper — Proofpoint/NSA, CVE-2026-42897): a skill's content
+    # instructs, or its code implements, erasing the agent's OWN audit trail (trajectory
+    # sidecar / shell history / log directory) after it runs — the anti-forensic
+    # behavior OWAReaper used to strip its delivery evidence from Exchange, applied to a
+    # skill's own footprint. Distinct from B22 (config-posture only), B345 (the direct
+    # sibling — self-modification CONTENT, not erasure), and B189 (cron run-log
+    # orphans — deliberately advisory/never-FAIL because self-erasure is the OpenClaw
+    # product default for one-shot cron jobs; this check must not resurrect that as a
+    # FAIL). WARN on a bare directive or a bare sink alone (legitimate log rotation/temp
+    # cleanup looks identical at the verb level); FAIL only when a directive is
+    # corroborated by a sink targeting the agent's trajectory/history/log path — the
+    # same "two independent signals, never a bare one" discipline B159/B335/B345 already
+    # established for this content ring.
+    CheckMeta(
+        "B346",
+        "Anti-forensic self-erase directive targeting the agent's own audit trail",
+        CRITICAL,
+        "hardening",
+        "Incident Response / Audit Trail",
+        confidence="MEDIUM",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
