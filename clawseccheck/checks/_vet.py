@@ -3180,6 +3180,19 @@ def _powershell_encoded_payloads(blob: str) -> list[str]:
 # simply absent from the dict at that point — this never forces new work, only
 # records what was already known. Retention only — informational bookkeeping for a
 # future evidence-accumulation consumer; never itself changes a verdict.
+#
+# C-353 (measured, then retracted): an escalator ("B13 WARN + corroborating_buckets
+# non-empty -> FAIL") was proposed and tested against the SkillTrustBench corpus
+# attribution (eval/skilltrustbench/c353_bucket_attribution.py, 2,555 cases). The
+# aggregate lift (0.775 -> 0.932 precision) is real but is a Simpson's-paradox
+# artifact: 88.5% of it is explained by winner-bucket base rates alone (buckets like
+# warns_chunked_file_exec/warns_shell_injection are already >=0.98 precision with or
+# without corroboration; warns_content/warnings/warns_unpinned sit at 0.44-0.52 and
+# rarely co-fire with another bucket at all). Simulating the rule on the same corpus
+# produces 18 new false FAILs on gold-benign skills — a hard C-303/GR#5 blocker — for
+# ~0.015 of real precision gain, 78.9% of escalations landing in buckets with zero
+# headroom left. Anyone reopening this should re-run the per-bucket attribution
+# first, not just the aggregate number.
 def _b13_verdict(
     severity: str,
     status: str,
