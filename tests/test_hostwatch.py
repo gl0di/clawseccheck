@@ -225,19 +225,49 @@ def test_linux_egress_nftables_output_accept_is_allow(tmp_path):
 
 
 def test_linux_egress_ufw_outgoing_deny_is_deny(tmp_path):
-    _touch(tmp_path, "etc/ufw/ufw.conf", 'DEFAULT_OUTGOING_POLICY="deny"\n')
+    # B-437: the real key/file is DEFAULT_OUTPUT_POLICY in /etc/default/ufw, not
+    # DEFAULT_OUTGOING_POLICY in /etc/ufw/ufw.conf — and it only counts as an
+    # active posture when ufw is actually enabled.
+    _touch(tmp_path, "etc/default/ufw", 'DEFAULT_OUTPUT_POLICY="deny"\n')
+    _touch(tmp_path, "etc/ufw/ufw.conf", "ENABLED=yes\n")
     res = detect(root=tmp_path, system="Linux", which=_none)
     eg = res["classes"]["egress_posture"]
     assert eg["status"] == "present"
     assert eg["active"] is True
+    assert any("DEFAULT_OUTPUT_POLICY=deny" in e for e in eg["evidence"])
 
 
 def test_linux_egress_ufw_outgoing_allow_is_allow(tmp_path):
-    _touch(tmp_path, "etc/ufw/ufw.conf", 'DEFAULT_OUTGOING_POLICY="allow"\n')
+    _touch(tmp_path, "etc/default/ufw", 'DEFAULT_OUTPUT_POLICY="allow"\n')
+    _touch(tmp_path, "etc/ufw/ufw.conf", "ENABLED=yes\n")
     res = detect(root=tmp_path, system="Linux", which=_none)
     eg = res["classes"]["egress_posture"]
     assert eg["status"] == "present"
     assert eg["active"] is False
+
+
+def test_linux_egress_ufw_outgoing_policy_old_key_location_not_read(tmp_path):
+    # C-135 regression pin: the OLD (wrong) key/file from before B-437 must NOT
+    # be read — a leftover DEFAULT_OUTGOING_POLICY in ufw.conf is not the real
+    # field and must not be mistaken for a resolved policy.
+    _touch(tmp_path, "etc/ufw/ufw.conf", 'DEFAULT_OUTGOING_POLICY="deny"\nENABLED=yes\n')
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    eg = res["classes"]["egress_posture"]
+    assert eg["status"] == "unknown"
+    assert eg["active"] is None
+
+
+def test_linux_egress_ufw_policy_present_but_disabled_is_not_active(tmp_path):
+    # B-437 secondary defect: a deny policy left on disk for a DISABLED ufw
+    # (`ufw disable` was run but /etc/default/ufw was never edited back) must
+    # not be credited as an active egress posture.
+    _touch(tmp_path, "etc/default/ufw", 'DEFAULT_OUTPUT_POLICY="deny"\n')
+    _touch(tmp_path, "etc/ufw/ufw.conf", "ENABLED=no\n")
+    res = detect(root=tmp_path, system="Linux", which=_none)
+    eg = res["classes"]["egress_posture"]
+    assert eg["status"] == "unknown"
+    assert eg["active"] is None
+    assert eg["found"] == []
 
 
 def test_linux_egress_no_config_is_unknown(tmp_path):

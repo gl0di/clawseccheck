@@ -127,14 +127,18 @@ def _ufw_enabled(root: Path) -> bool | None:
 
 
 def _ufw_outgoing_policy(root: Path) -> str | None:
-    """DEFAULT_OUTGOING_POLICY from /etc/ufw/ufw.conf, lowercased ('deny'/'reject'/
-    'allow'/...), or None if the key or file is absent/unreadable."""
-    txt = _read_text(root / "etc/ufw/ufw.conf")
+    """DEFAULT_OUTPUT_POLICY from /etc/default/ufw, lowercased ('deny'/'reject'/
+    'allow'/...), or None if the key or file is absent/unreadable.
+
+    B-437: the key does NOT live in /etc/ufw/ufw.conf (that file only holds
+    ENABLED/LOGLEVEL-style toggles) — it is DEFAULT_OUTPUT_POLICY in
+    /etc/default/ufw, verified directly against a real Ubuntu host."""
+    txt = _read_text(root / "etc/default/ufw")
     if txt is None:
         return None
     for line in txt.splitlines():
         s = line.strip()
-        if s.lower().startswith("default_outgoing_policy"):
+        if s.lower().startswith("default_output_policy"):
             _, _, val = s.partition("=")
             return val.strip().strip('"').strip("'").lower() or None
     return None
@@ -348,8 +352,12 @@ def _detect_linux(root: Path, which) -> dict:
         found.append(f"nftables OUTPUT policy={nft_policy}")
         deny = nft_policy in ("drop", "reject")
     ufw_policy = _ufw_outgoing_policy(root)
-    if ufw_policy is not None:
-        found.append(f"ufw DEFAULT_OUTGOING_POLICY={ufw_policy}")
+    # B-437: a DEFAULT_OUTPUT_POLICY left on disk for a DISABLED ufw is not an
+    # active egress posture — gate on _ufw_enabled() also being True, or a
+    # `ufw disable` that never touched /etc/default/ufw would still be
+    # credited as enforcing a deny-outbound policy it isn't actually applying.
+    if ufw_policy is not None and _ufw_enabled(root) is True:
+        found.append(f"ufw DEFAULT_OUTPUT_POLICY={ufw_policy}")
         policy_deny = ufw_policy in ("deny", "reject")
         # multiple confirmed sources: any confirmed default-allow is a real gap,
         # so let a False win over an earlier True rather than silently hiding it.

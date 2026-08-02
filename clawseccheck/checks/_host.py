@@ -359,8 +359,8 @@ def check_host_egress_posture(ctx: Context) -> Finding:
             "Could not determine read-only whether outbound traffic defaults to "
             "deny or allow on this host.",
             "Verify manually whether outbound traffic defaults to deny (nftables/"
-            "iptables OUTPUT policy, ufw DEFAULT_OUTGOING_POLICY) — an unreadable "
-            "policy is the expected result on most systems.",
+            "iptables OUTPUT policy, ufw DEFAULT_OUTPUT_POLICY in /etc/default/ufw) "
+            "— an unreadable policy is the expected result on most systems.",
             evidence=evidence,
         )
 
