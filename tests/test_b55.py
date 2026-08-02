@@ -79,9 +79,65 @@ def test_bad_fixture_b55_is_scored_in_audit_but_checkmeta_is_not():
 
 
 # --------------------------------------------------------------------------- PASS
-def test_scoped_fs_write_passes_on_clean_fixture():
+# B-410 (gap #2 in the B55 docstring, third C-135 round on this same PASS branch):
+# this fixture's tools.exec.mode="ask" gate paired with its declared-but-not-open
+# allowlist channel used to clear straight to PASS via the old `not open_ch` test --
+# exactly the conflation the docstring names ("channels declared, none proven open"
+# treated the same as "no proven ingress at all"). tools.exec.mode is not
+# write-specific, so an untrusted-content channel still reaching the write grant
+# must WARN, matching the ungated boundary already pinned by
+# test_b55_allowlist_channel_does_not_escalate_to_fail. This test used to assert
+# PASS on the pre-fix premise; corrected here rather than preserved as a stale pin
+# (see test_gated_with_no_channels_declared_stays_pass below for the genuinely
+# scoped PASS case this fixture no longer represents).
+def test_gated_declared_allowlist_channel_no_longer_passes_on_clean_fixture():
     f = _b55(FIXTURES / "clean_b55_fs_write_scoped")
+    assert f.status == WARN, f.detail
+    assert f.status != FAIL  # still WARN-capped, not escalated
+
+
+# The counterpart PASS case B-410 preserves: no channel declared at all (so no proven
+# ingress either way, open or merely-allowlisted) plus an approval gate stays a
+# defensible PASS -- this is what "clean_b55_fs_write_scoped" was meant to pin before
+# its channel policy made it the gap #2 repro instead.
+def test_gated_with_no_channels_declared_stays_pass(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"tools": {"allow": ["fs_write"], "exec": {"mode": "ask"}}}',
+    )
+    f = _b55(home)
     assert f.status == PASS, f.detail
+
+
+# B-410's exact ticket repro: tools.profile "full" (a B-395 grant-detection path) +
+# tools.exec.mode "ask" + a channel declared with only dmPolicy="allowlist"/
+# groupPolicy="allowlist" (untrusted content reachable, never proven open). Used to
+# PASS; must now WARN.
+def test_b410_exact_repro_no_longer_passes(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"tools": {"profile": "full", "exec": {"mode": "ask"}},'
+        ' "channels": {"telegram": {"enabled": true, "dmPolicy": "allowlist",'
+        ' "groupPolicy": "allowlist"}}}',
+    )
+    f = _b55(home)
+    assert f.status == WARN, f.detail
+    assert f.status != PASS
+
+
+# B-410's other declared-but-not-open sub-case: a "pairing" dmPolicy channel is
+# untrusted content the same way "allowlist" is (_external_input_channels covers
+# both), so it must warn under a gate too, matching
+# test_b55_paired_channel_does_not_escalate_to_fail's ungated boundary.
+def test_gated_paired_channel_declared_still_warns_not_pass(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"dmPolicy": "pairing"}},'
+        ' "tools": {"allow": ["fs_write"], "exec": {"mode": "ask"}}}',
+    )
+    f = _b55(home)
+    assert f.status == WARN, f.detail
+    assert f.status != PASS
 
 
 def test_no_write_tool_passes(tmp_path):
@@ -262,8 +318,27 @@ def test_risk12_fires_on_broad_write_plus_untrusted_ingress():
     assert "RISK-12" in ids
 
 
-def test_risk12_silent_on_scoped_config():
+# B-410: "clean_b55_fs_write_scoped" declares an allowlist channel (untrusted
+# content, never proven open) alongside the write grant, so B55 now correctly WARNs
+# on it (see test_gated_declared_allowlist_channel_no_longer_passes_on_clean_fixture)
+# -- and RISK-12 (keyed on B55 FAIL/WARN + untrusted ingress) now correctly fires
+# too. This test used to assert RISK-12 stayed silent on the pre-fix PASS premise;
+# corrected here rather than preserved as a stale pin.
+def test_risk12_fires_on_declared_allowlist_channel_gated_config():
     ctx, findings, _ = audit(FIXTURES / "clean_b55_fs_write_scoped")
+    ids = {p.id for p in risk_paths(ctx, findings)}
+    assert "RISK-12" in ids
+
+
+# The counterpart RISK-12-stays-silent case B-410 preserves: no channel declared at
+# all, so B55 genuinely PASSes (test_gated_with_no_channels_declared_stays_pass) and
+# RISK-12 has no ingress leg to fire on.
+def test_risk12_silent_when_no_channels_declared(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"tools": {"allow": ["fs_write"], "exec": {"mode": "ask"}}}',
+    )
+    ctx, findings, _ = audit(home)
     ids = {p.id for p in risk_paths(ctx, findings)}
     assert "RISK-12" not in ids
 
@@ -406,6 +481,31 @@ def test_new_grant_path_open_channel_confined_warns_not_fails(tmp_path, tools_js
     f = _b55(home)
     assert f.status == WARN, f.detail
     assert f.scored is False
+
+
+# B-410 third dimension on this same new-grant-path matrix: a channel that is
+# DECLARED but only dmPolicy="allowlist" (untrusted content, never proven open) plus
+# a gated tools.exec.mode used to clear straight to PASS for every one of the four
+# B-395 grant-detection paths -- the same conflation gap #2 in the B55 docstring
+# describes, now closed. Every path here must WARN, not PASS.
+@pytest.mark.parametrize(
+    "tools_json",
+    [
+        '{"allow": ["*"], "exec": {"mode": "ask"}}',
+        '{"allow": ["group:fs"], "exec": {"mode": "ask"}}',
+        '{"profile": "full", "exec": {"mode": "ask"}}',
+        '{"allow": ["read"], "alsoAllow": ["write"], "exec": {"mode": "ask"}}',
+    ],
+    ids=["wildcard", "group_fs", "profile", "alsoAllow"],
+)
+def test_new_grant_path_declared_not_open_channel_gated_warns_not_pass(tmp_path, tools_json):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"dmPolicy": "allowlist"}}, "tools": ' + tools_json + "}",
+    )
+    f = _b55(home)
+    assert f.status == WARN, f.detail
+    assert f.status != PASS
 
 
 def test_b55_and_b68_never_disagree_on_the_same_config():

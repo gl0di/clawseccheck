@@ -31,6 +31,7 @@ from ._shared import (
     _canon_tool,
     _config_unreadable,
     _custom,
+    _external_input_channels,
     _finding,
     _has_approval_gate,
     _hint,
@@ -904,24 +905,23 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     can still produce a false FAIL. Closing this needs a real multi-layer policy
     composer, not a one-line patch — out of scope for this pass.
 
-    Known, deliberately UNFIXED gap #2 in this same pass (a third C-135 round on the
-    elevated-allowFrom removal above found it, and recommended its own dedicated review
-    rather than a same-sitting patch — three sequential "fix one thing, find the
-    adjacent one" cycles is itself a signal this PASS branch wants a holistic
-    redesign, not a fourth incremental one): `gated` (`tools.exec.mode` having an
-    approval-gate value) still clears `not open_ch` straight to PASS, even though this
-    same function's own FAIL-branch reasoning says `tools.exec.mode` "doesn't scope
-    write-capable tools" either. Concretely, `tools.profile: "full"` (a new B-395
+    Gap #2 (B-410) is now CLOSED: `gated` (`tools.exec.mode` having an approval-gate
+    value) used to clear `not open_ch` straight to PASS, even though this same
+    function's own FAIL-branch reasoning says `tools.exec.mode` "doesn't scope
+    write-capable tools" either. Concretely, `tools.profile: "full"` (a B-395
     grant-detection path) + `tools.exec.mode: "ask"` + a channel that is declared but
     only `dmPolicy: "allowlist"` (untrusted CONTENT reachable, not "open"/proven-broad
     reach — the same category this function's own comment already carves out as
-    "stays the WARN fallback" for the UNGATED case) still PASSes once gated, instead of
-    staying WARN. Unlike the elevated-allowFrom removal, `tools.exec.mode` is not
-    PROVEN entirely irrelevant to write-tool reachability (only "not write-specific"),
-    so the right fix isn't a clean removal — it likely needs to distinguish "no
-    channels declared at all" (a defensible PASS) from "channels declared, none proven
-    open" (arguably still WARN even when gated), which the current `not open_ch` test
-    conflates. Filed as a follow-up, not patched here.
+    "stays the WARN fallback" for the UNGATED case) used to PASS once gated, instead
+    of staying WARN. `tools.exec.mode` is not PROVEN entirely irrelevant to
+    write-tool reachability (only "not write-specific"), so the fix is not a clean
+    removal like the elevated-allowFrom one above — it distinguishes "no channels
+    declared at all" (`_external_input_channels` empty — still a defensible PASS,
+    genuinely no proven ingress) from "channels declared, none proven open, but
+    carrying untrusted content" (`_external_input_channels` non-empty — now WARN even
+    when gated), which the old `not open_ch` test alone conflated. `open_ch` itself
+    (feeding the FAIL gate below) is unchanged — this only narrows what `not open_ch`
+    accepts as PASS-worthy.
 
     Gap #3 (alsoAllow-only implicit wildcard, B-411) is now CLOSED: `_b68_fs_tools_granted`
     delegates to `_tool_policy_view`, which models OpenClaw's `unionAllow` injection of an
@@ -936,12 +936,17 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
               declared-but-non-list tools.allow (a scalar or mapping — schema-invalid,
               but seen in the wild) also lands here, not PASS.
     PASS    — no write-capable tool granted, OR one is granted, no open-ingress channel
-              reaches it, and tools.exec.mode has an approval gate set.
+              reaches it, AND no channel is declared at all with untrusted-content
+              reach either (_external_input_channels empty), with tools.exec.mode
+              set as an approval gate.
     WARN    — write tool granted with no proven broad reach and no approval gate
-              (ungated), OR reachable by a proven-open channel but confined to the
-              workspace (tools.fs.workspaceOnly / sandbox.mode='all'), OR reachable by
-              a proven-open channel, unconfined, but the ONLY grant signal is
-              tools.alsoAllow's implicit wildcard (B-411) with no explicit
+              (ungated), OR reachable by a declared-but-not-open channel carrying
+              untrusted content (_external_input_channels non-empty, e.g.
+              dmPolicy="allowlist"/"pairing") even when gated (B-410 — the gate is
+              not write-specific), OR reachable by a proven-open channel but
+              confined to the workspace (tools.fs.workspaceOnly / sandbox.mode='all'),
+              OR reachable by a proven-open channel, unconfined, but the ONLY grant
+              signal is tools.alsoAllow's implicit wildcard (B-411) with no explicit
               write/edit/apply_patch/"*"/"group:fs" token and no powerful
               tools.profile -- an independent C-135 review found a real per-agent
               tools.profile can narrow that implicit grant away invisibly to this
@@ -1049,15 +1054,41 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # directions: the only signals this function's decision tree consults now are
     # open_ch (proven broad reach), gated (a non-write-specific but still real
     # exec-mode approval gate), and fs_confined (workspace/sandbox confinement).
+    #
+    # B-410 (gap #2 above, third C-135 round on this same PASS branch): `gated` alone
+    # used to clear straight to PASS whenever no channel was proven fully OPEN — but a
+    # channel that IS declared with an untrusted-content policy (allowlist/pairing —
+    # _external_input_channels, deliberately the BROADER helper here, unlike open_ch
+    # above) still carries only the same non-write-specific gate this function's own
+    # FAIL-branch reasoning already disclaims ("tools.exec.mode='ask' alone ... doesn't
+    # scope write-capable tools"). PASS is reserved for genuinely NO declared ingress at
+    # all; a declared-but-not-open channel downgrades to WARN even when gated.
     if not open_ch:
-        if gated:
+        ext_ch = _external_input_channels(cfg)
+        if gated and not ext_ch:
             return _finding(
                 "B55",
                 PASS,
-                f"Filesystem-write tool granted ({label}) but no open-ingress channel "
-                f"reaches it, and an approval gate (tools.exec.mode) is set.",
+                f"Filesystem-write tool granted ({label}) but no ingress channel is "
+                f"declared, and an approval gate (tools.exec.mode) is set.",
                 "Scoping is in place — keep tools.exec.mode='ask' (or 'deny'/'allowlist').",
                 evidence=[f"write tool granted: {label}"],
+            )
+        if gated and ext_ch:
+            return _finding(
+                "B55",
+                WARN,
+                f"Filesystem-write tool granted ({label}) is reachable by a declared "
+                f"channel carrying untrusted content ({', '.join(ext_ch)}) that is not "
+                f"proven open, and the only scoping is a non-write-specific approval "
+                f"gate (tools.exec.mode) — it doesn't scope write-capable tools.",
+                "Lock the channel(s) to 'owner' (or 'disabled'); tools.exec.mode='ask' "
+                "alone does not clear this — it doesn't scope write-capable tools.",
+                evidence=[
+                    f"write tool granted: {label}",
+                    f"declared, not-open, untrusted-content channel(s): {', '.join(ext_ch)}",
+                    "approval gate present (tools.exec.mode) but not write-specific",
+                ],
             )
     else:
         ev = [
