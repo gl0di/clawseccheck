@@ -4673,6 +4673,82 @@ def check_plugin_hook_grants(ctx: Context) -> Finding:
     )
 
 
+# B-421: the bundled `memory-core` id -- the literal implicit default from
+# DEFAULT_SLOT_BY_KEY (slots-kpL659LX.js:6-8) -- is never itself a built-in alias target
+# (see _PLUGIN_ID_ALIASES below), so a plain, case-sensitive string compare against it is
+# faithful to the real normalizer's behavior for this specific id.
+_MEMORY_SLOT_DEFAULT_OWNER = "memory-core"
+
+# B-421: OpenClaw's own built-in plugin-id alias table (config-state-CtMlHVRM.js:6-9,
+# BUILT_IN_PLUGIN_ALIAS_FALLBACKS) -- normalizePluginId folds an alias to its canonical id
+# before any allow/deny/activation comparison. NOTE what the real normalizer does NOT do:
+# it does not lowercase ids outside this table -- normalizePluginIdWithLookup (same file
+# :17-23) looks the LOWERCASED id up in the alias map, but on a miss falls back to the
+# CASE-PRESERVED trimmed string, not the lowercased one. So a bare case difference like
+# "Memory-Core" vs "memory-core" is never folded together by the real normalizer -- only
+# these five specific keys (3 aliases + their 2 canonical targets) are.
+_PLUGIN_ID_ALIASES = {
+    "google-gemini-cli": "google",
+    "minimax-portal": "minimax",
+    "minimax-portal-auth": "minimax",
+}
+
+
+def _normalize_plugin_id(raw: str) -> str:
+    """B-421: replicate OpenClaw's ``normalizePluginId`` (config-state-CtMlHVRM.js:17-23)
+    closely enough for allow/deny comparison -- trim, fold a KNOWN alias to its canonical
+    id (the lookup itself is case-insensitive), otherwise return the trimmed value AS-IS.
+    Deliberately NOT lowercased on a miss -- that matches the real fallback, not a
+    stronger case-insensitive comparison the real normalizer does not perform."""
+    trimmed = raw.strip()
+    return _PLUGIN_ID_ALIASES.get(trimmed.lower(), trimmed)
+
+
+def _memory_default_owner_blocked(plugins: dict) -> bool:
+    """B-421: is the implicit ``memory-core`` default prevented from actually taking the
+    memory slot, per OpenClaw's own activation precedence -- grounded directly against the
+    installed dist (not just the schema)?
+
+    Two real functions gate this; either one blocking is enough to suppress disclosure:
+
+    * ``resolvePluginActivationDecisionShared`` (config-normalization-shared-w2iz0aeC.js
+      :70-100, general plugin activation) returns ``activated:false`` on
+      ``!config.enabled`` (:70, cause ``"plugins-disabled"``),
+      ``config.deny.includes(id)`` (:77, ``"blocked-by-denylist"``), or
+      ``entry?.enabled === false`` (:85, ``"disabled-in-config"``) -- each checked
+      BEFORE the slot-selection grant at :100, so any one of the three wins over slot
+      ownership, including the implicit default.
+    * ``resolveMemorySlotStartupPluginId`` (gateway-startup-plugin-ids-COmsQTCi.js
+      :603-614) -- the function that actually resolves which plugin id backs the memory
+      slot at gateway startup when ``plugins.slots.memory`` is left unset -- has its OWN
+      extra guard on the implicit-default fallback specifically: a non-empty
+      ``plugins.allow`` that omits the default id means the implicit default is never
+      even selected as a candidate (:610) -- this is exactly ``fixtures/home_safe``'s
+      shape (``plugins.allow: ["trentclaw"]``, no ``memory-core`` entry anywhere).
+
+    Only the UNSET/blank ``plugins.slots.memory`` path is gated by this helper -- an
+    EXPLICITLY named owner is a separate, unaffected disclosure (B-421 ticket scope).
+    """
+    if plugins.get("enabled") is False:
+        return True
+    deny = plugins.get("deny")
+    if isinstance(deny, list):
+        denied = {p.strip() for p in deny if isinstance(p, str)}
+        if _MEMORY_SLOT_DEFAULT_OWNER in denied:
+            return True
+    entries = plugins.get("entries")
+    if isinstance(entries, dict):
+        entry = entries.get(_MEMORY_SLOT_DEFAULT_OWNER)
+        if isinstance(entry, dict) and entry.get("enabled") is False:
+            return True
+    allow = plugins.get("allow")
+    if isinstance(allow, list):
+        allowed = {p.strip() for p in allow if isinstance(p, str) and p.strip()}
+        if allowed and _MEMORY_SLOT_DEFAULT_OWNER not in allowed:
+            return True
+    return False
+
+
 def check_plugin_slots_and_deny(ctx: Context) -> Finding:
     """B342 (disclosure advisory) — plugins.slots.{memory,contextEngine} ownership and
     plugins.allow/plugins.deny contradictions.
@@ -4712,12 +4788,36 @@ def check_plugin_slots_and_deny(ctx: Context) -> Finding:
     code only disclosed an EXPLICIT non-``"none"`` string, so an unset/absent
     ``plugins.slots`` block silently hid the real default owner.
 
-    ``contextEngine`` carries NO such default at the same normalization site --
+    ``contextEngine`` carries no such default AT THIS ONE NORMALIZATION SITE --
     ``contextEngine: normalizeSlotValue(config?.slots?.contextEngine)`` never calls
     ``defaultSlotIdForKey`` for it, unlike the ``memory`` line right above it -- so an
-    absent ``contextEngine`` genuinely has no assigned owner at the config layer. This
-    check's original "absent -> not reported" reading was already correct for that field
-    and stays unchanged; only ``memory`` gets the default-owner disclosure.
+    absent ``contextEngine`` genuinely has no assigned owner at the config layer here.
+    (A DIFFERENT call site, ``selectedContextEngineSlotId``, context-engine-host-compat
+    -3e18sMNi.js:147, DOES default an absent ``contextEngine`` to the literal id
+    ``"legacy"`` -- so the "no default" claim is true only for config-normalization, not
+    universally; this check reads the config-normalization site.) This check's original
+    "absent -> not reported" reading was already correct for that field and stays
+    unchanged; only ``memory`` gets the default-owner disclosure.
+
+    B-421 -- the B-401 default-owner disclosure above was itself over-eager: it asserted
+    the implicit ``memory-core`` default even when OpenClaw's own activation precedence
+    means that default never actually takes effect (``plugins.enabled: false``,
+    ``memory-core`` denied, its entry explicitly disabled, or a non-empty
+    ``plugins.allow`` that omits it -- see ``_memory_default_owner_blocked`` above,
+    grounded against ``resolvePluginActivationDecisionShared`` and
+    ``resolveMemorySlotStartupPluginId`` in the installed dist). It fired WARN on this
+    project's own ``fixtures/home_safe`` (``plugins.allow: ["trentclaw"]``) for exactly
+    this reason. The implicit-default disclosure is now gated on all four conditions;
+    an EXPLICITLY named owner is unaffected (still disclosed regardless -- that is a
+    literal, direct statement in the config, not an inferred default).
+
+    B-421 also fixed the allow/deny contradiction comparison: it previously compared raw
+    ``.strip()``ped strings, missing OpenClaw's own alias table (e.g. ``google-gemini-cli``
+    normalizes to ``google``, config-state-CtMlHVRM.js:6-9) -- so ``allow: ["google-gemini
+    -cli"], deny: ["google"]`` silently missed a real contradiction. The comparison now
+    normalizes through that alias table first. It deliberately does NOT case-fold ids
+    outside the alias table -- the real ``normalizePluginId`` does not either (see
+    ``_normalize_plugin_id`` above); a bare case difference is not folded together.
 
     A ``plugins.slots`` value of the wrong TYPE (not an object) or a ``memory``/
     ``contextEngine`` value of the wrong type (not a string) is schema-invalid and is
@@ -4730,10 +4830,17 @@ def check_plugin_slots_and_deny(ctx: Context) -> Finding:
     attack. Neither is a misconfiguration this tool can adjudicate from config alone,
     so it discloses and does not judge.
 
-    PASS    — a plugin block exists, plugins.slots.memory is explicitly "none", no
-              contextEngine owner is named, and the two allow/deny lists do not overlap.
-    WARN    — the memory slot is owned (explicitly or via the unset default), and/or a
-              contextEngine owner is named, and/or an id appears in both allow and deny.
+    PASS    — a plugin block exists and no plugin actually owns the memory or
+              contextEngine slot: plugins.slots.memory is explicitly "none", OR it is
+              unset/blank but the implicit memory-core default cannot take effect
+              (plugins.enabled: false, memory-core denied, its entry disabled, or a
+              non-empty plugins.allow that omits it — B-421); no contextEngine owner is
+              named; and the two allow/deny lists do not overlap (after alias
+              normalization).
+    WARN    — the memory slot is owned — explicitly, or via the unset default when
+              none of the B-421 gates block it — and/or a contextEngine owner is named,
+              and/or an id appears in both allow and deny (directly, or via OpenClaw's
+              built-in alias table).
     UNKNOWN — no plugins block at all (not applicable); or plugins.slots / one of its
               two fields holds a non-string, non-object value that can't be read as
               owned, default-owned, or disabled.
@@ -4764,17 +4871,21 @@ def check_plugin_slots_and_deny(ctx: Context) -> Finding:
         # literal "none" disables the slot; any other non-empty string overrides it.
         memory_raw = slots.get("memory")
         if memory_raw is None:
-            disclosed.append(
-                "plugins.slots.memory=memory-core (implicit default -- "
-                "plugins.slots.memory is unset)"
-            )
+            # B-421: only disclose the implicit default when OpenClaw's own precedence
+            # would actually let it take effect (see _memory_default_owner_blocked).
+            if not _memory_default_owner_blocked(plugins):
+                disclosed.append(
+                    "plugins.slots.memory=memory-core (implicit default -- "
+                    "plugins.slots.memory is unset)"
+                )
         elif isinstance(memory_raw, str):
             owner = memory_raw.strip()
             if not owner:
-                disclosed.append(
-                    "plugins.slots.memory=memory-core (implicit default -- "
-                    "plugins.slots.memory is blank)"
-                )
+                if not _memory_default_owner_blocked(plugins):
+                    disclosed.append(
+                        "plugins.slots.memory=memory-core (implicit default -- "
+                        "plugins.slots.memory is blank)"
+                    )
             elif owner.lower() != "none":
                 disclosed.append(f"plugins.slots.memory={owner}")
         else:
@@ -4793,10 +4904,31 @@ def check_plugin_slots_and_deny(ctx: Context) -> Finding:
     allow = plugins.get("allow")
     deny = plugins.get("deny")
     if isinstance(allow, list) and isinstance(deny, list):
-        allowed = {p.strip() for p in allow if isinstance(p, str) and p.strip()}
-        denied = {p.strip() for p in deny if isinstance(p, str) and p.strip()}
-        for pid in sorted(allowed & denied):
-            disclosed.append(f"{pid}: in both plugins.allow and plugins.deny (deny wins)")
+        # B-421: compare through OpenClaw's own alias table (normalizePluginId) so an
+        # alias-obscured contradiction (e.g. allow: google-gemini-cli / deny: google)
+        # is still caught -- a raw .strip()-only compare missed it.
+        allowed = {
+            _normalize_plugin_id(p): p.strip()
+            for p in allow
+            if isinstance(p, str) and p.strip()
+        }
+        denied = {
+            _normalize_plugin_id(p): p.strip()
+            for p in deny
+            if isinstance(p, str) and p.strip()
+        }
+        for norm_id in sorted(set(allowed) & set(denied)):
+            allow_raw, deny_raw = allowed[norm_id], denied[norm_id]
+            if allow_raw == deny_raw:
+                disclosed.append(
+                    f"{allow_raw}: in both plugins.allow and plugins.deny (deny wins)"
+                )
+            else:
+                disclosed.append(
+                    f"{allow_raw} (plugins.allow) and {deny_raw} (plugins.deny) "
+                    "resolve to the same plugin id after alias normalization "
+                    "(deny wins)"
+                )
     if disclosed:
         return _finding(
             "B342",
@@ -4826,8 +4958,11 @@ def check_plugin_slots_and_deny(ctx: Context) -> Finding:
     return _finding(
         "B342",
         PASS,
-        "plugins.slots.memory is explicitly disabled (\"none\"), no contextEngine "
-        "owner is named, and plugins.allow and plugins.deny do not overlap.",
+        "No plugin currently owns the memory or contextEngine slot -- "
+        "plugins.slots.memory is explicitly disabled (\"none\"), or it is unset/blank "
+        "but the implicit memory-core default cannot take effect per OpenClaw's own "
+        "activation precedence -- no contextEngine owner is named, and plugins.allow "
+        "and plugins.deny do not overlap.",
         "Keep plugins.allow and plugins.deny disjoint so a deny never silently "
         "overrides an entry you believe is allowed.",
     )

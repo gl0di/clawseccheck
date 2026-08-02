@@ -345,3 +345,115 @@ def test_b342_malformed_shapes_do_not_raise():
         {"plugins": "not-a-dict"},
     ):
         assert check_plugin_slots_and_deny(_ctx(cfg)).status != FAIL, cfg
+
+
+# ---------------------------------------------------- B-421: implicit-default owner gating
+# The unset `plugins.slots.memory` default only takes effect when OpenClaw's own activation
+# precedence actually lets it -- config-normalization-shared-w2iz0aeC.js:70-100
+# (`resolvePluginActivationDecisionShared`) and gateway-startup-plugin-ids-COmsQTCi.js
+# :603-614 (`resolveMemorySlotStartupPluginId`, which resolves who actually backs the
+# memory slot when the field is left unset). Before B-421 the implicit default was
+# disclosed unconditionally, which WARNed on this project's own fixtures/home_safe.
+
+
+def test_b342_implicit_default_not_disclosed_when_plugins_disabled():
+    """Gate 1 -- config-normalization-shared-w2iz0aeC.js:70, `!config.enabled`."""
+    cfg = {"plugins": {"enabled": False}}
+    f = check_plugin_slots_and_deny(_ctx(cfg))
+    assert f.status == PASS, f.evidence
+
+
+def test_b342_implicit_default_not_disclosed_when_denied():
+    """Gate 2 -- :77, `deny.includes(id)` -- deny wins even over the implicit default."""
+    cfg = {"plugins": {"deny": ["memory-core"]}}
+    f = check_plugin_slots_and_deny(_ctx(cfg))
+    assert f.status == PASS, f.evidence
+
+
+def test_b342_implicit_default_not_disclosed_when_entry_disabled():
+    """Gate 3 -- :85, `entry?.enabled === false`."""
+    cfg = {"plugins": {"entries": {"memory-core": {"enabled": False}}}}
+    f = check_plugin_slots_and_deny(_ctx(cfg))
+    assert f.status == PASS, f.evidence
+
+
+def test_b342_implicit_default_not_disclosed_when_excluded_by_allowlist():
+    """Gate 4 -- gateway-startup-plugin-ids-COmsQTCi.js:610: a non-empty `plugins.allow`
+    that omits the bundled default id means the implicit default is never even selected
+    as a candidate. This is fixtures/home_safe's own shape."""
+    cfg = {"plugins": {"allow": ["trentclaw"]}}
+    f = check_plugin_slots_and_deny(_ctx(cfg))
+    assert f.status == PASS, f.evidence
+
+
+def test_b342_implicit_default_still_disclosed_when_no_gate_applies():
+    """Regression pin: the B-401 default-owner disclosure itself must still fire when
+    none of the four B-421 gates block it (an unrelated entry "p" does not touch
+    memory-core's own gates)."""
+    cfg = {"plugins": {"entries": {"p": {"enabled": True}}}}
+    f = check_plugin_slots_and_deny(_ctx(cfg))
+    assert f.status == WARN
+    assert any("plugins.slots.memory=memory-core" in e for e in f.evidence or [])
+
+
+def test_b342_gates_do_not_affect_an_explicitly_named_owner():
+    """B-421 scope: only the UNSET/blank implicit-default path is gated -- an explicitly
+    named plugins.slots.memory owner is still disclosed regardless (it is a direct
+    statement in the config, not an inferred default; unchanged from B-401)."""
+    cfg = {"plugins": {"enabled": False, "slots": {"memory": "custom-memory-plugin"}}}
+    f = check_plugin_slots_and_deny(_ctx(cfg))
+    assert f.status == WARN
+    assert any("plugins.slots.memory=custom-memory-plugin" in e for e in f.evidence or [])
+
+
+def test_b342_home_safe_fixture_no_longer_warns():
+    """The exact repro from CLAWSECCHECK-B-421: fixtures/home_safe
+    (plugins.allow: ["trentclaw"], nothing else in the plugin block) used to WARN B342
+    unconditionally on this project's own canonical clean baseline config."""
+    f = check_plugin_slots_and_deny(collect(home=str(FIXTURES / "home_safe")))
+    assert f.status == PASS, f.evidence
+
+
+# --------------------------------------------------- B-421: allow/deny alias normalization
+
+
+def test_b342_allow_deny_alias_collision_is_reported():
+    """OpenClaw's own `normalizePluginId` (config-state-CtMlHVRM.js:6-9) folds a built-in
+    alias to its canonical id before activation, so an id pair that LOOKS disjoint can
+    still collide. `google-gemini-cli` -> `google` is a real, grounded alias (contrast
+    with the case-difference test below, which is NOT folded by the real normalizer)."""
+    cfg = {
+        "plugins": {
+            "slots": {"memory": "none"},
+            "allow": ["google-gemini-cli"],
+            "deny": ["google"],
+        }
+    }
+    f = check_plugin_slots_and_deny(_ctx(cfg))
+    assert f.status == WARN
+    joined = " ".join(f.evidence or [])
+    assert "google-gemini-cli" in joined and "google" in joined
+
+
+def test_b342_allow_deny_case_difference_alone_is_not_a_collision():
+    """Grounding correction: the real `normalizePluginId` (config-state-CtMlHVRM.js
+    :17-23) does NOT lowercase arbitrary (non-alias) ids -- it only trims them and falls
+    back to the case-preserved original on an alias-lookup miss. So a bare case
+    difference alone -- unlike the alias case above -- is not treated as a collision."""
+    cfg = {
+        "plugins": {
+            "slots": {"memory": "none"},
+            "allow": ["Memory-Core"],
+            "deny": ["memory-core"],
+        }
+    }
+    assert check_plugin_slots_and_deny(_ctx(cfg)).status == PASS
+
+
+def test_b342_allow_deny_literal_match_still_uses_the_plain_evidence_format():
+    """Regression pin: a literal (non-alias) match keeps the original, simpler evidence
+    string -- only an alias-obscured collision gets the two-sided phrasing."""
+    cfg = {"plugins": {"slots": {"memory": "none"}, "allow": ["a", "b"], "deny": ["b"]}}
+    f = check_plugin_slots_and_deny(_ctx(cfg))
+    assert f.status == WARN
+    assert any(e == "b: in both plugins.allow and plugins.deny (deny wins)" for e in f.evidence or [])
