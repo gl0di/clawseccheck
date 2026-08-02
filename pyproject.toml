@@ -45,6 +45,14 @@ packages = ["clawseccheck", "clawseccheck.checks"]
 [tool.setuptools.dynamic]
 version = { attr = "clawseccheck.__version__" }
 
+[tool.ruff]
+# F-159/B347: this fixture's .py is INTENTIONALLY syntactically invalid — it is the
+# UNKNOWN-path test input for "skill source unreadable / AST cannot parse" (see
+# tests/test_b347_deaddrop_resolver.py). Every other fixture .py in the repo is valid
+# Python (even the malicious-looking ones), so this is the first and only exclude here;
+# keep it scoped to this one path rather than excluding fixtures/ wholesale.
+exclude = ["fixtures/unknown_b347_deaddrop_unparseable/**"]
+
 [tool.ruff.lint.per-file-ignores]
 # The checks/ aggregator re-exports every topic module's symbols (incl. privates) so
 # they stay importable as `from clawseccheck.checks import X`. It deliberately has no

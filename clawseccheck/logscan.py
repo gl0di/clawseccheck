@@ -594,7 +594,7 @@ def _decodes_to_compressed_blob(token: str) -> bool:
 # itself (`_decodes_to_compressed_blob`), not merely when it is longer. A real urlsafe
 # blob's own container span still decodes fine (it IS the whole blob), so the ordinary
 # B-383 case is unaffected; an attacker-glued wrapper never does, so its "contained"
-# span — the real blob — survives instead. See CLAWSECCHECK-B-432.
+# span — the real blob — survives instead.
 def _collect_blob_tokens(line: str) -> list:
     """Return up to `_MAX_BLOBS_PER_LINE` distinct base64 blob-candidate tokens from
     *line*, trying both the standard and URL-safe alphabets — see the note above for why
