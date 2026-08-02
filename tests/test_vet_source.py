@@ -346,6 +346,53 @@ def test_c135_real_host_ioc_still_fails_after_the_any_pool_fix():
         assert "catalog: url" in f.detail
 
 
+# --------------------------------------------------------------------------- #
+# CLAWSECCHECK-B-436: vet_source consumer defects found by a C-135 sweep of the #
+# canonical `is_known_bad_host()` predicate (the predicate itself is clean --  #
+# see test_iocdb.py -- these are the 4 bugs in ITS CONSUMERS).                 #
+# --------------------------------------------------------------------------- #
+def test_b436_path_basename_matching_known_bad_host_is_not_a_false_fail():
+    # Defect 1: a URL whose PATH BASENAME happens to equal a known-bad HOST value
+    # (not the actual host of the URL) must not FAIL as if the host itself were bad.
+    # `mirror.internal.example` is unrelated to the shipped `laosji.net` HOSTS
+    # record -- only the trailing path segment collides with it, by coincidence.
+    f = vet_source("https://mirror.internal.example/laosji.net")
+    assert f.status != FAIL, f"{f.status}: {f.detail}"
+    assert "known-compromised" not in f.detail
+
+
+def test_b436_ip_subdomain_no_longer_collides_via_vet_source():
+    # Defect 2: vet_source used to re-implement its own type-blind host match
+    # (`host_l == h or host_l.endswith("." + h)`) instead of calling the canonical,
+    # type-honoring `iocdb.is_known_bad_host()` -- so "sub.<known-bad-ip>" wrongly
+    # FAILed even though an IP IOC has no meaningful "subdomain". Must now agree
+    # with the canonical predicate: neither FAILs.
+    assert iocdb.is_known_bad_host("sub.91.92.242.30") is False
+    f = vet_source("https://sub.91.92.242.30/x")
+    assert f.status != FAIL, f"{f.status}: {f.detail}"
+    assert "known-compromised" not in f.detail
+
+
+def test_b436_git_source_on_known_bad_host_now_flags():
+    # Defect 3: a git:-sourced install off known-bad infrastructure was silently
+    # never checked -- HOSTS values only ever populated the "url" pool, and
+    # eco == "git" only ever consulted the (empty) "git"/"any" pools. Calling the
+    # canonical host predicate directly (step 1b) fixes this for every ecosystem.
+    f = vet_source("git:laosji.net/owner/repo@v1")
+    assert f.status == FAIL, f"{f.status}: {f.detail}"
+    assert "known-compromised infrastructure" in f.detail
+    assert "catalog: url" in f.detail
+
+
+def test_b436_trailing_dot_fqdn_no_longer_evades_the_host_match():
+    # Defect 4: a root-dot FQDN (`laosji.net.`) resolves to the IDENTICAL server as
+    # `laosji.net` but used to bypass the matcher entirely (urlsplit().hostname
+    # preserves the trailing dot; the old code only .strip()'d whitespace).
+    f = vet_source("https://laosji.net./p.tgz")
+    assert f.status == FAIL, f"{f.status}: {f.detail}"
+    assert "known-compromised infrastructure" in f.detail
+
+
 def test_vet_source_stays_silent_when_iocdb_is_fresh():
     # Real dataset, real (current) clock -- freshness_notice() contributes nothing.
     f = vet_source("clawhub:my-totally-new-skill")

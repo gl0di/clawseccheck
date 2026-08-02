@@ -53,6 +53,7 @@ from ..textnorm import (
     normalize_for_scan,
 )
 from ..iocdb import (
+    is_known_bad_host as _iocdb_is_known_bad_host,
     known_bad_sources as _iocdb_known_bad_sources,
 )
 
@@ -4869,7 +4870,17 @@ def vet_source(
 
     # 1. Known-bad IOC — exact ecosystem+name match (a bare registry name is checked
     #    against every ecosystem, mirroring OpenClaw's bare-spec resolution order).
+    # B-436: for eco == "url", `name`/`plain` is a URL's PATH BASENAME (the last path
+    # segment) -- NOT a package/slug identity -- while the "url" pool is populated
+    # (also) from iocdb.HOSTS host IOCs (see known_bad_sources()'s own docstring).
+    # Matching a basename against that pool false-FAILed any URL whose filename
+    # happens to equal a known-bad host string (e.g. a blocklist mirror literally
+    # named "laosji.net"), even though the URL's actual HOST is unrelated. The real
+    # host is checked correctly below (step 1b, keyed off info["host"]), so a URL
+    # source's own "url" pool is excluded here.
     eco_keys = [eco, "any"] if eco != "registry" else list(bad.keys())
+    if eco == "url":
+        eco_keys = [k for k in eco_keys if k != "url"]
     for k in eco_keys:
         pool = bad.get(k) or frozenset()
         if name.lower() in pool or plain in pool:
@@ -4878,19 +4889,24 @@ def vet_source(
             )
             break
 
-    # 1b. Known-bad HOST — a URL (or git) whose host is, or is a subdomain of, a known-bad
-    #     domain/IP in the url/any pool. The name check above matches slugs/packages; this
-    #     matches infrastructure IOCs (a source served straight off known-bad C2 infra).
+    # 1b. Known-bad HOST — a URL/git source whose host is, or is a subdomain of, a
+    #     known-bad domain/IP. The name check above matches slugs/packages; this
+    #     matches infrastructure IOCs (a source served straight off known-bad C2
+    #     infra). B-436: this used to re-implement its own type-blind host match
+    #     (`host_l == h or host_l.endswith("." + h)`) over the flat eco/"any" pools --
+    #     ignoring each record's own "ip" vs "domain" type (an IP record has no
+    #     meaningful "subdomain", so "sub.<bad-ip>" wrongly matched) and never firing
+    #     for eco == "git" (HOSTS values only ever populate the "url" pool, so a
+    #     git:-sourced install off known-bad infra was silently never flagged). Both
+    #     are exactly what iocdb.is_known_bad_host() -- the one canonical,
+    #     type-honoring predicate -- already exists to prevent; call it directly
+    #     instead of re-deriving a second, looser, eco-scoped copy here.
     host_l = (info.get("host") or "").lower()
-    if host_l and not reasons_bad:
-        for k in (eco, "any"):
-            pool = bad.get(k) or frozenset()
-            if any(host_l == h or host_l.endswith("." + h) for h in pool):
-                reasons_bad.append(
-                    f"host '{host_l}' is known-compromised infrastructure "
-                    f"(exact IOC match, catalog: {k})"
-                )
-                break
+    if host_l and not reasons_bad and _iocdb_is_known_bad_host(host_l):
+        reasons_bad.append(
+            f"host '{host_l}' is known-compromised infrastructure "
+            f"(exact IOC match, catalog: url)"
+        )
 
     # 2. Typosquat vs the brand list + ecosystem known-good pools + real plugin ids.
     pool = set(_KNOWN_NAMES) | set(good.get("plugin-ids") or ())

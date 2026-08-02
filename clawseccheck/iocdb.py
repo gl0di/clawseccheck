@@ -308,10 +308,19 @@ def is_known_bad_host(host) -> bool:
     so a longer numeric-looking host string that merely ENDS WITH a known-bad IP's
     digits must never match it that way. Never raises -- a non-string/empty input
     simply returns False.
+
+    B-436: a trailing DNS root dot (`laosji.net.`) is stripped before comparison --
+    DNS itself treats `example.com` and `example.com.` as the identical FQDN, so a
+    root-dot suffix resolves to the exact same server and must not silently evade the
+    match (`urlsplit().hostname` preserves the trailing dot, and the old `.strip()`
+    here only trimmed whitespace, never it). `rstrip(".")` after the emptiness check
+    so a host that is nothing but dots still returns False rather than matching an
+    empty-string bad value.
     """
     h = str(host or "").strip().lower()
     if not h:
         return False
+    h = h.rstrip(".")
     for bad, typ in _KNOWN_BAD_HOST_RECORDS:
         if h == bad:
             return True

@@ -285,6 +285,26 @@ def test_is_known_bad_host_never_raises_on_bad_input():
 
 
 # --------------------------------------------------------------------------- #
+# CLAWSECCHECK-B-436 item 4: is_known_bad_host() strips a trailing DNS root    #
+# dot before comparison -- "laosji.net." resolves to the identical server as  #
+# "laosji.net" and must not silently evade the match.                        #
+# --------------------------------------------------------------------------- #
+def test_is_known_bad_host_strips_trailing_root_dot_exact():
+    assert iocdb.is_known_bad_host("laosji.net.") is True
+    assert iocdb.is_known_bad_host("91.92.242.30.") is True
+
+
+def test_is_known_bad_host_strips_trailing_root_dot_subdomain():
+    assert iocdb.is_known_bad_host("cdn.laosji.net.") is True
+
+
+def test_is_known_bad_host_all_dots_is_false_not_a_crash():
+    # A host that is nothing but dots must not match an empty-string bad value.
+    assert iocdb.is_known_bad_host(".") is False
+    assert iocdb.is_known_bad_host("...") is False
+
+
+# --------------------------------------------------------------------------- #
 # CLAWSECCHECK-B-384 item 2: is_known_bad_host() honors `type` -- exact-only    #
 # for "ip" records, exact-or-subdomain for "domain" records.                  #
 # --------------------------------------------------------------------------- #
