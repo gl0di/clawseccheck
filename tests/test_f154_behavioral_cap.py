@@ -30,6 +30,17 @@ TestCliEndToEnd):
     could not avoid capping on bare "divergence" alone — near-certain-benign background
     noise per the check's own docstring. Fixed via Finding.sub_signals.
 
+B-416 (C-135 adversarial finding on this very F-154 wiring): T1's elevated HIGH ceiling
+assumed "PROVEN in that order" was stronger evidence than T2/T3/B191's own MEDIUM
+ceiling. It is not — T1 classifies its ingress/sensitive/egress legs by VERB NAME ONLY
+(no argument/value linkage), so an entirely benign, causally-unrelated tool sequence
+(e.g. `fixtures/traj_behavioral_trifecta` itself: web_fetch -> read_credential_file ->
+send_message, three unrelated actions) satisfies the exact same shape as a genuine
+attack chain and hard-capped a clean config at grade C with no actionable remediation.
+Fixed by retracting T1's elevated ceiling in `scoring._BEHAVIORAL_CAP_BY_ID` — all four
+detectors now share the MEDIUM ceiling; see `TestBehavioralCapScoring.
+test_t1_now_shares_t3s_medium_ceiling_after_b416`.
+
 Offline, deterministic, no network. Uses the shipped fixtures only.
 """
 from __future__ import annotations
@@ -57,6 +68,7 @@ SAFE = str(FIXTURES / "home_safe")
 NO_SIDECAR = str(FIXTURES / "traj_no_sidecar")
 TRIFECTA = FIXTURES / "traj_behavioral_trifecta"
 CLEAN_TRAJ = FIXTURES / "traj_behavioral_clean"
+BENIGN_TRIFECTA = FIXTURES / "traj_behavioral_benign_trifecta"  # B-416 repro
 BASE = ["--no-native", "--no-host", "--no-sockets", "--no-history"]
 
 
@@ -109,11 +121,16 @@ class TestBehavioralCapScoring:
         assert capped.score <= BEHAVIORAL_SIGNAL_CAP
         assert capped.score < clean.score
 
-    def test_t3_caps_at_the_medium_ceiling_not_t1s_high_ceiling(self):
+    def test_t1_now_shares_t3s_medium_ceiling_after_b416(self):
+        """B-416: T1's elevated HIGH ceiling was retracted — "PROVEN in that order" is
+        no stronger a fact than T2/T3/B191's own "cannot rule out a benign
+        explanation" acknowledgment, since T1's legs are classified by verb NAME ONLY
+        (no argument/value linkage). All four detectors now cap identically."""
         findings = [_pass_finding()]
         t1 = compute(findings, behavioral_fired_ids=frozenset({"T1"}))
         t3 = compute(findings, behavioral_fired_ids=frozenset({"T3"}))
-        assert t3.score > t1.score, "T3 (advisory) must cap looser than T1 (proven chain)"
+        assert t1.score == t3.score
+        assert t1.behavioral_cap_reason == "T1 behavioral trifecta"
         assert t3.behavioral_cap_reason == "T3 capability drift"
 
     def test_t2_and_b191_share_t3s_medium_ceiling(self):
@@ -258,6 +275,48 @@ class TestBehavioralGradeCapSignal:
         result = analyze(ctx)
         fired = grade_cap_signal(result)
         assert fired == frozenset()
+
+
+# ── B-416 (C-135 adversarial finding) ─────────────────────────────────────────
+#
+# BEHAVIORAL_SIGNAL_CAP hard-capped an entirely benign, causally-unrelated tool
+# sequence at grade C via T1: "check a public reference page, then read my own stored
+# cloud credentials to run an authenticated cost/status query, then email a summary"
+# satisfies T1's trifecta SHAPE (ingress verb -> sensitive verb -> egress verb, by NAME
+# only — no argument/value linkage) with zero data linkage between the three steps.
+# T1's own catalogued severity is MEDIUM (catalog.py); the elevated HIGH grade-cap
+# ceiling this task retracts was an independent evidentiary judgment that this repro
+# disproves — "PROVEN in that order" is no stronger a fact than T2/T3/B191's own
+# "cannot rule out a benign explanation". Fixed by retracting T1's elevated ceiling in
+# `scoring._BEHAVIORAL_CAP_BY_ID` — T1 still WARNs (unchanged detection), it now caps
+# at the same MEDIUM ceiling as T2/T3/B191.
+# -------------------------------------------------------------------------------
+
+
+class TestB416BenignTrifectaNoLongerHardCapsAtHigh:
+    def test_benign_trifecta_fixture_fires_t1_via_grade_cap_signal(self):
+        """T1's detection itself is unchanged — the fixture's shape still reaches
+        `grade_cap_signal`. What changes is the ceiling it's capped at (see the CLI
+        end-to-end test below)."""
+        ctx = collect(BENIGN_TRIFECTA)
+        result = analyze(ctx)
+        assert grade_cap_signal(result) == frozenset({"T1"})
+
+    def test_full_fires_t1_but_caps_at_medium_not_high(self, tmp_path, capsys):
+        """THE B-416 REPRO, re-run after the fix: the exact task report reproduced
+        grade 79/C under --full. It must still cap (T1 still fires — this is a real,
+        worth-a-look shape) but no longer at the tighter HIGH ceiling; 89/B, the same
+        ceiling T2/T3/B191 already share."""
+        home = _combined_home(tmp_path, BENIGN_TRIFECTA)
+        main(["--home", str(home)] + BASE + ["--json"])
+        plain = json.loads(capsys.readouterr().out)
+        main(["--home", str(home)] + BASE + ["--full", "--json"])
+        full = json.loads(capsys.readouterr().out)
+        assert full["behavioral_capped"] is True
+        assert full["behavioral_cap_reason"] == "T1 behavioral trifecta"
+        assert full["score"] < plain["score"], "T1 must still lower the grade under --full"
+        assert full["score"] == 89, "must cap at the MEDIUM ceiling (89/B), not HIGH (79/C)"
+        assert full["grade"] == "B"
 
 
 # ── F-154 round 2 (C-135 review, both findings) ──────────────────────────────

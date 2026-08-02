@@ -510,8 +510,11 @@ def check_behavioral_trifecta(
             "externally-delivered group/channel message), then a sensitive-data verb, "
             f"then an egress verb, ran in this order within a thread: {detail}.",
             "Review the trajectory sidecar for the named thread(s) manually. This is "
-            "proof-by-log of the same pattern A1 flags by capability — untrusted input "
-            "reached sensitive data and then left the agent, in one observed sequence.",
+            "proof-by-log that an ingress-classified action, a sensitive-data action, "
+            "and an egress action ran in that temporal order, in one thread. Verb order "
+            "alone does not prove data actually flowed between them (B-416): three "
+            "causally-unrelated actions in an ordinary workflow can satisfy this shape, "
+            "so treat it as a lead to review manually, not confirmed exfiltration.",
             firing[:6],
         )
     return _finding(

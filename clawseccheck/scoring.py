@@ -238,41 +238,47 @@ LIVE_INJECTION_CAP = FAIL_CAPS[CRITICAL]
 # byte-identical to before this task, exactly like every other additive cap-only
 # argument above.
 #
-# PER-DETECTOR CEILING, not one flat value — the four detectors are not equally strong
-# evidence:
-#   * T1 (behavioral trifecta: an ingress leg, then a sensitive-data verb, then an
-#     egress verb, PROVEN in that order within one thread) is the closest match to
-#     RUNTIME_SIGNAL_CAP's own "proof a chain was ATTEMPTED, not a config heuristic"
-#     reasoning — literally the same trifecta shape A1/RUNTIME_SIGNAL_CAP already
-#     treat that way, just observed via a verb sequence instead of a skill/bootstrap
-#     indicator matched in runtime arguments. Elevated to the SAME ceiling as
-#     RUNTIME_SIGNAL_CAP (FAIL_CAPS[HIGH]) despite T1's own catalogued severity being
-#     MEDIUM (catalog.py) — exactly how LIVE_INJECTION_CAP already elevates past its
-#     producers' un-scored status: a cap tier's severity-shape rationale is an
-#     independent evidentiary judgment, not a mirror of a check's catalogued severity.
-#   * T2 (outcome anomaly), T3 (capability drift) and B191 (audit-trail divergence)
-#     stay at their own catalogued MEDIUM ceiling (FAIL_CAPS[MEDIUM]) — each is
-#     explicitly advisory by its OWN docstring: T2 is "ambiguous by design" (a
-#     fail-fail-success series can be persistence past a denial OR ordinary
-#     retry/backoff on a transient failure); T3 is "advisory, not proof of abuse" (a
-#     verb beyond tools.allow is often legitimate — built-ins/MCP tools are
-#     auto-available beyond it); B191's own three signals each have "a legitimate
-#     benign story this check cannot rule out" (a deliberately tightened policy; a
-#     third-party tool name that slipped past an older syntax gate; trajectory tracing
-#     turned off on purpose) — corroborating incomplete/divergent audit COVERAGE, not a
-#     proven attack chain. None of the three individually rises to T1's "proven
-#     multi-stage chain" bar, so none individually earns T1's tighter ceiling.
-# The tightest ceiling among whatever fired wins, mirroring how FAIL_CAPS' own
-# "most-severe FAIL cap wins" composes multiple concurrently-true severities.
+# PER-DETECTOR CEILING, not one flat value.
+#
+# B-416 (C-135 adversarial finding) RETRACTED this table's earlier premise that T1
+# deserved a tighter ceiling than T2/T3/B191. The original reasoning was: T1
+# (behavioral trifecta: an ingress leg, then a sensitive-data verb, then an egress
+# verb, PROVEN in that order within one thread) is the closest match to
+# RUNTIME_SIGNAL_CAP's own "proof a chain was ATTEMPTED, not a config heuristic" —
+# literally the same trifecta shape A1/RUNTIME_SIGNAL_CAP already treat that way, just
+# observed via a verb sequence instead of a skill/bootstrap indicator matched in
+# runtime arguments. That reasoning does not survive T1's own structural limitation
+# (documented at length in behavioral.py, `_classify_verb_role`'s and B-249's own
+# comments): the ingress/sensitive/egress legs are classified by VERB NAME ONLY, never
+# by argument/value — so "web_fetch -> get_aws_credentials -> send_email_report" (an
+# ordinary "look something up / use my own stored creds / send a report" workflow, zero
+# data linkage between the three) satisfies the EXACT SAME shape as a genuine multi-
+# stage exfil chain. Verified: this hard-capped an entirely benign config at grade C
+# with no actionable remediation (this project's own canonical "T1 fires" fixture,
+# `fixtures/traj_behavioral_trifecta`, is itself shaped exactly this way — an
+# unarguable illustration that "PROVEN in that order" was never proof of anything
+# beyond order). "PROVEN in that order" is real, log-observed fact — but it is no
+# stronger a fact than the "cannot rule out a benign explanation" acknowledgment T2/T3/
+# B191's own docstrings already make about THEIR signals (T2: "ambiguous by design" — a
+# fail-fail-success series can be persistence past a denial OR ordinary retry/backoff;
+# T3: "advisory, not proof of abuse" — a verb beyond tools.allow is often legitimate;
+# B191: "a legitimate benign story this check cannot rule out"). T1 now shares their
+# ceiling instead of sitting above it — restoring consistency with T1's own catalogued
+# severity, which was already MEDIUM (catalog.py) even while this table elevated its
+# CAP past it. All four detectors share one ceiling now, so `_BEHAVIORAL_LABELS`'
+# per-id reason text is still meaningful (names WHICH detector(s) fired) even though the
+# numeric ceiling below no longer varies by id — kept as a per-id table rather than a
+# single scalar so a future detector can still be given its own ceiling without
+# reshaping this data structure again.
 _BEHAVIORAL_CAP_BY_ID: dict = {
-    "T1": FAIL_CAPS[HIGH],
+    "T1": FAIL_CAPS[MEDIUM],
     "T2": FAIL_CAPS[MEDIUM],
     "T3": FAIL_CAPS[MEDIUM],
     "B191": FAIL_CAPS[MEDIUM],
 }
 # Convenience constant for callers/tests that want "the tightest this tier can ever
-# apply" without enumerating the per-id table above — equal to FAIL_CAPS[HIGH] (T1's
-# own ceiling), since T1 is the strongest of the four.
+# apply" without enumerating the per-id table above — equal to FAIL_CAPS[MEDIUM] (B-416:
+# all four detectors now share one ceiling; see `_BEHAVIORAL_CAP_BY_ID`'s own comment).
 BEHAVIORAL_SIGNAL_CAP = min(_BEHAVIORAL_CAP_BY_ID.values())
 
 # Stable, testable labels for `behavioral_cap_reason` — never free text, same

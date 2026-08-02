@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from clawseccheck.catalog import CRITICAL, FAIL, MEDIUM, PASS, UNKNOWN, Finding
+from clawseccheck.catalog import CRITICAL, FAIL, LOW, MEDIUM, PASS, UNKNOWN, Finding
 from clawseccheck.collector import Context, collect
 from clawseccheck.report import render_html, render_json, render_report
 from clawseccheck.scoring import (
@@ -148,9 +148,15 @@ MATRIX = [
         extra_substrs=[f"a corroborated runtime signal ({_RUNTIME_PHRASE})"],
     ),
     _scenario(
-        "severity(MEDIUM)+behavioral",
-        findings=_pool() + [_fail(MEDIUM)], behavioral_ids=frozenset({"T1"}),
-        primary_substr="open MEDIUM finding",
+        # B-416: T1's grade-cap ceiling moved from HIGH (79) to MEDIUM (89) — a MEDIUM
+        # severity FAIL (also 89) would now TIE with it rather than genuinely
+        # co-occurring (a tie leaves `behavioral_capped` False: it only binds when it
+        # tightens the score BELOW what the severity cap already produced — see
+        # `compute()`'s "only-when-actually-binding" discipline). LOW (94) keeps this a
+        # real two-signal scenario: behavioral (89) still binds tighter than LOW (94).
+        "severity(LOW)+behavioral",
+        findings=_pool() + [_fail(LOW)], behavioral_ids=frozenset({"T1"}),
+        primary_substr="open LOW finding",
         extra_substrs=["a behavioral detector fired (T1 behavioral trifecta)"],
     ),
     _scenario(
@@ -351,4 +357,6 @@ assert RUNTIME_SIGNAL_CAP == 79
 assert CONFIG_BLIND_CAP == 49
 assert DEGRADED_CHECK_CAP == 49
 assert LIVE_INJECTION_CAP == 49
-assert BEHAVIORAL_SIGNAL_CAP == 79
+# B-416: T1's elevated HIGH ceiling was retracted — all four behavioral detectors
+# (T1/T2/T3/B191) now share the MEDIUM ceiling, so BEHAVIORAL_SIGNAL_CAP moved 79 -> 89.
+assert BEHAVIORAL_SIGNAL_CAP == 89

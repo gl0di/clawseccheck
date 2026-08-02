@@ -268,6 +268,25 @@ def test_t1_warns_on_ordered_trifecta():
     assert "th1" in f.evidence
 
 
+def test_t1_warns_on_benign_causally_unrelated_sequence_b416():
+    """CLAWSECCHECK-B-416's own repro at the unit level: "look up a public reference
+    page, then use my own stored cloud credentials for an authenticated call, then
+    email a summary" — an entirely ordinary, causally-unrelated workflow that
+    satisfies the trifecta SHAPE purely because T1 classifies by verb NAME only. Must
+    still WARN (T1's detection is unchanged — the fix is to the grade-cap ceiling this
+    WARN reaches, not to whether it fires; see test_f154_behavioral_cap.py)."""
+    groups = {
+        "th1": [
+            {"type": "tool.call", "name": "web_fetch", "seq": 1},
+            {"type": "tool.call", "name": "get_aws_credentials", "seq": 2},
+            {"type": "tool.call", "name": "send_email_report", "seq": 3},
+        ]
+    }
+    f = check_behavioral_trifecta(groups)
+    assert f.status == WARN
+    assert "th1" in f.evidence
+
+
 def test_t1_pass_when_egress_before_sensitive():
     """Order matters — egress before the sensitive leg is not a trifecta."""
     groups = {
@@ -444,6 +463,23 @@ def test_traj_behavioral_trifecta_fixture_warns():
     r = analyze(_ctx(FIXTURES / "traj_behavioral_trifecta"))
     t1 = next(f for f in r["findings"] if f.id == "T1")
     assert t1.status == WARN
+
+
+def test_traj_behavioral_benign_trifecta_fixture_still_warns():
+    """B-416: the exact repro from the task report — web_fetch (ingress) -> a stored-
+    credential lookup (sensitive) -> an email report (egress), zero data linkage
+    between the three (an ordinary "look something up / use my own stored creds /
+    send a report" workflow). T1 still WARNs here (the shape is real and worth a
+    human's manual review) — this is NOT a claim that T1 should go silent on it. What
+    changed is the grade-cap ceiling this WARN reaches (see
+    tests/test_f154_behavioral_cap.py's B-416 coverage), not whether it fires."""
+    r = analyze(_ctx(FIXTURES / "traj_behavioral_benign_trifecta"))
+    t1 = next(f for f in r["findings"] if f.id == "T1")
+    assert t1.status == WARN
+    # softened wording (B-416): no longer claims proven data flow ("reached sensitive
+    # data and then left the agent") — only what the log actually shows (order).
+    assert "reached sensitive data and then left the agent" not in t1.fix
+    assert "does not prove data" in t1.fix
 
 
 def test_traj_behavioral_clean_fixture_silent():
