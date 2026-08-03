@@ -2805,6 +2805,24 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B348 (F-161): a plugins.load.paths entry resolves to an on-disk directory whose
+    # openclaw.plugin.json manifest declares an "id" with no matching
+    # plugins.entries.<id> record. plugins.load.paths (config_plugin_load_paths, reused
+    # from B158) is an auto-load surface independent of plugins.entries. Advisory,
+    # WARN-only (Golden Rule #5): a load path with no entries record is normal
+    # local-dev shape, not proof of malice — the operational consequence (that removing
+    # the entries record alone does not stop the plugin loading) is surfaced only in the
+    # check's WARN detail/fix text, not here.
+    CheckMeta(
+        "B348",
+        "Plugin load path with no matching plugins.entries record",
+        LOW,
+        "advisory",
+        "Supply Chain / Plugin Hygiene",
+        scored=False,
+        confidence="MEDIUM",
+        surface="mcp",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -2976,6 +2994,7 @@ AST_MAP = {
     "B186": ("AST02",),  # relocated bundled skills/hooks root = supply-chain code-load root the scanners never enumerated (cf. B184)
     "B187": ("AST02",),  # non-bundled plugin declares agentToolResultMiddleware = supply-chain interception capability disclosure (cf. B151/B152/B177)
     "B193": ("AST02",),  # gateway secret inlined in the service unit = credential exposure on the persistence surface (cf. B182)
+    "B348": ("AST02",),  # plugins.load.paths entry not in plugins.entries = supply-chain visibility gap (cf. B152/B158)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
