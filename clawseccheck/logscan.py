@@ -93,7 +93,7 @@ from .checks import (
 # this module (or checks/), so there is no import cycle.
 from .collector import _read_with_limit as _read_stream_capped
 from .logdiscovery import LogSink
-from .scanbudget import audit_budget_exceeded
+from .scanbudget import DEFAULT_LIMITS, ScanLimits, audit_budget_exceeded
 from .textnorm import normalize_for_scan
 
 _MAX_BYTES_PER_FILE = 2 * 1024 * 1024  # ~2 MiB per-file read cap (DoS guard)
@@ -182,6 +182,13 @@ class LogScanResult:
     oversized_lines: int = 0  # count of lines that exceeded _MAX_LINE_LEN
     oversized_line_chars: int = 0  # total char length of those oversized lines
     unscanned_middle_chars: int = 0  # chars between the two windows, never regex-scanned
+    # F-164: the ScanLimits this scan ran under, stashed here (rather than threaded as a
+    # new parameter through _scan_line_content and every call site of it) so the ONE
+    # other place that also makes an oversized-line windowing decision
+    # (_scan_blob_for_compressed_indicators's decompressed-line loop) can read it too,
+    # without widening a function signature that many unrelated call sites already share.
+    # None (scan_log_file's own default) behaves exactly as scanbudget.DEFAULT_LIMITS.
+    limits: "ScanLimits | None" = None
     # C-327: disambiguates a bounded-decompression-bomb cap hit (a base64 blob's
     # gzip/zlib layer produced more than _MAX_DECODED_BLOB_BYTES) from every other
     # reason `truncated` can be True — mirrors how `byte_cap_truncated` already
@@ -228,6 +235,36 @@ def _windowed(text: str, start: int, end: int) -> str:
     prefix = "…" if lo > 0 else ""
     suffix = "…" if hi < len(text) else ""
     return prefix + text[lo:hi] + suffix
+
+
+def _sliding_windows(text: str, window_chars: int, overlap: int):
+    """F-164 SC-4 (--exhaustive): yield overlapping windows covering the WHOLE of
+    *text*, each at most *window_chars* long, stepping by (window_chars - overlap).
+
+    Zero-gap coverage guarantee: for any ``0 <= overlap < window_chars``, consecutive
+    windows are ``step = window_chars - overlap`` apart and each is ``window_chars``
+    long, so window N+1 always starts inside window N's tail — any span of text up to
+    *overlap* chars long is therefore guaranteed to land FULLY inside at least one
+    window, even if it straddles a step boundary. This is the same DoS/ReDoS bound the
+    old fixed head/tail windowing already relied on (see ``_OVERSIZED_WINDOW_CHARS``'s
+    module-level comment): every individual window here is still <= *window_chars*
+    chars, so each ``_scan_line_content`` call pays the exact same bounded regex cost
+    an ordinary max-length line already does today — only the NUMBER of calls grows,
+    linearly in ``len(text)``, which is exactly the extra cost ``--exhaustive``'s
+    raised wall-clock budget (``scanbudget.ScanLimits``) exists to absorb.
+
+    Deliberately does NOT raise ``_MAX_LINE_LEN`` itself (that constant's own
+    "DO NOT RAISE THIS" comment still applies) — this is the alternative route to full
+    coverage the ticket calls for instead.
+    """
+    step = max(1, window_chars - overlap)
+    n = len(text)
+    start = 0
+    while start < n:
+        yield text[start:start + window_chars]
+        if start + window_chars >= n:
+            break
+        start += step
 
 
 def _add_sample(result: LogScanResult, signal: str, raw_snippet: str) -> None:
@@ -493,6 +530,7 @@ def _scan_blob_for_compressed_indicators(
         # apply that same per-line oversized-window discipline to each split line, so a
         # decompressed document gets exactly the AND-pairing behavior it would have had
         # if it had been scanned as a plaintext file in the first place.
+        lim = result.limits if result.limits is not None else DEFAULT_LIMITS
         for decoded_line in text.splitlines():
             if not decoded_line.strip():
                 continue
@@ -501,7 +539,15 @@ def _scan_blob_for_compressed_indicators(
                 # _OVERSIZED_WINDOW_CHARS above) — a single decompressed line can be just
                 # as long, and the regex-cost bound windowing exists to enforce does not
                 # stop applying just because the line came from a decode step instead of
-                # the file directly.
+                # the file directly. F-164: mirrors scan_log_file's own exhaustive-vs-
+                # default branch exactly, reading `result.limits` (stashed there by
+                # scan_log_file) rather than a new parameter on this function, since the
+                # decode chain that reaches here has no `ctx`/`limits` of its own.
+                if lim.exhaustive:
+                    for window in _sliding_windows(decoded_line, lim.window_chars, lim.window_overlap):
+                        _scan_line_content(result, window, is_trajectory=is_trajectory,
+                                            allow_blob_decode=False)
+                    continue
                 head = decoded_line[:_OVERSIZED_WINDOW_CHARS]
                 tail = decoded_line[-_OVERSIZED_WINDOW_CHARS:]
                 _scan_line_content(result, head, is_trajectory=is_trajectory, allow_blob_decode=False)
@@ -902,7 +948,8 @@ def _scan_trajectory_record(result: LogScanResult, line: str, last_seq, last_ts)
     return last_seq, last_ts
 
 
-def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None) -> LogScanResult:
+def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None,
+                   limits: "ScanLimits | None" = None) -> LogScanResult:
     """Bounded, redacted content scan of one log sink. Read-only; never raises.
 
     ``deadline`` is a ``time.monotonic()``-relative deadline (e.g. from
@@ -911,8 +958,14 @@ def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None) -> Lo
     ``checks.correlation_indicators``, C-221); when given, each line is also tested for
     substring membership of those tokens — a cross-artifact correlation signal — without
     ever storing the raw line, only the already-vetted token + a hit count.
+
+    ``limits`` (F-164, optional) is a ``scanbudget.ScanLimits``; ``None`` reproduces
+    today's real defaults exactly (``scanbudget.DEFAULT_LIMITS``). Under
+    ``limits.exhaustive``, an oversized line is scanned via full overlapping sliding
+    windows (see ``_sliding_windows``) instead of only its bounded head/tail.
     """
-    result = LogScanResult(sink=sink)
+    lim = limits if limits is not None else DEFAULT_LIMITS
+    result = LogScanResult(sink=sink, limits=lim)
     path = sink.path
 
     is_trajectory = sink.kind == "trajectory"
@@ -924,7 +977,7 @@ def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None) -> Lo
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for raw_line in fh:
                 line_bytes = len(raw_line.encode("utf-8", errors="replace"))
-                if result.bytes_scanned + line_bytes > _MAX_BYTES_PER_FILE:
+                if result.bytes_scanned + line_bytes > lim.log_max_bytes_per_file:
                     result.truncated = True
                     result.byte_cap_truncated = True
                     break
@@ -955,6 +1008,21 @@ def scan_log_file(sink: LogSink, deadline, skill_iocs: dict | None = None) -> Lo
                     # scope (a field-scoped `context.compiled` reader), not this one.
                     if is_trajectory:
                         last_seq, last_ts = None, None
+
+                    if lim.exhaustive:
+                        # F-164 SC-4: full-line coverage via overlapping sliding windows
+                        # instead of only the bounded head/tail (see _sliding_windows'
+                        # own docstring for the coverage/DoS-bound argument). The default
+                        # (non-exhaustive) path below is UNCHANGED — this is a new branch,
+                        # not a generalization of it, so the default output stays
+                        # byte-identical to before this feature existed.
+                        for window in _sliding_windows(line, lim.window_chars, lim.window_overlap):
+                            cred_w = _scan_line_content(
+                                result, window, is_trajectory=is_trajectory,
+                                cred_seen_before=cred_seen,
+                            )
+                            cred_seen = cred_seen or cred_w
+                        continue  # nothing left unscanned — unscanned_middle_chars stays 0
 
                     # B-285/LOG-1: windowed content scan (classes 1/2/4/6) instead of a
                     # bare skip — see _OVERSIZED_WINDOW_CHARS above for why this is safe.

@@ -2180,12 +2180,12 @@ def check_memory_reconsumption_injection(ctx: Context) -> Finding:
     any_scanned = False
     isolated_hits = 0
 
-    # F-164: --exhaustive widens the per-sink budget via limits_for(ctx); DEFAULT_LIMITS
-    # reproduces _B180_PER_FILE_BUDGET_S exactly.
-    per_file_budget = limits_for(ctx).log_per_file_budget_s
+    # F-164: --exhaustive widens the per-sink budget and full-line coverage via
+    # limits_for(ctx); DEFAULT_LIMITS reproduces _B180_PER_FILE_BUDGET_S exactly.
+    lim = limits_for(ctx)
     for sink in memory_sinks:
-        deadline = audit_deadline(per_file_budget)
-        result = scan_log_file(sink, deadline)
+        deadline = audit_deadline(lim.log_per_file_budget_s)
+        result = scan_log_file(sink, deadline, limits=lim)
         all_results.append(result)
         if result.bytes_scanned == 0:
             continue

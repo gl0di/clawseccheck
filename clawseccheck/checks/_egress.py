@@ -2731,7 +2731,7 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         if remaining is not None:
             per_sink_budget = min(per_sink_budget, remaining)
         deadline = audit_deadline(per_sink_budget)
-        result = scan_log_file(sink, deadline, skill_iocs)
+        result = scan_log_file(sink, deadline, skill_iocs, limits=lim)
         all_results.append(result)
         if result.bytes_scanned == 0:
             continue
