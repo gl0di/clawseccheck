@@ -2161,7 +2161,7 @@ def check_memory_reconsumption_injection(ctx: Context) -> Finding:
     # `check_log_threat_hunt` (B164, checks/_egress.py) imports it lazily too.
     from ..logdiscovery import discover_log_sinks  # noqa: PLC0415
     from ..logscan import scan_log_file, summarize_truncation  # noqa: PLC0415
-    from ..scanbudget import audit_deadline  # noqa: PLC0415
+    from ..scanbudget import audit_deadline, limits_for  # noqa: PLC0415
 
     memory_sinks = [s for s in discover_log_sinks(ctx) if s.kind == "memory"]
     if not memory_sinks:
@@ -2180,8 +2180,11 @@ def check_memory_reconsumption_injection(ctx: Context) -> Finding:
     any_scanned = False
     isolated_hits = 0
 
+    # F-164: --exhaustive widens the per-sink budget via limits_for(ctx); DEFAULT_LIMITS
+    # reproduces _B180_PER_FILE_BUDGET_S exactly.
+    per_file_budget = limits_for(ctx).log_per_file_budget_s
     for sink in memory_sinks:
-        deadline = audit_deadline(_B180_PER_FILE_BUDGET_S)
+        deadline = audit_deadline(per_file_budget)
         result = scan_log_file(sink, deadline)
         all_results.append(result)
         if result.bytes_scanned == 0:
