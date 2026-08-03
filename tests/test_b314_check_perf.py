@@ -315,3 +315,41 @@ class TestLogThreatHuntCumulativeBudget:
         # proving none were skipped under the widened budget.
         assert f_exhaustive.status == "WARN"
         assert "Corroborated threat signal(s) in 6 log sink(s)" in f_exhaustive.detail
+
+    def test_exhaustive_budget_still_fires_on_a_pathological_corpus_and_reports_it(self, tmp_path):
+        """F-164 SC-6: --exhaustive raises the wall-clock budget, it does not remove it.
+        A synthetic, deliberately pathological corpus (many large sinks) must still
+        terminate promptly once EXHAUSTIVE_LIMITS' own (here monkeypatched small, for a
+        fast deterministic test) cumulative budget is exhausted, and whatever got
+        skipped must be reported — never silently dropped, exactly the same honesty
+        discipline the default path already has."""
+        import dataclasses
+
+        from clawseccheck import scanbudget
+
+        home = tmp_path / ".openclaw"
+        home.mkdir()
+        # More, larger sinks than the earlier test — deliberately pathological.
+        sinks = self._sinks(tmp_path, n=20, lines_per_sink=20000)
+
+        # A real (not monkeypatched-to-near-zero) but still small budget: enough for a
+        # handful of sinks, not all 20 -- proves the cap is a genuine ceiling, not "so
+        # generous it never actually bites" on a big enough corpus.
+        small_exhaustive = dataclasses.replace(
+            scanbudget.EXHAUSTIVE_LIMITS, log_check_budget_s=1.0, log_per_file_budget_s=1.0)
+
+        with mock.patch("clawseccheck.logdiscovery.discover_log_sinks", return_value=sinks), \
+             mock.patch.object(scanbudget, "EXHAUSTIVE_LIMITS", small_exhaustive):
+            ctx = Context(home=home)
+            ctx.config = {}
+            ctx.installed_skills = {}
+            ctx.exhaustive = True
+            t0 = time.perf_counter()
+            f = check_log_threat_hunt(ctx)
+            dt = time.perf_counter() - t0
+
+        # (1) terminates promptly -- the raised budget is not "no budget at all".
+        assert dt < 10.0, f"pathological --exhaustive corpus took {dt:.2f}s to terminate"
+        # (2)/(3) whatever the budget cut off is disclosed, never silent.
+        assert "not scanned" in f.detail
+        assert "log/transcript sink" in f.detail
