@@ -1243,20 +1243,50 @@ def _empty_inventory() -> dict:
     """A fresh, all-clear inventory shape — every nested list/dict is newly allocated
     per call (no shared mutable state across callers) — for when `ctx` is unavailable."""
     return {
-        "system": {"status": PASS, "findings": []},
+        "openclaw": {"status": PASS, "findings": []},
+        "host": {"status": PASS, "findings": []},
         "agents": {"status": PASS, "findings": [], "roster": [], "attested": False},
         "skills": [],
         "mcp": [],
+        "plugins": {"scanned": False, "rows": []},
         "channels": {"status": PASS, "findings": [], "roster": []},
+        "logs": {"status": PASS, "findings": []},
     }
 
 
-def build_inventory(findings: list[Finding], ctx) -> dict:
-    """Build the additive `"inventory"` JSON payload (design §4.6). Presentation-only:
-    reads only what the main audit already collected on `ctx`, and re-groups the SAME
-    `findings` list the family view (above) renders — never alters score/grade, never
-    emits a new Finding. Every SURFACES slug routes to exactly one of the 5 subjects
-    (SUBJECT_OF coherence, mirrored by tests/test_subject_inventory.py)."""
+def _plugin_inventory(plugin_sweep) -> dict:
+    """The `"plugins"` inventory bucket (F-163) — the additive-JSON counterpart to
+    `_plugins_inventory_lines` (the text/dashboard renderer), built from the SAME
+    duck-typed `PluginSweep`-shaped object (`.no_roots`/`.no_targets`/`.rows`), never
+    imported here (same report<->pipeline import-cycle precedent that function's own
+    docstring sets out).
+
+    `plugin_sweep` is only ever populated by a `--full` run (the plugin sweep phase) —
+    a plain audit() never scans plugins at all, so "not scanned" is the honest default,
+    not an empty/clear verdict. Present-but-empty (`"scanned": True, "rows": []`) is
+    reserved for a real sweep that found zero installed plugins — distinct from
+    "scanned": False (never swept this run), matching the same "MCP servers (none
+    configured)" vs. "not applicable" distinction `_mcp_inventory` already draws.
+    """
+    if plugin_sweep is None or getattr(plugin_sweep, "no_roots", True):
+        return {"scanned": False, "rows": []}
+    if getattr(plugin_sweep, "no_targets", True):
+        return {"scanned": True, "rows": []}
+    return {
+        "scanned": True,
+        "rows": [
+            {"name": name, "status": status} for name, status, _ev in plugin_sweep.rows
+        ],
+    }
+
+
+def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
+    """Build the additive `"inventory"` JSON payload (design §4.6, extended by F-163).
+    Presentation-only: reads only what the main audit already collected on `ctx` (plus
+    the optional `--full`-only `plugin_sweep`), and re-groups the SAME `findings` list
+    the family view (above) renders — never alters score/grade, never emits a new
+    Finding. Every SURFACES slug routes to exactly one of the 8 subjects (SUBJECT_OF
+    coherence, mirrored by tests/test_subject_inventory.py)."""
     if ctx is None:
         return _empty_inventory()
     unsuppressed = [f for f in findings if not getattr(f, "suppressed", False)]
@@ -1271,7 +1301,9 @@ def build_inventory(findings: list[Finding], ctx) -> dict:
         issues = [f for f in members if f.status in (FAIL, WARN)]
         return {"status": _worst_status(members), "findings": [f.id for f in issues]}
 
-    system = _bucket("system")
+    openclaw = _bucket("openclaw")
+    host = _bucket("host")
+    logs = _bucket("logs")
 
     agents_roster, attested = _agents_roster(ctx)
     agents = _bucket("agents")
@@ -1282,11 +1314,14 @@ def build_inventory(findings: list[Finding], ctx) -> dict:
     channels["roster"] = _channels_roster(ctx)
 
     return {
-        "system": system,
+        "openclaw": openclaw,
+        "host": host,
         "agents": agents,
         "skills": _skill_inventory(ctx),
         "mcp": _mcp_inventory(ctx),
+        "plugins": _plugin_inventory(plugin_sweep),
         "channels": channels,
+        "logs": logs,
     }
 
 
@@ -1372,21 +1407,27 @@ def _mcp_inventory_lines(inv: dict, *, ascii_only: bool = False, compact: bool =
 
 
 def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool = False,
-                              color: bool = False) -> str:
-    """Owner-facing "Inventory by subject" block (F-131 Phase 1) -- System / Agents /
-    Skills / MCP / Channels, each with a rolled-up status; Skills and MCP additionally
-    get a per-instance verdict (design §4.4/§4.5). Purely additive/presentation: `--ascii`
+                              color: bool = False, plugin_sweep=None) -> str:
+    """Owner-facing "Inventory by subject" block (F-131 Phase 1, extended by F-163) --
+    OpenClaw core / Host machine / Agents / Skills / MCP / Plugins / Channels / Logs &
+    trajectories, each with a rolled-up status; Skills, MCP and Plugins additionally get
+    a per-instance verdict (design §4.4/§4.5). Purely additive/presentation: `--ascii`
     degrades cleanly (no unicode/color), and this returns "" when `ctx` is unavailable —
     same "skip, don't guess" precedent `render_report` already uses for the capability-
-    graph / credential-surface sections below."""
+    graph / credential-surface sections below. `plugin_sweep` is `--full`-only (same
+    duck-typed object `render_dashboard` already accepts) — omitted on a plain audit,
+    where the Plugins bucket honestly reports "not scanned" rather than a fake clear."""
     if ctx is None:
         return ""
-    inv = build_inventory(findings, ctx)
+    inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
     by_id = {f.id: f for f in findings}
     rule_char = "=" if ascii_only else "═"
     lines: list[str] = ["== INVENTORY BY SUBJECT " + rule_char * 44]
 
-    lines.extend(_inventory_bucket_lines(SUBJECT_LABEL["system"], inv["system"], by_id,
+    lines.extend(_inventory_bucket_lines(SUBJECT_LABEL["openclaw"], inv["openclaw"], by_id,
+                                          ascii_only=ascii_only))
+
+    lines.extend(_inventory_bucket_lines(SUBJECT_LABEL["host"], inv["host"], by_id,
                                           ascii_only=ascii_only))
 
     ag = inv["agents"]
@@ -1403,6 +1444,11 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
 
     lines.extend(_mcp_inventory_lines(inv, ascii_only=ascii_only))
 
+    if inv["plugins"]["scanned"]:
+        lines.extend(_plugins_inventory_lines(plugin_sweep, ascii_only=ascii_only))
+    else:
+        lines.append(f" {SUBJECT_LABEL['plugins']} (not scanned — run --full to include)")
+
     ch = inv["channels"]
     croster = ch.get("roster") or []
     cn = len(croster)
@@ -1410,6 +1456,9 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
     lines.extend(_inventory_bucket_lines(ch_label, ch, by_id, ascii_only=ascii_only))
     if croster:
         lines.append(f"   roster: {', '.join(_sanitize(c) for c in croster)}")
+
+    lines.extend(_inventory_bucket_lines(SUBJECT_LABEL["logs"], inv["logs"], by_id,
+                                          ascii_only=ascii_only))
 
     lines.append(rule_char * 68)
     lines.append(" (details by security family below)")
@@ -1425,7 +1474,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
                   freshness_notice: list[str] | None = None,
                   openclaw_detected: bool = True, ctx=None,
                   verbose: bool = False, color: bool = False,
-                  tamper: ScoreResult | None = None) -> str:
+                  tamper: ScoreResult | None = None, plugin_sweep=None) -> str:
     findings = deduplicate_findings(findings)
     icon = _color_icons(_ICON_ASCII if ascii_only else _ICON, color)
     ok = "[OK]" if ascii_only else "✅"
@@ -1717,7 +1766,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # grade underneath ~40 lines of findings, which is the one thing that decision
     # forbade ("nothing existing is restructured"). Presentational only, and "" when ctx
     # is unavailable (mirrors the ctx-gated sections above).
-    inv_text = render_subject_inventory(findings, ctx, ascii_only=ascii_only, color=color)
+    inv_text = render_subject_inventory(findings, ctx, ascii_only=ascii_only, color=color,
+                                         plugin_sweep=plugin_sweep)
     if inv_text:
         lines.append("")
         lines.extend(inv_text.split("\n"))
@@ -2260,7 +2310,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     inv = None
     skills_block = ""
     if ctx is not None:
-        inv = build_inventory(findings, ctx)
+        inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
         if inv["skills"]:
             skill_lines = _skills_inventory_lines(inv, ctx, ascii_only=ascii_only)
             skills_block = "\n" + f"{sep} Skills {sep}" + "\n" + "\n".join(skill_lines) + "\n"
@@ -2953,7 +3003,7 @@ def render_permission_manifest(ctx, target: str) -> str:
 
 
 def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
-                ctx=None, skill_sweep: dict | None = None,
+                ctx=None, skill_sweep: dict | None = None, plugin_sweep=None,
                 live_test_vulnerable: bool = False, live_test_reason: str | None = None,
                 behavioral_fired_ids=frozenset()) -> str:
     actions = suggest_actions(findings, score)
@@ -3068,7 +3118,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     # F-131 Phase 1: "Inventory by subject" — additive top-level key (design §4.6).
     # Presentation-only: never alters score/grade/findings above; empty/UNKNOWN-shaped
     # when ctx is unavailable (build_inventory's own ctx-is-None fallback).
-    payload["inventory"] = build_inventory(findings, ctx)
+    payload["inventory"] = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
     # F-149 JSON gap: present ONLY under --full (the caller passes None otherwise) —
     # matches the printed SKILL SWEEP section, which likewise only exists under
     # --full. Visibility only, same as the printed section: never folded into

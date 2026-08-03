@@ -141,12 +141,12 @@ def test_json_coverage_families_have_required_fields(capsys):
 
 
 def test_json_coverage_summary_checked_plus_partial_equals_surface_count(capsys):
-    """checked + partial must equal the number of bucket surfaces (13)."""
+    """checked + partial must equal the number of bucket surfaces (14)."""
     doc = _json_doc(VULN, capsys)
     summary = doc["coverage"]["summary"]
     total = summary["checked"] + summary["partial"]
-    # 13 bucket surfaces (trifecta excluded)
-    assert total == 13, f"checked({summary['checked']}) + partial({summary['partial']}) = {total}, expected 13"
+    # 14 bucket surfaces (trifecta excluded; F-163 added "logs")
+    assert total == 14, f"checked({summary['checked']}) + partial({summary['partial']}) = {total}, expected 14"
 
 
 # ---------------------------------------------------------------------------
