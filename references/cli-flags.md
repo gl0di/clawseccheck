@@ -27,6 +27,14 @@ kept here so the always-loaded playbook stays lean.
 - `--fast` — only with `--full`: skip the plugin sweep, behavioral replay, and skill sweep,
   keeping the audit + self-test + vet-mcp + the (free) adjudication packet. For CI runs where
   the deep phases are too slow; this is the pre-F-150 `--full` shape.
+- `--exhaustive` — raise the trajectory-file / log-sink / per-line scan caps instead of the
+  interactive-fast defaults: every trajectory file (not just the 60 most recent), every log
+  sink (not cut off by the cumulative time budget), and the FULL byte range of an over-length
+  log line via overlapping sliding windows (not only its head/tail). Applies to B164/B180,
+  which run on every audit — has effect with or without `--full`. The per-check and
+  whole-audit wall-clock budgets are raised in the same step, so scanning more cannot degrade
+  a check into a timed-out UNKNOWN. Slower; offer it after a normal run flags something
+  suspicious and the user wants maximum coverage, not as a default.
 - `--judged-bundle PATH` (`-` for stdin): feed back a host-agent judge's answers to a
   prior `--full --json` packet in one file (`attestation` / `judged` / `vetJudged`
   buckets). Under `--full`, produces a `"Second opinion (advisory)"` section and, in
