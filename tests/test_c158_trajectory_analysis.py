@@ -238,7 +238,32 @@ def test_files_not_capped_at_max_files_no_disclosure(tmp_path):
     assert r["files_total"] == _MAX_FILES
     assert r["files_capped"] is False
 
-    out = render_trajectory_analysis(c)
+
+# ---------------------------------------------------------------------------
+# F-164 SC-2 — --exhaustive raises the per-file cap so nothing is dropped.
+# ---------------------------------------------------------------------------
+
+def test_exhaustive_scans_every_file_past_the_default_cap(tmp_path):
+    from clawseccheck.trajectory import _MAX_FILES
+
+    total = _MAX_FILES + 5
+    _write_many_sessions(tmp_path, total)
+    c = Context(home=tmp_path)
+    c.config = {}
+    c.bootstrap = {}
+    c.installed_skills = {}
+    c.exhaustive = True
+    r = analyze(c)
+    assert r["files_total"] == total
+    assert r["files_capped"] is False
+    assert r["files_scanned"] == total
+
+    # ledger_home scoped to an empty, isolated file: this test asserts the trajectory
+    # cap disclosure, not self-test corroboration -- without this the real machine's
+    # ~/.clawseccheck/coverage.json (if it happens to record a prior canary/multiturn
+    # run) would make self_test_corroboration run its OWN separate capped scan and
+    # falsely fail this assertion on a polluted dev box.
+    out = render_trajectory_analysis(c, ledger_home=str(tmp_path / "no_such_ledger.json"))
     assert "most recent" not in out
 
 

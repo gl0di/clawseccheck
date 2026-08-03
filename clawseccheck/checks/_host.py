@@ -434,8 +434,8 @@ def check_incident_readiness(ctx: Context) -> Finding:
             "agents/<agent>/sessions/ should not grant write to Users / Everyone.",
         )
 
-    home = ctx.home
-    files = _trajectory.find_trajectory_files(home) if isinstance(home, Path) else []
+    from ..scanbudget import limits_for  # noqa: PLC0415 (F-164, leaf import, no cycle)
+    files = _trajectory.find_trajectory_files(ctx.home, max_files=limits_for(ctx).traj_max_files) if isinstance(ctx.home, Path) else []
     if not files:
         return _finding(
             "B85",

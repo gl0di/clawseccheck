@@ -40,6 +40,7 @@ from ..scanbudget import (
     budget_exceeded,
     cpu_deadline,
     cpu_exceeded,
+    limits_for,
 )
 from ..textnorm import (
     _has_suspicious_zero_width,
@@ -6776,7 +6777,9 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             "Run the audit on the host where the agent's session logs live.",
         )
 
-    tool_defs, meta = _trajectory.read_compiled_tool_descriptions(home)
+    lim = limits_for(ctx)
+    tool_defs, meta = _trajectory.read_compiled_tool_descriptions(
+        home, max_files=lim.traj_max_files, max_bytes_per_file=lim.traj_max_bytes_per_file)
 
     if not tool_defs:
         why = (

@@ -129,6 +129,7 @@ from . import canary, multiturn
 from .checks import _CRED_RE, _EXFIL_RE, _SECRET_PATH_RE, correlation_indicators
 from .ledger import load_ledger
 from .logsafe import redact
+from .scanbudget import limits_for
 from .trajectory import (
     _MAX_BYTES_PER_FILE,
     _SCHEMA_VERSION,
@@ -417,7 +418,9 @@ def _analyze_scan(ctx, *, explicit_path: str | None = None) -> dict:
     else:
         home = getattr(ctx, "home", None)
         stats: dict = {}
-        files = find_trajectory_files(home, stats=stats) if isinstance(home, Path) else []
+        lim = limits_for(ctx)
+        files = (find_trajectory_files(home, max_files=lim.traj_max_files, stats=stats)
+                 if isinstance(home, Path) else [])
         result["files_total"] = stats.get("files_total", 0)
         result["files_capped"] = stats.get("files_capped", False)
     if not files:
@@ -431,9 +434,10 @@ def _analyze_scan(ctx, *, explicit_path: str | None = None) -> dict:
     # Counted once per record, not once per regex match, so one command mentioning the
     # same store five times is one access observation, not five.
     cred_counts: dict[tuple[str, str], int] = {}
+    max_bytes = limits_for(ctx).traj_max_bytes_per_file
     for path in files:
         result["files_scanned"] += 1
-        for name, blob in _iter_tool_calls(path):
+        for name, blob in _iter_tool_calls(path, max_bytes=max_bytes):
             if name == "__unknown__":
                 result["unknown_version"] = True
                 continue
@@ -655,7 +659,7 @@ def _iter_selftest_texts(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
 
 
 def self_test_corroboration(home, *, explicit_path: str | None = None,
-                             ledger_home: str | None = None) -> dict:
+                             ledger_home: str | None = None, ctx=None) -> dict:
     """B-300: corroborate a canary/multi-turn self-test claim against the trajectory log.
 
     Returns a result dict:
@@ -681,6 +685,10 @@ def self_test_corroboration(home, *, explicit_path: str | None = None,
     Never returns a RESISTANT/VULNERABLE verdict — see module docstring's honest-labelling
     note. ``ledger_home`` overrides the ledger's HOME dir (tests only; ``None`` -> the real
     ``~/.clawseccheck/coverage.json``, same default as every other ``ledger`` caller).
+
+    ``ctx`` (F-164, optional) — when given, ``scanbudget.limits_for(ctx)`` widens the
+    trajectory file/byte cap under ``--exhaustive``; ``None`` reproduces today's real
+    defaults exactly (``limits_for(None)`` resolves to ``DEFAULT_LIMITS``).
     """
     result: dict = {
         "ledger_recorded": False,
@@ -711,7 +719,9 @@ def self_test_corroboration(home, *, explicit_path: str | None = None,
         result["files_total"] = len(files)
     else:
         stats: dict = {}
-        files = find_trajectory_files(home, stats=stats) if isinstance(home, Path) else []
+        lim = limits_for(ctx)
+        files = (find_trajectory_files(home, max_files=lim.traj_max_files, stats=stats)
+                 if isinstance(home, Path) else [])
         result["files_total"] = stats.get("files_total", 0)
         result["files_capped"] = stats.get("files_capped", False)
     if not files:
@@ -720,9 +730,10 @@ def self_test_corroboration(home, *, explicit_path: str | None = None,
 
     echo_only_candidate = {name: False for name, _prefix, _markers in _SELFTEST_SOURCES}
 
+    max_bytes = limits_for(ctx).traj_max_bytes_per_file
     for path in files:
         result["files_scanned"] += 1
-        for rec_type, text in _iter_selftest_texts(path):
+        for rec_type, text in _iter_selftest_texts(path, max_bytes=max_bytes):
             if rec_type == "__unknown__":
                 result["unknown_version"] = True
                 continue
@@ -754,14 +765,18 @@ _SELFTEST_LABELS = {"canary": "canary (--canary)", "multiturn": "multi-turn (--m
 
 def render_self_test_corroboration(home, *, explicit_path: str | None = None,
                                     ledger_home: str | None = None,
-                                    ascii_only: bool = False) -> list:
+                                    ascii_only: bool = False, ctx=None) -> list:
     """Render B-300's self-test corroboration lines for --analyze-trajectory.
 
     Returns ``[]`` when the local ledger shows no self-test capability was ever run —
     silence, matching ``self_test_corroboration``'s own "nothing to corroborate" contract
     (never an affirmative all-clear either way).
+
+    ``ctx`` (F-164, optional): forwarded to ``self_test_corroboration`` to honor
+    ``--exhaustive``'s widened trajectory cap; ``None`` keeps today's default.
     """
-    r = self_test_corroboration(home, explicit_path=explicit_path, ledger_home=ledger_home)
+    r = self_test_corroboration(home, explicit_path=explicit_path, ledger_home=ledger_home,
+                                 ctx=ctx)
     if not r["ledger_recorded"]:
         return []
 
@@ -857,7 +872,7 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
                      "host where an OpenClaw agent has produced session trajectories.")
         lines.extend(render_self_test_corroboration(
             getattr(ctx, "home", None), explicit_path=explicit_path, ascii_only=ascii_only,
-            ledger_home=ledger_home))
+            ledger_home=ledger_home, ctx=ctx))
         return "\n".join(lines)
 
     lines.append(
@@ -927,5 +942,5 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
 
     lines.extend(render_self_test_corroboration(
         getattr(ctx, "home", None), explicit_path=explicit_path, ascii_only=ascii_only,
-        ledger_home=ledger_home))
+        ledger_home=ledger_home, ctx=ctx))
     return "\n".join(lines)
