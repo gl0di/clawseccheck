@@ -155,7 +155,7 @@ def test_b85_is_registered_and_advisory():
 
     meta = BY_ID["B85"]
     assert meta.scored is False               # advisory: never moves the static grade
-    assert meta.surface == "monitoring"
+    assert meta.surface == "logs"              # F-163: audit/trajectory-trail half of monitoring
     assert ast_for("B85") == ("AST09",)       # governance / audit-trail, mirrors B50
     assert owasp_for("B85") == ()             # no clean LLM analog (like B50)
     assert check_incident_readiness in checks.CHECKS
