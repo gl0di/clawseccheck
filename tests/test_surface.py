@@ -22,11 +22,12 @@ _SEVEN_FAMILIES: frozenset[str] = frozenset({
 })
 
 
-def test_surfaces_contains_thirteen_buckets_plus_trifecta():
-    """SURFACES must have exactly the 13 named buckets plus 'trifecta'."""
-    assert len(SURFACES) == 14
+def test_surfaces_contains_fourteen_buckets_plus_trifecta():
+    """SURFACES must have exactly the 14 named buckets plus 'trifecta' (F-163 added
+    "logs", split out of "monitoring")."""
+    assert len(SURFACES) == 15
     assert "trifecta" in SURFACES
-    assert len(_BUCKET_SURFACES) == 13
+    assert len(_BUCKET_SURFACES) == 14
 
 
 def test_surfaces_contains_all_required_slugs():
@@ -34,7 +35,7 @@ def test_surfaces_contains_all_required_slugs():
     required = {
         "gateway", "tools", "agents", "mcp", "skills",
         "bootstrap", "channels", "sessions", "secrets",
-        "monitoring", "hooks", "host", "update",
+        "monitoring", "hooks", "host", "update", "logs",
         "trifecta",
     }
     assert required == _VALID_SURFACES

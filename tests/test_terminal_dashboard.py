@@ -213,7 +213,7 @@ class TestCoverageLines:
         text = "\n".join(lines)
         assert "Coverage of OpenClaw surfaces" in text
         assert "checked" in text and "partial" in text
-        assert "of 13 config surfaces" in text
+        assert "of 14 config surfaces" in text
 
     def test_not_checkable_names_listed(self):
         text = "\n".join(_coverage_lines(_findings()))

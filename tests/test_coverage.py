@@ -1,7 +1,7 @@
 """Tests for clawseccheck/coverage.py (F-029: Dashboard coverage engine).
 
 Verifies:
-- All 13 bucket surfaces present in output; "trifecta" absent.
+- All 14 bucket surfaces present in output; "trifecta" absent.
 - checked vs partial surface states.
 - 7-family roll-up via FAMILY_OF.
 - Static not_checkable gaps (3 grounded entries); roadmap empty.
@@ -50,10 +50,10 @@ def _all_unknown() -> list[Finding]:
     ]
 
 
-# ── 13 buckets present / trifecta excluded ────────────────────────────────────
+# ── 14 buckets present / trifecta excluded ────────────────────────────────────
 
-def test_all_13_bucket_surfaces_in_output():
-    """All 13 bucket surface slugs must appear in coverage()["surfaces"]."""
+def test_all_14_bucket_surfaces_in_output():
+    """All 14 bucket surface slugs must appear in coverage()["surfaces"]."""
     result = coverage([])
     assert set(result["surfaces"].keys()) == set(_BUCKET_SURFACES)
 
@@ -64,9 +64,9 @@ def test_trifecta_excluded_from_surfaces():
     assert "trifecta" not in result["surfaces"]
 
 
-def test_surfaces_count_is_exactly_13():
+def test_surfaces_count_is_exactly_14():
     result = coverage([])
-    assert len(result["surfaces"]) == 13
+    assert len(result["surfaces"]) == 14
 
 
 # ── Surface state: checked vs partial ─────────────────────────────────────────
@@ -289,7 +289,7 @@ def test_summary_roadmap_count():
 def test_summary_empty_findings_all_partial():
     result = coverage([])
     assert result["summary"]["checked"] == 0
-    assert result["summary"]["partial"] == 13
+    assert result["summary"]["partial"] == 14
 
 
 def test_summary_checked_increments_per_surface():
@@ -297,11 +297,11 @@ def test_summary_checked_increments_per_surface():
     # Two distinct surfaces: gateway (B2) and secrets (B1)
     result = coverage([_f("B2", FAIL), _f("B1", PASS)])
     assert result["summary"]["checked"] == 2
-    assert result["summary"]["partial"] == 11  # 13 - 2
+    assert result["summary"]["partial"] == 12  # 14 - 2
 
 
-def test_summary_checked_plus_partial_always_13():
-    """checked + partial always equals 13 (the total number of bucket surfaces)."""
+def test_summary_checked_plus_partial_always_14():
+    """checked + partial always equals 14 (the total number of bucket surfaces)."""
     for findings in (
         [],
         [_f("B2", FAIL)],
@@ -310,7 +310,7 @@ def test_summary_checked_plus_partial_always_13():
     ):
         result = coverage(findings)
         total = result["summary"]["checked"] + result["summary"]["partial"]
-        assert total == 13, f"checked+partial={total}, expected 13 for {[f.id for f in findings]}"
+        assert total == 14, f"checked+partial={total}, expected 14 for {[f.id for f in findings]}"
 
 
 # ── Determinism ───────────────────────────────────────────────────────────────

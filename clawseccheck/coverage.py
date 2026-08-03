@@ -13,7 +13,7 @@ from .catalog import BY_ID, FAMILY_OF, SURFACES, Finding
 
 # ── Derived surface / family constants ───────────────────────────────────────
 
-# The 13 bucket surfaces in canonical order (the "trifecta" cross-cutting chip
+# The 14 bucket surfaces in canonical order (the "trifecta" cross-cutting chip
 # is deliberately excluded — it is a headline chip, not a coverage bucket).
 _BUCKET_SURFACES: tuple[str, ...] = tuple(s for s in SURFACES if s != "trifecta")
 
@@ -79,7 +79,7 @@ def _worst(counts: dict[str, int]) -> str:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def coverage(findings: list[Finding]) -> dict:
-    """Compute the coverage map over the 13 OpenClaw bucket surfaces.
+    """Compute the coverage map over the 14 OpenClaw bucket surfaces.
 
     Findings whose `id` is not in BY_ID (e.g. MCP-VET diagnostic findings)
     and findings from the "trifecta" surface are silently ignored — they carry

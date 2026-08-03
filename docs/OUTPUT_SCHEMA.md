@@ -53,7 +53,7 @@ versioning §6 in `CLAUDE.md`).
 | `behavioral_cap_reason` | `str \| null` | yes | Stable label naming which behavioral detector(s) drove `behavioral_capped`, e.g. `"T1 behavioral trifecta"` (joined with `"; "` when more than one fired) — never free text. `null` when `behavioral_capped` is `false`. |
 | `config_parse_reason` | `string \| null` | yes | Short diagnostic for why `config_parse_error` is `true` (the raw loader message), OR a note that a dotfiles-style symlink was safely followed when `config_symlink_escapes_home` is `true`. `null` when the config parsed cleanly with no relocation. Never contains a secret or file-content value. |
 | `errors` | `array[str]` | yes | Human-readable collection/parse messages (e.g. the `openclaw.json` parse error). Empty array on a clean run. |
-| `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §18. |
+| `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (OpenClaw core/Host machine/Agents/Skills/MCP/Plugins/Channels/Logs & trajectories) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §18. |
 | `skill_sweep` | `object` | only with `--full` | Per-skill vet verdict for every installed skill (the second engine, on top of the audit) — the machine-readable form of `--full`'s printed SKILL SWEEP section. Absent (key not present) on a plain `--json` run without `--full`. Visibility only — never affects `score`/`grade`. See §19. |
 | `scan_receipt` | `str` | yes | Deterministic content-integrity hash over all findings, formatted `"sha256:<64-hex-chars>"`. Same findings set (any order) always yields the same receipt; a changed finding set changes it. Not a security signature — a drift/tamper-evidence checksum for the scan output itself. |
 | `phases` | `array[object]` | only with `--full` | One entry per `--full` pipeline phase (skill sweep, plugin sweep, behavioral, adjudication), in run order. Each entry: `name` (`str`), `status` (`"ran"`/`"skipped"`/`"not_reached"`/`"unavailable"`/`"error"`), `elapsed_s` (`float`, wall-clock — the one non-deterministic value in the payload), `complete` (`bool`, false when the phase could not account for everything it is responsible for), `detail` (`str`, one plain-English sentence), `notScanned` (`array[str]`, every target this phase cannot vouch for). Absent on a plain `--json` run without `--full`. |
@@ -102,11 +102,14 @@ versioning §6 in `CLAUDE.md`).
   "config_parse_reason": null,
   "errors": [],
   "inventory": {
-    "system": { "status": "FAIL", "findings": ["B2"] },
+    "openclaw": { "status": "FAIL", "findings": ["B2"] },
+    "host": { "status": "WARN", "findings": ["B50"] },
     "agents": { "status": "PASS", "findings": [], "roster": ["(default)"], "attested": false },
     "skills": [ { "name": "pdf", "verdict": "NO KNOWN ISSUE", "status": "PASS", "reasons": [] } ],
     "mcp": [ { "name": "slack", "verdict": "ok", "reasons": [] } ],
-    "channels": { "status": "WARN", "findings": ["B26"], "roster": ["telegram"] }
+    "plugins": { "scanned": false, "rows": [] },
+    "channels": { "status": "WARN", "findings": ["B26"], "roster": ["telegram"] },
+    "logs": { "status": "PASS", "findings": [] }
   },
   "scan_receipt": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 }
@@ -1081,28 +1084,39 @@ is unaffected by this extension). This is an accepted, disclosed limitation.
 
 ---
 
-## 18. `inventory` Object (F-131 — Inventory by Subject, Phase 1)
+## 18. `inventory` Object (F-131 — Inventory by Subject, Phase 1; extended to 8 subjects by F-163)
 
 Owner-facing regrouping of the SAME `findings` (§2) above by the entities an owner
-actually owns — System, Agents, Skills, MCP servers, Channels — instead of the 7
-analyst-facing security families the text report groups by underneath it. Purely
-additive and presentation-only: it never changes `score`, `grade`, or any `Finding`;
-every finding id it lists also appears, unchanged, in the top-level `findings` array.
+actually owns — OpenClaw core, Host machine, Agents, Skills, MCP servers, Plugins,
+Channels, Logs & trajectories — instead of the 7 analyst-facing security families the
+text report groups by underneath it. Purely additive and presentation-only: it never
+changes `score`, `grade`, or any `Finding`; every finding id it lists also appears,
+unchanged, in the top-level `findings` array.
 
-Skills and MCP servers get a **per-instance** verdict (one entry per installed skill /
-configured MCP server, reusing the same scoring paths `--vet <skill>` / `--vet-mcp` use).
-System, Agents, and Channels stay **bucket-level** in Phase 1 — one rolled-up status plus
-the ids of the surface's own FAIL/WARN findings — because no `Finding` carries a
-precise per-instance (e.g. "which channel") attribution yet; that is deferred to a
-possible Phase 2.
+Skills, MCP servers, and Plugins get a **per-instance** verdict (one entry per
+installed skill / configured MCP server / swept plugin, reusing the same scoring
+paths `--vet <skill>` / `--vet-mcp` / the plugin sweep use). OpenClaw core, Host
+machine, Agents, Channels, and Logs & trajectories stay **bucket-level** — one
+rolled-up status plus the ids of the surface's own FAIL/WARN findings — because no
+`Finding` carries a precise per-instance (e.g. "which channel") attribution yet; that
+is deferred to a possible Phase 2.
+
+**F-163 change note**: the old 5-subject shape's `"system"` key is gone, replaced by
+two subjects — `"openclaw"` (OpenClaw's own configuration: gateway, tools, secrets,
+monitoring, hooks, update, sessions) and `"host"` (the host machine: network IDS,
+audit logging, file-integrity monitoring, EDR, native binary PATH). `"plugins"` and
+`"logs"` are new. A JSON consumer keyed on the old 5-key shape must be updated.
 
 | Field | Type | Description |
 |---|---|---|
-| `system` | `object` | Bucket: `{"status": str, "findings": array[str]}`. `status` is the worst status (`FAIL` > `WARN` > `UNKNOWN` > `PASS`) among findings on the system surfaces (gateway, tools, secrets, monitoring, hooks, host, update, sessions); `findings` lists the ids of that bucket's own FAIL/WARN findings. |
-| `agents` | `object` | Bucket, same shape as `system`, plus: `roster` (`array[str]`) — agent names, preferring an attested roster (`--attest`) over the static `agents.list` config, falling back to `["(default)"]`; `attested` (`bool`) — `true` when the roster came from an attestation self-report. |
+| `openclaw` | `object` | Bucket: `{"status": str, "findings": array[str]}`. `status` is the worst status (`FAIL` > `WARN` > `UNKNOWN` > `PASS`) among findings on the OpenClaw-core surfaces (gateway, tools, secrets, monitoring, hooks, update, sessions); `findings` lists the ids of that bucket's own FAIL/WARN findings. |
+| `host` | `object` | Bucket, same shape as `openclaw`, scoped to the `host` surface (network IDS, audit logging, file-integrity monitoring, EDR, native binary PATH safety, systemd persistence) — answers "is this MACHINE monitored", a distinct question from "is OpenClaw configured well". |
+| `agents` | `object` | Bucket, same shape as `openclaw`, plus: `roster` (`array[str]`) — agent names, preferring an attested roster (`--attest`) over the static `agents.list` config, falling back to `["(default)"]`; `attested` (`bool`) — `true` when the roster came from an attestation self-report. |
 | `skills` | `array[object]` | One entry per installed skill: `{"name": str, "verdict": str, "status": str, "reasons": array[str]}`. `verdict` reuses the same word set `--vet` uses (`"NO KNOWN ISSUE"`, `"SUSPICIOUS"`, `"DANGEROUS"`, `"UNKNOWN"`); `status` is the underlying `PASS`/`WARN`/`FAIL`/`UNKNOWN`; `reasons` holds up to 3 sanitised detail strings. Empty array when no skills are installed. A skill the per-skill scan budget could not reach reports `status: "UNKNOWN"` with a reason explaining why — never a false `"NO KNOWN ISSUE"`. |
 | `mcp` | `array[object]` | One entry per configured MCP server (both `mcp.servers` nesting and legacy `mcpServers`/`mcp_servers`): `{"name": str, "verdict": str, "reasons": array[str]}`. `verdict` is `"ok"` (no supply-chain/trust signal), or `"WARN"`/`"FAIL"`/`"UNKNOWN"`. Empty array when no MCP servers are configured. |
-| `channels` | `object` | Bucket, same shape as `system`, plus: `roster` (`array[str]`) — configured channel provider names (the `defaults` pseudo-provider excluded). |
+| `plugins` | `object` | `{"scanned": bool, "rows": array[object]}`. `scanned` is `false` when this run never swept plugins (plain `audit()`/`--json` without `--full` — a plugin sweep is `--full`-only) — distinct from `true` with an empty `rows` (a real sweep found zero installed plugins). Each row: `{"name": str, "status": str}` (`PASS`/`WARN`/`FAIL`/`UNKNOWN`/`"SKIPPED"`/`"TRUNCATED"`). |
+| `channels` | `object` | Bucket, same shape as `openclaw`, plus: `roster` (`array[str]`) — configured channel provider names (the `defaults` pseudo-provider excluded). |
+| `logs` | `object` | Bucket, same shape as `openclaw`, scoped to the `logs` surface (trajectory sidecar / audit-trail / log-content-scan / behavioral checks — B164, B180, B85, T1, T2, T3, B191). |
 
 ### Notes
 
