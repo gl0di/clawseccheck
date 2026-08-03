@@ -5442,6 +5442,117 @@ def check_orphaned_plugin_caches(ctx: Context) -> Finding:
     )
 
 
+# ---------- B348: undeclared plugins.load.paths entry (uninstall won't stop it) ----------
+def check_undeclared_plugin_load_path(ctx: Context) -> Finding:
+    """B348 (F-161) — a plugin loads via plugins.load.paths with no matching
+    plugins.entries.<id> record.
+
+    Grounded observable config fact: OpenClaw's ``plugins.load.paths`` (resolved via
+    the shared ``config_plugin_load_paths`` — same helper B158 already reconciles
+    against disk) is an independent auto-load surface from ``plugins.entries``. A
+    directory on that load-path list, carrying an ``openclaw.plugin.json`` manifest
+    that declares an "id" with no corresponding ``plugins.entries.<id>`` record, still
+    loads on every gateway start; only removing the load path itself changes that
+    (verified live on a real host, F-161).
+
+    Fires only when ALL hold: plugins.allow is unset/None (no reachability allowlist
+    could gate it at a different layer), a plugins.load.paths entry resolves to an
+    on-disk directory, that directory carries an openclaw.plugin.json manifest with a
+    declared id, and that id has no plugins.entries.<id> record.
+
+    WARN (LOW/advisory), never FAIL — a load path with no entries record is normal
+    local-dev shape (e.g. a plugin mid-development, deliberately left unregistered).
+
+    PASS    — plugins.allow is set, or every plugins.load.paths manifest id has a
+              matching plugins.entries record.
+    UNKNOWN — no config found / unreadable, or no plugins.load.paths entry resolves
+              to an on-disk manifest with a declared id.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B348",
+            UNKNOWN,
+            "No openclaw.json found — plugins.load.paths can't be reconciled against "
+            "plugins.entries.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B348", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    cfg = ctx.config
+    plugins = cfg.get("plugins") if isinstance(cfg, dict) else None
+    allow = plugins.get("allow") if isinstance(plugins, dict) else None
+    if allow is not None:
+        return _finding(
+            "B348",
+            PASS,
+            "plugins.allow is set — an explicit reachability allowlist gates which "
+            "plugins may load.",
+            "Keep plugins.allow in sync as plugins.load.paths entries change.",
+        )
+
+    from ..skilldiscovery import config_plugin_load_paths
+
+    import json as _json
+
+    load_paths = config_plugin_load_paths(ctx.home, cfg)
+    declared = set(_plugins(cfg))
+
+    undeclared: list[str] = []
+    checked_any = False
+    for load_path in load_paths:
+        if not load_path.is_dir():
+            continue
+        manifest_file = load_path / _PLUGIN_MANIFEST
+        if not manifest_file.is_file():
+            continue
+        try:
+            manifest = _json.loads(manifest_file.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(manifest, dict):
+            continue
+        pid = manifest.get("id")
+        if not isinstance(pid, str) or not pid:
+            continue
+        checked_any = True
+        if pid not in declared:
+            undeclared.append(f"{pid} ({load_path})")
+
+    if not checked_any:
+        return _finding(
+            "B348",
+            UNKNOWN,
+            "No plugins.load.paths entry resolves to an on-disk directory carrying an "
+            f"{_PLUGIN_MANIFEST} manifest with a declared id — not applicable.",
+            "No action needed unless a plugin load path is added later.",
+        )
+
+    if undeclared:
+        extra = f" (+{len(undeclared) - 6} more)" if len(undeclared) > 6 else ""
+        return _finding(
+            "B348",
+            WARN,
+            "plugins.load.paths declares plugin(s) with no matching plugins.entries "
+            "record: " + ", ".join(undeclared[:6]) + extra + ". This plugin loads on "
+            "every gateway start regardless of its plugins.entries record — running "
+            "`openclaw plugins uninstall` only removes the entries record, it does not "
+            "stop the plugin from loading; the load path itself must be removed.",
+            "Remove the plugin's directory from plugins.load.paths (or delete the "
+            "directory) to actually stop it loading, not just its plugins.entries "
+            "record.",
+            evidence=undeclared,
+        )
+
+    return _finding(
+        "B348",
+        PASS,
+        "plugins.load.paths plugin(s) all have a matching plugins.entries record.",
+        "Keep plugins.entries in sync with plugins.load.paths as load paths change.",
+    )
+
+
 # ---------- B177 (B-240): OpenClaw's own persisted per-plugin ClawHub trust verdict ----------
 def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     """B177 (B-240) — OpenClaw's OWN persisted per-plugin ClawHub trust verdict.

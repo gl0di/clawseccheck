@@ -814,6 +814,7 @@ from ._mcp import (
     check_codex_plugin_hooks,
     check_compiled_tool_poisoning,
     check_orphaned_plugin_caches,
+    check_undeclared_plugin_load_path,
     vet_mcp,
     vet_plugin,
 )
@@ -1352,6 +1353,7 @@ CHECKS = [
     check_systemd_persistence,  # B150 — systemd user-unit Restart=always persistence
     check_codex_plugin_hooks,  # B151 — codex connector shell hooks in the plugin doc-cache
     check_orphaned_plugin_caches,  # B152 — on-disk plugin cache not in plugins.entries
+    check_undeclared_plugin_load_path,  # B348 — plugins.load.paths entry not in plugins.entries (F-161)
     check_clawhub_lock_verification,  # B135 — accepted-despite-failed-verification install
     check_skill_install_tamper,  # B181 — installed skill modified since its recorded install hash (B-257)
     check_clawhub_token_store,  # B182 — ClawHub CLI plaintext token store perms, outside the OpenClaw home (B-259)
