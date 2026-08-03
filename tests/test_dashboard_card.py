@@ -13,14 +13,14 @@ from pathlib import Path
 
 import re
 
-from clawseccheck import audit
+from clawseccheck import audit, brand
 from clawseccheck.catalog import ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, WARN, Finding
 from clawseccheck.checks._mcp import PluginSweep
 from clawseccheck.cli import main
 from clawseccheck.collector import Context
 from clawseccheck.report import (
-    _plugins_inventory_lines, _sev_token, _worth_a_glance_lines, render_dashboard,
-    render_dashboard_findings,
+    _glance_qualifying_findings, _plugins_inventory_lines, _sev_token, _worth_a_glance_lines,
+    render_dashboard, render_dashboard_findings,
 )
 from clawseccheck.scoring import compute
 
@@ -93,8 +93,24 @@ class TestRenderDashboard:
         out, findings = self._out()
         score = compute(findings)
         first = out.splitlines()[0]
-        assert first.startswith("🦞 OpenClaw Security Audit · Grade ")
+        assert first.startswith("🦞 ClawSecCheck · OpenClaw Security Audit · Grade ")
         assert f"· {score.score}/100" in first
+
+    def test_header_contains_wordmark(self):
+        # B-444 bug B: the card header used to hand-roll "{mascot}OpenClaw Security
+        # Audit", bypassing brand.header() entirely, so brand.WORDMARK never reached
+        # the single most-seen surface (the card a host agent pastes into chat).
+        out, _ = self._out()
+        first = out.splitlines()[0]
+        assert brand.WORDMARK in first
+
+    def test_ascii_header_contains_wordmark(self):
+        # ascii_only used to drop the mascot with nothing to replace it; brand.header()
+        # still carries the wordmark on the ascii path.
+        out, _ = self._out(ascii_only=True)
+        first = out.splitlines()[0]
+        assert brand.WORDMARK in first
+        assert out.isascii()
 
     def test_score_bar_and_issue_count(self):
         out, _ = self._out()
@@ -103,6 +119,32 @@ class TestRenderDashboard:
         # 3 non-suppressed FAIL/WARN (incl. the MEDIUM-confidence one — Section-1 counts
         # ALL issues; Section 3 below filters to high-confidence only).
         assert "3 issues" in bar_line
+
+    def test_glance_only_findings_disclosed_not_silently_dropped(self):
+        # B-444 bug A: under full=False (plain --dashboard), the header count included
+        # B3 (WARN, confidence=MEDIUM) but render_dashboard_findings excludes MEDIUM/
+        # ATTESTED-confidence findings from its body, and full=False never reaches
+        # _worth_a_glance_lines either — so B3 used to be counted but rendered nowhere.
+        # Real repro on Dave's fleet dropped 12 findings this way, one of them HIGH.
+        out, findings = self._out()
+        assert "3 issues" in out  # header still counts B3
+        glance_n = len(_glance_qualifying_findings(findings))
+        assert glance_n == 1  # exactly B3
+        assert f"(+{glance_n} more — run --full for the rest)" in out
+
+    def test_full_true_shows_the_glance_finding_instead_of_disclosing(self):
+        # --full already reaches _worth_a_glance_lines, so B3 is actually rendered —
+        # no need for (and no) a "+N more" disclosure line in that path.
+        out, _ = self._out(full=True)
+        assert "(+1 more" not in out
+        assert "B3" in out
+
+    def test_no_disclosure_line_when_everything_is_already_shown(self):
+        # A findings set with nothing MEDIUM/ATTESTED-confidence must not grow a
+        # spurious "(+0 more...)" line.
+        findings = [_f("B2", FAIL, CRITICAL), _f("B1", PASS, HIGH)]
+        out = render_dashboard(findings, compute(findings))
+        assert "more — run --full" not in out
 
     def test_no_fix_surfaces(self):
         # Reports-only (F-074): no FIX FIRST, no fix: lines, no projection offers.
@@ -148,7 +190,7 @@ class TestCliDashboard:
                    "--dashboard"])
         assert rc == 0
         out = capsys.readouterr().out
-        assert out.startswith("🦞 OpenClaw Security Audit")
+        assert out.startswith("🦞 ClawSecCheck · OpenClaw Security Audit")
         assert "│ 🌐 Exposure & Network" in out
         assert "Scan receipt" not in out
 

@@ -87,17 +87,18 @@ class TestRenderReportHeader:
 # ── render_dashboard ──────────────────────────────────────────────────────────
 
 class TestRenderDashboardHeader:
-    def test_header_starts_with_the_brand_mascot_and_a_single_separator(self):
-        # render_dashboard doesn't route the whole line through brand.header() — it
-        # has its own noun ("OpenClaw Security Audit", not "ClawSecCheck") — but the
-        # mascot and every separator inside the line must still be brand-sourced.
+    def test_header_starts_with_the_brand_wordmark_and_a_single_separator(self):
+        # B-444: render_dashboard now routes its header through brand.header(), so
+        # the wordmark (not just the mascot) reaches the single most-seen surface —
+        # the card a host agent pastes into chat. Every separator inside the line
+        # must still be brand-sourced.
         out = render_dashboard(_findings(), _score())
         first = out.splitlines()[0]
-        assert first.startswith(f"{brand.MASCOT} OpenClaw Security Audit")
+        assert first.startswith(f"{brand.header(subtitle='OpenClaw Security Audit')}")
         # Every separator inside the line is the ONE brand separator — never a
         # stray em-dash mixed in alongside the middle-dot.
         assert "—" not in first
-        assert first.count(brand.SEPARATOR.strip()) >= 2
+        assert first.count(brand.SEPARATOR.strip()) >= 3
 
     def test_findings_rule_uses_the_brand_separator(self):
         out = render_dashboard(_findings(), _score())

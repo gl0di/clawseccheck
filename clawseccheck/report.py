@@ -2086,6 +2086,21 @@ def _second_opinion_lines(phase, *, ascii_only: bool = False) -> list[str]:
     return [f"{marker} {_sanitize(phase.detail)}"]
 
 
+def _glance_qualifying_findings(findings: list[Finding]) -> list[Finding]:
+    """The non-suppressed, MEDIUM/ATTESTED-confidence FAIL/WARN findings —
+    render_dashboard_findings's own HIGH-confidence filter excludes exactly this set
+    from Section 2 (B-444's `_worth_a_glance_lines` renders it instead, `full=True`
+    only). Factored out so `_worth_a_glance_lines` and render_dashboard's own
+    count-vs-render disclosure (B-444, `full=False`) share ONE filter rather than two
+    that could drift apart on the confidence/suppressed rule."""
+    return [
+        f for f in findings
+        if f.status in (FAIL, WARN)
+        and not getattr(f, "suppressed", False)
+        and getattr(f, "confidence", "HIGH") in (MEDIUM, ATTESTED)
+    ]
+
+
 def _worth_a_glance_lines(findings: list[Finding], *, ascii_only: bool = False,
                           limit: int = 12, compact: bool = False,
                           why_drop_severities: frozenset = frozenset()) -> list[str]:
@@ -2116,12 +2131,7 @@ def _worth_a_glance_lines(findings: list[Finding], *, ascii_only: bool = False,
     same final-budget-enforcement drop set Section 2 gets — see
     `render_dashboard_findings`'s docstring.
     """
-    qualifying = [
-        f for f in findings
-        if f.status in (FAIL, WARN)
-        and not getattr(f, "suppressed", False)
-        and getattr(f, "confidence", "HIGH") in (MEDIUM, ATTESTED)
-    ]
+    qualifying = _glance_qualifying_findings(findings)
     if not qualifying:
         return []
     qualifying.sort(key=lambda f: (_STATUS_ORDER.get(f.status, 9), _SEV_ORDER.get(f.severity, 9)))
@@ -2188,8 +2198,15 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     shows — one source of truth, not a second formatter to drift out of sync.
 
     F-153: `full=False` (every pre-existing caller, and every `--dashboard` invocation
-    that doesn't also pass `--full`) reproduces the EXACT prior output byte-identical —
-    Sections 1-2 plus the optional Skills block, nothing else. Dave settled 2026-07-30
+    that doesn't also pass `--full`) reproduces Sections 1-2 plus the optional Skills
+    block, nothing else. (B-444 superseded the "byte-identical" claim this docstring
+    used to make here in two deliberate ways: the header now always routes through
+    `brand.header()` — bug B, the wordmark was missing — and Section 2 appends a
+    "(+N more — run --full for the rest)" disclosure line whenever `n_issues` counts
+    MEDIUM/ATTESTED-confidence FAIL/WARN findings that `render_dashboard_findings`
+    excludes and `full=False` never reaches `_worth_a_glance_lines` to show instead —
+    bug A, the header count and the render used to silently disagree.) Dave settled
+    2026-07-30
     that `--dashboard` must fully render everything `--full` does rather than the
     additive-append shape `--full` itself grew first (F-150/F-151/F-152); this is that
     render, reached only via `--dashboard --full`. The fixed order is: Skills (vet) ·
@@ -2245,10 +2262,18 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # Grade"/"— Findings —" spots, a middle-dot for the "Grade F · 49/100" spot) — a
     # visible drift within the same string. One brand separator everywhere now.
     sep = brand.ASCII_SEPARATOR.strip() if ascii_only else brand.SEPARATOR.strip()
-    mascot = "" if ascii_only else f"{brand.MASCOT} "
     issues_word = "issue" if n_issues == 1 else "issues"
+    # B-444 bug B: this used to hand-assemble "{mascot}OpenClaw Security Audit" as an
+    # f-string, bypassing brand.header() entirely -- so brand.WORDMARK ("ClawSecCheck")
+    # never reached the single most-seen surface (the card a host agent pastes into
+    # chat), unlike render_report's header (which already routes through
+    # brand.header()). Routing through brand.header() here keeps all three brand tiers
+    # consistent and, since brand.header() itself drops the mascot under ascii_only,
+    # the wordmark still lands on the ascii path (mascot alone used to become empty
+    # there with nothing to replace it).
+    head = brand.header(subtitle="OpenClaw Security Audit", ascii_only=ascii_only)
     header_lines = [
-        f"{mascot}OpenClaw Security Audit {sep} Grade {score.grade} {sep} {score.score}/100",
+        f"{head} {sep} Grade {score.grade} {sep} {score.score}/100",
         f"{_score_bar(score.score, score.grade, ascii_only=ascii_only)}"
         f"  {sep}  {n_issues} {issues_word}",
         "",
@@ -2266,10 +2291,24 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             skills_block = "\n" + f"{sep} Skills {sep}" + "\n" + "\n".join(skill_lines) + "\n"
 
     if not full:
+        # B-444 bug A: render_dashboard_findings only renders HIGH-confidence FAIL/WARN
+        # (it excludes MEDIUM/ATTESTED -- see its own docstring), but `n_issues` above
+        # counts EVERY non-suppressed FAIL/WARN regardless of confidence. `full=True`
+        # covers that gap by also rendering _worth_a_glance_lines, but `full=False`
+        # (plain `--dashboard`) never calls it, so a MEDIUM/ATTESTED-confidence
+        # FAIL/WARN used to be counted in the header and rendered nowhere -- a real
+        # repro dropped 12 findings (incl. one HIGH check) silently this way. Per the
+        # project's no-silent-caps doctrine, the fix is a disclosure line, not quietly
+        # matching the header count down to what's rendered (that would just trade an
+        # overstatement for an understatement).
+        glance_n = len(_glance_qualifying_findings(findings))
+
         def _assemble(why_drop_severities: frozenset = frozenset()) -> str:
             body = render_dashboard_findings(
                 findings, ascii_only=ascii_only, compact=compact,
                 why_drop_severities=why_drop_severities).rstrip("\n")
+            if glance_n:
+                body += f"\n\n(+{glance_n} more — run --full for the rest)"
             return header_block + body + "\n" + skills_block
 
         return _finalize_compact_dashboard(_assemble, compact=compact, ascii_only=ascii_only)
