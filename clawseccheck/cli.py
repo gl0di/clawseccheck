@@ -1127,6 +1127,14 @@ def _flag_coherence_notes(args) -> list[str]:
         no_effect.append("--compact")
     if getattr(args, "attest", None) is not None and win_attr not in _ATTEST_CONSUMERS:
         no_effect.append("--attest")
+    # F-164: --exhaustive is consumed by the same audit() call --attest's consumers
+    # already share downstream, plus --show-suppressed (which re-runs audit() itself
+    # to keep B164/B180 fingerprints matching a real --exhaustive run — see its own
+    # comment). Every other mode (vet/menu/live-test family, etc.) never touches a
+    # real check-execution audit() call, so --exhaustive genuinely has no effect there.
+    if (bool(getattr(args, "exhaustive", False))
+            and win_attr not in _ATTEST_CONSUMERS and win_attr != "show_suppressed"):
+        no_effect.append("--exhaustive")
     # --trend / --monitor record a score-history point as part of their job, so
     # --no-history cannot suppress it there (every other mode either records on the
     # default path or writes no history at all, where --no-history is a no-op).
@@ -1518,6 +1526,16 @@ def _main(argv=None) -> int:
                         "only the audit + self-test + vet-mcp sections — this is today's "
                         "--full shape, for CI runs the deep phases are too slow for. The "
                         "judge packet is still emitted; it re-runs no check and is free")
+    p.add_argument("--exhaustive", action="store_true",
+                   help="F-164: raise the trajectory-file / log-sink / per-line scan caps "
+                        "instead of today's interactive-fast defaults, and scan the full "
+                        "byte range of over-length log lines via overlapping windows instead "
+                        "of only their head/tail. Applies to B164/B180, which run on every "
+                        "audit (not only --full) — so this has effect with or without --full. "
+                        "The per-check and whole-audit wall-clock budgets are raised in the "
+                        "same step so a wider scan cannot degrade a check into a capped "
+                        "UNKNOWN. Slower; use when a normal run flagged something suspicious "
+                        "and you want maximum coverage")
     p.add_argument("--judged-bundle", metavar="PATH", dest="judged_bundle",
                    help="only with --full: feed back one file holding a host-agent judge's "
                         "answers to a prior '--full --json' packet — an 'attestation' "
@@ -1917,9 +1935,13 @@ def _main(argv=None) -> int:
             # detail differs here from a normal run (ctx.sockets is None => a
             # different "socket scan was not run" UNKNOWN text) — since
             # fingerprint() hashes the detail, a suppression captured from a real run
-            # was silently never found here, and the reverse also held.
+            # was silently never found here, and the reverse also held. F-164:
+            # --exhaustive changes B164/B180's disclosure text the same way, so it
+            # needs the same mirroring or an --exhaustive suppression stops matching
+            # here.
             ctx, findings, _ = audit(args.home, include_native=False,
-                                     include_sockets=not args.no_sockets)
+                                     include_sockets=not args.no_sockets,
+                                     exhaustive=args.exhaustive)
             suppressed = [f for f in findings if getattr(f, "suppressed", False)]
             # B-154: a bare "RISK-NN" entry matches a RiskPath.id, not any Finding —
             # surface those explicitly too, or --show-suppressed silently missed them.
@@ -1983,7 +2005,8 @@ def _main(argv=None) -> int:
         ctx, findings, score = audit(args.home, include_native=not args.no_native,
                                      include_host=not args.no_host,
                                      include_sockets=not args.no_sockets,
-                                     attestation=attestation)
+                                     attestation=attestation,
+                                     exhaustive=args.exhaustive)
     except (PermissionError, OSError) as exc:
         _emit(f"Cannot read the OpenClaw home at {_sanitize(args.home)}: {_sanitize(str(exc))}")
         _emit("Fix the permissions (or run as the owning user) and re-run the audit.")

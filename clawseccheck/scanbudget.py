@@ -25,8 +25,10 @@ normal run (which finishes in well under a second).
 from __future__ import annotations
 
 import signal
+import sys
 import threading
 import time
+from dataclasses import dataclass
 
 # Generous ceilings: a real audit is sub-second; these only catch a pathological hang.
 DEFAULT_CHECK_BUDGET_S = 15.0
@@ -133,6 +135,117 @@ DEFAULT_VET_ALL_BUDGET_S = 1800.0
 # the same design rule the budgets above state: generous ceilings that stop pathological
 # hangs, never clip a normal run.
 DEFAULT_FULL_BUDGET_S = 2000.0
+
+
+# ── F-164: --exhaustive plumbing (SC-1) ───────────────────────────────────────
+#
+# One named bundle per mode (DEFAULT_LIMITS / EXHAUSTIVE_LIMITS), picked by
+# limits_for(ctx). This module stays a LEAF: ctx is read duck-typed via getattr, so
+# scanbudget never gains an import edge on collector.py (see the package's
+# dependency-flow doc). A field only changes real behavior once its call site is
+# taught to read limits_for(ctx) instead of its own hardcoded default — that wiring
+# happens module by module in later F-164 sub-changes; SC-1 wires only
+# check_budget_s/audit_budget_s into run_all(), which is why every other field below
+# still equals today's real, individually-calibrated constant.
+@dataclass(frozen=True)
+class ScanLimits:
+    """Named bundle of the DoS/ReDoS-guard ceilings ``--exhaustive`` can widen.
+
+    Deliberately NOT the caps this module's own docstring, ``collector.py``,
+    ``monitor.py``, ``checks/_config.py``, ``incident.py``, ``trajectory.py``'s
+    field-scoped reader caps, or ``logscan.py``'s decompression-bomb caps already
+    guard — those bound a different resource (memory/decompression) for an
+    unrelated reason and are out of scope for this feature.
+    """
+
+    exhaustive: bool
+    traj_max_files: int
+    traj_max_bytes_per_file: int
+    log_check_budget_s: float
+    log_per_file_budget_s: float
+    log_max_bytes_per_file: int
+    window_chars: int
+    window_overlap: int
+    check_budget_s: float
+    audit_budget_s: float
+
+
+# Reproduces today's real constants EXACTLY (the byte-identical-default-path
+# guarantee this whole feature depends on) — see each source module's own comment
+# for why ITS number is what it is:
+#   traj_max_files / traj_max_bytes_per_file  <- trajectory._MAX_FILES / _MAX_BYTES_PER_FILE
+#   log_check_budget_s / log_per_file_budget_s <- checks/_egress._LOG_HUNT_CHECK_BUDGET_S /
+#                                                  _LOG_HUNT_PER_FILE_BUDGET_S
+#   log_max_bytes_per_file  <- logscan._MAX_BYTES_PER_FILE
+#   window_chars            <- logscan._OVERSIZED_WINDOW_CHARS
+#   window_overlap          <- 0: today's two windows (first N / last N chars) never overlap
+#   check_budget_s / audit_budget_s  <- DEFAULT_CHECK_BUDGET_S / DEFAULT_AUDIT_BUDGET_S (above)
+# `tests/test_f164_exhaustive_flag.py` re-imports every one of these from its real
+# source and asserts equality, so drift fails the suite instead of silently reopening
+# the default path.
+DEFAULT_LIMITS = ScanLimits(
+    exhaustive=False,
+    traj_max_files=60,
+    traj_max_bytes_per_file=8_000_000,
+    log_check_budget_s=4.5,
+    log_per_file_budget_s=3.0,
+    log_max_bytes_per_file=2 * 1024 * 1024,
+    window_chars=3000,
+    window_overlap=0,
+    check_budget_s=DEFAULT_CHECK_BUDGET_S,
+    audit_budget_s=DEFAULT_AUDIT_BUDGET_S,
+)
+
+# Sentinel for "no real cap" on a field whose consumers compare it directly
+# (`trajectory.find_trajectory_files`: `len(files) > max_files`; the
+# `read_proven_tools*` readers: `read > max_bytes_per_file`) rather than only
+# slicing with it — both raise TypeError against `None`, so `None` is NOT a sound
+# sentinel here. `sys.maxsize` is an exact, arbitrary-precision int (no overflow
+# risk) that reads as "unbounded" rather than a made-up large number.
+_UNBOUNDED = sys.maxsize
+
+# Opt-in, generous — never used unless the caller asks for --exhaustive.
+EXHAUSTIVE_LIMITS = ScanLimits(
+    exhaustive=True,
+    traj_max_files=_UNBOUNDED,
+    traj_max_bytes_per_file=_UNBOUNDED,
+    log_check_budget_s=60.0,                   # 13.3x DEFAULT — see check_budget_s below
+    log_per_file_budget_s=30.0,                # 10x DEFAULT: one sink may legitimately
+                                                # run far longer scanning more of a corpus
+    log_max_bytes_per_file=32 * 1024 * 1024,   # 16x DEFAULT (2 MiB -> 32 MiB)
+    window_chars=3000,                         # unchanged here — a later F-164 sub-change's
+                                                # job, not this one; reserved field only
+    window_overlap=512,                        # reserved: no reader consumes this yet
+    # check_budget_s is the SIGALRM hard deadline run_all() wraps EVERY check in,
+    # including B164/B180 — whose OWN log_check_budget_s is merely a cooperative
+    # budget polled BETWEEN sinks, not a hard cut (one sink can overrun it before the
+    # check next checks). If check_budget_s were not comfortably above
+    # log_check_budget_s, raising the log budget would just move where the outer
+    # SIGALRM kills the check — trading a clean run for a degraded UNKNOWN that CAPS
+    # THE SCORE (B-399), i.e. --exhaustive would silently make the grade WORSE. 120.0
+    # leaves a flat 60s (2x) of headroom above log_check_budget_s=60.0, for both the
+    # per-sink overshoot and every other check's own (unraised) cost sharing the same
+    # wall-clock slice.
+    check_budget_s=120.0,
+    # audit_budget_s bounds the WHOLE CHECKS list cooperatively (checked between
+    # checks), so it must clear the single slowest check (check_budget_s=120.0) by a
+    # margin comparable to what DEFAULT_AUDIT_BUDGET_S already keeps over
+    # DEFAULT_CHECK_BUDGET_S (120.0 / 15.0 = 8x here vs 900.0 / 120.0 = 7.5x there),
+    # while staying well under the outer --full pipeline ceilings this nests inside
+    # (DEFAULT_VET_ALL_BUDGET_S=1800s, DEFAULT_FULL_BUDGET_S=2000s), so a slow
+    # --exhaustive audit still leaves those later phases room instead of starving them.
+    audit_budget_s=900.0,
+)
+
+
+def limits_for(ctx: object) -> ScanLimits:
+    """:data:`DEFAULT_LIMITS`, or :data:`EXHAUSTIVE_LIMITS` when ``ctx.exhaustive`` is truthy.
+
+    Duck-typed via ``getattr`` (default False) so this leaf module never imports
+    ``collector.Context`` — any object exposing an ``exhaustive`` attribute works,
+    including a bare test double.
+    """
+    return EXHAUSTIVE_LIMITS if getattr(ctx, "exhaustive", False) else DEFAULT_LIMITS
 
 
 class ScanBudgetExceeded(BaseException):

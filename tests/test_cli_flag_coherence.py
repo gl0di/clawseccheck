@@ -181,3 +181,38 @@ def test_bad_attest_warning_still_visible_on_human_path(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 0
     assert "could not read a valid attestation" in captured.err
+
+
+# ------------------------- F-164: --exhaustive coherence -------------------------
+def test_exhaustive_ignored_by_menu(capsys):
+    # --menu never calls audit() with real check execution, so --exhaustive is a
+    # genuine no-op there -- same B-066 contract as every other global modifier.
+    main(["--exhaustive", "--menu"])
+    assert "--exhaustive has no effect with --menu" in capsys.readouterr().err
+
+
+def test_exhaustive_ignored_by_vet(tmp_path, capsys):
+    main(["--vet", _dangerous_skill(tmp_path), "--exhaustive"])
+    assert "--exhaustive has no effect with --vet" in capsys.readouterr().err
+
+
+def test_exhaustive_consumed_by_default_path_no_note(capsys):
+    rc = main(["--home", VULN, *COMMON, "--exhaustive", "--json"])
+    assert rc == 0
+    assert "--exhaustive has no effect" not in capsys.readouterr().err
+
+
+def test_exhaustive_consumed_by_risk_paths_no_note(capsys):
+    # --risk-paths is an _ATTEST_CONSUMERS mode: it reuses the same audit() call the
+    # default path makes, so --exhaustive is genuinely honored there too.
+    rc = main(["--home", VULN, *COMMON, "--risk-paths", "--exhaustive"])
+    assert rc == 0
+    assert "--exhaustive has no effect" not in capsys.readouterr().err
+
+
+def test_exhaustive_consumed_by_show_suppressed_no_note(capsys):
+    # --show-suppressed re-runs audit() itself (to keep fingerprints matching a real
+    # --exhaustive run) rather than going through the shared _ATTEST_CONSUMERS path.
+    rc = main(["--home", VULN, *COMMON, "--show-suppressed", "--exhaustive"])
+    assert rc == 0
+    assert "--exhaustive has no effect" not in capsys.readouterr().err

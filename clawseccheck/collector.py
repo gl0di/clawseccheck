@@ -483,6 +483,11 @@ class Context:
     # check_effective_bind reports UNKNOWN, exactly like ctx.host is None for B50-B54.
     sockets: object = None
     include_sockets: bool = False  # /proc/net/tcp{,6} listening-socket scan enabled
+    # F-164: --exhaustive widens the DoS/ReDoS-guard ceilings scanbudget.limits_for()
+    # hands back (traj/log scan caps, per-check/audit wall-clock budgets) instead of
+    # today's defaults. No behavior of its own here — same pattern as include_sockets
+    # above — just a flag other code (scanbudget.limits_for, run_all callers) can read.
+    exhaustive: bool = False
     # C-135 bug 1: the proc_root audit() was called with (default "/proc"), carried on ctx
     # so check_effective_bind's best-effort PID correlation (sockets.identify_listener_process)
     # reads from the SAME root a test injected for the socket scan itself, rather than a

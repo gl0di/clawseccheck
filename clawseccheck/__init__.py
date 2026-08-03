@@ -27,6 +27,7 @@ from .report import (
     render_monitor, render_report, render_subject_inventory, render_svg, render_vet_json,
 )
 from .risk import risk_paths, render_risk_paths
+from .scanbudget import limits_for
 from .scoring import ScoreResult, compute
 from .sarif import render_sarif
 from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
@@ -42,7 +43,8 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
           include_host: bool = False, host_root: str = "/",
           native_bin: str = "openclaw", native_timeout: int = 60,
           attestation: dict | None = None,
-          include_sockets: bool = False, proc_root: str = "/proc"):
+          include_sockets: bool = False, proc_root: str = "/proc",
+          exhaustive: bool = False):
     """Run the full audit. Returns (ctx, findings, ScoreResult).
 
     `include_native=False` and `include_host=False` keep the engine fully offline
@@ -66,6 +68,11 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     omitted, the attestation checks (B43/B44) report UNKNOWN and the score is
     unchanged. Passed straight through to ctx so the engine stays deterministic.
 
+    `exhaustive` (default False, F-164) records `ctx.exhaustive` and, via
+    `scanbudget.limits_for(ctx)`, widens the per-check/whole-audit wall-clock
+    budgets `run_all` enforces. False reproduces `scanbudget.DEFAULT_LIMITS`
+    exactly, so the default path is byte-identical to before this parameter existed.
+
     I-025/B-309: the returned ScoreResult may be capped — never given an ordinary
     scored point — by a corroborated runtime signal (a trajaudit-style skill/bootstrap
     indicator match; see scoring._runtime_cap_signal). Every runtime-consuming check
@@ -81,7 +88,9 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
         ctx.sockets = _scan_listening_sockets(proc_root=proc_root)
     if attestation:
         ctx.attestation = attestation
-    findings = run_all(ctx)
+    ctx.exhaustive = exhaustive
+    lim = limits_for(ctx)
+    findings = run_all(ctx, check_budget_s=lim.check_budget_s, audit_budget_s=lim.audit_budget_s)
     ignore = _baseline.load_ignore(home)
     _baseline.apply(findings, ignore)
     # I-025/B-309: pass ctx so scoring.compute can also see a trajaudit-style indicator
