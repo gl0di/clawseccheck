@@ -898,3 +898,177 @@ def test_publish_workflow_post_publish_check_is_warn_only() -> None:
     raise AssertionError(
         "No warn-only post-publish visibility step found in the publish workflow."
     )
+
+
+def _step_name(step: list) -> str:
+    m = re.search(r"-\s+(?:name|uses):\s*(.+)", step[0][1])
+    return m.group(1).strip() if m else ""
+
+
+def _size_guard_shell_block() -> str:
+    """Extract the literal `run: |` body of the pre-upload bundle-size guard step.
+
+    Same pattern as _preflight_shell_block(): executed verbatim by the tests below, so
+    what's under test is the real workflow shell, not a paraphrase that could quietly
+    stop matching (CLAWSECCHECK-B-440).
+    """
+    lines = _lines()
+    start = next(
+        (
+            i for i, ln in enumerate(lines)
+            if ln.strip().startswith("- name:") and "too big to upload" in ln
+        ),
+        None,
+    )
+    assert start is not None, (
+        "Could not find the pre-upload bundle-size guard step (name containing "
+        "'too big to upload') in the workflow — it was renamed; update this extractor."
+    )
+    run_i = None
+    for i in range(start + 1, len(lines)):
+        if lines[i].strip().startswith("- name:"):
+            break
+        if lines[i].strip() == "run: |":
+            run_i = i
+            break
+    assert run_i is not None, (
+        "The size-guard step no longer uses a 'run: |' literal block; update this "
+        "extractor."
+    )
+    indent = len(lines[run_i]) - len(lines[run_i].lstrip())
+    body = []
+    for ln in lines[run_i + 1:]:
+        if ln.strip() and (len(ln) - len(ln.lstrip())) <= indent:
+            break
+        body.append(ln)
+    return textwrap.dedent("\n".join(body))
+
+
+def _size_guard_threshold_bytes() -> int:
+    """The MAX_STAGED_BYTES constant declared inside the size-guard shell block."""
+    match = re.search(r"MAX_STAGED_BYTES=(\d+)", _size_guard_shell_block())
+    assert match, "No MAX_STAGED_BYTES=<int> assignment found in the size-guard step."
+    return int(match.group(1))
+
+
+def test_size_guard_step_runs_right_after_staging_and_before_any_publish() -> None:
+    """The bundle-size guard must fail BEFORE the release tag's approval gets spent.
+
+    v3.59.0 discovered its 413 only at real-upload time — after the tag was already
+    pushed and the `environment: release` manual approval already spent on a bundle that
+    was always going to fail (CLAWSECCHECK-B-440, folded from CLAWSECCHECK-B-443).
+    Anchored to running immediately after the 'Stage publishable files' step (so it sees
+    the CHANGELOG.md trim) and strictly before the first 'clawhub publish' invocation
+    (including the --dry-run preflight).
+    """
+    steps = _steps()
+    names = [_step_name(s) for s in steps]
+
+    staging_idx = next(
+        (i for i, n in enumerate(names) if "Stage publishable files" in n), None
+    )
+    guard_idx = next(
+        (i for i, n in enumerate(names) if "too big to upload" in n), None
+    )
+    assert staging_idx is not None, "Could not find the 'Stage publishable files' step."
+    assert guard_idx is not None, "Could not find the pre-upload bundle-size guard step."
+    assert guard_idx == staging_idx + 1, (
+        f"The size guard (step #{guard_idx}: {names[guard_idx]!r}) must be the step "
+        f"immediately after staging (step #{staging_idx}: {names[staging_idx]!r}), so it "
+        "fails before any preflight/dry-run/publish work runs and before another release "
+        "tag's approval gate gets spent."
+    )
+
+    invocations = _publish_invocations()
+    assert invocations, "No step in the workflow runs 'clawhub publish'."
+    first_publish_line = min(inv["line"] for inv in invocations)
+    guard_lines = [lineno for lineno, _ in steps[guard_idx]]
+    assert max(guard_lines) < first_publish_line, (
+        "The size guard must run entirely before the first 'clawhub publish' invocation."
+    )
+
+
+def test_size_guard_threshold_is_between_the_known_good_and_known_bad_sizes() -> None:
+    """The threshold must sit strictly between the last known-good and known-bad sizes.
+
+    Evidence (CLAWSECCHECK-B-440, 2026-08-02/03): v3.58.0's ~4.5MB staged tree published
+    fine; v3.59.0's ~5.3MB staged tree (after the CHANGELOG.md trim above; ~5.6MB before
+    it) still 413'd. A threshold outside this gap either blocks an ordinary release or
+    misses the exact failure mode it exists to catch fast.
+    """
+    threshold = _size_guard_threshold_bytes()
+    known_good_bytes = int(4.5 * 1024 * 1024)   # v3.58.0 — published fine
+    known_bad_bytes = int(5.3 * 1024 * 1024)    # v3.59.0 — 413'd
+    assert known_good_bytes < threshold < known_bad_bytes, (
+        f"MAX_STAGED_BYTES={threshold} is not strictly between the known-good size "
+        f"({known_good_bytes}, v3.58.0) and the known-bad size ({known_bad_bytes}, "
+        "v3.59.0) — either it will block a normal release or it will miss the failure "
+        "mode it exists to catch fast."
+    )
+    assert threshold < 50 * 1024 * 1024, (
+        f"MAX_STAGED_BYTES={threshold} is not comfortably under ClawHub's documented "
+        "50MB limit — check for a typo."
+    )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_size_guard_fires_on_an_oversized_staged_bundle(tmp_path) -> None:
+    """The guard must actually FAIL when the staged tree exceeds its threshold.
+
+    Builds a tmp `dist/clawseccheck` just over MAX_STAGED_BYTES and runs the REAL guard
+    shell block against it — proving the guard has teeth, the same pattern as
+    test_dangling_link_guard_detects_a_missing_target.
+    """
+    threshold = _size_guard_threshold_bytes()
+    staged = tmp_path / "dist" / "clawseccheck"
+    staged.mkdir(parents=True)
+    (staged / "oversized.bin").write_bytes(b"\0" * (threshold + 4096))
+
+    script = tmp_path / "guard.sh"
+    script.write_text(_size_guard_shell_block(), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(script)],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode != 0, (
+        "The size guard must exit non-zero when the staged tree exceeds "
+        f"MAX_STAGED_BYTES ({threshold}).\nstdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    )
+    assert "::error::" in proc.stdout, (
+        f"Expected an ::error:: annotation on an oversized bundle.\nstdout: {proc.stdout!r}"
+    )
+    assert str(threshold) in proc.stdout, (
+        "The failure message should name the configured threshold so the CI log is "
+        f"self-explanatory.\nstdout: {proc.stdout!r}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_size_guard_passes_on_a_staged_bundle_within_budget(tmp_path) -> None:
+    """Positive control: a small staged tree must not be blocked.
+
+    Without this, a guard that failed unconditionally would still satisfy the oversized
+    case above while blocking every release.
+    """
+    staged = tmp_path / "dist" / "clawseccheck"
+    staged.mkdir(parents=True)
+    (staged / "small.txt").write_bytes(b"x" * 1024)
+
+    script = tmp_path / "guard.sh"
+    script.write_text(_size_guard_shell_block(), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(script)],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, (
+        "The size guard must pass on a staged tree well within budget.\n"
+        f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    )
+    assert "Staged bundle size OK" in proc.stdout, (
+        f"Expected the OK confirmation line in stdout.\nstdout: {proc.stdout!r}"
+    )
