@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="docs/assets/logo.png" alt="ClawSecCheck logo" width="120">
+</p>
+
+<p align="center">
   <img src="docs/assets/banner-readme.png" alt="ClawSecCheck — local, read-only security audit for your OpenClaw agent" width="820">
 </p>
 

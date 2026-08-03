@@ -25,7 +25,7 @@ from .catalog import (
     ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
 from .ansi import paint
-from .brand import BRAND_RED, LOGO_SVG, SEVERITY, WORDMARK, grade_ansi, grade_hex
+from .brand import BRAND_RED, FAVICON_DATA_URI, LOGO_SVG, SEVERITY, WORDMARK, grade_ansi, grade_hex
 from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
 from .guide import suggest_actions
@@ -3231,6 +3231,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{esc(title_text)}</title>
+    <link rel="icon" type="image/png" href="{FAVICON_DATA_URI}">
     <style>
         :root {{
             --bg: #eef1f5;
